@@ -8,11 +8,10 @@ import json
 import pathlib
 import platform as platform_mod
 import shutil
-import subprocess
 import sys
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Callable, Any
 import logging
 
 from fastapi import FastAPI, Query, Request
@@ -34,6 +33,7 @@ from mediaforce.core import (
 )
 from mediaforce.db import MediaItem, EncodeResult, ShowOverride, now_iso
 from sqlalchemy import func
+from sqlmodel import select
 from dataclasses import asdict
 
 # Configuration
@@ -451,7 +451,7 @@ def resolve_existing_library_root() -> Optional[str]:
     return None
 
 
-def format_size(bytes_val: int) -> str:
+def format_size(bytes_val: float | int | None) -> str:
     """Format bytes as human-readable size."""
     if bytes_val is None:
         return "?"
@@ -490,7 +490,7 @@ templates.env.filters["format_size"] = format_size
 templates.env.filters["format_duration"] = format_duration
 
 
-def build_pagination_url(request: Request) -> callable:
+def build_pagination_url(request: Request) -> Callable[[int], str]:
     """Create a pagination URL builder for the current request."""
     def pagination_url(page: int) -> str:
         params = dict(request.query_params)
@@ -1194,7 +1194,7 @@ async def queue_episodes_view(request: Request, conn, show: str, season: str, pa
                 )
                 if len(tracks) > 3:
                     audio_info += f" (+{len(tracks) - 3})"
-            except:
+            except Exception:
                 pass
 
         # Parse subtitle tracks
@@ -1202,7 +1202,7 @@ async def queue_episodes_view(request: Request, conn, show: str, season: str, pa
         if row["subtitle_tracks"]:
             try:
                 sub_count = len(json.loads(row["subtitle_tracks"]))
-            except:
+            except Exception:
                 pass
 
         episodes.append({
@@ -1488,7 +1488,7 @@ async def shows(request: Request):
         """)
 
         # Aggregate by show name
-        show_data = {}
+        show_data: dict[str, dict[str, Any]] = {}
         for row in cursor.fetchall():
             show_name = extract_show_name(row["path"])
             if not show_name:
@@ -2142,7 +2142,7 @@ async def api_queue_episodes(show_name: str, season_name: str, request: Request)
                     )
                     if len(tracks) > 3:
                         audio_info += f" (+{len(tracks) - 3})"
-                except:
+                except Exception:
                     pass
 
             # Parse subtitle tracks

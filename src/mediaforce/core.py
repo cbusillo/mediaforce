@@ -31,7 +31,7 @@ import tempfile
 import time
 import urllib.request
 import urllib.error
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 import builtins
@@ -47,7 +47,6 @@ from mediaforce.db import (
     EncodeResult,
     Library,
     MediaItem,
-    ShowOverride,
     init_engine,
     now_iso,
 )
@@ -1699,7 +1698,7 @@ def build_ffmpeg_command(
             # - Use mapping_family 1 (required for multichannel Opus)
             # - Force standard 5.1 layout (fixes 5.1(side) incompatibility)
             if channels > 2:
-                cmd.extend([f"-mapping_family", "1"])
+                cmd.extend(["-mapping_family", "1"])
                 if channels == 6:
                     cmd.extend([f"-af:a:{i}", "channelmap=channel_layout=5.1"])
                 elif channels == 8:
@@ -1841,14 +1840,6 @@ def measure_ssim_psnr(
     if duration_sec > 0:
         cmd.extend(["-t", str(duration_sec)])
 
-    # Use lavfi to compute both SSIM and PSNR
-    # Scale encoded to match source resolution if different
-    filter_complex = (
-        "[0:v]scale=flags=bicubic[enc];"
-        "[1:v]scale=flags=bicubic[ref];"
-        "[enc][ref]ssim=stats_file=-;[enc][ref]psnr=stats_file=-"
-    )
-
     # SSIM filter - scale both to same format for comparison
     # Convert both to yuv420p to ensure format compatibility
     ssim_filter = "[0:v]format=yuv420p[enc];[1:v]format=yuv420p[ref];[enc][ref]ssim=stats_file=-"
@@ -1957,7 +1948,7 @@ def measure_vmaf(
     # Normalize pixel formats for comparison
     # Use log_fmt=json for easier parsing
     vmaf_filter = (
-        f"[0:v]format=yuv420p[enc];[1:v]format=yuv420p[ref];"
+        "[0:v]format=yuv420p[enc];[1:v]format=yuv420p[ref];"
         f"[enc][ref]libvmaf=model=version={model}:log_fmt=json:log_path=/dev/stdout"
     )
 
@@ -2249,16 +2240,6 @@ def cmd_encode(args: argparse.Namespace) -> int:
                     minimum=vmaf_stats['min'],
                     tier=classification.tier.value,
                 )
-
-        cmd = build_ffmpeg_command(
-            f,
-            output_path,
-            settings,
-            info,
-            max_height=target_height,
-            hw_decode=args.hw_decode,
-            hw_encode=args.hw_encode,
-        )
 
         # Build output path (mirror library structure like run command)
         source_str = str(f)
@@ -3005,8 +2986,6 @@ def check_missing_outputs(session: Session) -> int:
 
     Returns the number of files reset.
     """
-    now_str = datetime.now().isoformat()
-
     # Find completed encodes where the output file no longer exists
     joins = session.exec(
         select(MediaItem.id, MediaItem.path, EncodeResult.output_path)
@@ -3930,11 +3909,11 @@ def cmd_promote(args: argparse.Namespace) -> int:
         sidecars = find_sidecars(f)
 
         if args.dry_run:
-            print(f"    [dry-run] Would move encoded file")
+            print("    [dry-run] Would move encoded file")
             if sidecars:
                 print(f"    [dry-run] Would rename {len(sidecars)} sidecar(s)")
             if args.delete_original:
-                print(f"    [dry-run] Would delete original")
+                print("    [dry-run] Would delete original")
             continue
 
         try:
@@ -3961,7 +3940,7 @@ def cmd_promote(args: argparse.Namespace) -> int:
             # Delete original if requested
             if args.delete_original:
                 f.unlink()
-                print(f"    Deleted original")
+                print("    Deleted original")
 
             # Update database
             if conn:
@@ -3979,7 +3958,7 @@ def cmd_promote(args: argparse.Namespace) -> int:
                 conn.commit()
 
             promoted += 1
-            print(f"    [ok]")
+            print("    [ok]")
 
         except Exception as e:
             print(f"    [error] {e}")
@@ -3989,7 +3968,7 @@ def cmd_promote(args: argparse.Namespace) -> int:
         conn.close()
 
     print()
-    print(f"Promotion complete:")
+    print("Promotion complete:")
     print(f"  Promoted: {promoted}")
     print(f"  Skipped (no encode found): {skipped}")
     print(f"  Errors: {errors}")
@@ -4652,7 +4631,7 @@ def cmd_compare_clips(args: argparse.Namespace) -> int:
     if seek_pos + clip_duration > duration:
         seek_pos = max(0, duration - clip_duration - 5)
 
-    print(f"Extracting comparison clips (no re-encoding)...")
+    print("Extracting comparison clips (no re-encoding)...")
     print(f"  Source: {source_path.name}")
     print(f"  Encoded: {encoded_path.name}")
     print(f"  Position: {seek_pos:.1f}s, Duration: {clip_duration}s")
@@ -4935,7 +4914,7 @@ def cmd_compare_clips(args: argparse.Namespace) -> int:
 
     html_file.write_text(html_content)
 
-    print(f"\nComparison ready:")
+    print("\nComparison ready:")
     print(f"  Directory: {clip_dir}")
     print(f"  HTML viewer: {html_file}")
     print(f"\nOpen with: open \"{html_file}\"")
@@ -4977,7 +4956,7 @@ def cmd_compare_full(args: argparse.Namespace) -> int:
     # Get source info for duration display
     source_info = probe_media(source_path)
 
-    print(f"Generating comparison HTML (full videos)...")
+    print("Generating comparison HTML (full videos)...")
     print(f"  Source: {source_path}")
     print(f"  Encoded: {encoded_path}")
 
@@ -5063,7 +5042,7 @@ def cmd_review_compare(args: argparse.Namespace) -> int:
 
     clip_duration = args.duration
 
-    print(f"Generating comparison video...")
+    print("Generating comparison video...")
     print(f"  Source: {source_path.name}")
     print(f"  Encoded: {output_path.name}")
     print(f"  Position: {positions[0]:.1f}s, Duration: {clip_duration}s")
