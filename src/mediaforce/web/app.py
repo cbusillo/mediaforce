@@ -30,8 +30,17 @@ from mediaforce.core import (
     load_app_settings,
     save_app_settings,
     _watch_libraries,
+    ensure_active_profile_settings,
 )
-from mediaforce.db import MediaItem, EncodeResult, ShowOverride, now_iso
+from mediaforce.db import (
+    MediaItem,
+    EncodeResult,
+    ShowOverride,
+    ProfileEvaluation,
+    VmafSample,
+    ProfileChoiceFeedback,
+    now_iso,
+)
 from sqlalchemy import func
 from sqlmodel import select
 from dataclasses import asdict
@@ -418,6 +427,56 @@ class WorkerStatus(BaseModel):
     state: str
     current: Optional[str] = None
     last_heartbeat: Optional[str] = None
+
+
+class FlagProfileRequest(BaseModel):
+    decision: str = "bad"
+    reason: str
+
+
+def _serialize_eval(ev: ProfileEvaluation) -> dict:
+    return {
+        "id": ev.id,
+        "media_id": ev.media_id,
+        "encode_result_id": ev.encode_result_id,
+        "selected_profile": ev.selected_profile,
+        "sample_strategy": ev.sample_strategy,
+        "sample_count": ev.sample_count,
+        "sample_length": ev.sample_length,
+        "median_vmaf": ev.median_vmaf,
+        "min_vmaf": ev.min_vmaf,
+        "max_vmaf": ev.max_vmaf,
+        "threshold_min": ev.threshold_min,
+        "threshold_median": ev.threshold_median,
+        "decision": ev.decision,
+        "status": ev.status,
+        "note": ev.note,
+        "created_at": ev.created_at,
+        "updated_at": ev.updated_at,
+    }
+
+
+def _serialize_sample(s: VmafSample) -> dict:
+    return {
+        "id": s.id,
+        "evaluation_id": s.evaluation_id,
+        "kind": s.sample_kind,
+        "start_sec": s.start_sec,
+        "duration_sec": s.duration_sec,
+        "vmaf": s.vmaf,
+        "log_path": s.log_path,
+        "created_at": s.created_at,
+    }
+
+
+def _serialize_feedback(fb: ProfileChoiceFeedback) -> dict:
+    return {
+        "id": fb.id,
+        "evaluation_id": fb.evaluation_id,
+        "decision": fb.decision,
+        "reason": fb.reason_text,
+        "flagged_at": fb.flagged_at,
+    }
 
 
 # =============================================================================
@@ -2063,6 +2122,59 @@ async def api_active_encodes(request: Request):
             })
 
     return {"success": True, "encodes": encodes}
+
+
+@app.post("/api/profile-settings/refresh")
+async def api_refresh_profile_settings():
+    with get_db_connection() as conn:
+        src = ensure_active_profile_settings(conn.session)
+        return {
+            "success": True,
+            "source": {
+                "id": src.id if src else None,
+                "name": src.name if src else None,
+                "fetched_at": src.fetched_at if src else None,
+                "applied_at": src.applied_at if src else None,
+            },
+        }
+
+
+@app.get("/api/evaluations/{eval_id}")
+async def api_get_evaluation(eval_id: int):
+    with get_db_connection() as conn:
+        session = conn.session
+        ev = session.get(ProfileEvaluation, eval_id)
+        if not ev:
+            return {"success": False, "error": "not found"}
+        samples = session.exec(select(VmafSample).where(VmafSample.evaluation_id == eval_id)).all()
+        feedback = session.exec(select(ProfileChoiceFeedback).where(ProfileChoiceFeedback.evaluation_id == eval_id)).all()
+        return {
+            "success": True,
+            "evaluation": _serialize_eval(ev),
+            "samples": [_serialize_sample(s) for s in samples],
+            "feedback": [_serialize_feedback(fb) for fb in feedback],
+        }
+
+
+@app.post("/api/evaluations/{eval_id}/flag")
+async def api_flag_evaluation(eval_id: int, data: FlagProfileRequest):
+    with get_db_connection() as conn:
+        session = conn.session
+        ev = session.get(ProfileEvaluation, eval_id)
+        if not ev:
+            return {"success": False, "error": "not found"}
+        fb = ProfileChoiceFeedback(
+            evaluation_id=eval_id,
+            decision=data.decision,
+            reason_text=data.reason,
+        )
+        ev.status = "flagged"
+        ev.decision = data.decision
+        ev.updated_at = now_iso()
+        session.add(fb)
+        session.add(ev)
+        session.commit()
+        return {"success": True}
 
 
 @app.get("/api/queue/seasons/{show_name}")

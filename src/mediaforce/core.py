@@ -47,6 +47,9 @@ from mediaforce.db import (
     EncodeResult,
     Library,
     MediaItem,
+    ProfileSettingsSource,
+    ProfileEvaluation,
+    VmafSample,
     init_engine,
     now_iso,
 )
@@ -329,6 +332,131 @@ def load_app_settings() -> AppSettings:
     return _default_app_settings()
 
 
+def _fetch_remote_profile_settings(url: str, existing_etag: str | None = None) -> tuple[Optional[str], Optional[str]]:
+    """Fetch remote profile settings payload and return (payload, etag)."""
+
+    headers = {"User-Agent": "mediaforce/0.2"}
+    if existing_etag:
+        headers["If-None-Match"] = existing_etag
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:  # type: ignore[arg-type]
+            if resp.status == 304:
+                return None, existing_etag
+            payload = resp.read().decode("utf-8")
+            etag = resp.headers.get("ETag")
+            return payload, etag
+    except Exception:
+        return None, None
+
+
+def ensure_active_profile_settings(session: Session) -> Optional[ProfileSettingsSource]:
+    """Return active profile settings, refreshing from REMOTE_SETTINGS_URL when configured."""
+
+    src = session.exec(
+        select(ProfileSettingsSource)
+        .where(ProfileSettingsSource.is_active)
+        .order_by(text("id DESC"))
+    ).first()
+
+    if REMOTE_SETTINGS_URL is None:
+        return src
+
+    needs_fetch = src is None
+    if src and src.fetched_at:
+        try:
+            last = datetime.fromisoformat(src.fetched_at)
+            needs_fetch = (datetime.now() - last).total_seconds() > 24 * 3600
+        except Exception:
+            needs_fetch = True
+
+    if not needs_fetch:
+        return src
+
+    payload, etag = _fetch_remote_profile_settings(REMOTE_SETTINGS_URL, existing_etag=src.etag if src else None)
+    if payload is None and etag == (src.etag if src else None):
+        return src
+    if payload:
+        checksum = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        new_src = ProfileSettingsSource(
+            name="remote-default",
+            source_type="remote",
+            url=REMOTE_SETTINGS_URL,
+            etag=etag,
+            checksum=checksum,
+            payload=payload,
+            fetched_at=datetime.now().isoformat(),
+            applied_at=datetime.now().isoformat(),
+            is_active=True,
+        )
+        session.add(new_src)
+        session.commit()
+        session.refresh(new_src)
+        return new_src
+    return src
+
+
+def _extract_thresholds(source: Optional[ProfileSettingsSource]) -> tuple[float, float]:
+    """Return (threshold_min, threshold_median) defaults if missing."""
+
+    default_min = 82.0
+    default_median = 92.0
+    if not source:
+        return default_min, default_median
+    try:
+        data = json.loads(source.payload)
+        thresholds = data.get("thresholds", {})
+        return float(thresholds.get("min", default_min)), float(thresholds.get("median", default_median))
+    except Exception:
+        return default_min, default_median
+
+
+def create_profile_evaluation(
+    session: Session,
+    media_id: int,
+    selected_profile: str,
+    settings_source: Optional[ProfileSettingsSource],
+    sample_count: int,
+    sample_length: float,
+) -> ProfileEvaluation:
+    thresholds = _extract_thresholds(settings_source)
+    eval_obj = ProfileEvaluation(
+        media_id=media_id,
+        selected_profile=selected_profile,
+        sample_strategy="3x8s_motion",
+        sample_count=sample_count,
+        sample_length=sample_length,
+        threshold_min=thresholds[0],
+        threshold_median=thresholds[1],
+        status="running",
+        settings_source_id=settings_source.id if settings_source else None,
+    )
+    session.add(eval_obj)
+    session.commit()
+    session.refresh(eval_obj)
+    return eval_obj
+
+
+def save_vmaf_samples(
+    session: Session,
+    evaluation_id: int,
+    timestamps: list[float],
+    scores: list[float],
+    sample_length: float,
+):
+    kinds = ["short", "mid", "motion"]
+    for idx, (ts, score) in enumerate(zip(timestamps, scores)):
+        sample = VmafSample(
+            evaluation_id=evaluation_id,
+            sample_kind=kinds[idx] if idx < len(kinds) else "auto",
+            start_sec=ts,
+            duration_sec=sample_length,
+            vmaf=score,
+        )
+        session.add(sample)
+    session.commit()
+
+
 def load_remote_settings(url: str) -> Optional[AppSettings]:
     """Fetch settings JSON from master API and convert to AppSettings."""
     try:
@@ -589,7 +717,8 @@ class MediaInfo:
 
     @property
     def is_already_av1(self) -> bool:
-        return self.video_codec and "av1" in self.video_codec.lower()
+        codec = self.video_codec or ""
+        return "av1" in codec.lower()
 
     @property
     def is_interlaced(self) -> bool:
@@ -2677,16 +2806,18 @@ def recalculate_priorities(session: Session, max_age: int) -> None:
     based on the actual range of potential_savings_bytes values.
     """
     # Get max savings from all pending files
-    max_savings = session.exec(
-        select(MediaItem.potential_savings_bytes)
-        .where(
-            MediaItem.status == "pending",
-            MediaItem.potential_savings_bytes.is_not(None),
-            MediaItem.potential_savings_bytes > 0,
+    row = session.exec(
+        text(
+            """
+            SELECT MAX(potential_savings_bytes)
+            FROM media_inventory
+            WHERE status = 'pending'
+              AND potential_savings_bytes IS NOT NULL
+              AND potential_savings_bytes > 0
+            """
         )
-        .order_by(MediaItem.potential_savings_bytes.desc())
-        .limit(1)
-    ).first() or 1
+    ).first()
+    max_savings = row[0] if row and row[0] else 1
 
     # Recalculate priorities for all pending files
     pending = session.exec(select(MediaItem).where(MediaItem.status == "pending")).all()
@@ -2817,12 +2948,16 @@ async def _watch_single_library(lib: LibrarySettings, root: pathlib.Path) -> Non
                 session = init_db(db_path)
 
                 now = int(time.time())
-                oldest_mtime = session.exec(
-                    select(MediaItem.mtime)
-                    .where(MediaItem.status == "pending", MediaItem.mtime.is_not(None), MediaItem.mtime > 0)
-                    .order_by(MediaItem.mtime)
-                    .limit(1)
-                ).first() or int(path.stat().st_mtime)
+                oldest_row = session.exec(
+                    text(
+                        """
+                        SELECT MIN(mtime)
+                        FROM media_inventory
+                        WHERE status='pending' AND mtime IS NOT NULL AND mtime > 0
+                        """
+                    )
+                ).first()
+                oldest_mtime = oldest_row[0] if oldest_row and oldest_row[0] else int(path.stat().st_mtime)
                 max_age = max(now - oldest_mtime, 1)
 
                 print(f"[watch] Detected new media file: {path}")
@@ -2884,15 +3019,15 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
     # Optional periodic autoupdate during long runs
     if getattr(args, "autoupdate_interval", None):
-        interval = max(300, int(args.autoupdate_interval))
+        interval: Optional[int] = max(300, int(args.autoupdate_interval))
     else:
         interval = None
 
     async def runner():
-        if interval:
+        if interval is not None:
             async def updater():
                 while True:
-                    await asyncio.sleep(interval)
+                    await asyncio.sleep(float(interval))
                     if maybe_autoupdate(args.autoupdate_url, AUTOUPDATE_FILES):
                         print("[autoupdate] New version fetched; restarting watch to apply.")
                         os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -2986,6 +3121,8 @@ def check_missing_outputs(session: Session) -> int:
 
     Returns the number of files reset.
     """
+    now_str = now_iso()
+
     # Find completed encodes where the output file no longer exists
     joins = session.exec(
         select(MediaItem.id, MediaItem.path, EncodeResult.output_path)
@@ -3000,7 +3137,7 @@ def check_missing_outputs(session: Session) -> int:
             item = session.get(MediaItem, mid)
             if item:
                 item.status = "pending"
-                item.updated_at = now_iso()
+                item.updated_at = now_str
                 session.add(item)
             missing_count += 1
             print(f"  [reset] Missing output for: {pathlib.Path(src_path).name}")
@@ -3329,6 +3466,7 @@ def record_encode_result(
     error_msg: Optional[str] = None,
     metrics: Optional[QualityMetrics] = None,
     outlier_result: Optional[OutlierResult] = None,
+    profile_eval_id: Optional[int] = None,
 ) -> int:
     """Record encode result in the database.
 
@@ -3374,6 +3512,7 @@ def record_encode_result(
         is_outlier=is_outlier,
         outlier_reasons=outlier_reasons,
         review_status=review_status,
+        profile_eval_id=profile_eval_id,
     )
     session.add(result)
     session.commit()
@@ -3589,8 +3728,20 @@ def cmd_run(args: argparse.Namespace) -> int:
                         target_height = lib.max_height
                     break
 
+        eval_obj: Optional[ProfileEvaluation] = None
+        active_settings_source = ensure_active_profile_settings(session)
+
         # Optional VMAF sampling to adjust tier before full encode
         if args.sample_vmaf:
+            eval_obj = create_profile_evaluation(
+                session,
+                media_id=claimed["id"],
+                selected_profile=tier,
+                settings_source=active_settings_source,
+                sample_count=args.sample_count,
+                sample_length=args.sample_length,
+            )
+
             vmaf_stats = sample_vmaf(
                 info,
                 settings,
@@ -3600,9 +3751,51 @@ def cmd_run(args: argparse.Namespace) -> int:
                 motion_aware=args.sample_motion_aware,
             )
             if vmaf_stats:
+                scores = vmaf_stats.get("samples", [])
+                timestamps = vmaf_stats.get("timestamps", [])
+                if scores:
+                    save_vmaf_samples(session, eval_obj.id, timestamps, scores, args.sample_length)  # type: ignore[arg-type]
+                eval_obj.median_vmaf = vmaf_stats.get("median")
+                eval_obj.min_vmaf = vmaf_stats.get("min")
+                eval_obj.max_vmaf = max(scores) if scores else None
+
+                threshold_min, threshold_med = _extract_thresholds(active_settings_source)
+                eval_obj.threshold_min = threshold_min
+                eval_obj.threshold_median = threshold_med
+
+                fail = False
+                if eval_obj.min_vmaf is not None and eval_obj.min_vmaf < threshold_min:
+                    fail = True
+                if eval_obj.median_vmaf is not None and eval_obj.median_vmaf < threshold_med:
+                    fail = True
+
+                if fail:
+                    eval_obj.status = "failed"
+                    eval_obj.decision = "fail"
+                    eval_obj.note = "Below VMAF thresholds"
+                    eval_obj.updated_at = datetime.now().isoformat()
+                    session.add(eval_obj)
+                    session.commit()
+                    log_warn(
+                        "vmaf_threshold_fail",
+                        file=str(source_path),
+                        median=eval_obj.median_vmaf,
+                        minimum=eval_obj.min_vmaf,
+                        threshold_min=threshold_min,
+                        threshold_median=threshold_med,
+                    )
+                    release_claim(session, claimed["id"], success=False)
+                    active_slots -= 1
+                    continue
+
                 classification = adjust_tier_with_vmaf(classification, vmaf_stats)
                 settings = classification.recommended_settings
                 tier = classification.tier.value
+                eval_obj.decision = "keep"
+                eval_obj.status = "done"
+                eval_obj.updated_at = datetime.now().isoformat()
+                session.add(eval_obj)
+                session.commit()
                 log_info(
                     "vmaf_sample",
                     file=str(source_path),
@@ -3610,6 +3803,13 @@ def cmd_run(args: argparse.Namespace) -> int:
                     minimum=vmaf_stats['min'],
                     tier=tier,
                 )
+            else:
+                eval_obj.status = "failed"
+                eval_obj.decision = "fail"
+                eval_obj.note = "VMAF sampling failed"
+                eval_obj.updated_at = datetime.now().isoformat()
+                session.add(eval_obj)
+                session.commit()
 
         cmd = build_ffmpeg_command(
             source_path,
@@ -3703,13 +3903,19 @@ def cmd_run(args: argparse.Namespace) -> int:
             finish_progress_tracking(session, progress_id, success=True)
 
             # Record result
-            record_encode_result(
+            result_id = record_encode_result(
                 session, claimed["id"], str(source_path), tier, settings,
                 str(output_path), output_size, output_bitrate, source_size,
                 machine, started_at,
                 metrics=metrics,
                 outlier_result=outlier_result,
+                profile_eval_id=eval_obj.id if eval_obj else None,
             )
+            if eval_obj:
+                eval_obj.encode_result_id = result_id
+                eval_obj.updated_at = datetime.now().isoformat()
+                session.add(eval_obj)
+                session.commit()
             release_claim(session, claimed["id"], success=True)
             encoded_count += 1
 
@@ -3720,11 +3926,18 @@ def cmd_run(args: argparse.Namespace) -> int:
             # Clean up progress tracking
             finish_progress_tracking(session, progress_id, success=False, error_msg=error_msg[:500])
 
-            record_encode_result(
+            result_id = record_encode_result(
                 session, claimed["id"], str(source_path), tier, settings,
                 str(output_path), 0, None, source_path.stat().st_size,
-                machine, started_at, error_msg
+                machine, started_at, error_msg,
+                profile_eval_id=eval_obj.id if eval_obj else None,
             )
+            if eval_obj:
+                eval_obj.encode_result_id = result_id
+                eval_obj.status = "failed"
+                eval_obj.updated_at = datetime.now().isoformat()
+                session.add(eval_obj)
+                session.commit()
             release_claim(session, claimed["id"], success=False)
             error_count += 1
 

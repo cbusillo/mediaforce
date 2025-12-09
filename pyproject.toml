@@ -55,6 +55,14 @@ ignore_missing_imports = false
 module = ["fastapi", "fastapi.*", "sqlmodel", "sqlmodel.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["sqlalchemy", "sqlalchemy.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["pydantic", "pydantic.*", "uvicorn", "uvicorn.*"]
+ignore_missing_imports = true
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

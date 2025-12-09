@@ -7,7 +7,11 @@ from sqlmodel import Field, Session, SQLModel, create_engine
 from sqlalchemy import text
 
 
-class AppSetting(SQLModel, table=True):
+def now_iso() -> str:
+    return datetime.now().isoformat()
+
+
+class AppSetting(SQLModel, table=True):  # type: ignore[misc,call-arg]
     id: int = Field(default=1, primary_key=True)
     global_max_height: Optional[int] = None
     max_concurrency: int = 1
@@ -16,7 +20,7 @@ class AppSetting(SQLModel, table=True):
     offpeak_end: Optional[str] = "05:00"
 
 
-class Library(SQLModel, table=True):
+class Library(SQLModel, table=True):  # type: ignore[misc,call-arg]
     id: str = Field(primary_key=True)
     name: str
     media_type: str
@@ -27,7 +31,7 @@ class Library(SQLModel, table=True):
     weight: float = 1.0
 
 
-class MediaItem(SQLModel, table=True):
+class MediaItem(SQLModel, table=True):  # type: ignore[misc,call-arg]
     __tablename__ = "media_inventory"
 
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -73,7 +77,7 @@ class MediaItem(SQLModel, table=True):
     updated_at: Optional[str] = None
 
 
-class EncodeResult(SQLModel, table=True):
+class EncodeResult(SQLModel, table=True):  # type: ignore[misc,call-arg]
     __tablename__ = "encode_results"
 
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -108,10 +112,72 @@ class EncodeResult(SQLModel, table=True):
     outlier_reasons: Optional[str] = None
     review_status: str = "approved"
     reviewed_at: Optional[str] = None
+    profile_eval_id: Optional[int] = Field(default=None, foreign_key="profile_evaluations.id")
+
+
+class ProfileSettingsSource(SQLModel, table=True):  # type: ignore[misc,call-arg]
+    __tablename__ = "profile_settings_sources"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    source_type: str = Field(default="remote")  # remote|local
+    url: Optional[str] = None
+    etag: Optional[str] = None
+    checksum: Optional[str] = None
+    payload: str  # JSON payload
+    fetched_at: Optional[str] = None
+    applied_at: Optional[str] = None
+    is_active: bool = True
+
+
+class ProfileEvaluation(SQLModel, table=True):  # type: ignore[misc,call-arg]
+    __tablename__ = "profile_evaluations"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    media_id: int = Field(foreign_key="media_inventory.id")
+    encode_result_id: Optional[int] = Field(default=None, foreign_key="encode_results.id")
+    settings_source_id: Optional[int] = Field(default=None, foreign_key="profile_settings_sources.id")
+    selected_profile: str
+    sample_strategy: str = "3x8s_motion"
+    sample_count: int = 3
+    sample_length: float = 8.0
+    median_vmaf: Optional[float] = None
+    min_vmaf: Optional[float] = None
+    max_vmaf: Optional[float] = None
+    threshold_min: Optional[float] = None
+    threshold_median: Optional[float] = None
+    decision: str = "keep"  # keep|bump|fail|flagged
+    status: str = "pending"  # pending|running|done|failed|flagged
+    note: Optional[str] = None
+    created_at: str = Field(default_factory=now_iso)
+    updated_at: Optional[str] = None
+
+
+class VmafSample(SQLModel, table=True):  # type: ignore[misc,call-arg]
+    __tablename__ = "vmaf_samples"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    evaluation_id: int = Field(foreign_key="profile_evaluations.id")
+    sample_kind: str = "auto"
+    start_sec: float
+    duration_sec: float
+    vmaf: float
+    log_path: Optional[str] = None
+    created_at: str = Field(default_factory=now_iso)
+
+
+class ProfileChoiceFeedback(SQLModel, table=True):  # type: ignore[misc,call-arg]
+    __tablename__ = "profile_choice_feedback"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    evaluation_id: int = Field(foreign_key="profile_evaluations.id")
+    decision: str  # good|bad
+    reason_text: Optional[str] = None
+    flagged_at: str = Field(default_factory=now_iso)
     promoted_at: Optional[str] = None
 
 
-class EncodeProgress(SQLModel, table=True):
+class EncodeProgress(SQLModel, table=True):  # type: ignore[misc,call-arg]
     __tablename__ = "encode_progress"
 
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -136,7 +202,7 @@ class EncodeProgress(SQLModel, table=True):
     updated_at: Optional[str] = None
 
 
-class ShowOverride(SQLModel, table=True):
+class ShowOverride(SQLModel, table=True):  # type: ignore[misc,call-arg]
     __tablename__ = "show_overrides"
 
     show_name: str = Field(primary_key=True)
@@ -144,10 +210,6 @@ class ShowOverride(SQLModel, table=True):
     notes: Optional[str] = None
     max_height: Optional[int] = None
     updated_at: Optional[str] = None
-
-
-def now_iso() -> str:
-    return datetime.now().isoformat()
 
 
 def _maybe_migrate_legacy_tables(engine) -> None:
@@ -169,10 +231,26 @@ def _maybe_migrate_legacy_tables(engine) -> None:
         conn.commit()
 
 
+def _maybe_add_new_columns(engine) -> None:
+    """Add new columns to existing tables when upgrading in place."""
+    with engine.connect() as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+        }
+        if "encode_results" in tables:
+            rows = list(conn.execute(text("PRAGMA table_info('encode_results')")))
+            cols = {row[1] for row in rows}
+            if "profile_eval_id" not in cols:
+                conn.execute(text("ALTER TABLE encode_results ADD COLUMN profile_eval_id INTEGER"))
+                conn.commit()
+
+
 def init_engine(db_path: str):
     engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
     _maybe_migrate_legacy_tables(engine)
     SQLModel.metadata.create_all(engine)
+    _maybe_add_new_columns(engine)
     return engine
 
 
