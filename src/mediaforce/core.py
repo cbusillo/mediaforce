@@ -122,7 +122,28 @@ class SessionShim:
         self.session = session
 
     def execute(self, sql: str, params: tuple | dict | None = None):
-        result = self.session.exec(text(sql), params or {})
+        """Mimic sqlite3-style execute using SQLModel Session.exec.
+
+        Parameters are optional; if provided as a dict they are bound by name.
+        Tuple positional params are not currently used by the app and are
+        ignored to keep the shim simple.
+        """
+
+        # SQL in this codebase often uses sqlite-style "?" placeholders. SQLAlchemy's text()
+        # expects named params, so map "?" -> :p0, :p1, ... when positional args are given.
+        if isinstance(params, (list, tuple)):
+            placeholders = sql.count("?")
+            mapping = {f"p{i}": params[i] for i in range(min(placeholders, len(params)))}
+            for i in range(placeholders):
+                sql = sql.replace("?", f":p{i}", 1)
+            stmt = text(sql)
+            result = self.session.exec(stmt, params=mapping)
+        elif isinstance(params, dict):
+            stmt = text(sql)
+            result = self.session.exec(stmt, params=params)
+        else:
+            stmt = text(sql)
+            result = self.session.exec(stmt)
         rows = result.all()
         return ResultWrapper(rows)
 
@@ -263,6 +284,15 @@ def maybe_autoupdate(base_url: str, files: list[str]) -> bool:
             changed = True
 
     return changed
+
+
+# Package-relative files that worker autoupdate should pull
+AUTOUPDATE_FILES = [
+    "__init__.py",
+    "core.py",
+    "db/__init__.py",
+    "db/models.py",
+]
 
 
 def load_app_settings() -> AppSettings:
@@ -2859,9 +2889,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
         return 1
 
     if getattr(args, "autoupdate_url", None):
-        updated = maybe_autoupdate(args.autoupdate_url, ["mediaforce.py"])
+        updated = maybe_autoupdate(args.autoupdate_url, AUTOUPDATE_FILES)
         if updated:
-            print("[autoupdate] Updated mediaforce.py. Restarting watch to load new code.")
+            print("[autoupdate] Updated mediaforce package files. Restarting watch to load new code.")
             os.execv(sys.executable, [sys.executable] + sys.argv)
 
     # Load settings (remote or local)
@@ -2882,7 +2912,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
             async def updater():
                 while True:
                     await asyncio.sleep(interval)
-                    if maybe_autoupdate(args.autoupdate_url, ["mediaforce.py"]):
+                    if maybe_autoupdate(args.autoupdate_url, AUTOUPDATE_FILES):
                         print("[autoupdate] New version fetched; restarting watch to apply.")
                         os.execv(sys.executable, [sys.executable] + sys.argv)
             asyncio.create_task(updater())
@@ -3028,7 +3058,10 @@ def claim_next_file(session: Session, machine: str) -> Optional[dict]:
     weighted = session.exec(
         select(MediaItem, Library.weight)
         .join(Library, MediaItem.library_id == Library.id, isouter=True)
-        .where(MediaItem.status == "pending")
+        .where(
+            MediaItem.status == "pending",
+            (MediaItem.claimed_by.is_(None) | (MediaItem.claimed_by == machine)),
+        )
         .order_by(
             MediaItem.manual_priority,
             ((MediaItem.priority_score or 0) * (Library.weight or 1)).desc(),
@@ -3434,7 +3467,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # Autoupdate on startup
     if getattr(args, "autoupdate_url", None):
-        if maybe_autoupdate(args.autoupdate_url, ["mediaforce.py"]):
+        if maybe_autoupdate(args.autoupdate_url, AUTOUPDATE_FILES):
             log_info("autoupdate_restart")
             os.execv(sys.executable, [sys.executable] + sys.argv)
 
@@ -3469,7 +3502,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         if now - last_update_check < interval:
             return
         last_update_check = now
-        if maybe_autoupdate(args.autoupdate_url, ["mediaforce.py"]):
+        if maybe_autoupdate(args.autoupdate_url, AUTOUPDATE_FILES):
             log_info("autoupdate_restart")
             os.execv(sys.executable, [sys.executable] + sys.argv)
 

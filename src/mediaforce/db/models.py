@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlmodel import Field, Session, SQLModel, create_engine, select
+from sqlalchemy import text
 
 
 class AppSetting(SQLModel, table=True):
@@ -27,6 +28,8 @@ class Library(SQLModel, table=True):
 
 
 class MediaItem(SQLModel, table=True):
+    __tablename__ = "media_inventory"
+
     id: Optional[int] = Field(default=None, primary_key=True)
     path: str = Field(unique=True, index=True)
     library_id: Optional[str] = Field(default=None, foreign_key="library.id")
@@ -71,8 +74,10 @@ class MediaItem(SQLModel, table=True):
 
 
 class EncodeResult(SQLModel, table=True):
+    __tablename__ = "encode_results"
+
     id: Optional[int] = Field(default=None, primary_key=True)
-    source_id: int = Field(foreign_key="mediaitem.id")
+    source_id: int = Field(foreign_key="media_inventory.id")
     source_path: str
 
     tier: Optional[str] = None
@@ -107,8 +112,10 @@ class EncodeResult(SQLModel, table=True):
 
 
 class EncodeProgress(SQLModel, table=True):
+    __tablename__ = "encode_progress"
+
     id: Optional[int] = Field(default=None, primary_key=True)
-    source_id: int = Field(foreign_key="mediaitem.id")
+    source_id: int = Field(foreign_key="media_inventory.id")
     source_path: str
     output_path: str
     machine: str
@@ -130,6 +137,8 @@ class EncodeProgress(SQLModel, table=True):
 
 
 class ShowOverride(SQLModel, table=True):
+    __tablename__ = "show_overrides"
+
     show_name: str = Field(primary_key=True)
     default_tier: Optional[str] = None
     notes: Optional[str] = None
@@ -141,8 +150,28 @@ def now_iso() -> str:
     return datetime.now().isoformat()
 
 
+def _maybe_migrate_legacy_tables(engine) -> None:
+    """Rename legacy table names to current ones if needed."""
+    renames = [
+        ("mediaitem", "media_inventory"),
+        ("encoderesult", "encode_results"),
+        ("encodeprogress", "encode_progress"),
+        ("showoverride", "show_overrides"),
+    ]
+    with engine.connect() as conn:
+        existing = {
+            row[0]
+            for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+        }
+        for old, new in renames:
+            if old in existing and new not in existing:
+                conn.execute(text(f'ALTER TABLE "{old}" RENAME TO "{new}"'))
+        conn.commit()
+
+
 def init_engine(db_path: str):
     engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    _maybe_migrate_legacy_tables(engine)
     SQLModel.metadata.create_all(engine)
     return engine
 
