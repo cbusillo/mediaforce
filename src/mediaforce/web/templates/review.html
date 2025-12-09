@@ -134,8 +134,9 @@
         </div>
         <div style="margin-top:0.5rem; display:flex; gap:0.5rem; align-items:center;">
             <button class="btn btn-primary" onclick="syncPlay()">Play/Pause Both</button>
+            <button class="btn" id="previewToggle">View: Both</button>
             <input type="range" id="previewSeek" min="0" max="100" value="0" style="flex:1;">
-            <span id="previewTime" class="text-muted" style="min-width: 120px; text-align:right;">0:00 / 0:00</span>
+            <span id="previewTime" class="text-muted" style="min-width: 140px; text-align:right;">0:00:00 / 0:00:00</span>
         </div>
         <div class="text-muted" style="font-size:0.85rem; margin-top:0.25rem;">
             Shortcuts: space play/pause · Left/Right seek 5s · 1/2/3/4/5 speed 0.75/1/1.25/1.5/2x
@@ -409,17 +410,19 @@ const previewSrc = document.getElementById('previewSource');
 const previewEnc = document.getElementById('previewEncoded');
 const previewSeek = document.getElementById('previewSeek');
 const previewTime = document.getElementById('previewTime');
+const previewToggle = document.getElementById('previewToggle');
 const hoverThumb = document.getElementById('hoverThumb');
 const hoverVideo = document.getElementById('hoverVideo');
 
 const SEEK_STEP = 5; // seconds
 const SPEED_MAP = { '1': 0.75, '2': 1.0, '3': 1.25, '4': 1.5, '5': 2.0 };
 let previewOpen = false;
+let previewView = 'both'; // both | source | encoded
 
 function activeDuration() {
     const srcDur = isFinite(previewSrc.duration) ? previewSrc.duration : 0;
     const encDur = isFinite(previewEnc.duration) ? previewEnc.duration : 0;
-    return srcDur || encDur || 0;
+    return Math.max(srcDur, encDur, 0);
 }
 
 function setCurrentTime(t) {
@@ -437,10 +440,11 @@ function setPlaybackRate(rate) {
 }
 
 function formatTime(sec) {
-    if (!isFinite(sec) || sec < 0) return '0:00';
-    const m = Math.floor(sec / 60);
+    if (!isFinite(sec) || sec < 0) return '0:00:00';
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
     const s = Math.floor(sec % 60);
-    return `${m}:${s.toString().padStart(2, '0')}`;
+    return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 }
 
 function openPreview(id) {
@@ -451,6 +455,8 @@ function openPreview(id) {
     previewEnc.load();
     previewModal.style.display = 'flex';
     previewOpen = true;
+    previewView = 'both';
+    applyPreviewView();
     setPlaybackRate(1.0);
     setCurrentTime(0);
 }
@@ -463,18 +469,22 @@ function closePreview() {
 }
 
 function syncPlay() {
-    if (previewSrc.paused && previewEnc.paused) {
-        previewSrc.play().catch(() => {});
-        previewEnc.play().catch(() => {});
+    const active = previewView === 'encoded' ? previewEnc : previewSrc;
+    const other = previewView === 'encoded' ? previewSrc : previewEnc;
+    const playTarget = active.paused && other.paused;
+    if (playTarget) {
+        active.play().catch(() => {});
+        if (previewView === 'both') other.play().catch(() => {});
     } else {
-        previewSrc.pause();
-        previewEnc.pause();
+        active.pause();
+        other.pause();
     }
 }
 
 function updatePreviewTime() {
     const dur = activeDuration();
-    const t = isFinite(previewSrc.currentTime) ? previewSrc.currentTime : 0;
+    const active = previewView === 'encoded' ? previewEnc : previewSrc;
+    const t = isFinite(active.currentTime) ? active.currentTime : 0;
     const pct = dur > 0 ? (t / dur) * 100 : 0;
     previewSeek.value = pct;
     previewTime.textContent = `${formatTime(t)} / ${formatTime(dur)}`;
@@ -498,6 +508,27 @@ previewSeek.addEventListener('input', () => {
     const dur = activeDuration();
     const t = dur > 0 ? (previewSeek.value / 100) * dur : 0;
     setCurrentTime(t);
+});
+
+function applyPreviewView() {
+    const showSource = previewView === 'both' || previewView === 'source';
+    const showEncoded = previewView === 'both' || previewView === 'encoded';
+    previewSrc.parentElement.style.display = showSource ? '' : 'none';
+    previewEnc.parentElement.style.display = showEncoded ? '' : 'none';
+    previewToggle.textContent = `View: ${previewView.charAt(0).toUpperCase()}${previewView.slice(1)}`;
+}
+
+previewToggle.addEventListener('click', () => {
+    const current = Math.max(
+        isFinite(previewSrc.currentTime) ? previewSrc.currentTime : 0,
+        isFinite(previewEnc.currentTime) ? previewEnc.currentTime : 0,
+    );
+    setCurrentTime(current);
+    previewView = previewView === 'both' ? 'source' : previewView === 'source' ? 'encoded' : 'both';
+    if (previewView === 'source') previewEnc.pause();
+    if (previewView === 'encoded') previewSrc.pause();
+    applyPreviewView();
+    updatePreviewTime();
 });
 
 // Clicking either video toggles play/pause in sync
@@ -526,12 +557,14 @@ document.addEventListener('keydown', (e) => {
 
     if (e.code === 'ArrowRight') {
         e.preventDefault();
-        setCurrentTime(previewSrc.currentTime + SEEK_STEP);
+        const active = previewView === 'encoded' ? previewEnc : previewSrc;
+        setCurrentTime(active.currentTime + SEEK_STEP);
     }
 
     if (e.code === 'ArrowLeft') {
         e.preventDefault();
-        setCurrentTime(previewSrc.currentTime - SEEK_STEP);
+        const active = previewView === 'encoded' ? previewEnc : previewSrc;
+        setCurrentTime(active.currentTime - SEEK_STEP);
     }
 
     if (SPEED_MAP[e.key]) {

@@ -26,12 +26,15 @@
 
 <div class="compare-controls">
     <button id="playPause" class="btn btn-primary">Play</button>
+    <button id="toggleView" class="btn">View: Both</button>
     <input type="range" id="seekBar" min="0" max="100" value="0">
-    <span id="timeDisplay">0:00 / 0:00</span>
+    <span id="timeDisplay">0:00:00 / 0:00:00</span>
     <select id="speed" class="btn">
-        <option value="0.25">0.25x</option>
-        <option value="0.5">0.5x</option>
+        <option value="0.75">0.75x</option>
         <option value="1" selected>1x</option>
+        <option value="1.25">1.25x</option>
+        <option value="1.5">1.5x</option>
+        <option value="1.75">1.75x</option>
         <option value="2">2x</option>
     </select>
 </div>
@@ -60,13 +63,27 @@
 const source = document.getElementById('source');
 const encoded = document.getElementById('encoded');
 const playPause = document.getElementById('playPause');
+const toggleView = document.getElementById('toggleView');
 const seekBar = document.getElementById('seekBar');
 const timeDisplay = document.getElementById('timeDisplay');
 const speedSelect = document.getElementById('speed');
 
 let isSyncing = false;
+let viewMode = 'both'; // 'both' | 'source' | 'encoded'
+
+const SEEK_STEP = 5;
+const SPEED_MAP = { '1': 1.0, '2': 1.25, '3': 1.5, '4': 1.75, '5': 2.0 };
+
+function formatTimeHMS(seconds) {
+    if (!isFinite(seconds) || seconds < 0) return '0:00:00';
+    const hrs = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+}
 
 function formatTime(s) {
+    // kept for internal reuse where hours aren't needed
     if (!isFinite(s) || s < 0) return '0:00';
     const mins = Math.floor(s / 60);
     const secs = Math.floor(s % 60);
@@ -83,10 +100,15 @@ function syncVideos(master, slave) {
 }
 
 function updateTime() {
-    const dur = isFinite(source.duration) ? source.duration : 0;
-    const pct = dur > 0 ? (source.currentTime / dur) * 100 : 0;
+    const master = viewMode === 'encoded' ? encoded : source;
+    const fallback = viewMode === 'encoded' ? source : encoded;
+    const masterTime = isFinite(master.currentTime) ? master.currentTime : fallback.currentTime;
+    const durSource = isFinite(source.duration) ? source.duration : 0;
+    const durEncoded = isFinite(encoded.duration) ? encoded.duration : 0;
+    const dur = Math.max(durSource, durEncoded, 0);
+    const pct = dur > 0 ? (masterTime / dur) * 100 : 0;
     seekBar.value = pct;
-    timeDisplay.textContent = `${formatTime(source.currentTime)} / ${formatTime(dur)}`;
+    timeDisplay.textContent = `${formatTimeHMS(masterTime)} / ${formatTimeHMS(dur)}`;
 }
 
 source.addEventListener('timeupdate', () => {
@@ -111,6 +133,35 @@ playPause.addEventListener('click', () => {
     }
 });
 
+toggleView.addEventListener('click', () => {
+    const current = Math.max(
+        isFinite(source.currentTime) ? source.currentTime : 0,
+        isFinite(encoded.currentTime) ? encoded.currentTime : 0,
+    );
+    source.currentTime = current;
+    encoded.currentTime = current;
+
+    if (viewMode === 'both') {
+        viewMode = 'source';
+        encoded.pause();
+        encoded.parentElement.style.display = 'none';
+        source.parentElement.style.display = '';
+        toggleView.textContent = 'View: Source';
+    } else if (viewMode === 'source') {
+        viewMode = 'encoded';
+        source.pause();
+        source.parentElement.style.display = 'none';
+        encoded.parentElement.style.display = '';
+        toggleView.textContent = 'View: Encoded';
+    } else {
+        viewMode = 'both';
+        source.parentElement.style.display = '';
+        encoded.parentElement.style.display = '';
+        toggleView.textContent = 'View: Both';
+    }
+    updateTime();
+});
+
 seekBar.addEventListener('input', () => {
     const dur = isFinite(source.duration) ? source.duration : 0;
     const time = dur > 0 ? (seekBar.value / 100) * dur : 0;
@@ -129,9 +180,16 @@ document.addEventListener('keydown', (e) => {
         e.preventDefault();
         playPause.click();
     } else if (e.code === 'ArrowLeft') {
-        source.currentTime -= 5;
+        source.currentTime = Math.max(0, source.currentTime - SEEK_STEP);
+        encoded.currentTime = source.currentTime;
     } else if (e.code === 'ArrowRight') {
-        source.currentTime += 5;
+        source.currentTime = source.currentTime + SEEK_STEP;
+        encoded.currentTime = source.currentTime;
+    } else if (SPEED_MAP[e.key]) {
+        const speed = SPEED_MAP[e.key];
+        speedSelect.value = String(speed);
+        source.playbackRate = speed;
+        encoded.playbackRate = speed;
     }
 });
 
