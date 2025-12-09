@@ -1,0 +1,261 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Settings</h1>
+
+<div class="card">
+    <h3>Libraries</h3>
+    <p class="text-muted" style="margin-bottom: 1rem;">
+        Configure logical libraries (TV, Movies) and their paths on macOS and Linux.
+        These settings are shared between the web UI, CLI, and background watchers.
+    </p>
+
+    <div style="display: flex; gap: 1rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap;">
+        <div class="stat-card" style="background: var(--bg-secondary); padding: 0.75rem 1rem; border-radius: 6px;">
+            <div class="label" style="color: var(--text-secondary);">Watcher</div>
+            <div class="value" style="font-size: 1.1rem; color: var(--accent);">
+                {% if watch_status.running %}Running{% else %}Stopped{% endif %}
+            </div>
+            <div class="text-muted" style="font-size: 0.9rem;">{{ watch_status.message }}</div>
+        </div>
+
+        <button type="button" id="watch-start" class="btn btn-success">Start Watch</button>
+        <button type="button" id="watch-stop" class="btn btn-warning">Stop Watch</button>
+        <span id="watch-status" class="text-muted"></span>
+    </div>
+
+    <div style="margin-bottom: 1rem; display: flex; gap: 1rem; flex-wrap: wrap; align-items: center;">
+        <div>
+            <label for="global-max-height" class="text-muted" style="display:block; margin-bottom: 0.25rem;">Global Max Height</label>
+            <select id="global-max-height" name="global_max_height" style="width: 160px;">
+                {% for h in ["",480,720,1080,1440,2160,4320] %}
+                    <option value="{{ h }}" {% if h != '' and global_max_height is not none and (h|int) == global_max_height %}selected{% endif %}>
+                        {% if h == "" %}Unset{% else %}{{ h }}p{% endif %}
+                    </option>
+                {% endfor %}
+            </select>
+            <div class="text-muted" style="font-size: 0.85rem;">Downscale only; never upscale.</div>
+        </div>
+
+        <div>
+            <label for="max-concurrency" class="text-muted" style="display:block; margin-bottom: 0.25rem;">Max Concurrency</label>
+            <input id="max-concurrency" type="number" name="max_concurrency" min="1" value="{{ settings.max_concurrency or 1 }}" style="width: 120px;">
+            <div class="text-muted" style="font-size: 0.85rem;">Encodes allowed in parallel on this host.</div>
+        </div>
+
+        <div>
+            <label class="text-muted" style="display:block; margin-bottom: 0.25rem;">Off-peak Window</label>
+            <div style="display:flex; gap:0.35rem; align-items:center;">
+                <input type="checkbox" name="offpeak_enabled" id="offpeak-enabled" {% if settings.offpeak_enabled %}checked{% endif %}>
+                <input type="time" name="offpeak_start" value="{{ settings.offpeak_start or '00:00' }}" style="width:120px;">
+                <span>to</span>
+                <input type="time" name="offpeak_end" value="{{ settings.offpeak_end or '05:00' }}" style="width:120px;">
+            </div>
+            <div class="text-muted" style="font-size: 0.85rem;">Workers only encode during this window when enabled.</div>
+        </div>
+    </div>
+
+    <form id="settings-form">
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Type</th>
+            <th>macOS Path (/Volumes)</th>
+            <th>Linux Path (/mnt)</th>
+            <th>Watch for New Files</th>
+            <th>Max Height</th>
+            <th>Last Scan</th>
+            <th>Scan Now</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for lib in libraries %}
+                <tr>
+                    <td>
+                        <input type="hidden" name="libraries[{{ loop.index0 }}][id]" value="{{ lib.id }}">
+                        <input type="text" name="libraries[{{ loop.index0 }}][name]" value="{{ lib.name }}" style="width: 180px;">
+                    </td>
+                    <td>
+                        <select name="libraries[{{ loop.index0 }}][media_type]" style="width: 120px;">
+                            {% set mt = (lib.media_type or '').lower() %}
+                            <option value="tv" {% if mt == 'tv' %}selected{% endif %}>TV</option>
+                            <option value="movies" {% if mt == 'movies' %}selected{% endif %}>Movies</option>
+                            <option value="generic" {% if mt not in ['tv', 'movies'] %}selected{% endif %}>Other</option>
+                        </select>
+                    </td>
+            <td>
+                <input type="text" name="libraries[{{ loop.index0 }}][mac_path]" value="{{ lib.mac_path }}" style="width: 260px;">
+            </td>
+            <td>
+                <input type="text" name="libraries[{{ loop.index0 }}][linux_path]" value="{{ lib.linux_path }}" style="width: 260px;">
+            </td>
+            <td style="text-align: center;">
+                <input class="row-checkbox" type="checkbox" name="libraries[{{ loop.index0 }}][watch]" value="true" {% if lib.watch %}checked{% endif %}>
+            </td>
+            <td>
+                <select name="libraries[{{ loop.index0 }}][max_height]" style="width: 130px;">
+                    {% for h in ["",480,720,1080,1440,2160,4320] %}
+                        <option value="{{ h }}" {% if h != '' and lib.max_height is not none and (h|int) == lib.max_height %}selected{% endif %}>
+                            {% if h == "" %}Unset{% else %}{{ h }}p{% endif %}
+                        </option>
+                    {% endfor %}
+                </select>
+            </td>
+            <td class="text-muted" style="font-size: 0.9rem;">
+                {% set status = (lib_status | selectattr('lib.id', 'equalto', lib.id) | list | first) %}
+                {% if status and status.last_scan %}
+                    {{ status.last_scan[:16] }}
+                {% else %}
+                    never
+                {% endif %}
+            </td>
+            <td>
+                <button type="button" class="btn btn-sm btn-primary scan-btn" data-path="{{ lib.mac_path if is_mac else lib.linux_path }}">Scan</button>
+            </td>
+        </tr>
+        {% endfor %}
+            </tbody>
+        </table>
+
+        <div style="margin-top: 1rem; display: flex; gap: 1rem; align-items: center;">
+            <button type="submit" class="btn btn-primary">Save Settings</button>
+            <span id="settings-status" class="text-muted"></span>
+        </div>
+    </form>
+</div>
+
+<script>
+document.getElementById('settings-form').addEventListener('submit', async function (event) {
+    event.preventDefault();
+
+    const form = event.target;
+    const formData = new FormData(form);
+
+    // Build libraries array from indexed fields
+    const libraries = [];
+    const indexPattern = /^libraries\[(\d+)\]\[(.+)\]$/;
+
+    for (const [key, value] of formData.entries()) {
+        const match = key.match(indexPattern);
+        if (!match) continue;
+
+        const idx = parseInt(match[1], 10);
+        const field = match[2];
+
+        if (!libraries[idx]) {
+            libraries[idx] = {};
+        }
+
+        if (field === 'watch') {
+            libraries[idx][field] = true;
+        } else {
+            libraries[idx][field] = value;
+        }
+    }
+
+    // Global max height (select sits outside the form in DOM order, so read directly)
+    const gmhEl = document.getElementById('global-max-height');
+    const gmh = gmhEl ? gmhEl.value : '';
+    const global_max_height = gmh && gmh !== '' ? parseInt(gmh, 10) : null;
+
+    const maxConcurrencyEl = document.getElementById('max-concurrency');
+    const max_concurrency = maxConcurrencyEl ? Math.max(1, parseInt(maxConcurrencyEl.value || '1', 10)) : 1;
+
+    const offpeakEnabledEl = document.getElementById('offpeak-enabled');
+    const offpeak_enabled = offpeakEnabledEl ? offpeakEnabledEl.checked : false;
+    const offpeak_start = (document.querySelector('input[name="offpeak_start"]')?.value) || '00:00';
+    const offpeak_end = (document.querySelector('input[name="offpeak_end"]')?.value) || '05:00';
+
+    // Ensure unchecked checkboxes are false
+    for (let i = 0; i < libraries.length; i++) {
+        if (!libraries[i]) continue;
+        if (typeof libraries[i].watch === 'undefined') {
+            libraries[i].watch = false;
+        }
+        if (libraries[i].max_height === '' || libraries[i].max_height === undefined) libraries[i].max_height = null;
+        else libraries[i].max_height = parseInt(libraries[i].max_height, 10) || null;
+    }
+
+    const statusEl = document.getElementById('settings-status');
+    statusEl.textContent = 'Saving...';
+
+    try {
+        const resp = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ libraries, global_max_height, max_concurrency, offpeak_enabled, offpeak_start, offpeak_end }),
+        });
+
+        const data = await resp.json();
+        if (data.success) {
+            statusEl.textContent = 'Settings saved.';
+            statusEl.className = 'text-success';
+        } else {
+            statusEl.textContent = data.error || 'Failed to save settings.';
+            statusEl.className = 'text-danger';
+        }
+    } catch (err) {
+        statusEl.textContent = 'Error saving settings.';
+        statusEl.className = 'text-danger';
+    }
+});
+
+// Watch controls
+const watchStatus = document.getElementById('watch-status');
+const watchStart = document.getElementById('watch-start');
+const watchStop = document.getElementById('watch-stop');
+
+async function toggleWatch(action) {
+    watchStatus.textContent = action === 'start' ? 'Starting…' : 'Stopping…';
+    try {
+        const resp = await fetch('/api/watch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action }),
+        });
+        const data = await resp.json();
+        if (data.success) {
+            watchStatus.textContent = `Watcher: ${data.status.running ? 'Running' : 'Stopped'} (${data.status.message || ''})`;
+            watchStatus.className = data.status.running ? 'text-success' : 'text-muted';
+        } else {
+            watchStatus.textContent = data.error || 'Failed to toggle watcher';
+            watchStatus.className = 'text-danger';
+        }
+    } catch (err) {
+        watchStatus.textContent = 'Error toggling watcher';
+        watchStatus.className = 'text-danger';
+    }
+}
+
+watchStart?.addEventListener('click', () => toggleWatch('start'));
+watchStop?.addEventListener('click', () => toggleWatch('stop'));
+
+// Scan buttons
+document.querySelectorAll('.scan-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+        const path = btn.getAttribute('data-path');
+        if (!path) return;
+        btn.textContent = 'Scanning…';
+        btn.disabled = true;
+        try {
+            const resp = await fetch('/api/scan', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path }),
+            });
+            const data = await resp.json();
+            if (!data.success) {
+                alert(`Scan failed: ${data.error || 'unknown error'}`);
+            }
+        } catch (err) {
+            alert('Error starting scan');
+        } finally {
+            btn.textContent = 'Scan';
+            btn.disabled = false;
+        }
+    });
+});
+</script>
+
+{% endblock %}

@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Dashboard</h1>
+
+{% if lib_status %}
+<div class="card" style="margin-bottom: 1rem;">
+    <h3>Library Status</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Path</th>
+                <th>Last Scan</th>
+                <th>Watcher</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for entry in lib_status %}
+            <tr>
+                <td>{{ entry.lib.name }}</td>
+                <td class="truncate">{{ entry.root }}</td>
+                <td>
+                    {% if entry.running %}
+                        <span class="text-warning">running…</span>
+                    {% elif entry.last_scan %}
+                        {{ entry.last_scan[:16] }}
+                    {% else %}
+                        <span class="text-muted">never</span>
+                    {% endif %}
+                </td>
+                <td>{{ 'On' if entry.lib.watch else 'Off' }}</td>
+                <td>
+                    {% if entry.running %}
+                        <span class="pill pill-on">Scan running</span>
+                    {% else %}
+                        <span class="pill pill-off">Idle</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="value">{{ stats.pending }}</div>
+        <div class="label">Pending</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ stats.encoding }}</div>
+        <div class="label">Encoding</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ stats.encoded }}</div>
+        <div class="label">Encoded</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ stats.completed }}</div>
+        <div class="label">Completed</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ stats.space_saved_gb }}</div>
+        <div class="label">GB Saved</div>
+    </div>
+</div>
+
+{% if active_encodes %}
+<div class="card">
+    <h3>Active Encodes</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>File</th>
+                <th>Machine</th>
+                <th>Started</th>
+                <th>Tier</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for encode in active_encodes %}
+            <tr>
+                <td class="truncate" title="{{ encode.path }}">{{ encode.filename }}</td>
+                <td>{{ encode.claimed_by or '?' }}</td>
+                <td>{{ encode.claimed_at or '?' }}</td>
+                <td class="tier-{{ encode.detected_tier }}">{{ encode.detected_tier }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<div class="card">
+    <h3>Recent Completions</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>File</th>
+                <th>Source</th>
+                <th>Output</th>
+                <th>Reduction</th>
+                <th>Completed</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for encode in recent_completions %}
+            <tr>
+                <td class="truncate" title="{{ encode.path }}">{{ encode.filename }}</td>
+                <td>{{ encode.source_size }}</td>
+                <td>{{ encode.output_size }}</td>
+                <td class="text-success">{{ encode.reduction }}%</td>
+                <td>{{ encode.completed_at }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="card">
+    <h3>Queue by Tier</h3>
+    <div class="stats-grid">
+        {% for tier, count in tier_counts.items() %}
+        <div class="stat-card">
+            <div class="value tier-{{ tier }}">{{ count }}</div>
+            <div class="label">{{ tier }}</div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}

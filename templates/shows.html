@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Show Management</h1>
+
+<p class="text-muted" style="margin-bottom: 1rem;">
+    Manage tier overrides for TV shows. Overrides apply to all episodes when scanning.
+</p>
+
+<!-- Search/Filter -->
+<div class="card" style="margin-bottom: 1rem;">
+    <div style="display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;">
+        <input type="text" id="showSearch" placeholder="Search shows..."
+               style="flex: 1; min-width: 200px; padding: 0.5rem; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--text-secondary); border-radius: 4px;"
+               oninput="filterShows()">
+        <select id="tierFilter" onchange="filterShows()" style="padding: 0.5rem; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--text-secondary); border-radius: 4px;">
+            <option value="">All Tiers</option>
+            <option value="pristine">Pristine</option>
+            <option value="good">Good</option>
+            <option value="mediocre">Mediocre</option>
+            <option value="poor">Poor</option>
+            <option value="override">Has Override</option>
+        </select>
+        <span class="text-muted"><span id="showCount">{{ shows|length }}</span> shows</span>
+    </div>
+</div>
+
+<div class="card">
+    <table id="showsTable">
+        <thead>
+            <tr>
+                <th>Show Name</th>
+                <th>Episodes</th>
+                <th>Pending</th>
+                <th>Encoded</th>
+                <th>Completed</th>
+                <th>Detected Tier</th>
+                <th>Override</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for show in shows %}
+            <tr data-show="{{ show.name }}" data-tier="{{ show.detected_tier }}" data-override="{{ show.override_tier or '' }}">
+                <td>{{ show.name }}</td>
+                <td>{{ show.total }}</td>
+                <td>{{ show.pending }}</td>
+                <td>{{ show.encoded }}</td>
+                <td>{{ show.completed }}</td>
+                <td class="tier-{{ show.detected_tier }}">{{ show.detected_tier or '-' }}</td>
+                <td>
+                    <select class="tier-select" data-show="{{ show.name }}"
+                            onchange="setOverride(this)"
+                            style="padding: 0.25rem; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--text-secondary); border-radius: 4px;">
+                        <option value="" {{ 'selected' if not show.override_tier else '' }}>Auto-detect</option>
+                        <option value="pristine" {{ 'selected' if show.override_tier == 'pristine' else '' }}>Pristine</option>
+                        <option value="good" {{ 'selected' if show.override_tier == 'good' else '' }}>Good</option>
+                        <option value="mediocre" {{ 'selected' if show.override_tier == 'mediocre' else '' }}>Mediocre</option>
+                        <option value="poor" {{ 'selected' if show.override_tier == 'poor' else '' }}>Poor</option>
+                    </select>
+                </td>
+                <td>
+                    {% if show.pending > 0 %}
+                    <button onclick="applyTierToShow('{{ show.name|e }}')" class="btn btn-sm btn-primary">Apply to Pending</button>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- Override Modal -->
+<div id="overrideModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000;">
+    <div style="background: var(--bg-card); padding: 2rem; border-radius: 8px; max-width: 500px; margin: 10% auto;">
+        <h3>Apply Tier to Pending Episodes</h3>
+        <p class="text-muted">Update all pending episodes of "<span id="modalShowName">Show</span>" to use the selected tier.</p>
+
+        <div style="margin: 1rem 0;">
+            <label style="display: block; margin-bottom: 0.5rem;">Tier:</label>
+            <select id="modalTier" style="width: 100%; padding: 0.5rem; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--text-secondary); border-radius: 4px;">
+                <option value="pristine">Pristine (CRF 26)</option>
+                <option value="good">Good (CRF 28)</option>
+                <option value="mediocre">Mediocre (CRF 30)</option>
+                <option value="poor">Poor (CRF 32)</option>
+            </select>
+        </div>
+
+        <div style="margin: 1rem 0;">
+            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                <input type="checkbox" id="modalSetOverride" checked>
+                <span>Also set as default override for future episodes</span>
+            </label>
+        </div>
+
+        <div style="display: flex; gap: 1rem; margin-top: 1.5rem;">
+            <button onclick="confirmApplyTier()" class="btn btn-primary">Apply</button>
+            <button onclick="hideOverrideModal()" class="btn" style="background: var(--bg-secondary);">Cancel</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentShowName = null;
+
+function filterShows() {
+    const search = document.getElementById('showSearch').value.toLowerCase();
+    const tierFilter = document.getElementById('tierFilter').value;
+    const rows = document.querySelectorAll('#showsTable tbody tr');
+    let visible = 0;
+
+    rows.forEach(row => {
+        const showName = row.dataset.show.toLowerCase();
+        const tier = row.dataset.tier;
+        const override = row.dataset.override;
+
+        let show = true;
+        if (search && !showName.includes(search)) show = false;
+        if (tierFilter === 'override' && !override) show = false;
+        else if (tierFilter && tierFilter !== 'override' && tier !== tierFilter) show = false;
+
+        row.style.display = show ? '' : 'none';
+        if (show) visible++;
+    });
+
+    document.getElementById('showCount').textContent = visible;
+}
+
+async function setOverride(select) {
+    const showName = select.dataset.show;
+    const tier = select.value;
+
+    const resp = await fetch('/api/show-override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ show_name: showName, tier: tier || null })
+    });
+
+    const data = await resp.json();
+    if (!data.success) {
+        alert('Error: ' + data.error);
+        window.location.reload();
+    }
+
+    select.closest('tr').dataset.override = tier;
+}
+
+function applyTierToShow(showName) {
+    currentShowName = showName;
+    document.getElementById('modalShowName').textContent = showName;
+
+    const row = document.querySelector(`tr[data-show="${showName}"]`);
+    const currentTier = row.dataset.override || row.dataset.tier || 'good';
+    document.getElementById('modalTier').value = currentTier;
+
+    document.getElementById('overrideModal').style.display = 'block';
+}
+
+function hideOverrideModal() {
+    document.getElementById('overrideModal').style.display = 'none';
+    currentShowName = null;
+}
+
+async function confirmApplyTier() {
+    if (!currentShowName) return;
+
+    const tier = document.getElementById('modalTier').value;
+    const setOverride = document.getElementById('modalSetOverride').checked;
+
+    const resp = await fetch('/api/apply-tier-to-show', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            show_name: currentShowName,
+            tier: tier,
+            set_override: setOverride
+        })
+    });
+
+    const data = await resp.json();
+    if (data.success) {
+        alert(`Updated ${data.updated} episodes to ${tier} tier.`);
+        window.location.reload();
+    } else {
+        alert('Error: ' + data.error);
+    }
+}
+
+document.addEventListener('keydown', (e) => {
+    if (e.code === 'Escape') hideOverrideModal();
+});
+</script>
+{% endblock %}

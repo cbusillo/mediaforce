@@ -1,0 +1,843 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Encoding Queue</h1>
+
+<div id="toast" class="toast" style="display:none;"></div>
+
+<div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
+        <div style="display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap;">
+            <h3 style="margin: 0;">Titles ({{ total }} titles{% if total_files != total %}, {{ total_files }} files{% endif %})</h3>
+            {% if libraries %}
+            <label class="text-muted" style="display:flex; gap:0.5rem; align-items:center;">
+                Library:
+                <select id="library-select" style="min-width: 240px;" onchange="switchLibrary(this.value)">
+                    {% for lib in libraries %}
+                        <option value="{{ lib }}" {% if lib == library_root %}selected{% endif %}>{{ lib }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            {% endif %}
+            {% set cur_status = (lib_status | selectattr('root', 'equalto', library_root) | list | first) %}
+            <span class="pill {{ 'pill-on' if cur_status and cur_status.running else 'pill-off' }}">
+                Scan {{ 'running' if cur_status and cur_status.running else (cur_status.last_scan or 'never') }}
+            </span>
+        </div>
+        <div style="display: flex; gap: 1rem; align-items: center;">
+            <span class="text-muted">Est. Savings: <strong class="text-success">{{ total_savings }}</strong></span>
+            <button class="btn btn-sm btn-warning" onclick="kickWatch()">Kick Watcher</button>
+            <button class="btn btn-sm btn-primary" onclick="triggerScan()">Rescan</button>
+            <button class="btn btn-sm btn-primary" onclick="toggleView()">View: <span id="viewLabel">{{ 'Compact' if request.query_params.get('view') == 'compact' else 'Table' }}</span></button>
+            <input id="searchBox" type="text" placeholder="Filter titles" style="padding:0.35rem 0.5rem;" oninput="filterShows()">
+            <button class="btn btn-sm btn-primary" onclick="expandAll()">Expand All</button>
+            <button class="btn btn-sm btn-primary" onclick="collapseAll()">Collapse All</button>
+        </div>
+    </div>
+
+    <div id="tableView" style="display: {{ 'none' if request.query_params.get('view') == 'compact' else 'block' }};">
+    <table id="queueTable">
+        <thead>
+            <tr>
+                <th style="width: 30px;"></th>
+                <th class="sortable" data-sort-key="name" data-sort-type="str" onclick="changeSort('name')">Name</th>
+        <th class="sortable" data-sort-key="files" data-sort-type="num" onclick="changeSort('files')">Files</th>
+        <th class="sortable" data-sort-key="size" data-sort-type="num" onclick="changeSort('size')">Total Size</th>
+        <th class="sortable" data-sort-key="savings" data-sort-type="num" onclick="changeSort('savings')">Est. Savings</th>
+        <th class="sortable" data-sort-key="priority" data-sort-type="num" onclick="changeSort('priority')">Max Priority</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for show in shows %}
+            <tr class="show-row" data-show="{{ show.show_name }}" data-name="{{ show.show_name }}" data-files="{{ show.file_count }}" data-size="{{ show.total_size_bytes or 0 }}" data-savings="{{ show.total_savings_bytes or 0 }}" data-priority="{{ show.max_priority }}">
+                <td>
+                    <span class="expand-icon" onclick="toggleShow('{{ show.show_name | e }}', event)">&#9654;</span>
+                </td>
+                <td><strong>{{ show.show_name }}</strong></td>
+                <td>{{ show.file_count }}</td>
+                <td>{{ show.total_size }}</td>
+                <td class="text-success">{{ show.total_savings }}</td>
+                <td>{{ "%.3f"|format(show.max_priority) }}</td>
+            </tr>
+            <!-- Placeholder for seasons (inserted dynamically) -->
+            <tr class="seasons-container" id="seasons-{{ loop.index }}" data-show="{{ show.show_name }}" style="display: none;">
+                <td colspan="6" class="nested-container">
+                    <div class="loading">Loading seasons...</div>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    {% if total_pages > 1 %}
+    <div style="display: flex; justify-content: center; align-items: center; gap: 0.5rem; margin-top: 1rem; flex-wrap: wrap;">
+        {% if page > 1 %}
+        <a href="{{ pagination_url(1) }}" class="btn btn-sm btn-primary">&laquo; First</a>
+        <a href="{{ pagination_url(page - 1) }}" class="btn btn-sm btn-primary">&lsaquo; Prev</a>
+        {% endif %}
+
+        {% for p in page_range %}
+            {% if p == page %}
+            <span class="btn btn-sm" style="background: var(--accent); color: #fff;">{{ p }}</span>
+            {% else %}
+            <a href="{{ pagination_url(p) }}" class="btn btn-sm btn-primary">{{ p }}</a>
+            {% endif %}
+        {% endfor %}
+
+        {% if page < total_pages %}
+        <a href="{{ pagination_url(page + 1) }}" class="btn btn-sm btn-primary">Next &rsaquo;</a>
+        <a href="{{ pagination_url(total_pages) }}" class="btn btn-sm btn-primary">Last &raquo;</a>
+        {% endif %}
+    </div>
+    <p class="text-muted" style="text-align: center; margin-top: 0.5rem;">
+        Page {{ page }} of {{ total_pages }}
+    </p>
+    {% endif %}
+    </div>
+
+    <div id="cardView" style="display: {{ 'block' if request.query_params.get('view') == 'compact' else 'none' }};">
+        <div class="card-grid">
+            {% for show in shows %}
+            <div class="mini-card show-card" data-show="{{ show.show_name }}" data-name="{{ show.show_name }}" data-files="{{ show.file_count }}">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <strong>{{ show.show_name }}</strong>
+                    <span class="pill pill-on">{{ show.file_count }} file{{ 's' if show.file_count != 1 else '' }}</span>
+                </div>
+                <div class="text-muted">Size {{ show.total_size }} · Savings {{ show.total_savings }}</div>
+                <div class="text-muted">Priority {{ "%.3f"|format(show.max_priority) }}</div>
+                <button class="btn btn-sm btn-primary" style="margin-top:0.5rem;" onclick="openCard('{{ show.show_name|e }}')">Open</button>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+</div>
+
+<style>
+.show-row {
+    cursor: pointer;
+}
+
+.show-row:hover {
+    background: var(--bg-secondary) !important;
+}
+
+.expand-icon {
+    cursor: pointer;
+    display: inline-block;
+    transition: transform 0.2s;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.expand-icon.expanded {
+    transform: rotate(90deg);
+}
+
+.expand-icon:hover {
+    color: var(--accent);
+}
+
+.nested-container {
+    padding: 0 !important;
+    background: var(--bg-secondary) !important;
+}
+
+.nested-table-wrapper {
+    padding: 0.5rem 0.5rem 0.5rem 2rem;
+}
+
+.nested-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0;
+}
+
+.nested-table th,
+.nested-table td {
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+    border-bottom: 1px solid var(--bg-primary);
+}
+
+.card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 0.75rem;
+}
+
+.mini-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--bg-primary);
+    border-radius: 8px;
+    padding: 0.75rem;
+}
+
+.nested-table th {
+    color: var(--text-secondary);
+    font-weight: 500;
+    text-transform: uppercase;
+    font-size: 0.75rem;
+}
+
+.season-row {
+    cursor: pointer;
+    background: var(--bg-card);
+}
+
+.season-row:hover {
+    background: var(--bg-primary) !important;
+}
+
+.episode-row {
+    cursor: pointer;
+    background: var(--bg-secondary);
+}
+
+.episode-row:hover {
+    background: var(--bg-primary) !important;
+}
+
+.loading {
+    padding: 1rem 2rem;
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+.toast {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--accent);
+    color: var(--text-primary);
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.25);
+    z-index: 9999;
+    transition: opacity 0.2s ease;
+}
+.toast.success { border-color: #4caf50; }
+.toast.error { border-color: #f44336; }
+
+.episode-details {
+    padding: 1rem;
+    background: var(--bg-primary);
+    margin: 0.5rem 0;
+    border-radius: 4px;
+}
+
+.detail-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1.5rem;
+    margin-bottom: 1rem;
+}
+
+.detail-section h4 {
+    margin: 0 0 0.5rem 0;
+    color: var(--accent);
+    font-size: 0.85rem;
+    text-transform: uppercase;
+}
+
+.detail-item {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 0.25rem;
+    font-size: 0.85rem;
+}
+
+.detail-label {
+    color: var(--text-secondary);
+    min-width: 80px;
+}
+
+.detail-full-width {
+    grid-column: 1 / -1;
+}
+
+.tier-reasoning {
+    font-style: italic;
+    font-size: 0.8rem;
+}
+
+.detail-path {
+    font-size: 0.8rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--bg-secondary);
+}
+
+.detail-path code {
+    background: var(--bg-secondary);
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    word-break: break-all;
+}
+
+.indent-1 {
+    padding-left: 1.5rem !important;
+}
+
+.indent-2 {
+    padding-left: 3rem !important;
+}
+
+
+.sortable {
+    cursor: pointer;
+}
+
+.sortable::after {
+    content: ' \25BE';
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+}
+
+.sortable.sorted-asc::after {
+    content: ' \25B4';
+    color: var(--accent);
+}
+
+.sortable.sorted-desc::after {
+    content: ' \25BE';
+    color: var(--accent);
+}
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const loadedShows = {};
+const loadedSeasons = {};
+const libraryRoot = "{{ library_root }}";
+const currentSort = "{{ sort or 'priority' }}";
+const currentOrder = "{{ order or 'desc' }}";
+
+function toggleShow(showName, event) {
+    event.stopPropagation();
+    const row = event.target.closest('tr');
+    const icon = row.querySelector('.expand-icon');
+    const seasonsRow = row.nextElementSibling;
+
+    if (seasonsRow.style.display === 'none') {
+        seasonsRow.style.display = 'table-row';
+        icon.classList.add('expanded');
+        loadSeasons(showName, seasonsRow);
+    } else {
+        seasonsRow.style.display = 'none';
+        icon.classList.remove('expanded');
+    }
+}
+
+async function loadSeasons(showName, container) {
+    if (loadedShows[showName]) {
+        return; // Already loaded
+    }
+
+    try {
+        const resp = await fetch(`/api/queue/seasons/${encodeURIComponent(showName)}?library=${encodeURIComponent(libraryRoot)}&sort=${encodeURIComponent(currentSort)}&order=${encodeURIComponent(currentOrder)}`);
+        const data = await resp.json();
+        loadedShows[showName] = data.seasons;
+
+        const html = renderSeasonsTable(showName, data.seasons);
+        container.querySelector('td').innerHTML = html;
+
+        // Convenience: for movie-like entries (single season "Files") auto-expand and load episodes immediately.
+        if (data.seasons.length === 1 && data.seasons[0].season_name === 'Files') {
+            const seasonName = data.seasons[0].season_name;
+            const seasonRow = container.querySelector('.season-row');
+            const episodesRow = container.querySelector('.episodes-container');
+            if (seasonRow && episodesRow) {
+                seasonRow.querySelector('.expand-icon')?.classList.add('expanded');
+                episodesRow.style.display = 'table-row';
+                loadEpisodes(showName, seasonName, episodesRow, true);
+            }
+        }
+    } catch (e) {
+        container.querySelector('td').innerHTML = '<div class="loading">Error loading seasons</div>';
+    }
+}
+
+function renderSeasonsTable(showName, seasons) {
+    if (!seasons.length) {
+        return '<div class="loading">No seasons found</div>';
+    }
+
+    let html = `<div class="nested-table-wrapper"><table class="nested-table">
+        <thead>
+            <tr>
+                <th style="width: 30px;"></th>
+                <th class="sortable" data-sort-key="season" data-sort-type="str">Season</th>
+                <th class="sortable" data-sort-key="files" data-sort-type="num">Files</th>
+                <th class="sortable" data-sort-key="size" data-sort-type="num">Total Size</th>
+                <th class="sortable" data-sort-key="savings" data-sort-type="num">Est. Savings</th>
+                <th class="sortable" data-sort-key="priority" data-sort-type="num">Max Priority</th>
+            </tr>
+        </thead>
+        <tbody>`;
+
+    seasons.forEach((season, idx) => {
+        const seasonKey = `${showName}|${season.season_name}`;
+        html += `
+            <tr class="season-row" data-show="${escapeHtml(showName)}" data-season="${escapeHtml(season.season_name)}" data-files="${season.file_count}" data-size="${season.total_savings_bytes || 0}" data-savings="${season.total_savings_bytes || 0}" data-priority="${season.max_priority}" data-name="${escapeHtml(season.season_name)}">
+                <td>
+                    <span class="expand-icon" onclick="toggleSeason('${escapeHtml(showName)}', '${escapeHtml(season.season_name)}', event)">&#9654;</span>
+                </td>
+                <td class="indent-1"><strong>${escapeHtml(season.season_name)}</strong></td>
+                <td>${season.file_count}</td>
+                <td>${season.total_size}</td>
+                <td class="text-success">${season.total_savings}</td>
+                <td>${season.max_priority.toFixed(3)}</td>
+            </tr>
+            <tr class="episodes-container" id="episodes-${idx}" data-show="${escapeHtml(showName)}" data-season="${escapeHtml(season.season_name)}" style="display: none;">
+                <td colspan="6" class="nested-container">
+                    <div class="loading">Loading episodes...</div>
+                </td>
+            </tr>`;
+    });
+
+    html += '</tbody></table></div>';
+    // Defer attaching sort handlers so DOM is updated first
+    setTimeout(() => {
+        const wrapper = document.querySelector('.seasons-container td');
+        attachSortHandlers(wrapper || document);
+    }, 0);
+    return html;
+}
+
+function toggleSeason(showName, seasonName, event) {
+    event.stopPropagation();
+    const row = event.target.closest('tr');
+    const icon = row.querySelector('.expand-icon');
+    const episodesRow = row.nextElementSibling;
+
+    if (episodesRow.style.display === 'none') {
+        episodesRow.style.display = 'table-row';
+        icon.classList.add('expanded');
+        loadEpisodes(showName, seasonName, episodesRow);
+    } else {
+        episodesRow.style.display = 'none';
+        icon.classList.remove('expanded');
+    }
+}
+
+async function loadEpisodes(showName, seasonName, container, autoExpand = false) {
+    const key = `${showName}|${seasonName}`;
+    if (loadedSeasons[key]) {
+        return; // Already loaded
+    }
+
+    try {
+        const resp = await fetch(`/api/queue/episodes/${encodeURIComponent(showName)}/${encodeURIComponent(seasonName)}?library=${encodeURIComponent(libraryRoot)}&sort=${encodeURIComponent(currentSort)}&order=${encodeURIComponent(currentOrder)}`);
+        const data = await resp.json();
+        loadedSeasons[key] = data.episodes;
+
+        const html = renderEpisodesTable(data.episodes);
+        container.querySelector('td').innerHTML = html;
+
+        if (autoExpand) {
+            container.querySelectorAll('.episode-row').forEach(row => {
+                const id = row.dataset.id;
+                toggleEpisodeDetails(id, { stopPropagation: () => {}, target: row });
+            });
+        }
+    } catch (e) {
+        container.querySelector('td').innerHTML = '<div class="loading">Error loading episodes</div>';
+    }
+}
+
+function renderEpisodesTable(episodes) {
+    if (!episodes.length) {
+        return '<div class="loading">No episodes found</div>';
+    }
+
+    let html = `<div class="nested-table-wrapper"><table class="nested-table">
+        <thead>
+            <tr>
+                <th style="width: 30px;"></th>
+                <th class="sortable" data-sort-key="file" data-sort-type="str">File</th>
+                <th class="sortable" data-sort-key="size" data-sort-type="num">Size</th>
+                <th class="sortable" data-sort-key="savings" data-sort-type="num">Est. Savings</th>
+                <th class="sortable" data-sort-key="codec" data-sort-type="str">Codec</th>
+                <th class="sortable" data-sort-key="res" data-sort-type="num">Resolution</th>
+                <th class="sortable" data-sort-key="tier" data-sort-type="str">Tier</th>
+                <th class="sortable" data-sort-key="priority" data-sort-type="num">Priority</th>
+                <th class="sortable" data-sort-key="bitrate" data-sort-type="num">Bitrate</th>
+                <th class="sortable" data-sort-key="duration" data-sort-type="num">Duration</th>
+            </tr>
+        </thead>
+        <tbody>`;
+
+    episodes.forEach((ep, idx) => {
+        html += `
+            <tr class="episode-row" data-id="${ep.id}" data-size="${ep.size_bytes || 0}" data-savings="${ep.savings_bytes || 0}" data-priority="${ep.priority_score}" data-bitrate="${ep.bitrate_kbps || 0}" data-duration="${ep.duration_sec || 0}" data-file="${escapeHtml(ep.filename)}" data-tier="${ep.detected_tier}" data-codec="${escapeHtml(ep.video_codec || '')}" data-res="${ep.height || 0}">
+                <td>
+                    <span class="expand-icon" onclick="toggleEpisodeDetails(${ep.id}, event)">&#9654;</span>
+                </td>
+                <td class="truncate indent-2" title="${escapeHtml(ep.path)}">${escapeHtml(ep.filename)}</td>
+                <td>${ep.size}</td>
+                <td class="text-success">${ep.savings}</td>
+                <td>${escapeHtml(ep.video_codec)}${ep.video_profile ? ' (' + escapeHtml(ep.video_profile) + ')' : ''}</td>
+                <td>${ep.resolution}</td>
+                <td class="tier-${ep.detected_tier}">${ep.detected_tier}</td>
+                <td>${ep.priority_score.toFixed(3)}</td>
+                <td>${ep.bitrate}</td>
+                <td>${ep.duration}</td>
+            </tr>
+            <tr class="episode-details-row" id="ep-details-${ep.id}" style="display: none;">
+                <td colspan="8" class="nested-container">
+                    ${renderEpisodeDetails(ep)}
+                </td>
+            </tr>`;
+    });
+
+    html += '</tbody></table></div>';
+    setTimeout(() => {
+        const wrapper = document.querySelector('.episodes-container td');
+        attachSortHandlers(wrapper || document);
+    }, 0);
+    return html;
+}
+
+function renderEpisodeDetails(ep) {
+    let html = `<div class="episode-details">
+        <div class="detail-grid">
+            <div class="detail-section">
+                <h4>Video</h4>
+                <div class="detail-item">
+                    <span class="detail-label">Codec:</span>
+                    <span>${escapeHtml(ep.video_codec)}${ep.video_profile ? ' (' + escapeHtml(ep.video_profile) + ')' : ''}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">Resolution:</span>
+                    <span>${escapeHtml(ep.resolution)}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">Bit Depth:</span>
+                    <span>${ep.bit_depth || '?'}-bit</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">Frame Rate:</span>
+                    <span>${escapeHtml(ep.frame_rate)}</span>
+        </div>`;
+
+    if (ep.is_hdr) {
+        html += `<div class="detail-item">
+            <span class="detail-label">HDR:</span>
+            <span class="text-warning">${ep.hdr_format || 'Yes'}</span>
+        </div>`;
+    }
+    if (ep.is_interlaced) {
+        html += `<div class="detail-item">
+            <span class="detail-label">Interlaced:</span>
+            <span class="text-warning">Yes</span>
+        </div>`;
+    }
+
+    html += `<div class="detail-item" style="margin-top:0.5rem;">
+        <button class="btn btn-sm btn-primary" onclick="bumpEpisode(${ep.id})">Bump to Front</button>
+    </div>`;
+
+    html += `</div>
+            <div class="detail-section">
+                <h4>Audio</h4>
+                <div class="detail-item">
+                    <span class="detail-label">Tracks:</span>
+                    <span>${escapeHtml(ep.audio_info)}</span>
+                </div>
+            </div>
+            <div class="detail-section">
+                <h4>Subtitles</h4>
+                <div class="detail-item">
+                    <span class="detail-label">Count:</span>
+                    <span>${ep.subtitle_count} track${ep.subtitle_count !== 1 ? 's' : ''}</span>
+                </div>
+            </div>`;
+
+    if (ep.tier_reasoning) {
+        html += `<div class="detail-section detail-full-width">
+            <h4>Tier Classification</h4>
+            <div class="detail-item">
+                <span class="tier-reasoning">${escapeHtml(ep.tier_reasoning)}</span>
+            </div>
+        </div>`;
+    }
+
+    html += `</div>
+        <div class="detail-path text-muted">
+            <span class="detail-label">Full Path:</span>
+            <code>${escapeHtml(ep.path)}</code>
+        </div>
+    </div>`;
+
+    return html;
+}
+
+async function bumpEpisode(id) {
+    try {
+        const resp = await fetch('/api/bump', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id })
+        });
+        const data = await resp.json();
+        if (data.success) {
+            updatePriorityDisplay(id, data.manual_priority);
+            showToast('Bumped to front', true);
+        } else {
+            showToast(data.error || 'Failed to bump', false);
+        }
+    } catch (e) {
+        showToast('Failed to bump', false);
+    }
+}
+
+function updatePriorityDisplay(id, manualPriority) {
+    const row = document.querySelector(`tr.episode-row[data-id="${id}"]`);
+    if (!row) return;
+    row.dataset.priority = manualPriority;
+    const priorityCell = row.querySelector('td:nth-child(8)');
+    if (priorityCell) {
+        priorityCell.textContent = `${manualPriority} (bumped)`;
+    }
+}
+
+function showToast(message, success=true) {
+    const toast = document.getElementById('toast');
+    if (!toast) return;
+    toast.textContent = message;
+    toast.className = `toast ${success ? 'success' : 'error'}`;
+    toast.style.display = 'block';
+    toast.style.opacity = '1';
+    setTimeout(() => { toast.style.opacity = '0'; }, 1800);
+    setTimeout(() => { toast.style.display = 'none'; }, 2200);
+}
+
+function toggleEpisodeDetails(id, event) {
+    event.stopPropagation();
+    const row = event.target.closest('tr');
+    const icon = row.querySelector('.expand-icon');
+    const detailsRow = document.getElementById(`ep-details-${id}`);
+
+    if (detailsRow.style.display === 'none') {
+        detailsRow.style.display = 'table-row';
+        icon.classList.add('expanded');
+    } else {
+        detailsRow.style.display = 'none';
+        icon.classList.remove('expanded');
+    }
+}
+
+function escapeHtml(str) {
+    if (!str) return '';
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+function expandAll() {
+    document.querySelectorAll('.show-row').forEach(row => {
+        const icon = row.querySelector('.expand-icon');
+        const seasonsRow = row.nextElementSibling;
+        const showName = row.dataset.show;
+
+        if (seasonsRow.style.display === 'none') {
+            seasonsRow.style.display = 'table-row';
+            icon.classList.add('expanded');
+            loadSeasons(showName, seasonsRow);
+        }
+    });
+}
+
+function collapseAll() {
+    document.querySelectorAll('.seasons-container, .episodes-container, .episode-details-row').forEach(row => {
+        row.style.display = 'none';
+    });
+    document.querySelectorAll('.expand-icon').forEach(icon => {
+        icon.classList.remove('expanded');
+    });
+}
+
+// Click on row to expand (not just icon)
+document.querySelectorAll('.show-row').forEach(row => {
+    row.addEventListener('click', function(e) {
+        if (e.target.classList.contains('expand-icon')) return;
+        const showName = this.dataset.show;
+        toggleShow(showName, { stopPropagation: () => {}, target: this });
+    });
+});
+
+// Season rows: allow clicking the row to expand/collapse
+document.addEventListener('click', function(e) {
+    const row = e.target.closest('.season-row');
+    if (!row) return;
+    if (e.target.classList.contains('expand-icon')) return;
+    const showName = row.dataset.show;
+    const seasonName = row.dataset.season;
+    toggleSeason(showName, seasonName, { stopPropagation: () => {}, target: row });
+});
+
+// Episode rows: allow clicking the row to expand/collapse details
+document.addEventListener('click', function(e) {
+    const row = e.target.closest('.episode-row');
+    if (!row) return;
+    if (e.target.classList.contains('expand-icon')) return;
+    const id = row.dataset.id;
+    toggleEpisodeDetails(id, { stopPropagation: () => {}, target: row });
+});
+
+
+// Sorting helpers
+function sortTable(tableEl, key, type, direction) {
+    const tbody = tableEl.querySelector('tbody');
+    if (!tbody) return;
+    const rows = Array.from(tbody.querySelectorAll('tr')).filter(r => !r.classList.contains('episode-details-row'));
+
+    const dir = direction === 'desc' ? -1 : 1;
+
+    rows.sort((a, b) => {
+        const va = a.dataset[key] ?? '';
+        const vb = b.dataset[key] ?? '';
+
+        if (type === 'num') {
+            const na = parseFloat(va) || 0;
+            const nb = parseFloat(vb) || 0;
+            return (na - nb) * dir;
+        }
+        return va.localeCompare(vb) * dir;
+    });
+
+    rows.forEach(r => tbody.appendChild(r));
+}
+
+function attachSortHandlers(container) {
+    container.querySelectorAll('.sortable').forEach(th => {
+        th.addEventListener('click', () => {
+            const key = th.dataset.sortKey;
+            const type = th.dataset.sortType || 'str';
+            const table = th.closest('table');
+            const current = th.classList.contains('sorted-asc') ? 'asc' : th.classList.contains('sorted-desc') ? 'desc' : null;
+
+            // Reset other headers
+            table.querySelectorAll('.sortable').forEach(el => el.classList.remove('sorted-asc', 'sorted-desc'));
+
+            const nextDir = current === 'asc' ? 'desc' : 'asc';
+            th.classList.add(nextDir === 'asc' ? 'sorted-asc' : 'sorted-desc');
+            sortTable(table, key, type, nextDir);
+        });
+    });
+}
+
+// Initial attach for main table
+attachSortHandlers(document);
+
+function changeSort(key) {
+    const url = new URL(window.location.href);
+    const currentKey = url.searchParams.get('sort') || currentSort || 'priority';
+    const currentDir = url.searchParams.get('order') || currentOrder || 'desc';
+    let nextDir = 'desc';
+    if (currentKey === key) {
+        nextDir = currentDir === 'desc' ? 'asc' : 'desc';
+    }
+    url.searchParams.set('sort', key);
+    url.searchParams.set('order', nextDir);
+    window.location.href = url.toString();
+}
+
+function switchLibrary(lib) {
+    const url = new URL(window.location.href);
+    url.searchParams.set('library', lib);
+    window.location.href = url.toString();
+}
+
+function toggleView() {
+    const url = new URL(window.location.href);
+    const current = url.searchParams.get('view');
+    url.searchParams.set('view', current === 'compact' ? 'table' : 'compact');
+    window.location.href = url.toString();
+}
+
+function openCard(showName) {
+    // In compact view, clicking open will reuse existing table expansion logic
+    switchToTableIfNeeded();
+    const row = document.querySelector(`tr.show-row[data-show="${CSS.escape(showName)}"]`);
+    if (row) {
+        const icon = row.querySelector('.expand-icon');
+        if (icon && !icon.classList.contains('expanded')) {
+            icon.click();
+        }
+    }
+    window.scrollTo({ top: row ? row.offsetTop - 80 : 0, behavior: 'smooth' });
+}
+
+function switchToTableIfNeeded() {
+    if (document.getElementById('tableView').style.display === 'none') {
+        const url = new URL(window.location.href);
+        url.searchParams.set('view', 'table');
+        window.location.href = url.toString();
+    }
+}
+
+function filterShows() {
+    const term = document.getElementById('searchBox').value.trim().toLowerCase();
+    // Table rows
+    document.querySelectorAll('.show-row').forEach(row => {
+        const name = (row.dataset.name || '').toLowerCase();
+        const match = !term || name.includes(term);
+        row.style.display = match ? '' : 'none';
+        const seasonsRow = row.nextElementSibling;
+        if (seasonsRow && seasonsRow.classList.contains('seasons-container')) {
+            seasonsRow.style.display = match ? seasonsRow.style.display : 'none';
+        }
+    });
+    // Cards
+    document.querySelectorAll('.show-card').forEach(card => {
+        const name = (card.dataset.name || '').toLowerCase();
+        const match = !term || name.includes(term);
+        card.style.display = match ? '' : 'none';
+    });
+}
+
+async function triggerScan() {
+    const btn = event.target;
+    btn.disabled = true;
+    btn.textContent = 'Scanning...';
+    try {
+        const resp = await fetch('/api/scan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: libraryRoot })
+        });
+        const data = await resp.json();
+        alert(data.success ? 'Scan started' : `Scan error: ${data.error || data.output || 'unknown'}`);
+    } catch (e) {
+        alert('Scan error: ' + e);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Rescan';
+    }
+}
+
+async function kickWatch() {
+    const btn = event.target;
+    btn.disabled = true;
+    btn.textContent = 'Starting...';
+    try {
+        const resp = await fetch('/api/watch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'start' })
+        });
+        const data = await resp.json();
+        alert(data.success ? 'Watcher running' : `Watch error: ${data.error || 'unknown'}`);
+    } catch (e) {
+        alert('Watch error: ' + e);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Kick Watcher';
+    }
+}
+</script>
+{% endblock %}

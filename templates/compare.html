@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Compare: {{ filename }}</h1>
+
+<div class="compare-container">
+    <div class="compare-video">
+        <div class="label">
+            <span>Source ({{ source_codec }})</span>
+            <span>{{ source_size }}</span>
+        </div>
+        <video id="source" preload="metadata" controls playsinline>
+            <source src="/video/source/{{ encode_id }}">
+        </video>
+    </div>
+    <div class="compare-video">
+        <div class="label">
+            <span>Encoded</span>
+            <span>{{ output_size }} ({{ reduction }}% smaller)</span>
+        </div>
+        <video id="encoded" preload="metadata" controls playsinline>
+            <source src="/video/encoded/{{ encode_id }}">
+        </video>
+    </div>
+</div>
+
+<div class="compare-controls">
+    <button id="playPause" class="btn btn-primary">Play</button>
+    <input type="range" id="seekBar" min="0" max="100" value="0">
+    <span id="timeDisplay">0:00 / 0:00</span>
+    <select id="speed" class="btn">
+        <option value="0.25">0.25x</option>
+        <option value="0.5">0.5x</option>
+        <option value="1" selected>1x</option>
+        <option value="2">2x</option>
+    </select>
+</div>
+
+<div class="card" style="margin-top: 1rem;">
+    <h3>Encode Details</h3>
+    <table>
+        <tr><td>Tier</td><td class="tier-{{ tier }}">{{ tier }}</td></tr>
+        <tr><td>CRF</td><td>{{ crf or '-' }}</td></tr>
+        <tr><td>Preset</td><td>{{ preset or '-' }}</td></tr>
+        <tr><td>VMAF</td><td>{{ vmaf or '-' }}</td></tr>
+        <tr><td>SSIM</td><td>{{ ssim or '-' }}</td></tr>
+        <tr><td>Deinterlaced</td><td>{{ 'Yes' if deinterlaced else 'No' }}</td></tr>
+    </table>
+</div>
+
+<div style="margin-top: 1rem;">
+    <a href="/review" class="btn btn-primary">Back to Review</a>
+    <button onclick="promote()" class="btn btn-success">Promote</button>
+    <button onclick="reject()" class="btn btn-warning">Reject</button>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const source = document.getElementById('source');
+const encoded = document.getElementById('encoded');
+const playPause = document.getElementById('playPause');
+const seekBar = document.getElementById('seekBar');
+const timeDisplay = document.getElementById('timeDisplay');
+const speedSelect = document.getElementById('speed');
+
+let isSyncing = false;
+
+function formatTime(s) {
+    if (!isFinite(s) || s < 0) return '0:00';
+    const mins = Math.floor(s / 60);
+    const secs = Math.floor(s % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+function syncVideos(master, slave) {
+    if (isSyncing) return;
+    isSyncing = true;
+    if (isFinite(master.currentTime)) {
+        slave.currentTime = master.currentTime;
+    }
+    isSyncing = false;
+}
+
+function updateTime() {
+    const dur = isFinite(source.duration) ? source.duration : 0;
+    const pct = dur > 0 ? (source.currentTime / dur) * 100 : 0;
+    seekBar.value = pct;
+    timeDisplay.textContent = `${formatTime(source.currentTime)} / ${formatTime(dur)}`;
+}
+
+source.addEventListener('timeupdate', () => {
+    syncVideos(source, encoded);
+    updateTime();
+});
+
+encoded.addEventListener('timeupdate', () => syncVideos(encoded, source));
+
+source.addEventListener('loadedmetadata', updateTime);
+encoded.addEventListener('loadedmetadata', updateTime);
+
+playPause.addEventListener('click', () => {
+    if (source.paused) {
+        source.play();
+        encoded.play();
+        playPause.textContent = 'Pause';
+    } else {
+        source.pause();
+        encoded.pause();
+        playPause.textContent = 'Play';
+    }
+});
+
+seekBar.addEventListener('input', () => {
+    const dur = isFinite(source.duration) ? source.duration : 0;
+    const time = dur > 0 ? (seekBar.value / 100) * dur : 0;
+    source.currentTime = time;
+    encoded.currentTime = time;
+});
+
+speedSelect.addEventListener('change', () => {
+    const speed = parseFloat(speedSelect.value);
+    source.playbackRate = speed;
+    encoded.playbackRate = speed;
+});
+
+document.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') {
+        e.preventDefault();
+        playPause.click();
+    } else if (e.code === 'ArrowLeft') {
+        source.currentTime -= 5;
+    } else if (e.code === 'ArrowRight') {
+        source.currentTime += 5;
+    }
+});
+
+async function promote() {
+    if (!confirm('Promote this encode? This will replace the original file.')) return;
+    const resp = await fetch('/api/promote/{{ encode_id }}', { method: 'POST' });
+    const data = await resp.json();
+    if (data.success) {
+        window.location.href = '/review';
+    } else {
+        alert('Error: ' + data.error);
+    }
+}
+
+async function reject() {
+    if (!confirm('Reject this encode? The encoded file will be deleted.')) return;
+    const resp = await fetch('/api/reject/{{ encode_id }}', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+    });
+    const data = await resp.json();
+    if (data.success) {
+        window.location.href = '/review';
+    } else {
+        alert('Error: ' + data.error);
+    }
+}
+</script>
+{% endblock %}
