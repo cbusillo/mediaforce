@@ -261,6 +261,8 @@ Real-time monitoring and management interface.
 ```bash
 # Start the web server (default port 8765)
 uv run mediaforce-web
+# or module style (no root scripts required)
+uv run mediaforce.web
 
 # Custom port
 uv run mediaforce-web --port 5555
@@ -270,7 +272,7 @@ uv run mediaforce-web --port 5555
 
 | Page | URL | Description |
 |------|-----|-------------|
-| **Dashboard** | `/` | Overview stats, recent encodes, space savings |
+| **Dashboard** | `/` | Overview stats, live active-encodes, recent completions, space savings |
 | **Queue** | `/queue` | Pending files with expandable show/season/episode hierarchy |
 | **Completed** | `/completed` | Successfully promoted files |
 | **Review** | `/review` | Quality outliers and size-increase encodes needing attention |
@@ -284,6 +286,12 @@ used by the CLI, web UI, and background watchers.
 - **Episode details**: Video codec, resolution, bitrate, audio tracks, tier reasoning
 - **Estimated savings**: Per-show and per-file space savings predictions
 - **Expand/Collapse All**: Quick navigation buttons
+- **Server pagination + cached totals**: Priority-ordered pages with cached counts for snappy navigation
+- **Worker panel**: Shows active workers from encode progress with per-episode bump and send-to-worker actions
+
+### Live Monitoring
+
+- **Active encodes polling**: Dashboard auto-refreshes active encodes via `/api/active-encodes` every 3s (progress %, speed, ETA, frames).
 
 ### API Endpoints
 
@@ -362,7 +370,7 @@ For each watched library on this host, the watcher:
   logic as `scan`
 - Recalculates priorities so new entries are correctly ordered in the queue
 
-This pairs with `mediaforce.py run` on worker nodes: the Mac Studio can
+This pairs with `mediaforce run` (or `python -m mediaforce run`) on worker nodes: the Mac Studio can
 watch `/Volumes/media/{tv,movies}` and populate the queue, while Linux
 encoders process the same libraries via `/mnt/media/{tv,movies}` using the
 shared SQLite inventory.
@@ -375,12 +383,12 @@ shared SQLite inventory.
 python3 -m pytest tests/
 
 # Type checking
-python3 -m mypy mediaforce.py
+python3 -m mypy src/mediaforce
 ```
 
 ## Workers (unified scheduler)
 - Single worker can handle all libraries from the unified database at `~/.config/mediaforce/mediaforce.db`.
-- Example systemd unit: `mediaforce-worker.service` -> `uv run python mediaforce.py run /mnt/media --output /mnt/media/transcode --autoupdate-url http://192.168.1.3:5555/raw/ --autoupdate-interval 3600 --settings-url http://192.168.1.3:5555/api/settings/current --hw-decode`.
+- Example systemd unit: `mediaforce-worker.service` -> `uv run python -m mediaforce run /mnt/media --output /mnt/media/transcode --autoupdate-url http://192.168.1.3:5555/raw/ --autoupdate-interval 3600 --settings-url http://192.168.1.3:5555/api/settings/current --hw-decode`.
 - Per-library weights and max heights come from settings; manual bumps use `manual_priority` (lower numbers encode first). `max_concurrency` and off-peak window can be set in the web Settings page.
 
 Workers pull settings from the master (`/api/settings/current`) and code from `/raw/manifest.json` with hourly autoupdate and self-restart on change.

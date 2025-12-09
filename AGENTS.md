@@ -50,3 +50,8 @@ values that change (versions, hostnames, mounts).
 - Link, don’t duplicate: when adding features, update the most specific doc (e.g., `docs/architecture.md` for layout
   changes, README for user-facing workflow) and reference it here if needed.
 - Keep AGENTS.md scoped to process and pointers so it stays valid as the project evolves.
+
+## Style Reminders (local)
+
+- Prefer descriptive identifiers over comments/docstrings; only add them when they clarify non-obvious intent.
+- Use full words in names; avoid cryptic abbreviations.
