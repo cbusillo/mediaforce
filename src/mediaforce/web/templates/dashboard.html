@@ -1,134 +1,321 @@
-{% extends "base.html" %}
-
-{% block content %}
+{% extends "base.html" %} {% block content %}
 <h1>Dashboard</h1>
 
 {% if lib_status %}
-<div class="card" style="margin-bottom: 1rem;">
-    <h3>Library Status</h3>
-    <table>
-        <thead>
-            <tr>
-                <th>Name</th>
-                <th>Path</th>
-                <th>Last Scan</th>
-                <th>Watcher</th>
-                <th>Status</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for entry in lib_status %}
-            <tr>
-                <td>{{ entry.lib.name }}</td>
-                <td class="truncate">{{ entry.root }}</td>
-                <td>
-                    {% if entry.running %}
-                        <span class="text-warning">running…</span>
-                    {% elif entry.last_scan %}
-                        {{ entry.last_scan[:16] }}
-                    {% else %}
-                        <span class="text-muted">never</span>
-                    {% endif %}
-                </td>
-                <td>{{ 'On' if entry.lib.watch else 'Off' }}</td>
-                <td>
-                    {% if entry.running %}
-                        <span class="pill pill-on">Scan running</span>
-                    {% else %}
-                        <span class="pill pill-off">Idle</span>
-                    {% endif %}
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+<div class="card" style="margin-bottom: 1rem">
+  <h3>Library Status</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Path</th>
+        <th>Last Scan</th>
+        <th>Watcher</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for entry in lib_status %}
+      <tr>
+        <td>{{ entry.lib.name }}</td>
+        <td class="truncate">{{ entry.root }}</td>
+        <td>
+          {% if entry.running %}
+          <span class="text-warning">running…</span>
+          {% elif entry.last_scan %} {{ entry.last_scan[:16] }} {% else %}
+          <span class="text-muted">never</span>
+          {% endif %}
+        </td>
+        <td>{{ 'On' if entry.lib.watch else 'Off' }}</td>
+        <td>
+          {% if entry.running %}
+          <span class="pill pill-on">Scan running</span>
+          {% else %}
+          <span class="pill pill-off">Idle</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
 </div>
 {% endif %}
 
 <div class="stats-grid">
-    <div class="stat-card">
-        <div class="value">{{ stats.pending }}</div>
-        <div class="label">Pending</div>
-    </div>
-    <div class="stat-card">
-        <div class="value">{{ stats.encoding }}</div>
-        <div class="label">Encoding</div>
-    </div>
-    <div class="stat-card">
-        <div class="value">{{ stats.encoded }}</div>
-        <div class="label">Encoded</div>
-    </div>
-    <div class="stat-card">
-        <div class="value">{{ stats.completed }}</div>
-        <div class="label">Completed</div>
-    </div>
-    <div class="stat-card">
-        <div class="value">{{ stats.space_saved_gb }}</div>
-        <div class="label">GB Saved</div>
-    </div>
-</div>
-
-{% if active_encodes %}
-<div class="card">
-    <h3>Active Encodes</h3>
-    <table>
-        <thead>
-            <tr>
-                <th>File</th>
-                <th>Machine</th>
-                <th>Started</th>
-                <th>Tier</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for encode in active_encodes %}
-            <tr>
-                <td class="truncate" title="{{ encode.path }}">{{ encode.filename }}</td>
-                <td>{{ encode.claimed_by or '?' }}</td>
-                <td>{{ encode.claimed_at or '?' }}</td>
-                <td class="tier-{{ encode.detected_tier }}">{{ encode.detected_tier }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</div>
-{% endif %}
-
-<div class="card">
-    <h3>Recent Completions</h3>
-    <table>
-        <thead>
-            <tr>
-                <th>File</th>
-                <th>Source</th>
-                <th>Output</th>
-                <th>Reduction</th>
-                <th>Completed</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for encode in recent_completions %}
-            <tr>
-                <td class="truncate" title="{{ encode.path }}">{{ encode.filename }}</td>
-                <td>{{ encode.source_size }}</td>
-                <td>{{ encode.output_size }}</td>
-                <td class="text-success">{{ encode.reduction }}%</td>
-                <td>{{ encode.completed_at }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+  <div class="stat-card">
+    <div class="value">{{ stats.pending }}</div>
+    <div class="label">Pending</div>
+  </div>
+  <div class="stat-card">
+    <div class="value">{{ stats.encoding }}</div>
+    <div class="label">Encoding</div>
+  </div>
+  <div class="stat-card">
+    <div class="value">{{ stats.encoded }}</div>
+    <div class="label">Encoded</div>
+  </div>
+  <div class="stat-card">
+    <div class="value">{{ stats.completed }}</div>
+    <div class="label">Completed</div>
+  </div>
+  <div class="stat-card">
+    <div class="value">{{ stats.space_saved_gb }}</div>
+    <div class="label">GB Saved</div>
+  </div>
 </div>
 
 <div class="card">
-    <h3>Queue by Tier</h3>
-    <div class="stats-grid">
-        {% for tier, count in tier_counts.items() %}
-        <div class="stat-card">
-            <div class="value tier-{{ tier }}">{{ count }}</div>
-            <div class="label">{{ tier }}</div>
-        </div>
-        {% endfor %}
+  <div style="display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap">
+    <h3 style="margin: 0">Workers</h3>
+    <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap">
+      <div class="status-chip" id="watchStatusDash">
+        Watch: {% if watch_status.running %}running{% elif watch_status.paused %}paused{% else %}stopped{% endif %}{% if
+        watch_status.message %} ({{ watch_status.message }}){% endif %}
+      </div>
+      <button class="btn btn-sm btn-success" onclick="toggleWatch('start')">Start</button>
+      <button class="btn btn-sm btn-warning" onclick="toggleWatch('pause')">Pause</button>
+      <button class="btn btn-sm btn-danger" onclick="toggleWatch('stop')">Stop</button>
+      <button class="btn btn-sm" onclick="refreshWorkers()">Refresh</button>
     </div>
+  </div>
+  <table id="workersTable">
+    <thead>
+      <tr>
+        <th>Host</th>
+        <th>Role</th>
+        <th>State</th>
+        <th>Active</th>
+        <th>Scope/Progress</th>
+        <th>Message</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td colspan="7" class="text-muted">Loading workers…</td>
+      </tr>
+    </tbody>
+  </table>
 </div>
+
+<div class="card">
+  <h3>Active Encodes</h3>
+  <table id="activeEncodes">
+    <thead>
+      <tr>
+        <th>File</th>
+        <th>Machine</th>
+        <th>Tier</th>
+        <th>Progress</th>
+        <th>Speed</th>
+        <th>ETA</th>
+        <th>Frames</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for enc in active_encodes %}
+      <tr>
+        <td class="truncate" title="{{ enc.path }}">{{ enc.filename }}</td>
+        <td>{{ enc.machine }}</td>
+        <td class="tier-{{ enc.tier }}">{{ enc.tier }}</td>
+        <td>{{ '%.1f'|format(enc.percent_complete) }}%</td>
+        <td>{{ enc.speed }}</td>
+        <td>{{ enc.eta or '-' }}</td>
+        <td>{{ enc.frame or 0 }} / {{ enc.total_frames or '?' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h3>Recent Completions</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>File</th>
+        <th>Source</th>
+        <th>Output</th>
+        <th>Reduction</th>
+        <th>Completed</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for encode in recent_completions %}
+      <tr>
+        <td class="truncate" title="{{ encode.path }}">{{ encode.filename }}</td>
+        <td>{{ encode.source_size }}</td>
+        <td>{{ encode.output_size }}</td>
+        <td class="text-success">{{ encode.reduction }}%</td>
+        <td>{{ encode.completed_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h3>Queue by Tier</h3>
+  <div class="stats-grid">
+    {% for tier, count in tier_counts.items() %}
+    <div class="stat-card">
+      <div class="value tier-{{ tier }}">{{ count }}</div>
+      <div class="label">{{ tier }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %} {% block scripts %}
+<script>
+  if (window.location.pathname === '/') {
+      const table = document.getElementById('activeEncodes');
+      const workersTable = document.getElementById('workersTable');
+      const watchChip = document.getElementById('watchStatusDash');
+      const dashboardLibrary = "{{ library_root or '' }}";
+      const hostName = "{{ host_name or '' }}";
+      let watchStatusData = {{ watch_status | default({}) | tojson | safe }};
+      let currentWorkers = {{ workers | default([]) | tojson | safe }};
+
+      function setChip(el, text, tone = 'muted') {
+          if (!el) return;
+          el.textContent = text;
+          el.classList.remove('text-success', 'text-danger', 'text-warning', 'text-muted');
+          const cls = tone === 'success' ? 'text-success' : tone === 'danger' ? 'text-danger' : tone === 'warning' ? 'text-warning' : 'text-muted';
+          el.classList.add(cls);
+      }
+
+      function updateNavWatch(running, message) {
+          const pill = document.querySelector('.pill-watch');
+          if (pill) {
+              pill.classList.toggle('pill-on', running);
+              pill.classList.toggle('pill-off', !running);
+              pill.textContent = running ? 'Watch on' : 'Watch off';
+          }
+          const navMsg = document.getElementById('navWatchStatus');
+          if (navMsg && message) navMsg.textContent = message;
+      }
+
+      function buildWatchRow() {
+          const tr = document.createElement('tr');
+          const state = watchStatusData.running ? 'running' : watchStatusData.paused ? 'paused' : 'stopped';
+          const libs = (watchStatusData.libraries || []).join(', ') || 'none';
+          tr.innerHTML = `
+              <td>${hostName || 'local'}</td>
+              <td>watcher</td>
+              <td>${state}</td>
+              <td>${(watchStatusData.libraries || []).length}</td>
+              <td>${libs}</td>
+              <td class="truncate" title="${watchStatusData.message || ''}">${watchStatusData.message || '-'}</td>
+              <td class="text-muted">Use controls above</td>
+          `;
+          return tr;
+      }
+
+      function renderWorkers(list) {
+          if (!workersTable) return;
+          currentWorkers = list;
+          const tbody = workersTable.querySelector('tbody');
+          if (!tbody) return;
+          tbody.innerHTML = '';
+          tbody.appendChild(buildWatchRow());
+          if (!list || list.length === 0) {
+              const tr = document.createElement('tr');
+              tr.innerHTML = '<td colspan="7" class="text-muted">No encoder workers reporting.</td>';
+              tbody.appendChild(tr);
+              return;
+          }
+          list.forEach(w => {
+              const state = (w.active || 0) > 0 ? 'encoding' : 'idle';
+              const progress = w.percent_complete ? `${Math.round(w.percent_complete)}%` : '0%';
+              const tr = document.createElement('tr');
+              tr.innerHTML = `
+                  <td>${w.machine || '-'}</td>
+                  <td>encoder</td>
+                  <td>${state}</td>
+                  <td>${w.active || 0}</td>
+                  <td>${progress}</td>
+                  <td class="truncate" title="${w.sample_path || ''}">${w.sample_path || '-'}</td>
+                  <td class="text-muted">Route jobs in Queue</td>
+              `;
+              tbody.appendChild(tr);
+          });
+      }
+
+      function updateWatchUI() {
+          const state = watchStatusData.running ? 'running' : watchStatusData.paused ? 'paused' : 'stopped';
+          const tone = watchStatusData.running ? 'success' : watchStatusData.paused ? 'warning' : 'danger';
+          const msg = watchStatusData.message || 'idle';
+          setChip(watchChip, `Watch: ${state}${msg ? ' (' + msg + ')' : ''}`, tone);
+          updateNavWatch(!!watchStatusData.running, msg);
+          renderWorkers(currentWorkers);
+      }
+
+      async function toggleWatch(action) {
+          setChip(watchChip, `Watch: ${action}…`, 'warning');
+          try {
+              const resp = await fetch('/api/watch', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ action })
+              });
+              const data = await resp.json();
+              if (data.success) {
+                  watchStatusData = data.status || watchStatusData;
+                  updateWatchUI();
+              } else {
+                  setChip(watchChip, data.error || 'Watch action failed', 'danger');
+              }
+          } catch (e) {
+              setChip(watchChip, 'Watch error: ' + e, 'danger');
+          }
+      }
+      window.toggleWatch = toggleWatch;
+
+      async function refreshWorkers() {
+          try {
+              const suffix = dashboardLibrary ? `?library=${encodeURIComponent(dashboardLibrary)}` : '';
+              const resp = await fetch(`/api/workers${suffix}`);
+              const data = await resp.json();
+              if (data.success) {
+                  renderWorkers(data.workers || []);
+              }
+          } catch (e) {
+              /* silent */
+          }
+      }
+      window.refreshWorkers = refreshWorkers;
+
+      async function refreshActive() {
+          try {
+              const resp = await fetch('/api/active-encodes');
+              const data = await resp.json();
+              if (!data.success || !table) return;
+              const tbody = table.querySelector('tbody');
+              if (!tbody) return;
+              tbody.innerHTML = '';
+              data.encodes.forEach(enc => {
+                  const tr = document.createElement('tr');
+                  tr.innerHTML = `
+                      <td class="truncate" title="${enc.path || ''}">${enc.filename || 'Unknown'}</td>
+                      <td>${enc.machine || '-'}</td>
+                      <td class="tier-${enc.tier || ''}">${enc.tier || '-'}</td>
+                      <td>${(enc.percent_complete || 0).toFixed(1)}%</td>
+                      <td>${enc.speed ? enc.speed.toFixed(2) + 'x' : '0x'}</td>
+                      <td>${enc.eta || '-'}</td>
+                      <td>${enc.frame || 0} / ${enc.total_frames || '?'}</td>
+                  `;
+                  tbody.appendChild(tr);
+              });
+          } catch (e) {
+              /* silent */
+          }
+      }
+
+      renderWorkers(currentWorkers);
+      updateWatchUI();
+      refreshActive();
+      setInterval(refreshActive, 3000);
+      setInterval(refreshWorkers, 8000);
+  }
+</script>
 {% endblock %}

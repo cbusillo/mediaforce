@@ -1,288 +1,404 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{{ title }} - Mediaforce</title>
     <style>
-        :root {
-            --bg-primary: #1a1a2e;
-            --bg-secondary: #16213e;
-            --bg-card: #0f3460;
-            --text-primary: #eee;
-            --text-secondary: #aaa;
-            --accent: #e94560;
-            --accent-hover: #ff6b6b;
-            --success: #4ecca3;
-            --warning: #ffc107;
-            --info: #17a2b8;
-        }
+      :root {
+        --bg-primary: #1a1a2e;
+        --bg-secondary: #16213e;
+        --bg-card: #0f3460;
+        --text-primary: #eee;
+        --text-secondary: #aaa;
+        --accent: #e94560;
+        --accent-hover: #ff6b6b;
+        --success: #4ecca3;
+        --warning: #ffc107;
+        --info: #17a2b8;
+      }
 
-        * { box-sizing: border-box; margin: 0; padding: 0; }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
 
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            min-height: 100vh;
-        }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg-primary);
+        color: var(--text-primary);
+        min-height: 100vh;
+      }
 
-        nav {
-            background: var(--bg-secondary);
-            padding: 1rem 2rem;
-            display: flex;
-            gap: 2rem;
-            align-items: center;
-            border-bottom: 2px solid var(--accent);
-        }
+      nav {
+        background: var(--bg-secondary);
+        padding: 1rem 2rem;
+        display: flex;
+        gap: 2rem;
+        align-items: center;
+        border-bottom: 2px solid var(--accent);
+      }
 
-        nav .logo {
-            font-size: 1.5rem;
-            font-weight: bold;
-            color: var(--accent);
-        }
+      nav .logo {
+        font-size: 1.5rem;
+        font-weight: bold;
+        color: var(--accent);
+      }
 
-        nav a {
-            color: var(--text-secondary);
-            text-decoration: none;
-            padding: 0.5rem 1rem;
-            border-radius: 4px;
-            transition: all 0.2s;
-        }
+      nav a {
+        color: var(--text-secondary);
+        text-decoration: none;
+        padding: 0.5rem 1rem;
+        border-radius: 4px;
+        transition: all 0.2s;
+      }
 
-        nav a:hover, nav a.active {
-            color: var(--text-primary);
-            background: var(--bg-card);
-        }
+      nav a:hover,
+      nav a.active {
+        color: var(--text-primary);
+        background: var(--bg-card);
+      }
 
-        main {
-            padding: 2rem;
-            max-width: 1600px;
-            margin: 0 auto;
-        }
+      main {
+        padding: 2rem;
+        max-width: 1600px;
+        margin: 0 auto;
+      }
 
-        h1, h2, h3 { margin-bottom: 1rem; }
+      h1,
+      h2,
+      h3 {
+        margin-bottom: 1rem;
+      }
 
-        .card {
-            background: var(--bg-card);
-            border-radius: 8px;
-            padding: 1.5rem;
-            margin-bottom: 1.5rem;
-        }
+      .card {
+        background: var(--bg-card);
+        border-radius: 8px;
+        padding: 1.5rem;
+        margin-bottom: 1.5rem;
+      }
 
-        .card h3 {
-            color: var(--accent);
-            border-bottom: 1px solid var(--bg-secondary);
-            padding-bottom: 0.5rem;
-            margin-bottom: 1rem;
-        }
+      .card h3 {
+        color: var(--accent);
+        border-bottom: 1px solid var(--bg-secondary);
+        padding-bottom: 0.5rem;
+        margin-bottom: 1rem;
+      }
 
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 1rem;
-        }
+      .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 1rem;
+      }
 
-        .stat-card {
-            background: var(--bg-secondary);
-            border-radius: 8px;
-            padding: 1.5rem;
-            text-align: center;
-        }
+      .stat-card {
+        background: var(--bg-secondary);
+        border-radius: 8px;
+        padding: 1.5rem;
+        text-align: center;
+      }
 
-        .stat-card .value {
-            font-size: 2.5rem;
-            font-weight: bold;
-            color: var(--accent);
-        }
+      .stat-card .value {
+        font-size: 2.5rem;
+        font-weight: bold;
+        color: var(--accent);
+      }
 
-        .stat-card .label {
-            color: var(--text-secondary);
-            margin-top: 0.5rem;
-        }
+      .stat-card .label {
+        color: var(--text-secondary);
+        margin-top: 0.5rem;
+      }
 
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
 
-        th, td {
-            padding: 0.75rem;
-            text-align: left;
-            border-bottom: 1px solid var(--bg-secondary);
-        }
+      th,
+      td {
+        padding: 0.75rem;
+        text-align: left;
+        border-bottom: 1px solid var(--bg-secondary);
+      }
 
-        th {
-            color: var(--text-secondary);
-            font-weight: 500;
-            text-transform: uppercase;
-            font-size: 0.85rem;
-        }
+      th {
+        color: var(--text-secondary);
+        font-weight: 500;
+        text-transform: uppercase;
+        font-size: 0.85rem;
+      }
 
-        tr:hover {
-            background: var(--bg-secondary);
-        }
+      tr:hover {
+        background: var(--bg-secondary);
+      }
 
-        .badge {
-            display: inline-block;
-            padding: 0.25rem 0.75rem;
-            border-radius: 12px;
-            font-size: 0.85rem;
-            font-weight: 500;
-        }
+      .badge {
+        display: inline-block;
+        padding: 0.25rem 0.75rem;
+        border-radius: 12px;
+        font-size: 0.85rem;
+        font-weight: 500;
+      }
 
-        .badge-pending { background: var(--info); color: #fff; }
-        .badge-encoding { background: var(--warning); color: #000; }
-        .badge-completed { background: var(--success); color: #000; }
-        .badge-failed { background: var(--accent); color: #fff; }
+      .badge-pending {
+        background: var(--info);
+        color: #fff;
+      }
+      .badge-encoding {
+        background: var(--warning);
+        color: #000;
+      }
+      .badge-completed {
+        background: var(--success);
+        color: #000;
+      }
+      .badge-failed {
+        background: var(--accent);
+        color: #fff;
+      }
 
-        .tier-pristine { color: #4ecca3; }
-        .tier-good { color: #17a2b8; }
-        .tier-mediocre { color: #ffc107; }
-        .tier-poor { color: #e94560; }
+      .tier-pristine {
+        color: #4ecca3;
+      }
+      .tier-good {
+        color: #17a2b8;
+      }
+      .tier-mediocre {
+        color: #ffc107;
+      }
+      .tier-poor {
+        color: #e94560;
+      }
 
-        .btn {
-            display: inline-block;
-            padding: 0.5rem 1rem;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            text-decoration: none;
-            font-size: 0.9rem;
-            transition: all 0.2s;
-        }
+      .btn {
+        display: inline-block;
+        padding: 0.5rem 1rem;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        text-decoration: none;
+        font-size: 0.9rem;
+        transition: all 0.2s;
+      }
 
-        .btn-primary {
-            background: var(--accent);
-            color: #fff;
-        }
+      .btn-primary {
+        background: var(--accent);
+        color: #fff;
+      }
 
-        .btn-primary:hover {
-            background: var(--accent-hover);
-        }
+      .btn-primary:hover {
+        background: var(--accent-hover);
+      }
 
-        .btn-success {
-            background: var(--success);
-            color: #000;
-        }
+      .btn-success {
+        background: var(--success);
+        color: #000;
+      }
 
-        .btn-warning {
-            background: var(--warning);
-            color: #000;
-        }
+      .btn-warning {
+        background: var(--warning);
+        color: #000;
+      }
 
-        .btn-sm {
-            padding: 0.25rem 0.5rem;
-            font-size: 0.8rem;
-        }
+      .btn-sm {
+        padding: 0.25rem 0.5rem;
+        font-size: 0.8rem;
+      }
 
-        .truncate {
-            max-width: 300px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
+      .truncate {
+        max-width: 300px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
 
-        .text-muted { color: var(--text-secondary); }
-        .text-success { color: var(--success); }
-        .text-warning { color: var(--warning); }
-        .text-danger { color: var(--accent); }
+      .text-muted {
+        color: var(--text-secondary);
+      }
+      .text-success {
+        color: var(--success);
+      }
+      .text-warning {
+        color: var(--warning);
+      }
+      .text-danger {
+        color: var(--accent);
+      }
 
-        .nav-status { display: flex; gap: 0.5rem; align-items: center; }
-        .pill {
-            padding: 0.35rem 0.65rem;
-            border-radius: 999px;
-            font-size: 0.8rem;
-            border: 1px solid var(--bg-card);
-            background: var(--bg-primary);
-            color: var(--text-secondary);
-        }
-        .pill-on { border-color: var(--success); color: var(--success); }
-        .pill-off { border-color: var(--text-secondary); color: var(--text-secondary); }
+      .nav-status {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+      }
+      .nav-badge {
+        display: flex;
+        flex-direction: column;
+        gap: 0.15rem;
+        line-height: 1.1;
+      }
+      .nav-subtext {
+        font-size: 0.75rem;
+        color: var(--text-secondary);
+      }
+      .status-chip {
+        padding: 0.35rem 0.55rem;
+        border-radius: 6px;
+        background: var(--bg-secondary);
+        color: var(--text-secondary);
+        font-size: 0.85rem;
+      }
+      .nav-search {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+        background: var(--bg-card);
+        border-radius: 999px;
+        padding: 0.25rem 0.5rem;
+        border: 1px solid var(--bg-secondary);
+      }
+      .nav-search input {
+        background: transparent;
+        border: none;
+        color: var(--text-primary);
+        width: 160px;
+        padding: 0.25rem 0.5rem;
+        outline: none;
+      }
+      .nav-search button {
+        border: none;
+        background: var(--accent);
+        color: #fff;
+        border-radius: 999px;
+        padding: 0.3rem 0.7rem;
+        cursor: pointer;
+        font-size: 0.8rem;
+      }
+      .pill {
+        padding: 0.35rem 0.65rem;
+        border-radius: 999px;
+        font-size: 0.8rem;
+        border: 1px solid var(--bg-card);
+        background: var(--bg-primary);
+        color: var(--text-secondary);
+      }
+      .pill-on {
+        border-color: var(--success);
+        color: var(--success);
+      }
+      .pill-off {
+        border-color: var(--text-secondary);
+        color: var(--text-secondary);
+      }
 
+      .compare-container {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+      }
+
+      .compare-video {
+        background: #000;
+        border-radius: 8px;
+        overflow: hidden;
+      }
+
+      .compare-video video {
+        width: 100%;
+        display: block;
+      }
+
+      .compare-video .label {
+        padding: 0.5rem 1rem;
+        background: var(--bg-secondary);
+        display: flex;
+        justify-content: space-between;
+      }
+
+      .compare-controls {
+        display: flex;
+        gap: 1rem;
+        align-items: center;
+        padding: 1rem;
+        background: var(--bg-secondary);
+        border-radius: 8px;
+        margin-top: 1rem;
+      }
+
+      .compare-controls input[type="range"] {
+        flex: 1;
+      }
+
+      @media (max-width: 1200px) {
         .compare-container {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 1rem;
+          grid-template-columns: 1fr;
         }
+      }
 
-        .compare-video {
-            background: #000;
-            border-radius: 8px;
-            overflow: hidden;
-        }
+      .row-checkbox {
+        width: 18px;
+        height: 18px;
+        cursor: pointer;
+      }
 
-        .compare-video video {
-            width: 100%;
-            display: block;
-        }
-
-        .compare-video .label {
-            padding: 0.5rem 1rem;
-            background: var(--bg-secondary);
-            display: flex;
-            justify-content: space-between;
-        }
-
-        .compare-controls {
-            display: flex;
-            gap: 1rem;
-            align-items: center;
-            padding: 1rem;
-            background: var(--bg-secondary);
-            border-radius: 8px;
-            margin-top: 1rem;
-        }
-
-        .compare-controls input[type="range"] {
-            flex: 1;
-        }
-
-        @media (max-width: 1200px) {
-            .compare-container {
-                grid-template-columns: 1fr;
-            }
-        }
-
-        .row-checkbox {
-            width: 18px;
-            height: 18px;
-            cursor: pointer;
-        }
-
-        .outlier-row {
-            background: rgba(255, 193, 7, 0.1) !important;
-        }
-        .outlier-row:hover {
-            background: rgba(255, 193, 7, 0.2) !important;
-        }
+      .outlier-row {
+        background: rgba(255, 193, 7, 0.1) !important;
+      }
+      .outlier-row:hover {
+        background: rgba(255, 193, 7, 0.2) !important;
+      }
     </style>
-</head>
-<body>
+  </head>
+  <body>
     <nav>
-        <span class="logo">Mediaforce</span>
-        <a href="/" class="{{ 'active' if active == 'dashboard' else '' }}">Dashboard</a>
-        <a href="/shows" class="{{ 'active' if active == 'shows' else '' }}">Shows</a>
-        <a href="/queue" class="{{ 'active' if active == 'queue' else '' }}">Queue</a>
-        <a href="/review" class="{{ 'active' if active == 'review' else '' }}">Review</a>
-        <a href="/completed" class="{{ 'active' if active == 'completed' else '' }}">Completed</a>
-        <a href="/settings" class="{{ 'active' if active == 'settings' else '' }}">Settings</a>
-        <div style="flex:1"></div>
-        {% set ns = nav_status or {} %}
-        <div class="nav-status">
-            <span class="pill {{ 'pill-on' if ns.get('scan_running') else 'pill-off' }}" title="Scan status">Scan {{ 'running' if ns.get('scan_running') else 'idle' }}</span>
-            <span class="pill {{ 'pill-on' if ns.get('watch_running') else 'pill-off' }}" title="Watch status">Watch {{ 'on' if ns.get('watch_running') else 'off' }}</span>
+      <span class="logo">Mediaforce</span>
+      <a href="/" class="{{ 'active' if active == 'dashboard' else '' }}">Dashboard</a>
+      <a href="/shows" class="{{ 'active' if active == 'shows' else '' }}">Shows</a>
+      <a href="/queue" class="{{ 'active' if active == 'queue' else '' }}">Queue</a>
+      <a href="/review" class="{{ 'active' if active == 'review' else '' }}">Review</a>
+      <a href="/completed" class="{{ 'active' if active == 'completed' else '' }}">Completed</a>
+      <a href="/settings" class="{{ 'active' if active == 'settings' else '' }}">Settings</a>
+      <div style="flex: 1"></div>
+      <form class="nav-search" action="/search" method="get">
+        <input
+          type="text"
+          name="q"
+          placeholder="Search files"
+          value="{{ request.query_params.get('q') if request and request.query_params else '' }}"
+          aria-label="Search files"
+        />
+        <button type="submit">Go</button>
+      </form>
+      {% set ns = nav_status or {} %}
+      <div class="nav-status">
+        <div class="nav-badge">
+          <span class="pill pill-scan {{ 'pill-on' if ns.get('scan_running') else 'pill-off' }}" title="Scan status"
+            >Scan {{ 'running' if ns.get('scan_running') else 'idle' }}</span
+          >
+          {% if ns.get('scan_last') %}
+          <div class="nav-subtext" id="navScanSummary" title="Last scan per library">
+            {% for name, ts in ns.get('scan_last').items() %} {{ name }}: {{ ts[:16] if ts else 'never' }}{% if not
+            loop.last %} · {% endif %} {% endfor %}
+          </div>
+          {% elif ns.get('scan_latest') %}
+          <div class="nav-subtext" id="navScanSummary">Last scan {{ ns.get('scan_latest')[:16] }}</div>
+          {% endif %}
         </div>
+        <div class="nav-badge">
+          <span class="pill pill-watch {{ 'pill-on' if ns.get('watch_running') else 'pill-off' }}" title="Watch status"
+            >Watch {{ 'on' if ns.get('watch_running') else ('paused' if ns.get('watch_paused') else 'off') }}</span
+          >
+          <div class="nav-subtext" id="navWatchStatus">{{ ns.get('watch_message') or 'idle' }}</div>
+        </div>
+      </div>
     </nav>
-    <main>
-        {% block content %}{% endblock %}
-    </main>
+    <main>{% block content %}{% endblock %}</main>
     <script>
-        // Auto-refresh for dashboard
-        if (window.location.pathname === '/') {
-            setTimeout(() => window.location.reload(), 30000);
-        }
+      // Auto-refresh for dashboard
+      if (window.location.pathname === "/") {
+        setTimeout(() => window.location.reload(), 30000);
+      }
     </script>
     {% block scripts %}{% endblock %}
-</body>
+  </body>
 </html>

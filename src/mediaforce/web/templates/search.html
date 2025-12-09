@@ -1,0 +1,64 @@
+{% extends "base.html" %} {% block content %}
+<h1>Search</h1>
+
+<div class="card" style="margin-bottom: 1rem">
+  <form action="/search" method="get" style="display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: flex-end">
+    <label style="display: flex; flex-direction: column; gap: 0.25rem">
+      <span class="text-muted">Query</span>
+      <input type="text" name="q" value="{{ query or '' }}" placeholder="show or filename" style="min-width: 260px" />
+    </label>
+    <label style="display: flex; flex-direction: column; gap: 0.25rem">
+      <span class="text-muted">Status</span>
+      <select name="status">
+        <option value="" {% if not status %}selected{% endif %}>Any</option>
+        <option value="pending" {% if status="" ="pending" %}selected{% endif %}>Pending</option>
+        <option value="encoding" {% if status="" ="encoding" %}selected{% endif %}>Encoding</option>
+        <option value="encoded" {% if status="" ="encoded" %}selected{% endif %}>Encoded</option>
+        <option value="completed" {% if status="" ="completed" %}selected{% endif %}>Completed</option>
+      </select>
+    </label>
+    <label style="display: flex; flex-direction: column; gap: 0.25rem">
+      <span class="text-muted">Tier</span>
+      <select name="tier">
+        <option value="" {% if not tier %}selected{% endif %}>Any</option>
+        {% for t in ['pristine','good','mediocre','poor'] %}
+        <option value="{{ t }}" {% if tier="" ="t" %}selected{% endif %}>{{ t }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="btn btn-primary" type="submit">Search</button>
+  </form>
+</div>
+
+<div class="card">
+  <h3 style="margin-top: 0">Results ({{ results|length }} of {{ total }})</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>File</th>
+        <th>Status</th>
+        <th>Tier</th>
+        <th>Size</th>
+        <th>Reduction</th>
+        <th>Last Update</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in results %}
+      <tr>
+        <td class="truncate" title="{{ row.path }}">{{ row.filename }}</td>
+        <td>{{ row.status }}</td>
+        <td class="tier-{{ row.tier }}">{{ row.tier or '-' }}</td>
+        <td>{{ row.size }}</td>
+        <td class="text-success">{{ row.reduction }}%</td>
+        <td>{{ row.updated_at or '-' }}</td>
+      </tr>
+      {% endfor %} {% if results|length == 0 %}
+      <tr>
+        <td colspan="6" class="text-muted">No matches</td>
+      </tr>
+      {% endif %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

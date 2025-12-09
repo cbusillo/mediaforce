@@ -21,7 +21,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 # Import functions from mediaforce
-from mediaforce import (
+from mediaforce.core import (
     AppSettings,
     LibrarySettings,
     get_db_path,
@@ -90,18 +90,92 @@ def get_library_status() -> list[dict]:
     return libs
 
 
-def get_worker_status() -> list[dict]:
-    """Static placeholder until real worker registry is added."""
-    # TODO: replace with DB/API-backed worker registry
-    return []
+def get_worker_status(library_root: Optional[str] = None) -> list[dict]:
+    """Return active workers based on encode_progress entries."""
+    try:
+        root = library_root or resolve_existing_library_root()
+        if not root:
+            return []
+        with get_db_connection(root) as conn:
+            rows = conn.execute(
+                """
+                SELECT machine, COUNT(*) as active, MAX(updated_at) as updated_at,
+                       MAX(percent_complete) as percent_complete,
+                       MAX(tier) as tier,
+                       MAX(source_path) as sample_path
+                FROM encode_progress
+                GROUP BY machine
+                ORDER BY machine
+                """
+            ).fetchall()
+            workers = []
+            for row in rows:
+                workers.append({
+                    "machine": row["machine"],
+                    "active": row["active"],
+                    "percent_complete": row["percent_complete"] or 0,
+                    "tier": row["tier"],
+                    "sample_path": row["sample_path"],
+                    "updated_at": row["updated_at"],
+                })
+            return workers
+    except Exception:
+        return []
+
+
+def _watch_status_snapshot() -> dict:
+    """Return a lightweight, read-only copy of the current watch status."""
+
+    return {
+        "running": WATCH_STATUS.get("running", False),
+        "paused": WATCH_STATUS.get("paused", False),
+        "libraries": WATCH_STATUS.get("libraries", []),
+        "message": WATCH_STATUS.get("message", "idle"),
+    }
+
+
+def _parse_size_param(value: Optional[str]) -> Optional[int]:
+    """Convert a size parameter in MB/GB suffix to bytes (None if invalid)."""
+
+    if value is None:
+        return None
+    try:
+        text = value.strip().lower()
+        if not text:
+            return None
+        multiplier = 1024 * 1024
+        if text.endswith("gb"):
+            multiplier *= 1024
+            text = text[:-2]
+        elif text.endswith("mb"):
+            text = text[:-2]
+        num = float(text)
+        if num < 0:
+            return None
+        return int(num * multiplier)
+    except Exception:
+        return None
 
 
 def _nav_status() -> dict:
-    running_scans = [lib for lib, state in SCAN_STATUS.items() if state == "running"]
+    """Build navigation status badges (scan + watch) with last-scan details."""
+
+    libs = get_library_status()
+    running_scans = [entry["root"] for entry in libs if entry.get("running")]
+    last_scan_map = {entry["lib"].name: entry.get("last_scan") for entry in libs}
+    latest_scan = None
+    for ts in last_scan_map.values():
+        if ts:
+            latest_scan = ts if latest_scan is None else max(latest_scan, ts)
+
     return {
         "scan_running": bool(running_scans),
         "scan_libraries": running_scans,
+        "scan_last": last_scan_map,
+        "scan_latest": latest_scan,
         "watch_running": WATCH_STATUS.get("running", False),
+        "watch_paused": WATCH_STATUS.get("paused", False),
+        "watch_message": WATCH_STATUS.get("message", "idle"),
     }
 
 app = FastAPI(title="Mediaforce", description="Content-aware media encoding management")
@@ -116,6 +190,7 @@ templates = Jinja2Templates(directory=str(templates_dir))
 WATCH_TASK: Optional[asyncio.Task] = None
 WATCH_STATUS: dict = {
     "running": False,
+    "paused": False,
     "libraries": [],
     "message": "idle",
 }
@@ -135,18 +210,18 @@ async def _startup_watch():
         WATCH_STATUS.update({"running": False, "message": "watch start failed"})
 
 
-ALLOWED_RAW_FILES = {
-    "mediaforce.py",
-    "mediaforce_web.py",
-    "pyproject.toml",
-    "uv.lock",
-    "src/mediaforce/core.py",
-    "src/mediaforce/web/app.py",
-    "src/mediaforce/db/models.py",
+ALLOWED_RAW_FILES: dict[str, str] = {
+    "__init__.py": "src/mediaforce/__init__.py",
+    "core.py": "src/mediaforce/core.py",
+    "db/__init__.py": "src/mediaforce/db/__init__.py",
+    "db/models.py": "src/mediaforce/db/models.py",
+    "web/app.py": "src/mediaforce/web/app.py",
+    "cli/__init__.py": "src/mediaforce/cli/__init__.py",
+    "cli/main.py": "src/mediaforce/cli/main.py",
 }
 
 
-@app.get("/raw/{filename}", response_class=PlainTextResponse)
+@app.get("/raw/{filename:path}", response_class=PlainTextResponse)
 async def raw_file(filename: str):
     """Serve whitelisted source files for remote workers (pull-based autoupdate).
 
@@ -155,7 +230,7 @@ async def raw_file(filename: str):
     if filename not in ALLOWED_RAW_FILES:
         return HTMLResponse("not found", status_code=404)
 
-    target = PROJECT_ROOT / filename
+    target = PROJECT_ROOT / ALLOWED_RAW_FILES[filename]
     try:
         text = target.read_text()
     except Exception:
@@ -168,8 +243,8 @@ async def raw_manifest():
     """Expose a simple manifest with version + sha256 hashes for allowed raw files."""
     manifest = {"version": datetime.utcnow().isoformat() + "Z", "files": {}}
     base = PROJECT_ROOT
-    for fname in ALLOWED_RAW_FILES:
-        p = base / fname
+    for export_name, rel_path in ALLOWED_RAW_FILES.items():
+        p = base / rel_path
         if not p.exists() or not p.is_file():
             continue
         import hashlib
@@ -178,7 +253,7 @@ async def raw_manifest():
         with p.open("rb") as f:
             for chunk in iter(lambda: f.read(8192), b""):
                 h.update(chunk)
-        manifest["files"][fname] = {
+        manifest["files"][export_name] = {
             "sha256": h.hexdigest(),
             "size": p.stat().st_size,
         }
@@ -186,6 +261,9 @@ async def raw_manifest():
     return manifest
 
 QUEUE_CACHE: dict[str, dict] = {}  # reserved for future use
+QUEUE_CACHE_TTL = 10  # seconds
+QUEUE_TOTALS_CACHE: dict[str, dict] = {}
+QUEUE_TOTALS_TTL = 15  # seconds
 
 
 def _get_watch_libraries() -> list[str]:
@@ -208,6 +286,7 @@ async def _start_watch_task() -> dict:
     if not watch_roots:
         WATCH_STATUS.update({
             "running": False,
+            "paused": False,
             "libraries": [],
             "message": "No watch-enabled libraries on this host",
         })
@@ -216,6 +295,7 @@ async def _start_watch_task() -> dict:
     async def runner():
         WATCH_STATUS.update({
             "running": True,
+            "paused": False,
             "libraries": watch_roots,
             "message": "watching",
         })
@@ -223,22 +303,26 @@ async def _start_watch_task() -> dict:
             await _watch_libraries()
             WATCH_STATUS.update({
                 "running": False,
+                "paused": False,
                 "message": "stopped",
             })
         except asyncio.CancelledError:
             WATCH_STATUS.update({
                 "running": False,
+                "paused": True,
                 "message": "stopped",
             })
             raise
         except Exception as exc:  # pragma: no cover
             WATCH_STATUS.update({
                 "running": False,
+                "paused": False,
                 "message": f"error: {exc}",
             })
     # Mark running before returning so API callers see immediate state
     WATCH_STATUS.update({
         "running": True,
+        "paused": False,
         "libraries": watch_roots,
         "message": "watching",
     })
@@ -246,7 +330,7 @@ async def _start_watch_task() -> dict:
     return WATCH_STATUS
 
 
-async def _stop_watch_task() -> dict:
+async def _stop_watch_task(message: str = "stopped", paused: bool = False) -> dict:
     global WATCH_TASK
     if WATCH_TASK and not WATCH_TASK.done():
         WATCH_TASK.cancel()
@@ -256,7 +340,8 @@ async def _stop_watch_task() -> dict:
             pass
     WATCH_STATUS.update({
         "running": False,
-        "message": "stopped",
+        "paused": paused,
+        "message": message,
     })
     return WATCH_STATUS
 
@@ -423,6 +508,7 @@ def build_pagination_url(request: Request) -> callable:
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     """Main dashboard with overview stats."""
+    host_name = platform_mod.node()
     library_root = resolve_existing_library_root()
     if not library_root:
         return templates.TemplateResponse("dashboard.html", {
@@ -434,6 +520,9 @@ async def dashboard(request: Request):
             "recent_completions": [],
             "tier_counts": {},
             "lib_status": get_library_status(),
+            "watch_status": _watch_status_snapshot(),
+            "workers": [],
+            "host_name": host_name,
             "nav_status": _nav_status(),
             "error": "No accessible library root found. Mount /Volumes or /mnt media shares.",
         })
@@ -458,8 +547,8 @@ async def dashboard(request: Request):
         """)
         row = cursor.fetchone()
         space_saved_gb = 0
-        if row and row["source_bytes"] and row["output_bytes"]:
-            space_saved_gb = (row["source_bytes"] - row["output_bytes"]) / 1024 / 1024 / 1024
+        if row and row[0] and row[1]:
+            space_saved_gb = (row[0] - row[1]) / 1024 / 1024 / 1024
 
         # Active encodes (with progress)
         cursor = conn.execute("""
@@ -523,6 +612,7 @@ async def dashboard(request: Request):
         tier_counts = {row["detected_tier"]: row["cnt"] for row in cursor.fetchall()}
 
         lib_status = get_library_status()
+        workers = get_worker_status(library_root)
 
     stats = {
         "pending": status_counts.get("pending", 0),
@@ -541,7 +631,11 @@ async def dashboard(request: Request):
         "recent_completions": recent_completions,
         "tier_counts": tier_counts,
         "lib_status": lib_status,
+        "workers": workers,
+        "watch_status": _watch_status_snapshot(),
         "nav_status": _nav_status(),
+        "library_root": library_root,
+        "host_name": host_name,
     })
 
 
@@ -556,19 +650,12 @@ async def settings_page(request: Request):
     # Library status (last scan time per library)
     lib_status = get_library_status()
 
-    # Expose current watch status
-    status = {
-        "running": WATCH_STATUS.get("running", False),
-        "message": WATCH_STATUS.get("message", "idle"),
-        "libraries": WATCH_STATUS.get("libraries", []),
-    }
-
     return templates.TemplateResponse("settings.html", {
         "request": request,
         "title": "Settings",
         "active": "settings",
         "libraries": libraries,
-        "watch_status": status,
+        "watch_status": _watch_status_snapshot(),
         "is_mac": IS_MAC,
         "global_max_height": global_max_height,
         "settings": settings,
@@ -631,6 +718,23 @@ def _queue_cache_set(library_root: str, shows: list[dict]):
     }
 
 
+def _queue_totals_get(cache_key: str):
+    entry = QUEUE_TOTALS_CACHE.get(cache_key)
+    if not entry:
+        return None
+    if entry.get("expires", 0) < datetime.utcnow().timestamp():
+        QUEUE_TOTALS_CACHE.pop(cache_key, None)
+        return None
+    return entry.get("totals")
+
+
+def _queue_totals_set(cache_key: str, totals: dict):
+    QUEUE_TOTALS_CACHE[cache_key] = {
+        "expires": datetime.utcnow().timestamp() + QUEUE_TOTALS_TTL,
+        "totals": totals,
+    }
+
+
 def _aggregate_queue_shows(conn, library_root: str) -> list[dict]:
     # Deprecated; shows are now fetched with ordered/limited SQL in queue_shows_view
     return []
@@ -656,6 +760,10 @@ async def queue(
     request: Request,
     page: int = Query(1, ge=1),
     per_page: int = Query(50),
+    show: Optional[str] = Query(None, description="Filter by show name (contains)"),
+    tier: Optional[str] = Query(None, description="Filter by detected tier"),
+    size_min: Optional[str] = Query(None, description="Minimum size (e.g., 500MB, 5GB)"),
+    size_max: Optional[str] = Query(None, description="Maximum size (e.g., 2GB)"),
 ):
     """View encoding queue with hierarchical in-page drill-down."""
     if per_page not in [25, 50, 100, 200]:
@@ -666,7 +774,18 @@ async def queue(
 
     try:
         with get_db_connection(library_root) as conn:
-            return await queue_shows_view(request, conn, page, per_page, library_root, libs)
+            return await queue_shows_view(
+                request,
+                conn,
+                page,
+                per_page,
+                library_root,
+                libs,
+                show,
+                tier,
+                _parse_size_param(size_min),
+                _parse_size_param(size_max),
+            )
     except FileNotFoundError as exc:
         return templates.TemplateResponse("queue.html", {
             "request": request,
@@ -686,13 +805,26 @@ async def queue(
             "library_root": library_root,
             "libraries": libs,
             "lib_status": get_library_status(),
+            "workers": get_worker_status(library_root),
+            "watch_status": _watch_status_snapshot(),
             "nav_status": _nav_status(),
             "error": str(exc),
         })
 
 
-async def queue_shows_view(request: Request, conn, page: int, per_page: int, library_root: str, libraries: list[str]):
-    """View grouped by shows."""
+async def queue_shows_view(
+    request: Request,
+    conn,
+    page: int,
+    per_page: int,
+    library_root: str,
+    libraries: list[str],
+    show_filter: Optional[str] = None,
+    tier_filter: Optional[str] = None,
+    size_min_bytes: Optional[int] = None,
+    size_max_bytes: Optional[int] = None,
+):
+    """View grouped by shows with filter/sort support."""
     sort = request.query_params.get("sort", "priority")
     direction = request.query_params.get("order", "desc").lower()
     direction = "desc" if direction not in ["asc", "desc"] else direction
@@ -703,10 +835,30 @@ async def queue_shows_view(request: Request, conn, page: int, per_page: int, lib
         "size": "total_size_bytes",
         "savings": "total_savings_bytes",
         "priority": "max_priority",
+        "date": "latest_scan",
+        "reduction": "reduction_ratio",
     }
     sort_expr = sort_map.get(sort, "max_priority")
 
     like_pattern = f"{library_root}/%"
+
+    # Dynamic filters
+    filters = ["status = 'pending'", "path LIKE ?"]
+    params: list = [like_pattern]
+    if show_filter:
+        filters.append("LOWER(path) LIKE ?")
+        params.append(f"%{show_filter.lower()}%")
+    if tier_filter:
+        filters.append("detected_tier = ?")
+        params.append(tier_filter)
+    if size_min_bytes is not None:
+        filters.append("size_bytes >= ?")
+        params.append(size_min_bytes)
+    if size_max_bytes is not None:
+        filters.append("size_bytes <= ?")
+        params.append(size_max_bytes)
+
+    where_clause = " AND ".join(filters)
 
     # Base aggregation CTE
     agg_sql = f"""
@@ -719,9 +871,13 @@ async def queue_shows_view(request: Request, conn, page: int, per_page: int, lib
             END AS show_name,
             size_bytes,
             potential_savings_bytes,
-            priority_score
+            priority_score,
+            detected_tier,
+            scanned_at,
+            mtime,
+            updated_at
         FROM media_inventory
-        WHERE status = 'pending' AND path LIKE ?
+        WHERE {where_clause}
     ), agg AS (
         SELECT
             show_name,
@@ -729,7 +885,13 @@ async def queue_shows_view(request: Request, conn, page: int, per_page: int, lib
             SUM(size_bytes) AS total_size_bytes,
             SUM(potential_savings_bytes) AS total_savings_bytes,
             AVG(priority_score) AS avg_priority,
-            MAX(priority_score) AS max_priority
+            MAX(priority_score) AS max_priority,
+            MAX(COALESCE(scanned_at, updated_at, datetime(mtime, 'unixepoch'))) AS latest_scan,
+            CASE
+                WHEN SUM(size_bytes) > 0 AND SUM(potential_savings_bytes) IS NOT NULL THEN
+                    SUM(potential_savings_bytes) * 1.0 / SUM(size_bytes)
+                ELSE 0
+            END AS reduction_ratio
         FROM rel
         GROUP BY show_name
     )
@@ -738,51 +900,48 @@ async def queue_shows_view(request: Request, conn, page: int, per_page: int, lib
     LIMIT ? OFFSET ?
     """
 
-    # Total shows and totals
-    total_row = conn.execute(
-        """
-        WITH rel AS (
-            SELECT
-                CASE
-                    WHEN instr(substr(path, ?), '/') > 0
-                        THEN substr(substr(path, ?), 1, instr(substr(path, ?), '/') - 1)
-                    ELSE substr(path, ?)
-                END AS show_name,
-                size_bytes,
-                potential_savings_bytes
-            FROM media_inventory
-            WHERE status = 'pending' AND path LIKE ?
-        ), agg AS (
-            SELECT show_name,
-                   COUNT(*) AS file_count,
-                   SUM(size_bytes) AS total_size_bytes,
-                   SUM(potential_savings_bytes) AS total_savings_bytes
-            FROM rel
-            GROUP BY show_name
-        )
-        SELECT COUNT(*) as total_shows,
-               SUM(file_count) as total_files,
-               SUM(total_savings_bytes) as total_savings
-        FROM agg
-        """,
-        (
-            len(library_root)+2,
-            len(library_root)+2,
-            len(library_root)+2,
-            len(library_root)+2,
-            like_pattern,
-        ),
-    ).fetchone()
+    cache_key = f"totals:{library_root}:{sort}:{direction}:{like_pattern}:{show_filter}:{tier_filter}:{size_min_bytes}:{size_max_bytes}"
+    total_row = _queue_totals_get(cache_key)
+    if not total_row:
+        total_row = conn.execute(
+            f"""
+            WITH rel AS (
+                SELECT
+                    CASE
+                        WHEN instr(substr(path, {len(library_root)+2}), '/') > 0
+                            THEN substr(substr(path, {len(library_root)+2}), 1, instr(substr(path, {len(library_root)+2}), '/') - 1)
+                        ELSE substr(path, {len(library_root)+2})
+                    END AS show_name,
+                    size_bytes,
+                    potential_savings_bytes
+                FROM media_inventory
+                WHERE {where_clause}
+            ), agg AS (
+                SELECT show_name,
+                       COUNT(*) AS file_count,
+                       SUM(size_bytes) AS total_size_bytes,
+                       SUM(potential_savings_bytes) AS total_savings_bytes
+                FROM rel
+                GROUP BY show_name
+            )
+            SELECT COUNT(*) as total_shows,
+                   SUM(file_count) as total_files,
+                   SUM(total_savings_bytes) as total_savings
+            FROM agg
+            """,
+            tuple(params),
+        ).fetchone()
+        _queue_totals_set(cache_key, total_row)
 
-    total = total_row["total_shows"] or 0
-    total_files = total_row["total_files"] or 0
-    total_savings = total_row["total_savings"] or 0
+    total = (total_row[0] if total_row else 0) or 0
+    total_files = (total_row[1] if total_row else 0) or 0
+    total_savings = (total_row[2] if total_row else 0) or 0
 
     total_pages = max(1, (total + per_page - 1) // per_page)
     page = max(1, min(page, total_pages))
     offset = (page - 1) * per_page
 
-    rows = conn.execute(agg_sql, (like_pattern, per_page, offset)).fetchall()
+    rows = conn.execute(agg_sql, tuple(params + [per_page, offset])).fetchall()
 
     shows = []
     for row in rows:
@@ -795,6 +954,8 @@ async def queue_shows_view(request: Request, conn, page: int, per_page: int, lib
             "total_savings_bytes": row["total_savings_bytes"] or 0,
             "avg_priority": row["avg_priority"] or 0,
             "max_priority": row["max_priority"] or 0,
+            "latest_scan": row["latest_scan"],
+            "reduction_pct": (row["reduction_ratio"] or 0) * 100 if row.get("reduction_ratio") is not None else 0,
         })
 
     start_page = max(1, page - 2)
@@ -819,6 +980,8 @@ async def queue_shows_view(request: Request, conn, page: int, per_page: int, lib
         "breadcrumbs": [],
         "pagination_url": build_pagination_url(request),
         "lib_status": get_library_status(),
+        "workers": get_worker_status(library_root),
+        "watch_status": _watch_status_snapshot(),
         "nav_status": _nav_status(),
         "sort": sort,
         "order": direction,
@@ -954,6 +1117,8 @@ async def queue_seasons_view(request: Request, conn, show: str, page: int, per_p
         "pagination_url": build_pagination_url(request),
         "sort": sort,
         "order": direction,
+        "workers": get_worker_status(library_root),
+        "watch_status": _watch_status_snapshot(),
         "nav_status": _nav_status(),
     })
 
@@ -1087,9 +1252,95 @@ async def queue_episodes_view(request: Request, conn, show: str, season: str, pa
             {"name": show, "url": f"/queue?show={show}"},
         ],
         "pagination_url": build_pagination_url(request),
+        "workers": get_worker_status(library_root),
         "sort": sort,
         "order": direction,
+        "watch_status": _watch_status_snapshot(),
         "nav_status": _nav_status(),
+    })
+
+
+@app.get("/search", response_class=HTMLResponse)
+async def search_page(
+    request: Request,
+    q: Optional[str] = Query("", description="Search term"),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    tier: Optional[str] = Query(None, description="Filter by tier"),
+):
+    """Simple cross-page search across inventory/encodes."""
+
+    library_root = resolve_existing_library_root()
+    if not library_root:
+        return templates.TemplateResponse("search.html", {
+            "request": request,
+            "title": "Search",
+            "active": "search",
+            "query": q,
+            "status": status,
+            "tier": tier,
+            "results": [],
+            "total": 0,
+            "nav_status": _nav_status(),
+            "watch_status": _watch_status_snapshot(),
+        })
+
+    filters = []
+    params: list = []
+    if q:
+        filters.append("LOWER(m.path) LIKE ?")
+        params.append(f"%{q.lower()}%")
+    if status:
+        filters.append("m.status = ?")
+        params.append(status)
+    if tier:
+        filters.append("m.detected_tier = ?")
+        params.append(tier)
+
+    where_clause = " AND ".join(filters) if filters else "1=1"
+
+    with get_db_connection(library_root) as conn:
+        cursor = conn.execute(
+            f"""
+            SELECT m.id, m.path, m.status, m.detected_tier, m.size_bytes, m.updated_at,
+                   COALESCE(e.output_size_bytes, 0) as output_size_bytes,
+                   e.completed_at
+            FROM media_inventory m
+            LEFT JOIN encode_results e ON e.source_id = m.id
+            WHERE {where_clause}
+            ORDER BY m.updated_at DESC
+            LIMIT 200
+            """,
+            tuple(params),
+        )
+
+        rows = cursor.fetchall()
+
+    results = []
+    for row in rows:
+        reduction = 0
+        if row["output_size_bytes"] and row["size_bytes"]:
+            reduction = int((1 - row["output_size_bytes"] / row["size_bytes"]) * 100)
+        results.append({
+            "path": row["path"],
+            "filename": pathlib.Path(row["path"]).name,
+            "status": row["status"],
+            "tier": row["detected_tier"],
+            "size": format_size(row["size_bytes"]),
+            "reduction": reduction,
+            "updated_at": row["updated_at"][:16] if row["updated_at"] else None,
+        })
+
+    return templates.TemplateResponse("search.html", {
+        "request": request,
+        "title": "Search",
+        "active": "search",
+        "query": q,
+        "status": status,
+        "tier": tier,
+        "results": results,
+        "total": len(results),
+        "nav_status": _nav_status(),
+        "watch_status": _watch_status_snapshot(),
     })
 
 
@@ -1152,31 +1403,29 @@ async def review(request: Request):
 
         encodes = []
         for row in cursor.fetchall():
-            output_path = pathlib.Path(row["output_path"])
-            if output_path.exists():
-                reduction_pct = 0
-                size_increase_pct = 0
-                if row["size_bytes"] and row["output_size_bytes"]:
-                    reduction_pct = (1 - row["output_size_bytes"] / row["size_bytes"]) * 100
-                    if reduction_pct < 0:
-                        size_increase_pct = abs(reduction_pct)
+            reduction_pct = 0
+            size_increase_pct = 0
+            if row["size_bytes"] and row["output_size_bytes"]:
+                reduction_pct = (1 - row["output_size_bytes"] / row["size_bytes"]) * 100
+                if reduction_pct < 0:
+                    size_increase_pct = abs(reduction_pct)
 
-                show_name = extract_show_name(row["path"])
+            show_name = extract_show_name(row["path"])
 
-                encodes.append({
-                    "id": row["id"],
-                    "source_path": row["path"],
-                    "filename": pathlib.Path(row["path"]).name,
-                    "show_name": show_name,
-                    "source_size": format_size(row["size_bytes"]),
-                    "output_size": format_size(row["output_size_bytes"]),
-                    "reduction": f"{reduction_pct:.0f}",
-                    "reduction_pct": reduction_pct,
-                    "size_increase_pct": f"{size_increase_pct:.0f}",
-                    "tier": row["detected_tier"],
-                    "vmaf": f"{row['vmaf']:.1f}" if row["vmaf"] else None,
-                    "is_outlier": bool(row["is_outlier"]),
-                })
+            encodes.append({
+                "id": row["id"],
+                "source_path": row["path"],
+                "filename": pathlib.Path(row["path"]).name,
+                "show_name": show_name,
+                "source_size": format_size(row["size_bytes"]),
+                "output_size": format_size(row["output_size_bytes"]),
+                "reduction": f"{reduction_pct:.0f}",
+                "reduction_pct": reduction_pct,
+                "size_increase_pct": f"{size_increase_pct:.0f}",
+                "tier": row["detected_tier"],
+                "vmaf": f"{row['vmaf']:.1f}" if row["vmaf"] else None,
+                "is_outlier": bool(row["is_outlier"]),
+            })
 
     return templates.TemplateResponse("review.html", {
         "request": request,
@@ -1449,6 +1698,37 @@ async def api_bump(data: BumpRequest):
     return {"success": True, "manual_priority": new_priority}
 
 
+class SendToWorkerRequest(BaseModel):
+    id: int
+    worker: str
+
+
+@app.post("/api/send-to-worker")
+async def api_send_to_worker(data: SendToWorkerRequest):
+    """Hint a specific worker to take a pending item by bumping it and setting claimed_by."""
+    if not data.worker:
+        return {"success": False, "error": "worker required"}
+
+    with get_db_connection() as shim:
+        session = shim.session
+        current_min = session.exec(select(func.min(MediaItem.manual_priority))).first() or 0
+        new_priority = current_min - 1
+        now_str = now_iso()
+
+        item = session.get(MediaItem, data.id)
+        if not item:
+            return {"success": False, "error": "Item not found"}
+
+        item.manual_priority = new_priority
+        item.claimed_by = data.worker
+        item.status = "pending"
+        item.updated_at = now_str
+        session.add(item)
+        session.commit()
+
+    return {"success": True, "manual_priority": new_priority}
+
+
 @app.post("/api/bulk-promote")
 async def api_bulk_promote(data: BulkPromoteRequest):
     """Bulk promote multiple encodes."""
@@ -1633,10 +1913,12 @@ async def api_watch_toggle(data: WatchToggleRequest):
     try:
         if data.action == "start":
             status = await _start_watch_task()
+        elif data.action == "pause":
+            status = await _stop_watch_task("paused by user", paused=True)
         elif data.action == "stop":
             status = await _stop_watch_task()
         else:
-            return {"success": False, "error": "action must be 'start' or 'stop'"}
+            return {"success": False, "error": "action must be 'start', 'pause', or 'stop'"}
         return {"success": True, "status": status}
     except Exception as exc:  # pragma: no cover - defensive
         return {"success": False, "error": str(exc)}
@@ -1652,7 +1934,7 @@ async def api_scan_library(data: ScanRequest):
 
     # Run scan as a subprocess to reuse the CLI logic safely.
     repo_dir = pathlib.Path(__file__).parent
-    cmd = [sys.executable, "mediaforce.py", "scan", lib_path]
+    cmd = [sys.executable, "-m", "mediaforce", "scan", lib_path]
 
     try:
         SCAN_STATUS[lib_path] = "running"
@@ -1678,7 +1960,7 @@ async def api_scan_library(data: ScanRequest):
         asyncio.create_task(runner())
         return {"success": True, "message": "scan started"}
     except FileNotFoundError:
-        return {"success": False, "error": "mediaforce.py not found"}
+        return {"success": False, "error": "mediaforce package not found"}
     except Exception as exc:  # pragma: no cover
         return {"success": False, "error": str(exc)}
 
@@ -1718,6 +2000,13 @@ async def api_update_settings(data: SettingsUpdateRequest):
         return {"success": False, "error": str(exc)}
 
 
+@app.get("/api/workers")
+async def api_workers(request: Request):
+    """Return active worker list for the current library."""
+    library_root = request.query_params.get('library') or _resolve_library(request)
+    return {"success": True, "workers": get_worker_status(library_root)}
+
+
 @app.get("/api/settings/current")
 async def api_get_settings():
     """Return current settings (libraries and global max height)."""
@@ -1736,6 +2025,44 @@ async def api_get_settings():
         }
     except Exception as exc:  # pragma: no cover
         return {"success": False, "error": str(exc)}
+
+
+@app.get("/api/active-encodes")
+async def api_active_encodes(request: Request):
+    """Return live encode progress for dashboard polling."""
+    library_root = request.query_params.get("library") or resolve_existing_library_root()
+    if not library_root:
+        return {"success": True, "encodes": []}
+
+    with get_db_connection(library_root) as conn:
+        cursor = conn.execute("""
+            SELECT p.*, m.size_bytes as source_size_bytes, m.video_codec
+            FROM encode_progress p
+            LEFT JOIN media_inventory m ON p.source_id = m.id
+            ORDER BY p.started_at DESC
+        """)
+        encodes = []
+        for row in cursor.fetchall():
+            eta_display = None
+            if row["eta_seconds"] and row["eta_seconds"] > 0:
+                eta_display = format_duration(row["eta_seconds"])
+            encodes.append({
+                "filename": pathlib.Path(row["source_path"]).name if row["source_path"] else "Unknown",
+                "path": row["source_path"],
+                "show_name": extract_show_name(row["source_path"]) if row["source_path"] else None,
+                "machine": row["machine"],
+                "tier": row["tier"],
+                "started_at": row["started_at"][:16] if row["started_at"] else None,
+                "percent_complete": row["percent_complete"] or 0,
+                "speed": row["speed"] or 0,
+                "eta": eta_display,
+                "phase": row["phase"] or "encoding",
+                "frame": row["frame"] or 0,
+                "total_frames": row["total_frames"] or 0,
+                "fps": row["fps"] or 0,
+            })
+
+    return {"success": True, "encodes": encodes}
 
 
 @app.get("/api/queue/seasons/{show_name}")

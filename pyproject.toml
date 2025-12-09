@@ -4,6 +4,7 @@ version = "0.2.0"
 description = "Content-aware media encoding with unified scheduling"
 readme = "README.md"
 requires-python = ">=3.13"
+
 dependencies = [
     "fastapi",
     "uvicorn[standard]",
@@ -13,19 +14,45 @@ dependencies = [
     "sqlmodel",
 ]
 
+[dependency-groups]
+dev = [
+    "mypy",
+    "pytest",
+    "ruff",
+    "sqlalchemy2-stubs",
+]
+
 [project.scripts]
 mediaforce = "mediaforce.core:main"
 mediaforce-web = "mediaforce.web.app:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-data]
-"mediaforce.web" = ["templates/*.html", "templates/**/*.html", "static/*"]
-
-[tool.uv]
-dev-dependencies = [
-    "mypy",
-    "pytest",
-    "ruff",
+[tool.hatch.build.targets.wheel]
+packages = ["src/mediaforce"]
+include = [
+    "src/mediaforce/web/templates/*.html",
+    "src/mediaforce/web/templates/**/*.html",
+    "src/mediaforce/web/static/**",
 ]
+
+[tool.black]
+line-length = 120
+target-version = ["py313"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+extend-ignore = [
+    "E203",  # match black on slice spacing
+]
+
+[tool.mypy]
+python_version = "3.13"
+ignore_missing_imports = false
+
+[[tool.mypy.overrides]]
+module = ["fastapi", "fastapi.*", "sqlmodel", "sqlmodel.*"]
+ignore_missing_imports = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
