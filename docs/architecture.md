@@ -13,8 +13,8 @@ web UI, and domain logic organized while we continue the refactor.
 
 Entry points
 
-- CLI: `mediaforce` (or `python mediaforce.py` via shim) → `mediaforce.core.main`
-- Web: `mediaforce-web` (or `python mediaforce_web.py`) → `mediaforce.web.app:app`
+- CLI: `uv run mediaforce` (shims exist for editable checkout) → `mediaforce.core.main`
+- Web: `uv run mediaforce-web` → `mediaforce.web.app:app`
 
 Data locations
 

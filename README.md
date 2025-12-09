@@ -77,30 +77,30 @@ ffmpeg -encoders | grep svt
 ### Check Platform Status
 
 ```bash
-python3 mediaforce.py status
+uv run mediaforce status
 ```
 
 ### Single Episode Test
 
 ```bash
 # Analyze and show what would happen (dry run)
-python3 mediaforce.py analyze "/path/to/episode.mkv"
+uv run mediaforce analyze "/path/to/episode.mkv"
 
 # Encode single file
-python3 mediaforce.py encode "/path/to/episode.mkv" -o "/path/to/output/" --hw-decode
+uv run mediaforce encode "/path/to/episode.mkv" -o "/path/to/output/" --hw-decode
 
 # Encode with manual tier override
-python3 mediaforce.py encode "/path/to/episode.mkv" -o "/path/to/output/" --tier pristine --hw-decode
+uv run mediaforce encode "/path/to/episode.mkv" -o "/path/to/output/" --tier pristine --hw-decode
 ```
 
 ### Season Batch
 
 ```bash
 # Analyze entire season
-python3 mediaforce.py analyze "/path/to/Show/Season 1/"
+uv run mediaforce analyze "/path/to/Show/Season 1/"
 
 # Encode season (processes all video files)
-python3 mediaforce.py encode "/path/to/Show/Season 1/" -o "/path/to/output/"
+uv run mediaforce encode "/path/to/Show/Season 1/" -o "/path/to/output/"
 ```
 
 ### Show Overrides
@@ -192,22 +192,22 @@ A single SQLite database lives at `~/.config/mediaforce/mediaforce.db` and store
 
 ```bash
 # Scan library and populate inventory (no encoding)
-python3 mediaforce.py scan /Volumes/media/tv
+uv run mediaforce scan /Volumes/media/tv
 
 # Show queue (what would be encoded next)
-python3 mediaforce.py queue /Volumes/media/tv --limit 20
+uv run mediaforce queue /Volumes/media/tv --limit 20
 
 # Dry run - show what would happen
-python3 mediaforce.py encode /Volumes/media/tv --dry-run
+uv run mediaforce encode /Volumes/media/tv --dry-run
 
 # Encode to transcode folder (don't replace originals)
-python3 mediaforce.py encode /Volumes/media/tv --no-replace
+uv run mediaforce encode /Volumes/media/tv --no-replace
 
 # Encode and replace originals
-python3 mediaforce.py encode /Volumes/media/tv
+uv run mediaforce encode /Volumes/media/tv
 
 # Promote pending encodes (after --no-replace verification)
-python3 mediaforce.py promote /Volumes/media/tv
+uv run mediaforce promote /Volumes/media/tv
 ```
 
 ### Priority Scoring
@@ -236,7 +236,7 @@ For cheap power windows (e.g., 12 AM - 5 AM):
 
 ```bash
 # crontab entry
-0 0 * * * python3 /path/to/mediaforce.py encode /Volumes/media/tv --until 05:00
+0 0 * * * cd /path/to/repo && uv run mediaforce encode /Volumes/media/tv --until 05:00
 ```
 
 The `--until` flag finishes the current file then stops after the specified time.
@@ -260,10 +260,10 @@ Real-time monitoring and management interface.
 
 ```bash
 # Start the web server (default port 8765)
-python3 mediaforce_web.py
+uv run mediaforce-web
 
 # Custom port
-python3 mediaforce_web.py --port 5555
+uv run mediaforce-web --port 5555
 ```
 
 ### Pages
@@ -350,7 +350,7 @@ Requirements:
 Start a watcher on the local host:
 
 ```bash
-python3 mediaforce.py watch
+uv run mediaforce watch
 ```
 
 For each watched library on this host, the watcher:
