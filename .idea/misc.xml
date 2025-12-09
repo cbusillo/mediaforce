@@ -4,6 +4,9 @@
     <option name="sdkName" value="Python 3.12 (mediaforce)" />
   </component>
   <component name="ProjectRootManager" version="2" project-jdk-name="uv (mediaforce)" project-jdk-type="Python SDK" />
+  <component name="PythonCompatibilityInspectionAdvertiser">
+    <option name="version" value="3" />
+  </component>
   <component name="RuffConfiguration">
     <option name="enabled" value="true" />
   </component>

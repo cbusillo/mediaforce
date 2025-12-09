@@ -14,8 +14,14 @@ dependencies = [
 ]
 
 [project.scripts]
-mediaforce = "mediaforce:main"
-mediaforce-web = "mediaforce_web:main"
+mediaforce = "mediaforce.core:main"
+mediaforce-web = "mediaforce.web.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"mediaforce.web" = ["templates/*.html", "templates/**/*.html", "static/*"]
 
 [tool.uv]
 dev-dependencies = [

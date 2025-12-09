@@ -13,11 +13,10 @@ source quality and applies appropriate compression settings.
 
 ## Supported Platforms
 
-| Host | Media Roots | Hardware |
-|------|-------------|----------|
-| chris-mbp.shiny (M2) | `/Volumes/media`, `/Volumes/extras` | Apple Silicon |
-| chris-studio.shiny (M4) | `/Volumes/media`, `/Volumes/extras` | Apple Silicon |
-| tdarr.shiny (CT 103) | `/mnt/media`, `/mnt/extras` | NVIDIA 3060 + 1660 |
+| OS | CPU/GPU | Notes |
+|----|---------|-------|
+| macOS 13+ | Apple Silicon | Tested with Homebrew ffmpeg + libsvtav1 |
+| Linux (Ubuntu/Debian/Fedora) | x86_64 + NVIDIA (NVDEC/NVENC optional) | ffmpeg with libsvtav1; CUDA only needed for hardware decode |
 
 Paths are automatically normalized between platforms (e.g., `/Volumes/media` ↔ `/mnt/media`).
 
@@ -26,6 +25,16 @@ Paths are automatically normalized between platforms (e.g., `/Volumes/media` ↔
 ```
 scan → queue → encode → verify → promote
 ```
+
+## Project Layout
+
+- `src/mediaforce/core.py` — main application logic (settings, queue, encoder, scanner).
+- `src/mediaforce/db/` — SQLModel models and DB helpers (SQLite settings/inventory).
+- `src/mediaforce/cli/` — CLI entrypoint shim (`mediaforce` console script).
+- `src/mediaforce/web/` — FastAPI app, routes, templates, and static assets (`mediaforce-web`).
+- `docs/` — contributor docs (e.g., `hosts.example.md`).
+- `todo.md` — roadmap/features in progress.
+- See `docs/architecture.md` for refactor goals and next steps.
 
 1. **Scan**: Inventory library, probe all files for metadata
 2. **Queue**: Prioritize by age + size (oldest/biggest first)
@@ -292,43 +301,37 @@ POST /api/settings
 
 ## Global Settings & Libraries
 
-Library configuration is shared between the CLI, web UI, and background
-watchers via a small JSON file next to `mediaforce.py`:
+Library configuration now lives in the SQLite settings DB at
+`~/.config/mediaforce/mediaforce.db` and is shared by the CLI, web UI, and
+workers. Edit it via the **Settings** tab (`/settings`) or the
+`/api/settings` endpoint; workers can also pull `--settings-url` pointing to
+`/api/settings/current`.
 
-```text
-av1_settings.json
-```
-
-Each library entry describes a logical collection (TV, Movies, etc.) and its
-paths on macOS and Linux:
+The settings API returns JSON shaped like:
 
 ```json
 {
-  "libraries": [
-    {
-      "id": "tv",
-      "name": "TV Library",
-      "media_type": "tv",
-      "mac_path": "/Volumes/media/tv",
-      "linux_path": "/mnt/media/tv",
-      "watch": true
-    },
-    {
-      "id": "movies",
-      "name": "Movies Library",
-      "media_type": "movies",
-      "mac_path": "/Volumes/media/movies",
-      "linux_path": "/mnt/media/movies",
-      "watch": true
-    }
-  ]
+  "settings": {
+    "global_max_height": 2160,
+    "max_concurrency": 2,
+    "offpeak_enabled": false,
+    "offpeak_start": "00:00",
+    "offpeak_end": "05:00",
+    "libraries": [
+      {
+        "id": "tv",
+        "name": "TV Library",
+        "media_type": "tv",
+        "mac_path": "/Volumes/media/tv",
+        "linux_path": "/mnt/media/tv",
+        "watch": true,
+        "max_height": null,
+        "weight": 1.0
+      }
+    ]
+  }
 }
 ```
-
-You can edit this file by hand, or use the **Settings** tab in the web
-dashboard (`/settings`), which provides a form for updating library names,
-types, macOS paths (`/Volumes/...`), Linux paths (`/mnt/...`), and whether
-each library should be watched for new files.
 
 When the app needs a library root for the current host, it chooses the
 macOS path on Darwin and the Linux path on Linux, keeping queue and DB
@@ -342,8 +345,7 @@ automatically queue them via the existing scan pipeline.
 Requirements:
 
 - `watchfiles` Python package (declared in `pyproject.toml`)
-- Libraries with `"watch": true` in `av1_settings.json` (or enabled on the
-  Settings page)
+- Libraries with `watch` enabled in settings (via the Settings page/API)
 
 Start a watcher on the local host:
 
