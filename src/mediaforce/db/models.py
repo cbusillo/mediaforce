@@ -108,6 +108,8 @@ class EncodeResult(SQLModel, table=True):  # type: ignore[misc,call-arg]
     encode_speed: Optional[float] = None
     error_message: Optional[str] = None
     retry_count: int = 0
+    promoted: bool = False
+    promoted_at: Optional[str] = None
     is_outlier: bool = False
     outlier_reasons: Optional[str] = None
     review_status: str = "approved"
@@ -141,14 +143,17 @@ class ProfileEvaluation(SQLModel, table=True):  # type: ignore[misc,call-arg]
     sample_strategy: str = "3x8s_motion"
     sample_count: int = 3
     sample_length: float = 8.0
+    weighted_vmaf: Optional[float] = None
     median_vmaf: Optional[float] = None
     min_vmaf: Optional[float] = None
     max_vmaf: Optional[float] = None
     threshold_min: Optional[float] = None
     threshold_median: Optional[float] = None
+    threshold_max: Optional[float] = None
     decision: str = "keep"  # keep|bump|fail|flagged
     status: str = "pending"  # pending|running|done|failed|flagged
     note: Optional[str] = None
+    reason_json: Optional[str] = None
     created_at: str = Field(default_factory=now_iso)
     updated_at: Optional[str] = None
 
@@ -162,6 +167,7 @@ class VmafSample(SQLModel, table=True):  # type: ignore[misc,call-arg]
     start_sec: float
     duration_sec: float
     vmaf: float
+    weight: Optional[float] = None
     log_path: Optional[str] = None
     created_at: str = Field(default_factory=now_iso)
 
@@ -173,8 +179,25 @@ class ProfileChoiceFeedback(SQLModel, table=True):  # type: ignore[misc,call-arg
     evaluation_id: int = Field(foreign_key="profile_evaluations.id")
     decision: str  # good|bad
     reason_text: Optional[str] = None
+    status: str = "queued"  # queued|processing|done
     flagged_at: str = Field(default_factory=now_iso)
     promoted_at: Optional[str] = None
+
+
+class RetrainingCandidate(SQLModel, table=True):  # type: ignore[misc,call-arg]
+    __tablename__ = "retraining_candidates"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    evaluation_id: int = Field(foreign_key="profile_evaluations.id")
+    media_id: int = Field(foreign_key="media_inventory.id")
+    encode_result_id: Optional[int] = Field(default=None, foreign_key="encode_results.id")
+    feedback_id: Optional[int] = Field(default=None, foreign_key="profile_choice_feedback.id")
+
+    reason_text: Optional[str] = None
+    status: str = "pending"  # pending|processing|done|dismissed
+    created_at: str = Field(default_factory=now_iso)
+    processed_at: Optional[str] = None
+    notes: Optional[str] = None
 
 
 class EncodeProgress(SQLModel, table=True):  # type: ignore[misc,call-arg]
@@ -243,6 +266,31 @@ def _maybe_add_new_columns(engine) -> None:
             cols = {row[1] for row in rows}
             if "profile_eval_id" not in cols:
                 conn.execute(text("ALTER TABLE encode_results ADD COLUMN profile_eval_id INTEGER"))
+                conn.commit()
+
+        if "profile_evaluations" in tables:
+            rows = list(conn.execute(text("PRAGMA table_info('profile_evaluations')")))
+            cols = {row[1] for row in rows}
+            if "weighted_vmaf" not in cols:
+                conn.execute(text("ALTER TABLE profile_evaluations ADD COLUMN weighted_vmaf REAL"))
+            if "threshold_max" not in cols:
+                conn.execute(text("ALTER TABLE profile_evaluations ADD COLUMN threshold_max REAL"))
+            if "reason_json" not in cols:
+                conn.execute(text("ALTER TABLE profile_evaluations ADD COLUMN reason_json TEXT"))
+            conn.commit()
+
+        if "profile_choice_feedback" in tables:
+            rows = list(conn.execute(text("PRAGMA table_info('profile_choice_feedback')")))
+            cols = {row[1] for row in rows}
+            if "status" not in cols:
+                conn.execute(text("ALTER TABLE profile_choice_feedback ADD COLUMN status TEXT DEFAULT 'queued'"))
+                conn.commit()
+
+        if "vmaf_samples" in tables:
+            rows = list(conn.execute(text("PRAGMA table_info('vmaf_samples')")))
+            cols = {row[1] for row in rows}
+            if "weight" not in cols:
+                conn.execute(text("ALTER TABLE vmaf_samples ADD COLUMN weight REAL"))
                 conn.commit()
 
 

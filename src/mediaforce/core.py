@@ -39,7 +39,7 @@ import inspect
 from typing import Optional, List, Dict, Any, TYPE_CHECKING
 
 from sqlmodel import Session, select, delete
-from sqlalchemy import text
+from sqlalchemy import text, func, desc
 
 from mediaforce.db import (
     AppSetting,
@@ -2806,18 +2806,12 @@ def recalculate_priorities(session: Session, max_age: int) -> None:
     based on the actual range of potential_savings_bytes values.
     """
     # Get max savings from all pending files
-    row = session.exec(
-        text(
-            """
-            SELECT MAX(potential_savings_bytes)
-            FROM media_inventory
-            WHERE status = 'pending'
-              AND potential_savings_bytes IS NOT NULL
-              AND potential_savings_bytes > 0
-            """
+    max_savings = session.exec(
+        select(func.max(func.coalesce(MediaItem.potential_savings_bytes, 0))).where(
+            MediaItem.status == "pending",
+            func.coalesce(MediaItem.potential_savings_bytes, 0) > 0,
         )
-    ).first()
-    max_savings = row[0] if row and row[0] else 1
+    ).first() or 1
 
     # Recalculate priorities for all pending files
     pending = session.exec(select(MediaItem).where(MediaItem.status == "pending")).all()
@@ -2948,16 +2942,12 @@ async def _watch_single_library(lib: LibrarySettings, root: pathlib.Path) -> Non
                 session = init_db(db_path)
 
                 now = int(time.time())
-                oldest_row = session.exec(
-                    text(
-                        """
-                        SELECT MIN(mtime)
-                        FROM media_inventory
-                        WHERE status='pending' AND mtime IS NOT NULL AND mtime > 0
-                        """
+                oldest_mtime = session.exec(
+                    select(func.min(func.coalesce(MediaItem.mtime, 0))).where(
+                        MediaItem.status == "pending",
+                        func.coalesce(MediaItem.mtime, 0) > 0,
                     )
-                ).first()
-                oldest_mtime = oldest_row[0] if oldest_row and oldest_row[0] else int(path.stat().st_mtime)
+                ).first() or int(path.stat().st_mtime)
                 max_age = max(now - oldest_mtime, 1)
 
                 print(f"[watch] Detected new media file: {path}")
@@ -3012,7 +3002,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
     # Load settings (remote or local)
     settings_url = getattr(args, "settings_url", None)
-    settings = load_remote_settings(settings_url) if settings_url else load_app_settings()
+    env_settings_url = os.getenv("MEDIAFORCE_REMOTE_SETTINGS_URL")
+    effective_settings_url = settings_url or env_settings_url
+    settings = load_remote_settings(effective_settings_url) if effective_settings_url else load_app_settings()
     if settings is None:
         print("[error] Could not load settings.", file=sys.stderr)
         return 1
@@ -3027,7 +3019,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         if interval is not None:
             async def updater():
                 while True:
-                    await asyncio.sleep(float(interval))
+                    await asyncio.sleep(float(interval))  # type: ignore[arg-type]
                     if maybe_autoupdate(args.autoupdate_url, AUTOUPDATE_FILES):
                         print("[autoupdate] New version fetched; restarting watch to apply.")
                         os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -3057,7 +3049,7 @@ def cmd_queue(args: argparse.Namespace) -> int:
     rows = session.exec(
         select(MediaItem)
         .where(MediaItem.status == "pending")
-        .order_by(MediaItem.priority_score.desc())
+        .order_by(desc(MediaItem.priority_score))
         .limit(limit)
     ).all()
 
@@ -3098,7 +3090,7 @@ def cmd_queue(args: argparse.Namespace) -> int:
     encode_rows = session.exec(
         select(EncodeResult.output_size_bytes, MediaItem.size_bytes)
         .join(MediaItem, EncodeResult.source_id == MediaItem.id)
-        .where(EncodeResult.output_size_bytes.is_not(None), EncodeResult.output_size_bytes > 0)
+        .where(func.coalesce(EncodeResult.output_size_bytes, 0) > 0)
     ).all()
     if encode_rows:
         source_bytes = sum(src or 0 for _, src in encode_rows)
@@ -3127,7 +3119,10 @@ def check_missing_outputs(session: Session) -> int:
     joins = session.exec(
         select(MediaItem.id, MediaItem.path, EncodeResult.output_path)
         .join(EncodeResult, EncodeResult.source_id == MediaItem.id)
-        .where(MediaItem.status == "encoded", EncodeResult.output_path.is_not(None))
+        .where(
+            MediaItem.status == "encoded",
+            EncodeResult.output_path.is_not(None),  # type: ignore[attr-defined]
+        )
     ).all()
 
     missing_count = 0
@@ -3159,7 +3154,8 @@ def claim_next_file(session: Session, machine: str) -> Optional[dict]:
     stale_items = session.exec(
         select(MediaItem).where(
             MediaItem.status == "encoding",
-            MediaItem.claimed_at < stale_cutoff,
+            MediaItem.claimed_at.is_not(None),  # type: ignore[attr-defined]
+            MediaItem.claimed_at < stale_cutoff,  # type: ignore[operator]
         )
     ).all()
     for item in stale_items:
@@ -3171,17 +3167,15 @@ def claim_next_file(session: Session, machine: str) -> Optional[dict]:
     if stale_items:
         session.commit()
 
+    weighted_score = func.coalesce(MediaItem.priority_score, 0) * func.coalesce(Library.weight, 1)
     weighted = session.exec(
         select(MediaItem, Library.weight)
         .join(Library, MediaItem.library_id == Library.id, isouter=True)
         .where(
             MediaItem.status == "pending",
-            (MediaItem.claimed_by.is_(None) | (MediaItem.claimed_by == machine)),
+            (MediaItem.claimed_by.is_(None) | (MediaItem.claimed_by == machine)),  # type: ignore[attr-defined]
         )
-        .order_by(
-            MediaItem.manual_priority,
-            ((MediaItem.priority_score or 0) * (Library.weight or 1)).desc(),
-        )
+        .order_by(MediaItem.manual_priority, desc(weighted_score))
         .limit(1)
     ).first()
 
@@ -3412,6 +3406,8 @@ def run_ffmpeg_with_progress(
 
     accumulated = {}
     last_update = time.time()
+
+    assert process.stdout is not None  # Ensure text stream available
 
     while True:
         line = process.stdout.readline()
@@ -3832,7 +3828,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         active_slots += 1
 
         # Start progress tracking
-        duration_sec = info.duration_sec or 0
+        duration_sec = info.duration_sec or 0  # type: ignore[attr-defined]
         progress_id = start_progress_tracking(
             session, claimed["id"], str(source_path), str(output_path),
             machine, tier, duration_sec,
@@ -4094,9 +4090,9 @@ def cmd_promote(args: argparse.Namespace) -> int:
     errors = 0
 
     # Open DB if it exists (for updating status)
-    conn = None
+    session = None
     if db_path.exists():
-        conn = init_db(db_path)
+        session = init_db(db_path)
 
     for f in files:
         # Skip if already AV1
@@ -4156,19 +4152,21 @@ def cmd_promote(args: argparse.Namespace) -> int:
                 print("    Deleted original")
 
             # Update database
-            if conn:
-                now_str = datetime.now().isoformat()
-                conn.execute("""
-                    UPDATE media_inventory
-                    SET status = 'completed', updated_at = ?
-                    WHERE path = ?
-                """, (now_str, str(f)))
-                conn.execute("""
-                    UPDATE encode_results
-                    SET promoted = TRUE, promoted_at = ?
-                    WHERE source_path = ?
-                """, (now_str, str(f)))
-                conn.commit()
+            if session:
+                now_str = now_iso()
+                item = session.exec(select(MediaItem).where(MediaItem.path == str(f))).first()
+                if item:
+                    item.status = "completed"
+                    item.path = str(dest_path)
+                    item.updated_at = now_str
+                    session.add(item)
+                enc = session.exec(select(EncodeResult).where(EncodeResult.source_path == str(f))).first()
+                if enc:
+                    enc.promoted = True
+                    enc.promoted_at = now_str
+                    enc.output_path = enc.output_path or str(dest_path)
+                    session.add(enc)
+                session.commit()
 
             promoted += 1
             print("    [ok]")
@@ -4177,8 +4175,8 @@ def cmd_promote(args: argparse.Namespace) -> int:
             print(f"    [error] {e}")
             errors += 1
 
-    if conn:
-        conn.close()
+    if session:
+        session.close()
 
     print()
     print("Promotion complete:")
@@ -4346,36 +4344,41 @@ def cmd_review_list(args: argparse.Namespace) -> int:
         print(f"[error] No database found: {db_path}", file=sys.stderr)
         return 1
 
-    conn = init_db(db_path)
+    session = init_db(db_path)
 
-    # Query for items needing review
+    base_query = (
+        select(
+            EncodeResult.id,
+            EncodeResult.source_path,
+            EncodeResult.output_path,
+            EncodeResult.tier,
+            EncodeResult.output_size_bytes,
+            MediaItem.size_bytes,
+            EncodeResult.psnr,
+            EncodeResult.ssim,
+            EncodeResult.vmaf,
+            EncodeResult.is_outlier,
+            EncodeResult.outlier_reasons,
+            EncodeResult.review_status,
+            EncodeResult.completed_at,
+        )
+        .select_from(EncodeResult)
+        .join(MediaItem, EncodeResult.source_id == MediaItem.id, isouter=True)
+    )
+
     if args.all:
-        # Show all encodes with quality metrics
-        query = """
-            SELECT r.id, r.source_path, r.output_path, r.tier,
-                   r.output_size_bytes, m.size_bytes as source_size,
-                   r.psnr, r.ssim, r.vmaf, r.is_outlier, r.outlier_reasons, r.review_status,
-                   r.completed_at
-            FROM encode_results r
-            LEFT JOIN media_inventory m ON r.source_id = m.id
-            WHERE r.psnr IS NOT NULL OR r.ssim IS NOT NULL OR r.vmaf IS NOT NULL
-            ORDER BY r.is_outlier DESC, r.vmaf ASC NULLS LAST
-        """
+        stmt = base_query.where(
+            (EncodeResult.psnr.is_not(None))  # type: ignore[attr-defined]
+            | (EncodeResult.ssim.is_not(None))  # type: ignore[attr-defined]
+            | (EncodeResult.vmaf.is_not(None))  # type: ignore[attr-defined]
+        ).order_by(desc(EncodeResult.is_outlier), func.coalesce(EncodeResult.vmaf, 0).asc())
     else:
-        # Show only pending reviews (outliers not yet reviewed)
-        query = """
-            SELECT r.id, r.source_path, r.output_path, r.tier,
-                   r.output_size_bytes, m.size_bytes as source_size,
-                   r.psnr, r.ssim, r.vmaf, r.is_outlier, r.outlier_reasons, r.review_status,
-                   r.completed_at
-            FROM encode_results r
-            LEFT JOIN media_inventory m ON r.source_id = m.id
-            WHERE r.is_outlier = 1 AND r.review_status = 'pending'
-            ORDER BY r.vmaf ASC NULLS LAST
-        """
+        stmt = base_query.where(
+            EncodeResult.is_outlier == True,  # noqa: E712
+            EncodeResult.review_status == "pending",
+        ).order_by(func.coalesce(EncodeResult.vmaf, 0).asc())
 
-    results = conn.execute(query).fetchall()
-    conn.close()
+    results = session.exec(stmt).all()
 
     if not results:
         if args.all:
@@ -4448,36 +4451,24 @@ def cmd_review_approve(args: argparse.Namespace) -> int:
         print(f"[error] No database found: {db_path}", file=sys.stderr)
         return 1
 
-    conn = init_db(db_path)
+    session = init_db(db_path)
 
-    # Update the review status
-    result = conn.execute(
-        """
-        UPDATE encode_results
-        SET review_status = 'approved', reviewed_at = ?
-        WHERE id = ?
-        """,
-        (datetime.now().isoformat(), args.id),
-    )
-    conn.commit()
-
-    if result.rowcount == 0:
+    enc = session.get(EncodeResult, args.id)
+    if not enc:
         print(f"[error] No encode found with ID {args.id}", file=sys.stderr)
-        conn.close()
+        session.close()
         return 1
 
-    # Get the encode info
-    row = conn.execute(
-        "SELECT source_path, output_path FROM encode_results WHERE id = ?",
-        (args.id,),
-    ).fetchone()
-    conn.close()
+    enc.review_status = "approved"
+    enc.reviewed_at = now_iso()
+    session.add(enc)
+    session.commit()
 
-    if row:
-        print(f"Approved: {pathlib.Path(row[0]).name}")
-        print(f"  Output: {row[1]}")
-    else:
-        print(f"Approved encode ID {args.id}")
+    print(f"Approved: {pathlib.Path(enc.source_path).name}")
+    if enc.output_path:
+        print(f"  Output: {enc.output_path}")
+
+    session.close()
 
     return 0
 
@@ -4493,33 +4484,22 @@ def cmd_review_reject(args: argparse.Namespace) -> int:
         print(f"[error] No database found: {db_path}", file=sys.stderr)
         return 1
 
-    conn = init_db(db_path)
+    session = init_db(db_path)
 
-    # Get the encode info first
-    row = conn.execute(
-        "SELECT source_path, output_path FROM encode_results WHERE id = ?",
-        (args.id,),
-    ).fetchone()
-
-    if not row:
+    enc = session.get(EncodeResult, args.id)
+    if not enc:
         print(f"[error] No encode found with ID {args.id}", file=sys.stderr)
-        conn.close()
+        session.close()
         return 1
 
-    source_path = pathlib.Path(row[0])
-    output_path = pathlib.Path(row[1]) if row[1] else None
+    source_path = pathlib.Path(enc.source_path)
+    output_path = pathlib.Path(enc.output_path) if enc.output_path else None
 
-    # Update the review status
-    conn.execute(
-        """
-        UPDATE encode_results
-        SET review_status = 'rejected', reviewed_at = ?
-        WHERE id = ?
-        """,
-        (datetime.now().isoformat(), args.id),
-    )
-    conn.commit()
-    conn.close()
+    enc.review_status = "rejected"
+    enc.reviewed_at = now_iso()
+    session.add(enc)
+    session.commit()
+    session.close()
 
     print(f"Rejected: {source_path.name}")
 
@@ -5204,21 +5184,17 @@ def cmd_review_compare(args: argparse.Namespace) -> int:
         print(f"[error] No database found: {db_path}", file=sys.stderr)
         return 1
 
-    conn = init_db(db_path)
-
-    # Get the encode info
-    row = conn.execute(
-        "SELECT source_path, output_path, vmaf FROM encode_results WHERE id = ?",
-        (args.id,),
-    ).fetchone()
-    conn.close()
-
-    if not row:
+    session = init_db(db_path)
+    enc = session.get(EncodeResult, args.id)
+    if not enc:
+        session.close()
         print(f"[error] No encode found with ID {args.id}", file=sys.stderr)
         return 1
 
-    source_path = pathlib.Path(row[0])
-    output_path = pathlib.Path(row[1]) if row[1] else None
+    source_path = pathlib.Path(enc.source_path)
+    output_path = pathlib.Path(enc.output_path) if enc.output_path else None
+    vmaf_score = enc.vmaf
+    session.close()
 
     if not source_path.exists():
         print(f"[error] Source file not found: {source_path}", file=sys.stderr)

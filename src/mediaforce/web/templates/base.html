@@ -18,6 +18,19 @@
         --info: #17a2b8;
       }
 
+      body.light {
+        --bg-primary: #f6f7fb;
+        --bg-secondary: #e8eaf2;
+        --bg-card: #ffffff;
+        --text-primary: #1e2430;
+        --text-secondary: #4a5568;
+        --accent: #d7263d;
+        --accent-hover: #f05a71;
+        --success: #2fbf71;
+        --warning: #f2c94c;
+        --info: #2d9cdb;
+      }
+
       * {
         box-sizing: border-box;
         margin: 0;
@@ -38,6 +51,30 @@
         gap: 2rem;
         align-items: center;
         border-bottom: 2px solid var(--accent);
+      }
+
+      .theme-toggle {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        color: var(--text-secondary);
+        font-size: 0.9rem;
+        cursor: pointer;
+      }
+
+      .theme-toggle button {
+        border: 1px solid var(--text-secondary);
+        background: transparent;
+        color: var(--text-primary);
+        padding: 0.35rem 0.75rem;
+        border-radius: 999px;
+        cursor: pointer;
+      }
+
+      .theme-toggle button:hover {
+        border-color: var(--accent);
+        color: var(--accent);
       }
 
       nav .logo {
@@ -359,6 +396,10 @@
       <a href="/completed" class="{{ 'active' if active == 'completed' else '' }}">Completed</a>
       <a href="/settings" class="{{ 'active' if active == 'settings' else '' }}">Settings</a>
       <div style="flex: 1"></div>
+      <div class="theme-toggle">
+        <span id="themeLabel">Dark</span>
+        <button type="button" id="themeToggle" aria-label="Toggle theme">Toggle</button>
+      </div>
       <form class="nav-search" action="/search" method="get">
         <input
           type="text"
@@ -398,6 +439,23 @@
       if (window.location.pathname === "/") {
         setTimeout(() => window.location.reload(), 30000);
       }
+    </script>
+    <script>
+      (function () {
+        const body = document.body;
+        const toggleBtn = document.getElementById('themeToggle');
+        const label = document.getElementById('themeLabel');
+        const stored = localStorage.getItem('mf-theme');
+        if (stored === 'light') body.classList.add('light');
+        label.textContent = body.classList.contains('light') ? 'Light' : 'Dark';
+
+        toggleBtn?.addEventListener('click', () => {
+          body.classList.toggle('light');
+          const mode = body.classList.contains('light') ? 'light' : 'dark';
+          localStorage.setItem('mf-theme', mode);
+          label.textContent = mode === 'light' ? 'Light' : 'Dark';
+        });
+      })();
     </script>
     {% block scripts %}{% endblock %}
   </body>

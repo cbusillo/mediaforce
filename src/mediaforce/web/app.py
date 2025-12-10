@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# mypy: ignore-errors
+# pyright: reportMissingImports=false, reportOptionalOperand=false, reportAttributeAccessIssue=false
 """
 Mediaforce web interface for managing encoding queues and monitoring progress.
 """
@@ -12,23 +14,33 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Optional, Callable, Any
-import logging
+from mediaforce.config.logging import configure_logging, env_log_config
 
 from fastapi import FastAPI, Query, Request
+from fastapi.staticfiles import StaticFiles
+from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 # Import functions from mediaforce
+from mediaforce.config.settings import AppSettings, LibrarySettings, load_app_settings, save_app_settings
+from mediaforce.services.db_access import (
+    fetch_queue_totals,
+    fetch_queue_listing,
+    fetch_stats,
+)
+from mediaforce.db.repository.session import session_scope
+from mediaforce.db.repository.media import MediaRepository
+from mediaforce.db.repository.encode import EncodeRepository
+from mediaforce.db.repository.profile import ProfileEvaluationRepository, FeedbackRepository, RetrainingRepository
+from mediaforce.db.repository.queue import QueueRepository
+from mediaforce.db.repository.base import Pagination
 from mediaforce.core import (
-    AppSettings,
-    LibrarySettings,
     get_db_path,
     get_library_root,
     init_db_shim,
     iter_libraries_for_current_host,
-    load_app_settings,
-    save_app_settings,
     _watch_libraries,
     ensure_active_profile_settings,
 )
@@ -39,15 +51,17 @@ from mediaforce.db import (
     ProfileEvaluation,
     VmafSample,
     ProfileChoiceFeedback,
+    RetrainingCandidate,
+    EncodeProgress,
     now_iso,
 )
-from sqlalchemy import func
-from sqlmodel import select
+from sqlalchemy import func, desc, text
+from sqlmodel import select, Session
 from dataclasses import asdict
 
 # Configuration
 IS_MAC = platform_mod.system() == "Darwin"
-logger = logging.getLogger("mediaforce.web")
+logger = configure_logging(env_log_config(component="mediaforce.web"))
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 
@@ -83,10 +97,8 @@ def get_library_status() -> list[dict]:
         running = SCAN_STATUS.get(str(root)) == "running"
         if db.exists():
             try:
-                conn = init_db_shim(db)
-                row = conn.execute("SELECT MAX(scanned_at) FROM media_inventory").fetchone()
-                last_scan = row[0] if row and row[0] else None
-                conn.close()
+                with session_scope() as session:
+                    last_scan = session.exec(select(func.max(MediaItem.scanned_at))).first()
             except Exception:
                 last_scan = None
         libs.append({
@@ -105,27 +117,30 @@ def get_worker_status(library_root: Optional[str] = None) -> list[dict]:
         root = library_root or resolve_existing_library_root()
         if not root:
             return []
-        with get_db_connection(root) as conn:
-            rows = conn.execute(
-                """
-                SELECT machine, COUNT(*) as active, MAX(updated_at) as updated_at,
-                       MAX(percent_complete) as percent_complete,
-                       MAX(tier) as tier,
-                       MAX(source_path) as sample_path
-                FROM encode_progress
-                GROUP BY machine
-                ORDER BY machine
-                """
-            ).fetchall()
+        with session_scope() as session:
+            rows = (
+                session.exec(
+                    select(
+                        EncodeProgress.machine,
+                        func.count().label("active"),
+                        func.max(EncodeProgress.updated_at).label("updated_at"),
+                        func.max(EncodeProgress.percent_complete).label("percent_complete"),
+                        func.max(EncodeProgress.tier).label("tier"),
+                        func.max(EncodeProgress.source_path).label("sample_path"),
+                    )
+                    .group_by(EncodeProgress.machine)
+                    .order_by(EncodeProgress.machine.collate("NOCASE"))
+                ).all()
+            )
             workers = []
             for row in rows:
                 workers.append({
-                    "machine": row["machine"],
-                    "active": row["active"],
-                    "percent_complete": row["percent_complete"] or 0,
-                    "tier": row["tier"],
-                    "sample_path": row["sample_path"],
-                    "updated_at": row["updated_at"],
+                    "machine": row.machine,
+                    "active": row.active or 0,
+                    "percent_complete": row.percent_complete or 0,
+                    "tier": row.tier,
+                    "sample_path": row.sample_path,
+                    "updated_at": row.updated_at,
                 })
             return workers
     except Exception:
@@ -187,7 +202,32 @@ def _nav_status() -> dict:
         "watch_message": WATCH_STATUS.get("message", "idle"),
     }
 
+
+def _ensure_promotion_columns(session: Session) -> None:
+    """Backfill promoted/promoted_at columns for older databases if missing."""
+
+    try:
+        cols = {
+            row[1] for row in session.exec(text("PRAGMA table_info('encode_results')")).all()
+        }
+        stmts = []
+        if "promoted" not in cols:
+            stmts.append("ALTER TABLE encode_results ADD COLUMN promoted BOOLEAN DEFAULT 0")
+        if "promoted_at" not in cols:
+            stmts.append("ALTER TABLE encode_results ADD COLUMN promoted_at TEXT")
+        for stmt in stmts:
+            session.exec(text(stmt))
+        if stmts:
+            session.commit()
+    except Exception:
+        session.rollback()
+        logger.warning("Failed to ensure promotion columns", exc_info=True)
+
 app = FastAPI(title="Mediaforce", description="Content-aware media encoding management")
+STATIC_DIR = PROJECT_ROOT / "src" / "mediaforce" / "web" / "static"
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+static_dir = PROJECT_ROOT / "src" / "mediaforce" / "web" / "static"
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 # Setup Jinja2 templates
 templates_dir = pathlib.Path(__file__).parent / "templates"
@@ -209,7 +249,7 @@ SCAN_STATUS: dict[str, str] = {}
 
 
 @app.on_event("startup")
-async def _startup_watch():
+async def _startup_watch() -> None:
     """Ensure watcher starts automatically when configured libraries exist."""
     try:
         if _get_watch_libraries():
@@ -434,6 +474,15 @@ class FlagProfileRequest(BaseModel):
     reason: str
 
 
+class QueueAddRequest(BaseModel):
+    path: str
+    library: Optional[str] = None
+
+
+class QueueMoveRequest(BaseModel):
+    delta: int = 1
+
+
 def _serialize_eval(ev: ProfileEvaluation) -> dict:
     return {
         "id": ev.id,
@@ -443,14 +492,17 @@ def _serialize_eval(ev: ProfileEvaluation) -> dict:
         "sample_strategy": ev.sample_strategy,
         "sample_count": ev.sample_count,
         "sample_length": ev.sample_length,
+        "weighted_vmaf": ev.weighted_vmaf,
         "median_vmaf": ev.median_vmaf,
         "min_vmaf": ev.min_vmaf,
         "max_vmaf": ev.max_vmaf,
         "threshold_min": ev.threshold_min,
         "threshold_median": ev.threshold_median,
+        "threshold_max": ev.threshold_max,
         "decision": ev.decision,
         "status": ev.status,
         "note": ev.note,
+        "reason_json": ev.reason_json,
         "created_at": ev.created_at,
         "updated_at": ev.updated_at,
     }
@@ -464,8 +516,33 @@ def _serialize_sample(s: VmafSample) -> dict:
         "start_sec": s.start_sec,
         "duration_sec": s.duration_sec,
         "vmaf": s.vmaf,
+        "weight": s.weight,
         "log_path": s.log_path,
         "created_at": s.created_at,
+    }
+
+
+def _compute_stats(session: Session) -> dict:
+    totals = session.exec(
+        select(func.sum(MediaItem.size_bytes), func.sum(EncodeResult.output_size_bytes))
+        .join(EncodeResult, EncodeResult.source_id == MediaItem.id)
+        .where(EncodeResult.output_size_bytes.is_not(None), EncodeResult.output_size_bytes > 0)  # type: ignore[union-attr]
+    ).one_or_none()
+    total_in, total_out = totals if totals else (0, 0)
+    saved_bytes = (total_in or 0) - (total_out or 0)
+
+    encodes = session.exec(
+        select(func.count(EncodeResult.id)).where(EncodeResult.output_size_bytes.is_not(None))  # type: ignore[union-attr]
+    ).one()
+    active = session.exec(
+        select(func.count())
+        .select_from(EncodeProgress)
+        .where(EncodeProgress.percent_complete < 100)
+    ).one()
+    return {
+        "saved_bytes": saved_bytes,
+        "encodes": encodes if encodes is not None else 0,
+        "active_encodes": active if active is not None else 0,
     }
 
 
@@ -586,89 +663,83 @@ async def dashboard(request: Request):
             "error": "No accessible library root found. Mount /Volumes or /mnt media shares.",
         })
 
-    with get_db_connection(library_root) as conn:
-        # Get status counts
-        cursor = conn.execute("""
-            SELECT status, COUNT(*) as cnt
-            FROM media_inventory
-            GROUP BY status
-        """)
-        status_counts = {row["status"]: row["cnt"] for row in cursor.fetchall()}
+    with session_scope() as session:
+        # Status counts
+        status_rows = session.exec(
+            select(MediaItem.status, func.count().label("cnt")).group_by(MediaItem.status)
+        ).all()
+        status_counts = {row.status: row.cnt for row in status_rows}
 
-        # Get space saved
-        cursor = conn.execute("""
-            SELECT
-                COALESCE(SUM(m.size_bytes), 0) as source_bytes,
-                COALESCE(SUM(e.output_size_bytes), 0) as output_bytes
-            FROM encode_results e
-            JOIN media_inventory m ON e.source_id = m.id
-            WHERE e.output_size_bytes > 0
-        """)
-        row = cursor.fetchone()
+        # Space saved
+        space_row = session.exec(
+            select(
+                func.coalesce(func.sum(MediaItem.size_bytes), 0),
+                func.coalesce(func.sum(EncodeResult.output_size_bytes), 0),
+            )
+            .join(EncodeResult, EncodeResult.source_id == MediaItem.id)
+            .where(EncodeResult.output_size_bytes.is_not(None), EncodeResult.output_size_bytes > 0)  # type: ignore[attr-defined]
+        ).first()
         space_saved_gb = 0
-        if row and row[0] and row[1]:
-            space_saved_gb = (row[0] - row[1]) / 1024 / 1024 / 1024
+        if space_row and space_row[0] and space_row[1]:
+            space_saved_gb = (space_row[0] - space_row[1]) / 1024 / 1024 / 1024
 
         # Active encodes (with progress)
-        cursor = conn.execute("""
-            SELECT p.*, m.size_bytes as source_size_bytes, m.video_codec
-            FROM encode_progress p
-            LEFT JOIN media_inventory m ON p.source_id = m.id
-            ORDER BY p.started_at DESC
-        """)
+        active_rows = session.exec(
+            select(EncodeProgress, MediaItem.size_bytes, MediaItem.video_codec)
+            .select_from(EncodeProgress)
+            .join(MediaItem, EncodeProgress.source_id == MediaItem.id, isouter=True)
+            .order_by(EncodeProgress.started_at.desc())
+        ).all()
         active_encodes = []
-        for row in cursor.fetchall():
-            filename = pathlib.Path(row["source_path"]).name if row["source_path"] else "Unknown"
-            show_name = extract_show_name(row["source_path"]) if row["source_path"] else None
-            eta_display = None
-            if row["eta_seconds"] and row["eta_seconds"] > 0:
-                eta_display = format_duration(row["eta_seconds"])
+        for row in active_rows:
+            prog, source_size, video_codec = row[0], row[1], row[2]
+            filename = pathlib.Path(prog.source_path).name if prog.source_path else "Unknown"
+            show_name = extract_show_name(prog.source_path) if prog.source_path else None
+            eta_display = format_duration(prog.eta_seconds) if prog.eta_seconds and prog.eta_seconds > 0 else None
             active_encodes.append({
                 "filename": filename,
-                "path": row["source_path"],
+                "path": prog.source_path,
                 "show_name": show_name,
-                "machine": row["machine"],
-                "tier": row["tier"],
-                "started_at": row["started_at"][:16] if row["started_at"] else None,
-                "percent_complete": row["percent_complete"] or 0,
-                "speed": f"{row['speed']:.2f}x" if row["speed"] else "0x",
+                "machine": prog.machine,
+                "tier": prog.tier,
+                "started_at": prog.started_at[:16] if prog.started_at else None,
+                "percent_complete": prog.percent_complete or 0,
+                "speed": f"{prog.speed:.2f}x" if prog.speed else "0x",
                 "eta": eta_display,
-                "phase": row["phase"] or "encoding",
+                "phase": prog.phase or "encoding",
             })
 
         # Recent completions (last 10)
-        cursor = conn.execute("""
-            SELECT m.path, m.size_bytes, e.output_size_bytes, e.completed_at,
-                   m.detected_tier
-            FROM encode_results e
-            JOIN media_inventory m ON e.source_id = m.id
-            WHERE e.output_size_bytes > 0
-            ORDER BY e.completed_at DESC
-            LIMIT 10
-        """)
+        recent_rows = session.exec(
+            select(MediaItem.path, MediaItem.size_bytes, EncodeResult.output_size_bytes, EncodeResult.completed_at, MediaItem.detected_tier)
+            .join(EncodeResult, EncodeResult.source_id == MediaItem.id)
+            .where(EncodeResult.output_size_bytes.is_not(None), EncodeResult.output_size_bytes > 0)  # type: ignore[attr-defined]
+            .order_by(EncodeResult.completed_at.desc())  # type: ignore[attr-defined]
+            .limit(10)
+        ).all()
         recent_completions = []
-        for row in cursor.fetchall():
+        for row in recent_rows:
+            path, size_bytes, out_bytes, completed_at, tier = row
             reduction = 0
-            if row["size_bytes"] and row["output_size_bytes"]:
-                reduction = int((1 - row["output_size_bytes"] / row["size_bytes"]) * 100)
+            if size_bytes and out_bytes:
+                reduction = int((1 - out_bytes / size_bytes) * 100)
             recent_completions.append({
-                "path": row["path"],
-                "filename": pathlib.Path(row["path"]).name,
-                "source_size": format_size(row["size_bytes"]),
-                "output_size": format_size(row["output_size_bytes"]),
+                "path": path,
+                "filename": pathlib.Path(path).name,
+                "source_size": format_size(size_bytes),
+                "output_size": format_size(out_bytes),
                 "reduction": reduction,
-                "tier": row["detected_tier"],
-                "completed_at": row["completed_at"][:16] if row["completed_at"] else "?",
+                "tier": tier,
+                "completed_at": completed_at[:16] if completed_at else "?",
             })
 
         # Get tier counts for pending
-        cursor = conn.execute("""
-            SELECT detected_tier, COUNT(*) as cnt
-            FROM media_inventory
-            WHERE status = 'pending'
-            GROUP BY detected_tier
-        """)
-        tier_counts = {row["detected_tier"]: row["cnt"] for row in cursor.fetchall()}
+        tier_rows = session.exec(
+            select(MediaItem.detected_tier, func.count().label("cnt"))
+            .where(MediaItem.status == "pending")
+            .group_by(MediaItem.detected_tier)
+        ).all()
+        tier_counts = {row.detected_tier: row.cnt for row in tier_rows}
 
         lib_status = get_library_status()
         workers = get_worker_status(library_root)
@@ -831,49 +902,25 @@ async def queue(
     library_root = _resolve_library(request)
     libs = [str(root) for _, root in iter_libraries_for_current_host(load_app_settings())]
 
-    try:
-        with get_db_connection(library_root) as conn:
-            return await queue_shows_view(
-                request,
-                conn,
-                page,
-                per_page,
-                library_root,
-                libs,
-                show,
-                tier,
-                _parse_size_param(size_min),
-                _parse_size_param(size_max),
-            )
-    except FileNotFoundError as exc:
-        return templates.TemplateResponse("queue.html", {
-            "request": request,
-            "title": "Queue",
-            "active": "queue",
-            "view_mode": "shows",
-            "shows": [],
-            "total": 0,
-            "total_files": 0,
-            "total_savings": "0",
-            "page": 1,
-            "per_page": per_page,
-            "total_pages": 1,
-            "page_range": [1],
-            "breadcrumbs": [],
-            "pagination_url": build_pagination_url(request),
-            "library_root": library_root,
-            "libraries": libs,
-            "lib_status": get_library_status(),
-            "workers": get_worker_status(library_root),
-            "watch_status": _watch_status_snapshot(),
-            "nav_status": _nav_status(),
-            "error": str(exc),
-        })
+    with session_scope() as session:
+        repo = QueueRepository(session)
+        return await queue_shows_view(
+            request,
+            repo,
+            page,
+            per_page,
+            library_root,
+            libs,
+            show,
+            tier,
+            _parse_size_param(size_min),
+            _parse_size_param(size_max),
+        )
 
 
 async def queue_shows_view(
     request: Request,
-    conn,
+    repo: QueueRepository,
     page: int,
     per_page: int,
     library_root: str,
@@ -888,134 +935,21 @@ async def queue_shows_view(
     direction = request.query_params.get("order", "desc").lower()
     direction = "desc" if direction not in ["asc", "desc"] else direction
 
-    sort_map = {
-        "name": "show_name COLLATE NOCASE",
-        "files": "file_count",
-        "size": "total_size_bytes",
-        "savings": "total_savings_bytes",
-        "priority": "max_priority",
-        "date": "latest_scan",
-        "reduction": "reduction_ratio",
-    }
-    sort_expr = sort_map.get(sort, "max_priority")
-
-    like_pattern = f"{library_root}/%"
-
-    # Dynamic filters
-    filters = ["status = 'pending'", "path LIKE ?"]
-    params: list = [like_pattern]
-    if show_filter:
-        filters.append("LOWER(path) LIKE ?")
-        params.append(f"%{show_filter.lower()}%")
-    if tier_filter:
-        filters.append("detected_tier = ?")
-        params.append(tier_filter)
-    if size_min_bytes is not None:
-        filters.append("size_bytes >= ?")
-        params.append(size_min_bytes)
-    if size_max_bytes is not None:
-        filters.append("size_bytes <= ?")
-        params.append(size_max_bytes)
-
-    where_clause = " AND ".join(filters)
-
-    # Base aggregation CTE
-    agg_sql = f"""
-    WITH rel AS (
-        SELECT
-            CASE
-                WHEN instr(substr(path, {len(library_root)+2}), '/') > 0
-                    THEN substr(substr(path, {len(library_root)+2}), 1, instr(substr(path, {len(library_root)+2}), '/') - 1)
-                ELSE substr(path, {len(library_root)+2})
-            END AS show_name,
-            size_bytes,
-            potential_savings_bytes,
-            priority_score,
-            detected_tier,
-            scanned_at,
-            mtime,
-            updated_at
-        FROM media_inventory
-        WHERE {where_clause}
-    ), agg AS (
-        SELECT
-            show_name,
-            COUNT(*) AS file_count,
-            SUM(size_bytes) AS total_size_bytes,
-            SUM(potential_savings_bytes) AS total_savings_bytes,
-            AVG(priority_score) AS avg_priority,
-            MAX(priority_score) AS max_priority,
-            MAX(COALESCE(scanned_at, updated_at, datetime(mtime, 'unixepoch'))) AS latest_scan,
-            CASE
-                WHEN SUM(size_bytes) > 0 AND SUM(potential_savings_bytes) IS NOT NULL THEN
-                    SUM(potential_savings_bytes) * 1.0 / SUM(size_bytes)
-                ELSE 0
-            END AS reduction_ratio
-        FROM rel
-        GROUP BY show_name
+    shows, total, total_files, total_savings = repo.list_shows(
+        library_root=library_root,
+        show_filter=show_filter,
+        tier_filter=tier_filter,
+        size_min=size_min_bytes,
+        size_max=size_max_bytes,
+        per_page=per_page,
+        page=page,
+        sort=sort,
+        direction=direction,
     )
-    SELECT * FROM agg
-    ORDER BY {sort_expr} {direction}
-    LIMIT ? OFFSET ?
-    """
-
-    cache_key = f"totals:{library_root}:{sort}:{direction}:{like_pattern}:{show_filter}:{tier_filter}:{size_min_bytes}:{size_max_bytes}"
-    total_row = _queue_totals_get(cache_key)
-    if not total_row:
-        total_row = conn.execute(
-            f"""
-            WITH rel AS (
-                SELECT
-                    CASE
-                        WHEN instr(substr(path, {len(library_root)+2}), '/') > 0
-                            THEN substr(substr(path, {len(library_root)+2}), 1, instr(substr(path, {len(library_root)+2}), '/') - 1)
-                        ELSE substr(path, {len(library_root)+2})
-                    END AS show_name,
-                    size_bytes,
-                    potential_savings_bytes
-                FROM media_inventory
-                WHERE {where_clause}
-            ), agg AS (
-                SELECT show_name,
-                       COUNT(*) AS file_count,
-                       SUM(size_bytes) AS total_size_bytes,
-                       SUM(potential_savings_bytes) AS total_savings_bytes
-                FROM rel
-                GROUP BY show_name
-            )
-            SELECT COUNT(*) as total_shows,
-                   SUM(file_count) as total_files,
-                   SUM(total_savings_bytes) as total_savings
-            FROM agg
-            """,
-            tuple(params),
-        ).fetchone()
-        _queue_totals_set(cache_key, total_row)
-
-    total = (total_row[0] if total_row else 0) or 0
-    total_files = (total_row[1] if total_row else 0) or 0
-    total_savings = (total_row[2] if total_row else 0) or 0
 
     total_pages = max(1, (total + per_page - 1) // per_page)
     page = max(1, min(page, total_pages))
     offset = (page - 1) * per_page
-
-    rows = conn.execute(agg_sql, tuple(params + [per_page, offset])).fetchall()
-
-    shows = []
-    for row in rows:
-        shows.append({
-            "show_name": row["show_name"],
-            "file_count": row["file_count"],
-            "total_size": format_size(row["total_size_bytes"]),
-            "total_size_bytes": row["total_size_bytes"] or 0,
-            "total_savings": format_size(row["total_savings_bytes"]) if row["total_savings_bytes"] else "?",
-            "total_savings_bytes": row["total_savings_bytes"] or 0,
-            "avg_priority": row["avg_priority"] or 0,
-            "max_priority": row["max_priority"] or 0,
-            "latest_scan": row["latest_scan"],
-            "reduction_pct": (row["reduction_ratio"] or 0) * 100 if row.get("reduction_ratio") is not None else 0,
-        })
 
     start_page = max(1, page - 2)
     end_page = min(total_pages, page + 2)
@@ -1047,114 +981,18 @@ async def queue_shows_view(
     })
 
 
-async def queue_seasons_view(request: Request, conn, show: str, page: int, per_page: int, library_root: str):
-    """View seasons for a specific show."""
-    sort = request.query_params.get("sort", "priority")
-    direction = request.query_params.get("order", "desc").lower()
-    direction = "desc" if direction not in ["asc", "desc"] else direction
+async def queue_seasons_view(request: Request, repo: QueueRepository, show: str, page: int, per_page: int, library_root: str):
+    """View seasons for a specific show via repository."""
 
-    sort_map = {
-        "season": "season_name COLLATE NOCASE",
-        "files": "file_count",
-        "size": "total_size_bytes",
-        "savings": "total_savings_bytes",
-        "priority": "max_priority",
-    }
-    sort_expr = sort_map.get(sort, "max_priority")
-
-    like_pattern = f"{library_root}/{show}/%"
-
-    total_row = conn.execute(
-        """
-        WITH rel AS (
-            SELECT
-                CASE
-                    WHEN instr(substr(path, ?), '/') > 0
-                        THEN substr(substr(path, ?), 1, instr(substr(path, ?), '/') - 1)
-                    ELSE 'Files'
-                END AS season_name,
-                size_bytes,
-                potential_savings_bytes,
-                priority_score
-            FROM media_inventory
-            WHERE status='pending' AND path LIKE ?
-        ), agg AS (
-            SELECT
-                season_name,
-                COUNT(*) AS file_count,
-                SUM(size_bytes) AS total_size_bytes,
-                SUM(potential_savings_bytes) AS total_savings_bytes,
-                AVG(priority_score) AS avg_priority,
-                MAX(priority_score) AS max_priority
-            FROM rel
-            GROUP BY season_name
-        )
-        SELECT COUNT(*) as total_seasons,
-               SUM(file_count) as total_files,
-               SUM(total_savings_bytes) as total_savings
-        FROM agg
-        """,
-        (len(library_root)+len(show)+3,)*4 + (like_pattern,),
-    ).fetchone()
-
-    total = total_row["total_seasons"] or 0
-    total_files = total_row["total_files"] or 0
-    total_savings = total_row["total_savings"] or 0
+    seasons_all = repo.list_seasons(library_root, show)
+    total = len(seasons_all)
+    total_files = sum(s.get("file_count", 0) for s in seasons_all)
+    total_savings = sum(s.get("total_savings", 0) for s in seasons_all)
 
     total_pages = max(1, (total + per_page - 1) // per_page)
     page = max(1, min(page, total_pages))
     offset = (page - 1) * per_page
-
-    rows = conn.execute(
-        f"""
-        WITH rel AS (
-            SELECT
-                CASE
-                    WHEN instr(substr(path, ?), '/') > 0
-                        THEN substr(substr(path, ?), 1, instr(substr(path, ?), '/') - 1)
-                    ELSE 'Files'
-                END AS season_name,
-                size_bytes,
-                potential_savings_bytes,
-                priority_score
-            FROM media_inventory
-            WHERE status='pending' AND path LIKE ?
-        ), agg AS (
-            SELECT
-                season_name,
-                COUNT(*) AS file_count,
-                SUM(size_bytes) AS total_size_bytes,
-                SUM(potential_savings_bytes) AS total_savings_bytes,
-                AVG(priority_score) AS avg_priority,
-                MAX(priority_score) AS max_priority
-            FROM rel
-            GROUP BY season_name
-        )
-        SELECT * FROM agg
-        ORDER BY {sort_expr} {direction}
-        LIMIT ? OFFSET ?
-        """,
-        (len(library_root)+len(show)+3,)*4 + (like_pattern, per_page, offset),
-    ).fetchall()
-
-    seasons = []
-    for row in rows:
-        seasons.append({
-            "season_name": row["season_name"],
-            "file_count": row["file_count"],
-            "total_size": format_size(row["total_size_bytes"]),
-            "total_savings": format_size(row["total_savings_bytes"]) if row["total_savings_bytes"] else "?",
-            "total_savings_bytes": row["total_savings_bytes"] or 0,
-            "avg_priority": row["avg_priority"] or 0,
-            "max_priority": row["max_priority"] or 0,
-        })
-
-    # Pagination
-    total = len(seasons)
-    total_pages = max(1, (total + per_page - 1) // per_page)
-    page = max(1, min(page, total_pages))
-    offset = (page - 1) * per_page
-    seasons = seasons[offset:offset + per_page]
+    seasons = seasons_all[offset:offset + per_page]
 
     page_range = list(range(max(1, page - 2), min(total_pages + 1, page + 3)))
 
@@ -1174,8 +1012,6 @@ async def queue_seasons_view(request: Request, conn, show: str, page: int, per_p
         "page_range": page_range,
         "breadcrumbs": [{"name": "All Shows", "url": "/queue"}],
         "pagination_url": build_pagination_url(request),
-        "sort": sort,
-        "order": direction,
         "workers": get_worker_status(library_root),
         "watch_status": _watch_status_snapshot(),
         "nav_status": _nav_status(),
@@ -1207,9 +1043,14 @@ async def queue_episodes_view(request: Request, conn, show: str, season: str, pa
     # Total count and savings
     total_row = conn.execute(
         """
-        SELECT COUNT(*) as total, SUM(potential_savings_bytes) as total_savings
-        FROM media_inventory
-        WHERE status = 'pending' AND path LIKE ?
+        SELECT COUNT(*) as total, SUM(potential_savings_bytes) as total_savings,
+               MIN(pe.status) as eval_status,
+               MIN(pe.median_vmaf) as eval_median,
+               MIN(pe.min_vmaf) as eval_min,
+               MIN(pe.id) as eval_id
+        FROM media_inventory mi
+        LEFT JOIN profile_evaluations pe ON pe.media_id = mi.id
+        WHERE mi.status = 'pending' AND mi.path LIKE ?
         """,
         (like_pattern,),
     ).fetchone()
@@ -1223,13 +1064,18 @@ async def queue_episodes_view(request: Request, conn, show: str, season: str, pa
 
     cursor = conn.execute(
         f"""
-        SELECT id, path, size_bytes, detected_tier, priority_score, bitrate_kbps,
-               duration_sec, is_interlaced, potential_savings_bytes,
-               video_codec, video_profile, resolution, width, height,
-               bit_depth, frame_rate, is_hdr, hdr_format, audio_tracks, subtitle_tracks,
-               tier_reasoning
-        FROM media_inventory
-        WHERE status = 'pending' AND path LIKE ?
+        SELECT mi.id, mi.path, mi.size_bytes, mi.detected_tier, mi.priority_score, mi.bitrate_kbps,
+               mi.duration_sec, mi.is_interlaced, mi.potential_savings_bytes,
+               mi.video_codec, mi.video_profile, mi.resolution, mi.width, mi.height,
+               mi.bit_depth, mi.frame_rate, mi.is_hdr, mi.hdr_format, mi.audio_tracks, mi.subtitle_tracks,
+               mi.tier_reasoning,
+               pe.id as eval_id,
+               pe.status as eval_status,
+               pe.median_vmaf as eval_median,
+               pe.min_vmaf as eval_min
+        FROM media_inventory mi
+        LEFT JOIN profile_evaluations pe ON pe.media_id = mi.id
+        WHERE mi.status = 'pending' AND mi.path LIKE ?
         ORDER BY {sort_expr} {direction}
         LIMIT ? OFFSET ?
         """,
@@ -1264,6 +1110,12 @@ async def queue_episodes_view(request: Request, conn, show: str, season: str, pa
             except Exception:
                 pass
 
+        eval_obj = None
+        if row["profile_eval_id"]:
+            eval_obj = conn.execute(
+                "SELECT * FROM profile_evaluations WHERE id = ?", (row["profile_eval_id"],)
+            ).fetchone()
+
         episodes.append({
             "id": row["id"],
             "path": row["path"],
@@ -1289,6 +1141,10 @@ async def queue_episodes_view(request: Request, conn, show: str, season: str, pa
             "audio_info": audio_info,
             "subtitle_count": sub_count,
             "tier_reasoning": row["tier_reasoning"] or "",
+            "eval_status": eval_obj["status"] if eval_obj else None,
+            "eval_median": eval_obj["median_vmaf"] if eval_obj else None,
+            "eval_min": eval_obj["min_vmaf"] if eval_obj else None,
+            "eval_id": eval_obj["id"] if eval_obj else None,
         })
 
     return templates.TemplateResponse("queue.html", {
@@ -1344,49 +1200,49 @@ async def search_page(
         })
 
     filters = []
-    params: list = []
     if q:
-        filters.append("LOWER(m.path) LIKE ?")
-        params.append(f"%{q.lower()}%")
+        filters.append(func.lower(MediaItem.path).like(f"%{q.lower()}%"))
     if status:
-        filters.append("m.status = ?")
-        params.append(status)
+        filters.append(MediaItem.status == status)
     if tier:
-        filters.append("m.detected_tier = ?")
-        params.append(tier)
+        filters.append(MediaItem.detected_tier == tier)
 
-    where_clause = " AND ".join(filters) if filters else "1=1"
-
-    with get_db_connection(library_root) as conn:
-        cursor = conn.execute(
-            f"""
-            SELECT m.id, m.path, m.status, m.detected_tier, m.size_bytes, m.updated_at,
-                   COALESCE(e.output_size_bytes, 0) as output_size_bytes,
-                   e.completed_at
-            FROM media_inventory m
-            LEFT JOIN encode_results e ON e.source_id = m.id
-            WHERE {where_clause}
-            ORDER BY m.updated_at DESC
-            LIMIT 200
-            """,
-            tuple(params),
+    with session_scope() as session:
+        stmt = (
+            select(
+                MediaItem.id,
+                MediaItem.path,
+                MediaItem.status,
+                MediaItem.detected_tier,
+                MediaItem.size_bytes,
+                MediaItem.updated_at,
+                func.coalesce(EncodeResult.output_size_bytes, 0).label("output_size_bytes"),
+                EncodeResult.completed_at,
+            )
+            .select_from(MediaItem)
+            .join(EncodeResult, EncodeResult.source_id == MediaItem.id, isouter=True)
         )
-
-        rows = cursor.fetchall()
+        if filters:
+            stmt = stmt.where(*filters)
+        stmt = stmt.order_by(MediaItem.updated_at.desc()).limit(200)  # type: ignore[attr-defined]
+        rows = session.exec(stmt).all()
 
     results = []
     for row in rows:
         reduction = 0
-        if row["output_size_bytes"] and row["size_bytes"]:
-            reduction = int((1 - row["output_size_bytes"] / row["size_bytes"]) * 100)
+        output_size = row.output_size_bytes if hasattr(row, "output_size_bytes") else row[6]
+        size_bytes = row.size_bytes if hasattr(row, "size_bytes") else row[4]
+        updated_at = row.updated_at if hasattr(row, "updated_at") else row[5]
+        if output_size and size_bytes:
+            reduction = int((1 - output_size / size_bytes) * 100)
         results.append({
-            "path": row["path"],
-            "filename": pathlib.Path(row["path"]).name,
-            "status": row["status"],
-            "tier": row["detected_tier"],
-            "size": format_size(row["size_bytes"]),
+            "path": row.path,
+            "filename": pathlib.Path(row.path).name,
+            "status": row.status,
+            "tier": row.detected_tier,
+            "size": format_size(size_bytes),
             "reduction": reduction,
-            "updated_at": row["updated_at"][:16] if row["updated_at"] else None,
+            "updated_at": updated_at[:16] if updated_at else None,
         })
 
     return templates.TemplateResponse("search.html", {
@@ -1407,34 +1263,45 @@ async def search_page(
 @app.get("/completed", response_class=HTMLResponse)
 async def completed(request: Request):
     """View completed (promoted) files."""
-    with get_db_connection() as conn:
-        cursor = conn.execute("""
-            SELECT e.id, m.path, m.size_bytes, m.detected_tier,
-                   e.output_size_bytes, e.vmaf, e.promoted_at
-            FROM encode_results e
-            JOIN media_inventory m ON e.source_id = m.id
-            WHERE m.status = 'completed'
-              AND e.output_size_bytes > 0
-            ORDER BY e.promoted_at DESC
-            LIMIT 100
-        """)
+    with session_scope() as session:
+        _ensure_promotion_columns(session)
+        rows = session.exec(
+            select(
+                EncodeResult.id,
+                MediaItem.path,
+                MediaItem.size_bytes,
+                MediaItem.detected_tier,
+                EncodeResult.output_size_bytes,
+                EncodeResult.vmaf,
+                EncodeResult.promoted_at,
+            )
+            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
+            .where(
+                MediaItem.status == "completed",
+                EncodeResult.output_size_bytes.is_not(None),  # type: ignore[attr-defined]
+                EncodeResult.output_size_bytes > 0,
+            )
+            .order_by(EncodeResult.promoted_at.desc())  # type: ignore[attr-defined]
+            .limit(100)
+        ).all()
 
-        encodes = []
-        for row in cursor.fetchall():
-            reduction = 0
-            if row["size_bytes"] and row["output_size_bytes"]:
-                reduction = int((1 - row["output_size_bytes"] / row["size_bytes"]) * 100)
-            encodes.append({
-                "id": row["id"],
-                "source_path": row["path"],
-                "filename": pathlib.Path(row["path"]).name,
-                "source_size": format_size(row["size_bytes"]),
-                "output_size": format_size(row["output_size_bytes"]),
-                "reduction": reduction,
-                "tier": row["detected_tier"],
-                "vmaf": f"{row['vmaf']:.1f}" if row["vmaf"] else None,
-                "promoted_at": row["promoted_at"][:16] if row["promoted_at"] else None,
-            })
+    encodes = []
+    for row in rows:
+        rid, path, size_bytes, tier, out_size, vmaf, promoted_at = row
+        reduction = 0
+        if size_bytes and out_size:
+            reduction = int((1 - out_size / size_bytes) * 100)
+        encodes.append({
+            "id": rid,
+            "source_path": path,
+            "filename": pathlib.Path(path).name,
+            "source_size": format_size(size_bytes),
+            "output_size": format_size(out_size),
+            "reduction": reduction,
+            "tier": tier,
+            "vmaf": f"{vmaf:.1f}" if vmaf else None,
+            "promoted_at": promoted_at[:16] if promoted_at else None,
+        })
 
     return templates.TemplateResponse("completed.html", {
         "request": request,
@@ -1448,43 +1315,55 @@ async def completed(request: Request):
 @app.get("/review", response_class=HTMLResponse)
 async def review(request: Request):
     """Review encodes pending promotion."""
-    with get_db_connection() as conn:
-        cursor = conn.execute("""
-            SELECT e.id, m.path, m.size_bytes, m.detected_tier, e.output_path,
-                   e.output_size_bytes, e.vmaf, e.is_outlier
-            FROM encode_results e
-            JOIN media_inventory m ON e.source_id = m.id
-            WHERE m.status = 'encoded'
-              AND e.output_path IS NOT NULL
-              AND e.output_size_bytes > 0
-            ORDER BY e.completed_at DESC
-        """)
-
+    with session_scope() as session:
         encodes = []
-        for row in cursor.fetchall():
+        _ensure_promotion_columns(session)
+        stmt = (
+            select(EncodeResult, MediaItem, ProfileEvaluation, RetrainingCandidate)
+            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
+            .outerjoin(ProfileEvaluation, ProfileEvaluation.id == EncodeResult.profile_eval_id)
+            .outerjoin(RetrainingCandidate, RetrainingCandidate.evaluation_id == ProfileEvaluation.id)
+            .where(MediaItem.status == "encoded", EncodeResult.output_size_bytes > 0)
+            .order_by(desc(EncodeResult.completed_at))
+        )
+        rows = session.exec(stmt).all()
+        for enc, media, eval_obj, retrain in rows:
             reduction_pct = 0
             size_increase_pct = 0
-            if row["size_bytes"] and row["output_size_bytes"]:
-                reduction_pct = (1 - row["output_size_bytes"] / row["size_bytes"]) * 100
+            media_size = media.size_bytes or 0
+            enc_size = enc.output_size_bytes or 0
+            if media_size and enc_size:
+                reduction_pct = (1 - enc_size / media_size) * 100
                 if reduction_pct < 0:
                     size_increase_pct = abs(reduction_pct)
 
-            show_name = extract_show_name(row["path"])
-
+            show_name = extract_show_name(media.path)
             encodes.append({
-                "id": row["id"],
-                "source_path": row["path"],
-                "filename": pathlib.Path(row["path"]).name,
+                "id": enc.id,
+                "source_path": media.path,
+                "filename": pathlib.Path(media.path).name,
                 "show_name": show_name,
-                "source_size": format_size(row["size_bytes"]),
-                "output_size": format_size(row["output_size_bytes"]),
+                "source_size": format_size(media.size_bytes),
+                "output_size": format_size(enc.output_size_bytes),
                 "reduction": f"{reduction_pct:.0f}",
                 "reduction_pct": reduction_pct,
                 "size_increase_pct": f"{size_increase_pct:.0f}",
-                "tier": row["detected_tier"],
-                "vmaf": f"{row['vmaf']:.1f}" if row["vmaf"] else None,
-                "is_outlier": bool(row["is_outlier"]),
+                "tier": media.detected_tier,
+                "vmaf": f"{enc.vmaf:.1f}" if enc.vmaf else None,
+                "is_outlier": bool(enc.is_outlier),
+                "eval_status": eval_obj.status if eval_obj else None,
+                "eval_median": eval_obj.median_vmaf if eval_obj else None,
+                "eval_min": eval_obj.min_vmaf if eval_obj else None,
+                "eval_id": eval_obj.id if eval_obj else None,
+                "eval_note": eval_obj.note if eval_obj else None,
+                "eval_weighted": eval_obj.weighted_vmaf if eval_obj else None,
+                "eval_thresh_min": eval_obj.threshold_min if eval_obj else None,
+                "eval_thresh_med": eval_obj.threshold_median if eval_obj else None,
+                "eval_thresh_max": eval_obj.threshold_max if eval_obj else None,
+                "retrain_status": retrain.status if retrain else None,
             })
+
+        stats = _compute_stats(session)
 
     return templates.TemplateResponse("review.html", {
         "request": request,
@@ -1492,46 +1371,52 @@ async def review(request: Request):
         "active": "review",
         "encodes": encodes,
         "nav_status": _nav_status(),
+        "stats": stats,
     })
 
 
 @app.get("/compare/{encode_id}", response_class=HTMLResponse)
 async def compare(request: Request, encode_id: int):
     """Side-by-side video comparison."""
-    with get_db_connection() as conn:
-        cursor = conn.execute("""
-            SELECT e.*, m.path as source_path, m.size_bytes as source_size,
-                   m.video_codec, m.detected_tier, m.is_interlaced
-            FROM encode_results e
-            JOIN media_inventory m ON e.source_id = m.id
-            WHERE e.id = ?
-        """, (encode_id,))
-
-        row = cursor.fetchone()
+    with session_scope() as session:
+        row = session.exec(
+            select(
+                EncodeResult,
+                MediaItem.path.label("source_path"),  # type: ignore[attr-defined]
+                MediaItem.size_bytes.label("source_size"),  # type: ignore[attr-defined]
+                MediaItem.video_codec,
+                MediaItem.detected_tier,
+                MediaItem.is_interlaced,
+            )
+            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
+            .where(EncodeResult.id == encode_id)
+        ).first()
 
     if not row:
         return HTMLResponse("Encode not found", status_code=404)
 
+    enc, source_path, source_size, video_codec, detected_tier, is_interlaced = row
+
     reduction = 0
-    if row["source_size"] and row["output_size_bytes"]:
-        reduction = int((1 - row["output_size_bytes"] / row["source_size"]) * 100)
+    if source_size and enc.output_size_bytes:
+        reduction = int((1 - enc.output_size_bytes / source_size) * 100)
 
     return templates.TemplateResponse("compare.html", {
         "request": request,
         "title": "Compare",
         "active": "review",
         "encode_id": encode_id,
-        "filename": pathlib.Path(row["source_path"]).name,
-        "source_codec": row["video_codec"] or "?",
-        "source_size": format_size(row["source_size"]),
-        "output_size": format_size(row["output_size_bytes"]),
+        "filename": pathlib.Path(source_path).name,
+        "source_codec": video_codec or "?",
+        "source_size": format_size(source_size),
+        "output_size": format_size(enc.output_size_bytes),
         "reduction": reduction,
-        "tier": row["detected_tier"],
-        "crf": row["crf"],
-        "preset": row["preset"],
-        "vmaf": f"{row['vmaf']:.1f}" if row["vmaf"] else None,
-        "ssim": f"{row['ssim']:.4f}" if row["ssim"] else None,
-        "deinterlaced": row["is_interlaced"],
+        "tier": detected_tier,
+        "crf": enc.crf,
+        "preset": enc.preset,
+        "vmaf": f"{enc.vmaf:.1f}" if enc.vmaf else None,
+        "ssim": f"{enc.ssim:.4f}" if enc.ssim else None,
+        "deinterlaced": is_interlaced,
         "nav_status": _nav_status(),
     })
 
@@ -1539,17 +1424,15 @@ async def compare(request: Request, encode_id: int):
 @app.get("/shows", response_class=HTMLResponse)
 async def shows(request: Request):
     """Show/Series management page."""
-    with get_db_connection() as conn:
-        cursor = conn.execute("""
-            SELECT path, status, detected_tier
-            FROM media_inventory
-            WHERE path LIKE '%/Season %'
-        """)
+    with session_scope() as session:
+        rows = session.exec(
+            select(MediaItem.path, MediaItem.status, MediaItem.detected_tier)
+            .where(MediaItem.path.like("%/Season %"))
+        ).all()
 
-        # Aggregate by show name
         show_data: dict[str, dict[str, Any]] = {}
-        for row in cursor.fetchall():
-            show_name = extract_show_name(row["path"])
+        for path, status, detected_tier in rows:
+            show_name = extract_show_name(path)
             if not show_name:
                 continue
 
@@ -1564,15 +1447,12 @@ async def shows(request: Request):
                 }
 
             show_data[show_name]["total"] += 1
-            status = row["status"]
             if status in ["pending", "encoded", "completed"]:
                 show_data[show_name][status] += 1
 
-            tier = row["detected_tier"]
-            if tier:
-                show_data[show_name]["tiers"][tier] = show_data[show_name]["tiers"].get(tier, 0) + 1
+            if detected_tier:
+                show_data[show_name]["tiers"][detected_tier] = show_data[show_name]["tiers"].get(detected_tier, 0) + 1
 
-        # Determine detected tier for each show
         for show in show_data.values():
             if show["tiers"]:
                 show["detected_tier"] = max(show["tiers"].items(), key=lambda x: x[1])[0]
@@ -1580,9 +1460,8 @@ async def shows(request: Request):
                 show["detected_tier"] = None
             del show["tiers"]
 
-        # Get show overrides
-        cursor = conn.execute("SELECT show_name, default_tier FROM show_overrides")
-        overrides = {row["show_name"]: row["default_tier"] for row in cursor.fetchall()}
+        overrides_rows = session.exec(select(ShowOverride.show_name, ShowOverride.default_tier)).all()
+        overrides = {row[0]: row[1] for row in overrides_rows}
 
         for show in show_data.values():
             show["override_tier"] = overrides.get(show["name"])
@@ -1606,23 +1485,22 @@ async def shows(request: Request):
 @app.get("/video/{video_type}/{encode_id}")
 async def serve_video(video_type: str, encode_id: int):
     """Serve video files for comparison."""
-    with get_db_connection() as conn:
-        cursor = conn.execute("""
-            SELECT e.output_path, m.path as source_path
-            FROM encode_results e
-            JOIN media_inventory m ON e.source_id = m.id
-            WHERE e.id = ?
-        """, (encode_id,))
-
-        row = cursor.fetchone()
+    with session_scope() as session:
+        row = session.exec(
+            select(EncodeResult.output_path, MediaItem.path.label("source_path"))
+            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
+            .where(EncodeResult.id == encode_id)
+        ).first()
 
     if not row:
         return HTMLResponse("Not found", status_code=404)
 
+    output_path, source_path = row
+
     if video_type == "source":
-        video_path = pathlib.Path(row["source_path"])
+        video_path = pathlib.Path(source_path)
     elif video_type == "encoded":
-        video_path = pathlib.Path(row["output_path"])
+        video_path = pathlib.Path(output_path)
     else:
         return HTMLResponse("Invalid video type", status_code=400)
 
@@ -1797,23 +1675,20 @@ async def api_bulk_promote(data: BulkPromoteRequest):
     promoted = 0
     failed = 0
 
-    with get_db_connection() as conn:
+    with session_scope() as session:
         for encode_id in data.ids:
             try:
-                cursor = conn.execute("""
-                    SELECT e.output_path, m.path as source_path, m.id as source_id
-                    FROM encode_results e
-                    JOIN media_inventory m ON e.source_id = m.id
-                    WHERE e.id = ?
-                """, (encode_id,))
-
-                row = cursor.fetchone()
-                if not row:
+                enc = session.get(EncodeResult, encode_id)
+                if not enc:
+                    failed += 1
+                    continue
+                item = session.get(MediaItem, enc.source_id)
+                if not item:
                     failed += 1
                     continue
 
-                output_path = pathlib.Path(row["output_path"])
-                source_path = pathlib.Path(row["source_path"])
+                output_path = pathlib.Path(enc.output_path)
+                source_path = pathlib.Path(item.path)
 
                 if not output_path.exists():
                     failed += 1
@@ -1827,23 +1702,19 @@ async def api_bulk_promote(data: BulkPromoteRequest):
                 if source_path != new_path and source_path.exists():
                     source_path.unlink()
 
-                conn.execute("""
-                    UPDATE media_inventory
-                    SET status = 'completed', path = ?, updated_at = ?
-                    WHERE id = ?
-                """, (str(new_path), datetime.now().isoformat(), row["source_id"]))
-
-                conn.execute("""
-                    UPDATE encode_results
-                    SET promoted_at = ?
-                    WHERE id = ?
-                """, (datetime.now().isoformat(), encode_id))
+                now_str = now_iso()
+                item.status = "completed"
+                item.path = str(new_path)
+                item.updated_at = now_str
+                enc.promoted_at = now_str
+                session.add(item)
+                session.add(enc)
+                session.commit()
 
                 promoted += 1
             except Exception:
+                session.rollback()
                 failed += 1
-
-        conn.commit()
 
     return {"success": True, "promoted": promoted, "failed": failed}
 
@@ -1857,23 +1728,19 @@ async def api_bulk_reject(data: BulkRejectRequest):
     rejected = 0
     failed = 0
 
-    with get_db_connection() as conn:
+    with session_scope() as session:
         for encode_id in data.ids:
             try:
-                cursor = conn.execute("""
-                    SELECT e.output_path, m.id as source_id
-                    FROM encode_results e
-                    JOIN media_inventory m ON e.source_id = m.id
-                    WHERE e.id = ?
-                """, (encode_id,))
-
-                row = cursor.fetchone()
-                if not row:
+                enc = session.get(EncodeResult, encode_id)
+                if not enc:
+                    failed += 1
+                    continue
+                item = session.get(MediaItem, enc.source_id)
+                if not item:
                     failed += 1
                     continue
 
-                output_path = pathlib.Path(row["output_path"])
-
+                output_path = pathlib.Path(enc.output_path)
                 if output_path.exists():
                     output_path.unlink()
 
@@ -1885,25 +1752,18 @@ async def api_bulk_reject(data: BulkRejectRequest):
                 except (OSError, StopIteration):
                     pass
 
+                now_str = now_iso()
+                item.status = "pending"
                 if data.new_tier:
-                    conn.execute("""
-                        UPDATE media_inventory
-                        SET status = 'pending', detected_tier = ?, updated_at = ?
-                        WHERE id = ?
-                    """, (data.new_tier, datetime.now().isoformat(), row["source_id"]))
-                else:
-                    conn.execute("""
-                        UPDATE media_inventory
-                        SET status = 'pending', updated_at = ?
-                        WHERE id = ?
-                    """, (datetime.now().isoformat(), row["source_id"]))
-
-                conn.execute("DELETE FROM encode_results WHERE id = ?", (encode_id,))
+                    item.detected_tier = data.new_tier
+                item.updated_at = now_str
+                session.add(item)
+                session.delete(enc)
+                session.commit()
                 rejected += 1
             except Exception:
+                session.rollback()
                 failed += 1
-
-        conn.commit()
 
     return {"success": True, "rejected": rejected, "failed": failed}
 
@@ -1913,23 +1773,24 @@ async def api_show_override(data: ShowOverrideRequest):
     """Set or clear a tier override for a show."""
     if not data.show_name:
         return {"success": False, "error": "show_name required"}
-
-    with get_db_connection() as conn:
+    with session_scope() as session:
         try:
             if data.tier:
-                conn.execute("""
-                    INSERT INTO show_overrides (show_name, default_tier, updated_at)
-                    VALUES (?, ?, datetime('now'))
-                    ON CONFLICT(show_name) DO UPDATE SET
-                        default_tier = excluded.default_tier,
-                        updated_at = datetime('now')
-                """, (data.show_name, data.tier))
+                session.merge(
+                    ShowOverride(
+                        show_name=data.show_name,
+                        default_tier=data.tier,
+                        updated_at=now_iso(),
+                    )
+                )
             else:
-                conn.execute("DELETE FROM show_overrides WHERE show_name = ?", (data.show_name,))
-
-            conn.commit()
+                existing = session.get(ShowOverride, data.show_name)
+                if existing:
+                    session.delete(existing)
+            session.commit()
             return {"success": True}
         except Exception as e:
+            session.rollback()
             return {"success": False, "error": str(e)}
 
 
@@ -1939,29 +1800,35 @@ async def api_apply_tier_to_show(data: ApplyTierRequest):
     if not data.show_name or not data.tier:
         return {"success": False, "error": "show_name and tier required"}
 
-    with get_db_connection() as conn:
+    with session_scope() as session:
         try:
-            cursor = conn.execute("""
-                UPDATE media_inventory
-                SET detected_tier = ?, updated_at = datetime('now')
-                WHERE status = 'pending'
-                  AND path LIKE ?
-            """, (data.tier, f"%/{data.show_name}/Season %"))
-
-            updated = cursor.rowcount
+            items = session.exec(
+                select(MediaItem).where(
+                    MediaItem.status == "pending",
+                    MediaItem.path.like(f"%/{data.show_name}/Season %"),
+                )
+            ).all()
+            now_str = now_iso()
+            updated = 0
+            for item in items:
+                item.detected_tier = data.tier
+                item.updated_at = now_str
+                session.add(item)
+                updated += 1
 
             if data.set_override:
-                conn.execute("""
-                    INSERT INTO show_overrides (show_name, default_tier, updated_at)
-                    VALUES (?, ?, datetime('now'))
-                    ON CONFLICT(show_name) DO UPDATE SET
-                        default_tier = excluded.default_tier,
-                        updated_at = datetime('now')
-                """, (data.show_name, data.tier))
+                session.merge(
+                    ShowOverride(
+                        show_name=data.show_name,
+                        default_tier=data.tier,
+                        updated_at=now_str,
+                    )
+                )
 
-            conn.commit()
+            session.commit()
             return {"success": True, "updated": updated}
         except Exception as e:
+            session.rollback()
             return {"success": False, "error": str(e)}
 
 
@@ -2092,34 +1959,33 @@ async def api_active_encodes(request: Request):
     library_root = request.query_params.get("library") or resolve_existing_library_root()
     if not library_root:
         return {"success": True, "encodes": []}
+    with session_scope() as session:
+        rows = session.exec(
+            select(EncodeProgress, MediaItem.size_bytes, MediaItem.video_codec)
+            .select_from(EncodeProgress)
+            .join(MediaItem, EncodeProgress.source_id == MediaItem.id, isouter=True)
+            .order_by(EncodeProgress.started_at.desc())
+        ).all()
 
-    with get_db_connection(library_root) as conn:
-        cursor = conn.execute("""
-            SELECT p.*, m.size_bytes as source_size_bytes, m.video_codec
-            FROM encode_progress p
-            LEFT JOIN media_inventory m ON p.source_id = m.id
-            ORDER BY p.started_at DESC
-        """)
-        encodes = []
-        for row in cursor.fetchall():
-            eta_display = None
-            if row["eta_seconds"] and row["eta_seconds"] > 0:
-                eta_display = format_duration(row["eta_seconds"])
-            encodes.append({
-                "filename": pathlib.Path(row["source_path"]).name if row["source_path"] else "Unknown",
-                "path": row["source_path"],
-                "show_name": extract_show_name(row["source_path"]) if row["source_path"] else None,
-                "machine": row["machine"],
-                "tier": row["tier"],
-                "started_at": row["started_at"][:16] if row["started_at"] else None,
-                "percent_complete": row["percent_complete"] or 0,
-                "speed": row["speed"] or 0,
-                "eta": eta_display,
-                "phase": row["phase"] or "encoding",
-                "frame": row["frame"] or 0,
-                "total_frames": row["total_frames"] or 0,
-                "fps": row["fps"] or 0,
-            })
+    encodes = []
+    for row in rows:
+        prog, source_size, video_codec = row[0], row[1], row[2]
+        eta_display = format_duration(prog.eta_seconds) if prog.eta_seconds and prog.eta_seconds > 0 else None
+        encodes.append({
+            "filename": pathlib.Path(prog.source_path).name if prog.source_path else "Unknown",
+            "path": prog.source_path,
+            "show_name": extract_show_name(prog.source_path) if prog.source_path else None,
+            "machine": prog.machine,
+            "tier": prog.tier,
+            "started_at": prog.started_at[:16] if prog.started_at else None,
+            "percent_complete": prog.percent_complete or 0,
+            "speed": prog.speed or 0,
+            "eta": eta_display,
+            "phase": prog.phase or "encoding",
+            "frame": prog.frame or 0,
+            "total_frames": prog.total_frames or 0,
+            "fps": prog.fps or 0,
+        })
 
     return {"success": True, "encodes": encodes}
 
@@ -2148,11 +2014,22 @@ async def api_get_evaluation(eval_id: int):
             return {"success": False, "error": "not found"}
         samples = session.exec(select(VmafSample).where(VmafSample.evaluation_id == eval_id)).all()
         feedback = session.exec(select(ProfileChoiceFeedback).where(ProfileChoiceFeedback.evaluation_id == eval_id)).all()
+        retrain = session.exec(select(RetrainingCandidate).where(RetrainingCandidate.evaluation_id == eval_id)).first()
+        retrain_payload = None
+        if retrain:
+            retrain_payload = {
+                "id": retrain.id,
+                "status": retrain.status,
+                "reason_text": retrain.reason_text,
+                "created_at": retrain.created_at,
+                "processed_at": retrain.processed_at,
+            }
         return {
             "success": True,
             "evaluation": _serialize_eval(ev),
             "samples": [_serialize_sample(s) for s in samples],
             "feedback": [_serialize_feedback(fb) for fb in feedback],
+            "retraining": retrain_payload,
         }
 
 
@@ -2167,12 +2044,139 @@ async def api_flag_evaluation(eval_id: int, data: FlagProfileRequest):
             evaluation_id=eval_id,
             decision=data.decision,
             reason_text=data.reason,
+            status="queued",
         )
         ev.status = "flagged"
         ev.decision = data.decision
         ev.updated_at = now_iso()
         session.add(fb)
         session.add(ev)
+        session.commit()
+
+        # Feed retraining queue (dedupe per evaluation)
+        existing = session.exec(
+            select(RetrainingCandidate).where(RetrainingCandidate.evaluation_id == eval_id)
+        ).first()
+        if not existing:
+            candidate = RetrainingCandidate(
+                evaluation_id=eval_id,
+                media_id=ev.media_id,
+                encode_result_id=ev.encode_result_id,
+                feedback_id=fb.id,
+                reason_text=data.reason,
+                status="pending",
+            )
+            session.add(candidate)
+            session.commit()
+        return {"success": True}
+
+
+@app.post("/api/queue/{media_id}/bump")
+async def api_queue_bump(media_id: int, data: QueueMoveRequest):
+    with session_scope() as session:
+        repo = MediaRepository(session)
+        repo.bump_priority(media_id, delta=data.delta)
+        return {"success": True}
+
+
+@app.post("/api/queue/{media_id}/pause")
+async def api_queue_pause(media_id: int):
+    with session_scope() as session:
+        repo = MediaRepository(session)
+        item = repo.get(media_id)
+        if not item:
+            return {"success": False, "error": "not found"}
+        item.status = "paused"
+        session.add(item)
+        session.commit()
+        return {"success": True}
+
+
+@app.post("/api/queue/{media_id}/resume")
+async def api_queue_resume(media_id: int):
+    with session_scope() as session:
+        repo = MediaRepository(session)
+        item = repo.get(media_id)
+        if not item:
+            return {"success": False, "error": "not found"}
+        item.status = "pending"
+        item.skip_reason = None
+        session.add(item)
+        session.commit()
+        return {"success": True}
+
+
+@app.post("/api/queue/add")
+async def api_queue_add(data: QueueAddRequest):
+    path = pathlib.Path(data.path).resolve()
+    app_settings = load_app_settings()
+    library_root = data.library or resolve_existing_library_root() or str(pathlib.Path(path).parents[2])
+    with session_scope() as session:
+        repo = MediaRepository(session)
+        existing = session.exec(select(MediaItem).where(MediaItem.path == str(path))).first()
+        if existing:
+            existing.status = "pending"
+            existing.skip_reason = None
+            session.add(existing)
+            session.commit()
+            return {"success": True, "id": existing.id, "message": "already existed; resumed"}
+        item = MediaItem(
+            path=str(path),
+            library_id=None,
+            status="pending",
+            skip_reason=None,
+        )
+        repo.add(item)
+        session.commit()
+        return {"success": True, "id": item.id}
+
+
+@app.get("/api/queue/skipped")
+async def api_queue_skipped(page: int = 1, per_page: int = 50):
+    with session_scope() as session:
+        repo = MediaRepository(session)
+        page_obj = repo.list_skipped(pagination=Pagination(limit=per_page, offset=(page - 1) * per_page))
+        items = [
+            {
+                "id": m.id,
+                "path": m.path,
+                "skip_reason": m.skip_reason,
+                "updated_at": m.updated_at,
+            }
+            for m in page_obj.items
+        ]
+        return {
+            "success": True,
+            "items": items,
+            "total": page_obj.total,
+            "page": page,
+            "per_page": per_page,
+        }
+
+
+@app.post("/api/queue/{media_id}/force-rescan")
+async def api_queue_force_rescan(media_id: int):
+    with session_scope() as session:
+        repo = MediaRepository(session)
+        item = repo.get(media_id)
+        if not item:
+            return {"success": False, "error": "not found"}
+        item.status = "pending"
+        item.skip_reason = None
+        session.add(item)
+        session.commit()
+        return {"success": True}
+
+
+@app.post("/api/queue/{media_id}/reset-skip")
+async def api_queue_reset_skip(media_id: int):
+    with session_scope() as session:
+        repo = MediaRepository(session)
+        item = repo.get(media_id)
+        if not item:
+            return {"success": False, "error": "not found"}
+        item.skip_reason = None
+        session.add(item)
         session.commit()
         return {"success": True}
 
@@ -2181,39 +2185,20 @@ async def api_flag_evaluation(eval_id: int, data: FlagProfileRequest):
 async def api_queue_seasons(show_name: str, request: Request):
     """Get seasons for a specific show."""
     library_root = request.query_params.get('library') or _resolve_library(request)
-    with get_db_connection(library_root) as conn:
-        like_pattern = f"{library_root}/{show_name}/%"
-        rows = conn.execute(
-            "SELECT path, size_bytes, potential_savings_bytes, priority_score FROM media_inventory WHERE status='pending' AND path LIKE ?",
-            (like_pattern,),
-        ).fetchall()
-
-        season_map: dict[str, dict] = {}
-        for row in rows:
-            parsed = parse_media_path(row["path"], library_root)
-            season_name = parsed["season"] or "Files"
-            ent = season_map.setdefault(season_name, {
-                "season_name": season_name,
-                "file_count": 0,
-                "total_size_bytes": 0,
-                "total_savings_bytes": 0,
-                "max_priority": 0.0,
-            })
-
-            ent["file_count"] += 1
-            ent["total_size_bytes"] += row["size_bytes"] or 0
-            ent["total_savings_bytes"] += row["potential_savings_bytes"] or 0
-            ent["max_priority"] = max(ent["max_priority"], row["priority_score"] or 0)
-
-        seasons = [{
-            "season_name": ent["season_name"],
-            "file_count": ent["file_count"],
-            "total_size": format_size(ent["total_size_bytes"]),
-            "total_savings": format_size(ent["total_savings_bytes"]) if ent["total_savings_bytes"] else "?",
-            "total_savings_bytes": ent["total_savings_bytes"],
-            "max_priority": ent["max_priority"],
-        } for ent in season_map.values()]
-
+    with session_scope() as session:
+        repo = QueueRepository(session)
+        seasons_raw = repo.list_seasons(library_root, show_name)
+        seasons = [
+            {
+                "season_name": s["season_name"],
+                "file_count": s["file_count"],
+                "total_size": format_size(s["total_size"]),
+                "total_savings": format_size(s["total_savings"]) if s["total_savings"] else "?",
+                "total_savings_bytes": s["total_savings"],
+                "max_priority": s["max_priority"],
+            }
+            for s in seasons_raw
+        ]
         seasons = sorted(seasons, key=lambda x: -x["max_priority"])
 
     return {"seasons": seasons}
@@ -2223,75 +2208,40 @@ async def api_queue_seasons(show_name: str, request: Request):
 async def api_queue_episodes(show_name: str, season_name: str, request: Request):
     """Get episodes for a specific show/season."""
     library_root = request.query_params.get('library') or _resolve_library(request)
-    with get_db_connection(library_root) as conn:
-        if season_name == "Files":
-            like_pattern = f"{library_root}/{show_name}/%"
-        else:
-            like_pattern = f"{library_root}/{show_name}/{season_name}/%"
-        cursor = conn.execute("""
-            SELECT id, path, size_bytes, detected_tier, priority_score, bitrate_kbps,
-                   duration_sec, is_interlaced, potential_savings_bytes,
-                   video_codec, video_profile, resolution, width, height,
-                   bit_depth, frame_rate, is_hdr, hdr_format, audio_tracks, subtitle_tracks,
-                   tier_reasoning
-            FROM media_inventory
-            WHERE status = 'pending' AND path LIKE ?
-            ORDER BY priority_score DESC
-        """, (like_pattern,))
-
+    with session_scope() as session:
+        repo = QueueRepository(session)
+        eps = repo.list_episodes(library_root, show_name, season_name)
         episodes = []
-        for row in cursor.fetchall():
-            savings = row["potential_savings_bytes"] or 0
-
-            # Parse audio tracks
-            audio_info = "?"
-            if row["audio_tracks"]:
-                try:
-                    tracks = json.loads(row["audio_tracks"])
-                    audio_info = ", ".join(
-                        f"{t.get('codec', '?')} {t.get('channels', '?')}ch"
-                        for t in tracks[:3]
-                    )
-                    if len(tracks) > 3:
-                        audio_info += f" (+{len(tracks) - 3})"
-                except Exception:
-                    pass
-
-            # Parse subtitle tracks
-            sub_count = 0
-            if row["subtitle_tracks"]:
-                try:
-                    sub_count = len(json.loads(row["subtitle_tracks"]))
-                except Exception:
-                    pass
-
+        for item in eps:
+            savings = item.potential_savings_bytes or 0
+            sub_count = len(json.loads(item.subtitle_tracks)) if item.subtitle_tracks else 0
             episodes.append({
-                "id": row["id"],
-                "path": row["path"],
-                "filename": pathlib.Path(row["path"]).name,
-                "size_bytes": row["size_bytes"],
-                "size": format_size(row["size_bytes"]),
-                "detected_tier": row["detected_tier"],
-                "priority_score": row["priority_score"],
-                "bitrate_kbps": row["bitrate_kbps"],
-                "bitrate": f"{row['bitrate_kbps']}k" if row["bitrate_kbps"] else "?",
-                "duration": format_duration(row["duration_sec"]),
-                "duration_sec": row["duration_sec"],
-                "is_interlaced": row["is_interlaced"],
+                "id": item.id,
+                "path": item.path,
+                "filename": pathlib.Path(item.path).name,
+                "size_bytes": item.size_bytes,
+                "size": format_size(item.size_bytes),
+                "detected_tier": item.detected_tier,
+                "priority_score": item.priority_score,
+                "bitrate_kbps": item.bitrate_kbps,
+                "bitrate": f"{item.bitrate_kbps}k" if item.bitrate_kbps else "?",
+                "duration": format_duration(item.duration_sec or 0),
+                "duration_sec": item.duration_sec,
+                "is_interlaced": item.is_interlaced,
                 "savings": format_size(savings) if savings else "?",
                 "savings_bytes": savings,
-                "video_codec": row["video_codec"] or "?",
-                "video_profile": row["video_profile"] or "",
-                "resolution": row["resolution"] or f"{row['width']}x{row['height']}" if row["width"] else "?",
-                "width": row["width"],
-                "height": row["height"],
-                "bit_depth": row["bit_depth"],
-                "frame_rate": row["frame_rate"] or "?",
-                "is_hdr": row["is_hdr"],
-                "hdr_format": row["hdr_format"],
-                "audio_info": audio_info,
+                "video_codec": item.video_codec or "?",
+                "video_profile": item.video_profile or "",
+                "resolution": item.resolution or (f"{item.width}x{item.height}" if item.width else "?"),
+                "width": item.width,
+                "height": item.height,
+                "bit_depth": item.bit_depth,
+                "frame_rate": item.frame_rate or "?",
+                "is_hdr": item.is_hdr,
+                "hdr_format": item.hdr_format,
+                "audio_info": item.audio_tracks or "",
                 "subtitle_count": sub_count,
-                "tier_reasoning": row["tier_reasoning"] or "",
+                "tier_reasoning": item.tier_reasoning or "",
             })
 
     return {"episodes": episodes}
@@ -2300,15 +2250,11 @@ async def api_queue_episodes(show_name: str, season_name: str, request: Request)
 @app.get("/api/stats")
 async def api_stats():
     """Get current stats as JSON."""
-    with get_db_connection() as conn:
-        cursor = conn.execute("""
-            SELECT status, COUNT(*) as cnt
-            FROM media_inventory
-            GROUP BY status
-        """)
-        status_counts = {row["status"]: row["cnt"] for row in cursor.fetchall()}
-
-    return status_counts
+    with session_scope() as session:
+        rows = session.exec(
+            select(MediaItem.status, func.count().label("cnt")).group_by(MediaItem.status)
+        ).all()
+    return {row.status: row.cnt for row in rows}
 
 
 
