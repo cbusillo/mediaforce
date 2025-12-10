@@ -27,7 +27,7 @@
     <div style="margin-bottom: 1rem; display: flex; gap: 1rem; flex-wrap: wrap; align-items: center;">
         <div>
             <label for="global-max-height" class="text-muted" style="display:block; margin-bottom: 0.25rem;">Global Max Height</label>
-            <select id="global-max-height" name="global_max_height" style="width: 160px;">
+            <select id="global-max-height" name="global_max_height" aria-label="Global maximum height" style="width: 160px;">
                 {% for h in ["",480,720,1080,1440,2160,4320] %}
                     <option value="{{ h }}" {% if h != '' and global_max_height is not none and (h|int) == global_max_height %}selected{% endif %}>
                         {% if h == "" %}Unset{% else %}{{ h }}p{% endif %}
@@ -39,17 +39,17 @@
 
         <div>
             <label for="max-concurrency" class="text-muted" style="display:block; margin-bottom: 0.25rem;">Max Concurrency</label>
-            <input id="max-concurrency" type="number" name="max_concurrency" min="1" value="{{ settings.max_concurrency or 1 }}" style="width: 120px;">
+            <input id="max-concurrency" type="number" name="max_concurrency" min="1" value="{{ settings.max_concurrency or 1 }}" aria-label="Maximum concurrent encodes" style="width: 120px;">
             <div class="text-muted" style="font-size: 0.85rem;">Encodes allowed in parallel on this host.</div>
         </div>
 
         <div>
             <label class="text-muted" style="display:block; margin-bottom: 0.25rem;">Off-peak Window</label>
             <div style="display:flex; gap:0.35rem; align-items:center;">
-                <input type="checkbox" name="offpeak_enabled" id="offpeak-enabled" {% if settings.offpeak_enabled %}checked{% endif %}>
-                <input type="time" name="offpeak_start" value="{{ settings.offpeak_start or '00:00' }}" style="width:120px;">
+                <input type="checkbox" name="offpeak_enabled" id="offpeak-enabled" aria-label="Enable off-peak window" {% if settings.offpeak_enabled %}checked{% endif %}>
+                <input type="time" name="offpeak_start" aria-label="Off-peak start" value="{{ settings.offpeak_start or '00:00' }}" style="width:120px;">
                 <span>to</span>
-                <input type="time" name="offpeak_end" value="{{ settings.offpeak_end or '05:00' }}" style="width:120px;">
+                <input type="time" name="offpeak_end" aria-label="Off-peak end" value="{{ settings.offpeak_end or '05:00' }}" style="width:120px;">
             </div>
             <div class="text-muted" style="font-size: 0.85rem;">Workers only encode during this window when enabled.</div>
         </div>
@@ -74,10 +74,10 @@
                 <tr>
                     <td>
                         <input type="hidden" name="libraries[{{ loop.index0 }}][id]" value="{{ lib.id }}">
-                        <input type="text" name="libraries[{{ loop.index0 }}][name]" value="{{ lib.name }}" style="width: 180px;">
+                        <input type="text" name="libraries[{{ loop.index0 }}][name]" value="{{ lib.name }}" aria-label="Library name" style="width: 180px;">
                     </td>
                     <td>
-                        <select name="libraries[{{ loop.index0 }}][media_type]" style="width: 120px;">
+                        <select name="libraries[{{ loop.index0 }}][media_type]" aria-label="Media type for {{ lib.name }}" style="width: 120px;">
                             {% set mt = (lib.media_type or '').lower() %}
                             <option value="tv" {% if mt == 'tv' %}selected{% endif %}>TV</option>
                             <option value="movies" {% if mt == 'movies' %}selected{% endif %}>Movies</option>
@@ -85,16 +85,16 @@
                         </select>
                     </td>
             <td>
-                <input type="text" name="libraries[{{ loop.index0 }}][mac_path]" value="{{ lib.mac_path }}" style="width: 260px;">
+                <input type="text" name="libraries[{{ loop.index0 }}][mac_path]" value="{{ lib.mac_path }}" aria-label="macOS path" style="width: 260px;">
             </td>
             <td>
-                <input type="text" name="libraries[{{ loop.index0 }}][linux_path]" value="{{ lib.linux_path }}" style="width: 260px;">
+                <input type="text" name="libraries[{{ loop.index0 }}][linux_path]" value="{{ lib.linux_path }}" aria-label="Linux path" style="width: 260px;">
             </td>
             <td style="text-align: center;">
-                <input class="row-checkbox" type="checkbox" name="libraries[{{ loop.index0 }}][watch]" value="true" {% if lib.watch %}checked{% endif %}>
+                <input class="row-checkbox" type="checkbox" name="libraries[{{ loop.index0 }}][watch]" aria-label="Watch library {{ lib.name }}" value="true" {% if lib.watch %}checked{% endif %}>
             </td>
             <td>
-                <select name="libraries[{{ loop.index0 }}][max_height]" style="width: 130px;">
+                <select name="libraries[{{ loop.index0 }}][max_height]" aria-label="Max height for {{ lib.name }}" style="width: 130px;">
                     {% for h in ["",480,720,1080,1440,2160,4320] %}
                         <option value="{{ h }}" {% if h != '' and lib.max_height is not none and (h|int) == lib.max_height %}selected{% endif %}>
                             {% if h == "" %}Unset{% else %}{{ h }}p{% endif %}

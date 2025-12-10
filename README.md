@@ -13,9 +13,9 @@ source quality and applies appropriate compression settings.
 
 ## Supported Platforms
 
-| OS | CPU/GPU | Notes |
-|----|---------|-------|
-| macOS 13+ | Apple Silicon | Tested with Homebrew ffmpeg + libsvtav1 |
+| OS                           | CPU/GPU                                | Notes                                                       |
+|------------------------------|----------------------------------------|-------------------------------------------------------------|
+| macOS 13+                    | Apple Silicon                          | Tested with Homebrew ffmpeg + libsvtav1                     |
 | Linux (Ubuntu/Debian/Fedora) | x86_64 + NVIDIA (NVDEC/NVENC optional) | ffmpeg with libsvtav1; CUDA only needed for hardware decode |
 
 Paths are automatically normalized between platforms (e.g., `/Volumes/media` ↔ `/mnt/media`).
@@ -29,6 +29,7 @@ scan → queue → encode → verify → promote
 ## Project Layout
 
 - `src/mediaforce/core.py` — main application logic (settings, queue, encoder, scanner).
+- `src/mediaforce/config/` — shared config helpers (`settings`, structured `logging`).
 - `src/mediaforce/db/` — SQLModel models and DB helpers (SQLite settings/inventory).
 - `src/mediaforce/cli/` — CLI entrypoint shim (`mediaforce` console script).
 - `src/mediaforce/web/` — FastAPI app, routes, templates, and static assets (`mediaforce-web`).
@@ -70,6 +71,7 @@ ffmpeg -encoders | grep svt
 - Unified state lives at `~/.config/mediaforce/mediaforce.db` (settings + inventory).
 - Library roots and weights are defined in the settings JSON/DB; defaults cover `/Volumes/media` on macOS and `/mnt/media` on Linux.
 - Global settings include `max_concurrency` (per-host encode slots) and optional off-peak window (e.g., 00:00–05:00) enforced by workers.
+- Logs are structured JSON to stdout. Set `MEDIAFORCE_LOG_LEVEL` (default `INFO`) and optional `MEDIAFORCE_LOG_FILE=/path/to/mediaforce.jsonl` to mirror logs to a JSONL file.
 - Hostnames in use: `chris-mbp.shiny` (M2 laptop), `chris-studio.shiny` (M4 studio), `tdarr.shiny` (CT 103 encoder).
 
 ## Usage
@@ -144,19 +146,19 @@ Source quality is estimated from:
 
 | Channels | Target Bitrate |
 |----------|----------------|
-| Mono | 64 kbps |
-| Stereo | 128 kbps |
-| 5.1 | 256 kbps |
-| 7.1 | 384 kbps |
+| Mono     | 64 kbps        |
+| Stereo   | 128 kbps       |
+| 5.1      | 256 kbps       |
+| 7.1      | 384 kbps       |
 
 **Smart passthrough/conversion:**
 
-| Source Codec | Action |
-|--------------|--------|
-| Opus ≤ target | Passthrough (copy) |
-| AAC ≤ target | Passthrough (copy) |
-| AAC > target | Convert to Opus |
-| AC3/EAC3/DTS/MP3 | Always convert to Opus |
+| Source Codec                    | Action                 |
+|---------------------------------|------------------------|
+| Opus ≤ target                   | Passthrough (copy)     |
+| AAC ≤ target                    | Passthrough (copy)     |
+| AAC > target                    | Convert to Opus        |
+| AC3/EAC3/DTS/MP3                | Always convert to Opus |
 | Lossless (FLAC, TrueHD, DTS-HD) | Always convert to Opus |
 
 **Track selection:**
@@ -270,13 +272,13 @@ uv run mediaforce-web --port 5555
 
 ### Pages
 
-| Page | URL | Description |
-|------|-----|-------------|
-| **Dashboard** | `/` | Overview stats, live active-encodes, recent completions, space savings |
-| **Queue** | `/queue` | Pending files with expandable show/season/episode hierarchy |
-| **Completed** | `/completed` | Successfully promoted files |
-| **Review** | `/review` | Quality outliers and size-increase encodes needing attention |
-| **Shows** | `/shows` | Per-show tier overrides management |
+| Page          | URL          | Description                                                            |
+|---------------|--------------|------------------------------------------------------------------------|
+| **Dashboard** | `/`          | Overview stats, live active-encodes, recent completions, space savings |
+| **Queue**     | `/queue`     | Pending files with expandable show/season/episode hierarchy            |
+| **Completed** | `/completed` | Successfully promoted files                                            |
+| **Review**    | `/review`    | Quality outliers and size-increase encodes needing attention           |
+| **Shows**     | `/shows`     | Per-show tier overrides management                                     |
 The **Settings** tab (`/settings`) exposes the global library configuration
 used by the CLI, web UI, and background watchers.
 

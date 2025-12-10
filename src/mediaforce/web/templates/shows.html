@@ -10,10 +10,10 @@
 <!-- Search/Filter -->
 <div class="card" style="margin-bottom: 1rem;">
     <div style="display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;">
-        <input type="text" id="showSearch" placeholder="Search shows..."
+        <input type="text" id="showSearch" placeholder="Search shows..." aria-label="Search shows"
                style="flex: 1; min-width: 200px; padding: 0.5rem; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--text-secondary); border-radius: 4px;"
                oninput="filterShows()">
-        <select id="tierFilter" onchange="filterShows()" style="padding: 0.5rem; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--text-secondary); border-radius: 4px;">
+        <select id="tierFilter" aria-label="Filter by tier" onchange="filterShows()" style="padding: 0.5rem; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--text-secondary); border-radius: 4px;">
             <option value="">All Tiers</option>
             <option value="pristine">Pristine</option>
             <option value="good">Good</option>
@@ -49,7 +49,7 @@
                 <td>{{ show.completed }}</td>
                 <td class="tier-{{ show.detected_tier }}">{{ show.detected_tier or '-' }}</td>
                 <td>
-                    <select class="tier-select" data-show="{{ show.name }}"
+                    <select class="tier-select" data-show="{{ show.name }}" aria-label="Tier override for {{ show.name }}"
                             onchange="setOverride(this)"
                             style="padding: 0.25rem; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--text-secondary); border-radius: 4px;">
                         <option value="" {{ 'selected' if not show.override_tier else '' }}>Auto-detect</option>
@@ -78,7 +78,7 @@
 
         <div style="margin: 1rem 0;">
             <label style="display: block; margin-bottom: 0.5rem;">Tier:</label>
-            <select id="modalTier" style="width: 100%; padding: 0.5rem; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--text-secondary); border-radius: 4px;">
+            <select id="modalTier" aria-label="Tier to apply" style="width: 100%; padding: 0.5rem; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--text-secondary); border-radius: 4px;">
                 <option value="pristine">Pristine (CRF 26)</option>
                 <option value="good">Good (CRF 28)</option>
                 <option value="mediocre">Mediocre (CRF 30)</option>
@@ -88,7 +88,7 @@
 
         <div style="margin: 1rem 0;">
             <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
-                <input type="checkbox" id="modalSetOverride" checked>
+                <input type="checkbox" id="modalSetOverride" aria-label="Set default override" checked>
                 <span>Also set as default override for future episodes</span>
             </label>
         </div>

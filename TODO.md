@@ -78,8 +78,8 @@
   - Consider lightweight queue abstraction before scaling workers
 
 - [ ] **Structured Logging & Settings**
-  - Finish structured logging sweep; centralize log config in settings helpers
-  - Trim legacy flags/config paths; ensure web/CLI share the same settings surface
+  - Shared helpers now live in `src/mediaforce/config/logging.py` and `src/mediaforce/config/settings.py` (stdout JSON + optional JSONL). Remaining: finish replacing legacy `print` output where not user-facing and trim old flags/config paths.
+  - Ensure web/CLI share the same settings surface
 
 - [ ] **Statistics Dashboard**
   - Total space saved over time (chart)
@@ -87,11 +87,11 @@
   - Average reduction by tier
   - Encoding speed trends
 
-- [ ] **Skipped Files Management**
+- [x] **Skipped Files Management**
   - View files marked as `skipped_native_av1` or other skip reasons
   - Option to force re-scan or reset status
 
-- [ ] **Manual Queue Management**
+- [x] **Manual Queue Management**
   - Reorder queue (bump priority)
   - Pause/resume specific files
   - Add files manually to queue

@@ -3,13 +3,20 @@
 This repo now uses a package layout under `src/mediaforce` to keep the CLI,
 web UI, and domain logic organized while we continue the refactor.
 
-- `core.py` – legacy monolith; holds most logic (settings, queue, encoder, scan).
+- `core.py` – legacy monolith; holds most logic (queue, encoder, scan). Settings
+  + logging helpers now live in `config/`.
+- `config/` – shared runtime config (`settings.py`) and structured logging
+  helpers (`logging.py`).
 - `db/` – SQLModel models and engine helpers (`models.py`).
 - `cli/` – console entrypoint shim; calls into `core.main`.
 - `web/` – FastAPI app (`app.py`), templates, static assets.
 - `services/`, `domain/`, `config/` – placeholders for extracting logic from
   `core.py` during the ongoing refactor (queue, scanner, encoder, watchers,
   classification).
+- `db/repository/` – early SQLModel repositories (queue listings, encode/profile
+  access) to replace ad-hoc SQL in web routes.
+- `db/repository/` – early SQLModel repositories (queue listings, encode/profile
+  access) to replace ad-hoc SQL in web routes.
 
 Entry points
 
@@ -28,5 +35,6 @@ Next refactor steps (suggested)
    `domain/` (classification, tier rules, normalization).
 2) Replace direct SQL calls in the web app with service functions + typed
    models.
-3) Introduce structured logging helpers in `config/logging.py` and swap out the
-   remaining `print` uses.
+3) Structured logging helpers now live in `config/logging.py` with stdout JSON
+   by default and optional JSONL file sink; continue swapping remaining direct
+   `print` calls where useful for UX.

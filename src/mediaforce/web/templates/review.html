@@ -1,596 +1,796 @@
-{% extends "base.html" %}
-
-{% block content %}
+{% extends "base.html" %} {% block content %}
 <h1>Review Pending Encodes</h1>
 
-<p class="text-muted" style="margin-bottom: 1rem;">
-    These encodes are waiting in the transcode folder. Review and promote or reject them.
+<p class="text-muted" style="margin-bottom: 1rem">
+  These encodes are waiting in the transcode folder. Review and promote or reject them.
 </p>
 
 <!-- Bulk Actions Bar -->
-<div class="card" style="margin-bottom: 1rem;">
-    <div style="display: flex; flex-wrap: wrap; gap: 1rem; align-items: center;">
-        <span id="selectedCount" class="text-muted">0 selected</span>
-        <button onclick="promoteSelected()" class="btn btn-success" id="promoteSelectedBtn" disabled>Promote Selected</button>
-        <button onclick="showBulkRejectModal()" class="btn btn-warning" id="rejectSelectedBtn" disabled>Reject Selected</button>
-        <span style="border-left: 1px solid var(--text-secondary); height: 24px; margin: 0 0.5rem;"></span>
-        <span class="text-muted">Quick Actions:</span>
-        <button onclick="promoteByReduction(10)" class="btn btn-sm btn-primary">Promote &gt;10% reduction</button>
-        <button onclick="promoteByReduction(20)" class="btn btn-sm btn-primary">Promote &gt;20% reduction</button>
-        <button onclick="promoteByReduction(30)" class="btn btn-sm btn-primary">Promote &gt;30% reduction</button>
-        <span style="border-left: 1px solid var(--text-secondary); height: 24px; margin: 0 0.5rem;"></span>
-        <span class="text-muted">Filters:</span>
-        <button class="btn btn-sm btn-primary" onclick="setFilter('all')">All</button>
-        <button class="btn btn-sm btn-primary" onclick="setFilter('size_increase')">Size Increases</button>
-        <button class="btn btn-sm btn-primary" onclick="setFilter('low_vmaf')">Low VMAF (&lt;85)</button>
-        <input id="filterText" type="text" placeholder="Search file/show" style="padding:0.35rem 0.5rem; min-width: 200px;" oninput="applyFilters()">
-    </div>
+<div class="card" style="margin-bottom: 1rem">
+  <div style="display: flex; flex-wrap: wrap; gap: 1rem; align-items: center">
+    <span id="selectedCount" class="text-muted">0 selected</span>
+    <button onclick="promoteSelected()" class="btn btn-success" id="promoteSelectedBtn" disabled>
+      Promote Selected
+    </button>
+    <button onclick="showBulkRejectModal()" class="btn btn-warning" id="rejectSelectedBtn" disabled>
+      Reject Selected
+    </button>
+    <span style="border-left: 1px solid var(--text-secondary); height: 24px; margin: 0 0.5rem"></span>
+    <span class="text-muted">Quick Actions:</span>
+    <button onclick="promoteByReduction(10)" class="btn btn-sm btn-primary">Promote &gt;10% reduction</button>
+    <button onclick="promoteByReduction(20)" class="btn btn-sm btn-primary">Promote &gt;20% reduction</button>
+    <button onclick="promoteByReduction(30)" class="btn btn-sm btn-primary">Promote &gt;30% reduction</button>
+    <span style="border-left: 1px solid var(--text-secondary); height: 24px; margin: 0 0.5rem"></span>
+    <span class="text-muted">Filters:</span>
+    <button class="btn btn-sm btn-primary" onclick="setFilter('all')">All</button>
+    <button class="btn btn-sm btn-primary" onclick="setFilter('size_increase')">Size Increases</button>
+    <button class="btn btn-sm btn-primary" onclick="setFilter('low_vmaf')">Low VMAF (&lt;85)</button>
+    <input
+      id="filterText"
+      type="text"
+      placeholder="Search file/show"
+      aria-label="Filter encodes"
+      style="padding: 0.35rem 0.5rem; min-width: 200px"
+      oninput="applyFilters()"
+    />
+  </div>
 </div>
 
-{% set outliers = encodes | selectattr('reduction_pct', 'lt', 0) | list %}
-{% if outliers %}
-<div class="card" style="border: 2px solid var(--warning);">
-    <h3 style="color: var(--warning);">Size Increases ({{ outliers|length }})</h3>
-    <p class="text-muted" style="margin-bottom: 1rem;">
-        These files got BIGGER after encoding. Consider rejecting with a different tier (e.g., "poor" for already-compressed sources).
-    </p>
-    <table>
-        <thead>
-            <tr>
-                <th style="width: 30px;"><input type="checkbox" onchange="toggleAllOutliers(this)"></th>
-                <th>File</th>
-                <th>Show</th>
-                <th>Source</th>
-                <th>Encoded</th>
-                <th>Change</th>
-                <th>Tier</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for encode in outliers %}
-            <tr id="row-{{ encode.id }}" data-reduction="{{ encode.reduction_pct }}">
-                <td><input type="checkbox" class="row-checkbox" value="{{ encode.id }}" onchange="updateSelectedCount()"></td>
-                <td class="truncate" title="{{ encode.source_path }}">{{ encode.filename }}</td>
-                <td>{{ encode.show_name or '-' }}</td>
-                <td>{{ encode.source_size }}</td>
-                <td>{{ encode.output_size }}</td>
-                <td class="text-danger">+{{ encode.size_increase_pct }}%</td>
-                <td class="tier-{{ encode.tier }}">{{ encode.tier }}</td>
-                <td>
-                    <a href="/compare/{{ encode.id }}" class="btn btn-sm btn-primary">Compare</a>
-                    <button onclick="showRejectModal({{ encode.id }}, '{{ encode.show_name|e }}', '{{ encode.tier }}')" class="btn btn-sm btn-warning">Reject</button>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+{% set outliers = encodes | selectattr('reduction_pct', 'lt', 0) | list %} {% if outliers %}
+<div class="card" style="border: 2px solid var(--warning)">
+  <h3 style="color: var(--warning)">Size Increases ({{ outliers|length }})</h3>
+  <p class="text-muted" style="margin-bottom: 1rem">
+    These files got BIGGER after encoding. Consider rejecting with a different tier (e.g., "poor" for already-compressed
+    sources).
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 30px">
+          <input type="checkbox" aria-label="Select all size increase rows" onchange="toggleAllOutliers(this)" />
+        </th>
+        <th>File</th>
+        <th>Show</th>
+        <th>Source</th>
+        <th>Encoded</th>
+        <th>Change</th>
+        <th>Tier</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for encode in outliers %}
+      <tr id="row-{{ encode.id }}" data-reduction="{{ encode.reduction_pct }}">
+        <td>
+          <input
+            type="checkbox"
+            class="row-checkbox"
+            aria-label="Select encode {{ encode.id }}"
+            value="{{ encode.id }}"
+            onchange="updateSelectedCount()"
+          />
+        </td>
+        <td class="truncate" title="{{ encode.source_path }}">{{ encode.filename }}</td>
+        <td>{{ encode.show_name or '-' }}</td>
+        <td>{{ encode.source_size }}</td>
+        <td>{{ encode.output_size }}</td>
+        <td class="text-danger">+{{ encode.size_increase_pct }}%</td>
+        <td class="tier-{{ encode.tier }}">{{ encode.tier }}</td>
+        <td>
+          <a href="/compare/{{ encode.id }}" class="btn btn-sm btn-primary">Compare</a>
+          <button
+            onclick="showRejectModal({{ encode.id }}, '{{ encode.show_name|e }}', '{{ encode.tier }}')"
+            class="btn btn-sm btn-warning"
+          >
+            Reject
+          </button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
 </div>
 {% endif %}
 
 <div class="card">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
-        <h3 style="margin: 0;">Pending Review ({{ encodes|length }})</h3>
-    </div>
-    <table>
-        <thead>
-            <tr>
-                <th style="width: 30px;"><input type="checkbox" id="selectAllMain" onchange="toggleAllMain(this)"></th>
-                <th>File</th>
-                <th>Show</th>
-                <th>Source</th>
-                <th>Encoded</th>
-                <th>Reduction</th>
-                <th>Tier</th>
-                <th>VMAF</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for encode in encodes %}
-            <tr id="row-{{ encode.id }}" class="{{ 'outlier-row' if encode.reduction_pct < 0 else '' }}" data-reduction="{{ encode.reduction_pct }}" data-vmaf="{{ encode.vmaf or '' }}" data-name="{{ encode.filename|lower }}" data-show="{{ (encode.show_name or '')|lower }}">
-                <td><input type="checkbox" class="row-checkbox" value="{{ encode.id }}" onchange="updateSelectedCount()"></td>
-                <td class="truncate" title="{{ encode.source_path }}" onmouseenter="showThumb(event, {{ encode.id }})" onmouseleave="hideThumb()">{{ encode.filename }}</td>
-                <td>{{ encode.show_name or '-' }}</td>
-                <td>{{ encode.source_size }}</td>
-                <td>{{ encode.output_size }}</td>
-                <td class="{{ 'text-success' if encode.reduction_pct > 0 else 'text-danger' }}">
-                    {% if encode.reduction_pct > 0 %}
-                        {{ encode.reduction }}%
-                    {% else %}
-                        +{{ encode.size_increase_pct }}%
-                    {% endif %}
-                </td>
-                <td class="tier-{{ encode.tier }}">{{ encode.tier }}</td>
-                <td>{{ encode.vmaf or '-' }}</td>
-                <td>
-                    <button onclick="openPreview({{ encode.id }})" class="btn btn-sm btn-primary">Preview</button>
-                    <a href="/compare/{{ encode.id }}" class="btn btn-sm btn-success">Compare</a>
-                    <button onclick="promote({{ encode.id }})" class="btn btn-sm btn-success">Promote</button>
-                    <button onclick="showRejectModal({{ encode.id }}, '{{ encode.show_name|e }}', '{{ encode.tier }}')" class="btn btn-sm btn-warning">Reject</button>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem">
+    <h3 style="margin: 0">Pending Review ({{ encodes|length }})</h3>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 30px">
+          <input
+            type="checkbox"
+            id="selectAllMain"
+            aria-label="Select all pending rows"
+            onchange="toggleAllMain(this)"
+          />
+        </th>
+        <th>File</th>
+        <th>Show</th>
+        <th>Source</th>
+        <th>Encoded</th>
+        <th>Reduction</th>
+        <th>Tier</th>
+        <th>VMAF / Profile</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for encode in encodes %}
+      <tr
+        id="row-{{ encode.id }}"
+        class="{{ 'outlier-row' if encode.reduction_pct < 0 else '' }}"
+        data-reduction="{{ encode.reduction_pct }}"
+        data-vmaf="{{ encode.vmaf or '' }}"
+        data-name="{{ encode.filename|lower }}"
+        data-show="{{ (encode.show_name or '')|lower }}"
+      >
+        <td>
+          <input
+            type="checkbox"
+            class="row-checkbox"
+            aria-label="Select encode {{ encode.id }}"
+            value="{{ encode.id }}"
+            onchange="updateSelectedCount()"
+          />
+        </td>
+        <td
+          class="truncate"
+          title="{{ encode.source_path }}"
+          onmouseenter="showThumb(event, {{ encode.id }})"
+          onmouseleave="hideThumb()"
+        >
+          {{ encode.filename }}
+        </td>
+        <td>{{ encode.show_name or '-' }}</td>
+        <td>{{ encode.source_size }}</td>
+        <td>{{ encode.output_size }}</td>
+        <td class="{{ 'text-success' if encode.reduction_pct > 0 else 'text-danger' }}">
+          {% if encode.reduction_pct > 0 %} {{ encode.reduction }}% {% else %} +{{ encode.size_increase_pct }}% {% endif
+          %}
+        </td>
+        <td class="tier-{{ encode.tier }}">{{ encode.tier }}</td>
+        <td title="{{ encode.eval_note or '' }}">
+          {% if encode.eval_median %}
+          <div>
+            med {{ '%.1f'|format(encode.eval_median) }} · min {{ '%.1f'|format(encode.eval_min or 0) }}{% if
+            encode.eval_weighted %} · w {{ '%.1f'|format(encode.eval_weighted) }}{% endif %}
+          </div>
+          <div class="text-muted" style="font-size: 0.85rem">
+            thr {{ encode.eval_thresh_min or '-' }}/{{ encode.eval_thresh_med or '-' }}/{{ encode.eval_thresh_max or '-'
+            }}
+          </div>
+          {% else %} {{ encode.vmaf or '-' }} {% endif %}
+        </td>
+        <td>
+          <button onclick="openPreview({{ encode.id }})" class="btn btn-sm btn-primary">Preview</button>
+          <a href="/compare/{{ encode.id }}" class="btn btn-sm btn-success">Compare</a>
+          <button onclick="promote({{ encode.id }})" class="btn btn-sm btn-success">Promote</button>
+          <button
+            onclick="showRejectModal({{ encode.id }}, '{{ encode.show_name|e }}', '{{ encode.tier }}')"
+            class="btn btn-sm btn-warning"
+          >
+            Reject
+          </button>
+          {% if encode.eval_id %}
+          <button
+            onclick="flagQuality({{ encode.eval_id }}, event)"
+            class="btn btn-sm btn-danger"
+            data-retrain="{{ encode.retrain_status or '' }}"
+            {%
+            if
+            encode.retrain_status
+            %}disabled{%
+            endif
+            %}
+          >
+            {% if encode.retrain_status %}Flagged ({{ encode.retrain_status }}){% else %}Flag Quality{% endif %}
+          </button>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
 </div>
 
 <!-- Preview Modal -->
-<div id="previewModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 1200; align-items: center; justify-content: center;">
-    <div style="background: var(--bg-card); padding: 1rem; border-radius: 10px; max-width: 960px; width: 95%; box-shadow: 0 10px 40px rgba(0,0,0,0.5);">
-        <div style="display:flex; justify-content: space-between; align-items:center; margin-bottom: 0.5rem;">
-            <h3 style="margin:0;">Quick Preview</h3>
-            <button onclick="closePreview()" class="btn btn-warning">Close</button>
-        </div>
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
-            <div>
-                <div class="label" style="padding:0.25rem 0.5rem; background: var(--bg-secondary);">Source</div>
-                <video id="previewSource" controls preload="metadata" style="width:100%; background:#000; border-radius:6px;" playsinline></video>
-            </div>
-            <div>
-                <div class="label" style="padding:0.25rem 0.5rem; background: var(--bg-secondary);">Encoded</div>
-                <video id="previewEncoded" controls preload="metadata" style="width:100%; background:#000; border-radius:6px;" playsinline></video>
-            </div>
-        </div>
-        <div style="margin-top:0.5rem; display:flex; gap:0.5rem; align-items:center;">
-            <button class="btn btn-primary" onclick="syncPlay()">Play/Pause Both</button>
-            <button class="btn" id="previewToggle">View: Both</button>
-            <input type="range" id="previewSeek" min="0" max="100" value="0" style="flex:1;">
-            <span id="previewTime" class="text-muted" style="min-width: 140px; text-align:right;">0:00:00 / 0:00:00</span>
-        </div>
-        <div class="text-muted" style="font-size:0.85rem; margin-top:0.25rem;">
-            Shortcuts: space play/pause · Left/Right seek 5s · 1/2/3/4/5 speed 0.75/1/1.25/1.5/2x
-        </div>
+<div
+  id="previewModal"
+  style="
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.8);
+    z-index: 1200;
+    align-items: center;
+    justify-content: center;
+  "
+>
+  <div
+    style="
+      background: var(--bg-card);
+      padding: 1rem;
+      border-radius: 10px;
+      max-width: 960px;
+      width: 95%;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+    "
+  >
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem">
+      <h3 style="margin: 0">Quick Preview</h3>
+      <button onclick="closePreview()" class="btn btn-warning">Close</button>
     </div>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem">
+      <div>
+        <div class="label" style="padding: 0.25rem 0.5rem; background: var(--bg-secondary)">Source</div>
+        <video
+          id="previewSource"
+          controls
+          preload="metadata"
+          style="width: 100%; background: #000; border-radius: 6px"
+          playsinline
+        ></video>
+      </div>
+      <div>
+        <div class="label" style="padding: 0.25rem 0.5rem; background: var(--bg-secondary)">Encoded</div>
+        <video
+          id="previewEncoded"
+          controls
+          preload="metadata"
+          style="width: 100%; background: #000; border-radius: 6px"
+          playsinline
+        ></video>
+      </div>
+    </div>
+    <div style="margin-top: 0.5rem; display: flex; gap: 0.5rem; align-items: center">
+      <button class="btn btn-primary" onclick="syncPlay()">Play/Pause Both</button>
+      <button class="btn" id="previewToggle">View: Both</button>
+      <input type="range" id="previewSeek" min="0" max="100" value="0" style="flex: 1" aria-label="Preview seek" />
+      <span id="previewTime" class="text-muted" style="min-width: 140px; text-align: right">0:00:00 / 0:00:00</span>
+    </div>
+    <div class="text-muted" style="font-size: 0.85rem; margin-top: 0.25rem">
+      Shortcuts: space play/pause · Left/Right seek 5s · 1/2/3/4/5 speed 0.75/1/1.25/1.5/2x
+    </div>
+  </div>
 </div>
 
 <!-- Hover thumbnail -->
-<div id="hoverThumb" style="display:none; position: fixed; z-index:1300; padding:6px; background: var(--bg-card); border:1px solid var(--bg-secondary); border-radius:6px; box-shadow:0 8px 20px rgba(0,0,0,0.4);">
-    <div class="label" style="font-size:0.8rem; margin-bottom:4px; color: var(--text-secondary);">Preview</div>
-    <video id="hoverVideo" muted autoplay loop playsinline style="width:200px; height:120px; background:#000; border-radius:4px; object-fit:cover;"></video>
+<div
+  id="hoverThumb"
+  style="
+    display: none;
+    position: fixed;
+    z-index: 1300;
+    padding: 6px;
+    background: var(--bg-card);
+    border: 1px solid var(--bg-secondary);
+    border-radius: 6px;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+  "
+>
+  <div class="label" style="font-size: 0.8rem; margin-bottom: 4px; color: var(--text-secondary)">Preview</div>
+  <video
+    id="hoverVideo"
+    muted
+    autoplay
+    loop
+    playsinline
+    style="width: 200px; height: 120px; background: #000; border-radius: 4px; object-fit: cover"
+  ></video>
 </div>
 
 <!-- Reject Modal (Single) -->
-<div id="rejectModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000;">
-    <div style="background: var(--bg-card); padding: 2rem; border-radius: 8px; max-width: 500px; margin: 10% auto;">
-        <h3>Reject & Re-queue</h3>
-        <p class="text-muted">The encoded file will be deleted. Choose a new tier for re-encoding.</p>
+<div
+  id="rejectModal"
+  style="
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.8);
+    z-index: 1000;
+  "
+>
+  <div style="background: var(--bg-card); padding: 2rem; border-radius: 8px; max-width: 500px; margin: 10% auto">
+    <h3>Reject & Re-queue</h3>
+    <p class="text-muted">The encoded file will be deleted. Choose a new tier for re-encoding.</p>
 
-        <div style="margin: 1rem 0;">
-            <label style="display: block; margin-bottom: 0.5rem;">New Tier:</label>
-            <select id="rejectTier" style="width: 100%; padding: 0.5rem; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--text-secondary); border-radius: 4px;">
-                <option value="">Same tier (just re-queue)</option>
-                <option value="pristine">Pristine (CRF 26) - Modern, clean content</option>
-                <option value="good">Good (CRF 28) - Most HD TV</option>
-                <option value="mediocre">Mediocre (CRF 30) - Older HD, moderate grain</option>
-                <option value="poor">Poor (CRF 32) - Already compressed, heavy denoise</option>
-            </select>
-        </div>
-
-        <div style="margin: 1rem 0;">
-            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
-                <input type="checkbox" id="applyToShow">
-                <span>Apply this tier to all "<span id="showNameLabel">Show Name</span>" episodes</span>
-            </label>
-        </div>
-
-        <div style="display: flex; gap: 1rem; margin-top: 1.5rem;">
-            <button onclick="confirmReject()" class="btn btn-warning">Reject & Re-queue</button>
-            <button onclick="hideRejectModal()" class="btn btn-primary">Cancel</button>
-        </div>
+    <div style="margin: 1rem 0">
+      <label style="display: block; margin-bottom: 0.5rem">New Tier:</label>
+      <select
+        id="rejectTier"
+        aria-label="Select new tier"
+        style="
+          width: 100%;
+          padding: 0.5rem;
+          background: var(--bg-secondary);
+          color: var(--text-primary);
+          border: 1px solid var(--text-secondary);
+          border-radius: 4px;
+        "
+      >
+        <option value="">Same tier (just re-queue)</option>
+        <option value="pristine">Pristine (CRF 26) - Modern, clean content</option>
+        <option value="good">Good (CRF 28) - Most HD TV</option>
+        <option value="mediocre">Mediocre (CRF 30) - Older HD, moderate grain</option>
+        <option value="poor">Poor (CRF 32) - Already compressed, heavy denoise</option>
+      </select>
     </div>
+
+    <div style="margin: 1rem 0">
+      <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer">
+        <input type="checkbox" id="applyToShow" aria-label="Apply tier to entire show" />
+        <span>Apply this tier to all "<span id="showNameLabel">Show Name</span>" episodes</span>
+      </label>
+    </div>
+
+    <div style="display: flex; gap: 1rem; margin-top: 1.5rem">
+      <button onclick="confirmReject()" class="btn btn-warning">Reject & Re-queue</button>
+      <button onclick="hideRejectModal()" class="btn btn-primary">Cancel</button>
+    </div>
+  </div>
 </div>
 
 <!-- Bulk Reject Modal -->
-<div id="bulkRejectModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000;">
-    <div style="background: var(--bg-card); padding: 2rem; border-radius: 8px; max-width: 500px; margin: 10% auto;">
-        <h3>Bulk Reject & Re-queue</h3>
-        <p class="text-muted"><span id="bulkRejectCount">0</span> files will be rejected and re-queued.</p>
+<div
+  id="bulkRejectModal"
+  style="
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.8);
+    z-index: 1000;
+  "
+>
+  <div style="background: var(--bg-card); padding: 2rem; border-radius: 8px; max-width: 500px; margin: 10% auto">
+    <h3>Bulk Reject & Re-queue</h3>
+    <p class="text-muted"><span id="bulkRejectCount">0</span> files will be rejected and re-queued.</p>
 
-        <div style="margin: 1rem 0;">
-            <label style="display: block; margin-bottom: 0.5rem;">New Tier for all:</label>
-            <select id="bulkRejectTier" style="width: 100%; padding: 0.5rem; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--text-secondary); border-radius: 4px;">
-                <option value="">Same tier (just re-queue)</option>
-                <option value="pristine">Pristine (CRF 26) - Modern, clean content</option>
-                <option value="good">Good (CRF 28) - Most HD TV</option>
-                <option value="mediocre">Mediocre (CRF 30) - Older HD, moderate grain</option>
-                <option value="poor">Poor (CRF 32) - Already compressed, heavy denoise</option>
-            </select>
-        </div>
-
-        <div style="display: flex; gap: 1rem; margin-top: 1.5rem;">
-            <button onclick="confirmBulkReject()" class="btn btn-warning">Reject All Selected</button>
-            <button onclick="hideBulkRejectModal()" class="btn btn-primary">Cancel</button>
-        </div>
+    <div style="margin: 1rem 0">
+      <label style="display: block; margin-bottom: 0.5rem">New Tier for all:</label>
+      <select
+        id="bulkRejectTier"
+        aria-label="Select bulk reject tier"
+        style="
+          width: 100%;
+          padding: 0.5rem;
+          background: var(--bg-secondary);
+          color: var(--text-primary);
+          border: 1px solid var(--text-secondary);
+          border-radius: 4px;
+        "
+      >
+        <option value="">Same tier (just re-queue)</option>
+        <option value="pristine">Pristine (CRF 26) - Modern, clean content</option>
+        <option value="good">Good (CRF 28) - Most HD TV</option>
+        <option value="mediocre">Mediocre (CRF 30) - Older HD, moderate grain</option>
+        <option value="poor">Poor (CRF 32) - Already compressed, heavy denoise</option>
+      </select>
     </div>
+
+    <div style="display: flex; gap: 1rem; margin-top: 1.5rem">
+      <button onclick="confirmBulkReject()" class="btn btn-warning">Reject All Selected</button>
+      <button onclick="hideBulkRejectModal()" class="btn btn-primary">Cancel</button>
+    </div>
+  </div>
 </div>
-{% endblock %}
-
-{% block scripts %}
+{% endblock %} {% block scripts %}
 <script>
-let currentRejectId = null;
+  let currentRejectId = null;
 
-function getSelectedIds() {
-    return Array.from(document.querySelectorAll('.row-checkbox:checked')).map(cb => parseInt(cb.value));
-}
+  function getSelectedIds() {
+    return Array.from(document.querySelectorAll(".row-checkbox:checked")).map((cb) => parseInt(cb.value));
+  }
 
-function updateSelectedCount() {
+  function updateSelectedCount() {
     const count = getSelectedIds().length;
-    document.getElementById('selectedCount').textContent = count + ' selected';
-    document.getElementById('promoteSelectedBtn').disabled = count === 0;
-    document.getElementById('rejectSelectedBtn').disabled = count === 0;
-}
+    document.getElementById("selectedCount").textContent = count + " selected";
+    document.getElementById("promoteSelectedBtn").disabled = count === 0;
+    document.getElementById("rejectSelectedBtn").disabled = count === 0;
+  }
 
-function toggleAllMain(checkbox) {
-    const table = checkbox.closest('table');
+  function toggleAllMain(checkbox) {
+    const table = checkbox.closest("table");
     if (!table) return;
-    table.querySelectorAll('.row-checkbox').forEach(cb => {
-        cb.checked = checkbox.checked;
+    table.querySelectorAll(".row-checkbox").forEach((cb) => {
+      cb.checked = checkbox.checked;
     });
     updateSelectedCount();
-}
+  }
 
-function toggleAllOutliers(checkbox) {
-    checkbox.closest('table').querySelectorAll('.row-checkbox').forEach(cb => {
+  function toggleAllOutliers(checkbox) {
+    checkbox
+      .closest("table")
+      .querySelectorAll(".row-checkbox")
+      .forEach((cb) => {
         cb.checked = checkbox.checked;
-    });
+      });
     updateSelectedCount();
-}
+  }
 
-// Filtering
-let activeFilter = 'all';
+  // Filtering
+  let activeFilter = "all";
 
-function setFilter(filter) {
+  function setFilter(filter) {
     activeFilter = filter;
     applyFilters();
-}
+  }
 
-function applyFilters() {
-    const text = (document.getElementById('filterText')?.value || '').toLowerCase();
+  function applyFilters() {
+    const text = (document.getElementById("filterText")?.value || "").toLowerCase();
     const rows = document.querySelectorAll('tbody tr[id^="row-"]');
-    rows.forEach(row => {
-        const reduction = parseFloat(row.dataset.reduction || '0');
-        const vmaf = parseFloat(row.dataset.vmaf || '999');
-        const name = row.dataset.name || '';
-        const show = row.dataset.show || '';
+    rows.forEach((row) => {
+      const reduction = parseFloat(row.dataset.reduction || "0");
+      const vmaf = parseFloat(row.dataset.vmaf || "999");
+      const name = row.dataset.name || "";
+      const show = row.dataset.show || "";
 
-        let showRow = true;
-        if (activeFilter === 'size_increase' && reduction >= 0) showRow = false;
-        if (activeFilter === 'low_vmaf' && !(vmaf && vmaf < 85)) showRow = false;
-        if (text && !(name.includes(text) || show.includes(text))) showRow = false;
+      let showRow = true;
+      if (activeFilter === "size_increase" && reduction >= 0) showRow = false;
+      if (activeFilter === "low_vmaf" && !(vmaf && vmaf < 85)) showRow = false;
+      if (text && !(name.includes(text) || show.includes(text))) showRow = false;
 
-        row.style.display = showRow ? '' : 'none';
+      row.style.display = showRow ? "" : "none";
     });
-}
+  }
 
-async function promoteSelected() {
+  async function promoteSelected() {
     const ids = getSelectedIds();
     if (ids.length === 0) return;
     if (!confirm(`Promote ${ids.length} encodes? This will replace the original files.`)) return;
 
-    const resp = await fetch('/api/bulk-promote', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: ids })
+    const resp = await fetch("/api/bulk-promote", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: ids }),
     });
 
     const data = await resp.json();
     if (data.success) {
-        alert(`Successfully promoted ${data.promoted} files.` + (data.failed > 0 ? ` ${data.failed} failed.` : ''));
-        window.location.reload();
+      alert(`Successfully promoted ${data.promoted} files.` + (data.failed > 0 ? ` ${data.failed} failed.` : ""));
+      window.location.reload();
     } else {
-        alert('Error: ' + data.error);
+      alert("Error: " + data.error);
     }
-}
+  }
 
-async function promoteByReduction(minReduction) {
-    const rows = document.querySelectorAll('tr[data-reduction]');
+  async function promoteByReduction(minReduction) {
+    const rows = document.querySelectorAll("tr[data-reduction]");
     const ids = [];
-    rows.forEach(row => {
-        const reduction = parseFloat(row.dataset.reduction);
-        if (reduction >= minReduction) {
-            const checkbox = row.querySelector('.row-checkbox');
-            if (checkbox) ids.push(parseInt(checkbox.value));
-        }
+    rows.forEach((row) => {
+      const reduction = parseFloat(row.dataset.reduction);
+      if (reduction >= minReduction) {
+        const checkbox = row.querySelector(".row-checkbox");
+        if (checkbox) ids.push(parseInt(checkbox.value));
+      }
     });
 
     if (ids.length === 0) {
-        alert(`No files with >${minReduction}% reduction found.`);
-        return;
+      alert(`No files with >${minReduction}% reduction found.`);
+      return;
     }
 
     if (!confirm(`Promote ${ids.length} files with >${minReduction}% reduction?`)) return;
 
-    const resp = await fetch('/api/bulk-promote', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: ids })
+    const resp = await fetch("/api/bulk-promote", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: ids }),
     });
 
     const data = await resp.json();
     if (data.success) {
-        alert(`Successfully promoted ${data.promoted} files.` + (data.failed > 0 ? ` ${data.failed} failed.` : ''));
-        window.location.reload();
+      alert(`Successfully promoted ${data.promoted} files.` + (data.failed > 0 ? ` ${data.failed} failed.` : ""));
+      window.location.reload();
     } else {
-        alert('Error: ' + data.error);
+      alert("Error: " + data.error);
     }
-}
+  }
 
-function showBulkRejectModal() {
+  function showBulkRejectModal() {
     const ids = getSelectedIds();
     if (ids.length === 0) return;
-    document.getElementById('bulkRejectCount').textContent = ids.length;
-    document.getElementById('bulkRejectTier').value = '';
-    document.getElementById('bulkRejectModal').style.display = 'block';
-}
+    document.getElementById("bulkRejectCount").textContent = ids.length;
+    document.getElementById("bulkRejectTier").value = "";
+    document.getElementById("bulkRejectModal").style.display = "block";
+  }
 
-function hideBulkRejectModal() {
-    document.getElementById('bulkRejectModal').style.display = 'none';
-}
+  function hideBulkRejectModal() {
+    document.getElementById("bulkRejectModal").style.display = "none";
+  }
 
-async function confirmBulkReject() {
+  async function confirmBulkReject() {
     const ids = getSelectedIds();
     if (ids.length === 0) return;
 
-    const newTier = document.getElementById('bulkRejectTier').value;
+    const newTier = document.getElementById("bulkRejectTier").value;
 
-    const resp = await fetch('/api/bulk-reject', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: ids, new_tier: newTier || null })
+    const resp = await fetch("/api/bulk-reject", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: ids, new_tier: newTier || null }),
     });
 
     const data = await resp.json();
     if (data.success) {
-        alert(`Successfully rejected ${data.rejected} files.` + (data.failed > 0 ? ` ${data.failed} failed.` : ''));
-        window.location.reload();
+      alert(`Successfully rejected ${data.rejected} files.` + (data.failed > 0 ? ` ${data.failed} failed.` : ""));
+      window.location.reload();
     } else {
-        alert('Error: ' + data.error);
+      alert("Error: " + data.error);
     }
-}
+  }
 
-function showRejectModal(id, showName, currentTier) {
+  function showRejectModal(id, showName, currentTier) {
     currentRejectId = id;
-    document.getElementById('showNameLabel').textContent = showName || 'Unknown Show';
-    document.getElementById('rejectTier').value = '';
-    document.getElementById('applyToShow').checked = false;
+    document.getElementById("showNameLabel").textContent = showName || "Unknown Show";
+    document.getElementById("rejectTier").value = "";
+    document.getElementById("applyToShow").checked = false;
     const row = document.getElementById(`row-${id}`);
-    if (row && row.classList.contains('outlier-row')) {
-        document.getElementById('rejectTier').value = 'poor';
+    if (row && row.classList.contains("outlier-row")) {
+      document.getElementById("rejectTier").value = "poor";
     }
-    document.getElementById('rejectModal').style.display = 'block';
-}
+    document.getElementById("rejectModal").style.display = "block";
+  }
 
-function hideRejectModal() {
-    document.getElementById('rejectModal').style.display = 'none';
+  function hideRejectModal() {
+    document.getElementById("rejectModal").style.display = "none";
     currentRejectId = null;
-}
+  }
 
-async function confirmReject() {
+  async function confirmReject() {
     if (!currentRejectId) return;
 
-    const newTier = document.getElementById('rejectTier').value;
-    const applyToShow = document.getElementById('applyToShow').checked;
+    const newTier = document.getElementById("rejectTier").value;
+    const applyToShow = document.getElementById("applyToShow").checked;
 
     const resp = await fetch(`/api/reject/${currentRejectId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            new_tier: newTier || null,
-            apply_to_show: applyToShow
-        })
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        new_tier: newTier || null,
+        apply_to_show: applyToShow,
+      }),
     });
 
     const data = await resp.json();
     if (data.success) {
-        document.getElementById(`row-${currentRejectId}`).remove();
-        hideRejectModal();
-        window.location.reload();
+      document.getElementById(`row-${currentRejectId}`).remove();
+      hideRejectModal();
+      window.location.reload();
     } else {
-        alert('Error: ' + data.error);
+      alert("Error: " + data.error);
     }
-}
+  }
 
-async function promote(id) {
-    if (!confirm('Promote this encode? This will replace the original file.')) return;
-    const resp = await fetch(`/api/promote/${id}`, { method: 'POST' });
+  async function promote(id) {
+    if (!confirm("Promote this encode? This will replace the original file.")) return;
+    const resp = await fetch(`/api/promote/${id}`, { method: "POST" });
     const data = await resp.json();
     if (data.success) {
-        document.getElementById(`row-${id}`).remove();
-        updateSelectedCount();
+      document.getElementById(`row-${id}`).remove();
+      updateSelectedCount();
     } else {
-        alert('Error: ' + data.error);
+      alert("Error: " + data.error);
     }
-}
+  }
 
-// Preview modal logic
-let previewId = null;
-const previewModal = document.getElementById('previewModal');
-const previewSrc = document.getElementById('previewSource');
-const previewEnc = document.getElementById('previewEncoded');
-const previewSeek = document.getElementById('previewSeek');
-const previewTime = document.getElementById('previewTime');
-const previewToggle = document.getElementById('previewToggle');
-const hoverThumb = document.getElementById('hoverThumb');
-const hoverVideo = document.getElementById('hoverVideo');
+  async function flagQuality(evalId, evt) {
+    const reason = prompt("Why is this profile choice bad?");
+    if (!reason) return;
+    const btn = evt?.target;
+    const resp = await fetch(`/api/evaluations/${evalId}/flag`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision: "bad", reason }),
+    });
+    const data = await resp.json();
+    if (data.success) {
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = "Flagged (pending)";
+      }
+      alert("Flag submitted.");
+    } else {
+      alert("Error: " + (data.error || "failed to flag"));
+    }
+  }
 
-const SEEK_STEP = 5; // seconds
-const SPEED_MAP = { '1': 0.75, '2': 1.0, '3': 1.25, '4': 1.5, '5': 2.0 };
-let previewOpen = false;
-let previewView = 'both'; // both | source | encoded
+  // Preview modal logic
+  let previewId = null;
+  const previewModal = document.getElementById("previewModal");
+  const previewSrc = document.getElementById("previewSource");
+  const previewEnc = document.getElementById("previewEncoded");
+  const previewSeek = document.getElementById("previewSeek");
+  const previewTime = document.getElementById("previewTime");
+  const previewToggle = document.getElementById("previewToggle");
+  const hoverThumb = document.getElementById("hoverThumb");
+  const hoverVideo = document.getElementById("hoverVideo");
 
-function activeDuration() {
+  const SEEK_STEP = 5; // seconds
+  const SPEED_MAP = { 1: 0.75, 2: 1.0, 3: 1.25, 4: 1.5, 5: 2.0 };
+  let previewOpen = false;
+  let previewView = "both"; // both | source | encoded
+
+  function activeDuration() {
     const srcDur = isFinite(previewSrc.duration) ? previewSrc.duration : 0;
     const encDur = isFinite(previewEnc.duration) ? previewEnc.duration : 0;
     return Math.max(srcDur, encDur, 0);
-}
+  }
 
-function setCurrentTime(t) {
+  function setCurrentTime(t) {
     const dur = activeDuration();
     const clamped = Math.max(0, dur ? Math.min(dur, t) : t);
     if (isFinite(clamped)) {
-        previewSrc.currentTime = clamped;
-        previewEnc.currentTime = clamped;
+      previewSrc.currentTime = clamped;
+      previewEnc.currentTime = clamped;
     }
-}
+  }
 
-function setPlaybackRate(rate) {
+  function setPlaybackRate(rate) {
     previewSrc.playbackRate = rate;
     previewEnc.playbackRate = rate;
-}
+  }
 
-function formatTime(sec) {
-    if (!isFinite(sec) || sec < 0) return '0:00:00';
+  function formatTime(sec) {
+    if (!isFinite(sec) || sec < 0) return "0:00:00";
     const h = Math.floor(sec / 3600);
     const m = Math.floor((sec % 3600) / 60);
     const s = Math.floor(sec % 60);
-    return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-}
+    return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  }
 
-function openPreview(id) {
+  function openPreview(id) {
     previewId = id;
     previewSrc.src = `/video/source/${id}`;
     previewEnc.src = `/video/encoded/${id}`;
     previewSrc.load();
     previewEnc.load();
-    previewModal.style.display = 'flex';
+    previewModal.style.display = "flex";
     previewOpen = true;
-    previewView = 'both';
+    previewView = "both";
     applyPreviewView();
     setPlaybackRate(1.0);
     setCurrentTime(0);
-}
+  }
 
-function closePreview() {
-    previewModal.style.display = 'none';
+  function closePreview() {
+    previewModal.style.display = "none";
     previewSrc.pause();
     previewEnc.pause();
     previewOpen = false;
-}
+  }
 
-function syncPlay() {
-    const active = previewView === 'encoded' ? previewEnc : previewSrc;
-    const other = previewView === 'encoded' ? previewSrc : previewEnc;
+  function syncPlay() {
+    const active = previewView === "encoded" ? previewEnc : previewSrc;
+    const other = previewView === "encoded" ? previewSrc : previewEnc;
     const playTarget = active.paused && other.paused;
     if (playTarget) {
-        active.play().catch(() => {});
-        if (previewView === 'both') other.play().catch(() => {});
+      active.play().catch(() => {});
+      if (previewView === "both") other.play().catch(() => {});
     } else {
-        active.pause();
-        other.pause();
+      active.pause();
+      other.pause();
     }
-}
+  }
 
-function updatePreviewTime() {
+  function updatePreviewTime() {
     const dur = activeDuration();
-    const active = previewView === 'encoded' ? previewEnc : previewSrc;
+    const active = previewView === "encoded" ? previewEnc : previewSrc;
     const t = isFinite(active.currentTime) ? active.currentTime : 0;
     const pct = dur > 0 ? (t / dur) * 100 : 0;
     previewSeek.value = pct;
     previewTime.textContent = `${formatTime(t)} / ${formatTime(dur)}`;
-}
+  }
 
-previewSrc.addEventListener('timeupdate', () => {
+  previewSrc.addEventListener("timeupdate", () => {
     if (Math.abs(previewEnc.currentTime - previewSrc.currentTime) > 0.15) {
-        previewEnc.currentTime = previewSrc.currentTime;
+      previewEnc.currentTime = previewSrc.currentTime;
     }
     updatePreviewTime();
-});
-previewEnc.addEventListener('timeupdate', () => {
+  });
+  previewEnc.addEventListener("timeupdate", () => {
     if (Math.abs(previewEnc.currentTime - previewSrc.currentTime) > 0.15) {
-        previewSrc.currentTime = previewEnc.currentTime;
+      previewSrc.currentTime = previewEnc.currentTime;
     }
-});
-previewSrc.addEventListener('loadedmetadata', updatePreviewTime);
-previewEnc.addEventListener('loadedmetadata', updatePreviewTime);
+  });
+  previewSrc.addEventListener("loadedmetadata", updatePreviewTime);
+  previewEnc.addEventListener("loadedmetadata", updatePreviewTime);
 
-previewSeek.addEventListener('input', () => {
+  previewSeek.addEventListener("input", () => {
     const dur = activeDuration();
     const t = dur > 0 ? (previewSeek.value / 100) * dur : 0;
     setCurrentTime(t);
-});
+  });
 
-function applyPreviewView() {
-    const showSource = previewView === 'both' || previewView === 'source';
-    const showEncoded = previewView === 'both' || previewView === 'encoded';
-    previewSrc.parentElement.style.display = showSource ? '' : 'none';
-    previewEnc.parentElement.style.display = showEncoded ? '' : 'none';
+  function applyPreviewView() {
+    const showSource = previewView === "both" || previewView === "source";
+    const showEncoded = previewView === "both" || previewView === "encoded";
+    previewSrc.parentElement.style.display = showSource ? "" : "none";
+    previewEnc.parentElement.style.display = showEncoded ? "" : "none";
     previewToggle.textContent = `View: ${previewView.charAt(0).toUpperCase()}${previewView.slice(1)}`;
-}
+  }
 
-previewToggle.addEventListener('click', () => {
+  previewToggle.addEventListener("click", () => {
     const current = Math.max(
-        isFinite(previewSrc.currentTime) ? previewSrc.currentTime : 0,
-        isFinite(previewEnc.currentTime) ? previewEnc.currentTime : 0,
+      isFinite(previewSrc.currentTime) ? previewSrc.currentTime : 0,
+      isFinite(previewEnc.currentTime) ? previewEnc.currentTime : 0,
     );
     setCurrentTime(current);
-    previewView = previewView === 'both' ? 'source' : previewView === 'source' ? 'encoded' : 'both';
-    if (previewView === 'source') previewEnc.pause();
-    if (previewView === 'encoded') previewSrc.pause();
+    previewView = previewView === "both" ? "source" : previewView === "source" ? "encoded" : "both";
+    if (previewView === "source") previewEnc.pause();
+    if (previewView === "encoded") previewSrc.pause();
     applyPreviewView();
     updatePreviewTime();
-});
+  });
 
-// Clicking either video toggles play/pause in sync
-previewSrc.addEventListener('click', (e) => {
+  // Clicking either video toggles play/pause in sync
+  previewSrc.addEventListener("click", (e) => {
     e.preventDefault();
     syncPlay();
-});
-previewEnc.addEventListener('click', (e) => {
+  });
+  previewEnc.addEventListener("click", (e) => {
     e.preventDefault();
     syncPlay();
-});
+  });
 
-document.addEventListener('keydown', (e) => {
-    if (e.code === 'Escape') {
-        hideRejectModal();
-        hideBulkRejectModal();
-        if (previewOpen) closePreview();
+  document.addEventListener("keydown", (e) => {
+    if (e.code === "Escape") {
+      hideRejectModal();
+      hideBulkRejectModal();
+      if (previewOpen) closePreview();
     }
 
     if (!previewOpen) return;
 
-    if (e.code === 'Space') {
-        e.preventDefault();
-        syncPlay();
+    if (e.code === "Space") {
+      e.preventDefault();
+      syncPlay();
     }
 
-    if (e.code === 'ArrowRight') {
-        e.preventDefault();
-        const active = previewView === 'encoded' ? previewEnc : previewSrc;
-        setCurrentTime(active.currentTime + SEEK_STEP);
+    if (e.code === "ArrowRight") {
+      e.preventDefault();
+      const active = previewView === "encoded" ? previewEnc : previewSrc;
+      setCurrentTime(active.currentTime + SEEK_STEP);
     }
 
-    if (e.code === 'ArrowLeft') {
-        e.preventDefault();
-        const active = previewView === 'encoded' ? previewEnc : previewSrc;
-        setCurrentTime(active.currentTime - SEEK_STEP);
+    if (e.code === "ArrowLeft") {
+      e.preventDefault();
+      const active = previewView === "encoded" ? previewEnc : previewSrc;
+      setCurrentTime(active.currentTime - SEEK_STEP);
     }
 
     if (SPEED_MAP[e.key]) {
-        e.preventDefault();
-        setPlaybackRate(SPEED_MAP[e.key]);
+      e.preventDefault();
+      setPlaybackRate(SPEED_MAP[e.key]);
     }
-});
+  });
 
-// Hover thumbnail
-let hoverTimer = null;
-function showThumb(evt, id) {
+  // Hover thumbnail
+  let hoverTimer = null;
+  function showThumb(evt, id) {
     clearTimeout(hoverTimer);
     hoverTimer = setTimeout(() => {
-        hoverVideo.src = `/video/encoded/${id}`;
-        hoverVideo.load();
-        const rect = evt.target.getBoundingClientRect();
-        hoverThumb.style.left = `${rect.right + 12}px`;
-        hoverThumb.style.top = `${rect.top}px`;
-        hoverThumb.style.display = 'block';
+      hoverVideo.src = `/video/encoded/${id}`;
+      hoverVideo.load();
+      const rect = evt.target.getBoundingClientRect();
+      hoverThumb.style.left = `${rect.right + 12}px`;
+      hoverThumb.style.top = `${rect.top}px`;
+      hoverThumb.style.display = "block";
     }, 200);
-}
-function hideThumb() {
+  }
+  function hideThumb() {
     clearTimeout(hoverTimer);
-    hoverThumb.style.display = 'none';
+    hoverThumb.style.display = "none";
     hoverVideo.pause();
-    hoverVideo.src = '';
-}
+    hoverVideo.src = "";
+  }
 </script>
 {% endblock %}

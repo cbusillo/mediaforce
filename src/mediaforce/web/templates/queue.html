@@ -21,9 +21,14 @@
       {% if libraries %}
       <label class="text-muted" style="display: flex; gap: 0.5rem; align-items: center">
         Library:
-        <select id="library-select" style="min-width: 240px" onchange="switchLibrary(this.value)">
+        <select
+          id="library-select"
+          style="min-width: 240px"
+          aria-label="Select library"
+          onchange="switchLibrary(this.value)"
+        >
           {% for lib in libraries %}
-          <option value="{{ lib }}" {% if lib="" ="library_root" %}selected{% endif %}>{{ lib }}</option>
+          <option value="{{ lib }}" {% if lib == library_root %}selected{% endif %}>{{ lib }}</option>
           {% endfor %}
         </select>
       </label>
@@ -44,6 +49,7 @@
           id="searchBox"
           type="text"
           placeholder="Client filter"
+          aria-label="Filter by client"
           style="padding: 0.35rem 0.5rem"
           oninput="filterShows()"
           value=""
@@ -52,10 +58,11 @@
           id="serverShow"
           type="text"
           placeholder="Show contains"
+          aria-label="Filter by show name"
           style="padding: 0.35rem 0.5rem; min-width: 180px"
           value="{{ request.query_params.get('show','') }}"
         />
-        <select id="tierFilter" style="padding: 0.35rem 0.5rem">
+        <select id="tierFilter" style="padding: 0.35rem 0.5rem" aria-label="Filter by tier">
           <option value="">Any tier</option>
           <option value="pristine">pristine</option>
           <option value="good">good</option>
@@ -66,6 +73,7 @@
           id="sizeMin"
           type="text"
           placeholder="Min size (e.g. 500MB)"
+          aria-label="Minimum size"
           style="padding: 0.35rem 0.5rem; width: 150px"
           value="{{ request.query_params.get('size_min','') }}"
         />
@@ -73,6 +81,7 @@
           id="sizeMax"
           type="text"
           placeholder="Max size (e.g. 5GB)"
+          aria-label="Maximum size"
           style="padding: 0.35rem 0.5rem; width: 150px"
           value="{{ request.query_params.get('size_max','') }}"
         />
@@ -123,6 +132,17 @@
   {% endif %}
 
   <div id="tableView" style="display: {{ 'none' if request.query_params.get('view') == 'compact' else 'block' }};">
+    <div class="card" style="margin-bottom: 1rem">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem">
+        <h4 style="margin: 0">Skipped items</h4>
+        <div>
+          <button class="btn btn-sm" onclick="loadSkipped()">Refresh</button>
+        </div>
+      </div>
+      <div id="skippedContainer" class="text-muted" style="margin-top: 0.5rem">
+        Click refresh to load skipped items.
+      </div>
+    </div>
     <table id="queueTable">
       <thead>
         <tr>
@@ -680,7 +700,9 @@
                   <td>${ep.duration}</td>
                   <td>
                       <button class="btn btn-sm btn-primary" onclick="bumpEpisode(${ep.id})">Bump</button>
-                      <select class="btn" onchange="sendToWorker(${ep.id}, this.value)">
+                      <button class="btn btn-sm" onclick="pauseEpisode(${ep.id})">Pause</button>
+                      <button class="btn btn-sm" onclick="resumeEpisode(${ep.id})">Resume</button>
+                      <select class="btn" aria-label="Send episode to worker" onchange="sendToWorker(${ep.id}, this.value)">
                           <option value="">Send to…</option>
                           ${workers.map(w => `<option value="${w.machine}">${w.machine}</option>`).join('')}
                       </select>
@@ -1057,16 +1079,38 @@
 
   async function bumpEpisode(id) {
       try {
-          const resp = await fetch('/api/bump', {
+          const resp = await fetch(`/api/queue/${id}/bump`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ id })
+              body: JSON.stringify({ delta: 1 })
           });
           const data = await resp.json();
           if (!data.success) throw new Error(data.error || 'Unknown error');
           showToast(`Bumped item ${id}`);
       } catch (e) {
           alert('Bump failed: ' + e.message);
+      }
+  }
+
+  async function pauseEpisode(id) {
+      try {
+          const resp = await fetch(`/api/queue/${id}/pause`, { method: 'POST' });
+          const data = await resp.json();
+          if (!data.success) throw new Error(data.error || 'Unknown error');
+          showToast(`Paused ${id}`);
+      } catch (e) {
+          alert('Pause failed: ' + e.message);
+      }
+  }
+
+  async function resumeEpisode(id) {
+      try {
+          const resp = await fetch(`/api/queue/${id}/resume`, { method: 'POST' });
+          const data = await resp.json();
+          if (!data.success) throw new Error(data.error || 'Unknown error');
+          showToast(`Resumed ${id}`);
+      } catch (e) {
+          alert('Resume failed: ' + e.message);
       }
   }
 
@@ -1084,6 +1128,50 @@
       } catch (e) {
           alert('Send failed: ' + e.message);
       }
+  }
+
+  async function loadSkipped() {
+      const container = document.getElementById('skippedContainer');
+      if (!container) return;
+      container.textContent = 'Loading skipped items...';
+      try {
+          const resp = await fetch('/api/queue/skipped');
+          const data = await resp.json();
+          if (!data.success) throw new Error(data.error || 'Unknown error');
+          if (!data.items.length) {
+              container.textContent = 'No skipped items';
+              return;
+          }
+          const rows = data.items.map(it => `
+            <tr>
+              <td>${it.id}</td>
+              <td class="truncate" title="${escapeHtml(it.path)}">${escapeHtml(it.path)}</td>
+              <td>${escapeHtml(it.skip_reason || '-') }</td>
+              <td>${it.updated_at || '-'}</td>
+              <td>
+                <button class="btn btn-sm" onclick="forceRescan(${it.id})">Force Rescan</button>
+                <button class="btn btn-sm" onclick="resetSkip(${it.id})">Reset</button>
+              </td>
+            </tr>
+          `).join('');
+          container.innerHTML = `<div class="nested-table-wrapper"><table class="nested-table"><thead><tr><th>ID</th><th>Path</th><th>Reason</th><th>Updated</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      } catch (e) {
+          container.textContent = 'Failed to load skipped items: ' + e.message;
+      }
+  }
+
+  async function forceRescan(id) {
+      const resp = await fetch(`/api/queue/${id}/force-rescan`, { method: 'POST' });
+      const data = await resp.json();
+      showToast(data.success ? 'Re-queued' : 'Error: ' + (data.error || 'unknown'));
+      loadSkipped();
+  }
+
+  async function resetSkip(id) {
+      const resp = await fetch(`/api/queue/${id}/reset-skip`, { method: 'POST' });
+      const data = await resp.json();
+      showToast(data.success ? 'Skip reset' : 'Error: ' + (data.error || 'unknown'));
+      loadSkipped();
   }
 
   function openSendModal(worker) {

@@ -15,8 +15,9 @@ values that change (versions, hostnames, mounts).
 - `src/mediaforce/core.py` — main CLI logic (scanner/queue/encode/watch).
 - `src/mediaforce/web/app.py` — FastAPI web UI; templates in `src/mediaforce/web/templates/`.
 - `src/mediaforce/db/models.py` — SQLModel models + settings/storage helpers.
+- `src/mediaforce/config/` — shared runtime helpers: `settings.py` (AppSettings, engine bootstrap) and `logging.py` (structured JSON stdout + optional JSONL file sink via `MEDIAFORCE_LOG_FILE`).
 - `src/mediaforce/cli/main.py` — console shim (`mediaforce` entrypoint).
-- Placeholder packages `services/`, `domain/`, `config/` exist for ongoing extraction from `core.py`.
+- Placeholder packages `services/`, `domain/` exist for ongoing extraction from `core.py`.
 
 ## Operational Guardrails
 
@@ -43,7 +44,8 @@ values that change (versions, hostnames, mounts).
 - Prefer `apply_patch` for edits; preserve history with `git mv` when relocating files.
 - Run focused tests for the area you touch (add `tests/` as it appears). If no tests exist, add minimal coverage near
   the change.
-- Logging: avoid `print`; use the structured logging helpers in `core.py` (`log_info`, `log_warn`, `log_error`).
+- Logging: avoid `print`; use structured logging helpers from `config/logging.py` (`log_info`, `log_warn`, `log_error`). Configure via env: `MEDIAFORCE_LOG_LEVEL` (default INFO), optional `MEDIAFORCE_LOG_FILE=/path/to/mediaforce.jsonl`.
+- Python version baseline is modern; avoid adding `from __future__` imports in new code.
 
 ## Future-Proofing
 
