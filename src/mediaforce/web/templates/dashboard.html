@@ -176,6 +176,11 @@
     {% endfor %}
   </div>
 </div>
+
+<div id="hoverThumb" class="hover-preview hidden">
+  <div class="hover-preview__label">Preview</div>
+  <video id="hoverVideo" muted autoplay loop playsinline class="hover-preview__video"></video>
+</div>
 {% endblock %} {% block scripts %}
 <script>
   if (window.location.pathname === '/') {
@@ -327,6 +332,34 @@
       refreshActive();
       setInterval(refreshActive, 3000);
       setInterval(refreshWorkers, 8000);
+  }
+
+  // Hover thumbnail for recent completions
+  const dashHoverThumb = document.getElementById('hoverThumb');
+  const dashHoverVideo = document.getElementById('hoverVideo');
+  let dashHoverTimer = null;
+  const dashToggleEl = (el, show) => {
+    if (!el) return;
+    el.classList.toggle('hidden', !show);
+  };
+  function showThumb(evt, id) {
+    clearTimeout(dashHoverTimer);
+    dashHoverTimer = setTimeout(() => {
+      const target = evt.currentTarget || evt.target;
+      if (!target?.getBoundingClientRect) return;
+      dashHoverVideo.src = `/video/encoded/${id}`;
+      dashHoverVideo.load();
+      const rect = target.getBoundingClientRect();
+      dashHoverThumb.style.left = `${Math.min(rect.right + 12, window.innerWidth - 240)}px`;
+      dashHoverThumb.style.top = `${rect.top}px`;
+      dashToggleEl(dashHoverThumb, true);
+    }, 150);
+  }
+  function hideThumb() {
+    clearTimeout(dashHoverTimer);
+    dashToggleEl(dashHoverThumb, false);
+    dashHoverVideo.pause();
+    dashHoverVideo.src = '';
   }
 </script>
 {% endblock %}

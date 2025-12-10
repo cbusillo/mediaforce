@@ -711,7 +711,14 @@ async def dashboard(request: Request):
 
         # Recent completions (last 10)
         recent_rows = session.exec(
-            select(MediaItem.path, MediaItem.size_bytes, EncodeResult.output_size_bytes, EncodeResult.completed_at, MediaItem.detected_tier)
+            select(
+                MediaItem.path,
+                MediaItem.size_bytes,
+                EncodeResult.output_size_bytes,
+                EncodeResult.completed_at,
+                MediaItem.detected_tier,
+                EncodeResult.id,
+            )
             .join(EncodeResult, EncodeResult.source_id == MediaItem.id)
             .where(EncodeResult.output_size_bytes.is_not(None), EncodeResult.output_size_bytes > 0)  # type: ignore[attr-defined]
             .order_by(EncodeResult.completed_at.desc())  # type: ignore[attr-defined]
@@ -719,11 +726,12 @@ async def dashboard(request: Request):
         ).all()
         recent_completions = []
         for row in recent_rows:
-            path, size_bytes, out_bytes, completed_at, tier = row
+            path, size_bytes, out_bytes, completed_at, tier, encode_id = row
             reduction = 0
             if size_bytes and out_bytes:
                 reduction = int((1 - out_bytes / size_bytes) * 100)
             recent_completions.append({
+                "id": encode_id,
                 "path": path,
                 "filename": pathlib.Path(path).name,
                 "source_size": format_size(size_bytes),
