@@ -688,9 +688,11 @@
   function showThumb(evt, id) {
     clearTimeout(hoverTimer);
     hoverTimer = setTimeout(() => {
+      const target = evt.currentTarget || evt.target;
+      if (!target?.getBoundingClientRect) return;
       hoverVideo.src = `/video/encoded/${id}`;
       hoverVideo.load();
-      const rect = evt.target.getBoundingClientRect();
+      const rect = target.getBoundingClientRect();
       hoverThumb.style.left = `${rect.right + 12}px`;
       hoverThumb.style.top = `${rect.top}px`;
       toggleEl(hoverThumb, true);
