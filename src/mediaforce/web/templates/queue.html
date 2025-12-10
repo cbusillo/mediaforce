@@ -178,10 +178,9 @@
           </tr>
           <!-- Placeholder for seasons (inserted dynamically) -->
           <tr
-            class="seasons-container"
+            class="seasons-container hidden"
             id="seasons-{{ loop.index }}"
             data-show="{{ show.show_name }}"
-            style="display: none"
           >
             <td colspan="8" class="nested-container">
               <div class="loading">Loading seasons...</div>
@@ -233,201 +232,6 @@
     </div>
   </div>
 
-<style>
-  .show-row {
-    cursor: pointer;
-  }
-
-  .show-row:hover {
-    background: var(--bg-secondary) !important;
-  }
-
-  .expand-icon {
-    cursor: pointer;
-    display: inline-block;
-    transition: transform 0.2s;
-    font-size: 0.8rem;
-    color: var(--text-secondary);
-  }
-
-  .expand-icon.expanded {
-    transform: rotate(90deg);
-  }
-
-  .expand-icon:hover {
-    color: var(--accent);
-  }
-
-  .nested-container {
-    padding: 0 !important;
-    background: var(--bg-secondary) !important;
-  }
-
-  .nested-table-wrapper {
-    padding: 0.5rem 0.5rem 0.5rem 2rem;
-  }
-
-  .nested-table {
-    width: 100%;
-    border-collapse: collapse;
-    margin: 0;
-  }
-
-  .nested-table th,
-  .nested-table td {
-    padding: 0.5rem 0.75rem;
-    text-align: left;
-    border-bottom: 1px solid var(--bg-primary);
-  }
-
-  .card-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-    gap: 0.75rem;
-  }
-
-  .mini-card {
-    background: var(--bg-secondary);
-    border: 1px solid var(--bg-primary);
-    border-radius: 8px;
-    padding: 0.75rem;
-  }
-
-  .nested-table th {
-    color: var(--text-secondary);
-    font-weight: 500;
-    text-transform: uppercase;
-    font-size: 0.75rem;
-  }
-
-  .season-row {
-    cursor: pointer;
-    background: var(--bg-card);
-  }
-
-  .season-row:hover {
-    background: var(--bg-primary) !important;
-  }
-
-  .episode-row {
-    cursor: pointer;
-    background: var(--bg-secondary);
-  }
-
-  .episode-row:hover {
-    background: var(--bg-primary) !important;
-  }
-
-  .loading {
-    padding: 1rem 2rem;
-    color: var(--text-secondary);
-    font-style: italic;
-  }
-
-  .toast {
-    position: fixed;
-    top: 16px;
-    right: 16px;
-    background: var(--bg-secondary);
-    border: 1px solid var(--accent);
-    color: var(--text-primary);
-    padding: 0.75rem 1rem;
-    border-radius: 6px;
-    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
-    z-index: 9999;
-    transition: opacity 0.2s ease;
-  }
-  .toast.success {
-    border-color: #4caf50;
-  }
-  .toast.error {
-    border-color: #f44336;
-  }
-
-  .episode-details {
-    padding: 1rem;
-    background: var(--bg-primary);
-    margin: 0.5rem 0;
-    border-radius: 4px;
-  }
-
-  .detail-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 1.5rem;
-    margin-bottom: 1rem;
-  }
-
-  .detail-section h4 {
-    margin: 0 0 0.5rem 0;
-    color: var(--accent);
-    font-size: 0.85rem;
-    text-transform: uppercase;
-  }
-
-  .detail-item {
-    display: flex;
-    gap: 0.5rem;
-    margin-bottom: 0.25rem;
-    font-size: 0.85rem;
-  }
-
-  .detail-label {
-    color: var(--text-secondary);
-    min-width: 80px;
-  }
-
-  .detail-full-width {
-    grid-column: 1 / -1;
-  }
-
-  .tier-reasoning {
-    font-style: italic;
-    font-size: 0.8rem;
-  }
-
-  .detail-path {
-    font-size: 0.8rem;
-    padding-top: 0.5rem;
-    border-top: 1px solid var(--bg-secondary);
-  }
-
-  .detail-path code {
-    background: var(--bg-secondary);
-    padding: 0.25rem 0.5rem;
-    border-radius: 4px;
-    font-size: 0.75rem;
-    word-break: break-all;
-  }
-
-  .indent-1 {
-    padding-left: 1.5rem !important;
-  }
-
-  .indent-2 {
-    padding-left: 3rem !important;
-  }
-
-  .sortable {
-    cursor: pointer;
-  }
-
-  .sortable::after {
-    content: " \25BE";
-    color: var(--text-secondary);
-    font-size: 0.75rem;
-  }
-
-  .sortable.sorted-asc::after {
-    content: " \25B4";
-    color: var(--accent);
-  }
-
-  .sortable.sorted-desc::after {
-    content: " \25BE";
-    color: var(--accent);
-  }
-</style>
 {% endblock %} {% block scripts %}
 <script>
   const loadedShows = {};
@@ -512,12 +316,12 @@
       const icon = row.querySelector('.expand-icon');
       const seasonsRow = row.nextElementSibling;
 
-      if (seasonsRow.style.display === 'none') {
-          seasonsRow.style.display = 'table-row';
+      if (seasonsRow.classList.contains('hidden')) {
+          seasonsRow.classList.remove('hidden');
           icon.classList.add('expanded');
           loadSeasons(showName, seasonsRow);
       } else {
-          seasonsRow.style.display = 'none';
+          seasonsRow.classList.add('hidden');
           icon.classList.remove('expanded');
       }
   }
@@ -542,7 +346,7 @@
               const episodesRow = container.querySelector('.episodes-container');
               if (seasonRow && episodesRow) {
                   seasonRow.querySelector('.expand-icon')?.classList.add('expanded');
-                  episodesRow.style.display = 'table-row';
+                  episodesRow.classList.remove('hidden');
                   loadEpisodes(showName, seasonName, episodesRow, true);
               }
           }
@@ -582,7 +386,7 @@
                   <td class="text-success">${season.total_savings}</td>
                   <td>${season.max_priority.toFixed(3)}</td>
               </tr>
-              <tr class="episodes-container" id="episodes-${idx}" data-show="${escapeHtml(showName)}" data-season="${escapeHtml(season.season_name)}" style="display: none;">
+              <tr class="episodes-container hidden" id="episodes-${idx}" data-show="${escapeHtml(showName)}" data-season="${escapeHtml(season.season_name)}">
                   <td colspan="6" class="nested-container">
                       <div class="loading">Loading episodes...</div>
                   </td>
@@ -604,12 +408,12 @@
       const icon = row.querySelector('.expand-icon');
       const episodesRow = row.nextElementSibling;
 
-      if (episodesRow.style.display === 'none') {
-          episodesRow.style.display = 'table-row';
+      if (episodesRow.classList.contains('hidden')) {
+          episodesRow.classList.remove('hidden');
           icon.classList.add('expanded');
           loadEpisodes(showName, seasonName, episodesRow);
       } else {
-          episodesRow.style.display = 'none';
+          episodesRow.classList.add('hidden');
           icon.classList.remove('expanded');
       }
   }
@@ -687,7 +491,7 @@
                       </select>
                   </td>
               </tr>
-              <tr class="episode-details-row" id="ep-details-${ep.id}" style="display: none;">
+              <tr class="episode-details-row hidden" id="ep-details-${ep.id}">
                   <td colspan="8" class="nested-container">
                       ${renderEpisodeDetails(ep)}
                   </td>
@@ -737,7 +541,7 @@
           </div>`;
       }
 
-      html += `<div class="detail-item" style="margin-top:0.5rem;">
+      html += `<div class="detail-item mt-2">
           <button class="btn btn-sm btn-primary" onclick="bumpEpisode(${ep.id})">Bump to Front</button>
       </div>`;
 
@@ -810,10 +614,13 @@
       if (!toast) return;
       toast.textContent = message;
       toast.className = `toast ${success ? 'success' : 'error'}`;
-      toast.style.display = 'block';
-      toast.style.opacity = '1';
-      setTimeout(() => { toast.style.opacity = '0'; }, 1800);
-      setTimeout(() => { toast.style.display = 'none'; }, 2200);
+      toast.classList.remove('hidden', 'opacity-0');
+      toast.classList.add('animate-fade-in');
+      setTimeout(() => { toast.classList.add('opacity-0'); }, 1800);
+      setTimeout(() => {
+          toast.classList.add('hidden');
+          toast.classList.remove('opacity-0', 'animate-fade-in');
+      }, 2200);
   }
 
   function toggleEpisodeDetails(id, event) {
@@ -822,11 +629,11 @@
       const icon = row.querySelector('.expand-icon');
       const detailsRow = document.getElementById(`ep-details-${id}`);
 
-      if (detailsRow.style.display === 'none') {
-          detailsRow.style.display = 'table-row';
+      if (detailsRow.classList.contains('hidden')) {
+          detailsRow.classList.remove('hidden');
           icon.classList.add('expanded');
       } else {
-          detailsRow.style.display = 'none';
+          detailsRow.classList.add('hidden');
           icon.classList.remove('expanded');
       }
   }
@@ -844,8 +651,8 @@
           const seasonsRow = row.nextElementSibling;
           const showName = row.dataset.show;
 
-          if (seasonsRow.style.display === 'none') {
-              seasonsRow.style.display = 'table-row';
+          if (seasonsRow.classList.contains('hidden')) {
+              seasonsRow.classList.remove('hidden');
               icon.classList.add('expanded');
               loadSeasons(showName, seasonsRow);
           }
@@ -854,7 +661,7 @@
 
   function collapseAll() {
       document.querySelectorAll('.seasons-container, .episodes-container, .episode-details-row').forEach(row => {
-          row.style.display = 'none';
+          row.classList.add('hidden');
       });
       document.querySelectorAll('.expand-icon').forEach(icon => {
           icon.classList.remove('expanded');
@@ -974,7 +781,7 @@
   }
 
   function switchToTableIfNeeded() {
-      if (document.getElementById('tableView').style.display === 'none') {
+      if (document.getElementById('tableView').classList.contains('hidden')) {
           const url = new URL(window.location.href);
           url.searchParams.set('view', 'table');
           window.location.href = url.toString();
@@ -987,17 +794,17 @@
       document.querySelectorAll('.show-row').forEach(row => {
           const name = (row.dataset.name || '').toLowerCase();
           const match = !term || name.includes(term);
-          row.style.display = match ? '' : 'none';
+          row.classList.toggle('hidden', !match);
           const seasonsRow = row.nextElementSibling;
           if (seasonsRow && seasonsRow.classList.contains('seasons-container')) {
-              seasonsRow.style.display = match ? seasonsRow.style.display : 'none';
+              seasonsRow.classList.toggle('hidden', !match);
           }
       });
       // Cards
       document.querySelectorAll('.show-card').forEach(card => {
           const name = (card.dataset.name || '').toLowerCase();
           const match = !term || name.includes(term);
-          card.style.display = match ? '' : 'none';
+          card.classList.toggle('hidden', !match);
       });
   }
 
@@ -1157,15 +964,6 @@
       const targetId = prompt(`Send which item id to ${worker}?`);
       if (!targetId) return;
       sendToWorker(parseInt(targetId, 10), worker);
-  }
-
-  function showToast(msg) {
-      const toast = document.getElementById('toast');
-      if (!toast) return alert(msg);
-      toast.textContent = msg;
-      toast.className = 'toast success';
-      toast.style.display = 'block';
-      setTimeout(() => toast.style.display = 'none', 2000);
   }
 </script>
 {% endblock %}
