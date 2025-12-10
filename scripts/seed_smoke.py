@@ -90,13 +90,18 @@ def main() -> None:
     now = datetime.now().isoformat()
 
     with Session(engine) as session:
-        # Clear previous sample rows so the script is idempotent.
+        # Remove prior seeded rows for idempotency.
         session.exec(
-            text("DELETE FROM encode_results WHERE source_path = :path OR output_path = :path").bindparams(
-                path=str(sample)
+            text(
+                "DELETE FROM encode_results WHERE source_path IN (:sample, :encoded) "
+                "OR output_path IN (:sample, :encoded)"
+            ).bindparams(sample=str(sample), encoded=str(encoded))
+        )
+        session.exec(
+            text("DELETE FROM media_inventory WHERE path IN (:sample, :encoded)").bindparams(
+                sample=str(sample), encoded=str(encoded)
             )
         )
-        session.exec(text("DELETE FROM media_inventory WHERE path = :path").bindparams(path=str(sample)))
         session.commit()
 
         # Pending encode (review/compare)
