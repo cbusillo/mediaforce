@@ -168,7 +168,6 @@
           {% else %} {{ encode.vmaf or '-' }} {% endif %}
         </td>
         <td>
-          <button onclick="openPreview({{ encode.id }})" class="btn btn-sm btn-primary">Preview</button>
           <a href="/compare/{{ encode.id }}" class="btn btn-sm btn-success">Compare</a>
           <button onclick="promote({{ encode.id }})" class="btn btn-sm btn-success">Promote</button>
           <button
@@ -197,35 +196,6 @@
       {% endfor %}
     </tbody>
   </table>
-</div>
-
-<!-- Preview Modal -->
-<div id="previewModal" class="modal-overlay hidden">
-  <div class="modal-card max-w-4xl">
-    <div class="flex justify-between items-center mb-2">
-      <h3 class="m-0 text-lg font-semibold">Quick Preview</h3>
-      <button onclick="closePreview()" class="btn btn-warning">Close</button>
-    </div>
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
-      <div>
-        <div class="py-1 px-2 bg-surface-subtle text-xs">Source</div>
-        <video id="previewSource" controls preload="metadata" playsinline class="w-full bg-black rounded-md"></video>
-      </div>
-      <div>
-        <div class="py-1 px-2 bg-surface-subtle text-xs">Encoded</div>
-        <video id="previewEncoded" controls preload="metadata" playsinline class="w-full bg-black rounded-md"></video>
-      </div>
-    </div>
-    <div class="mt-2 flex gap-2 items-center">
-      <button class="btn btn-primary" onclick="syncPlay()">Play/Pause Both</button>
-      <button class="btn" id="previewToggle">View: Both</button>
-      <input type="range" id="previewSeek" min="0" max="100" value="0" class="flex-1" aria-label="Preview seek" />
-      <span id="previewTime" class="text-foreground-muted min-w-[140px] text-right text-sm">0:00:00 / 0:00:00</span>
-    </div>
-    <div class="text-foreground-muted text-xs mt-1">
-      Shortcuts: space play/pause · Left/Right seek 5s · 1/2/3/4/5 speed 0.75/1/1.25/1.5/2x
-    </div>
-  </div>
 </div>
 
 <!-- Hover thumbnail -->

@@ -1640,10 +1640,6 @@ input[type="text"]::placeholder,
   margin-bottom: 1.5rem;
 }
 
-.mt-1 {
-  margin-top: 0.25rem;
-}
-
 .mt-2 {
   margin-top: 0.5rem;
 }
@@ -1742,10 +1738,6 @@ input[type="text"]::placeholder,
 
 .min-w-\[260px\] {
   min-width: 260px;
-}
-
-.max-w-4xl {
-  max-width: 56rem;
 }
 
 .max-w-6xl {
@@ -2020,10 +2012,6 @@ input[type="text"]::placeholder,
 
 .text-center {
   text-align: center;
-}
-
-.text-right {
-  text-align: right;
 }
 
 .indent-1 {
