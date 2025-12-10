@@ -29,6 +29,11 @@
   .card { @apply bg-surface-card border border-surface-subtle rounded-lg p-4 space-y-3; }
   .btn-accent { @apply bg-accent text-white border-none hover:bg-accent-hover; }
   .btn-ghost { @apply border border-foreground-muted text-foreground hover:text-accent hover:border-accent; }
+  .btn-primary { @apply bg-accent text-white border-none hover:bg-accent-hover; }
+  .btn-success { @apply bg-success text-white border-none hover:bg-success/90; }
+  .btn-warning { @apply bg-warning text-foreground border-none hover:bg-warning/90; }
+  .btn-danger { @apply bg-red-600 text-white border-none hover:bg-red-700; }
+  .btn-sm { @apply text-xs px-2 py-1; }
   .table-zebra tr:nth-child(even) { @apply bg-surface-subtle/60; }
   .form-label { @apply text-sm font-medium text-foreground-muted; }
   .form-input { @apply px-3 py-2 text-sm rounded-md border border-surface-subtle bg-surface-card text-foreground placeholder:text-foreground-muted outline-none; }

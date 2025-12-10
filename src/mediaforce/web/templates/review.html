@@ -1,27 +1,24 @@
 {% extends "base.html" %} {% block content %}
-<h1>Review Pending Encodes</h1>
-
-<p class="text-muted" style="margin-bottom: 1rem">
-  These encodes are waiting in the transcode folder. Review and promote or reject them.
-</p>
+<div class="flex items-center justify-between mb-4">
+  <div>
+    <h1 class="text-3xl font-semibold">Review Pending Encodes</h1>
+    <p class="text-foreground-muted text-sm">These encodes are waiting in the transcode folder. Review and promote or reject them.</p>
+  </div>
+</div>
 
 <!-- Bulk Actions Bar -->
-<div class="card" style="margin-bottom: 1rem">
-  <div style="display: flex; flex-wrap: wrap; gap: 1rem; align-items: center">
-    <span id="selectedCount" class="text-muted">0 selected</span>
-    <button onclick="promoteSelected()" class="btn btn-success" id="promoteSelectedBtn" disabled>
-      Promote Selected
-    </button>
-    <button onclick="showBulkRejectModal()" class="btn btn-warning" id="rejectSelectedBtn" disabled>
-      Reject Selected
-    </button>
-    <span style="border-left: 1px solid var(--text-secondary); height: 24px; margin: 0 0.5rem"></span>
-    <span class="text-muted">Quick Actions:</span>
+<div class="card mb-4">
+  <div class="flex flex-wrap gap-4 items-center">
+    <span id="selectedCount" class="text-foreground-muted">0 selected</span>
+    <button onclick="promoteSelected()" class="btn btn-success" id="promoteSelectedBtn" disabled>Promote Selected</button>
+    <button onclick="showBulkRejectModal()" class="btn btn-warning" id="rejectSelectedBtn" disabled>Reject Selected</button>
+    <span class="border-l border-foreground-muted h-6 mx-2"></span>
+    <span class="text-foreground-muted">Quick Actions:</span>
     <button onclick="promoteByReduction(10)" class="btn btn-sm btn-primary">Promote &gt;10% reduction</button>
     <button onclick="promoteByReduction(20)" class="btn btn-sm btn-primary">Promote &gt;20% reduction</button>
     <button onclick="promoteByReduction(30)" class="btn btn-sm btn-primary">Promote &gt;30% reduction</button>
-    <span style="border-left: 1px solid var(--text-secondary); height: 24px; margin: 0 0.5rem"></span>
-    <span class="text-muted">Filters:</span>
+    <span class="border-l border-foreground-muted h-6 mx-2"></span>
+    <span class="text-foreground-muted">Filters:</span>
     <button class="btn btn-sm btn-primary" onclick="setFilter('all')">All</button>
     <button class="btn btn-sm btn-primary" onclick="setFilter('size_increase')">Size Increases</button>
     <button class="btn btn-sm btn-primary" onclick="setFilter('low_vmaf')">Low VMAF (&lt;85)</button>
@@ -30,23 +27,23 @@
       type="text"
       placeholder="Search file/show"
       aria-label="Filter encodes"
-      style="padding: 0.35rem 0.5rem; min-width: 200px"
+      class="form-input min-w-[200px]"
       oninput="applyFilters()"
     />
   </div>
 </div>
 
 {% set outliers = encodes | selectattr('reduction_pct', 'lt', 0) | list %} {% if outliers %}
-<div class="card" style="border: 2px solid var(--warning)">
-  <h3 style="color: var(--warning)">Size Increases ({{ outliers|length }})</h3>
-  <p class="text-muted" style="margin-bottom: 1rem">
+<div class="card border-2 border-warning">
+  <h3 class="text-warning">Size Increases ({{ outliers|length }})</h3>
+  <p class="text-foreground-muted mb-4">
     These files got BIGGER after encoding. Consider rejecting with a different tier (e.g., "poor" for already-compressed
     sources).
   </p>
-  <table>
+  <table class="table-zebra">
     <thead>
       <tr>
-        <th style="width: 30px">
+        <th class="w-[30px]">
           <input type="checkbox" aria-label="Select all size increase rows" onchange="toggleAllOutliers(this)" />
         </th>
         <th>File</th>
@@ -74,7 +71,7 @@
         <td>{{ encode.show_name or '-' }}</td>
         <td>{{ encode.source_size }}</td>
         <td>{{ encode.output_size }}</td>
-        <td class="text-danger">+{{ encode.size_increase_pct }}%</td>
+        <td class="text-warning">+{{ encode.size_increase_pct }}%</td>
         <td class="tier-{{ encode.tier }}">{{ encode.tier }}</td>
         <td>
           <a href="/compare/{{ encode.id }}" class="btn btn-sm btn-primary">Compare</a>
@@ -93,13 +90,13 @@
 {% endif %}
 
 <div class="card">
-  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem">
-    <h3 style="margin: 0">Pending Review ({{ encodes|length }})</h3>
+  <div class="section-heading">
+    <h3 class="section-title">Pending Review ({{ encodes|length }})</h3>
   </div>
-  <table>
+  <table class="table-zebra">
     <thead>
       <tr>
-        <th style="width: 30px">
+        <th class="w-[30px]">
           <input
             type="checkbox"
             id="selectAllMain"
@@ -158,7 +155,7 @@
             med {{ '%.1f'|format(encode.eval_median) }} · min {{ '%.1f'|format(encode.eval_min or 0) }}{% if
             encode.eval_weighted %} · w {{ '%.1f'|format(encode.eval_weighted) }}{% endif %}
           </div>
-          <div class="text-muted" style="font-size: 0.85rem">
+          <div class="text-foreground-muted text-xs">
             thr {{ encode.eval_thresh_min or '-' }}/{{ encode.eval_thresh_med or '-' }}/{{ encode.eval_thresh_max or '-'
             }}
           </div>
@@ -208,50 +205,30 @@
     align-items: center;
     justify-content: center;
   "
+  class="modal-overlay"
 >
-  <div
-    style="
-      background: var(--bg-card);
-      padding: 1rem;
-      border-radius: 10px;
-      max-width: 960px;
-      width: 95%;
-      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
-    "
-  >
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem">
-      <h3 style="margin: 0">Quick Preview</h3>
+  <div class="modal-card max-w-4xl">
+    <div class="flex justify-between items-center mb-2">
+      <h3 class="m-0 text-lg font-semibold">Quick Preview</h3>
       <button onclick="closePreview()" class="btn btn-warning">Close</button>
     </div>
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem">
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
       <div>
-        <div class="label" style="padding: 0.25rem 0.5rem; background: var(--bg-secondary)">Source</div>
-        <video
-          id="previewSource"
-          controls
-          preload="metadata"
-          style="width: 100%; background: #000; border-radius: 6px"
-          playsinline
-        ></video>
+        <div class="py-1 px-2 bg-surface-subtle text-xs">Source</div>
+        <video id="previewSource" controls preload="metadata" playsinline class="w-full bg-black rounded-md"></video>
       </div>
       <div>
-        <div class="label" style="padding: 0.25rem 0.5rem; background: var(--bg-secondary)">Encoded</div>
-        <video
-          id="previewEncoded"
-          controls
-          preload="metadata"
-          style="width: 100%; background: #000; border-radius: 6px"
-          playsinline
-        ></video>
+        <div class="py-1 px-2 bg-surface-subtle text-xs">Encoded</div>
+        <video id="previewEncoded" controls preload="metadata" playsinline class="w-full bg-black rounded-md"></video>
       </div>
     </div>
-    <div style="margin-top: 0.5rem; display: flex; gap: 0.5rem; align-items: center">
+    <div class="mt-2 flex gap-2 items-center">
       <button class="btn btn-primary" onclick="syncPlay()">Play/Pause Both</button>
       <button class="btn" id="previewToggle">View: Both</button>
-      <input type="range" id="previewSeek" min="0" max="100" value="0" style="flex: 1" aria-label="Preview seek" />
-      <span id="previewTime" class="text-muted" style="min-width: 140px; text-align: right">0:00:00 / 0:00:00</span>
+      <input type="range" id="previewSeek" min="0" max="100" value="0" class="flex-1" aria-label="Preview seek" />
+      <span id="previewTime" class="text-foreground-muted min-w-[140px] text-right text-sm">0:00:00 / 0:00:00</span>
     </div>
-    <div class="text-muted" style="font-size: 0.85rem; margin-top: 0.25rem">
+    <div class="text-foreground-muted text-xs mt-1">
       Shortcuts: space play/pause · Left/Right seek 5s · 1/2/3/4/5 speed 0.75/1/1.25/1.5/2x
     </div>
   </div>
@@ -271,14 +248,14 @@
     box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
   "
 >
-  <div class="label" style="font-size: 0.8rem; margin-bottom: 4px; color: var(--text-secondary)">Preview</div>
+  <div class="text-xs mb-1 text-foreground-muted">Preview</div>
   <video
     id="hoverVideo"
     muted
     autoplay
     loop
     playsinline
-    style="width: 200px; height: 120px; background: #000; border-radius: 4px; object-fit: cover"
+    class="w-[200px] h-[120px] bg-black rounded object-cover"
   ></video>
 </div>
 
@@ -295,24 +272,18 @@
     background: rgba(0, 0, 0, 0.8);
     z-index: 1000;
   "
+  class="modal-overlay"
 >
-  <div style="background: var(--bg-card); padding: 2rem; border-radius: 8px; max-width: 500px; margin: 10% auto">
+  <div class="modal-card max-w-lg mx-auto mt-[10%]">
     <h3>Reject & Re-queue</h3>
-    <p class="text-muted">The encoded file will be deleted. Choose a new tier for re-encoding.</p>
+    <p class="text-foreground-muted">The encoded file will be deleted. Choose a new tier for re-encoding.</p>
 
-    <div style="margin: 1rem 0">
-      <label style="display: block; margin-bottom: 0.5rem">New Tier:</label>
+    <div class="my-4">
+      <label class="block mb-2 form-label">New Tier:</label>
       <select
         id="rejectTier"
         aria-label="Select new tier"
-        style="
-          width: 100%;
-          padding: 0.5rem;
-          background: var(--bg-secondary);
-          color: var(--text-primary);
-          border: 1px solid var(--text-secondary);
-          border-radius: 4px;
-        "
+        class="form-select w-full"
       >
         <option value="">Same tier (just re-queue)</option>
         <option value="pristine">Pristine (CRF 26) - Modern, clean content</option>
@@ -322,16 +293,16 @@
       </select>
     </div>
 
-    <div style="margin: 1rem 0">
-      <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer">
+    <div class="my-4">
+      <label class="flex items-center gap-2 cursor-pointer">
         <input type="checkbox" id="applyToShow" aria-label="Apply tier to entire show" />
         <span>Apply this tier to all "<span id="showNameLabel">Show Name</span>" episodes</span>
       </label>
     </div>
 
-    <div style="display: flex; gap: 1rem; margin-top: 1.5rem">
+    <div class="flex gap-3 mt-4 items-center">
       <button onclick="confirmReject()" class="btn btn-warning">Reject & Re-queue</button>
-      <button onclick="hideRejectModal()" class="btn btn-primary">Cancel</button>
+      <button onclick="hideRejectModal()" class="btn">Cancel</button>
     </div>
   </div>
 </div>
@@ -349,24 +320,18 @@
     background: rgba(0, 0, 0, 0.8);
     z-index: 1000;
   "
+  class="modal-overlay"
 >
-  <div style="background: var(--bg-card); padding: 2rem; border-radius: 8px; max-width: 500px; margin: 10% auto">
+  <div class="modal-card max-w-lg mx-auto mt-[10%]">
     <h3>Bulk Reject & Re-queue</h3>
-    <p class="text-muted"><span id="bulkRejectCount">0</span> files will be rejected and re-queued.</p>
+    <p class="text-foreground-muted"><span id="bulkRejectCount">0</span> files will be rejected and re-queued.</p>
 
-    <div style="margin: 1rem 0">
-      <label style="display: block; margin-bottom: 0.5rem">New Tier for all:</label>
+    <div class="my-4">
+      <label class="block mb-2 form-label">New Tier for all:</label>
       <select
         id="bulkRejectTier"
         aria-label="Select bulk reject tier"
-        style="
-          width: 100%;
-          padding: 0.5rem;
-          background: var(--bg-secondary);
-          color: var(--text-primary);
-          border: 1px solid var(--text-secondary);
-          border-radius: 4px;
-        "
+        class="form-select w-full"
       >
         <option value="">Same tier (just re-queue)</option>
         <option value="pristine">Pristine (CRF 26) - Modern, clean content</option>
@@ -376,9 +341,9 @@
       </select>
     </div>
 
-    <div style="display: flex; gap: 1rem; margin-top: 1.5rem">
+    <div class="flex gap-3 mt-4 items-center">
       <button onclick="confirmBulkReject()" class="btn btn-warning">Reject All Selected</button>
-      <button onclick="hideBulkRejectModal()" class="btn btn-primary">Cancel</button>
+      <button onclick="hideBulkRejectModal()" class="btn">Cancel</button>
     </div>
   </div>
 </div>
