@@ -1,60 +1,62 @@
 {% extends "base.html" %}
 
 {% block content %}
-<h1>Compare: {{ filename }}</h1>
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-3xl font-semibold">Compare: {{ filename }}</h1>
+</div>
 
-<div class="compare-container">
-    <div class="compare-video">
-        <div class="label">
-            <span>Source ({{ source_codec }})</span>
-            <span>{{ source_size }}</span>
-        </div>
-        <video id="source" preload="metadata" controls playsinline>
-            <source src="/video/source/{{ encode_id }}">
-        </video>
+<div class="grid gap-4 md:grid-cols-2 mb-4">
+  <div class="compare-video space-y-2">
+    <div class="flex justify-between items-center text-sm text-foreground-muted bg-surface-subtle py-1 px-2 rounded">
+      <span>Source ({{ source_codec }})</span>
+      <span>{{ source_size }}</span>
     </div>
-    <div class="compare-video">
-        <div class="label">
-            <span>Encoded</span>
-            <span>{{ output_size }} ({{ reduction }}% smaller)</span>
-        </div>
-        <video id="encoded" preload="metadata" controls playsinline>
-            <source src="/video/encoded/{{ encode_id }}">
-        </video>
+    <video id="source" preload="metadata" controls playsinline class="w-full rounded-lg border border-surface-subtle bg-black">
+      <source src="/video/source/{{ encode_id }}">
+    </video>
+  </div>
+  <div class="compare-video space-y-2">
+    <div class="flex justify-between items-center text-sm text-foreground-muted bg-surface-subtle py-1 px-2 rounded">
+      <span>Encoded</span>
+      <span>{{ output_size }} ({{ reduction }}% smaller)</span>
     </div>
+    <video id="encoded" preload="metadata" controls playsinline class="w-full rounded-lg border border-surface-subtle bg-black">
+      <source src="/video/encoded/{{ encode_id }}">
+    </video>
+  </div>
 </div>
 
-<div class="compare-controls">
-    <button id="playPause" class="btn btn-primary">Play</button>
-    <button id="toggleView" class="btn">View: Both</button>
-    <input type="range" id="seekBar" min="0" max="100" value="0" aria-label="Comparison seek">
-    <span id="timeDisplay">0:00:00 / 0:00:00</span>
-    <select id="speed" class="btn" aria-label="Playback speed">
-        <option value="0.75">0.75x</option>
-        <option value="1" selected>1x</option>
-        <option value="1.25">1.25x</option>
-        <option value="1.5">1.5x</option>
-        <option value="1.75">1.75x</option>
-        <option value="2">2x</option>
-    </select>
+<div class="flex flex-wrap items-center gap-3 bg-surface-card p-3 rounded-lg border border-surface-subtle mb-4">
+  <button id="playPause" class="btn btn-primary">Play</button>
+  <button id="toggleView" class="btn">View: Both</button>
+  <input type="range" id="seekBar" min="0" max="100" value="0" aria-label="Comparison seek" class="flex-1" />
+  <span id="timeDisplay" class="text-sm text-foreground-muted min-w-[140px]">0:00:00 / 0:00:00</span>
+  <select id="speed" class="form-select w-28" aria-label="Playback speed">
+    <option value="0.75">0.75x</option>
+    <option value="1" selected>1x</option>
+    <option value="1.25">1.25x</option>
+    <option value="1.5">1.5x</option>
+    <option value="1.75">1.75x</option>
+    <option value="2">2x</option>
+  </select>
 </div>
 
-<div class="card" style="margin-top: 1rem;">
-    <h3>Encode Details</h3>
-    <table>
-        <tr><td>Tier</td><td class="tier-{{ tier }}">{{ tier }}</td></tr>
-        <tr><td>CRF</td><td>{{ crf or '-' }}</td></tr>
-        <tr><td>Preset</td><td>{{ preset or '-' }}</td></tr>
-        <tr><td>VMAF</td><td>{{ vmaf or '-' }}</td></tr>
-        <tr><td>SSIM</td><td>{{ ssim or '-' }}</td></tr>
-        <tr><td>Deinterlaced</td><td>{{ 'Yes' if deinterlaced else 'No' }}</td></tr>
-    </table>
+<div class="card mt-4">
+  <h3>Encode Details</h3>
+  <table class="table-zebra">
+    <tr><td>Tier</td><td class="tier-{{ tier }}">{{ tier }}</td></tr>
+    <tr><td>CRF</td><td>{{ crf or '-' }}</td></tr>
+    <tr><td>Preset</td><td>{{ preset or '-' }}</td></tr>
+    <tr><td>VMAF</td><td>{{ vmaf or '-' }}</td></tr>
+    <tr><td>SSIM</td><td>{{ ssim or '-' }}</td></tr>
+    <tr><td>Deinterlaced</td><td>{{ 'Yes' if deinterlaced else 'No' }}</td></tr>
+  </table>
 </div>
 
-<div style="margin-top: 1rem;">
-    <a href="/review" class="btn btn-primary">Back to Review</a>
-    <button onclick="promote()" class="btn btn-success">Promote</button>
-    <button onclick="reject()" class="btn btn-warning">Reject</button>
+<div class="flex gap-3 mt-4">
+  <a href="/review" class="btn btn-primary">Back to Review</a>
+  <button onclick="promote()" class="btn btn-success">Promote</button>
+  <button onclick="reject()" class="btn btn-warning">Reject</button>
 </div>
 {% endblock %}
 
