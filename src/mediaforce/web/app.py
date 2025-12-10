@@ -1381,7 +1381,13 @@ async def compare(request: Request, encode_id: int):
     with session_scope() as session:
         row = session.exec(
             select(
-                EncodeResult,
+                EncodeResult.id,
+                EncodeResult.output_size_bytes,
+                EncodeResult.output_path,
+                EncodeResult.crf,
+                EncodeResult.preset,
+                EncodeResult.vmaf,
+                EncodeResult.ssim,
                 MediaItem.path.label("source_path"),  # type: ignore[attr-defined]
                 MediaItem.size_bytes.label("source_size"),  # type: ignore[attr-defined]
                 MediaItem.video_codec,
@@ -1395,12 +1401,20 @@ async def compare(request: Request, encode_id: int):
         if not row:
             return HTMLResponse("Encode not found", status_code=404)
 
-        enc, source_path, source_size, video_codec, detected_tier, is_interlaced = row
-        output_size = enc.output_size_bytes
-        crf = enc.crf
-        preset = enc.preset
-        vmaf = enc.vmaf
-        ssim = enc.ssim
+        (
+            _enc_id,
+            output_size,
+            _output_path,
+            crf,
+            preset,
+            vmaf,
+            ssim,
+            source_path,
+            source_size,
+            video_codec,
+            detected_tier,
+            is_interlaced,
+        ) = row
 
         reduction = 0
         if source_size and output_size:
