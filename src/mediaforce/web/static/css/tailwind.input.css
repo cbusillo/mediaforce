@@ -125,7 +125,7 @@
     @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-subtle text-sm text-foreground;
   }
   .hover-preview {
-    @apply hidden fixed z-[1200] p-2 rounded-lg bg-surface-card border border-surface-subtle shadow-elevated space-y-1;
+    @apply fixed z-[1200] p-2 rounded-lg bg-surface-card border border-surface-subtle shadow-elevated space-y-1;
   }
   .hover-preview__label {
     @apply text-xs text-foreground-muted;
@@ -228,5 +228,50 @@
   .sortable.sorted-desc::after {
     content: " \25BE";
     @apply text-accent;
+  }
+}
+
+@layer utilities {
+  /* Light/dark theme variables so the toggle actually switches palettes */
+  :root {
+    --surface: #f8fafc;
+    --surface-subtle: #f1f5f9;
+    --surface-card: #ffffff;
+    --surface-muted: #e2e8f0;
+    --foreground: #0f172a;
+    --foreground-muted: #475569;
+    --border-subtle: #e2e8f0;
+  }
+
+  .dark {
+    --surface: #0f172a;
+    --surface-subtle: #111827;
+    --surface-card: #1f2937;
+    --surface-muted: #0b1220;
+    --foreground: #e5e7eb;
+    --foreground-muted: #9ca3af;
+    --border-subtle: #1f2937;
+  }
+
+  .bg-surface {
+    background-color: var(--surface) !important;
+  }
+  .bg-surface-subtle {
+    background-color: var(--surface-subtle) !important;
+  }
+  .bg-surface-card {
+    background-color: var(--surface-card) !important;
+  }
+  .bg-surface-muted {
+    background-color: var(--surface-muted) !important;
+  }
+  .text-foreground {
+    color: var(--foreground) !important;
+  }
+  .text-foreground-muted {
+    color: var(--foreground-muted) !important;
+  }
+  .border-surface-subtle {
+    border-color: var(--border-subtle) !important;
   }
 }
