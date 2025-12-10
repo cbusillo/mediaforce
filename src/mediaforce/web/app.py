@@ -1381,9 +1381,7 @@ async def compare(request: Request, encode_id: int):
     with session_scope() as session:
         row = session.exec(
             select(
-                EncodeResult.id,
                 EncodeResult.output_size_bytes,
-                EncodeResult.output_path,
                 EncodeResult.crf,
                 EncodeResult.preset,
                 EncodeResult.vmaf,
@@ -1402,9 +1400,7 @@ async def compare(request: Request, encode_id: int):
             return HTMLResponse("Encode not found", status_code=404)
 
         (
-            _enc_id,
             output_size,
-            _output_path,
             crf,
             preset,
             vmaf,
