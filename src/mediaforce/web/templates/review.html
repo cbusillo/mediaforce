@@ -2,7 +2,9 @@
 <div class="flex items-center justify-between mb-4">
   <div>
     <h1 class="text-3xl font-semibold">Review Pending Encodes</h1>
-    <p class="text-foreground-muted text-sm">These encodes are waiting in the transcode folder. Review and promote or reject them.</p>
+    <p class="text-foreground-muted text-sm">
+      These encodes are waiting in the transcode folder. Review and promote or reject them.
+    </p>
   </div>
 </div>
 
@@ -10,8 +12,12 @@
 <div class="card mb-4">
   <div class="flex flex-wrap gap-4 items-center">
     <span id="selectedCount" class="text-foreground-muted">0 selected</span>
-    <button onclick="promoteSelected()" class="btn btn-success" id="promoteSelectedBtn" disabled>Promote Selected</button>
-    <button onclick="showBulkRejectModal()" class="btn btn-warning" id="rejectSelectedBtn" disabled>Reject Selected</button>
+    <button onclick="promoteSelected()" class="btn btn-success" id="promoteSelectedBtn" disabled>
+      Promote Selected
+    </button>
+    <button onclick="showBulkRejectModal()" class="btn btn-warning" id="rejectSelectedBtn" disabled>
+      Reject Selected
+    </button>
     <span class="border-l border-foreground-muted h-6 mx-2"></span>
     <span class="text-foreground-muted">Quick Actions:</span>
     <button onclick="promoteByReduction(10)" class="btn btn-sm btn-primary">Promote &gt;10% reduction</button>
@@ -194,19 +200,7 @@
 </div>
 
 <!-- Preview Modal -->
-<div
-  id="previewModal"
-  style="
-    display: none;
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.8);
-    z-index: 1200;
-    align-items: center;
-    justify-content: center;
-  "
-  class="modal-overlay"
->
+<div id="previewModal" class="modal-overlay hidden">
   <div class="modal-card max-w-4xl">
     <div class="flex justify-between items-center mb-2">
       <h3 class="m-0 text-lg font-semibold">Quick Preview</h3>
@@ -235,56 +229,20 @@
 </div>
 
 <!-- Hover thumbnail -->
-<div
-  id="hoverThumb"
-  style="
-    display: none;
-    position: fixed;
-    z-index: 1300;
-    padding: 6px;
-    background: var(--bg-card);
-    border: 1px solid var(--bg-secondary);
-    border-radius: 6px;
-    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
-  "
->
-  <div class="text-xs mb-1 text-foreground-muted">Preview</div>
-  <video
-    id="hoverVideo"
-    muted
-    autoplay
-    loop
-    playsinline
-    class="w-[200px] h-[120px] bg-black rounded object-cover"
-  ></video>
+<div id="hoverThumb" class="hover-preview hidden">
+  <div class="hover-preview__label">Preview</div>
+  <video id="hoverVideo" muted autoplay loop playsinline class="hover-preview__video"></video>
 </div>
 
 <!-- Reject Modal (Single) -->
-<div
-  id="rejectModal"
-  style="
-    display: none;
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0, 0, 0, 0.8);
-    z-index: 1000;
-  "
-  class="modal-overlay"
->
+<div id="rejectModal" class="modal-overlay hidden">
   <div class="modal-card max-w-lg mx-auto mt-[10%]">
     <h3>Reject & Re-queue</h3>
     <p class="text-foreground-muted">The encoded file will be deleted. Choose a new tier for re-encoding.</p>
 
     <div class="my-4">
       <label class="block mb-2 form-label">New Tier:</label>
-      <select
-        id="rejectTier"
-        aria-label="Select new tier"
-        class="form-select w-full"
-      >
+      <select id="rejectTier" aria-label="Select new tier" class="form-select w-full">
         <option value="">Same tier (just re-queue)</option>
         <option value="pristine">Pristine (CRF 26) - Modern, clean content</option>
         <option value="good">Good (CRF 28) - Most HD TV</option>
@@ -308,31 +266,14 @@
 </div>
 
 <!-- Bulk Reject Modal -->
-<div
-  id="bulkRejectModal"
-  style="
-    display: none;
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0, 0, 0, 0.8);
-    z-index: 1000;
-  "
-  class="modal-overlay"
->
+<div id="bulkRejectModal" class="modal-overlay hidden">
   <div class="modal-card max-w-lg mx-auto mt-[10%]">
     <h3>Bulk Reject & Re-queue</h3>
     <p class="text-foreground-muted"><span id="bulkRejectCount">0</span> files will be rejected and re-queued.</p>
 
     <div class="my-4">
       <label class="block mb-2 form-label">New Tier for all:</label>
-      <select
-        id="bulkRejectTier"
-        aria-label="Select bulk reject tier"
-        class="form-select w-full"
-      >
+      <select id="bulkRejectTier" aria-label="Select bulk reject tier" class="form-select w-full">
         <option value="">Same tier (just re-queue)</option>
         <option value="pristine">Pristine (CRF 26) - Modern, clean content</option>
         <option value="good">Good (CRF 28) - Most HD TV</option>
@@ -350,6 +291,10 @@
 {% endblock %} {% block scripts %}
 <script>
   let currentRejectId = null;
+  const toggleEl = (el, show) => {
+    if (!el) return;
+    el.classList.toggle("hidden", !show);
+  };
 
   function getSelectedIds() {
     return Array.from(document.querySelectorAll(".row-checkbox:checked")).map((cb) => parseInt(cb.value));
@@ -403,7 +348,7 @@
       if (activeFilter === "low_vmaf" && !(vmaf && vmaf < 85)) showRow = false;
       if (text && !(name.includes(text) || show.includes(text))) showRow = false;
 
-      row.style.display = showRow ? "" : "none";
+      row.classList.toggle("hidden", !showRow);
     });
   }
 
@@ -465,11 +410,11 @@
     if (ids.length === 0) return;
     document.getElementById("bulkRejectCount").textContent = ids.length;
     document.getElementById("bulkRejectTier").value = "";
-    document.getElementById("bulkRejectModal").style.display = "block";
+    toggleEl(document.getElementById("bulkRejectModal"), true);
   }
 
   function hideBulkRejectModal() {
-    document.getElementById("bulkRejectModal").style.display = "none";
+    toggleEl(document.getElementById("bulkRejectModal"), false);
   }
 
   async function confirmBulkReject() {
@@ -502,11 +447,11 @@
     if (row && row.classList.contains("outlier-row")) {
       document.getElementById("rejectTier").value = "poor";
     }
-    document.getElementById("rejectModal").style.display = "block";
+    toggleEl(document.getElementById("rejectModal"), true);
   }
 
   function hideRejectModal() {
-    document.getElementById("rejectModal").style.display = "none";
+    toggleEl(document.getElementById("rejectModal"), false);
     currentRejectId = null;
   }
 
@@ -618,7 +563,7 @@
     previewEnc.src = `/video/encoded/${id}`;
     previewSrc.load();
     previewEnc.load();
-    previewModal.style.display = "flex";
+    toggleEl(previewModal, true);
     previewOpen = true;
     previewView = "both";
     applyPreviewView();
@@ -627,7 +572,7 @@
   }
 
   function closePreview() {
-    previewModal.style.display = "none";
+    toggleEl(previewModal, false);
     previewSrc.pause();
     previewEnc.pause();
     previewOpen = false;
@@ -678,8 +623,8 @@
   function applyPreviewView() {
     const showSource = previewView === "both" || previewView === "source";
     const showEncoded = previewView === "both" || previewView === "encoded";
-    previewSrc.parentElement.style.display = showSource ? "" : "none";
-    previewEnc.parentElement.style.display = showEncoded ? "" : "none";
+    toggleEl(previewSrc.parentElement, showSource);
+    toggleEl(previewEnc.parentElement, showEncoded);
     previewToggle.textContent = `View: ${previewView.charAt(0).toUpperCase()}${previewView.slice(1)}`;
   }
 
@@ -748,12 +693,12 @@
       const rect = evt.target.getBoundingClientRect();
       hoverThumb.style.left = `${rect.right + 12}px`;
       hoverThumb.style.top = `${rect.top}px`;
-      hoverThumb.style.display = "block";
+      toggleEl(hoverThumb, true);
     }, 200);
   }
   function hideThumb() {
     clearTimeout(hoverTimer);
-    hoverThumb.style.display = "none";
+    toggleEl(hoverThumb, false);
     hoverVideo.pause();
     hoverVideo.src = "";
   }

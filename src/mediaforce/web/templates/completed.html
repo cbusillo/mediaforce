@@ -1,6 +1,4 @@
-{% extends "base.html" %}
-
-{% block content %}
+{% extends "base.html" %} {% block content %}
 <div class="flex items-center justify-between mb-4">
   <div>
     <h1 class="text-3xl font-semibold text-foreground">Completed Encodes</h1>
@@ -28,10 +26,16 @@
         </tr>
       </thead>
       <tbody>
-        {% if encodes %}
-        {% for encode in encodes %}
+        {% if encodes %} {% for encode in encodes %}
         <tr>
-          <td class="truncate" title="{{ encode.source_path }}" onmouseenter="showThumb(event, {{ encode.id }})" onmouseleave="hideThumb()">{{ encode.filename }}</td>
+          <td
+            class="truncate"
+            title="{{ encode.source_path }}"
+            onmouseenter="showThumb(event, {{ encode.id }})"
+            onmouseleave="hideThumb()"
+          >
+            {{ encode.filename }}
+          </td>
           <td>{{ encode.source_size }}</td>
           <td>{{ encode.output_size }}</td>
           <td class="text-success">{{ encode.reduction }}%</td>
@@ -39,8 +43,7 @@
           <td>{{ encode.vmaf or '-' }}</td>
           <td>{{ encode.promoted_at or '-' }}</td>
         </tr>
-        {% endfor %}
-        {% else %}
+        {% endfor %} {% else %}
         <tr>
           <td colspan="7" class="py-6 text-center text-foreground-muted">No promoted encodes yet.</td>
         </tr>
@@ -49,49 +52,39 @@
     </table>
   </div>
 </div>
-{% endblock %}
 
-{% block scripts %}
+<div id="hoverThumb" class="hover-preview hidden">
+  <div class="hover-preview__label">Preview</div>
+  <video id="hoverVideo" muted autoplay loop playsinline class="hover-preview__video"></video>
+</div>
+{% endblock %} {% block scripts %}
 <script>
-// Hover thumbnail (uses encoded video)
-let hoverTimer = null;
-const hoverThumb = document.getElementById('hoverThumb') || (function(){
-    const div = document.createElement('div');
-    div.id = 'hoverThumb';
-    div.style.position = 'fixed';
-    div.style.zIndex = '1300';
-    div.style.padding = '8px';
-    div.style.background = '#1f2937';
-    div.style.border = '1px solid #111827';
-    div.style.borderRadius = '8px';
-    div.style.boxShadow = '0 10px 30px rgba(0,0,0,0.45)';
-    div.style.display = 'none';
-    div.innerHTML = `
-        <div style="font-size:0.8rem; margin-bottom:6px; color: #9ca3af;">Preview</div>
-        <video id="hoverVideo" muted autoplay loop playsinline style="width:220px; height:132px; background:#000; border-radius:6px; object-fit:cover;"></video>
-    `;
-    document.body.appendChild(div);
-    return div;
-})();
-const hoverVideo = document.getElementById('hoverVideo');
+  // Hover thumbnail (uses encoded video)
+  let hoverTimer = null;
+  const hoverThumb = document.getElementById("hoverThumb");
+  const hoverVideo = document.getElementById("hoverVideo");
+  const toggleEl = (el, show) => {
+    if (!el) return;
+    el.classList.toggle("hidden", !show);
+  };
 
-function showThumb(evt, id) {
+  function showThumb(evt, id) {
     clearTimeout(hoverTimer);
     hoverTimer = setTimeout(() => {
-        hoverVideo.src = `/video/encoded/${id}`;
-        hoverVideo.load();
-        const rect = evt.target.getBoundingClientRect();
-        hoverThumb.style.left = `${Math.min(rect.right + 12, window.innerWidth - 220)}px`;
-        hoverThumb.style.top = `${rect.top}px`;
-        hoverThumb.style.display = 'block';
+      hoverVideo.src = `/video/encoded/${id}`;
+      hoverVideo.load();
+      const rect = evt.target.getBoundingClientRect();
+      hoverThumb.style.left = `${Math.min(rect.right + 12, window.innerWidth - 220)}px`;
+      hoverThumb.style.top = `${rect.top}px`;
+      toggleEl(hoverThumb, true);
     }, 150);
-}
+  }
 
-function hideThumb() {
+  function hideThumb() {
     clearTimeout(hoverTimer);
-    hoverThumb.style.display = 'none';
+    toggleEl(hoverThumb, false);
     hoverVideo.pause();
-    hoverVideo.src = '';
-}
+    hoverVideo.src = "";
+  }
 </script>
 {% endblock %}

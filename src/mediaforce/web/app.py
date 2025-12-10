@@ -1381,7 +1381,13 @@ async def compare(request: Request, encode_id: int):
     with session_scope() as session:
         row = session.exec(
             select(
-                EncodeResult,
+                EncodeResult.id,
+                EncodeResult.output_size_bytes,
+                EncodeResult.output_path,
+                EncodeResult.crf,
+                EncodeResult.preset,
+                EncodeResult.vmaf,
+                EncodeResult.ssim,
                 MediaItem.path.label("source_path"),  # type: ignore[attr-defined]
                 MediaItem.size_bytes.label("source_size"),  # type: ignore[attr-defined]
                 MediaItem.video_codec,
@@ -1392,33 +1398,48 @@ async def compare(request: Request, encode_id: int):
             .where(EncodeResult.id == encode_id)
         ).first()
 
-    if not row:
-        return HTMLResponse("Encode not found", status_code=404)
+        if not row:
+            return HTMLResponse("Encode not found", status_code=404)
 
-    enc, source_path, source_size, video_codec, detected_tier, is_interlaced = row
+        (
+            _enc_id,
+            output_size,
+            _output_path,
+            crf,
+            preset,
+            vmaf,
+            ssim,
+            source_path,
+            source_size,
+            video_codec,
+            detected_tier,
+            is_interlaced,
+        ) = row
 
-    reduction = 0
-    if source_size and enc.output_size_bytes:
-        reduction = int((1 - enc.output_size_bytes / source_size) * 100)
+        reduction = 0
+        if source_size and output_size:
+            reduction = int((1 - output_size / source_size) * 100)
 
-    return templates.TemplateResponse("compare.html", {
-        "request": request,
-        "title": "Compare",
-        "active": "review",
-        "encode_id": encode_id,
-        "filename": pathlib.Path(source_path).name,
-        "source_codec": video_codec or "?",
-        "source_size": format_size(source_size),
-        "output_size": format_size(enc.output_size_bytes),
-        "reduction": reduction,
-        "tier": detected_tier,
-        "crf": enc.crf,
-        "preset": enc.preset,
-        "vmaf": f"{enc.vmaf:.1f}" if enc.vmaf else None,
-        "ssim": f"{enc.ssim:.4f}" if enc.ssim else None,
-        "deinterlaced": is_interlaced,
-        "nav_status": _nav_status(),
-    })
+        response_payload = {
+            "request": request,
+            "title": "Compare",
+            "active": "review",
+            "encode_id": encode_id,
+            "filename": pathlib.Path(source_path).name,
+            "source_codec": video_codec or "?",
+            "source_size": format_size(source_size),
+            "output_size": format_size(output_size),
+            "reduction": reduction,
+            "tier": detected_tier,
+            "crf": crf,
+            "preset": preset,
+            "vmaf": f"{vmaf:.1f}" if vmaf else None,
+            "ssim": f"{ssim:.4f}" if ssim else None,
+            "deinterlaced": is_interlaced,
+            "nav_status": _nav_status(),
+        }
+
+    return templates.TemplateResponse("compare.html", response_payload)
 
 
 @app.get("/shows", response_class=HTMLResponse)
