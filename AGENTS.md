@@ -44,6 +44,9 @@ values that change (versions, hostnames, mounts).
 - Prefer `apply_patch` for edits; preserve history with `git mv` when relocating files.
 - Run focused tests for the area you touch (add `tests/` as it appears). If no tests exist, add minimal coverage near
   the change.
+- Tailwind CSS: keep `src/mediaforce/web/static/css/tailwind.css` readable in git. Use `npm run tailwind:dev` while
+  iterating; only run `tailwind:build` for release output and avoid committing the minified one-line CSS. If you do
+  build, rerun `tailwind:dev` before committing.
 - Logging: avoid `print`; use structured logging helpers from `config/logging.py` (`log_info`, `log_warn`, `log_error`). Configure via env: `MEDIAFORCE_LOG_LEVEL` (default INFO), optional `MEDIAFORCE_LOG_FILE=/path/to/mediaforce.jsonl`.
 - Python version baseline is modern; avoid adding `from __future__` imports in new code.
 
