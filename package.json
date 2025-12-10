@@ -1,0 +1,10 @@
+{
+  "name": "mediaforce",
+  "private": true,
+  "devDependencies": {
+    "tailwindcss": "^3.4.1"
+  },
+  "scripts": {
+    "tailwind:build": "tailwindcss -i src/mediaforce/web/static/css/tailwind.input.css -o src/mediaforce/web/static/css/tailwind.css --minify"
+  }
+}

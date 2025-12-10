@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root { color-scheme: light dark; }
+  body {@apply bg-surface text-foreground font-sans min-h-screen antialiased;}
+  nav {@apply bg-surface-subtle text-foreground px-6 py-4 flex items-center gap-3 border-b border-accent/30 shadow-sm;}
+  nav .logo {@apply text-xl font-semibold text-accent mr-2;}
+  nav a {@apply px-3 py-2 rounded-md text-sm text-foreground-muted hover:bg-surface-card hover:text-foreground transition;}
+  nav a.active {@apply bg-surface-card text-foreground;}
+  main {@apply max-w-6xl mx-auto px-6 py-8 space-y-6;}
+  h1 {@apply text-2xl font-semibold mb-3;}
+  h2 {@apply text-xl font-semibold mb-2;}
+  h3 {@apply text-lg font-semibold mb-2;}
+  table {@apply w-full border-collapse text-sm;}
+  th {@apply text-left uppercase tracking-wide text-foreground-muted font-medium pb-2 border-b border-surface-subtle;}
+  td {@apply py-2 border-b border-surface-subtle text-foreground;}
+  button, input[type='submit'], input[type='button'] {@apply inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md border border-foreground-muted bg-surface-card text-foreground hover:bg-surface-subtle transition;}
+  input[type='text'], input[type='number'], input[type='search'] {@apply px-3 py-2 text-sm rounded-md border border-surface-subtle bg-surface-card text-foreground placeholder:text-foreground-muted outline-none;}
+}
+
+@layer components {
+  .pill { @apply inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border border-surface-subtle bg-surface-card text-foreground-muted; }
+  .pill-on { @apply border-success text-success; }
+  .pill-off { @apply border-foreground-muted text-foreground-muted; }
+  .badge-tier { @apply px-2 py-0.5 rounded-full text-xs bg-accent/10 text-accent font-medium; }
+  .stat-card { @apply bg-surface-card border border-surface-subtle rounded-lg p-4 flex items-center justify-between gap-3; }
+  .card { @apply bg-surface-card border border-surface-subtle rounded-lg p-4 space-y-3; }
+  .btn-accent { @apply bg-accent text-white border-none hover:bg-accent-hover; }
+  .btn-ghost { @apply border border-foreground-muted text-foreground hover:text-accent hover:border-accent; }
+  .table-zebra tr:nth-child(even) { @apply bg-surface-subtle/60; }
+}

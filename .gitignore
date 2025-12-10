@@ -194,3 +194,5 @@ cython_debug/
 #.idea/
 
 .code/
+node_modules/
+package-lock.json

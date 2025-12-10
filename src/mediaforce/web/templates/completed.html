@@ -1,36 +1,53 @@
 {% extends "base.html" %}
 
 {% block content %}
-<h1>Completed Encodes</h1>
+<div class="flex items-center justify-between mb-4">
+  <div>
+    <h1 class="text-3xl font-semibold text-foreground">Completed Encodes</h1>
+    <p class="text-foreground-muted text-sm">Recently promoted outputs (latest 100).</p>
+  </div>
+  <div class="pill hidden md:inline-flex">Auto-refresh disabled; reload for latest.</div>
+</div>
 
-<div class="card">
-    <h3>Recently Promoted</h3>
-    <table>
-        <thead>
-            <tr>
-                <th>File</th>
-                <th>Source</th>
-                <th>Output</th>
-                <th>Reduction</th>
-                <th>Tier</th>
-                <th>VMAF</th>
-                <th>Promoted</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for encode in encodes %}
-            <tr>
-                <td class="truncate" title="{{ encode.source_path }}" onmouseenter="showThumb(event, {{ encode.id }})" onmouseleave="hideThumb()">{{ encode.filename }}</td>
-                <td>{{ encode.source_size }}</td>
-                <td>{{ encode.output_size }}</td>
-                <td class="text-success">{{ encode.reduction }}%</td>
-                <td class="tier-{{ encode.tier }}">{{ encode.tier }}</td>
-                <td>{{ encode.vmaf or '-' }}</td>
-                <td>{{ encode.promoted_at or '-' }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
+<div class="card shadow border border-surface-subtle/80">
+  <div class="flex items-center justify-between gap-2">
+    <h3 class="m-0 text-lg font-semibold">Recently Promoted</h3>
+    <div class="text-foreground-muted text-sm">{{ encodes|length }} items</div>
+  </div>
+  <div class="overflow-auto">
+    <table class="table-auto w-full text-sm table-zebra">
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Source</th>
+          <th>Output</th>
+          <th>Reduction</th>
+          <th>Tier</th>
+          <th>VMAF</th>
+          <th>Promoted</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if encodes %}
+        {% for encode in encodes %}
+        <tr>
+          <td class="truncate" title="{{ encode.source_path }}" onmouseenter="showThumb(event, {{ encode.id }})" onmouseleave="hideThumb()">{{ encode.filename }}</td>
+          <td>{{ encode.source_size }}</td>
+          <td>{{ encode.output_size }}</td>
+          <td class="text-success">{{ encode.reduction }}%</td>
+          <td class="tier-{{ encode.tier }}">{{ encode.tier }}</td>
+          <td>{{ encode.vmaf or '-' }}</td>
+          <td>{{ encode.promoted_at or '-' }}</td>
+        </tr>
+        {% endfor %}
+        {% else %}
+        <tr>
+          <td colspan="7" class="py-6 text-center text-foreground-muted">No promoted encodes yet.</td>
+        </tr>
+        {% endif %}
+      </tbody>
     </table>
+  </div>
 </div>
 {% endblock %}
 
@@ -43,15 +60,15 @@ const hoverThumb = document.getElementById('hoverThumb') || (function(){
     div.id = 'hoverThumb';
     div.style.position = 'fixed';
     div.style.zIndex = '1300';
-    div.style.padding = '6px';
-    div.style.background = 'var(--bg-card)';
-    div.style.border = '1px solid var(--bg-secondary)';
-    div.style.borderRadius = '6px';
-    div.style.boxShadow = '0 8px 20px rgba(0,0,0,0.4)';
+    div.style.padding = '8px';
+    div.style.background = '#1f2937';
+    div.style.border = '1px solid #111827';
+    div.style.borderRadius = '8px';
+    div.style.boxShadow = '0 10px 30px rgba(0,0,0,0.45)';
     div.style.display = 'none';
     div.innerHTML = `
-        <div class="label" style="font-size:0.8rem; margin-bottom:4px; color: var(--text-secondary);">Preview</div>
-        <video id="hoverVideo" muted autoplay loop playsinline style="width:200px; height:120px; background:#000; border-radius:4px; object-fit:cover;"></video>
+        <div style="font-size:0.8rem; margin-bottom:6px; color: #9ca3af;">Preview</div>
+        <video id="hoverVideo" muted autoplay loop playsinline style="width:220px; height:132px; background:#000; border-radius:6px; object-fit:cover;"></video>
     `;
     document.body.appendChild(div);
     return div;

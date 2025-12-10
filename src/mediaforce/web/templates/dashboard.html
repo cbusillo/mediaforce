@@ -1,33 +1,35 @@
 {% extends "base.html" %} {% block content %}
-<h1>Dashboard</h1>
+<h1 class="text-3xl font-semibold text-foreground mb-6">Dashboard</h1>
 
 {% if lib_status %}
-<div class="card" style="margin-bottom: 1rem">
-  <h3>Library Status</h3>
-  <table>
+<div class="card shadow-lg border border-surface-subtle/80">
+  <div class="flex items-center justify-between mb-3">
+    <h3 class="text-lg font-semibold text-foreground">Library Status</h3>
+  </div>
+  <table class="table-auto w-full text-sm table-zebra">
     <thead>
-      <tr>
-        <th>Name</th>
-        <th>Path</th>
-        <th>Last Scan</th>
-        <th>Watcher</th>
-        <th>Status</th>
+      <tr class="text-foreground-muted uppercase tracking-wide">
+        <th class="px-3 py-2 text-left">Name</th>
+        <th class="px-3 py-2 text-left">Path</th>
+        <th class="px-3 py-2 text-left">Last Scan</th>
+        <th class="px-3 py-2 text-left">Watcher</th>
+        <th class="px-3 py-2 text-left">Status</th>
       </tr>
     </thead>
     <tbody>
       {% for entry in lib_status %}
       <tr>
-        <td>{{ entry.lib.name }}</td>
-        <td class="truncate">{{ entry.root }}</td>
-        <td>
+        <td class="px-3 py-2 font-medium">{{ entry.lib.name }}</td>
+        <td class="px-3 py-2 truncate text-foreground-muted">{{ entry.root }}</td>
+        <td class="px-3 py-2">
           {% if entry.running %}
-          <span class="text-warning">running…</span>
+          <span class="badge-tier">Running…</span>
           {% elif entry.last_scan %} {{ entry.last_scan[:16] }} {% else %}
-          <span class="text-muted">never</span>
+          <span class="text-foreground-muted">Never</span>
           {% endif %}
         </td>
-        <td>{{ 'On' if entry.lib.watch else 'Off' }}</td>
-        <td>
+        <td class="px-3 py-2">{{ 'On' if entry.lib.watch else 'Off' }}</td>
+        <td class="px-3 py-2">
           {% if entry.running %}
           <span class="pill pill-on">Scan running</span>
           {% else %}
@@ -41,34 +43,34 @@
 </div>
 {% endif %}
 
-<div class="stats-grid">
-  <div class="stat-card">
-    <div class="value">{{ stats.pending }}</div>
-    <div class="label">Pending</div>
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+  <div class="stat-card shadow border border-surface-subtle/60">
+    <div class="value text-3xl font-semibold">{{ stats.pending }}</div>
+    <div class="label uppercase text-xs text-foreground-muted tracking-wide">Pending</div>
   </div>
-  <div class="stat-card">
-    <div class="value">{{ stats.encoding }}</div>
-    <div class="label">Encoding</div>
+  <div class="stat-card shadow border border-surface-subtle/60">
+    <div class="value text-3xl font-semibold">{{ stats.encoding }}</div>
+    <div class="label uppercase text-xs text-foreground-muted tracking-wide">Encoding</div>
   </div>
-  <div class="stat-card">
-    <div class="value">{{ stats.encoded }}</div>
-    <div class="label">Encoded</div>
+  <div class="stat-card shadow border border-surface-subtle/60">
+    <div class="value text-3xl font-semibold">{{ stats.encoded }}</div>
+    <div class="label uppercase text-xs text-foreground-muted tracking-wide">Encoded</div>
   </div>
-  <div class="stat-card">
-    <div class="value">{{ stats.completed }}</div>
-    <div class="label">Completed</div>
+  <div class="stat-card shadow border border-surface-subtle/60">
+    <div class="value text-3xl font-semibold">{{ stats.completed }}</div>
+    <div class="label uppercase text-xs text-foreground-muted tracking-wide">Completed</div>
   </div>
-  <div class="stat-card">
-    <div class="value">{{ stats.space_saved_gb }}</div>
-    <div class="label">GB Saved</div>
+  <div class="stat-card shadow border border-surface-subtle/60">
+    <div class="value text-3xl font-semibold">{{ stats.space_saved_gb }}</div>
+    <div class="label uppercase text-xs text-foreground-muted tracking-wide">GB Saved</div>
   </div>
 </div>
 
-<div class="card">
-  <div style="display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap">
-    <h3 style="margin: 0">Workers</h3>
-    <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap">
-      <div class="status-chip" id="watchStatusDash">
+<div class="card shadow border border-surface-subtle/80">
+  <div class="flex flex-wrap items-center justify-between gap-3">
+    <h3 class="m-0 text-lg font-semibold">Workers</h3>
+    <div class="flex flex-wrap items-center gap-2 text-sm">
+      <div class="pill" id="watchStatusDash">
         Watch: {% if watch_status.running %}running{% elif watch_status.paused %}paused{% else %}stopped{% endif %}{% if
         watch_status.message %} ({{ watch_status.message }}){% endif %}
       </div>
@@ -78,89 +80,98 @@
       <button class="btn btn-sm" onclick="refreshWorkers()">Refresh</button>
     </div>
   </div>
-  <table id="workersTable">
-    <thead>
-      <tr>
-        <th>Host</th>
-        <th>Role</th>
-        <th>State</th>
-        <th>Active</th>
-        <th>Scope/Progress</th>
-        <th>Message</th>
-        <th>Actions</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td colspan="7" class="text-muted">Loading workers…</td>
-      </tr>
-    </tbody>
-  </table>
+  <div class="overflow-auto">
+    <table id="workersTable" class="table-auto w-full text-sm table-zebra">
+      <thead>
+        <tr>
+          <th>Host</th>
+          <th>Role</th>
+          <th>State</th>
+          <th>Active</th>
+          <th>Scope/Progress</th>
+          <th>Message</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td colspan="7" class="text-foreground-muted">Loading workers…</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
 </div>
 
-<div class="card">
-  <h3>Active Encodes</h3>
-  <table id="activeEncodes">
-    <thead>
-      <tr>
-        <th>File</th>
-        <th>Machine</th>
-        <th>Tier</th>
-        <th>Progress</th>
-        <th>Speed</th>
-        <th>ETA</th>
-        <th>Frames</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for enc in active_encodes %}
-      <tr>
-        <td class="truncate" title="{{ enc.path }}">{{ enc.filename }}</td>
-        <td>{{ enc.machine }}</td>
-        <td class="tier-{{ enc.tier }}">{{ enc.tier }}</td>
-        <td>{{ '%.1f'|format(enc.percent_complete) }}%</td>
-        <td>{{ enc.speed }}</td>
-        <td>{{ enc.eta or '-' }}</td>
-        <td>{{ enc.frame or 0 }} / {{ enc.total_frames or '?' }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+<div class="card shadow border border-surface-subtle/80">
+  <div class="flex items-center justify-between gap-2">
+    <h3 class="m-0 text-lg font-semibold">Active Encodes</h3>
+    <button class="btn btn-sm" onclick="refreshActive()">Refresh</button>
+  </div>
+  <div class="overflow-auto">
+    <table id="activeEncodes" class="table-auto w-full text-sm table-zebra">
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Machine</th>
+          <th>Tier</th>
+          <th>Progress</th>
+          <th>Speed</th>
+          <th>ETA</th>
+          <th>Frames</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for enc in active_encodes %}
+        <tr>
+          <td class="truncate" title="{{ enc.path }}">{{ enc.filename }}</td>
+          <td>{{ enc.machine }}</td>
+          <td class="tier-{{ enc.tier }}">{{ enc.tier }}</td>
+          <td>{{ '%.1f'|format(enc.percent_complete) }}%</td>
+          <td>{{ enc.speed }}</td>
+          <td>{{ enc.eta or '-' }}</td>
+          <td>{{ enc.frame or 0 }} / {{ enc.total_frames or '?' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </div>
 
-<div class="card">
-  <h3>Recent Completions</h3>
-  <table>
-    <thead>
-      <tr>
-        <th>File</th>
-        <th>Source</th>
-        <th>Output</th>
-        <th>Reduction</th>
-        <th>Completed</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for encode in recent_completions %}
-      <tr>
-        <td class="truncate" title="{{ encode.path }}">{{ encode.filename }}</td>
-        <td>{{ encode.source_size }}</td>
-        <td>{{ encode.output_size }}</td>
-        <td class="text-success">{{ encode.reduction }}%</td>
-        <td>{{ encode.completed_at }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+<div class="card shadow border border-surface-subtle/80">
+  <h3 class="m-0 text-lg font-semibold">Recent Completions</h3>
+  <div class="overflow-auto">
+    <table class="table-auto w-full text-sm table-zebra">
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Source</th>
+          <th>Output</th>
+          <th>Reduction</th>
+          <th>Completed</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for encode in recent_completions %}
+        <tr>
+          <td class="truncate" title="{{ encode.path }}">{{ encode.filename }}</td>
+          <td>{{ encode.source_size }}</td>
+          <td>{{ encode.output_size }}</td>
+          <td class="text-success">{{ encode.reduction }}%</td>
+          <td>{{ encode.completed_at }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </div>
 
-<div class="card">
-  <h3>Queue by Tier</h3>
-  <div class="stats-grid">
+<div class="card shadow border border-surface-subtle/80">
+  <h3 class="m-0 text-lg font-semibold">Queue by Tier</h3>
+  <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
     {% for tier, count in tier_counts.items() %}
     <div class="stat-card">
-      <div class="value tier-{{ tier }}">{{ count }}</div>
-      <div class="label">{{ tier }}</div>
+      <div class="value tier-{{ tier }} text-2xl font-semibold">{{ count }}</div>
+      <div class="label uppercase text-xs text-foreground-muted tracking-wide">{{ tier }}</div>
     </div>
     {% endfor %}
   </div>
