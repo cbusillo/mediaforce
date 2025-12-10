@@ -1,5 +1,4 @@
-{% extends "base.html" %}
-{% block content %}
+{% extends "base.html" %} {% block content %}
 <div class="flex items-center justify-between mb-4">
   <div>
     <h1 class="text-3xl font-semibold">Encoding Queue</h1>
@@ -12,7 +11,9 @@
 <div class="card space-y-4">
   <div class="flex flex-wrap justify-between items-center gap-3">
     <div class="flex flex-wrap items-center gap-3">
-      <h3 class="text-lg font-semibold m-0">Titles ({{ total }} titles{% if total_files != total %}, {{ total_files }} files{% endif %})</h3>
+      <h3 class="text-lg font-semibold m-0">
+        Titles ({{ total }} titles{% if total_files != total %}, {{ total_files }} files{% endif %})
+      </h3>
       {% if libraries %}
       <label class="text-foreground-muted flex items-center gap-2 text-sm">
         Library:
@@ -23,18 +24,19 @@
           onchange="switchLibrary(this.value)"
         >
           {% for lib in libraries %}
-          <option value="{{ lib }}" {% if lib == library_root %}selected{% endif %}>{{ lib }}</option>
+          <option value="{{ lib }}" {% if lib="" ="library_root" %}selected{% endif %}>{{ lib }}</option>
           {% endfor %}
         </select>
       </label>
-      {% endif %}
-      {% set cur_status = (lib_status | selectattr('root', 'equalto', library_root) | list | first) %}
+      {% endif %} {% set cur_status = (lib_status | selectattr('root', 'equalto', library_root) | list | first) %}
       <span class="pill {{ 'pill-on' if cur_status and cur_status.running else 'pill-off' }}">
         Scan {{ 'running' if cur_status and cur_status.running else (cur_status.last_scan or 'never') }}
       </span>
     </div>
     <div class="flex flex-wrap items-center gap-3">
-      <span class="text-foreground-muted text-sm">Est. Savings: <strong class="text-success">{{ total_savings }}</strong></span>
+      <span class="text-foreground-muted text-sm"
+        >Est. Savings: <strong class="text-success">{{ total_savings }}</strong></span
+      >
       <button class="btn btn-sm btn-warning" onclick="kickWatch()">Kick Watcher</button>
       <button class="btn btn-sm btn-primary" onclick="triggerScan()">Rescan</button>
       <button class="btn btn-sm btn-primary" onclick="toggleView()">
@@ -89,148 +91,152 @@
     <button class="btn btn-sm btn-primary" onclick="expandAll()">Expand All</button>
     <button class="btn btn-sm btn-primary" onclick="collapseAll()">Collapse All</button>
     <div class="chip" id="scanStatus">
-      Scan: {% if cur_status and cur_status.running %}running…{% elif cur_status and cur_status.last_scan %}last {{ cur_status.last_scan[:16] }}{% else %}never{% endif %}
+      Scan: {% if cur_status and cur_status.running %}running…{% elif cur_status and cur_status.last_scan %}last {{
+      cur_status.last_scan[:16] }}{% else %}never{% endif %}
     </div>
     <div class="chip" id="watchStatus">
-      Watch: {% if watch_status.running %}running{% elif watch_status.paused %}paused{% else %}stopped{% endif %}{% if watch_status.message %} ({{ watch_status.message }}){% endif %}
+      Watch: {% if watch_status.running %}running{% elif watch_status.paused %}paused{% else %}stopped{% endif %}{% if
+      watch_status.message %} ({{ watch_status.message }}){% endif %}
     </div>
   </div>
 </div>
 
 {% if workers %}
-  <div class="card mb-4">
-    <div class="flex items-center justify-between gap-2 mb-2">
-      <h4 class="m-0 text-base font-semibold">Workers</h4>
-    </div>
-    <div class="overflow-auto">
-      <table class="table-auto w-full text-sm table-zebra">
-        <thead>
-          <tr>
-            <th>Machine</th>
-            <th>Active</th>
-            <th>Progress</th>
-            <th>Sample</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for w in workers %}
-          <tr>
-            <td>{{ w.machine }}</td>
-            <td>{{ w.active }}</td>
-            <td>{{ '%.0f'|format(w.percent_complete or 0) }}%</td>
-            <td class="truncate" title="{{ w.sample_path }}">{{ w.sample_path or '-' }}</td>
-            <td>
-              <button class="btn btn-sm" onclick="openSendModal('{{ w.machine }}')">Send to {{ w.machine }}</button>
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
+<div class="card mb-4">
+  <div class="flex items-center justify-between gap-2 mb-2">
+    <h4 class="m-0 text-base font-semibold">Workers</h4>
   </div>
-  {% endif %}
-  <div id="tableView" class="{{ 'hidden' if request.query_params.get('view') == 'compact' else '' }}">
-    <div class="card mb-4">
-      <div class="flex items-center justify-between gap-2 flex-wrap">
-        <h4 class="m-0 text-base font-semibold">Skipped items</h4>
-        <button class="btn btn-sm" onclick="loadSkipped()">Refresh</button>
-      </div>
-      <div id="skippedContainer" class="text-foreground-muted mt-2">
-        Click refresh to load skipped items.
-      </div>
+  <div class="overflow-auto">
+    <table class="table-auto w-full text-sm table-zebra">
+      <thead>
+        <tr>
+          <th>Machine</th>
+          <th>Active</th>
+          <th>Progress</th>
+          <th>Sample</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for w in workers %}
+        <tr>
+          <td>{{ w.machine }}</td>
+          <td>{{ w.active }}</td>
+          <td>{{ '%.0f'|format(w.percent_complete or 0) }}%</td>
+          <td class="truncate" title="{{ w.sample_path }}">{{ w.sample_path or '-' }}</td>
+          <td>
+            <button class="btn btn-sm" onclick="openSendModal('{{ w.machine }}')">Send to {{ w.machine }}</button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+<div id="tableView" class="{{ 'hidden' if request.query_params.get('view') == 'compact' else '' }}">
+  <div class="card mb-4">
+    <div class="flex items-center justify-between gap-2 flex-wrap">
+      <h4 class="m-0 text-base font-semibold">Skipped items</h4>
+      <button class="btn btn-sm" onclick="loadSkipped()">Refresh</button>
     </div>
-    <div class="overflow-auto">
-      <table id="queueTable" class="table-auto w-full text-sm table-zebra">
-        <thead>
-          <tr>
-            <th class="w-8"></th>
-            <th class="sortable" data-sort-key="name" data-sort-type="str" onclick="changeSort('name')">Name</th>
-            <th class="sortable" data-sort-key="files" data-sort-type="num" onclick="changeSort('files')">Files</th>
-            <th class="sortable" data-sort-key="size" data-sort-type="num" onclick="changeSort('size')">Total Size</th>
-            <th class="sortable" data-sort-key="savings" data-sort-type="num" onclick="changeSort('savings')">Est. Savings</th>
-            <th class="sortable" data-sort-key="reduction" data-sort-type="num" onclick="changeSort('reduction')">Reduction %</th>
-            <th class="sortable" data-sort-key="date" data-sort-type="str" onclick="changeSort('date')">Last Scan</th>
-            <th class="sortable" data-sort-key="priority" data-sort-type="num" onclick="changeSort('priority')">Max Priority</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for show in shows %}
-          <tr
-            class="show-row"
-            data-show="{{ show.show_name }}"
-            data-name="{{ show.show_name }}"
-            data-files="{{ show.file_count }}"
-            data-size="{{ show.total_size_bytes or 0 }}"
-            data-savings="{{ show.total_savings_bytes or 0 }}"
-            data-priority="{{ show.max_priority }}"
-          >
-            <td>
-              <span class="expand-icon" onclick="toggleShow('{{ show.show_name | e }}', event)">&#9654;</span>
-            </td>
-            <td><strong>{{ show.show_name }}</strong></td>
-            <td>{{ show.file_count }}</td>
-            <td>{{ show.total_size }}</td>
-            <td class="text-success">{{ show.total_savings }}</td>
-            <td>{{ '%.1f'|format(show.reduction_pct) if show.reduction_pct is not none else '-' }}</td>
-            <td>{{ show.latest_scan[:16] if show.latest_scan else '-' }}</td>
-            <td>{{ "%.3f"|format(show.max_priority) }}</td>
-          </tr>
-          <!-- Placeholder for seasons (inserted dynamically) -->
-          <tr
-            class="seasons-container hidden"
-            id="seasons-{{ loop.index }}"
-            data-show="{{ show.show_name }}"
-          >
-            <td colspan="8" class="nested-container">
-              <div class="loading">Loading seasons...</div>
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
+    <div id="skippedContainer" class="text-foreground-muted mt-2">Click refresh to load skipped items.</div>
+  </div>
+  <div class="overflow-auto">
+    <table id="queueTable" class="table-auto w-full text-sm table-zebra">
+      <thead>
+        <tr>
+          <th class="w-8"></th>
+          <th class="sortable" data-sort-key="name" data-sort-type="str" onclick="changeSort('name')">Name</th>
+          <th class="sortable" data-sort-key="files" data-sort-type="num" onclick="changeSort('files')">Files</th>
+          <th class="sortable" data-sort-key="size" data-sort-type="num" onclick="changeSort('size')">Total Size</th>
+          <th class="sortable" data-sort-key="savings" data-sort-type="num" onclick="changeSort('savings')">
+            Est. Savings
+          </th>
+          <th class="sortable" data-sort-key="reduction" data-sort-type="num" onclick="changeSort('reduction')">
+            Reduction %
+          </th>
+          <th class="sortable" data-sort-key="date" data-sort-type="str" onclick="changeSort('date')">Last Scan</th>
+          <th class="sortable" data-sort-key="priority" data-sort-type="num" onclick="changeSort('priority')">
+            Max Priority
+          </th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for show in shows %}
+        <tr
+          class="show-row"
+          data-show="{{ show.show_name }}"
+          data-name="{{ show.show_name }}"
+          data-files="{{ show.file_count }}"
+          data-size="{{ show.total_size_bytes or 0 }}"
+          data-savings="{{ show.total_savings_bytes or 0 }}"
+          data-priority="{{ show.max_priority }}"
+        >
+          <td>
+            <span class="expand-icon" onclick="toggleShow('{{ show.show_name | e }}', event)">&#9654;</span>
+          </td>
+          <td><strong>{{ show.show_name }}</strong></td>
+          <td>{{ show.file_count }}</td>
+          <td>{{ show.total_size }}</td>
+          <td class="text-success">{{ show.total_savings }}</td>
+          <td>{{ '%.1f'|format(show.reduction_pct) if show.reduction_pct is not none else '-' }}</td>
+          <td>{{ show.latest_scan[:16] if show.latest_scan else '-' }}</td>
+          <td>{{ "%.3f"|format(show.max_priority) }}</td>
+        </tr>
+        <!-- Placeholder for seasons (inserted dynamically) -->
+        <tr class="seasons-container hidden" id="seasons-{{ loop.index }}" data-show="{{ show.show_name }}">
+          <td colspan="8" class="nested-container">
+            <div class="loading">Loading seasons...</div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 
-    {% if total_pages > 1 %}
-    <div class="flex justify-center items-center gap-2 mt-4 flex-wrap">
-      {% if page > 1 %}
-      <a href="{{ pagination_url(1) }}" class="btn btn-sm btn-primary">&laquo; First</a>
-      <a href="{{ pagination_url(page - 1) }}" class="btn btn-sm btn-primary">&lsaquo; Prev</a>
-      {% endif %} {% for p in page_range %} {% if p == page %}
-      <span class="btn btn-sm btn-accent text-white">{{ p }}</span>
-      {% else %}
-      <a href="{{ pagination_url(p) }}" class="btn btn-sm btn-primary">{{ p }}</a>
-      {% endif %} {% endfor %} {% if page < total_pages %}
-      <a href="{{ pagination_url(page + 1) }}" class="btn btn-sm btn-primary">Next &rsaquo;</a>
-      <a href="{{ pagination_url(total_pages) }}" class="btn btn-sm btn-primary">Last &raquo;</a>
-      {% endif %}
-    </div>
-    <p class="text-foreground-muted text-center mt-2">Page {{ page }} of {{ total_pages }}</p>
+  {% if total_pages > 1 %}
+  <div class="flex justify-center items-center gap-2 mt-4 flex-wrap">
+    {% if page > 1 %}
+    <a href="{{ pagination_url(1) }}" class="btn btn-sm btn-primary">&laquo; First</a>
+    <a href="{{ pagination_url(page - 1) }}" class="btn btn-sm btn-primary">&lsaquo; Prev</a>
+    {% endif %} {% for p in page_range %} {% if p == page %}
+    <span class="btn btn-sm btn-accent text-white">{{ p }}</span>
+    {% else %}
+    <a href="{{ pagination_url(p) }}" class="btn btn-sm btn-primary">{{ p }}</a>
+    {% endif %} {% endfor %} {% if page < total_pages %}
+    <a href="{{ pagination_url(page + 1) }}" class="btn btn-sm btn-primary">Next &rsaquo;</a>
+    <a href="{{ pagination_url(total_pages) }}" class="btn btn-sm btn-primary">Last &raquo;</a>
     {% endif %}
   </div>
+  <p class="text-foreground-muted text-center mt-2">Page {{ page }} of {{ total_pages }}</p>
+  {% endif %}
+</div>
 
-  <div id="cardView" class="{{ '' if request.query_params.get('view') == 'compact' else 'hidden' }}">
-    <div class="card-grid">
-      {% for show in shows %}
-      <div
-        class="mini-card show-card"
-        data-show="{{ show.show_name }}"
-        data-name="{{ show.show_name }}"
-        data-files="{{ show.file_count }}"
-      >
-        <div class="flex items-center justify-between">
-          <strong>{{ show.show_name }}</strong>
-          <span class="pill pill-on">{{ show.file_count }} file{{ 's' if show.file_count != 1 else '' }}</span>
-        </div>
-        <div class="text-foreground-muted">Size {{ show.total_size }} · Savings {{ show.total_savings }}</div>
-        <div class="text-foreground-muted">Reduction {{ '%.1f'|format(show.reduction_pct) if show.reduction_pct is not none else '-' }}%</div>
-        <div class="text-foreground-muted">Priority {{ "%.3f"|format(show.max_priority) }}</div>
-        <div class="text-foreground-muted">Last scan {{ show.latest_scan[:16] if show.latest_scan else '—' }}</div>
-        <button class="btn btn-sm btn-primary mt-2" onclick="openCard('{{ show.show_name|e }}')">Open</button>
+<div id="cardView" class="{{ '' if request.query_params.get('view') == 'compact' else 'hidden' }}">
+  <div class="card-grid">
+    {% for show in shows %}
+    <div
+      class="mini-card show-card"
+      data-show="{{ show.show_name }}"
+      data-name="{{ show.show_name }}"
+      data-files="{{ show.file_count }}"
+    >
+      <div class="flex items-center justify-between">
+        <strong>{{ show.show_name }}</strong>
+        <span class="pill pill-on">{{ show.file_count }} file{{ 's' if show.file_count != 1 else '' }}</span>
       </div>
-      {% endfor %}
+      <div class="text-foreground-muted">Size {{ show.total_size }} · Savings {{ show.total_savings }}</div>
+      <div class="text-foreground-muted">
+        Reduction {{ '%.1f'|format(show.reduction_pct) if show.reduction_pct is not none else '-' }}%
+      </div>
+      <div class="text-foreground-muted">Priority {{ "%.3f"|format(show.max_priority) }}</div>
+      <div class="text-foreground-muted">Last scan {{ show.latest_scan[:16] if show.latest_scan else '—' }}</div>
+      <button class="btn btn-sm btn-primary mt-2" onclick="openCard('{{ show.show_name|e }}')">Open</button>
     </div>
+    {% endfor %}
   </div>
+</div>
 
 {% endblock %} {% block scripts %}
 <script>

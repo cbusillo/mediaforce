@@ -1,6 +1,4 @@
-{% extends "base.html" %}
-
-{% block content %}
+{% extends "base.html" %} {% block content %}
 <div class="flex items-center justify-between mb-4">
   <h1 class="text-3xl font-semibold">Compare: {{ filename }}</h1>
 </div>
@@ -11,8 +9,14 @@
       <span>Source ({{ source_codec }})</span>
       <span>{{ source_size }}</span>
     </div>
-    <video id="source" preload="metadata" controls playsinline class="w-full rounded-lg border border-surface-subtle bg-black">
-      <source src="/video/source/{{ encode_id }}">
+    <video
+      id="source"
+      preload="metadata"
+      controls
+      playsinline
+      class="w-full rounded-lg border border-surface-subtle bg-black"
+    >
+      <source src="/video/source/{{ encode_id }}" />
     </video>
   </div>
   <div class="compare-video space-y-2">
@@ -20,8 +24,14 @@
       <span>Encoded</span>
       <span>{{ output_size }} ({{ reduction }}% smaller)</span>
     </div>
-    <video id="encoded" preload="metadata" controls playsinline class="w-full rounded-lg border border-surface-subtle bg-black">
-      <source src="/video/encoded/{{ encode_id }}">
+    <video
+      id="encoded"
+      preload="metadata"
+      controls
+      playsinline
+      class="w-full rounded-lg border border-surface-subtle bg-black"
+    >
+      <source src="/video/encoded/{{ encode_id }}" />
     </video>
   </div>
 </div>
@@ -44,12 +54,30 @@
 <div class="card mt-4">
   <h3>Encode Details</h3>
   <table class="table-zebra">
-    <tr><td>Tier</td><td class="tier-{{ tier }}">{{ tier }}</td></tr>
-    <tr><td>CRF</td><td>{{ crf or '-' }}</td></tr>
-    <tr><td>Preset</td><td>{{ preset or '-' }}</td></tr>
-    <tr><td>VMAF</td><td>{{ vmaf or '-' }}</td></tr>
-    <tr><td>SSIM</td><td>{{ ssim or '-' }}</td></tr>
-    <tr><td>Deinterlaced</td><td>{{ 'Yes' if deinterlaced else 'No' }}</td></tr>
+    <tr>
+      <td>Tier</td>
+      <td class="tier-{{ tier }}">{{ tier }}</td>
+    </tr>
+    <tr>
+      <td>CRF</td>
+      <td>{{ crf or '-' }}</td>
+    </tr>
+    <tr>
+      <td>Preset</td>
+      <td>{{ preset or '-' }}</td>
+    </tr>
+    <tr>
+      <td>VMAF</td>
+      <td>{{ vmaf or '-' }}</td>
+    </tr>
+    <tr>
+      <td>SSIM</td>
+      <td>{{ ssim or '-' }}</td>
+    </tr>
+    <tr>
+      <td>Deinterlaced</td>
+      <td>{{ 'Yes' if deinterlaced else 'No' }}</td>
+    </tr>
   </table>
 </div>
 
@@ -58,52 +86,54 @@
   <button onclick="promote()" class="btn btn-success">Promote</button>
   <button onclick="reject()" class="btn btn-warning">Reject</button>
 </div>
-{% endblock %}
-
-{% block scripts %}
+{% endblock %} {% block scripts %}
 <script>
-const source = document.getElementById('source');
-const encoded = document.getElementById('encoded');
-const playPause = document.getElementById('playPause');
-const toggleView = document.getElementById('toggleView');
-const seekBar = document.getElementById('seekBar');
-const timeDisplay = document.getElementById('timeDisplay');
-const speedSelect = document.getElementById('speed');
+  const source = document.getElementById("source");
+  const encoded = document.getElementById("encoded");
+  const playPause = document.getElementById("playPause");
+  const toggleView = document.getElementById("toggleView");
+  const seekBar = document.getElementById("seekBar");
+  const timeDisplay = document.getElementById("timeDisplay");
+  const speedSelect = document.getElementById("speed");
+  const toggleEl = (el, show) => {
+    if (!el) return;
+    el.classList.toggle("hidden", !show);
+  };
 
-let isSyncing = false;
-let viewMode = 'both'; // 'both' | 'source' | 'encoded'
+  let isSyncing = false;
+  let viewMode = "both"; // 'both' | 'source' | 'encoded'
 
-const SEEK_STEP = 5;
-const SPEED_MAP = { '1': 1.0, '2': 1.25, '3': 1.5, '4': 1.75, '5': 2.0 };
+  const SEEK_STEP = 5;
+  const SPEED_MAP = { 1: 1.0, 2: 1.25, 3: 1.5, 4: 1.75, 5: 2.0 };
 
-function formatTimeHMS(seconds) {
-    if (!isFinite(seconds) || seconds < 0) return '0:00:00';
+  function formatTimeHMS(seconds) {
+    if (!isFinite(seconds) || seconds < 0) return "0:00:00";
     const hrs = Math.floor(seconds / 3600);
     const mins = Math.floor((seconds % 3600) / 60);
     const secs = Math.floor(seconds % 60);
-    return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-}
+    return `${hrs}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+  }
 
-function formatTime(s) {
+  function formatTime(s) {
     // kept for internal reuse where hours aren't needed
-    if (!isFinite(s) || s < 0) return '0:00';
+    if (!isFinite(s) || s < 0) return "0:00";
     const mins = Math.floor(s / 60);
     const secs = Math.floor(s % 60);
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-}
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  }
 
-function syncVideos(master, slave) {
+  function syncVideos(master, slave) {
     if (isSyncing) return;
     isSyncing = true;
     if (isFinite(master.currentTime)) {
-        slave.currentTime = master.currentTime;
+      slave.currentTime = master.currentTime;
     }
     isSyncing = false;
-}
+  }
 
-function updateTime() {
-    const master = viewMode === 'encoded' ? encoded : source;
-    const fallback = viewMode === 'encoded' ? source : encoded;
+  function updateTime() {
+    const master = viewMode === "encoded" ? encoded : source;
+    const fallback = viewMode === "encoded" ? source : encoded;
     const masterTime = isFinite(master.currentTime) ? master.currentTime : fallback.currentTime;
     const durSource = isFinite(source.duration) ? source.duration : 0;
     const durEncoded = isFinite(encoded.duration) ? encoded.duration : 0;
@@ -111,114 +141,114 @@ function updateTime() {
     const pct = dur > 0 ? (masterTime / dur) * 100 : 0;
     seekBar.value = pct;
     timeDisplay.textContent = `${formatTimeHMS(masterTime)} / ${formatTimeHMS(dur)}`;
-}
+  }
 
-source.addEventListener('timeupdate', () => {
+  source.addEventListener("timeupdate", () => {
     syncVideos(source, encoded);
     updateTime();
-});
+  });
 
-encoded.addEventListener('timeupdate', () => syncVideos(encoded, source));
+  encoded.addEventListener("timeupdate", () => syncVideos(encoded, source));
 
-source.addEventListener('loadedmetadata', updateTime);
-encoded.addEventListener('loadedmetadata', updateTime);
+  source.addEventListener("loadedmetadata", updateTime);
+  encoded.addEventListener("loadedmetadata", updateTime);
 
-playPause.addEventListener('click', () => {
+  playPause.addEventListener("click", () => {
     if (source.paused) {
-        source.play();
-        encoded.play();
-        playPause.textContent = 'Pause';
+      source.play();
+      encoded.play();
+      playPause.textContent = "Pause";
     } else {
-        source.pause();
-        encoded.pause();
-        playPause.textContent = 'Play';
+      source.pause();
+      encoded.pause();
+      playPause.textContent = "Play";
     }
-});
+  });
 
-toggleView.addEventListener('click', () => {
+  toggleView.addEventListener("click", () => {
     const current = Math.max(
-        isFinite(source.currentTime) ? source.currentTime : 0,
-        isFinite(encoded.currentTime) ? encoded.currentTime : 0,
+      isFinite(source.currentTime) ? source.currentTime : 0,
+      isFinite(encoded.currentTime) ? encoded.currentTime : 0,
     );
     source.currentTime = current;
     encoded.currentTime = current;
 
-    if (viewMode === 'both') {
-        viewMode = 'source';
-        encoded.pause();
-        encoded.parentElement.style.display = 'none';
-        source.parentElement.style.display = '';
-        toggleView.textContent = 'View: Source';
-    } else if (viewMode === 'source') {
-        viewMode = 'encoded';
-        source.pause();
-        source.parentElement.style.display = 'none';
-        encoded.parentElement.style.display = '';
-        toggleView.textContent = 'View: Encoded';
+    if (viewMode === "both") {
+      viewMode = "source";
+      encoded.pause();
+      toggleEl(encoded.parentElement, false);
+      toggleEl(source.parentElement, true);
+      toggleView.textContent = "View: Source";
+    } else if (viewMode === "source") {
+      viewMode = "encoded";
+      source.pause();
+      toggleEl(source.parentElement, false);
+      toggleEl(encoded.parentElement, true);
+      toggleView.textContent = "View: Encoded";
     } else {
-        viewMode = 'both';
-        source.parentElement.style.display = '';
-        encoded.parentElement.style.display = '';
-        toggleView.textContent = 'View: Both';
+      viewMode = "both";
+      toggleEl(source.parentElement, true);
+      toggleEl(encoded.parentElement, true);
+      toggleView.textContent = "View: Both";
     }
     updateTime();
-});
+  });
 
-seekBar.addEventListener('input', () => {
+  seekBar.addEventListener("input", () => {
     const dur = isFinite(source.duration) ? source.duration : 0;
     const time = dur > 0 ? (seekBar.value / 100) * dur : 0;
     source.currentTime = time;
     encoded.currentTime = time;
-});
+  });
 
-speedSelect.addEventListener('change', () => {
+  speedSelect.addEventListener("change", () => {
     const speed = parseFloat(speedSelect.value);
     source.playbackRate = speed;
     encoded.playbackRate = speed;
-});
+  });
 
-document.addEventListener('keydown', (e) => {
-    if (e.code === 'Space') {
-        e.preventDefault();
-        playPause.click();
-    } else if (e.code === 'ArrowLeft') {
-        source.currentTime = Math.max(0, source.currentTime - SEEK_STEP);
-        encoded.currentTime = source.currentTime;
-    } else if (e.code === 'ArrowRight') {
-        source.currentTime = source.currentTime + SEEK_STEP;
-        encoded.currentTime = source.currentTime;
+  document.addEventListener("keydown", (e) => {
+    if (e.code === "Space") {
+      e.preventDefault();
+      playPause.click();
+    } else if (e.code === "ArrowLeft") {
+      source.currentTime = Math.max(0, source.currentTime - SEEK_STEP);
+      encoded.currentTime = source.currentTime;
+    } else if (e.code === "ArrowRight") {
+      source.currentTime = source.currentTime + SEEK_STEP;
+      encoded.currentTime = source.currentTime;
     } else if (SPEED_MAP[e.key]) {
-        const speed = SPEED_MAP[e.key];
-        speedSelect.value = String(speed);
-        source.playbackRate = speed;
-        encoded.playbackRate = speed;
+      const speed = SPEED_MAP[e.key];
+      speedSelect.value = String(speed);
+      source.playbackRate = speed;
+      encoded.playbackRate = speed;
     }
-});
+  });
 
-async function promote() {
-    if (!confirm('Promote this encode? This will replace the original file.')) return;
-    const resp = await fetch('/api/promote/{{ encode_id }}', { method: 'POST' });
+  async function promote() {
+    if (!confirm("Promote this encode? This will replace the original file.")) return;
+    const resp = await fetch("/api/promote/{{ encode_id }}", { method: "POST" });
     const data = await resp.json();
     if (data.success) {
-        window.location.href = '/review';
+      window.location.href = "/review";
     } else {
-        alert('Error: ' + data.error);
+      alert("Error: " + data.error);
     }
-}
+  }
 
-async function reject() {
-    if (!confirm('Reject this encode? The encoded file will be deleted.')) return;
-    const resp = await fetch('/api/reject/{{ encode_id }}', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({})
+  async function reject() {
+    if (!confirm("Reject this encode? The encoded file will be deleted.")) return;
+    const resp = await fetch("/api/reject/{{ encode_id }}", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
     });
     const data = await resp.json();
     if (data.success) {
-        window.location.href = '/review';
+      window.location.href = "/review";
     } else {
-        alert('Error: ' + data.error);
+      alert("Error: " + data.error);
     }
-}
+  }
 </script>
 {% endblock %}
