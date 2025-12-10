@@ -484,27 +484,18 @@
   }
 
   // Hover thumbnail
-  const hoverThumb = document.getElementById("hoverThumb");
-  const hoverVideo = document.getElementById("hoverVideo");
-  let hoverTimer = null;
+  const hoverPreview = window.mfCommon?.createHoverPreview({
+    thumbId: "hoverThumb",
+    videoId: "hoverVideo",
+    srcBuilder: (id) => `/video/encoded/${id}`,
+    delay: 200,
+    maxWidth: 240,
+  });
   function showThumb(evt, id) {
-    clearTimeout(hoverTimer);
-    hoverTimer = setTimeout(() => {
-      const target = evt.currentTarget || evt.target;
-      if (!target?.getBoundingClientRect) return;
-      hoverVideo.src = `/video/encoded/${id}`;
-      hoverVideo.load();
-      const rect = target.getBoundingClientRect();
-      hoverThumb.style.left = `${rect.right + 12}px`;
-      hoverThumb.style.top = `${rect.top}px`;
-      toggleEl(hoverThumb, true);
-    }, 200);
+    hoverPreview?.show(evt, id);
   }
   function hideThumb() {
-    clearTimeout(hoverTimer);
-    toggleEl(hoverThumb, false);
-    hoverVideo.pause();
-    hoverVideo.src = "";
+    hoverPreview?.hide();
   }
 </script>
 {% endblock %}

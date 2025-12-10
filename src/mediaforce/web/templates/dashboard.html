@@ -342,31 +342,18 @@
   }
 
   // Hover thumbnail for recent completions
-  const dashHoverThumb = document.getElementById('hoverThumb');
-  const dashHoverVideo = document.getElementById('hoverVideo');
-  let dashHoverTimer = null;
-  const dashToggleEl = (el, show) => {
-    if (!el) return;
-    el.classList.toggle('hidden', !show);
-  };
+  const dashHover = window.mfCommon?.createHoverPreview({
+    thumbId: 'hoverThumb',
+    videoId: 'hoverVideo',
+    srcBuilder: (id) => `/video/encoded/${id}`,
+    delay: 150,
+    maxWidth: 240,
+  });
   function dashShowThumb(evt, id) {
-    clearTimeout(dashHoverTimer);
-    dashHoverTimer = setTimeout(() => {
-      const target = evt.currentTarget || evt.target;
-      if (!target?.getBoundingClientRect) return;
-      dashHoverVideo.src = `/video/encoded/${id}`;
-      dashHoverVideo.load();
-      const rect = target.getBoundingClientRect();
-      dashHoverThumb.style.left = `${Math.min(rect.right + 12, window.innerWidth - 240)}px`;
-      dashHoverThumb.style.top = `${rect.top}px`;
-      dashToggleEl(dashHoverThumb, true);
-    }, 150);
+    dashHover?.show(evt, id);
   }
   function dashHideThumb() {
-    clearTimeout(dashHoverTimer);
-    dashToggleEl(dashHoverThumb, false);
-    dashHoverVideo.pause();
-    dashHoverVideo.src = '';
+    dashHover?.hide();
   }
 </script>
 {% endblock %}
