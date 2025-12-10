@@ -1,126 +1,131 @@
 {% extends "base.html" %}
 
 {% block content %}
-<h1>Settings</h1>
+<div class="flex items-center justify-between mb-4">
+    <div>
+        <h1 class="text-3xl font-semibold">Settings</h1>
+        <p class="text-foreground-muted text-sm">Configure libraries, watcher, and host-level encode limits.</p>
+    </div>
+</div>
 
-<div class="card">
-    <h3>Libraries</h3>
-    <p class="text-muted" style="margin-bottom: 1rem;">
-        Configure logical libraries (TV, Movies) and their paths on macOS and Linux.
-        These settings are shared between the web UI, CLI, and background watchers.
-    </p>
-
-    <div style="display: flex; gap: 1rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap;">
-        <div class="stat-card" style="background: var(--bg-secondary); padding: 0.75rem 1rem; border-radius: 6px;">
-            <div class="label" style="color: var(--text-secondary);">Watcher</div>
-            <div class="value" style="font-size: 1.1rem; color: var(--accent);">
-                {% if watch_status.running %}Running{% else %}Stopped{% endif %}
-            </div>
-            <div class="text-muted" style="font-size: 0.9rem;">{{ watch_status.message }}</div>
+<div class="card space-y-4">
+    <div class="section-heading">
+        <div>
+            <h3 class="section-title">Libraries</h3>
+            <p class="section-subtle">Shared across web, CLI, and background watchers.</p>
         </div>
-
-        <button type="button" id="watch-start" class="btn btn-success">Start Watch</button>
-        <button type="button" id="watch-stop" class="btn btn-warning">Stop Watch</button>
-        <span id="watch-status" class="text-muted"></span>
     </div>
 
-    <div style="margin-bottom: 1rem; display: flex; gap: 1rem; flex-wrap: wrap; align-items: center;">
-        <div>
-            <label for="global-max-height" class="text-muted" style="display:block; margin-bottom: 0.25rem;">Global Max Height</label>
-            <select id="global-max-height" name="global_max_height" aria-label="Global maximum height" style="width: 160px;">
+    <div class="flex flex-wrap gap-3 items-center">
+        <div class="stat-card">
+            <div class="label text-foreground-muted text-xs uppercase">Watcher</div>
+            <div class="value text-accent text-lg font-semibold">{% if watch_status.running %}Running{% else %}Stopped{% endif %}</div>
+            <div class="text-foreground-muted text-sm">{{ watch_status.message }}</div>
+        </div>
+        <button type="button" id="watch-start" class="btn btn-success">Start Watch</button>
+        <button type="button" id="watch-stop" class="btn btn-warning">Stop Watch</button>
+        <span id="watch-status" class="text-foreground-muted text-sm"></span>
+    </div>
+
+    <div class="flex flex-wrap gap-6 items-start">
+        <div class="space-y-1">
+            <label for="global-max-height" class="form-label">Global Max Height</label>
+            <select id="global-max-height" name="global_max_height" aria-label="Global maximum height" class="form-select w-40">
                 {% for h in ["",480,720,1080,1440,2160,4320] %}
                     <option value="{{ h }}" {% if h != '' and global_max_height is not none and (h|int) == global_max_height %}selected{% endif %}>
                         {% if h == "" %}Unset{% else %}{{ h }}p{% endif %}
                     </option>
                 {% endfor %}
             </select>
-            <div class="text-muted" style="font-size: 0.85rem;">Downscale only; never upscale.</div>
+            <div class="text-foreground-muted text-sm">Downscale only; never upscale.</div>
         </div>
 
-        <div>
-            <label for="max-concurrency" class="text-muted" style="display:block; margin-bottom: 0.25rem;">Max Concurrency</label>
-            <input id="max-concurrency" type="number" name="max_concurrency" min="1" value="{{ settings.max_concurrency or 1 }}" aria-label="Maximum concurrent encodes" style="width: 120px;">
-            <div class="text-muted" style="font-size: 0.85rem;">Encodes allowed in parallel on this host.</div>
+        <div class="space-y-1">
+            <label for="max-concurrency" class="form-label">Max Concurrency</label>
+            <input id="max-concurrency" class="form-input w-28" type="number" name="max_concurrency" min="1" value="{{ settings.max_concurrency or 1 }}" aria-label="Maximum concurrent encodes">
+            <div class="text-foreground-muted text-sm">Encodes allowed in parallel on this host.</div>
         </div>
 
-        <div>
-            <label class="text-muted" style="display:block; margin-bottom: 0.25rem;">Off-peak Window</label>
-            <div style="display:flex; gap:0.35rem; align-items:center;">
+        <div class="space-y-1">
+            <label class="form-label">Off-peak Window</label>
+            <div class="flex items-center gap-2">
                 <input type="checkbox" name="offpeak_enabled" id="offpeak-enabled" aria-label="Enable off-peak window" {% if settings.offpeak_enabled %}checked{% endif %}>
-                <input type="time" name="offpeak_start" aria-label="Off-peak start" value="{{ settings.offpeak_start or '00:00' }}" style="width:120px;">
-                <span>to</span>
-                <input type="time" name="offpeak_end" aria-label="Off-peak end" value="{{ settings.offpeak_end or '05:00' }}" style="width:120px;">
+                <input class="form-input w-28" type="time" name="offpeak_start" aria-label="Off-peak start" value="{{ settings.offpeak_start or '00:00' }}">
+                <span class="text-foreground-muted">to</span>
+                <input class="form-input w-28" type="time" name="offpeak_end" aria-label="Off-peak end" value="{{ settings.offpeak_end or '05:00' }}">
             </div>
-            <div class="text-muted" style="font-size: 0.85rem;">Workers only encode during this window when enabled.</div>
+            <div class="text-foreground-muted text-sm">Workers only encode during this window when enabled.</div>
         </div>
     </div>
 
-    <form id="settings-form">
-        <table>
-            <thead>
-                <tr>
-                    <th>Name</th>
-                    <th>Type</th>
-            <th>macOS Path (/Volumes)</th>
-            <th>Linux Path (/mnt)</th>
-            <th>Watch for New Files</th>
-            <th>Max Height</th>
-            <th>Last Scan</th>
-            <th>Scan Now</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for lib in libraries %}
-                <tr>
-                    <td>
-                        <input type="hidden" name="libraries[{{ loop.index0 }}][id]" value="{{ lib.id }}">
-                        <input type="text" name="libraries[{{ loop.index0 }}][name]" value="{{ lib.name }}" aria-label="Library name" style="width: 180px;">
-                    </td>
-                    <td>
-                        <select name="libraries[{{ loop.index0 }}][media_type]" aria-label="Media type for {{ lib.name }}" style="width: 120px;">
-                            {% set mt = (lib.media_type or '').lower() %}
-                            <option value="tv" {% if mt == 'tv' %}selected{% endif %}>TV</option>
-                            <option value="movies" {% if mt == 'movies' %}selected{% endif %}>Movies</option>
-                            <option value="generic" {% if mt not in ['tv', 'movies'] %}selected{% endif %}>Other</option>
-                        </select>
-                    </td>
-            <td>
-                <input type="text" name="libraries[{{ loop.index0 }}][mac_path]" value="{{ lib.mac_path }}" aria-label="macOS path" style="width: 260px;">
-            </td>
-            <td>
-                <input type="text" name="libraries[{{ loop.index0 }}][linux_path]" value="{{ lib.linux_path }}" aria-label="Linux path" style="width: 260px;">
-            </td>
-            <td style="text-align: center;">
-                <input class="row-checkbox" type="checkbox" name="libraries[{{ loop.index0 }}][watch]" aria-label="Watch library {{ lib.name }}" value="true" {% if lib.watch %}checked{% endif %}>
-            </td>
-            <td>
-                <select name="libraries[{{ loop.index0 }}][max_height]" aria-label="Max height for {{ lib.name }}" style="width: 130px;">
-                    {% for h in ["",480,720,1080,1440,2160,4320] %}
-                        <option value="{{ h }}" {% if h != '' and lib.max_height is not none and (h|int) == lib.max_height %}selected{% endif %}>
-                            {% if h == "" %}Unset{% else %}{{ h }}p{% endif %}
-                        </option>
+    <form id="settings-form" class="space-y-3">
+        <div class="overflow-auto">
+            <table class="table-auto w-full text-sm table-zebra">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Type</th>
+                        <th>macOS Path (/Volumes)</th>
+                        <th>Linux Path (/mnt)</th>
+                        <th>Watch</th>
+                        <th>Max Height</th>
+                        <th>Last Scan</th>
+                        <th>Scan Now</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for lib in libraries %}
+                    <tr>
+                        <td>
+                            <input type="hidden" name="libraries[{{ loop.index0 }}][id]" value="{{ lib.id }}">
+                            <input class="form-input w-44" type="text" name="libraries[{{ loop.index0 }}][name]" value="{{ lib.name }}" aria-label="Library name">
+                        </td>
+                        <td>
+                            <select class="form-select w-32" name="libraries[{{ loop.index0 }}][media_type]" aria-label="Media type for {{ lib.name }}">
+                                {% set mt = (lib.media_type or '').lower() %}
+                                <option value="tv" {% if mt == 'tv' %}selected{% endif %}>TV</option>
+                                <option value="movies" {% if mt == 'movies' %}selected{% endif %}>Movies</option>
+                                <option value="generic" {% if mt not in ['tv', 'movies'] %}selected{% endif %}>Other</option>
+                            </select>
+                        </td>
+                        <td>
+                            <input class="form-input w-64" type="text" name="libraries[{{ loop.index0 }}][mac_path]" value="{{ lib.mac_path }}" aria-label="macOS path">
+                        </td>
+                        <td>
+                            <input class="form-input w-64" type="text" name="libraries[{{ loop.index0 }}][linux_path]" value="{{ lib.linux_path }}" aria-label="Linux path">
+                        </td>
+                        <td class="text-center">
+                            <input class="row-checkbox" type="checkbox" name="libraries[{{ loop.index0 }}][watch]" aria-label="Watch library {{ lib.name }}" value="true" {% if lib.watch %}checked{% endif %}>
+                        </td>
+                        <td>
+                            <select class="form-select w-32" name="libraries[{{ loop.index0 }}][max_height]" aria-label="Max height for {{ lib.name }}">
+                                {% for h in ["",480,720,1080,1440,2160,4320] %}
+                                    <option value="{{ h }}" {% if h != '' and lib.max_height is not none and (h|int) == lib.max_height %}selected{% endif %}>
+                                        {% if h == "" %}Unset{% else %}{{ h }}p{% endif %}
+                                    </option>
+                                {% endfor %}
+                            </select>
+                        </td>
+                        <td class="text-foreground-muted">
+                            {% set status = (lib_status | selectattr('lib.id', 'equalto', lib.id) | list | first) %}
+                            {% if status and status.last_scan %}
+                                {{ status.last_scan[:16] }}
+                            {% else %}
+                                never
+                            {% endif %}
+                        </td>
+                        <td>
+                            <button type="button" class="btn btn-sm btn-accent scan-btn" data-path="{{ lib.mac_path if is_mac else lib.linux_path }}">Scan</button>
+                        </td>
+                    </tr>
                     {% endfor %}
-                </select>
-            </td>
-            <td class="text-muted" style="font-size: 0.9rem;">
-                {% set status = (lib_status | selectattr('lib.id', 'equalto', lib.id) | list | first) %}
-                {% if status and status.last_scan %}
-                    {{ status.last_scan[:16] }}
-                {% else %}
-                    never
-                {% endif %}
-            </td>
-            <td>
-                <button type="button" class="btn btn-sm btn-primary scan-btn" data-path="{{ lib.mac_path if is_mac else lib.linux_path }}">Scan</button>
-            </td>
-        </tr>
-        {% endfor %}
-            </tbody>
-        </table>
+                </tbody>
+            </table>
+        </div>
 
-        <div style="margin-top: 1rem; display: flex; gap: 1rem; align-items: center;">
-            <button type="submit" class="btn btn-primary">Save Settings</button>
-            <span id="settings-status" class="text-muted"></span>
+        <div class="flex items-center gap-3 pt-2">
+            <button type="submit" class="btn btn-accent">Save Settings</button>
+            <span id="settings-status" class="text-foreground-muted text-sm"></span>
         </div>
     </form>
 </div>
