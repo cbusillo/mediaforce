@@ -38,7 +38,7 @@
   - Buttons: Rescan library, Kick watcher, with status feedback
   - Workers panel on Dashboard: state/host/role, start/stop/pause
 
-- [ ] **Profile Selection Quality Loop**
+- [x] **Profile Selection Quality Loop**
   - Motion-weighted 3-clip VMAF sampling (short + mid + motion chunk)
   - Min/max VMAF thresholds; never upscale; honor global + per-library max height
   - Record chosen profile + reasoning; UI button “flag bad choice” to feed retraining

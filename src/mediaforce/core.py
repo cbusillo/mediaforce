@@ -33,6 +33,7 @@ import urllib.request
 import urllib.error
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Optional, List, Dict, Any, TYPE_CHECKING
 
 from sqlmodel import Session, select, delete
@@ -3311,7 +3312,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if settings_url:
         app_settings = load_remote_settings(settings_url)
         if app_settings is None:
-            print(f"[warn] Could not load remote settings from {settings_url}; using local defaults.")
+            log_warn("remote_settings_load_failed", url=settings_url)
     if app_settings is None:
         app_settings = load_app_settings()
 
@@ -3470,61 +3471,147 @@ def cmd_run(args: argparse.Namespace) -> int:
 
         # Build and run ffmpeg command
         # Downscale target from settings (never upscale)
-        app_settings = load_app_settings()
         target_height, target_height_reason = resolve_target_height_for_path(source_path, app_settings)
 
         eval_obj_id: Optional[int] = None
         active_settings_source = ensure_active_profile_settings(session) if session is not None else None
 
         # Optional VMAF sampling to adjust tier before full encode
-        if args.sample_vmaf and session is not None:
-            from mediaforce.services.quality_loop import run_profile_quality_loop
+        if args.sample_vmaf:
+            from mediaforce.services.quality_loop import build_motion_weighted_plan, run_profile_quality_loop
 
-            info_for_samples = info
-            assert info_for_samples is not None
+            if session is not None:
+                info_for_samples = info
+                assert info_for_samples is not None
 
-            def measure(item) -> Optional[float]:
-                enc_path, enc_size = encode_sample_clip(
-                    source_path,
-                    settings,
-                    info_for_samples,
-                    item.start_sec,
-                    item.duration_sec,
-                    target_height,
+                def measure(item) -> Optional[float]:
+                    enc_path, enc_size = encode_sample_clip(
+                        source_path,
+                        settings,
+                        info_for_samples,
+                        item.start_sec,
+                        item.duration_sec,
+                        target_height,
+                    )
+                    if not enc_path:
+                        return None
+                    vmaf = compute_vmaf_score(
+                        source_path,
+                        enc_path,
+                        item.start_sec,
+                        item.duration_sec,
+                        encoded_size=enc_size,
+                    )
+                    try:
+                        enc_path.unlink(missing_ok=True)
+                        enc_path.parent.rmdir()
+                    except OSError:
+                        pass
+                    return vmaf
+
+                loop_result = run_profile_quality_loop(
+                    session,
+                    media_id=claimed["id"],
+                    source_path=source_path,
+                    duration_seconds=float(info.duration_seconds or 0.0),
+                    initial_profile=tier,
+                    settings_source=active_settings_source,
+                    sample_length=args.sample_length,
+                    motion_aware=args.sample_motion_aware,
+                    measure_vmaf=measure,
+                    window_bitrate=window_bitrate,
+                    target_height=target_height,
+                    target_height_reason=target_height_reason,
                 )
-                if not enc_path:
-                    return None
-                vmaf = compute_vmaf_score(
-                    source_path,
-                    enc_path,
-                    item.start_sec,
-                    item.duration_sec,
-                    encoded_size=enc_size,
-                )
-                try:
-                    enc_path.unlink(missing_ok=True)
-                    enc_path.parent.rmdir()
-                except OSError:
-                    pass
-                return vmaf
+                eval_obj_id = loop_result.evaluation_id
+            elif use_api and api_client is not None:
+                duration_seconds = float(info.duration_seconds or 0.0)
+                if duration_seconds > 0.0 and args.sample_length > 0:
+                    try:
+                        eval_id, _thresholds = api_client.evaluation_start(
+                            media_id=int(claimed["id"]),
+                            initial_profile=tier,
+                            sample_length=float(args.sample_length),
+                        )
+                        eval_obj_id = eval_id
 
-            loop_result = run_profile_quality_loop(
-                session,
-                media_id=claimed["id"],
-                source_path=source_path,
-                duration_seconds=float(info.duration_seconds or 0.0),
-                initial_profile=tier,
-                settings_source=active_settings_source,
-                sample_length=args.sample_length,
-                motion_aware=args.sample_motion_aware,
-                measure_vmaf=measure,
-                window_bitrate=window_bitrate,
-                target_height=target_height,
-                target_height_reason=target_height_reason,
-            )
-            eval_obj_id = loop_result.evaluation_id
+                        plan = build_motion_weighted_plan(
+                            source_path=source_path,
+                            duration_seconds=duration_seconds,
+                            sample_length=float(args.sample_length),
+                            motion_aware=bool(args.sample_motion_aware),
+                            window_bitrate=window_bitrate,
+                        )
 
-            if loop_result.selected_profile != tier:
+                        samples_payload: list[dict[str, Any]] = []
+                        for item in plan:
+                            enc_path, enc_size = encode_sample_clip(
+                                source_path,
+                                settings,
+                                info,
+                                item.start_sec,
+                                item.duration_sec,
+                                target_height,
+                            )
+                            if not enc_path:
+                                continue
+                            vmaf = compute_vmaf_score(
+                                source_path,
+                                enc_path,
+                                item.start_sec,
+                                item.duration_sec,
+                                encoded_size=enc_size,
+                            )
+                            try:
+                                enc_path.unlink(missing_ok=True)
+                                enc_path.parent.rmdir()
+                            except OSError:
+                                pass
+                            if vmaf is None:
+                                continue
+                            samples_payload.append(
+                                {
+                                    "kind": item.kind,
+                                    "start_sec": item.start_sec,
+                                    "duration_sec": item.duration_sec,
+                                    "weight": item.weight,
+                                    "vmaf": float(vmaf),
+                                }
+                            )
+
+                        resp = api_client.evaluation_submit_samples(
+                            evaluation_id=eval_id,
+                            samples=samples_payload,
+                            target_height=target_height,
+                            target_height_reason=target_height_reason,
+                        )
+                        loop_result = SimpleNamespace(
+                            evaluation_id=eval_id,
+                            initial_profile=resp.get("initial_profile") or tier,
+                            selected_profile=resp.get("selected_profile") or tier,
+                            decision=resp.get("decision") or "keep",
+                            summary=SimpleNamespace(
+                                weighted=(resp.get("summary") or {}).get("weighted"),
+                                minimum=(resp.get("summary") or {}).get("min"),
+                                median=(resp.get("summary") or {}).get("median"),
+                            ),
+                            thresholds=SimpleNamespace(
+                                min_vmaf=(_thresholds or {}).get("min"),
+                                median_vmaf=(_thresholds or {}).get("median"),
+                            ),
+                        )
+                    except WorkerApiError as e:
+                        log_warn("quality_loop_api_failed", error=str(e))
+                        loop_result = None
+                else:
+                    loop_result = None
+            else:
+                loop_result = None
+
+            if loop_result is None:
+                pass
+
+            if loop_result is not None and loop_result.selected_profile != tier:
                 try:
                     new_tier = SourceTier(loop_result.selected_profile)
                     classification = ClassificationResult(
@@ -3542,19 +3629,20 @@ def cmd_run(args: argparse.Namespace) -> int:
                 except ValueError:
                     pass
 
-            log_info(
-                "quality_loop_result",
-                file=str(source_path),
-                eval_id=loop_result.evaluation_id,
-                initial=loop_result.initial_profile,
-                selected=loop_result.selected_profile,
-                decision=loop_result.decision,
-                weighted=loop_result.summary.weighted,
-                minimum=loop_result.summary.minimum,
-                median=loop_result.summary.median,
-                threshold_min=loop_result.thresholds.min_vmaf,
-                threshold_median=loop_result.thresholds.median_vmaf,
-            )
+            if loop_result is not None:
+                log_info(
+                    "quality_loop_result",
+                    file=str(source_path),
+                    eval_id=loop_result.evaluation_id,
+                    initial=loop_result.initial_profile,
+                    selected=loop_result.selected_profile,
+                    decision=loop_result.decision,
+                    weighted=loop_result.summary.weighted,
+                    minimum=loop_result.summary.minimum,
+                    median=loop_result.summary.median,
+                    threshold_min=loop_result.thresholds.min_vmaf,
+                    threshold_median=loop_result.thresholds.median_vmaf,
+                )
 
         cmd = build_ffmpeg_command(
             source_path,

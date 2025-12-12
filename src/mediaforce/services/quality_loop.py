@@ -188,13 +188,182 @@ def choose_profile(
         return selected, decision, "done", note
 
     # If very high quality, try a more aggressive profile.
-    if summary.weighted is not None and summary.weighted >= 95.0:
+    high_threshold = thresholds.max_vmaf if thresholds.max_vmaf is not None else 95.0
+    if summary.weighted is not None and summary.weighted >= high_threshold:
         selected = _tier_more_aggressive(initial_profile)
-        note = f"high_weighted_vmaf ({summary.weighted:.1f})"
+        note = f"high_weighted_vmaf ({summary.weighted:.1f} >= {high_threshold:.1f})"
         decision = "bump" if selected != initial_profile else "keep"
         return selected, decision, "done", note
 
     return initial_profile, "keep", "done", None
+
+
+def start_profile_evaluation(
+    session: Session,
+    *,
+    media_id: int,
+    initial_profile: str,
+    thresholds: VmafThresholds,
+    settings_source: Optional[ProfileSettingsSource],
+    sample_length: float,
+    sample_strategy: str = "3x8s_motion",
+    sample_count: int = 3,
+) -> ProfileEvaluation:
+    now_str = now_iso()
+    ev = ProfileEvaluation(
+        media_id=media_id,
+        encode_result_id=None,
+        settings_source_id=settings_source.id if settings_source else None,
+        selected_profile=initial_profile,
+        sample_strategy=sample_strategy,
+        sample_count=sample_count,
+        sample_length=sample_length,
+        threshold_min=thresholds.min_vmaf,
+        threshold_median=thresholds.median_vmaf,
+        threshold_max=thresholds.max_vmaf,
+        decision="keep",
+        status="running",
+        created_at=now_str,
+        updated_at=now_str,
+    )
+    session.add(ev)
+    session.commit()
+    session.refresh(ev)
+    return ev
+
+
+def finalize_profile_evaluation(
+    session: Session,
+    *,
+    evaluation_id: int,
+    initial_profile: str,
+    thresholds: VmafThresholds,
+    settings_source: Optional[ProfileSettingsSource],
+    sample_results: list[VmafSampleResult],
+    target_height: Optional[int] = None,
+    target_height_reason: Optional[str] = None,
+) -> QualityLoopResult:
+    ev = session.get(ProfileEvaluation, evaluation_id)
+    if not ev:
+        raise ValueError("evaluation_not_found")
+
+    now_str = now_iso()
+    if not sample_results:
+        ev.status = "failed"
+        ev.decision = "fail"
+        ev.note = "VMAF sampling failed"
+        ev.reason_json = json.dumps(
+            {
+                "version": 1,
+                "status": ev.status,
+                "decision": ev.decision,
+                "note": ev.note,
+                "initial_profile": initial_profile,
+                "selected_profile": initial_profile,
+                "thresholds": {
+                    "min": thresholds.min_vmaf,
+                    "median": thresholds.median_vmaf,
+                    "max": thresholds.max_vmaf,
+                },
+                "target_height": target_height,
+                "target_height_reason": target_height_reason,
+                "settings_source_id": settings_source.id if settings_source else None,
+                "created_at": now_str,
+            },
+            ensure_ascii=False,
+        )
+        ev.updated_at = now_str
+        session.add(ev)
+        session.commit()
+        return QualityLoopResult(
+            evaluation_id=ev.id or 0,
+            selected_profile=initial_profile,
+            initial_profile=initial_profile,
+            decision=ev.decision,
+            status=ev.status,
+            note=ev.note,
+            thresholds=thresholds,
+            summary=VmafSummary(weighted=None, median=None, minimum=None, maximum=None),
+        )
+
+    summary = summarize_vmaf_samples(sample_results)
+    selected_profile, decision, status, note = choose_profile(
+        initial_profile=initial_profile,
+        summary=summary,
+        thresholds=thresholds,
+    )
+
+    for sample in sample_results:
+        session.add(
+            VmafSample(
+                evaluation_id=ev.id,  # type: ignore[arg-type]
+                sample_kind=sample.kind,
+                start_sec=sample.start_sec,
+                duration_sec=sample.duration_sec,
+                vmaf=sample.vmaf,
+                weight=sample.weight,
+                created_at=now_str,
+            )
+        )
+    session.commit()
+
+    reason_payload = {
+        "version": 1,
+        "initial_profile": initial_profile,
+        "selected_profile": selected_profile,
+        "decision": decision,
+        "status": status,
+        "thresholds": {
+            "min": thresholds.min_vmaf,
+            "median": thresholds.median_vmaf,
+            "max": thresholds.max_vmaf,
+        },
+        "summary": {
+            "weighted": summary.weighted,
+            "median": summary.median,
+            "min": summary.minimum,
+            "max": summary.maximum,
+        },
+        "samples": [
+            {
+                "kind": s.kind,
+                "start_sec": s.start_sec,
+                "duration_sec": s.duration_sec,
+                "weight": s.weight,
+                "vmaf": s.vmaf,
+            }
+            for s in sample_results
+        ],
+        "target_height": target_height,
+        "target_height_reason": target_height_reason,
+        "settings_source_id": settings_source.id if settings_source else None,
+        "settings_source_checksum": settings_source.checksum if settings_source else None,
+        "created_at": now_str,
+    }
+
+    ev.selected_profile = selected_profile
+    ev.weighted_vmaf = summary.weighted
+    ev.median_vmaf = summary.median
+    ev.min_vmaf = summary.minimum
+    ev.max_vmaf = summary.maximum
+    ev.decision = decision
+    ev.status = status
+    ev.note = note
+    ev.reason_json = json.dumps(reason_payload, ensure_ascii=False)
+    ev.updated_at = now_str
+    session.add(ev)
+    session.commit()
+
+    return QualityLoopResult(
+        evaluation_id=ev.id or 0,
+        selected_profile=selected_profile,
+        initial_profile=initial_profile,
+        decision=decision,
+        status=status,
+        note=note,
+        thresholds=thresholds,
+        summary=summary,
+    )
 
 
 def run_profile_quality_loop(
@@ -214,26 +383,16 @@ def run_profile_quality_loop(
 ) -> QualityLoopResult:
     thresholds = extract_thresholds(settings_source)
     now_str = now_iso()
-
-    ev = ProfileEvaluation(
+    ev = start_profile_evaluation(
+        session,
         media_id=media_id,
-        encode_result_id=None,
-        settings_source_id=settings_source.id if settings_source else None,
-        selected_profile=initial_profile,
+        initial_profile=initial_profile,
+        thresholds=thresholds,
+        settings_source=settings_source,
+        sample_length=sample_length,
         sample_strategy="3x8s_motion",
         sample_count=3,
-        sample_length=sample_length,
-        threshold_min=thresholds.min_vmaf,
-        threshold_median=thresholds.median_vmaf,
-        threshold_max=thresholds.max_vmaf,
-        decision="keep",
-        status="running",
-        created_at=now_str,
-        updated_at=now_str,
     )
-    session.add(ev)
-    session.commit()
-    session.refresh(ev)
 
     plan = build_motion_weighted_plan(
         source_path=source_path,
@@ -296,120 +455,13 @@ def run_profile_quality_loop(
             )
         )
 
-    if not sample_results:
-        ev.status = "failed"
-        ev.decision = "fail"
-        ev.note = "VMAF sampling failed"
-        ev.reason_json = json.dumps(
-            {
-                "version": 1,
-                "status": ev.status,
-                "decision": ev.decision,
-                "note": ev.note,
-                "initial_profile": initial_profile,
-                "selected_profile": initial_profile,
-                "thresholds": {
-                    "min": thresholds.min_vmaf,
-                    "median": thresholds.median_vmaf,
-                    "max": thresholds.max_vmaf,
-                },
-                "target_height": target_height,
-                "target_height_reason": target_height_reason,
-                "settings_source_id": settings_source.id if settings_source else None,
-                "created_at": now_str,
-            },
-            ensure_ascii=False,
-        )
-        ev.updated_at = now_iso()
-        session.add(ev)
-        session.commit()
-        return QualityLoopResult(
-            evaluation_id=ev.id or 0,
-            selected_profile=initial_profile,
-            initial_profile=initial_profile,
-            decision=ev.decision,
-            status=ev.status,
-            note=ev.note,
-            thresholds=thresholds,
-            summary=VmafSummary(weighted=None, median=None, minimum=None, maximum=None),
-        )
-
-    summary = summarize_vmaf_samples(sample_results)
-    selected_profile, decision, status, note = choose_profile(
-        initial_profile=initial_profile,
-        summary=summary,
-        thresholds=thresholds,
-    )
-
-    # Persist samples
-    for sample in sample_results:
-        session.add(
-            VmafSample(
-                evaluation_id=ev.id,  # type: ignore[arg-type]
-                sample_kind=sample.kind,
-                start_sec=sample.start_sec,
-                duration_sec=sample.duration_sec,
-                vmaf=sample.vmaf,
-                weight=sample.weight,
-                created_at=now_str,
-            )
-        )
-    session.commit()
-
-    reason_payload = {
-        "version": 1,
-        "initial_profile": initial_profile,
-        "selected_profile": selected_profile,
-        "decision": decision,
-        "status": status,
-        "thresholds": {
-            "min": thresholds.min_vmaf,
-            "median": thresholds.median_vmaf,
-            "max": thresholds.max_vmaf,
-        },
-        "summary": {
-            "weighted": summary.weighted,
-            "median": summary.median,
-            "min": summary.minimum,
-            "max": summary.maximum,
-        },
-        "samples": [
-            {
-                "kind": s.kind,
-                "start_sec": s.start_sec,
-                "duration_sec": s.duration_sec,
-                "weight": s.weight,
-                "vmaf": s.vmaf,
-            }
-            for s in sample_results
-        ],
-        "target_height": target_height,
-        "target_height_reason": target_height_reason,
-        "settings_source_id": settings_source.id if settings_source else None,
-        "settings_source_checksum": settings_source.checksum if settings_source else None,
-        "created_at": now_str,
-    }
-
-    ev.selected_profile = selected_profile
-    ev.weighted_vmaf = summary.weighted
-    ev.median_vmaf = summary.median
-    ev.min_vmaf = summary.minimum
-    ev.max_vmaf = summary.maximum
-    ev.decision = decision
-    ev.status = status
-    ev.note = note
-    ev.reason_json = json.dumps(reason_payload, ensure_ascii=False)
-    ev.updated_at = now_iso()
-    session.add(ev)
-    session.commit()
-
-    return QualityLoopResult(
+    return finalize_profile_evaluation(
+        session,
         evaluation_id=ev.id or 0,
-        selected_profile=selected_profile,
         initial_profile=initial_profile,
-        decision=decision,
-        status=status,
-        note=note,
         thresholds=thresholds,
-        summary=summary,
+        settings_source=settings_source,
+        sample_results=sample_results,
+        target_height=target_height,
+        target_height_reason=target_height_reason,
     )

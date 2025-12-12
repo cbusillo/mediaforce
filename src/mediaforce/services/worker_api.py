@@ -161,3 +161,41 @@ class WorkerApiClient:
             raise WorkerApiError(data.get("error") or "report failed")
         return int(data.get("encode_result_id") or 0)
 
+    def evaluation_start(
+        self,
+        *,
+        media_id: int,
+        initial_profile: str,
+        sample_length: float,
+    ) -> tuple[int, dict[str, Any]]:
+        data = self._request_json(
+            "POST",
+            "/api/evaluations/start",
+            {
+                "media_id": int(media_id),
+                "initial_profile": str(initial_profile),
+                "sample_length": float(sample_length),
+            },
+        )
+        if not data.get("success"):
+            raise WorkerApiError(data.get("error") or "evaluation start failed")
+        return int(data.get("evaluation_id") or 0), dict(data.get("thresholds") or {})
+
+    def evaluation_submit_samples(
+        self,
+        *,
+        evaluation_id: int,
+        samples: list[dict[str, Any]],
+        target_height: Optional[int] = None,
+        target_height_reason: Optional[str] = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"samples": samples}
+        if target_height is not None:
+            payload["target_height"] = int(target_height)
+        if target_height_reason is not None:
+            payload["target_height_reason"] = str(target_height_reason)
+
+        data = self._request_json("POST", f"/api/evaluations/{int(evaluation_id)}/samples", payload)
+        if not data.get("success"):
+            raise WorkerApiError(data.get("error") or "evaluation submit samples failed")
+        return data

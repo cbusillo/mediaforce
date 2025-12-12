@@ -50,12 +50,20 @@ from mediaforce.services.promote import (
     rollback_promote,
 )
 from mediaforce.services.quality_feedback import flag_profile_choice
+from mediaforce.services.quality_loop import (
+    VmafSampleResult,
+    VmafThresholds,
+    extract_thresholds,
+    finalize_profile_evaluation,
+    start_profile_evaluation,
+)
 from mediaforce.domain.types import TierSettings
 from mediaforce.db import (
     MediaItem,
     EncodeResult,
     ShowOverride,
     ProfileEvaluation,
+    ProfileSettingsSource,
     VmafSample,
     ProfileChoiceFeedback,
     RetrainingCandidate,
@@ -535,6 +543,26 @@ class WorkerStatus(BaseModel):
 class FlagProfileRequest(BaseModel):
     decision: str = "bad"
     reason: str
+
+
+class EvaluationStartRequest(BaseModel):
+    media_id: int
+    initial_profile: str
+    sample_length: float = 8.0
+
+
+class EvaluationSamplePayload(BaseModel):
+    kind: str
+    start_sec: float
+    duration_sec: float
+    weight: float
+    vmaf: float
+
+
+class EvaluationSubmitSamplesRequest(BaseModel):
+    samples: list[EvaluationSamplePayload]
+    target_height: Optional[int] = None
+    target_height_reason: Optional[str] = None
 
 
 class QueueAddRequest(BaseModel):
@@ -2349,12 +2377,92 @@ async def api_get_evaluation(eval_id: int):
                 "created_at": retrain.created_at,
                 "processed_at": retrain.processed_at,
             }
+    return {
+        "success": True,
+        "evaluation": _serialize_eval(ev),
+        "samples": [_serialize_sample(s) for s in samples],
+        "feedback": [_serialize_feedback(fb) for fb in feedback],
+        "retraining": retrain_payload,
+    }
+
+
+@app.post("/api/evaluations/start")
+async def api_start_evaluation(data: EvaluationStartRequest):
+    with session_scope() as session:
+        settings_source = ensure_active_profile_settings(session)
+        thresholds = extract_thresholds(settings_source)
+        ev = start_profile_evaluation(
+            session,
+            media_id=int(data.media_id),
+            initial_profile=data.initial_profile,
+            thresholds=thresholds,
+            settings_source=settings_source,
+            sample_length=float(data.sample_length),
+        )
         return {
             "success": True,
-            "evaluation": _serialize_eval(ev),
-            "samples": [_serialize_sample(s) for s in samples],
-            "feedback": [_serialize_feedback(fb) for fb in feedback],
-            "retraining": retrain_payload,
+            "evaluation_id": ev.id,
+            "thresholds": {
+                "min": thresholds.min_vmaf,
+                "median": thresholds.median_vmaf,
+                "max": thresholds.max_vmaf,
+            },
+            "settings_source_id": settings_source.id if settings_source else None,
+        }
+
+
+@app.post("/api/evaluations/{eval_id}/samples")
+async def api_submit_evaluation_samples(eval_id: int, data: EvaluationSubmitSamplesRequest):
+    with session_scope() as session:
+        ev = session.get(ProfileEvaluation, int(eval_id))
+        if not ev:
+            return {"success": False, "error": "not found"}
+
+        settings_source = session.get(ProfileSettingsSource, ev.settings_source_id) if ev.settings_source_id else None
+        thresholds = VmafThresholds(
+            min_vmaf=float(ev.threshold_min or 82.0),
+            median_vmaf=float(ev.threshold_median or 92.0),
+            max_vmaf=float(ev.threshold_max) if ev.threshold_max is not None else None,
+        )
+        sample_results = [
+            VmafSampleResult(
+                kind=s.kind,
+                start_sec=float(s.start_sec),
+                duration_sec=float(s.duration_sec),
+                weight=float(s.weight),
+                vmaf=float(s.vmaf),
+            )
+            for s in data.samples
+        ]
+
+        try:
+            result = finalize_profile_evaluation(
+                session,
+                evaluation_id=int(eval_id),
+                initial_profile=ev.selected_profile,
+                thresholds=thresholds,
+                settings_source=settings_source,
+                sample_results=sample_results,
+                target_height=data.target_height,
+                target_height_reason=data.target_height_reason,
+            )
+        except ValueError:
+            session.rollback()
+            return {"success": False, "error": "not found"}
+
+        return {
+            "success": True,
+            "selected_profile": result.selected_profile,
+            "initial_profile": result.initial_profile,
+            "decision": result.decision,
+            "status": result.status,
+            "note": result.note,
+            "summary": {
+                "weighted": result.summary.weighted,
+                "median": result.summary.median,
+                "min": result.summary.minimum,
+                "max": result.summary.maximum,
+            },
         }
 
 
