@@ -42,6 +42,7 @@ from sqlalchemy import text, func, desc
 from mediaforce.services.promote import promote_encoded_file_atomic, rollback_promote
 from mediaforce.services.classification import TIER_SETTINGS, adjust_tier_with_vmaf, classify_source
 from mediaforce.services.show_overrides import get_default_tier_for_show, import_show_config_json
+from mediaforce.services.remote_settings import load_remote_settings
 from mediaforce.services.worker_api import WorkerApiClient, WorkerApiError
 
 from mediaforce.domain.types import ClassificationResult, MediaInfo, SourceTier, TierSettings
@@ -330,50 +331,6 @@ def save_vmaf_samples(
         session.add(sample)
     session.commit()
 
-
-def load_remote_settings(url: str) -> Optional[AppSettings]:
-    """Fetch settings JSON from master API and convert to AppSettings."""
-    try:
-        with urllib.request.urlopen(url) as resp:
-            payload = json.loads(resp.read().decode())
-    except Exception:
-        return None
-
-    if not isinstance(payload, dict):
-        return None
-    settings_payload = payload.get("settings") if "settings" in payload else payload
-    if not isinstance(settings_payload, dict):
-        return None
-
-    libs_raw = settings_payload.get("libraries", [])
-    libraries: list[LibrarySettings] = []
-    for raw in libs_raw:
-        try:
-            libraries.append(
-                LibrarySettings(
-                    id=str(raw.get("id") or ""),
-                    name=str(raw.get("name") or ""),
-                    media_type=str(raw.get("media_type") or ""),
-                    mac_path=str(raw.get("mac_path") or ""),
-                    linux_path=str(raw.get("linux_path") or ""),
-                    watch=bool(raw.get("watch", True)),
-                    max_height=(int(raw.get("max_height")) if raw.get("max_height") else None),
-                    weight=float(raw.get("weight", 1.0)),
-                )
-            )
-        except Exception:
-            continue
-
-    global_max_height = settings_payload.get("global_max_height")
-    try:
-        global_max_height = int(global_max_height) if global_max_height is not None else None
-    except Exception:
-        global_max_height = None
-
-    if not libraries:
-        return None
-
-    return AppSettings(libraries=libraries, global_max_height=global_max_height)
 
 def iter_libraries_for_current_host(settings: Optional[AppSettings] = None) -> list[tuple[LibrarySettings, pathlib.Path]]:
     """Return libraries and resolved paths for the current OS.
