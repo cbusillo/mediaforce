@@ -10,7 +10,7 @@ import json
 import pathlib
 import platform as platform_mod
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, asynccontextmanager
 from datetime import datetime
 from typing import Optional, Callable, Any
 from mediaforce.config.logging import configure_logging, env_log_config
@@ -242,23 +242,29 @@ WATCH_STATUS: dict = {
 SCAN_STATUS: dict[str, str] = {}
 
 
-@app.on_event("startup")
-async def _startup_schema() -> None:
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
     try:
         ensure_schema(ENGINE)
     except Exception:
         logger.warning("Failed to ensure DB schema", exc_info=True)
 
-
-@app.on_event("startup")
-async def _startup_watch() -> None:
-    """Ensure watcher starts automatically when configured libraries exist."""
     try:
         if _get_watch_libraries():
             await _start_watch_task()
     except Exception:
-        # Don't fail app startup if watch cannot start
         WATCH_STATUS.update({"running": False, "message": "watch start failed"})
+
+    try:
+        yield
+    finally:
+        try:
+            await _stop_watch_task(message="shutdown", paused=False)
+        except Exception:
+            WATCH_STATUS.update({"running": False, "message": "shutdown failed"})
+
+
+app.router.lifespan_context = _lifespan
 
 
 ALLOWED_RAW_FILES: dict[str, str] = {
