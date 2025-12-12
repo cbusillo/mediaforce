@@ -2439,7 +2439,7 @@ def scan_file_to_db(
         }
 
     except Exception as e:
-        print(f"  [error] Failed to scan {file_path}: {e}", file=sys.stderr)
+        log_error("scan_file_failed", file=str(file_path), error=str(e))
         return None
 
 
@@ -2467,7 +2467,11 @@ def recalculate_priorities(session: Session, max_age: int) -> None:
         session.add(item)
 
     session.commit()
-    print(f"  Updated priorities for {len(pending)} pending files (max_savings={max_savings:,} bytes)")
+    log_info(
+        "priorities_updated",
+        pending=len(pending),
+        max_savings_bytes=int(max_savings),
+    )
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
@@ -2558,14 +2562,14 @@ async def _watch_single_library(lib: LibrarySettings, root: pathlib.Path) -> Non
     """
 
     if awatch is None or Change is None:
-        print("[error] watchfiles is not installed; 'watch' command is unavailable", file=sys.stderr)
+        log_error("watch_unavailable", error="watchfiles_not_installed")
         return
 
     if not root.exists():
-        print(f"[watch] Root does not exist, skipping: {root}")
+        log_warn("watch_root_missing", library=lib.id, root=str(root))
         return
 
-    print(f"[watch] Watching {root} ({lib.name}) for new video files...")
+    log_info("watch_start", library=lib.id, name=lib.name, root=str(root))
 
     async for changes in awatch(root, recursive=True):
         for change, path_str in changes:
@@ -2594,7 +2598,7 @@ async def _watch_single_library(lib: LibrarySettings, root: pathlib.Path) -> Non
                 ).first() or int(path.stat().st_mtime)
                 max_age = max(now - oldest_mtime, 1)
 
-                print(f"[watch] Detected new media file: {path}")
+                log_info("watch_detected", library=lib.id, file=str(path))
                 result = scan_file_to_db(session, path, max_savings=1, max_age=max_age, library_id=lib.id)
                 session.commit()
 
@@ -2602,11 +2606,16 @@ async def _watch_single_library(lib: LibrarySettings, root: pathlib.Path) -> Non
                 session.close()
 
                 if result:
-                    print(f"[watch] Queued {path.name} (tier={result['tier']})")
+                    log_info(
+                        "watch_queued",
+                        library=lib.id,
+                        file=str(path),
+                        tier=result.get("tier"),
+                    )
                 else:
-                    print(f"[watch] Failed to scan {path}", file=sys.stderr)
+                    log_error("watch_scan_failed", library=lib.id, file=str(path))
             except Exception as exc:
-                print(f"[watch] Error handling {path}: {exc}", file=sys.stderr)
+                log_error("watch_handle_error", library=lib.id, file=str(path), error=str(exc))
 
 
 async def _watch_libraries() -> None:
@@ -2620,7 +2629,7 @@ async def _watch_libraries() -> None:
     ]
 
     if not libraries:
-        print("[watch] No libraries configured for this host.")
+        log_warn("watch_no_libraries")
         return
 
     tasks = [
@@ -2635,13 +2644,13 @@ def cmd_watch(args: argparse.Namespace) -> int:
     """Watch configured libraries and auto-queue new video files."""
 
     if awatch is None or Change is None:
-        print("[error] watchfiles is not installed. Install with 'pip install watchfiles' to use the watch command.", file=sys.stderr)
+        log_error("watch_unavailable", error="watchfiles_not_installed")
         return 1
 
     if getattr(args, "autoupdate_url", None):
         updated = maybe_autoupdate(args.autoupdate_url, AUTOUPDATE_FILES)
         if updated:
-            print("[autoupdate] Updated mediaforce package files. Restarting watch to load new code.")
+            log_info("autoupdate_restart", component="watch")
             os.execv(sys.executable, [sys.executable] + sys.argv)
 
     # Load settings (remote or local)
@@ -2650,7 +2659,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     effective_settings_url = settings_url or env_settings_url
     settings = load_remote_settings(effective_settings_url) if effective_settings_url else load_app_settings()
     if settings is None:
-        print("[error] Could not load settings.", file=sys.stderr)
+        log_error("settings_load_failed", url=effective_settings_url)
         return 1
 
     # Optional periodic autoupdate during long runs
@@ -2665,7 +2674,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 while True:
                     await asyncio.sleep(float(interval))  # type: ignore[arg-type]
                     if maybe_autoupdate(args.autoupdate_url, AUTOUPDATE_FILES):
-                        print("[autoupdate] New version fetched; restarting watch to apply.")
+                        log_info("autoupdate_restart", component="watch")
                         os.execv(sys.executable, [sys.executable] + sys.argv)
             asyncio.create_task(updater())
         await _watch_libraries()
@@ -2673,7 +2682,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     try:
         asyncio.run(runner())
     except KeyboardInterrupt:
-        print("\n[watch] Stopping.")
+        log_info("watch_stop")
     return 0
 
 
