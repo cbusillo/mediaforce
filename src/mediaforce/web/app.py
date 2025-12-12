@@ -9,7 +9,6 @@ import asyncio
 import json
 import pathlib
 import platform as platform_mod
-import shutil
 import sys
 from contextlib import contextmanager
 from datetime import datetime
@@ -18,22 +17,14 @@ from mediaforce.config.logging import configure_logging, env_log_config
 
 from fastapi import FastAPI, Query, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 # Import functions from mediaforce
-from mediaforce.config.settings import AppSettings, LibrarySettings, load_app_settings, save_app_settings
-from mediaforce.services.db_access import (
-    fetch_queue_totals,
-    fetch_queue_listing,
-    fetch_stats,
-)
+from mediaforce.config.settings import AppSettings, LibrarySettings, load_app_settings, save_app_settings, ENGINE
 from mediaforce.db.repository.session import session_scope
 from mediaforce.db.repository.media import MediaRepository
-from mediaforce.db.repository.encode import EncodeRepository
-from mediaforce.db.repository.profile import ProfileEvaluationRepository, FeedbackRepository, RetrainingRepository
 from mediaforce.db.repository.queue import QueueRepository
 from mediaforce.db.repository.base import Pagination
 from mediaforce.core import (
@@ -41,9 +32,25 @@ from mediaforce.core import (
     get_library_root,
     init_db_shim,
     iter_libraries_for_current_host,
+    normalize_path,
     _watch_libraries,
     ensure_active_profile_settings,
+    claim_next_file,
+    release_claim,
+    start_progress_tracking,
+    update_progress,
+    finish_progress_tracking,
+    record_encode_result,
+    OutlierResult,
+    QualityMetrics,
 )
+from mediaforce.services.promote import (
+    promote_encoded_file_atomic,
+    rollback_from_manifest,
+    rollback_promote,
+)
+from mediaforce.services.quality_feedback import flag_profile_choice
+from mediaforce.domain.types import TierSettings
 from mediaforce.db import (
     MediaItem,
     EncodeResult,
@@ -54,8 +61,9 @@ from mediaforce.db import (
     RetrainingCandidate,
     EncodeProgress,
     now_iso,
+    ensure_schema,
 )
-from sqlalchemy import func, desc, text
+from sqlalchemy import func, desc
 from sqlmodel import select, Session
 from dataclasses import asdict
 
@@ -203,31 +211,9 @@ def _nav_status() -> dict:
     }
 
 
-def _ensure_promotion_columns(session: Session) -> None:
-    """Backfill promoted/promoted_at columns for older databases if missing."""
-
-    try:
-        cols = {
-            row[1] for row in session.exec(text("PRAGMA table_info('encode_results')")).all()
-        }
-        stmts = []
-        if "promoted" not in cols:
-            stmts.append("ALTER TABLE encode_results ADD COLUMN promoted BOOLEAN DEFAULT 0")
-        if "promoted_at" not in cols:
-            stmts.append("ALTER TABLE encode_results ADD COLUMN promoted_at TEXT")
-        for stmt in stmts:
-            session.exec(text(stmt))
-        if stmts:
-            session.commit()
-    except Exception:
-        session.rollback()
-        logger.warning("Failed to ensure promotion columns", exc_info=True)
-
 app = FastAPI(title="Mediaforce", description="Content-aware media encoding management")
 STATIC_DIR = PROJECT_ROOT / "src" / "mediaforce" / "web" / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-static_dir = PROJECT_ROOT / "src" / "mediaforce" / "web" / "static"
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 # Setup Jinja2 templates
 templates_dir = pathlib.Path(__file__).parent / "templates"
@@ -246,6 +232,14 @@ WATCH_STATUS: dict = {
 
 # Track web-triggered scan status
 SCAN_STATUS: dict[str, str] = {}
+
+
+@app.on_event("startup")
+async def _startup_schema() -> None:
+    try:
+        ensure_schema(ENGINE)
+    except Exception:
+        logger.warning("Failed to ensure DB schema", exc_info=True)
 
 
 @app.on_event("startup")
@@ -428,6 +422,75 @@ class ApplyTierRequest(BaseModel):
     show_name: str
     tier: str
     set_override: bool = False
+
+
+class WorkerClaimRequest(BaseModel):
+    machine: str
+
+
+class WorkerReleaseRequest(BaseModel):
+    id: int
+    machine: str
+    success: bool
+    error: Optional[str] = None
+
+
+class WorkerProgressStartRequest(BaseModel):
+    source_id: int
+    source_path: str
+    output_path: str
+    machine: str
+    tier: str
+    duration_sec: float
+    total_frames: Optional[int] = None
+
+
+class WorkerProgressUpdateRequest(BaseModel):
+    progress_id: int
+    frame: int = 0
+    fps: float = 0.0
+    speed: float = 0.0
+    bitrate_kbps: Optional[float] = None
+    size_bytes: int = 0
+    time_encoded_sec: float = 0.0
+    duration_sec: Optional[float] = None
+    phase: Optional[str] = None
+    phase_detail: Optional[str] = None
+
+
+class WorkerMetricsPayload(BaseModel):
+    ssim: Optional[float] = None
+    psnr: Optional[float] = None
+    vmaf: Optional[float] = None
+    sample_duration_sec: Optional[float] = None
+    sample_start_sec: Optional[float] = None
+
+
+class WorkerOutlierPayload(BaseModel):
+    is_outlier: bool
+    reasons: list[str] = []
+
+
+class WorkerEncodeReportRequest(BaseModel):
+    source_id: int
+    source_path: str
+    tier: str
+    crf: int
+    preset: int
+    film_grain: int
+    denoise: Optional[str] = None
+    output_path: str
+    output_size_bytes: int
+    output_bitrate_kbps: Optional[int] = None
+    source_size_bytes: int
+    machine: str
+    started_at: str
+    success: bool
+    error_message: Optional[str] = None
+    metrics: Optional[WorkerMetricsPayload] = None
+    outlier: Optional[WorkerOutlierPayload] = None
+    profile_eval_id: Optional[int] = None
+    progress_id: Optional[int] = None
 
 
 class LibrarySettingsModel(BaseModel):
@@ -692,7 +755,7 @@ async def dashboard(request: Request):
         ).all()
         active_encodes = []
         for row in active_rows:
-            prog, source_size, video_codec = row[0], row[1], row[2]
+            prog = row[0]
             filename = pathlib.Path(prog.source_path).name if prog.source_path else "Unknown"
             show_name = extract_show_name(prog.source_path) if prog.source_path else None
             eta_display = format_duration(prog.eta_seconds) if prog.eta_seconds and prog.eta_seconds > 0 else None
@@ -957,7 +1020,6 @@ async def queue_shows_view(
 
     total_pages = max(1, (total + per_page - 1) // per_page)
     page = max(1, min(page, total_pages))
-    offset = (page - 1) * per_page
 
     start_page = max(1, page - 2)
     end_page = min(total_pages, page + 2)
@@ -1272,7 +1334,6 @@ async def search_page(
 async def completed(request: Request):
     """View completed (promoted) files."""
     with session_scope() as session:
-        _ensure_promotion_columns(session)
         rows = session.exec(
             select(
                 EncodeResult.id,
@@ -1325,7 +1386,6 @@ async def review(request: Request):
     """Review encodes pending promotion."""
     with session_scope() as session:
         encodes = []
-        _ensure_promotion_columns(session)
         stmt = (
             select(EncodeResult, MediaItem, ProfileEvaluation, RetrainingCandidate)
             .join(MediaItem, EncodeResult.source_id == MediaItem.id)
@@ -1553,29 +1613,52 @@ async def api_promote(encode_id: int):
         if not row:
             return {"success": False, "error": "Encode not found"}
         encode, item = row
-        output_path = pathlib.Path(encode.output_path)
-        source_path = pathlib.Path(item.path)
+        if not encode.output_path:
+            return {"success": False, "error": "Encoded file path missing"}
+
+        output_path = normalize_path(pathlib.Path(encode.output_path))
+        source_path = normalize_path(pathlib.Path(item.path))
 
         if not output_path.exists():
             return {"success": False, "error": "Encoded file not found"}
 
+        rollback_state = None
         try:
-            new_name = source_path.stem + ".mp4"
-            new_path = source_path.parent / new_name
+            dest_path = source_path.parent / output_path.name
+            result, rollback_state = promote_encoded_file_atomic(
+                source_path=source_path,
+                encoded_path=output_path,
+                dest_path=dest_path,
+                dry_run=False,
+                move_original_to_backup=True,
+                rename_sidecars=True,
+                verify=True,
+                logger=logger,
+            )
 
-            shutil.move(str(output_path), str(new_path))
+            try:
+                now_str = now_iso()
+                item.status = "completed"
+                item.path = str(result.dest_path)
+                item.updated_at = now_str
+                encode.promoted = True
+                encode.promoted_at = now_str
+                encode.promoted_path = str(result.dest_path)
+                encode.source_backup_path = (
+                    str(result.backup_source_path) if result.backup_source_path else None
+                )
+                encode.promote_manifest_json = result.manifest.to_json()
+                encode.output_path = str(result.dest_path)
+                session.add(item)
+                session.add(encode)
+                session.commit()
+            except Exception as db_exc:
+                session.rollback()
+                if rollback_state:
+                    rollback_promote(rollback_state)
+                raise db_exc
 
-            if source_path != new_path and source_path.exists():
-                source_path.unlink()
-
-            item.status = "completed"
-            item.path = str(new_path)
-            item.updated_at = now_iso()
-            encode.promoted_at = now_iso()
-            session.add(item)
-            session.add(encode)
-            session.commit()
-            return {"success": True}
+            return {"success": True, "dest_path": str(result.dest_path)}
         except Exception as e:
             session.rollback()
             return {"success": False, "error": str(e)}
@@ -1712,29 +1795,51 @@ async def api_bulk_promote(data: BulkPromoteRequest):
                     failed += 1
                     continue
 
-                output_path = pathlib.Path(enc.output_path)
-                source_path = pathlib.Path(item.path)
+                if not enc.output_path:
+                    failed += 1
+                    continue
+
+                output_path = normalize_path(pathlib.Path(enc.output_path))
+                source_path = normalize_path(pathlib.Path(item.path))
 
                 if not output_path.exists():
                     failed += 1
                     continue
 
-                new_name = source_path.stem + ".mp4"
-                new_path = source_path.parent / new_name
+                rollback_state = None
+                dest_path = source_path.parent / output_path.name
+                result, rollback_state = promote_encoded_file_atomic(
+                    source_path=source_path,
+                    encoded_path=output_path,
+                    dest_path=dest_path,
+                    dry_run=False,
+                    move_original_to_backup=True,
+                    rename_sidecars=True,
+                    verify=True,
+                    logger=logger,
+                )
 
-                shutil.move(str(output_path), str(new_path))
-
-                if source_path != new_path and source_path.exists():
-                    source_path.unlink()
-
-                now_str = now_iso()
-                item.status = "completed"
-                item.path = str(new_path)
-                item.updated_at = now_str
-                enc.promoted_at = now_str
-                session.add(item)
-                session.add(enc)
-                session.commit()
+                try:
+                    now_str = now_iso()
+                    item.status = "completed"
+                    item.path = str(result.dest_path)
+                    item.updated_at = now_str
+                    enc.promoted = True
+                    enc.promoted_at = now_str
+                    enc.promoted_path = str(result.dest_path)
+                    enc.source_backup_path = (
+                        str(result.backup_source_path) if result.backup_source_path else None
+                    )
+                    enc.promote_manifest_json = result.manifest.to_json()
+                    enc.output_path = str(result.dest_path)
+                    session.add(item)
+                    session.add(enc)
+                    session.commit()
+                except Exception as db_exc:
+                    session.rollback()
+                    if rollback_state:
+                        rollback_promote(rollback_state)
+                    raise db_exc
 
                 promoted += 1
             except Exception:
@@ -1742,6 +1847,41 @@ async def api_bulk_promote(data: BulkPromoteRequest):
                 failed += 1
 
     return {"success": True, "promoted": promoted, "failed": failed}
+
+
+@app.post("/api/rollback/{encode_id}")
+async def api_rollback(encode_id: int):
+    """Rollback a previous promotion when a backup/manifest is available."""
+    with get_db_connection() as shim:
+        session = shim.session
+        row = session.exec(
+            select(EncodeResult, MediaItem)
+            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
+            .where(EncodeResult.id == encode_id)
+        ).first()
+        if not row:
+            return {"success": False, "error": "Encode not found"}
+
+        encode, item = row
+        if not encode.promote_manifest_json:
+            return {"success": False, "error": "No promote manifest available"}
+
+        try:
+            rollback_from_manifest(encode.promote_manifest_json)
+            now_str = now_iso()
+            item.path = encode.source_path
+            item.status = "pending"
+            item.updated_at = now_str
+            encode.promoted = False
+            encode.promoted_at = None
+            encode.promoted_path = None
+            session.add(item)
+            session.add(encode)
+            session.commit()
+            return {"success": True}
+        except Exception as e:
+            session.rollback()
+            return {"success": False, "error": str(e)}
 
 
 @app.post("/api/bulk-reject")
@@ -1958,6 +2098,166 @@ async def api_workers(request: Request):
     return {"success": True, "workers": get_worker_status(library_root)}
 
 
+@app.post("/api/worker/claim")
+async def api_worker_claim(data: WorkerClaimRequest):
+    """Claim the next pending item for a worker without direct DB access."""
+
+    machine = (data.machine or "").strip()
+    if not machine:
+        return {"success": False, "error": "machine required"}
+
+    with session_scope() as session:
+        claimed = claim_next_file(session, machine)
+        if not claimed:
+            return {"success": True, "claimed": None}
+
+        show_name = extract_show_name(claimed.get("path") or "")
+        override_tier = None
+        if show_name:
+            existing = session.get(ShowOverride, show_name)
+            if existing and existing.default_tier:
+                override_tier = existing.default_tier
+
+        return {
+            "success": True,
+            "claimed": claimed,
+            "show_name": show_name,
+            "override_tier": override_tier,
+        }
+
+
+@app.post("/api/worker/release")
+async def api_worker_release(data: WorkerReleaseRequest):
+    """Release a claimed item back to the queue (or mark encoded)."""
+
+    machine = (data.machine or "").strip()
+    if not machine:
+        return {"success": False, "error": "machine required"}
+
+    with session_scope() as session:
+        release_claim(session, int(data.id), bool(data.success))
+    return {"success": True}
+
+
+@app.post("/api/worker/progress/start")
+async def api_worker_progress_start(data: WorkerProgressStartRequest):
+    """Create a progress row for an active encode."""
+
+    machine = (data.machine or "").strip()
+    if not machine:
+        return {"success": False, "error": "machine required"}
+
+    with session_scope() as session:
+        pid = start_progress_tracking(
+            session,
+            int(data.source_id),
+            data.source_path,
+            data.output_path,
+            machine,
+            data.tier,
+            float(data.duration_sec or 0.0),
+            total_frames=data.total_frames,
+        )
+        return {"success": True, "progress_id": pid}
+
+
+@app.post("/api/worker/progress/update")
+async def api_worker_progress_update(data: WorkerProgressUpdateRequest):
+    """Update encode progress for an active encode."""
+
+    with session_scope() as session:
+        update_progress(
+            session,
+            int(data.progress_id),
+            frame=int(data.frame or 0),
+            fps=float(data.fps or 0.0),
+            speed=float(data.speed or 0.0),
+            bitrate_kbps=data.bitrate_kbps,
+            size_bytes=int(data.size_bytes or 0),
+            time_encoded_sec=float(data.time_encoded_sec or 0.0),
+            duration_sec=float(data.duration_sec) if data.duration_sec is not None else None,
+            phase=data.phase,
+            phase_detail=data.phase_detail,
+        )
+        return {"success": True}
+
+
+@app.post("/api/worker/report")
+async def api_worker_report(data: WorkerEncodeReportRequest):
+    """Record an encode result from a worker and transition DB state safely."""
+
+    machine = (data.machine or "").strip()
+    if not machine:
+        return {"success": False, "error": "machine required"}
+
+    with session_scope() as session:
+        if data.progress_id is not None:
+            finish_progress_tracking(
+                session,
+                int(data.progress_id),
+                success=bool(data.success),
+                error_msg=data.error_message,
+            )
+
+        settings = TierSettings(
+            crf=int(data.crf),
+            preset=int(data.preset),
+            film_grain=int(data.film_grain),
+            denoise=data.denoise,
+        )
+
+        metrics_obj: Optional[QualityMetrics] = None
+        if data.metrics is not None:
+            metrics_obj = QualityMetrics(
+                ssim=data.metrics.ssim,
+                psnr=data.metrics.psnr,
+                vmaf=data.metrics.vmaf,
+                sample_duration_sec=data.metrics.sample_duration_sec,
+                sample_start_sec=data.metrics.sample_start_sec,
+            )
+
+        outlier_obj: Optional[OutlierResult] = None
+        if data.outlier is not None:
+            outlier_obj = OutlierResult(
+                is_outlier=bool(data.outlier.is_outlier),
+                reasons=list(data.outlier.reasons or []),
+                metrics=metrics_obj,
+            )
+
+        error_msg = data.error_message if not data.success else None
+        result_id = record_encode_result(
+            session,
+            int(data.source_id),
+            data.source_path,
+            data.tier,
+            settings,
+            data.output_path,
+            int(data.output_size_bytes),
+            data.output_bitrate_kbps,
+            int(data.source_size_bytes),
+            machine,
+            data.started_at,
+            error_msg,
+            metrics=metrics_obj,
+            outlier_result=outlier_obj,
+            profile_eval_id=data.profile_eval_id,
+        )
+
+        if data.profile_eval_id:
+            eval_obj = session.get(ProfileEvaluation, int(data.profile_eval_id))
+            if eval_obj:
+                eval_obj.encode_result_id = result_id
+                eval_obj.updated_at = datetime.now().isoformat()
+                if not data.success:
+                    eval_obj.status = "failed"
+                session.add(eval_obj)
+                session.commit()
+
+        release_claim(session, int(data.source_id), bool(data.success))
+
+    return {"success": True, "encode_result_id": result_id}
+
+
 @app.get("/api/settings/current")
 async def api_get_settings():
     """Return current settings (libraries and global max height)."""
@@ -1994,7 +2294,7 @@ async def api_active_encodes(request: Request):
 
     encodes = []
     for row in rows:
-        prog, source_size, video_codec = row[0], row[1], row[2]
+        prog = row[0]
         eta_display = format_duration(prog.eta_seconds) if prog.eta_seconds and prog.eta_seconds > 0 else None
         encodes.append({
             "filename": pathlib.Path(prog.source_path).name if prog.source_path else "Unknown",
@@ -2062,38 +2362,17 @@ async def api_get_evaluation(eval_id: int):
 async def api_flag_evaluation(eval_id: int, data: FlagProfileRequest):
     with get_db_connection() as conn:
         session = conn.session
-        ev = session.get(ProfileEvaluation, eval_id)
-        if not ev:
-            return {"success": False, "error": "not found"}
-        fb = ProfileChoiceFeedback(
-            evaluation_id=eval_id,
-            decision=data.decision,
-            reason_text=data.reason,
-            status="queued",
-        )
-        ev.status = "flagged"
-        ev.decision = data.decision
-        ev.updated_at = now_iso()
-        session.add(fb)
-        session.add(ev)
-        session.commit()
-
-        # Feed retraining queue (dedupe per evaluation)
-        existing = session.exec(
-            select(RetrainingCandidate).where(RetrainingCandidate.evaluation_id == eval_id)
-        ).first()
-        if not existing:
-            candidate = RetrainingCandidate(
+        try:
+            flag_profile_choice(
+                session,
                 evaluation_id=eval_id,
-                media_id=ev.media_id,
-                encode_result_id=ev.encode_result_id,
-                feedback_id=fb.id,
-                reason_text=data.reason,
-                status="pending",
+                decision=data.decision,
+                reason=data.reason,
             )
-            session.add(candidate)
-            session.commit()
-        return {"success": True}
+            return {"success": True}
+        except ValueError:
+            session.rollback()
+            return {"success": False, "error": "not found"}
 
 
 @app.post("/api/queue/{media_id}/bump")
@@ -2134,8 +2413,6 @@ async def api_queue_resume(media_id: int):
 @app.post("/api/queue/add")
 async def api_queue_add(data: QueueAddRequest):
     path = pathlib.Path(data.path).resolve()
-    app_settings = load_app_settings()
-    library_root = data.library or resolve_existing_library_root() or str(pathlib.Path(path).parents[2])
     with session_scope() as session:
         repo = MediaRepository(session)
         existing = session.exec(select(MediaItem).where(MediaItem.path == str(path))).first()

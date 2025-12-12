@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Generic, Iterable, Optional, Sequence, Type, TypeVar
+from typing import Any, Generic, Iterable, Optional, Sequence, Type, TypeVar
 
+from sqlalchemy import func
 from sqlmodel import SQLModel, Session, select  # type: ignore[reportMissingImports]
 
 
@@ -57,13 +58,16 @@ class BaseRepository(Generic[ModelT]):
         pagination: Optional[Pagination] = None,
     ) -> Page[ModelT]:
         paged = pagination.clamp() if pagination else None
-        stmt = select(self.model)
+        stmt: Any = select(self.model)
         if where is not None:
             stmt = stmt.where(where)
         if order_by is not None:
             stmt = stmt.order_by(order_by)
 
-        total = self.session.exec(stmt.with_only_columns(self.model.id).order_by(None)).unique().count()
+        count_stmt: Any = select(func.count()).select_from(self.model)
+        if where is not None:
+            count_stmt = count_stmt.where(where)
+        total = int(self.session.exec(count_stmt).first() or 0)
 
         if paged:
             stmt = stmt.offset(paged.offset).limit(paged.limit)

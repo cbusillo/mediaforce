@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pathlib
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Optional
 
 from sqlmodel import Session, select, delete
 
@@ -59,6 +59,7 @@ def _default_app_settings() -> AppSettings:
                 media_type="tv",
                 mac_path="/Volumes/media/tv",
                 linux_path="/mnt/media/tv",
+                max_height=1080,
             ),
             LibrarySettings(
                 id="movies",
@@ -66,6 +67,7 @@ def _default_app_settings() -> AppSettings:
                 media_type="movies",
                 mac_path="/Volumes/media/movies",
                 linux_path="/mnt/media/movies",
+                max_height=2160,
             ),
         ],
     )
@@ -98,8 +100,8 @@ def load_app_settings() -> AppSettings:
                         global_max_height=gmh,
                         max_concurrency=setting.max_concurrency if setting else 1,
                         offpeak_enabled=setting.offpeak_enabled if setting else False,
-                        offpeak_start=setting.offpeak_start if setting else "00:00",
-                        offpeak_end=setting.offpeak_end if setting else "05:00",
+                        offpeak_start=(setting.offpeak_start or "00:00") if setting else "00:00",
+                        offpeak_end=(setting.offpeak_end or "05:00") if setting else "05:00",
                     )
         except Exception:
             pass
@@ -133,4 +135,3 @@ def save_app_settings(settings: AppSettings) -> None:
                 )
             )
         session.commit()
-

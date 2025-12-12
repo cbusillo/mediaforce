@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from sqlmodel import Session, select, desc  # type: ignore[reportMissingImports]
+from sqlmodel import Session, desc  # type: ignore[reportMissingImports]
 
 from mediaforce.db.models import EncodeResult
 from mediaforce.db.repository.base import BaseRepository, Page, Pagination

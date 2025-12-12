@@ -74,6 +74,7 @@
   - Add minimal unit tests near newly extracted services
 
 - [ ] **Worker/Queue Coordination**
+  - Minimal API-backed coordination (claim/release/progress/report + settings fetch) ✅
   - Clarify worker lifecycle/state and queue handoff; reduce direct DB polling
   - Consider lightweight queue abstraction before scaling workers
 
@@ -115,6 +116,7 @@
 
 ## Cleanup
 
+- [x] Remove `show_config.json` runtime overrides (import via `mediaforce import-show-config`)
 - [ ] Remove legacy code paths (old SQL/table names, orphaned scripts, obsolete
       shims) once migrations are stable. No migration code should be left behind.
       We will be starting with a fresh database after this todo is done.
