@@ -2745,7 +2745,11 @@ def check_missing_outputs(session: Session) -> int:
                 item.updated_at = now_str
                 session.add(item)
             missing_count += 1
-            print(f"  [reset] Missing output for: {pathlib.Path(src_path).name}")
+            log_warn(
+                "missing_output_reset",
+                source=str(src_path),
+                output=str(out_path),
+            )
 
     if missing_count:
         session.commit()

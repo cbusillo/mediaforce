@@ -392,6 +392,10 @@ Recommended: run workers in **API mode** so they don’t open SQLite directly on
 multiple hosts. Set `MEDIAFORCE_API_URL` (or pass `--api-url`) and the worker
 will claim work + report progress/results via the web API.
 
+If you want to restrict worker endpoints, set `MEDIAFORCE_API_TOKEN` on the web
+server and on all workers. Workers will send `Authorization: Bearer <token>` to
+`/api/worker/*` and the quality-loop evaluation submit endpoints.
+
 ## Development
 
 ```bash
@@ -405,6 +409,7 @@ python3 -m mypy src/mediaforce
 ## Workers (unified scheduler)
 - Single worker can handle all libraries from the unified database at `~/.config/mediaforce/mediaforce.db`.
 - Recommended: set `MEDIAFORCE_API_URL=http://<host>:5555` (or pass `--api-url`) so workers coordinate via the API instead of direct SQLite.
+- Optional: set `MEDIAFORCE_API_TOKEN=<shared secret>` on the server + workers to require auth for worker claim/progress/report endpoints.
 - Example systemd unit: `mediaforce-worker.service` -> `uv run python -m mediaforce run /mnt/media --output /mnt/media/transcode --api-url http://192.168.1.3:5555 --autoupdate-url http://192.168.1.3:5555/raw/ --autoupdate-interval 3600 --hw-decode`.
 - Per-library weights and max heights come from settings; manual bumps use `manual_priority` (lower numbers encode first). `max_concurrency` and off-peak window can be set in the web Settings page.
 
