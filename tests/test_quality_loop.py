@@ -1,7 +1,5 @@
 import pathlib
 
-import pytest
-
 from mediaforce.config.settings import AppSettings, LibrarySettings
 from mediaforce.core import build_sample_plan, resolve_target_height_for_path
 

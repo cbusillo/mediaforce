@@ -5,6 +5,7 @@ from typing import Optional
 
 from sqlmodel import Field, Session, SQLModel, create_engine
 from sqlalchemy import text
+from sqlalchemy.engine import Engine
 
 
 def now_iso() -> str:
@@ -110,6 +111,9 @@ class EncodeResult(SQLModel, table=True):  # type: ignore[misc,call-arg]
     retry_count: int = 0
     promoted: bool = False
     promoted_at: Optional[str] = None
+    promoted_path: Optional[str] = None
+    source_backup_path: Optional[str] = None
+    promote_manifest_json: Optional[str] = None
     is_outlier: bool = False
     outlier_reasons: Optional[str] = None
     review_status: str = "approved"
@@ -264,9 +268,19 @@ def _maybe_add_new_columns(engine) -> None:
         if "encode_results" in tables:
             rows = list(conn.execute(text("PRAGMA table_info('encode_results')")))
             cols = {row[1] for row in rows}
+            if "promoted" not in cols:
+                conn.execute(text("ALTER TABLE encode_results ADD COLUMN promoted BOOLEAN DEFAULT 0"))
+            if "promoted_at" not in cols:
+                conn.execute(text("ALTER TABLE encode_results ADD COLUMN promoted_at TEXT"))
+            if "promoted_path" not in cols:
+                conn.execute(text("ALTER TABLE encode_results ADD COLUMN promoted_path TEXT"))
+            if "source_backup_path" not in cols:
+                conn.execute(text("ALTER TABLE encode_results ADD COLUMN source_backup_path TEXT"))
+            if "promote_manifest_json" not in cols:
+                conn.execute(text("ALTER TABLE encode_results ADD COLUMN promote_manifest_json TEXT"))
             if "profile_eval_id" not in cols:
                 conn.execute(text("ALTER TABLE encode_results ADD COLUMN profile_eval_id INTEGER"))
-                conn.commit()
+            conn.commit()
 
         if "profile_evaluations" in tables:
             rows = list(conn.execute(text("PRAGMA table_info('profile_evaluations')")))
@@ -293,12 +307,21 @@ def _maybe_add_new_columns(engine) -> None:
                 conn.execute(text("ALTER TABLE vmaf_samples ADD COLUMN weight REAL"))
                 conn.commit()
 
+def ensure_schema(engine: Engine) -> None:
+    """Ensure schema exists and is migrated for the current code version.
 
-def init_engine(db_path: str):
-    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    This helper is safe to call multiple times and is intended to be the single
+    shared entrypoint for schema creation/backfills across CLI and web.
+    """
+
     _maybe_migrate_legacy_tables(engine)
     SQLModel.metadata.create_all(engine)
     _maybe_add_new_columns(engine)
+
+
+def init_engine(db_path: str):
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    ensure_schema(engine)
     return engine
 
 

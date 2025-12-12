@@ -141,7 +141,7 @@ Create a maintainable system for colors, spacing, and typography.
 - **What**: Add typography, spacing, and shadow scale to `tailwind.config.js`
 - **Current**: Only custom colors and font defined; no spacing scale, shadows, radius presets
 - **Add**:
-  ```js
+```js
   spacing: {
     'xs': '0.25rem',
     'sm': '0.5rem',
@@ -166,7 +166,7 @@ Create a maintainable system for colors, spacing, and typography.
     'lg': '1.125rem',
     'xl': '1.25rem',
   }
-  ```
+```
 - **Files**: `tailwind.config.js`
 - **Rationale**: Single source of truth for all spacing/sizing; easier to adjust overall scale
 

@@ -34,7 +34,7 @@ scan → queue → encode → verify → promote
 - `src/mediaforce/cli/` — CLI entrypoint shim (`mediaforce` console script).
 - `src/mediaforce/web/` — FastAPI app, routes, templates, and static assets (`mediaforce-web`).
 - `docs/` — contributor docs (e.g., `hosts.example.md`).
-- `todo.md` — roadmap/features in progress.
+- `TODO.md` — roadmap/features in progress.
 - See `docs/architecture.md` for refactor goals and next steps.
 
 1. **Scan**: Inventory library, probe all files for metadata
@@ -54,7 +54,7 @@ scan → queue → encode → verify → promote
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.13+
 - ffmpeg with libsvtav1 encoder
 - ffprobe (usually bundled with ffmpeg)
 
@@ -107,15 +107,17 @@ uv run mediaforce encode "/path/to/Show/Season 1/" -o "/path/to/output/"
 
 ### Show Overrides
 
-Create `show_config.json` to set per-show defaults:
+Show-level defaults (like forcing a specific tier for a show) are managed via the
+Web UI (**Shows** page) and stored in `~/.config/mediaforce/mediaforce.db`.
 
-```json
-{
-  "Mr. Robot": {"tier": "pristine", "denoise": false},
-  "Star Trek": {"tier": "poor", "denoise": "heavy"},
-  "The Office": {"tier": "good"}
-}
+Legacy note: `show_config.json` is no longer read during normal operation.
+If you have one from an older version, import it once:
+
+```bash
+uv run mediaforce import-show-config --apply
 ```
+
+(Omit `--apply` for a dry-run.) After importing, delete `show_config.json`.
 
 ## Technical Details
 
@@ -138,7 +140,7 @@ Source quality is estimated from:
 - **Bitrate efficiency**: High bitrate + low resolution = noisy source
 - **Codec age**: MPEG-2, older H.264 profiles suggest older masters
 - **Resolution vs. content era**: 1080p show from 1995 = upscaled
-- **Manual overrides**: show_config.json takes precedence
+- **Manual overrides**: show-level overrides from the Web UI/settings DB
 
 ### Audio Handling
 
@@ -210,6 +212,14 @@ uv run mediaforce encode /Volumes/media/tv
 
 # Promote pending encodes (after --no-replace verification)
 uv run mediaforce promote /Volumes/media/tv
+
+# Promotion keeps a hidden backup of the original by default.
+# Periodically purge old backups (dry-run by default):
+uv run mediaforce purge-backups --older-than-days 30
+
+# Apply deletion (only deletes backups for successfully-promoted items
+# older than the threshold, and only when the promoted file exists):
+uv run mediaforce purge-backups --older-than-days 30 --apply
 ```
 
 ### Priority Scoring
@@ -343,6 +353,9 @@ The settings API returns JSON shaped like:
 }
 ```
 
+Fresh installs seed two libraries with sensible caps: TV at 1080p and Movies
+at 2160p, with a global fallback cap of 1080p when no library match is found.
+
 When the app needs a library root for the current host, it chooses the
 macOS path on Darwin and the Linux path on Linux, keeping queue and DB
 paths consistent across machines.
@@ -372,11 +385,12 @@ For each watched library on this host, the watcher:
   logic as `scan`
 - Recalculates priorities so new entries are correctly ordered in the queue
 
-This pairs with `mediaforce run` (or `python -m mediaforce run`) on worker nodes: the Mac Studio can
-watch `/Volumes/media/{tv,movies}` and populate the queue, while Linux
-encoders process the same libraries via `/mnt/media/{tv,movies}` using the
-shared SQLite inventory.
-```
+This pairs with `mediaforce run` (or `python -m mediaforce run`) on worker
+nodes.
+
+Recommended: run workers in **API mode** so they don’t open SQLite directly on
+multiple hosts. Set `MEDIAFORCE_API_URL` (or pass `--api-url`) and the worker
+will claim work + report progress/results via the web API.
 
 ## Development
 
@@ -390,7 +404,8 @@ python3 -m mypy src/mediaforce
 
 ## Workers (unified scheduler)
 - Single worker can handle all libraries from the unified database at `~/.config/mediaforce/mediaforce.db`.
-- Example systemd unit: `mediaforce-worker.service` -> `uv run python -m mediaforce run /mnt/media --output /mnt/media/transcode --autoupdate-url http://192.168.1.3:5555/raw/ --autoupdate-interval 3600 --settings-url http://192.168.1.3:5555/api/settings/current --hw-decode`.
+- Recommended: set `MEDIAFORCE_API_URL=http://<host>:5555` (or pass `--api-url`) so workers coordinate via the API instead of direct SQLite.
+- Example systemd unit: `mediaforce-worker.service` -> `uv run python -m mediaforce run /mnt/media --output /mnt/media/transcode --api-url http://192.168.1.3:5555 --autoupdate-url http://192.168.1.3:5555/raw/ --autoupdate-interval 3600 --hw-decode`.
 - Per-library weights and max heights come from settings; manual bumps use `manual_priority` (lower numbers encode first). `max_concurrency` and off-peak window can be set in the web Settings page.
 
 Workers pull settings from the master (`/api/settings/current`) and code from `/raw/manifest.json` with hourly autoupdate and self-restart on change.

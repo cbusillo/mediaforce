@@ -31,18 +31,22 @@ import tempfile
 import time
 import urllib.request
 import urllib.error
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
-import builtins
-import inspect
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Optional, List, Dict, Any, TYPE_CHECKING
 
 from sqlmodel import Session, select, delete
 from sqlalchemy import text, func, desc
 
+from mediaforce.services.promote import promote_encoded_file_atomic, rollback_promote
+from mediaforce.services.classification import TIER_SETTINGS, adjust_tier_with_vmaf, classify_source
+from mediaforce.services.show_overrides import get_default_tier_for_show, import_show_config_json
+from mediaforce.services.worker_api import WorkerApiClient, WorkerApiError
+
+from mediaforce.domain.types import ClassificationResult, MediaInfo, SourceTier, TierSettings
+
 from mediaforce.db import (
-    AppSetting,
     EncodeProgress,
     EncodeResult,
     Library,
@@ -50,9 +54,10 @@ from mediaforce.db import (
     ProfileSettingsSource,
     ProfileEvaluation,
     VmafSample,
-    init_engine,
     now_iso,
 )
+
+from mediaforce.config.settings import AppSettings, LibrarySettings, CONFIG_DIR, ENGINE, INVENTORY_DB, load_app_settings
 
 
 # Cross-platform media roots
@@ -60,20 +65,7 @@ MEDIA_ROOTS_MAC = ["/Volumes/media", "/Volumes/extras"]
 MEDIA_ROOTS_LINUX = ["/mnt/media", "/mnt/extras"]
 
 
-# Application-level settings -------------------------------------------------
-
-
-# Settings and data storage live under ~/.config/mediaforce
-CONFIG_DIR = pathlib.Path.home() / ".config" / "mediaforce"
-CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-DB_PATH = CONFIG_DIR / "mediaforce.db"
-SETTINGS_DB = DB_PATH
-SETTINGS_PATH = DB_PATH
-INVENTORY_DB = DB_PATH
 REMOTE_SETTINGS_URL: str | None = None
-
-ENGINE = init_engine(str(DB_PATH))
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("mediaforce")
 
@@ -93,19 +85,6 @@ def log_warn(message: str, **fields: Any) -> None:
 
 def log_error(message: str, **fields: Any) -> None:
     log_event(logging.ERROR, message, **fields)
-
-
-def _print_override(*args, **kwargs):
-    stream = kwargs.get("file")
-    level = logging.ERROR if stream is sys.stderr else logging.INFO
-    text = " ".join(str(a) for a in args)
-    frame = inspect.currentframe()
-    caller = frame.f_back.f_back if frame and frame.f_back else None
-    origin = caller.f_code.co_name if caller else "print"
-    log_event(level, "cli_output", origin=origin, text=text)
-
-
-builtins.print = _print_override
 
 
 class ResultWrapper:
@@ -154,76 +133,6 @@ class SessionShim:
 
     def close(self):
         self.session.close()
-
-
-@dataclass
-class LibrarySettings:
-    """Configuration for a logical media library.
-
-    We keep separate paths for macOS and Linux so that the same logical
-    library (e.g. "TV" or "Movies") can be accessed from both /Volumes and
-    /mnt style mounts. This configuration is shared by the CLI, the web UI,
-    and any background watchers.
-    """
-
-    id: str
-    name: str
-    media_type: str  # e.g. "tv", "movies"
-    mac_path: str
-    linux_path: str
-    watch: bool = True
-    max_height: Optional[int] = None  # Downscale target height (e.g., 1080); never upscales
-    weight: float = 1.0
-
-
-@dataclass
-class AppSettings:
-    """Top-level application settings container."""
-
-    libraries: list[LibrarySettings] = field(default_factory=list)
-    global_max_height: Optional[int] = None
-    max_concurrency: int = 1
-    offpeak_enabled: bool = False
-    offpeak_start: str = "00:00"
-    offpeak_end: str = "05:00"
-
-
-def _default_app_settings() -> AppSettings:
-    """Return default settings used when no config file exists.
-
-    By default we track TV and Movies libraries under /Volumes/media on macOS
-    and /mnt/media on Linux, which matches the documented layout in README.
-    """
-
-    return AppSettings(
-        global_max_height=1080,
-        max_concurrency=1,
-        offpeak_enabled=False,
-        offpeak_start="00:00",
-        offpeak_end="05:00",
-        libraries=[
-            LibrarySettings(
-                id="tv",
-                name="TV Library",
-                media_type="tv",
-                mac_path="/Volumes/media/tv",
-                linux_path="/mnt/media/tv",
-                watch=True,
-                max_height=1080,
-                weight=1.0,
-            ),
-            LibrarySettings(
-                id="movies",
-                name="Movies Library",
-                media_type="movies",
-                mac_path="/Volumes/media/movies",
-                linux_path="/mnt/media/movies",
-                watch=True,
-                max_height=2160,
-                weight=1.0,
-            ),
-        ]
-    )
 
 
 # =============================================================================
@@ -295,41 +204,6 @@ AUTOUPDATE_FILES = [
     "db/__init__.py",
     "db/models.py",
 ]
-
-
-def load_app_settings() -> AppSettings:
-    """Load application settings from disk, falling back to defaults."""
-    if SETTINGS_DB.exists():
-        try:
-            with Session(ENGINE) as session:
-                setting = session.get(AppSetting, 1)
-                gmh = setting.global_max_height if setting else None
-                libs = session.exec(select(Library)).all()
-                if libs:
-                    return AppSettings(
-                        libraries=[
-                            LibrarySettings(
-                                id=lib.id,
-                                name=lib.name,
-                                media_type=lib.media_type,
-                                mac_path=lib.mac_path,
-                                linux_path=lib.linux_path,
-                                watch=lib.watch,
-                                max_height=lib.max_height,
-                                weight=lib.weight,
-                            )
-                            for lib in libs
-                        ],
-                        global_max_height=gmh,
-                        max_concurrency=setting.max_concurrency if setting else 1,
-                        offpeak_enabled=setting.offpeak_enabled if setting else False,
-                        offpeak_start=setting.offpeak_start if setting else "00:00",
-                        offpeak_end=setting.offpeak_end if setting else "05:00",
-                    )
-        except Exception:
-            pass
-
-    return _default_app_settings()
 
 
 def _fetch_remote_profile_settings(url: str, existing_etag: str | None = None) -> tuple[Optional[str], Optional[str]]:
@@ -501,35 +375,6 @@ def load_remote_settings(url: str) -> Optional[AppSettings]:
 
     return AppSettings(libraries=libraries, global_max_height=global_max_height)
 
-
-
-def save_app_settings(settings: AppSettings) -> None:
-    """Persist application settings to SQLite."""
-    with Session(ENGINE) as session:
-        setting = session.get(AppSetting, 1) or AppSetting(id=1)
-        setting.global_max_height = settings.global_max_height
-        setting.max_concurrency = settings.max_concurrency
-        setting.offpeak_enabled = settings.offpeak_enabled
-        setting.offpeak_start = settings.offpeak_start
-        setting.offpeak_end = settings.offpeak_end
-        session.add(setting)
-        session.exec(delete(Library))
-        for lib in settings.libraries:
-            session.add(
-                Library(
-                    id=lib.id,
-                    name=lib.name,
-                    media_type=lib.media_type,
-                    mac_path=lib.mac_path,
-                    linux_path=lib.linux_path,
-                    watch=lib.watch,
-                    max_height=lib.max_height,
-                    weight=lib.weight,
-                )
-            )
-        session.commit()
-
-
 def iter_libraries_for_current_host(settings: Optional[AppSettings] = None) -> list[tuple[LibrarySettings, pathlib.Path]]:
     """Return libraries and resolved paths for the current OS.
 
@@ -627,33 +472,6 @@ def detect_platform() -> Dict[str, Any]:
     return info
 
 
-class SourceTier(Enum):
-    """Source quality classification."""
-
-    PRISTINE = "pristine"  # Modern streaming, Blu-ray
-    GOOD = "good"  # Most HD TV
-    MEDIOCRE = "mediocre"  # Older HD, moderate grain
-    POOR = "poor"  # Upscaled SD, heavy noise
-
-
-@dataclass
-class TierSettings:
-    """Encoding settings for a source tier."""
-
-    crf: int
-    preset: int
-    film_grain: int  # 0 = disabled, 4-8 = typical range
-    denoise: Optional[str]  # None, "light", "medium", "heavy"
-
-
-# Encoding parameters per tier
-TIER_SETTINGS: dict[SourceTier, TierSettings] = {
-    SourceTier.PRISTINE: TierSettings(crf=26, preset=5, film_grain=0, denoise=None),
-    SourceTier.GOOD: TierSettings(crf=28, preset=5, film_grain=8, denoise=None),
-    SourceTier.MEDIOCRE: TierSettings(crf=30, preset=6, film_grain=4, denoise="light"),
-    SourceTier.POOR: TierSettings(crf=32, preset=6, film_grain=0, denoise="heavy"),
-}
-
 # Denoise filter strings for ffmpeg
 DENOISE_FILTERS: dict[str, str] = {
     "light": "hqdn3d=2:2:3:3",
@@ -677,78 +495,6 @@ else:
     except Exception:  # pragma: no cover - watch is an optional feature
         Change = None  # type: ignore
         awatch = None  # type: ignore
-
-
-@dataclass
-class MediaInfo:
-    """Parsed media file information."""
-
-    path: pathlib.Path
-    duration_seconds: Optional[float] = None
-    video_codec: Optional[str] = None
-    video_width: Optional[int] = None
-    video_height: Optional[int] = None
-    video_bitrate_kbps: Optional[int] = None
-    video_bit_depth: Optional[int] = None
-    video_framerate: Optional[float] = None
-    video_field_order: Optional[str] = None  # progressive, tt, bb, tb, bt
-    # Interlacing detection via idet filter (actual frame analysis)
-    interlace_detected: Optional[bool] = None  # True if idet found interlaced content
-    interlace_tff_ratio: Optional[float] = None  # Ratio of TFF frames (0-1)
-    audio_tracks: list[dict] = field(default_factory=list)
-    subtitle_tracks: list[dict] = field(default_factory=list)
-    container_bitrate_kbps: Optional[int] = None
-    is_hdr: Optional[bool] = None
-    hdr_format: Optional[str] = None
-
-    @property
-    def resolution_label(self) -> str:
-        if self.video_height is None:
-            return "unknown"
-        if self.video_height >= 2160:
-            return "4K"
-        if self.video_height >= 1080:
-            return "1080p"
-        if self.video_height >= 720:
-            return "720p"
-        if self.video_height >= 480:
-            return "480p"
-        return f"{self.video_height}p"
-
-    @property
-    def is_already_av1(self) -> bool:
-        codec = self.video_codec or ""
-        return "av1" in codec.lower()
-
-    @property
-    def is_interlaced(self) -> bool:
-        """Check if video is interlaced.
-
-        Prioritizes actual frame analysis (interlace_detected) over metadata (field_order).
-        Many older shows have incorrect metadata saying "progressive" when they're actually
-        interlaced, so we use ffmpeg's idet filter for detection.
-        """
-        # If we've run idet detection, trust that over metadata
-        if self.interlace_detected is not None:
-            return self.interlace_detected
-        # Fall back to metadata-based check
-        if not self.video_field_order:
-            return False
-        # progressive = not interlaced
-        # tt = top field first, bb = bottom field first
-        # tb = top coded first, bottom displayed first
-        # bt = bottom coded first, top displayed first
-        return self.video_field_order.lower() not in ("progressive", "unknown", "")
-
-
-@dataclass
-class ClassificationResult:
-    """Result of source quality classification."""
-
-    tier: SourceTier
-    confidence: str  # "high", "medium", "low"
-    reasons: list[str]
-    recommended_settings: TierSettings
 
 
 @dataclass
@@ -1050,6 +796,67 @@ def pick_sample_times(
                 chosen.append(ts)
 
     return chosen[:count]
+
+
+def build_sample_plan(
+    info: MediaInfo,
+    count: int = 3,
+    sample_len: float = 8.0,
+    motion_aware: bool = True,
+) -> list[tuple[float, float, str]]:
+    """Return a weighted sampling plan.
+
+    Each entry is (start_sec, weight, label). The first two samples are
+    representative "short" and "mid" positions, and the final one is a
+    "motion" sample (optionally chosen via window bitrate probing).
+    """
+
+    duration = info.duration_seconds or 0.0
+    if duration <= 0:
+        return []
+
+    def clamp_ts(ts: float) -> float:
+        return max(0.0, min(ts, max(0.0, duration - sample_len)))
+
+    plan: list[tuple[float, float, str]] = []
+    if count >= 1:
+        plan.append((clamp_ts(duration * 0.15), 1.0, "short"))
+    if count >= 2:
+        plan.append((clamp_ts(duration * 0.50), 1.0, "mid"))
+
+    if count >= 3:
+        motion_ts = clamp_ts(duration * 0.75)
+        motion_weight = 1.0
+
+        if motion_aware:
+            candidates: list[tuple[float, float]] = []
+            steps = max(count * 3, 8)
+            for i in range(1, steps + 1):
+                p = i / (steps + 1)
+                start = clamp_ts(duration * p)
+                br = window_bitrate(info.path, start, duration=5.0)
+                if br is not None:
+                    candidates.append((float(br), start))
+
+            if candidates:
+                candidates.sort(reverse=True, key=lambda x: x[0])
+                best_br, best_ts = candidates[0]
+                avg_br = sum(b for b, _ in candidates) / len(candidates)
+                motion_ts = best_ts
+                if avg_br > 0:
+                    motion_weight = max(1.25, min(5.0, best_br / avg_br))
+                else:
+                    motion_weight = 1.5
+            else:
+                motion_weight = 1.5
+
+        plan.append((motion_ts, motion_weight, "motion"))
+
+    for idx in range(len(plan), count):
+        frac = 0.2 + (idx * 0.15)
+        plan.append((clamp_ts(duration * frac), 1.0, "auto"))
+
+    return plan[:count]
 
 
 def encode_sample_clip(
@@ -1477,175 +1284,6 @@ def probe_media_with_interlace_detection(
     return info
 
 
-def classify_source(info: MediaInfo, show_config: Optional[dict] = None, vmaf_hint: Optional[float] = None) -> ClassificationResult:
-    """Classify source quality and recommend encoding settings.
-
-    The classification is based on heuristics about bitrate efficiency,
-    codec age, and resolution vs. likely content era.
-    """
-    reasons: list[str] = []
-
-    # Check for manual override
-    if show_config and "tier" in show_config:
-        tier_str = show_config["tier"].lower()
-        for tier in SourceTier:
-            if tier.value == tier_str:
-                reasons.append(f"Manual override from config: {tier_str}")
-                return ClassificationResult(
-                    tier=tier,
-                    confidence="high",
-                    reasons=reasons,
-                    recommended_settings=TIER_SETTINGS[tier],
-                )
-
-    # Start with a score-based approach
-    # Higher score = worse quality source = more aggressive compression
-    score = 0
-
-
-    # Codec-based scoring
-    codec = (info.video_codec or "").lower()
-    if codec in ("mpeg2video", "mpeg2"):
-        score += 3
-        reasons.append("MPEG-2 codec suggests older/legacy source")
-    elif codec in ("mpeg4", "msmpeg4", "divx", "xvid"):
-        score += 3
-        reasons.append("Legacy MPEG-4/DivX codec")
-    elif codec == "vc1":
-        score += 1
-        reasons.append("VC-1 codec (older HD era)")
-    elif codec in ("h264", "avc"):
-        # H.264 is neutral - could be anything
-        pass
-    elif codec in ("hevc", "h265"):
-        score -= 1
-        reasons.append("HEVC suggests modern encode")
-    elif "av1" in codec:
-        score -= 2
-        reasons.append("Already AV1 - likely high quality source")
-
-    # Bitrate efficiency scoring
-    # Calculate bits per pixel per frame as a quality indicator
-    if info.video_bitrate_kbps and info.video_width and info.video_height:
-        pixels = info.video_width * info.video_height
-        fps = info.video_framerate or 24
-        bpp = (info.video_bitrate_kbps * 1000) / (pixels * fps)
-
-        # bpp ranges (very rough):
-        # < 0.02: heavily compressed
-        # 0.02-0.05: typical streaming
-        # 0.05-0.10: high quality streaming/blu-ray encode
-        # > 0.10: very high bitrate or inefficient
-
-        if bpp > 0.15:
-            score += 2
-            reasons.append(f"High bpp ({bpp:.3f}) suggests noisy/inefficient source")
-        elif bpp > 0.10:
-            score += 1
-            reasons.append(f"Elevated bpp ({bpp:.3f})")
-        elif bpp < 0.02:
-            score -= 1
-            reasons.append(f"Low bpp ({bpp:.3f}) - already well compressed")
-
-    # Resolution vs bitrate sanity check
-    # 1080p should typically be 3-8 Mbps for good quality
-    # If it's much higher, source is probably noisy
-    if info.video_height and info.video_bitrate_kbps:
-        if info.video_height >= 1080:
-            if info.video_bitrate_kbps > 15000:
-                score += 2
-                reasons.append(f"Very high bitrate ({info.video_bitrate_kbps}kbps) for {info.resolution_label}")
-            elif info.video_bitrate_kbps > 10000:
-                score += 1
-                reasons.append(f"High bitrate ({info.video_bitrate_kbps}kbps) for {info.resolution_label}")
-            elif info.video_bitrate_kbps < 3000:
-                score -= 1
-                reasons.append(f"Efficient bitrate ({info.video_bitrate_kbps}kbps)")
-        elif info.video_height >= 720:
-            if info.video_bitrate_kbps > 8000:
-                score += 2
-                reasons.append(f"Very high bitrate for 720p ({info.video_bitrate_kbps}kbps)")
-        elif info.video_height < 720:
-            # SD content - likely upscaled if file is "HD"
-            score += 2
-            reasons.append(f"Sub-HD resolution ({info.resolution_label}) - possibly upscaled")
-
-    # Optional VMAF hint (from quick sample) can sway aggressiveness
-    if vmaf_hint is not None:
-        if vmaf_hint >= 95:
-            score -= 1
-            reasons.append(f"VMAF hint high ({vmaf_hint:.1f}) -> more aggressive")
-        elif vmaf_hint < 85:
-            score += 1
-            reasons.append(f"VMAF hint low ({vmaf_hint:.1f}) -> less aggressive")
-
-    # Convert score to tier
-    if score <= -1:
-        tier = SourceTier.PRISTINE
-    elif score <= 1:
-        tier = SourceTier.GOOD
-    elif score <= 3:
-        tier = SourceTier.MEDIOCRE
-    else:
-        tier = SourceTier.POOR
-
-    # Determine confidence
-    if len(reasons) >= 3:
-        confidence = "high"
-    elif len(reasons) >= 2:
-        confidence = "medium"
-    else:
-        confidence = "low"
-        reasons.append("Limited metadata available for classification")
-
-    if not reasons:
-        reasons.append("Default classification - no strong indicators")
-
-    return ClassificationResult(
-        tier=tier,
-        confidence=confidence,
-        reasons=reasons,
-        recommended_settings=TIER_SETTINGS[tier],
-    )
-
-
-def adjust_tier_with_vmaf(classification: ClassificationResult, vmaf_stats: dict) -> ClassificationResult:
-    """Adjust tier based on VMAF statistics (median/min)."""
-
-    median = vmaf_stats.get("median")
-    vmin = vmaf_stats.get("min")
-    tier = classification.tier
-
-    def more_aggressive(t: SourceTier) -> SourceTier:
-        order = [SourceTier.POOR, SourceTier.MEDIOCRE, SourceTier.GOOD, SourceTier.PRISTINE]
-        idx = order.index(t)
-        return order[max(0, idx - 1)]
-
-    def less_aggressive(t: SourceTier) -> SourceTier:
-        order = [SourceTier.POOR, SourceTier.MEDIOCRE, SourceTier.GOOD, SourceTier.PRISTINE]
-        idx = order.index(t)
-        return order[min(len(order) - 1, idx + 1)]
-
-    adjusted = tier
-    reasons = list(classification.reasons)
-
-    if median is not None and median >= 94:
-        adjusted = more_aggressive(adjusted)
-        reasons.append(f"VMAF median {median:.1f} -> more aggressive")
-    if (median is not None and median < 86) or (vmin is not None and vmin < 82):
-        adjusted = less_aggressive(adjusted)
-        reasons.append(
-            f"VMAF low (median {median:.1f if median is not None else 'n/a'}, min {vmin:.1f if vmin is not None else 'n/a'}) -> less aggressive"
-        )
-
-    return ClassificationResult(
-        tier=adjusted,
-        confidence=classification.confidence,
-        reasons=reasons,
-        recommended_settings=TIER_SETTINGS[adjusted],
-    )
-
-
 def is_english_track(track: dict) -> bool:
     """Check if a track is English."""
     lang = (track.get("language") or "").lower()
@@ -1888,29 +1526,6 @@ def collect_video_files(path: pathlib.Path) -> list[pathlib.Path]:
         return files
 
     return []
-
-
-def load_show_config(config_path: Optional[pathlib.Path] = None) -> dict[str, dict]:
-    """Load show configuration overrides."""
-    if config_path is None:
-        # Look for config in standard locations
-        candidates = [
-            pathlib.Path("show_config.json"),
-            pathlib.Path(__file__).parent / "show_config.json",
-        ]
-        for c in candidates:
-            if c.exists():
-                config_path = c
-                break
-
-    if config_path and config_path.exists():
-        try:
-            with config_path.open() as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            log_warn("show_config_load_failed", config=str(config_path), error=str(e))
-
-    return {}
 
 
 def guess_show_name(path: pathlib.Path) -> Optional[str]:
@@ -2243,9 +1858,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         log_error("analyze_no_files", path=str(path))
         return 1
 
-    show_config = load_show_config()
     show_name = guess_show_name(path)
-    file_config = show_config.get(show_name, {}) if show_name else {}
+    override_tier: Optional[str] = None
+    if show_name:
+        with Session(ENGINE) as session:
+            override_tier = get_default_tier_for_show(session, show_name=show_name)
 
     log_info("analyze_start", files=len(files), show=show_name)
 
@@ -2255,7 +1872,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             log_warn("analyze_probe_failed", file=str(f))
             continue
 
-        classification = classify_source(info, file_config)
+        classification = classify_source(info, override_tier)
 
         log_info(
             "analyze_file",
@@ -2297,13 +1914,15 @@ def cmd_encode(args: argparse.Namespace) -> int:
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    show_config = load_show_config()
     show_name = guess_show_name(path)
-    file_config = show_config.get(show_name, {}) if show_name else {}
+    override_tier: Optional[str] = None
+    if show_name:
+        with Session(ENGINE) as session:
+            override_tier = get_default_tier_for_show(session, show_name=show_name)
 
     # Manual tier override from CLI
     if args.tier:
-        file_config["tier"] = args.tier
+        override_tier = args.tier
 
     log_info("encode_start_cli", files=len(files), output=str(output_dir), show=show_name)
 
@@ -2320,7 +1939,7 @@ def cmd_encode(args: argparse.Namespace) -> int:
             log_info("encode_skip_av1", file=str(f))
             continue
 
-        classification = classify_source(info, file_config)
+        classification = classify_source(info, override_tier)
         settings = classification.recommended_settings
 
         log_info(
@@ -2635,6 +2254,31 @@ def find_library_for_path(
         except ValueError:
             continue
     return None, None
+
+
+def resolve_target_height_for_path(path: pathlib.Path, settings: AppSettings) -> tuple[Optional[int], str]:
+    """Resolve the downscale target height for a given path.
+
+    Prefers per-library max_height when the path matches a configured library,
+    falling back to global_max_height. Never upscales (caller enforces).
+    """
+
+    for lib, root in iter_libraries_for_current_host(settings):
+        try:
+            if path.is_relative_to(root):
+                if lib.max_height is not None:
+                    return lib.max_height, f"library:{lib.id}"
+                break
+        except Exception:
+            if str(path).startswith(str(root)):
+                if lib.max_height is not None:
+                    return lib.max_height, f"library:{lib.id}"
+                break
+
+    if settings.global_max_height is not None:
+        return settings.global_max_height, "global"
+
+    return None, "none"
 
 
 def detect_hdr(info: MediaInfo) -> tuple[bool, Optional[str]]:
@@ -3447,6 +3091,71 @@ def run_ffmpeg_with_progress(
     )
 
 
+def run_ffmpeg_with_progress_api(
+    cmd: list[str],
+    api_client: WorkerApiClient,
+    progress_id: int,
+    duration_sec: float,
+) -> subprocess.CompletedProcess:
+    """Run ffmpeg with progress updates sent to the Mediaforce API."""
+
+    cmd_with_progress = cmd.copy()
+
+    try:
+        idx = cmd_with_progress.index("-hide_banner") + 1
+    except ValueError:
+        idx = 1
+    cmd_with_progress.insert(idx, "-progress")
+    cmd_with_progress.insert(idx + 1, "pipe:1")
+    cmd_with_progress.insert(idx, "-nostats")
+
+    process = subprocess.Popen(
+        cmd_with_progress,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+
+    accumulated: dict[str, Any] = {}
+    last_update = time.time()
+    assert process.stdout is not None
+
+    while True:
+        line = process.stdout.readline()
+        if not line and process.poll() is not None:
+            break
+
+        parsed = parse_ffmpeg_progress(line)
+        accumulated.update(parsed)
+
+        now = time.time()
+        if now - last_update >= 2 and accumulated:
+            try:
+                api_client.progress_update(
+                    progress_id=progress_id,
+                    frame=int(accumulated.get("frame", 0) or 0),
+                    fps=float(accumulated.get("fps", 0) or 0.0),
+                    speed=float(accumulated.get("speed", 0) or 0.0),
+                    bitrate_kbps=accumulated.get("bitrate_kbps"),
+                    size_bytes=int(accumulated.get("size_bytes", 0) or 0),
+                    time_encoded_sec=float(accumulated.get("time_encoded_sec", 0) or 0.0),
+                    duration_sec=duration_sec,
+                )
+            except WorkerApiError:
+                pass
+            last_update = now
+
+    _, stderr = process.communicate()
+
+    return subprocess.CompletedProcess(
+        args=cmd_with_progress,
+        returncode=process.returncode,
+        stdout="",
+        stderr=stderr,
+    )
+
+
 def record_encode_result(
     session: Session,
     source_id: int,
@@ -3557,11 +3266,21 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
 
     library_root = get_library_root(path)
-    db_path = get_db_path(library_root)
 
-    if not db_path.exists():
-        log_error("run_db_missing", db=str(db_path))
-        return 1
+    api_url = getattr(args, "api_url", None) or os.getenv("MEDIAFORCE_API_URL")
+    use_api = bool(api_url)
+    api_client: Optional[WorkerApiClient] = None
+    db_path: Optional[pathlib.Path] = None
+
+    if use_api:
+        assert api_url is not None
+        api_client = WorkerApiClient(api_url)
+        log_info("worker_api_enabled", url=api_url)
+    else:
+        db_path = get_db_path(library_root)
+        if not db_path.exists():
+            log_error("run_db_missing", db=str(db_path))
+            return 1
 
     # Determine transcode output root
     transcode_root = pathlib.Path(args.output)
@@ -3587,13 +3306,24 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # Load settings (prefer remote settings-url if provided)
     settings_url = getattr(args, "settings_url", None)
+    if use_api and not settings_url and api_url:
+        settings_url = f"{api_url.rstrip('/')}/api/settings/current"
     app_settings = None
     if settings_url:
         app_settings = load_remote_settings(settings_url)
         if app_settings is None:
-            print(f"[warn] Could not load remote settings from {settings_url}; using local defaults.")
+            log_warn("remote_settings_load_failed", url=settings_url)
     if app_settings is None:
         app_settings = load_app_settings()
+
+    profile_settings_url = (
+        getattr(args, "profile_settings_url", None)
+        or os.getenv("MEDIAFORCE_PROFILE_SETTINGS_URL")
+    )
+    if profile_settings_url:
+        global REMOTE_SETTINGS_URL
+        REMOTE_SETTINGS_URL = profile_settings_url
+        log_info("profile_settings_url_set", url=profile_settings_url)
 
     if getattr(args, "max_concurrency", None):
         app_settings.max_concurrency = max(args.max_concurrency, 1)
@@ -3620,8 +3350,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             log_info("autoupdate_restart")
             os.execv(sys.executable, [sys.executable] + sys.argv)
 
-    session = init_db(db_path)
-    show_config = load_show_config()
+    session: Optional[Session] = None
+    if not use_api:
+        assert db_path is not None
+        session = init_db(db_path)
 
     encoded_count = 0
     error_count = 0
@@ -3650,12 +3382,29 @@ def cmd_run(args: argparse.Namespace) -> int:
             continue
 
         # Claim next file
-        claimed = claim_next_file(session, machine)
-        if claimed is None:
-            log_info("queue_empty")
-            break
+        claimed: Optional[dict] = None
+        override_tier: Optional[str] = None
+        if use_api and api_client is not None:
+            try:
+                claim_obj = api_client.claim(machine=machine)
+            except WorkerApiError as e:
+                log_error("worker_api_claim_failed", error=str(e))
+                break
+            if claim_obj is None:
+                log_info("queue_empty")
+                break
+            claimed = {"id": claim_obj.id, "path": claim_obj.path}
+            override_tier = claim_obj.override_tier
+        else:
+            assert session is not None
+            claimed = claim_next_file(session, machine)
+            if claimed is None:
+                log_info("queue_empty")
+                break
+            show_name = guess_show_name(normalize_path(pathlib.Path(claimed["path"])))
+            override_tier = get_default_tier_for_show(session, show_name=show_name) if show_name else None
 
-        source_path = pathlib.Path(claimed["path"])
+        source_path = normalize_path(pathlib.Path(claimed["path"]))
         log_info("encode_start", index=encoded_count + 1, file=str(source_path))
 
         # Probe file with interlacing detection
@@ -3663,16 +3412,21 @@ def cmd_run(args: argparse.Namespace) -> int:
         info = probe_media_with_interlace_detection(source_path)
         if info is None:
             log_error("probe_failed", file=str(source_path))
-            release_claim(session, claimed["id"], success=False)
+            if use_api and api_client is not None:
+                try:
+                    api_client.release(machine=machine, source_id=int(claimed["id"]), success=False)
+                except WorkerApiError as e:
+                    log_warn("worker_api_release_failed", error=str(e))
+            else:
+                assert session is not None
+                release_claim(session, claimed["id"], success=False)
             error_count += 1
             continue
 
-        # Get show config if applicable
-        show_name = guess_show_name(source_path)
-        file_config = show_config.get(show_name, {}) if show_name else {}
+        # override_tier already resolved (DB or API claim)
 
         # Classify and get settings
-        classification = classify_source(info, file_config)
+        classification = classify_source(info, override_tier)
         settings = classification.recommended_settings
         tier = classification.tier.value
 
@@ -3705,107 +3459,190 @@ def cmd_run(args: argparse.Namespace) -> int:
 
         if output_path.exists() and not args.force:
             log_info("skip_output_exists", output=str(output_path))
-            release_claim(session, claimed["id"], success=True)
+            if use_api and api_client is not None:
+                try:
+                    api_client.release(machine=machine, source_id=int(claimed["id"]), success=True)
+                except WorkerApiError as e:
+                    log_warn("worker_api_release_failed", error=str(e))
+            else:
+                assert session is not None
+                release_claim(session, claimed["id"], success=True)
             continue
 
         # Build and run ffmpeg command
         # Downscale target from settings (never upscale)
-        app_settings = load_app_settings()
-        target_height = app_settings.global_max_height
-        for lib, root in iter_libraries_for_current_host(app_settings):
-            try:
-                if source_path.is_relative_to(root):
-                    if lib.max_height:
-                        target_height = lib.max_height
-                    break
-            except Exception:
-                if str(source_path).startswith(str(root)):
-                    if lib.max_height:
-                        target_height = lib.max_height
-                    break
+        target_height, target_height_reason = resolve_target_height_for_path(source_path, app_settings)
 
-        eval_obj: Optional[ProfileEvaluation] = None
-        active_settings_source = ensure_active_profile_settings(session)
+        eval_obj_id: Optional[int] = None
+        active_settings_source = ensure_active_profile_settings(session) if session is not None else None
 
         # Optional VMAF sampling to adjust tier before full encode
         if args.sample_vmaf:
-            eval_obj = create_profile_evaluation(
-                session,
-                media_id=claimed["id"],
-                selected_profile=tier,
-                settings_source=active_settings_source,
-                sample_count=args.sample_count,
-                sample_length=args.sample_length,
-            )
+            from mediaforce.services.quality_loop import build_motion_weighted_plan, run_profile_quality_loop
 
-            vmaf_stats = sample_vmaf(
-                info,
-                settings,
-                max_height=target_height,
-                sample_count=args.sample_count,
-                sample_length=args.sample_length,
-                motion_aware=args.sample_motion_aware,
-            )
-            if vmaf_stats:
-                scores = vmaf_stats.get("samples", [])
-                timestamps = vmaf_stats.get("timestamps", [])
-                if scores:
-                    save_vmaf_samples(session, eval_obj.id, timestamps, scores, args.sample_length)  # type: ignore[arg-type]
-                eval_obj.median_vmaf = vmaf_stats.get("median")
-                eval_obj.min_vmaf = vmaf_stats.get("min")
-                eval_obj.max_vmaf = max(scores) if scores else None
+            if session is not None:
+                info_for_samples = info
+                assert info_for_samples is not None
 
-                threshold_min, threshold_med = _extract_thresholds(active_settings_source)
-                eval_obj.threshold_min = threshold_min
-                eval_obj.threshold_median = threshold_med
-
-                fail = False
-                if eval_obj.min_vmaf is not None and eval_obj.min_vmaf < threshold_min:
-                    fail = True
-                if eval_obj.median_vmaf is not None and eval_obj.median_vmaf < threshold_med:
-                    fail = True
-
-                if fail:
-                    eval_obj.status = "failed"
-                    eval_obj.decision = "fail"
-                    eval_obj.note = "Below VMAF thresholds"
-                    eval_obj.updated_at = datetime.now().isoformat()
-                    session.add(eval_obj)
-                    session.commit()
-                    log_warn(
-                        "vmaf_threshold_fail",
-                        file=str(source_path),
-                        median=eval_obj.median_vmaf,
-                        minimum=eval_obj.min_vmaf,
-                        threshold_min=threshold_min,
-                        threshold_median=threshold_med,
+                def measure(item) -> Optional[float]:
+                    enc_path, enc_size = encode_sample_clip(
+                        source_path,
+                        settings,
+                        info_for_samples,
+                        item.start_sec,
+                        item.duration_sec,
+                        target_height,
                     )
-                    release_claim(session, claimed["id"], success=False)
-                    active_slots -= 1
-                    continue
+                    if not enc_path:
+                        return None
+                    vmaf = compute_vmaf_score(
+                        source_path,
+                        enc_path,
+                        item.start_sec,
+                        item.duration_sec,
+                        encoded_size=enc_size,
+                    )
+                    try:
+                        enc_path.unlink(missing_ok=True)
+                        enc_path.parent.rmdir()
+                    except OSError:
+                        pass
+                    return vmaf
 
-                classification = adjust_tier_with_vmaf(classification, vmaf_stats)
-                settings = classification.recommended_settings
-                tier = classification.tier.value
-                eval_obj.decision = "keep"
-                eval_obj.status = "done"
-                eval_obj.updated_at = datetime.now().isoformat()
-                session.add(eval_obj)
-                session.commit()
-                log_info(
-                    "vmaf_sample",
-                    file=str(source_path),
-                    median=vmaf_stats['median'],
-                    minimum=vmaf_stats['min'],
-                    tier=tier,
+                loop_result = run_profile_quality_loop(
+                    session,
+                    media_id=claimed["id"],
+                    source_path=source_path,
+                    duration_seconds=float(info.duration_seconds or 0.0),
+                    initial_profile=tier,
+                    settings_source=active_settings_source,
+                    sample_length=args.sample_length,
+                    motion_aware=args.sample_motion_aware,
+                    measure_vmaf=measure,
+                    window_bitrate=window_bitrate,
+                    target_height=target_height,
+                    target_height_reason=target_height_reason,
                 )
+                eval_obj_id = loop_result.evaluation_id
+            elif use_api and api_client is not None:
+                duration_seconds = float(info.duration_seconds or 0.0)
+                if duration_seconds > 0.0 and args.sample_length > 0:
+                    try:
+                        eval_id, _thresholds = api_client.evaluation_start(
+                            media_id=int(claimed["id"]),
+                            initial_profile=tier,
+                            sample_length=float(args.sample_length),
+                        )
+                        eval_obj_id = eval_id
+
+                        plan = build_motion_weighted_plan(
+                            source_path=source_path,
+                            duration_seconds=duration_seconds,
+                            sample_length=float(args.sample_length),
+                            motion_aware=bool(args.sample_motion_aware),
+                            window_bitrate=window_bitrate,
+                        )
+
+                        samples_payload: list[dict[str, Any]] = []
+                        for item in plan:
+                            enc_path, enc_size = encode_sample_clip(
+                                source_path,
+                                settings,
+                                info,
+                                item.start_sec,
+                                item.duration_sec,
+                                target_height,
+                            )
+                            if not enc_path:
+                                continue
+                            vmaf = compute_vmaf_score(
+                                source_path,
+                                enc_path,
+                                item.start_sec,
+                                item.duration_sec,
+                                encoded_size=enc_size,
+                            )
+                            try:
+                                enc_path.unlink(missing_ok=True)
+                                enc_path.parent.rmdir()
+                            except OSError:
+                                pass
+                            if vmaf is None:
+                                continue
+                            samples_payload.append(
+                                {
+                                    "kind": item.kind,
+                                    "start_sec": item.start_sec,
+                                    "duration_sec": item.duration_sec,
+                                    "weight": item.weight,
+                                    "vmaf": float(vmaf),
+                                }
+                            )
+
+                        resp = api_client.evaluation_submit_samples(
+                            evaluation_id=eval_id,
+                            samples=samples_payload,
+                            target_height=target_height,
+                            target_height_reason=target_height_reason,
+                        )
+                        loop_result = SimpleNamespace(
+                            evaluation_id=eval_id,
+                            initial_profile=resp.get("initial_profile") or tier,
+                            selected_profile=resp.get("selected_profile") or tier,
+                            decision=resp.get("decision") or "keep",
+                            summary=SimpleNamespace(
+                                weighted=(resp.get("summary") or {}).get("weighted"),
+                                minimum=(resp.get("summary") or {}).get("min"),
+                                median=(resp.get("summary") or {}).get("median"),
+                            ),
+                            thresholds=SimpleNamespace(
+                                min_vmaf=(_thresholds or {}).get("min"),
+                                median_vmaf=(_thresholds or {}).get("median"),
+                            ),
+                        )
+                    except WorkerApiError as e:
+                        log_warn("quality_loop_api_failed", error=str(e))
+                        loop_result = None
+                else:
+                    loop_result = None
             else:
-                eval_obj.status = "failed"
-                eval_obj.decision = "fail"
-                eval_obj.note = "VMAF sampling failed"
-                eval_obj.updated_at = datetime.now().isoformat()
-                session.add(eval_obj)
-                session.commit()
+                loop_result = None
+
+            if loop_result is None:
+                pass
+
+            if loop_result is not None and loop_result.selected_profile != tier:
+                try:
+                    new_tier = SourceTier(loop_result.selected_profile)
+                    classification = ClassificationResult(
+                        tier=new_tier,
+                        confidence=classification.confidence,
+                        reasons=classification.reasons
+                        + [
+                            f"quality_loop:{tier}->{loop_result.selected_profile}"
+                            f" (weighted={loop_result.summary.weighted})"
+                        ],
+                        recommended_settings=TIER_SETTINGS[new_tier],
+                    )
+                    settings = classification.recommended_settings
+                    tier = classification.tier.value
+                except ValueError:
+                    pass
+
+            if loop_result is not None:
+                log_info(
+                    "quality_loop_result",
+                    file=str(source_path),
+                    eval_id=loop_result.evaluation_id,
+                    initial=loop_result.initial_profile,
+                    selected=loop_result.selected_profile,
+                    decision=loop_result.decision,
+                    weighted=loop_result.summary.weighted,
+                    minimum=loop_result.summary.minimum,
+                    median=loop_result.summary.median,
+                    threshold_min=loop_result.thresholds.min_vmaf,
+                    threshold_median=loop_result.thresholds.median_vmaf,
+                )
 
         cmd = build_ffmpeg_command(
             source_path,
@@ -3820,7 +3657,14 @@ def cmd_run(args: argparse.Namespace) -> int:
 
         if args.dry_run:
             log_info("dry_run", output=str(output_path))
-            release_claim(session, claimed["id"], success=True)
+            if use_api and api_client is not None:
+                try:
+                    api_client.release(machine=machine, source_id=int(claimed["id"]), success=True)
+                except WorkerApiError as e:
+                    log_warn("worker_api_release_failed", error=str(e))
+            else:
+                assert session is not None
+                release_claim(session, claimed["id"], success=True)
             encoded_count += 1
             continue
 
@@ -3828,15 +3672,35 @@ def cmd_run(args: argparse.Namespace) -> int:
         active_slots += 1
 
         # Start progress tracking
-        duration_sec = info.duration_sec or 0  # type: ignore[attr-defined]
-        progress_id = start_progress_tracking(
-            session, claimed["id"], str(source_path), str(output_path),
-            machine, tier, duration_sec,
-        )
+        duration_sec = float(info.duration_seconds or 0.0)
+        if use_api and api_client is not None:
+            progress_id = api_client.progress_start(
+                source_id=int(claimed["id"]),
+                source_path=str(source_path),
+                output_path=str(output_path),
+                machine=machine,
+                tier=tier,
+                duration_sec=duration_sec,
+            )
+        else:
+            assert session is not None
+            progress_id = start_progress_tracking(
+                session,
+                claimed["id"],
+                str(source_path),
+                str(output_path),
+                machine,
+                tier,
+                duration_sec,
+            )
 
         try:
             # Run ffmpeg with progress tracking
-            result = run_ffmpeg_with_progress(cmd, session, progress_id, duration_sec)
+            if use_api and api_client is not None:
+                result = run_ffmpeg_with_progress_api(cmd, api_client, progress_id, duration_sec)
+            else:
+                assert session is not None
+                result = run_ffmpeg_with_progress(cmd, session, progress_id, duration_sec)
 
             if result.returncode != 0:
                 raise subprocess.CalledProcessError(
@@ -3865,7 +3729,19 @@ def cmd_run(args: argparse.Namespace) -> int:
 
             if args.verify:
                 # Update progress phase
-                update_progress(session, progress_id, phase="verifying", phase_detail="Running quality checks")
+                if use_api and api_client is not None:
+                    try:
+                        api_client.progress_update(
+                            progress_id=progress_id,
+                            duration_sec=duration_sec,
+                            phase="verifying",
+                            phase_detail="Running quality checks",
+                        )
+                    except WorkerApiError as e:
+                        log_warn("worker_api_progress_failed", error=str(e))
+                else:
+                    assert session is not None
+                    update_progress(session, progress_id, phase="verifying", phase_detail="Running quality checks")
                 log_info("verify_start", file=str(source_path))
                 try:
                     metrics = verify_encode_quality(
@@ -3895,46 +3771,123 @@ def cmd_run(args: argparse.Namespace) -> int:
                 except Exception as e:
                     log_error("verify_exception", error=str(e))
 
-            # Clean up progress tracking
-            finish_progress_tracking(session, progress_id, success=True)
+            if use_api and api_client is not None:
+                payload: dict[str, Any] = {
+                    "source_id": int(claimed["id"]),
+                    "source_path": str(source_path),
+                    "tier": tier,
+                    "crf": settings.crf,
+                    "preset": settings.preset,
+                    "film_grain": settings.film_grain,
+                    "denoise": settings.denoise,
+                    "output_path": str(output_path),
+                    "output_size_bytes": int(output_size),
+                    "output_bitrate_kbps": output_bitrate,
+                    "source_size_bytes": int(source_size),
+                    "machine": machine,
+                    "started_at": started_at,
+                    "success": True,
+                    "profile_eval_id": eval_obj_id,
+                    "progress_id": progress_id,
+                }
+                if metrics is not None:
+                    payload["metrics"] = {
+                        "ssim": metrics.ssim,
+                        "psnr": metrics.psnr,
+                        "vmaf": metrics.vmaf,
+                        "sample_duration_sec": metrics.sample_duration_sec,
+                        "sample_start_sec": metrics.sample_start_sec,
+                    }
+                if outlier_result is not None:
+                    payload["outlier"] = {
+                        "is_outlier": outlier_result.is_outlier,
+                        "reasons": outlier_result.reasons,
+                    }
+                try:
+                    api_client.report_encode_result(payload=payload)
+                except WorkerApiError as e:
+                    log_error("worker_api_report_failed", error=str(e))
+                    try:
+                        api_client.release(machine=machine, source_id=int(claimed["id"]), success=False)
+                    except WorkerApiError:
+                        pass
+            else:
+                assert session is not None
+                # Clean up progress tracking
+                finish_progress_tracking(session, progress_id, success=True)
 
-            # Record result
-            result_id = record_encode_result(
-                session, claimed["id"], str(source_path), tier, settings,
-                str(output_path), output_size, output_bitrate, source_size,
-                machine, started_at,
-                metrics=metrics,
-                outlier_result=outlier_result,
-                profile_eval_id=eval_obj.id if eval_obj else None,
-            )
-            if eval_obj:
-                eval_obj.encode_result_id = result_id
-                eval_obj.updated_at = datetime.now().isoformat()
-                session.add(eval_obj)
-                session.commit()
-            release_claim(session, claimed["id"], success=True)
+                # Record result
+                result_id = record_encode_result(
+                    session, claimed["id"], str(source_path), tier, settings,
+                    str(output_path), output_size, output_bitrate, source_size,
+                    machine, started_at,
+                    metrics=metrics,
+                    outlier_result=outlier_result,
+                    profile_eval_id=eval_obj_id,
+                )
+                if eval_obj_id:
+                    eval_obj = session.get(ProfileEvaluation, eval_obj_id)
+                    if eval_obj:
+                        eval_obj.encode_result_id = result_id
+                        eval_obj.updated_at = datetime.now().isoformat()
+                        session.add(eval_obj)
+                        session.commit()
+                release_claim(session, claimed["id"], success=True)
             encoded_count += 1
 
         except subprocess.CalledProcessError as e:
             error_msg = e.stderr if isinstance(e.stderr, str) else (e.stderr.decode() if e.stderr else str(e))
             log_error("encode_failed", error=error_msg[:200])
 
-            # Clean up progress tracking
-            finish_progress_tracking(session, progress_id, success=False, error_msg=error_msg[:500])
+            if use_api and api_client is not None:
+                payload = {
+                    "source_id": int(claimed["id"]),
+                    "source_path": str(source_path),
+                    "tier": tier,
+                    "crf": settings.crf,
+                    "preset": settings.preset,
+                    "film_grain": settings.film_grain,
+                    "denoise": settings.denoise,
+                    "output_path": str(output_path),
+                    "output_size_bytes": 0,
+                    "output_bitrate_kbps": None,
+                    "source_size_bytes": int(source_path.stat().st_size),
+                    "machine": machine,
+                    "started_at": started_at,
+                    "success": False,
+                    "error_message": error_msg[:500],
+                    "profile_eval_id": eval_obj_id,
+                    "progress_id": progress_id,
+                }
+                try:
+                    api_client.report_encode_result(payload=payload)
+                except WorkerApiError as ex:
+                    log_error("worker_api_report_failed", error=str(ex))
+                    try:
+                        api_client.release(machine=machine, source_id=int(claimed["id"]), success=False)
+                    except WorkerApiError:
+                        pass
+            else:
+                assert session is not None
 
-            result_id = record_encode_result(
-                session, claimed["id"], str(source_path), tier, settings,
-                str(output_path), 0, None, source_path.stat().st_size,
-                machine, started_at, error_msg,
-                profile_eval_id=eval_obj.id if eval_obj else None,
-            )
-            if eval_obj:
-                eval_obj.encode_result_id = result_id
-                eval_obj.status = "failed"
-                eval_obj.updated_at = datetime.now().isoformat()
-                session.add(eval_obj)
-                session.commit()
-            release_claim(session, claimed["id"], success=False)
+                # Clean up progress tracking
+                finish_progress_tracking(session, progress_id, success=False, error_msg=error_msg[:500])
+
+                result_id = record_encode_result(
+                    session, claimed["id"], str(source_path), tier, settings,
+                    str(output_path), 0, None, source_path.stat().st_size,
+                    machine, started_at, error_msg,
+                    profile_eval_id=eval_obj_id,
+                )
+                if eval_obj_id:
+                    eval_obj = session.get(ProfileEvaluation, eval_obj_id)
+                    if eval_obj:
+                        eval_obj.encode_result_id = result_id
+                        eval_obj.status = "failed"
+                        eval_obj.updated_at = datetime.now().isoformat()
+                        session.add(eval_obj)
+                        session.commit()
+                release_claim(session, claimed["id"], success=False)
             error_count += 1
 
             # Clean up partial output
@@ -3943,7 +3896,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         finally:
             active_slots = max(active_slots - 1, 0)
 
-    session.close()
+    if session is not None:
+        session.close()
 
     log_info(
         "run_complete",
@@ -3955,48 +3909,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0 if error_count == 0 else 1
 
 
-# Sidecar extensions to rename when promoting
-SIDECAR_EXTENSIONS = {
-    ".nfo",      # metadata
-    ".srt",      # subtitles
-    ".sub",      # subtitles
-    ".idx",      # subtitle index
-    ".ass",      # styled subtitles
-    ".ssa",      # styled subtitles
-}
-
-# Image sidecar patterns (partial match on stem)
-IMAGE_SIDECAR_SUFFIXES = [
-    "-poster",
-    "-fanart",
-    "-thumb",
-    "-banner",
-    "-landscape",
-    "-clearlogo",
-    "-clearart",
-]
-
-
-def find_sidecars(source_path: pathlib.Path) -> list[pathlib.Path]:
-    """Find all sidecar files associated with a video file."""
-    sidecars = []
-    parent = source_path.parent
-    stem = source_path.stem
-
-    # Direct extension match (e.g., show.s01e01.mkv -> show.s01e01.nfo)
-    for ext in SIDECAR_EXTENSIONS:
-        sidecar = parent / f"{stem}{ext}"
-        if sidecar.exists():
-            sidecars.append(sidecar)
-
-    # Image sidecars (e.g., show.s01e01-thumb.jpg)
-    for suffix in IMAGE_SIDECAR_SUFFIXES:
-        for img_ext in [".jpg", ".jpeg", ".png", ".webp"]:
-            sidecar = parent / f"{stem}{suffix}{img_ext}"
-            if sidecar.exists():
-                sidecars.append(sidecar)
-
-    return sidecars
 
 
 def get_transcode_output_path(source_path: pathlib.Path, transcode_root: pathlib.Path) -> Optional[pathlib.Path]:
@@ -4054,21 +3966,20 @@ def get_transcode_output_path(source_path: pathlib.Path, transcode_root: pathlib
 
 def cmd_promote(args: argparse.Namespace) -> int:
     """Promote completed encodes - replace originals with encoded files."""
-    path = pathlib.Path(args.path).resolve()
-    transcode_root = pathlib.Path(args.transcode_root).resolve()
+    path = normalize_path(pathlib.Path(args.path).resolve())
+    transcode_root = normalize_path(pathlib.Path(args.transcode_root).resolve())
 
     if not path.exists():
-        print(f"[error] Path does not exist: {path}", file=sys.stderr)
+        log_error("promote_path_missing", path=str(path))
         return 1
 
     if not transcode_root.exists():
-        print(f"[error] Transcode root does not exist: {transcode_root}", file=sys.stderr)
+        log_error("promote_transcode_root_missing", transcode_root=str(transcode_root))
         return 1
 
     library_root = get_library_root(path)
     db_path = get_db_path(library_root)
 
-    # Collect video files to process
     if path.is_file():
         files = [path]
     else:
@@ -4077,113 +3988,98 @@ def cmd_promote(args: argparse.Namespace) -> int:
             files.extend(path.rglob(f"*{ext}"))
         files = sorted(files)
 
+    files = [f for f in files if f.is_file() and not f.name.startswith(".")]
     if not files:
-        print("No video files found.")
+        log_info("promote_no_files", path=str(path))
         return 0
 
-    print(f"Checking {len(files)} files for promotion...")
-    print(f"Transcode root: {transcode_root}")
-    print()
+    log_info(
+        "promote_scan",
+        files=len(files),
+        transcode_root=str(transcode_root),
+        dry_run=args.dry_run,
+    )
 
     promoted = 0
     skipped = 0
     errors = 0
 
-    # Open DB if it exists (for updating status)
     session = None
     if db_path.exists():
         session = init_db(db_path)
 
     for f in files:
-        # Skip if already AV1
         if ".AV1." in f.name or f.suffix.lower() == ".av1":
             continue
 
-        # Find corresponding encoded file
         encoded = get_transcode_output_path(f, transcode_root)
-
         if encoded is None:
             skipped += 1
             continue
 
-        # Calculate new filename for destination
-        new_stem = encoded.stem  # Already has .AV1 in it
-        new_name = f"{new_stem}.mp4"
-        dest_path = f.parent / new_name
+        dest_path = f.parent / encoded.name
+        log_info(
+            "promote_candidate",
+            source=str(f),
+            encoded=str(encoded),
+            dest=str(dest_path),
+        )
 
-        print(f"  {f.name}")
-        print(f"    -> {new_name}")
-
-        # Find sidecars
-        sidecars = find_sidecars(f)
-
-        if args.dry_run:
-            print("    [dry-run] Would move encoded file")
-            if sidecars:
-                print(f"    [dry-run] Would rename {len(sidecars)} sidecar(s)")
-            if args.delete_original:
-                print("    [dry-run] Would delete original")
-            continue
-
+        rollback_state = None
         try:
-            # Move encoded file to destination
-            shutil.move(str(encoded), str(dest_path))
+            result, rollback_state = promote_encoded_file_atomic(
+                source_path=f,
+                encoded_path=encoded,
+                dest_path=dest_path,
+                dry_run=args.dry_run,
+                move_original_to_backup=args.delete_original,
+                rename_sidecars=True,
+                verify=True,
+                logger=logger,
+            )
 
-            # Rename sidecars to match new filename
-            for sidecar in sidecars:
-                sidecar_ext = sidecar.suffix
-                # For image sidecars, preserve the suffix
-                sidecar_stem = sidecar.stem
-                for suffix in IMAGE_SIDECAR_SUFFIXES:
-                    if sidecar_stem.endswith(suffix):
-                        new_sidecar_name = f"{new_stem.replace('.AV1', '')}{suffix}{sidecar_ext}"
-                        break
-                else:
-                    new_sidecar_name = f"{new_stem.replace('.AV1', '')}{sidecar_ext}"
+            if args.dry_run:
+                promoted += 1
+                continue
 
-                new_sidecar_path = sidecar.parent / new_sidecar_name
-                if sidecar != new_sidecar_path:
-                    sidecar.rename(new_sidecar_path)
-                    print(f"    Renamed: {sidecar.name} -> {new_sidecar_name}")
-
-            # Delete original if requested
-            if args.delete_original:
-                f.unlink()
-                print("    Deleted original")
-
-            # Update database
             if session:
-                now_str = now_iso()
-                item = session.exec(select(MediaItem).where(MediaItem.path == str(f))).first()
-                if item:
-                    item.status = "completed"
-                    item.path = str(dest_path)
-                    item.updated_at = now_str
-                    session.add(item)
-                enc = session.exec(select(EncodeResult).where(EncodeResult.source_path == str(f))).first()
-                if enc:
-                    enc.promoted = True
-                    enc.promoted_at = now_str
-                    enc.output_path = enc.output_path or str(dest_path)
-                    session.add(enc)
-                session.commit()
+                try:
+                    now_str = now_iso()
+                    item = session.exec(select(MediaItem).where(MediaItem.path == str(f))).first()
+                    if item:
+                        item.status = "completed"
+                        item.path = str(result.dest_path)
+                        item.updated_at = now_str
+                        session.add(item)
+
+                    enc = session.exec(select(EncodeResult).where(EncodeResult.source_path == str(f))).first()
+                    if enc:
+                        enc.promoted = True
+                        enc.promoted_at = now_str
+                        enc.promoted_path = str(result.dest_path)
+                        enc.source_backup_path = (
+                            str(result.backup_source_path) if result.backup_source_path else None
+                        )
+                        enc.promote_manifest_json = result.manifest.to_json()
+                        enc.output_path = str(result.dest_path)
+                        session.add(enc)
+
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    if rollback_state:
+                        rollback_promote(rollback_state)
+                    raise
 
             promoted += 1
-            print("    [ok]")
-
         except Exception as e:
-            print(f"    [error] {e}")
+            log_error("promote_item_failed", source=str(f), error=str(e))
             errors += 1
 
     if session:
         session.close()
 
-    print()
-    print("Promotion complete:")
-    print(f"  Promoted: {promoted}")
-    print(f"  Skipped (no encode found): {skipped}")
-    print(f"  Errors: {errors}")
-
+    log_info("promote_summary", promoted=promoted, skipped=skipped, errors=errors)
     return 0 if errors == 0 else 1
 
 
@@ -4240,6 +4136,228 @@ def cmd_verify(args: argparse.Namespace) -> int:
         print()
         print("[!] Quality may be too low - consider re-encoding with lower CRF")
 
+    return 0
+
+
+def _parse_iso_datetime(value: str) -> Optional[datetime]:
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def cmd_purge_backups(args: argparse.Namespace) -> int:
+    """Purge promotion backup files for older, successfully-promoted items."""
+
+    older_than_days = int(args.older_than_days)
+    if older_than_days < 0:
+        log_error("purge_backups_invalid_threshold", older_than_days=older_than_days)
+        return 1
+
+    limit = int(args.limit)
+    if limit < 0:
+        log_error("purge_backups_invalid_limit", limit=limit)
+        return 1
+
+    apply = bool(args.apply)
+    dry_run = not apply
+
+    cutoff_dt = datetime.now() - timedelta(days=older_than_days)
+    cutoff_iso = cutoff_dt.isoformat()
+
+    db_path = get_db_path()
+    if not db_path.exists():
+        log_info("purge_backups_no_db", db=str(db_path))
+        return 0
+
+    session = init_db(db_path)
+    try:
+        stmt = (
+            select(EncodeResult)
+            .where(
+                EncodeResult.promoted == True,  # noqa: E712
+                EncodeResult.promoted_at.is_not(None),  # type: ignore[union-attr]
+                EncodeResult.promoted_at < cutoff_iso,  # type: ignore[operator]
+                EncodeResult.source_backup_path.is_not(None),  # type: ignore[union-attr]
+                EncodeResult.promoted_path.is_not(None),  # type: ignore[union-attr]
+            )
+            .order_by(EncodeResult.promoted_at)
+        )
+        candidates = session.exec(stmt).all()
+    finally:
+        session.close()
+
+    considered = 0
+    eligible = 0
+    deleted = 0
+    skipped = 0
+    errors = 0
+    freed_bytes = 0
+
+    for enc in candidates:
+        considered += 1
+        if limit and deleted >= limit:
+            break
+
+        promoted_at_raw = enc.promoted_at
+        promoted_at = _parse_iso_datetime(promoted_at_raw) if promoted_at_raw else None
+        if promoted_at is None:
+            skipped += 1
+            continue
+
+        cutoff_for_compare = (
+            cutoff_dt
+            if promoted_at.tzinfo is None
+            else datetime.now(promoted_at.tzinfo) - timedelta(days=older_than_days)
+        )
+        if promoted_at > cutoff_for_compare:
+            skipped += 1
+            continue
+
+        if not enc.promoted_path or not enc.source_backup_path:
+            skipped += 1
+            continue
+
+        promoted_path = normalize_path(pathlib.Path(enc.promoted_path))
+        backup_path = normalize_path(pathlib.Path(enc.source_backup_path))
+
+        if not promoted_path.exists():
+            log_warn(
+                "purge_backups_skip_promoted_missing",
+                encode_id=enc.id,
+                promoted=str(promoted_path),
+                backup=str(backup_path),
+            )
+            skipped += 1
+            continue
+
+        if not backup_path.exists():
+            skipped += 1
+            continue
+
+        # Extra safety: backup file must match our known naming scheme.
+        source_name = pathlib.Path(enc.source_path).name
+        expected_prefix = f".{source_name}.mediaforce-orig-"
+        if not backup_path.name.startswith(expected_prefix):
+            log_warn(
+                "purge_backups_skip_unexpected_name",
+                encode_id=enc.id,
+                backup=str(backup_path),
+                expected_prefix=expected_prefix,
+            )
+            skipped += 1
+            continue
+
+        if backup_path.parent != promoted_path.parent:
+            log_warn(
+                "purge_backups_skip_suspicious_paths",
+                encode_id=enc.id,
+                promoted=str(promoted_path),
+                backup=str(backup_path),
+            )
+            skipped += 1
+            continue
+
+        eligible += 1
+
+        try:
+            size = backup_path.stat().st_size
+        except OSError:
+            size = 0
+
+        if dry_run:
+            log_info(
+                "purge_backups_dry_run",
+                encode_id=enc.id,
+                backup=str(backup_path),
+                promoted=str(promoted_path),
+                bytes=size,
+                promoted_at=promoted_at_raw,
+            )
+            continue
+
+        try:
+            backup_path.unlink()
+            deleted += 1
+            freed_bytes += size
+            log_info(
+                "purge_backups_deleted",
+                encode_id=enc.id,
+                backup=str(backup_path),
+                bytes=size,
+                promoted_at=promoted_at_raw,
+            )
+        except OSError as e:
+            errors += 1
+            log_error(
+                "purge_backups_delete_failed",
+                encode_id=enc.id,
+                backup=str(backup_path),
+                error=str(e),
+            )
+
+    log_info(
+        "purge_backups_summary",
+        older_than_days=older_than_days,
+        dry_run=dry_run,
+        limit=limit if limit else None,
+        candidates=len(candidates),
+        considered=considered,
+        eligible=eligible,
+        deleted=deleted,
+        skipped=skipped,
+        errors=errors,
+        freed_bytes=freed_bytes,
+    )
+    return 0 if errors == 0 else 1
+
+
+def cmd_import_show_config(args: argparse.Namespace) -> int:
+    """Import legacy show overrides from `show_config.json` into the DB."""
+
+    apply = bool(getattr(args, "apply", False))
+    dry_run = not apply
+    overwrite_existing = bool(getattr(args, "overwrite_existing", False))
+
+    config_path: Optional[pathlib.Path] = None
+    if getattr(args, "path", None):
+        config_path = pathlib.Path(args.path).expanduser()
+    else:
+        candidates = [
+            pathlib.Path("show_config.json"),
+            CONFIG_DIR / "show_config.json",
+        ]
+        for c in candidates:
+            if c.exists():
+                config_path = c
+                break
+
+    if not config_path or not config_path.exists():
+        log_error("show_config_missing", searched=str(config_path) if config_path else None)
+        return 1
+
+    try:
+        with Session(ENGINE) as session:
+            result = import_show_config_json(
+                session,
+                config_path=config_path,
+                dry_run=dry_run,
+                overwrite_existing=overwrite_existing,
+            )
+    except Exception as e:
+        log_error("show_config_import_failed", config=str(config_path), error=str(e))
+        return 1
+
+    log_info(
+        "show_config_import_summary",
+        config=str(config_path),
+        dry_run=dry_run,
+        overwrite_existing=overwrite_existing,
+        created=result.created,
+        updated=result.updated,
+        skipped=result.skipped,
+        total_actions=len(result.actions),
+    )
     return 0
 
 
@@ -5193,7 +5311,6 @@ def cmd_review_compare(args: argparse.Namespace) -> int:
 
     source_path = pathlib.Path(enc.source_path)
     output_path = pathlib.Path(enc.output_path) if enc.output_path else None
-    vmaf_score = enc.vmaf
     session.close()
 
     if not source_path.exists():
@@ -5426,7 +5543,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run.add_argument("--autoupdate-url", help="Base URL hosting manifest.json and raw files for updates")
     p_run.add_argument("--autoupdate-interval", type=int, default=0, help="Seconds between update checks (0 = only at startup)")
+    p_run.add_argument(
+        "--api-url",
+        dest="api_url",
+        help="Mediaforce API base URL for worker coordination (or set MEDIAFORCE_API_URL)",
+    )
     p_run.add_argument("--settings-url", help="Remote settings endpoint (e.g., http://host:5555/api/settings/current)")
+    p_run.add_argument(
+        "--profile-settings-url",
+        dest="profile_settings_url",
+        help="Remote profile thresholds/settings JSON for quality loop (or set MEDIAFORCE_PROFILE_SETTINGS_URL)",
+    )
     p_run.set_defaults(func=cmd_run)
 
     # watch (auto-queue new files as they appear)
@@ -5537,15 +5664,61 @@ def build_parser() -> argparse.ArgumentParser:
         "--delete-original",
         action="store_true",
         default=True,
-        help="Delete original after promotion (default: True)",
+        help="Move original to hidden backup after promotion (default: True)",
     )
     p_promote.add_argument(
         "--no-delete",
         action="store_false",
         dest="delete_original",
-        help="Keep original file after promotion",
+        help="Keep original file after promotion (no backup move)",
     )
     p_promote.set_defaults(func=cmd_promote)
+
+    # purge-backups
+    p_purge = subparsers.add_parser(
+        "purge-backups",
+        help="Purge promotion backup files for older promoted items (dry-run by default)",
+    )
+    p_purge.add_argument(
+        "--older-than-days",
+        type=int,
+        default=30,
+        help="Only purge backups for items promoted more than N days ago (default: 30)",
+    )
+    p_purge.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Max backups to delete (0 = no limit)",
+    )
+    p_purge.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually delete backup files (default: dry-run)",
+    )
+    p_purge.set_defaults(func=cmd_purge_backups)
+
+    # import-show-config
+    p_import_show_config = subparsers.add_parser(
+        "import-show-config",
+        help="Import legacy show_config.json into DB show overrides (dry-run by default)",
+    )
+    p_import_show_config.add_argument(
+        "--path",
+        help="Path to show_config.json (default: ./show_config.json or ~/.config/mediaforce/show_config.json)",
+    )
+    p_import_show_config.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually write overrides to the database (default: dry-run)",
+    )
+    p_import_show_config.add_argument(
+        "--overwrite-existing",
+        dest="overwrite_existing",
+        action="store_true",
+        help="Overwrite existing DB overrides when importing (default: keep DB values)",
+    )
+    p_import_show_config.set_defaults(func=cmd_import_show_config)
 
     # verify (single file pair)
     p_verify = subparsers.add_parser(

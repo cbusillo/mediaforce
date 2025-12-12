@@ -165,6 +165,15 @@
             thr {{ encode.eval_thresh_min or '-' }}/{{ encode.eval_thresh_med or '-' }}/{{ encode.eval_thresh_max or '-'
             }}
           </div>
+          {% if encode.eval_id %}
+          <button
+            type="button"
+            class="text-xs underline text-foreground-muted hover:text-foreground"
+            onclick="showEvalDetails({{ encode.eval_id }})"
+          >
+            Details
+          </button>
+          {% endif %}
           {% else %} {{ encode.vmaf or '-' }} {% endif %}
         </td>
         <td>
@@ -256,6 +265,17 @@
       <button onclick="confirmBulkReject()" class="btn btn-warning">Reject All Selected</button>
       <button onclick="hideBulkRejectModal()" class="btn">Cancel</button>
     </div>
+  </div>
+</div>
+
+<!-- Evaluation Details Modal -->
+<div id="evalModal" class="modal-overlay hidden">
+  <div class="modal-card max-w-3xl mx-auto mt-[10%]">
+    <div class="flex items-start justify-between gap-4">
+      <h3 class="m-0">Profile Evaluation Details</h3>
+      <button type="button" onclick="hideEvalDetails()" class="btn">Close</button>
+    </div>
+    <pre id="evalDetails" class="mt-4 p-3 rounded bg-surface-subtle overflow-auto text-xs"></pre>
   </div>
 </div>
 {% endblock %} {% block scripts %}
@@ -481,6 +501,41 @@
     } else {
       alert("Error: " + (data.error || "failed to flag"));
     }
+  }
+
+  async function showEvalDetails(evalId) {
+    const modal = document.getElementById("evalModal");
+    const pre = document.getElementById("evalDetails");
+    pre.textContent = "Loading...";
+    modal.classList.remove("hidden");
+
+    try {
+      const resp = await fetch(`/api/evaluations/${evalId}`);
+      const data = await resp.json();
+      if (!data.success) {
+        pre.textContent = data.error || "failed to load";
+        return;
+      }
+
+      const reasonJson = data.evaluation?.reason_json;
+      if (!reasonJson) {
+        pre.textContent = JSON.stringify(data, null, 2);
+        return;
+      }
+
+      try {
+        pre.textContent = JSON.stringify(JSON.parse(reasonJson), null, 2);
+      } catch {
+        pre.textContent = String(reasonJson);
+      }
+    } catch (err) {
+      pre.textContent = String(err);
+    }
+  }
+
+  function hideEvalDetails() {
+    const modal = document.getElementById("evalModal");
+    modal.classList.add("hidden");
   }
 
   // Hover thumbnail

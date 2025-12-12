@@ -13,7 +13,7 @@ from mediaforce.db.models import MediaItem, EncodeResult, Library
 def recalculate_priorities(session: Session, max_age: int, calculate_priority: Callable) -> None:
     """Recalculate priority scores using actual max_savings from the database."""
 
-    row = session.exec(
+    row = session.exec(  # type: ignore[call-overload]
         text(
             """
             SELECT MAX(potential_savings_bytes)

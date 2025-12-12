@@ -7,7 +7,7 @@ values that change (versions, hostnames, mounts).
 
 - Read `README.md` for the product pitch, pipeline, and usage examples.
 - See `docs/architecture.md` for the current code layout and refactor plan.
-- Roadmap lives in `todo.md` (do not duplicate tasks here).
+- Roadmap lives in `TODO.md` (do not duplicate tasks here).
 - Local host inventory: `docs/hosts.local.md` (gitignored).
 
 ## Codebase Map (high level)
