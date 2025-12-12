@@ -45,6 +45,7 @@ def test_quality_loop_api_persists_evaluation_and_samples(tmp_path, monkeypatch)
     import sys
 
     webapp_module = sys.modules["mediaforce.web.app"]
+    monkeypatch.delenv("MEDIAFORCE_API_TOKEN", raising=False)
     monkeypatch.setattr(webapp_module, "session_scope", _scope, raising=False)
     monkeypatch.setattr(webapp_module, "ensure_schema", lambda _engine: None, raising=False)
 
@@ -121,6 +122,7 @@ def test_quality_loop_api_respects_max_threshold(tmp_path, monkeypatch):
     import sys
 
     webapp_module = sys.modules["mediaforce.web.app"]
+    monkeypatch.delenv("MEDIAFORCE_API_TOKEN", raising=False)
     monkeypatch.setattr(webapp_module, "session_scope", _scope, raising=False)
     monkeypatch.setattr(webapp_module, "ensure_schema", lambda _engine: None, raising=False)
 

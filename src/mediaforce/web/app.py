@@ -7,6 +7,7 @@ Mediaforce web interface for managing encoding queues and monitoring progress.
 
 import asyncio
 import json
+import os
 import pathlib
 import platform as platform_mod
 import sys
@@ -15,7 +16,7 @@ from datetime import datetime
 from typing import Optional, Callable, Any
 from mediaforce.config.logging import configure_logging, env_log_config
 
-from fastapi import FastAPI, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
@@ -265,6 +266,21 @@ async def _lifespan(_app: FastAPI):
 
 
 app.router.lifespan_context = _lifespan
+
+
+def _require_worker_api_auth(request: Request) -> None:
+    required = os.getenv("MEDIAFORCE_API_TOKEN")
+    if not required:
+        return
+
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        provided = auth.split(" ", 1)[1].strip()
+    else:
+        provided = request.headers.get("x-mediaforce-token") or ""
+
+    if provided != required:
+        raise HTTPException(status_code=401, detail="unauthorized")
 
 
 ALLOWED_RAW_FILES: dict[str, str] = {
@@ -2132,7 +2148,7 @@ async def api_workers(request: Request):
     return {"success": True, "workers": get_worker_status(library_root)}
 
 
-@app.post("/api/worker/claim")
+@app.post("/api/worker/claim", dependencies=[Depends(_require_worker_api_auth)])
 async def api_worker_claim(data: WorkerClaimRequest):
     """Claim the next pending item for a worker without direct DB access."""
 
@@ -2160,7 +2176,7 @@ async def api_worker_claim(data: WorkerClaimRequest):
         }
 
 
-@app.post("/api/worker/release")
+@app.post("/api/worker/release", dependencies=[Depends(_require_worker_api_auth)])
 async def api_worker_release(data: WorkerReleaseRequest):
     """Release a claimed item back to the queue (or mark encoded)."""
 
@@ -2173,7 +2189,7 @@ async def api_worker_release(data: WorkerReleaseRequest):
     return {"success": True}
 
 
-@app.post("/api/worker/progress/start")
+@app.post("/api/worker/progress/start", dependencies=[Depends(_require_worker_api_auth)])
 async def api_worker_progress_start(data: WorkerProgressStartRequest):
     """Create a progress row for an active encode."""
 
@@ -2195,7 +2211,7 @@ async def api_worker_progress_start(data: WorkerProgressStartRequest):
         return {"success": True, "progress_id": pid}
 
 
-@app.post("/api/worker/progress/update")
+@app.post("/api/worker/progress/update", dependencies=[Depends(_require_worker_api_auth)])
 async def api_worker_progress_update(data: WorkerProgressUpdateRequest):
     """Update encode progress for an active encode."""
 
@@ -2216,7 +2232,7 @@ async def api_worker_progress_update(data: WorkerProgressUpdateRequest):
         return {"success": True}
 
 
-@app.post("/api/worker/report")
+@app.post("/api/worker/report", dependencies=[Depends(_require_worker_api_auth)])
 async def api_worker_report(data: WorkerEncodeReportRequest):
     """Record an encode result from a worker and transition DB state safely."""
 
@@ -2392,7 +2408,7 @@ async def api_get_evaluation(eval_id: int):
     }
 
 
-@app.post("/api/evaluations/start")
+@app.post("/api/evaluations/start", dependencies=[Depends(_require_worker_api_auth)])
 async def api_start_evaluation(data: EvaluationStartRequest):
     with session_scope() as session:
         settings_source = ensure_active_profile_settings(session)
@@ -2417,7 +2433,7 @@ async def api_start_evaluation(data: EvaluationStartRequest):
         }
 
 
-@app.post("/api/evaluations/{eval_id}/samples")
+@app.post("/api/evaluations/{eval_id}/samples", dependencies=[Depends(_require_worker_api_auth)])
 async def api_submit_evaluation_samples(eval_id: int, data: EvaluationSubmitSamplesRequest):
     with session_scope() as session:
         ev = session.get(ProfileEvaluation, int(eval_id))

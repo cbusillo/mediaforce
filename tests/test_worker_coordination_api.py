@@ -33,7 +33,47 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(webapp_module, "session_scope", _scope, raising=False)
     monkeypatch.setattr(webapp_module, "ensure_schema", lambda _engine: None, raising=False)
 
+    monkeypatch.delenv("MEDIAFORCE_API_TOKEN", raising=False)
+
     return TestClient(app)
+
+
+def test_worker_endpoints_require_token_when_configured(tmp_path, monkeypatch):
+    db_path = tmp_path / "test.db"
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine)
+
+    @contextmanager
+    def _scope():
+        session = Session(engine)
+        try:
+            yield session
+            session.commit()
+        finally:
+            session.close()
+
+    import sys
+
+    webapp_module = sys.modules["mediaforce.web.app"]
+    monkeypatch.setattr(webapp_module, "session_scope", _scope, raising=False)
+    monkeypatch.setattr(webapp_module, "ensure_schema", lambda _engine: None, raising=False)
+    monkeypatch.setenv("MEDIAFORCE_API_TOKEN", "secret")
+
+    with webapp_module.session_scope() as session:  # type: ignore[attr-defined]
+        item = MediaItem(path="/tmp/ShowA/Season 1/E01.mkv", status="pending", detected_tier="good")
+        session.add(item)
+        session.commit()
+
+    c = TestClient(app)
+    assert c.post("/api/worker/claim", json={"machine": "worker-1"}).status_code == 401
+
+    ok = c.post(
+        "/api/worker/claim",
+        json={"machine": "worker-1"},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert ok.status_code == 200
+    assert ok.json()["success"] is True
 
 
 def test_worker_claim_includes_show_override(client):

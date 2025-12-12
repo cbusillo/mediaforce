@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -32,10 +33,12 @@ class WorkerApiClient:
         base_url: str,
         *,
         timeout_sec: float = 10.0,
+        token: Optional[str] = None,
         request_json: Optional[RequestJsonFn] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_sec = float(timeout_sec)
+        self.token = token if token is not None else os.getenv("MEDIAFORCE_API_TOKEN")
         self._request_json = request_json or self._request_json_urllib
 
     def _request_json_urllib(
@@ -47,6 +50,8 @@ class WorkerApiClient:
         url = f"{self.base_url}{path}"
         data_bytes = None
         headers = {"Accept": "application/json"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
         if payload is not None:
             data_bytes = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
