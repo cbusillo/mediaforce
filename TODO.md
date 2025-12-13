@@ -16,13 +16,13 @@
   - API-backed claim/release/progress/report so workers don’t open SQLite directly
   - Optional shared-secret auth for worker endpoints (`MEDIAFORCE_API_TOKEN`)
 - [ ] **Release mechanics**
-  - Decide channel: GitHub tag/release vs PyPI
-  - Bump `pyproject.toml` version and add a short changelog
-  - Build wheel/sdist and verify templates/static included
+  - [x] Bump `pyproject.toml` version and add `CHANGELOG.md`
+  - [x] Build wheel/sdist and verify templates/static included
+  - [ ] Decide channel: GitHub tag/release vs PyPI
 - [ ] **Final smoke runs**
-  - One full encode → verify → promote (verify-before-promote) → rollback scenario
-  - Worker API mode run with `MEDIAFORCE_API_URL` (+ token if enabled)
-  - `purge-backups` dry-run then apply on known-old promoted items
+  - [x] Promotion verify-before-promote + rollback (`scripts/release_smoke.sh`)
+  - [x] Worker API mode dry-run with token (`scripts/release_smoke.sh`)
+  - [ ] `purge-backups` dry-run then apply on known-old promoted items
 
 ## High Priority
 
