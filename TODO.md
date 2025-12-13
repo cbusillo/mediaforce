@@ -15,10 +15,10 @@
 - [x] **Worker safety**
   - API-backed claim/release/progress/report so workers don’t open SQLite directly
   - Optional shared-secret auth for worker endpoints (`MEDIAFORCE_API_TOKEN`)
-- [ ] **Release mechanics**
+- [x] **Release mechanics**
   - [x] Bump `pyproject.toml` version and add `CHANGELOG.md`
   - [x] Build wheel/sdist and verify templates/static included
-  - [ ] Decide channel: GitHub tag/release vs PyPI
+  - [x] Decide channel: GitHub tag/release vs PyPI (GitHub tag + release)
 - [ ] **Final smoke runs**
   - [x] Promotion verify-before-promote + rollback (`scripts/release_smoke.sh`)
   - [x] Worker API mode dry-run with token (`scripts/release_smoke.sh`)
