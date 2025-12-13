@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Callable, Any
 from mediaforce.config.logging import configure_logging, env_log_config
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
@@ -39,6 +39,7 @@ from mediaforce.services.encoder import record_encode_result
 from mediaforce.services.progress import finish_progress_tracking, start_progress_tracking, update_progress
 from mediaforce.services.queue import claim_next_file, release_claim
 from mediaforce.services.watch import watch_libraries
+from mediaforce.services.notifications import send_notifications
 from mediaforce.core import ensure_active_profile_settings
 from mediaforce.services.promote import (
     promote_encoded_file_atomic,
@@ -2261,7 +2262,7 @@ async def api_worker_progress_update(data: WorkerProgressUpdateRequest):
 
 
 @app.post("/api/worker/report", dependencies=[Depends(_require_worker_api_auth)])
-async def api_worker_report(data: WorkerEncodeReportRequest):
+async def api_worker_report(data: WorkerEncodeReportRequest, background_tasks: BackgroundTasks):
     """Record an encode result from a worker and transition DB state safely."""
 
     machine = (data.machine or "").strip()
@@ -2332,6 +2333,56 @@ async def api_worker_report(data: WorkerEncodeReportRequest):
                 session.commit()
 
         release_claim(session, int(data.source_id), bool(data.success))
+
+        try:
+            source_size = int(data.source_size_bytes)
+            output_size = int(data.output_size_bytes or 0)
+        except Exception:
+            source_size = 0
+            output_size = 0
+
+        saved_bytes = max(0, source_size - output_size) if data.success else 0
+        size_increase = output_size > source_size if data.success and source_size > 0 else False
+        reduction_pct = (
+            (1 - (output_size / source_size)) * 100
+            if data.success and source_size > 0 and output_size > 0
+            else None
+        )
+
+        event = "encode_completed" if data.success else "encode_failed"
+        if size_increase:
+            event = "encode_size_increase"
+
+        summary = (
+            f"{event}: {data.source_path}"
+            + (f" ({saved_bytes} bytes saved)" if saved_bytes else "")
+            + (" (size increased)" if size_increase else "")
+        )
+        payload = {
+            "encode_result_id": result_id,
+            "success": bool(data.success),
+            "source_id": int(data.source_id),
+            "source_path": data.source_path,
+            "output_path": data.output_path,
+            "tier": data.tier,
+            "machine": machine,
+            "source_size_bytes": source_size,
+            "output_size_bytes": output_size,
+            "saved_bytes": saved_bytes,
+            "reduction_pct": reduction_pct,
+            "error_message": data.error_message,
+            "vmaf": data.metrics.vmaf if data.metrics else None,
+            "outlier": bool(data.outlier.is_outlier) if data.outlier else None,
+            "outlier_reasons": list(data.outlier.reasons or []) if data.outlier else [],
+        }
+
+        background_tasks.add_task(
+            send_notifications,
+            event=event,
+            summary=summary,
+            data=payload,
+            logger=logger,
+        )
 
     return {"success": True, "encode_result_id": result_id}
 

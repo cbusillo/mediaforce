@@ -94,6 +94,7 @@ from mediaforce.services.scanner import (
     VIDEO_EXTENSIONS,
 )
 from mediaforce.services.watch import watch_libraries as svc_watch_libraries
+from mediaforce.services.notifications import send_notifications
 
 
 REMOTE_SETTINGS_URL: str | None = None
@@ -3096,6 +3097,40 @@ def cmd_run(args: argparse.Namespace) -> int:
                         session.add(eval_obj)
                         session.commit()
                 release_claim(session, claimed["id"], success=True)
+
+                size_increase = output_size > source_size if source_size > 0 else False
+                saved_bytes = max(0, source_size - output_size) if source_size > 0 else 0
+                reduction_pct = (1 - (output_size / source_size)) * 100 if source_size > 0 else None
+                event = "encode_size_increase" if size_increase else "encode_completed"
+                summary = (
+                    f"{event}: {source_path}"
+                    + (f" ({saved_bytes} bytes saved)" if saved_bytes else "")
+                    + (" (size increased)" if size_increase else "")
+                )
+                try:
+                    send_notifications(
+                        event=event,
+                        summary=summary,
+                        data={
+                            "encode_result_id": result_id,
+                            "success": True,
+                            "source_id": int(claimed["id"]),
+                            "source_path": str(source_path),
+                            "output_path": str(output_path),
+                            "tier": tier,
+                            "machine": machine,
+                            "source_size_bytes": int(source_size),
+                            "output_size_bytes": int(output_size),
+                            "saved_bytes": int(saved_bytes),
+                            "reduction_pct": reduction_pct,
+                            "vmaf": metrics.vmaf if metrics else None,
+                            "outlier": bool(outlier_result.is_outlier) if outlier_result else None,
+                            "outlier_reasons": list(outlier_result.reasons) if outlier_result else [],
+                        },
+                        logger=CLI_LOGGER,
+                    )
+                except Exception:
+                    pass
             encoded_count += 1
 
         except subprocess.CalledProcessError as e:
@@ -3151,6 +3186,25 @@ def cmd_run(args: argparse.Namespace) -> int:
                         session.add(eval_obj)
                         session.commit()
                 release_claim(session, claimed["id"], success=False)
+
+                try:
+                    send_notifications(
+                        event="encode_failed",
+                        summary=f"encode_failed: {source_path}",
+                        data={
+                            "encode_result_id": result_id,
+                            "success": False,
+                            "source_id": int(claimed["id"]),
+                            "source_path": str(source_path),
+                            "output_path": str(output_path),
+                            "tier": tier,
+                            "machine": machine,
+                            "error_message": error_msg[:500],
+                        },
+                        logger=CLI_LOGGER,
+                    )
+                except Exception:
+                    pass
             error_count += 1
 
             # Clean up partial output

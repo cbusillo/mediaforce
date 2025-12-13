@@ -118,7 +118,7 @@
   - Pause/resume specific files
   - Add files manually to queue
 
-- [ ] **Notifications**
+- [x] **Notifications**
   - Webhook support for encode completion
   - Email/Discord alerts for failures or size increases
 
