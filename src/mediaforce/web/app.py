@@ -24,7 +24,6 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Str
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-# Import functions from mediaforce
 from mediaforce.config.settings import AppSettings, LibrarySettings, load_app_settings, save_app_settings, ENGINE
 from mediaforce.db.repository.session import session_scope
 from mediaforce.db.repository.media import MediaRepository
@@ -74,7 +73,6 @@ from sqlmodel import select, Session
 from dataclasses import asdict
 from mediaforce.web.charts import sparkline_svg
 
-# Configuration
 IS_MAC = platform_mod.system() == "Darwin"
 # Ensure the base logger is configured for shared service logs that emit events
 # against the default "mediaforce" component.
@@ -424,11 +422,6 @@ async def _stop_watch_task(message: str = "stopped", paused: bool = False) -> di
     return WATCH_STATUS
 
 
-# =============================================================================
-# Pydantic Models for API
-# =============================================================================
-
-
 class BulkPromoteRequest(BaseModel):
     ids: list[int]
 
@@ -674,11 +667,6 @@ def _serialize_feedback(fb: ProfileChoiceFeedback) -> dict:
     }
 
 
-# =============================================================================
-# Database Helpers
-# =============================================================================
-
-
 def resolve_existing_library_root() -> Optional[str]:
     """Return first existing library root for this host, or None."""
     settings = load_app_settings()
@@ -689,7 +677,6 @@ def resolve_existing_library_root() -> Optional[str]:
 
 
 def format_size(bytes_val: float | int | None) -> str:
-    """Format bytes as human-readable size."""
     if bytes_val is None:
         return "?"
     for unit in ["B", "KB", "MB", "GB", "TB"]:
@@ -700,7 +687,6 @@ def format_size(bytes_val: float | int | None) -> str:
 
 
 def format_duration(seconds: float) -> str:
-    """Format seconds as HH:MM:SS."""
     if seconds is None:
         return "?"
     hours = int(seconds // 3600)
@@ -712,7 +698,6 @@ def format_duration(seconds: float) -> str:
 
 
 def extract_show_name(path: str) -> Optional[str]:
-    """Extract show name from path (assumes /Show Name/Season X/...)."""
     parts = pathlib.Path(path).parts
     for i, part in enumerate(parts):
         if part.lower().startswith("season"):
@@ -728,19 +713,12 @@ templates.env.filters["format_duration"] = format_duration
 
 
 def build_pagination_url(request: Request) -> Callable[[int], str]:
-    """Create a pagination URL builder for the current request."""
     def pagination_url(page: int) -> str:
         params = dict(request.query_params)
         params["page"] = str(page)
         query_string = "&".join(f"{k}={v}" for k, v in params.items())
         return f"{request.url.path}?{query_string}"
     return pagination_url
-
-
-# =============================================================================
-# HTML Page Routes
-# =============================================================================
-
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
@@ -1810,11 +1788,6 @@ async def shows(request: Request):
     })
 
 
-# =============================================================================
-# Video Streaming
-# =============================================================================
-
-
 @app.get("/video/{video_type}/{encode_id}")
 async def serve_video(video_type: str, encode_id: int):
     """Serve video files for comparison."""
@@ -1841,11 +1814,6 @@ async def serve_video(video_type: str, encode_id: int):
         return HTMLResponse("Video file not found", status_code=404)
 
     return FileResponse(video_path)
-
-
-# =============================================================================
-# API Endpoints
-# =============================================================================
 
 
 @app.post("/api/promote/{encode_id}")
@@ -2958,16 +2926,8 @@ async def api_stats_summary(days: int = Query(30, ge=7, le=365)):
         ],
     }
 
-
-
-
-# =============================================================================
-# Main
-# =============================================================================
-
-
 def main():
-    """Entry point for av1-web command."""
+    """CLI entry point for `mediaforce-web`."""
     import argparse
 
     import uvicorn

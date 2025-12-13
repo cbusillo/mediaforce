@@ -143,5 +143,5 @@
 - [x] Remove legacy code paths (old SQL/table names, orphaned scripts, obsolete
       shims) once migrations are stable. No migration code should be left behind.
       We will be starting with a fresh database after this todo is done.
-- [ ] Sweep codebase to remove non-essential comments/docstrings; rely on clear,
+- [x] Sweep codebase to remove non-essential comments/docstrings; rely on clear,
       descriptive identifiers instead
