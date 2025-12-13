@@ -2231,17 +2231,25 @@ def resolve_target_height_for_path(path: pathlib.Path, settings: AppSettings) ->
     falling back to global_max_height. Never upscales (caller enforces).
     """
 
-    for lib, root in iter_libraries_for_current_host(settings):
-        try:
-            if path.is_relative_to(root):
-                if lib.max_height is not None:
-                    return lib.max_height, f"library:{lib.id}"
-                break
-        except Exception:
-            if str(path).startswith(str(root)):
-                if lib.max_height is not None:
-                    return lib.max_height, f"library:{lib.id}"
-                break
+    # Prefer per-library max_height when the path matches any configured root.
+    # We intentionally check both mac and linux roots so paths that originated
+    # from another host (e.g. DB entries) still resolve correctly.
+    path_str = str(path)
+    for lib in settings.libraries:
+        roots = [lib.mac_path, lib.linux_path]
+        for root in roots:
+            if not root:
+                continue
+            try:
+                if path.is_relative_to(pathlib.Path(root)):
+                    if lib.max_height is not None:
+                        return lib.max_height, f"library:{lib.id}"
+                    return settings.global_max_height, "global"
+            except Exception:
+                if path_str.startswith(root.rstrip("/") + "/") or path_str == root:
+                    if lib.max_height is not None:
+                        return lib.max_height, f"library:{lib.id}"
+                    return settings.global_max_height, "global"
 
     if settings.global_max_height is not None:
         return settings.global_max_height, "global"
