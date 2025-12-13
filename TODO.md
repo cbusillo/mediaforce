@@ -88,7 +88,7 @@
   - Extract shared JS (status chips, filters, fetch helpers) into a static bundle
   - Keep templates thin; consider HTMX/Alpine for small interactivity
 
-- [ ] **Typing & Tests Discipline**
+- [x] **Typing & Tests Discipline**
   - Run `ruff`/`mypy` on touched files in CI; keep FastAPI/SQLModel ignores scoped
   - Add minimal unit tests near newly extracted services
 

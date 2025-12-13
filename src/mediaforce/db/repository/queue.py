@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from typing import Optional, Sequence, Any
 
-from sqlalchemy import text, func, case, select
-from sqlmodel import Session
+from sqlalchemy import text, func, case
+from sqlmodel import Session, select as _select  # type: ignore[reportMissingImports]
 
 from mediaforce.db.models import MediaItem
+
+select: Any = _select
 
 
 class QueueRepository:
@@ -27,43 +29,52 @@ class QueueRepository:
         direction: str,
     ) -> tuple[list[dict], int, int, int]:
         like_root = f"{library_root}/%"
+        path_col: Any = MediaItem.path
+        size_col_model: Any = MediaItem.size_bytes
+        tier_col_model: Any = MediaItem.detected_tier
+        priority_col_model: Any = MediaItem.priority_score
+        savings_col_model: Any = MediaItem.potential_savings_bytes
+        scanned_at_col: Any = MediaItem.scanned_at
+        updated_at_col: Any = MediaItem.updated_at
+        mtime_col: Any = MediaItem.mtime
+
         filters = [
             MediaItem.status == "pending",
-            MediaItem.path.like(like_root),
+            path_col.like(like_root),
         ]
 
         if show_filter:
-            filters.append(func.lower(MediaItem.path).like(f"%{show_filter.lower()}%"))
+            filters.append(func.lower(path_col).like(f"%{show_filter.lower()}%"))
         if tier_filter:
-            filters.append(MediaItem.detected_tier == tier_filter)
+            filters.append(tier_col_model == tier_filter)
         if size_min is not None:
-            filters.append(MediaItem.size_bytes >= size_min)
+            filters.append(size_col_model >= size_min)
         if size_max is not None:
-            filters.append(MediaItem.size_bytes <= size_max)
+            filters.append(size_col_model <= size_max)
 
         # Extract show name (first segment after library root)
-        rel_path = func.substr(MediaItem.path, len(library_root) + 2)
+        rel_path = func.substr(path_col, len(library_root) + 2)
         first_slash_pos = func.instr(rel_path, "/")
-        show_name = case(
+        show_name: Any = case(
             (first_slash_pos > 0, func.substr(rel_path, 1, first_slash_pos - 1)),
             else_=rel_path,
         ).label("show_name")
 
         file_count_col = func.count().label("file_count")
-        size_col = func.sum(MediaItem.size_bytes).label("total_size_bytes")
-        savings_col = func.sum(MediaItem.potential_savings_bytes).label("total_savings_bytes")
-        avg_priority_col = func.avg(MediaItem.priority_score).label("avg_priority")
-        max_priority_col = func.max(MediaItem.priority_score).label("max_priority")
+        size_col = func.sum(size_col_model).label("total_size_bytes")
+        savings_col = func.sum(savings_col_model).label("total_savings_bytes")
+        avg_priority_col = func.avg(priority_col_model).label("avg_priority")
+        max_priority_col = func.max(priority_col_model).label("max_priority")
         latest_scan_col = func.max(
             func.coalesce(
-                MediaItem.scanned_at,
-                MediaItem.updated_at,
-                func.datetime(MediaItem.mtime, "unixepoch"),
+                scanned_at_col,
+                updated_at_col,
+                func.datetime(mtime_col, "unixepoch"),
             )
         ).label("latest_scan")
-        reduction_col = case(
-            (func.sum(MediaItem.size_bytes) > 0,
-             func.sum(MediaItem.potential_savings_bytes) * 1.0 / func.sum(MediaItem.size_bytes)),
+        reduction_col: Any = case(
+            (func.sum(size_col_model) > 0,
+             func.sum(savings_col_model) * 1.0 / func.sum(size_col_model)),
             else_=0,
         ).label("reduction_ratio")
 
@@ -98,12 +109,12 @@ class QueueRepository:
             func.sum(text("total_savings_bytes")).label("total_savings"),
         ).select_from(base_query.subquery())
 
-        total_row = self.session.exec(total_stmt).mappings().fetchone()
+        total_row = self.session.exec(total_stmt).mappings().fetchone()  # type: ignore[call-overload]
         total = total_row["total_shows"] if total_row and total_row["total_shows"] else 0
         total_files = total_row["total_files"] if total_row and total_row["total_files"] else 0
         total_savings = total_row["total_savings"] if total_row and total_row["total_savings"] else 0
 
-        rows = self.session.exec(
+        rows = self.session.exec(  # type: ignore[call-overload]
             base_query.order_by(sort_expr).limit(per_page).offset((page - 1) * per_page)
         ).mappings().fetchall()
         shows: list[dict] = []
@@ -125,9 +136,14 @@ class QueueRepository:
 
     def list_seasons(self, library_root: str, show_name: str) -> list[dict]:
         like_pattern = f"{library_root}/{show_name}/%"
-        rel_path = func.substr(MediaItem.path, len(library_root) + len(show_name) + 3)
+        path_col: Any = MediaItem.path
+        size_col_model: Any = MediaItem.size_bytes
+        savings_col_model: Any = MediaItem.potential_savings_bytes
+        priority_col_model: Any = MediaItem.priority_score
+
+        rel_path = func.substr(path_col, len(library_root) + len(show_name) + 3)
         first_slash_pos = func.instr(rel_path, "/")
-        season_name = case(
+        season_name: Any = case(
             (first_slash_pos > 0, func.substr(rel_path, 1, first_slash_pos - 1)),
             else_=text("'Files'"),
         ).label("season_name")
@@ -136,15 +152,15 @@ class QueueRepository:
             select(
                 season_name,
                 func.count().label("file_count"),
-                func.sum(MediaItem.size_bytes).label("total_size_bytes"),
-                func.sum(MediaItem.potential_savings_bytes).label("total_savings_bytes"),
-                func.max(MediaItem.priority_score).label("max_priority"),
+                func.sum(size_col_model).label("total_size_bytes"),
+                func.sum(savings_col_model).label("total_savings_bytes"),
+                func.max(priority_col_model).label("max_priority"),
             )
-            .where(MediaItem.status == "pending", MediaItem.path.like(like_pattern))
+            .where(MediaItem.status == "pending", path_col.like(like_pattern))
             .group_by(season_name)
-            .order_by(func.max(MediaItem.priority_score).desc())
+            .order_by(func.max(priority_col_model).desc())
         )
-        rows = self.session.exec(stmt).mappings().fetchall()
+        rows = self.session.exec(stmt).mappings().fetchall()  # type: ignore[call-overload]
         seasons: list[dict] = []
         for row in rows:
             seasons.append(
@@ -160,13 +176,12 @@ class QueueRepository:
 
     def list_episodes(self, library_root: str, show_name: str, season_name: str) -> Sequence[MediaItem]:
         like_pattern = f"{library_root}/{show_name}/{season_name}/%"
+        path_col: Any = MediaItem.path
+        priority_col_model: Any = MediaItem.priority_score
         stmt = (
             select(MediaItem)
-            .where(MediaItem.status == "pending", MediaItem.path.like(like_pattern))
-            .order_by(MediaItem.priority_score.desc())
+            .where(MediaItem.status == "pending", path_col.like(like_pattern))
+            .order_by(priority_col_model.desc())
         )
         rows = self.session.exec(stmt).all()
         return rows
-"""Queue listing repository (raw SQL encapsulated)."""
-# mypy: ignore-errors
-# pyright: reportMissingImports=false, reportGeneralTypeIssues=false
