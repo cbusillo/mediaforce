@@ -3,20 +3,24 @@
 This repo now uses a package layout under `src/mediaforce` to keep the CLI,
 web UI, and domain logic organized while we continue the refactor.
 
-- `core.py` – legacy monolith; holds most logic (queue, encoder, scan). Settings
-  + logging helpers now live in `config/`.
+- `core.py` – legacy CLI entry + orchestration glue. Encoding loop and some
+  higher-level flows still live here, but core scanning/queue/progress/watch
+  helpers have been extracted into `services/`.
 - `config/` – shared runtime config (`settings.py`) and structured logging
   helpers (`logging.py`).
+- `config/paths.py` – portable path helpers (mac `/Volumes/...` ↔ linux
+  `/mnt/...`) and library root detection.
 - `db/` – SQLModel models and engine helpers (`models.py`).
+- `db/shim.py` – sqlite3-style shim used by a few legacy endpoints.
 - `cli/` – console entrypoint shim; calls into `core.main`.
 - `web/` – FastAPI app (`app.py`), templates, static assets.
-- `services/`, `domain/`, `config/` – placeholders for extracting logic from
-  `core.py` during the ongoing refactor (queue, scanner, encoder, watchers,
-  classification).
-- `db/repository/` – early SQLModel repositories (queue listings, encode/profile
-  access) to replace ad-hoc SQL in web routes.
-- `db/repository/` – early SQLModel repositories (queue listings, encode/profile
-  access) to replace ad-hoc SQL in web routes.
+- `services/` – extracted logic:
+  - `scanner.py` (scan + priority inputs)
+  - `queue.py` (claim/release, missing outputs, recalc priorities)
+  - `encoder.py` + `progress.py` (ffmpeg progress parsing, result recording)
+  - `watch.py` (watchfiles-based auto-queue)
+- `domain/` – shared types and small pure helpers.
+- `db/repository/` – SQLModel repositories for web read paths.
 
 Entry points
 
@@ -31,10 +35,6 @@ Data locations
 
 Next refactor steps (suggested)
 
-1) Split `core.py` into `services/` (scanner, encoder, queue, watch) and
-   `domain/` (classification, tier rules, normalization).
-2) Replace direct SQL calls in the web app with service functions + typed
-   models.
-3) Structured logging helpers now live in `config/logging.py` with stdout JSON
-   by default and optional JSONL file sink; continue swapping remaining direct
-   `print` calls where useful for UX.
+1) Replace remaining ad-hoc SQL in web routes with repositories/services.
+2) Continue shrinking `core.py` so it becomes mostly CLI wiring.
+3) Add more unit tests around new service modules as we extract.

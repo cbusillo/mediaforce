@@ -29,23 +29,15 @@ from mediaforce.db.repository.media import MediaRepository
 from mediaforce.db.repository.queue import QueueRepository
 from mediaforce.db.repository.base import Pagination
 from mediaforce.db.repository.stats import StatsRepository
-from mediaforce.core import (
-    get_db_path,
-    get_library_root,
-    init_db_shim,
-    iter_libraries_for_current_host,
-    normalize_path,
-    _watch_libraries,
-    ensure_active_profile_settings,
-    claim_next_file,
-    release_claim,
-    start_progress_tracking,
-    update_progress,
-    finish_progress_tracking,
-    record_encode_result,
-    OutlierResult,
-    QualityMetrics,
-)
+from mediaforce.config.paths import get_library_root, iter_libraries_for_current_host, normalize_path
+from mediaforce.config.settings import INVENTORY_DB
+from mediaforce.db.shim import init_db_shim
+from mediaforce.domain.types import OutlierResult, QualityMetrics
+from mediaforce.services.encoder import record_encode_result
+from mediaforce.services.progress import finish_progress_tracking, start_progress_tracking, update_progress
+from mediaforce.services.queue import claim_next_file, release_claim
+from mediaforce.services.watch import watch_libraries
+from mediaforce.core import ensure_active_profile_settings
 from mediaforce.services.promote import (
     promote_encoded_file_atomic,
     rollback_from_manifest,
@@ -114,7 +106,7 @@ def get_library_status() -> list[dict]:
     settings = load_app_settings()
     libs = []
     for lib, root in iter_libraries_for_current_host(settings):
-        db = get_db_path(root)
+        db = INVENTORY_DB
         last_scan = None
         running = SCAN_STATUS.get(str(root)) == "running"
         if db.exists():
@@ -378,7 +370,7 @@ async def _start_watch_task() -> dict:
             "message": "watching",
         })
         try:
-            await _watch_libraries()
+            await watch_libraries()
             WATCH_STATUS.update({
                 "running": False,
                 "paused": False,
@@ -688,8 +680,7 @@ def get_db_connection(library_path: str = DEFAULT_LIBRARY):
     library_root = get_library_root(pathlib.Path(library_path))
     if not library_root.exists():
         raise FileNotFoundError(f"Library root not found: {library_root}")
-    db_path = get_db_path(library_root)
-    conn = init_db_shim(db_path)
+    conn = init_db_shim()
     try:
         yield conn
     finally:

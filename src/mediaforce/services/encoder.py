@@ -17,44 +17,54 @@ from mediaforce.domain.types import QualityMetrics, MediaInfo, TierSettings
 def parse_ffmpeg_progress(line: str) -> dict:
     data: dict[str, float | int] = {}
     line = line.strip()
-    if not line:
+    if not line or "=" not in line:
         return data
 
-    if line.startswith("frame="):
+    key, _, raw_value = line.partition("=")
+    key = key.strip()
+    value = raw_value.strip()
+
+    if key == "frame":
         try:
-            data["frame"] = int(line.split("=", 1)[1])
-        except Exception:
+            data["frame"] = int(value)
+        except ValueError:
             pass
-    elif line.startswith("fps="):
+    elif key == "fps":
         try:
-            data["fps"] = float(line.split("=", 1)[1])
-        except Exception:
+            data["fps"] = float(value)
+        except ValueError:
             pass
-    elif line.startswith("bitrate="):
+    elif key == "bitrate":
+        if value != "N/A":
+            match = re.match(r"([\d.]+)kbits/s", value)
+            if match:
+                try:
+                    data["bitrate_kbps"] = float(match.group(1))
+                except ValueError:
+                    pass
+    elif key == "total_size":
         try:
-            value = line.split("=", 1)[1]
-            if value.endswith("kbits/s"):
-                data["bitrate_kbps"] = float(value.replace("kbits/s", "").strip())
-        except Exception:
+            data["size_bytes"] = int(value)
+        except ValueError:
             pass
-    elif line.startswith("total_size="):
+    elif key == "out_time_us":
         try:
-            data["size_bytes"] = int(line.split("=", 1)[1])
-        except Exception:
+            data["time_encoded_sec"] = int(value) / 1_000_000
+        except ValueError:
             pass
-    elif line.startswith("out_time_ms="):
+    elif key == "out_time_ms":
         try:
-            ms = int(line.split("=", 1)[1])
-            data["time_encoded_sec"] = ms / 1_000_000
-        except Exception:
+            data["time_encoded_sec"] = int(value) / 1_000
+        except ValueError:
             pass
-    elif line.startswith("speed="):
-        match = re.search(r"speed=([0-9.]+)x", line)
-        if match:
-            try:
-                data["speed"] = float(match.group(1))
-            except Exception:
-                pass
+    elif key == "speed":
+        if value != "N/A":
+            match = re.match(r"([\d.]+)x", value)
+            if match:
+                try:
+                    data["speed"] = float(match.group(1))
+                except ValueError:
+                    pass
 
     return data
 

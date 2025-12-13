@@ -36,7 +36,7 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Optional, List, Dict, Any, TYPE_CHECKING
 
-from sqlmodel import Session, select, delete
+from sqlmodel import Session, select
 from sqlalchemy import text, func, desc
 
 from mediaforce.config.logging import (
@@ -54,9 +54,7 @@ from mediaforce.services.worker_api import WorkerApiClient, WorkerApiError
 from mediaforce.domain.types import ClassificationResult, MediaInfo, SourceTier, TierSettings
 
 from mediaforce.db import (
-    EncodeProgress,
     EncodeResult,
-    Library,
     MediaItem,
     ProfileSettingsSource,
     ProfileEvaluation,
@@ -64,12 +62,38 @@ from mediaforce.db import (
     now_iso,
 )
 
-from mediaforce.config.settings import AppSettings, LibrarySettings, CONFIG_DIR, ENGINE, INVENTORY_DB, load_app_settings
-
-
-# Cross-platform media roots
-MEDIA_ROOTS_MAC = ["/Volumes/media", "/Volumes/extras"]
-MEDIA_ROOTS_LINUX = ["/mnt/media", "/mnt/extras"]
+from mediaforce.config.paths import (
+    find_library_for_path,
+    get_library_root,
+    get_media_roots,
+    iter_libraries_for_current_host,
+    normalize_path,
+)
+from mediaforce.config.settings import AppSettings, CONFIG_DIR, ENGINE, INVENTORY_DB, load_app_settings
+from mediaforce.db.shim import init_db_shim as svc_init_db_shim
+from mediaforce.services.encoder import (
+    parse_ffmpeg_progress as svc_parse_ffmpeg_progress,
+    record_encode_result as svc_record_encode_result,
+    run_ffmpeg_with_progress as svc_run_ffmpeg_with_progress,
+)
+from mediaforce.services.media_probe import probe_media
+from mediaforce.services.progress import (
+    finish_progress_tracking as svc_finish_progress_tracking,
+    start_progress_tracking as svc_start_progress_tracking,
+    update_progress as svc_update_progress,
+)
+from mediaforce.services.queue import (
+    check_missing_outputs as svc_check_missing_outputs,
+    claim_next_file as svc_claim_next_file,
+    recalculate_priorities as svc_recalculate_priorities,
+    release_claim as svc_release_claim,
+)
+from mediaforce.services.scanner import (
+    calculate_priority as svc_calculate_priority,
+    scan_file_to_db as svc_scan_file_to_db,
+    VIDEO_EXTENSIONS,
+)
+from mediaforce.services.watch import watch_libraries as svc_watch_libraries
 
 
 REMOTE_SETTINGS_URL: str | None = None
@@ -97,54 +121,6 @@ def log_warn(message: str, **fields: Any) -> None:
 
 def log_error(message: str, **fields: Any) -> None:
     log_event(logging.ERROR, message, **fields)
-
-
-class ResultWrapper:
-    def __init__(self, rows):
-        self._rows = rows
-
-    def fetchone(self):
-        return self._rows[0] if self._rows else None
-
-    def fetchall(self):
-        return self._rows
-
-
-class SessionShim:
-    def __init__(self, session: Session):
-        self.session = session
-
-    def execute(self, sql: str, params: tuple | dict | None = None):
-        """Mimic sqlite3-style execute using SQLModel Session.exec.
-
-        Parameters are optional; if provided as a dict they are bound by name.
-        Tuple positional params are not currently used by the app and are
-        ignored to keep the shim simple.
-        """
-
-        # SQL in this codebase often uses sqlite-style "?" placeholders. SQLAlchemy's text()
-        # expects named params, so map "?" -> :p0, :p1, ... when positional args are given.
-        if isinstance(params, (list, tuple)):
-            placeholders = sql.count("?")
-            mapping = {f"p{i}": params[i] for i in range(min(placeholders, len(params)))}
-            for i in range(placeholders):
-                sql = sql.replace("?", f":p{i}", 1)
-            stmt = text(sql)
-            result = self.session.exec(stmt, params=mapping)
-        elif isinstance(params, dict):
-            stmt = text(sql)
-            result = self.session.exec(stmt, params=params)
-        else:
-            stmt = text(sql)
-            result = self.session.exec(stmt)
-        rows = result.all()
-        return ResultWrapper(rows)
-
-    def commit(self):
-        self.session.commit()
-
-    def close(self):
-        self.session.close()
 
 
 # =============================================================================
@@ -343,70 +319,6 @@ def save_vmaf_samples(
     session.commit()
 
 
-def iter_libraries_for_current_host(settings: Optional[AppSettings] = None) -> list[tuple[LibrarySettings, pathlib.Path]]:
-    """Return libraries and resolved paths for the current OS.
-
-    This is the canonical way to get logical -> physical library mappings.
-    """
-
-    if settings is None:
-        settings = load_app_settings()
-
-    is_mac = platform.system() == "Darwin"
-    result: list[tuple[LibrarySettings, pathlib.Path]] = []
-
-    for lib in settings.libraries:
-        root = lib.mac_path if is_mac else lib.linux_path
-        if not root:
-            continue
-        result.append((lib, pathlib.Path(root)))
-
-    return result
-
-
-def get_media_roots() -> list[str]:
-    """Return media root paths for current platform.
-
-    This uses the coarse /Volumes vs /mnt roots so it stays compatible with
-    existing paths and the inventory database. Higher-level code should
-    prefer the library settings helpers when it needs specific tv/movies
-    roots, but this remains the canonical list of mount prefixes.
-    """
-
-    if platform.system() == "Darwin":
-        return MEDIA_ROOTS_MAC
-    return MEDIA_ROOTS_LINUX
-
-
-def normalize_path(path: pathlib.Path) -> pathlib.Path:
-    """Normalize path between macOS and Linux mount points.
-
-    If a path doesn't exist, try swapping /Volumes/X <-> /mnt/X.
-    """
-    if path.exists():
-        return path
-
-    path_str = str(path)
-
-    # Try Mac -> Linux
-    for mac_root in MEDIA_ROOTS_MAC:
-        if path_str.startswith(mac_root):
-            linux_root = mac_root.replace("/Volumes/", "/mnt/")
-            candidate = pathlib.Path(path_str.replace(mac_root, linux_root, 1))
-            if candidate.exists():
-                return candidate
-
-    # Try Linux -> Mac
-    for linux_root in MEDIA_ROOTS_LINUX:
-        if path_str.startswith(linux_root):
-            mac_root = linux_root.replace("/mnt/", "/Volumes/")
-            candidate = pathlib.Path(path_str.replace(linux_root, mac_root, 1))
-            if candidate.exists():
-                return candidate
-
-    return path
-
-
 def detect_platform() -> Dict[str, Any]:
     """Detect current platform and available hardware."""
     info: Dict[str, Any] = {
@@ -446,9 +358,6 @@ DENOISE_FILTERS: dict[str, str] = {
     "medium": "hqdn3d=4:3:6:4.5",
     "heavy": "nlmeans=s=3.0:p=7:r=9",
 }
-
-VIDEO_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".ts", ".mov"}
-
 
 # =============================================================================
 # Library watching (auto-queue new files)
@@ -1032,125 +941,6 @@ def apply_downscale_filter(
     input_filters = input_filters.copy()
     input_filters.append(scale_expr)
     return input_filters
-
-
-def probe_media(path: pathlib.Path) -> Optional[MediaInfo]:
-    """Run ffprobe and parse results."""
-    ffprobe = find_ffprobe()
-    if not ffprobe:
-        log_error("ffprobe_missing", path=str(path))
-        return None
-
-    cmd = [
-        ffprobe,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-print_format",
-        "json",
-        "-show_streams",
-        "-show_format",
-        str(path),
-    ]
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        data = json.loads(result.stdout)
-    except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
-        log_error("ffprobe_failed", path=str(path), error=str(e))
-        return None
-
-    info = MediaInfo(path=path)
-
-    # Parse format info
-    fmt = data.get("format", {})
-    if duration := fmt.get("duration"):
-        try:
-            info.duration_seconds = float(duration)
-        except ValueError:
-            pass
-
-    if bitrate := fmt.get("bit_rate"):
-        try:
-            info.container_bitrate_kbps = int(bitrate) // 1000
-        except ValueError:
-            pass
-
-    # Parse streams
-    for stream in data.get("streams", []):
-        codec_type = stream.get("codec_type")
-
-        if codec_type == "video":
-            info.video_codec = stream.get("codec_name")
-            info.video_width = stream.get("width")
-            info.video_height = stream.get("height")
-
-            # Bit depth
-            if bits := stream.get("bits_per_raw_sample"):
-                try:
-                    info.video_bit_depth = int(bits)
-                except ValueError:
-                    pass
-            if info.video_bit_depth is None:
-                pix_fmt = (stream.get("pix_fmt") or "").lower()
-                if "p10" in pix_fmt or "10le" in pix_fmt:
-                    info.video_bit_depth = 10
-                elif "p12" in pix_fmt:
-                    info.video_bit_depth = 12
-                else:
-                    info.video_bit_depth = 8
-
-            # Bitrate
-            if br := stream.get("bit_rate"):
-                try:
-                    info.video_bitrate_kbps = int(br) // 1000
-                except ValueError:
-                    pass
-
-            # Frame rate
-            if fps_str := stream.get("avg_frame_rate"):
-                try:
-                    if "/" in fps_str:
-                        num, den = fps_str.split("/")
-                        info.video_framerate = float(num) / float(den)
-                    else:
-                        info.video_framerate = float(fps_str)
-                except (ValueError, ZeroDivisionError):
-                    pass
-
-            # Field order (interlaced detection)
-            info.video_field_order = stream.get("field_order")
-
-        elif codec_type == "audio":
-            track = {
-                "index": stream.get("index"),
-                "codec": stream.get("codec_name"),
-                "channels": stream.get("channels"),
-                "channel_layout": stream.get("channel_layout"),
-                "language": (stream.get("tags") or {}).get("language"),
-            }
-            if br := stream.get("bit_rate"):
-                try:
-                    track["bitrate_kbps"] = int(br) // 1000
-                except ValueError:
-                    pass
-            info.audio_tracks.append(track)
-
-        elif codec_type == "subtitle":
-            track = {
-                "index": stream.get("index"),
-                "codec": stream.get("codec_name"),
-                "language": (stream.get("tags") or {}).get("language"),
-            }
-            info.subtitle_tracks.append(track)
-
-    # If no video bitrate found, estimate from container
-    if info.video_bitrate_kbps is None and info.container_bitrate_kbps:
-        # Rough estimate: subtract ~200kbps per audio track
-        audio_estimate = len(info.audio_tracks) * 200
-        info.video_bitrate_kbps = max(0, info.container_bitrate_kbps - audio_estimate)
-
-    return info
 
 
 def detect_interlacing(path: pathlib.Path, num_frames: int = 500) -> tuple[bool, float]:
@@ -2186,42 +1976,8 @@ def init_db(_: pathlib.Path) -> Session:
     return Session(ENGINE)
 
 
-def init_db_shim(_: pathlib.Path) -> SessionShim:
-    return SessionShim(Session(ENGINE))
-
-
-def get_library_root(path: pathlib.Path) -> pathlib.Path:
-    """Find the library root (tv, movies, etc.) for a given path."""
-    path = path.resolve()
-    for root in get_media_roots():
-        root_path = pathlib.Path(root)
-        if str(path).startswith(str(root_path)):
-            # Return first level under media root (e.g., /Volumes/media/tv)
-            rel = path.relative_to(root_path)
-            parts = rel.parts
-            if parts:
-                return root_path / parts[0]
-    # Fallback: use the path itself if it's a directory
-    if path.is_dir():
-        return path
-    return path.parent
-
-
-def find_library_for_path(
-    path: pathlib.Path,
-    settings: Optional[AppSettings] = None,
-) -> tuple[Optional[LibrarySettings], Optional[pathlib.Path]]:
-    resolved = path.resolve()
-    if settings is None:
-        settings = load_app_settings()
-
-    for lib, root in iter_libraries_for_current_host(settings):
-        try:
-            resolved.relative_to(root)
-            return lib, root
-        except ValueError:
-            continue
-    return None, None
+def init_db_shim(_: pathlib.Path) -> Any:
+    return svc_init_db_shim()
 
 
 def resolve_target_height_for_path(path: pathlib.Path, settings: AppSettings) -> tuple[Optional[int], str]:
@@ -2280,27 +2036,7 @@ def calculate_priority(
     max_savings: int,
     max_age: int,
 ) -> float:
-    """Calculate priority score (0-1, higher = encode first).
-
-    Priority favors:
-    - Biggest space savings (encode files that will free up the most space)
-    - Older files (process backlog first)
-    """
-    now = int(time.time())
-    age = now - mtime
-
-    # Normalize to 0-1
-    # Age: older = higher priority
-    age_score = min(1.0, age / max_age) if max_age > 0 else 0.5
-
-    # Savings: larger savings = higher priority
-    if potential_savings_bytes and potential_savings_bytes > 0 and max_savings > 0:
-        savings_score = min(1.0, potential_savings_bytes / max_savings)
-    else:
-        savings_score = 0.0  # No estimated savings = low priority
-
-    # Savings weighted more heavily (70%) since space recovery is the goal
-    return (age_score * 0.3) + (savings_score * 0.7)
+    return svc_calculate_priority(potential_savings_bytes, mtime, max_savings, max_age)
 
 
 def scan_file_to_db(
@@ -2310,144 +2046,24 @@ def scan_file_to_db(
     max_age: int,
     library_id: str | None = None,
 ) -> Optional[dict]:
-    """Scan a single file and insert/update in database."""
     try:
-        info = probe_media(file_path)
-        if info is None:
-            return None
-
-        # Get file stats
-        stat = file_path.stat()
-        size_bytes = stat.st_size
-        mtime = int(stat.st_mtime)
-
-        # Detect special cases
-        is_av1 = info.is_already_av1
-        is_hdr, hdr_format = detect_hdr(info)
-        is_interlaced = detect_interlaced(info)
-
-        # Check if any audio track is Opus
-        is_opus = any(
-            (t.get("codec") or "").lower() == "opus"
-            for t in info.audio_tracks
+        return svc_scan_file_to_db(
+            session,
+            file_path,
+            max_savings=max_savings,
+            max_age=max_age,
+            library_id=library_id,
+            classify_source=classify_source,
+            probe_media=probe_media,
+            now_iso=now_iso,
         )
-
-        # Classify
-        classification = classify_source(info)
-        tier = classification.tier.value
-        tier_reasoning = "; ".join(classification.reasons)
-
-        # Estimate target bitrate and savings (calculate before priority)
-        # AV1 typically achieves 30-50% file size compared to H.264 at similar quality
-        # Use compression ratio based on tier (higher CRF = more compression)
-        settings = TIER_SETTINGS.get(classification.tier)
-        estimated_target = None
-        potential_savings = None
-        if settings and info.video_bitrate_kbps:
-            # Estimate AV1 output as a fraction of source bitrate
-            # Lower CRF = higher quality = less compression
-            av1_ratio = {26: 0.40, 28: 0.35, 30: 0.30, 32: 0.25}.get(settings.crf, 0.35)
-            estimated_target = int(info.video_bitrate_kbps * av1_ratio)
-
-            if info.video_bitrate_kbps > estimated_target:
-                # Calculate bytes saved: (bitrate_diff_kbps * duration_sec * 1000) / 8
-                # bitrate is in kbps, duration in seconds, result in bytes
-                bitrate_diff = info.video_bitrate_kbps - estimated_target
-                potential_savings = int(
-                    bitrate_diff * (info.duration_seconds or 0) * 1000 / 8
-                )
-
-        # Calculate priority based on potential savings and age
-        priority = calculate_priority(potential_savings, mtime, max_savings, max_age)
-
-        # Determine status
-        status = "pending"
-        skip_reason = None
-        if is_av1:
-            status = "skipped_native_av1"
-            skip_reason = "Already AV1 encoded"
-        elif is_hdr:
-            status = "skipped_hdr"
-            skip_reason = f"HDR content ({hdr_format or 'unknown format'})"
-
-        now_str = now_iso()
-
-        existing = session.exec(select(MediaItem).where(MediaItem.path == str(file_path))).one_or_none()
-        item = existing or MediaItem(path=str(file_path))
-        item.library_id = library_id or item.library_id
-        item.size_bytes = size_bytes
-        item.mtime = mtime
-        item.duration_sec = info.duration_seconds
-        item.video_codec = info.video_codec
-        item.video_profile = None
-        item.resolution = f"{info.video_width}x{info.video_height}" if info.video_width and info.video_height else None
-        item.width = info.video_width
-        item.height = info.video_height
-        item.bitrate_kbps = info.video_bitrate_kbps
-        item.bit_depth = info.video_bit_depth
-        item.frame_rate = str(info.video_framerate) if info.video_framerate else None
-        item.is_interlaced = is_interlaced
-        item.is_hdr = is_hdr
-        item.hdr_format = hdr_format
-        item.audio_tracks = json.dumps(info.audio_tracks)
-        item.subtitle_tracks = json.dumps(info.subtitle_tracks)
-        item.detected_tier = tier
-        item.tier_reasoning = tier_reasoning
-        item.is_av1 = is_av1
-        item.is_opus = is_opus
-        item.estimated_target_bitrate_kbps = estimated_target
-        item.potential_savings_bytes = potential_savings
-        item.priority_score = priority
-        item.status = item.status if item.status in ("encoded", "encoding", "completed") else status
-        item.skip_reason = skip_reason
-        item.scanned_at = now_str if not item.scanned_at else item.scanned_at
-        item.updated_at = now_str
-
-        session.add(item)
-        session.commit()
-
-        return {
-            "path": str(file_path),
-            "status": status,
-            "tier": tier,
-            "is_av1": is_av1,
-            "is_hdr": is_hdr,
-        }
-
     except Exception as e:
         log_error("scan_file_failed", file=str(file_path), error=str(e))
         return None
 
 
 def recalculate_priorities(session: Session, max_age: int) -> None:
-    """Recalculate priority scores using actual max_savings from the database.
-
-    This should be called after scanning to properly normalize priority scores
-    based on the actual range of potential_savings_bytes values.
-    """
-    # Get max savings from all pending files
-    max_savings = session.exec(
-        select(func.max(func.coalesce(MediaItem.potential_savings_bytes, 0))).where(
-            MediaItem.status == "pending",
-            func.coalesce(MediaItem.potential_savings_bytes, 0) > 0,
-        )
-    ).first() or 1
-
-    # Recalculate priorities for all pending files
-    pending = session.exec(select(MediaItem).where(MediaItem.status == "pending")).all()
-
-    for item in pending:
-        priority = calculate_priority(item.potential_savings_bytes, item.mtime, max_savings, max_age)
-        item.priority_score = priority
-        item.updated_at = now_iso()
-        session.add(item)
-
-    session.commit()
-    log_info(
-        "priorities_updated",
-        pending=len(pending),
-        max_savings_bytes=int(max_savings),
-    )
+    svc_recalculate_priorities(session, max_age=max_age, calculate_priority=calculate_priority)
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
@@ -2530,92 +2146,6 @@ def cmd_scan(args: argparse.Namespace) -> int:
     return 0
 
 
-async def _watch_single_library(lib: LibrarySettings, root: pathlib.Path) -> None:
-    """Watch a single library for new video files and auto-queue them.
-
-    When a new file appears under the configured root, we run it through the
-    existing scan pipeline so it lands in the inventory database and queue.
-    """
-
-    if awatch is None or Change is None:
-        log_error("watch_unavailable", error="watchfiles_not_installed")
-        return
-
-    if not root.exists():
-        log_warn("watch_root_missing", library=lib.id, root=str(root))
-        return
-
-    log_info("watch_start", library=lib.id, name=lib.name, root=str(root))
-
-    async for changes in awatch(root, recursive=True):
-        for change, path_str in changes:
-            if change not in (Change.added, Change.modified):
-                continue
-
-            path = normalize_path(pathlib.Path(path_str))
-            if path.suffix.lower() not in VIDEO_EXTENSIONS:
-                continue
-            if path.name.startswith("."):
-                continue
-            if not path.is_file():
-                continue
-
-            try:
-                library_root = get_library_root(path)
-                db_path = get_db_path(library_root)
-                session = init_db(db_path)
-
-                now = int(time.time())
-                oldest_mtime = session.exec(
-                    select(func.min(func.coalesce(MediaItem.mtime, 0))).where(
-                        MediaItem.status == "pending",
-                        func.coalesce(MediaItem.mtime, 0) > 0,
-                    )
-                ).first() or int(path.stat().st_mtime)
-                max_age = max(now - oldest_mtime, 1)
-
-                log_info("watch_detected", library=lib.id, file=str(path))
-                result = scan_file_to_db(session, path, max_savings=1, max_age=max_age, library_id=lib.id)
-                session.commit()
-
-                recalculate_priorities(session, max_age=max_age)
-                session.close()
-
-                if result:
-                    log_info(
-                        "watch_queued",
-                        library=lib.id,
-                        file=str(path),
-                        tier=result.get("tier"),
-                    )
-                else:
-                    log_error("watch_scan_failed", library=lib.id, file=str(path))
-            except Exception as exc:
-                log_error("watch_handle_error", library=lib.id, file=str(path), error=str(exc))
-
-
-async def _watch_libraries() -> None:
-    """Watch all configured libraries that have watch enabled."""
-
-    settings = load_app_settings()
-    libraries = [
-        (lib, root)
-        for lib, root in iter_libraries_for_current_host(settings)
-        if lib.watch
-    ]
-
-    if not libraries:
-        log_warn("watch_no_libraries")
-        return
-
-    tasks = [
-        _watch_single_library(lib, root)
-        for lib, root in libraries
-    ]
-
-    await asyncio.gather(*tasks)
-
-
 def cmd_watch(args: argparse.Namespace) -> int:
     """Watch configured libraries and auto-queue new video files."""
 
@@ -2653,7 +2183,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                         log_info("autoupdate_restart", component="watch")
                         os.execv(sys.executable, [sys.executable] + sys.argv)
             asyncio.create_task(updater())
-        await _watch_libraries()
+        await svc_watch_libraries(settings)
 
     try:
         asyncio.run(runner())
@@ -2755,119 +2285,18 @@ def cmd_queue(args: argparse.Namespace) -> int:
 
 
 def check_missing_outputs(session: Session) -> int:
-    """Check for completed encodes with missing output files and reset to pending.
-
-    Returns the number of files reset.
-    """
-    now_str = now_iso()
-
-    # Find completed encodes where the output file no longer exists
-    joins = session.exec(
-        select(MediaItem.id, MediaItem.path, EncodeResult.output_path)
-        .join(EncodeResult, EncodeResult.source_id == MediaItem.id)
-        .where(
-            MediaItem.status == "encoded",
-            EncodeResult.output_path.is_not(None),  # type: ignore[attr-defined]
-        )
-    ).all()
-
-    missing_count = 0
-    for mid, src_path, out_path in joins:
-        output_path = pathlib.Path(out_path)
-        if not output_path.exists():
-            item = session.get(MediaItem, mid)
-            if item:
-                item.status = "pending"
-                item.updated_at = now_str
-                session.add(item)
-            missing_count += 1
-            log_warn(
-                "missing_output_reset",
-                source=str(src_path),
-                output=str(out_path),
-            )
-
-    if missing_count:
-        session.commit()
-
+    missing_count, missing_files = svc_check_missing_outputs(session, now_iso=now_iso)
+    for entry in missing_files:
+        log_warn("missing_output_reset", source=entry.get("source"), output=entry.get("output"))
     return missing_count
 
 
 def claim_next_file(session: Session, machine: str) -> Optional[dict]:
-    """Claim the next file with library-aware weighting and manual bumping."""
-    from datetime import timedelta
-
-    now = datetime.now()
-    now_str = now_iso()
-    stale_cutoff = (now - timedelta(seconds=STALE_CLAIM_SECONDS)).isoformat()
-
-    stale_items = session.exec(
-        select(MediaItem).where(
-            MediaItem.status == "encoding",
-            MediaItem.claimed_at.is_not(None),  # type: ignore[attr-defined]
-            MediaItem.claimed_at < stale_cutoff,  # type: ignore[operator]
-        )
-    ).all()
-    for item in stale_items:
-        item.status = "pending"
-        item.claimed_by = None
-        item.claimed_at = None
-        item.updated_at = now_str
-        session.add(item)
-    if stale_items:
-        session.commit()
-
-    weighted_score = func.coalesce(MediaItem.priority_score, 0) * func.coalesce(Library.weight, 1)
-    weighted = session.exec(
-        select(MediaItem, Library.weight)
-        .join(Library, MediaItem.library_id == Library.id, isouter=True)
-        .where(
-            MediaItem.status == "pending",
-            (MediaItem.claimed_by.is_(None) | (MediaItem.claimed_by == machine)),  # type: ignore[attr-defined]
-        )
-        .order_by(MediaItem.manual_priority, desc(weighted_score))
-        .limit(1)
-    ).first()
-
-    if not weighted:
-        return None
-
-    item, _weight = weighted
-    fresh = session.get(MediaItem, item.id)
-    if fresh is None or fresh.status != "pending":
-        return claim_next_file(session, machine)
-
-    fresh.status = "encoding"
-    fresh.claimed_by = machine
-    fresh.claimed_at = now_str
-    fresh.updated_at = now_str
-    session.add(fresh)
-    session.commit()
-
-    return {
-        "id": fresh.id,
-        "path": fresh.path,
-        "detected_tier": fresh.detected_tier,
-        "bitrate_kbps": fresh.bitrate_kbps,
-        "duration_sec": fresh.duration_sec,
-        "library_id": fresh.library_id,
-    }
+    return svc_claim_next_file(session, machine, stale_seconds=STALE_CLAIM_SECONDS, now_iso=now_iso)
 
 
 def release_claim(session: Session, file_id: int, success: bool) -> None:
-    item = session.get(MediaItem, file_id)
-    if not item:
-        return
-    now_str = now_iso()
-    if success:
-        item.status = "encoded"
-    else:
-        item.status = "pending"
-        item.claimed_by = None
-        item.claimed_at = None
-    item.updated_at = now_str
-    session.add(item)
-    session.commit()
+    svc_release_claim(session, file_id, success, now_iso=now_iso)
 
 
 # =============================================================================
@@ -2885,24 +2314,16 @@ def start_progress_tracking(
     duration_sec: float,
     total_frames: Optional[int] = None,
 ) -> int:
-    now_str = now_iso()
-    session.exec(delete(EncodeProgress).where(EncodeProgress.machine == machine))
-    progress = EncodeProgress(
+    return svc_start_progress_tracking(
+        session,
         source_id=source_id,
         source_path=source_path,
         output_path=output_path,
         machine=machine,
         tier=tier,
-        started_at=now_str,
         duration_sec=duration_sec,
         total_frames=total_frames,
-        phase="encoding",
-        updated_at=now_str,
     )
-    session.add(progress)
-    session.commit()
-    session.refresh(progress)
-    return progress.id  # type: ignore[arg-type]
 
 
 def update_progress(
@@ -2918,36 +2339,19 @@ def update_progress(
     phase: Optional[str] = None,
     phase_detail: Optional[str] = None,
 ) -> None:
-    now_str = now_iso()
-
-    percent_complete = 0.0
-    eta_seconds: Optional[int] = None
-
-    if duration_sec and duration_sec > 0 and time_encoded_sec > 0:
-        percent_complete = min(100.0, (time_encoded_sec / duration_sec) * 100)
-        if speed and speed > 0:
-            remaining_sec = duration_sec - time_encoded_sec
-            eta_seconds = int(remaining_sec / speed)
-
-    progress = session.get(EncodeProgress, progress_id)
-    if not progress:
-        return
-
-    progress.frame = frame
-    progress.fps = fps
-    progress.speed = speed
-    progress.bitrate_kbps = bitrate_kbps
-    progress.size_bytes = size_bytes
-    progress.time_encoded_sec = time_encoded_sec
-    progress.percent_complete = percent_complete
-    progress.eta_seconds = eta_seconds
-    if phase:
-        progress.phase = phase
-    if phase_detail:
-        progress.phase_detail = phase_detail
-    progress.updated_at = now_str
-    session.add(progress)
-    session.commit()
+    svc_update_progress(
+        session,
+        progress_id,
+        frame=frame,
+        fps=fps,
+        speed=speed,
+        bitrate_kbps=bitrate_kbps,
+        size_bytes=size_bytes,
+        time_encoded_sec=time_encoded_sec,
+        duration_sec=duration_sec,
+        phase=phase,
+        phase_detail=phase_detail,
+    )
 
 
 def finish_progress_tracking(
@@ -2956,70 +2360,16 @@ def finish_progress_tracking(
     success: bool,
     error_msg: Optional[str] = None,
 ) -> None:
-    progress = session.get(EncodeProgress, progress_id)
-    if progress:
-        session.delete(progress)
-        session.commit()
+    svc_finish_progress_tracking(
+        session,
+        progress_id,
+        success=success,
+        error_msg=error_msg,
+    )
 
 
 def parse_ffmpeg_progress(line: str) -> dict:
-    """Parse ffmpeg progress output line.
-
-    FFmpeg with -progress outputs key=value pairs like:
-        frame=1234
-        fps=45.67
-        bitrate=2345.6kbits/s
-        total_size=12345678
-        out_time_us=12345678
-        speed=1.23x
-    """
-    result = {}
-
-    # Parse key=value
-    if "=" in line:
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip()
-
-        if key == "frame":
-            try:
-                result["frame"] = int(value)
-            except ValueError:
-                pass
-        elif key == "fps":
-            try:
-                result["fps"] = float(value)
-            except ValueError:
-                pass
-        elif key == "bitrate":
-            # e.g., "2345.6kbits/s" or "N/A"
-            if value != "N/A":
-                match = re.match(r"([\d.]+)kbits/s", value)
-                if match:
-                    result["bitrate_kbps"] = float(match.group(1))
-        elif key == "total_size":
-            try:
-                result["size_bytes"] = int(value)
-            except ValueError:
-                pass
-        elif key == "out_time_us":
-            try:
-                result["time_encoded_sec"] = int(value) / 1_000_000
-            except ValueError:
-                pass
-        elif key == "out_time_ms":
-            try:
-                result["time_encoded_sec"] = int(value) / 1_000
-            except ValueError:
-                pass
-        elif key == "speed":
-            # e.g., "1.23x" or "N/A"
-            if value != "N/A":
-                match = re.match(r"([\d.]+)x", value)
-                if match:
-                    result["speed"] = float(match.group(1))
-
-    return result
+    return svc_parse_ffmpeg_progress(line)
 
 
 def run_ffmpeg_with_progress(
@@ -3028,72 +2378,12 @@ def run_ffmpeg_with_progress(
     progress_id: int,
     duration_sec: float,
 ) -> subprocess.CompletedProcess:
-    """Run ffmpeg command with progress tracking.
-
-    Adds -progress pipe:1 to get machine-readable progress updates.
-    """
-    # Add progress output flag
-    cmd_with_progress = cmd.copy()
-
-    # Insert -progress after -hide_banner or at position 1
-    try:
-        idx = cmd_with_progress.index("-hide_banner") + 1
-    except ValueError:
-        idx = 1
-    cmd_with_progress.insert(idx, "-progress")
-    cmd_with_progress.insert(idx + 1, "pipe:1")
-
-    # Also add -nostats to avoid duplicate output
-    cmd_with_progress.insert(idx, "-nostats")
-
-    process = subprocess.Popen(
-        cmd_with_progress,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
-
-    accumulated = {}
-    last_update = time.time()
-
-    assert process.stdout is not None  # Ensure text stream available
-
-    while True:
-        line = process.stdout.readline()
-        if not line and process.poll() is not None:
-            break
-
-        parsed = parse_ffmpeg_progress(line)
-        accumulated.update(parsed)
-
-        # Update database every 2 seconds to avoid too many writes
-        now = time.time()
-        if now - last_update >= 2 and accumulated:
-            try:
-                update_progress(
-                    session,
-                    progress_id,
-                    frame=accumulated.get("frame", 0),
-                    fps=accumulated.get("fps", 0),
-                    speed=accumulated.get("speed", 0),
-                    bitrate_kbps=accumulated.get("bitrate_kbps"),
-                    size_bytes=accumulated.get("size_bytes", 0),
-                    time_encoded_sec=accumulated.get("time_encoded_sec", 0),
-                    duration_sec=duration_sec,
-                )
-            except Exception:
-                pass
-            last_update = now
-
-    # Get stderr for error messages
-    _, stderr = process.communicate()
-
-    return subprocess.CompletedProcess(
-        args=cmd_with_progress,
-        returncode=process.returncode,
-        stdout="",
-        stderr=stderr,
+    return svc_run_ffmpeg_with_progress(
+        cmd,
+        session,
+        progress_id,
+        duration_sec,
+        update_progress=update_progress,
     )
 
 
@@ -3179,56 +2469,23 @@ def record_encode_result(
     outlier_result: Optional[OutlierResult] = None,
     profile_eval_id: Optional[int] = None,
 ) -> int:
-    """Record encode result in the database.
-
-    Returns:
-        The ID of the inserted encode_results row.
-    """
-    completed_at = datetime.now().isoformat()
-    compression_ratio = output_size / source_size if source_size > 0 else None
-
-    # Extract quality metrics
-    psnr = metrics.psnr if metrics else None
-    ssim = metrics.ssim if metrics else None
-    vmaf = metrics.vmaf if metrics else None
-    vmaf_sample_sec = metrics.sample_duration_sec if metrics else None
-
-    # Extract outlier info
-    is_outlier = outlier_result.is_outlier if outlier_result else False
-    outlier_reasons = "; ".join(outlier_result.reasons) if outlier_result and outlier_result.reasons else None
-    review_status = "pending" if is_outlier else "approved"  # Auto-approve non-outliers
-
-    result = EncodeResult(
+    return svc_record_encode_result(
+        session,
         source_id=source_id,
         source_path=source_path,
         tier=tier,
-        crf=settings.crf,
-        preset=settings.preset,
-        denoise=settings.denoise,
-        film_grain=settings.film_grain,
-        audio_codec="opus",
-        audio_bitrate_kbps=256,
+        settings=settings,
         output_path=output_path,
-        output_size_bytes=output_size,
-        output_bitrate_kbps=output_bitrate,
-        compression_ratio=compression_ratio,
-        psnr=psnr,
-        ssim=ssim,
-        vmaf=vmaf,
-        vmaf_sample_sec=vmaf_sample_sec,
+        output_size=output_size,
+        output_bitrate=output_bitrate,
+        source_size=source_size,
         machine=machine,
         started_at=started_at,
-        completed_at=completed_at,
-        error_message=error_msg,
-        is_outlier=is_outlier,
-        outlier_reasons=outlier_reasons,
-        review_status=review_status,
+        error_msg=error_msg,
+        metrics=metrics,
+        outlier_result=outlier_result,
         profile_eval_id=profile_eval_id,
     )
-    session.add(result)
-    session.commit()
-    session.refresh(result)
-    return result.id  # type: ignore[arg-type]
 
 
 def parse_until_time(until_str: str) -> Optional[datetime]:

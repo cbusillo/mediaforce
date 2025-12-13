@@ -8,6 +8,7 @@ from sqlalchemy import func, text
 from sqlmodel import Session, select
 
 from mediaforce.db.models import MediaItem, EncodeResult, Library
+from mediaforce.db import now_iso as default_now_iso
 
 
 def recalculate_priorities(session: Session, max_age: int, calculate_priority: Callable) -> None:
@@ -36,10 +37,13 @@ def recalculate_priorities(session: Session, max_age: int, calculate_priority: C
     session.commit()
 
 
-def check_missing_outputs(session: Session, now_iso: Callable[[], str]) -> tuple[int, list[str]]:
+def check_missing_outputs(
+    session: Session,
+    now_iso: Callable[[], str] = default_now_iso,
+) -> tuple[int, list[dict[str, str]]]:
     """Check for completed encodes with missing output files and reset to pending.
 
-    Returns (count, list of source path basenames reset).
+    Returns (count, list of {"source": ..., "output": ...} entries reset).
     """
 
     joins = session.exec(
@@ -49,7 +53,7 @@ def check_missing_outputs(session: Session, now_iso: Callable[[], str]) -> tuple
     ).all()
 
     missing_count = 0
-    missing_files: list[str] = []
+    missing_files: list[dict[str, str]] = []
     now_str = now_iso()
     for mid, src_path, out_path in joins:
         output_path = pathlib.Path(out_path)
@@ -60,7 +64,10 @@ def check_missing_outputs(session: Session, now_iso: Callable[[], str]) -> tuple
                 item.updated_at = now_str
                 session.add(item)
             missing_count += 1
-            missing_files.append(pathlib.Path(src_path).name)
+            missing_files.append({
+                "source": str(src_path),
+                "output": str(out_path),
+            })
 
     if missing_count:
         session.commit()
@@ -68,7 +75,34 @@ def check_missing_outputs(session: Session, now_iso: Callable[[], str]) -> tuple
     return missing_count, missing_files
 
 
-def claim_next_file(session: Session, machine: str, stale_seconds: int, now_iso: Callable[[], str]) -> Optional[dict]:
+def release_claim(
+    session: Session,
+    file_id: int,
+    success: bool,
+    now_iso: Callable[[], str] = default_now_iso,
+) -> None:
+    item = session.get(MediaItem, file_id)
+    if not item:
+        return
+
+    now_str = now_iso()
+    if success:
+        item.status = "encoded"
+    else:
+        item.status = "pending"
+        item.claimed_by = None
+        item.claimed_at = None
+    item.updated_at = now_str
+    session.add(item)
+    session.commit()
+
+
+def claim_next_file(
+    session: Session,
+    machine: str,
+    stale_seconds: int = 8 * 60 * 60,
+    now_iso: Callable[[], str] = default_now_iso,
+) -> Optional[dict]:
     """Claim the next file with library-aware weighting and manual bumping."""
 
     now = datetime.now()

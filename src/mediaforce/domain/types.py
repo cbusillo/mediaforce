@@ -154,3 +154,13 @@ class OutlierThresholds:
 
 DEFAULT_OUTLIER_THRESHOLDS = OutlierThresholds()
 
+
+@dataclass
+class OutlierResult:
+    """Outlier check result used by review and worker reporting."""
+
+    is_outlier: bool
+    reasons: list[str]
+    metrics: Optional[QualityMetrics] = None
+    compression_ratio: Optional[float] = None
+    output_bitrate_kbps: Optional[int] = None

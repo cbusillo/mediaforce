@@ -75,7 +75,7 @@
 
 ## Medium Priority
 
-- [ ] **Architecture Extraction**
+- [x] **Architecture Extraction**
   - Move scanner/queue/encoder/watch into `services/` modules with a thin domain
     layer in `domain/`
   - Web/CLI call services instead of `core.py` directly; keep shared helpers typed

@@ -1,16 +1,13 @@
 from __future__ import annotations
 
+import json
 import pathlib
 import time
 from typing import Optional, Callable
 
 from sqlmodel import Session, select
 
-from mediaforce.domain.types import (
-    MediaInfo,
-    TierSettings,
-    ClassificationResult,
-)
+from mediaforce.domain.types import MediaInfo, TierSettings, ClassificationResult
 from mediaforce.db.models import MediaItem
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".ts", ".mov"}
@@ -18,6 +15,9 @@ VIDEO_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".ts", ".mov"}
 
 def detect_hdr(info: MediaInfo) -> tuple[bool, Optional[str]]:
     """Detect if content is HDR and what format (lightweight heuristic)."""
+
+    if info.is_hdr:
+        return True, info.hdr_format or "unknown"
 
     if info.video_bit_depth and info.video_bit_depth > 8:
         # Placeholder: future improvement to read color_transfer/primaries
@@ -129,8 +129,8 @@ def scan_file_to_db(
     item.mtime = mtime
     item.duration_sec = info.duration_seconds
     item.video_codec = info.video_codec
-    item.video_profile = info.video_field_order
-    item.resolution = info.resolution_label
+    item.video_profile = None
+    item.resolution = f"{info.video_width}x{info.video_height}" if info.video_width and info.video_height else None
     item.width = info.video_width
     item.height = info.video_height
     item.bitrate_kbps = info.video_bitrate_kbps
@@ -139,8 +139,8 @@ def scan_file_to_db(
     item.is_interlaced = is_interlaced
     item.is_hdr = is_hdr or bool(info.is_hdr)
     item.hdr_format = hdr_format or info.hdr_format
-    item.audio_tracks = str(info.audio_tracks)
-    item.subtitle_tracks = str(info.subtitle_tracks)
+    item.audio_tracks = json.dumps(info.audio_tracks)
+    item.subtitle_tracks = json.dumps(info.subtitle_tracks)
     item.detected_tier = tier
     item.tier_reasoning = tier_reasoning
     item.is_av1 = is_av1
@@ -148,10 +148,10 @@ def scan_file_to_db(
     item.estimated_target_bitrate_kbps = estimated_target
     item.potential_savings_bytes = potential_savings
     item.priority_score = priority
-    item.status = status
+    item.status = item.status if item.status in ("encoded", "encoding", "completed") else status
     item.skip_reason = skip_reason
+    item.scanned_at = now_str if not item.scanned_at else item.scanned_at
     item.updated_at = now_str
-    item.scanned_at = item.scanned_at or now_str
 
     session.add(item)
     session.commit()
