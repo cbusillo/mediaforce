@@ -84,7 +84,7 @@
   - Add repository helpers around SQLModel for common queries
   - Reduce ad-hoc SQL in web routes; keep raw SQL only for hotspots
 
-- [ ] **Frontend Hygiene**
+- [x] **Frontend Hygiene**
   - Extract shared JS (status chips, filters, fetch helpers) into a static bundle
   - Keep templates thin; consider HTMX/Alpine for small interactivity
 

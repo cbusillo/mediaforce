@@ -9,16 +9,9 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/static/css/tailwind.css" />
     <script src="/static/js/common.js"></script>
-    <script>
-      (() => {
-        const stored = localStorage.getItem("mf-theme");
-        if (stored === "light") {
-          document.documentElement.classList.remove("dark");
-        } else {
-          document.documentElement.classList.add("dark");
-        }
-      })();
-    </script>
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/ui.js"></script>
+    <script src="/static/js/app.js"></script>
   </head>
   <body class="bg-surface text-foreground min-h-screen">
     <nav class="flex items-center gap-4 px-6 py-4 border-b border-accent/40 bg-surface-subtle shadow-sm">
@@ -97,25 +90,10 @@
     </nav>
     <main class="max-w-6xl mx-auto px-4 py-6">{% block content %}{% endblock %}</main>
     <script>
+      // Keep a light refresh on the dashboard without wiring a websocket.
       if (window.location.pathname === "/") {
         setTimeout(() => window.location.reload(), 30000);
       }
-
-      (function () {
-        const toggleBtn = document.getElementById("themeToggle");
-        const label = document.getElementById("themeLabel");
-        const setLabel = () =>
-          (label.textContent = document.documentElement.classList.contains("dark") ? "Dark" : "Light");
-        setLabel();
-        toggleBtn?.addEventListener("click", () => {
-          document.documentElement.classList.toggle("dark");
-          const mode = document.documentElement.classList.contains("dark") ? "dark" : "light";
-          localStorage.setItem("mf-theme", mode);
-          toggleBtn.setAttribute("aria-pressed", mode === "dark");
-          setLabel();
-        });
-        toggleBtn?.setAttribute("aria-pressed", document.documentElement.classList.contains("dark"));
-      })();
     </script>
     {% block scripts %}{% endblock %}
   </body>

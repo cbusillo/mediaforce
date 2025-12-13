@@ -58,22 +58,5 @@
   <video id="hoverVideo" muted autoplay loop playsinline class="hover-preview__video"></video>
 </div>
 {% endblock %} {% block scripts %}
-<script>
-  // Hover thumbnail (uses encoded video)
-  const hoverPreview = window.mfCommon?.createHoverPreview({
-    thumbId: "hoverThumb",
-    videoId: "hoverVideo",
-    srcBuilder: (id) => `/video/encoded/${id}`,
-    delay: 150,
-    maxWidth: 220,
-  });
-
-  function showThumb(evt, id) {
-    hoverPreview?.show(evt, id);
-  }
-
-  function hideThumb() {
-    hoverPreview?.hide();
-  }
-</script>
+<script src="/static/js/pages/completed.js"></script>
 {% endblock %}
