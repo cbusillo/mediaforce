@@ -22,7 +22,7 @@
 - [ ] **Final smoke runs**
   - [x] Promotion verify-before-promote + rollback (`scripts/release_smoke.sh`)
   - [x] Worker API mode dry-run with token (`scripts/release_smoke.sh`)
-  - [ ] `purge-backups` dry-run then apply on known-old promoted items
+  - [x] `purge-backups` dry-run then apply (smoke: temp DB + promoted files)
 
 ## High Priority
 
