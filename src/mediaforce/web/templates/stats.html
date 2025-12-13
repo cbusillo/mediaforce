@@ -1,0 +1,113 @@
+{% extends "base.html" %} {% block content %}
+<div class="flex flex-wrap items-center justify-between gap-3 mb-6">
+  <h1 class="text-3xl font-semibold text-foreground">Stats</h1>
+  <form class="flex items-center gap-2" method="get" action="/stats">
+    <label class="text-sm text-foreground-muted" for="days">Window</label>
+    <select
+      id="days"
+      name="days"
+      class="bg-surface-card border border-surface-subtle rounded-md px-3 py-2 text-sm"
+      onchange="this.form.submit()"
+    >
+      {% for option in [7, 14, 30, 60, 90, 180, 365] %}
+      <option value="{{ option }}" {% if option == window_days %}selected{% endif %}>Last {{ option }} days</option>
+      {% endfor %}
+    </select>
+  </form>
+</div>
+
+{% if error %}
+<div class="card border border-danger/40 bg-danger/10 text-danger mb-6">{{ error }}</div>
+{% endif %}
+
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+  <div class="card shadow border border-surface-subtle/60">
+    <div class="text-xs uppercase tracking-wide text-foreground-muted">Space Saved</div>
+    <div class="text-2xl font-semibold">{{ window_saved }}</div>
+    <div class="mt-2">{{ saved_spark | safe }}</div>
+  </div>
+  <div class="card shadow border border-surface-subtle/60">
+    <div class="text-xs uppercase tracking-wide text-foreground-muted">Encodes</div>
+    <div class="text-2xl font-semibold">{{ window_totals.encodes }}</div>
+    <div class="mt-2">{{ encodes_spark | safe }}</div>
+  </div>
+  <div class="card shadow border border-surface-subtle/60">
+    <div class="text-xs uppercase tracking-wide text-foreground-muted">Avg Reduction</div>
+    <div class="text-2xl font-semibold">{{ window_avg_reduction }}</div>
+    <div class="mt-2">{{ reduction_spark | safe }}</div>
+  </div>
+  <div class="card shadow border border-surface-subtle/60">
+    <div class="text-xs uppercase tracking-wide text-foreground-muted">Avg Speed</div>
+    <div class="text-2xl font-semibold">{{ window_avg_speed }}</div>
+    <div class="mt-2">{{ speed_spark | safe }}</div>
+  </div>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+  <div class="card shadow border border-surface-subtle/80">
+    <h3 class="m-0 text-lg font-semibold">Daily</h3>
+    <div class="overflow-auto mt-3">
+      <table class="table-auto w-full text-sm table-zebra">
+        <thead>
+          <tr>
+            <th class="text-left">Day</th>
+            <th class="text-right">Encodes</th>
+            <th class="text-right">Saved</th>
+            <th class="text-right">Avg Reduction</th>
+            <th class="text-right">Avg Speed</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in daily %}
+          <tr>
+            <td class="whitespace-nowrap">{{ row.day }}</td>
+            <td class="text-right">{{ row.encodes }}</td>
+            <td class="text-right">{{ row.saved_human }}</td>
+            <td class="text-right">{{ row.avg_reduction_human }}</td>
+            <td class="text-right">{{ row.avg_speed_human }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card shadow border border-surface-subtle/80">
+    <h3 class="m-0 text-lg font-semibold">Reduction by Tier</h3>
+    <div class="overflow-auto mt-3">
+      <table class="table-auto w-full text-sm table-zebra">
+        <thead>
+          <tr>
+            <th class="text-left">Tier</th>
+            <th class="text-right">Encodes</th>
+            <th class="text-right">Avg Reduction</th>
+            <th class="text-right">Saved</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for tier in tiers %}
+          <tr>
+            <td class="tier-{{ tier.tier }} font-medium">{{ tier.tier }}</td>
+            <td class="text-right">{{ tier.encodes }}</td>
+            <td class="text-right">{{ tier.avg_reduction_human }}</td>
+            <td class="text-right">{{ tier.saved_human }}</td>
+          </tr>
+          {% endfor %}
+          {% if tiers|length == 0 %}
+          <tr>
+            <td colspan="4" class="text-foreground-muted">No encode results in this window yet.</td>
+          </tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="mt-4 text-xs text-foreground-muted">
+      All-time saved: <span class="font-medium text-foreground">{{ all_time_saved }}</span> · Encodes:
+      <span class="font-medium text-foreground">{{ all_time_totals.encodes }}</span>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+

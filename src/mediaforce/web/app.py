@@ -12,7 +12,7 @@ import pathlib
 import platform as platform_mod
 import sys
 from contextlib import contextmanager, asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Callable, Any
 from mediaforce.config.logging import configure_logging, env_log_config
 
@@ -28,6 +28,7 @@ from mediaforce.db.repository.session import session_scope
 from mediaforce.db.repository.media import MediaRepository
 from mediaforce.db.repository.queue import QueueRepository
 from mediaforce.db.repository.base import Pagination
+from mediaforce.db.repository.stats import StatsRepository
 from mediaforce.core import (
     get_db_path,
     get_library_root,
@@ -75,6 +76,7 @@ from mediaforce.db import (
 from sqlalchemy import func, desc
 from sqlmodel import select, Session
 from dataclasses import asdict
+from mediaforce.web.charts import sparkline_svg
 
 # Configuration
 IS_MAC = platform_mod.system() == "Darwin"
@@ -890,6 +892,92 @@ async def dashboard(request: Request):
         "nav_status": _nav_status(),
         "library_root": library_root,
         "host_name": host_name,
+    })
+
+
+@app.get("/stats", response_class=HTMLResponse)
+async def stats_page(
+    request: Request,
+    days: int = Query(30, ge=7, le=365),
+):
+    library_root = resolve_existing_library_root()
+    if not library_root:
+        return templates.TemplateResponse(request, "stats.html", {
+            "request": request,
+            "title": "Stats",
+            "active": "stats",
+            "window_days": days,
+            "window_totals": {"encodes": 0},
+            "window_saved": "0",
+            "window_avg_reduction": "-",
+            "window_avg_speed": "-",
+            "daily": [],
+            "tiers": [],
+            "all_time_totals": {"encodes": 0},
+            "all_time_saved": "0",
+            "saved_spark": "",
+            "encodes_spark": "",
+            "reduction_spark": "",
+            "speed_spark": "",
+            "nav_status": _nav_status(),
+            "error": "No accessible library root found. Mount /Volumes or /mnt media shares.",
+        })
+
+    since = datetime.now() - timedelta(days=days - 1)
+
+    with session_scope() as session:
+        repo = StatsRepository(session)
+        window_totals = repo.totals(since=since)
+        all_time_totals = repo.totals()
+        daily_stats = repo.daily(days=days)
+        tier_stats = repo.reduction_by_tier(since=since)
+
+    daily_rows = []
+    for row in daily_stats:
+        daily_rows.append({
+            "day": row.day.isoformat(),
+            "encodes": row.encodes,
+            "saved_human": format_size(row.saved_bytes),
+            "avg_reduction_human": f"{row.avg_reduction * 100:.1f}%" if row.avg_reduction is not None else "-",
+            "avg_speed_human": f"{row.avg_speed:.2f}x" if row.avg_speed is not None else "-",
+        })
+
+    tier_rows = []
+    for row in tier_stats:
+        tier_rows.append({
+            "tier": row.tier,
+            "encodes": row.encodes,
+            "saved_human": format_size(row.saved_bytes),
+            "avg_reduction_human": f"{row.avg_reduction * 100:.1f}%" if row.avg_reduction is not None else "-",
+        })
+
+    saved_series = [float(row.saved_bytes) / 1024 / 1024 / 1024 for row in daily_stats]
+    encodes_series = [float(row.encodes) for row in daily_stats]
+    reduction_series = [float(row.avg_reduction or 0.0) * 100.0 for row in daily_stats]
+    speed_series = [float(row.avg_speed or 0.0) for row in daily_stats]
+
+    window_saved = format_size(window_totals.saved_bytes)
+    window_avg_reduction = f"{window_totals.avg_reduction * 100:.1f}%" if window_totals.avg_reduction is not None else "-"
+    window_avg_speed = f"{window_totals.avg_speed:.2f}x" if window_totals.avg_speed is not None else "-"
+
+    return templates.TemplateResponse(request, "stats.html", {
+        "request": request,
+        "title": "Stats",
+        "active": "stats",
+        "window_days": days,
+        "window_totals": window_totals,
+        "window_saved": window_saved,
+        "window_avg_reduction": window_avg_reduction,
+        "window_avg_speed": window_avg_speed,
+        "daily": daily_rows,
+        "tiers": tier_rows,
+        "all_time_totals": all_time_totals,
+        "all_time_saved": format_size(all_time_totals.saved_bytes),
+        "saved_spark": sparkline_svg(saved_series, stroke="#38bdf8", fill="rgba(56, 189, 248, 0.16)"),
+        "encodes_spark": sparkline_svg(encodes_series, stroke="#a855f7", fill="rgba(168, 85, 247, 0.16)"),
+        "reduction_spark": sparkline_svg(reduction_series, stroke="#22c55e", fill="rgba(34, 197, 94, 0.16)"),
+        "speed_spark": sparkline_svg(speed_series, stroke="#f59e0b", fill="rgba(245, 158, 11, 0.16)"),
+        "nav_status": _nav_status(),
     })
 
 
@@ -2690,6 +2778,49 @@ async def api_stats():
             select(MediaItem.status, func.count().label("cnt")).group_by(MediaItem.status)
         ).all()
     return {row.status: row.cnt for row in rows}
+
+
+@app.get("/api/stats/summary")
+async def api_stats_summary(days: int = Query(30, ge=7, le=365)):
+    since = datetime.now() - timedelta(days=days - 1)
+    with session_scope() as session:
+        repo = StatsRepository(session)
+        totals = repo.totals(since=since)
+        daily = repo.daily(days=days)
+        tiers = repo.reduction_by_tier(since=since)
+
+    return {
+        "window_days": days,
+        "totals": {
+            "encodes": totals.encodes,
+            "source_bytes": totals.source_bytes,
+            "output_bytes": totals.output_bytes,
+            "saved_bytes": totals.saved_bytes,
+            "avg_reduction": totals.avg_reduction,
+            "avg_speed": totals.avg_speed,
+        },
+        "daily": [
+            {
+                "day": row.day.isoformat(),
+                "encodes": row.encodes,
+                "source_bytes": row.source_bytes,
+                "output_bytes": row.output_bytes,
+                "saved_bytes": row.saved_bytes,
+                "avg_reduction": row.avg_reduction,
+                "avg_speed": row.avg_speed,
+            }
+            for row in daily
+        ],
+        "tiers": [
+            {
+                "tier": row.tier,
+                "encodes": row.encodes,
+                "saved_bytes": row.saved_bytes,
+                "avg_reduction": row.avg_reduction,
+            }
+            for row in tiers
+        ],
+    }
 
 
 

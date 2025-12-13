@@ -19,7 +19,7 @@
   - [x] Bump `pyproject.toml` version and add `CHANGELOG.md`
   - [x] Build wheel/sdist and verify templates/static included
   - [x] Decide channel: GitHub tag/release vs PyPI (GitHub tag + release)
-- [ ] **Final smoke runs**
+- [x] **Final smoke runs**
   - [x] Promotion verify-before-promote + rollback (`scripts/release_smoke.sh`)
   - [x] Worker API mode dry-run with token (`scripts/release_smoke.sh`)
   - [x] `purge-backups` dry-run then apply (smoke: temp DB + promoted files)
@@ -103,7 +103,7 @@
   - No runtime `print()` paths in `src/` (human summaries handled centrally)
   - Web/CLI use the same DB-backed settings surface
 
-- [ ] **Statistics Dashboard**
+- [x] **Statistics Dashboard**
   - Total space saved over time (chart)
   - Encodes per day/week
   - Average reduction by tier
