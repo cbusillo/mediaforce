@@ -124,7 +124,7 @@
 
 ## Lower Priority
 
-- [ ] **Dark/Light Theme Toggle**
+- [x] **Dark/Light Theme Toggle**
 - [ ] **Mobile-responsive Design Improvements**
 - [ ] **Export Reports** (CSV of completed encodes, space savings)
 
