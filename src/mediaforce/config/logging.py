@@ -166,6 +166,19 @@ HUMAN_EVENT_FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "verify_batch_summary": lambda f: (
         f"Verify batch: verified={f.get('verified')} failed={f.get('failed')} skipped={f.get('skipped')}"
     ),
+    "scan_complete": lambda f: (
+        "Scan complete: "
+        f"pending={f.get('pending')} "
+        f"skipped_av1={f.get('skipped_native_av1')} "
+        f"skipped_hdr={f.get('skipped_hdr')} "
+        f"errors={f.get('errors')}"
+    ),
+    "run_start": lambda f: (
+        f"Run: start machine={f.get('machine')} library={f.get('library')} output={f.get('output')}"
+    ),
+    "run_complete": lambda f: (
+        f"Run: done encoded={f.get('encoded')} errors={f.get('errors')} outliers={f.get('outliers')}"
+    ),
     "review_list_empty": lambda _f: "Review: empty",
     "review_list": lambda f: f"Review: {f.get('count')} items (all={f.get('all')})",
     "review_approved": lambda f: f"Review: approved id={f.get('id')} file={_human_basename(f.get('source'))}",
