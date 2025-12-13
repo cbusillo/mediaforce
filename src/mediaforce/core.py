@@ -39,6 +39,12 @@ from typing import Optional, List, Dict, Any, TYPE_CHECKING
 from sqlmodel import Session, select, delete
 from sqlalchemy import text, func, desc
 
+from mediaforce.config.logging import (
+    configure_logging,
+    env_log_config,
+    log_event as _structured_log_event,
+)
+
 from mediaforce.services.promote import promote_encoded_file_atomic, rollback_promote
 from mediaforce.services.classification import TIER_SETTINGS, adjust_tier_with_vmaf, classify_source
 from mediaforce.services.show_overrides import get_default_tier_for_show, import_show_config_json
@@ -67,13 +73,18 @@ MEDIA_ROOTS_LINUX = ["/mnt/media", "/mnt/extras"]
 
 
 REMOTE_SETTINGS_URL: str | None = None
-logging.basicConfig(level=logging.INFO, format="%(message)s")
-logger = logging.getLogger("mediaforce")
+
+# Configure the base logger once so services that log against the default
+# component ("mediaforce") inherit handlers/formatters.
+configure_logging(env_log_config(component="mediaforce"))
+
+# CLI events use a dedicated logger so we can optionally emit compact human
+# output to stderr while keeping structured JSON on stdout.
+CLI_LOGGER = configure_logging(env_log_config(component="mediaforce.cli"))
 
 
 def log_event(level: int, message: str, **fields: Any) -> None:
-    payload = {"message": message, **fields}
-    logger.log(level, json.dumps(payload, ensure_ascii=False))
+    _structured_log_event(level, message, logger=CLI_LOGGER, **fields)
 
 
 def log_info(message: str, **fields: Any) -> None:
@@ -4022,7 +4033,7 @@ def cmd_promote(args: argparse.Namespace) -> int:
                 move_original_to_backup=args.delete_original,
                 rename_sidecars=True,
                 verify=True,
-                logger=logger,
+                logger=CLI_LOGGER,
             )
 
             if args.dry_run:

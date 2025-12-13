@@ -78,6 +78,9 @@ from dataclasses import asdict
 
 # Configuration
 IS_MAC = platform_mod.system() == "Darwin"
+# Ensure the base logger is configured for shared service logs that emit events
+# against the default "mediaforce" component.
+configure_logging(env_log_config(component="mediaforce"))
 logger = configure_logging(env_log_config(component="mediaforce.web"))
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
