@@ -1,9 +1,28 @@
 # Mediaforce Web UI - Feature Roadmap
 
-- Replace print statements with structured logging (host, library, path, job id),
-  configurable level.
-- Documented max concurrency + off-peak settings; remaining work: finish
-  print→log sweep and ORM for bulk endpoints.
+- [x] Replace print statements with structured logging (host, library, path, job id), configurable level.
+- [x] Document max concurrency + off-peak settings.
+
+## Release Readiness
+
+- [x] **CI quality gates**
+  - GitHub Actions: `ruff` + `mypy` + `pytest`
+- [x] **Web lifecycle hygiene**
+  - FastAPI lifespan startup/shutdown (no deprecated `on_event`)
+- [x] **Logging UX**
+  - Structured JSON logs to stdout + optional JSONL file sink (`MEDIAFORCE_LOG_FILE`)
+  - TTY-only human summaries to stderr (disable with `MEDIAFORCE_HUMAN=0`)
+- [x] **Worker safety**
+  - API-backed claim/release/progress/report so workers don’t open SQLite directly
+  - Optional shared-secret auth for worker endpoints (`MEDIAFORCE_API_TOKEN`)
+- [ ] **Release mechanics**
+  - Decide channel: GitHub tag/release vs PyPI
+  - Bump `pyproject.toml` version and add a short changelog
+  - Build wheel/sdist and verify templates/static included
+- [ ] **Final smoke runs**
+  - One full encode → verify → promote (verify-before-promote) → rollback scenario
+  - Worker API mode run with `MEDIAFORCE_API_URL` (+ token if enabled)
+  - `purge-backups` dry-run then apply on known-old promoted items
 
 ## High Priority
 
@@ -73,14 +92,16 @@
   - Run `ruff`/`mypy` on touched files in CI; keep FastAPI/SQLModel ignores scoped
   - Add minimal unit tests near newly extracted services
 
-- [ ] **Worker/Queue Coordination**
+- [x] **Worker/Queue Coordination**
   - Minimal API-backed coordination (claim/release/progress/report + settings fetch) ✅
+  - Optional shared-secret auth for worker endpoints (`MEDIAFORCE_API_TOKEN`) ✅
   - Clarify worker lifecycle/state and queue handoff; reduce direct DB polling
   - Consider lightweight queue abstraction before scaling workers
 
-- [ ] **Structured Logging & Settings**
-  - Shared helpers now live in `src/mediaforce/config/logging.py` and `src/mediaforce/config/settings.py` (stdout JSON + optional JSONL). Remaining: finish replacing legacy `print` output where not user-facing and trim old flags/config paths.
-  - Ensure web/CLI share the same settings surface
+- [x] **Structured Logging & Settings**
+  - Shared helpers live in `src/mediaforce/config/logging.py` and `src/mediaforce/config/settings.py`
+  - No runtime `print()` paths in `src/` (human summaries handled centrally)
+  - Web/CLI use the same DB-backed settings surface
 
 - [ ] **Statistics Dashboard**
   - Total space saved over time (chart)
