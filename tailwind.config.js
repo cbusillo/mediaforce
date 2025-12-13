@@ -1,5 +1,12 @@
 module.exports = {
-  content: ["./src/mediaforce/web/templates/**/*.html"],
+  content: [
+    "./src/mediaforce/web/templates/**/*.html",
+    "./src/mediaforce/web/static/js/**/*.js",
+  ],
+  safelist: [
+    { pattern: /^tier-/ },
+    { pattern: /^text-(success|warning|danger)$/ },
+  ],
   darkMode: "class",
   theme: {
     extend: {

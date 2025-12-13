@@ -138,7 +138,7 @@
 ## Cleanup
 
 - [x] Remove `show_config.json` runtime overrides (import via `mediaforce import-show-config`)
-- [ ] Web UI styling cleanup: add real `.tier-*` classes + Tailwind safelist for dynamic classes
+- [x] Web UI styling cleanup: add real `.tier-*` classes + Tailwind safelist for dynamic classes
 - [ ] Document Web UI component conventions (short `docs/web-ui-components.md`)
 - [ ] Remove legacy code paths (old SQL/table names, orphaned scripts, obsolete
       shims) once migrations are stable. No migration code should be left behind.

@@ -939,6 +939,30 @@ input[type="text"]::placeholder,
   background-color: rgb(239 68 68 / 0.9);
 }
 
+.\!pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  border-radius: 9999px;
+  border-width: 1px;
+  --tw-border-opacity: 1;
+  border-color: rgb(17 24 39 / var(--tw-border-opacity, 1));
+  --tw-bg-opacity: 1;
+  background-color: rgb(31 41 55 / var(--tw-bg-opacity, 1));
+  padding-left: 0.625rem;
+  padding-right: 0.625rem;
+  padding-top: 0.25rem;
+  padding-bottom: 0.25rem;
+  font-size: 0.75rem;
+  line-height: 1rem;
+  font-weight: 500;
+  --tw-text-opacity: 1;
+  color: rgb(156 163 175 / var(--tw-text-opacity, 1));
+  background-color: var(--surface-card);
+  color: var(--foreground-muted);
+  border-color: var(--border-subtle);
+}
+
 .pill {
   display: inline-flex;
   align-items: center;
@@ -1539,6 +1563,48 @@ input[type="text"]::placeholder,
   grid-column: 1 / -1;
 }
 
+.text-muted {
+  --tw-text-opacity: 1;
+  color: rgb(156 163 175 / var(--tw-text-opacity, 1));
+  color: var(--foreground-muted);
+}
+
+.tier-pristine {
+  font-weight: 600;
+  --tw-text-opacity: 1;
+  color: rgb(34 197 94 / var(--tw-text-opacity, 1));
+}
+
+.tier-good {
+  font-weight: 500;
+  color: rgb(34 197 94 / 0.9);
+}
+
+.tier-mediocre {
+  font-weight: 500;
+  --tw-text-opacity: 1;
+  color: rgb(245 158 11 / var(--tw-text-opacity, 1));
+}
+
+.tier-poor {
+  font-weight: 500;
+  --tw-text-opacity: 1;
+  color: rgb(239 68 68 / var(--tw-text-opacity, 1));
+}
+
+.tier-unknown {
+  font-weight: 500;
+  --tw-text-opacity: 1;
+  color: rgb(156 163 175 / var(--tw-text-opacity, 1));
+  color: var(--foreground-muted);
+}
+
+.tier-override {
+  font-weight: 500;
+  --tw-text-opacity: 1;
+  color: rgb(14 165 233 / var(--tw-text-opacity, 1));
+}
+
 .tier-reasoning {
   font-size: 0.75rem;
   line-height: 1rem;
@@ -1603,6 +1669,10 @@ input[type="text"]::placeholder,
   content: " \25BE";
   --tw-text-opacity: 1;
   color: rgb(233 69 96 / var(--tw-text-opacity, 1));
+}
+
+.visible {
+  visibility: visible;
 }
 
 .m-0 {

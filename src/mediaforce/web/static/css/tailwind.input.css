@@ -199,6 +199,27 @@
   .detail-full-width {
     @apply col-span-full;
   }
+  .text-muted {
+    @apply text-foreground-muted;
+  }
+  .tier-pristine {
+    @apply text-success font-semibold;
+  }
+  .tier-good {
+    @apply text-success/90 font-medium;
+  }
+  .tier-mediocre {
+    @apply text-warning font-medium;
+  }
+  .tier-poor {
+    @apply text-danger font-medium;
+  }
+  .tier-unknown {
+    @apply text-foreground-muted font-medium;
+  }
+  .tier-override {
+    @apply text-info font-medium;
+  }
   .tier-reasoning {
     @apply italic text-xs;
   }
