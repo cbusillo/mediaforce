@@ -1,10 +1,7 @@
-from __future__ import annotations
-
 from datetime import datetime
 from typing import Optional
 
 from sqlmodel import Field, Session, SQLModel, create_engine
-from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 
@@ -238,75 +235,6 @@ class ShowOverride(SQLModel, table=True):  # type: ignore[misc,call-arg]
     max_height: Optional[int] = None
     updated_at: Optional[str] = None
 
-
-def _maybe_migrate_legacy_tables(engine) -> None:
-    """Rename legacy table names to current ones if needed."""
-    renames = [
-        ("mediaitem", "media_inventory"),
-        ("encoderesult", "encode_results"),
-        ("encodeprogress", "encode_progress"),
-        ("showoverride", "show_overrides"),
-    ]
-    with engine.connect() as conn:
-        existing = {
-            row[0]
-            for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
-        }
-        for old, new in renames:
-            if old in existing and new not in existing:
-                conn.execute(text(f'ALTER TABLE "{old}" RENAME TO "{new}"'))
-        conn.commit()
-
-
-def _maybe_add_new_columns(engine) -> None:
-    """Add new columns to existing tables when upgrading in place."""
-    with engine.connect() as conn:
-        tables = {
-            row[0]
-            for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
-        }
-        if "encode_results" in tables:
-            rows = list(conn.execute(text("PRAGMA table_info('encode_results')")))
-            cols = {row[1] for row in rows}
-            if "promoted" not in cols:
-                conn.execute(text("ALTER TABLE encode_results ADD COLUMN promoted BOOLEAN DEFAULT 0"))
-            if "promoted_at" not in cols:
-                conn.execute(text("ALTER TABLE encode_results ADD COLUMN promoted_at TEXT"))
-            if "promoted_path" not in cols:
-                conn.execute(text("ALTER TABLE encode_results ADD COLUMN promoted_path TEXT"))
-            if "source_backup_path" not in cols:
-                conn.execute(text("ALTER TABLE encode_results ADD COLUMN source_backup_path TEXT"))
-            if "promote_manifest_json" not in cols:
-                conn.execute(text("ALTER TABLE encode_results ADD COLUMN promote_manifest_json TEXT"))
-            if "profile_eval_id" not in cols:
-                conn.execute(text("ALTER TABLE encode_results ADD COLUMN profile_eval_id INTEGER"))
-            conn.commit()
-
-        if "profile_evaluations" in tables:
-            rows = list(conn.execute(text("PRAGMA table_info('profile_evaluations')")))
-            cols = {row[1] for row in rows}
-            if "weighted_vmaf" not in cols:
-                conn.execute(text("ALTER TABLE profile_evaluations ADD COLUMN weighted_vmaf REAL"))
-            if "threshold_max" not in cols:
-                conn.execute(text("ALTER TABLE profile_evaluations ADD COLUMN threshold_max REAL"))
-            if "reason_json" not in cols:
-                conn.execute(text("ALTER TABLE profile_evaluations ADD COLUMN reason_json TEXT"))
-            conn.commit()
-
-        if "profile_choice_feedback" in tables:
-            rows = list(conn.execute(text("PRAGMA table_info('profile_choice_feedback')")))
-            cols = {row[1] for row in rows}
-            if "status" not in cols:
-                conn.execute(text("ALTER TABLE profile_choice_feedback ADD COLUMN status TEXT DEFAULT 'queued'"))
-                conn.commit()
-
-        if "vmaf_samples" in tables:
-            rows = list(conn.execute(text("PRAGMA table_info('vmaf_samples')")))
-            cols = {row[1] for row in rows}
-            if "weight" not in cols:
-                conn.execute(text("ALTER TABLE vmaf_samples ADD COLUMN weight REAL"))
-                conn.commit()
-
 def ensure_schema(engine: Engine) -> None:
     """Ensure schema exists and is migrated for the current code version.
 
@@ -314,9 +242,7 @@ def ensure_schema(engine: Engine) -> None:
     shared entrypoint for schema creation/backfills across CLI and web.
     """
 
-    _maybe_migrate_legacy_tables(engine)
     SQLModel.metadata.create_all(engine)
-    _maybe_add_new_columns(engine)
 
 
 def init_engine(db_path: str):

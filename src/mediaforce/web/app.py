@@ -13,7 +13,7 @@ import os
 import pathlib
 import platform as platform_mod
 import sys
-from contextlib import contextmanager, asynccontextmanager
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Optional, Callable, Any, Iterable, Iterator, Sequence
 from mediaforce.config.logging import configure_logging, env_log_config
@@ -33,9 +33,8 @@ from mediaforce.db.repository.base import Pagination
 from mediaforce.db.repository.stats import StatsRepository
 from mediaforce.db.repository.encode import EncodeRepository
 from mediaforce.db.repository.progress import ProgressRepository
-from mediaforce.config.paths import get_library_root, iter_libraries_for_current_host, normalize_path
+from mediaforce.config.paths import iter_libraries_for_current_host, normalize_path
 from mediaforce.config.settings import INVENTORY_DB
-from mediaforce.db.shim import init_db_shim
 from mediaforce.domain.types import OutlierResult, QualityMetrics
 from mediaforce.services.encoder import record_encode_result
 from mediaforce.services.progress import finish_progress_tracking, start_progress_tracking, update_progress
@@ -678,22 +677,6 @@ def _serialize_feedback(fb: ProfileChoiceFeedback) -> dict:
 # =============================================================================
 # Database Helpers
 # =============================================================================
-
-
-@contextmanager
-def get_db_connection(library_path: str = DEFAULT_LIBRARY):
-    """Get database connection for the library.
-
-    Raises FileNotFoundError if the library root does not exist (e.g., missing mount).
-    """
-    library_root = get_library_root(pathlib.Path(library_path))
-    if not library_root.exists():
-        raise FileNotFoundError(f"Library root not found: {library_root}")
-    conn = init_db_shim()
-    try:
-        yield conn
-    finally:
-        conn.close()
 
 
 def resolve_existing_library_root() -> Optional[str]:
@@ -1868,27 +1851,26 @@ async def serve_video(video_type: str, encode_id: int):
 @app.post("/api/promote/{encode_id}")
 async def api_promote(encode_id: int):
     """Promote an encode (replace original with encoded version)."""
-    with get_db_connection() as shim:
-        session = shim.session
-        row = session.exec(
-            select(EncodeResult, MediaItem)
-            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
-            .where(EncodeResult.id == encode_id)
-        ).first()
-        if not row:
-            return {"success": False, "error": "Encode not found"}
-        encode, item = row
-        if not encode.output_path:
-            return {"success": False, "error": "Encoded file path missing"}
+    rollback_state = None
+    try:
+        with session_scope() as session:
+            row = session.exec(
+                select(EncodeResult, MediaItem)
+                .join(MediaItem, EncodeResult.source_id == MediaItem.id)
+                .where(EncodeResult.id == encode_id)
+            ).first()
+            if not row:
+                return {"success": False, "error": "Encode not found"}
+            encode, item = row
+            if not encode.output_path:
+                return {"success": False, "error": "Encoded file path missing"}
 
-        output_path = normalize_path(pathlib.Path(encode.output_path))
-        source_path = normalize_path(pathlib.Path(item.path))
+            output_path = normalize_path(pathlib.Path(encode.output_path))
+            source_path = normalize_path(pathlib.Path(item.path))
 
-        if not output_path.exists():
-            return {"success": False, "error": "Encoded file not found"}
+            if not output_path.exists():
+                return {"success": False, "error": "Encoded file not found"}
 
-        rollback_state = None
-        try:
             dest_path = source_path.parent / output_path.name
             result, rollback_state = promote_encoded_file_atomic(
                 source_path=source_path,
@@ -1901,51 +1883,45 @@ async def api_promote(encode_id: int):
                 logger=logger,
             )
 
-            try:
-                now_str = now_iso()
-                item.status = "completed"
-                item.path = str(result.dest_path)
-                item.updated_at = now_str
-                encode.promoted = True
-                encode.promoted_at = now_str
-                encode.promoted_path = str(result.dest_path)
-                encode.source_backup_path = (
-                    str(result.backup_source_path) if result.backup_source_path else None
-                )
-                encode.promote_manifest_json = result.manifest.to_json()
-                encode.output_path = str(result.dest_path)
-                session.add(item)
-                session.add(encode)
-                session.commit()
-            except Exception as db_exc:
-                session.rollback()
-                if rollback_state:
-                    rollback_promote(rollback_state)
-                raise db_exc
+            now_str = now_iso()
+            item.status = "completed"
+            item.path = str(result.dest_path)
+            item.updated_at = now_str
+            encode.promoted = True
+            encode.promoted_at = now_str
+            encode.promoted_path = str(result.dest_path)
+            encode.source_backup_path = str(result.backup_source_path) if result.backup_source_path else None
+            encode.promote_manifest_json = result.manifest.to_json()
+            encode.output_path = str(result.dest_path)
+            session.add(item)
+            session.add(encode)
 
-            return {"success": True, "dest_path": str(result.dest_path)}
-        except Exception as e:
-            session.rollback()
-            return {"success": False, "error": str(e)}
+        return {"success": True, "dest_path": str(result.dest_path)}
+    except Exception as exc:
+        if rollback_state:
+            try:
+                rollback_promote(rollback_state)
+            except Exception:
+                logger.exception("Failed to rollback promotion")
+        return {"success": False, "error": str(exc)}
 
 
 @app.post("/api/reject/{encode_id}")
 async def api_reject(encode_id: int, data: RejectRequest):
     """Reject an encode."""
-    with get_db_connection() as shim:
-        session = shim.session
-        row = session.exec(
-            select(EncodeResult, MediaItem)
-            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
-            .where(EncodeResult.id == encode_id)
-        ).first()
-        if not row:
-            return {"success": False, "error": "Encode not found"}
-        encode, item = row
-        output_path = pathlib.Path(encode.output_path)
-        source_path = pathlib.Path(item.path)
+    try:
+        with session_scope() as session:
+            row = session.exec(
+                select(EncodeResult, MediaItem)
+                .join(MediaItem, EncodeResult.source_id == MediaItem.id)
+                .where(EncodeResult.id == encode_id)
+            ).first()
+            if not row:
+                return {"success": False, "error": "Encode not found"}
+            encode, item = row
+            output_path = pathlib.Path(encode.output_path)
+            source_path = pathlib.Path(item.path)
 
-        try:
             if output_path.exists():
                 output_path.unlink()
 
@@ -1975,12 +1951,10 @@ async def api_reject(encode_id: int, data: RejectRequest):
             item.updated_at = now_iso()
             session.add(item)
             session.delete(encode)
-            session.commit()
 
-            return {"success": True, "show_name": show_name}
-        except Exception as e:
-            session.rollback()
-            return {"success": False, "error": str(e)}
+        return {"success": True, "show_name": show_name}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
 
 
 @app.post("/api/bump")
@@ -1988,8 +1962,7 @@ async def api_bump(data: BumpRequest):
     """Bump an item to the front of the queue by lowering manual_priority."""
     if data.id is None and (not data.path):
         return {"success": False, "error": "id or path required"}
-    with get_db_connection() as shim:
-        session = shim.session
+    with session_scope() as session:
         current_min = session.exec(select(func.min(MediaItem.manual_priority))).first() or 0
         new_priority = current_min - 1
         now_str = now_iso()
@@ -2003,7 +1976,6 @@ async def api_bump(data: BumpRequest):
         item.manual_priority = new_priority
         item.updated_at = now_str
         session.add(item)
-        session.commit()
 
     return {"success": True, "manual_priority": new_priority}
 
@@ -2018,9 +1990,7 @@ async def api_send_to_worker(data: SendToWorkerRequest):
     """Hint a specific worker to take a pending item by bumping it and setting claimed_by."""
     if not data.worker:
         return {"success": False, "error": "worker required"}
-
-    with get_db_connection() as shim:
-        session = shim.session
+    with session_scope() as session:
         current_min = session.exec(select(func.min(MediaItem.manual_priority))).first() or 0
         new_priority = current_min - 1
         now_str = now_iso()
@@ -2034,7 +2004,6 @@ async def api_send_to_worker(data: SendToWorkerRequest):
         item.status = "pending"
         item.updated_at = now_str
         session.add(item)
-        session.commit()
 
     return {"success": True, "manual_priority": new_priority}
 
@@ -2117,21 +2086,20 @@ async def api_bulk_promote(data: BulkPromoteRequest):
 @app.post("/api/rollback/{encode_id}")
 async def api_rollback(encode_id: int):
     """Rollback a previous promotion when a backup/manifest is available."""
-    with get_db_connection() as shim:
-        session = shim.session
-        row = session.exec(
-            select(EncodeResult, MediaItem)
-            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
-            .where(EncodeResult.id == encode_id)
-        ).first()
-        if not row:
-            return {"success": False, "error": "Encode not found"}
+    try:
+        with session_scope() as session:
+            row = session.exec(
+                select(EncodeResult, MediaItem)
+                .join(MediaItem, EncodeResult.source_id == MediaItem.id)
+                .where(EncodeResult.id == encode_id)
+            ).first()
+            if not row:
+                return {"success": False, "error": "Encode not found"}
 
-        encode, item = row
-        if not encode.promote_manifest_json:
-            return {"success": False, "error": "No promote manifest available"}
+            encode, item = row
+            if not encode.promote_manifest_json:
+                return {"success": False, "error": "No promote manifest available"}
 
-        try:
             rollback_from_manifest(encode.promote_manifest_json)
             now_str = now_iso()
             item.path = encode.source_path
@@ -2142,11 +2110,10 @@ async def api_rollback(encode_id: int):
             encode.promoted_path = None
             session.add(item)
             session.add(encode)
-            session.commit()
-            return {"success": True}
-        except Exception as e:
-            session.rollback()
-            return {"success": False, "error": str(e)}
+
+        return {"success": True}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
 
 
 @app.post("/api/bulk-reject")
@@ -2632,8 +2599,8 @@ async def api_active_encodes(request: Request):
 
 @app.post("/api/profile-settings/refresh")
 async def api_refresh_profile_settings():
-    with get_db_connection() as conn:
-        src = ensure_active_profile_settings(conn.session)
+    with session_scope() as session:
+        src = ensure_active_profile_settings(session)
         return {
             "success": True,
             "source": {
@@ -2647,8 +2614,7 @@ async def api_refresh_profile_settings():
 
 @app.get("/api/evaluations/{eval_id}")
 async def api_get_evaluation(eval_id: int):
-    with get_db_connection() as conn:
-        session = conn.session
+    with session_scope() as session:
         ev = session.get(ProfileEvaluation, eval_id)
         if not ev:
             return {"success": False, "error": "not found"}
@@ -2755,8 +2721,7 @@ async def api_submit_evaluation_samples(eval_id: int, data: EvaluationSubmitSamp
 
 @app.post("/api/evaluations/{eval_id}/flag")
 async def api_flag_evaluation(eval_id: int, data: FlagProfileRequest):
-    with get_db_connection() as conn:
-        session = conn.session
+    with session_scope() as session:
         try:
             flag_profile_choice(
                 session,

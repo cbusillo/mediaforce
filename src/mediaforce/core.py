@@ -70,7 +70,6 @@ from mediaforce.config.paths import (
     normalize_path,
 )
 from mediaforce.config.settings import AppSettings, CONFIG_DIR, ENGINE, INVENTORY_DB, load_app_settings
-from mediaforce.db.shim import init_db_shim as svc_init_db_shim
 from mediaforce.services.encoder import (
     parse_ffmpeg_progress as svc_parse_ffmpeg_progress,
     record_encode_result as svc_record_encode_result,
@@ -1975,10 +1974,6 @@ def get_db_path(_: pathlib.Path | None = None) -> pathlib.Path:
 
 def init_db(_: pathlib.Path) -> Session:
     return Session(ENGINE)
-
-
-def init_db_shim(_: pathlib.Path) -> Any:
-    return svc_init_db_shim()
 
 
 def resolve_target_height_for_path(path: pathlib.Path, settings: AppSettings) -> tuple[Optional[int], str]:

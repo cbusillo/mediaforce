@@ -11,7 +11,6 @@ web UI, and domain logic organized while we continue the refactor.
 - `config/paths.py` – portable path helpers (mac `/Volumes/...` ↔ linux
   `/mnt/...`) and library root detection.
 - `db/` – SQLModel models and engine helpers (`models.py`).
-- `db/shim.py` – sqlite3-style shim used by a few legacy endpoints.
 - `cli/` – console entrypoint shim; calls into `core.main`.
 - `web/` – FastAPI app (`app.py`), templates, static assets.
 - `services/` – extracted logic:
