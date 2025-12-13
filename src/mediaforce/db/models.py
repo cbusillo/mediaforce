@@ -226,6 +226,15 @@ class EncodeProgress(SQLModel, table=True):  # type: ignore[misc,call-arg]
     updated_at: Optional[str] = None
 
 
+class WorkerRegistry(SQLModel, table=True):  # type: ignore[misc,call-arg]
+    __tablename__ = "worker_registry"
+
+    machine: str = Field(primary_key=True)
+    role: str = "encoder"  # encoder|watcher
+    last_seen: str = Field(default_factory=now_iso)
+    sample_path: Optional[str] = None
+
+
 class ShowOverride(SQLModel, table=True):  # type: ignore[misc,call-arg]
     __tablename__ = "show_overrides"
 

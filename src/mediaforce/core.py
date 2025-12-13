@@ -3205,6 +3205,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             # Clean up partial output
             if output_path.exists():
                 output_path.unlink()
+
+            # Avoid hammering the same failing job in a tight loop.
+            time.sleep(5)
         finally:
             active_slots = max(active_slots - 1, 0)
 

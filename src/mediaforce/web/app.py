@@ -59,6 +59,7 @@ from mediaforce.db import (
     MediaItem,
     EncodeResult,
     ShowOverride,
+    WorkerRegistry,
     ProfileEvaluation,
     ProfileSettingsSource,
     VmafSample,
@@ -2307,9 +2308,19 @@ async def api_worker_claim(data: WorkerClaimRequest):
         return {"success": False, "error": "machine required"}
 
     with session_scope() as session:
+        session.merge(WorkerRegistry(machine=machine, role="encoder", last_seen=now_iso()))
         claimed = claim_next_file(session, machine)
         if not claimed:
             return {"success": True, "claimed": None}
+
+        session.merge(
+            WorkerRegistry(
+                machine=machine,
+                role="encoder",
+                last_seen=now_iso(),
+                sample_path=claimed.get("path"),
+            )
+        )
 
         show_name = extract_show_name(claimed.get("path") or "")
         override_tier = None

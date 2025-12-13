@@ -224,7 +224,10 @@ def build_ffmpeg_command(
         if system == "darwin":
             cmd.extend(["-hwaccel", "videotoolbox"])
         elif system == "linux":
-            cmd.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
+            # Only use CUDA when an NVIDIA device is present. Many Linux hosts
+            # (including containerized workers) do not have CUDA available.
+            if pathlib.Path("/dev/nvidia0").exists():
+                cmd.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
 
     cmd.extend(["-i", str(input_path)])
 
