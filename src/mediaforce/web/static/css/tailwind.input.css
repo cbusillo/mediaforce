@@ -11,7 +11,7 @@
     @apply bg-surface text-foreground font-sans min-h-screen antialiased;
   }
   nav {
-    @apply bg-surface-subtle text-foreground px-6 py-4 flex items-center gap-3 border-b border-accent/30 shadow-sm;
+    @apply bg-surface-subtle text-foreground px-4 sm:px-6 py-4 border-b border-accent/30 shadow-sm;
   }
   nav .logo {
     @apply text-xl font-semibold text-accent mr-2;

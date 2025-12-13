@@ -6,40 +6,42 @@
   <div class="flex items-center justify-between mb-3">
     <h3 class="text-lg font-semibold text-foreground">Library Status</h3>
   </div>
-  <table class="table-auto w-full text-sm table-zebra">
-    <thead>
-      <tr class="text-foreground-muted uppercase tracking-wide">
-        <th class="px-3 py-2 text-left">Name</th>
-        <th class="px-3 py-2 text-left">Path</th>
-        <th class="px-3 py-2 text-left">Last Scan</th>
-        <th class="px-3 py-2 text-left">Watcher</th>
-        <th class="px-3 py-2 text-left">Status</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for entry in lib_status %}
-      <tr>
-        <td class="px-3 py-2 font-medium">{{ entry.lib.name }}</td>
-        <td class="px-3 py-2 truncate text-foreground-muted">{{ entry.root }}</td>
-        <td class="px-3 py-2">
-          {% if entry.running %}
-          <span class="badge-tier">Running…</span>
-          {% elif entry.last_scan %} {{ entry.last_scan[:16] }} {% else %}
-          <span class="text-foreground-muted">Never</span>
-          {% endif %}
-        </td>
-        <td class="px-3 py-2">{{ 'On' if entry.lib.watch else 'Off' }}</td>
-        <td class="px-3 py-2">
-          {% if entry.running %}
-          <span class="pill pill-on">Scan running</span>
-          {% else %}
-          <span class="pill pill-off">Idle</span>
-          {% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div class="overflow-auto">
+    <table class="table-auto w-full text-sm table-zebra">
+      <thead>
+        <tr class="text-foreground-muted uppercase tracking-wide">
+          <th class="px-3 py-2 text-left">Name</th>
+          <th class="px-3 py-2 text-left">Path</th>
+          <th class="px-3 py-2 text-left">Last Scan</th>
+          <th class="px-3 py-2 text-left">Watcher</th>
+          <th class="px-3 py-2 text-left">Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for entry in lib_status %}
+        <tr>
+          <td class="px-3 py-2 font-medium">{{ entry.lib.name }}</td>
+          <td class="px-3 py-2 truncate text-foreground-muted max-w-[240px] sm:max-w-none">{{ entry.root }}</td>
+          <td class="px-3 py-2">
+            {% if entry.running %}
+            <span class="badge-tier">Running…</span>
+            {% elif entry.last_scan %} {{ entry.last_scan[:16] }} {% else %}
+            <span class="text-foreground-muted">Never</span>
+            {% endif %}
+          </td>
+          <td class="px-3 py-2">{{ 'On' if entry.lib.watch else 'Off' }}</td>
+          <td class="px-3 py-2">
+            {% if entry.running %}
+            <span class="pill pill-on">Scan running</span>
+            {% else %}
+            <span class="pill pill-off">Idle</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </div>
 {% endif %}
 

@@ -53,32 +53,34 @@
 
 <div class="card mt-4">
   <h3>Encode Details</h3>
-  <table class="table-zebra">
-    <tr>
-      <td>Tier</td>
-      <td class="tier-{{ tier }}">{{ tier }}</td>
-    </tr>
-    <tr>
-      <td>CRF</td>
-      <td>{{ crf or '-' }}</td>
-    </tr>
-    <tr>
-      <td>Preset</td>
-      <td>{{ preset or '-' }}</td>
-    </tr>
-    <tr>
-      <td>VMAF</td>
-      <td>{{ vmaf or '-' }}</td>
-    </tr>
-    <tr>
-      <td>SSIM</td>
-      <td>{{ ssim or '-' }}</td>
-    </tr>
-    <tr>
-      <td>Deinterlaced</td>
-      <td>{{ 'Yes' if deinterlaced else 'No' }}</td>
-    </tr>
-  </table>
+  <div class="overflow-auto">
+    <table class="table-auto w-full text-sm table-zebra">
+      <tr>
+        <td>Tier</td>
+        <td class="tier-{{ tier }}">{{ tier }}</td>
+      </tr>
+      <tr>
+        <td>CRF</td>
+        <td>{{ crf or '-' }}</td>
+      </tr>
+      <tr>
+        <td>Preset</td>
+        <td>{{ preset or '-' }}</td>
+      </tr>
+      <tr>
+        <td>VMAF</td>
+        <td>{{ vmaf or '-' }}</td>
+      </tr>
+      <tr>
+        <td>SSIM</td>
+        <td>{{ ssim or '-' }}</td>
+      </tr>
+      <tr>
+        <td>Deinterlaced</td>
+        <td>{{ 'Yes' if deinterlaced else 'No' }}</td>
+      </tr>
+    </table>
+  </div>
 </div>
 
 <div class="flex gap-3 mt-4">

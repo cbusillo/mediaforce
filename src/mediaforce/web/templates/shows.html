@@ -1,103 +1,121 @@
-{% extends "base.html" %}
-
-{% block content %}
+{% extends "base.html" %} {% block content %}
 <div class="flex items-center justify-between mb-4">
-    <div>
-        <h1 class="text-3xl font-semibold">Show Management</h1>
-        <p class="text-foreground-muted text-sm">Manage tier overrides for TV shows; overrides apply during scanning.</p>
-    </div>
+  <div>
+    <h1 class="text-3xl font-semibold">Show Management</h1>
+    <p class="text-foreground-muted text-sm">Manage tier overrides for TV shows; overrides apply during scanning.</p>
+  </div>
 </div>
 
 <!-- Search/Filter -->
 <div class="card mb-4">
-    <div class="flex flex-wrap items-center gap-3">
-        <input type="text" id="showSearch" placeholder="Search shows..." aria-label="Search shows" class="form-input flex-1 min-w-[200px]" oninput="filterShows()">
-        <select id="tierFilter" aria-label="Filter by tier" onchange="filterShows()" class="form-select">
-            <option value="">All Tiers</option>
-            <option value="pristine">Pristine</option>
-            <option value="good">Good</option>
-            <option value="mediocre">Mediocre</option>
-            <option value="poor">Poor</option>
-            <option value="override">Has Override</option>
-        </select>
-        <span class="text-foreground-muted text-sm"><span id="showCount">{{ shows|length }}</span> shows</span>
-    </div>
+  <div class="flex flex-wrap items-center gap-3">
+    <input
+      type="text"
+      id="showSearch"
+      placeholder="Search shows..."
+      aria-label="Search shows"
+      class="form-input flex-1 min-w-[200px]"
+      oninput="filterShows()"
+    />
+    <select id="tierFilter" aria-label="Filter by tier" onchange="filterShows()" class="form-select">
+      <option value="">All Tiers</option>
+      <option value="pristine">Pristine</option>
+      <option value="good">Good</option>
+      <option value="mediocre">Mediocre</option>
+      <option value="poor">Poor</option>
+      <option value="override">Has Override</option>
+    </select>
+    <span class="text-foreground-muted text-sm"><span id="showCount">{{ shows|length }}</span> shows</span>
+  </div>
 </div>
 
 <div class="card">
+  <div class="overflow-auto">
     <table id="showsTable" class="table-auto w-full text-sm table-zebra">
-        <thead>
-            <tr>
-                <th>Show Name</th>
-                <th>Episodes</th>
-                <th>Pending</th>
-                <th>Encoded</th>
-                <th>Completed</th>
-                <th>Detected Tier</th>
-                <th>Override</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for show in shows %}
-            <tr data-show="{{ show.name }}" data-tier="{{ show.detected_tier }}" data-override="{{ show.override_tier or '' }}">
-                <td>{{ show.name }}</td>
-                <td>{{ show.total }}</td>
-                <td>{{ show.pending }}</td>
-                <td>{{ show.encoded }}</td>
-                <td>{{ show.completed }}</td>
-                <td class="tier-{{ show.detected_tier }}">{{ show.detected_tier or '-' }}</td>
-                <td>
-                    <select class="tier-select form-select" data-show="{{ show.name }}" aria-label="Tier override for {{ show.name }}" onchange="setOverride(this)">
-                        <option value="" {% if not show.override_tier %}selected{% endif %}>Auto-detect</option>
-                        <option value="pristine" {% if show.override_tier == 'pristine' %}selected{% endif %}>Pristine</option>
-                        <option value="good" {% if show.override_tier == 'good' %}selected{% endif %}>Good</option>
-                        <option value="mediocre" {% if show.override_tier == 'mediocre' %}selected{% endif %}>Mediocre</option>
-                        <option value="poor" {% if show.override_tier == 'poor' %}selected{% endif %}>Poor</option>
-                    </select>
-                </td>
-                <td>
-                    {% if show.pending > 0 %}
-                    <button onclick="applyTierToShow('{{ show.name|e }}')" class="btn btn-sm btn-primary">Apply to Pending</button>
-                    {% endif %}
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
+      <thead>
+        <tr>
+          <th>Show Name</th>
+          <th>Episodes</th>
+          <th>Pending</th>
+          <th>Encoded</th>
+          <th>Completed</th>
+          <th>Detected Tier</th>
+          <th>Override</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for show in shows %}
+        <tr
+          data-show="{{ show.name }}"
+          data-tier="{{ show.detected_tier }}"
+          data-override="{{ show.override_tier or '' }}"
+        >
+          <td>{{ show.name }}</td>
+          <td>{{ show.total }}</td>
+          <td>{{ show.pending }}</td>
+          <td>{{ show.encoded }}</td>
+          <td>{{ show.completed }}</td>
+          <td class="tier-{{ show.detected_tier }}">{{ show.detected_tier or '-' }}</td>
+          <td>
+            <select
+              class="tier-select form-select"
+              data-show="{{ show.name }}"
+              aria-label="Tier override for {{ show.name }}"
+              onchange="setOverride(this)"
+            >
+              <option value="" {% if not show.override_tier %}selected{% endif %}>Auto-detect</option>
+              <option value="pristine" {% if show.override_tier == 'pristine' %}selected{% endif %}>Pristine</option>
+              <option value="good" {% if show.override_tier == 'good' %}selected{% endif %}>Good</option>
+              <option value="mediocre" {% if show.override_tier == 'mediocre' %}selected{% endif %}>Mediocre</option>
+              <option value="poor" {% if show.override_tier == 'poor' %}selected{% endif %}>Poor</option>
+            </select>
+          </td>
+          <td>
+            {% if show.pending > 0 %}
+            <button onclick="applyTierToShow('{{ show.name|e }}')" class="btn btn-sm btn-primary">
+              Apply to Pending
+            </button>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
     </table>
+  </div>
 </div>
 
 <!-- Override Modal -->
-<div id="overrideModal" class="modal-overlay" style="display: none;">
-    <div class="modal-card max-w-lg">
-        <h3 class="text-xl font-semibold">Apply Tier to Pending Episodes</h3>
-        <p class="text-foreground-muted text-sm">Update all pending episodes of "<span id="modalShowName">Show</span>" with the selected tier.</p>
+<div id="overrideModal" class="modal-overlay" style="display: none">
+  <div class="modal-card max-w-lg">
+    <h3 class="text-xl font-semibold">Apply Tier to Pending Episodes</h3>
+    <p class="text-foreground-muted text-sm">
+      Update all pending episodes of "<span id="modalShowName">Show</span>" with the selected tier.
+    </p>
 
-        <div class="space-y-2">
-            <label class="form-label">Tier</label>
-            <select id="modalTier" aria-label="Tier to apply" class="form-select w-full">
-                <option value="pristine">Pristine (CRF 26)</option>
-                <option value="good">Good (CRF 28)</option>
-                <option value="mediocre">Mediocre (CRF 30)</option>
-                <option value="poor">Poor (CRF 32)</option>
-            </select>
-        </div>
-
-        <div class="space-y-2">
-            <label class="inline-flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" id="modalSetOverride" aria-label="Set default override" checked>
-                <span class="text-sm">Also set as default override for future episodes</span>
-            </label>
-        </div>
-
-        <div class="flex gap-2 pt-2">
-            <button onclick="confirmApplyTier()" class="btn btn-accent">Apply</button>
-            <button onclick="hideOverrideModal()" class="btn btn-ghost">Cancel</button>
-        </div>
+    <div class="space-y-2">
+      <label class="form-label">Tier</label>
+      <select id="modalTier" aria-label="Tier to apply" class="form-select w-full">
+        <option value="pristine">Pristine (CRF 26)</option>
+        <option value="good">Good (CRF 28)</option>
+        <option value="mediocre">Mediocre (CRF 30)</option>
+        <option value="poor">Poor (CRF 32)</option>
+      </select>
     </div>
-</div>
-{% endblock %}
 
-{% block scripts %}
+    <div class="space-y-2">
+      <label class="inline-flex items-center gap-2 cursor-pointer">
+        <input type="checkbox" id="modalSetOverride" aria-label="Set default override" checked />
+        <span class="text-sm">Also set as default override for future episodes</span>
+      </label>
+    </div>
+
+    <div class="flex gap-2 pt-2">
+      <button onclick="confirmApplyTier()" class="btn btn-accent">Apply</button>
+      <button onclick="hideOverrideModal()" class="btn btn-ghost">Cancel</button>
+    </div>
+  </div>
+</div>
+{% endblock %} {% block scripts %}
 <script src="/static/js/pages/shows.js"></script>
 {% endblock %}

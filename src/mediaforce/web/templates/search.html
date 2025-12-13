@@ -10,7 +10,14 @@
   <form action="/search" method="get" class="flex flex-wrap gap-4 items-end">
     <label class="flex flex-col gap-1">
       <span class="form-label">Query</span>
-      <input class="form-input min-w-[260px]" type="text" name="q" value="{{ query or '' }}" placeholder="show or filename" aria-label="Search query" />
+      <input
+        class="form-input min-w-[260px]"
+        type="text"
+        name="q"
+        value="{{ query or '' }}"
+        placeholder="show or filename"
+        aria-label="Search query"
+      />
     </label>
     <label class="flex flex-col gap-1">
       <span class="form-label">Status</span>
@@ -37,33 +44,35 @@
 
 <div class="card">
   <h3 class="text-lg font-semibold mb-2">Results ({{ results|length }} of {{ total }})</h3>
-  <table>
-    <thead>
-      <tr>
-        <th>File</th>
-        <th>Status</th>
-        <th>Tier</th>
-        <th>Size</th>
-        <th>Reduction</th>
-        <th>Last Update</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for row in results %}
-      <tr>
-        <td class="truncate" title="{{ row.path }}">{{ row.filename }}</td>
-        <td>{{ row.status }}</td>
-        <td class="tier-{{ row.tier }}">{{ row.tier or '-' }}</td>
-        <td>{{ row.size }}</td>
-        <td class="text-success">{{ row.reduction }}%</td>
-        <td>{{ row.updated_at or '-' }}</td>
-      </tr>
-      {% endfor %} {% if results|length == 0 %}
-      <tr>
-        <td colspan="6" class="text-muted">No matches</td>
-      </tr>
-      {% endif %}
-    </tbody>
-  </table>
+  <div class="overflow-auto">
+    <table class="table-auto w-full text-sm table-zebra">
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Status</th>
+          <th>Tier</th>
+          <th>Size</th>
+          <th>Reduction</th>
+          <th>Last Update</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in results %}
+        <tr>
+          <td class="truncate" title="{{ row.path }}">{{ row.filename }}</td>
+          <td>{{ row.status }}</td>
+          <td class="tier-{{ row.tier }}">{{ row.tier or '-' }}</td>
+          <td>{{ row.size }}</td>
+          <td class="text-success">{{ row.reduction }}%</td>
+          <td>{{ row.updated_at or '-' }}</td>
+        </tr>
+        {% endfor %} {% if results|length == 0 %}
+        <tr>
+          <td colspan="6" class="text-muted">No matches</td>
+        </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
 </div>
 {% endblock %}

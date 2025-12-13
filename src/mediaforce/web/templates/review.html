@@ -46,52 +46,54 @@
     These files got BIGGER after encoding. Consider rejecting with a different tier (e.g., "poor" for already-compressed
     sources).
   </p>
-  <table class="table-zebra">
-    <thead>
-      <tr>
-        <th class="w-[30px]">
-          <input type="checkbox" aria-label="Select all size increase rows" onchange="toggleAllOutliers(this)" />
-        </th>
-        <th>File</th>
-        <th>Show</th>
-        <th>Source</th>
-        <th>Encoded</th>
-        <th>Change</th>
-        <th>Tier</th>
-        <th>Actions</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for encode in outliers %}
-      <tr id="row-{{ encode.id }}" data-reduction="{{ encode.reduction_pct }}">
-        <td>
-          <input
-            type="checkbox"
-            class="row-checkbox"
-            aria-label="Select encode {{ encode.id }}"
-            value="{{ encode.id }}"
-            onchange="updateSelectedCount()"
-          />
-        </td>
-        <td class="truncate" title="{{ encode.source_path }}">{{ encode.filename }}</td>
-        <td>{{ encode.show_name or '-' }}</td>
-        <td>{{ encode.source_size }}</td>
-        <td>{{ encode.output_size }}</td>
-        <td class="text-warning">+{{ encode.size_increase_pct }}%</td>
-        <td class="tier-{{ encode.tier }}">{{ encode.tier }}</td>
-        <td>
-          <a href="/compare/{{ encode.id }}" class="btn btn-sm btn-primary">Compare</a>
-          <button
-            onclick="showRejectModal({{ encode.id }}, '{{ encode.show_name|e }}', '{{ encode.tier }}')"
-            class="btn btn-sm btn-warning"
-          >
-            Reject
-          </button>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div class="overflow-auto">
+    <table class="table-auto w-full text-sm table-zebra">
+      <thead>
+        <tr>
+          <th class="w-[30px]">
+            <input type="checkbox" aria-label="Select all size increase rows" onchange="toggleAllOutliers(this)" />
+          </th>
+          <th>File</th>
+          <th>Show</th>
+          <th>Source</th>
+          <th>Encoded</th>
+          <th>Change</th>
+          <th>Tier</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for encode in outliers %}
+        <tr id="row-{{ encode.id }}" data-reduction="{{ encode.reduction_pct }}">
+          <td>
+            <input
+              type="checkbox"
+              class="row-checkbox"
+              aria-label="Select encode {{ encode.id }}"
+              value="{{ encode.id }}"
+              onchange="updateSelectedCount()"
+            />
+          </td>
+          <td class="truncate" title="{{ encode.source_path }}">{{ encode.filename }}</td>
+          <td>{{ encode.show_name or '-' }}</td>
+          <td>{{ encode.source_size }}</td>
+          <td>{{ encode.output_size }}</td>
+          <td class="text-warning">+{{ encode.size_increase_pct }}%</td>
+          <td class="tier-{{ encode.tier }}">{{ encode.tier }}</td>
+          <td>
+            <a href="/compare/{{ encode.id }}" class="btn btn-sm btn-primary">Compare</a>
+            <button
+              onclick="showRejectModal({{ encode.id }}, '{{ encode.show_name|e }}', '{{ encode.tier }}')"
+              class="btn btn-sm btn-warning"
+            >
+              Reject
+            </button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </div>
 {% endif %}
 
@@ -99,112 +101,113 @@
   <div class="section-heading">
     <h3 class="section-title">Pending Review ({{ encodes|length }})</h3>
   </div>
-  <table class="table-zebra">
-    <thead>
-      <tr>
-        <th class="w-[30px]">
-          <input
-            type="checkbox"
-            id="selectAllMain"
-            aria-label="Select all pending rows"
-            onchange="toggleAllMain(this)"
-          />
-        </th>
-        <th>File</th>
-        <th>Show</th>
-        <th>Source</th>
-        <th>Encoded</th>
-        <th>Reduction</th>
-        <th>Tier</th>
-        <th>VMAF / Profile</th>
-        <th>Actions</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for encode in encodes %}
-      <tr
-        id="row-{{ encode.id }}"
-        class="{{ 'outlier-row' if encode.reduction_pct < 0 else '' }}"
-        data-reduction="{{ encode.reduction_pct }}"
-        data-vmaf="{{ encode.vmaf or '' }}"
-        data-name="{{ encode.filename|lower }}"
-        data-show="{{ (encode.show_name or '')|lower }}"
-      >
-        <td>
-          <input
-            type="checkbox"
-            class="row-checkbox"
-            aria-label="Select encode {{ encode.id }}"
-            value="{{ encode.id }}"
-            onchange="updateSelectedCount()"
-          />
-        </td>
-        <td
-          class="truncate"
-          title="{{ encode.source_path }}"
-          onmouseenter="showThumb(event, {{ encode.id }})"
-          onmouseleave="hideThumb()"
+  <div class="overflow-auto">
+    <table class="table-auto w-full text-sm table-zebra">
+      <thead>
+        <tr>
+          <th class="w-[30px]">
+            <input
+              type="checkbox"
+              id="selectAllMain"
+              aria-label="Select all pending rows"
+              onchange="toggleAllMain(this)"
+            />
+          </th>
+          <th>File</th>
+          <th>Show</th>
+          <th>Source</th>
+          <th>Encoded</th>
+          <th>Reduction</th>
+          <th>Tier</th>
+          <th>VMAF / Profile</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for encode in encodes %}
+        <tr
+          id="row-{{ encode.id }}"
+          class="{{ 'outlier-row' if encode.reduction_pct < 0 else '' }}"
+          data-reduction="{{ encode.reduction_pct }}"
+          data-vmaf="{{ encode.vmaf or '' }}"
+          data-name="{{ encode.filename|lower }}"
+          data-show="{{ (encode.show_name or '')|lower }}"
         >
-          {{ encode.filename }}
-        </td>
-        <td>{{ encode.show_name or '-' }}</td>
-        <td>{{ encode.source_size }}</td>
-        <td>{{ encode.output_size }}</td>
-        <td class="{{ 'text-success' if encode.reduction_pct > 0 else 'text-danger' }}">
-          {% if encode.reduction_pct > 0 %} {{ encode.reduction }}% {% else %} +{{ encode.size_increase_pct }}% {% endif
-          %}
-        </td>
-        <td class="tier-{{ encode.tier }}">{{ encode.tier }}</td>
-        <td title="{{ encode.eval_note or '' }}">
-          {% if encode.eval_median %}
-          <div>
-            med {{ '%.1f'|format(encode.eval_median) }} · min {{ '%.1f'|format(encode.eval_min or 0) }}{% if
-            encode.eval_weighted %} · w {{ '%.1f'|format(encode.eval_weighted) }}{% endif %}
-          </div>
-          <div class="text-foreground-muted text-xs">
-            thr {{ encode.eval_thresh_min or '-' }}/{{ encode.eval_thresh_med or '-' }}/{{ encode.eval_thresh_max or '-'
-            }}
-          </div>
-          {% if encode.eval_id %}
-          <button
-            type="button"
-            class="text-xs underline text-foreground-muted hover:text-foreground"
-            onclick="showEvalDetails({{ encode.eval_id }})"
+          <td>
+            <input
+              type="checkbox"
+              class="row-checkbox"
+              aria-label="Select encode {{ encode.id }}"
+              value="{{ encode.id }}"
+              onchange="updateSelectedCount()"
+            />
+          </td>
+          <td
+            class="truncate"
+            title="{{ encode.source_path }}"
+            onmouseenter="showThumb(event, {{ encode.id }})"
+            onmouseleave="hideThumb()"
           >
-            Details
-          </button>
-          {% endif %}
-          {% else %} {{ encode.vmaf or '-' }} {% endif %}
-        </td>
-        <td>
-          <a href="/compare/{{ encode.id }}" class="btn btn-sm btn-success">Compare</a>
-          <button onclick="promote({{ encode.id }})" class="btn btn-sm btn-success">Promote</button>
-          <button
-            onclick="showRejectModal({{ encode.id }}, '{{ encode.show_name|e }}', '{{ encode.tier }}')"
-            class="btn btn-sm btn-warning"
-          >
-            Reject
-          </button>
-          {% if encode.eval_id %}
-          <button
-            onclick="flagQuality({{ encode.eval_id }}, event)"
-            class="btn btn-sm btn-danger"
-            data-retrain="{{ encode.retrain_status or '' }}"
-            {%
-            if
-            encode.retrain_status
-            %}disabled{%
-            endif
-            %}
-          >
-            {% if encode.retrain_status %}Flagged ({{ encode.retrain_status }}){% else %}Flag Quality{% endif %}
-          </button>
-          {% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+            {{ encode.filename }}
+          </td>
+          <td>{{ encode.show_name or '-' }}</td>
+          <td>{{ encode.source_size }}</td>
+          <td>{{ encode.output_size }}</td>
+          <td class="{{ 'text-success' if encode.reduction_pct > 0 else 'text-danger' }}">
+            {% if encode.reduction_pct > 0 %} {{ encode.reduction }}% {% else %} +{{ encode.size_increase_pct }}% {%
+            endif %}
+          </td>
+          <td class="tier-{{ encode.tier }}">{{ encode.tier }}</td>
+          <td title="{{ encode.eval_note or '' }}">
+            {% if encode.eval_median %}
+            <div>
+              med {{ '%.1f'|format(encode.eval_median) }} · min {{ '%.1f'|format(encode.eval_min or 0) }}{% if
+              encode.eval_weighted %} · w {{ '%.1f'|format(encode.eval_weighted) }}{% endif %}
+            </div>
+            <div class="text-foreground-muted text-xs">
+              thr {{ encode.eval_thresh_min or '-' }}/{{ encode.eval_thresh_med or '-' }}/{{ encode.eval_thresh_max or
+              '-' }}
+            </div>
+            {% if encode.eval_id %}
+            <button
+              type="button"
+              class="text-xs underline text-foreground-muted hover:text-foreground"
+              onclick="showEvalDetails({{ encode.eval_id }})"
+            >
+              Details
+            </button>
+            {% endif %} {% else %} {{ encode.vmaf or '-' }} {% endif %}
+          </td>
+          <td>
+            <a href="/compare/{{ encode.id }}" class="btn btn-sm btn-success">Compare</a>
+            <button onclick="promote({{ encode.id }})" class="btn btn-sm btn-success">Promote</button>
+            <button
+              onclick="showRejectModal({{ encode.id }}, '{{ encode.show_name|e }}', '{{ encode.tier }}')"
+              class="btn btn-sm btn-warning"
+            >
+              Reject
+            </button>
+            {% if encode.eval_id %}
+            <button
+              onclick="flagQuality({{ encode.eval_id }}, event)"
+              class="btn btn-sm btn-danger"
+              data-retrain="{{ encode.retrain_status or '' }}"
+              {%
+              if
+              encode.retrain_status
+              %}disabled{%
+              endif
+              %}
+            >
+              {% if encode.retrain_status %}Flagged ({{ encode.retrain_status }}){% else %}Flag Quality{% endif %}
+            </button>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </div>
 
 <!-- Hover thumbnail -->

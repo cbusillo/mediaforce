@@ -14,51 +14,14 @@
     <script src="/static/js/app.js"></script>
   </head>
   <body class="bg-surface text-foreground min-h-screen">
-    <nav class="flex items-center gap-4 px-6 py-4 border-b border-accent/40 bg-surface-subtle shadow-sm">
-      <a href="/" class="flex items-center gap-3">
-        <img src="/static/img/mediaforce-logo.svg" alt="Mediaforce" class="h-8 w-8" />
-        <span class="text-xl font-semibold text-accent">Mediaforce</span>
-      </a>
-      <div class="flex items-center gap-2 text-sm text-foreground-muted">
-        <a
-          href="/"
-          class="px-3 py-2 rounded-md hover:bg-surface-card {{ 'bg-surface-card text-foreground' if active == 'dashboard' else '' }}"
-          >Dashboard</a
-        >
-        <a
-          href="/shows"
-          class="px-3 py-2 rounded-md hover:bg-surface-card {{ 'bg-surface-card text-foreground' if active == 'shows' else '' }}"
-          >Shows</a
-        >
-        <a
-          href="/queue"
-          class="px-3 py-2 rounded-md hover:bg-surface-card {{ 'bg-surface-card text-foreground' if active == 'queue' else '' }}"
-          >Queue</a
-        >
-        <a
-          href="/review"
-          class="px-3 py-2 rounded-md hover:bg-surface-card {{ 'bg-surface-card text-foreground' if active == 'review' else '' }}"
-          >Review</a
-        >
-        <a
-          href="/completed"
-          class="px-3 py-2 rounded-md hover:bg-surface-card {{ 'bg-surface-card text-foreground' if active == 'completed' else '' }}"
-          >Completed</a
-        >
-        <a
-          href="/stats"
-          class="px-3 py-2 rounded-md hover:bg-surface-card {{ 'bg-surface-card text-foreground' if active == 'stats' else '' }}"
-          >Stats</a
-        >
-        <a
-          href="/settings"
-          class="px-3 py-2 rounded-md hover:bg-surface-card {{ 'bg-surface-card text-foreground' if active == 'settings' else '' }}"
-          >Settings</a
-        >
-      </div>
-      <div class="flex-1"></div>
-      <div class="flex items-center gap-3 text-sm text-foreground-muted">
-        <div class="flex items-center gap-2">
+    <nav class="px-4 sm:px-6 py-4 border-b border-accent/40 bg-surface-subtle shadow-sm">
+      <div class="flex items-center gap-3">
+        <a href="/" class="flex items-center gap-3">
+          <img src="/static/img/mediaforce-logo.svg" alt="Mediaforce" class="h-8 w-8" />
+          <span class="text-xl font-semibold text-accent">Mediaforce</span>
+        </a>
+
+        <div class="ml-auto flex items-center gap-2 sm:gap-3 text-sm text-foreground-muted">
           <button
             id="themeToggle"
             type="button"
@@ -68,27 +31,80 @@
           >
             <span id="themeLabel">Dark</span>
           </button>
+
+          <a
+            href="/search"
+            aria-label="Search"
+            class="sm:hidden px-3 py-1 rounded-full border border-foreground-muted hover:border-accent hover:text-accent"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-4 w-4">
+              <path d="M11 19a8 8 0 1 1 0-16 8 8 0 0 1 0 16z" />
+              <path d="m21 21-4.3-4.3" />
+            </svg>
+          </a>
+
+          <form
+            class="hidden sm:flex items-center gap-2 bg-surface-card border border-surface-subtle rounded-full px-3 py-1"
+            action="/search"
+            method="get"
+          >
+            <input
+              type="text"
+              name="q"
+              placeholder="Search files"
+              value="{{ request.query_params.get('q') if request and request.query_params else '' }}"
+              aria-label="Search files"
+              class="bg-transparent border-none outline-none text-sm text-foreground placeholder:text-foreground-muted w-28 md:w-40"
+            />
+            <button type="submit" class="text-xs px-2 py-1 rounded-full bg-accent text-white hover:bg-accent-hover">
+              Go
+            </button>
+          </form>
         </div>
-        <form
-          class="flex items-center gap-2 bg-surface-card border border-surface-subtle rounded-full px-3 py-1"
-          action="/search"
-          method="get"
+      </div>
+
+      <div
+        class="mt-3 flex items-center gap-1 sm:gap-2 text-sm text-foreground-muted"
+        style="overflow-x: auto; white-space: nowrap; max-width: 100%"
+      >
+        <a
+          href="/"
+          class="px-2 py-1 sm:px-3 sm:py-2 rounded-md hover:bg-surface-card {{ 'bg-surface-card text-foreground' if active == 'dashboard' else '' }}"
+          >Dashboard</a
         >
-          <input
-            type="text"
-            name="q"
-            placeholder="Search files"
-            value="{{ request.query_params.get('q') if request and request.query_params else '' }}"
-            aria-label="Search files"
-            class="bg-transparent border-none outline-none text-sm text-foreground placeholder:text-foreground-muted w-40"
-          />
-          <button type="submit" class="text-xs px-2 py-1 rounded-full bg-accent text-white hover:bg-accent-hover">
-            Go
-          </button>
-        </form>
+        <a
+          href="/shows"
+          class="px-2 py-1 sm:px-3 sm:py-2 rounded-md hover:bg-surface-card {{ 'bg-surface-card text-foreground' if active == 'shows' else '' }}"
+          >Shows</a
+        >
+        <a
+          href="/queue"
+          class="px-2 py-1 sm:px-3 sm:py-2 rounded-md hover:bg-surface-card {{ 'bg-surface-card text-foreground' if active == 'queue' else '' }}"
+          >Queue</a
+        >
+        <a
+          href="/review"
+          class="px-2 py-1 sm:px-3 sm:py-2 rounded-md hover:bg-surface-card {{ 'bg-surface-card text-foreground' if active == 'review' else '' }}"
+          >Review</a
+        >
+        <a
+          href="/completed"
+          class="px-2 py-1 sm:px-3 sm:py-2 rounded-md hover:bg-surface-card {{ 'bg-surface-card text-foreground' if active == 'completed' else '' }}"
+          >Completed</a
+        >
+        <a
+          href="/stats"
+          class="px-2 py-1 sm:px-3 sm:py-2 rounded-md hover:bg-surface-card {{ 'bg-surface-card text-foreground' if active == 'stats' else '' }}"
+          >Stats</a
+        >
+        <a
+          href="/settings"
+          class="px-2 py-1 sm:px-3 sm:py-2 rounded-md hover:bg-surface-card {{ 'bg-surface-card text-foreground' if active == 'settings' else '' }}"
+          >Settings</a
+        >
       </div>
     </nav>
-    <main class="max-w-6xl mx-auto px-4 py-6">{% block content %}{% endblock %}</main>
+    <main class="max-w-6xl mx-auto px-3 sm:px-4 py-6">{% block content %}{% endblock %}</main>
     <script>
       // Keep a light refresh on the dashboard without wiring a websocket.
       if (window.location.pathname === "/") {
