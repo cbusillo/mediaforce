@@ -80,7 +80,7 @@
     layer in `domain/`
   - Web/CLI call services instead of `core.py` directly; keep shared helpers typed
 
-- [ ] **DB Access Layer**
+- [x] **DB Access Layer**
   - Add repository helpers around SQLModel for common queries
   - Reduce ad-hoc SQL in web routes; keep raw SQL only for hotspots
 

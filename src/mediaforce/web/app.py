@@ -29,6 +29,8 @@ from mediaforce.db.repository.media import MediaRepository
 from mediaforce.db.repository.queue import QueueRepository
 from mediaforce.db.repository.base import Pagination
 from mediaforce.db.repository.stats import StatsRepository
+from mediaforce.db.repository.encode import EncodeRepository
+from mediaforce.db.repository.progress import ProgressRepository
 from mediaforce.config.paths import get_library_root, iter_libraries_for_current_host, normalize_path
 from mediaforce.config.settings import INVENTORY_DB
 from mediaforce.db.shim import init_db_shim
@@ -101,18 +103,24 @@ def get_default_library_path() -> str:
 DEFAULT_LIBRARY = get_default_library_path()
 
 
-def get_library_status() -> list[dict]:
-    """Return library list with last_scan timestamp (if DB present)."""
+def get_library_status(session: Session | None = None) -> list[dict]:
+    """Return library list with last_scan timestamp per library."""
+
+    if session is None:
+        with session_scope() as scoped:
+            return get_library_status(scoped)
+
     settings = load_app_settings()
     libs = []
+    media_repo = MediaRepository(session)
+
     for lib, root in iter_libraries_for_current_host(settings):
         db = INVENTORY_DB
-        last_scan = None
         running = SCAN_STATUS.get(str(root)) == "running"
+        last_scan = None
         if db.exists():
             try:
-                with session_scope() as session:
-                    last_scan = session.exec(select(func.max(MediaItem.scanned_at))).first()
+                last_scan = media_repo.last_scan_ts(library_id=lib.id)
             except Exception:
                 last_scan = None
         libs.append({
@@ -127,36 +135,10 @@ def get_library_status() -> list[dict]:
 
 def get_worker_status(library_root: Optional[str] = None) -> list[dict]:
     """Return active workers based on encode_progress entries."""
+    _ = library_root
     try:
-        root = library_root or resolve_existing_library_root()
-        if not root:
-            return []
         with session_scope() as session:
-            rows = (
-                session.exec(
-                    select(
-                        EncodeProgress.machine,
-                        func.count().label("active"),
-                        func.max(EncodeProgress.updated_at).label("updated_at"),
-                        func.max(EncodeProgress.percent_complete).label("percent_complete"),
-                        func.max(EncodeProgress.tier).label("tier"),
-                        func.max(EncodeProgress.source_path).label("sample_path"),
-                    )
-                    .group_by(EncodeProgress.machine)
-                    .order_by(EncodeProgress.machine.collate("NOCASE"))
-                ).all()
-            )
-            workers = []
-            for row in rows:
-                workers.append({
-                    "machine": row.machine,
-                    "active": row.active or 0,
-                    "percent_complete": row.percent_complete or 0,
-                    "tier": row.tier,
-                    "sample_path": row.sample_path,
-                    "updated_at": row.updated_at,
-                })
-            return workers
+            return ProgressRepository(session).list_workers()
     except Exception:
         return []
 
@@ -773,32 +755,16 @@ async def dashboard(request: Request):
         })
 
     with session_scope() as session:
-        # Status counts
-        status_rows = session.exec(
-            select(MediaItem.status, func.count().label("cnt")).group_by(MediaItem.status)
-        ).all()
-        status_counts = {row.status: row.cnt for row in status_rows}
+        media_repo = MediaRepository(session)
+        encode_repo = EncodeRepository(session)
+        progress_repo = ProgressRepository(session)
 
-        # Space saved
-        space_row = session.exec(
-            select(
-                func.coalesce(func.sum(MediaItem.size_bytes), 0),
-                func.coalesce(func.sum(EncodeResult.output_size_bytes), 0),
-            )
-            .join(EncodeResult, EncodeResult.source_id == MediaItem.id)
-            .where(EncodeResult.output_size_bytes.is_not(None), EncodeResult.output_size_bytes > 0)  # type: ignore[attr-defined]
-        ).first()
-        space_saved_gb = 0
-        if space_row and space_row[0] and space_row[1]:
-            space_saved_gb = (space_row[0] - space_row[1]) / 1024 / 1024 / 1024
+        status_counts = media_repo.count_by_status()
 
-        # Active encodes (with progress)
-        active_rows = session.exec(
-            select(EncodeProgress, MediaItem.size_bytes, MediaItem.video_codec)
-            .select_from(EncodeProgress)
-            .join(MediaItem, EncodeProgress.source_id == MediaItem.id, isouter=True)
-            .order_by(EncodeProgress.started_at.desc())
-        ).all()
+        space_saved_bytes = encode_repo.space_saved_bytes()
+        space_saved_gb = space_saved_bytes / 1024 / 1024 / 1024
+
+        active_rows = progress_repo.list_active()
         active_encodes = []
         for row in active_rows:
             prog = row[0]
@@ -818,21 +784,7 @@ async def dashboard(request: Request):
                 "phase": prog.phase or "encoding",
             })
 
-        # Recent completions (last 10)
-        recent_rows = session.exec(
-            select(
-                MediaItem.path,
-                MediaItem.size_bytes,
-                EncodeResult.output_size_bytes,
-                EncodeResult.completed_at,
-                MediaItem.detected_tier,
-                EncodeResult.id,
-            )
-            .join(EncodeResult, EncodeResult.source_id == MediaItem.id)
-            .where(EncodeResult.output_size_bytes.is_not(None), EncodeResult.output_size_bytes > 0)  # type: ignore[attr-defined]
-            .order_by(EncodeResult.completed_at.desc())  # type: ignore[attr-defined]
-            .limit(10)
-        ).all()
+        recent_rows = encode_repo.recent_completions(limit=10)
         recent_completions = []
         for row in recent_rows:
             path, size_bytes, out_bytes, completed_at, tier, encode_id = row
@@ -850,16 +802,10 @@ async def dashboard(request: Request):
                 "completed_at": completed_at[:16] if completed_at else "?",
             })
 
-        # Get tier counts for pending
-        tier_rows = session.exec(
-            select(MediaItem.detected_tier, func.count().label("cnt"))
-            .where(MediaItem.status == "pending")
-            .group_by(MediaItem.detected_tier)
-        ).all()
-        tier_counts = {row.detected_tier: row.cnt for row in tier_rows}
+        tier_counts = media_repo.pending_tier_counts()
 
-        lib_status = get_library_status()
-        workers = get_worker_status(library_root)
+        lib_status = get_library_status(session)
+        workers = progress_repo.list_workers()
 
     stats = {
         "pending": status_counts.get("pending", 0),
@@ -2765,10 +2711,7 @@ async def api_queue_episodes(show_name: str, season_name: str, request: Request)
 async def api_stats():
     """Get current stats as JSON."""
     with session_scope() as session:
-        rows = session.exec(
-            select(MediaItem.status, func.count().label("cnt")).group_by(MediaItem.status)
-        ).all()
-    return {row.status: row.cnt for row in rows}
+        return MediaRepository(session).count_by_status()
 
 
 @app.get("/api/stats/summary")

@@ -22,6 +22,11 @@ web UI, and domain logic organized while we continue the refactor.
 - `domain/` – shared types and small pure helpers.
 - `db/repository/` – SQLModel repositories for web read paths.
 
+Repository layer
+
+- `db/repository/` holds SQLModel query helpers used by the web app. Prefer
+  adding a repository method over duplicating query logic in routes.
+
 Entry points
 
 - CLI: `uv run mediaforce` (shims exist for editable checkout) → `mediaforce.core.main`
