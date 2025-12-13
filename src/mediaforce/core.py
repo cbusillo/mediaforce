@@ -2651,7 +2651,13 @@ def cmd_run(args: argparse.Namespace) -> int:
                 break
             if claim_obj is None:
                 log_info("queue_empty")
-                break
+                # In API mode, long-running workers should remain up and wait
+                # for the master to enqueue or assign new work. For dry-run,
+                # we exit promptly so smoke tests and one-shot runs complete.
+                if args.dry_run:
+                    break
+                time.sleep(10)
+                continue
             claimed = {"id": claim_obj.id, "path": claim_obj.path}
             override_tier = claim_obj.override_tier
         else:
