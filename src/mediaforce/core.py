@@ -2664,24 +2664,23 @@ def cmd_queue(args: argparse.Namespace) -> int:
     ).all()
 
     if not rows:
-        print("Queue is empty (no pending files).")
+        log_info("queue_empty", library=str(library_root), limit=limit)
         return 0
 
-    print(f"Top {len(rows)} files in queue:\n")
-    print(f"{'Priority':>8}  {'Size':>8}  {'Savings':>8}  {'Tier':>10}  {'Bitrate':>10}  Path")
-    print("-" * 90)
-
+    items: list[dict[str, Any]] = []
     for row in rows:
-        size_mb = (row.size_bytes or 0) // 1024 // 1024
-        savings = row.potential_savings_bytes
-        savings_str = f"{savings // 1024 // 1024}MB" if savings else "?"
-        bitrate = f"{row.bitrate_kbps}k" if row.bitrate_kbps else "?"
-        priority = f"{row.priority_score:.3f}" if row.priority_score is not None else "?"
-        # Shorten path for display
-        display_path = row.path
-        if len(display_path) > 40:
-            display_path = "..." + display_path[-37:]
-        print(f"{priority:>8}  {size_mb:>6}MB  {savings_str:>8}  {row.detected_tier or '?':>10}  {bitrate:>10}  {display_path}")
+        items.append(
+            {
+                "id": row.id,
+                "path": row.path,
+                "priority_score": row.priority_score,
+                "size_bytes": row.size_bytes,
+                "potential_savings_bytes": row.potential_savings_bytes,
+                "tier": row.detected_tier,
+                "bitrate_kbps": row.bitrate_kbps,
+                "library_id": row.library_id,
+            }
+        )
 
     # Show summary
     log_info("inventory_summary")
@@ -2692,9 +2691,13 @@ def cmd_queue(args: argparse.Namespace) -> int:
     for status, mid, size_bytes in summary:
         cnt, total = totals.get(status, (0, 0))
         totals[status] = (cnt + 1, total + (size_bytes or 0))
+
+    totals_payload: dict[str, dict[str, Any]] = {}
     for status, (cnt, total_bytes) in totals.items():
-        total_gb = total_bytes / 1024 / 1024 / 1024
-        print(f"  {status}: {cnt} files ({total_gb:.1f} GB)")
+        totals_payload[status] = {
+            "count": cnt,
+            "total_bytes": total_bytes,
+        }
 
     # Calculate space saved from completed encodes
     encode_rows = session.exec(
@@ -2702,17 +2705,31 @@ def cmd_queue(args: argparse.Namespace) -> int:
         .join(MediaItem, EncodeResult.source_id == MediaItem.id)
         .where(func.coalesce(EncodeResult.output_size_bytes, 0) > 0)
     ).all()
+
+    space_saved_payload: Optional[dict[str, Any]] = None
     if encode_rows:
         source_bytes = sum(src or 0 for _, src in encode_rows)
         output_bytes = sum(out or 0 for out, _ in encode_rows)
         if source_bytes and output_bytes:
-            source_gb = source_bytes / 1024 / 1024 / 1024
-            output_gb = output_bytes / 1024 / 1024 / 1024
-            saved_gb = source_gb - output_gb
+            saved_bytes = source_bytes - output_bytes
             saved_pct = (1 - output_bytes / source_bytes) * 100
-            print(f"\nSpace saved from {len(encode_rows)} encodes:")
-            print(f"  Source: {source_gb:.1f} GB → Output: {output_gb:.1f} GB")
-            print(f"  Saved: {saved_gb:.1f} GB ({saved_pct:.1f}%)")
+            space_saved_payload = {
+                "encodes": len(encode_rows),
+                "source_bytes": source_bytes,
+                "output_bytes": output_bytes,
+                "saved_bytes": saved_bytes,
+                "saved_pct": saved_pct,
+            }
+
+    log_info(
+        "queue_listing",
+        library=str(library_root),
+        limit=limit,
+        count=len(items),
+        items=items,
+        totals=totals_payload,
+        space_saved=space_saved_payload,
+    )
 
     session.close()
     return 0
@@ -4059,26 +4076,28 @@ def cmd_verify(args: argparse.Namespace) -> int:
     encoded_path = pathlib.Path(args.encoded).resolve()
 
     if not source_path.exists():
-        print(f"[error] Source file not found: {source_path}", file=sys.stderr)
+        log_error("verify_source_missing", source=str(source_path))
         return 1
 
     if not encoded_path.exists():
-        print(f"[error] Encoded file not found: {encoded_path}", file=sys.stderr)
+        log_error("verify_encoded_missing", encoded=str(encoded_path))
         return 1
-
-    print(f"Source:  {source_path.name}")
-    print(f"Encoded: {encoded_path.name}")
-    print()
 
     # Get file sizes
     source_size = source_path.stat().st_size
     encoded_size = encoded_path.stat().st_size
     ratio = encoded_size / source_size * 100
-    print(f"Size: {source_size // 1024 // 1024}MB -> {encoded_size // 1024 // 1024}MB ({ratio:.1f}%)")
-    print()
 
-    print("Measuring quality (this may take a while)...")
-    print()
+    log_info(
+        "verify_start",
+        source=str(source_path),
+        encoded=str(encoded_path),
+        source_size_bytes=source_size,
+        encoded_size_bytes=encoded_size,
+        ratio_pct=ratio,
+        sample_duration_sec=float(args.sample_duration),
+        use_vmaf=not bool(args.no_vmaf),
+    )
 
     metrics = verify_encode_quality(
         source_path,
@@ -4087,24 +4106,18 @@ def cmd_verify(args: argparse.Namespace) -> int:
         use_vmaf=not args.no_vmaf,
     )
 
-    print()
-    print("=" * 50)
-    print("Results:")
-    print(f"  Grade: {metrics.quality_grade}")
-
-    if metrics.ssim is not None:
-        print(f"  SSIM:  {metrics.ssim:.4f}")
-    if metrics.psnr is not None:
-        print(f"  PSNR:  {metrics.psnr:.2f} dB")
-    if metrics.vmaf is not None:
-        print(f"  VMAF:  {metrics.vmaf:.2f}")
-
-    if metrics.is_acceptable:
-        print()
-        print("[ok] Quality is acceptable for promotion")
-    else:
-        print()
-        print("[!] Quality may be too low - consider re-encoding with lower CRF")
+    log_info(
+        "verify_result",
+        source=str(source_path),
+        encoded=str(encoded_path),
+        grade=metrics.quality_grade,
+        acceptable=bool(metrics.is_acceptable),
+        ssim=metrics.ssim,
+        psnr=metrics.psnr,
+        vmaf=metrics.vmaf,
+        sample_start_sec=metrics.sample_start_sec,
+        sample_duration_sec=metrics.sample_duration_sec,
+    )
 
     return 0
 
@@ -4337,11 +4350,11 @@ def cmd_verify_batch(args: argparse.Namespace) -> int:
     transcode_root = pathlib.Path(args.transcode_root).resolve()
 
     if not path.exists():
-        print(f"[error] Path does not exist: {path}", file=sys.stderr)
+        log_error("verify_batch_path_missing", path=str(path))
         return 1
 
     if not transcode_root.exists():
-        print(f"[error] Transcode root does not exist: {transcode_root}", file=sys.stderr)
+        log_error("verify_batch_transcode_root_missing", transcode_root=str(transcode_root))
         return 1
 
     # Find all video files in source path
@@ -4354,11 +4367,17 @@ def cmd_verify_batch(args: argparse.Namespace) -> int:
         files = sorted(files)
 
     if not files:
-        print("No video files found.")
+        log_info("verify_batch_no_files", path=str(path))
         return 0
 
-    print(f"Checking {len(files)} files for verification...")
-    print()
+    log_info(
+        "verify_batch_start",
+        path=str(path),
+        transcode_root=str(transcode_root),
+        total_files=len(files),
+        sample_duration_sec=float(args.sample_duration),
+        use_vmaf=not bool(args.no_vmaf),
+    )
 
     verified = 0
     skipped = 0
@@ -4376,8 +4395,6 @@ def cmd_verify_batch(args: argparse.Namespace) -> int:
             skipped += 1
             continue
 
-        print(f"Verifying: {f.name}")
-
         metrics = verify_encode_quality(
             f,
             encoded,
@@ -4388,31 +4405,31 @@ def cmd_verify_batch(args: argparse.Namespace) -> int:
 
         results.append((f.name, metrics))
 
+        log_info(
+            "verify_batch_result",
+            source=str(f),
+            encoded=str(encoded),
+            grade=metrics.quality_grade,
+            acceptable=bool(metrics.is_acceptable),
+            ssim=metrics.ssim,
+            psnr=metrics.psnr,
+            vmaf=metrics.vmaf,
+        )
+
         if metrics.is_acceptable:
-            print(f"  -> Grade: {metrics.quality_grade} [OK]")
             verified += 1
         else:
-            print(f"  -> Grade: {metrics.quality_grade} [FAIL]")
             failed += 1
-        print()
 
-    print("=" * 60)
-    print("Summary:")
-    print(f"  Verified (acceptable): {verified}")
-    print(f"  Failed (low quality):  {failed}")
-    print(f"  Skipped (no encode):   {skipped}")
-    print()
-
-    if results:
-        print("Detailed results:")
-        print(f"{'File':<40} {'SSIM':>8} {'PSNR':>8} {'VMAF':>8} {'Grade':>6}")
-        print("-" * 72)
-        for name, m in results:
-            short_name = name[:37] + "..." if len(name) > 40 else name
-            ssim_str = f"{m.ssim:.4f}" if m.ssim else "N/A"
-            psnr_str = f"{m.psnr:.1f}" if m.psnr else "N/A"
-            vmaf_str = f"{m.vmaf:.1f}" if m.vmaf else "N/A"
-            print(f"{short_name:<40} {ssim_str:>8} {psnr_str:>8} {vmaf_str:>8} {m.quality_grade:>6}")
+    log_info(
+        "verify_batch_summary",
+        path=str(path),
+        transcode_root=str(transcode_root),
+        verified=verified,
+        failed=failed,
+        skipped=skipped,
+        total_results=len(results),
+    )
 
     return 0 if failed == 0 else 1
 
@@ -4422,14 +4439,14 @@ def cmd_review_list(args: argparse.Namespace) -> int:
     path = pathlib.Path(args.path).resolve()
 
     if not path.exists():
-        print(f"[error] Path does not exist: {path}", file=sys.stderr)
+        log_error("review_list_path_missing", path=str(path))
         return 1
 
     library_root = get_library_root(path)
     db_path = get_db_path(library_root)
 
     if not db_path.exists():
-        print(f"[error] No database found: {db_path}", file=sys.stderr)
+        log_error("review_list_db_missing", db=str(db_path))
         return 1
 
     session = init_db(db_path)
@@ -4469,16 +4486,14 @@ def cmd_review_list(args: argparse.Namespace) -> int:
     results = session.exec(stmt).all()
 
     if not results:
-        if args.all:
-            print("No encodes with quality metrics found.")
-        else:
-            print("No pending reviews. All encodes are approved or no outliers detected.")
+        log_info(
+            "review_list_empty",
+            library=str(library_root),
+            all=bool(args.all),
+        )
         return 0
 
-    # Print header
-    print(f"\n{'ID':>4} {'Status':>8} {'VMAF':>6} {'SSIM':>7} {'PSNR':>6} {'Ratio':>6} {'Tier':>8} File")
-    print("-" * 100)
-
+    items: list[dict[str, Any]] = []
     for row in results:
         result_id = row[0]
         source_path = pathlib.Path(row[1])
@@ -4494,11 +4509,6 @@ def cmd_review_list(args: argparse.Namespace) -> int:
 
         ratio = output_size / source_size * 100 if source_size > 0 else 0
 
-        # Format metrics
-        vmaf_str = f"{vmaf:.1f}" if vmaf is not None else "-"
-        ssim_str = f"{ssim:.4f}" if ssim is not None else "-"
-        psnr_str = f"{psnr:.1f}" if psnr is not None else "-"
-
         # Status indicator
         if review_status == "approved":
             status = "OK"
@@ -4509,21 +4519,30 @@ def cmd_review_list(args: argparse.Namespace) -> int:
         else:
             status = "pending"
 
-        # Truncate filename
-        name = source_path.name
-        if len(name) > 45:
-            name = name[:42] + "..."
-
-        print(f"{result_id:>4} {status:>8} {vmaf_str:>6} {ssim_str:>7} {psnr_str:>6} {ratio:>5.1f}% {tier:>8} {name}")
-
-        # Show outlier reasons if present
+        payload: dict[str, Any] = {
+            "id": int(result_id),
+            "source_path": str(source_path),
+            "output_path": row[2],
+            "tier": tier,
+            "review_status": review_status,
+            "is_outlier": bool(is_outlier),
+            "ratio_pct": ratio,
+            "vmaf": vmaf,
+            "ssim": ssim,
+            "psnr": psnr,
+            "grade": status,
+        }
         if is_outlier and outlier_reasons and args.verbose:
-            print(f"     Reasons: {outlier_reasons}")
+            payload["outlier_reasons"] = outlier_reasons
+        items.append(payload)
 
-    print()
-    print(f"Total: {len(results)} encodes")
-    if not args.all:
-        print("Use --all to show all encodes with metrics (including approved)")
+    log_info(
+        "review_list",
+        library=str(library_root),
+        all=bool(args.all),
+        count=len(items),
+        items=items,
+    )
 
     return 0
 
@@ -4536,14 +4555,14 @@ def cmd_review_approve(args: argparse.Namespace) -> int:
     db_path = get_db_path(library_root)
 
     if not db_path.exists():
-        print(f"[error] No database found: {db_path}", file=sys.stderr)
+        log_error("review_db_missing", db=str(db_path))
         return 1
 
     session = init_db(db_path)
 
     enc = session.get(EncodeResult, args.id)
     if not enc:
-        print(f"[error] No encode found with ID {args.id}", file=sys.stderr)
+        log_error("review_encode_not_found", id=int(args.id))
         session.close()
         return 1
 
@@ -4552,9 +4571,12 @@ def cmd_review_approve(args: argparse.Namespace) -> int:
     session.add(enc)
     session.commit()
 
-    print(f"Approved: {pathlib.Path(enc.source_path).name}")
-    if enc.output_path:
-        print(f"  Output: {enc.output_path}")
+    log_info(
+        "review_approved",
+        id=int(args.id),
+        source=str(enc.source_path),
+        output=str(enc.output_path) if enc.output_path else None,
+    )
 
     session.close()
 
@@ -4569,14 +4591,14 @@ def cmd_review_reject(args: argparse.Namespace) -> int:
     db_path = get_db_path(library_root)
 
     if not db_path.exists():
-        print(f"[error] No database found: {db_path}", file=sys.stderr)
+        log_error("review_db_missing", db=str(db_path))
         return 1
 
     session = init_db(db_path)
 
     enc = session.get(EncodeResult, args.id)
     if not enc:
-        print(f"[error] No encode found with ID {args.id}", file=sys.stderr)
+        log_error("review_encode_not_found", id=int(args.id))
         session.close()
         return 1
 
@@ -4589,15 +4611,19 @@ def cmd_review_reject(args: argparse.Namespace) -> int:
     session.commit()
     session.close()
 
-    print(f"Rejected: {source_path.name}")
-
     # Optionally delete the output file
+    deleted = False
     if args.delete and output_path and output_path.exists():
         output_path.unlink()
-        print(f"  Deleted: {output_path}")
-    elif output_path and output_path.exists():
-        print(f"  Output still exists: {output_path}")
-        print("  Use --delete to remove the output file")
+        deleted = True
+
+    log_info(
+        "review_rejected",
+        id=int(args.id),
+        source=str(source_path),
+        output=str(output_path) if output_path else None,
+        deleted=deleted,
+    )
 
     return 0
 
@@ -4880,11 +4906,11 @@ def cmd_compare_clips(args: argparse.Namespace) -> int:
     encoded_path = pathlib.Path(args.encoded).resolve()
 
     if not source_path.exists():
-        print(f"[error] Source file not found: {source_path}", file=sys.stderr)
+        log_error("compare_source_missing", source=str(source_path))
         return 1
 
     if not encoded_path.exists():
-        print(f"[error] Encoded file not found: {encoded_path}", file=sys.stderr)
+        log_error("compare_encoded_missing", encoded=str(encoded_path))
         return 1
 
     # Determine output location
@@ -4901,7 +4927,7 @@ def cmd_compare_clips(args: argparse.Namespace) -> int:
     # Get duration for seeking
     source_info = probe_media(source_path)
     if source_info is None:
-        print(f"[error] Failed to probe source: {source_path}", file=sys.stderr)
+        log_error("compare_probe_failed", source=str(source_path))
         return 1
 
     duration = source_info.duration_seconds or 60
@@ -4912,10 +4938,14 @@ def cmd_compare_clips(args: argparse.Namespace) -> int:
     if seek_pos + clip_duration > duration:
         seek_pos = max(0, duration - clip_duration - 5)
 
-    print("Extracting comparison clips (no re-encoding)...")
-    print(f"  Source: {source_path.name}")
-    print(f"  Encoded: {encoded_path.name}")
-    print(f"  Position: {seek_pos:.1f}s, Duration: {clip_duration}s")
+    log_info(
+        "compare_clips_start",
+        source=str(source_path),
+        encoded=str(encoded_path),
+        clip_dir=str(clip_dir),
+        seek_pos_sec=float(seek_pos),
+        clip_duration_sec=float(clip_duration),
+    )
 
     # Determine output format - try to keep source codec for browser compatibility
     # For H.264 source, keep as .mp4; for AV1 encoded, keep as .mp4
@@ -4924,7 +4954,7 @@ def cmd_compare_clips(args: argparse.Namespace) -> int:
 
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
-        print("[error] ffmpeg not found", file=sys.stderr)
+        log_error("compare_ffmpeg_missing")
         return 1
 
     # Extract source clip - copy video stream (remux to MP4 for browser compatibility)
@@ -4952,12 +4982,12 @@ def cmd_compare_clips(args: argparse.Namespace) -> int:
     ]
 
     try:
-        print("  Extracting source clip...")
+        log_info("compare_extract_clip", kind="source", path=str(source_clip))
         subprocess.run(cmd_source, check=True, capture_output=True)
-        print("  Extracting encoded clip...")
+        log_info("compare_extract_clip", kind="encoded", path=str(encoded_clip))
         subprocess.run(cmd_encoded, check=True, capture_output=True)
     except subprocess.CalledProcessError as e:
-        print(f"[error] Failed to extract clips: {e.stderr.decode()[:500]}", file=sys.stderr)
+        log_error("compare_extract_failed", error=e.stderr.decode()[:500])
         return 1
 
     # Get file sizes for display
@@ -5195,10 +5225,12 @@ def cmd_compare_clips(args: argparse.Namespace) -> int:
 
     html_file.write_text(html_content)
 
-    print("\nComparison ready:")
-    print(f"  Directory: {clip_dir}")
-    print(f"  HTML viewer: {html_file}")
-    print(f"\nOpen with: open \"{html_file}\"")
+    log_info(
+        "compare_ready",
+        clip_dir=str(clip_dir),
+        html=str(html_file),
+        open_cmd=f"open \"{html_file}\"" if platform.system() == "Darwin" else None,
+    )
 
     # Try to open automatically on macOS
     if platform.system() == "Darwin":
@@ -5216,11 +5248,11 @@ def cmd_compare_full(args: argparse.Namespace) -> int:
     encoded_path = pathlib.Path(args.encoded).resolve()
 
     if not source_path.exists():
-        print(f"[error] Source file not found: {source_path}", file=sys.stderr)
+        log_error("compare_source_missing", source=str(source_path))
         return 1
 
     if not encoded_path.exists():
-        print(f"[error] Encoded file not found: {encoded_path}", file=sys.stderr)
+        log_error("compare_encoded_missing", encoded=str(encoded_path))
         return 1
 
     # Determine output location
@@ -5237,9 +5269,12 @@ def cmd_compare_full(args: argparse.Namespace) -> int:
     # Get source info for duration display
     source_info = probe_media(source_path)
 
-    print("Generating comparison HTML (full videos)...")
-    print(f"  Source: {source_path}")
-    print(f"  Encoded: {encoded_path}")
+    log_info(
+        "compare_full_start",
+        source=str(source_path),
+        encoded=str(encoded_path),
+        html=str(html_file),
+    )
 
     generate_compare_html(
         source_path=source_path,
@@ -5248,8 +5283,11 @@ def cmd_compare_full(args: argparse.Namespace) -> int:
         source_info=source_info,
     )
 
-    print(f"\nComparison ready: {html_file}")
-    print(f"Open with: open \"{html_file}\"")
+    log_info(
+        "compare_ready",
+        html=str(html_file),
+        open_cmd=f"open \"{html_file}\"" if platform.system() == "Darwin" else None,
+    )
 
     # Auto-open on macOS
     if platform.system() == "Darwin":
@@ -5269,14 +5307,14 @@ def cmd_review_compare(args: argparse.Namespace) -> int:
     db_path = get_db_path(library_root)
 
     if not db_path.exists():
-        print(f"[error] No database found: {db_path}", file=sys.stderr)
+        log_error("review_db_missing", db=str(db_path))
         return 1
 
     session = init_db(db_path)
     enc = session.get(EncodeResult, args.id)
     if not enc:
         session.close()
-        print(f"[error] No encode found with ID {args.id}", file=sys.stderr)
+        log_error("review_encode_not_found", id=int(args.id))
         return 1
 
     source_path = pathlib.Path(enc.source_path)
@@ -5284,11 +5322,11 @@ def cmd_review_compare(args: argparse.Namespace) -> int:
     session.close()
 
     if not source_path.exists():
-        print(f"[error] Source file not found: {source_path}", file=sys.stderr)
+        log_error("compare_source_missing", source=str(source_path))
         return 1
 
     if not output_path or not output_path.exists():
-        print(f"[error] Encoded file not found: {output_path}", file=sys.stderr)
+        log_error("compare_encoded_missing", encoded=str(output_path) if output_path else None)
         return 1
 
     # Determine output location - put compare videos in _compare subfolder
@@ -5304,7 +5342,7 @@ def cmd_review_compare(args: argparse.Namespace) -> int:
     # Get duration for seeking
     source_info = probe_media(source_path)
     if source_info is None:
-        print(f"[error] Failed to probe source: {source_path}", file=sys.stderr)
+        log_error("compare_probe_failed", source=str(source_path))
         return 1
 
     duration = source_info.duration_seconds or 60
@@ -5318,10 +5356,15 @@ def cmd_review_compare(args: argparse.Namespace) -> int:
 
     clip_duration = args.duration
 
-    print("Generating comparison video...")
-    print(f"  Source: {source_path.name}")
-    print(f"  Encoded: {output_path.name}")
-    print(f"  Position: {positions[0]:.1f}s, Duration: {clip_duration}s")
+    log_info(
+        "compare_video_start",
+        id=int(args.id),
+        source=str(source_path),
+        encoded=str(output_path),
+        position_sec=float(positions[0]),
+        clip_duration_sec=float(clip_duration),
+        output=str(compare_file),
+    )
 
     # Build ffmpeg command for stacked comparison at source resolution
     # Stack vertically with labels (SOURCE on top, ENCODED on bottom)
@@ -5345,10 +5388,13 @@ def cmd_review_compare(args: argparse.Namespace) -> int:
 
     try:
         subprocess.run(cmd, check=True, capture_output=True)
-        print(f"\nComparison saved: {compare_file}")
-        print(f"Open with: open \"{compare_file}\"")
+        log_info(
+            "compare_video_ready",
+            output=str(compare_file),
+            open_cmd=f"open \"{compare_file}\"" if platform.system() == "Darwin" else None,
+        )
     except subprocess.CalledProcessError as e:
-        print(f"[error] Failed to generate comparison: {e.stderr.decode()[:500]}", file=sys.stderr)
+        log_error("compare_video_failed", error=e.stderr.decode()[:500])
         return 1
 
     return 0
