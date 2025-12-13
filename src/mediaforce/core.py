@@ -2924,12 +2924,12 @@ def cmd_run(args: argparse.Namespace) -> int:
             log_info("dry_run", output=str(output_path))
             if use_api and api_client is not None:
                 try:
-                    api_client.release(machine=machine, source_id=int(claimed["id"]), success=True)
+                    api_client.release(machine=machine, source_id=int(claimed["id"]), success=False)
                 except WorkerApiError as e:
                     log_warn("worker_api_release_failed", error=str(e))
             else:
                 assert session is not None
-                release_claim(session, claimed["id"], success=True)
+                release_claim(session, claimed["id"], success=False)
             encoded_count += 1
             continue
 
@@ -5220,6 +5220,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    from mediaforce.config.dotenv import load_dotenv_if_present
+
+    load_dotenv_if_present()
     parser = build_parser()
     args = parser.parse_args()
     return args.func(args)

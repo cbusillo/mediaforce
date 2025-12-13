@@ -2939,6 +2939,9 @@ async def api_stats_summary(days: int = Query(30, ge=7, le=365)):
 
 def main():
     """CLI entry point for `mediaforce-web`."""
+    from mediaforce.config.dotenv import load_dotenv_if_present
+
+    load_dotenv_if_present()
     import argparse
 
     import uvicorn
