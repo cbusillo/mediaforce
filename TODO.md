@@ -126,7 +126,7 @@
 
 - [x] **Dark/Light Theme Toggle**
 - [x] **Mobile-responsive Design Improvements**
-- [ ] **Export Reports** (CSV of completed encodes, space savings)
+- [x] **Export Reports** (CSV of completed encodes, space savings)
 
 ## Completed
 

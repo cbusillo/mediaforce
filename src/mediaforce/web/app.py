@@ -6,6 +6,8 @@ Mediaforce web interface for managing encoding queues and monitoring progress.
 """
 
 import asyncio
+import csv
+import io
 import json
 import os
 import pathlib
@@ -13,12 +15,12 @@ import platform as platform_mod
 import sys
 from contextlib import contextmanager, asynccontextmanager
 from datetime import datetime, timedelta
-from typing import Optional, Callable, Any
+from typing import Optional, Callable, Any, Iterable, Iterator, Sequence
 from mediaforce.config.logging import configure_logging, env_log_config
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
@@ -80,6 +82,30 @@ IS_MAC = platform_mod.system() == "Darwin"
 configure_logging(env_log_config(component="mediaforce"))
 logger = configure_logging(env_log_config(component="mediaforce.web"))
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[3]
+
+
+def _iter_csv_bytes(header: Sequence[str], rows: Iterable[Sequence[object]]) -> Iterator[bytes]:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(list(header))
+    yield buffer.getvalue().encode("utf-8")
+    buffer.seek(0)
+    buffer.truncate(0)
+
+    for row in rows:
+        writer.writerow(list(row))
+        yield buffer.getvalue().encode("utf-8")
+        buffer.seek(0)
+        buffer.truncate(0)
+
+
+def _csv_response(*, filename: str, header: Sequence[str], rows: Iterable[Sequence[object]]) -> StreamingResponse:
+    response = StreamingResponse(
+        _iter_csv_bytes(header, rows),
+        media_type="text/csv; charset=utf-8",
+    )
+    response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
 
 
 def get_default_library_path() -> str:
@@ -1458,6 +1484,166 @@ async def completed(request: Request):
         "encodes": encodes,
         "nav_status": _nav_status(),
     })
+
+
+@app.get("/export/completed.csv")
+async def export_completed_csv(
+    limit: int = Query(5000, ge=1, le=50_000),
+):
+    """Export completed (promoted) encodes as CSV."""
+
+    with session_scope() as session:
+        rows = session.exec(
+            select(
+                EncodeResult.id,
+                MediaItem.library_id,
+                MediaItem.path,
+                MediaItem.size_bytes,
+                EncodeResult.output_path,
+                EncodeResult.output_size_bytes,
+                EncodeResult.tier,
+                EncodeResult.vmaf,
+                EncodeResult.machine,
+                EncodeResult.promoted_at,
+            )
+            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
+            .where(
+                MediaItem.status == "completed",
+                EncodeResult.output_size_bytes.is_not(None),  # type: ignore[attr-defined]
+                EncodeResult.output_size_bytes > 0,
+            )
+            .order_by(desc(EncodeResult.promoted_at))  # type: ignore[attr-defined]
+            .limit(limit)
+        ).all()
+
+    header = (
+        "encode_id",
+        "library_id",
+        "filename",
+        "source_path",
+        "output_path",
+        "source_bytes",
+        "output_bytes",
+        "saved_bytes",
+        "reduction_pct",
+        "tier",
+        "vmaf",
+        "machine",
+        "promoted_at",
+    )
+
+    def iter_rows() -> Iterator[Sequence[object]]:
+        for rid, library_id, source_path, source_bytes, output_path, output_bytes, tier, vmaf, machine, promoted_at in rows:
+            saved_bytes = None
+            reduction_pct = None
+            if source_bytes and output_bytes:
+                saved_bytes = int(source_bytes - output_bytes)
+                if source_bytes > 0:
+                    reduction_pct = round((1.0 - (output_bytes / source_bytes)) * 100.0, 3)
+
+            yield (
+                rid,
+                library_id,
+                pathlib.Path(source_path).name,
+                source_path,
+                output_path,
+                int(source_bytes or 0),
+                int(output_bytes or 0),
+                saved_bytes if saved_bytes is not None else "",
+                reduction_pct if reduction_pct is not None else "",
+                tier or "",
+                round(float(vmaf), 3) if vmaf is not None else "",
+                machine or "",
+                promoted_at or "",
+            )
+
+    return _csv_response(filename="mediaforce-completed.csv", header=header, rows=iter_rows())
+
+
+@app.get("/export/stats/daily.csv")
+async def export_stats_daily_csv(
+    days: int = Query(30, ge=7, le=365),
+):
+    """Export daily stats (encodes + savings) as CSV."""
+
+    since = datetime.now() - timedelta(days=days - 1)
+    with session_scope() as session:
+        repo = StatsRepository(session)
+        window_totals = repo.totals(since=since)
+        daily_stats = repo.daily(days=days)
+
+    header = (
+        "day",
+        "encodes",
+        "source_bytes",
+        "output_bytes",
+        "saved_bytes",
+        "avg_reduction_pct",
+        "avg_speed_x",
+    )
+
+    def iter_rows() -> Iterator[Sequence[object]]:
+        for row in daily_stats:
+            yield (
+                row.day.isoformat(),
+                row.encodes,
+                row.source_bytes,
+                row.output_bytes,
+                row.saved_bytes,
+                round(float(row.avg_reduction) * 100.0, 4) if row.avg_reduction is not None else "",
+                round(float(row.avg_speed), 4) if row.avg_speed is not None else "",
+            )
+
+        yield ()
+        yield (
+            "WINDOW_TOTAL",
+            window_totals.encodes,
+            window_totals.source_bytes,
+            window_totals.output_bytes,
+            window_totals.saved_bytes,
+            round(float(window_totals.avg_reduction) * 100.0, 4) if window_totals.avg_reduction is not None else "",
+            round(float(window_totals.avg_speed), 4) if window_totals.avg_speed is not None else "",
+        )
+
+    return _csv_response(
+        filename=f"mediaforce-stats-daily-{days}d.csv",
+        header=header,
+        rows=iter_rows(),
+    )
+
+
+@app.get("/export/stats/tiers.csv")
+async def export_stats_tiers_csv(
+    days: int = Query(30, ge=7, le=365),
+):
+    """Export tier stats (encodes + savings) as CSV."""
+
+    since = datetime.now() - timedelta(days=days - 1)
+    with session_scope() as session:
+        repo = StatsRepository(session)
+        tier_stats = repo.reduction_by_tier(since=since)
+
+    header = (
+        "tier",
+        "encodes",
+        "saved_bytes",
+        "avg_reduction_pct",
+    )
+
+    def iter_rows() -> Iterator[Sequence[object]]:
+        for row in tier_stats:
+            yield (
+                row.tier,
+                row.encodes,
+                row.saved_bytes,
+                round(float(row.avg_reduction) * 100.0, 4) if row.avg_reduction is not None else "",
+            )
+
+    return _csv_response(
+        filename=f"mediaforce-stats-tiers-{days}d.csv",
+        header=header,
+        rows=iter_rows(),
+    )
 
 
 @app.get("/review", response_class=HTMLResponse)

@@ -4,7 +4,10 @@
     <h1 class="text-3xl font-semibold text-foreground">Completed Encodes</h1>
     <p class="text-foreground-muted text-sm">Recently promoted outputs (latest 100).</p>
   </div>
-  <div class="pill hidden md:inline-flex">Auto-refresh disabled; reload for latest.</div>
+  <div class="flex items-center gap-2">
+    <a class="btn btn-sm" href="/export/completed.csv" download>Download CSV</a>
+    <div class="pill hidden md:inline-flex">Auto-refresh disabled; reload for latest.</div>
+  </div>
 </div>
 
 <div class="card shadow border border-surface-subtle/80">
