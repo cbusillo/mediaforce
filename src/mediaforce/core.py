@@ -2976,6 +2976,35 @@ def cmd_run(args: argparse.Namespace) -> int:
                 assert session is not None
                 result = run_ffmpeg_with_progress(cmd, session, progress_id, duration_sec)
 
+            if result.returncode != 0 and args.hw_decode:
+                stderr = result.stderr or ""
+                hwaccel_failed = any(
+                    token in stderr
+                    for token in (
+                        "cuInit(0) failed",
+                        "CUDA_ERROR",
+                        "No device available for decoder",
+                        "Device setup failed",
+                    )
+                )
+                used_cuda = any(part == "cuda" for part in (result.args or []))
+                if hwaccel_failed and used_cuda:
+                    log_warn("hw_decode_failed_fallback", machine=machine)
+                    cmd = build_ffmpeg_command(
+                        source_path,
+                        output_path,
+                        settings,
+                        info,
+                        max_height=target_height,
+                        hw_decode=False,
+                        hw_encode=args.hw_encode,
+                    )
+                    if use_api and api_client is not None:
+                        result = run_ffmpeg_with_progress_api(cmd, api_client, progress_id, duration_sec)
+                    else:
+                        assert session is not None
+                        result = run_ffmpeg_with_progress(cmd, session, progress_id, duration_sec)
+
             if result.returncode != 0:
                 raise subprocess.CalledProcessError(
                     result.returncode, result.args, result.stdout, result.stderr
