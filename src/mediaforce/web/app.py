@@ -2546,6 +2546,7 @@ async def api_active_encodes(request: Request):
     library_root = request.query_params.get("library") or resolve_existing_library_root()
     if not library_root:
         return {"success": True, "encodes": []}
+    encodes: list[dict[str, Any]] = []
     with session_scope() as session:
         rows = session.exec(
             select(EncodeProgress, MediaItem.size_bytes, MediaItem.video_codec)
@@ -2554,25 +2555,24 @@ async def api_active_encodes(request: Request):
             .order_by(EncodeProgress.started_at.desc())
         ).all()
 
-    encodes = []
-    for row in rows:
-        prog = row[0]
-        eta_display = format_duration(prog.eta_seconds) if prog.eta_seconds and prog.eta_seconds > 0 else None
-        encodes.append({
-            "filename": pathlib.Path(prog.source_path).name if prog.source_path else "Unknown",
-            "path": prog.source_path,
-            "show_name": extract_show_name(prog.source_path) if prog.source_path else None,
-            "machine": prog.machine,
-            "tier": prog.tier,
-            "started_at": prog.started_at[:16] if prog.started_at else None,
-            "percent_complete": prog.percent_complete or 0,
-            "speed": prog.speed or 0,
-            "eta": eta_display,
-            "phase": prog.phase or "encoding",
-            "frame": prog.frame or 0,
-            "total_frames": prog.total_frames,
-            "fps": prog.fps or 0,
-        })
+        for row in rows:
+            prog = row[0]
+            eta_display = format_duration(prog.eta_seconds) if prog.eta_seconds and prog.eta_seconds > 0 else None
+            encodes.append({
+                "filename": pathlib.Path(prog.source_path).name if prog.source_path else "Unknown",
+                "path": prog.source_path,
+                "show_name": extract_show_name(prog.source_path) if prog.source_path else None,
+                "machine": prog.machine,
+                "tier": prog.tier,
+                "started_at": prog.started_at[:16] if prog.started_at else None,
+                "percent_complete": prog.percent_complete or 0,
+                "speed": prog.speed or 0,
+                "eta": eta_display,
+                "phase": prog.phase or "encoding",
+                "frame": prog.frame or 0,
+                "total_frames": prog.total_frames,
+                "fps": prog.fps or 0,
+            })
 
     return {"success": True, "encodes": encodes}
 
