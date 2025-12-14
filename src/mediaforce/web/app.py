@@ -1753,13 +1753,14 @@ async def shows(request: Request):
                     "name": show_name,
                     "total": 0,
                     "pending": 0,
+                    "encoding": 0,
                     "encoded": 0,
                     "completed": 0,
                     "tiers": {},
                 }
 
             show_data[show_name]["total"] += 1
-            if status in ["pending", "encoded", "completed"]:
+            if status in ["pending", "encoding", "encoded", "completed"]:
                 show_data[show_name][status] += 1
 
             if detected_tier:
@@ -2569,7 +2570,7 @@ async def api_active_encodes(request: Request):
             "eta": eta_display,
             "phase": prog.phase or "encoding",
             "frame": prog.frame or 0,
-            "total_frames": prog.total_frames or 0,
+            "total_frames": prog.total_frames,
             "fps": prog.fps or 0,
         })
 

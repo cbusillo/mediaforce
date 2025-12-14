@@ -37,6 +37,7 @@
           <th>Show Name</th>
           <th>Episodes</th>
           <th>Pending</th>
+          <th>Encoding</th>
           <th>Encoded</th>
           <th>Completed</th>
           <th>Detected Tier</th>
@@ -54,6 +55,7 @@
           <td>{{ show.name }}</td>
           <td>{{ show.total }}</td>
           <td>{{ show.pending }}</td>
+          <td>{{ show.encoding }}</td>
           <td>{{ show.encoded }}</td>
           <td>{{ show.completed }}</td>
           <td class="tier-{{ show.detected_tier }}">{{ show.detected_tier or '-' }}</td>

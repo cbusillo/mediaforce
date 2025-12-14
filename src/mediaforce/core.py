@@ -2936,6 +2936,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         log_info("encode_launch", output=output_path.name)
         active_slots += 1
 
+        total_frames: Optional[int] = None
+        if info.video_framerate and info.duration_seconds and info.video_framerate > 0 and info.duration_seconds > 0:
+            try:
+                total_frames = int(info.video_framerate * info.duration_seconds)
+            except Exception:
+                total_frames = None
+
         # Start progress tracking
         duration_sec = float(info.duration_seconds or 0.0)
         if use_api and api_client is not None:
@@ -2946,6 +2953,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 machine=machine,
                 tier=tier,
                 duration_sec=duration_sec,
+                total_frames=total_frames,
             )
         else:
             assert session is not None
@@ -2957,6 +2965,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 machine,
                 tier,
                 duration_sec,
+                total_frames=total_frames,
             )
 
         try:

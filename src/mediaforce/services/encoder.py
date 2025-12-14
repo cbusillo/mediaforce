@@ -3,6 +3,7 @@ from __future__ import annotations
 import pathlib
 import platform as platform_mod
 import re
+import shutil
 import subprocess
 import time
 from datetime import datetime
@@ -53,8 +54,10 @@ def parse_ffmpeg_progress(line: str) -> dict:
         except ValueError:
             pass
     elif key == "out_time_ms":
+        # Despite the name, ffmpeg reports out_time_ms in microseconds.
+        # (It mirrors out_time_us; see `ffmpeg -progress` output.)
         try:
-            data["time_encoded_sec"] = int(value) / 1_000
+            data["time_encoded_sec"] = int(value) / 1_000_000
         except ValueError:
             pass
     elif key == "speed":
@@ -226,7 +229,7 @@ def build_ffmpeg_command(
         elif system == "linux":
             # Only use CUDA when an NVIDIA device is present. Many Linux hosts
             # (including containerized workers) do not have CUDA available.
-            if pathlib.Path("/dev/nvidia0").exists():
+            if pathlib.Path("/dev/nvidia0").exists() and shutil.which("nvidia-smi"):
                 cmd.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
 
     cmd.extend(["-i", str(input_path)])
