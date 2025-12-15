@@ -19,6 +19,15 @@ def get_media_roots() -> list[str]:
     return MEDIA_ROOTS_LINUX
 
 
+def default_transcode_root() -> str:
+    """Return the default transcode root for the current platform."""
+
+    roots = get_media_roots()
+    if not roots:
+        return "transcode"
+    return str(pathlib.Path(roots[0]) / "transcode")
+
+
 def normalize_path(path: pathlib.Path) -> pathlib.Path:
     """Normalize path between macOS (/Volumes/...) and Linux (/mnt/...) mount points."""
 
@@ -96,4 +105,3 @@ def find_library_for_path(
         except ValueError:
             continue
     return None, None
-

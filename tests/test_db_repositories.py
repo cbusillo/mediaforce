@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime
 
 from sqlmodel import SQLModel, Session, create_engine
 
@@ -94,6 +95,7 @@ def test_encode_repository_space_saved_and_recent(tmp_path):
 
 def test_progress_repository_workers_and_active(tmp_path):
     with session_for_test(tmp_path) as session:
+        now = datetime.now().isoformat()
         item = MediaItem(path="/tmp/a.mkv", status="encoding", size_bytes=1000, video_codec="h264")
         session.add(item)
         session.commit()
@@ -107,9 +109,9 @@ def test_progress_repository_workers_and_active(tmp_path):
                 output_path="/tmp/a.AV1.mp4",
                 machine="worker-1",
                 tier="good",
-                started_at="2025-01-01T00:00:00",
+                started_at=now,
                 percent_complete=12.5,
-                updated_at="2025-01-01T00:01:00",
+                updated_at=now,
             )
         )
         session.commit()
@@ -125,4 +127,3 @@ def test_progress_repository_workers_and_active(tmp_path):
         assert prog.machine == "worker-1"
         assert size_bytes == 1000
         assert codec == "h264"
-

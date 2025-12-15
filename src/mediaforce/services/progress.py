@@ -4,7 +4,7 @@ from typing import Optional
 
 from sqlmodel import Session, delete
 
-from mediaforce.db import EncodeProgress, now_iso
+from mediaforce.db import EncodeProgress, WorkerRegistry, now_iso
 
 
 def start_progress_tracking(
@@ -19,6 +19,14 @@ def start_progress_tracking(
 ) -> int:
     now_str = now_iso()
     session.exec(delete(EncodeProgress).where(EncodeProgress.machine == machine))
+    session.merge(
+        WorkerRegistry(
+            machine=machine,
+            role="encoder",
+            last_seen=now_str,
+            sample_path=source_path,
+        )
+    )
     progress = EncodeProgress(
         source_id=source_id,
         source_path=source_path,
@@ -64,6 +72,15 @@ def update_progress(
     if not progress:
         return
 
+    session.merge(
+        WorkerRegistry(
+            machine=progress.machine,
+            role="encoder",
+            last_seen=now_str,
+            sample_path=progress.source_path,
+        )
+    )
+
     progress.frame = frame
     progress.fps = fps
     progress.speed = speed
@@ -91,4 +108,3 @@ def finish_progress_tracking(
     if progress:
         session.delete(progress)
         session.commit()
-

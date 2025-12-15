@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any
 from typing import Optional
 
@@ -15,10 +16,47 @@ class ProgressRepository:
     def __init__(self, session: Session):
         self.session = session
 
-    def list_workers(self) -> list[dict]:
+    def cleanup_stale_progress(self, *, stale_seconds: int = 300) -> int:
+        """Remove progress rows that have stopped updating.
+
+        Workers update progress roughly every couple seconds while encoding.
+        If we don't hear from them for a while, treat the row as stale so the
+        UI doesn't show ghost encodes forever.
+        """
+
+        cutoff = (datetime.now() - timedelta(seconds=int(stale_seconds))).isoformat()
+        updated_at: Any = EncodeProgress.updated_at
+        started_at: Any = EncodeProgress.started_at
+
+        rows = self.session.exec(select(EncodeProgress).where(
+            (updated_at.is_not(None) & (updated_at < cutoff))  # type: ignore[operator]
+            | (updated_at.is_(None) & (started_at < cutoff))  # type: ignore[operator]
+        )).all()
+
+        if not rows:
+            return 0
+
+        for row in rows:
+            self.session.delete(row)
+        self.session.commit()
+        return len(rows)
+
+    def list_workers(self, *, stale_seconds: int = 300, online_seconds: int = 90) -> list[dict]:
         workers: dict[str, dict] = {}
 
+        self.cleanup_stale_progress(stale_seconds=stale_seconds)
+        now = datetime.now()
+
         for row in self.session.exec(select(WorkerRegistry).order_by(WorkerRegistry.machine)).all():
+            last_seen_dt: Optional[datetime]
+            try:
+                last_seen_dt = datetime.fromisoformat(str(row.last_seen))
+            except Exception:
+                last_seen_dt = None
+            is_online = False
+            if last_seen_dt is not None:
+                is_online = (now - last_seen_dt).total_seconds() <= float(online_seconds)
+
             workers[str(row.machine)] = {
                 "machine": row.machine,
                 "active": 0,
@@ -27,6 +65,7 @@ class ProgressRepository:
                 "sample_path": row.sample_path,
                 "updated_at": row.last_seen,
                 "role": row.role,
+                "state": "waiting" if is_online else "offline",
             }
 
         machine: Any = EncodeProgress.machine
@@ -35,6 +74,7 @@ class ProgressRepository:
         tier: Any = EncodeProgress.tier
         source_path: Any = EncodeProgress.source_path
 
+        cutoff = (now - timedelta(seconds=int(stale_seconds))).isoformat()
         rows = self.session.exec(
             select(
                 machine,
@@ -44,6 +84,7 @@ class ProgressRepository:
                 func.max(tier).label("tier"),
                 func.max(source_path).label("sample_path"),
             )
+            .where((updated_at.is_not(None) & (updated_at >= cutoff)) | updated_at.is_(None))
             .group_by(machine)
             .order_by(machine.collate("NOCASE"))
         ).all()
@@ -58,17 +99,31 @@ class ProgressRepository:
                 "sample_path": row.sample_path or base.get("sample_path"),
                 "updated_at": row.updated_at or base.get("updated_at"),
             })
+            if (row.active or 0) > 0:
+                base["state"] = "encoding"
             workers[machine_name] = base
 
         return sorted(workers.values(), key=lambda w: str(w.get("machine") or "").lower())
 
-    def list_active(self) -> list[tuple[EncodeProgress, Optional[int], Optional[str]]]:
+    def list_active(
+        self,
+        *,
+        library_root: Optional[str] = None,
+        stale_seconds: int = 300,
+    ) -> list[tuple[EncodeProgress, Optional[int], Optional[str]]]:
         started_at: Any = EncodeProgress.started_at
-        return (
-            self.session.exec(
-                select(EncodeProgress, MediaItem.size_bytes, MediaItem.video_codec)
-                .select_from(EncodeProgress)
-                .join(MediaItem, EncodeProgress.source_id == MediaItem.id, isouter=True)
-                .order_by(started_at.desc())
-            ).all()
+
+        self.cleanup_stale_progress(stale_seconds=stale_seconds)
+        cutoff = (datetime.now() - timedelta(seconds=int(stale_seconds))).isoformat()
+        updated_at: Any = EncodeProgress.updated_at
+
+        stmt = (
+            select(EncodeProgress, MediaItem.size_bytes, MediaItem.video_codec)
+            .select_from(EncodeProgress)
+            .join(MediaItem, EncodeProgress.source_id == MediaItem.id, isouter=True)
+            .where((updated_at.is_not(None) & (updated_at >= cutoff)) | updated_at.is_(None))
+            .order_by(started_at.desc())
         )
+        if library_root:
+            stmt = stmt.where(EncodeProgress.source_path.like(f"{library_root}/%"))
+        return self.session.exec(stmt).all()

@@ -63,6 +63,7 @@ from mediaforce.db import (
 )
 
 from mediaforce.config.paths import (
+    default_transcode_root,
     find_library_for_path,
     get_library_root,
     get_media_roots,
@@ -4824,8 +4825,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("path", help="Library path (e.g., /Volumes/media/tv)")
     p_run.add_argument(
         "-o", "--output",
-        default="/Volumes/media/transcode",
-        help="Output directory root (default: /Volumes/media/transcode)",
+        default=default_transcode_root(),
+        help=f"Output directory root (default: {default_transcode_root()})",
     )
     p_run.add_argument(
         "--until",
@@ -5040,8 +5041,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_promote.add_argument("path", help="Library path to promote (e.g., /Volumes/media/tv)")
     p_promote.add_argument(
         "--transcode-root",
-        default="/Volumes/media/transcode",
-        help="Root of transcode folder (default: /Volumes/media/transcode)",
+        default=default_transcode_root(),
+        help=f"Root of transcode folder (default: {default_transcode_root()})",
     )
     p_promote.add_argument(
         "--dry-run",
@@ -5136,8 +5137,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify_batch.add_argument("path", help="Library path (e.g., /Volumes/media/tv)")
     p_verify_batch.add_argument(
         "--transcode-root",
-        default="/Volumes/media/transcode",
-        help="Root of transcode folder (default: /Volumes/media/transcode)",
+        default=default_transcode_root(),
+        help=f"Root of transcode folder (default: {default_transcode_root()})",
     )
     p_verify_batch.add_argument(
         "--sample-duration",

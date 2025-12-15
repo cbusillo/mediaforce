@@ -69,6 +69,8 @@ class WorkerApiClient:
             raise WorkerApiError(f"HTTP {e.code} for {url}: {body}") from e
         except urllib.error.URLError as e:
             raise WorkerApiError(f"Request failed for {url}: {e}") from e
+        except Exception as e:
+            raise WorkerApiError(f"Request failed for {url}: {e}") from e
 
     def claim(self, *, machine: str) -> Optional[WorkerClaim]:
         data = self._request_json("POST", "/api/worker/claim", {"machine": machine})

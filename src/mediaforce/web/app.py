@@ -725,23 +725,10 @@ def build_pagination_url(request: Request) -> Callable[[int], str]:
 async def dashboard(request: Request):
     """Main dashboard with overview stats."""
     host_name = platform_mod.node()
-    library_root = resolve_existing_library_root()
+    library_root = resolve_existing_library_root() or ""
+    error = None
     if not library_root:
-        return templates.TemplateResponse("dashboard.html", {
-            "request": request,
-            "title": "Dashboard",
-            "active": "dashboard",
-            "stats": {"pending": 0, "encoding": 0, "encoded": 0, "completed": 0, "space_saved_gb": "0"},
-            "active_encodes": [],
-            "recent_completions": [],
-            "tier_counts": {},
-            "lib_status": get_library_status(),
-            "watch_status": _watch_status_snapshot(),
-            "workers": [],
-            "host_name": host_name,
-            "nav_status": _nav_status(),
-            "error": "No accessible library root found. Mount /Volumes or /mnt media shares.",
-        })
+        error = "No accessible library root found. Mount /Volumes or /mnt media shares."
 
     with session_scope() as session:
         media_repo = MediaRepository(session)
@@ -818,6 +805,7 @@ async def dashboard(request: Request):
         "nav_status": _nav_status(),
         "library_root": library_root,
         "host_name": host_name,
+        "error": error,
     })
 
 
@@ -2543,17 +2531,10 @@ async def api_get_settings():
 @app.get("/api/active-encodes")
 async def api_active_encodes(request: Request):
     """Return live encode progress for dashboard polling."""
-    library_root = request.query_params.get("library") or resolve_existing_library_root()
-    if not library_root:
-        return {"success": True, "encodes": []}
+    library_root = (request.query_params.get("library") or "").strip()
     encodes: list[dict[str, Any]] = []
     with session_scope() as session:
-        rows = session.exec(
-            select(EncodeProgress, MediaItem.size_bytes, MediaItem.video_codec)
-            .select_from(EncodeProgress)
-            .join(MediaItem, EncodeProgress.source_id == MediaItem.id, isouter=True)
-            .order_by(EncodeProgress.started_at.desc())
-        ).all()
+        rows = ProgressRepository(session).list_active(library_root=library_root)
 
         for row in rows:
             prog = row[0]
