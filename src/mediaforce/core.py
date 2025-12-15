@@ -2525,16 +2525,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     except Exception:
         path = raw_path
 
-    try:
-        path.stat()
-    except PermissionError:
-        # Some hosts (notably SMB mounts) may allow direct file access while
-        # denying directory listing/stat operations. In that case, proceed.
-        pass
-    except FileNotFoundError:
-        log_error("run_path_missing", path=str(path))
-        return 1
-
     library_root = get_library_root(path)
 
     api_url = getattr(args, "api_url", None) or os.getenv("MEDIAFORCE_API_URL")
@@ -2547,6 +2537,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         api_client = WorkerApiClient(api_url)
         log_info("worker_api_enabled", url=api_url)
     else:
+        try:
+            path.stat()
+        except PermissionError:
+            pass
+        except FileNotFoundError:
+            log_error("run_path_missing", path=str(path))
+            return 1
+
         db_path = get_db_path(library_root)
         if not db_path.exists():
             log_error("run_db_missing", db=str(db_path))
@@ -2638,6 +2636,16 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     while True:
         check_autoupdate()
+        if use_api:
+            try:
+                path.stat()
+            except PermissionError:
+                pass
+            except FileNotFoundError:
+                log_warn("run_library_unavailable", path=str(path))
+                time.sleep(30)
+                continue
+
         if until_time and datetime.now() >= until_time:
             log_info("run_until_reached", until=args.until)
             break
