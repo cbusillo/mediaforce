@@ -2636,15 +2636,14 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     while True:
         check_autoupdate()
+        library_available = True
         if use_api:
             try:
                 path.stat()
             except PermissionError:
-                pass
+                library_available = True
             except FileNotFoundError:
-                log_warn("run_library_unavailable", path=str(path))
-                time.sleep(30)
-                continue
+                library_available = False
 
         if until_time and datetime.now() >= until_time:
             log_info("run_until_reached", until=args.until)
@@ -2664,7 +2663,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         override_tier: Optional[str] = None
         if use_api and api_client is not None:
             try:
-                claim_result = api_client.claim(machine=machine)
+                claim_result = api_client.claim(
+                    machine=machine,
+                    available=library_available,
+                    sample_path=(str(path) if not library_available else None),
+                )
             except WorkerApiError as e:
                 log_error("worker_api_claim_failed", error=str(e))
                 break
@@ -2682,6 +2685,10 @@ def cmd_run(args: argparse.Namespace) -> int:
 
             claim_obj = claim_result.claim
             if claim_obj is None:
+                if not library_available:
+                    log_warn("run_library_unavailable", path=str(path))
+                    time.sleep(30)
+                    continue
                 event = "worker_paused" if claim_result.control_mode == "drain" else "queue_empty"
                 log_info(event)
                 if args.dry_run:

@@ -78,8 +78,17 @@ class WorkerApiClient:
         except Exception as e:
             raise WorkerApiError(f"Request failed for {url}: {e}") from e
 
-    def claim(self, *, machine: str) -> WorkerClaimResult:
-        data = self._request_json("POST", "/api/worker/claim", {"machine": machine})
+    def claim(
+        self,
+        *,
+        machine: str,
+        available: bool = True,
+        sample_path: Optional[str] = None,
+    ) -> WorkerClaimResult:
+        payload: dict[str, Any] = {"machine": machine, "available": bool(available)}
+        if sample_path:
+            payload["sample_path"] = str(sample_path)
+        data = self._request_json("POST", "/api/worker/claim", payload)
         if not data.get("success"):
             raise WorkerApiError(data.get("error") or "claim failed")
 

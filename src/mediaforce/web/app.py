@@ -494,6 +494,8 @@ class ApplyTierRequest(BaseModel):
 
 class WorkerClaimRequest(BaseModel):
     machine: str
+    available: bool = True
+    sample_path: Optional[str] = None
 
 
 class WorkerReleaseRequest(BaseModel):
@@ -2399,7 +2401,18 @@ async def api_worker_claim(data: WorkerClaimRequest):
 
     with session_scope() as session:
         mode = _effective_worker_mode(session, machine)
-        session.merge(WorkerRegistry(machine=machine, role="encoder", last_seen=now_iso()))
+        reported_sample_path = (data.sample_path or "").strip() if data.sample_path else None
+        session.merge(
+            WorkerRegistry(
+                machine=machine,
+                role="encoder",
+                last_seen=now_iso(),
+                sample_path=reported_sample_path,
+            )
+        )
+
+        if not bool(getattr(data, "available", True)):
+            return {"success": True, "claimed": None, "control": {"mode": mode}}
 
         if mode in {"drain", "stop"}:
             return {"success": True, "claimed": None, "control": {"mode": mode}}
@@ -2413,7 +2426,7 @@ async def api_worker_claim(data: WorkerClaimRequest):
                 machine=machine,
                 role="encoder",
                 last_seen=now_iso(),
-                sample_path=claimed.get("path"),
+                sample_path=claimed.get("path") or reported_sample_path,
             )
         )
 
