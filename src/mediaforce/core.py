@@ -2411,23 +2411,34 @@ def run_ffmpeg_with_progress_api(
         bufsize=1,
     )
 
+    import queue
+    import threading
+
+    stdout_lines: queue.Queue[str] = queue.Queue()
+
+    def _drain_stdout() -> None:
+        try:
+            if process.stdout is None:
+                return
+            for line in process.stdout:
+                stdout_lines.put(line)
+        except Exception:
+            return
+
+    threading.Thread(target=_drain_stdout, daemon=True).start()
+
     accumulated: dict[str, Any] = {}
     last_update = time.time()
     last_control_check = time.time()
     assert process.stdout is not None
 
     while True:
-        line = ""
         try:
-            import select
+            line = stdout_lines.get(timeout=1.0)
+        except queue.Empty:
+            line = ""
 
-            ready, _, _ = select.select([process.stdout], [], [], 1.0)
-            if ready:
-                line = process.stdout.readline()
-        except Exception:
-            line = process.stdout.readline()
-
-        if not line and process.poll() is not None:
+        if not line and process.poll() is not None and stdout_lines.empty():
             break
 
         if line:
