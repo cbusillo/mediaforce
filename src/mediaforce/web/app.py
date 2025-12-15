@@ -2662,35 +2662,38 @@ async def api_active_encodes(request: Request):
                 "fps": prog.fps or 0,
             })
 
-        # Fallback: if workers have claimed items but the master missed
-        # progress initialization (e.g., restart during encode), show a minimal
+        # Fallback: if workers have claimed items but the master missed progress
+        # initialization (e.g., master restart during encode), show a minimal
         # placeholder so the dashboard still lists the machine.
-        if not encodes:
-            cutoff = (datetime.now() - timedelta(hours=8)).isoformat()
-            stmt = select(MediaItem).where(
-                MediaItem.status == "encoding",
-                MediaItem.claimed_by.is_not(None),  # type: ignore[union-attr]
-                MediaItem.claimed_at.is_not(None),  # type: ignore[union-attr]
-                MediaItem.claimed_at >= cutoff,  # type: ignore[operator]
-            )
-            if library_root:
-                stmt = stmt.where(MediaItem.path.like(f"{library_root}/%"))
-            for item in session.exec(stmt).all():
-                encodes.append({
-                    "filename": pathlib.Path(item.path).name,
-                    "path": item.path,
-                    "show_name": extract_show_name(item.path),
-                    "machine": item.claimed_by,
-                    "tier": item.detected_tier,
-                    "started_at": (item.claimed_at or "")[:16] if item.claimed_at else None,
-                    "percent_complete": 0,
-                    "speed": 0,
-                    "eta": None,
-                    "phase": "starting",
-                    "frame": 0,
-                    "total_frames": None,
-                    "fps": 0,
-                })
+        existing_keys = {(e.get("machine"), e.get("path")) for e in encodes}
+        cutoff = (datetime.now() - timedelta(hours=8)).isoformat()
+        stmt = select(MediaItem).where(
+            MediaItem.status == "encoding",
+            MediaItem.claimed_by.is_not(None),  # type: ignore[union-attr]
+            MediaItem.claimed_at.is_not(None),  # type: ignore[union-attr]
+            MediaItem.claimed_at >= cutoff,  # type: ignore[operator]
+        )
+        if library_root:
+            stmt = stmt.where(MediaItem.path.like(f"{library_root}/%"))
+        for item in session.exec(stmt).all():
+            key = (item.claimed_by, item.path)
+            if key in existing_keys:
+                continue
+            encodes.append({
+                "filename": pathlib.Path(item.path).name,
+                "path": item.path,
+                "show_name": extract_show_name(item.path),
+                "machine": item.claimed_by,
+                "tier": item.detected_tier,
+                "started_at": (item.claimed_at or "")[:16] if item.claimed_at else None,
+                "percent_complete": 0,
+                "speed": 0,
+                "eta": None,
+                "phase": "starting",
+                "frame": 0,
+                "total_frames": None,
+                "fps": 0,
+            })
 
     return {"success": True, "encodes": encodes}
 
