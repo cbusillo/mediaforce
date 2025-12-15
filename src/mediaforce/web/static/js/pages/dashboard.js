@@ -38,7 +38,8 @@
         machine && machine !== "-"
           ? `<button class="btn btn-xs btn-success" onclick="resumeWorker('${safeMachine}')">Run</button>` +
             `<button class="btn btn-xs btn-warning" onclick="pauseWorker('${safeMachine}')">Pause</button>` +
-            `<button class="btn btn-xs btn-danger" onclick="stopWorker('${safeMachine}')">Stop</button>`
+            `<button class="btn btn-xs btn-danger" onclick="stopWorker('${safeMachine}')">Stop</button>` +
+            `<button class="btn btn-xs btn-danger" onclick="stopWorkerNow('${safeMachine}')">Stop Now</button>`
           : "";
       const message = w.sample_path || w.samplePath || "-";
       tr.innerHTML = `
@@ -144,6 +145,13 @@
   };
   window.stopWorker = async function (machine) {
     await window.mfApi.postJson("/api/worker-control/worker", { machine, mode: "stop" });
+    await refreshWorkers();
+  };
+
+  window.stopWorkerNow = async function (machine) {
+    const ok = window.confirm(`Stop the current encode on ${machine} right now? This will requeue the job.`);
+    if (!ok) return;
+    await window.mfApi.postJson("/api/worker-control/stop-now", { machine });
     await refreshWorkers();
   };
 

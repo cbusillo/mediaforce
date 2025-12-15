@@ -243,6 +243,15 @@ class WorkerControl(SQLModel, table=True):  # type: ignore[misc,call-arg]
     updated_at: str = Field(default_factory=now_iso)
 
 
+class WorkerCommand(SQLModel, table=True):  # type: ignore[misc,call-arg]
+    __tablename__ = "worker_commands"
+
+    key: str = Field(primary_key=True)
+    stop_now: bool = False
+    requested_at: Optional[str] = None
+    updated_at: str = Field(default_factory=now_iso)
+
+
 class ShowOverride(SQLModel, table=True):  # type: ignore[misc,call-arg]
     __tablename__ = "show_overrides"
 

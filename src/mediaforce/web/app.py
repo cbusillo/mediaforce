@@ -60,6 +60,7 @@ from mediaforce.db import (
     EncodeResult,
     ShowOverride,
     WorkerRegistry,
+    WorkerCommand,
     WorkerControl,
     ProfileEvaluation,
     ProfileSettingsSource,
@@ -531,6 +532,15 @@ class WorkerControlUpdateRequest(BaseModel):
 class WorkerControlPerMachineRequest(BaseModel):
     machine: str
     mode: Optional[str] = None  # run|drain|stop; None clears override
+
+
+class WorkerStopNowRequest(BaseModel):
+    machine: str
+
+
+class WorkerControlAckRequest(BaseModel):
+    machine: str
+    action: str = "stop_now"
 
 
 class WorkerMetricsPayload(BaseModel):
@@ -2387,6 +2397,56 @@ async def api_worker_control_worker(data: WorkerControlPerMachineRequest):
         return {"success": True, "machine": machine, "mode": mode}
 
 
+@app.post("/api/worker-control/stop-now")
+async def api_worker_control_stop_now(data: WorkerStopNowRequest):
+    machine = (data.machine or "").strip()
+    if not machine:
+        return {"success": False, "error": "machine required"}
+
+    key = f"worker:{machine}"
+    now_str = now_iso()
+    with session_scope() as session:
+        active = session.exec(select(EncodeProgress).where(EncodeProgress.machine == machine)).first()
+        if not active:
+            return {"success": False, "error": "worker is not encoding"}
+
+        session.merge(WorkerCommand(key=key, stop_now=True, requested_at=now_str, updated_at=now_str))
+        session.commit()
+    return {"success": True, "machine": machine}
+
+
+@app.get("/api/worker/control", dependencies=[Depends(_require_worker_api_auth)])
+async def api_worker_control(machine: str = Query("")):
+    machine = (machine or "").strip()
+    if not machine:
+        return {"success": False, "error": "machine required"}
+
+    with session_scope() as session:
+        mode = _effective_worker_mode(session, machine)
+        cmd = session.get(WorkerCommand, f"worker:{machine}")
+        stop_now = bool(cmd.stop_now) if cmd else False
+        return {"success": True, "control": {"mode": mode, "stop_now": stop_now}}
+
+
+@app.post("/api/worker/control/ack", dependencies=[Depends(_require_worker_api_auth)])
+async def api_worker_control_ack(data: WorkerControlAckRequest):
+    machine = (data.machine or "").strip()
+    if not machine:
+        return {"success": False, "error": "machine required"}
+    if (data.action or "").strip() != "stop_now":
+        return {"success": False, "error": "unsupported action"}
+
+    key = f"worker:{machine}"
+    with session_scope() as session:
+        row = session.get(WorkerCommand, key)
+        if row:
+            row.stop_now = False
+            row.updated_at = now_iso()
+            session.add(row)
+            session.commit()
+    return {"success": True}
+
+
 @app.post("/api/worker/claim", dependencies=[Depends(_require_worker_api_auth)])
 async def api_worker_claim(data: WorkerClaimRequest):
     """Claim the next pending item for a worker without direct DB access."""
@@ -2397,6 +2457,8 @@ async def api_worker_claim(data: WorkerClaimRequest):
 
     with session_scope() as session:
         mode = _effective_worker_mode(session, machine)
+        cmd = session.get(WorkerCommand, f"worker:{machine}")
+        stop_now = bool(cmd.stop_now) if cmd else False
         reported_sample_path = (data.sample_path or "").strip() if data.sample_path else None
         session.merge(
             WorkerRegistry(
@@ -2408,14 +2470,14 @@ async def api_worker_claim(data: WorkerClaimRequest):
         )
 
         if not bool(getattr(data, "available", True)):
-            return {"success": True, "claimed": None, "control": {"mode": mode}}
+            return {"success": True, "claimed": None, "control": {"mode": mode, "stop_now": stop_now}}
 
         if mode in {"drain", "stop"}:
-            return {"success": True, "claimed": None, "control": {"mode": mode}}
+            return {"success": True, "claimed": None, "control": {"mode": mode, "stop_now": stop_now}}
 
         claimed = claim_next_file(session, machine)
         if not claimed:
-            return {"success": True, "claimed": None, "control": {"mode": mode}}
+            return {"success": True, "claimed": None, "control": {"mode": mode, "stop_now": stop_now}}
 
         session.merge(
             WorkerRegistry(
@@ -2438,7 +2500,7 @@ async def api_worker_claim(data: WorkerClaimRequest):
             "claimed": claimed,
             "show_name": show_name,
             "override_tier": override_tier,
-            "control": {"mode": mode},
+            "control": {"mode": mode, "stop_now": stop_now},
         }
 
 

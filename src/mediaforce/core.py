@@ -2387,6 +2387,7 @@ def run_ffmpeg_with_progress(
 def run_ffmpeg_with_progress_api(
     cmd: list[str],
     api_client: WorkerApiClient,
+    machine: str,
     progress_id: int,
     duration_sec: float,
 ) -> subprocess.CompletedProcess:
@@ -2412,6 +2413,7 @@ def run_ffmpeg_with_progress_api(
 
     accumulated: dict[str, Any] = {}
     last_update = time.time()
+    last_control_check = time.time()
     assert process.stdout is not None
 
     while True:
@@ -2423,6 +2425,35 @@ def run_ffmpeg_with_progress_api(
         accumulated.update(parsed)
 
         now = time.time()
+
+        if now - last_control_check >= 5:
+            try:
+                control = api_client.control(machine=machine)
+                if bool(control.stop_now):
+                    try:
+                        api_client.ack(machine=machine, action="stop_now")
+                    except WorkerApiError:
+                        pass
+
+                    try:
+                        process.terminate()
+                        process.wait(timeout=3)
+                    except Exception:
+                        try:
+                            process.kill()
+                        except Exception:
+                            pass
+
+                    return subprocess.CompletedProcess(
+                        args=cmd_with_progress,
+                        returncode=255,
+                        stdout="",
+                        stderr="stopped_now",
+                    )
+            except WorkerApiError:
+                pass
+            last_control_check = now
+
         if now - last_update >= 2 and accumulated:
             try:
                 api_client.progress_update(
@@ -3020,7 +3051,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         try:
             # Run ffmpeg with progress tracking
             if use_api and api_client is not None:
-                result = run_ffmpeg_with_progress_api(cmd, api_client, progress_id, duration_sec)
+                result = run_ffmpeg_with_progress_api(cmd, api_client, machine, progress_id, duration_sec)
             else:
                 assert session is not None
                 result = run_ffmpeg_with_progress(cmd, session, progress_id, duration_sec)
@@ -3049,7 +3080,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                         hw_encode=args.hw_encode,
                     )
                     if use_api and api_client is not None:
-                        result = run_ffmpeg_with_progress_api(cmd, api_client, progress_id, duration_sec)
+                        result = run_ffmpeg_with_progress_api(cmd, api_client, machine, progress_id, duration_sec)
                     else:
                         assert session is not None
                         result = run_ffmpeg_with_progress(cmd, session, progress_id, duration_sec)

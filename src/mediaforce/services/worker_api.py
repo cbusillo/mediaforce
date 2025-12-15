@@ -4,6 +4,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -27,6 +28,7 @@ class WorkerClaim:
 class WorkerClaimResult:
     claim: Optional[WorkerClaim]
     control_mode: str = "run"
+    stop_now: bool = False
 
 
 class WorkerApiError(RuntimeError):
@@ -94,10 +96,11 @@ class WorkerApiClient:
 
         control = data.get("control") or {}
         mode = str(control.get("mode") or "run")
+        stop_now = bool(control.get("stop_now") or False)
 
         claimed = data.get("claimed")
         if not claimed:
-            return WorkerClaimResult(claim=None, control_mode=mode)
+            return WorkerClaimResult(claim=None, control_mode=mode, stop_now=stop_now)
 
         claim = WorkerClaim(
             id=int(claimed["id"]),
@@ -110,7 +113,26 @@ class WorkerApiClient:
             override_tier=data.get("override_tier"),
         )
 
-        return WorkerClaimResult(claim=claim, control_mode=mode)
+        return WorkerClaimResult(claim=claim, control_mode=mode, stop_now=stop_now)
+
+    def control(self, *, machine: str) -> WorkerClaimResult:
+        machine_q = urllib.parse.quote(str(machine), safe="")
+        data = self._request_json("GET", f"/api/worker/control?machine={machine_q}", None)
+        if not data.get("success"):
+            raise WorkerApiError(data.get("error") or "control failed")
+        control = data.get("control") or {}
+        mode = str(control.get("mode") or "run")
+        stop_now = bool(control.get("stop_now") or False)
+        return WorkerClaimResult(claim=None, control_mode=mode, stop_now=stop_now)
+
+    def ack(self, *, machine: str, action: str = "stop_now") -> None:
+        data = self._request_json(
+            "POST",
+            "/api/worker/control/ack",
+            {"machine": machine, "action": action},
+        )
+        if not data.get("success"):
+            raise WorkerApiError(data.get("error") or "ack failed")
 
     def release(self, *, machine: str, source_id: int, success: bool, error: Optional[str] = None) -> None:
         data = self._request_json(
