@@ -7,7 +7,7 @@ from typing import Optional, Callable
 from sqlalchemy import func, text
 from sqlmodel import Session, select
 
-from mediaforce.db.models import MediaItem, EncodeResult, Library
+from mediaforce.db.models import EncodeProgress, EncodeResult, Library, MediaItem
 from mediaforce.db import now_iso as default_now_iso
 
 
@@ -101,6 +101,7 @@ def claim_next_file(
     session: Session,
     machine: str,
     stale_seconds: int = 8 * 60 * 60,
+    progress_stale_seconds: int = 5 * 60,
     now_iso: Callable[[], str] = default_now_iso,
 ) -> Optional[dict]:
     """Claim the next file with library-aware weighting and manual bumping."""
@@ -124,6 +125,58 @@ def claim_next_file(
         session.add(item)
     if stale_items:
         session.commit()
+
+    # Keep at most one active claim per machine unless progress is actively
+    # updating. This prevents a worker from accumulating multiple "encoding"
+    # rows if it restarts or hangs between claim and release.
+    progress_cutoff = (now - timedelta(seconds=int(progress_stale_seconds))).isoformat()
+
+    active_progress_source_ids = {
+        int(row[0])
+        for row in session.exec(
+            select(EncodeProgress.source_id)
+            .where(
+                EncodeProgress.machine == machine,
+                EncodeProgress.updated_at.is_not(None),
+                EncodeProgress.updated_at >= progress_cutoff,
+            )
+        ).all()
+        if row and row[0] is not None
+    }
+
+    claimed_for_machine = session.exec(
+        select(MediaItem).where(
+            MediaItem.status == "encoding",
+            MediaItem.claimed_by == machine,
+        )
+    ).all()
+
+    dirty = False
+    for item in claimed_for_machine:
+        if item.id is None:
+            continue
+        if int(item.id) in active_progress_source_ids:
+            continue
+        if item.claimed_at is None:
+            continue
+        if item.claimed_at < progress_cutoff:  # type: ignore[operator]
+            item.status = "pending"
+            item.claimed_by = None
+            item.claimed_at = None
+            item.updated_at = now_str
+            session.add(item)
+            dirty = True
+    if dirty:
+        session.commit()
+
+    active_claim_count = session.exec(
+        select(func.count()).select_from(MediaItem).where(
+            MediaItem.status == "encoding",
+            MediaItem.claimed_by == machine,
+        )
+    ).one()
+    if active_claim_count and int(active_claim_count or 0) > 0:
+        return None
 
     weight_expr = func.coalesce(MediaItem.priority_score, 0) * func.coalesce(Library.weight, 1)
     weighted = session.exec(
