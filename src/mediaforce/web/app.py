@@ -304,6 +304,8 @@ async def raw_file(filename: str):
 
     Restricts to a small allowlist and prevents path traversal.
     """
+    if filename == "manifest.json":
+        return await raw_manifest()
     if filename not in ALLOWED_RAW_FILES:
         return HTMLResponse("not found", status_code=404)
 
