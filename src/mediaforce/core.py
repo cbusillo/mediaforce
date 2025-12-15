@@ -2517,6 +2517,17 @@ def within_offpeak(settings: AppSettings) -> bool:
     return now >= start or now <= end
 
 
+def _resolve_machine_name() -> str:
+    override = (os.getenv("MEDIAFORCE_MACHINE_NAME") or "").strip()
+    if override:
+        return override
+
+    hostname = socket.gethostname().strip()
+    if hostname.lower().endswith(".local"):
+        return hostname.rsplit(".", 1)[0]
+    return hostname
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """Run queue-based encoding from inventory database."""
     raw_path = pathlib.Path(args.path)
@@ -2563,7 +2574,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             return 1
         log_info("run_until_set", until=args.until)
 
-    machine = socket.gethostname()
+    machine = _resolve_machine_name()
     log_info("run_start", machine=machine, library=str(library_root), output=str(transcode_root))
 
     # Autoupdate on startup
