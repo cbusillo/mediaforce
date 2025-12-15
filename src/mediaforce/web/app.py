@@ -20,7 +20,7 @@ from mediaforce.config.logging import configure_logging, env_log_config
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
@@ -305,7 +305,7 @@ async def raw_file(filename: str):
     Restricts to a small allowlist and prevents path traversal.
     """
     if filename == "manifest.json":
-        return await raw_manifest()
+        return JSONResponse(await raw_manifest())
     if filename not in ALLOWED_RAW_FILES:
         return HTMLResponse("not found", status_code=404)
 
