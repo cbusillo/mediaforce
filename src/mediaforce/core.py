@@ -2519,9 +2519,19 @@ def within_offpeak(settings: AppSettings) -> bool:
 
 def cmd_run(args: argparse.Namespace) -> int:
     """Run queue-based encoding from inventory database."""
-    path = pathlib.Path(args.path).resolve()
+    raw_path = pathlib.Path(args.path)
+    try:
+        path = raw_path.resolve()
+    except Exception:
+        path = raw_path
 
-    if not path.exists():
+    try:
+        path.stat()
+    except PermissionError:
+        # Some hosts (notably SMB mounts) may allow direct file access while
+        # denying directory listing/stat operations. In that case, proceed.
+        pass
+    except FileNotFoundError:
         log_error("run_path_missing", path=str(path))
         return 1
 
@@ -3024,9 +3034,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                 )
 
             # Get output stats
-            output_size = output_path.stat().st_size
-            source_size = source_path.stat().st_size
-            ratio = output_size / source_size * 100
+            try:
+                output_size = output_path.stat().st_size
+            except FileNotFoundError:
+                output_size = 0
+            try:
+                source_size = source_path.stat().st_size
+            except FileNotFoundError:
+                source_size = 0
+            ratio = (output_size / source_size * 100) if source_size > 0 else 0
 
             # Probe output for bitrate
             output_info = probe_media(output_path)
