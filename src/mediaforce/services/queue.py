@@ -101,7 +101,7 @@ def claim_next_file(
     session: Session,
     machine: str,
     stale_seconds: int = 8 * 60 * 60,
-    progress_stale_seconds: int = 30 * 60,
+    progress_stale_seconds: int = 5 * 60,
     now_iso: Callable[[], str] = default_now_iso,
 ) -> Optional[dict]:
     """Claim the next file with library-aware weighting and manual bumping."""

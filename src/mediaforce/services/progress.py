@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Callable
 
 from sqlmodel import Session, delete
 
 from mediaforce.db import EncodeProgress, WorkerRegistry, now_iso
+from mediaforce.db import now_iso as default_now_iso
 
 
 def start_progress_tracking(
@@ -19,14 +20,7 @@ def start_progress_tracking(
 ) -> int:
     now_str = now_iso()
     session.exec(delete(EncodeProgress).where(EncodeProgress.machine == machine))
-    session.merge(
-        WorkerRegistry(
-            machine=machine,
-            role="encoder",
-            last_seen=now_str,
-            sample_path=source_path,
-        )
-    )
+    session.merge(WorkerRegistry(machine=machine, role="encoder", last_seen=now_str, sample_path=source_path))
     progress = EncodeProgress(
         source_id=source_id,
         source_path=source_path,
@@ -95,6 +89,25 @@ def update_progress(
         progress.phase_detail = phase_detail
     progress.updated_at = now_str
     session.add(progress)
+    session.commit()
+
+
+def upsert_heartbeat(
+    session: Session,
+    *,
+    machine: str,
+    sample_path: Optional[str] = None,
+    now_iso: Callable[[], str] = default_now_iso,
+) -> None:
+    now_str = now_iso()
+    session.merge(
+        WorkerRegistry(
+            machine=machine,
+            role="encoder",
+            last_seen=now_str,
+            sample_path=sample_path,
+        )
+    )
     session.commit()
 
 

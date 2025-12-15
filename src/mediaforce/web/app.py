@@ -36,7 +36,7 @@ from mediaforce.config.paths import iter_libraries_for_current_host, normalize_p
 from mediaforce.config.settings import INVENTORY_DB
 from mediaforce.domain.types import OutlierResult, QualityMetrics
 from mediaforce.services.encoder import record_encode_result
-from mediaforce.services.progress import finish_progress_tracking, start_progress_tracking, update_progress
+from mediaforce.services.progress import finish_progress_tracking, start_progress_tracking, update_progress, upsert_heartbeat
 from mediaforce.services.queue import claim_next_file, release_claim
 from mediaforce.services.watch import watch_libraries
 from mediaforce.services.notifications import send_notifications
@@ -2460,14 +2460,7 @@ async def api_worker_claim(data: WorkerClaimRequest):
         cmd = session.get(WorkerCommand, f"worker:{machine}")
         stop_now = bool(cmd.stop_now) if cmd else False
         reported_sample_path = (data.sample_path or "").strip() if data.sample_path else None
-        session.merge(
-            WorkerRegistry(
-                machine=machine,
-                role="encoder",
-                last_seen=now_iso(),
-                sample_path=reported_sample_path,
-            )
-        )
+        upsert_heartbeat(session, machine=machine, sample_path=reported_sample_path)
 
         if not bool(getattr(data, "available", True)):
             return {"success": True, "claimed": None, "control": {"mode": mode, "stop_now": stop_now}}
@@ -2479,14 +2472,7 @@ async def api_worker_claim(data: WorkerClaimRequest):
         if not claimed:
             return {"success": True, "claimed": None, "control": {"mode": mode, "stop_now": stop_now}}
 
-        session.merge(
-            WorkerRegistry(
-                machine=machine,
-                role="encoder",
-                last_seen=now_iso(),
-                sample_path=claimed.get("path") or reported_sample_path,
-            )
-        )
+        upsert_heartbeat(session, machine=machine, sample_path=claimed.get("path") or reported_sample_path)
 
         show_name = extract_show_name(claimed.get("path") or "")
         override_tier = None
