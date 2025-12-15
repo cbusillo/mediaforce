@@ -2417,12 +2417,22 @@ def run_ffmpeg_with_progress_api(
     assert process.stdout is not None
 
     while True:
-        line = process.stdout.readline()
+        line = ""
+        try:
+            import select
+
+            ready, _, _ = select.select([process.stdout], [], [], 1.0)
+            if ready:
+                line = process.stdout.readline()
+        except Exception:
+            line = process.stdout.readline()
+
         if not line and process.poll() is not None:
             break
 
-        parsed = parse_ffmpeg_progress(line)
-        accumulated.update(parsed)
+        if line:
+            parsed = parse_ffmpeg_progress(line)
+            accumulated.update(parsed)
 
         now = time.time()
 

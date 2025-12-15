@@ -16,7 +16,7 @@ class ProgressRepository:
     def __init__(self, session: Session):
         self.session = session
 
-    def cleanup_stale_progress(self, *, stale_seconds: int = 8 * 60 * 60) -> int:
+    def cleanup_stale_progress(self, *, stale_seconds: int = 30 * 60) -> int:
         """Remove progress rows that have stopped updating.
 
         Workers update progress roughly every couple seconds while encoding.
@@ -41,7 +41,7 @@ class ProgressRepository:
         self.session.commit()
         return len(rows)
 
-    def list_workers(self, *, stale_seconds: int = 8 * 60 * 60, online_seconds: int = 90) -> list[dict]:
+    def list_workers(self, *, stale_seconds: int = 30 * 60, online_seconds: int = 90) -> list[dict]:
         workers: dict[str, dict] = {}
 
         self.cleanup_stale_progress(stale_seconds=stale_seconds)
@@ -109,7 +109,7 @@ class ProgressRepository:
         self,
         *,
         library_root: Optional[str] = None,
-        stale_seconds: int = 8 * 60 * 60,
+        stale_seconds: int = 30 * 60,
     ) -> list[tuple[EncodeProgress, Optional[int], Optional[str]]]:
         started_at: Any = EncodeProgress.started_at
 
