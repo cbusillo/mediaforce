@@ -27,14 +27,16 @@
     }
     list.forEach((w) => {
       const state = w.state || ((w.active || 0) > 0 ? "encoding" : "waiting");
-      const progress = w.percent_complete ? `${Math.round(w.percent_complete)}%` : "0%";
+      const percent = typeof w.percent_complete === "number" ? w.percent_complete : 0;
+      const progress =
+        state === "encoding" ? (percent > 0 ? `${Math.round(percent)}%` : "Starting…") : "—";
       const machine = w.machine || "-";
       const tr = document.createElement("tr");
 
       const safeMachine = String(machine).replace(/'/g, "\\'");
       const actions =
         machine && machine !== "-"
-          ? `<button class="btn btn-xs btn-success" onclick="resumeWorker('${safeMachine}')">Resume</button>` +
+          ? `<button class="btn btn-xs btn-success" onclick="resumeWorker('${safeMachine}')">Run</button>` +
             `<button class="btn btn-xs btn-warning" onclick="pauseWorker('${safeMachine}')">Pause</button>` +
             `<button class="btn btn-xs btn-danger" onclick="stopWorker('${safeMachine}')">Stop</button>`
           : "";
@@ -44,7 +46,7 @@
         <td>encoder</td>
         <td>${state}</td>
         <td>${w.active || 0}</td>
-        <td>${state === "offline" ? "—" : progress}</td>
+        <td>${progress}</td>
         <td class="truncate" title="${message}">${message}</td>
         <td class="flex gap-1 flex-wrap">${actions}</td>
       `;

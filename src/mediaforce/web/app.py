@@ -210,7 +210,6 @@ def _watch_status_snapshot() -> dict:
 
     return {
         "running": WATCH_STATUS.get("running", False),
-        "paused": WATCH_STATUS.get("paused", False),
         "libraries": WATCH_STATUS.get("libraries", []),
         "message": WATCH_STATUS.get("message", "idle"),
     }
@@ -256,7 +255,6 @@ def _nav_status() -> dict:
         "scan_last": last_scan_map,
         "scan_latest": latest_scan,
         "watch_running": WATCH_STATUS.get("running", False),
-        "watch_paused": WATCH_STATUS.get("paused", False),
         "watch_message": WATCH_STATUS.get("message", "idle"),
     }
 
@@ -275,7 +273,6 @@ templates = Jinja2Templates(directory=str(templates_dir))
 WATCH_TASK: Optional[asyncio.Task] = None
 WATCH_STATUS: dict = {
     "running": False,
-    "paused": False,
     "libraries": [],
     "message": "idle",
 }
@@ -301,7 +298,7 @@ async def _lifespan(_app: FastAPI):
         yield
     finally:
         try:
-            await _stop_watch_task(message="shutdown", paused=False)
+            await _stop_watch_task(message="shutdown")
         except Exception:
             WATCH_STATUS.update({"running": False, "message": "shutdown failed"})
 
@@ -402,7 +399,6 @@ async def _start_watch_task() -> dict:
     if not watch_roots:
         WATCH_STATUS.update({
             "running": False,
-            "paused": False,
             "libraries": [],
             "message": "No watch-enabled libraries on this host",
         })
@@ -411,7 +407,6 @@ async def _start_watch_task() -> dict:
     async def runner():
         WATCH_STATUS.update({
             "running": True,
-            "paused": False,
             "libraries": watch_roots,
             "message": "watching",
         })
@@ -419,26 +414,22 @@ async def _start_watch_task() -> dict:
             await watch_libraries()
             WATCH_STATUS.update({
                 "running": False,
-                "paused": False,
                 "message": "stopped",
             })
         except asyncio.CancelledError:
             WATCH_STATUS.update({
                 "running": False,
-                "paused": True,
                 "message": "stopped",
             })
             raise
         except Exception as exc:  # pragma: no cover
             WATCH_STATUS.update({
                 "running": False,
-                "paused": False,
                 "message": f"error: {exc}",
             })
     # Mark running before returning so API callers see immediate state
     WATCH_STATUS.update({
         "running": True,
-        "paused": False,
         "libraries": watch_roots,
         "message": "watching",
     })
@@ -446,7 +437,7 @@ async def _start_watch_task() -> dict:
     return WATCH_STATUS
 
 
-async def _stop_watch_task(message: str = "stopped", paused: bool = False) -> dict:
+async def _stop_watch_task(message: str = "stopped") -> dict:
     global WATCH_TASK
     if WATCH_TASK and not WATCH_TASK.done():
         WATCH_TASK.cancel()
@@ -456,7 +447,6 @@ async def _stop_watch_task(message: str = "stopped", paused: bool = False) -> di
             pass
     WATCH_STATUS.update({
         "running": False,
-        "paused": paused,
         "message": message,
     })
     return WATCH_STATUS
