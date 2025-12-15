@@ -23,6 +23,12 @@ class WorkerClaim:
     override_tier: Optional[str] = None
 
 
+@dataclass
+class WorkerClaimResult:
+    claim: Optional[WorkerClaim]
+    control_mode: str = "run"
+
+
 class WorkerApiError(RuntimeError):
     pass
 
@@ -72,16 +78,19 @@ class WorkerApiClient:
         except Exception as e:
             raise WorkerApiError(f"Request failed for {url}: {e}") from e
 
-    def claim(self, *, machine: str) -> Optional[WorkerClaim]:
+    def claim(self, *, machine: str) -> WorkerClaimResult:
         data = self._request_json("POST", "/api/worker/claim", {"machine": machine})
         if not data.get("success"):
             raise WorkerApiError(data.get("error") or "claim failed")
 
+        control = data.get("control") or {}
+        mode = str(control.get("mode") or "run")
+
         claimed = data.get("claimed")
         if not claimed:
-            return None
+            return WorkerClaimResult(claim=None, control_mode=mode)
 
-        return WorkerClaim(
+        claim = WorkerClaim(
             id=int(claimed["id"]),
             path=str(claimed["path"]),
             detected_tier=claimed.get("detected_tier"),
@@ -91,6 +100,8 @@ class WorkerApiClient:
             show_name=data.get("show_name"),
             override_tier=data.get("override_tier"),
         )
+
+        return WorkerClaimResult(claim=claim, control_mode=mode)
 
     def release(self, *, machine: str, source_id: int, success: bool, error: Optional[str] = None) -> None:
         data = self._request_json(

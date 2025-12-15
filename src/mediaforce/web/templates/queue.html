@@ -2,7 +2,7 @@
 <div class="flex items-center justify-between mb-4">
   <div>
     <h1 class="text-3xl font-semibold">Encoding Queue</h1>
-    <p class="text-foreground-muted text-sm">Manage pending encodes, watchers, filters, and views.</p>
+    <p class="text-foreground-muted text-sm">Manage pending encodes, filters, and views.</p>
   </div>
 </div>
 
@@ -37,7 +37,6 @@
       <span class="text-foreground-muted text-sm"
         >Est. Savings: <strong class="text-success">{{ total_savings }}</strong></span
       >
-      <button class="btn btn-sm btn-warning" onclick="kickWatch()">Kick Watcher</button>
       <button class="btn btn-sm btn-primary" onclick="triggerScan()">Rescan</button>
       <button class="btn btn-sm btn-primary" onclick="toggleView()">
         View: <span id="viewLabel">{{ 'Compact' if request.query_params.get('view') == 'compact' else 'Table' }}</span>
@@ -93,10 +92,6 @@
     <div class="chip" id="scanStatus">
       Scan: {% if cur_status and cur_status.running %}running…{% elif cur_status and cur_status.last_scan %}last {{
       cur_status.last_scan[:16] }}{% else %}never{% endif %}
-    </div>
-    <div class="chip" id="watchStatus">
-      Watch: {% if watch_status.running %}running{% elif watch_status.paused %}paused{% else %}stopped{% endif %}{% if
-      watch_status.message %} ({{ watch_status.message }}){% endif %}
     </div>
   </div>
 </div>
@@ -246,9 +241,7 @@
   const currentSort = "{{ sort or 'priority' }}";
   const currentOrder = "{{ order or 'desc' }}";
   const workers = {{ workers | default([]) | tojson | safe }};
-  const watchStatusData = {{ watch_status | default({}) | tojson | safe }};
   const scanStatusEl = document.getElementById('scanStatus');
-  const watchStatusEl = document.getElementById('watchStatus');
   const serverShowInput = document.getElementById('serverShow');
   const tierFilter = document.getElementById('tierFilter');
   const sizeMinInput = document.getElementById('sizeMin');
@@ -300,21 +293,6 @@
           if (summary) summary.textContent = summaryText;
       }
   }
-
-  function updateNavWatch(running, message) {
-      const pill = document.querySelector('.pill-watch');
-      if (pill) {
-          pill.classList.toggle('pill-on', running);
-          pill.classList.toggle('pill-off', !running);
-          pill.textContent = running ? 'Watch on' : 'Watch off';
-      }
-      const navMsg = document.getElementById('navWatchStatus');
-      if (navMsg && message) navMsg.textContent = message;
-  }
-
-  updateNavWatch(!!watchStatusData.running, watchStatusData.message || 'idle');
-  const initialWatchTone = watchStatusData.running ? 'success' : watchStatusData.paused ? 'warning' : 'danger';
-  setStatus(watchStatusEl, watchStatusEl?.textContent || 'Watch status', initialWatchTone);
 
   function toggleShow(showName, event) {
       event.stopPropagation();
@@ -838,34 +816,6 @@
       } finally {
           btn.disabled = false;
           btn.textContent = 'Rescan';
-      }
-  }
-
-  async function kickWatch() {
-      const btn = event.target;
-      btn.disabled = true;
-      btn.textContent = 'Starting...';
-      setStatus(watchStatusEl, 'Starting watcher…', 'warning');
-      try {
-          const resp = await fetch('/api/watch', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ action: 'start' })
-          });
-          const data = await resp.json();
-          if (data.success) {
-              const msg = data.status?.message || 'running';
-              setStatus(watchStatusEl, `Watch: running (${msg})`, 'success');
-              updateNavWatch(true, msg);
-              showToast('Watcher started');
-          } else {
-              setStatus(watchStatusEl, `Watch error: ${data.error || 'unknown'}`, 'danger');
-          }
-      } catch (e) {
-          setStatus(watchStatusEl, 'Watch error: ' + e, 'danger');
-      } finally {
-          btn.disabled = false;
-          btn.textContent = 'Kick Watcher';
       }
   }
 

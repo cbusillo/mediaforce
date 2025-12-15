@@ -60,6 +60,7 @@ from mediaforce.db import (
     EncodeResult,
     ShowOverride,
     WorkerRegistry,
+    WorkerControl,
     ProfileEvaluation,
     ProfileSettingsSource,
     VmafSample,
@@ -163,9 +164,45 @@ def get_worker_status(library_root: Optional[str] = None) -> list[dict]:
     _ = library_root
     try:
         with session_scope() as session:
-            return ProgressRepository(session).list_workers()
+            workers = ProgressRepository(session).list_workers()
+            return _apply_worker_controls(session, workers)
     except Exception:
         return []
+
+
+def _effective_worker_mode(session: Session, machine: str) -> str:
+    """Resolve worker mode from per-worker override or global setting."""
+
+    machine_key = f"worker:{machine}"
+    row = session.get(WorkerControl, machine_key)
+    if row and row.mode:
+        return row.mode
+
+    global_row = session.get(WorkerControl, "global")
+    if global_row and global_row.mode:
+        return global_row.mode
+    return "run"
+
+
+def _apply_worker_controls(session: Session, workers: list[dict]) -> list[dict]:
+    global_row = session.get(WorkerControl, "global")
+    global_mode = (global_row.mode if global_row else None) or "run"
+
+    updated: list[dict] = []
+    for w in workers:
+        machine = str(w.get("machine") or "")
+        mode = _effective_worker_mode(session, machine) if machine else global_mode
+        state = str(w.get("state") or "")
+
+        if mode in {"drain", "stop"} and state != "encoding":
+            state = "paused" if mode == "drain" else "stopping"
+
+        w2 = dict(w)
+        w2["control_mode"] = mode
+        w2["global_mode"] = global_mode
+        w2["state"] = state or w2.get("state")
+        updated.append(w2)
+    return updated
 
 
 def _watch_status_snapshot() -> dict:
@@ -487,6 +524,15 @@ class WorkerProgressUpdateRequest(BaseModel):
     duration_sec: Optional[float] = None
     phase: Optional[str] = None
     phase_detail: Optional[str] = None
+
+
+class WorkerControlUpdateRequest(BaseModel):
+    mode: str  # run|drain|stop
+
+
+class WorkerControlPerMachineRequest(BaseModel):
+    machine: str
+    mode: Optional[str] = None  # run|drain|stop; None clears override
 
 
 class WorkerMetricsPayload(BaseModel):
@@ -2287,7 +2333,62 @@ async def api_update_settings(data: SettingsUpdateRequest):
 async def api_workers(request: Request):
     """Return active worker list for the current library."""
     library_root = request.query_params.get('library') or _resolve_library(request)
-    return {"success": True, "workers": get_worker_status(library_root)}
+    try:
+        with session_scope() as session:
+            workers = ProgressRepository(session).list_workers()
+            workers = _apply_worker_controls(session, workers)
+        return {"success": True, "workers": workers}
+    except Exception:
+        return {"success": True, "workers": []}
+
+
+@app.get("/api/worker-control")
+async def api_worker_control_state():
+    with session_scope() as session:
+        global_row = session.get(WorkerControl, "global")
+        global_mode = (global_row.mode if global_row else None) or "run"
+        overrides = session.exec(select(WorkerControl).where(WorkerControl.key.like("worker:%"))).all()
+        per_worker: dict[str, str] = {}
+        for row in overrides:
+            machine = str(row.key).split(":", 1)[1] if ":" in str(row.key) else str(row.key)
+            per_worker[machine] = row.mode
+        return {"success": True, "global": global_mode, "overrides": per_worker}
+
+
+@app.post("/api/worker-control/global")
+async def api_worker_control_global(data: WorkerControlUpdateRequest):
+    mode = (data.mode or "").strip().lower()
+    if mode not in {"run", "drain", "stop"}:
+        return {"success": False, "error": "mode must be run|drain|stop"}
+
+    with session_scope() as session:
+        session.merge(WorkerControl(key="global", mode=mode, updated_at=now_iso()))
+        session.commit()
+    return {"success": True, "mode": mode}
+
+
+@app.post("/api/worker-control/worker")
+async def api_worker_control_worker(data: WorkerControlPerMachineRequest):
+    machine = (data.machine or "").strip()
+    if not machine:
+        return {"success": False, "error": "machine required"}
+
+    mode = (data.mode or "").strip().lower() if data.mode is not None else None
+    if mode is not None and mode not in {"run", "drain", "stop"}:
+        return {"success": False, "error": "mode must be run|drain|stop or null"}
+
+    key = f"worker:{machine}"
+    with session_scope() as session:
+        if mode is None:
+            row = session.get(WorkerControl, key)
+            if row:
+                session.delete(row)
+                session.commit()
+            return {"success": True, "machine": machine, "mode": None}
+
+        session.merge(WorkerControl(key=key, mode=mode, updated_at=now_iso()))
+        session.commit()
+        return {"success": True, "machine": machine, "mode": mode}
 
 
 @app.post("/api/worker/claim", dependencies=[Depends(_require_worker_api_auth)])
@@ -2299,10 +2400,15 @@ async def api_worker_claim(data: WorkerClaimRequest):
         return {"success": False, "error": "machine required"}
 
     with session_scope() as session:
+        mode = _effective_worker_mode(session, machine)
         session.merge(WorkerRegistry(machine=machine, role="encoder", last_seen=now_iso()))
+
+        if mode in {"drain", "stop"}:
+            return {"success": True, "claimed": None, "control": {"mode": mode}}
+
         claimed = claim_next_file(session, machine)
         if not claimed:
-            return {"success": True, "claimed": None}
+            return {"success": True, "claimed": None, "control": {"mode": mode}}
 
         session.merge(
             WorkerRegistry(
@@ -2325,6 +2431,7 @@ async def api_worker_claim(data: WorkerClaimRequest):
             "claimed": claimed,
             "show_name": show_name,
             "override_tier": override_tier,
+            "control": {"mode": mode},
         }
 
 

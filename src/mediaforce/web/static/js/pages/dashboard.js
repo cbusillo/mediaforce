@@ -3,36 +3,14 @@
 
   const table = document.getElementById("activeEncodes");
   const workersTable = document.getElementById("workersTable");
-  const watchChip = document.getElementById("watchStatusDash");
 
   const page = window.mfUi?.getPageData() || {};
   const dashboardLibrary = page.library_root || "";
   const hostName = page.host_name || "";
-  let watchStatusData = page.watch_status || {};
   let currentWorkers = page.workers || [];
 
-  function setChip(el, text, tone = "muted") {
-    window.mfUi?.setStatus(el, text, tone);
-  }
-
-  function updateNavWatch(running, message) {
-    window.mfUi?.updateNavWatch(running, message);
-  }
-
-  function buildWatchRow() {
-    const tr = document.createElement("tr");
-    const state = watchStatusData.running ? "running" : watchStatusData.paused ? "paused" : "stopped";
-    const libs = (watchStatusData.libraries || []).join(", ") || "none";
-    tr.innerHTML = `
-      <td>${hostName || "local"}</td>
-      <td>watcher</td>
-      <td>${state}</td>
-      <td>${(watchStatusData.libraries || []).length}</td>
-      <td>${libs}</td>
-      <td class="truncate" title="${watchStatusData.message || ""}">${watchStatusData.message || "-"}</td>
-      <td class="text-muted">Use controls above</td>
-    `;
-    return tr;
+  async function setGlobalMode(mode) {
+    await window.mfApi.postJson("/api/worker-control/global", { mode });
   }
 
   function renderWorkers(list) {
@@ -41,7 +19,6 @@
     const tbody = workersTable.querySelector("tbody");
     if (!tbody) return;
     tbody.innerHTML = "";
-    tbody.appendChild(buildWatchRow());
     if (!list || list.length === 0) {
       const tr = document.createElement("tr");
       tr.innerHTML = '<td colspan="7" class="text-muted">No encoder workers reporting.</td>';
@@ -51,42 +28,27 @@
     list.forEach((w) => {
       const state = w.state || ((w.active || 0) > 0 ? "encoding" : "waiting");
       const progress = w.percent_complete ? `${Math.round(w.percent_complete)}%` : "0%";
+      const machine = w.machine || "-";
       const tr = document.createElement("tr");
+
+      const safeMachine = String(machine).replace(/'/g, "\\'");
+      const actions =
+        machine && machine !== "-"
+          ? `<button class="btn btn-xs btn-success" onclick="resumeWorker('${safeMachine}')">Resume</button>` +
+            `<button class="btn btn-xs btn-warning" onclick="pauseWorker('${safeMachine}')">Pause</button>` +
+            `<button class="btn btn-xs btn-danger" onclick="stopWorker('${safeMachine}')">Stop</button>`
+          : "";
       tr.innerHTML = `
-        <td>${w.machine || "-"}</td>
+        <td>${machine}</td>
         <td>encoder</td>
         <td>${state}</td>
         <td>${w.active || 0}</td>
         <td>${state === "offline" ? "—" : progress}</td>
         <td class="truncate" title="${w.sample_path || ""}">${w.sample_path || "-"}</td>
-        <td class="text-muted">Route jobs in Queue</td>
+        <td class="flex gap-1 flex-wrap">${actions}</td>
       `;
       tbody.appendChild(tr);
     });
-  }
-
-  function updateWatchUI() {
-    const state = watchStatusData.running ? "running" : watchStatusData.paused ? "paused" : "stopped";
-    const tone = watchStatusData.running ? "success" : watchStatusData.paused ? "warning" : "danger";
-    const msg = watchStatusData.message || "idle";
-    setChip(watchChip, `Watch: ${state}${msg ? " (" + msg + ")" : ""}`, tone);
-    updateNavWatch(!!watchStatusData.running, msg);
-    renderWorkers(currentWorkers);
-  }
-
-  async function toggleWatch(action) {
-    setChip(watchChip, `Watch: ${action}…`, "warning");
-    try {
-      const resp = await window.mfApi.postJson("/api/watch", { action });
-      if (resp.ok && resp.data?.success) {
-        watchStatusData = resp.data.status || watchStatusData;
-        updateWatchUI();
-      } else {
-        setChip(watchChip, resp.data?.error || resp.error || "Watch action failed", "danger");
-      }
-    } catch (e) {
-      setChip(watchChip, "Watch error", "danger");
-    }
   }
 
   async function refreshWorkers() {
@@ -151,11 +113,33 @@
     }
   }
 
-  window.toggleWatch = toggleWatch;
   window.refreshWorkers = refreshWorkers;
+  window.pauseAllWorkers = async function () {
+    await setGlobalMode("drain");
+    await refreshWorkers();
+  };
+  window.resumeAllWorkers = async function () {
+    await setGlobalMode("run");
+    await refreshWorkers();
+  };
+  window.stopAllWorkers = async function () {
+    await setGlobalMode("stop");
+    await refreshWorkers();
+  };
+  window.pauseWorker = async function (machine) {
+    await window.mfApi.postJson("/api/worker-control/worker", { machine, mode: "drain" });
+    await refreshWorkers();
+  };
+  window.resumeWorker = async function (machine) {
+    await window.mfApi.postJson("/api/worker-control/worker", { machine, mode: "run" });
+    await refreshWorkers();
+  };
+  window.stopWorker = async function (machine) {
+    await window.mfApi.postJson("/api/worker-control/worker", { machine, mode: "stop" });
+    await refreshWorkers();
+  };
 
   renderWorkers(currentWorkers);
-  updateWatchUI();
   refreshActive();
   setInterval(refreshActive, 3000);
   setInterval(refreshWorkers, 8000);

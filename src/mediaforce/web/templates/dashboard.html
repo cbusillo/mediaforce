@@ -72,13 +72,9 @@
   <div class="flex flex-wrap items-center justify-between gap-3">
     <h3 class="m-0 text-lg font-semibold">Workers</h3>
     <div class="flex flex-wrap items-center gap-2 text-sm">
-      <div class="pill" id="watchStatusDash">
-        Watch: {% if watch_status.running %}running{% elif watch_status.paused %}paused{% else %}stopped{% endif %}{% if
-        watch_status.message %} ({{ watch_status.message }}){% endif %}
-      </div>
-      <button class="btn btn-sm btn-success" onclick="toggleWatch('start')">Start</button>
-      <button class="btn btn-sm btn-warning" onclick="toggleWatch('pause')">Pause</button>
-      <button class="btn btn-sm btn-danger" onclick="toggleWatch('stop')">Stop</button>
+      <button class="btn btn-sm btn-primary" onclick="resumeAllWorkers()">Resume All</button>
+      <button class="btn btn-sm btn-warning" onclick="pauseAllWorkers()">Pause After Current</button>
+      <button class="btn btn-sm btn-danger" onclick="stopAllWorkers()">Stop When Idle</button>
       <button class="btn btn-sm" onclick="refreshWorkers()">Refresh</button>
     </div>
   </div>
@@ -195,7 +191,6 @@
   window.__MF_PAGE__ = {
     library_root: "{{ library_root or '' }}",
     host_name: "{{ host_name or '' }}",
-    watch_status: {{ watch_status | default({}) | tojson | safe }},
     workers: {{ workers | default([]) | tojson | safe }},
   };
 </script>

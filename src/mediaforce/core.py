@@ -2646,19 +2646,31 @@ def cmd_run(args: argparse.Namespace) -> int:
         override_tier: Optional[str] = None
         if use_api and api_client is not None:
             try:
-                claim_obj = api_client.claim(machine=machine)
+                claim_result = api_client.claim(machine=machine)
             except WorkerApiError as e:
                 log_error("worker_api_claim_failed", error=str(e))
                 break
-            if claim_obj is None:
+
+            if claim_result is None:
                 log_info("queue_empty")
-                # In API mode, long-running workers should remain up and wait
-                # for the master to enqueue or assign new work. For dry-run,
-                # we exit promptly so smoke tests and one-shot runs complete.
                 if args.dry_run:
                     break
                 time.sleep(10)
                 continue
+
+            if claim_result.control_mode == "stop":
+                log_info("worker_stop_requested", machine=machine)
+                break
+
+            claim_obj = claim_result.claim
+            if claim_obj is None:
+                event = "worker_paused" if claim_result.control_mode == "drain" else "queue_empty"
+                log_info(event)
+                if args.dry_run:
+                    break
+                time.sleep(10)
+                continue
+
             claimed = {"id": claim_obj.id, "path": claim_obj.path}
             override_tier = claim_obj.override_tier
         else:

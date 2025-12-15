@@ -235,6 +235,14 @@ class WorkerRegistry(SQLModel, table=True):  # type: ignore[misc,call-arg]
     sample_path: Optional[str] = None
 
 
+class WorkerControl(SQLModel, table=True):  # type: ignore[misc,call-arg]
+    __tablename__ = "worker_control"
+
+    key: str = Field(primary_key=True)
+    mode: str = "run"  # run|drain|stop
+    updated_at: str = Field(default_factory=now_iso)
+
+
 class ShowOverride(SQLModel, table=True):  # type: ignore[misc,call-arg]
     __tablename__ = "show_overrides"
 
