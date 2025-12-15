@@ -194,8 +194,14 @@ def _apply_worker_controls(session: Session, workers: list[dict]) -> list[dict]:
         mode = _effective_worker_mode(session, machine) if machine else global_mode
         state = str(w.get("state") or "")
 
-        if mode in {"drain", "stop"} and state != "encoding":
-            state = "paused" if mode == "drain" else "stopping"
+        if mode == "drain" and state != "encoding":
+            state = "paused"
+
+        if mode == "stop":
+            if state == "encoding":
+                state = "stopping"
+            else:
+                state = "stopped"
 
         w2 = dict(w)
         w2["control_mode"] = mode

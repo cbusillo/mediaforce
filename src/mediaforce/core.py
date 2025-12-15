@@ -2679,18 +2679,18 @@ def cmd_run(args: argparse.Namespace) -> int:
                 time.sleep(10)
                 continue
 
-            if claim_result.control_mode == "stop":
-                log_info("worker_stop_requested", machine=machine)
-                break
-
             claim_obj = claim_result.claim
             if claim_obj is None:
                 if not library_available:
                     log_warn("run_library_unavailable", path=str(path))
                     time.sleep(30)
                     continue
-                event = "worker_paused" if claim_result.control_mode == "drain" else "queue_empty"
-                log_info(event)
+
+                if claim_result.control_mode == "stop":
+                    log_info("worker_stopped", machine=machine)
+                else:
+                    event = "worker_paused" if claim_result.control_mode == "drain" else "queue_empty"
+                    log_info(event)
                 if args.dry_run:
                     break
                 time.sleep(10)
