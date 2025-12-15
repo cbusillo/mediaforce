@@ -131,17 +131,26 @@ def claim_next_file(
     # it up). Treat any "encoding" row with no recent progress as stale.
     progress_cutoff = (now - timedelta(seconds=int(progress_stale_seconds))).isoformat()
 
-    active_progress_source_ids = {
-        int(row[0])
-        for row in session.exec(
-            select(EncodeProgress.source_id)
-            .where(
-                EncodeProgress.updated_at.is_not(None),
-                EncodeProgress.updated_at >= progress_cutoff,
-            )
-        ).all()
-        if row and row[0] is not None
-    }
+    active_progress_source_ids: set[int] = set()
+    for row in session.exec(
+        select(EncodeProgress.source_id).where(
+            EncodeProgress.updated_at.is_not(None),
+            EncodeProgress.updated_at >= progress_cutoff,
+        )
+    ).all():
+        # sqlmodel/sqlalchemy may return scalar ints or 1-tuples depending on
+        # dialect/driver.
+        raw = None
+        if isinstance(row, (tuple, list)):
+            raw = row[0] if row else None
+        else:
+            raw = row
+        if raw is None:
+            continue
+        try:
+            active_progress_source_ids.add(int(raw))
+        except Exception:
+            continue
 
     stalled_items = session.exec(
         select(MediaItem).where(
@@ -169,18 +178,25 @@ def claim_next_file(
     # updating. This prevents a worker from accumulating multiple "encoding"
     # rows if it restarts or hangs between claim and release.
 
-    active_progress_source_ids_for_machine = {
-        int(row[0])
-        for row in session.exec(
-            select(EncodeProgress.source_id)
-            .where(
-                EncodeProgress.machine == machine,
-                EncodeProgress.updated_at.is_not(None),
-                EncodeProgress.updated_at >= progress_cutoff,
-            )
-        ).all()
-        if row and row[0] is not None
-    }
+    active_progress_source_ids_for_machine: set[int] = set()
+    for row in session.exec(
+        select(EncodeProgress.source_id).where(
+            EncodeProgress.machine == machine,
+            EncodeProgress.updated_at.is_not(None),
+            EncodeProgress.updated_at >= progress_cutoff,
+        )
+    ).all():
+        raw = None
+        if isinstance(row, (tuple, list)):
+            raw = row[0] if row else None
+        else:
+            raw = row
+        if raw is None:
+            continue
+        try:
+            active_progress_source_ids_for_machine.add(int(raw))
+        except Exception:
+            continue
 
     claimed_for_machine = session.exec(
         select(MediaItem).where(
