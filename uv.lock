@@ -297,6 +297,7 @@ source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "jinja2" },
+    { name = "python-dotenv" },
     { name = "python-multipart" },
     { name = "sqlmodel" },
     { name = "uvicorn", extra = ["standard"] },
@@ -316,6 +317,7 @@ dev = [
 requires-dist = [
     { name = "fastapi" },
     { name = "jinja2" },
+    { name = "python-dotenv" },
     { name = "python-multipart" },
     { name = "sqlmodel" },
     { name = "uvicorn", extras = ["standard"] },

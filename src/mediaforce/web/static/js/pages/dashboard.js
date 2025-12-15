@@ -38,13 +38,14 @@
             `<button class="btn btn-xs btn-warning" onclick="pauseWorker('${safeMachine}')">Pause</button>` +
             `<button class="btn btn-xs btn-danger" onclick="stopWorker('${safeMachine}')">Stop</button>`
           : "";
+      const message = w.sample_path || w.samplePath || "-";
       tr.innerHTML = `
         <td>${machine}</td>
         <td>encoder</td>
         <td>${state}</td>
         <td>${w.active || 0}</td>
         <td>${state === "offline" ? "—" : progress}</td>
-        <td class="truncate" title="${w.sample_path || ""}">${w.sample_path || "-"}</td>
+        <td class="truncate" title="${message}">${message}</td>
         <td class="flex gap-1 flex-wrap">${actions}</td>
       `;
       tbody.appendChild(tr);
@@ -73,12 +74,16 @@
       (resp.data.encodes || []).forEach((enc) => {
         const tr = document.createElement("tr");
         const machine = enc.machine || "-";
+        const speed = typeof enc.speed === "number" ? enc.speed : 0;
+        const speedLabel = speed > 0 ? speed.toFixed(2) + "x" : "-";
+        const progressLabel =
+          enc.phase === "starting" && (!enc.percent_complete || enc.percent_complete <= 0) ? "Starting…" : (enc.percent_complete || 0).toFixed(1) + "%";
         tr.innerHTML = `
           <td class="truncate" title="${enc.path || ""}">${enc.filename || "Unknown"}</td>
           <td>${machine}</td>
           <td class="tier-${enc.tier || ""}">${enc.tier || "-"}</td>
-          <td>${(enc.percent_complete || 0).toFixed(1)}%</td>
-          <td>${enc.speed ? enc.speed.toFixed(2) + "x" : "0x"}</td>
+          <td>${progressLabel}</td>
+          <td>${speedLabel}</td>
           <td>${enc.eta || "-"}</td>
           <td>${enc.frame || 0} / ${enc.total_frames || "?"}</td>
         `;
@@ -95,12 +100,13 @@
           if (!machine) return;
           const existing = workersByMachine.get(machine) || { machine };
           const percent = enc.percent_complete || 0;
+          const samplePath = enc.path || existing.sample_path;
           workersByMachine.set(machine, {
             ...existing,
             active: Math.max(existing.active || 0, 1),
             percent_complete: Math.max(existing.percent_complete || 0, percent),
             state: "encoding",
-            sample_path: enc.path || existing.sample_path,
+            sample_path: samplePath,
             updated_at: new Date().toISOString(),
           });
         });

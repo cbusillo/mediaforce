@@ -101,7 +101,7 @@ def claim_next_file(
     session: Session,
     machine: str,
     stale_seconds: int = 8 * 60 * 60,
-    progress_stale_seconds: int = 5 * 60,
+    progress_stale_seconds: int = 30 * 60,
     now_iso: Callable[[], str] = default_now_iso,
 ) -> Optional[dict]:
     """Claim the next file with library-aware weighting and manual bumping."""
@@ -126,12 +126,50 @@ def claim_next_file(
     if stale_items:
         session.commit()
 
-    # Keep at most one active claim per machine unless progress is actively
-    # updating. This prevents a worker from accumulating multiple "encoding"
-    # rows if it restarts or hangs between claim and release.
+    # If a worker crashes after claiming but before starting progress updates,
+    # the job can get stuck in "encoding" forever (and other workers won't pick
+    # it up). Treat any "encoding" row with no recent progress as stale.
     progress_cutoff = (now - timedelta(seconds=int(progress_stale_seconds))).isoformat()
 
     active_progress_source_ids = {
+        int(row[0])
+        for row in session.exec(
+            select(EncodeProgress.source_id)
+            .where(
+                EncodeProgress.updated_at.is_not(None),
+                EncodeProgress.updated_at >= progress_cutoff,
+            )
+        ).all()
+        if row and row[0] is not None
+    }
+
+    stalled_items = session.exec(
+        select(MediaItem).where(
+            MediaItem.status == "encoding",
+            MediaItem.claimed_at != None,  # noqa: E711
+            MediaItem.claimed_at < progress_cutoff,  # type: ignore[operator]
+        )
+    ).all()
+    dirty = False
+    for item in stalled_items:
+        if item.id is None:
+            continue
+        if int(item.id) in active_progress_source_ids:
+            continue
+        item.status = "pending"
+        item.claimed_by = None
+        item.claimed_at = None
+        item.updated_at = now_str
+        session.add(item)
+        dirty = True
+    if dirty:
+        session.commit()
+
+    # Keep at most one active claim per machine unless progress is actively
+    # updating. This prevents a worker from accumulating multiple "encoding"
+    # rows if it restarts or hangs between claim and release.
+
+    active_progress_source_ids_for_machine = {
         int(row[0])
         for row in session.exec(
             select(EncodeProgress.source_id)
@@ -155,7 +193,7 @@ def claim_next_file(
     for item in claimed_for_machine:
         if item.id is None:
             continue
-        if int(item.id) in active_progress_source_ids:
+        if int(item.id) in active_progress_source_ids_for_machine:
             continue
         if item.claimed_at is None:
             continue

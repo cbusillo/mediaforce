@@ -10,6 +10,7 @@ dependencies = [
     "uvicorn[standard]",
     "jinja2",
     "python-multipart",
+    "python-dotenv",
     "watchfiles",
     "sqlmodel",
 ]
