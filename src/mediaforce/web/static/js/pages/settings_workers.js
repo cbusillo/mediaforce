@@ -4,6 +4,7 @@
   const table = document.getElementById("settingsWorkersTable");
   const refreshBtn = document.getElementById("workers-refresh");
   const clearOfflineBtn = document.getElementById("workers-clear-offline");
+  const normalizeBtn = document.getElementById("workers-normalize");
   const statusEl = document.getElementById("workers-status");
 
   function setStatus(text, level) {
@@ -92,9 +93,23 @@
     }
   }
 
+  async function normalizeNames() {
+    const ok = window.confirm("Merge old dotted worker names (offline > 7 days) into their base hostname?");
+    if (!ok) return;
+    setStatus("Normalizing…", "warning");
+    const resp = await window.mfApi.postJson("/api/workers/normalize", { older_than_days: 7, offline_only: true });
+    if (resp.ok && resp.data?.success) {
+      const n = (resp.data.merged || []).length;
+      setStatus(`Merged ${n} worker(s).`, "success");
+      await refresh();
+    } else {
+      setStatus(resp.data?.error || resp.error || "Failed to normalize.", "danger");
+    }
+  }
+
   refreshBtn?.addEventListener("click", refresh);
   clearOfflineBtn?.addEventListener("click", clearOffline);
+  normalizeBtn?.addEventListener("click", normalizeNames);
 
   refresh();
 })();
-

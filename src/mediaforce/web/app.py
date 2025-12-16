@@ -185,6 +185,15 @@ def _effective_worker_mode(session: Session, machine: str) -> str:
     return "run"
 
 
+def _canonical_machine_name(machine: str) -> str:
+    machine = (machine or "").strip()
+    if not machine:
+        return ""
+    if "." in machine:
+        machine = machine.split(".", 1)[0]
+    return machine
+
+
 def _apply_worker_controls(session: Session, workers: list[dict]) -> list[dict]:
     global_row = session.get(WorkerControl, "global")
     global_mode = (global_row.mode if global_row else None) or "run"
@@ -546,6 +555,11 @@ class WorkerControlAckRequest(BaseModel):
 class WorkerCleanupRequest(BaseModel):
     machine: Optional[str] = None
     older_than_days: int = 30
+    offline_only: bool = True
+
+
+class WorkerNormalizeRequest(BaseModel):
+    older_than_days: int = 7
     offline_only: bool = True
 
 
@@ -2369,9 +2383,42 @@ def _delete_worker_artifacts(session: Session, *, machine: str) -> None:
         session.delete(cmd)
 
 
+def _merge_worker_artifacts(session: Session, *, src: str, dst: str) -> None:
+    if src == dst:
+        return
+
+    src_key = f"worker:{src}"
+    dst_key = f"worker:{dst}"
+
+    src_reg = session.get(WorkerRegistry, src)
+    if src_reg:
+        dst_reg = session.get(WorkerRegistry, dst)
+        if not dst_reg:
+            dst_reg = WorkerRegistry(machine=dst, role=src_reg.role)
+        try:
+            dst_reg.last_seen = max(str(dst_reg.last_seen or ""), str(src_reg.last_seen or "")) or now_iso()
+        except Exception:
+            dst_reg.last_seen = str(src_reg.last_seen or now_iso())
+        if not dst_reg.sample_path and src_reg.sample_path:
+            dst_reg.sample_path = src_reg.sample_path
+        session.merge(dst_reg)
+
+    src_ctrl = session.get(WorkerControl, src_key)
+    dst_ctrl = session.get(WorkerControl, dst_key)
+    if src_ctrl and not dst_ctrl:
+        session.merge(WorkerControl(key=dst_key, mode=src_ctrl.mode, updated_at=now_iso()))
+
+    src_cmd = session.get(WorkerCommand, src_key)
+    dst_cmd = session.get(WorkerCommand, dst_key)
+    if src_cmd and not dst_cmd:
+        session.merge(WorkerCommand(key=dst_key, stop_now=bool(src_cmd.stop_now), requested_at=src_cmd.requested_at, updated_at=now_iso()))
+
+    _delete_worker_artifacts(session, machine=src)
+
+
 @app.post("/api/workers/cleanup")
 async def api_workers_cleanup(data: WorkerCleanupRequest):
-    machine = (data.machine or "").strip() if data.machine else None
+    machine = _canonical_machine_name(data.machine or "") if data.machine else None
     older_days = int(data.older_than_days or 0)
     if older_days < 0:
         return {"success": False, "error": "older_than_days must be >= 0"}
@@ -2410,6 +2457,44 @@ async def api_workers_cleanup(data: WorkerCleanupRequest):
         return {"success": True, "deleted": deleted}
 
 
+@app.post("/api/workers/normalize")
+async def api_workers_normalize(data: WorkerNormalizeRequest):
+    older_days = int(data.older_than_days or 0)
+    if older_days < 0:
+        return {"success": False, "error": "older_than_days must be >= 0"}
+
+    cutoff = (datetime.now() - timedelta(days=older_days)).isoformat()
+
+    with session_scope() as session:
+        merged: list[dict[str, str]] = []
+        for row in session.exec(select(WorkerRegistry)).all():
+            src = str(row.machine)
+            if "." not in src:
+                continue
+            dst = _canonical_machine_name(src)
+            if not dst or dst == src:
+                continue
+
+            last_seen = str(getattr(row, "last_seen", "") or "")
+            if last_seen and last_seen >= cutoff:
+                continue
+
+            if bool(data.offline_only):
+                try:
+                    last_seen_dt = datetime.fromisoformat(last_seen)
+                    if (datetime.now() - last_seen_dt).total_seconds() <= 90:
+                        continue
+                except Exception:
+                    pass
+
+            _merge_worker_artifacts(session, src=src, dst=dst)
+            merged.append({"from": src, "to": dst})
+
+        if merged:
+            session.commit()
+        return {"success": True, "merged": merged}
+
+
 @app.get("/api/worker-control")
 async def api_worker_control_state():
     with session_scope() as session:
@@ -2437,7 +2522,7 @@ async def api_worker_control_global(data: WorkerControlUpdateRequest):
 
 @app.post("/api/worker-control/worker")
 async def api_worker_control_worker(data: WorkerControlPerMachineRequest):
-    machine = (data.machine or "").strip()
+    machine = _canonical_machine_name(data.machine or "")
     if not machine:
         return {"success": False, "error": "machine required"}
 
@@ -2461,7 +2546,7 @@ async def api_worker_control_worker(data: WorkerControlPerMachineRequest):
 
 @app.post("/api/worker-control/stop-now")
 async def api_worker_control_stop_now(data: WorkerStopNowRequest):
-    machine = (data.machine or "").strip()
+    machine = _canonical_machine_name(data.machine or "")
     if not machine:
         return {"success": False, "error": "machine required"}
 
@@ -2479,7 +2564,7 @@ async def api_worker_control_stop_now(data: WorkerStopNowRequest):
 
 @app.get("/api/worker/control", dependencies=[Depends(_require_worker_api_auth)])
 async def api_worker_control(machine: str = Query("")):
-    machine = (machine or "").strip()
+    machine = _canonical_machine_name(machine or "")
     if not machine:
         return {"success": False, "error": "machine required"}
 
@@ -2492,7 +2577,7 @@ async def api_worker_control(machine: str = Query("")):
 
 @app.post("/api/worker/control/ack", dependencies=[Depends(_require_worker_api_auth)])
 async def api_worker_control_ack(data: WorkerControlAckRequest):
-    machine = (data.machine or "").strip()
+    machine = _canonical_machine_name(data.machine or "")
     if not machine:
         return {"success": False, "error": "machine required"}
     if (data.action or "").strip() != "stop_now":
@@ -2513,7 +2598,7 @@ async def api_worker_control_ack(data: WorkerControlAckRequest):
 async def api_worker_claim(data: WorkerClaimRequest):
     """Claim the next pending item for a worker without direct DB access."""
 
-    machine = (data.machine or "").strip()
+    machine = _canonical_machine_name(data.machine or "")
     if not machine:
         return {"success": False, "error": "machine required"}
 
@@ -2556,7 +2641,7 @@ async def api_worker_claim(data: WorkerClaimRequest):
 async def api_worker_release(data: WorkerReleaseRequest):
     """Release a claimed item back to the queue (or mark encoded)."""
 
-    machine = (data.machine or "").strip()
+    machine = _canonical_machine_name(data.machine or "")
     if not machine:
         return {"success": False, "error": "machine required"}
 
@@ -2569,7 +2654,7 @@ async def api_worker_release(data: WorkerReleaseRequest):
 async def api_worker_progress_start(data: WorkerProgressStartRequest):
     """Create a progress row for an active encode."""
 
-    machine = (data.machine or "").strip()
+    machine = _canonical_machine_name(data.machine or "")
     if not machine:
         return {"success": False, "error": "machine required"}
 
@@ -2612,7 +2697,7 @@ async def api_worker_progress_update(data: WorkerProgressUpdateRequest):
 async def api_worker_report(data: WorkerEncodeReportRequest, background_tasks: BackgroundTasks):
     """Record an encode result from a worker and transition DB state safely."""
 
-    machine = (data.machine or "").strip()
+    machine = _canonical_machine_name(data.machine or "")
     if not machine:
         return {"success": False, "error": "machine required"}
 
