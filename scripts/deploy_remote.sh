@@ -48,10 +48,10 @@ done
 
 tmp_remote="/tmp/mediaforce-deploy.tgz"
 
-echo "Uploading bundle to $host…" >&2
+echo "Uploading bundle to ${host}..." >&2
 scp "$bundle" "$host:$tmp_remote" >/dev/null
 
-echo "Deploying into $remote_dir…" >&2
+echo "Deploying into ${remote_dir}..." >&2
 
 ssh "$host" bash -lc "
   set -euo pipefail
