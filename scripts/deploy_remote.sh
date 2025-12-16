@@ -53,30 +53,38 @@ scp "$bundle" "$host:$tmp_remote" >/dev/null
 
 echo "Deploying into ${remote_dir}..." >&2
 
-ssh "$host" bash -lc "
-  set -euo pipefail
-  mkdir -p '$remote_dir'
-  cd '$remote_dir'
-  tar -xzf '$tmp_remote'
+# Use stdin to avoid ssh argument quoting issues.
+ssh "$host" \
+  "REMOTE_DIR=$(printf %q "$remote_dir") SYSTEMD_UNIT=$(printf %q "$systemd_unit") LAUNCHD_LABEL=$(printf %q "$launchd_label") TMP_REMOTE=$(printf %q "$tmp_remote") bash -s" <<'REMOTE'
+set -euo pipefail
 
-  if command -v uv >/dev/null 2>&1; then
-    uv sync
-  elif [[ -x "${HOME}/.local/bin/uv" ]]; then
-    "${HOME}/.local/bin/uv" sync
-  elif [[ -x "/root/.local/bin/uv" ]]; then
-    /root/.local/bin/uv sync
-  else
-    echo 'uv not found on remote; skipping uv sync' >&2
-  fi
+eval "REMOTE_DIR=${REMOTE_DIR}"
+eval "SYSTEMD_UNIT=${SYSTEMD_UNIT}"
+eval "LAUNCHD_LABEL=${LAUNCHD_LABEL}"
+eval "TMP_REMOTE=${TMP_REMOTE}"
 
-  if [[ -n '$systemd_unit' ]]; then
-    systemctl restart '$systemd_unit'
-    systemctl is-active '$systemd_unit' >/dev/null
-  fi
+mkdir -p "${REMOTE_DIR}"
+cd "${REMOTE_DIR}"
+tar -xzf "${TMP_REMOTE}"
 
-  if [[ -n '$launchd_label' ]]; then
-    launchctl kickstart -k "gui/$(id -u)/${launchd_label}" || true
-  fi
-"
+if command -v uv >/dev/null 2>&1; then
+  uv sync
+elif [[ -x "${HOME}/.local/bin/uv" ]]; then
+  "${HOME}/.local/bin/uv" sync
+elif [[ -x "/root/.local/bin/uv" ]]; then
+  /root/.local/bin/uv sync
+else
+  echo 'uv not found on remote; skipping uv sync' >&2
+fi
+
+if [[ -n "${SYSTEMD_UNIT}" ]]; then
+  systemctl restart "${SYSTEMD_UNIT}"
+  systemctl is-active "${SYSTEMD_UNIT}" >/dev/null
+fi
+
+if [[ -n "${LAUNCHD_LABEL}" ]]; then
+  launchctl kickstart -k "gui/$(id -u)/${LAUNCHD_LABEL}" || true
+fi
+REMOTE
 
 echo "Done." >&2
