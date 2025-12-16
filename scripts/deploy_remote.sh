@@ -67,6 +67,15 @@ mkdir -p "${REMOTE_DIR}"
 cd "${REMOTE_DIR}"
 tar -xzf "${TMP_REMOTE}"
 
+# Ensure local env stays local (bundle intentionally excludes it).
+if [[ ! -f "${REMOTE_DIR}/.env" ]]; then
+  {
+    echo "# Local dev env (gitignored)"
+    echo "MEDIAFORCE_API_TOKEN="
+    echo "MEDIAFORCE_API_URL="
+  } > "${REMOTE_DIR}/.env"
+fi
+
 if command -v uv >/dev/null 2>&1; then
   uv sync
 elif [[ -x "${HOME}/.local/bin/uv" ]]; then
