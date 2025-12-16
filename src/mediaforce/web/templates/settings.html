@@ -130,6 +130,41 @@
     </form>
 </div>
 
+<div class="card space-y-4 mt-6">
+    <div class="section-heading">
+        <div>
+            <h3 class="section-title">Workers</h3>
+            <p class="section-subtle">Remove stale worker entries and per-worker overrides.</p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2 text-sm">
+            <button type="button" class="btn btn-sm" id="workers-refresh">Refresh</button>
+            <button type="button" class="btn btn-sm" id="workers-clear-offline">Clear Offline</button>
+        </div>
+    </div>
+
+    <div class="overflow-auto">
+        <table id="settingsWorkersTable" class="table-auto w-full text-sm table-zebra">
+            <thead>
+                <tr>
+                    <th>Host</th>
+                    <th>State</th>
+                    <th>Active</th>
+                    <th>Last Seen</th>
+                    <th>Message</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td colspan="6" class="text-foreground-muted">Loading workers…</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    <div id="workers-status" class="text-foreground-muted text-sm"></div>
+</div>
+
 <script src="/static/js/pages/settings.js"></script>
+<script src="/static/js/pages/settings_workers.js"></script>
 
 {% endblock %}
