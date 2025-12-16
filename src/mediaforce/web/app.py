@@ -992,6 +992,7 @@ async def settings_page(request: Request):
         "global_max_height": global_max_height,
         "settings": settings,
         "lib_status": lib_status,
+        "api_url_hint": str(request.base_url).rstrip("/"),
         "nav_status": _nav_status(),
     })
 

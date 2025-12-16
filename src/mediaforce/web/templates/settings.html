@@ -163,6 +163,15 @@
         </table>
     </div>
     <div id="workers-status" class="text-foreground-muted text-sm"></div>
+
+    <div class="text-foreground-muted text-sm">
+        <div class="font-semibold text-foreground">Recommended worker env</div>
+        <div class="mt-1">Workers should be started with a stable name and point at this master:</div>
+        <pre class="mt-2 p-3 rounded bg-surface-subtle border border-surface-subtle overflow-auto text-xs"><code>MEDIAFORCE_API_URL={{ api_url_hint }}
+MEDIAFORCE_API_TOKEN=&lt;same token as master&gt;
+MEDIAFORCE_MACHINE_NAME=&lt;short-hostname&gt;</code></pre>
+        <div class="mt-2">Note: the token is never shown in the UI; copy it from the master environment.</div>
+    </div>
 </div>
 
 <script src="/static/js/pages/settings.js"></script>
