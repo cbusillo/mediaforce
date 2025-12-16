@@ -2575,8 +2575,10 @@ def _resolve_machine_name() -> str:
         return override
 
     hostname = socket.gethostname().strip()
-    if hostname.lower().endswith(".local"):
-        return hostname.rsplit(".", 1)[0]
+    # Prefer stable, human-friendly identifiers. Domains are noisy in the UI and
+    # lead to duplicates when hosts report both a FQDN and a bare hostname.
+    if "." in hostname:
+        hostname = hostname.split(".", 1)[0]
     return hostname
 
 

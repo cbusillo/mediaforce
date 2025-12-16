@@ -543,6 +543,12 @@ class WorkerControlAckRequest(BaseModel):
     action: str = "stop_now"
 
 
+class WorkerCleanupRequest(BaseModel):
+    machine: Optional[str] = None
+    older_than_days: int = 30
+    offline_only: bool = True
+
+
 class WorkerMetricsPayload(BaseModel):
     ssim: Optional[float] = None
     psnr: Optional[float] = None
@@ -2346,6 +2352,62 @@ async def api_workers(request: Request):
         return {"success": True, "workers": workers}
     except Exception:
         return {"success": True, "workers": []}
+
+
+def _delete_worker_artifacts(session: Session, *, machine: str) -> None:
+    key = f"worker:{machine}"
+    reg = session.get(WorkerRegistry, machine)
+    if reg:
+        session.delete(reg)
+
+    ctrl = session.get(WorkerControl, key)
+    if ctrl:
+        session.delete(ctrl)
+
+    cmd = session.get(WorkerCommand, key)
+    if cmd:
+        session.delete(cmd)
+
+
+@app.post("/api/workers/cleanup")
+async def api_workers_cleanup(data: WorkerCleanupRequest):
+    machine = (data.machine or "").strip() if data.machine else None
+    older_days = int(data.older_than_days or 0)
+    if older_days < 0:
+        return {"success": False, "error": "older_than_days must be >= 0"}
+
+    with session_scope() as session:
+        if machine:
+            _delete_worker_artifacts(session, machine=machine)
+            session.commit()
+            return {"success": True, "deleted": [machine]}
+
+        cutoff = (datetime.now() - timedelta(days=older_days)).isoformat()
+        deleted: list[str] = []
+
+        for row in session.exec(select(WorkerRegistry)).all():
+            last_seen = str(getattr(row, "last_seen", "") or "")
+            if not last_seen:
+                continue
+            if last_seen >= cutoff:
+                continue
+
+            if bool(data.offline_only):
+                try:
+                    last_seen_dt = datetime.fromisoformat(last_seen)
+                    if (datetime.now() - last_seen_dt).total_seconds() <= 90:
+                        continue
+                except Exception:
+                    pass
+
+            deleted.append(str(row.machine))
+
+        for m in deleted:
+            _delete_worker_artifacts(session, machine=m)
+        if deleted:
+            session.commit()
+
+        return {"success": True, "deleted": deleted}
 
 
 @app.get("/api/worker-control")

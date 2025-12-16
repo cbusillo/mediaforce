@@ -39,7 +39,8 @@
           ? `<button class="btn btn-xs btn-success" onclick="resumeWorker('${safeMachine}')">Run</button>` +
             `<button class="btn btn-xs btn-warning" onclick="pauseWorker('${safeMachine}')">Pause</button>` +
             `<button class="btn btn-xs btn-danger" onclick="stopWorker('${safeMachine}')">Stop</button>` +
-            `<button class="btn btn-xs btn-danger" onclick="stopWorkerNow('${safeMachine}')">Stop Now</button>`
+            `<button class="btn btn-xs btn-danger" onclick="stopWorkerNow('${safeMachine}')">Stop Now</button>` +
+            (state === "offline" ? `<button class="btn btn-xs" onclick="deleteWorker('${safeMachine}')">Remove</button>` : "")
           : "";
       const message = w.sample_path || w.samplePath || "-";
       tr.innerHTML = `
@@ -152,6 +153,20 @@
     const ok = window.confirm(`Stop the current encode on ${machine} right now? This will requeue the job.`);
     if (!ok) return;
     await window.mfApi.postJson("/api/worker-control/stop-now", { machine });
+    await refreshWorkers();
+  };
+
+  window.deleteWorker = async function (machine) {
+    const ok = window.confirm(`Remove worker ${machine} from this dashboard?`);
+    if (!ok) return;
+    await window.mfApi.postJson("/api/workers/cleanup", { machine });
+    await refreshWorkers();
+  };
+
+  window.clearOfflineWorkers = async function () {
+    const ok = window.confirm("Clear offline workers not seen in 30 days?");
+    if (!ok) return;
+    await window.mfApi.postJson("/api/workers/cleanup", { older_than_days: 30, offline_only: true });
     await refreshWorkers();
   };
 
