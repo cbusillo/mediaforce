@@ -982,6 +982,8 @@ async def settings_page(request: Request):
     # Library status (last scan time per library)
     lib_status = get_library_status()
 
+    api_url_hint = os.getenv("MEDIAFORCE_API_URL") or str(request.base_url).rstrip("/")
+
     return templates.TemplateResponse("settings.html", {
         "request": request,
         "title": "Settings",
@@ -992,7 +994,7 @@ async def settings_page(request: Request):
         "global_max_height": global_max_height,
         "settings": settings,
         "lib_status": lib_status,
-        "api_url_hint": str(request.base_url).rstrip("/"),
+        "api_url_hint": api_url_hint,
         "nav_status": _nav_status(),
     })
 
