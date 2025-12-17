@@ -2588,9 +2588,15 @@ async def api_worker_control_stop_now(data: WorkerStopNowRequest):
     key = f"worker:{machine}"
     now_str = now_iso()
     with session_scope() as session:
-        active = session.exec(select(EncodeProgress).where(EncodeProgress.machine == machine)).first()
-        if not active:
-            return {"success": False, "error": "worker is not encoding"}
+        active_progress = session.exec(select(EncodeProgress).where(EncodeProgress.machine == machine)).first()
+        active_claim = session.exec(
+            select(MediaItem).where(
+                MediaItem.status == "encoding",
+                MediaItem.claimed_by == machine,
+            )
+        ).first()
+        if not active_progress and not active_claim:
+            return {"success": False, "error": "worker has no active job"}
 
         session.merge(WorkerCommand(key=key, stop_now=True, requested_at=now_str, updated_at=now_str))
         session.commit()
