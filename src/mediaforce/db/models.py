@@ -276,10 +276,19 @@ def ensure_schema(engine: Engine) -> None:
     # SQLModel's create_all will not add new columns to an existing table, so we
     # must backfill schema changes here to keep upgrades safe.
     with engine.begin() as conn:
-        columns = {
-            row["name"]
-            for row in conn.exec_driver_sql("PRAGMA table_info(media_inventory)")  # type: ignore[index]
-        }
+        rows = list(conn.exec_driver_sql("PRAGMA table_info(media_inventory)").fetchall())
+        columns: set[str] = set()
+        for row in rows:
+            name = None
+            try:
+                name = row["name"]  # type: ignore[index]
+            except Exception:
+                try:
+                    name = row[1]
+                except Exception:
+                    name = None
+            if isinstance(name, str) and name:
+                columns.add(name)
 
         if "cooldown_until" not in columns:
             conn.exec_driver_sql("ALTER TABLE media_inventory ADD COLUMN cooldown_until TEXT")
