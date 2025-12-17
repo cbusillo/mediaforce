@@ -42,6 +42,10 @@ EnvironmentFile=/opt/mediaforce/.env
 # Use a single slot by default; scale by running more workers on more machines.
 ExecStart=/root/.local/bin/uv run mediaforce run /mnt/media/tv --max-concurrency 1
 
+# systemd sends SIGTERM on stop/restart; treat it as a clean exit so "restart"
+# doesn't spam unit failures.
+SuccessExitStatus=143
+
 # Be patient when stopping (ffmpeg can take a moment to exit).
 TimeoutStopSec=30
 KillSignal=SIGTERM
@@ -84,4 +88,3 @@ scripts/deploy_remote.sh user@host /opt/mediaforce /tmp/mediaforce-bundle.tgz --
 ```
 
 The bundle intentionally excludes `.env` so per-host secrets and names remain local.
-
