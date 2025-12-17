@@ -72,7 +72,40 @@ ffmpeg -encoders | grep svt
 - Library roots and weights are defined in the settings JSON/DB; defaults cover `/Volumes/media` on macOS and `/mnt/media` on Linux.
 - Global settings include `max_concurrency` (per-host encode slots) and optional off-peak window (e.g., 00:00–05:00) enforced by workers.
 - Logs are structured JSON to stdout. Set `MEDIAFORCE_LOG_LEVEL` (default `INFO`) and optional `MEDIAFORCE_LOG_FILE=/path/to/mediaforce.jsonl` to mirror logs to a JSONL file.
-- Hostnames in use: `chris-mbp.shiny` (M2 laptop), `chris-studio.shiny` (M4 studio), `tdarr.shiny` (CT 103 encoder).
+
+### Workers (Remote Encoders)
+
+Workers connect to the master Web UI over the Worker API. Configure each worker with:
+
+```bash
+MEDIAFORCE_API_URL=<http://master-host:5555>
+MEDIAFORCE_API_TOKEN=<shared secret>
+MEDIAFORCE_MACHINE_NAME=<short-hostname>
+```
+
+Notes:
+- `MEDIAFORCE_MACHINE_NAME` should be a stable, short identifier (e.g. `tdarr`, `chris-mbp`).
+- If not set, Mediaforce falls back to the local hostname and strips any domain portion.
+- The Web UI also canonicalizes dotted names (e.g. `foo.local` → `foo`) to reduce duplicates.
+
+In the Web UI, go to **Settings → Workers** to see live worker state, global mode, and queue counts.
+
+### Deploying to Remote Hosts
+
+For simple “push a new build” workflows (no git required on the remote), use:
+
+```bash
+# Build a bundle that does NOT ship .env
+scripts/deploy_bundle.sh /tmp/mediaforce-bundle.tgz
+
+# Linux + systemd
+scripts/deploy_remote.sh user@linux-host /opt/mediaforce /tmp/mediaforce-bundle.tgz --systemd mediaforce-worker
+
+# macOS + launchd
+scripts/deploy_remote.sh user@mac-host /Users/user/Developer/mediaforce /tmp/mediaforce-bundle.tgz --launchd com.mediaforce.worker
+```
+
+This bundle intentionally excludes `.env` so per-host secrets and identifiers remain local.
 
 ## Usage
 
