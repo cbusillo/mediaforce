@@ -3221,7 +3221,12 @@ async def api_queue_episodes(show_name: str, season_name: str, request: Request)
 async def api_stats():
     """Get current stats as JSON."""
     with session_scope() as session:
-        return MediaRepository(session).count_by_status()
+        counts = dict(MediaRepository(session).count_by_status() or {})
+
+        # Ensure stable keys so UIs can treat missing statuses as 0.
+        for key in ("pending", "encoding", "paused", "encoded", "completed", "skipped"):
+            counts.setdefault(key, 0)
+        return counts
 
 
 @app.get("/api/stats/summary")
