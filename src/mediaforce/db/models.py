@@ -272,6 +272,18 @@ def ensure_schema(engine: Engine) -> None:
 
     SQLModel.metadata.create_all(engine)
 
+    # Lightweight, idempotent migrations for SQLite.
+    # SQLModel's create_all will not add new columns to an existing table, so we
+    # must backfill schema changes here to keep upgrades safe.
+    with engine.begin() as conn:
+        columns = {
+            row["name"]
+            for row in conn.exec_driver_sql("PRAGMA table_info(media_inventory)")  # type: ignore[index]
+        }
+
+        if "cooldown_until" not in columns:
+            conn.exec_driver_sql("ALTER TABLE media_inventory ADD COLUMN cooldown_until TEXT")
+
 
 def init_engine(db_path: str):
     engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
