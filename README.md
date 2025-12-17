@@ -34,6 +34,7 @@ scan → queue → encode → verify → promote
 - `src/mediaforce/cli/` — CLI entrypoint shim (`mediaforce` console script).
 - `src/mediaforce/web/` — FastAPI app, routes, templates, and static assets (`mediaforce-web`).
 - `docs/` — contributor docs (e.g., `hosts.example.md`).
+- `docs/workers.md` — how to run remote workers (systemd/launchd) and deploy updates.
 - `TODO.md` — roadmap/features in progress.
 - See `docs/architecture.md` for refactor goals and next steps.
 
