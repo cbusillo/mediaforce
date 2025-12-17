@@ -233,12 +233,15 @@ def claim_next_file(
         return None
 
     weight_expr = func.coalesce(MediaItem.priority_score, 0) * func.coalesce(Library.weight, 1)
+    cooldown_until = MediaItem.cooldown_until
+    now_str = now_iso()
     weighted = session.exec(
         select(MediaItem, Library.weight)
         .join(Library, MediaItem.library_id == Library.id, isouter=True)
         .where(
             MediaItem.status == "pending",
             ((MediaItem.claimed_by == None) | (MediaItem.claimed_by == machine)),  # noqa: E711
+            ((cooldown_until == None) | (cooldown_until <= now_str)),  # noqa: E711
         )
         .order_by(MediaItem.manual_priority, weight_expr.desc())
         .limit(1)
@@ -250,11 +253,18 @@ def claim_next_file(
     item, _weight = weighted
     fresh = session.get(MediaItem, item.id)
     if fresh is None or fresh.status != "pending":
-        return claim_next_file(session, machine, stale_seconds, now_iso)
+        return claim_next_file(
+            session,
+            machine,
+            stale_seconds=stale_seconds,
+            progress_stale_seconds=progress_stale_seconds,
+            now_iso=now_iso,
+        )
 
     fresh.status = "encoding"
     fresh.claimed_by = machine
     fresh.claimed_at = now_str
+    fresh.cooldown_until = None
     fresh.updated_at = now_str
     session.add(fresh)
     session.commit()

@@ -1,0 +1,78 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+from sqlalchemy import func
+from sqlmodel import Session, select
+
+from mediaforce.db.models import EncodeProgress, MediaItem
+
+
+def reconcile_queue_state(
+    session: Session,
+    *,
+    progress_stale_seconds: int = 10 * 60,
+) -> dict[str, int]:
+    """Best-effort reconciliation of inventory <-> progress.
+
+    Goals:
+    - If an item is marked `encoding` but has no recent progress row, reset it to `pending`.
+    - If a progress row exists but the item isn't `encoding`, set it to `encoding`.
+
+    This is intentionally conservative; it only touches rows that appear stale.
+    """
+
+    now = datetime.now()
+    cutoff = (now - timedelta(seconds=int(progress_stale_seconds))).isoformat()
+    changed = {"reset_to_pending": 0, "force_to_encoding": 0}
+
+    # Progress -> item status alignment.
+    for progress in session.exec(select(EncodeProgress)).all():
+        item = session.get(MediaItem, int(progress.source_id))
+        if not item:
+            continue
+        if item.status != "encoding":
+            item.status = "encoding"
+            item.claimed_by = progress.machine
+            item.claimed_at = str(progress.started_at)
+            item.updated_at = now.isoformat()
+            session.add(item)
+            changed["force_to_encoding"] += 1
+
+    # Stale encoding items -> pending.
+    encoding_items = session.exec(select(MediaItem).where(MediaItem.status == "encoding")).all()
+    for item in encoding_items:
+        if item.id is None:
+            continue
+
+        # Recent progress exists?
+        progress = session.exec(
+            select(EncodeProgress)
+            .where(EncodeProgress.source_id == int(item.id))
+            .order_by(func.coalesce(EncodeProgress.updated_at, EncodeProgress.started_at).desc())
+        ).first()
+
+        if progress is None:
+            # No progress row. If claim is old, treat as stuck.
+            claimed_at = str(item.claimed_at or "")
+            if claimed_at and claimed_at < cutoff:
+                item.status = "pending"
+                item.claimed_by = None
+                item.claimed_at = None
+                item.updated_at = now.isoformat()
+                session.add(item)
+                changed["reset_to_pending"] += 1
+            continue
+
+        updated_at = str(progress.updated_at or progress.started_at or "")
+        if updated_at and updated_at < cutoff:
+            item.status = "pending"
+            item.claimed_by = None
+            item.claimed_at = None
+            item.updated_at = now.isoformat()
+            session.add(item)
+            changed["reset_to_pending"] += 1
+
+    if changed["reset_to_pending"] or changed["force_to_encoding"]:
+        session.commit()
+    return changed

@@ -71,6 +71,8 @@ class MediaItem(SQLModel, table=True):  # type: ignore[misc,call-arg]
     claimed_by: Optional[str] = None
     claimed_at: Optional[str] = None
 
+    cooldown_until: Optional[str] = None
+
     scanned_at: Optional[str] = None
     updated_at: Optional[str] = None
 

@@ -46,6 +46,7 @@ from mediaforce.services.promote import (
     rollback_from_manifest,
     rollback_promote,
 )
+from mediaforce.services.reconcile import reconcile_queue_state
 from mediaforce.services.quality_feedback import flag_profile_choice
 from mediaforce.services.quality_loop import (
     VmafSampleResult,
@@ -306,6 +307,8 @@ WATCH_STATUS: dict = {
 # Track web-triggered scan status
 SCAN_STATUS: dict[str, str] = {}
 
+RECONCILE_TASK: Optional[asyncio.Task] = None
+
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
@@ -320,6 +323,18 @@ async def _lifespan(_app: FastAPI):
     except Exception:
         WATCH_STATUS.update({"running": False, "message": "watch start failed"})
 
+    async def reconcile_runner():
+        while True:
+            try:
+                with session_scope() as session:
+                    reconcile_queue_state(session)
+            except Exception:
+                pass
+            await asyncio.sleep(60)
+
+    global RECONCILE_TASK
+    RECONCILE_TASK = asyncio.create_task(reconcile_runner())
+
     try:
         yield
     finally:
@@ -327,6 +342,13 @@ async def _lifespan(_app: FastAPI):
             await _stop_watch_task(message="shutdown")
         except Exception:
             WATCH_STATUS.update({"running": False, "message": "shutdown failed"})
+
+        if RECONCILE_TASK and not RECONCILE_TASK.done():
+            RECONCILE_TASK.cancel()
+            try:
+                await RECONCILE_TASK
+            except asyncio.CancelledError:
+                pass
 
 
 app.router.lifespan_context = _lifespan
@@ -2778,6 +2800,16 @@ async def api_worker_report(data: WorkerEncodeReportRequest, background_tasks: B
                 session.commit()
 
         release_claim(session, int(data.source_id), bool(data.success))
+
+        # If the worker was force-stopped, apply a short cooldown so the same
+        # machine doesn't immediately re-claim the same item.
+        if not bool(data.success) and str(data.error_message or "") == "stopped_now":
+            item = session.get(MediaItem, int(data.source_id))
+            if item:
+                item.cooldown_until = (datetime.now() + timedelta(minutes=2)).isoformat()
+                item.updated_at = datetime.now().isoformat()
+                session.add(item)
+                session.commit()
 
         try:
             source_size = int(data.source_size_bytes)
