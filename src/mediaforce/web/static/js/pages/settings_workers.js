@@ -5,6 +5,9 @@
   const refreshBtn = document.getElementById("workers-refresh");
   const clearOfflineBtn = document.getElementById("workers-clear-offline");
   const normalizeBtn = document.getElementById("workers-normalize");
+  const runAllBtn = document.getElementById("workers-run-all");
+  const pauseAllBtn = document.getElementById("workers-pause-all");
+  const stopAllBtn = document.getElementById("workers-stop-all");
   const statusEl = document.getElementById("workers-status");
 
   const pendingEl = document.getElementById("queuePending");
@@ -184,6 +187,24 @@
   refreshBtn?.addEventListener("click", refresh);
   clearOfflineBtn?.addEventListener("click", clearOffline);
   normalizeBtn?.addEventListener("click", normalizeNames);
+
+  runAllBtn?.addEventListener("click", async () => {
+    setStatus("Setting global mode: run…", "warning");
+    await window.mfApi.postJson("/api/worker-control/global", { mode: "run" });
+    await refresh();
+  });
+  pauseAllBtn?.addEventListener("click", async () => {
+    setStatus("Setting global mode: drain…", "warning");
+    await window.mfApi.postJson("/api/worker-control/global", { mode: "drain" });
+    await refresh();
+  });
+  stopAllBtn?.addEventListener("click", async () => {
+    const ok = window.confirm("Stop all workers after they finish current encodes?");
+    if (!ok) return;
+    setStatus("Setting global mode: stop…", "warning");
+    await window.mfApi.postJson("/api/worker-control/global", { mode: "stop" });
+    await refresh();
+  });
 
   refresh();
   setInterval(refresh, 5000);
