@@ -7,6 +7,11 @@
   const normalizeBtn = document.getElementById("workers-normalize");
   const statusEl = document.getElementById("workers-status");
 
+  const pendingEl = document.getElementById("queuePending");
+  const encodingEl = document.getElementById("queueEncoding");
+  const pausedEl = document.getElementById("queuePaused");
+  const globalModeEl = document.getElementById("globalWorkerMode");
+
   function setStatus(text, level) {
     window.mfUi?.setStatus(statusEl, text, level || "muted");
   }
@@ -64,6 +69,29 @@
     } catch (_) {
       setStatus("Failed to load workers.", "danger");
     }
+
+    try {
+      const statsResp = await window.mfApi.getJson("/api/stats");
+      if (statsResp.ok && statsResp.data) {
+        const pending = statsResp.data.pending || 0;
+        const encoding = statsResp.data.encoding || 0;
+        const paused = statsResp.data.paused || 0;
+        if (pendingEl) pendingEl.textContent = String(pending);
+        if (encodingEl) encodingEl.textContent = String(encoding);
+        if (pausedEl) pausedEl.textContent = String(paused);
+      }
+    } catch (_) {
+      /* ignore */
+    }
+
+    try {
+      const ctrlResp = await window.mfApi.getJson("/api/worker-control");
+      if (ctrlResp.ok && ctrlResp.data?.success) {
+        if (globalModeEl) globalModeEl.textContent = String(ctrlResp.data.global || "run");
+      }
+    } catch (_) {
+      /* ignore */
+    }
   }
 
   window.settingsDeleteWorker = async function (machine) {
@@ -112,4 +140,5 @@
   normalizeBtn?.addEventListener("click", normalizeNames);
 
   refresh();
+  setInterval(refresh, 5000);
 })();
