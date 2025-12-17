@@ -103,6 +103,40 @@ class ProgressRepository:
                 base["state"] = "encoding"
             workers[machine_name] = base
 
+        # If a worker claimed a job but hasn't started progress tracking yet,
+        # show it as "starting" so the UI reflects reality.
+        claimed_by: Any = MediaItem.claimed_by
+        claimed_at: Any = MediaItem.claimed_at
+        path: Any = MediaItem.path
+        status: Any = MediaItem.status
+
+        starting_rows = self.session.exec(
+            select(
+                claimed_by,
+                func.count().label("active"),
+                func.max(claimed_at).label("updated_at"),
+                func.max(path).label("sample_path"),
+            )
+            .where(status == "encoding", claimed_by.is_not(None))
+            .group_by(claimed_by)
+        ).all()
+
+        for row in starting_rows:
+            machine_name = str(row.claimed_by or "")
+            if not machine_name:
+                continue
+            base = workers.get(machine_name) or {"machine": machine_name, "role": "encoder"}
+            if str(base.get("state") or "") == "encoding":
+                continue
+            base.update({
+                "active": row.active or base.get("active") or 0,
+                "percent_complete": base.get("percent_complete") or 0,
+                "sample_path": row.sample_path or base.get("sample_path"),
+                "updated_at": row.updated_at or base.get("updated_at"),
+            })
+            base["state"] = "starting"
+            workers[machine_name] = base
+
         return sorted(workers.values(), key=lambda w: str(w.get("machine") or "").lower())
 
     def list_active(

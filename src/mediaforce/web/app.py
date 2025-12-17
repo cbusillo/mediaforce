@@ -308,6 +308,7 @@ WATCH_STATUS: dict = {
 SCAN_STATUS: dict[str, str] = {}
 
 RECONCILE_TASK: Optional[asyncio.Task] = None
+RECONCILE_LAST: dict[str, Any] = {"updated_at": None, "result": None, "error": None}
 
 
 @asynccontextmanager
@@ -327,9 +328,14 @@ async def _lifespan(_app: FastAPI):
         while True:
             try:
                 with session_scope() as session:
-                    reconcile_queue_state(session)
-            except Exception:
-                pass
+                    result = reconcile_queue_state(session)
+                changed = int(result.get("reset_to_pending", 0) or 0) + int(result.get("force_to_encoding", 0) or 0)
+                if changed:
+                    logger.info("reconcile_changed", extra={"result": result})
+                RECONCILE_LAST.update({"updated_at": datetime.now().isoformat(), "result": result, "error": None})
+            except Exception as exc:
+                RECONCILE_LAST.update({"updated_at": datetime.now().isoformat(), "result": None, "error": str(exc)})
+                logger.warning("reconcile_failed", exc_info=True)
             await asyncio.sleep(60)
 
     global RECONCILE_TASK
@@ -352,6 +358,21 @@ async def _lifespan(_app: FastAPI):
 
 
 app.router.lifespan_context = _lifespan
+
+
+@app.post("/api/reconcile/run")
+async def api_reconcile_run():
+    """Run a one-shot reconcile pass (Settings → Workers)."""
+
+    with session_scope() as session:
+        result = reconcile_queue_state(session)
+    RECONCILE_LAST.update({"updated_at": datetime.now().isoformat(), "result": result, "error": None})
+    return {"success": True, "result": result}
+
+
+@app.get("/api/reconcile/status")
+async def api_reconcile_status():
+    return {"success": True, "status": RECONCILE_LAST}
 
 
 def _require_worker_api_auth(request: Request) -> None:

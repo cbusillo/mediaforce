@@ -8,6 +8,7 @@
   const runAllBtn = document.getElementById("workers-run-all");
   const pauseAllBtn = document.getElementById("workers-pause-all");
   const stopAllBtn = document.getElementById("workers-stop-all");
+  const reconcileBtn = document.getElementById("workers-reconcile");
   const statusEl = document.getElementById("workers-status");
 
   const pendingEl = document.getElementById("queuePending");
@@ -207,6 +208,20 @@
     if (!ok) return;
     setStatus("Setting global mode: stop…", "warning");
     await window.mfApi.postJson("/api/worker-control/global", { mode: "stop" });
+    await refresh();
+  });
+
+  reconcileBtn?.addEventListener("click", async () => {
+    setStatus("Reconciling…", "warning");
+    const resp = await window.mfApi.postJson("/api/reconcile/run", {});
+    if (resp.ok && resp.data?.success) {
+      const r = resp.data.result || {};
+      const reset = r.reset_to_pending || 0;
+      const force = r.force_to_encoding || 0;
+      setStatus(`Reconciled: reset=${reset}, forced=${force}.`, reset || force ? "warning" : "success");
+    } else {
+      setStatus(resp.data?.error || resp.error || "Reconcile failed.", "danger");
+    }
     await refresh();
   });
 
