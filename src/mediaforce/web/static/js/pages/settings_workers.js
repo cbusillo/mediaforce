@@ -48,12 +48,14 @@
       const canControl = machine && machine !== "-";
       const actions = !canControl
         ? ""
-        : `<button class="btn btn-xs btn-success" onclick="settingsSetWorkerMode('${safeMachine}','run')">Run</button>` +
+        : `<div class="flex flex-wrap gap-1">` +
+          `<button class="btn btn-xs btn-success" onclick="settingsSetWorkerMode('${safeMachine}','run')">Run</button>` +
           `<button class="btn btn-xs btn-warning" onclick="settingsSetWorkerMode('${safeMachine}','drain')">Pause</button>` +
           `<button class="btn btn-xs btn-danger" onclick="settingsSetWorkerMode('${safeMachine}','stop')">Stop</button>` +
           `<button class="btn btn-xs btn-danger" onclick="settingsStopNow('${safeMachine}')">Stop Now</button>` +
           (w.override_mode ? `<button class="btn btn-xs" onclick="settingsClearWorkerOverride('${safeMachine}')">Clear Override</button>` : "") +
-          (state === "offline" ? `<button class="btn btn-xs" onclick="settingsDeleteWorker('${safeMachine}')">Remove</button>` : "");
+          (state === "offline" ? `<button class="btn btn-xs" onclick="settingsDeleteWorker('${safeMachine}')">Remove</button>` : "") +
+          `</div>`;
 
       tr.innerHTML = `
         <td>${machine}</td>
