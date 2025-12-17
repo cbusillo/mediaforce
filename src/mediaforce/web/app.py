@@ -185,6 +185,14 @@ def _effective_worker_mode(session: Session, machine: str) -> str:
     return "run"
 
 
+def _worker_override_mode(session: Session, machine: str) -> Optional[str]:
+    machine_key = f"worker:{machine}"
+    row = session.get(WorkerControl, machine_key)
+    if row and row.mode:
+        return row.mode
+    return None
+
+
 def _canonical_machine_name(machine: str) -> str:
     machine = (machine or "").strip()
     if not machine:
@@ -201,7 +209,8 @@ def _apply_worker_controls(session: Session, workers: list[dict]) -> list[dict]:
     updated: list[dict] = []
     for w in workers:
         machine = str(w.get("machine") or "")
-        mode = _effective_worker_mode(session, machine) if machine else global_mode
+        override_mode = _worker_override_mode(session, machine) if machine else None
+        mode = override_mode or global_mode
         state = str(w.get("state") or "")
 
         if mode == "drain" and state != "encoding":
@@ -215,6 +224,7 @@ def _apply_worker_controls(session: Session, workers: list[dict]) -> list[dict]:
 
         w2 = dict(w)
         w2["control_mode"] = mode
+        w2["override_mode"] = override_mode
         w2["global_mode"] = global_mode
         w2["state"] = state or w2.get("state")
         updated.append(w2)

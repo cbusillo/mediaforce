@@ -27,7 +27,7 @@
 
     if (!list || list.length === 0) {
       const tr = document.createElement("tr");
-      tr.innerHTML = '<td colspan="8" class="text-foreground-muted">No workers reporting.</td>';
+      tr.innerHTML = '<td colspan="9" class="text-foreground-muted">No workers reporting.</td>';
       tbody.appendChild(tr);
       return;
     }
@@ -37,6 +37,7 @@
       const machine = w.machine || "-";
       const state = w.state || "-";
       const mode = w.control_mode || "-";
+      const override = w.override_mode || "-";
       const active = w.active || 0;
       const percent = typeof w.percent_complete === "number" ? w.percent_complete : 0;
       const progressLabel = state === "encoding" ? (percent > 0 ? `${Math.round(percent)}%` : "Starting…") : "—";
@@ -51,13 +52,14 @@
           `<button class="btn btn-xs btn-warning" onclick="settingsSetWorkerMode('${safeMachine}','drain')">Pause</button>` +
           `<button class="btn btn-xs btn-danger" onclick="settingsSetWorkerMode('${safeMachine}','stop')">Stop</button>` +
           `<button class="btn btn-xs btn-danger" onclick="settingsStopNow('${safeMachine}')">Stop Now</button>` +
-          `<button class="btn btn-xs" onclick="settingsClearWorkerOverride('${safeMachine}')">Clear Override</button>` +
+          (w.override_mode ? `<button class="btn btn-xs" onclick="settingsClearWorkerOverride('${safeMachine}')">Clear Override</button>` : "") +
           (state === "offline" ? `<button class="btn btn-xs" onclick="settingsDeleteWorker('${safeMachine}')">Remove</button>` : "");
 
       tr.innerHTML = `
         <td>${machine}</td>
         <td>${state}</td>
         <td>${mode}</td>
+        <td>${override}</td>
         <td>${active}</td>
         <td>${progressLabel}</td>
         <td>${lastSeen}</td>

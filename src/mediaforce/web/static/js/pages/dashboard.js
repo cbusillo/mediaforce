@@ -21,12 +21,15 @@
     tbody.innerHTML = "";
     if (!list || list.length === 0) {
       const tr = document.createElement("tr");
-      tr.innerHTML = '<td colspan="7" class="text-muted">No encoder workers reporting.</td>';
+      tr.innerHTML = '<td colspan="8" class="text-muted">No encoder workers reporting.</td>';
       tbody.appendChild(tr);
       return;
     }
     list.forEach((w) => {
       const state = w.state || ((w.active || 0) > 0 ? "encoding" : "waiting");
+      const mode = w.control_mode || "run";
+      const modeSource = w.override_mode ? "override" : "global";
+      const modeTitle = `global=${w.global_mode || "run"}`;
       const percent = typeof w.percent_complete === "number" ? w.percent_complete : 0;
       const progress =
         state === "encoding" ? (percent > 0 ? `${Math.round(percent)}%` : "Starting…") : "—";
@@ -47,6 +50,7 @@
         <td>${machine}</td>
         <td>encoder</td>
         <td>${state}</td>
+        <td title="${modeTitle}">${mode} <span class="text-foreground-muted">(${modeSource})</span></td>
         <td>${w.active || 0}</td>
         <td>${progress}</td>
         <td class="truncate" title="${message}">${message}</td>
