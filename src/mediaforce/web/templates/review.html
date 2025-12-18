@@ -74,8 +74,8 @@
               onchange="updateSelectedCount()"
             />
           </td>
-          <td class="truncate" title="{{ encode.source_path }}">{{ encode.filename }}</td>
-          <td>{{ encode.show_name or '-' }}</td>
+          <td class="truncate max-w-[200px]" title="{{ encode.source_path }}">{{ encode.filename }}</td>
+          <td class="truncate max-w-[120px]">{{ encode.show_name or '-' }}</td>
           <td>{{ encode.source_size }}</td>
           <td>{{ encode.output_size }}</td>
           <td class="text-warning">+{{ encode.size_increase_pct }}%</td>
@@ -143,14 +143,14 @@
             />
           </td>
           <td
-            class="truncate"
+            class="truncate max-w-[200px]"
             title="{{ encode.source_path }}"
             onmouseenter="showThumb(event, {{ encode.id }})"
             onmouseleave="hideThumb()"
           >
             {{ encode.filename }}
           </td>
-          <td>{{ encode.show_name or '-' }}</td>
+          <td class="truncate max-w-[120px]">{{ encode.show_name or '-' }}</td>
           <td>{{ encode.source_size }}</td>
           <td>{{ encode.output_size }}</td>
           <td class="{{ 'text-success' if encode.reduction_pct > 0 else 'text-danger' }}">
