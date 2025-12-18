@@ -135,3 +135,8 @@ def save_app_settings(settings: AppSettings) -> None:
                 )
             )
         session.commit()
+
+
+def init_db(_: Optional[pathlib.Path] = None) -> Session:
+    """Initialize and return a Session."""
+    return Session(ENGINE)

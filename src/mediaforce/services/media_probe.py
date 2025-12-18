@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 from typing import Optional
@@ -128,6 +129,88 @@ def probe_media(path: pathlib.Path) -> Optional[MediaInfo]:
                 "lang": (stream.get("tags", {}) or {}).get("language"),
                 "title": (stream.get("tags", {}) or {}).get("title"),
             })
-
     return info
 
+
+def find_ffmpeg() -> Optional[str]:
+    for candidate in [
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "ffmpeg",
+    ]:
+        if shutil.which(candidate):
+            return candidate
+    return None
+
+
+def detect_interlacing(path: pathlib.Path, num_frames: int = 500) -> tuple[bool, float]:
+    """Detect interlacing by analyzing actual frame content using ffmpeg's idet filter."""
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        return False, 0.0
+
+    cmd = [
+        ffmpeg,
+        "-i", str(path),
+        "-vf", "idet",
+        "-frames:v", str(num_frames),
+        "-an",
+        "-f", "null",
+        "-"
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=False, timeout=60
+        )
+        output = result.stderr
+    except subprocess.TimeoutExpired:
+        return False, 0.0
+    except Exception:
+        return False, 0.0
+
+    tff = 0
+    bff = 0
+    progressive = 0
+
+    for line in output.split("\n"):
+        if "Multi frame detection:" in line:
+            tff_match = re.search(r"TFF:\s*(\d+)", line)
+            bff_match = re.search(r"BFF:\s*(\d+)", line)
+            prog_match = re.search(r"Progressive:\s*(\d+)", line)
+
+            if tff_match:
+                tff = int(tff_match.group(1))
+            if bff_match:
+                bff = int(bff_match.group(1))
+            if prog_match:
+                progressive = int(prog_match.group(1))
+
+    total_interlaced = tff + bff
+    total_frames = total_interlaced + progressive
+
+    if total_frames == 0:
+        return False, 0.0
+
+    interlaced_ratio = total_interlaced / total_frames
+    tff_ratio = tff / total_interlaced if total_interlaced > 0 else 0.0
+
+    is_interlaced = interlaced_ratio > 0.30
+
+    return is_interlaced, tff_ratio
+
+
+def probe_media_with_interlace_detection(
+    path: pathlib.Path, detect_interlace: bool = True
+) -> Optional[MediaInfo]:
+    """Probe media file and optionally detect interlacing via frame analysis."""
+    info = probe_media(path)
+    if info is None:
+        return None
+
+    if detect_interlace:
+        is_interlaced, tff_ratio = detect_interlacing(path)
+        info.interlace_detected = is_interlaced
+        info.interlace_tff_ratio = tff_ratio
+
+    return info

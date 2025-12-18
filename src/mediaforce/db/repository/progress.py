@@ -5,7 +5,7 @@ from typing import Any
 from typing import Optional
 
 from sqlalchemy import func
-from sqlmodel import Session, select as _select  # type: ignore[reportMissingImports]
+from sqlmodel import Session, select as _select, col  # type: ignore[reportMissingImports]
 
 from mediaforce.db.models import EncodeProgress, MediaItem, WorkerRegistry
 
@@ -159,5 +159,5 @@ class ProgressRepository:
             .order_by(started_at.desc())
         )
         if library_root:
-            stmt = stmt.where(EncodeProgress.source_path.like(f"{library_root}/%"))
+            stmt = stmt.where(col(EncodeProgress.source_path).like(f"{library_root}/%"))
         return self.session.exec(stmt).all()

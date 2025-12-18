@@ -105,3 +105,78 @@ def find_library_for_path(
         except ValueError:
             continue
     return None, None
+
+
+def get_db_path(_: Optional[pathlib.Path] = None) -> pathlib.Path:
+    """Return the unified inventory database path."""
+    from mediaforce.config.settings import INVENTORY_DB
+    return INVENTORY_DB
+
+
+def resolve_target_height_for_path(path: pathlib.Path, settings: AppSettings) -> tuple[Optional[int], str]:
+    """Resolve the downscale target height for a given path."""
+
+    path_str = str(path)
+    for lib in settings.libraries:
+        roots = [lib.mac_path, lib.linux_path]
+        for root in roots:
+            if not root:
+                continue
+            try:
+                if path.is_relative_to(pathlib.Path(root)):
+                    if lib.max_height is not None:
+                        return lib.max_height, f"library:{lib.id}"
+                    return settings.global_max_height, "global"
+            except Exception:
+                if path_str.startswith(root.rstrip("/") + "/") or path_str == root:
+                    if lib.max_height is not None:
+                        return lib.max_height, f"library:{lib.id}"
+                    return settings.global_max_height, "global"
+
+    if settings.global_max_height is not None:
+        return settings.global_max_height, "global"
+
+    return None, "none"
+
+
+def get_transcode_output_path(source_path: pathlib.Path, transcode_root: pathlib.Path) -> Optional[pathlib.Path]:
+    """Find the corresponding encoded file in the transcode folder."""
+    # Find relative path from media root
+    source_str = str(source_path)
+    rel_path = None
+    for root in get_media_roots():
+        if source_str.startswith(root):
+            rel_path = source_path.relative_to(root)
+            break
+
+    stem = source_path.stem
+
+    # Try structured path first
+    if rel_path:
+        output_dir = transcode_root / rel_path.parent
+        output_path = output_dir / f"{stem}.AV1.mp4"
+        if output_path.exists():
+            return output_path
+
+    # Try flat structure
+    flat_output = transcode_root / f"{stem}.AV1.mp4"
+    if flat_output.exists():
+        return flat_output
+
+    # Try with stripped codec markers
+    stem_stripped = stem
+    for marker in [".x264", ".x265", ".h264", ".h265", ".HEVC", ".AVC", ".H.264", ".H.265"]:
+        stem_stripped = stem_stripped.replace(marker, "")
+
+    if stem_stripped != stem:
+        if rel_path:
+            output_dir = transcode_root / rel_path.parent
+            output_path = output_dir / f"{stem_stripped}.AV1.mp4"
+            if output_path.exists():
+                return output_path
+
+        flat_output = transcode_root / f"{stem_stripped}.AV1.mp4"
+        if flat_output.exists():
+            return flat_output
+
+    return None

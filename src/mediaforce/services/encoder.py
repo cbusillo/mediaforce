@@ -14,6 +14,13 @@ from sqlmodel import Session
 from mediaforce.db.models import EncodeResult
 from mediaforce.domain.types import QualityMetrics, MediaInfo, TierSettings
 
+# Denoise filter strings for ffmpeg
+DENOISE_FILTERS: dict[str, str] = {
+    "light": "hqdn3d=2:2:3:3",
+    "medium": "hqdn3d=4:3:6:4.5",
+    "heavy": "nlmeans=s=3.0:p=7:r=9",
+}
+
 
 def parse_ffmpeg_progress(line: str) -> dict:
     data: dict[str, float | int] = {}
@@ -198,24 +205,110 @@ def record_encode_result(
     return int(result.id)  # type: ignore[arg-type]
 
 
+def find_ffmpeg() -> Optional[str]:
+    """Find ffmpeg executable."""
+    for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg"]:
+        if shutil.which(candidate):
+            return candidate
+    return None
+
+
+def choose_output_format(info: MediaInfo) -> str:
+    """Select pixel format; prefer 10-bit only when useful."""
+    if info.video_bit_depth and info.video_bit_depth > 8:
+        return "yuv420p10le"
+    if info.is_hdr:
+        return "yuv420p10le"
+    return "yuv420p"
+
+
+def apply_downscale_filter(
+    input_filters: list[str],
+    info: MediaInfo,
+    max_height: Optional[int],
+) -> list[str]:
+    """Append a scale filter if source is taller than max_height."""
+    if not max_height or not info.video_height:
+        return input_filters
+
+    if info.video_height <= max_height:
+        return input_filters
+
+    # Keep width mod-2, preserve aspect
+    scale_expr = f"scale=-2:{max_height}"
+    new_filters = input_filters.copy()
+    new_filters.append(scale_expr)
+    return new_filters
+
+
+def is_english_track(track: dict) -> bool:
+    """Check if a track is English."""
+    lang = (track.get("language") or "").lower()
+    return lang in ("eng", "en", "english")
+
+
+def is_undefined_track(track: dict) -> bool:
+    """Check if a track has no/undefined language."""
+    lang = track.get("language")
+    return lang is None or lang.lower() in ("", "und", "unk", "unknown")
+
+
+def select_audio_tracks(audio_tracks: list[dict]) -> list[dict]:
+    """Select which audio tracks to keep."""
+    if not audio_tracks:
+        return []
+
+    english = [t for t in audio_tracks if is_english_track(t)]
+    if english:
+        return english
+
+    undefined = [t for t in audio_tracks if is_undefined_track(t)]
+    if undefined:
+        return undefined
+
+    return [audio_tracks[0]]
+
+
+def select_subtitle_tracks(subtitle_tracks: list[dict]) -> list[dict]:
+    """Select which subtitle tracks to keep."""
+    TEXT_SUBTITLE_CODECS = {"subrip", "srt", "mov_text", "text"}
+
+    selected = []
+    for track in subtitle_tracks:
+        codec = (track.get("codec") or "").lower()
+        if codec not in TEXT_SUBTITLE_CODECS:
+            continue
+        if is_english_track(track) or is_undefined_track(track):
+            selected.append(track)
+
+    english = [t for t in selected if is_english_track(t)]
+    if english:
+        return english
+
+    return selected
+
+
+def get_opus_target_bitrate(channels: int) -> int:
+    """Get target Opus bitrate for channel count."""
+    target_bitrates = {
+        1: 64,
+        2: 128,
+        6: 256,
+        8: 384,
+    }
+    return target_bitrates.get(channels, min(384, 128 + (channels - 2) * 48))
+
+
 def build_ffmpeg_command(
     input_path: pathlib.Path,
     output_path: pathlib.Path,
     settings: TierSettings,
     media_info: MediaInfo,
-    *,
     max_height: Optional[int] = None,
     hw_decode: bool = False,
     hw_encode: bool = False,
-    find_ffmpeg: Callable[[], Optional[str]],
-    select_audio_tracks: Callable[[list[dict]], list[dict]],
-    select_subtitle_tracks: Callable[[list[dict]], list[dict]],
-    apply_downscale_filter: Callable[[list[str], MediaInfo, Optional[int]], list[str]],
-    choose_output_format: Callable[[MediaInfo], str],
-    denoise_filters: dict[str, str],
-    tier_settings_map,
-    platform_module=platform_mod,
 ) -> list[str]:
+    """Build ffmpeg command for AV1 encoding."""
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
         raise RuntimeError("ffmpeg not found")
@@ -223,12 +316,14 @@ def build_ffmpeg_command(
     cmd = [ffmpeg, "-hide_banner"]
 
     if hw_decode:
-        system = platform_module.system().lower()
+        system = platform_mod.system().lower()
         if system == "darwin":
             cmd.extend(["-hwaccel", "videotoolbox"])
         elif system == "linux":
-            # Only use CUDA when an NVIDIA device is present. Many Linux hosts
-            # (including containerized workers) do not have CUDA available.
+            # Only use CUDA when an NVIDIA device is present and we have nvidia-smi
+            # This logic was originally in core.py, reproducing it here.
+            # Assuming if the user asks for hw_decode on linux, they likely have it,
+            # but checking paths is safer.
             if pathlib.Path("/dev/nvidia0").exists() and shutil.which("nvidia-smi"):
                 cmd.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
 
@@ -246,14 +341,15 @@ def build_ffmpeg_command(
     vf_parts: list[str] = []
     if media_info.is_interlaced:
         vf_parts.append("bwdif=mode=0:parity=-1:deint=0")
-    if settings.denoise and settings.denoise in denoise_filters:
-        vf_parts.append(denoise_filters[settings.denoise])
+    if settings.denoise and settings.denoise in DENOISE_FILTERS:
+        vf_parts.append(DENOISE_FILTERS[settings.denoise])
     vf_parts = apply_downscale_filter(vf_parts, media_info, max_height)
     vf_parts.append(f"format={choose_output_format(media_info)}")
+
     if vf_parts:
         cmd.extend(["-vf", ",".join(vf_parts)])
 
-    if hw_encode and platform_module.system().lower() == "darwin":
+    if hw_encode and platform_mod.system().lower() == "darwin":
         cmd.extend(["-c:v", "av1_videotoolbox"])
         cmd.extend(["-b:v", "0"])
         cmd.extend(["-crf", str(settings.crf)])
@@ -268,14 +364,16 @@ def build_ffmpeg_command(
         channels = track.get("channels") or 2
         codec = (track.get("codec") or "").lower()
         source_bitrate = track.get("bitrate_kbps")
-        target_bitrate = _get_opus_target_bitrate(channels)
+        target_bitrate = get_opus_target_bitrate(channels)
         passthrough = False
+
         if codec == "opus":
             if source_bitrate is None or source_bitrate <= target_bitrate * 1.2:
                 passthrough = True
         elif codec == "aac":
             if source_bitrate and source_bitrate <= target_bitrate:
                 passthrough = True
+
         if passthrough:
             cmd.extend([f"-c:a:{i}", "copy"])
         else:
@@ -300,8 +398,3 @@ def build_ffmpeg_command(
 
     cmd.extend(["-y", str(output_path)])
     return cmd
-
-
-def _get_opus_target_bitrate(channels: int) -> int:
-    targets = {1: 64, 2: 128, 6: 256, 8: 384}
-    return targets.get(channels, min(384, 128 + (channels - 2) * 48))

@@ -93,12 +93,7 @@ def configure_logging(config: LogConfig) -> logging.Logger:
 
 
 def env_log_config(component: str = DEFAULT_COMPONENT) -> LogConfig:
-    """Build LogConfig from environment variables.
-
-    MEDIAFORCE_LOG_LEVEL controls the level (default INFO).
-    MEDIAFORCE_LOG_FILE enables JSONL output to that path.
-    """
-
+    """Build LogConfig from environment variables."""
     level = os.getenv("MEDIAFORCE_LOG_LEVEL", "INFO")
     json_file = os.getenv("MEDIAFORCE_LOG_FILE")
     return LogConfig(
@@ -106,6 +101,15 @@ def env_log_config(component: str = DEFAULT_COMPONENT) -> LogConfig:
         component=component,
         json_path=pathlib.Path(json_file).expanduser() if json_file else None,
     )
+
+
+# Configure the base logger once so services that log against the default
+# component ("mediaforce") inherit handlers/formatters.
+configure_logging(env_log_config(component="mediaforce"))
+
+# CLI events use a dedicated logger so we can optionally emit compact human
+# output to stderr while keeping structured JSON on stdout.
+CLI_LOGGER = configure_logging(env_log_config(component="mediaforce.cli"))
 
 
 def _human_enabled(logger: logging.Logger) -> bool:

@@ -2,47 +2,26 @@
 
 Keep this list short and current. Completed work should move to `CHANGELOG.md` (or git history).
 
-## Now
+## Priority (Architecture & Stability)
 
-- [x] **Canonical worker identity**
-  - Support explicit worker name (`MEDIAFORCE_MACHINE_NAME`) and normalize dotted hostnames.
-  - Ensure the dashboard + per-worker controls don’t duplicate hosts (`*.local` vs LAN domains).
+- [x] **Refactor `core.py`**
+  - Finish extracting orchestration logic (encoding loops, scan triggers) into a dedicated `OrchestrationService` or `PipelineService`.
+  - Reduce `core.py` to a thin CLI wiring layer.
 
-- [x] **Hard stop control (kill encode)**
-  - UI action to stop the current encode immediately.
-  - Item returns to `pending` deterministically.
+- [x] **Dockerize Worker**
+  - Create `Dockerfile.worker` to provide a reproducible environment with the correct `ffmpeg` build (libsvtav1) and Python dependencies.
+  - Simplify deployment on NAS/servers (Unraid, Synology, etc.).
 
-- [x] **Better worker lifecycle UX**
-  - Workers show clear states and consistent wording across Dashboard/Settings.
+## Features
 
-- [x] **Progress/ETA accuracy**
-  - Live progress/ETA display with sane defaults and stale-row cleanup.
+- [x] **Notification Channels**
+  - Implement a `NotificationService` for key events:
+    - Encode completion (Season/Movie finished).
+    - Worker failure/stuck alerts.
+    - Quality Loop decisions (e.g., "Downgraded to `mediocre` due to low VMAF").
+  - Support generic Webhooks (Discord, Slack, Gotify).
 
-- [x] **Worker service robustness (systemd/launchd)**
-  - Provide known-good unit/plist patterns to avoid restart loops / mid-encode kills.
-  - Add docs for restart semantics and safe stop behavior.
+## Documentation & Polish
 
-- [x] **DB reconcile/self-heal loop**
-  - Periodically reconcile `media_inventory` vs `encode_progress` and reset stuck `encoding` rows.
-  - Keep UI + DB consistent across worker/master restarts.
-
-- [x] **Stop-now cooldown**
-  - Prevent the same worker immediately re-claiming the same item after Stop Now.
-  - Prefer short cooldown or per-worker avoid list.
-
-- [x] **Reconcile observability**
-  - Log reconcile changes/errors.
-  - Add a manual “Reconcile now” action in Settings → Workers.
-
-- [x] **Starting-state UX**
-  - Show active claims even before progress rows exist (state `starting`).
-  - Surface the claimed path in the Workers tables.
-
-- [x] **Deploy warning cleanup**
-  - Ensure deploy bundles don’t include macOS metadata or Finder artifacts.
-  - Verify Linux extraction is warning-free.
-
-## Later
-
-- [ ] **Worker deployments**
-  - Document recommended service configs for systemd + launchd (including env file + restart semantics).
+- [x] **Worker Service Docs**
+  - Document recommended service configs for systemd + launchd (env files, restart semantics).

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Callable
 
 from sqlalchemy import func, text
-from sqlmodel import Session, select
+from sqlmodel import Session, select, col
 
 from mediaforce.db.models import EncodeProgress, EncodeResult, Library, MediaItem
 from mediaforce.db import now_iso as default_now_iso
@@ -112,9 +112,9 @@ def claim_next_file(
 
     stale_items = session.exec(
         select(MediaItem).where(
-            MediaItem.status == "encoding",
-            MediaItem.claimed_at != None,  # noqa: E711
-            MediaItem.claimed_at < stale_cutoff,  # type: ignore[operator]
+            col(MediaItem.status) == "encoding",
+            col(MediaItem.claimed_at) != None,  # noqa: E711
+            col(MediaItem.claimed_at) < stale_cutoff,
         )
     ).all()
     for item in stale_items:
@@ -134,8 +134,8 @@ def claim_next_file(
     active_progress_source_ids: set[int] = set()
     for row in session.exec(
         select(EncodeProgress.source_id).where(
-            EncodeProgress.updated_at.is_not(None),
-            EncodeProgress.updated_at >= progress_cutoff,
+            col(EncodeProgress.updated_at).is_not(None),
+            col(EncodeProgress.updated_at) >= progress_cutoff,
         )
     ).all():
         # sqlmodel/sqlalchemy may return scalar ints or 1-tuples depending on
@@ -154,9 +154,9 @@ def claim_next_file(
 
     stalled_items = session.exec(
         select(MediaItem).where(
-            MediaItem.status == "encoding",
-            MediaItem.claimed_at != None,  # noqa: E711
-            MediaItem.claimed_at < progress_cutoff,  # type: ignore[operator]
+            col(MediaItem.status) == "encoding",
+            col(MediaItem.claimed_at) != None,  # noqa: E711
+            col(MediaItem.claimed_at) < progress_cutoff,
         )
     ).all()
     dirty = False
@@ -181,9 +181,9 @@ def claim_next_file(
     active_progress_source_ids_for_machine: set[int] = set()
     for row in session.exec(
         select(EncodeProgress.source_id).where(
-            EncodeProgress.machine == machine,
-            EncodeProgress.updated_at.is_not(None),
-            EncodeProgress.updated_at >= progress_cutoff,
+            col(EncodeProgress.machine) == machine,
+            col(EncodeProgress.updated_at).is_not(None),
+            col(EncodeProgress.updated_at) >= progress_cutoff,
         )
     ).all():
         raw = None
@@ -213,7 +213,7 @@ def claim_next_file(
             continue
         if item.claimed_at is None:
             continue
-        if item.claimed_at < progress_cutoff:  # type: ignore[operator]
+        if col(MediaItem.claimed_at) < progress_cutoff:
             item.status = "pending"
             item.claimed_by = None
             item.claimed_at = None
@@ -239,9 +239,9 @@ def claim_next_file(
         select(MediaItem, Library.weight)
         .join(Library, MediaItem.library_id == Library.id, isouter=True)
         .where(
-            MediaItem.status == "pending",
-            ((MediaItem.claimed_by == None) | (MediaItem.claimed_by == machine)),  # noqa: E711
-            ((cooldown_until == None) | (cooldown_until <= now_str)),  # noqa: E711
+            col(MediaItem.status) == "pending",
+            ((col(MediaItem.claimed_by) == None) | (col(MediaItem.claimed_by) == machine)),  # noqa: E711
+            ((col(MediaItem.cooldown_until) == None) | (col(MediaItem.cooldown_until) <= now_str)),  # noqa: E711
         )
         .order_by(MediaItem.manual_priority, weight_expr.desc())
         .limit(1)
@@ -298,7 +298,7 @@ def encode_rows_with_sizes(session: Session):
         select(EncodeResult.output_size_bytes, MediaItem.size_bytes)
         .join(MediaItem, EncodeResult.source_id == MediaItem.id)
         .where(
-            EncodeResult.output_size_bytes != None,  # noqa: E711
-            EncodeResult.output_size_bytes > 0,  # type: ignore[operator]
+            col(EncodeResult.output_size_bytes) != None,  # noqa: E711
+            col(EncodeResult.output_size_bytes) > 0,
         )
     ).all()

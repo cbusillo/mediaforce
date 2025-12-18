@@ -37,8 +37,14 @@ Data locations
 - Templates: `src/mediaforce/web/templates/`
 - Static assets: `src/mediaforce/web/static/`
 
-Next refactor steps (suggested)
+Completed Refactor
+
+- `core.py` is now a thin CLI wiring layer.
+- All heavy orchestration logic has been moved to `services/orchestrator.py` and `services/worker_service.py`.
+- Quality metrics and HTML comparison generation are centralized in `services/metrics.py`.
+- Database access is strictly typed and passes `mypy`.
+
+Next steps
 
 1) Replace remaining ad-hoc SQL in web routes with repositories/services.
-2) Continue shrinking `core.py` so it becomes mostly CLI wiring.
-3) Add more unit tests around new service modules as we extract.
+2) Add more unit tests around the new service modules.

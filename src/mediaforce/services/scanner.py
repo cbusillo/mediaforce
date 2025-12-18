@@ -168,3 +168,27 @@ def scan_file_to_db(
         "is_av1": is_av1,
         "is_opus": is_opus,
     }
+
+
+def recalculate_priorities(
+    session: Session,
+    max_age: int,
+    calculate_priority: Callable[[Optional[int], int, int, int], float],
+) -> None:
+    """Update all pending items with fresh priority scores."""
+
+    # Find max potential savings for normalization
+    from sqlalchemy import func
+    max_savings_row = session.exec(select(func.max(MediaItem.potential_savings_bytes))).first()
+    max_savings = int(max_savings_row or 1)
+
+    items = session.exec(select(MediaItem).where(MediaItem.status == "pending")).all()
+    for item in items:
+        item.priority_score = calculate_priority(
+            item.potential_savings_bytes,
+            item.mtime,
+            max_savings,
+            max_age,
+        )
+        session.add(item)
+    session.commit()

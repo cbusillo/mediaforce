@@ -51,25 +51,79 @@ TimeoutStopSec=30
 KillSignal=SIGTERM
 
 Restart=always
-RestartSec=5
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Operational notes:
+### Restart Semantics
 
-- If you see repeated `status=143` (SIGTERM) restarts during encodes, check for
-  external watchdogs/timeouts and increase `TimeoutStopSec`.
-- Avoid killing the entire cgroup if you rely on graceful shutdown.
+Mediaforce workers handle `SIGTERM` gracefully by attempting to terminate the current `ffmpeg` subprocess. If a restart occurs, the worker will stop, and upon restart, it will look for new work. 
+
+**Note on "Stop Now":** When using the Web UI "Stop Now" action, the worker is sent a control signal via the API. It will kill the current process and return the item to `pending` with a cooldown, preventing immediate re-claim.
 
 ## macOS (launchd)
 
-Example LaunchAgent values (as a reference):
+Create a file at `~/Library/LaunchAgents/com.mediaforce.worker.plist`:
 
-- `ProgramArguments`: `uv run mediaforce run /Volumes/media/tv -o <output> --max-concurrency 1`
-- `EnvironmentVariables`: set `MEDIAFORCE_ENV_FILE` to the worker `.env` path.
-- `KeepAlive`: `true`
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mediaforce.worker</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/uv</string>
+        <string>run</string>
+        <string>mediaforce</string>
+        <string>run</string>
+        <string>/Volumes/media/tv</string>
+        <string>--max-concurrency</string>
+        <string>1</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/youruser/Developer/mediaforce</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>MEDIAFORCE_API_URL</key>
+        <string>http://master:5555</string>
+        <key>MEDIAFORCE_API_TOKEN</key>
+        <string>your-secret</string>
+    </dict>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/mediaforce.worker.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/mediaforce.worker.stderr.log</string>
+</dict>
+</plist>
+```
+
+Load it with: `launchctl load ~/Library/LaunchAgents/com.mediaforce.worker.plist`
+
+## Docker (Recommended for Linux/NAS)
+
+A pre-built environment with `ffmpeg` (SVT-AV1) and Python 3.13 is available via the `Dockerfile.worker`.
+
+```bash
+# Build the image
+docker build -t mediaforce-worker -f Dockerfile.worker .
+
+# Run the worker
+docker run -d \
+  --name mediaforce-worker \
+  -v /mnt/media:/media \
+  -e MEDIAFORCE_API_URL=http://master:5555 \
+  -e MEDIAFORCE_API_TOKEN=your-secret \
+  -e MEDIAFORCE_MACHINE_NAME=my-nas-worker \
+  mediaforce-worker /media/tv
+```
 
 ## Operations
 
