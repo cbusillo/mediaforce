@@ -1,0 +1,26 @@
+<div id="stats-container" 
+     class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6"
+     hx-get="/partials/dashboard/stats" 
+     hx-trigger="every 5s" 
+     hx-swap="outerHTML">
+  <div class="stat-card shadow border border-surface-subtle/60 bg-surface-card/50 backdrop-blur-sm">
+    <div class="value text-3xl font-semibold text-foreground">{{ stats.pending }}</div>
+    <div class="label uppercase text-xs text-foreground-muted tracking-wide font-medium mt-1">Pending</div>
+  </div>
+  <div class="stat-card shadow border border-surface-subtle/60 bg-surface-card/50 backdrop-blur-sm">
+    <div class="value text-3xl font-semibold text-accent">{{ stats.encoding }}</div>
+    <div class="label uppercase text-xs text-foreground-muted tracking-wide font-medium mt-1">Encoding</div>
+  </div>
+  <div class="stat-card shadow border border-surface-subtle/60 bg-surface-card/50 backdrop-blur-sm">
+    <div class="value text-3xl font-semibold text-foreground">{{ stats.encoded }}</div>
+    <div class="label uppercase text-xs text-foreground-muted tracking-wide font-medium mt-1">Encoded</div>
+  </div>
+  <div class="stat-card shadow border border-surface-subtle/60 bg-surface-card/50 backdrop-blur-sm">
+    <div class="value text-3xl font-semibold text-success">{{ stats.completed }}</div>
+    <div class="label uppercase text-xs text-foreground-muted tracking-wide font-medium mt-1">Completed</div>
+  </div>
+  <div class="stat-card shadow border border-surface-subtle/60 bg-surface-card/50 backdrop-blur-sm">
+    <div class="value text-3xl font-semibold text-info">{{ stats.space_saved_gb }}</div>
+    <div class="label uppercase text-xs text-foreground-muted tracking-wide font-medium mt-1">GB Saved</div>
+  </div>
+</div>

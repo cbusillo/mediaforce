@@ -8,6 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/static/css/tailwind.css" />
+    <script src="https://unpkg.com/htmx.org@1.9.10" integrity="sha384-D1Kt99CQMDuVetoL1lrYwg5t+9QdHe7NLX/SoJYkXDFfX37iInKRy5xLSi8nO7UC" crossorigin="anonymous"></script>
     <script src="/static/js/common.js"></script>
     <script src="/static/js/api.js"></script>
     <script src="/static/js/ui.js"></script>
@@ -105,12 +106,6 @@
       </div>
     </nav>
     <main class="max-w-6xl mx-auto px-3 sm:px-4 py-6">{% block content %}{% endblock %}</main>
-    <script>
-      // Keep a light refresh on the dashboard without wiring a websocket.
-      if (window.location.pathname === "/") {
-        setTimeout(() => window.location.reload(), 30000);
-      }
-    </script>
     {% block scripts %}{% endblock %}
   </body>
 </html>

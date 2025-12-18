@@ -1,0 +1,65 @@
+<div id="active-encodes-container" 
+     class="card shadow border border-surface-subtle/80"
+     hx-get="/partials/dashboard/active-encodes" 
+     hx-trigger="every 3s" 
+     hx-swap="outerHTML">
+  <div class="flex items-center justify-between gap-2 mb-3">
+    <h3 class="m-0 text-lg font-semibold">Active Encodes</h3>
+    <!-- Optional: manual refresh button (htmx handles auto-refresh, but nice to have) -->
+    <button class="btn btn-sm btn-ghost" hx-get="/partials/dashboard/active-encodes" hx-target="#active-encodes-container" hx-swap="outerHTML">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-rotate-cw"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 12"/><path d="M21 3v9h-9"/></svg>
+    </button>
+  </div>
+  <div class="overflow-auto">
+    <table id="activeEncodes" class="table-auto w-full text-sm table-zebra">
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Machine</th>
+          <th>Tier</th>
+          <th>Progress</th>
+          <th>Speed</th>
+          <th>ETA</th>
+          <th>Frames</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if not active_encodes %}
+        <tr>
+            <td colspan="7" class="text-center text-foreground-muted py-4">No active encodes running.</td>
+        </tr>
+        {% endif %}
+        {% for enc in active_encodes %}
+        <tr>
+          <td class="truncate max-w-[200px]" title="{{ enc.path }}">
+            <div class="font-medium text-foreground">{{ enc.filename }}</div>
+            <div class="text-xs text-foreground-muted truncate">{{ enc.path }}</div>
+          </td>
+          <td>
+            <span class="px-2 py-1 rounded bg-surface-subtle border border-surface-subtle text-xs font-mono">
+                {{ enc.machine }}
+            </span>
+          </td>
+          <td>
+            <span class="badge-tier tier-{{ enc.tier }}">{{ enc.tier }}</span>
+          </td>
+          <td>
+            <div class="flex flex-col gap-1 min-w-[120px]">
+                <div class="flex justify-between text-xs">
+                    <span>{{ '%.1f'|format(enc.percent_complete) }}%</span>
+                </div>
+                <div class="w-full bg-surface-subtle rounded-full h-1.5 overflow-hidden">
+                    <div class="bg-accent h-1.5 rounded-full transition-all duration-500 ease-out" 
+                         style="width: {{ enc.percent_complete }}%"></div>
+                </div>
+            </div>
+          </td>
+          <td class="font-mono">{{ enc.speed }}</td>
+          <td class="font-mono text-foreground-muted">{{ enc.eta or '-' }}</td>
+          <td class="font-mono text-xs text-foreground-muted">{{ enc.frame or 0 }} / {{ enc.total_frames or '?' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>

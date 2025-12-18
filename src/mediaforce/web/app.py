@@ -968,6 +968,77 @@ async def dashboard(request: Request):
     })
 
 
+@app.get("/partials/dashboard/active-encodes", response_class=HTMLResponse)
+async def dashboard_active_encodes(request: Request):
+    """HTMX partial for active encodes table."""
+    with session_scope() as session:
+        progress_repo = ProgressRepository(session)
+        active_rows = progress_repo.list_active()
+        active_encodes = []
+        for row in active_rows:
+            prog = row[0]
+            filename = pathlib.Path(prog.source_path).name if prog.source_path else "Unknown"
+            show_name = extract_show_name(prog.source_path) if prog.source_path else None
+            eta_display = format_duration(prog.eta_seconds) if prog.eta_seconds and prog.eta_seconds > 0 else None
+            active_encodes.append({
+                "filename": filename,
+                "path": prog.source_path,
+                "show_name": show_name,
+                "machine": prog.machine,
+                "tier": prog.tier,
+                "started_at": prog.started_at[:16] if prog.started_at else None,
+                "percent_complete": prog.percent_complete or 0,
+                "speed": f"{prog.speed:.2f}x" if prog.speed else "0x",
+                "eta": eta_display,
+                "frame": prog.frame,
+                "total_frames": prog.total_frames,
+                "phase": prog.phase or "encoding",
+            })
+
+    return templates.TemplateResponse("partials/dashboard_active_encodes.html", {
+        "request": request,
+        "active_encodes": active_encodes,
+    })
+
+
+@app.get("/partials/dashboard/stats", response_class=HTMLResponse)
+async def dashboard_stats(request: Request):
+    """HTMX partial for dashboard overview stats."""
+    with session_scope() as session:
+        media_repo = MediaRepository(session)
+        encode_repo = EncodeRepository(session)
+        
+        status_counts = media_repo.count_by_status()
+        space_saved_bytes = encode_repo.space_saved_bytes()
+        space_saved_gb = space_saved_bytes / 1024 / 1024 / 1024
+
+    stats = {
+        "pending": status_counts.get("pending", 0),
+        "encoding": status_counts.get("encoding", 0),
+        "encoded": status_counts.get("encoded", 0),
+        "completed": status_counts.get("completed", 0),
+        "space_saved_gb": f"{space_saved_gb:.1f}",
+    }
+
+    return templates.TemplateResponse("partials/dashboard_stats.html", {
+        "request": request,
+        "stats": stats,
+    })
+
+
+@app.get("/partials/dashboard/workers", response_class=HTMLResponse)
+async def dashboard_workers(request: Request):
+    """HTMX partial for workers table."""
+    with session_scope() as session:
+        progress_repo = ProgressRepository(session)
+        workers = progress_repo.list_workers()
+
+    return templates.TemplateResponse("partials/dashboard_workers.html", {
+        "request": request,
+        "workers": workers,
+    })
+
+
 @app.get("/stats", response_class=HTMLResponse)
 async def stats_page(
     request: Request,

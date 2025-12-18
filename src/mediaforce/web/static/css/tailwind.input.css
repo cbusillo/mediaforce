@@ -52,7 +52,7 @@
 
 @layer components {
   .btn {
-    @apply inline-flex items-center gap-1 px-3 py-2 text-sm font-medium rounded-lg border border-surface-subtle bg-surface-card text-foreground shadow-card transition-colors duration-150 hover:bg-surface-subtle focus:outline-none focus:ring-2 focus:ring-accent/60 focus:ring-offset-2 focus:ring-offset-surface;
+    @apply inline-flex items-center gap-1 px-3 py-2 text-sm font-medium rounded-lg border border-surface-subtle bg-surface-card text-foreground shadow transition-colors duration-150 hover:bg-surface-subtle focus:outline-none focus:ring-2 focus:ring-accent/60 focus:ring-offset-2 focus:ring-offset-surface;
   }
   .btn-sm {
     @apply text-xs px-2.5 py-1.5;
@@ -89,10 +89,10 @@
     @apply px-2 py-0.5 rounded-full text-xs bg-accent/10 text-accent font-medium;
   }
   .stat-card {
-    @apply bg-surface-card border border-surface-subtle rounded-lg p-4 flex items-center justify-between gap-3 shadow-card;
+    @apply bg-surface-card border border-surface-subtle rounded-lg p-4 flex items-center justify-between gap-3 shadow;
   }
   .card {
-    @apply bg-surface-card border border-surface-subtle rounded-lg p-4 space-y-3 shadow-card;
+    @apply bg-surface-card border border-surface-subtle rounded-lg p-4 space-y-3 shadow;
   }
   .table-zebra tr:nth-child(even) {
     @apply bg-surface-subtle/60;
@@ -125,55 +125,10 @@
     @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-subtle text-sm text-foreground;
   }
   .hover-preview {
-    @apply fixed z-[1200] p-2 rounded-lg bg-surface-card border border-surface-subtle shadow-elevated space-y-1;
-  }
-  .hover-preview__label {
-    @apply text-xs text-foreground-muted;
-  }
-  .hover-preview__video {
-    @apply w-[220px] h-[132px] bg-black rounded object-cover;
-  }
-  .card-grid {
-    @apply grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3;
-  }
-  .mini-card {
-    @apply bg-surface-card border border-surface-subtle rounded-lg p-3 space-y-1 shadow-sm hover:shadow-md transition;
-  }
-  .show-row {
-    @apply cursor-pointer hover:bg-surface-subtle transition-colors;
-  }
-  .season-row {
-    @apply cursor-pointer bg-surface-card/70 hover:bg-surface-card transition-colors;
-  }
-  .episode-row {
-    @apply cursor-pointer bg-surface-subtle hover:bg-surface transition-colors;
-  }
-  .expand-icon {
-    @apply cursor-pointer inline-block text-xs text-foreground-muted transition-transform duration-200 hover:text-accent;
-  }
-  .expand-icon.expanded {
-    @apply rotate-90;
-  }
-  .nested-container {
-    @apply p-0 bg-surface-subtle rounded-lg;
-  }
-  .nested-table-wrapper {
-    @apply px-2 py-2 pl-6;
-  }
-  .nested-table {
-    @apply w-full border-collapse m-0 text-sm;
-  }
-  .nested-table th {
-    @apply px-3 py-2 text-left border-b border-surface-subtle text-foreground-muted uppercase text-[0.75rem] font-semibold tracking-wide;
-  }
-  .nested-table td {
-    @apply px-3 py-2 border-b border-surface-subtle text-foreground;
-  }
-  .loading {
-    @apply px-4 py-3 text-foreground-muted italic;
+    @apply fixed z-[1200] p-2 rounded-lg bg-surface-card border border-surface-subtle shadow-xl space-y-1;
   }
   .toast {
-    @apply fixed top-4 right-4 bg-surface-card border border-accent text-foreground px-4 py-3 rounded-lg shadow-elevated z-50 transition-opacity duration-200;
+    @apply fixed top-4 right-4 bg-surface-card border border-accent text-foreground px-4 py-3 rounded-lg shadow-xl z-50 transition-opacity duration-200;
   }
   .toast.success {
     @apply border-success;

@@ -6,56 +6,59 @@ module.exports = {
   safelist: [
     { pattern: /^tier-/ },
     { pattern: /^text-(success|warning|danger)$/ },
+    { pattern: /^bg-(success|warning|danger)$/ },
+    { pattern: /^border-(success|warning|danger)$/ },
   ],
   darkMode: "class",
   theme: {
     extend: {
       fontFamily: {
         sans: ["Inter", "ui-sans-serif", "system-ui", "sans-serif"],
+        mono: ["JetBrains Mono", "ui-monospace", "monospace"],
       },
       colors: {
         surface: {
-          DEFAULT: "#0f172a",
-          subtle: "#111827",
-          card: "#1f2937",
-          muted: "#0b1220",
+          DEFAULT: "#020617", // darker slate 950
+          subtle: "#0f172a", // slate 900
+          card: "#1e293b", // slate 800
+          muted: "#334155", // slate 700
         },
         foreground: {
-          DEFAULT: "#e5e7eb",
-          muted: "#9ca3af",
+          DEFAULT: "#f8fafc", // slate 50
+          muted: "#94a3b8", // slate 400
         },
         accent: {
-          DEFAULT: "#e94560",
-          hover: "#ff6b6b",
+          DEFAULT: "#3b82f6", // sky 500
+          hover: "#60a5fa", // sky 400
+          light: "#e0f2fe", // sky 100
         },
-        success: "#22c55e",
-        warning: "#f59e0b",
-        info: "#0ea5e9",
-        danger: "#ef4444",
+        success: {
+          DEFAULT: "#10b981", // emerald 500
+          light: "#d1fae5",
+        },
+        warning: {
+          DEFAULT: "#f59e0b", // amber 500
+          light: "#fef3c7",
+        },
+        danger: {
+          DEFAULT: "#ef4444", // red 500
+          light: "#fee2e2",
+        },
+        info: "#06b6d4", // cyan 500
+        
+        // Tier specific colors
+        tier: {
+          pristine: "#8b5cf6", // violet 500
+          good: "#10b981", // emerald 500
+          mediocre: "#f59e0b", // amber 500
+          poor: "#ef4444", // red 500
+        }
       },
       boxShadow: {
-        card: "0 10px 30px -16px rgba(0,0,0,0.6)",
-        elevated: "0 18px 50px -24px rgba(0,0,0,0.65)",
-      },
-      borderRadius: {
-        xl: "0.9rem",
-      },
-      maxWidth: {
-        content: "80rem",
-      },
-      keyframes: {
-        fade: {
-          "0%": { opacity: "0", transform: "translateY(4px)" },
-          "100%": { opacity: "1", transform: "translateY(0)" },
-        },
-        slideup: {
-          "0%": { opacity: "0", transform: "translateY(12px)" },
-          "100%": { opacity: "1", transform: "translateY(0)" },
-        },
+        glow: "0 0 20px -5px rgba(59, 130, 246, 0.5)",
       },
       animation: {
-        "fade-in": "fade 200ms ease-out both",
-        "slide-up": "slideup 200ms ease-out both",
+        "pulse-slow": "pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite",
       },
     },
   },
