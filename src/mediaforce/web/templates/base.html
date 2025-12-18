@@ -14,16 +14,47 @@
     <script src="/static/js/ui.js"></script>
     <script src="/static/js/app.js"></script>
   </head>
-  <body class="bg-surface text-foreground min-h-screen flex flex-col md:flex-row">
-    <!-- Mobile Top Bar -->
-    <nav class="md:hidden px-4 py-3 border-b border-surface-subtle bg-surface-subtle shadow-sm flex items-center justify-between z-20">
-      <a href="/" class="flex items-center gap-2">
-        <img src="/static/img/mediaforce-logo.svg" alt="Mediaforce" class="h-6 w-6" />
-        <span class="text-lg font-semibold text-accent">Mediaforce</span>
-      </a>
-      <button id="mobileMenuBtn" class="p-2 text-foreground-muted hover:text-foreground">
-        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-      </button>
+  <body class="bg-surface text-foreground min-h-screen">
+    <nav class="px-4 sm:px-6 py-4 border-b border-surface-subtle bg-surface-subtle shadow-sm sticky top-0 z-50">
+      <div class="flex items-center gap-3">
+        <a href="/" class="flex items-center gap-3 mr-6">
+          <img src="/static/img/mediaforce-logo.svg" alt="Mediaforce" class="h-8 w-8" />
+          <span class="text-xl font-bold text-accent tracking-tight">Mediaforce</span>
+        </a>
+
+        <div class="hidden md:flex items-center gap-1">
+            <a href="/" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'dashboard' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Dashboard</a>
+            <a href="/shows" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'shows' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Shows</a>
+            <a href="/queue" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'queue' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Queue</a>
+            <a href="/review" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'review' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Review</a>
+            <a href="/completed" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'completed' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Completed</a>
+            <a href="/stats" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'stats' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Stats</a>
+            <a href="/settings" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'settings' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Settings</a>
+        </div>
+
+        <div class="ml-auto flex items-center gap-3">
+          <form class="hidden sm:flex relative" action="/search" method="get">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="absolute left-3 top-1/2 -translate-y-1/2 text-foreground-muted"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+            <input
+              type="text"
+              name="q"
+              placeholder="Search..."
+              value="{{ request.query_params.get('q') if request and request.query_params else '' }}"
+              class="w-40 focus:w-60 transition-all bg-surface-card border border-surface-subtle rounded-full py-1.5 pl-9 pr-3 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
+            />
+          </form>
+          
+          <button id="themeToggle" type="button" class="p-2 text-foreground-muted hover:text-foreground" aria-label="Toggle theme">
+            <span id="themeLabel" class="hidden">Dark</span>
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><path d="M12 1v2"/><path d="M12 21v2"/><path d="M4.22 4.22l1.42 1.42"/><path d="M18.36 18.36l1.42 1.42"/><path d="M1 12h2"/><path d="M21 12h2"/><path d="M4.22 19.78l1.42-1.42"/><path d="M18.36 5.64l1.42-1.42"/></svg>
+          </button>
+
+          <!-- Mobile Menu Button -->
+          <button id="mobileMenuBtn" class="md:hidden p-2 text-foreground-muted hover:text-foreground">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+          </button>
+        </div>
+      </div>
     </nav>
 
     <!-- Mobile Menu Overlay -->
@@ -41,67 +72,7 @@
         <a href="/settings" class="text-lg py-2 border-b border-surface-subtle">Settings</a>
     </div>
 
-    <!-- Desktop Sidebar -->
-    <aside class="hidden md:flex flex-col w-64 bg-surface-subtle border-r border-surface-subtle h-screen sticky top-0 overflow-y-auto shrink-0">
-      <div class="p-6 border-b border-surface-subtle/50">
-        <a href="/" class="flex items-center gap-3">
-          <img src="/static/img/mediaforce-logo.svg" alt="Mediaforce" class="h-8 w-8" />
-          <span class="text-xl font-bold text-accent tracking-tight">Mediaforce</span>
-        </a>
-      </div>
-
-      <nav class="flex-1 p-4 space-y-1">
-        <a href="/" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'dashboard' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">
-            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>
-            Dashboard
-        </a>
-        <a href="/shows" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'shows' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">
-            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19.8 19.8A2 2 0 0 1 17 22H7a2 2 0 0 1-2.8-2.2L6 18l-1.5-1.5A2 2 0 0 1 7 13h10a2 2 0 0 1 2.5 3.5L18 18l1.8 1.8z"/><path d="M12 13V2"/><line x1="12" y1="2" x2="8" y2="6"/><line x1="12" y1="2" x2="16" y2="6"/></svg>
-            Shows
-        </a>
-        <a href="/queue" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'queue' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">
-            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/></svg>
-            Queue
-        </a>
-        <a href="/review" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'review' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">
-            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
-            Review
-        </a>
-        <a href="/completed" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'completed' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">
-            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            Completed
-        </a>
-        <a href="/stats" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'stats' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">
-            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
-            Stats
-        </a>
-        <a href="/settings" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'settings' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">
-            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
-            Settings
-        </a>
-      </nav>
-
-      <div class="p-4 border-t border-surface-subtle/50 mt-auto">
-        <form class="relative" action="/search" method="get">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="absolute left-3 top-1/2 -translate-y-1/2 text-foreground-muted"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-            <input
-              type="text"
-              name="q"
-              placeholder="Search..."
-              value="{{ request.query_params.get('q') if request and request.query_params else '' }}"
-              class="w-full bg-surface-card border border-surface-subtle rounded-md py-2 pl-9 pr-3 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
-            />
-        </form>
-        <div class="mt-4 flex items-center justify-between text-xs text-foreground-muted">
-            <span>v0.3.0</span>
-            <button id="themeToggle" type="button" class="hover:text-foreground">
-                <span id="themeLabel">Dark</span> Mode
-            </button>
-        </div>
-      </div>
-    </aside>
-
-    <main class="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 py-8 overflow-x-hidden">
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 py-8">
       {% block content %}{% endblock %}
     </main>
 
@@ -110,8 +81,10 @@
       const menu = document.getElementById('mobileMenu');
       const close = document.getElementById('closeMobileMenu');
       
-      btn?.addEventListener('click', () => menu.classList.remove('hidden'));
-      close?.addEventListener('click', () => menu.classList.add('hidden'));
+      if (btn && menu && close) {
+          btn.addEventListener('click', () => menu.classList.remove('hidden'));
+          close.addEventListener('click', () => menu.classList.add('hidden'));
+      }
     </script>
     {% block scripts %}{% endblock %}
   </body>
