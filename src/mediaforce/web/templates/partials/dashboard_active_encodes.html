@@ -1,65 +1,76 @@
 <div id="active-encodes-container" 
-     class="card shadow border border-surface-subtle/80"
+     class="mb-8"
      hx-get="/partials/dashboard/active-encodes" 
      hx-trigger="every 3s" 
      hx-swap="outerHTML">
-  <div class="flex items-center justify-between gap-2 mb-3">
-    <h3 class="m-0 text-lg font-semibold">Active Encodes</h3>
-    <!-- Optional: manual refresh button (htmx handles auto-refresh, but nice to have) -->
-    <button class="btn btn-sm btn-ghost" hx-get="/partials/dashboard/active-encodes" hx-target="#active-encodes-container" hx-swap="outerHTML">
-      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-rotate-cw"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 12"/><path d="M21 3v9h-9"/></svg>
-    </button>
+  
+  <div class="flex items-center justify-between mb-4">
+    <h3 class="text-xl font-bold text-foreground flex items-center gap-2">
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-accent"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+      Active Encodes
+    </h3>
+    <span class="text-xs font-mono text-foreground-muted bg-surface-subtle px-2 py-1 rounded">
+        {{ active_encodes|length }} running
+    </span>
   </div>
-  <div class="overflow-auto">
-    <table id="activeEncodes" class="table-auto w-full text-sm table-zebra">
-      <thead>
-        <tr>
-          <th>File</th>
-          <th>Machine</th>
-          <th>Tier</th>
-          <th>Progress</th>
-          <th>Speed</th>
-          <th>ETA</th>
-          <th>Frames</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% if not active_encodes %}
-        <tr>
-            <td colspan="7" class="text-center text-foreground-muted py-4">No active encodes running.</td>
-        </tr>
-        {% endif %}
-        {% for enc in active_encodes %}
-        <tr>
-          <td class="truncate max-w-[200px]" title="{{ enc.path }}">
-            <div class="font-medium text-foreground">{{ enc.filename }}</div>
-            <div class="text-xs text-foreground-muted truncate">{{ enc.path }}</div>
-          </td>
-          <td>
-            <span class="px-2 py-1 rounded bg-surface-subtle border border-surface-subtle text-xs font-mono">
-                {{ enc.machine }}
-            </span>
-          </td>
-          <td>
-            <span class="badge-tier tier-{{ enc.tier }}">{{ enc.tier }}</span>
-          </td>
-          <td>
-            <div class="flex flex-col gap-1 min-w-[120px]">
-                <div class="flex justify-between text-xs">
-                    <span>{{ '%.1f'|format(enc.percent_complete) }}%</span>
-                </div>
-                <div class="w-full bg-surface-subtle rounded-full h-1.5 overflow-hidden">
-                    <div class="bg-accent h-1.5 rounded-full transition-all duration-500 ease-out" 
-                         style="width: {{ enc.percent_complete }}%"></div>
+
+  {% if not active_encodes %}
+  <div class="card p-8 text-center border-dashed border-2 border-surface-subtle bg-transparent">
+    <div class="text-foreground-muted mb-2">
+        <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="mx-auto opacity-50"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    </div>
+    <p class="text-foreground-muted font-medium">No active jobs.</p>
+    <p class="text-xs text-foreground-muted/70 mt-1">Workers are waiting for new content.</p>
+  </div>
+  {% else %}
+  
+  <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+    {% for enc in active_encodes %}
+    <div class="card relative overflow-hidden group hover:border-accent/50 transition-colors">
+        <!-- Background Progress Bar Effect -->
+        <div class="absolute bottom-0 left-0 h-1 bg-accent z-10 transition-all duration-1000 ease-linear" style="width: {{ enc.percent_complete }}%"></div>
+        
+        <div class="flex justify-between items-start mb-3">
+            <div class="flex-1 min-w-0 pr-3">
+                <h4 class="font-bold text-lg truncate text-foreground leading-tight" title="{{ enc.filename }}">
+                    {{ enc.show_name or enc.filename }}
+                </h4>
+                <div class="text-xs text-foreground-muted truncate font-mono mt-1" title="{{ enc.path }}">
+                    {{ enc.filename }}
                 </div>
             </div>
-          </td>
-          <td class="font-mono">{{ enc.speed }}</td>
-          <td class="font-mono text-foreground-muted">{{ enc.eta or '-' }}</td>
-          <td class="font-mono text-xs text-foreground-muted">{{ enc.frame or 0 }} / {{ enc.total_frames or '?' }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+            <span class="badge-tier tier-{{ enc.tier }} shadow-sm">
+                {{ enc.tier }}
+            </span>
+        </div>
+
+        <div class="grid grid-cols-2 gap-y-2 gap-x-4 text-sm mb-4">
+            <div>
+                <div class="text-xs text-foreground-muted uppercase tracking-wider">Speed</div>
+                <div class="font-mono text-foreground">{{ enc.speed }}</div>
+            </div>
+            <div class="text-right">
+                <div class="text-xs text-foreground-muted uppercase tracking-wider">ETA</div>
+                <div class="font-mono text-foreground">{{ enc.eta or '--:--' }}</div>
+            </div>
+            <div>
+                <div class="text-xs text-foreground-muted uppercase tracking-wider">Machine</div>
+                <div class="text-accent truncate">{{ enc.machine }}</div>
+            </div>
+            <div class="text-right">
+                <div class="text-xs text-foreground-muted uppercase tracking-wider">Frame</div>
+                <div class="font-mono text-foreground-muted">{{ enc.frame }}</div>
+            </div>
+        </div>
+
+        <div class="flex items-center justify-between text-xs font-medium">
+            <span class="{{ 'text-accent animate-pulse' if enc.phase == 'encoding' else 'text-foreground-muted' }}">
+                {{ enc.phase|title }}
+            </span>
+            <span class="text-foreground">{{ '%.1f'|format(enc.percent_complete) }}%</span>
+        </div>
+    </div>
+    {% endfor %}
   </div>
+  {% endif %}
 </div>

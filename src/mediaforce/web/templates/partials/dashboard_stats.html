@@ -1,26 +1,54 @@
 <div id="stats-container" 
-     class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6"
+     class="mb-8"
      hx-get="/partials/dashboard/stats" 
      hx-trigger="every 5s" 
      hx-swap="outerHTML">
-  <div class="stat-card shadow border border-surface-subtle/60 bg-surface-card/50 backdrop-blur-sm">
-    <div class="value text-3xl font-semibold text-foreground">{{ stats.pending }}</div>
-    <div class="label uppercase text-xs text-foreground-muted tracking-wide font-medium mt-1">Pending</div>
-  </div>
-  <div class="stat-card shadow border border-surface-subtle/60 bg-surface-card/50 backdrop-blur-sm">
-    <div class="value text-3xl font-semibold text-accent">{{ stats.encoding }}</div>
-    <div class="label uppercase text-xs text-foreground-muted tracking-wide font-medium mt-1">Encoding</div>
-  </div>
-  <div class="stat-card shadow border border-surface-subtle/60 bg-surface-card/50 backdrop-blur-sm">
-    <div class="value text-3xl font-semibold text-foreground">{{ stats.encoded }}</div>
-    <div class="label uppercase text-xs text-foreground-muted tracking-wide font-medium mt-1">Encoded</div>
-  </div>
-  <div class="stat-card shadow border border-surface-subtle/60 bg-surface-card/50 backdrop-blur-sm">
-    <div class="value text-3xl font-semibold text-success">{{ stats.completed }}</div>
-    <div class="label uppercase text-xs text-foreground-muted tracking-wide font-medium mt-1">Completed</div>
-  </div>
-  <div class="stat-card shadow border border-surface-subtle/60 bg-surface-card/50 backdrop-blur-sm">
-    <div class="value text-3xl font-semibold text-info">{{ stats.space_saved_gb }}</div>
-    <div class="label uppercase text-xs text-foreground-muted tracking-wide font-medium mt-1">GB Saved</div>
+  
+  <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
+    <!-- Pending -->
+    <div class="card p-4 flex flex-col items-center justify-center text-center hover:bg-surface-subtle transition-colors">
+        <div class="text-foreground-muted mb-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        </div>
+        <span class="text-3xl font-bold text-foreground">{{ stats.pending }}</span>
+        <span class="text-xs uppercase tracking-wider text-foreground-muted mt-1">Pending</span>
+    </div>
+
+    <!-- Active (Highlighted) -->
+    <div class="card p-4 flex flex-col items-center justify-center text-center bg-accent/5 border-accent/30 relative overflow-hidden">
+        <div class="absolute inset-0 bg-gradient-to-br from-accent/10 to-transparent pointer-events-none"></div>
+        <div class="text-accent mb-2 relative z-10">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin-slow"><path d="M12 2v4"/><path d="m16.2 7.8 2.9-2.9"/><path d="M18 12h4"/><path d="m16.2 16.2 2.9 2.9"/><path d="M12 18v4"/><path d="m4.9 19.1 2.9-2.9"/><path d="M2 12h4"/><path d="m4.9 4.9 2.9 2.9"/></svg>
+        </div>
+        <span class="text-3xl font-bold text-accent relative z-10">{{ stats.encoding }}</span>
+        <span class="text-xs uppercase tracking-wider text-accent/80 mt-1 relative z-10">Encoding</span>
+    </div>
+
+    <!-- Encoded -->
+    <div class="card p-4 flex flex-col items-center justify-center text-center hover:bg-surface-subtle transition-colors">
+        <div class="text-foreground-muted mb-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        </div>
+        <span class="text-3xl font-bold text-foreground">{{ stats.encoded }}</span>
+        <span class="text-xs uppercase tracking-wider text-foreground-muted mt-1">Encoded</span>
+    </div>
+
+    <!-- Completed -->
+    <div class="card p-4 flex flex-col items-center justify-center text-center hover:bg-surface-subtle transition-colors">
+        <div class="text-success mb-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="m9 12 2 2 4-4"/></svg>
+        </div>
+        <span class="text-3xl font-bold text-success">{{ stats.completed }}</span>
+        <span class="text-xs uppercase tracking-wider text-success/80 mt-1">Finished</span>
+    </div>
+
+    <!-- Savings -->
+    <div class="card p-4 flex flex-col items-center justify-center text-center hover:bg-surface-subtle transition-colors md:col-span-4 lg:col-span-1">
+        <div class="text-info mb-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 18V6"/></svg>
+        </div>
+        <span class="text-3xl font-bold text-info">{{ stats.space_saved_gb }}</span>
+        <span class="text-xs uppercase tracking-wider text-info/80 mt-1">GB Saved</span>
+    </div>
   </div>
 </div>
