@@ -30,15 +30,15 @@ Keep this list short and current. Completed work should move to `CHANGELOG.md` (
   - Prevent the same worker immediately re-claiming the same item after Stop Now.
   - Prefer short cooldown or per-worker avoid list.
 
-- [ ] **Reconcile observability**
+- [x] **Reconcile observability**
   - Log reconcile changes/errors.
   - Add a manual “Reconcile now” action in Settings → Workers.
 
-- [ ] **Starting-state UX**
+- [x] **Starting-state UX**
   - Show active claims even before progress rows exist (state `starting`).
   - Surface the claimed path in the Workers tables.
 
-- [ ] **Deploy warning cleanup**
+- [x] **Deploy warning cleanup**
   - Ensure deploy bundles don’t include macOS metadata or Finder artifacts.
   - Verify Linux extraction is warning-free.
 
