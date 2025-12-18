@@ -40,7 +40,7 @@ from mediaforce.services.progress import finish_progress_tracking, start_progres
 from mediaforce.services.queue import claim_next_file, release_claim
 from mediaforce.services.watch import watch_libraries
 from mediaforce.services.notifications import send_notifications
-from mediaforce.core import ensure_active_profile_settings
+from mediaforce.services.remote_settings import ensure_active_profile_settings
 from mediaforce.services.promote import (
     promote_encoded_file_atomic,
     rollback_from_manifest,
@@ -390,15 +390,45 @@ def _require_worker_api_auth(request: Request) -> None:
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
-ALLOWED_RAW_FILES: dict[str, str] = {
-    "__init__.py": "src/mediaforce/__init__.py",
-    "core.py": "src/mediaforce/core.py",
-    "db/__init__.py": "src/mediaforce/db/__init__.py",
-    "db/models.py": "src/mediaforce/db/models.py",
-    "web/app.py": "src/mediaforce/web/app.py",
-    "cli/__init__.py": "src/mediaforce/cli/__init__.py",
-    "cli/main.py": "src/mediaforce/cli/main.py",
-}
+def _build_allowed_raw_files() -> dict[str, str]:
+    """Return the allowlist of package files workers may pull from /raw/.
+
+    This intentionally limits exports to Python source within the mediaforce
+    package. Workers use these files for pull-based autoupdates.
+    """
+
+    package_root = PROJECT_ROOT / "src" / "mediaforce"
+    include_dirs = [
+        package_root / "cli",
+        package_root / "config",
+        package_root / "db",
+        package_root / "services",
+    ]
+    include_files = [
+        package_root / "__init__.py",
+        package_root / "core.py",
+        package_root / "web" / "app.py",
+    ]
+
+    candidates: set[pathlib.Path] = set()
+    for p in include_files:
+        if p.exists() and p.is_file():
+            candidates.add(p)
+    for d in include_dirs:
+        if not d.exists():
+            continue
+        for p in d.rglob("*.py"):
+            if p.is_file():
+                candidates.add(p)
+
+    allowed: dict[str, str] = {}
+    for p in sorted(candidates):
+        rel = p.relative_to(package_root).as_posix()
+        allowed[rel] = str(p.relative_to(PROJECT_ROOT))
+    return allowed
+
+
+ALLOWED_RAW_FILES: dict[str, str] = _build_allowed_raw_files()
 
 
 @app.get("/raw/{filename:path}", response_class=PlainTextResponse)

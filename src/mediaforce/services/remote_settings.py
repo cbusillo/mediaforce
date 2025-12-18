@@ -1,20 +1,20 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import urllib.request
+from datetime import datetime
 from typing import Optional
 
+from sqlmodel import Session, select
+from sqlalchemy import text
+
 from mediaforce.config.settings import AppSettings, LibrarySettings
+from mediaforce.db import ProfileSettingsSource
 
 
 def load_remote_settings(url: str) -> Optional[AppSettings]:
-    """Fetch settings JSON from master API and convert to AppSettings.
-
-    Note: This intentionally only maps fields currently used by the worker/CLI
-    orchestration (library roots + global_max_height). Other AppSettings fields
-    are left at defaults and may be overridden by CLI flags.
-    """
-
+    """Fetch settings JSON from master API and convert to AppSettings."""
     try:
         with urllib.request.urlopen(url) as resp:
             payload = json.loads(resp.read().decode())
@@ -57,3 +57,68 @@ def load_remote_settings(url: str) -> Optional[AppSettings]:
 
     return AppSettings(libraries=libraries, global_max_height=global_max_height)
 
+
+def _fetch_remote_profile_settings(url: str, existing_etag: str | None = None) -> tuple[Optional[str], Optional[str]]:
+    """Fetch remote profile settings payload and return (payload, etag)."""
+    headers = {"User-Agent": "mediaforce/0.2"}
+    if existing_etag:
+        headers["If-None-Match"] = existing_etag
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status == 304:
+                return None, existing_etag
+            payload = resp.read().decode("utf-8")
+            etag = resp.headers.get("ETag")
+            return payload, etag
+    except Exception:
+        return None, None
+
+
+def ensure_active_profile_settings(
+    session: Session,
+    remote_url: Optional[str] = None
+) -> Optional[ProfileSettingsSource]:
+    """Return active profile settings, refreshing from remote_url when provided."""
+
+    src = session.exec(
+        select(ProfileSettingsSource)
+        .where(ProfileSettingsSource.is_active == True)  # noqa: E712
+        .order_by(text("id DESC"))
+    ).first()
+
+    if remote_url is None:
+        return src
+
+    needs_fetch = src is None
+    if src and src.fetched_at:
+        try:
+            last = datetime.fromisoformat(src.fetched_at)
+            needs_fetch = (datetime.now() - last).total_seconds() > 24 * 3600
+        except Exception:
+            needs_fetch = True
+
+    if not needs_fetch:
+        return src
+
+    payload, etag = _fetch_remote_profile_settings(remote_url, existing_etag=src.etag if src else None)
+    if payload is None and etag == (src.etag if src else None):
+        return src
+    if payload:
+        checksum = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        new_src = ProfileSettingsSource(
+            name="remote-default",
+            source_type="remote",
+            url=remote_url,
+            etag=etag,
+            checksum=checksum,
+            payload=payload,
+            fetched_at=datetime.now().isoformat(),
+            applied_at=datetime.now().isoformat(),
+            is_active=True,
+        )
+        session.add(new_src)
+        session.commit()
+        session.refresh(new_src)
+        return new_src
+    return src

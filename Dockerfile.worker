@@ -1,0 +1,69 @@
+# Dockerfile.worker
+# Builds a Mediaforce worker image with Python 3.13 and FFmpeg (with SVT-AV1)
+
+FROM python:3.13-slim-bookworm AS builder
+
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+
+WORKDIR /app
+
+# Copy dependency definitions + minimal project files.
+#
+# Note: `uv sync` installs the local project (mediaforce) from this build context,
+# and our packaging metadata references README.md, so it must be present.
+COPY pyproject.toml uv.lock README.md ./
+
+# The project install also needs the source tree.
+COPY src /app/src
+
+# Install dependencies into a virtual environment
+# We use --frozen to ensure strict adherence to the lockfile
+RUN uv sync --frozen --no-dev
+
+# =============================================================================
+
+FROM python:3.13-slim-bookworm
+
+# Install runtime deps
+RUN apt-get update && apt-get install -y \
+    curl \
+    xz-utils \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install ffmpeg with SVT-AV1 support (using BtbN static build)
+# We use a specific commit hash or 'latest' - pinning is safer but 'latest' is easier for a start.
+# This URL provides a static binary with libsvtav1 enabled.
+ARG FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
+
+RUN curl -L -o /tmp/ffmpeg.tar.xz "${FFMPEG_URL}" \
+    && tar -xf /tmp/ffmpeg.tar.xz -C /tmp \
+    && mv /tmp/ffmpeg-*-linux64-gpl/bin/ffmpeg /usr/local/bin/ffmpeg \
+    && mv /tmp/ffmpeg-*-linux64-gpl/bin/ffprobe /usr/local/bin/ffprobe \
+    && chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe \
+    && rm -rf /tmp/ffmpeg*
+
+WORKDIR /app
+
+# Copy venv from builder
+COPY --from=builder /app/.venv /app/.venv
+
+# Source code and README are already copied in the builder stage.
+# Re-copy in runtime stage to keep the final image self-contained.
+COPY src /app/src
+COPY README.md /app/
+
+# Set environment variables
+ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONPATH="/app/src"
+ENV PYTHONUNBUFFERED=1
+
+# Default environment variables (override at runtime)
+# MEDIAFORCE_API_URL must be set
+ENV MEDIAFORCE_MAX_CONCURRENCY=1
+
+# Entrypoint
+# Users should mount /media (or equivalent) and pass arguments
+ENTRYPOINT ["mediaforce", "run"]
+CMD ["--help"]
