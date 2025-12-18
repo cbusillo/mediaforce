@@ -48,44 +48,14 @@
             <span id="themeLabel" class="hidden">Dark</span>
             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><path d="M12 1v2"/><path d="M12 21v2"/><path d="M4.22 4.22l1.42 1.42"/><path d="M18.36 18.36l1.42 1.42"/><path d="M1 12h2"/><path d="M21 12h2"/><path d="M4.22 19.78l1.42-1.42"/><path d="M18.36 5.64l1.42-1.42"/></svg>
           </button>
-
-          <!-- Mobile Menu Button -->
-          <button id="mobileMenuBtn" class="md:hidden p-2 text-foreground-muted hover:text-foreground">
-            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-          </button>
         </div>
       </div>
     </nav>
-
-    <!-- Mobile Menu Overlay -->
-    <div id="mobileMenu" class="hidden fixed inset-0 bg-surface/95 z-50 p-4 flex flex-col gap-4 md:hidden">
-        <div class="flex justify-between items-center mb-4">
-            <span class="font-bold text-xl">Menu</span>
-            <button id="closeMobileMenu" class="p-2"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-        </div>
-        <a href="/" class="text-lg py-2 border-b border-surface-subtle">Dashboard</a>
-        <a href="/shows" class="text-lg py-2 border-b border-surface-subtle">Shows</a>
-        <a href="/queue" class="text-lg py-2 border-b border-surface-subtle">Queue</a>
-        <a href="/review" class="text-lg py-2 border-b border-surface-subtle">Review</a>
-        <a href="/completed" class="text-lg py-2 border-b border-surface-subtle">Completed</a>
-        <a href="/stats" class="text-lg py-2 border-b border-surface-subtle">Stats</a>
-        <a href="/settings" class="text-lg py-2 border-b border-surface-subtle">Settings</a>
-    </div>
 
     <main class="max-w-7xl mx-auto px-4 sm:px-6 py-8">
       {% block content %}{% endblock %}
     </main>
 
-    <script>
-      const btn = document.getElementById('mobileMenuBtn');
-      const menu = document.getElementById('mobileMenu');
-      const close = document.getElementById('closeMobileMenu');
-      
-      if (btn && menu && close) {
-          btn.addEventListener('click', () => menu.classList.remove('hidden'));
-          close.addEventListener('click', () => menu.classList.add('hidden'));
-      }
-    </script>
     {% block scripts %}{% endblock %}
   </body>
 </html>
