@@ -1,0 +1,8 @@
+{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header %}
+{% block content %}
+{% call page_header("Error", heading or "Something went wrong", message) %}
+{% if back_href %}
+<a href="{{ back_href }}" class="btn btn-sm">Back</a>
+{% endif %}
+{% endcall %}
+{% endblock %}

@@ -2,12 +2,7 @@
   if (window.location.pathname !== "/settings") return;
 
   const table = document.getElementById("settingsWorkersTable");
-  const refreshBtn = document.getElementById("workers-refresh");
-  const clearOfflineBtn = document.getElementById("workers-clear-offline");
   const normalizeBtn = document.getElementById("workers-normalize");
-  const runAllBtn = document.getElementById("workers-run-all");
-  const pauseAllBtn = document.getElementById("workers-pause-all");
-  const stopAllBtn = document.getElementById("workers-stop-all");
   const reconcileBtn = document.getElementById("workers-reconcile");
   const statusEl = document.getElementById("workers-status");
 
@@ -20,11 +15,18 @@
     window.mfUi?.setStatus(statusEl, text, level || "muted");
   }
 
-  function renderWorkers(list) {
+  function renderWorkers(list, opts = {}) {
     if (!table) return;
     const tbody = table.querySelector("tbody");
     if (!tbody) return;
     tbody.innerHTML = "";
+
+    if (opts.error) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td colspan="9" class="text-danger">${opts.error}</td>`;
+      tbody.appendChild(tr);
+      return;
+    }
 
     if (!list || list.length === 0) {
       const tr = document.createElement("tr");
@@ -52,7 +54,6 @@
         : `<div class="flex flex-wrap gap-1">` +
           `<button class="btn btn-xs btn-success" onclick="settingsSetWorkerMode('${safeMachine}','run')">Run</button>` +
           `<button class="btn btn-xs btn-warning" onclick="settingsSetWorkerMode('${safeMachine}','drain')">Pause</button>` +
-          `<button class="btn btn-xs btn-danger" onclick="settingsSetWorkerMode('${safeMachine}','stop')">Stop</button>` +
           `<button class="btn btn-xs btn-danger" onclick="settingsStopNow('${safeMachine}')">Stop Now</button>` +
           (w.override_mode ? `<button class="btn btn-xs" onclick="settingsClearWorkerOverride('${safeMachine}')">Clear Override</button>` : "") +
           (state === "offline" ? `<button class="btn btn-xs" onclick="settingsDeleteWorker('${safeMachine}')">Remove</button>` : "") +
@@ -73,29 +74,75 @@
     });
   }
 
-  async function refresh() {
-    setStatus("Refreshing…", "warning");
+  function normalizeWorkersForSignature(list) {
+    if (!Array.isArray(list)) return [];
+    return list
+      .map((w) => ({
+        machine: w.machine || "",
+        state: w.state || "",
+        control_mode: w.control_mode || "",
+        override_mode: w.override_mode || "",
+        active: w.active || 0,
+        percent_complete: typeof w.percent_complete === "number" ? Math.round(w.percent_complete) : 0,
+        // `updated_at` can change on every poll (causing a visible flicker). Only
+        // track at minute precision so the UI remains stable.
+        updated_at: (w.updated_at || "").slice(0, 16),
+        sample_path: w.sample_path || w.samplePath || "",
+      }))
+      .sort((a, b) => a.machine.localeCompare(b.machine));
+  }
+
+  let inFlight = false;
+  let lastSig = "";
+  let refreshTimer = null;
+  let lastWorkers = null;
+  let lastStats = { pending: 0, encoding: 0, paused: 0 };
+  let lastGlobalMode = null;
+
+  function scheduleRefresh(delayMs) {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(() => {
+      refresh({ loud: false });
+    }, delayMs);
+  }
+
+  async function refresh(opts = {}) {
+    const loud = !!opts.loud;
+    if (document.hidden) {
+      scheduleRefresh(5000);
+      return;
+    }
+    if (inFlight) return;
+    inFlight = true;
+    if (loud) setStatus("Refreshing…", "warning");
+
+    let workers = null;
+    let pending = null;
+    let encoding = null;
+    let paused = null;
+    let globalMode = null;
+    let workersError = null;
     try {
       const resp = await window.mfApi.getJson("/api/workers");
       if (resp.ok && resp.data?.success) {
-        renderWorkers(resp.data.workers || []);
-        setStatus("", "muted");
+        workers = resp.data.workers || [];
+        lastWorkers = workers;
       } else {
-        setStatus(resp.data?.error || resp.error || "Failed to load workers.", "danger");
+        workersError = resp.data?.error || resp.error || "Failed to load workers.";
+        setStatus(workersError, "danger");
       }
     } catch (_) {
-      setStatus("Failed to load workers.", "danger");
+      workersError = "Failed to load workers.";
+      setStatus(workersError, "danger");
     }
 
     try {
       const statsResp = await window.mfApi.getJson("/api/stats");
       if (statsResp.ok && statsResp.data) {
-        const pending = statsResp.data.pending || 0;
-        const encoding = statsResp.data.encoding || 0;
-        const paused = statsResp.data.paused || 0;
-        if (pendingEl) pendingEl.textContent = String(pending);
-        if (encodingEl) encodingEl.textContent = String(encoding);
-        if (pausedEl) pausedEl.textContent = String(paused);
+        pending = statsResp.data.pending || 0;
+        encoding = statsResp.data.encoding || 0;
+        paused = statsResp.data.paused || 0;
+        lastStats = { pending, encoding, paused };
       }
     } catch (_) {
       /* ignore */
@@ -104,11 +151,57 @@
     try {
       const ctrlResp = await window.mfApi.getJson("/api/worker-control");
       if (ctrlResp.ok && ctrlResp.data?.success) {
-        if (globalModeEl) globalModeEl.textContent = String(ctrlResp.data.global || "run");
+        globalMode = ctrlResp.data.global || "run";
+        lastGlobalMode = globalMode;
       }
     } catch (_) {
       /* ignore */
     }
+
+    if (workers === null) {
+      if (lastWorkers !== null) {
+        workers = lastWorkers;
+      } else {
+        workers = [];
+      }
+    }
+
+    if (pending === null || encoding === null || paused === null) {
+      pending = lastStats.pending;
+      encoding = lastStats.encoding;
+      paused = lastStats.paused;
+    }
+
+    if (!globalMode) {
+      globalMode = lastGlobalMode;
+    }
+
+    const sigObj = {
+      workers: normalizeWorkersForSignature(workers),
+      stats: { pending, encoding, paused },
+      globalMode: String(globalMode || ""),
+    };
+
+    const sig = JSON.stringify(sigObj);
+    if (sig !== lastSig) {
+      if (workersError && lastWorkers === null) renderWorkers([], { error: workersError });
+      else renderWorkers(workers);
+      if (pendingEl) pendingEl.textContent = String(pending);
+      if (encodingEl) encodingEl.textContent = String(encoding);
+      if (pausedEl) pausedEl.textContent = String(paused);
+      if (globalModeEl && globalMode) globalModeEl.textContent = String(globalMode);
+      lastSig = sig;
+    }
+
+    if (loud) {
+      setStatus("Updated.", "success");
+      setTimeout(() => setStatus("", "muted"), 2000);
+    } else if (!workersError) {
+      setStatus("", "muted");
+    }
+
+    inFlight = false;
+    scheduleRefresh(5000);
   }
 
   window.settingsDeleteWorker = async function (machine) {
@@ -162,6 +255,12 @@
   };
 
   async function clearOffline() {
+    if (window.mfWorkers?.cleanupOffline) {
+      await window.mfWorkers.cleanupOffline(statusEl);
+      await refresh();
+      return;
+    }
+
     const ok = window.confirm("Clear offline workers not seen in 30 days?");
     if (!ok) return;
     setStatus("Clearing…", "warning");
@@ -189,27 +288,7 @@
     }
   }
 
-  refreshBtn?.addEventListener("click", refresh);
-  clearOfflineBtn?.addEventListener("click", clearOffline);
   normalizeBtn?.addEventListener("click", normalizeNames);
-
-  runAllBtn?.addEventListener("click", async () => {
-    setStatus("Setting global mode: run…", "warning");
-    await window.mfApi.postJson("/api/worker-control/global", { mode: "run" });
-    await refresh();
-  });
-  pauseAllBtn?.addEventListener("click", async () => {
-    setStatus("Setting global mode: drain…", "warning");
-    await window.mfApi.postJson("/api/worker-control/global", { mode: "drain" });
-    await refresh();
-  });
-  stopAllBtn?.addEventListener("click", async () => {
-    const ok = window.confirm("Stop all workers after they finish current encodes?");
-    if (!ok) return;
-    setStatus("Setting global mode: stop…", "warning");
-    await window.mfApi.postJson("/api/worker-control/global", { mode: "stop" });
-    await refresh();
-  });
 
   reconcileBtn?.addEventListener("click", async () => {
     setStatus("Reconciling…", "warning");
@@ -225,6 +304,13 @@
     await refresh();
   });
 
-  refresh();
-  setInterval(refresh, 5000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refresh({ loud: false });
+  });
+
+  document.body.addEventListener("mfWorkersRefresh", () => {
+    refresh({ loud: false });
+  });
+
+  refresh({ loud: false });
 })();

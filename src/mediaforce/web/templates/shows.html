@@ -1,22 +1,10 @@
-{% extends "base.html" %} {% block content %}
-<div class="flex items-center justify-between mb-4">
-  <div>
-    <h1 class="text-3xl font-semibold">Show Management</h1>
-    <p class="text-foreground-muted text-sm">Manage tier overrides for TV shows; overrides apply during scanning.</p>
-  </div>
-</div>
+{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, toolbar_search_input, table_empty_row %} {% block content %}
+{{ page_header("Library", "Shows", "Tier overrides apply during scanning and queueing.") }}
 
 <!-- Search/Filter -->
-<div class="card mb-4">
-  <div class="flex flex-wrap items-center gap-3">
-    <input
-      type="text"
-      id="showSearch"
-      placeholder="Search shows..."
-      aria-label="Search shows"
-      class="form-input flex-1 min-w-[200px]"
-      oninput="filterShows()"
-    />
+<div class="card mb-4 review-toolbar">
+  <div class="review-toolbar__row">
+    <div class="flex-1 min-w-[200px]">{{ toolbar_search_input('showSearch', 'Search shows', '', 'filterShows()', 'w-full') }}</div>
     <select id="tierFilter" aria-label="Filter by tier" onchange="filterShows()" class="form-select">
       <option value="">All Tiers</option>
       <option value="pristine">Pristine</option>
@@ -25,7 +13,7 @@
       <option value="poor">Poor</option>
       <option value="override">Has Override</option>
     </select>
-    <span class="text-foreground-muted text-sm"><span id="showCount">{{ shows|length }}</span> shows</span>
+    <span class="pill pill-off"><span id="showCount">{{ shows|length }}</span> shows</span>
   </div>
 </div>
 
@@ -82,6 +70,9 @@
           </td>
         </tr>
         {% endfor %}
+        {% if shows|length == 0 %}
+        {{ table_empty_row(9, 'No shows found') }}
+        {% endif %}
       </tbody>
     </table>
   </div>
@@ -113,11 +104,11 @@
     </div>
 
     <div class="flex gap-2 pt-2">
-      <button onclick="confirmApplyTier()" class="btn btn-accent">Apply</button>
-      <button onclick="hideOverrideModal()" class="btn btn-ghost">Cancel</button>
+      <button onclick="confirmApplyTier()" class="btn btn-sm btn-accent">Apply</button>
+      <button onclick="hideOverrideModal()" class="btn btn-sm btn-ghost">Cancel</button>
     </div>
   </div>
 </div>
 {% endblock %} {% block scripts %}
-<script src="/static/js/pages/shows.js"></script>
+<script src="/static/js/pages/shows.js?v={{ static_rev() }}"></script>
 {% endblock %}

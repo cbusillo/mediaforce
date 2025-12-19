@@ -7,40 +7,69 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/static/css/tailwind.css" />
+    <link rel="stylesheet" href="/static/css/tailwind.css?v={{ static_rev() }}" />
     <script src="https://unpkg.com/htmx.org@1.9.10" integrity="sha384-D1Kt99CQMDuVetoL1lrYwg5t+9QdHe7NLX/SoJYkXDFfX37iInKRy5xLSi8nO7UC" crossorigin="anonymous"></script>
-    <script src="/static/js/common.js"></script>
-    <script src="/static/js/api.js"></script>
-    <script src="/static/js/ui.js"></script>
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/common.js?v={{ static_rev() }}"></script>
+    <script src="/static/js/api.js?v={{ static_rev() }}"></script>
+    <script src="/static/js/ui.js?v={{ static_rev() }}"></script>
+    <script src="/static/js/app.js?v={{ static_rev() }}"></script>
   </head>
   <body class="bg-surface text-foreground min-h-screen">
-    <nav class="px-4 sm:px-6 py-4 border-b border-surface-subtle bg-surface-subtle shadow-sm sticky top-0 z-50">
+    <nav class="px-4 sm:px-6 py-4 border-b border-surface-subtle bg-surface-subtle shadow-sm sticky top-0 z-50 overflow-hidden">
       <div class="flex items-center gap-3">
         <a href="/" class="flex items-center gap-3 mr-6">
           <img src="/static/img/mediaforce-logo.svg" alt="Mediaforce" class="h-8 w-8" />
           <span class="text-xl font-bold text-accent tracking-tight">Mediaforce</span>
         </a>
 
-        <div class="hidden md:flex items-center gap-1">
-            <a href="/" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'dashboard' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Dashboard</a>
-            <a href="/shows" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'shows' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Shows</a>
-            <a href="/queue" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'queue' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Queue</a>
-            <a href="/review" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'review' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Review</a>
-            <a href="/completed" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'completed' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Completed</a>
-            <a href="/stats" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'stats' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Stats</a>
-            <a href="/settings" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'settings' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Settings</a>
+        <div class="flex-1 min-w-0 relative">
+          <div id="navScroll" class="flex flex-nowrap overflow-x-auto no-scrollbar nav-scroll-pad items-center gap-1">
+              <a href="/" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'dashboard' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Dashboard</a>
+              <a href="/shows" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'shows' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Shows</a>
+              <a href="/queue" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'queue' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Queue</a>
+              <a href="/review" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'review' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Review</a>
+              <a href="/completed" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'completed' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Completed</a>
+              <a href="/stats" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'stats' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Stats</a>
+              <a href="/settings" class="px-3 py-2 rounded-md text-sm font-medium transition-colors {{ 'bg-surface-card text-foreground shadow-sm' if active == 'settings' else 'text-foreground-muted hover:bg-surface-card/50 hover:text-foreground' }}">Settings</a>
+          </div>
+          <div class="nav-scroll-hint nav-scroll-hint--left" aria-hidden="true" title="Scroll">
+            <span class="nav-scroll-hint__chevron">‹</span>
+          </div>
+          <div class="nav-scroll-hint nav-scroll-hint--right" aria-hidden="true" title="Scroll">
+            <span class="nav-scroll-hint__chevron">›</span>
+          </div>
         </div>
 
         <div class="ml-auto flex items-center gap-3">
-          <form class="hidden sm:flex relative" action="/search" method="get">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="absolute left-3 top-1/2 -translate-y-1/2 text-foreground-muted"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+          <a
+            href="/search"
+            class="sm:hidden p-2 text-foreground-muted hover:text-foreground"
+            aria-label="Search"
+            title="Search"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.3-4.3" />
+            </svg>
+          </a>
+          <form class="hidden sm:flex relative" action="/search" method="get" autocomplete="off">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="absolute left-3 top-1/2 -translate-y-1/2 text-foreground-muted pointer-events-none"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
             <input
               type="text"
               name="q"
               placeholder="Search..."
-              value="{{ request.query_params.get('q') if request and request.query_params else '' }}"
-              class="w-40 focus:w-60 transition-all bg-surface-card border border-surface-subtle rounded-full py-1.5 pl-9 pr-3 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
+              value="{{ (request.query_params.get('q') or '') if request and request.query_params else '' }}"
+              class="w-32 focus:w-60 input-icon-left transition-all bg-surface-card border border-surface-subtle rounded-full py-1.5 pr-3 text-sm focus:border-accent focus:ring-1 focus:ring-accent outline-none"
             />
           </form>
           
@@ -48,13 +77,34 @@
             <span id="themeLabel" class="hidden">Dark</span>
             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><path d="M12 1v2"/><path d="M12 21v2"/><path d="M4.22 4.22l1.42 1.42"/><path d="M18.36 18.36l1.42 1.42"/><path d="M1 12h2"/><path d="M21 12h2"/><path d="M4.22 19.78l1.42-1.42"/><path d="M18.36 5.64l1.42-1.42"/></svg>
           </button>
+
+          <!-- Mobile Menu Button (deprecated: nav is always visible now) -->
+          <button id="mobileMenuBtn" type="button" class="hidden p-2 text-foreground-muted hover:text-foreground" aria-label="Toggle menu">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+          </button>
         </div>
       </div>
+
+      <!-- Mobile Menu -->
+      <div id="mobileMenu" class="hidden"></div>
     </nav>
 
     <main class="max-w-7xl mx-auto px-4 sm:px-6 py-8">
       {% block content %}{% endblock %}
     </main>
+
+    <div id="inspectModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-label="Encode details">
+      <div class="modal-card modal-card-wide">
+        <div class="flex items-center justify-between gap-3 mb-3">
+          <div>
+            <h3 class="m-0">Encode Inspection</h3>
+            <div id="inspectSubtitle" class="text-xs text-foreground-muted"></div>
+          </div>
+          <button type="button" class="btn btn-sm btn-ghost" onclick="window.mfInspect?.close()">Close</button>
+        </div>
+        <div id="inspectBody" class="space-y-3"></div>
+      </div>
+    </div>
 
     {% block scripts %}{% endblock %}
   </body>

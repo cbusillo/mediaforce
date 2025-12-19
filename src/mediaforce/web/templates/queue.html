@@ -1,15 +1,10 @@
-{% extends "base.html" %} {% block content %}
-<div class="flex items-center justify-between mb-4">
-  <div>
-    <h1 class="text-3xl font-semibold">Encoding Queue</h1>
-    <p class="text-foreground-muted text-sm">Manage pending encodes, filters, and views.</p>
-  </div>
-</div>
+{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, table_empty_row %} {% block content %}
+{{ page_header("Pipeline", "Queue", "Browse pending titles and prioritize work.") }}
 
 <div id="toast" class="toast hidden"></div>
 
-<div class="card space-y-4">
-  <div class="flex flex-wrap justify-between items-center gap-3">
+<div class="card review-toolbar space-y-4">
+  <div class="review-toolbar__row">
     <div class="flex flex-wrap items-center gap-3">
       <h3 class="text-lg font-semibold m-0">
         Titles ({{ total }} titles{% if total_files != total %}, {{ total_files }} files{% endif %})
@@ -44,7 +39,7 @@
     </div>
   </div>
 
-  <div class="flex flex-wrap items-center gap-2">
+  <div class="review-toolbar__row review-toolbar__row--filters">
     <input
       id="searchBox"
       class="form-input"
@@ -89,7 +84,7 @@
     <button class="btn btn-sm" onclick="resetFilters()">Reset</button>
     <button class="btn btn-sm btn-primary" onclick="expandAll()">Expand All</button>
     <button class="btn btn-sm btn-primary" onclick="collapseAll()">Collapse All</button>
-    <div class="chip" id="scanStatus">
+    <div class="pill pill-off" id="scanStatus">
       Scan: {% if cur_status and cur_status.running %}running…{% elif cur_status and cur_status.last_scan %}last {{
       cur_status.last_scan[:16] }}{% else %}never{% endif %}
     </div>
@@ -158,6 +153,9 @@
         </tr>
       </thead>
       <tbody>
+        {% if shows|length == 0 %}
+        {{ table_empty_row(8, 'No pending titles') }}
+        {% endif %}
         {% for show in shows %}
         <tr
           class="show-row"
@@ -469,7 +467,7 @@
                       <button class="btn btn-sm btn-primary" onclick="bumpEpisode(${ep.id})">Bump</button>
                       <button class="btn btn-sm" onclick="pauseEpisode(${ep.id})">Pause</button>
                       <button class="btn btn-sm" onclick="resumeEpisode(${ep.id})">Resume</button>
-                      <select class="btn" aria-label="Send episode to worker" onchange="sendToWorker(${ep.id}, this.value)">
+                    <select class="form-select" aria-label="Send episode to worker" onchange="sendToWorker(${ep.id}, this.value)">
                           <option value="">Send to…</option>
                           ${workers.map(w => `<option value="${w.machine}">${w.machine}</option>`).join('')}
                       </select>

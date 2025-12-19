@@ -1,12 +1,7 @@
-{% extends "base.html" %}
+{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, table_empty_row, worker_controls_bar %}
 
 {% block content %}
-<div class="flex items-center justify-between mb-4">
-    <div>
-        <h1 class="text-3xl font-semibold">Settings</h1>
-        <p class="text-foreground-muted text-sm">Configure libraries, watcher, and host-level encode limits.</p>
-    </div>
-</div>
+{{ page_header("Config", "Settings", "Libraries, watcher, and host-level encode limits.") }}
 
 <div class="card space-y-4">
     <div class="section-heading">
@@ -22,8 +17,8 @@
             <div class="value text-accent text-lg font-semibold">{% if watch_status.running %}Running{% else %}Stopped{% endif %}</div>
             <div class="text-foreground-muted text-sm">{{ watch_status.message }}</div>
         </div>
-        <button type="button" id="watch-start" class="btn btn-success">Start Watch</button>
-        <button type="button" id="watch-stop" class="btn btn-warning">Stop Watch</button>
+        <button type="button" id="watch-start" class="btn btn-sm btn-success">Start Watch</button>
+        <button type="button" id="watch-stop" class="btn btn-sm btn-warning">Stop Watch</button>
         <span id="watch-status" class="text-foreground-muted text-sm"></span>
     </div>
 
@@ -59,6 +54,12 @@
     </div>
 
     <form id="settings-form" class="space-y-3">
+        <div class="flex flex-wrap items-center gap-2">
+            <button type="button" id="add-library" class="btn btn-sm">Add Library</button>
+            <div class="text-sm text-foreground-muted">
+                Tip: on macOS use <code class="font-mono">/Volumes/…</code>; on Linux use <code class="font-mono">/mnt/…</code>. Leave the other blank.
+            </div>
+        </div>
         <div class="overflow-auto">
             <table class="table-auto w-full text-sm table-zebra">
                 <thead>
@@ -119,12 +120,49 @@
                         </td>
                     </tr>
                     {% endfor %}
+                    {% if libraries|length == 0 %}
+                    {{ table_empty_row(8, 'No libraries configured yet.') }}
+                    {% endif %}
                 </tbody>
             </table>
         </div>
 
+        <template id="libraryRowTemplate">
+            <tr>
+                <td>
+                    <input type="hidden" name="__ID__" value="">
+                    <input class="form-input w-44" type="text" name="__NAME__" value="" aria-label="Library name">
+                </td>
+                <td>
+                    <select class="form-select w-32" name="__MEDIA_TYPE__" aria-label="Media type">
+                        <option value="tv">TV</option>
+                        <option value="movies">Movies</option>
+                        <option value="generic" selected>Other</option>
+                    </select>
+                </td>
+                <td>
+                    <input class="form-input w-64" type="text" name="__MAC_PATH__" value="" aria-label="macOS path">
+                </td>
+                <td>
+                    <input class="form-input w-64" type="text" name="__LINUX_PATH__" value="" aria-label="Linux path">
+                </td>
+                <td class="text-center">
+                    <input class="row-checkbox" type="checkbox" name="__WATCH__" aria-label="Watch library" value="true">
+                </td>
+                <td>
+                    <select class="form-select w-32" name="__MAX_HEIGHT__" aria-label="Max height">
+                        {% for h in ["",480,720,1080,1440,2160,4320] %}
+                            <option value="{{ h }}">{% if h == "" %}Unset{% else %}{{ h }}p{% endif %}</option>
+                        {% endfor %}
+                    </select>
+                </td>
+                <td class="text-foreground-muted">-</td>
+                <td class="text-foreground-muted">Save first</td>
+            </tr>
+        </template>
+    
         <div class="flex items-center gap-3 pt-2">
-            <button type="submit" class="btn btn-accent">Save Settings</button>
+            <button type="submit" class="btn btn-sm btn-accent">Save Settings</button>
             <span id="settings-status" class="text-foreground-muted text-sm"></span>
         </div>
     </form>
@@ -137,21 +175,26 @@
             <p class="section-subtle">Remove stale worker entries and per-worker overrides.</p>
         </div>
         <div class="flex flex-wrap items-center gap-2 text-sm">
-            <button type="button" class="btn btn-sm" id="workers-refresh">Refresh</button>
-            <button type="button" class="btn btn-sm" id="workers-clear-offline">Clear Offline</button>
             <button type="button" class="btn btn-sm" id="workers-normalize">Normalize Names</button>
         </div>
     </div>
 
-    <div class="flex flex-wrap items-center gap-2 text-sm">
-        <button type="button" class="btn btn-sm btn-success" id="workers-run-all">Run All</button>
-        <button type="button" class="btn btn-sm btn-warning" id="workers-pause-all">Pause (finish current)</button>
-        <button type="button" class="btn btn-sm btn-danger" id="workers-stop-all">Stop (finish current)</button>
+    <div class="flex flex-wrap items-center gap-2">
+        {{ worker_controls_bar('workers-status', None, false, true, true, true, true) }}
         <button type="button" class="btn btn-sm" id="workers-reconcile">Reconcile Now</button>
     </div>
 
+    <div class="text-sm text-foreground-muted">
+        <div class="font-medium text-foreground">Worker controls</div>
+        <div class="mt-1">
+            <span class="font-medium">Pause</span> finishes current encodes, then stops taking new jobs.
+            <span class="font-medium">Stop Now</span> (per-worker) kills ffmpeg and requeues the job.
+            Use <span class="font-medium">Pause</span> unless you need an immediate stop.
+        </div>
+    </div>
+
     <div class="overflow-auto">
-        <table id="settingsWorkersTable" class="table-auto w-full text-sm table-zebra">
+        <table id="settingsWorkersTable" class="table-auto w-full text-sm table-zebra table-compact">
             <thead>
                 <tr>
                     <th>Host</th>
@@ -191,7 +234,7 @@ MEDIAFORCE_MACHINE_NAME=&lt;short-hostname&gt;</code></pre>
     </div>
 </div>
 
-<script src="/static/js/pages/settings.js"></script>
-<script src="/static/js/pages/settings_workers.js"></script>
+<script src="/static/js/pages/settings.js?v={{ static_rev() }}"></script>
+<script src="/static/js/pages/settings_workers.js?v={{ static_rev() }}"></script>
 
 {% endblock %}

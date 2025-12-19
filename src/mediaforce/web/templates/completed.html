@@ -1,16 +1,12 @@
-{% extends "base.html" %} {% block content %}
-<div class="flex items-center justify-between mb-4">
-  <div>
-    <h1 class="text-3xl font-semibold text-foreground">Completed Encodes</h1>
-    <p class="text-foreground-muted text-sm">Recently promoted outputs (latest 100).</p>
-  </div>
-  <div class="flex items-center gap-2">
-    <a class="btn btn-sm" href="/export/completed.csv" download>Download CSV</a>
-    <div class="pill hidden md:inline-flex">Auto-refresh disabled; reload for latest.</div>
-  </div>
+{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, table_empty_row %} {% block content %}
+{% call page_header("History", "Completed", "Recently promoted outputs (latest 100).") %}
+<div class="flex items-center gap-2">
+  <a class="btn btn-sm" href="/export/completed.csv" download>Download CSV</a>
+  <div class="pill hidden md:inline-flex">Auto-refresh disabled; reload for latest.</div>
 </div>
+{% endcall %}
 
-<div class="card shadow border border-surface-subtle/80">
+<div class="card">
   <div class="flex items-center justify-between gap-2">
     <h3 class="m-0 text-lg font-semibold">Recently Promoted</h3>
     <div class="text-foreground-muted text-sm">{{ encodes|length }} items</div>
@@ -31,12 +27,7 @@
       <tbody>
         {% if encodes %} {% for encode in encodes %}
         <tr>
-          <td
-            class="truncate"
-            title="{{ encode.source_path }}"
-            onmouseenter="showThumb(event, {{ encode.id }})"
-            onmouseleave="hideThumb()"
-          >
+          <td class="truncate" title="{{ encode.source_path }}">
             {{ encode.filename }}
           </td>
           <td>{{ encode.source_size }}</td>
@@ -47,19 +38,12 @@
           <td>{{ encode.promoted_at or '-' }}</td>
         </tr>
         {% endfor %} {% else %}
-        <tr>
-          <td colspan="7" class="py-6 text-center text-foreground-muted">No promoted encodes yet.</td>
-        </tr>
+        {{ table_empty_row(7, 'No promoted encodes yet.') }}
         {% endif %}
       </tbody>
     </table>
   </div>
 </div>
 
-<div id="hoverThumb" class="hover-preview hidden">
-  <div class="hover-preview__label">Preview</div>
-  <video id="hoverVideo" muted autoplay loop playsinline class="hover-preview__video"></video>
-</div>
 {% endblock %} {% block scripts %}
-<script src="/static/js/pages/completed.js"></script>
 {% endblock %}

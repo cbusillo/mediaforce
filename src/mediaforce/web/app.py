@@ -35,8 +35,14 @@ from mediaforce.db.repository.progress import ProgressRepository
 from mediaforce.config.paths import iter_libraries_for_current_host, normalize_path
 from mediaforce.config.settings import INVENTORY_DB
 from mediaforce.domain.types import OutlierResult, QualityMetrics
+from mediaforce.domain.types import MediaInfo
 from mediaforce.services.encoder import record_encode_result
-from mediaforce.services.progress import finish_progress_tracking, start_progress_tracking, update_progress, upsert_heartbeat
+from mediaforce.services.progress import (
+    finish_progress_tracking,
+    start_progress_tracking,
+    update_progress,
+    upsert_heartbeat,
+)
 from mediaforce.services.queue import claim_next_file, release_claim
 from mediaforce.services.watch import watch_libraries
 from mediaforce.services.notifications import send_notifications
@@ -151,13 +157,15 @@ def get_library_status(session: Session | None = None) -> list[dict]:
                 last_scan = media_repo.last_scan_ts(library_id=lib.id)
             except Exception:
                 last_scan = None
-        libs.append({
-            "lib": lib,
-            "root": str(root),
-            "db": str(db),
-            "last_scan": last_scan,
-            "running": running,
-        })
+        libs.append(
+            {
+                "lib": lib,
+                "root": str(root),
+                "db": str(db),
+                "last_scan": last_scan,
+                "running": running,
+            }
+        )
     return libs
 
 
@@ -294,6 +302,50 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates_dir = pathlib.Path(__file__).parent / "templates"
 templates_dir.mkdir(exist_ok=True)
 templates = Jinja2Templates(directory=str(templates_dir))
+
+
+def _static_rev() -> str:
+    """Cache-buster for static assets.
+
+    Browsers can be aggressive about caching `/static/*`. We append a stable
+    revision string derived from local mtimes so UI changes (CSS/JS) appear
+    immediately after a refresh even without `--reload`.
+    """
+
+    static_root = pathlib.Path(__file__).parent / "static"
+    now = int(datetime.now().timestamp())
+    try:
+        candidates: list[pathlib.Path] = []
+        css_dir = static_root / "css"
+        js_dir = static_root / "js"
+        if css_dir.exists():
+            candidates.extend([p for p in css_dir.rglob("*.css") if p.is_file()])
+        if js_dir.exists():
+            candidates.extend([p for p in js_dir.rglob("*.js") if p.is_file()])
+
+        mtimes = [p.stat().st_mtime for p in candidates]
+        if not mtimes:
+            return str(now)
+
+        # Use millisecond precision so back-to-back UI edits bust caches reliably.
+        return str(int(max(mtimes) * 1000))
+    except Exception:
+        return str(now)
+
+
+def _parse_json_maybe_list(raw: str | None) -> list[dict]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    return []
+
+
+templates.env.globals["static_rev"] = _static_rev
 
 
 # In-process watch task state
@@ -472,6 +524,7 @@ async def raw_manifest():
 
     return manifest
 
+
 QUEUE_CACHE: dict[str, dict] = {}  # reserved for future use
 QUEUE_CACHE_TTL = 10  # seconds
 QUEUE_TOTALS_CACHE: dict[str, dict] = {}
@@ -496,42 +549,55 @@ async def _start_watch_task() -> dict:
 
     watch_roots = _get_watch_libraries()
     if not watch_roots:
-        WATCH_STATUS.update({
-            "running": False,
-            "libraries": [],
-            "message": "No watch-enabled libraries on this host",
-        })
+        WATCH_STATUS.update(
+            {
+                "running": False,
+                "libraries": [],
+                "message": "No watch-enabled libraries on this host",
+            }
+        )
         return WATCH_STATUS
 
     async def runner():
-        WATCH_STATUS.update({
+        WATCH_STATUS.update(
+            {
+                "running": True,
+                "libraries": watch_roots,
+                "message": "watching",
+            }
+        )
+        try:
+            await watch_libraries()
+            WATCH_STATUS.update(
+                {
+                    "running": False,
+                    "message": "stopped",
+                }
+            )
+        except asyncio.CancelledError:
+            WATCH_STATUS.update(
+                {
+                    "running": False,
+                    "message": "stopped",
+                }
+            )
+            raise
+        except Exception as exc:  # pragma: no cover
+            WATCH_STATUS.update(
+                {
+                    "running": False,
+                    "message": f"error: {exc}",
+                }
+            )
+
+    # Mark running before returning so API callers see immediate state
+    WATCH_STATUS.update(
+        {
             "running": True,
             "libraries": watch_roots,
             "message": "watching",
-        })
-        try:
-            await watch_libraries()
-            WATCH_STATUS.update({
-                "running": False,
-                "message": "stopped",
-            })
-        except asyncio.CancelledError:
-            WATCH_STATUS.update({
-                "running": False,
-                "message": "stopped",
-            })
-            raise
-        except Exception as exc:  # pragma: no cover
-            WATCH_STATUS.update({
-                "running": False,
-                "message": f"error: {exc}",
-            })
-    # Mark running before returning so API callers see immediate state
-    WATCH_STATUS.update({
-        "running": True,
-        "libraries": watch_roots,
-        "message": "watching",
-    })
+        }
+    )
     WATCH_TASK = asyncio.create_task(runner())
     return WATCH_STATUS
 
@@ -544,10 +610,12 @@ async def _stop_watch_task(message: str = "stopped") -> dict:
             await WATCH_TASK
         except asyncio.CancelledError:
             pass
-    WATCH_STATUS.update({
-        "running": False,
-        "message": message,
-    })
+    WATCH_STATUS.update(
+        {
+            "running": False,
+            "message": message,
+        }
+    )
     return WATCH_STATUS
 
 
@@ -793,6 +861,28 @@ def _serialize_sample(s: VmafSample) -> dict:
     }
 
 
+def _serialize_media_info(info: MediaInfo) -> dict:
+    return {
+        "path": str(info.path),
+        "duration_seconds": info.duration_seconds,
+        "container_bitrate_kbps": info.container_bitrate_kbps,
+        "video": {
+            "codec": info.video_codec,
+            "width": info.video_width,
+            "height": info.video_height,
+            "bitrate_kbps": info.video_bitrate_kbps,
+            "bit_depth": info.video_bit_depth,
+            "framerate": info.video_framerate,
+            "field_order": info.video_field_order,
+            "is_interlaced": info.is_interlaced,
+            "is_hdr": info.is_hdr,
+            "hdr_format": info.hdr_format,
+        },
+        "audio_tracks": info.audio_tracks,
+        "subtitle_tracks": info.subtitle_tracks,
+    }
+
+
 def _compute_stats(session: Session) -> dict:
     totals = session.exec(
         select(func.sum(MediaItem.size_bytes), func.sum(EncodeResult.output_size_bytes))
@@ -806,9 +896,7 @@ def _compute_stats(session: Session) -> dict:
         select(func.count(EncodeResult.id)).where(EncodeResult.output_size_bytes.is_not(None))  # type: ignore[union-attr]
     ).one()
     active = session.exec(
-        select(func.count())
-        .select_from(EncodeProgress)
-        .where(EncodeProgress.percent_complete < 100)
+        select(func.count()).select_from(EncodeProgress).where(EncodeProgress.percent_complete < 100)
     ).one()
     return {
         "saved_bytes": saved_bytes,
@@ -838,7 +926,7 @@ def resolve_existing_library_root() -> Optional[str]:
 
 def format_size(bytes_val: float | int | None) -> str:
     if bytes_val is None:
-        return "?"
+        return "—"
     for unit in ["B", "KB", "MB", "GB", "TB"]:
         if abs(bytes_val) < 1024:
             return f"{bytes_val:.1f} {unit}"
@@ -846,9 +934,9 @@ def format_size(bytes_val: float | int | None) -> str:
     return f"{bytes_val:.1f} PB"
 
 
-def format_duration(seconds: float) -> str:
+def format_duration(seconds: float | None) -> str:
     if seconds is None:
-        return "?"
+        return "—"
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
@@ -878,7 +966,9 @@ def build_pagination_url(request: Request) -> Callable[[int], str]:
         params["page"] = str(page)
         query_string = "&".join(f"{k}={v}" for k, v in params.items())
         return f"{request.url.path}?{query_string}"
+
     return pagination_url
+
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
@@ -906,18 +996,20 @@ async def dashboard(request: Request):
             filename = pathlib.Path(prog.source_path).name if prog.source_path else "Unknown"
             show_name = extract_show_name(prog.source_path) if prog.source_path else None
             eta_display = format_duration(prog.eta_seconds) if prog.eta_seconds and prog.eta_seconds > 0 else None
-            active_encodes.append({
-                "filename": filename,
-                "path": prog.source_path,
-                "show_name": show_name,
-                "machine": prog.machine,
-                "tier": prog.tier,
-                "started_at": prog.started_at[:16] if prog.started_at else None,
-                "percent_complete": prog.percent_complete or 0,
-                "speed": f"{prog.speed:.2f}x" if prog.speed else "0x",
-                "eta": eta_display,
-                "phase": prog.phase or "encoding",
-            })
+            active_encodes.append(
+                {
+                    "filename": filename,
+                    "path": prog.source_path,
+                    "show_name": show_name,
+                    "machine": prog.machine,
+                    "tier": prog.tier,
+                    "started_at": prog.started_at[:16] if prog.started_at else None,
+                    "percent_complete": prog.percent_complete or 0,
+                    "speed": f"{prog.speed:.2f}x" if prog.speed else "0x",
+                    "eta": eta_display,
+                    "phase": prog.phase or "encoding",
+                }
+            )
 
         recent_rows = encode_repo.recent_completions(limit=10)
         recent_completions = []
@@ -926,16 +1018,18 @@ async def dashboard(request: Request):
             reduction = 0
             if size_bytes and out_bytes:
                 reduction = int((1 - out_bytes / size_bytes) * 100)
-            recent_completions.append({
-                "id": encode_id,
-                "path": path,
-                "filename": pathlib.Path(path).name,
-                "source_size": format_size(size_bytes),
-                "output_size": format_size(out_bytes),
-                "reduction": reduction,
-                "tier": tier,
-                "completed_at": completed_at[:16] if completed_at else "?",
-            })
+            recent_completions.append(
+                {
+                    "id": encode_id,
+                    "path": path,
+                    "filename": pathlib.Path(path).name,
+                    "source_size": format_size(size_bytes),
+                    "output_size": format_size(out_bytes),
+                    "reduction": reduction,
+                    "tier": tier,
+                    "completed_at": completed_at[:16] if completed_at else "—",
+                }
+            )
 
         tier_counts = media_repo.pending_tier_counts()
 
@@ -950,22 +1044,26 @@ async def dashboard(request: Request):
         "space_saved_gb": f"{space_saved_gb:.1f}",
     }
 
-    return templates.TemplateResponse("dashboard.html", {
-        "request": request,
-        "title": "Dashboard",
-        "active": "dashboard",
-        "stats": stats,
-        "active_encodes": active_encodes,
-        "recent_completions": recent_completions,
-        "tier_counts": tier_counts,
-        "lib_status": lib_status,
-        "workers": workers,
-        "watch_status": _watch_status_snapshot(),
-        "nav_status": _nav_status(),
-        "library_root": library_root,
-        "host_name": host_name,
-        "error": error,
-    })
+    return templates.TemplateResponse(
+        request,
+        "dashboard.html",
+        {
+            "request": request,
+            "title": "Dashboard",
+            "active": "dashboard",
+            "stats": stats,
+            "active_encodes": active_encodes,
+            "recent_completions": recent_completions,
+            "tier_counts": tier_counts,
+            "lib_status": lib_status,
+            "workers": workers,
+            "watch_status": _watch_status_snapshot(),
+            "nav_status": _nav_status(),
+            "library_root": library_root,
+            "host_name": host_name,
+            "error": error,
+        },
+    )
 
 
 @app.get("/partials/dashboard/active-encodes", response_class=HTMLResponse)
@@ -980,25 +1078,31 @@ async def dashboard_active_encodes(request: Request):
             filename = pathlib.Path(prog.source_path).name if prog.source_path else "Unknown"
             show_name = extract_show_name(prog.source_path) if prog.source_path else None
             eta_display = format_duration(prog.eta_seconds) if prog.eta_seconds and prog.eta_seconds > 0 else None
-            active_encodes.append({
-                "filename": filename,
-                "path": prog.source_path,
-                "show_name": show_name,
-                "machine": prog.machine,
-                "tier": prog.tier,
-                "started_at": prog.started_at[:16] if prog.started_at else None,
-                "percent_complete": prog.percent_complete or 0,
-                "speed": f"{prog.speed:.2f}x" if prog.speed else "0x",
-                "eta": eta_display,
-                "frame": prog.frame,
-                "total_frames": prog.total_frames,
-                "phase": prog.phase or "encoding",
-            })
+            active_encodes.append(
+                {
+                    "filename": filename,
+                    "path": prog.source_path,
+                    "show_name": show_name,
+                    "machine": prog.machine,
+                    "tier": prog.tier,
+                    "started_at": prog.started_at[:16] if prog.started_at else None,
+                    "percent_complete": prog.percent_complete or 0,
+                    "speed": f"{prog.speed:.2f}x" if prog.speed else "0x",
+                    "eta": eta_display,
+                    "frame": prog.frame,
+                    "total_frames": prog.total_frames,
+                    "phase": prog.phase or "encoding",
+                }
+            )
 
-    return templates.TemplateResponse("partials/dashboard_active_encodes.html", {
-        "request": request,
-        "active_encodes": active_encodes,
-    })
+    return templates.TemplateResponse(
+        request,
+        "partials/dashboard_active_encodes.html",
+        {
+            "request": request,
+            "active_encodes": active_encodes,
+        },
+    )
 
 
 @app.get("/partials/dashboard/stats", response_class=HTMLResponse)
@@ -1007,7 +1111,7 @@ async def dashboard_stats(request: Request):
     with session_scope() as session:
         media_repo = MediaRepository(session)
         encode_repo = EncodeRepository(session)
-        
+
         status_counts = media_repo.count_by_status()
         space_saved_bytes = encode_repo.space_saved_bytes()
         space_saved_gb = space_saved_bytes / 1024 / 1024 / 1024
@@ -1020,10 +1124,14 @@ async def dashboard_stats(request: Request):
         "space_saved_gb": f"{space_saved_gb:.1f}",
     }
 
-    return templates.TemplateResponse("partials/dashboard_stats.html", {
-        "request": request,
-        "stats": stats,
-    })
+    return templates.TemplateResponse(
+        request,
+        "partials/dashboard_stats.html",
+        {
+            "request": request,
+            "stats": stats,
+        },
+    )
 
 
 @app.get("/partials/dashboard/workers", response_class=HTMLResponse)
@@ -1033,10 +1141,14 @@ async def dashboard_workers(request: Request):
         progress_repo = ProgressRepository(session)
         workers = progress_repo.list_workers()
 
-    return templates.TemplateResponse("partials/dashboard_workers.html", {
-        "request": request,
-        "workers": workers,
-    })
+    return templates.TemplateResponse(
+        request,
+        "partials/dashboard_workers.html",
+        {
+            "request": request,
+            "workers": workers,
+        },
+    )
 
 
 @app.get("/stats", response_class=HTMLResponse)
@@ -1046,26 +1158,30 @@ async def stats_page(
 ):
     library_root = resolve_existing_library_root()
     if not library_root:
-        return templates.TemplateResponse(request, "stats.html", {
-            "request": request,
-            "title": "Stats",
-            "active": "stats",
-            "window_days": days,
-            "window_totals": {"encodes": 0},
-            "window_saved": "0",
-            "window_avg_reduction": "-",
-            "window_avg_speed": "-",
-            "daily": [],
-            "tiers": [],
-            "all_time_totals": {"encodes": 0},
-            "all_time_saved": "0",
-            "saved_spark": "",
-            "encodes_spark": "",
-            "reduction_spark": "",
-            "speed_spark": "",
-            "nav_status": _nav_status(),
-            "error": "No accessible library root found. Mount /Volumes or /mnt media shares.",
-        })
+        return templates.TemplateResponse(
+            request,
+            "stats.html",
+            {
+                "request": request,
+                "title": "Stats",
+                "active": "stats",
+                "window_days": days,
+                "window_totals": {"encodes": 0},
+                "window_saved": "0",
+                "window_avg_reduction": "-",
+                "window_avg_speed": "-",
+                "daily": [],
+                "tiers": [],
+                "all_time_totals": {"encodes": 0},
+                "all_time_saved": "0",
+                "saved_spark": "",
+                "encodes_spark": "",
+                "reduction_spark": "",
+                "speed_spark": "",
+                "nav_status": _nav_status(),
+                "error": "No accessible library root found. Mount /Volumes or /mnt media shares.",
+            },
+        )
 
     since = datetime.now() - timedelta(days=days - 1)
 
@@ -1078,22 +1194,26 @@ async def stats_page(
 
     daily_rows = []
     for row in daily_stats:
-        daily_rows.append({
-            "day": row.day.isoformat(),
-            "encodes": row.encodes,
-            "saved_human": format_size(row.saved_bytes),
-            "avg_reduction_human": f"{row.avg_reduction * 100:.1f}%" if row.avg_reduction is not None else "-",
-            "avg_speed_human": f"{row.avg_speed:.2f}x" if row.avg_speed is not None else "-",
-        })
+        daily_rows.append(
+            {
+                "day": row.day.isoformat(),
+                "encodes": row.encodes,
+                "saved_human": format_size(row.saved_bytes),
+                "avg_reduction_human": f"{row.avg_reduction * 100:.1f}%" if row.avg_reduction is not None else "-",
+                "avg_speed_human": f"{row.avg_speed:.2f}x" if row.avg_speed is not None else "-",
+            }
+        )
 
     tier_rows = []
     for row in tier_stats:
-        tier_rows.append({
-            "tier": row.tier,
-            "encodes": row.encodes,
-            "saved_human": format_size(row.saved_bytes),
-            "avg_reduction_human": f"{row.avg_reduction * 100:.1f}%" if row.avg_reduction is not None else "-",
-        })
+        tier_rows.append(
+            {
+                "tier": row.tier,
+                "encodes": row.encodes,
+                "saved_human": format_size(row.saved_bytes),
+                "avg_reduction_human": f"{row.avg_reduction * 100:.1f}%" if row.avg_reduction is not None else "-",
+            }
+        )
 
     saved_series = [float(row.saved_bytes) / 1024 / 1024 / 1024 for row in daily_stats]
     encodes_series = [float(row.encodes) for row in daily_stats]
@@ -1101,28 +1221,34 @@ async def stats_page(
     speed_series = [float(row.avg_speed or 0.0) for row in daily_stats]
 
     window_saved = format_size(window_totals.saved_bytes)
-    window_avg_reduction = f"{window_totals.avg_reduction * 100:.1f}%" if window_totals.avg_reduction is not None else "-"
+    window_avg_reduction = (
+        f"{window_totals.avg_reduction * 100:.1f}%" if window_totals.avg_reduction is not None else "-"
+    )
     window_avg_speed = f"{window_totals.avg_speed:.2f}x" if window_totals.avg_speed is not None else "-"
 
-    return templates.TemplateResponse(request, "stats.html", {
-        "request": request,
-        "title": "Stats",
-        "active": "stats",
-        "window_days": days,
-        "window_totals": window_totals,
-        "window_saved": window_saved,
-        "window_avg_reduction": window_avg_reduction,
-        "window_avg_speed": window_avg_speed,
-        "daily": daily_rows,
-        "tiers": tier_rows,
-        "all_time_totals": all_time_totals,
-        "all_time_saved": format_size(all_time_totals.saved_bytes),
-        "saved_spark": sparkline_svg(saved_series, stroke="#38bdf8", fill="rgba(56, 189, 248, 0.16)"),
-        "encodes_spark": sparkline_svg(encodes_series, stroke="#a855f7", fill="rgba(168, 85, 247, 0.16)"),
-        "reduction_spark": sparkline_svg(reduction_series, stroke="#22c55e", fill="rgba(34, 197, 94, 0.16)"),
-        "speed_spark": sparkline_svg(speed_series, stroke="#f59e0b", fill="rgba(245, 158, 11, 0.16)"),
-        "nav_status": _nav_status(),
-    })
+    return templates.TemplateResponse(
+        request,
+        "stats.html",
+        {
+            "request": request,
+            "title": "Stats",
+            "active": "stats",
+            "window_days": days,
+            "window_totals": window_totals,
+            "window_saved": window_saved,
+            "window_avg_reduction": window_avg_reduction,
+            "window_avg_speed": window_avg_speed,
+            "daily": daily_rows,
+            "tiers": tier_rows,
+            "all_time_totals": all_time_totals,
+            "all_time_saved": format_size(all_time_totals.saved_bytes),
+            "saved_spark": sparkline_svg(saved_series, stroke="#38bdf8", fill="rgba(56, 189, 248, 0.16)"),
+            "encodes_spark": sparkline_svg(encodes_series, stroke="#a855f7", fill="rgba(168, 85, 247, 0.16)"),
+            "reduction_spark": sparkline_svg(reduction_series, stroke="#22c55e", fill="rgba(34, 197, 94, 0.16)"),
+            "speed_spark": sparkline_svg(speed_series, stroke="#f59e0b", fill="rgba(245, 158, 11, 0.16)"),
+            "nav_status": _nav_status(),
+        },
+    )
 
 
 @app.get("/settings", response_class=HTMLResponse)
@@ -1138,19 +1264,23 @@ async def settings_page(request: Request):
 
     api_url_hint = os.getenv("MEDIAFORCE_API_URL") or str(request.base_url).rstrip("/")
 
-    return templates.TemplateResponse("settings.html", {
-        "request": request,
-        "title": "Settings",
-        "active": "settings",
-        "libraries": libraries,
-        "watch_status": _watch_status_snapshot(),
-        "is_mac": IS_MAC,
-        "global_max_height": global_max_height,
-        "settings": settings,
-        "lib_status": lib_status,
-        "api_url_hint": api_url_hint,
-        "nav_status": _nav_status(),
-    })
+    return templates.TemplateResponse(
+        request,
+        "settings.html",
+        {
+            "request": request,
+            "title": "Settings",
+            "active": "settings",
+            "libraries": libraries,
+            "watch_status": _watch_status_snapshot(),
+            "is_mac": IS_MAC,
+            "global_max_height": global_max_height,
+            "settings": settings,
+            "lib_status": lib_status,
+            "api_url_hint": api_url_hint,
+            "nav_status": _nav_status(),
+        },
+    )
 
 
 def parse_media_path(path: str, library_root: str = DEFAULT_LIBRARY) -> dict:
@@ -1188,6 +1318,73 @@ def parse_media_path(path: str, library_root: str = DEFAULT_LIBRARY) -> dict:
             "filename": parts[-1] if parts else p.name,
             "is_show": False,
         }
+
+
+def _compact_filename_for_review(filename: str) -> str:
+    """Create a shorter, more scannable display name for the review table."""
+
+    stem = pathlib.Path(filename).stem
+    raw = stem.replace("_", ".").replace("-", ".")
+    parts = [p for p in raw.split(".") if p]
+
+    stop = {
+        "2160p",
+        "1080p",
+        "720p",
+        "480p",
+        "4k",
+        "hdr",
+        "sdr",
+        "10bit",
+        "8bit",
+        "bluray",
+        "bdrip",
+        "web",
+        "webrip",
+        "webdl",
+        "hdtv",
+        "hevc",
+        "x265",
+        "x264",
+        "h264",
+        "h265",
+        "av1",
+        "aac",
+        "dts",
+        "truehd",
+        "atmos",
+    }
+
+    episode = None
+    for p in parts:
+        if len(p) == 6 and p[0] in {"S", "s"} and p[3] in {"E", "e"} and p[1:3].isdigit() and p[4:6].isdigit():
+            episode = p.upper()
+            break
+
+    if episode:
+        idx = next(i for i, p in enumerate(parts) if p.upper() == episode)
+        title_tokens: list[str] = []
+        for token in parts[idx + 1 :]:
+            t = token.lower()
+            if t in stop:
+                break
+            if t.isdigit():
+                break
+            if len(title_tokens) >= 4:
+                break
+            title_tokens.append(token)
+        title = " ".join(title_tokens).strip()
+        return f"{episode} {title}".strip()
+
+    keep: list[str] = []
+    for token in parts:
+        t = token.lower()
+        if t in stop:
+            break
+        keep.append(token)
+        if len(keep) >= 6:
+            break
+    return " ".join(keep).strip() or stem
 
 
 def _queue_cache_get(library_root: str):
@@ -1313,33 +1510,39 @@ async def queue_shows_view(
     end_page = min(total_pages, page + 2)
     page_range = list(range(start_page, end_page + 1))
 
-    return templates.TemplateResponse("queue.html", {
-        "request": request,
-        "title": "Queue",
-        "active": "queue",
-        "view_mode": "shows",
-        "library_root": library_root,
-        "libraries": libraries,
-        "shows": shows,
-        "total": total,
-        "total_files": total_files,
-        "total_savings": format_size(total_savings),
-        "page": page,
-        "per_page": per_page,
-        "total_pages": total_pages,
-        "page_range": page_range,
-        "breadcrumbs": [],
-        "pagination_url": build_pagination_url(request),
-        "lib_status": get_library_status(),
-        "workers": get_worker_status(library_root),
-        "watch_status": _watch_status_snapshot(),
-        "nav_status": _nav_status(),
-        "sort": sort,
-        "order": direction,
-    })
+    return templates.TemplateResponse(
+        request,
+        "queue.html",
+        {
+            "request": request,
+            "title": "Queue",
+            "active": "queue",
+            "view_mode": "shows",
+            "library_root": library_root,
+            "libraries": libraries,
+            "shows": shows,
+            "total": total,
+            "total_files": total_files,
+            "total_savings": format_size(total_savings),
+            "page": page,
+            "per_page": per_page,
+            "total_pages": total_pages,
+            "page_range": page_range,
+            "breadcrumbs": [],
+            "pagination_url": build_pagination_url(request),
+            "lib_status": get_library_status(),
+            "workers": get_worker_status(library_root),
+            "watch_status": _watch_status_snapshot(),
+            "nav_status": _nav_status(),
+            "sort": sort,
+            "order": direction,
+        },
+    )
 
 
-async def queue_seasons_view(request: Request, repo: QueueRepository, show: str, page: int, per_page: int, library_root: str):
+async def queue_seasons_view(
+    request: Request, repo: QueueRepository, show: str, page: int, per_page: int, library_root: str
+):
     """View seasons for a specific show via repository."""
 
     seasons_all = repo.list_seasons(library_root, show)
@@ -1350,33 +1553,39 @@ async def queue_seasons_view(request: Request, repo: QueueRepository, show: str,
     total_pages = max(1, (total + per_page - 1) // per_page)
     page = max(1, min(page, total_pages))
     offset = (page - 1) * per_page
-    seasons = seasons_all[offset:offset + per_page]
+    seasons = seasons_all[offset : offset + per_page]
 
     page_range = list(range(max(1, page - 2), min(total_pages + 1, page + 3)))
 
-    return templates.TemplateResponse("queue.html", {
-        "request": request,
-        "title": f"Queue - {show}",
-        "active": "queue",
-        "view_mode": "seasons",
-        "show_name": show,
-        "seasons": seasons,
-        "total": total,
-        "total_files": total_files,
-        "total_savings": format_size(total_savings),
-        "page": page,
-        "per_page": per_page,
-        "total_pages": total_pages,
-        "page_range": page_range,
-        "breadcrumbs": [{"name": "All Shows", "url": "/queue"}],
-        "pagination_url": build_pagination_url(request),
-        "workers": get_worker_status(library_root),
-        "watch_status": _watch_status_snapshot(),
-        "nav_status": _nav_status(),
-    })
+    return templates.TemplateResponse(
+        request,
+        "queue.html",
+        {
+            "request": request,
+            "title": f"Queue - {show}",
+            "active": "queue",
+            "view_mode": "seasons",
+            "show_name": show,
+            "seasons": seasons,
+            "total": total,
+            "total_files": total_files,
+            "total_savings": format_size(total_savings),
+            "page": page,
+            "per_page": per_page,
+            "total_pages": total_pages,
+            "page_range": page_range,
+            "breadcrumbs": [{"name": "All Shows", "url": "/queue"}],
+            "pagination_url": build_pagination_url(request),
+            "workers": get_worker_status(library_root),
+            "watch_status": _watch_status_snapshot(),
+            "nav_status": _nav_status(),
+        },
+    )
 
 
-async def queue_episodes_view(request: Request, conn, show: str, season: str, page: int, per_page: int, library_root: str):
+async def queue_episodes_view(
+    request: Request, conn, show: str, season: str, page: int, per_page: int, library_root: str
+):
     """View episodes for a specific show/season."""
     if season == "Files":
         like_pattern = f"{library_root}/{show}/%"
@@ -1447,12 +1656,12 @@ async def queue_episodes_view(request: Request, conn, show: str, season: str, pa
         total_savings += savings
 
         # Parse audio tracks
-        audio_info = "?"
+        audio_info = "—"
         if row["audio_tracks"]:
             try:
                 tracks = json.loads(row["audio_tracks"])
                 audio_info = ", ".join(
-                    f"{t.get('codec', '?')} {t.get('channels', '?')}ch"
+                    f"{t.get('codec', '—')} {t.get('channels', '—')}ch"
                     for t in tracks[:3]  # Show first 3
                 )
                 if len(tracks) > 3:
@@ -1474,63 +1683,69 @@ async def queue_episodes_view(request: Request, conn, show: str, season: str, pa
                 "SELECT * FROM profile_evaluations WHERE id = ?", (row["profile_eval_id"],)
             ).fetchone()
 
-        episodes.append({
-            "id": row["id"],
-            "path": row["path"],
-            "filename": pathlib.Path(row["path"]).name,
-            "size": format_size(row["size_bytes"]),
-            "size_bytes": row["size_bytes"],
-            "detected_tier": row["detected_tier"],
-            "priority_score": row["priority_score"],
-            "bitrate": f"{row['bitrate_kbps']}k" if row["bitrate_kbps"] else "?",
-            "bitrate_kbps": row["bitrate_kbps"],
-            "duration": format_duration(row["duration_sec"]),
-            "is_interlaced": row["is_interlaced"],
-            "savings": format_size(savings) if savings else "?",
-            "savings_bytes": savings,
-            # Expanded details
-            "video_codec": row["video_codec"] or "?",
-            "video_profile": row["video_profile"] or "",
-            "resolution": row["resolution"] or f"{row['width']}x{row['height']}" if row["width"] else "?",
-            "bit_depth": row["bit_depth"],
-            "frame_rate": row["frame_rate"] or "?",
-            "is_hdr": row["is_hdr"],
-            "hdr_format": row["hdr_format"],
-            "audio_info": audio_info,
-            "subtitle_count": sub_count,
-            "tier_reasoning": row["tier_reasoning"] or "",
-            "eval_status": eval_obj["status"] if eval_obj else None,
-            "eval_median": eval_obj["median_vmaf"] if eval_obj else None,
-            "eval_min": eval_obj["min_vmaf"] if eval_obj else None,
-            "eval_id": eval_obj["id"] if eval_obj else None,
-        })
+        episodes.append(
+            {
+                "id": row["id"],
+                "path": row["path"],
+                "filename": pathlib.Path(row["path"]).name,
+                "size": format_size(row["size_bytes"]),
+                "size_bytes": row["size_bytes"],
+                "detected_tier": row["detected_tier"],
+                "priority_score": row["priority_score"],
+                "bitrate": f"{row['bitrate_kbps']}k" if row["bitrate_kbps"] else "—",
+                "bitrate_kbps": row["bitrate_kbps"],
+                "duration": format_duration(row["duration_sec"]),
+                "is_interlaced": row["is_interlaced"],
+                "savings": format_size(savings) if savings else "—",
+                "savings_bytes": savings,
+                # Expanded details
+                "video_codec": row["video_codec"] or "—",
+                "video_profile": row["video_profile"] or "",
+                "resolution": row["resolution"] or f"{row['width']}x{row['height']}" if row["width"] else "—",
+                "bit_depth": row["bit_depth"],
+                "frame_rate": row["frame_rate"] or "—",
+                "is_hdr": row["is_hdr"],
+                "hdr_format": row["hdr_format"],
+                "audio_info": audio_info,
+                "subtitle_count": sub_count,
+                "tier_reasoning": row["tier_reasoning"] or "",
+                "eval_status": eval_obj["status"] if eval_obj else None,
+                "eval_median": eval_obj["median_vmaf"] if eval_obj else None,
+                "eval_min": eval_obj["min_vmaf"] if eval_obj else None,
+                "eval_id": eval_obj["id"] if eval_obj else None,
+            }
+        )
 
-    return templates.TemplateResponse("queue.html", {
-        "request": request,
-        "title": f"Queue - {show} - {season}",
-        "active": "queue",
-        "view_mode": "episodes",
-        "show_name": show,
-        "season_name": season,
-        "episodes": episodes,
-        "total": total,
-        "total_files": total,
-        "total_savings": format_size(total_savings),
-        "page": page,
-        "per_page": per_page,
-        "total_pages": total_pages,
-        "page_range": page_range,
-        "breadcrumbs": [
-            {"name": "All Shows", "url": "/queue"},
-            {"name": show, "url": f"/queue?show={show}"},
-        ],
-        "pagination_url": build_pagination_url(request),
-        "workers": get_worker_status(library_root),
-        "sort": sort,
-        "order": direction,
-        "watch_status": _watch_status_snapshot(),
-        "nav_status": _nav_status(),
-    })
+    return templates.TemplateResponse(
+        request,
+        "queue.html",
+        {
+            "request": request,
+            "title": f"Queue - {show} - {season}",
+            "active": "queue",
+            "view_mode": "episodes",
+            "show_name": show,
+            "season_name": season,
+            "episodes": episodes,
+            "total": total,
+            "total_files": total,
+            "total_savings": format_size(total_savings),
+            "page": page,
+            "per_page": per_page,
+            "total_pages": total_pages,
+            "page_range": page_range,
+            "breadcrumbs": [
+                {"name": "All Shows", "url": "/queue"},
+                {"name": show, "url": f"/queue?show={show}"},
+            ],
+            "pagination_url": build_pagination_url(request),
+            "workers": get_worker_status(library_root),
+            "sort": sort,
+            "order": direction,
+            "watch_status": _watch_status_snapshot(),
+            "nav_status": _nav_status(),
+        },
+    )
 
 
 @app.get("/search", response_class=HTMLResponse)
@@ -1544,18 +1759,22 @@ async def search_page(
 
     library_root = resolve_existing_library_root()
     if not library_root:
-        return templates.TemplateResponse("search.html", {
-            "request": request,
-            "title": "Search",
-            "active": "search",
-            "query": q,
-            "status": status,
-            "tier": tier,
-            "results": [],
-            "total": 0,
-            "nav_status": _nav_status(),
-            "watch_status": _watch_status_snapshot(),
-        })
+        return templates.TemplateResponse(
+            request,
+            "search.html",
+            {
+                "request": request,
+                "title": "Search",
+                "active": "search",
+                "query": q,
+                "status": status,
+                "tier": tier,
+                "results": [],
+                "total": 0,
+                "nav_status": _nav_status(),
+                "watch_status": _watch_status_snapshot(),
+            },
+        )
 
     filters = []
     if q:
@@ -1593,29 +1812,34 @@ async def search_page(
         updated_at = row.updated_at if hasattr(row, "updated_at") else row[5]
         if output_size and size_bytes:
             reduction = int((1 - output_size / size_bytes) * 100)
-        results.append({
-            "path": row.path,
-            "filename": pathlib.Path(row.path).name,
-            "status": row.status,
-            "tier": row.detected_tier,
-            "size": format_size(size_bytes),
-            "reduction": reduction,
-            "updated_at": updated_at[:16] if updated_at else None,
-        })
+        results.append(
+            {
+                "path": row.path,
+                "filename": pathlib.Path(row.path).name,
+                "status": row.status,
+                "tier": row.detected_tier,
+                "size": format_size(size_bytes),
+                "reduction": reduction,
+                "updated_at": updated_at[:16] if updated_at else None,
+            }
+        )
 
-    return templates.TemplateResponse("search.html", {
-        "request": request,
-        "title": "Search",
-        "active": "search",
-        "query": q,
-        "status": status,
-        "tier": tier,
-        "results": results,
-        "total": len(results),
-        "nav_status": _nav_status(),
-        "watch_status": _watch_status_snapshot(),
-    })
-
+    return templates.TemplateResponse(
+        request,
+        "search.html",
+        {
+            "request": request,
+            "title": "Search",
+            "active": "search",
+            "query": q,
+            "status": status,
+            "tier": tier,
+            "results": results,
+            "total": len(results),
+            "nav_status": _nav_status(),
+            "watch_status": _watch_status_snapshot(),
+        },
+    )
 
 
 @app.get("/completed", response_class=HTMLResponse)
@@ -1648,25 +1872,31 @@ async def completed(request: Request):
         reduction = 0
         if size_bytes and out_size:
             reduction = int((1 - out_size / size_bytes) * 100)
-        encodes.append({
-            "id": rid,
-            "source_path": path,
-            "filename": pathlib.Path(path).name,
-            "source_size": format_size(size_bytes),
-            "output_size": format_size(out_size),
-            "reduction": reduction,
-            "tier": tier,
-            "vmaf": f"{vmaf:.1f}" if vmaf else None,
-            "promoted_at": promoted_at[:16] if promoted_at else None,
-        })
+        encodes.append(
+            {
+                "id": rid,
+                "source_path": path,
+                "filename": pathlib.Path(path).name,
+                "source_size": format_size(size_bytes),
+                "output_size": format_size(out_size),
+                "reduction": reduction,
+                "tier": tier,
+                "vmaf": f"{vmaf:.1f}" if vmaf else None,
+                "promoted_at": promoted_at[:16] if promoted_at else None,
+            }
+        )
 
-    return templates.TemplateResponse("completed.html", {
-        "request": request,
-        "title": "Completed",
-        "active": "completed",
-        "encodes": encodes,
-        "nav_status": _nav_status(),
-    })
+    return templates.TemplateResponse(
+        request,
+        "completed.html",
+        {
+            "request": request,
+            "title": "Completed",
+            "active": "completed",
+            "encodes": encodes,
+            "nav_status": _nav_status(),
+        },
+    )
 
 
 @app.get("/export/completed.csv")
@@ -1716,7 +1946,18 @@ async def export_completed_csv(
     )
 
     def iter_rows() -> Iterator[Sequence[object]]:
-        for rid, library_id, source_path, source_bytes, output_path, output_bytes, tier, vmaf, machine, promoted_at in rows:
+        for (
+            rid,
+            library_id,
+            source_path,
+            source_bytes,
+            output_path,
+            output_bytes,
+            tier,
+            vmaf,
+            machine,
+            promoted_at,
+        ) in rows:
             saved_bytes = None
             reduction_pct = None
             if source_bytes and output_bytes:
@@ -1830,9 +2071,27 @@ async def export_stats_tiers_csv(
 
 
 @app.get("/review", response_class=HTMLResponse)
-async def review(request: Request):
+async def review(
+    request: Request,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50),
+):
     """Review encodes pending promotion."""
+    if per_page not in [25, 50, 100, 200]:
+        per_page = 50
+
     with session_scope() as session:
+        # Count total items first
+        count_stmt = (
+            select(func.count(EncodeResult.id))
+            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
+            .where(MediaItem.status == "encoded", EncodeResult.output_size_bytes > 0)
+        )
+        total_items = session.exec(count_stmt).one() or 0
+        total_pages = max(1, (total_items + per_page - 1) // per_page)
+        page = max(1, min(page, total_pages))
+        offset = (page - 1) * per_page
+
         encodes = []
         stmt = (
             select(EncodeResult, MediaItem, ProfileEvaluation, RetrainingCandidate)
@@ -1841,6 +2100,8 @@ async def review(request: Request):
             .outerjoin(RetrainingCandidate, RetrainingCandidate.evaluation_id == ProfileEvaluation.id)
             .where(MediaItem.status == "encoded", EncodeResult.output_size_bytes > 0)
             .order_by(desc(EncodeResult.completed_at))
+            .limit(per_page)
+            .offset(offset)
         )
         rows = session.exec(stmt).all()
         for enc, media, eval_obj, retrain in rows:
@@ -1854,41 +2115,59 @@ async def review(request: Request):
                     size_increase_pct = abs(reduction_pct)
 
             show_name = extract_show_name(media.path)
-            encodes.append({
-                "id": enc.id,
-                "source_path": media.path,
-                "filename": pathlib.Path(media.path).name,
-                "show_name": show_name,
-                "source_size": format_size(media.size_bytes),
-                "output_size": format_size(enc.output_size_bytes),
-                "reduction": f"{reduction_pct:.0f}",
-                "reduction_pct": reduction_pct,
-                "size_increase_pct": f"{size_increase_pct:.0f}",
-                "tier": media.detected_tier,
-                "vmaf": f"{enc.vmaf:.1f}" if enc.vmaf else None,
-                "is_outlier": bool(enc.is_outlier),
-                "eval_status": eval_obj.status if eval_obj else None,
-                "eval_median": eval_obj.median_vmaf if eval_obj else None,
-                "eval_min": eval_obj.min_vmaf if eval_obj else None,
-                "eval_id": eval_obj.id if eval_obj else None,
-                "eval_note": eval_obj.note if eval_obj else None,
-                "eval_weighted": eval_obj.weighted_vmaf if eval_obj else None,
-                "eval_thresh_min": eval_obj.threshold_min if eval_obj else None,
-                "eval_thresh_med": eval_obj.threshold_median if eval_obj else None,
-                "eval_thresh_max": eval_obj.threshold_max if eval_obj else None,
-                "retrain_status": retrain.status if retrain else None,
-            })
+            filename = pathlib.Path(media.path).name
+            encodes.append(
+                {
+                    "id": enc.id,
+                    "source_path": media.path,
+                    "filename": filename,
+                    "display_filename": _compact_filename_for_review(filename),
+                    "show_name": show_name,
+                    "source_size": format_size(media.size_bytes),
+                    "source_size_bytes": media.size_bytes,
+                    "output_size": format_size(enc.output_size_bytes),
+                    "reduction": f"{reduction_pct:.0f}",
+                    "reduction_pct": reduction_pct,
+                    "size_increase_pct": f"{size_increase_pct:.0f}",
+                    "tier": media.detected_tier,
+                    "vmaf": f"{enc.vmaf:.1f}" if enc.vmaf else None,
+                    "vmaf_raw": enc.vmaf,
+                    "is_outlier": bool(enc.is_outlier),
+                    "eval_status": eval_obj.status if eval_obj else None,
+                    "eval_median": eval_obj.median_vmaf if eval_obj else None,
+                    "eval_min": eval_obj.min_vmaf if eval_obj else None,
+                    "eval_id": eval_obj.id if eval_obj else None,
+                    "eval_note": eval_obj.note if eval_obj else None,
+                    "eval_weighted": eval_obj.weighted_vmaf if eval_obj else None,
+                    "eval_thresh_min": eval_obj.threshold_min if eval_obj else None,
+                    "eval_thresh_med": eval_obj.threshold_median if eval_obj else None,
+                    "eval_thresh_max": eval_obj.threshold_max if eval_obj else None,
+                    "retrain_status": retrain.status if retrain else None,
+                }
+            )
 
         stats = _compute_stats(session)
 
-    return templates.TemplateResponse("review.html", {
-        "request": request,
-        "title": "Review",
-        "active": "review",
-        "encodes": encodes,
-        "nav_status": _nav_status(),
-        "stats": stats,
-    })
+    page_range = list(range(max(1, page - 2), min(total_pages + 1, page + 3)))
+
+    return templates.TemplateResponse(
+        request,
+        "review.html",
+        {
+            "request": request,
+            "title": "Review",
+            "active": "review",
+            "encodes": encodes,
+            "nav_status": _nav_status(),
+            "stats": stats,
+            "page": page,
+            "per_page": per_page,
+            "total": total_items,
+            "total_pages": total_pages,
+            "page_range": page_range,
+            "pagination_url": build_pagination_url(request),
+        },
+    )
 
 
 @app.get("/compare/{encode_id}", response_class=HTMLResponse)
@@ -1913,7 +2192,19 @@ async def compare(request: Request, encode_id: int):
         ).first()
 
         if not row:
-            return HTMLResponse("Encode not found", status_code=404)
+            return templates.TemplateResponse(
+                request,
+                "error.html",
+                {
+                    "title": "Not found",
+                    "active": "review",
+                    "heading": "Encode not found",
+                    "message": "This encode no longer exists (it may have been cleaned up).",
+                    "back_href": "/review",
+                    "nav_status": _nav_status(),
+                },
+                status_code=404,
+            )
 
         (
             output_size,
@@ -1928,6 +2219,16 @@ async def compare(request: Request, encode_id: int):
             is_interlaced,
         ) = row
 
+        source_codec = video_codec
+        if not source_codec:
+            try:
+                from mediaforce.services.media_probe import probe_media
+
+                info = probe_media(normalize_path(pathlib.Path(source_path)))
+                source_codec = getattr(info, "video_codec", None) if info else None
+            except Exception:
+                source_codec = None
+
         reduction = 0
         if source_size and output_size:
             reduction = int((1 - output_size / source_size) * 100)
@@ -1938,7 +2239,7 @@ async def compare(request: Request, encode_id: int):
             "active": "review",
             "encode_id": encode_id,
             "filename": pathlib.Path(source_path).name,
-            "source_codec": video_codec or "?",
+            "source_codec": source_codec or "—",
             "source_size": format_size(source_size),
             "output_size": format_size(output_size),
             "reduction": reduction,
@@ -1951,7 +2252,7 @@ async def compare(request: Request, encode_id: int):
             "nav_status": _nav_status(),
         }
 
-    return templates.TemplateResponse("compare.html", response_payload)
+    return templates.TemplateResponse(request, "compare.html", response_payload)
 
 
 @app.get("/shows", response_class=HTMLResponse)
@@ -1959,8 +2260,7 @@ async def shows(request: Request):
     """Show/Series management page."""
     with session_scope() as session:
         rows = session.exec(
-            select(MediaItem.path, MediaItem.status, MediaItem.detected_tier)
-            .where(MediaItem.path.like("%/Season %"))
+            select(MediaItem.path, MediaItem.status, MediaItem.detected_tier).where(MediaItem.path.like("%/Season %"))
         ).all()
 
         show_data: dict[str, dict[str, Any]] = {}
@@ -2002,13 +2302,17 @@ async def shows(request: Request):
 
     shows_list = sorted(show_data.values(), key=lambda x: x["name"].lower())
 
-    return templates.TemplateResponse("shows.html", {
-        "request": request,
-        "title": "Shows",
-        "active": "shows",
-        "shows": shows_list,
-        "nav_status": _nav_status(),
-    })
+    return templates.TemplateResponse(
+        request,
+        "shows.html",
+        {
+            "request": request,
+            "title": "Shows",
+            "active": "shows",
+            "shows": shows_list,
+            "nav_status": _nav_status(),
+        },
+    )
 
 
 @app.get("/video/{video_type}/{encode_id}")
@@ -2027,9 +2331,11 @@ async def serve_video(video_type: str, encode_id: int):
     output_path, source_path = row
 
     if video_type == "source":
-        video_path = pathlib.Path(source_path)
+        video_path = normalize_path(pathlib.Path(source_path))
     elif video_type == "encoded":
-        video_path = pathlib.Path(output_path)
+        if not output_path:
+            return HTMLResponse("Encoded path missing", status_code=404)
+        video_path = normalize_path(pathlib.Path(output_path))
     else:
         return HTMLResponse("Invalid video type", status_code=400)
 
@@ -2252,9 +2558,7 @@ async def api_bulk_promote(data: BulkPromoteRequest):
                     enc.promoted = True
                     enc.promoted_at = now_str
                     enc.promoted_path = str(result.dest_path)
-                    enc.source_backup_path = (
-                        str(result.backup_source_path) if result.backup_source_path else None
-                    )
+                    enc.source_backup_path = str(result.backup_source_path) if result.backup_source_path else None
                     enc.promote_manifest_json = result.manifest.to_json()
                     enc.output_path = str(result.dest_path)
                     session.add(item)
@@ -2515,7 +2819,6 @@ async def api_update_settings(data: SettingsUpdateRequest):
 @app.get("/api/workers")
 async def api_workers(request: Request):
     """Return active worker list for the current library."""
-    library_root = request.query_params.get('library') or _resolve_library(request)
     try:
         with session_scope() as session:
             workers = ProgressRepository(session).list_workers()
@@ -2568,7 +2871,11 @@ def _merge_worker_artifacts(session: Session, *, src: str, dst: str) -> None:
     src_cmd = session.get(WorkerCommand, src_key)
     dst_cmd = session.get(WorkerCommand, dst_key)
     if src_cmd and not dst_cmd:
-        session.merge(WorkerCommand(key=dst_key, stop_now=bool(src_cmd.stop_now), requested_at=src_cmd.requested_at, updated_at=now_iso()))
+        session.merge(
+            WorkerCommand(
+                key=dst_key, stop_now=bool(src_cmd.stop_now), requested_at=src_cmd.requested_at, updated_at=now_iso()
+            )
+        )
 
     _delete_worker_artifacts(session, machine=src)
 
@@ -2949,9 +3256,7 @@ async def api_worker_report(data: WorkerEncodeReportRequest, background_tasks: B
         saved_bytes = max(0, source_size - output_size) if data.success else 0
         size_increase = output_size > source_size if data.success and source_size > 0 else False
         reduction_pct = (
-            (1 - (output_size / source_size)) * 100
-            if data.success and source_size > 0 and output_size > 0
-            else None
+            (1 - (output_size / source_size)) * 100 if data.success and source_size > 0 and output_size > 0 else None
         )
 
         event = "encode_completed" if data.success else "encode_failed"
@@ -3023,21 +3328,23 @@ async def api_active_encodes(request: Request):
         for row in rows:
             prog = row[0]
             eta_display = format_duration(prog.eta_seconds) if prog.eta_seconds and prog.eta_seconds > 0 else None
-            encodes.append({
-                "filename": pathlib.Path(prog.source_path).name if prog.source_path else "Unknown",
-                "path": prog.source_path,
-                "show_name": extract_show_name(prog.source_path) if prog.source_path else None,
-                "machine": prog.machine,
-                "tier": prog.tier,
-                "started_at": prog.started_at[:16] if prog.started_at else None,
-                "percent_complete": prog.percent_complete or 0,
-                "speed": prog.speed or 0,
-                "eta": eta_display,
-                "phase": prog.phase or "encoding",
-                "frame": prog.frame or 0,
-                "total_frames": prog.total_frames,
-                "fps": prog.fps or 0,
-            })
+            encodes.append(
+                {
+                    "filename": pathlib.Path(prog.source_path).name if prog.source_path else "Unknown",
+                    "path": prog.source_path,
+                    "show_name": extract_show_name(prog.source_path) if prog.source_path else None,
+                    "machine": prog.machine,
+                    "tier": prog.tier,
+                    "started_at": prog.started_at[:16] if prog.started_at else None,
+                    "percent_complete": prog.percent_complete or 0,
+                    "speed": prog.speed or 0,
+                    "eta": eta_display,
+                    "phase": prog.phase or "encoding",
+                    "frame": prog.frame or 0,
+                    "total_frames": prog.total_frames,
+                    "fps": prog.fps or 0,
+                }
+            )
 
         # Fallback: if workers have claimed items but the master missed progress
         # initialization (e.g., master restart during encode), show a minimal
@@ -3056,21 +3363,23 @@ async def api_active_encodes(request: Request):
             key = (item.claimed_by, item.path)
             if key in existing_keys:
                 continue
-            encodes.append({
-                "filename": pathlib.Path(item.path).name,
-                "path": item.path,
-                "show_name": extract_show_name(item.path),
-                "machine": item.claimed_by,
-                "tier": item.detected_tier,
-                "started_at": (item.claimed_at or "")[:16] if item.claimed_at else None,
-                "percent_complete": 0,
-                "speed": 0,
-                "eta": None,
-                "phase": "starting",
-                "frame": 0,
-                "total_frames": None,
-                "fps": 0,
-            })
+            encodes.append(
+                {
+                    "filename": pathlib.Path(item.path).name,
+                    "path": item.path,
+                    "show_name": extract_show_name(item.path),
+                    "machine": item.claimed_by,
+                    "tier": item.detected_tier,
+                    "started_at": (item.claimed_at or "")[:16] if item.claimed_at else None,
+                    "percent_complete": 0,
+                    "speed": 0,
+                    "eta": None,
+                    "phase": "starting",
+                    "frame": 0,
+                    "total_frames": None,
+                    "fps": 0,
+                }
+            )
 
     return {"success": True, "encodes": encodes}
 
@@ -3096,8 +3405,12 @@ async def api_get_evaluation(eval_id: int):
         ev = session.get(ProfileEvaluation, eval_id)
         if not ev:
             return {"success": False, "error": "not found"}
+
+        evaluation_payload = _serialize_eval(ev)
         samples = session.exec(select(VmafSample).where(VmafSample.evaluation_id == eval_id)).all()
-        feedback = session.exec(select(ProfileChoiceFeedback).where(ProfileChoiceFeedback.evaluation_id == eval_id)).all()
+        feedback = session.exec(
+            select(ProfileChoiceFeedback).where(ProfileChoiceFeedback.evaluation_id == eval_id)
+        ).all()
         retrain = session.exec(select(RetrainingCandidate).where(RetrainingCandidate.evaluation_id == eval_id)).first()
         retrain_payload = None
         if retrain:
@@ -3108,13 +3421,154 @@ async def api_get_evaluation(eval_id: int):
                 "created_at": retrain.created_at,
                 "processed_at": retrain.processed_at,
             }
-    return {
-        "success": True,
-        "evaluation": _serialize_eval(ev),
-        "samples": [_serialize_sample(s) for s in samples],
-        "feedback": [_serialize_feedback(fb) for fb in feedback],
-        "retraining": retrain_payload,
-    }
+
+        return {
+            "success": True,
+            "evaluation": evaluation_payload,
+            "samples": [_serialize_sample(s) for s in samples],
+            "feedback": [_serialize_feedback(fb) for fb in feedback],
+            "retraining": retrain_payload,
+        }
+
+
+@app.get("/api/review/encode/{encode_id}")
+async def api_review_encode_details(
+    encode_id: int,
+    probe_encoded: bool = True,
+    probe_source: bool = False,
+):
+    """Return a rich inspection payload for review/compare UI."""
+
+    def safe_stat_size(path: pathlib.Path) -> int | None:
+        try:
+            return int(path.stat().st_size)
+        except Exception:
+            return None
+
+    def safe_exists(path: pathlib.Path) -> bool:
+        try:
+            return path.exists()
+        except Exception:
+            return False
+
+    with session_scope() as session:
+        enc = session.get(EncodeResult, int(encode_id))
+        if not enc:
+            return {"success": False, "error": "not found"}
+
+        media = session.get(MediaItem, int(enc.source_id))
+        if not media:
+            return {"success": False, "error": "missing source"}
+
+        eval_obj = session.get(ProfileEvaluation, int(enc.profile_eval_id)) if enc.profile_eval_id else None
+
+        source_path = normalize_path(pathlib.Path(media.path))
+        source_exists = safe_exists(source_path)
+        source_size_bytes = media.size_bytes
+        if source_size_bytes is None and source_exists:
+            source_size_bytes = safe_stat_size(source_path)
+
+        encoded_path_str = enc.output_path
+        encoded_path = normalize_path(pathlib.Path(encoded_path_str)) if encoded_path_str else None
+        encoded_exists = safe_exists(encoded_path) if encoded_path else False
+        encoded_size_bytes = enc.output_size_bytes
+        if encoded_size_bytes is None and encoded_exists and encoded_path is not None:
+            encoded_size_bytes = safe_stat_size(encoded_path)
+
+        source_audio_tracks = _parse_json_maybe_list(media.audio_tracks)
+        source_subtitle_tracks = _parse_json_maybe_list(media.subtitle_tracks)
+
+        source_payload = {
+            "path": str(source_path),
+            "exists": bool(source_exists),
+            "size_bytes": source_size_bytes,
+            "size": format_size(source_size_bytes),
+            "duration_sec": media.duration_sec,
+            "duration": format_duration(media.duration_sec),
+            "video": {
+                "codec": media.video_codec,
+                "profile": media.video_profile,
+                "width": media.width,
+                "height": media.height,
+                "resolution": media.resolution,
+                "bit_depth": media.bit_depth,
+                "bitrate_kbps": media.bitrate_kbps,
+                "frame_rate": media.frame_rate,
+                "is_interlaced": bool(media.is_interlaced),
+                "is_hdr": bool(media.is_hdr),
+                "hdr_format": media.hdr_format,
+            },
+            "audio_tracks": source_audio_tracks,
+            "subtitle_tracks": source_subtitle_tracks,
+        }
+
+        encoded_payload = {
+            "path": str(encoded_path) if encoded_path else None,
+            "exists": bool(encoded_exists),
+            "size_bytes": encoded_size_bytes,
+            "size": format_size(encoded_size_bytes),
+            "container_bitrate_kbps": enc.output_bitrate_kbps,
+            "settings": {
+                "tier": media.detected_tier,
+                "crf": enc.crf,
+                "preset": enc.preset,
+                "denoise": enc.denoise,
+                "film_grain": enc.film_grain,
+                "audio_codec": enc.audio_codec,
+                "audio_bitrate_kbps": enc.audio_bitrate_kbps,
+            },
+            "quality": {
+                "vmaf": enc.vmaf,
+                "ssim": enc.ssim,
+                "psnr": enc.psnr,
+                "compression_ratio": enc.compression_ratio,
+                "encode_speed": enc.encode_speed,
+            },
+            "timestamps": {
+                "started_at": enc.started_at,
+                "completed_at": enc.completed_at,
+            },
+            "machine": enc.machine,
+            "error_message": enc.error_message,
+        }
+
+        evaluation_payload = _serialize_eval(eval_obj) if eval_obj else None
+        reduction_pct = None
+        if source_size_bytes and encoded_size_bytes:
+            try:
+                reduction_pct = (1 - (float(encoded_size_bytes) / float(source_size_bytes))) * 100
+            except Exception:
+                reduction_pct = None
+
+        probe = {"source": None, "encoded": None, "errors": {}}
+        if probe_source and source_exists:
+            try:
+                from mediaforce.services.media_probe import probe_media
+
+                info = probe_media(source_path)
+                probe["source"] = _serialize_media_info(info) if info else None
+            except Exception as exc:
+                probe["errors"]["source"] = str(exc)
+
+        if probe_encoded and encoded_exists and encoded_path is not None:
+            try:
+                from mediaforce.services.media_probe import probe_media
+
+                info = probe_media(encoded_path)
+                probe["encoded"] = _serialize_media_info(info) if info else None
+            except Exception as exc:
+                probe["errors"]["encoded"] = str(exc)
+
+        return {
+            "success": True,
+            "encode_id": enc.id,
+            "source_id": media.id,
+            "source": source_payload,
+            "encoded": encoded_payload,
+            "reduction_pct": reduction_pct,
+            "evaluation": evaluation_payload,
+            "probe": probe,
+        }
 
 
 @app.post("/api/evaluations/start", dependencies=[Depends(_require_worker_api_auth)])
@@ -3324,7 +3778,7 @@ async def api_queue_reset_skip(media_id: int):
 @app.get("/api/queue/seasons/{show_name}")
 async def api_queue_seasons(show_name: str, request: Request):
     """Get seasons for a specific show."""
-    library_root = request.query_params.get('library') or _resolve_library(request)
+    library_root = request.query_params.get("library") or _resolve_library(request)
     with session_scope() as session:
         repo = QueueRepository(session)
         seasons_raw = repo.list_seasons(library_root, show_name)
@@ -3333,7 +3787,7 @@ async def api_queue_seasons(show_name: str, request: Request):
                 "season_name": s["season_name"],
                 "file_count": s["file_count"],
                 "total_size": format_size(s["total_size"]),
-                "total_savings": format_size(s["total_savings"]) if s["total_savings"] else "?",
+                "total_savings": format_size(s["total_savings"]) if s["total_savings"] else "—",
                 "total_savings_bytes": s["total_savings"],
                 "max_priority": s["max_priority"],
             }
@@ -3347,7 +3801,7 @@ async def api_queue_seasons(show_name: str, request: Request):
 @app.get("/api/queue/episodes/{show_name}/{season_name}")
 async def api_queue_episodes(show_name: str, season_name: str, request: Request):
     """Get episodes for a specific show/season."""
-    library_root = request.query_params.get('library') or _resolve_library(request)
+    library_root = request.query_params.get("library") or _resolve_library(request)
     with session_scope() as session:
         repo = QueueRepository(session)
         eps = repo.list_episodes(library_root, show_name, season_name)
@@ -3355,34 +3809,36 @@ async def api_queue_episodes(show_name: str, season_name: str, request: Request)
         for item in eps:
             savings = item.potential_savings_bytes or 0
             sub_count = len(json.loads(item.subtitle_tracks)) if item.subtitle_tracks else 0
-            episodes.append({
-                "id": item.id,
-                "path": item.path,
-                "filename": pathlib.Path(item.path).name,
-                "size_bytes": item.size_bytes,
-                "size": format_size(item.size_bytes),
-                "detected_tier": item.detected_tier,
-                "priority_score": item.priority_score,
-                "bitrate_kbps": item.bitrate_kbps,
-                "bitrate": f"{item.bitrate_kbps}k" if item.bitrate_kbps else "?",
-                "duration": format_duration(item.duration_sec or 0),
-                "duration_sec": item.duration_sec,
-                "is_interlaced": item.is_interlaced,
-                "savings": format_size(savings) if savings else "?",
-                "savings_bytes": savings,
-                "video_codec": item.video_codec or "?",
-                "video_profile": item.video_profile or "",
-                "resolution": item.resolution or (f"{item.width}x{item.height}" if item.width else "?"),
-                "width": item.width,
-                "height": item.height,
-                "bit_depth": item.bit_depth,
-                "frame_rate": item.frame_rate or "?",
-                "is_hdr": item.is_hdr,
-                "hdr_format": item.hdr_format,
-                "audio_info": item.audio_tracks or "",
-                "subtitle_count": sub_count,
-                "tier_reasoning": item.tier_reasoning or "",
-            })
+            episodes.append(
+                {
+                    "id": item.id,
+                    "path": item.path,
+                    "filename": pathlib.Path(item.path).name,
+                    "size_bytes": item.size_bytes,
+                    "size": format_size(item.size_bytes),
+                    "detected_tier": item.detected_tier,
+                    "priority_score": item.priority_score,
+                    "bitrate_kbps": item.bitrate_kbps,
+                    "bitrate": f"{item.bitrate_kbps}k" if item.bitrate_kbps else "—",
+                    "duration": format_duration(item.duration_sec or 0),
+                    "duration_sec": item.duration_sec,
+                    "is_interlaced": item.is_interlaced,
+                    "savings": format_size(savings) if savings else "—",
+                    "savings_bytes": savings,
+                    "video_codec": item.video_codec or "—",
+                    "video_profile": item.video_profile or "",
+                    "resolution": item.resolution or (f"{item.width}x{item.height}" if item.width else "—"),
+                    "width": item.width,
+                    "height": item.height,
+                    "bit_depth": item.bit_depth,
+                    "frame_rate": item.frame_rate or "—",
+                    "is_hdr": item.is_hdr,
+                    "hdr_format": item.hdr_format,
+                    "audio_info": item.audio_tracks or "",
+                    "subtitle_count": sub_count,
+                    "tier_reasoning": item.tier_reasoning or "",
+                }
+            )
 
     return {"episodes": episodes}
 
@@ -3440,6 +3896,7 @@ async def api_stats_summary(days: int = Query(30, ge=7, le=365)):
             for row in tiers
         ],
     }
+
 
 def main():
     """CLI entry point for `mediaforce-web`."""

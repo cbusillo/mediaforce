@@ -1,24 +1,9 @@
-{% extends "base.html" %} {% block content %}
-<div class="flex items-center justify-between mb-4">
-  <div>
-    <h1 class="text-3xl font-semibold">Search</h1>
-    <p class="text-foreground-muted text-sm">Find media by name, tier, or status.</p>
-  </div>
-</div>
+{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, toolbar_search_input, table_empty_row %} {% block content %}
+{{ page_header("Browse", "Search", "Find media by name, tier, or status.") }}
 
-<div class="card mb-4">
-  <form action="/search" method="get" class="flex flex-wrap gap-4 items-end">
-    <label class="flex flex-col gap-1">
-      <span class="form-label">Query</span>
-      <input
-        class="form-input min-w-[260px]"
-        type="text"
-        name="q"
-        value="{{ query or '' }}"
-        placeholder="show or filename"
-        aria-label="Search query"
-      />
-    </label>
+<div class="card mb-4 review-toolbar">
+  <form action="/search" method="get" class="review-toolbar__row">
+    {{ toolbar_search_input('searchQ', 'Show or filename', query or '', None, 'min-w-[260px]', 'q') }}
     <label class="flex flex-col gap-1">
       <span class="form-label">Status</span>
       <select class="form-select" name="status" aria-label="Filter by status">
@@ -38,7 +23,7 @@
         {% endfor %}
       </select>
     </label>
-    <button class="btn btn-accent text-sm" type="submit">Search</button>
+    <button class="btn btn-sm btn-accent" type="submit">Search</button>
   </form>
 </div>
 
@@ -67,9 +52,7 @@
           <td>{{ row.updated_at or '-' }}</td>
         </tr>
         {% endfor %} {% if results|length == 0 %}
-        <tr>
-          <td colspan="6" class="text-muted">No matches</td>
-        </tr>
+        {{ table_empty_row(6, 'No matches') }}
         {% endif %}
       </tbody>
     </table>

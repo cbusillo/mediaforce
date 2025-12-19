@@ -1,18 +1,18 @@
+{% from "partials/ui_macros.html" import table_empty_row, worker_controls_bar %}
+
 <div id="workers-container" 
-     class="card shadow border border-surface-subtle/80 mb-6"
+     class="card mb-6"
      hx-get="/partials/dashboard/workers" 
-     hx-trigger="every 5s" 
+     hx-trigger="every 5s, mfWorkersRefresh from:body" 
      hx-swap="outerHTML">
-  <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
-    <h3 class="m-0 text-lg font-semibold">Workers</h3>
-    <div class="flex flex-wrap items-center gap-2 text-sm">
-      <button class="btn btn-sm btn-primary" onclick="resumeAllWorkers()">Run All</button>
-      <button class="btn btn-sm btn-warning" onclick="pauseAllWorkers()">Pause (finish current)</button>
-      <button class="btn btn-sm btn-danger" onclick="stopAllWorkers()">Stop (finish current)</button>
-      <button class="btn btn-sm" onclick="clearOfflineWorkers()">Clear Offline</button>
-      <button class="btn btn-sm" hx-get="/partials/dashboard/workers" hx-target="#workers-container" hx-swap="outerHTML">Refresh</button>
+  <div class="section-heading">
+    <div>
+      <h3 class="section-title">Workers</h3>
+      <div class="section-subtle">Fleet state (auto-refreshes every 5s).</div>
     </div>
+    {{ worker_controls_bar('dashboard-workers-status', '/settings', true, true, true, true, true) }}
   </div>
+  <div id="dashboard-workers-status" class="text-sm text-foreground-muted"></div>
   <div class="overflow-auto">
     <table id="workersTable" class="table-auto w-full text-sm table-zebra">
       <thead>
@@ -23,14 +23,11 @@
           <th>Active</th>
           <th>Scope/Progress</th>
           <th>Last Seen</th>
-          <th>Actions</th>
         </tr>
       </thead>
       <tbody>
         {% if not workers %}
-        <tr>
-            <td colspan="7" class="text-center text-foreground-muted py-4">No workers connected.</td>
-        </tr>
+        {{ table_empty_row(6, 'No workers connected.') }}
         {% endif %}
         {% for worker in workers %}
         <tr>
@@ -63,12 +60,6 @@
             {% endif %}
           </td>
           <td class="text-foreground-muted text-xs font-mono">{{ worker.updated_at[:19] }}</td>
-          <td>
-            <!-- Actions like specific stop/pause could be HTMX calls too, but keeping JS for now -->
-            <button class="btn btn-sm btn-ghost px-2" onclick="reconcileWorker('{{ worker.machine }}')">
-                Reconcile
-            </button>
-          </td>
         </tr>
         {% endfor %}
       </tbody>
