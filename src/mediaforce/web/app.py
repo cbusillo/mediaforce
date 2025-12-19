@@ -32,7 +32,7 @@ from mediaforce.db.repository.base import Pagination
 from mediaforce.db.repository.stats import StatsRepository
 from mediaforce.db.repository.encode import EncodeRepository
 from mediaforce.db.repository.progress import ProgressRepository
-from mediaforce.config.paths import iter_libraries_for_current_host, normalize_path
+from mediaforce.config.paths import default_transcode_root, get_media_roots, iter_libraries_for_current_host, normalize_path
 from mediaforce.config.settings import INVENTORY_DB
 from mediaforce.domain.types import OutlierResult, QualityMetrics
 from mediaforce.domain.types import MediaInfo
@@ -61,6 +61,79 @@ from mediaforce.services.quality_loop import (
     finalize_profile_evaluation,
     start_profile_evaluation,
 )
+
+
+def _validate_transcode_root(transcode_root: pathlib.Path) -> tuple[bool, str]:
+    """Ensure requested transcode_root is safe to delete from."""
+
+    try:
+        root = transcode_root.resolve()
+    except Exception:
+        return False, "Invalid path"
+
+    media_roots = [pathlib.Path(r).resolve() for r in get_media_roots()]
+    if root in media_roots:
+        return False, "Refusing: transcode root is a media root"
+
+    allowed = False
+    for mr in media_roots:
+        try:
+            if root == (mr / "transcode"):
+                allowed = True
+                break
+        except Exception:
+            continue
+    if not allowed:
+        return False, "Refusing: transcode root must be <media_root>/transcode"
+
+    return True, "ok"
+
+
+def _cleanup_transcode_root(transcode_root: pathlib.Path, dry_run: bool) -> dict:
+    deleted_files: list[str] = []
+    deleted_dirs: list[str] = []
+    bytes_freed = 0
+
+    if not transcode_root.exists():
+        return {"deleted_files": [], "deleted_dirs": [], "bytes_freed": 0}
+
+    for root, dirs, files in os.walk(transcode_root, topdown=False):
+        root_path = pathlib.Path(root)
+        for f in files:
+            path = root_path / f
+            try:
+                size = int(path.stat().st_size)
+            except Exception:
+                size = 0
+            if not dry_run:
+                try:
+                    path.unlink()
+                except Exception:
+                    continue
+            deleted_files.append(str(path))
+            bytes_freed += size
+
+        for d in dirs:
+            dpath = root_path / d
+            if dpath == transcode_root:
+                continue
+            try:
+                if any(dpath.iterdir()):
+                    continue
+            except Exception:
+                continue
+            if not dry_run:
+                try:
+                    dpath.rmdir()
+                except Exception:
+                    continue
+            deleted_dirs.append(str(dpath))
+
+    return {
+        "deleted_files": deleted_files,
+        "deleted_dirs": deleted_dirs,
+        "bytes_freed": bytes_freed,
+    }
 from mediaforce.domain.types import TierSettings
 from mediaforce.db import (
     MediaItem,
@@ -78,7 +151,7 @@ from mediaforce.db import (
     now_iso,
     ensure_schema,
 )
-from sqlalchemy import func, desc
+from sqlalchemy import func, desc, delete
 from sqlmodel import select, Session
 from dataclasses import asdict
 from mediaforce.web.charts import sparkline_svg
@@ -351,6 +424,7 @@ def _parse_json_maybe_list(raw: str | None) -> list[dict]:
 
 
 templates.env.globals["static_rev"] = _static_rev
+templates.env.globals["default_transcode_root"] = default_transcode_root
 
 
 # In-process watch task state
@@ -712,6 +786,21 @@ class WorkerCleanupRequest(BaseModel):
     machine: Optional[str] = None
     older_than_days: int = 30
     offline_only: bool = True
+
+
+class CleanupResetQueueRequest(BaseModel):
+    confirm: bool = False
+
+
+class CleanupClearReviewRequest(BaseModel):
+    confirm: bool = False
+    delete_all: bool = False
+
+
+class CleanupTranscodeFilesRequest(BaseModel):
+    confirm: bool = False
+    dry_run: bool = True
+    transcode_root: Optional[str] = None
 
 
 class WorkerNormalizeRequest(BaseModel):
@@ -1283,6 +1372,7 @@ async def settings_page(request: Request):
             "settings": settings,
             "lib_status": lib_status,
             "api_url_hint": api_url_hint,
+            "transcode_root_default": default_transcode_root(),
             "nav_status": _nav_status(),
         },
     )
@@ -1390,6 +1480,142 @@ def _compact_filename_for_review(filename: str) -> str:
         if len(keep) >= 6:
             break
     return " ".join(keep).strip() or stem
+
+
+def _vmaf_class(vmaf: float | None) -> str:
+    if vmaf is None:
+        return "unknown"
+    if vmaf >= 95:
+        return "excellent"
+    if vmaf >= 90:
+        return "good"
+    if vmaf >= 85:
+        return "warning"
+    return "poor"
+
+
+def _compute_attention_alerts(payload: dict) -> list[dict]:
+    """Compute attention alerts for source → encoded comparisons.
+
+    This powers the inline Watchlist in Review/Compare.
+    """
+
+    src = payload.get("source") or {}
+    enc = payload.get("encoded") or {}
+    probe = payload.get("probe") or {}
+    src_probe = probe.get("source") or {}
+    enc_probe = probe.get("encoded") or {}
+
+    reduction_pct = payload.get("reduction_pct")
+    quality = (enc.get("quality") or {})
+    vmaf = quality.get("vmaf")
+
+    alerts: list[dict] = []
+
+    def add(alert_type: str, severity: str, message: str, short: str | None = None):
+        alerts.append(
+            {
+                "type": alert_type,
+                "severity": severity,
+                "message": message,
+                "short": short or message,
+            }
+        )
+
+    src_tracks = (src_probe.get("audio_tracks") or src.get("audio_tracks") or [])
+    enc_tracks = (enc_probe.get("audio_tracks") or [])
+    if src_tracks and enc_tracks and len(src_tracks) != len(enc_tracks):
+        diff = len(enc_tracks) - len(src_tracks)
+        sign = "+" if diff > 0 else ""
+        add(
+            "audio_track_count",
+            "warning",
+            f"Audio tracks changed: {len(src_tracks)} → {len(enc_tracks)}",
+            f"Audio {sign}{diff}",
+        )
+
+    src_subs = (src_probe.get("subtitle_tracks") or src.get("subtitle_tracks") or [])
+    enc_subs = (enc_probe.get("subtitle_tracks") or [])
+    if src_subs and enc_subs and len(src_subs) != len(enc_subs):
+        diff = len(enc_subs) - len(src_subs)
+        sign = "+" if diff > 0 else ""
+        add(
+            "subtitle_track_count",
+            "warning",
+            f"Subtitle tracks changed: {len(src_subs)} → {len(enc_subs)}",
+            f"Subs {sign}{diff}",
+        )
+
+    s_vid = (src_probe.get("video") or src.get("video") or {})
+    e_vid = (enc_probe.get("video") or enc.get("video") or {})
+    if s_vid.get("codec") and e_vid.get("codec") and s_vid.get("codec") != e_vid.get("codec"):
+        add("video_codec", "info", f"Video codec: {s_vid.get('codec')} → {e_vid.get('codec')}")
+
+    if s_vid.get("width") and s_vid.get("height") and e_vid.get("width") and e_vid.get("height"):
+        s_res = f"{s_vid.get('width')}x{s_vid.get('height')}"
+        e_res = f"{e_vid.get('width')}x{e_vid.get('height')}"
+        if s_res != e_res:
+            add("resolution", "warning", f"Resolution: {s_res} → {e_res}", "Res Δ")
+
+    if bool(s_vid.get("is_hdr")) and not bool(e_vid.get("is_hdr")):
+        add("hdr_lost", "danger", "HDR lost in encode", "HDR lost")
+    elif bool(s_vid.get("is_hdr")) != bool(e_vid.get("is_hdr")):
+        add(
+            "hdr_changed",
+            "warning",
+            f"HDR changed: {'yes' if bool(s_vid.get('is_hdr')) else 'no'} → {'yes' if bool(e_vid.get('is_hdr')) else 'no'}",
+            "HDR Δ",
+        )
+
+    if s_vid.get("bit_depth") and e_vid.get("bit_depth") and s_vid.get("bit_depth") != e_vid.get("bit_depth"):
+        add(
+            "bit_depth",
+            "warning",
+            f"Bit depth: {s_vid.get('bit_depth')} → {e_vid.get('bit_depth')}",
+            f"{s_vid.get('bit_depth')}→{e_vid.get('bit_depth')}bit",
+        )
+
+    if bool(s_vid.get("is_interlaced")) != bool(e_vid.get("is_interlaced")):
+        add(
+            "interlaced",
+            "warning",
+            f"Interlaced: {'yes' if bool(s_vid.get('is_interlaced')) else 'no'} → {'yes' if bool(e_vid.get('is_interlaced')) else 'no'}",
+            "Interlace Δ",
+        )
+
+    try:
+        src_br = s_vid.get("bitrate_kbps")
+        enc_br = e_vid.get("bitrate_kbps") or enc.get("container_bitrate_kbps")
+        if src_br and enc_br:
+            ratio = float(enc_br) / float(src_br)
+            if ratio > 1.3:
+                add(
+                    "bitrate_up",
+                    "warning",
+                    f"Video bitrate up: {src_br}k → {enc_br}k",
+                    f"Bitrate ↑{int(ratio * 100)}%",
+                )
+    except Exception:
+        pass
+
+    try:
+        if vmaf is not None and float(vmaf) < 85:
+            add("low_vmaf", "warning", f"Low VMAF: {float(vmaf):.1f}", f"VMAF {float(vmaf):.0f}")
+    except Exception:
+        pass
+
+    try:
+        if reduction_pct is not None and float(reduction_pct) < 0:
+            add(
+                "size_increase",
+                "danger",
+                f"Size increased: +{abs(float(reduction_pct)):.0f}%",
+                f"Size +{abs(float(reduction_pct)):.0f}%",
+            )
+    except Exception:
+        pass
+
+    return alerts
 
 
 def _queue_cache_get(library_root: str):
@@ -2137,6 +2363,7 @@ async def review(
                     "tier": media.detected_tier,
                     "vmaf": f"{enc.vmaf:.1f}" if enc.vmaf else None,
                     "vmaf_raw": enc.vmaf,
+                    "vmaf_class": _vmaf_class(enc.vmaf),
                     "is_outlier": bool(enc.is_outlier),
                     "eval_status": eval_obj.status if eval_obj else None,
                     "eval_median": eval_obj.median_vmaf if eval_obj else None,
@@ -2148,6 +2375,15 @@ async def review(
                     "eval_thresh_med": eval_obj.threshold_median if eval_obj else None,
                     "eval_thresh_max": eval_obj.threshold_max if eval_obj else None,
                     "retrain_status": retrain.status if retrain else None,
+                    "attention_count": int((1 if reduction_pct < 0 else 0) + (1 if (enc.vmaf is not None and enc.vmaf < 85) else 0)),
+                    "top_alerts": [
+                        x
+                        for x in [
+                            ({"severity": "danger", "short": f"Size +{abs(reduction_pct):.0f}%"} if reduction_pct < 0 else None),
+                            ({"severity": "warning", "short": f"VMAF {enc.vmaf:.0f}"} if (enc.vmaf is not None and enc.vmaf < 85) else None),
+                        ]
+                        if x is not None
+                    ][:2],
                 }
             )
 
@@ -2819,6 +3055,74 @@ async def api_update_settings(data: SettingsUpdateRequest):
         return {"success": True}
     except Exception as exc:  # pragma: no cover - defensive
         return {"success": False, "error": str(exc)}
+
+
+@app.post("/api/cleanup/reset-queue")
+async def api_cleanup_reset_queue(data: CleanupResetQueueRequest):
+    if not data.confirm:
+        return {"success": False, "error": "Confirmation required"}
+
+    with session_scope() as session:
+        items = session.exec(select(MediaItem)).all()
+        affected = 0
+        for item in items:
+            item.status = "pending"
+            item.skip_reason = None
+            item.claimed_by = None
+            item.claimed_at = None
+            item.cooldown_until = None
+            session.add(item)
+            affected += 1
+        session.commit()
+
+    return {"success": True, "reset_count": affected, "message": f"Reset {affected} item(s) to pending."}
+
+
+@app.post("/api/cleanup/clear-review")
+async def api_cleanup_clear_review(data: CleanupClearReviewRequest):
+    if not data.confirm:
+        return {"success": False, "error": "Confirmation required"}
+
+    with session_scope() as session:
+        if data.delete_all:
+            count = session.exec(select(func.count(EncodeResult.id))).one() or 0
+            session.exec(delete(EncodeResult))
+            session.exec(delete(EncodeProgress))
+            session.commit()
+            return {"success": True, "deleted_count": int(count), "message": f"Deleted {count} encode result(s)."}
+
+        rows = session.exec(select(EncodeResult)).all()
+        affected = 0
+        for enc in rows:
+            enc.review_status = "pending"
+            enc.reviewed_at = None
+            session.add(enc)
+            affected += 1
+        session.commit()
+
+    return {"success": True, "reset_count": affected, "message": f"Reset {affected} encode(s) to pending review."}
+
+
+@app.post("/api/cleanup/transcode-files")
+async def api_cleanup_transcode_files(data: CleanupTranscodeFilesRequest):
+    transcode_root = pathlib.Path(data.transcode_root or default_transcode_root())
+    ok, reason = _validate_transcode_root(transcode_root)
+    if not ok:
+        return {"success": False, "error": reason}
+
+    # Resolve host mapping if the path doesn't exist on this machine.
+    transcode_root = normalize_path(transcode_root)
+
+    if not data.dry_run and not data.confirm:
+        return {"success": False, "error": "Confirmation required"}
+
+    result = _cleanup_transcode_root(transcode_root, dry_run=bool(data.dry_run))
+    return {
+        "success": True,
+        "dry_run": bool(data.dry_run),
+        "transcode_root": str(transcode_root),
+        **result,
+    }
 
 
 @app.get("/api/workers")
@@ -3564,7 +3868,7 @@ async def api_review_encode_details(
             except Exception as exc:
                 probe["errors"]["encoded"] = str(exc)
 
-        return {
+        payload = {
             "success": True,
             "encode_id": enc.id,
             "source_id": media.id,
@@ -3574,6 +3878,18 @@ async def api_review_encode_details(
             "evaluation": evaluation_payload,
             "probe": probe,
         }
+
+        attention_alerts = _compute_attention_alerts(payload)
+        payload["attention_alerts"] = attention_alerts
+        payload["summary"] = {
+            "reduction_pct": reduction_pct,
+            "vmaf": enc.vmaf,
+            "vmaf_class": _vmaf_class(enc.vmaf),
+            "attention_count": len(attention_alerts),
+            "top_alerts": [a.get("short") for a in attention_alerts[:2]],
+        }
+
+        return payload
 
 
 @app.post("/api/evaluations/start", dependencies=[Depends(_require_worker_api_auth)])

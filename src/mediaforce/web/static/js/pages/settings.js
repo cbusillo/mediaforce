@@ -162,4 +162,84 @@
 
   addLibraryBtn?.addEventListener("click", () => addLibraryRow());
   wireScanButtons(document);
+
+  const cleanupStatus = document.getElementById("cleanup-status");
+  const previewResult = document.getElementById("cleanup-preview-result");
+
+  async function cleanupResetQueue() {
+    const ok = window.confirm(
+      'Reset all inventory items to "pending"?\n\nThis clears claims, cooldowns, and skip reasons. Original media is not deleted.',
+    );
+    if (!ok) return;
+
+    window.mfUi?.setStatus(cleanupStatus, "Resetting queue…", "warning");
+    const resp = await window.mfApi.postJson("/api/cleanup/reset-queue", { confirm: true });
+    if (resp.ok && resp.data?.success) {
+      window.mfUi?.setStatus(cleanupStatus, resp.data.message || "Queue reset.", "success");
+    } else {
+      window.mfUi?.setStatus(cleanupStatus, resp.data?.error || resp.error || "Failed to reset queue.", "danger");
+    }
+  }
+
+  async function cleanupClearReview(deleteAll) {
+    const msg = deleteAll
+      ? "DELETE all encode results?\n\nThis cannot be undone."
+      : 'Reset all encode results to "pending" review?';
+    const ok = window.confirm(msg);
+    if (!ok) return;
+
+    window.mfUi?.setStatus(cleanupStatus, deleteAll ? "Deleting encodes…" : "Resetting review…", "warning");
+    const resp = await window.mfApi.postJson("/api/cleanup/clear-review", { confirm: true, delete_all: !!deleteAll });
+    if (resp.ok && resp.data?.success) {
+      window.mfUi?.setStatus(cleanupStatus, resp.data.message || "Done.", "success");
+    } else {
+      window.mfUi?.setStatus(cleanupStatus, resp.data?.error || resp.error || "Failed to clear review.", "danger");
+    }
+  }
+
+  async function cleanupPreviewTranscode() {
+    const root = document.getElementById("cleanup-transcode-root")?.value || "";
+    window.mfUi?.setStatus(cleanupStatus, "Previewing…", "warning");
+    const resp = await window.mfApi.postJson("/api/cleanup/transcode-files", {
+      dry_run: true,
+      confirm: false,
+      transcode_root: root,
+    });
+    if (resp.ok && resp.data?.success) {
+      const n = (resp.data.deleted_files || []).length;
+      const mb = ((resp.data.bytes_freed || 0) / 1024 / 1024).toFixed(1);
+      if (previewResult) previewResult.textContent = `Would delete ${n} file(s) (~${mb} MB).`;
+      window.mfUi?.setStatus(cleanupStatus, "Preview ready.", "success");
+      setTimeout(() => window.mfUi?.setStatus(cleanupStatus, "", "muted"), 1500);
+    } else {
+      window.mfUi?.setStatus(cleanupStatus, resp.data?.error || resp.error || "Preview failed.", "danger");
+    }
+  }
+
+  async function cleanupApplyTranscode() {
+    const root = document.getElementById("cleanup-transcode-root")?.value || "";
+    const ok = window.confirm(`Delete files under:\n\n${root}\n\nThis cannot be undone.`);
+    if (!ok) return;
+
+    window.mfUi?.setStatus(cleanupStatus, "Deleting files…", "warning");
+    const resp = await window.mfApi.postJson("/api/cleanup/transcode-files", {
+      dry_run: false,
+      confirm: true,
+      transcode_root: root,
+    });
+    if (resp.ok && resp.data?.success) {
+      const n = (resp.data.deleted_files || []).length;
+      const mb = ((resp.data.bytes_freed || 0) / 1024 / 1024).toFixed(1);
+      if (previewResult) previewResult.textContent = `Deleted ${n} file(s) (~${mb} MB).`;
+      window.mfUi?.setStatus(cleanupStatus, `Deleted ${n} file(s).`, "success");
+    } else {
+      window.mfUi?.setStatus(cleanupStatus, resp.data?.error || resp.error || "Delete failed.", "danger");
+    }
+  }
+
+  document.getElementById("cleanup-reset-queue")?.addEventListener("click", cleanupResetQueue);
+  document.getElementById("cleanup-reset-review")?.addEventListener("click", () => cleanupClearReview(false));
+  document.getElementById("cleanup-delete-review")?.addEventListener("click", () => cleanupClearReview(true));
+  document.getElementById("cleanup-preview")?.addEventListener("click", cleanupPreviewTranscode);
+  document.getElementById("cleanup-apply")?.addEventListener("click", cleanupApplyTranscode);
 })();

@@ -238,6 +238,50 @@ MEDIAFORCE_MACHINE_NAME=&lt;short-hostname&gt;</code></pre>
     </div>
 </div>
 
+<div class="card space-y-4 mt-6">
+    <div class="section-heading">
+        <div>
+            <h3 class="section-title">Cleanup & Reset</h3>
+            <p class="section-subtle">Fix bad state by resetting the database and cleaning transcode files. Original media is never deleted.</p>
+        </div>
+    </div>
+
+    <div class="space-y-2">
+        <div class="font-medium text-foreground">Reset Queue State</div>
+        <div class="text-sm text-foreground-muted">
+            Sets all inventory items back to <span class="font-medium text-foreground">pending</span> and clears claims/skip reasons.
+        </div>
+        <button type="button" id="cleanup-reset-queue" class="btn btn-sm btn-warning">Reset Queue</button>
+    </div>
+
+    <div class="space-y-2">
+        <div class="font-medium text-foreground">Clear Review State</div>
+        <div class="text-sm text-foreground-muted">
+            Reset encodes back to <span class="font-medium text-foreground">pending review</span>, or delete all encode results.
+        </div>
+        <div class="flex flex-wrap gap-2">
+            <button type="button" id="cleanup-reset-review" class="btn btn-sm btn-warning">Reset to Pending</button>
+            <button type="button" id="cleanup-delete-review" class="btn btn-sm btn-danger">Delete All Encodes</button>
+        </div>
+    </div>
+
+    <div class="space-y-2">
+        <div class="font-medium text-foreground">Clean Transcode Folder</div>
+        <div class="text-sm text-foreground-muted">
+            Deletes files under the transcode root for this host.
+            <span class="text-foreground">Only</span> <code class="font-mono">&lt;media_root&gt;/transcode</code> is allowed.
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+            <input id="cleanup-transcode-root" class="form-input w-96" type="text" value="{{ transcode_root_default }}" aria-label="Transcode root" />
+            <button type="button" id="cleanup-preview" class="btn btn-sm">Preview</button>
+            <button type="button" id="cleanup-apply" class="btn btn-sm btn-danger">Delete Files</button>
+        </div>
+        <div id="cleanup-preview-result" class="text-sm text-foreground-muted"></div>
+    </div>
+
+    <div id="cleanup-status" class="text-sm"></div>
+</div>
+
 <script src="/static/js/pages/settings.js?v={{ static_rev() }}"></script>
 <script src="/static/js/pages/settings_workers.js?v={{ static_rev() }}"></script>
 

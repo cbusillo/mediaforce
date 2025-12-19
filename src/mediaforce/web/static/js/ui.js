@@ -161,10 +161,17 @@
     };
 
     const alerts = [];
-    const pushAlert = (text, tone = "warning") => {
+    const pushAlert = (text, tone = "warning", short = null) => {
       if (!text) return;
-      alerts.push({ text, tone });
+      alerts.push({ text, tone, short });
     };
+
+    const serverAlerts = Array.isArray(payload?.attention_alerts) ? payload.attention_alerts : null;
+    if (serverAlerts && serverAlerts.length) {
+      serverAlerts.forEach((a) => {
+        pushAlert(a.message || a.text || "", a.severity || a.tone || "warning", a.short || null);
+      });
+    } else {
     const sourceTracks = (srcProbe?.audio_tracks || src?.audio_tracks || []).filter(Boolean);
     const encodedTracks = (encProbe?.audio_tracks || enc?.audio_tracks || []).filter(Boolean);
     if (sourceTracks.length && encodedTracks.length && sourceTracks.length !== encodedTracks.length) {
@@ -227,6 +234,7 @@
     }
     if (reduction !== null && reduction !== undefined && reduction < 0) {
       pushAlert(`Size increased: +${Math.abs(reduction).toFixed(0)}%`, "danger");
+    }
     }
 
     const qualityCard = `

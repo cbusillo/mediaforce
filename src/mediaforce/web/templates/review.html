@@ -110,9 +110,8 @@
           <th class="w-[260px]">File</th>
           <th class="w-[180px]">Show</th>
           <th class="w-[150px]">Size</th>
-          <th class="w-[90px]">Reduction</th>
-          <th class="w-[80px]">Tier</th>
-          <th class="w-[80px]">VMAF</th>
+          <th class="w-[140px]">Δ / VMAF</th>
+          <th class="w-[180px]">Attention</th>
           <th class="w-[140px]">Actions</th>
         </tr>
       </thead>
@@ -170,13 +169,29 @@
             <span class="text-foreground-muted">→</span>
             <span>{{ encode.output_size }}</span>
           </td>
-          <td class="{{ 'text-success' if encode.reduction_pct > 0 else 'text-danger' }}">
-            {% if encode.reduction_pct > 0 %} {{ encode.reduction }}% {% else %} +{{ encode.size_increase_pct }}% {%
-            endif %}
-          </td>
-          <td class="tier-{{ encode.tier }}">{{ encode.tier }}</td>
           <td>
-            {{ encode.vmaf or '-' }}
+            <span class="{{ 'text-success' if encode.reduction_pct > 0 else 'text-danger' }}">
+              {% if encode.reduction_pct > 0 %}
+              -{{ encode.reduction }}%
+              {% else %}
+              +{{ encode.size_increase_pct }}%
+              {% endif %}
+            </span>
+            <span class="text-foreground-muted">•</span>
+            <span class="chip chip-sm {{ 'chip-danger' if encode.vmaf_class == 'poor' else 'chip-warning' if encode.vmaf_class == 'warning' else 'chip-info' if encode.vmaf_class == 'unknown' else '' }}">{{ encode.vmaf or '-' }}</span>
+          </td>
+          <td>
+            <div class="flex flex-wrap gap-1">
+              {% for a in encode.top_alerts %}
+              <span class="chip chip-sm {{ 'chip-danger' if a.severity == 'danger' else 'chip-warning' if a.severity == 'warning' else 'chip-info' }}">{{ a.short }}</span>
+              {% endfor %}
+              {% if encode.attention_count > (encode.top_alerts|length) %}
+              <span class="chip chip-sm">+{{ encode.attention_count - (encode.top_alerts|length) }}</span>
+              {% endif %}
+              {% if encode.attention_count == 0 %}
+              <span class="text-foreground-muted">—</span>
+              {% endif %}
+            </div>
           </td>
           <td>
             <div class="flex items-center gap-1">
