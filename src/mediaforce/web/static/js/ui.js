@@ -42,6 +42,11 @@
     if (navMsg && message) navMsg.textContent = message;
   }
 
+  function setInlineStatus(el, message, tone = "muted") {
+    if (!el) return;
+    setStatus(el, message, tone);
+  }
+
   function escapeHtml(text) {
     const s = String(text ?? "");
     return s
@@ -383,6 +388,7 @@
   window.mfUi = {
     setTone,
     setStatus,
+    setInlineStatus,
     updateNavScan,
     updateNavWatch,
     escapeHtml,

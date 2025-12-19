@@ -2310,6 +2310,13 @@ input[type="text"]::placeholder,
     border-color 150ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+.btn-icon-xs {
+  height: 1.25rem;
+  width: 1.25rem;
+  border-radius: 0.375rem;
+  box-shadow: none;
+}
+
 .btn-icon:hover {
   background-color: var(--surface-card);
   color: var(--foreground);

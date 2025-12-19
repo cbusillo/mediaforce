@@ -151,7 +151,7 @@
           <td>
             <button
               type="button"
-              class="btn-icon row-expander"
+              class="btn-icon btn-icon-xs row-expander"
               title="Toggle details"
               aria-label="Toggle details"
               aria-expanded="false"
@@ -159,8 +159,8 @@
             >
               <svg
                 xmlns="http://www.w3.org/2000/svg"
-                width="16"
-                height="16"
+                width="14"
+                height="14"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
@@ -192,11 +192,11 @@
           </td>
           <td>
             <div class="flex items-center gap-1">
-              <a href="/compare/{{ encode.id }}" class="btn-icon" title="Compare" aria-label="Compare">
+              <a href="/compare/{{ encode.id }}" class="btn-icon btn-icon-xs" title="Compare" aria-label="Compare">
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
-                  width="16"
-                  height="16"
+                  width="14"
+                  height="14"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -211,14 +211,14 @@
               <button
                 type="button"
                 onclick="promote({{ encode.id }})"
-                class="btn-icon btn-icon-success"
+                class="btn-icon btn-icon-xs btn-icon-success"
                 title="Promote"
                 aria-label="Promote"
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
-                  width="16"
-                  height="16"
+                  width="14"
+                  height="14"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -232,14 +232,14 @@
               <button
                 type="button"
                 onclick="showRejectModal({{ encode.id }}, '{{ encode.show_name|e }}', '{{ encode.tier }}')"
-                class="btn-icon btn-icon-warning"
+                class="btn-icon btn-icon-xs btn-icon-warning"
                 title="Reject"
                 aria-label="Reject"
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
-                  width="16"
-                  height="16"
+                  width="14"
+                  height="14"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -255,7 +255,7 @@
               <button
                 type="button"
                 onclick="flagQuality({{ encode.eval_id }}, event)"
-                class="btn-icon btn-icon-danger"
+                class="btn-icon btn-icon-xs btn-icon-danger"
                 title="Flag quality"
                 aria-label="Flag quality"
                 data-retrain="{{ encode.retrain_status or '' }}"
@@ -268,8 +268,8 @@
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
-                  width="16"
-                  height="16"
+                  width="14"
+                  height="14"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"

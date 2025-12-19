@@ -31,7 +31,7 @@
     <div class="flex flex-col items-end gap-2">
       <div class="flex flex-wrap items-center gap-3 justify-end">
         <span class="text-foreground-muted text-sm">Est. Savings: <strong class="text-success">{{ total_savings }}</strong></span>
-        <button class="btn btn-sm btn-primary" onclick="triggerScan()">Rescan</button>
+      <button class="btn btn-sm btn-primary" onclick="triggerScan(event)">Rescan</button>
         <button class="btn btn-sm" onclick="toggleView()">
           View: <span id="viewLabel">{{ 'Compact' if request.query_params.get('view') == 'compact' else 'Table' }}</span>
         </button>
@@ -263,24 +263,11 @@
   }
 
   function setStatus(el, message, tone = 'info') {
-      if (!el) return;
-      el.textContent = message;
-      el.classList.remove('text-success', 'text-danger', 'text-warning', 'text-muted');
-      const cls = tone === 'success' ? 'text-success' : tone === 'danger' ? 'text-danger' : tone === 'warning' ? 'text-warning' : 'text-muted';
-      el.classList.add(cls);
+      window.mfUi?.setInlineStatus?.(el, message, tone);
   }
 
   function updateNavScan(running, summaryText) {
-      const pill = document.querySelector('.pill-scan');
-      if (pill) {
-          pill.classList.toggle('pill-on', running);
-          pill.classList.toggle('pill-off', !running);
-          pill.textContent = running ? 'Scan running' : 'Scan idle';
-      }
-      if (summaryText) {
-          const summary = document.getElementById('navScanSummary');
-          if (summary) summary.textContent = summaryText;
-      }
+      window.mfUi?.updateNavScan?.(running, summaryText);
   }
 
   function toggleShow(showName, event) {
@@ -781,8 +768,8 @@
       });
   }
 
-  async function triggerScan() {
-      const btn = event.target;
+  async function triggerScan(evt) {
+      const btn = evt?.currentTarget || evt?.target;
       btn.disabled = true;
       btn.textContent = 'Scanning...';
       setStatus(scanStatusEl, 'Starting scan…', 'warning');
