@@ -93,19 +93,6 @@
       {% block content %}{% endblock %}
     </main>
 
-    <div id="inspectModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-label="Encode details">
-      <div class="modal-card modal-card-wide">
-        <div class="flex items-center justify-between gap-3 mb-3">
-          <div>
-            <h3 class="m-0">Encode Inspection</h3>
-            <div id="inspectSubtitle" class="text-xs text-foreground-muted"></div>
-          </div>
-          <button type="button" class="btn btn-sm btn-ghost" onclick="window.mfInspect?.close()">Close</button>
-        </div>
-        <div id="inspectBody" class="space-y-3"></div>
-      </div>
-    </div>
-
     {% block scripts %}{% endblock %}
   </body>
 </html>

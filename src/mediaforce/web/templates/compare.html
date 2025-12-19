@@ -1,4 +1,4 @@
-{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header %} {% block content %}
+{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, toolbar_chip %} {% block content %}
 {% set subtitle = "Source " ~ source_size ~ " · Encoded " ~ output_size ~ " (" ~ reduction ~ "% smaller)" %}
 {% call page_header("Compare", filename, subtitle, "text-xl truncate") %}
 <div class="flex items-center gap-2">
@@ -45,19 +45,39 @@
   </div>
 </div>
 
-<div class="flex flex-wrap items-center gap-3 bg-surface-card p-3 rounded-lg border border-surface-subtle mb-4">
-  <button id="playPause" class="btn btn-sm btn-primary">Play</button>
-  <button id="toggleView" class="btn btn-sm">View: Both</button>
-  <input type="range" id="seekBar" min="0" max="100" value="0" aria-label="Comparison seek" class="flex-1" />
-  <span id="timeDisplay" class="text-sm text-foreground-muted min-w-[140px]">0:00:00 / 0:00:00</span>
-  <select id="speed" class="form-select w-28" aria-label="Playback speed">
-    <option value="0.75">0.75x</option>
-    <option value="1" selected>1x</option>
-    <option value="1.25">1.25x</option>
-    <option value="1.5">1.5x</option>
-    <option value="1.75">1.75x</option>
-    <option value="2">2x</option>
-  </select>
+<div class="card review-toolbar space-y-3 mb-4">
+  <div class="review-toolbar__row">
+    <div class="flex flex-wrap items-center gap-2">
+      <button id="playPause" class="btn btn-sm btn-accent" type="button">Play</button>
+      <div class="flex flex-wrap items-center gap-1">
+        <div class="review-toolbar__label">View</div>
+        {{ toolbar_chip('Both', 'setView(\'both\')', true, None, 'js-view-chip') }}
+        {{ toolbar_chip('Source', 'setView(\'source\')', false, None, 'js-view-chip') }}
+        {{ toolbar_chip('Encoded', 'setView(\'encoded\')', false, None, 'js-view-chip') }}
+      </div>
+      <div class="flex flex-wrap items-center gap-1">
+        <div class="review-toolbar__label">Fit</div>
+        {{ toolbar_chip('Fit', 'setFit(\'contain\')', true, None, 'js-fit-chip') }}
+        {{ toolbar_chip('Fill', 'setFit(\'cover\')', false, None, 'js-fit-chip') }}
+      </div>
+    </div>
+
+    <div class="flex items-center gap-2">
+      <select id="speed" class="form-select w-28" aria-label="Playback speed">
+        <option value="0.75">0.75x</option>
+        <option value="1" selected>1x</option>
+        <option value="1.25">1.25x</option>
+        <option value="1.5">1.5x</option>
+        <option value="1.75">1.75x</option>
+        <option value="2">2x</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="review-toolbar__row review-toolbar__row--filters">
+    <input type="range" id="seekBar" min="0" max="100" value="0" aria-label="Comparison seek" class="flex-1" />
+    <span id="timeDisplay" class="text-sm text-foreground-muted min-w-[140px]">0:00:00 / 0:00:00</span>
+  </div>
 </div>
 
 <div class="card mt-4">

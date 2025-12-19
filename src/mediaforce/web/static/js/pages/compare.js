@@ -5,10 +5,11 @@
   const source = document.getElementById("source");
   const encoded = document.getElementById("encoded");
   const playPause = document.getElementById("playPause");
-  const toggleView = document.getElementById("toggleView");
   const seekBar = document.getElementById("seekBar");
   const timeDisplay = document.getElementById("timeDisplay");
   const speedSelect = document.getElementById("speed");
+
+  if (!source || !encoded || !playPause || !seekBar || !timeDisplay || !speedSelect) return;
 
   const toggleEl = (el, show) => {
     if (!el) return;
@@ -17,8 +18,26 @@
 
   let isSyncing = false;
   let viewMode = "both";
+  let fitMode = "contain";
   const SEEK_STEP = 5;
   const SPEED_MAP = { 1: 1.0, 2: 1.25, 3: 1.5, 4: 1.75, 5: 2.0 };
+
+  function setChipActive(selector, activeText) {
+    document.querySelectorAll(selector).forEach((chip) => {
+      const label = (chip.textContent || "").trim().toLowerCase();
+      const active = label === activeText.toLowerCase();
+      chip.classList.toggle("filter-chip--active", active);
+      if (chip.hasAttribute("aria-pressed")) chip.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+  }
+
+  function applyFitMode() {
+    const fit = fitMode === "cover" ? "cover" : "contain";
+    [source, encoded].forEach((el) => {
+      if (!el) return;
+      el.style.objectFit = fit;
+    });
+  }
 
   function formatTimeHMS(seconds) {
     if (!isFinite(seconds) || seconds < 0) return "0:00:00";
@@ -69,7 +88,7 @@
     }
   });
 
-  toggleView.addEventListener("click", () => {
+  function applyViewMode(nextMode) {
     const current = Math.max(
       isFinite(source.currentTime) ? source.currentTime : 0,
       isFinite(encoded.currentTime) ? encoded.currentTime : 0,
@@ -77,29 +96,39 @@
     source.currentTime = current;
     encoded.currentTime = current;
 
-    if (viewMode === "both") {
-      viewMode = "source";
+    viewMode = nextMode;
+    if (viewMode === "source") {
       encoded.pause();
       toggleEl(encoded.parentElement, false);
       toggleEl(source.parentElement, true);
-      toggleView.textContent = "View: Source";
-    } else if (viewMode === "source") {
-      viewMode = "encoded";
+    } else if (viewMode === "encoded") {
       source.pause();
       toggleEl(source.parentElement, false);
       toggleEl(encoded.parentElement, true);
-      toggleView.textContent = "View: Encoded";
     } else {
-      viewMode = "both";
       toggleEl(source.parentElement, true);
       toggleEl(encoded.parentElement, true);
-      toggleView.textContent = "View: Both";
     }
+
+    setChipActive(".js-view-chip", viewMode === "both" ? "both" : viewMode);
     updateTime();
-  });
+  }
+
+  function setView(mode) {
+    const next = mode === "source" || mode === "encoded" ? mode : "both";
+    applyViewMode(next);
+  }
+
+  function setFit(mode) {
+    fitMode = mode === "cover" ? "cover" : "contain";
+    applyFitMode();
+    setChipActive(".js-fit-chip", fitMode === "cover" ? "fill" : "fit");
+  }
 
   seekBar.addEventListener("input", () => {
-    const dur = isFinite(source.duration) ? source.duration : 0;
+    const durSource = isFinite(source.duration) ? source.duration : 0;
+    const durEncoded = isFinite(encoded.duration) ? encoded.duration : 0;
+    const dur = Math.max(durSource, durEncoded, 0);
     const time = dur > 0 ? (seekBar.value / 100) * dur : 0;
     source.currentTime = time;
     encoded.currentTime = time;
@@ -116,11 +145,13 @@
       e.preventDefault();
       playPause.click();
     } else if (e.code === "ArrowLeft") {
-      source.currentTime = Math.max(0, source.currentTime - SEEK_STEP);
-      encoded.currentTime = source.currentTime;
+      const next = Math.max(0, Math.min(source.currentTime, encoded.currentTime) - SEEK_STEP);
+      source.currentTime = next;
+      encoded.currentTime = next;
     } else if (e.code === "ArrowRight") {
-      source.currentTime = source.currentTime + SEEK_STEP;
-      encoded.currentTime = source.currentTime;
+      const next = Math.max(source.currentTime, encoded.currentTime) + SEEK_STEP;
+      source.currentTime = next;
+      encoded.currentTime = next;
     } else if (SPEED_MAP[e.key]) {
       const speed = SPEED_MAP[e.key];
       speedSelect.value = String(speed);
@@ -128,6 +159,9 @@
       encoded.playbackRate = speed;
     }
   });
+
+  applyFitMode();
+  applyViewMode("both");
 
   async function promote() {
     if (!encodeId) return;
@@ -153,5 +187,6 @@
 
   window.promote = promote;
   window.reject = reject;
+  window.setView = setView;
+  window.setFit = setFit;
 })();
-

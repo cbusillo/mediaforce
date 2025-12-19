@@ -335,56 +335,6 @@
     containerEl.innerHTML = renderInspection(res.data);
   }
 
-  async function openInspection(encodeId, opts = {}) {
-    const modal = document.getElementById("inspectModal");
-    const body = document.getElementById("inspectBody");
-    const subtitle = document.getElementById("inspectSubtitle");
-    if (!modal || !body) return;
-
-    const probeEncoded = opts.probeEncoded !== false;
-    const probeSource = opts.probeSource === true;
-    subtitle.textContent = `Encode #${encodeId}`;
-    body.innerHTML = `<div class="text-foreground-muted">Loading…</div>`;
-    modal.classList.remove("hidden");
-
-    const qs = new URLSearchParams();
-    qs.set("probe_encoded", probeEncoded ? "1" : "0");
-    qs.set("probe_source", probeSource ? "1" : "0");
-    const url = `/api/review/encode/${encodeId}?${qs.toString()}`;
-
-    const resp = await fetch(url);
-    let data = null;
-    try {
-      data = await resp.json();
-    } catch (e) {
-      body.textContent = String(e);
-      return;
-    }
-    if (!resp.ok || !data?.success) {
-      body.textContent = data?.error || resp.statusText || "failed to load";
-      return;
-    }
-
-    body.innerHTML = renderInspection(data);
-  }
-
-  function closeInspection() {
-    const modal = document.getElementById("inspectModal");
-    if (!modal) return;
-    modal.classList.add("hidden");
-  }
-
-  function bindInspection() {
-    const modal = document.getElementById("inspectModal");
-    if (!modal) return;
-    modal.addEventListener("click", (e) => {
-      if (e.target === modal) closeInspection();
-    });
-    window.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") closeInspection();
-    });
-  }
-
   window.mfUi = {
     setTone,
     setStatus,
@@ -393,12 +343,9 @@
     updateNavWatch,
     escapeHtml,
     getPageData,
-    bindInspection,
   };
 
   window.mfInspect = {
-    open: openInspection,
-    close: closeInspection,
     fetch: fetchInspection,
     renderHtml: renderInspection,
     loadInto: loadInspectionInto,

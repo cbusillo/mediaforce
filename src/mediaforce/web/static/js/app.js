@@ -54,7 +54,6 @@
       const apply = (el, show) => {
         if (!el) return;
         el.classList.toggle("nav-scroll-hint--hidden", !show);
-        el.style.opacity = show ? "1" : "0";
       };
 
       if (!canScroll) {
@@ -77,6 +76,5 @@
     bindThemeToggle();
     bindMobileMenu();
     bindNavScrollHint();
-    window.mfUi?.bindInspection?.();
   });
 })();

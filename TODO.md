@@ -1,27 +1,34 @@
 # TODO
 
-Keep this list short and current. Completed work should move to `CHANGELOG.md` (or git history).
+Keep this list short and current. Completed work should live in git history.
 
-## Priority (Architecture & Stability)
+## Now (UI/UX + Cleanup)
 
-- [x] **Refactor `core.py`**
-  - Finish extracting orchestration logic (encoding loops, scan triggers) into a dedicated `OrchestrationService` or `PipelineService`.
-  - Reduce `core.py` to a thin CLI wiring layer.
+- [ ] **Standardize web UI**
+  - Use shared macros (`partials/ui_macros.html`) and shared JS (`static/js/ui.js`)
+    across all pages.
+  - Align page headers, toolbars, buttons, and empty states with `Review` as the
+    baseline.
 
-- [x] **Dockerize Worker**
-  - Create `Dockerfile.worker` to provide a reproducible environment with the correct `ffmpeg` build (libsvtav1) and Python dependencies.
-  - Simplify deployment on NAS/servers (Unraid, Synology, etc.).
+- [ ] **Review workflow UX**
+  - Keep row-details inline (no popups) and highlight “attention needed” changes
+    (track count changes, codec/profile changes, VMAF outliers).
+  - Reduce table clutter (short filename display; show full details on expand +
+    compare).
 
-## Features
+- [ ] **Compare page UX**
+  - Keep controls/actions pinned at the top.
+  - Make layout predictable (fit/fill toggle; consistent sizing; show inspection
+    inline).
 
-- [x] **Notification Channels**
-  - Implement a `NotificationService` for key events:
-    - Encode completion (Season/Movie finished).
-    - Worker failure/stuck alerts.
-    - Quality Loop decisions (e.g., "Downgraded to `mediocre` due to low VMAF").
-  - Support generic Webhooks (Discord, Slack, Gotify).
+- [ ] **Remove legacy/duplicated UI code**
+  - Delete unused handlers/templates and converge on a single pattern for worker
+    controls, filtering, and status messaging.
 
-## Documentation & Polish
+## Soon (Pipeline & Data Hygiene)
 
-- [x] **Worker Service Docs**
-  - Document recommended service configs for systemd + launchd (env files, restart semantics).
+- [ ] **Data reset tooling**
+  - Add safe UI/API action(s) to clear review/queue state and reconcile transcode
+    location contents.
+  - Ensure this respects per-host library mappings and does not delete original
+    media.
