@@ -279,6 +279,24 @@ MEDIAFORCE_MACHINE_NAME=&lt;short-hostname&gt;</code></pre>
         <div id="cleanup-preview-result" class="text-sm text-foreground-muted"></div>
     </div>
 
+    <div class="space-y-2 pt-4 border-t border-surface-subtle">
+        <div class="font-medium text-danger">Reset Everything</div>
+        <div class="text-sm text-foreground-muted">
+            Resets queue + review state, and optionally deletes encode results and cleans transcode files.
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+            <label class="inline-flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" id="cleanup-resetall-delete-encodes" aria-label="Delete all encode results" />
+                <span class="text-sm">Delete all encodes</span>
+            </label>
+            <label class="inline-flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" id="cleanup-resetall-clean-transcode" aria-label="Clean transcode files" checked />
+                <span class="text-sm">Clean transcode files</span>
+            </label>
+            <button type="button" id="cleanup-reset-all" class="btn btn-sm btn-danger">Reset Everything</button>
+        </div>
+    </div>
+
     <div id="cleanup-status" class="text-sm"></div>
 </div>
 

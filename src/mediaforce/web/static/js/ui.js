@@ -72,10 +72,12 @@
     const codec = track?.codec || track?.codec_name || "?";
     const channels = track?.channels;
     const bitrate = track?.bitrate_kbps || track?.bit_rate_kbps;
+    const rate = track?.sample_rate_hz || track?.sample_rate || track?.sampleRate;
     const lang = track?.language || track?.tags?.language;
     const parts = [codec.toString().toUpperCase()];
     if (channels) parts.push(`${channels}ch`);
     if (bitrate) parts.push(`${bitrate}k`);
+    if (rate) parts.push(`${rate}Hz`);
     if (lang) parts.push(lang);
     return parts.join(" ");
   }
@@ -137,7 +139,10 @@
         kv("Interlaced", v?.is_interlaced ? "yes" : "no"),
       ].join("");
 
-      const audioList = (paud.length ? paud : aud).slice(0, 10).map((t) => `<li>${escapeHtml(formatTrack(t))}</li>`).join("");
+      const trackList = (paud.length ? paud : aud).slice(0, 16);
+      const audioList = trackList
+        .map((t, idx) => `<li><span class='text-foreground-muted'>#${idx + 1}</span> ${escapeHtml(formatTrack(t))}</li>`)
+        .join("");
       const subtitleCount = (psub.length ? psub : sub).length;
 
       return `

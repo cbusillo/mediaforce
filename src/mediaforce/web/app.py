@@ -803,6 +803,13 @@ class CleanupTranscodeFilesRequest(BaseModel):
     transcode_root: Optional[str] = None
 
 
+class CleanupResetAllRequest(BaseModel):
+    confirm: bool = False
+    delete_encode_results: bool = False
+    clean_transcode_files: bool = True
+    transcode_root: Optional[str] = None
+
+
 class WorkerNormalizeRequest(BaseModel):
     older_than_days: int = 7
     offline_only: bool = True
@@ -1512,6 +1519,23 @@ def _compute_attention_alerts(payload: dict) -> list[dict]:
 
     alerts: list[dict] = []
 
+    def track_sig(track: dict) -> tuple[str, str, str]:
+        codec = (track.get("codec") or track.get("codec_name") or "?")
+        codec = str(codec).upper()
+        channels = track.get("channels")
+        channels_s = f"{channels}ch" if channels else ""
+        lang = track.get("language") or (track.get("tags") or {}).get("language") or ""
+        return (codec, channels_s, str(lang))
+
+    def format_sig(sig: tuple[str, str, str]) -> str:
+        codec, channels_s, lang = sig
+        parts = [codec]
+        if channels_s:
+            parts.append(channels_s)
+        if lang:
+            parts.append(lang)
+        return " ".join(parts).strip() or "?"
+
     def add(alert_type: str, severity: str, message: str, short: str | None = None):
         alerts.append(
             {
@@ -1524,7 +1548,7 @@ def _compute_attention_alerts(payload: dict) -> list[dict]:
 
     src_tracks = (src_probe.get("audio_tracks") or src.get("audio_tracks") or [])
     enc_tracks = (enc_probe.get("audio_tracks") or [])
-    if src_tracks and enc_tracks and len(src_tracks) != len(enc_tracks):
+    if (src_tracks or enc_tracks) and len(src_tracks) != len(enc_tracks):
         diff = len(enc_tracks) - len(src_tracks)
         sign = "+" if diff > 0 else ""
         add(
@@ -1533,10 +1557,25 @@ def _compute_attention_alerts(payload: dict) -> list[dict]:
             f"Audio tracks changed: {len(src_tracks)} → {len(enc_tracks)}",
             f"Audio {sign}{diff}",
         )
+    elif src_tracks and enc_tracks:
+        src_sigs = sorted(track_sig(t) for t in src_tracks if isinstance(t, dict))
+        enc_sigs = sorted(track_sig(t) for t in enc_tracks if isinstance(t, dict))
+        if src_sigs != enc_sigs:
+            add("audio_signature", "warning", "Audio track details changed", "Audio Δ")
+            for idx, (s_sig, e_sig) in enumerate(zip(src_sigs, enc_sigs)):
+                if s_sig != e_sig:
+                    add(
+                        "audio_track",
+                        "warning",
+                        f"Audio: {format_sig(s_sig)} → {format_sig(e_sig)}",
+                        f"Audio #{idx + 1} Δ",
+                    )
+                    if idx >= 1:
+                        break
 
     src_subs = (src_probe.get("subtitle_tracks") or src.get("subtitle_tracks") or [])
     enc_subs = (enc_probe.get("subtitle_tracks") or [])
-    if src_subs and enc_subs and len(src_subs) != len(enc_subs):
+    if (src_subs or enc_subs) and len(src_subs) != len(enc_subs):
         diff = len(enc_subs) - len(src_subs)
         sign = "+" if diff > 0 else ""
         add(
@@ -3127,6 +3166,64 @@ async def api_cleanup_transcode_files(data: CleanupTranscodeFilesRequest):
         "transcode_root": str(transcode_root),
         **result,
     }
+
+
+@app.post("/api/cleanup/reset-all")
+async def api_cleanup_reset_all(data: CleanupResetAllRequest):
+    if not data.confirm:
+        return {"success": False, "error": "Confirmation required"}
+
+    results: dict[str, Any] = {}
+
+    # Reset queue/inventory state.
+    with session_scope() as session:
+        items = session.exec(select(MediaItem)).all()
+        affected = 0
+        for item in items:
+            item.status = "pending"
+            item.skip_reason = None
+            item.claimed_by = None
+            item.claimed_at = None
+            item.cooldown_until = None
+            session.add(item)
+            affected += 1
+
+        if data.delete_encode_results:
+            raw_count = session.exec(select(func.count()).select_from(EncodeResult)).one()
+            count = raw_count[0] if isinstance(raw_count, (tuple, list)) else (raw_count or 0)
+            session.exec(delete(EncodeResult))
+            session.exec(delete(EncodeProgress))
+            results["review"] = {"deleted": int(count)}
+        else:
+            rows = session.exec(select(EncodeResult)).all()
+            reset = 0
+            for enc in rows:
+                enc.review_status = "pending"
+                enc.reviewed_at = None
+                session.add(enc)
+                reset += 1
+            results["review"] = {"reset": reset}
+
+        session.commit()
+        results["queue"] = {"reset": affected}
+
+    # Clean transcode files if requested.
+    if data.clean_transcode_files:
+        transcode_root = pathlib.Path(data.transcode_root or default_transcode_root())
+        ok, reason = _validate_transcode_root(transcode_root)
+        if not ok:
+            results["transcode"] = {"success": False, "error": reason}
+        else:
+            transcode_root = normalize_path(transcode_root)
+            trans = _cleanup_transcode_root(transcode_root, dry_run=False)
+            results["transcode"] = {
+                "success": True,
+                "transcode_root": str(transcode_root),
+                "deleted_files": len(trans.get("deleted_files") or []),
+                "bytes_freed": trans.get("bytes_freed") or 0,
+            }
+
+    return {"success": True, "results": results}
 
 
 @app.get("/api/workers")

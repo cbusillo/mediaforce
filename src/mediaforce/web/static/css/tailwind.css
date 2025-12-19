@@ -2422,6 +2422,10 @@ input[type="text"]::placeholder,
   border-top-color: var(--border-subtle);
 }
 
+.details-row .card {
+  background-color: var(--surface-card);
+}
+
 .btn-icon-success {
   border-color: rgb(34 197 94 / 0.35);
   background-color: rgb(34 197 94 / 0.14);

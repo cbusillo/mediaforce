@@ -237,9 +237,40 @@
     }
   }
 
+  async function cleanupResetAll() {
+    const deleteEncodes = document.getElementById("cleanup-resetall-delete-encodes")?.checked;
+    const cleanTranscode = document.getElementById("cleanup-resetall-clean-transcode")?.checked;
+    const root = document.getElementById("cleanup-transcode-root")?.value || "";
+
+    const msg =
+      `Reset everything?\n\n` +
+      `- Queue reset: yes\n` +
+      `- Review reset: ${deleteEncodes ? "delete all encodes" : "reset to pending"}\n` +
+      `- Clean transcode: ${cleanTranscode ? "yes" : "no"}\n\n` +
+      `This cannot be undone.`;
+
+    const ok = window.confirm(msg);
+    if (!ok) return;
+
+    window.mfUi?.setStatus(cleanupStatus, "Resetting…", "warning");
+    const resp = await window.mfApi.postJson("/api/cleanup/reset-all", {
+      confirm: true,
+      delete_encode_results: !!deleteEncodes,
+      clean_transcode_files: !!cleanTranscode,
+      transcode_root: root,
+    });
+    if (resp.ok && resp.data?.success) {
+      window.mfUi?.setStatus(cleanupStatus, "Reset complete.", "success");
+      if (previewResult) previewResult.textContent = JSON.stringify(resp.data.results || {});
+    } else {
+      window.mfUi?.setStatus(cleanupStatus, resp.data?.error || resp.error || "Reset failed.", "danger");
+    }
+  }
+
   document.getElementById("cleanup-reset-queue")?.addEventListener("click", cleanupResetQueue);
   document.getElementById("cleanup-reset-review")?.addEventListener("click", () => cleanupClearReview(false));
   document.getElementById("cleanup-delete-review")?.addEventListener("click", () => cleanupClearReview(true));
   document.getElementById("cleanup-preview")?.addEventListener("click", cleanupPreviewTranscode);
   document.getElementById("cleanup-apply")?.addEventListener("click", cleanupApplyTranscode);
+  document.getElementById("cleanup-reset-all")?.addEventListener("click", cleanupResetAll);
 })();
