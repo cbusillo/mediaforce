@@ -1,36 +1,57 @@
-{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, toolbar_search_input, table_empty_row %} {% block content %}
-{{ page_header("Library", "Shows", "Tier overrides apply during scanning and queueing.") }}
+{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, toolbar_search_input, table_empty_row, toolbar_chip %} {% block content %}
+{% call page_header("Library", "Shows", "Tier overrides apply during scanning and queueing.") %}
+<div class="flex items-center gap-2">
+  <a href="/settings" class="btn btn-sm">Settings</a>
+</div>
+{% endcall %}
 
-<!-- Search/Filter -->
-<div class="card mb-4 review-toolbar">
+<div class="card review-toolbar space-y-4 mb-4">
   <div class="review-toolbar__row">
-    <div class="flex-1 min-w-[200px]">{{ toolbar_search_input('showSearch', 'Search shows', '', 'filterShows()', 'w-full') }}</div>
-    <select id="tierFilter" aria-label="Filter by tier" onchange="filterShows()" class="form-select">
-      <option value="">All Tiers</option>
+    <div class="flex-1 min-w-[200px]">
+      {{ toolbar_search_input('showSearch', 'Search shows', '', 'filterShows()', 'w-full') }}
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="pill pill-off"><span id="showCount">{{ shows|length }}</span> shows</span>
+    </div>
+  </div>
+  <div class="review-toolbar__row review-toolbar__row--filters">
+    <div class="review-toolbar__label">Filter</div>
+    <div class="flex flex-wrap items-center gap-2">
+      <div class="flex flex-wrap items-center gap-1">
+        {{ toolbar_chip('All', 'setTierFilter(\'\')', true, None, 'js-tier-chip') }}
+        {{ toolbar_chip('Pristine', 'setTierFilter(\'pristine\')', false, None, 'js-tier-chip') }}
+        {{ toolbar_chip('Good', 'setTierFilter(\'good\')', false, None, 'js-tier-chip') }}
+        {{ toolbar_chip('Mediocre', 'setTierFilter(\'mediocre\')', false, None, 'js-tier-chip') }}
+        {{ toolbar_chip('Poor', 'setTierFilter(\'poor\')', false, None, 'js-tier-chip') }}
+        {{ toolbar_chip('Has Override', 'setTierFilter(\'override\')', false, None, 'js-tier-chip') }}
+      </div>
+    </div>
+    <select id="tierFilter" aria-label="Filter by tier" onchange="filterShows()" class="form-select hidden">
+      <option value="" selected>All Tiers</option>
       <option value="pristine">Pristine</option>
       <option value="good">Good</option>
       <option value="mediocre">Mediocre</option>
       <option value="poor">Poor</option>
       <option value="override">Has Override</option>
     </select>
-    <span class="pill pill-off"><span id="showCount">{{ shows|length }}</span> shows</span>
   </div>
+  <div id="showsStatus" class="text-sm text-foreground-muted"></div>
 </div>
 
 <div class="card">
   <div class="overflow-auto">
-    <table id="showsTable" class="table-auto w-full text-sm table-zebra">
+    <table id="showsTable" class="table-auto w-full text-sm table-zebra table-fixed">
       <thead>
         <tr>
-          <th>Show Name</th>
-          <th>Episodes</th>
-          <th>Pending</th>
-          <th>Encoding</th>
-          <th>Encoded</th>
-          <th>Completed</th>
-          <th>Detected Tier</th>
-          <th>Override</th>
-          <th>Actions</th>
+          <th class="w-[260px]">Show</th>
+          <th class="w-[90px]">Episodes</th>
+          <th class="w-[90px]">Pending</th>
+          <th class="w-[90px]">Encoding</th>
+          <th class="w-[90px]">Encoded</th>
+          <th class="w-[90px]">Done</th>
+          <th class="w-[120px]">Detected</th>
+          <th class="w-[220px]">Override</th>
+          <th class="w-[160px]">Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -40,7 +61,7 @@
           data-tier="{{ show.detected_tier }}"
           data-override="{{ show.override_tier or '' }}"
         >
-          <td>{{ show.name }}</td>
+          <td class="truncate" title="{{ show.name }}">{{ show.name }}</td>
           <td>{{ show.total }}</td>
           <td>{{ show.pending }}</td>
           <td>{{ show.encoding }}</td>
@@ -63,7 +84,7 @@
           </td>
           <td>
             {% if show.pending > 0 %}
-            <button onclick="applyTierToShow('{{ show.name|e }}')" class="btn btn-sm btn-primary">
+            <button onclick="applyTierToShow('{{ show.name|e }}')" class="btn btn-sm">
               Apply to Pending
             </button>
             {% endif %}

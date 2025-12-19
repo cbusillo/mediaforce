@@ -1,5 +1,10 @@
-{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, table_empty_row %} {% block content %}
-{{ page_header("Overview", "Dashboard", "Library status, worker health, and recent activity.") }}
+{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, table_empty_row, toolbar_chip %} {% block content %}
+{% call page_header("Overview", "Dashboard", "Library status, worker health, and recent activity.") %}
+<div class="flex items-center gap-2">
+  <a class="btn btn-sm" href="/settings">Settings</a>
+  {{ toolbar_chip('Refresh', 'window.location.reload()') }}
+</div>
+{% endcall %}
 
 {% if lib_status %}
 <div class="card mb-6">
