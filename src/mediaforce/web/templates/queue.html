@@ -1,4 +1,4 @@
-{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, table_empty_row, toolbar_search_input %} {% block content %}
+{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, table_empty_row, toolbar_search_input, toolbar_chip %} {% block content %}
 {{ page_header("Pipeline", "Queue", "Browse pending titles and prioritize work.") }}
 
 <div id="toast" class="toast hidden"></div>
@@ -71,9 +71,9 @@
     </div>
     <div class="flex items-center gap-2 flex-wrap">
       <button class="btn btn-sm btn-accent" onclick="applyFilters()">Apply</button>
-      <button class="btn btn-sm" onclick="resetFilters()">Reset</button>
-      <button class="btn btn-sm" onclick="expandAll()">Expand All</button>
-      <button class="btn btn-sm" onclick="collapseAll()">Collapse All</button>
+      {{ toolbar_chip('Reset', 'resetFilters()') }}
+      {{ toolbar_chip('Expand All', 'expandAll()') }}
+      {{ toolbar_chip('Collapse All', 'collapseAll()') }}
     </div>
   </div>
 </div>

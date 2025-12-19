@@ -939,6 +939,14 @@ input[type="text"]::placeholder,
   box-shadow: none;
 }
 
+.btn-xs.btn-success,
+.btn-xs.btn-warning,
+.btn-xs.btn-danger,
+.btn-xs.btn-accent,
+.btn-xs.btn-primary {
+  box-shadow: none;
+}
+
 .btn-primary {
   border-style: none;
   --tw-bg-opacity: 1;
@@ -2274,6 +2282,12 @@ input[type="text"]::placeholder,
   z-index: 10;
   background: linear-gradient(to right, rgba(0, 0, 0, 0), var(--surface-subtle));
   color: var(--foreground-muted);
+  opacity: 1;
+  transition: opacity 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.nav-scroll-hint:not(.nav-scroll-hint--hidden) {
+  opacity: 0.95;
 }
 
 .nav-scroll-hint--left {
@@ -2288,7 +2302,7 @@ input[type="text"]::placeholder,
 }
 
 .nav-scroll-hint--hidden {
-  display: none;
+  opacity: 0;
 }
 
 .nav-scroll-pad {
@@ -2360,18 +2374,23 @@ input[type="text"]::placeholder,
   font-size: 0.75rem;
   line-height: 1rem;
   font-weight: 600;
-  background-color: var(--surface-subtle);
+  background-color: var(--surface-card);
   color: var(--foreground-muted);
   border-width: 1px;
-  border-color: transparent;
+  border-color: rgb(148 163 184 / 0.18);
   transition: background-color 150ms cubic-bezier(0.4, 0, 0.2, 1), color 150ms cubic-bezier(0.4, 0, 0.2, 1),
     border-color 150ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .filter-chip:hover {
-  background-color: var(--surface-card);
+  background-color: var(--surface-subtle);
   color: var(--foreground);
-  border-color: var(--border-subtle);
+  border-color: rgb(148 163 184 / 0.28);
+}
+
+.filter-chip:focus-visible {
+  outline: 2px solid rgb(59 130 246 / 0.55);
+  outline-offset: 2px;
 }
 
 .filter-chip--active {

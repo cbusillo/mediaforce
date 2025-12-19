@@ -572,12 +572,20 @@
   }
 
   function openCard(showName) {
-    const row = document.querySelector(`tr.show-row[data-show="${CSS.escape(showName)}"]`);
-    if (row) {
-      const icon = row.querySelector(".expand-icon");
-      if (icon && !icon.classList.contains("expanded")) icon.click();
-      window.scrollTo({ top: row.offsetTop - 80, behavior: "smooth" });
+    const tableView = document.getElementById("tableView");
+    if (tableView?.classList.contains("hidden")) {
+      const url = new URL(window.location.href);
+      url.searchParams.set("view", "table");
+      url.searchParams.set("open_show", showName);
+      window.location.href = url.toString();
+      return;
     }
+
+    const row = document.querySelector(`tr.show-row[data-show="${CSS.escape(showName)}"]`);
+    if (!row) return;
+    const icon = row.querySelector(".expand-icon");
+    if (icon && !icon.classList.contains("expanded")) icon.click();
+    window.scrollTo({ top: row.offsetTop - 80, behavior: "smooth" });
   }
 
   document.querySelectorAll(".show-row").forEach((row) => {
@@ -602,6 +610,20 @@
   });
 
   attachSortHandlers(document);
+
+  const openShow = new URL(window.location.href).searchParams.get("open_show") || "";
+  if (openShow) {
+    setTimeout(() => {
+      openCard(openShow);
+      try {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("open_show");
+        window.history.replaceState({}, "", url.toString());
+      } catch (_) {
+        /* ignore */
+      }
+    }, 0);
+  }
 
   window.applyFilters = applyFilters;
   window.resetFilters = resetFilters;

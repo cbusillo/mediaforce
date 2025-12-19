@@ -307,30 +307,35 @@ templates = Jinja2Templates(directory=str(templates_dir))
 def _static_rev() -> str:
     """Cache-buster for static assets.
 
-    Browsers can be aggressive about caching `/static/*`. We append a stable
-    revision string derived from local mtimes so UI changes (CSS/JS) appear
-    immediately after a refresh even without `--reload`.
+    Browsers can be aggressive about caching `/static/*`. We append a revision
+    string derived from local mtimes so UI changes (CSS/JS) appear immediately
+    after a refresh.
+
+    Note: this is computed at call time (not import time), so it reflects
+    changes even if the server remains running.
     """
 
     static_root = pathlib.Path(__file__).parent / "static"
     now = int(datetime.now().timestamp())
+
+    candidates: list[pathlib.Path] = []
+    css_dir = static_root / "css"
+    js_dir = static_root / "js"
+    if css_dir.exists():
+        candidates.extend([p for p in css_dir.rglob("*.css") if p.is_file()])
+    if js_dir.exists():
+        candidates.extend([p for p in js_dir.rglob("*.js") if p.is_file()])
+
+    if not candidates:
+        return str(now)
+
     try:
-        candidates: list[pathlib.Path] = []
-        css_dir = static_root / "css"
-        js_dir = static_root / "js"
-        if css_dir.exists():
-            candidates.extend([p for p in css_dir.rglob("*.css") if p.is_file()])
-        if js_dir.exists():
-            candidates.extend([p for p in js_dir.rglob("*.js") if p.is_file()])
-
-        mtimes = [p.stat().st_mtime for p in candidates]
-        if not mtimes:
-            return str(now)
-
-        # Use millisecond precision so back-to-back UI edits bust caches reliably.
-        return str(int(max(mtimes) * 1000))
+        latest = max(p.stat().st_mtime_ns for p in candidates)
     except Exception:
         return str(now)
+
+    # mtime_ns -> ms for compact query strings; ns precision avoids missed edits.
+    return str(latest // 1_000_000)
 
 
 def _parse_json_maybe_list(raw: str | None) -> list[dict]:
