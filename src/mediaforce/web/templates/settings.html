@@ -1,7 +1,11 @@
-{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, table_empty_row, worker_controls_bar %}
+{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, table_empty_row, worker_controls_bar, toolbar_chip %}
 
 {% block content %}
-{{ page_header("Config", "Settings", "Libraries, watcher, and host-level encode limits.") }}
+{% call page_header("Config", "Settings", "Libraries, watcher, and host-level encode limits.") %}
+<div class="flex items-center gap-2">
+  {{ toolbar_chip('Refresh', 'window.location.reload()') }}
+</div>
+{% endcall %}
 
 <div class="card space-y-4">
     <div class="section-heading">

@@ -1,8 +1,9 @@
-{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, table_empty_row %} {% block content %}
+{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, table_empty_row, toolbar_chip %} {% block content %}
 {% call page_header("Analytics", "Stats", "Compression savings, throughput, and quality over time.") %}
 <div class="flex flex-wrap items-center gap-2">
   <a class="btn btn-sm" href="/export/stats/daily.csv?days={{ window_days }}" download>Daily CSV</a>
   <a class="btn btn-sm" href="/export/stats/tiers.csv?days={{ window_days }}" download>Tiers CSV</a>
+  {{ toolbar_chip('Refresh', 'window.location.reload()') }}
   <form class="flex items-center gap-2" method="get" action="/stats">
     <label class="text-sm text-foreground-muted" for="days">Window</label>
     <select id="days" name="days" class="form-select" onchange="this.form.submit()">
@@ -45,10 +46,10 @@
   <div class="card">
     <h3 class="m-0 text-lg font-semibold">Daily</h3>
     <div class="overflow-auto mt-3">
-      <table class="table-auto w-full text-sm table-zebra">
+      <table class="table-auto w-full text-sm table-zebra table-fixed">
         <thead>
           <tr>
-            <th class="text-left">Day</th>
+            <th class="text-left w-[140px]">Day</th>
             <th class="text-right">Encodes</th>
             <th class="text-right">Saved</th>
             <th class="text-right">Avg Reduction</th>
@@ -73,10 +74,10 @@
   <div class="card">
     <h3 class="m-0 text-lg font-semibold">Reduction by Tier</h3>
     <div class="overflow-auto mt-3">
-      <table class="table-auto w-full text-sm table-zebra">
+      <table class="table-auto w-full text-sm table-zebra table-fixed">
         <thead>
           <tr>
-            <th class="text-left">Tier</th>
+            <th class="text-left w-[140px]">Tier</th>
             <th class="text-right">Encodes</th>
             <th class="text-right">Avg Reduction</th>
             <th class="text-right">Saved</th>
