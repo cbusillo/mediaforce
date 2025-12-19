@@ -3,7 +3,7 @@ name = "mediaforce"
 version = "0.3.0"
 description = "Content-aware media encoding with unified scheduling"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 
 dependencies = [
     "fastapi",
@@ -38,11 +38,11 @@ include = [
 
 [tool.black]
 line-length = 120
-target-version = ["py313"]
+target-version = ["py314"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py313"
+target-version = "py314"
 
 [tool.ruff.lint]
 extend-ignore = [
@@ -50,7 +50,7 @@ extend-ignore = [
 ]
 
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.14"
 ignore_missing_imports = false
 
 [[tool.mypy.overrides]]
