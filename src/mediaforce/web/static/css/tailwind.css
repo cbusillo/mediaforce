@@ -927,7 +927,7 @@ input[type="text"]::placeholder,
 /* Extra-compact buttons for dense table rows. */
 
 .btn-xs {
-  height: 1.5rem;
+  height: 1.25rem;
   padding-left: 0.5rem;
   padding-right: 0.5rem;
   padding-top: 0;
@@ -936,6 +936,7 @@ input[type="text"]::placeholder,
   line-height: 1rem;
   border-radius: 0.375rem;
   white-space: nowrap;
+  box-shadow: none;
 }
 
 .btn-primary {

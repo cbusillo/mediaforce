@@ -51,11 +51,11 @@
       const canControl = machine && machine !== "-";
       const actions = !canControl
         ? ""
-        : `<div class="flex flex-wrap gap-1">` +
+        : `<div class="flex items-center gap-1 flex-nowrap whitespace-nowrap">` +
           `<button class="btn btn-xs btn-success" onclick="settingsSetWorkerMode('${safeMachine}','run')">Run</button>` +
           `<button class="btn btn-xs btn-warning" onclick="settingsSetWorkerMode('${safeMachine}','drain')">Pause</button>` +
-          `<button class="btn btn-xs btn-danger" onclick="settingsStopNow('${safeMachine}')">Stop Now</button>` +
-          (w.override_mode ? `<button class="btn btn-xs" onclick="settingsClearWorkerOverride('${safeMachine}')">Clear Override</button>` : "") +
+          `<button class="btn btn-xs btn-danger" title="Stop now (kills ffmpeg and requeues)" onclick="settingsStopNow('${safeMachine}')">Stop</button>` +
+          (w.override_mode ? `<button class="btn btn-xs" onclick="settingsClearWorkerOverride('${safeMachine}')">Clear</button>` : "") +
           (state === "offline" ? `<button class="btn btn-xs" onclick="settingsDeleteWorker('${safeMachine}')">Remove</button>` : "") +
           `</div>`;
 

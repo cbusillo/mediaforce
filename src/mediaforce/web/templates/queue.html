@@ -1,4 +1,4 @@
-{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, table_empty_row %} {% block content %}
+{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, table_empty_row, toolbar_search_input %} {% block content %}
 {{ page_header("Pipeline", "Queue", "Browse pending titles and prioritize work.") }}
 
 <div id="toast" class="toast hidden"></div>
@@ -29,75 +29,63 @@
       </span>
     </div>
     <div class="flex flex-wrap items-center gap-3">
-      <span class="text-foreground-muted text-sm"
-        >Est. Savings: <strong class="text-success">{{ total_savings }}</strong></span
-      >
+      <span class="text-foreground-muted text-sm">Est. Savings: <strong class="text-success">{{ total_savings }}</strong></span>
       <button class="btn btn-sm btn-primary" onclick="triggerScan()">Rescan</button>
-      <button class="btn btn-sm btn-primary" onclick="toggleView()">
+      <button class="btn btn-sm" onclick="toggleView()">
         View: <span id="viewLabel">{{ 'Compact' if request.query_params.get('view') == 'compact' else 'Table' }}</span>
       </button>
     </div>
   </div>
 
   <div class="review-toolbar__row review-toolbar__row--filters">
-    <input
-      id="searchBox"
-      class="form-input"
-      type="text"
-      placeholder="Client filter"
-      aria-label="Filter by client"
-      oninput="filterShows()"
-      value=""
-    />
-    <input
-      id="serverShow"
-      class="form-input min-w-[180px]"
-      type="text"
-      placeholder="Show contains"
-      aria-label="Filter by show name"
-      value="{{ request.query_params.get('show','') }}"
-    />
-    <select id="tierFilter" class="form-select" aria-label="Filter by tier">
-      <option value="">Any tier</option>
-      <option value="pristine">pristine</option>
-      <option value="good">good</option>
-      <option value="mediocre">mediocre</option>
-      <option value="poor">poor</option>
-    </select>
-    <input
-      id="sizeMin"
-      class="form-input w-40"
-      type="text"
-      placeholder="Min size (e.g. 500MB)"
-      aria-label="Minimum size"
-      value="{{ request.query_params.get('size_min','') }}"
-    />
-    <input
-      id="sizeMax"
-      class="form-input w-40"
-      type="text"
-      placeholder="Max size (e.g. 5GB)"
-      aria-label="Maximum size"
-      value="{{ request.query_params.get('size_max','') }}"
-    />
-    <button class="btn btn-sm btn-accent" onclick="applyFilters()">Apply Filters</button>
-    <button class="btn btn-sm" onclick="resetFilters()">Reset</button>
-    <button class="btn btn-sm btn-primary" onclick="expandAll()">Expand All</button>
-    <button class="btn btn-sm btn-primary" onclick="collapseAll()">Collapse All</button>
-    <div class="pill pill-off" id="scanStatus">
-      Scan: {% if cur_status and cur_status.running %}running…{% elif cur_status and cur_status.last_scan %}last {{
-      cur_status.last_scan[:16] }}{% else %}never{% endif %}
+    <div class="flex items-center gap-2 flex-wrap">
+      <div class="review-toolbar__label">Filters</div>
+      {{ toolbar_search_input('searchBox', 'Client filter', '', 'filterShows()', 'min-w-[220px]') }}
+      {{ toolbar_search_input('serverShow', 'Show contains', request.query_params.get('show',''), None, 'min-w-[220px]') }}
+      <select id="tierFilter" class="form-select" aria-label="Filter by tier">
+        <option value="">Any tier</option>
+        <option value="pristine">pristine</option>
+        <option value="good">good</option>
+        <option value="mediocre">mediocre</option>
+        <option value="poor">poor</option>
+      </select>
+      <input
+        id="sizeMin"
+        class="form-input w-40"
+        type="text"
+        placeholder="Min size (e.g. 500MB)"
+        aria-label="Minimum size"
+        value="{{ request.query_params.get('size_min','') }}"
+      />
+      <input
+        id="sizeMax"
+        class="form-input w-40"
+        type="text"
+        placeholder="Max size (e.g. 5GB)"
+        aria-label="Maximum size"
+        value="{{ request.query_params.get('size_max','') }}"
+      />
+    </div>
+    <div class="flex items-center gap-2 flex-wrap">
+      <button class="btn btn-sm btn-accent" onclick="applyFilters()">Apply</button>
+      <button class="btn btn-sm" onclick="resetFilters()">Reset</button>
+      <button class="btn btn-sm" onclick="expandAll()">Expand All</button>
+      <button class="btn btn-sm" onclick="collapseAll()">Collapse All</button>
     </div>
   </div>
 </div>
 
 {% if workers %}
 <div class="card mb-4">
-  <div class="flex items-center justify-between gap-2 mb-2">
-    <h4 class="m-0 text-base font-semibold">Workers</h4>
+  <div class="section-heading">
+    <div>
+      <h3 class="section-title">Workers</h3>
+      <div class="section-subtle">Send a specific episode to a specific worker.</div>
+    </div>
+    <a class="btn btn-sm" href="/settings">Manage</a>
   </div>
   <div class="overflow-auto">
-    <table class="table-auto w-full text-sm table-zebra">
+    <table class="table-auto w-full text-sm table-zebra table-compact">
       <thead>
         <tr>
           <th>Machine</th>
@@ -115,7 +103,7 @@
           <td>{{ '%.0f'|format(w.percent_complete or 0) }}%</td>
           <td class="truncate" title="{{ w.sample_path }}">{{ w.sample_path or '-' }}</td>
           <td>
-            <button class="btn btn-sm" onclick="openSendModal('{{ w.machine }}')">Send to {{ w.machine }}</button>
+            <button class="btn btn-xs" onclick="openSendModal('{{ w.machine }}')">Send</button>
           </td>
         </tr>
         {% endfor %}
