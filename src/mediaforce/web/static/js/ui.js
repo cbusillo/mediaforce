@@ -171,6 +171,13 @@
       alerts.push({ text, tone, short });
     };
 
+    const severityRank = (tone) => {
+      if (tone === "danger") return 0;
+      if (tone === "warning") return 1;
+      if (tone === "info") return 2;
+      return 3;
+    };
+
     const serverAlerts = Array.isArray(payload?.attention_alerts) ? payload.attention_alerts : null;
     if (serverAlerts && serverAlerts.length) {
       serverAlerts.forEach((a) => {
@@ -215,13 +222,13 @@
       const eRes = `${eVid.width}x${eVid.height}`;
       if (sRes !== eRes) pushAlert(`Resolution: ${sRes} → ${eRes}`, "warning");
     }
-    if ((sVid.is_hdr || false) !== (eVid.is_hdr || false)) {
+    if (sVid.is_hdr !== eVid.is_hdr) {
       pushAlert(`HDR changed: ${(sVid.is_hdr ? "yes" : "no")} → ${(eVid.is_hdr ? "yes" : "no")}`, "warning");
     }
     if (sVid.bit_depth && eVid.bit_depth && sVid.bit_depth !== eVid.bit_depth) {
       pushAlert(`Bit depth: ${sVid.bit_depth} → ${eVid.bit_depth}`, "warning");
     }
-    if ((sVid.is_interlaced || false) !== (eVid.is_interlaced || false)) {
+    if (sVid.is_interlaced !== eVid.is_interlaced) {
       pushAlert(
         `Interlaced: ${(sVid.is_interlaced ? "yes" : "no")} → ${(eVid.is_interlaced ? "yes" : "no")}`,
         "warning",
@@ -276,7 +283,11 @@
       `
       : "";
 
-    const alertBar = alerts.length
+    const sortedAlerts = alerts
+      .slice()
+      .sort((a, b) => severityRank(String(a.tone || "warning")) - severityRank(String(b.tone || "warning")));
+
+    const alertBar = sortedAlerts.length
       ? `
         <div class="card">
           <div class="section-heading">
@@ -284,12 +295,12 @@
             <div class="section-subtle">Things worth checking</div>
           </div>
           <div class="flex flex-wrap gap-2">
-            ${alerts
+            ${sortedAlerts
               .slice(0, 8)
               .map((a) => {
                 const tone = String(a.tone || "warning");
                 const cls = tone === "danger" ? "chip-danger" : tone === "info" ? "chip-info" : "chip-warning";
-                return `<span class="chip ${cls}">${escapeHtml(a.text)}</span>`;
+                return `<span class="chip chip-sm ${cls}">${escapeHtml(a.text)}</span>`;
               })
               .join("")}
           </div>
@@ -349,11 +360,9 @@
   }
 
   window.mfUi = {
-    setTone,
     setStatus,
     setInlineStatus,
     updateNavScan,
-    updateNavWatch,
     escapeHtml,
     getPageData,
   };
@@ -423,16 +432,11 @@
 
       if (action === "global-mode") {
         const mode = target.getAttribute("data-mode") || "";
-        postGlobalWorkerMode(mode, statusEl);
-        return;
-      }
-      if (action === "cleanup-offline") {
-        cleanupOfflineWorkers(statusEl);
-        return;
-      }
-      if (action === "refresh") {
+        void postGlobalWorkerMode(mode, statusEl);
+      } else if (action === "cleanup-offline") {
+        void cleanupOfflineWorkers(statusEl);
+      } else if (action === "refresh") {
         dispatchWorkersRefresh();
-        return;
       }
     });
   }
