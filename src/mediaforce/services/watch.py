@@ -81,8 +81,6 @@ async def _watch_single_library(lib: LibrarySettings, root: pathlib.Path) -> Non
 
 
 async def watch_libraries(settings: Optional[AppSettings] = None) -> None:
-    """Watch all configured libraries that have watch enabled."""
-
     if settings is None:
         settings = load_app_settings()
 
@@ -92,4 +90,3 @@ async def watch_libraries(settings: Optional[AppSettings] = None) -> None:
         return
 
     await asyncio.gather(*[_watch_single_library(lib, root) for lib, root in libraries])
-

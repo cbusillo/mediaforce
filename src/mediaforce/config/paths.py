@@ -10,16 +10,12 @@ MEDIA_ROOTS_LINUX = ["/mnt/media", "/mnt/extras"]
 
 
 def get_media_roots() -> list[str]:
-    """Return coarse mount roots for the current platform."""
-
     if platform.system() == "Darwin":
         return MEDIA_ROOTS_MAC
     return MEDIA_ROOTS_LINUX
 
 
 def default_transcode_root() -> str:
-    """Return the default transcode root for the current platform."""
-
     roots = get_media_roots()
     if not roots:
         return "transcode"
@@ -27,8 +23,6 @@ def default_transcode_root() -> str:
 
 
 def normalize_path(path: pathlib.Path) -> pathlib.Path:
-    """Normalize path between macOS (/Volumes/...) and Linux (/mnt/...) mount points."""
-
     if path.exists():
         return path
 
@@ -54,8 +48,6 @@ def normalize_path(path: pathlib.Path) -> pathlib.Path:
 def iter_libraries_for_current_host(
     settings: Optional[AppSettings] = None,
 ) -> list[tuple[LibrarySettings, pathlib.Path]]:
-    """Return (library, resolved root path) for the current OS."""
-
     if settings is None:
         settings = load_app_settings()
 
@@ -70,8 +62,6 @@ def iter_libraries_for_current_host(
 
 
 def get_library_root(path: pathlib.Path) -> pathlib.Path:
-    """Infer the library root (tv, movies, etc.) for a given path."""
-
     path = path.resolve()
     for root in get_media_roots():
         root_path = pathlib.Path(root)
@@ -90,8 +80,6 @@ def find_library_for_path(
     path: pathlib.Path,
     settings: Optional[AppSettings] = None,
 ) -> tuple[Optional[LibrarySettings], Optional[pathlib.Path]]:
-    """Match a filesystem path against configured libraries."""
-
     resolved = path.resolve()
     if settings is None:
         settings = load_app_settings()
@@ -106,14 +94,11 @@ def find_library_for_path(
 
 
 def get_db_path(_: Optional[pathlib.Path] = None) -> pathlib.Path:
-    """Return the unified inventory database path."""
     from mediaforce.config.settings import INVENTORY_DB
     return INVENTORY_DB
 
 
 def resolve_target_height_for_path(path: pathlib.Path, settings: AppSettings) -> tuple[Optional[int], str]:
-    """Resolve the downscale target height for a given path."""
-
     path_str = str(path)
     for lib in settings.libraries:
         roots = [lib.mac_path, lib.linux_path]
@@ -138,8 +123,6 @@ def resolve_target_height_for_path(path: pathlib.Path, settings: AppSettings) ->
 
 
 def get_transcode_output_path(source_path: pathlib.Path, transcode_root: pathlib.Path) -> Optional[pathlib.Path]:
-    """Find the corresponding encoded file in the transcode folder."""
-    # Find relative path from media root
     source_str = str(source_path)
     rel_path = None
     for root in get_media_roots():
@@ -149,19 +132,16 @@ def get_transcode_output_path(source_path: pathlib.Path, transcode_root: pathlib
 
     stem = source_path.stem
 
-    # Try structured path first
     if rel_path:
         output_dir = transcode_root / rel_path.parent
         output_path = output_dir / f"{stem}.AV1.mp4"
         if output_path.exists():
             return output_path
 
-    # Try flat structure
     flat_output = transcode_root / f"{stem}.AV1.mp4"
     if flat_output.exists():
         return flat_output
 
-    # Try with stripped codec markers
     stem_stripped = stem
     for marker in [".x264", ".x265", ".h264", ".h265", ".HEVC", ".AVC", ".H.264", ".H.265"]:
         stem_stripped = stem_stripped.replace(marker, "")

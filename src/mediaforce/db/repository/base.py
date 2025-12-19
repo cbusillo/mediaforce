@@ -1,4 +1,3 @@
-"""Repository helpers."""
 from dataclasses import dataclass
 from typing import Any, Generic, Iterable, Optional, Sequence, Type, TypeVar
 
@@ -36,15 +35,12 @@ class Pagination:
 
 
 class BaseRepository(Generic[ModelT]):
-    """Thin repository wrapper for SQLModel models."""
-
     model: Type[ModelT]
 
     def __init__(self, session: Session, model: Type[ModelT]):
         self.session = session
         self.model = model
 
-    # Reads -----------------------------------------------------------------
     def get(self, id_: int) -> Optional[ModelT]:
         return self.session.get(self.model, id_)
 
@@ -78,7 +74,6 @@ class BaseRepository(Generic[ModelT]):
             offset=paged.offset if paged else 0,
         )
 
-    # Writes ----------------------------------------------------------------
     def add(self, obj: ModelT, *, flush: bool = True) -> ModelT:
         self.session.add(obj)
         if flush:

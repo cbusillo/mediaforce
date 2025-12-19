@@ -19,7 +19,6 @@ from mediaforce.services.media_probe import find_ffprobe, probe_media
 
 
 def window_bitrate(path: pathlib.Path, start: float, duration: float = 5.0) -> Optional[float]:
-    """Approximate bitrate (bps) in a short window using ffprobe packets."""
     ffprobe = find_ffprobe()
     if not ffprobe:
         return None
@@ -61,7 +60,6 @@ def pick_sample_times(
     sample_len: float = 8.0,
     motion_aware: bool = True,
 ) -> list[float]:
-    """Pick sample start times (seconds)."""
     duration = info.duration_seconds or 0
     if duration <= 0:
         return []
@@ -73,7 +71,6 @@ def pick_sample_times(
         pct = [0.25, 0.5, 0.75][:count]
         return [clamp_ts(duration * p) for p in pct]
 
-    # Probe 8 candidate windows across the file
     candidates = []
     steps = max(count * 3, 8)
     for i in range(1, steps + 1):
@@ -92,11 +89,9 @@ def pick_sample_times(
     for _, ts in candidates:
         if len(chosen) >= count:
             break
-        # Keep simple spacing: avoid picks within sample_len of each other
         if all(abs(ts - c) > sample_len for c in chosen):
             chosen.append(ts)
 
-    # If we didn't get enough distinct windows, pad with spaced positions
     if len(chosen) < count:
         pct = [0.25, 0.5, 0.75]
         for p in pct:
@@ -115,7 +110,6 @@ def build_sample_plan(
     sample_len: float = 8.0,
     motion_aware: bool = True,
 ) -> list[tuple[float, float, str]]:
-    """Return a weighted sampling plan."""
     duration = info.duration_seconds or 0.0
     if duration <= 0:
         return []
@@ -172,7 +166,6 @@ def encode_sample_clip(
     duration: float,
     max_height: Optional[int],
 ) -> tuple[Optional[pathlib.Path], Optional[tuple[int, int]]]:
-    """Encode a short sample with current settings; return path and (w,h)."""
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
         return None, None
@@ -221,7 +214,6 @@ def encode_sample_clip(
     except Exception:
         return None, None
 
-    # Probe encoded dimensions
     ffprobe = find_ffprobe()
     if not ffprobe:
         return out_path, None
@@ -261,7 +253,6 @@ def compute_vmaf_score(
     duration: float,
     encoded_size: Optional[tuple[int, int]] = None,
 ) -> Optional[float]:
-    """Compute VMAF for a short clip; returns mean VMAF."""
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
         log_event(40, "ffmpeg_missing", stage="vmaf")
@@ -320,7 +311,6 @@ def sample_vmaf(
     sample_length: float = 8.0,
     motion_aware: bool = True,
 ) -> dict:
-    """Compute median/min VMAF across several samples."""
     times = pick_sample_times(info, count=sample_count, sample_len=sample_length, motion_aware=motion_aware)
     if not times:
         return {}
@@ -358,7 +348,6 @@ def measure_ssim_psnr(
     start_sec: float = 0,
     duration_sec: float = 0,
 ) -> tuple[Optional[float], Optional[float]]:
-    """Measure SSIM and PSNR between source and encoded video."""
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
         return None, None
@@ -423,7 +412,6 @@ def measure_vmaf(
     duration_sec: float = 0,
     model: str = "vmaf_v0.6.1",
 ) -> Optional[float]:
-    """Measure VMAF between source and encoded video."""
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
         return None
@@ -473,7 +461,6 @@ def verify_encode_quality(
     sample_positions: list[float] | None = None,
     use_vmaf: bool = True,
 ) -> QualityMetrics:
-    """Verify encoding quality by sampling and measuring metrics."""
     if sample_positions is None:
         sample_positions = [0.25, 0.5, 0.75]
 
@@ -525,26 +512,21 @@ def generate_compare_html(
     encode_id: Optional[int] = None,
     vmaf_score: Optional[float] = None,
 ) -> None:
-    """Generate HTML file for side-by-side video comparison."""
-    # Get file sizes
     source_size_mb = source_path.stat().st_size / 1024 / 1024
     encoded_size_mb = encoded_path.stat().st_size / 1024 / 1024
     ratio_pct = encoded_size_mb / source_size_mb * 100
 
-    # Format duration
     duration_str = ""
     if source_info and source_info.duration_seconds:
         mins = int(source_info.duration_seconds // 60)
         secs = int(source_info.duration_seconds % 60)
         duration_str = f"{mins}:{secs:02d}"
 
-    # VMAF display
     vmaf_html = ""
     if vmaf_score is not None:
         vmaf_color = "#4a4" if vmaf_score >= 90 else "#aa4" if vmaf_score >= 80 else "#a44"
         vmaf_html = f'<span style="color: {vmaf_color}">VMAF: {vmaf_score:.1f}</span>'
 
-    # Encode ID for promotion actions
     encode_id_attr = f'data-encode-id="{encode_id}"' if encode_id else ""
 
     html_content = f'''<!DOCTYPE html>

@@ -20,8 +20,6 @@ ENGINE = init_engine(str(DB_PATH))
 
 @dataclass
 class LibrarySettings:
-    """Configuration for a logical media library."""
-
     id: str
     name: str
     media_type: str  # e.g. "tv", "movies"
@@ -34,8 +32,6 @@ class LibrarySettings:
 
 @dataclass
 class AppSettings:
-    """Top-level application settings container."""
-
     libraries: list[LibrarySettings] = field(default_factory=list)
     global_max_height: Optional[int] = None
     max_concurrency: int = 1
@@ -45,8 +41,6 @@ class AppSettings:
 
 
 def _default_app_settings() -> AppSettings:
-    """Return default settings used when no config file exists."""
-
     return AppSettings(
         global_max_height=1080,
         max_concurrency=1,
@@ -72,8 +66,6 @@ def _default_app_settings() -> AppSettings:
 
 
 def load_app_settings() -> AppSettings:
-    """Load application settings from disk, falling back to defaults."""
-
     if SETTINGS_DB.exists():
         try:
             with Session(ENGINE) as session:
@@ -108,8 +100,6 @@ def load_app_settings() -> AppSettings:
 
 
 def save_app_settings(settings: AppSettings) -> None:
-    """Persist application settings to SQLite."""
-
     with Session(ENGINE) as session:
         setting = session.get(AppSetting, 1) or AppSetting(id=1)
         setting.global_max_height = settings.global_max_height
@@ -136,5 +126,4 @@ def save_app_settings(settings: AppSettings) -> None:
 
 
 def init_db(_: Optional[pathlib.Path] = None) -> Session:
-    """Initialize and return a Session."""
     return Session(ENGINE)

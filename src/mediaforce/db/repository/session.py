@@ -8,7 +8,6 @@ from mediaforce.config.settings import ENGINE
 
 @contextmanager
 def _session_scope() -> Iterator[Session]:
-    """Provide a transactional scope around a series of operations."""
     session = Session(ENGINE)
     try:
         yield session

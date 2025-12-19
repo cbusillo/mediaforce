@@ -81,12 +81,6 @@ def build_motion_weighted_plan(
     motion_aware: bool,
     window_bitrate: Optional[Callable[[pathlib.Path, float, float], Optional[float]]] = None,
 ) -> list[VmafPlanItem]:
-    """Return a 3-sample (short/mid/motion) plan with weights.
-
-    motion_aware requires window_bitrate callable (ffprobe-based) to choose a
-    high-motion window; otherwise it falls back to 75%.
-    """
-
     if duration_seconds <= 0 or sample_length <= 0:
         return []
 
@@ -171,8 +165,6 @@ def choose_profile(
     summary: VmafSummary,
     thresholds: VmafThresholds,
 ) -> tuple[str, str, str, Optional[str]]:
-    """Return (selected_profile, decision, status, note)."""
-
     if summary.minimum is not None and summary.minimum < thresholds.min_vmaf:
         selected = _tier_less_aggressive(initial_profile)
         note = f"min_vmaf_below_threshold ({summary.minimum:.1f} < {thresholds.min_vmaf:.1f})"
@@ -185,7 +177,6 @@ def choose_profile(
         decision = "bump" if selected != initial_profile else "keep"
         return selected, decision, "done", note
 
-    # If very high quality, try a more aggressive profile.
     high_threshold = thresholds.max_vmaf if thresholds.max_vmaf is not None else 95.0
     if summary.weighted is not None and summary.weighted >= high_threshold:
         selected = _tier_more_aggressive(initial_profile)

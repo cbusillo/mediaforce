@@ -69,14 +69,8 @@ else:
         Change = None
         awatch = None
 
-# Worker autoupdate pulls whitelisted files from the master web UI.
-#
-# The master only serves a tight allowlist (see `mediaforce.web.app`); when
-# autoupdate is enabled, we download *all* files listed in the manifest so
-# workers stay in sync even when internal modules are added/renamed.
 AUTOUPDATE_FILES: list[str] = []
 
-# Stale claim timeout (machine crashed) - 8 hours
 STALE_CLAIM_SECONDS = 8 * 60 * 60
 REMOTE_SETTINGS_URL_GLOBAL: str | None = None
 
@@ -101,10 +95,6 @@ def _download_file(url: str, dest: pathlib.Path, expected_sha256: str | None = N
 
 
 def maybe_autoupdate(base_url: str, files: list[str]) -> bool:
-    """Pull latest allowed files from base_url.
-
-    If files is empty, download everything listed in the manifest.
-    """
     if not base_url.endswith('/'):
         base_url += '/'
 
@@ -195,7 +185,6 @@ def run_ffmpeg_with_progress_api(
     progress_id: int,
     duration_sec: float,
 ) -> subprocess.CompletedProcess:
-    """Run ffmpeg with progress updates sent to the Mediaforce API."""
     cmd_with_progress = cmd.copy()
     try:
         idx = cmd_with_progress.index("-hide_banner") + 1

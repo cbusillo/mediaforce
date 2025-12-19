@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 # mypy: ignore-errors
 # pyright: reportMissingImports=false, reportOptionalOperand=false, reportAttributeAccessIssue=false
-"""
-Mediaforce web interface for managing encoding queues and monitoring progress.
-"""
-
 import asyncio
 import csv
 import io
@@ -85,8 +81,6 @@ from mediaforce.web.charts import sparkline_svg
 
 
 def _validate_transcode_root(transcode_root: pathlib.Path) -> tuple[bool, str]:
-    """Ensure requested transcode_root is safe to delete from."""
-
     try:
         root = transcode_root.resolve()
     except Exception:
@@ -158,8 +152,6 @@ def _cleanup_transcode_root(transcode_root: pathlib.Path, dry_run: bool) -> dict
 
 
 def _unwrap_count(value: Any, default: int = 0) -> int:
-    """Unwrap COUNT(*) results across SQLModel/SQLAlchemy return shapes."""
-
     if value is None:
         return default
     try:
@@ -181,8 +173,6 @@ def _unwrap_count(value: Any, default: int = 0) -> int:
         return default
 
 IS_MAC = platform_mod.system() == "Darwin"
-# Ensure the base logger is configured for shared service logs that emit events
-# against the default "mediaforce" component.
 configure_logging(env_log_config(component="mediaforce"))
 logger = configure_logging(env_log_config(component="mediaforce.web"))
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -213,18 +203,9 @@ def _csv_response(*, filename: str, header: Sequence[str], rows: Iterable[Sequen
 
 
 def get_default_library_path() -> str:
-    """Return the primary library path for this host.
-
-    We use the first configured library from the shared settings file,
-    falling back to the historical tv path if needed. This keeps the web
-    UI aligned with the CLI and watcher configuration while staying
-    compatible with existing deployments.
-    """
-
     settings: AppSettings = load_app_settings()
     libraries = iter_libraries_for_current_host(settings)
     if libraries:
-        # Use the first configured library for now (typically TV).
         _lib, root = libraries[0]
         return str(root)
 
@@ -235,8 +216,6 @@ DEFAULT_LIBRARY = get_default_library_path()
 
 
 def get_library_status(session: Session | None = None) -> list[dict]:
-    """Return library list with last_scan timestamp per library."""
-
     if session is None:
         with session_scope() as scoped:
             return get_library_status(scoped)
@@ -267,7 +246,6 @@ def get_library_status(session: Session | None = None) -> list[dict]:
 
 
 def get_worker_status(library_root: Optional[str] = None) -> list[dict]:
-    """Return active workers based on encode_progress entries."""
     _ = library_root
     try:
         with session_scope() as session:
@@ -278,8 +256,6 @@ def get_worker_status(library_root: Optional[str] = None) -> list[dict]:
 
 
 def _effective_worker_mode(session: Session, machine: str) -> str:
-    """Resolve worker mode from per-worker override or global setting."""
-
     machine_key = f"worker:{machine}"
     row = session.get(WorkerControl, machine_key)
     if row and row.mode:
@@ -338,8 +314,6 @@ def _apply_worker_controls(session: Session, workers: list[dict]) -> list[dict]:
 
 
 def _watch_status_snapshot() -> dict:
-    """Return a lightweight, read-only copy of the current watch status."""
-
     return {
         "running": WATCH_STATUS.get("running", False),
         "libraries": WATCH_STATUS.get("libraries", []),
@@ -348,8 +322,6 @@ def _watch_status_snapshot() -> dict:
 
 
 def _parse_size_param(value: Optional[str]) -> Optional[int]:
-    """Convert a size parameter in MB/GB suffix to bytes (None if invalid)."""
-
     if value is None:
         return None
     try:
@@ -371,8 +343,6 @@ def _parse_size_param(value: Optional[str]) -> Optional[int]:
 
 
 def _nav_status() -> dict:
-    """Build navigation status badges (scan + watch) with last-scan details."""
-
     libs = get_library_status()
     running_scans = [entry["root"] for entry in libs if entry.get("running")]
     last_scan_map = {entry["lib"].name: entry.get("last_scan") for entry in libs}
@@ -395,23 +365,12 @@ app = FastAPI(title="Mediaforce", description="Content-aware media encoding mana
 STATIC_DIR = PROJECT_ROOT / "src" / "mediaforce" / "web" / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-# Setup Jinja2 templates
 templates_dir = pathlib.Path(__file__).parent / "templates"
 templates_dir.mkdir(exist_ok=True)
 templates = Jinja2Templates(directory=str(templates_dir))
 
 
 def _static_rev() -> str:
-    """Cache-buster for static assets.
-
-    Browsers can be aggressive about caching `/static/*`. We append a revision
-    string derived from local mtimes so UI changes (CSS/JS) appear immediately
-    after a refresh.
-
-    Note: this is computed at call time (not import time), so it reflects
-    changes even if the server remains running.
-    """
-
     static_root = pathlib.Path(__file__).parent / "static"
     now = int(datetime.now().timestamp())
 
@@ -431,7 +390,6 @@ def _static_rev() -> str:
     except Exception:
         return str(now)
 
-    # mtime_ns -> ms for compact query strings; ns precision avoids missed edits.
     return str(latest // 1_000_000)
 
 
@@ -451,7 +409,6 @@ templates.env.globals["static_rev"] = _static_rev
 templates.env.globals["default_transcode_root"] = default_transcode_root
 
 
-# In-process watch task state
 WATCH_TASK: Optional[asyncio.Task] = None
 WATCH_STATUS: dict = {
     "running": False,
@@ -459,7 +416,6 @@ WATCH_STATUS: dict = {
     "message": "idle",
 }
 
-# Track web-triggered scan status
 SCAN_STATUS: dict[str, str] = {}
 
 RECONCILE_TASK: Optional[asyncio.Task] = None
@@ -517,8 +473,6 @@ app.router.lifespan_context = _lifespan
 
 @app.post("/api/reconcile/run")
 async def api_reconcile_run():
-    """Run a one-shot reconcile pass (Settings → Workers)."""
-
     with session_scope() as session:
         result = reconcile_queue_state(session)
     RECONCILE_LAST.update({"updated_at": datetime.now().isoformat(), "result": result, "error": None})
@@ -546,12 +500,6 @@ def _require_worker_api_auth(request: Request) -> None:
 
 
 def _build_allowed_raw_files() -> dict[str, str]:
-    """Return the allowlist of package files workers may pull from /raw/.
-
-    This intentionally limits exports to Python source within the mediaforce
-    package. Workers use these files for pull-based autoupdates.
-    """
-
     package_root = PROJECT_ROOT / "src" / "mediaforce"
     include_dirs = [
         package_root / "cli",
@@ -588,10 +536,6 @@ ALLOWED_RAW_FILES: dict[str, str] = _build_allowed_raw_files()
 
 @app.get("/raw/{filename:path}", response_class=PlainTextResponse)
 async def raw_file(filename: str):
-    """Serve whitelisted source files for remote workers (pull-based autoupdate).
-
-    Restricts to a small allowlist and prevents path traversal.
-    """
     if filename == "manifest.json":
         return JSONResponse(await raw_manifest())
     if filename not in ALLOWED_RAW_FILES:
@@ -607,7 +551,6 @@ async def raw_file(filename: str):
 
 @app.get("/raw/manifest.json")
 async def raw_manifest():
-    """Expose a simple manifest with version + sha256 hashes for allowed raw files."""
     version = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
     manifest = {"version": version, "files": {}}
     base = PROJECT_ROOT
@@ -636,7 +579,6 @@ QUEUE_TOTALS_TTL = 15  # seconds
 
 
 def _get_watch_libraries() -> list[str]:
-    """Return the library roots configured to be watched on this host."""
     settings = load_app_settings()
     libs = []
     for lib, root in iter_libraries_for_current_host(settings):
@@ -694,7 +636,6 @@ async def _start_watch_task() -> dict:
                 }
             )
 
-    # Mark running before returning so API callers see immediate state
     WATCH_STATUS.update(
         {
             "running": True,
@@ -876,8 +817,6 @@ class WorkerEncodeReportRequest(BaseModel):
 
 
 class LibrarySettingsModel(BaseModel):
-    """Pydantic model mirroring LibrarySettings for the API layer."""
-
     id: str
     name: str
     media_type: str
@@ -1042,7 +981,6 @@ def _serialize_feedback(fb: ProfileChoiceFeedback) -> dict:
 
 
 def resolve_existing_library_root() -> Optional[str]:
-    """Return first existing library root for this host, or None."""
     settings = load_app_settings()
     for _, root in iter_libraries_for_current_host(settings):
         if pathlib.Path(root).exists():
@@ -1081,7 +1019,6 @@ def extract_show_name(path: str) -> Optional[str]:
     return None
 
 
-# Add custom filters to Jinja2
 templates.env.filters["format_size"] = format_size
 templates.env.filters["format_duration"] = format_duration
 
@@ -1098,7 +1035,6 @@ def build_pagination_url(request: Request) -> Callable[[int], str]:
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    """Main dashboard with overview stats."""
     host_name = platform_mod.node()
     library_root = resolve_existing_library_root() or ""
     error = None
@@ -1194,7 +1130,6 @@ async def dashboard(request: Request):
 
 @app.get("/partials/dashboard/active-encodes", response_class=HTMLResponse)
 async def dashboard_active_encodes(request: Request):
-    """HTMX partial for active encodes table."""
     with session_scope() as session:
         progress_repo = ProgressRepository(session)
         active_rows = progress_repo.list_active()
@@ -1233,7 +1168,6 @@ async def dashboard_active_encodes(request: Request):
 
 @app.get("/partials/dashboard/stats", response_class=HTMLResponse)
 async def dashboard_stats(request: Request):
-    """HTMX partial for dashboard overview stats."""
     with session_scope() as session:
         media_repo = MediaRepository(session)
         encode_repo = EncodeRepository(session)
@@ -1262,7 +1196,6 @@ async def dashboard_stats(request: Request):
 
 @app.get("/partials/dashboard/workers", response_class=HTMLResponse)
 async def dashboard_workers(request: Request):
-    """HTMX partial for workers table."""
     with session_scope() as session:
         progress_repo = ProgressRepository(session)
         workers = progress_repo.list_workers()
@@ -1379,13 +1312,10 @@ async def stats_page(
 
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
-    """Application settings page (library configuration)."""
-
     settings: AppSettings = load_app_settings()
     libraries = settings.libraries
     global_max_height = settings.global_max_height
 
-    # Library status (last scan time per library)
     lib_status = get_library_status()
 
     api_url_hint = os.getenv("MEDIAFORCE_API_URL") or str(request.base_url).rstrip("/")
@@ -1411,10 +1341,6 @@ async def settings_page(request: Request):
 
 
 def parse_media_path(path: str, library_root: str = DEFAULT_LIBRARY) -> dict:
-    """Parse media path into show/season/episode components.
-
-    Works for both TV (Show/Season/File) and flat movies (Title/File).
-    """
     p = pathlib.Path(path)
     try:
         rel_path = p.relative_to(library_root)
@@ -1423,7 +1349,6 @@ def parse_media_path(path: str, library_root: str = DEFAULT_LIBRARY) -> dict:
 
     parts = rel_path.parts
     if len(parts) >= 3 and parts[1].lower().startswith("season"):
-        # TV structure
         return {
             "show_name": parts[0],
             "season": parts[1],
@@ -1431,7 +1356,6 @@ def parse_media_path(path: str, library_root: str = DEFAULT_LIBRARY) -> dict:
             "is_show": True,
         }
     elif len(parts) >= 2:
-        # Flat movie structure: Title/File
         return {
             "show_name": parts[0],
             "season": "Files",
@@ -1448,8 +1372,6 @@ def parse_media_path(path: str, library_root: str = DEFAULT_LIBRARY) -> dict:
 
 
 def _compact_filename_for_review(filename: str) -> str:
-    """Create a shorter, more scannable display name for the review table."""
-
     stem = pathlib.Path(filename).stem
     raw = stem.replace("_", ".").replace("-", ".")
     parts = [p for p in raw.split(".") if p]
@@ -1527,11 +1449,6 @@ def _vmaf_class(vmaf: float | None) -> str:
 
 
 def _compute_attention_alerts(payload: dict) -> list[dict]:
-    """Compute attention alerts for source → encoded comparisons.
-
-    This powers the inline Watchlist in Review/Compare.
-    """
-
     src = payload.get("source") or {}
     enc = payload.get("encoded") or {}
     probe = payload.get("probe") or {}
@@ -1741,7 +1658,6 @@ async def queue(
     size_min: Optional[str] = Query(None, description="Minimum size (e.g., 500MB, 5GB)"),
     size_max: Optional[str] = Query(None, description="Maximum size (e.g., 2GB)"),
 ):
-    """View encoding queue with hierarchical in-page drill-down."""
     if per_page not in [25, 50, 100, 200]:
         per_page = 50
 
@@ -1776,7 +1692,6 @@ async def queue_shows_view(
     size_min_bytes: Optional[int] = None,
     size_max_bytes: Optional[int] = None,
 ):
-    """View grouped by shows with filter/sort support."""
     sort = request.query_params.get("sort", "priority")
     direction = request.query_params.get("order", "desc").lower()
     direction = "desc" if direction not in ["asc", "desc"] else direction
@@ -1833,8 +1748,6 @@ async def queue_shows_view(
 async def queue_seasons_view(
     request: Request, repo: QueueRepository, show: str, page: int, per_page: int, library_root: str
 ):
-    """View seasons for a specific show via repository."""
-
     seasons_all = repo.list_seasons(library_root, show)
     total = len(seasons_all)
     total_files = sum(s.get("file_count", 0) for s in seasons_all)
@@ -1880,8 +1793,6 @@ async def search_page(
     status: Optional[str] = Query(None, description="Filter by status"),
     tier: Optional[str] = Query(None, description="Filter by tier"),
 ):
-    """Simple cross-page search across inventory/encodes."""
-
     library_root = resolve_existing_library_root()
     if not library_root:
         return templates.TemplateResponse(
@@ -1969,7 +1880,6 @@ async def search_page(
 
 @app.get("/completed", response_class=HTMLResponse)
 async def completed(request: Request):
-    """View completed (promoted) files."""
     with session_scope() as session:
         rows = session.exec(
             select(
@@ -2028,8 +1938,6 @@ async def completed(request: Request):
 async def export_completed_csv(
     limit: int = Query(5000, ge=1, le=50_000),
 ):
-    """Export completed (promoted) encodes as CSV."""
-
     with session_scope() as session:
         rows = session.exec(
             select(
@@ -2113,8 +2021,6 @@ async def export_completed_csv(
 async def export_stats_daily_csv(
     days: int = Query(30, ge=7, le=365),
 ):
-    """Export daily stats (encodes + savings) as CSV."""
-
     since = datetime.now() - timedelta(days=days - 1)
     with session_scope() as session:
         repo = StatsRepository(session)
@@ -2165,8 +2071,6 @@ async def export_stats_daily_csv(
 async def export_stats_tiers_csv(
     days: int = Query(30, ge=7, le=365),
 ):
-    """Export tier stats (encodes + savings) as CSV."""
-
     since = datetime.now() - timedelta(days=days - 1)
     with session_scope() as session:
         repo = StatsRepository(session)
@@ -2201,12 +2105,10 @@ async def review(
     page: int = Query(1, ge=1),
     per_page: int = Query(50),
 ):
-    """Review encodes pending promotion."""
     if per_page not in [25, 50, 100, 200]:
         per_page = 50
 
     with session_scope() as session:
-        # Count total items first
         count_stmt = (
             select(func.count(EncodeResult.id))
             .join(MediaItem, EncodeResult.source_id == MediaItem.id)
@@ -2307,7 +2209,6 @@ async def review(
 
 @app.get("/compare/{encode_id}", response_class=HTMLResponse)
 async def compare(request: Request, encode_id: int):
-    """Side-by-side video comparison."""
     with session_scope() as session:
         row = session.exec(
             select(
@@ -2392,7 +2293,6 @@ async def compare(request: Request, encode_id: int):
 
 @app.get("/shows", response_class=HTMLResponse)
 async def shows(request: Request):
-    """Show/Series management page."""
     with session_scope() as session:
         rows = session.exec(
             select(MediaItem.path, MediaItem.status, MediaItem.detected_tier).where(MediaItem.path.like("%/Season %"))
@@ -2452,7 +2352,6 @@ async def shows(request: Request):
 
 @app.get("/video/{video_type}/{encode_id}")
 async def serve_video(video_type: str, encode_id: int):
-    """Serve video files for comparison."""
     with session_scope() as session:
         row = session.exec(
             select(EncodeResult.output_path, MediaItem.path.label("source_path"))
@@ -2482,7 +2381,6 @@ async def serve_video(video_type: str, encode_id: int):
 
 @app.post("/api/promote/{encode_id}")
 async def api_promote(encode_id: int):
-    """Promote an encode (replace original with encoded version)."""
     rollback_state = None
     try:
         with session_scope() as session:
@@ -2540,7 +2438,6 @@ async def api_promote(encode_id: int):
 
 @app.post("/api/reject/{encode_id}")
 async def api_reject(encode_id: int, data: RejectRequest):
-    """Reject an encode."""
     try:
         with session_scope() as session:
             row = session.exec(
@@ -2591,7 +2488,6 @@ async def api_reject(encode_id: int, data: RejectRequest):
 
 @app.post("/api/bump")
 async def api_bump(data: BumpRequest):
-    """Bump an item to the front of the queue by lowering manual_priority."""
     if data.id is None and (not data.path):
         return {"success": False, "error": "id or path required"}
     with session_scope() as session:
@@ -2619,7 +2515,6 @@ class SendToWorkerRequest(BaseModel):
 
 @app.post("/api/send-to-worker")
 async def api_send_to_worker(data: SendToWorkerRequest):
-    """Hint a specific worker to take a pending item by bumping it and setting claimed_by."""
     if not data.worker:
         return {"success": False, "error": "worker required"}
     with session_scope() as session:
@@ -2642,7 +2537,6 @@ async def api_send_to_worker(data: SendToWorkerRequest):
 
 @app.post("/api/bulk-promote")
 async def api_bulk_promote(data: BulkPromoteRequest):
-    """Bulk promote multiple encodes."""
     if not data.ids:
         return {"success": False, "error": "No IDs provided"}
 
@@ -2715,7 +2609,6 @@ async def api_bulk_promote(data: BulkPromoteRequest):
 
 @app.post("/api/rollback/{encode_id}")
 async def api_rollback(encode_id: int):
-    """Rollback a previous promotion when a backup/manifest is available."""
     try:
         with session_scope() as session:
             row = session.exec(
@@ -2748,7 +2641,6 @@ async def api_rollback(encode_id: int):
 
 @app.post("/api/bulk-reject")
 async def api_bulk_reject(data: BulkRejectRequest):
-    """Bulk reject multiple encodes."""
     if not data.ids:
         return {"success": False, "error": "No IDs provided"}
 
@@ -2797,7 +2689,6 @@ async def api_bulk_reject(data: BulkRejectRequest):
 
 @app.post("/api/show-override")
 async def api_show_override(data: ShowOverrideRequest):
-    """Set or clear a tier override for a show."""
     if not data.show_name:
         return {"success": False, "error": "show_name required"}
     with session_scope() as session:
@@ -2823,7 +2714,6 @@ async def api_show_override(data: ShowOverrideRequest):
 
 @app.post("/api/apply-tier-to-show")
 async def api_apply_tier_to_show(data: ApplyTierRequest):
-    """Apply a tier to all pending episodes of a show."""
     if not data.show_name or not data.tier:
         return {"success": False, "error": "show_name and tier required"}
 
@@ -2861,8 +2751,6 @@ async def api_apply_tier_to_show(data: ApplyTierRequest):
 
 @app.post("/api/watch")
 async def api_watch_toggle(data: WatchToggleRequest):
-    """Start or stop the in-process library watcher."""
-
     try:
         if data.action == "start":
             status = await _start_watch_task()
@@ -2877,13 +2765,10 @@ async def api_watch_toggle(data: WatchToggleRequest):
 
 @app.post("/api/scan")
 async def api_scan_library(data: ScanRequest):
-    """Kick off a scan for a specific library path."""
-
     lib_path = data.path.strip()
     if not lib_path:
         return {"success": False, "error": "path is required"}
 
-    # Run scan as a subprocess to reuse the CLI logic safely.
     repo_dir = pathlib.Path(__file__).parent
     cmd = [sys.executable, "-m", "mediaforce", "scan", lib_path]
 
@@ -2918,10 +2803,7 @@ async def api_scan_library(data: ScanRequest):
 
 @app.post("/api/settings")
 async def api_update_settings(data: SettingsUpdateRequest):
-    """Update global application settings (libraries and watches)."""
-
     try:
-        # Convert Pydantic models back into our dataclasses for persistence.
         libs: list[LibrarySettings] = []
         for lib in data.libraries:
             libs.append(
@@ -3005,7 +2887,6 @@ async def api_cleanup_transcode_files(data: CleanupTranscodeFilesRequest):
     if not ok:
         return {"success": False, "error": reason}
 
-    # Resolve host mapping if the path doesn't exist on this machine.
     transcode_root = normalize_path(transcode_root)
 
     if not data.dry_run and not data.confirm:
@@ -3027,7 +2908,6 @@ async def api_cleanup_reset_all(data: CleanupResetAllRequest):
 
     results: dict[str, Any] = {}
 
-    # Reset queue/inventory state.
     with session_scope() as session:
         items = session.exec(select(MediaItem)).all()
         affected = 0
@@ -3059,7 +2939,6 @@ async def api_cleanup_reset_all(data: CleanupResetAllRequest):
         session.commit()
         results["queue"] = {"reset": affected}
 
-    # Clean transcode files if requested.
     if data.clean_transcode_files:
         transcode_root = pathlib.Path(data.transcode_root or default_transcode_root())
         ok, reason = _validate_transcode_root(transcode_root)
@@ -3080,7 +2959,6 @@ async def api_cleanup_reset_all(data: CleanupResetAllRequest):
 
 @app.get("/api/workers")
 async def api_workers(request: Request):
-    """Return active worker list for the current library."""
     try:
         with session_scope() as session:
             workers = ProgressRepository(session).list_workers()
@@ -3328,8 +3206,6 @@ async def api_worker_control_ack(data: WorkerControlAckRequest):
 
 @app.post("/api/worker/claim", dependencies=[Depends(_require_worker_api_auth)])
 async def api_worker_claim(data: WorkerClaimRequest):
-    """Claim the next pending item for a worker without direct DB access."""
-
     machine = _canonical_machine_name(data.machine or "")
     if not machine:
         return {"success": False, "error": "machine required"}
@@ -3371,8 +3247,6 @@ async def api_worker_claim(data: WorkerClaimRequest):
 
 @app.post("/api/worker/release", dependencies=[Depends(_require_worker_api_auth)])
 async def api_worker_release(data: WorkerReleaseRequest):
-    """Release a claimed item back to the queue (or mark encoded)."""
-
     machine = _canonical_machine_name(data.machine or "")
     if not machine:
         return {"success": False, "error": "machine required"}
@@ -3384,8 +3258,6 @@ async def api_worker_release(data: WorkerReleaseRequest):
 
 @app.post("/api/worker/progress/start", dependencies=[Depends(_require_worker_api_auth)])
 async def api_worker_progress_start(data: WorkerProgressStartRequest):
-    """Create a progress row for an active encode."""
-
     machine = _canonical_machine_name(data.machine or "")
     if not machine:
         return {"success": False, "error": "machine required"}
@@ -3406,8 +3278,6 @@ async def api_worker_progress_start(data: WorkerProgressStartRequest):
 
 @app.post("/api/worker/progress/update", dependencies=[Depends(_require_worker_api_auth)])
 async def api_worker_progress_update(data: WorkerProgressUpdateRequest):
-    """Update encode progress for an active encode."""
-
     with session_scope() as session:
         update_progress(
             session,
@@ -3427,8 +3297,6 @@ async def api_worker_progress_update(data: WorkerProgressUpdateRequest):
 
 @app.post("/api/worker/report", dependencies=[Depends(_require_worker_api_auth)])
 async def api_worker_report(data: WorkerEncodeReportRequest, background_tasks: BackgroundTasks):
-    """Record an encode result from a worker and transition DB state safely."""
-
     machine = _canonical_machine_name(data.machine or "")
     if not machine:
         return {"success": False, "error": "machine required"}
@@ -3561,7 +3429,6 @@ async def api_worker_report(data: WorkerEncodeReportRequest, background_tasks: B
 
 @app.get("/api/settings/current")
 async def api_get_settings():
-    """Return current settings (libraries and global max height)."""
     try:
         settings: AppSettings = load_app_settings()
         return {
@@ -3581,7 +3448,6 @@ async def api_get_settings():
 
 @app.get("/api/active-encodes")
 async def api_active_encodes(request: Request):
-    """Return live encode progress for dashboard polling."""
     library_root = (request.query_params.get("library") or "").strip()
     encodes: list[dict[str, Any]] = []
     with session_scope() as session:
@@ -3699,8 +3565,6 @@ async def api_review_encode_details(
     probe_encoded: bool = True,
     probe_source: bool = False,
 ):
-    """Return a rich inspection payload for review/compare UI."""
-
     def safe_stat_size(path: pathlib.Path) -> int | None:
         try:
             return int(path.stat().st_size)
@@ -4051,7 +3915,6 @@ async def api_queue_reset_skip(media_id: int):
 
 @app.get("/api/queue/seasons/{show_name}")
 async def api_queue_seasons(show_name: str, request: Request):
-    """Get seasons for a specific show."""
     library_root = request.query_params.get("library") or _resolve_library(request)
     with session_scope() as session:
         repo = QueueRepository(session)
@@ -4074,7 +3937,6 @@ async def api_queue_seasons(show_name: str, request: Request):
 
 @app.get("/api/queue/episodes/{show_name}/{season_name}")
 async def api_queue_episodes(show_name: str, season_name: str, request: Request):
-    """Get episodes for a specific show/season."""
     library_root = request.query_params.get("library") or _resolve_library(request)
     with session_scope() as session:
         repo = QueueRepository(session)
@@ -4119,7 +3981,6 @@ async def api_queue_episodes(show_name: str, season_name: str, request: Request)
 
 @app.get("/api/stats")
 async def api_stats():
-    """Get current stats as JSON."""
     with session_scope() as session:
         counts = dict(MediaRepository(session).count_by_status() or {})
 
@@ -4173,7 +4034,6 @@ async def api_stats_summary(days: int = Query(30, ge=7, le=365)):
 
 
 def main():
-    """CLI entry point for `mediaforce-web`."""
     from mediaforce.config.dotenv import load_dotenv_if_present
 
     load_dotenv_if_present()

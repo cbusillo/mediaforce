@@ -16,12 +16,6 @@ def classify_source(
     override_tier: Optional[str] = None,
     vmaf_hint: Optional[float] = None,
 ) -> ClassificationResult:
-    """Classify source quality and recommend encoding settings.
-
-    The classification is based on heuristics about bitrate efficiency, codec
-    age, and resolution vs. likely content era.
-    """
-
     reasons: list[str] = []
 
     if override_tier:
@@ -135,8 +129,6 @@ def adjust_tier_with_vmaf(
     classification: ClassificationResult,
     vmaf_stats: dict[str, Any],
 ) -> ClassificationResult:
-    """Adjust tier based on VMAF statistics (median/min)."""
-
     median = vmaf_stats.get("median")
     vmin = vmaf_stats.get("min")
     tier = classification.tier
@@ -169,4 +161,3 @@ def adjust_tier_with_vmaf(
         reasons=reasons,
         recommended_settings=TIER_SETTINGS[adjusted],
     )
-

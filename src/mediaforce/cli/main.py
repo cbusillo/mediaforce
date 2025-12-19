@@ -1,5 +1,3 @@
-"""Thin CLI shim to keep the entrypoint stable while we refactor internals."""
-
 from mediaforce.core import main as _core_main
 
 

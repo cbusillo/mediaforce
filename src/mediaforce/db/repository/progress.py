@@ -15,13 +15,6 @@ class ProgressRepository:
         self.session = session
 
     def cleanup_stale_progress(self, *, stale_seconds: int = 10 * 60) -> int:
-        """Remove progress rows that have stopped updating.
-
-        Workers update progress roughly every couple seconds while encoding.
-        If we don't hear from them for a while, treat the row as stale so the
-        UI doesn't show ghost encodes forever.
-        """
-
         cutoff = (datetime.now() - timedelta(seconds=int(stale_seconds))).isoformat()
         updated_at: Any = EncodeProgress.updated_at
         started_at: Any = EncodeProgress.started_at

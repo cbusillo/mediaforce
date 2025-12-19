@@ -8,34 +8,17 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
 
-# Default logger names live under the mediaforce namespace so child loggers can
-# inherit handlers/formatters without additional setup.
 DEFAULT_COMPONENT = "mediaforce"
 
 
 @dataclass
 class LogConfig:
-    """Runtime logging configuration.
-
-    Attributes
-    ----------
-    level: str
-        Log level name (INFO, DEBUG, WARNING, ERROR).
-    component: str
-        Logger namespace; child loggers inherit handlers automatically.
-    json_path: Optional[pathlib.Path]
-        When set, append newline-delimited JSON events to this file in addition
-        to stdout.
-    """
-
     level: str = "INFO"
     component: str = DEFAULT_COMPONENT
     json_path: Optional[pathlib.Path] = None
 
 
 class _JsonFormatter(logging.Formatter):
-    """Emit structured JSON with consistent keys for both stdout and files."""
-
     def __init__(self, component: str) -> None:
         super().__init__()
         self.component = component
@@ -63,12 +46,6 @@ class _JsonFormatter(logging.Formatter):
 
 
 def configure_logging(config: LogConfig) -> logging.Logger:
-    """Configure and return a logger for the given component.
-
-    The logger writes structured JSON to stdout and, when provided, to a JSONL
-    file. Repeated calls replace handlers to avoid duplicate output.
-    """
-
     logger = logging.getLogger(config.component)
     logger.setLevel(config.level.upper())
     logger.propagate = False
@@ -91,7 +68,6 @@ def configure_logging(config: LogConfig) -> logging.Logger:
 
 
 def env_log_config(component: str = DEFAULT_COMPONENT) -> LogConfig:
-    """Build LogConfig from environment variables."""
     level = os.getenv("MEDIAFORCE_LOG_LEVEL", "INFO")
     json_file = os.getenv("MEDIAFORCE_LOG_FILE")
     return LogConfig(
@@ -101,12 +77,8 @@ def env_log_config(component: str = DEFAULT_COMPONENT) -> LogConfig:
     )
 
 
-# Configure the base logger once so services that log against the default
-# component ("mediaforce") inherit handlers/formatters.
 configure_logging(env_log_config(component="mediaforce"))
 
-# CLI events use a dedicated logger so we can optionally emit compact human
-# output to stderr while keeping structured JSON on stdout.
 CLI_LOGGER = configure_logging(env_log_config(component="mediaforce.cli"))
 
 
@@ -118,7 +90,6 @@ def _human_enabled(logger: logging.Logger) -> bool:
     if raw is not None and raw.strip().lower() in {"0", "false", "no", "off"}:
         return False
 
-    # Avoid noisy human output for the web server by default.
     return logger.name.endswith(".cli")
 
 
@@ -217,8 +188,6 @@ def _format_human(event: str, fields: dict[str, Any]) -> Optional[str]:
 
 
 def log_event(level: int, event: str, *, logger: Optional[logging.Logger] = None, **fields: Any) -> None:
-    """Log a structured event with optional key/value fields."""
-
     target = logger or logging.getLogger(DEFAULT_COMPONENT)
     target.log(level, event, extra={"event": event, "fields": fields})
 

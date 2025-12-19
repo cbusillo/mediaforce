@@ -12,7 +12,6 @@ from sqlmodel import Session
 from mediaforce.db.models import EncodeResult
 from mediaforce.domain.types import QualityMetrics, MediaInfo, TierSettings
 
-# Denoise filter strings for ffmpeg
 DENOISE_FILTERS: dict[str, str] = {
     "light": "hqdn3d=2:2:3:3",
     "medium": "hqdn3d=4:3:6:4.5",

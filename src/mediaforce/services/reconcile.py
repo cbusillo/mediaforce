@@ -11,20 +11,10 @@ def reconcile_queue_state(
     *,
     progress_stale_seconds: int = 10 * 60,
 ) -> dict[str, int]:
-    """Best-effort reconciliation of inventory <-> progress.
-
-    Goals:
-    - If an item is marked `encoding` but has no recent progress row, reset it to `pending`.
-    - If a progress row exists but the item isn't `encoding`, set it to `encoding`.
-
-    This is intentionally conservative; it only touches rows that appear stale.
-    """
-
     now = datetime.now()
     cutoff = (now - timedelta(seconds=int(progress_stale_seconds))).isoformat()
     changed = {"reset_to_pending": 0, "force_to_encoding": 0}
 
-    # Progress -> item status alignment.
     for progress in session.exec(select(EncodeProgress)).all():
         item = session.get(MediaItem, int(progress.source_id))
         if not item:
@@ -37,13 +27,11 @@ def reconcile_queue_state(
             session.add(item)
             changed["force_to_encoding"] += 1
 
-    # Stale encoding items -> pending.
     encoding_items = session.exec(select(MediaItem).where(MediaItem.status == "encoding")).all()
     for item in encoding_items:
         if item.id is None:
             continue
 
-        # Recent progress exists?
         progress = session.exec(
             select(EncodeProgress)
             .where(EncodeProgress.source_id == int(item.id))
@@ -51,7 +39,6 @@ def reconcile_queue_state(
         ).first()
 
         if progress is None:
-            # No progress row. If claim is old, treat as stuck.
             claimed_at = str(item.claimed_at or "")
             if claimed_at and claimed_at < cutoff:
                 item.status = "pending"

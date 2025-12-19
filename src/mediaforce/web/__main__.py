@@ -1,8 +1,3 @@
-"""Module entrypoint to launch the Mediaforce web UI.
-
-Allows running via `python -m mediaforce.web` or `uv run mediaforce.web`.
-"""
-
 from .app import main
 
 

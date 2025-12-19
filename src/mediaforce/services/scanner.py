@@ -12,26 +12,19 @@ VIDEO_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".ts", ".mov"}
 
 
 def detect_hdr(info: MediaInfo) -> tuple[bool, Optional[str]]:
-    """Detect if content is HDR and what format (lightweight heuristic)."""
-
     if info.is_hdr:
         return True, info.hdr_format or "unknown"
 
     if info.video_bit_depth and info.video_bit_depth > 8:
-        # Placeholder: future improvement to read color_transfer/primaries
         return True, info.hdr_format or "unknown"
     return False, None
 
 
 def detect_interlaced(info: MediaInfo) -> bool:
-    """Detect if content is interlaced (uses MediaInfo flags)."""
-
     return info.is_interlaced
 
 
 def collect_video_files(path: pathlib.Path) -> list[pathlib.Path]:
-    """Collect video files from a path (file or directory)."""
-
     if path.is_file():
         return [path] if path.suffix.lower() in VIDEO_EXTENSIONS else []
 
@@ -48,8 +41,6 @@ def calculate_priority(
     max_savings: int,
     max_age: int,
 ) -> float:
-    """Calculate priority score (0-1, higher = encode first)."""
-
     now = int(time.time())
     age = now - mtime
 
@@ -74,11 +65,6 @@ def scan_file_to_db(
     probe_media: Callable[[pathlib.Path], Optional[MediaInfo]],
     now_iso: Callable[[], str],
 ) -> Optional[dict]:
-    """Scan a single file and insert/update DB entry.
-
-    External dependencies are injected to avoid circular imports.
-    """
-
     info = probe_media(file_path)
     if info is None:
         return None
@@ -173,9 +159,6 @@ def recalculate_priorities(
     max_age: int,
     calculate_priority: Callable[[Optional[int], int, int, int], float],
 ) -> None:
-    """Update all pending items with fresh priority scores."""
-
-    # Find max potential savings for normalization
     from sqlalchemy import func
     max_savings_row = session.exec(select(func.max(MediaItem.potential_savings_bytes))).first()
     max_savings = int(max_savings_row or 1)

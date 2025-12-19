@@ -100,7 +100,6 @@ def probe_media(path: pathlib.Path) -> Optional[MediaInfo]:
 
             info.video_field_order = stream.get("field_order")
 
-            # HDR hints (best-effort)
             transfer = (stream.get("color_transfer") or "").lower()
             primaries = (stream.get("color_primaries") or "").lower()
             matrix = (stream.get("color_space") or "").lower()
@@ -142,7 +141,6 @@ def find_ffmpeg() -> Optional[str]:
 
 
 def detect_interlacing(path: pathlib.Path, num_frames: int = 500) -> tuple[bool, float]:
-    """Detect interlacing by analyzing actual frame content using ffmpeg's idet filter."""
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
         return False, 0.0
@@ -201,7 +199,6 @@ def detect_interlacing(path: pathlib.Path, num_frames: int = 500) -> tuple[bool,
 def probe_media_with_interlace_detection(
     path: pathlib.Path, detect_interlace: bool = True
 ) -> Optional[MediaInfo]:
-    """Probe media file and optionally detect interlacing via frame analysis."""
     info = probe_media(path)
     if info is None:
         return None

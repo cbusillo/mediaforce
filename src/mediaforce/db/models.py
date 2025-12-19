@@ -264,17 +264,9 @@ class ShowOverride(SQLModel, table=True):  # type: ignore[misc,call-arg]
     updated_at: Optional[str] = None
 
 def ensure_schema(engine: Engine) -> None:
-    """Ensure schema exists and is migrated for the current code version.
-
-    This helper is safe to call multiple times and is intended to be the single
-    shared entrypoint for schema creation/backfills across CLI and web.
-    """
-
     SQLModel.metadata.create_all(engine)
 
-    # Lightweight, idempotent migrations for SQLite.
-    # SQLModel's create_all will not add new columns to an existing table, so we
-    # must backfill schema changes here to keep upgrades safe.
+    # SQLite: SQLModel's create_all won't add columns; backfill schema changes here.
     with engine.begin() as conn:
         rows = list(conn.exec_driver_sql("PRAGMA table_info(media_inventory)").fetchall())
         columns: set[str] = set()

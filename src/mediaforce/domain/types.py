@@ -5,8 +5,6 @@ from typing import Optional
 
 
 class SourceTier(Enum):
-    """Source quality classification."""
-
     PRISTINE = "pristine"  # Modern streaming, Blu-ray
     GOOD = "good"  # Most HD TV
     MEDIOCRE = "mediocre"  # Older HD, moderate grain
@@ -15,8 +13,6 @@ class SourceTier(Enum):
 
 @dataclass
 class TierSettings:
-    """Encoding settings for a source tier."""
-
     crf: int
     preset: int
     film_grain: int  # 0 = disabled, 4-8 = typical range
@@ -25,8 +21,6 @@ class TierSettings:
 
 @dataclass
 class MediaInfo:
-    """Parsed media file information."""
-
     path: pathlib.Path
     duration_seconds: Optional[float] = None
     video_codec: Optional[str] = None
@@ -74,8 +68,6 @@ class MediaInfo:
 
 @dataclass
 class ClassificationResult:
-    """Result of source quality classification."""
-
     tier: SourceTier
     confidence: str  # "high", "medium", "low"
     reasons: list[str]
@@ -84,8 +76,6 @@ class ClassificationResult:
 
 @dataclass
 class QualityMetrics:
-    """Quality metrics from SSIM/PSNR/VMAF comparison."""
-
     ssim: Optional[float] = None
     psnr: Optional[float] = None
     vmaf: Optional[float] = None
@@ -155,8 +145,6 @@ DEFAULT_OUTLIER_THRESHOLDS = OutlierThresholds()
 
 @dataclass
 class OutlierResult:
-    """Outlier check result used by review and worker reporting."""
-
     is_outlier: bool
     reasons: list[str]
     metrics: Optional[QualityMetrics] = None

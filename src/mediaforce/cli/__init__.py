@@ -1,4 +1,4 @@
-"""CLI entrypoints."""
+
 
 from .main import main  # noqa: F401
 

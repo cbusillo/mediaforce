@@ -41,12 +41,6 @@ def import_show_config_json(
     dry_run: bool = True,
     overwrite_existing: bool = False,
 ) -> ShowConfigImportResult:
-    """Import legacy show overrides from a JSON file into the DB-backed overrides.
-
-    This is intended as a one-time migration path away from `show_config.json`.
-    During normal operation, the application must not read that JSON.
-    """
-
     payload = json.loads(config_path.read_text())
     if not isinstance(payload, dict):
         raise ValueError("show_config.json must be a JSON object mapping show_name -> overrides")

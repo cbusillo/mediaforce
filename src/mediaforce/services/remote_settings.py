@@ -12,7 +12,6 @@ from mediaforce.db import ProfileSettingsSource
 
 
 def load_remote_settings(url: str) -> Optional[AppSettings]:
-    """Fetch settings JSON from master API and convert to AppSettings."""
     try:
         with urllib.request.urlopen(url) as resp:
             payload = json.loads(resp.read().decode())
@@ -57,7 +56,6 @@ def load_remote_settings(url: str) -> Optional[AppSettings]:
 
 
 def _fetch_remote_profile_settings(url: str, existing_etag: str | None = None) -> tuple[Optional[str], Optional[str]]:
-    """Fetch remote profile settings payload and return (payload, etag)."""
     headers = {"User-Agent": "mediaforce/0.2"}
     if existing_etag:
         headers["If-None-Match"] = existing_etag
@@ -77,8 +75,6 @@ def ensure_active_profile_settings(
     session: Session,
     remote_url: Optional[str] = None
 ) -> Optional[ProfileSettingsSource]:
-    """Return active profile settings, refreshing from remote_url when provided."""
-
     src = session.exec(
         select(ProfileSettingsSource)
         .where(col(ProfileSettingsSource.is_active).is_(True))

@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 # mypy: ignore-errors
-"""Mediaforce: content-aware media encoder with unified scheduling.
-
-Analyzes source quality and applies appropriate compression settings.
-Maximum compression with watchable quality, not source fidelity.
-"""
-
 import argparse
 import logging
 import pathlib
@@ -22,7 +16,6 @@ from mediaforce.config.logging import (
 )
 from mediaforce.config.paths import default_transcode_root, get_media_roots
 
-# Configure the base logger
 configure_logging(env_log_config(component="mediaforce"))
 CLI_LOGGER = configure_logging(env_log_config(component="mediaforce.cli"))
 
@@ -44,7 +37,6 @@ def log_error(message: str, **fields: Any) -> None:
 
 
 def detect_platform() -> Dict[str, Any]:
-    """Detect current platform and available hardware."""
     info: Dict[str, Any] = {
         "system": platform.system(),
         "machine": platform.machine(),
@@ -82,7 +74,6 @@ def find_ffmpeg() -> str | None:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    """Status command - show platform info and available resources."""
     info = detect_platform()
 
     log_info("platform_status", system=info['system'], machine=info['machine'], hostname=info['hostname'])
@@ -250,27 +241,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # status
     p_status = subparsers.add_parser("status", help="Show platform info")
     p_status.set_defaults(func=cmd_status)
 
-    # analyze
     p_analyze = subparsers.add_parser("analyze", help="Analyze media files")
     p_analyze.add_argument("path", help="Video file or directory")
     p_analyze.set_defaults(func=cmd_analyze)
 
-    # scan
     p_scan = subparsers.add_parser("scan", help="Scan library")
     p_scan.add_argument("path", help="Library path")
     p_scan.set_defaults(func=cmd_scan)
 
-    # queue
     p_queue = subparsers.add_parser("queue", help="Show queue")
     p_queue.add_argument("path", help="Library path")
     p_queue.add_argument("--limit", type=int, default=20)
     p_queue.set_defaults(func=cmd_queue)
 
-    # run
     p_run = subparsers.add_parser("run", help="Run worker")
     p_run.add_argument("path", help="Library path")
     p_run.add_argument("-o", "--output", default=default_transcode_root())
@@ -300,14 +286,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--profile-settings-url", dest="profile_settings_url")
     p_run.set_defaults(func=cmd_run)
 
-    # watch
     p_watch = subparsers.add_parser("watch", help="Watch libraries")
     p_watch.add_argument("--autoupdate-url")
     p_watch.add_argument("--autoupdate-interval", type=int, default=3600)
     p_watch.add_argument("--settings-url")
     p_watch.set_defaults(func=cmd_watch)
 
-    # encode
     p_encode = subparsers.add_parser("encode", help="Encode files")
     p_encode.add_argument("path", help="Video file or directory")
     p_encode.add_argument("-o", "--output", required=True)
@@ -326,7 +310,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_encode.add_argument("--no-hw-encode", dest="hw_encode", action="store_false")
     p_encode.set_defaults(func=cmd_encode)
 
-    # promote
     p_promote = subparsers.add_parser("promote", help="Promote encoded files")
     p_promote.add_argument("path", help="Library path")
     p_promote.add_argument("--transcode-root", default=default_transcode_root())
@@ -335,21 +318,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_promote.add_argument("--no-delete", action="store_false", dest="delete_original")
     p_promote.set_defaults(func=cmd_promote)
 
-    # purge-backups
     p_purge = subparsers.add_parser("purge-backups", help="Purge backups")
     p_purge.add_argument("--older-than-days", type=int, default=30)
     p_purge.add_argument("--limit", type=int, default=0)
     p_purge.add_argument("--apply", action="store_true")
     p_purge.set_defaults(func=cmd_purge_backups)
 
-    # import-show-config
     p_import = subparsers.add_parser("import-show-config", help="Import show config")
     p_import.add_argument("--path")
     p_import.add_argument("--apply", action="store_true")
     p_import.add_argument("--overwrite-existing", dest="overwrite_existing", action="store_true")
     p_import.set_defaults(func=cmd_import_show_config)
 
-    # verify
     p_verify = subparsers.add_parser("verify", help="Verify single file")
     p_verify.add_argument("source")
     p_verify.add_argument("encoded")
@@ -357,7 +337,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify.add_argument("--no-vmaf", action="store_true")
     p_verify.set_defaults(func=cmd_verify)
 
-    # verify-batch
     p_verify_batch = subparsers.add_parser("verify-batch", help="Batch verify")
     p_verify_batch.add_argument("path")
     p_verify_batch.add_argument("--transcode-root", default=default_transcode_root())
@@ -365,27 +344,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify_batch.add_argument("--no-vmaf", action="store_true")
     p_verify_batch.set_defaults(func=cmd_verify_batch)
 
-    # review list
     p_review_list = subparsers.add_parser("review-list", help="List review items")
     p_review_list.add_argument("path")
     p_review_list.add_argument("--all", action="store_true")
     p_review_list.add_argument("-v", "--verbose", action="store_true")
     p_review_list.set_defaults(func=cmd_review_list)
 
-    # review approve
     p_review_approve = subparsers.add_parser("review-approve", help="Approve item")
     p_review_approve.add_argument("path")
     p_review_approve.add_argument("id", type=int)
     p_review_approve.set_defaults(func=cmd_review_approve)
 
-    # review reject
     p_review_reject = subparsers.add_parser("review-reject", help="Reject item")
     p_review_reject.add_argument("path")
     p_review_reject.add_argument("id", type=int)
     p_review_reject.add_argument("--delete", action="store_true")
     p_review_reject.set_defaults(func=cmd_review_reject)
 
-    # review compare
     p_review_compare = subparsers.add_parser("review-compare", help="Compare item")
     p_review_compare.add_argument("path")
     p_review_compare.add_argument("id", type=int)
@@ -394,7 +369,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_review_compare.add_argument("--duration", type=int, default=10)
     p_review_compare.set_defaults(func=cmd_review_compare)
 
-    # compare-clips
     p_compare_clips = subparsers.add_parser("compare-clips", help="Compare clips")
     p_compare_clips.add_argument("source")
     p_compare_clips.add_argument("encoded")
@@ -403,7 +377,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_compare_clips.add_argument("--duration", type=int, default=30)
     p_compare_clips.set_defaults(func=cmd_compare_clips)
 
-    # compare-full
     p_compare_full = subparsers.add_parser("compare-full", help="Compare full")
     p_compare_full.add_argument("source")
     p_compare_full.add_argument("encoded")

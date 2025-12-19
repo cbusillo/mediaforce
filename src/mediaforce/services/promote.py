@@ -241,8 +241,6 @@ def verify_before_promote(
     probe: Callable[[pathlib.Path], Optional[ProbeSummary]] | None = None,
     require_av1: bool = True,
 ) -> tuple[bool, list[str], Optional[ProbeSummary], Optional[ProbeSummary]]:
-    """Lightweight ffprobe-based sanity checks to avoid promoting bad outputs."""
-
     reasons: list[str] = []
 
     if not source_path.exists():
@@ -322,13 +320,6 @@ def promote_encoded_file_atomic(
     probe: Callable[[pathlib.Path], Optional[ProbeSummary]] | None = None,
     logger: Optional[logging.Logger] = None,
 ) -> tuple[PromoteResult, Optional[PromoteRollbackState]]:
-    """Atomically promote an encoded file into the library with rollback support.
-
-    - Verify-before-promote: refuse to touch the library when ffprobe checks fail.
-    - Atomic staging: stage encoded into the destination directory then rename.
-    - Rollback: caller can rollback later (e.g., DB commit failure).
-    """
-
     dest = dest_path or _default_dest_for_encoded(source_path, encoded_path)
 
     if dest.resolve() == source_path.resolve():
@@ -483,8 +474,6 @@ def promote_encoded_file_atomic(
 
 
 def rollback_promote(state: PromoteRollbackState) -> None:
-    """Best-effort rollback for a partially-applied promotion."""
-
     for old, new in reversed(state.sidecar_renames):
         if new.exists() and not old.exists():
             os.replace(str(new), str(old))

@@ -9,8 +9,6 @@ select: Any = _select
 
 
 class QueueRepository:
-    """Encapsulate queue listings, keeping callers on Session."""
-
     def __init__(self, session: Session):
         self.session = session
 

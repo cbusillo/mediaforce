@@ -30,14 +30,6 @@ def _default_http_post(url: str, body: bytes, headers: dict[str, str], timeout_s
 
 
 def load_notification_config() -> NotificationConfig:
-    """Load notification configuration from env.
-
-    Supported env vars:
-    - MEDIAFORCE_NOTIFY_WEBHOOK_URL: single webhook
-    - MEDIAFORCE_NOTIFY_WEBHOOK_URLS: comma-separated list of webhooks
-    - MEDIAFORCE_NOTIFY_TIMEOUT_SECONDS: request timeout (default 3)
-    """
-
     raw_single = os.getenv("MEDIAFORCE_NOTIFY_WEBHOOK_URL", "").strip()
     raw_list = os.getenv("MEDIAFORCE_NOTIFY_WEBHOOK_URLS", "").strip()
 
@@ -54,7 +46,6 @@ def load_notification_config() -> NotificationConfig:
     except Exception:
         timeout = 3.0
 
-    # Deduplicate while preserving order
     seen: set[str] = set()
     uniq: list[str] = []
     for u in urls:
@@ -72,15 +63,12 @@ def build_notification_payload(
     summary: str,
     data: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build a payload compatible with generic webhooks + Slack/Discord."""
-
     ts = datetime.now(timezone.utc).isoformat()
     payload: dict[str, Any] = {
         "ts": ts,
         "event": event,
         "summary": summary,
         "data": data,
-        # Slack expects "text"; Discord expects "content" or embeds.
         "text": summary,
         "content": summary,
     }

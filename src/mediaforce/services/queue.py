@@ -25,7 +25,6 @@ def recalculate_priorities(session: Session, max_age: int, calculate_priority: C
     elif isinstance(max_row, int):
         max_savings_value = max_row
     else:
-        # SQLModel/SQLAlchemy may return a 1-tuple/Row here.
         try:
             max_savings_value = int(max_row[0]) if max_row[0] is not None else None
         except Exception:
@@ -105,8 +104,6 @@ def claim_next_file(
     progress_stale_seconds: int = 5 * 60,
     now_iso: Callable[[], str] = default_now_iso,
 ) -> Optional[dict]:
-    """Claim the next file with library-aware weighting and manual bumping."""
-
     now = datetime.now()
     now_str = now_iso()
     stale_cutoff = (now - timedelta(seconds=stale_seconds)).isoformat()
@@ -132,6 +129,26 @@ def claim_next_file(
     # it up). Treat any "encoding" row with no recent progress as stale.
     progress_cutoff = (now - timedelta(seconds=int(progress_stale_seconds))).isoformat()
 
+    def _coerce_int(value: object) -> int | None:
+        raw = value[0] if isinstance(value, (tuple, list)) and value else value
+        if raw is None:
+            return None
+        if isinstance(raw, bool):
+            return None
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, float):
+            return int(raw)
+        if isinstance(raw, str):
+            s = raw.strip()
+            if not s:
+                return None
+            try:
+                return int(s)
+            except ValueError:
+                return None
+        return None
+
     active_progress_source_ids: set[int] = set()
     for row in session.exec(
         select(EncodeProgress.source_id).where(
@@ -139,19 +156,9 @@ def claim_next_file(
             col(EncodeProgress.updated_at) >= progress_cutoff,
         )
     ).all():
-        # sqlmodel/sqlalchemy may return scalar ints or 1-tuples depending on
-        # dialect/driver.
-        raw = None
-        if isinstance(row, (tuple, list)):
-            raw = row[0] if row else None
-        else:
-            raw = row
-        if raw is None:
-            continue
-        try:
-            active_progress_source_ids.add(int(raw))
-        except Exception:
-            continue
+        value = _coerce_int(row)
+        if value is not None:
+            active_progress_source_ids.add(value)
 
     stalled_items = session.exec(
         select(MediaItem).where(
@@ -187,17 +194,9 @@ def claim_next_file(
             col(EncodeProgress.updated_at) >= progress_cutoff,
         )
     ).all():
-        raw = None
-        if isinstance(row, (tuple, list)):
-            raw = row[0] if row else None
-        else:
-            raw = row
-        if raw is None:
-            continue
-        try:
-            active_progress_source_ids_for_machine.add(int(raw))
-        except Exception:
-            continue
+        value = _coerce_int(row)
+        if value is not None:
+            active_progress_source_ids_for_machine.add(value)
 
     claimed_for_machine = session.exec(
         select(MediaItem).where(
