@@ -178,12 +178,28 @@
               {% endif %}
             </span>
             <span class="text-foreground-muted">•</span>
-            <span class="chip chip-sm {{ 'chip-danger' if encode.vmaf_class == 'poor' else 'chip-warning' if encode.vmaf_class == 'warning' else 'chip-info' if encode.vmaf_class == 'unknown' else '' }}">{{ encode.vmaf or '-' }}</span>
+            {% if encode.vmaf_class == 'poor' %}
+            {% set vmaf_chip_class = 'chip-danger' %}
+            {% elif encode.vmaf_class == 'warning' %}
+            {% set vmaf_chip_class = 'chip-warning' %}
+            {% elif encode.vmaf_class == 'unknown' %}
+            {% set vmaf_chip_class = 'chip-info' %}
+            {% else %}
+            {% set vmaf_chip_class = '' %}
+            {% endif %}
+            <span class="chip chip-sm {{ vmaf_chip_class }}">{{ encode.vmaf or '-' }}</span>
           </td>
           <td>
             <div class="flex flex-wrap gap-1">
               {% for a in encode.top_alerts %}
-              <span class="chip chip-sm {{ 'chip-danger' if a.severity == 'danger' else 'chip-warning' if a.severity == 'warning' else 'chip-info' }}">{{ a.short }}</span>
+              {% if a.severity == 'danger' %}
+              {% set alert_chip_class = 'chip-danger' %}
+              {% elif a.severity == 'warning' %}
+              {% set alert_chip_class = 'chip-warning' %}
+              {% else %}
+              {% set alert_chip_class = 'chip-info' %}
+              {% endif %}
+              <span class="chip chip-sm {{ alert_chip_class }}">{{ a.short }}</span>
               {% endfor %}
               {% if encode.attention_count > (encode.top_alerts|length) %}
               <span class="chip chip-sm">+{{ encode.attention_count - (encode.top_alerts|length) }}</span>

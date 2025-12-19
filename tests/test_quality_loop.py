@@ -1,7 +1,8 @@
 import pathlib
 
 from mediaforce.config.settings import AppSettings, LibrarySettings
-from mediaforce.core import build_sample_plan, resolve_target_height_for_path
+from mediaforce.services.metrics import build_sample_plan
+from mediaforce.config.paths import resolve_target_height_for_path
 
 
 class _DummyInfo:

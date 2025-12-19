@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from sqlmodel import SQLModel, Session, create_engine, select
 
-from mediaforce.core import recalculate_priorities, check_missing_outputs
-from mediaforce.db import MediaItem, EncodeResult
+from mediaforce.services.scanner import calculate_priority, recalculate_priorities
+from mediaforce.services.queue import check_missing_outputs
+from mediaforce.db.models import MediaItem, EncodeResult
 
 
 def make_session():
@@ -22,7 +23,7 @@ def test_recalculate_priorities_updates_scores():
     session.add_all(items)
     session.commit()
 
-    recalculate_priorities(session, max_age=1000)
+    recalculate_priorities(session, max_age=1000, calculate_priority=calculate_priority)
 
     rows = session.exec(select(MediaItem)).all()
     scores = {row.path: row.priority_score for row in rows}
@@ -40,7 +41,7 @@ def test_check_missing_outputs_resets_status(tmp_path):
     session.add(enc)
     session.commit()
 
-    reset = check_missing_outputs(session)
+    reset, _missing = check_missing_outputs(session)
     session.refresh(item)
 
     assert reset == 1
