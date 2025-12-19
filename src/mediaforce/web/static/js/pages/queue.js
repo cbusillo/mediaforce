@@ -142,7 +142,7 @@
       if (seasonsRow?.classList.contains("hidden")) {
         seasonsRow.classList.remove("hidden");
         icon?.classList.add("expanded");
-        loadSeasons(showName, seasonsRow);
+        void loadSeasons(showName, seasonsRow);
       }
     });
   }
@@ -165,7 +165,7 @@
     if (seasonsRow.classList.contains("hidden")) {
       seasonsRow.classList.remove("hidden");
       icon?.classList.add("expanded");
-      loadSeasons(showName, seasonsRow);
+      void loadSeasons(showName, seasonsRow);
     } else {
       seasonsRow.classList.add("hidden");
       icon?.classList.remove("expanded");
@@ -252,7 +252,7 @@
     if (episodesRow.classList.contains("hidden")) {
       episodesRow.classList.remove("hidden");
       icon?.classList.add("expanded");
-      loadEpisodes(showName, seasonName, episodesRow);
+      void loadEpisodes(showName, seasonName, episodesRow);
     } else {
       episodesRow.classList.add("hidden");
       icon?.classList.remove("expanded");
@@ -575,7 +575,7 @@
   function openSendModal(worker) {
     const targetId = prompt(`Send which item id to ${worker}?`);
     if (!targetId) return;
-    sendToWorker(parseInt(targetId, 10), worker);
+    void sendToWorker(parseInt(targetId, 10), worker);
   }
 
   function sortTable(tableEl, key, type, direction) {

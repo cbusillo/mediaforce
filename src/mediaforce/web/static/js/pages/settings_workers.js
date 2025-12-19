@@ -102,7 +102,7 @@
   function scheduleRefresh(delayMs) {
     if (refreshTimer) clearTimeout(refreshTimer);
     refreshTimer = setTimeout(() => {
-      refresh({ loud: false });
+      void refresh({ loud: false });
     }, delayMs);
   }
 
@@ -305,12 +305,12 @@
   });
 
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) refresh({ loud: false });
+    if (!document.hidden) void refresh({ loud: false });
   });
 
   document.body.addEventListener("mfWorkersRefresh", () => {
-    refresh({ loud: false });
+    void refresh({ loud: false });
   });
 
-  refresh({ loud: false });
+  void refresh({ loud: false });
 })();
