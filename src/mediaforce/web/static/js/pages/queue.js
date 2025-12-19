@@ -430,73 +430,118 @@
   }
 
   async function bumpEpisode(id) {
-    try {
-      const resp = await fetch(`/api/queue/${id}/bump`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ delta: 1 }),
-      });
-      const data = await resp.json();
-      if (!data.success) throw new Error(data.error || "Unknown error");
-      showToast(`Bumped item ${id}`, true);
-    } catch (e) {
-      alert("Bump failed: " + e.message);
+    const resp = await fetch(`/api/queue/${id}/bump`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ delta: 1 }),
+    }).catch((e) => {
+      alert("Bump failed: " + (e?.message || "Unknown error"));
+      return null;
+    });
+    if (!resp) return;
+
+    const data = await resp.json().catch((e) => {
+      alert("Bump failed: " + (e?.message || "Invalid JSON"));
+      return null;
+    });
+    if (!data?.success) {
+      alert("Bump failed: " + (data?.error || "Unknown error"));
+      return;
     }
+
+    showToast(`Bumped item ${id}`, true);
   }
 
   async function pauseEpisode(id) {
-    try {
-      const resp = await fetch(`/api/queue/${id}/pause`, { method: "POST" });
-      const data = await resp.json();
-      if (!data.success) throw new Error(data.error || "Unknown error");
-      showToast(`Paused ${id}`, true);
-    } catch (e) {
-      alert("Pause failed: " + e.message);
+    const resp = await fetch(`/api/queue/${id}/pause`, { method: "POST" }).catch((e) => {
+      alert("Pause failed: " + (e?.message || "Unknown error"));
+      return null;
+    });
+    if (!resp) return;
+
+    const data = await resp.json().catch((e) => {
+      alert("Pause failed: " + (e?.message || "Invalid JSON"));
+      return null;
+    });
+    if (!data?.success) {
+      alert("Pause failed: " + (data?.error || "Unknown error"));
+      return;
     }
+
+    showToast(`Paused ${id}`, true);
   }
 
   async function resumeEpisode(id) {
-    try {
-      const resp = await fetch(`/api/queue/${id}/resume`, { method: "POST" });
-      const data = await resp.json();
-      if (!data.success) throw new Error(data.error || "Unknown error");
-      showToast(`Resumed ${id}`, true);
-    } catch (e) {
-      alert("Resume failed: " + e.message);
+    const resp = await fetch(`/api/queue/${id}/resume`, { method: "POST" }).catch((e) => {
+      alert("Resume failed: " + (e?.message || "Unknown error"));
+      return null;
+    });
+    if (!resp) return;
+
+    const data = await resp.json().catch((e) => {
+      alert("Resume failed: " + (e?.message || "Invalid JSON"));
+      return null;
+    });
+    if (!data?.success) {
+      alert("Resume failed: " + (data?.error || "Unknown error"));
+      return;
     }
+
+    showToast(`Resumed ${id}`, true);
   }
 
   async function sendToWorker(id, worker) {
     if (!worker) return;
-    try {
-      const resp = await fetch("/api/send-to-worker", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, worker }),
-      });
-      const data = await resp.json();
-      if (!data.success) throw new Error(data.error || "Unknown error");
-      showToast(`Queued ${id} for ${worker}`, true);
-    } catch (e) {
-      alert("Send failed: " + e.message);
+
+    const resp = await fetch("/api/send-to-worker", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, worker }),
+    }).catch((e) => {
+      alert("Send failed: " + (e?.message || "Unknown error"));
+      return null;
+    });
+    if (!resp) return;
+
+    const data = await resp.json().catch((e) => {
+      alert("Send failed: " + (e?.message || "Invalid JSON"));
+      return null;
+    });
+    if (!data?.success) {
+      alert("Send failed: " + (data?.error || "Unknown error"));
+      return;
     }
+
+    showToast(`Queued ${id} for ${worker}`, true);
   }
 
   async function loadSkipped() {
     const container = document.getElementById("skippedContainer");
     if (!container) return;
     container.textContent = "Loading skipped items...";
-    try {
-      const resp = await fetch("/api/queue/skipped");
-      const data = await resp.json();
-      if (!data.success) throw new Error(data.error || "Unknown error");
-      if (!data.items.length) {
-        container.textContent = "No skipped items";
-        return;
-      }
-      const rows = data.items
-        .map(
-          (it) => `
+
+    const resp = await fetch("/api/queue/skipped").catch((e) => {
+      container.textContent = "Failed to load skipped items: " + (e?.message || "Unknown error");
+      return null;
+    });
+    if (!resp) return;
+
+    const data = await resp.json().catch((e) => {
+      container.textContent = "Failed to load skipped items: " + (e?.message || "Invalid JSON");
+      return null;
+    });
+    if (!data?.success) {
+      container.textContent = data?.error || "Unknown error";
+      return;
+    }
+    if (!data.items.length) {
+      container.textContent = "No skipped items";
+      return;
+    }
+
+    const rows = data.items
+      .map(
+        (it) => `
           <tr>
             <td>${it.id}</td>
             <td class="truncate" title="${escapeHtml(it.path)}">${escapeHtml(it.path)}</td>
@@ -508,12 +553,9 @@
             </td>
           </tr>
         `,
-        )
-        .join("");
-      container.innerHTML = `<div class="nested-table-wrapper"><table class="nested-table"><thead><tr><th>ID</th><th>Path</th><th>Reason</th><th>Updated</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`;
-    } catch (e) {
-      container.textContent = "Failed to load skipped items: " + e.message;
-    }
+      )
+      .join("");
+    container.innerHTML = `<div class="nested-table-wrapper"><table class="nested-table"><thead><tr><th>ID</th><th>Path</th><th>Reason</th><th>Updated</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   async function forceRescan(id) {
