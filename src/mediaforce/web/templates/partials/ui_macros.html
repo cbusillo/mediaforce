@@ -101,3 +101,14 @@
   {% endif %}
 </div>
 {%- endmacro %}
+
+{% macro toolbar_chip(label, onclick=None, pressed=None, variant=None, extra_class="") -%}
+<button
+  class="filter-chip {{ 'filter-chip--active' if pressed else '' }} {{ extra_class }}"
+  type="button"
+  {% if pressed is not none %}aria-pressed="{{ 'true' if pressed else 'false' }}"{% endif %}
+  {% if onclick %}onclick="{{ onclick }}"{% endif %}
+>
+  {{ label }}
+</button>
+{%- endmacro %}

@@ -1,4 +1,4 @@
-{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, toolbar_search_input %} {% block content %}
+{% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, toolbar_search_input, toolbar_chip %} {% block content %}
 {{ page_header("Review", "Pending Encodes", "These encodes are waiting in the transcode folder. Review and promote or reject them.") }}
 
 <!-- Bulk Actions Bar -->
@@ -15,30 +15,18 @@
     </div>
     <div class="flex items-center gap-2">
       <div class="review-toolbar__label">Auto-approve</div>
-      <button onclick="promoteByReduction(10)" class="filter-chip" type="button">&gt;10%</button>
-      <button onclick="promoteByReduction(20)" class="filter-chip" type="button">&gt;20%</button>
-      <button onclick="promoteByReduction(30)" class="filter-chip" type="button">&gt;30%</button>
+      {{ toolbar_chip('>10%', 'promoteByReduction(10)') }}
+      {{ toolbar_chip('>20%', 'promoteByReduction(20)') }}
+      {{ toolbar_chip('>30%', 'promoteByReduction(30)') }}
     </div>
   </div>
 
   <div class="review-toolbar__row review-toolbar__row--filters">
     <div class="flex items-center gap-2 flex-wrap">
       <div class="review-toolbar__label">Filter</div>
-      <button class="filter-chip" type="button" data-filter="all" aria-pressed="true" onclick="setFilter('all')">
-        All
-      </button>
-      <button
-        class="filter-chip"
-        type="button"
-        data-filter="size_increase"
-        aria-pressed="false"
-        onclick="setFilter('size_increase')"
-      >
-        Size ↑
-      </button>
-      <button class="filter-chip" type="button" data-filter="low_vmaf" aria-pressed="false" onclick="setFilter('low_vmaf')">
-        Low VMAF
-      </button>
+      {{ toolbar_chip('All', "setFilter('all')", True) }}
+      {{ toolbar_chip('Size ↑', "setFilter('size_increase')", False) }}
+      {{ toolbar_chip('Low VMAF', "setFilter('low_vmaf')", False) }}
     </div>
     {{ toolbar_search_input('filterText', 'Search file or show', '', 'applyFilters()') }}
   </div>
