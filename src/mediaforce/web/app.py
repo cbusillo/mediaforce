@@ -134,6 +134,30 @@ def _cleanup_transcode_root(transcode_root: pathlib.Path, dry_run: bool) -> dict
         "deleted_dirs": deleted_dirs,
         "bytes_freed": bytes_freed,
     }
+
+
+def _unwrap_count(value: Any, default: int = 0) -> int:
+    """Unwrap COUNT(*) results across SQLModel/SQLAlchemy return shapes."""
+
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except Exception:
+        pass
+
+    mapping = getattr(value, "_mapping", None)
+    if mapping is not None:
+        try:
+            first = next(iter(mapping.values()))
+            return int(first)
+        except Exception:
+            pass
+
+    try:
+        return int(value[0])
+    except Exception:
+        return default
 from mediaforce.domain.types import TierSettings
 from mediaforce.db import (
     MediaItem,
@@ -3125,10 +3149,7 @@ async def api_cleanup_clear_review(data: CleanupClearReviewRequest):
     with session_scope() as session:
         if data.delete_all:
             raw_count = session.exec(select(func.count()).select_from(EncodeResult)).one()
-            if isinstance(raw_count, (tuple, list)):
-                count = raw_count[0] if raw_count else 0
-            else:
-                count = raw_count or 0
+            count = _unwrap_count(raw_count)
             session.exec(delete(EncodeResult))
             session.exec(delete(EncodeProgress))
             session.commit()
@@ -3190,7 +3211,7 @@ async def api_cleanup_reset_all(data: CleanupResetAllRequest):
 
         if data.delete_encode_results:
             raw_count = session.exec(select(func.count()).select_from(EncodeResult)).one()
-            count = raw_count[0] if isinstance(raw_count, (tuple, list)) else (raw_count or 0)
+            count = _unwrap_count(raw_count)
             session.exec(delete(EncodeResult))
             session.exec(delete(EncodeProgress))
             results["review"] = {"deleted": int(count)}
