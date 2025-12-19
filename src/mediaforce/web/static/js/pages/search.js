@@ -1,9 +1,17 @@
 (function () {
   if (window.location.pathname !== "/search") return;
 
+  function syncQueryIntoHiddenForm(form) {
+    const qInput = document.getElementById("searchQ");
+    const hiddenQ = form.querySelector("input[name='q']");
+    if (!hiddenQ) return;
+    hiddenQ.value = qInput ? qInput.value : hiddenQ.value;
+  }
+
   function applyHiddenField(name, value) {
     const form = document.getElementById("searchHiddenForm");
     if (!form) return;
+    syncQueryIntoHiddenForm(form);
     const input = form.querySelector(`input[name='${CSS.escape(name)}']`);
     if (!input) return;
     input.value = value || "";
@@ -30,5 +38,11 @@
     setChipActive(".js-tier-chip", label);
     applyHiddenField("tier", tier);
   };
-})();
 
+  window.addEventListener("DOMContentLoaded", () => {
+    const form = document.getElementById("searchHiddenForm");
+    const qInput = document.getElementById("searchQ");
+    if (!form || !qInput) return;
+    qInput.addEventListener("input", () => syncQueryIntoHiddenForm(form));
+  });
+})();
