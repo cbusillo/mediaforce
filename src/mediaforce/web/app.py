@@ -3085,7 +3085,11 @@ async def api_cleanup_clear_review(data: CleanupClearReviewRequest):
 
     with session_scope() as session:
         if data.delete_all:
-            count = session.exec(select(func.count(EncodeResult.id))).one() or 0
+            raw_count = session.exec(select(func.count()).select_from(EncodeResult)).one()
+            if isinstance(raw_count, (tuple, list)):
+                count = raw_count[0] if raw_count else 0
+            else:
+                count = raw_count or 0
             session.exec(delete(EncodeResult))
             session.exec(delete(EncodeProgress))
             session.commit()
