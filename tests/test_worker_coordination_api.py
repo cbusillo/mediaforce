@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -229,10 +227,12 @@ def test_cmd_run_api_mode_does_not_require_db(tmp_path, monkeypatch):
         def __init__(self, _url: str):
             pass
 
-        def claim(self, *, machine: str):
+        def claim(self, *, machine: str, available: bool = True, sample_path: str | None = None):
+            _ = available
+            _ = sample_path
             return None
 
-    monkeypatch.setattr("mediaforce.core.WorkerApiClient", _StubClient)
+    monkeypatch.setattr("mediaforce.services.worker_service.WorkerApiClient", _StubClient)
 
     args = SimpleNamespace(
         path=str(tmp_path),
@@ -243,6 +243,7 @@ def test_cmd_run_api_mode_does_not_require_db(tmp_path, monkeypatch):
         verify=False,
         verify_duration=60,
         sample_vmaf=False,
+        sample_count=3,
         sample_length=8.0,
         sample_motion_aware=True,
         hw_decode=True,

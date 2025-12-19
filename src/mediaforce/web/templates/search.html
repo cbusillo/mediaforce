@@ -78,5 +78,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/js/pages/search.js?v={{ static_rev() }}"></script>
+<script src="{{ request.url_for('static', path='js/pages/search.js') }}?v={{ static_rev() }}"></script>
 {% endblock %}

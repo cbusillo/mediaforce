@@ -300,7 +300,7 @@ MEDIAFORCE_MACHINE_NAME=&lt;short-hostname&gt;</code></pre>
     <div id="cleanup-status" class="text-sm"></div>
 </div>
 
-<script src="/static/js/pages/settings.js?v={{ static_rev() }}"></script>
-<script src="/static/js/pages/settings_workers.js?v={{ static_rev() }}"></script>
+<script src="{{ request.url_for('static', path='js/pages/settings.js') }}?v={{ static_rev() }}"></script>
+<script src="{{ request.url_for('static', path='js/pages/settings_workers.js') }}?v={{ static_rev() }}"></script>
 
 {% endblock %}

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import logging
 import pathlib
@@ -13,8 +11,6 @@ from datetime import datetime, timedelta
 from typing import Any, Optional, List, Callable
 
 from sqlmodel import Session, select, desc, func, col
-from sqlalchemy import text
-
 from mediaforce.config.logging import log_event, CLI_LOGGER
 from mediaforce.config.paths import (
     get_media_roots,
@@ -48,7 +44,6 @@ from mediaforce.db import MediaItem, EncodeResult, now_iso
 
 
 def format_duration(seconds: Optional[float]) -> str:
-    """Format duration as HH:MM:SS."""
     if seconds is None:
         return "unknown"
     hours = int(seconds // 3600)
@@ -60,7 +55,6 @@ def format_duration(seconds: Optional[float]) -> str:
 
 
 def format_bitrate(kbps: Optional[int]) -> str:
-    """Format bitrate nicely."""
     if kbps is None:
         return "unknown"
     if kbps >= 1000:
@@ -69,7 +63,6 @@ def format_bitrate(kbps: Optional[int]) -> str:
 
 
 def collect_video_files(path: pathlib.Path) -> list[pathlib.Path]:
-    """Collect video files from path (file or directory)."""
     if path.is_file():
         if path.suffix.lower() in VIDEO_EXTENSIONS:
             return [path]
@@ -86,7 +79,6 @@ def collect_video_files(path: pathlib.Path) -> list[pathlib.Path]:
 
 
 def guess_show_name(path: pathlib.Path) -> Optional[str]:
-    """Try to extract show name from path."""
     parts = path.parts
     for i, part in enumerate(parts):
         if part.lower().startswith("season"):
@@ -96,7 +88,6 @@ def guess_show_name(path: pathlib.Path) -> Optional[str]:
 
 
 def run_analyze(path_str: str) -> int:
-    """Analyze command - probe and classify media files."""
     path = normalize_path(pathlib.Path(path_str).resolve())
     files = collect_video_files(path)
 
@@ -157,7 +148,6 @@ def run_encode_batch(
     sample_length: float = 8.0,
     sample_motion_aware: bool = True,
 ) -> int:
-    """Encode command - encode media files to AV1."""
     path = normalize_path(pathlib.Path(path_str).resolve())
     output_dir = normalize_path(pathlib.Path(output_dir_str).resolve())
     files = collect_video_files(path)
@@ -302,7 +292,6 @@ def run_encode_batch(
 
 
 def run_scan(args: argparse.Namespace) -> int:
-    """Scan library and populate inventory database."""
     path = pathlib.Path(args.path).resolve()
     if not path.exists():
         log_event(logging.ERROR, "path_missing", path=str(path))
@@ -393,7 +382,6 @@ def run_scan(args: argparse.Namespace) -> int:
 
 
 def run_queue(args: argparse.Namespace) -> int:
-    """Show encoding queue (priority order)."""
     path = pathlib.Path(args.path).resolve()
     library_root = get_library_root(path)
     db_path = get_db_path(library_root)
@@ -484,7 +472,6 @@ def run_queue(args: argparse.Namespace) -> int:
 
 
 def run_promote(args: argparse.Namespace) -> int:
-    """Promote completed encodes."""
     path = normalize_path(pathlib.Path(args.path).resolve())
     transcode_root = normalize_path(pathlib.Path(args.transcode_root).resolve())
 
@@ -528,29 +515,29 @@ def run_promote(args: argparse.Namespace) -> int:
     if db_path.exists():
         session = init_db(db_path)
 
-    for f in files:
-        if ".AV1." in f.name or f.suffix.lower() == ".av1":
+    for source_path in files:
+        if ".AV1." in source_path.name or source_path.suffix.lower() == ".av1":
             continue
 
-        encoded = get_transcode_output_path(f, transcode_root)
-        if encoded is None:
+        encoded_path = get_transcode_output_path(source_path, transcode_root)
+        if encoded_path is None:
             skipped += 1
             continue
 
-        dest_path = f.parent / encoded.name
+        dest_path = source_path.parent / encoded_path.name
         log_event(
             logging.INFO,
             "promote_candidate",
-            source=str(f),
-            encoded=str(encoded),
+            source=str(source_path),
+            encoded=str(encoded_path),
             dest=str(dest_path),
         )
 
         rollback_state = None
         try:
             result, rollback_state = promote_encoded_file_atomic(
-                source_path=f,
-                encoded_path=encoded,
+                source_path=source_path,
+                encoded_path=encoded_path,
                 dest_path=dest_path,
                 dry_run=args.dry_run,
                 move_original_to_backup=args.delete_original,
@@ -566,14 +553,16 @@ def run_promote(args: argparse.Namespace) -> int:
             if session:
                 try:
                     now_str = now_iso()
-                    item = session.exec(select(MediaItem).where(col(MediaItem.path) == str(f))).first()
+                    item = session.exec(select(MediaItem).where(col(MediaItem.path) == str(source_path))).first()
                     if item:
                         item.status = "completed"
                         item.path = str(result.dest_path)
                         item.updated_at = now_str
                         session.add(item)
 
-                    enc = session.exec(select(EncodeResult).where(col(EncodeResult.source_path) == str(f))).first()
+                    enc = session.exec(
+                        select(EncodeResult).where(col(EncodeResult.source_path) == str(source_path))
+                    ).first()
                     if enc:
                         enc.promoted = True
                         enc.promoted_at = now_str
@@ -589,7 +578,7 @@ def run_promote(args: argparse.Namespace) -> int:
 
             promoted += 1
         except Exception as e:
-            log_event(logging.ERROR, "promote_item_failed", source=str(f), error=str(e))
+            log_event(logging.ERROR, "promote_item_failed", source=str(source_path), error=str(e))
             errors += 1
 
     if session:
@@ -600,7 +589,6 @@ def run_promote(args: argparse.Namespace) -> int:
 
 
 def run_purge_backups(args: argparse.Namespace) -> int:
-    """Purge promotion backup files."""
     older_than_days = int(args.older_than_days)
     limit = int(args.limit)
     apply = bool(args.apply)
@@ -619,7 +607,7 @@ def run_purge_backups(args: argparse.Namespace) -> int:
         stmt: Any = (
             select(EncodeResult)
             .where(
-                col(EncodeResult.promoted) == True,  # noqa: E712
+                col(EncodeResult.promoted).is_(True),
                 col(EncodeResult.promoted_at).is_not(None),
                 col(EncodeResult.promoted_at) < cutoff_iso,
                 col(EncodeResult.source_backup_path).is_not(None),
@@ -709,7 +697,6 @@ def run_purge_backups(args: argparse.Namespace) -> int:
 
 
 def run_import_show_config(args: argparse.Namespace) -> int:
-    """Import legacy show_config.json."""
     apply = bool(getattr(args, "apply", False))
     dry_run = not apply
     overwrite_existing = bool(getattr(args, "overwrite_existing", False))
@@ -754,7 +741,6 @@ def run_import_show_config(args: argparse.Namespace) -> int:
 
 
 def run_verify_single(args: argparse.Namespace) -> int:
-    """Verify quality of a single encoded file."""
     source_path = pathlib.Path(args.source).resolve()
     encoded_path = pathlib.Path(args.encoded).resolve()
 
@@ -782,7 +768,6 @@ def run_verify_single(args: argparse.Namespace) -> int:
 
 
 def run_verify_batch(args: argparse.Namespace) -> int:
-    """Batch verify."""
     path = pathlib.Path(args.path).resolve()
     transcode_root = pathlib.Path(args.transcode_root).resolve()
 
@@ -824,7 +809,6 @@ def run_verify_batch(args: argparse.Namespace) -> int:
 
 
 def run_review_list(args: argparse.Namespace) -> int:
-    """List review items."""
     path = pathlib.Path(args.path).resolve()
     library_root = get_library_root(path)
     db_path = get_db_path(library_root)
@@ -836,7 +820,7 @@ def run_review_list(args: argparse.Namespace) -> int:
     
     stmt: Any = select(EncodeResult)
     if not args.all:
-        stmt = stmt.where(col(EncodeResult.is_outlier) == True, col(EncodeResult.review_status) == "pending")
+        stmt = stmt.where(col(EncodeResult.is_outlier).is_(True), col(EncodeResult.review_status) == "pending")
 
     results = session.exec(stmt).all()
     items = []
@@ -853,7 +837,6 @@ def run_review_list(args: argparse.Namespace) -> int:
 
 
 def run_review_approve(args: argparse.Namespace) -> int:
-    """Approve an encode (mark as reviewed and OK to promote)."""
     path = pathlib.Path(args.path).resolve()
     library_root = get_library_root(path)
     db_path = get_db_path(library_root)
@@ -886,7 +869,6 @@ def run_review_approve(args: argparse.Namespace) -> int:
 
 
 def run_review_reject(args: argparse.Namespace) -> int:
-    """Reject an encode (mark for re-encoding or deletion)."""
     path = pathlib.Path(args.path).resolve()
     library_root = get_library_root(path)
     db_path = get_db_path(library_root)
@@ -928,7 +910,6 @@ def run_review_reject(args: argparse.Namespace) -> int:
 
 
 def run_compare_clips(args: argparse.Namespace) -> int:
-    """Extract clips and generate HTML for side-by-side comparison."""
     source_path = pathlib.Path(args.source).resolve()
     encoded_path = pathlib.Path(args.encoded).resolve()
 
@@ -1002,7 +983,6 @@ def run_compare_clips(args: argparse.Namespace) -> int:
 
 
 def run_compare_full(args: argparse.Namespace) -> int:
-    """Generate HTML for side-by-side comparison of full video files."""
     source_path = pathlib.Path(args.source).resolve()
     encoded_path = pathlib.Path(args.encoded).resolve()
 
@@ -1031,7 +1011,6 @@ def run_compare_full(args: argparse.Namespace) -> int:
 
 
 def run_review_compare(args: argparse.Namespace) -> int:
-    """Generate a side-by-side comparison video of source vs encoded."""
     path = pathlib.Path(args.path).resolve()
     library_root = get_library_root(path)
     db_path = get_db_path(library_root)

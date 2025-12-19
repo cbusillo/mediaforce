@@ -1,8 +1,6 @@
-from __future__ import annotations
-
 from typing import Optional, Sequence, Any
 
-from sqlalchemy import text, func, case
+from sqlalchemy import func, case, literal
 from sqlmodel import Session, select as _select  # type: ignore[reportMissingImports]
 
 from mediaforce.db.models import MediaItem
@@ -11,7 +9,7 @@ select: Any = _select
 
 
 class QueueRepository:
-    """Encapsulate queue listings with raw SQL, keeping callers on Session."""
+    """Encapsulate queue listings, keeping callers on Session."""
 
     def __init__(self, session: Session):
         self.session = session
@@ -103,11 +101,12 @@ class QueueRepository:
         sort_expr = sort_map.get(sort, max_priority_col)
         sort_expr = sort_expr.asc() if direction.lower() == "asc" else sort_expr.desc()
 
+        grouped = base_query.subquery()
         total_stmt = select(
             func.count().label("total_shows"),
-            func.sum(text("file_count")).label("total_files"),
-            func.sum(text("total_savings_bytes")).label("total_savings"),
-        ).select_from(base_query.subquery())
+            func.sum(grouped.c.file_count).label("total_files"),
+            func.sum(grouped.c.total_savings_bytes).label("total_savings"),
+        ).select_from(grouped)
 
         total_row = self.session.exec(total_stmt).mappings().fetchone()  # type: ignore[call-overload]
         total = total_row["total_shows"] if total_row and total_row["total_shows"] else 0
@@ -145,7 +144,7 @@ class QueueRepository:
         first_slash_pos = func.instr(rel_path, "/")
         season_name: Any = case(
             (first_slash_pos > 0, func.substr(rel_path, 1, first_slash_pos - 1)),
-            else_=text("'Files'"),
+            else_=literal("Files"),
         ).label("season_name")
 
         stmt = (

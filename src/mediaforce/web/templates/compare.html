@@ -99,5 +99,5 @@
     }
   });
 </script>
-<script src="/static/js/pages/compare.js?v={{ static_rev() }}"></script>
+<script src="{{ request.url_for('static', path='js/pages/compare.js') }}?v={{ static_rev() }}"></script>
 {% endblock %}

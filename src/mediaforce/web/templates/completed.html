@@ -1,7 +1,7 @@
 {% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, table_empty_row, toolbar_chip %} {% block content %}
 {% call page_header("History", "Completed", "Recently promoted outputs (latest 100).") %}
 <div class="flex items-center gap-2">
-  <a class="btn btn-sm" href="/export/completed.csv" download>Download CSV</a>
+  <a class="btn btn-sm" href="{{ request.url_for('export_completed_csv') }}" download>Download CSV</a>
   {{ toolbar_chip('Refresh', 'window.location.reload()') }}
   <div class="pill hidden md:inline-flex">Auto-refresh disabled; reload for latest.</div>
 </div>

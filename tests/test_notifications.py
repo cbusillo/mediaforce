@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from mediaforce.services.notifications import (
     NotificationConfig,
     build_notification_payload,

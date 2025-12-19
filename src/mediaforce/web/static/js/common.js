@@ -5,5 +5,5 @@
     el.classList.toggle("hidden", !show);
   }
 
-  window.mfCommon = { toggleEl };
+  window.toggleEl = toggleEl;
 })();

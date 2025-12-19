@@ -18,7 +18,7 @@ def test_build_sample_plan_motion_weight(monkeypatch, tmp_path):
     def fake_window_bitrate(path, start, duration=5.0):
         return 8000 if start >= 50 else 800
 
-    monkeypatch.setattr("mediaforce.core.window_bitrate", fake_window_bitrate)
+    monkeypatch.setattr("mediaforce.services.metrics.window_bitrate", fake_window_bitrate)
 
     plan = build_sample_plan(info, count=3, sample_len=8.0, motion_aware=True)
 

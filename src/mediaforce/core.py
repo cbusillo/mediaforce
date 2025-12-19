@@ -6,8 +6,6 @@ Analyzes source quality and applies appropriate compression settings.
 Maximum compression with watchable quality, not source fidelity.
 """
 
-from __future__ import annotations
-
 import argparse
 import logging
 import pathlib

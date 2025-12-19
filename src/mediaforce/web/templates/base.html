@@ -7,18 +7,18 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/static/css/tailwind.css?v={{ static_rev() }}" />
+    <link rel="stylesheet" href="{{ request.url_for('static', path='css/tailwind.css') }}?v={{ static_rev() }}" />
     <script src="https://unpkg.com/htmx.org@1.9.10" integrity="sha384-D1Kt99CQMDuVetoL1lrYwg5t+9QdHe7NLX/SoJYkXDFfX37iInKRy5xLSi8nO7UC" crossorigin="anonymous"></script>
-    <script src="/static/js/common.js?v={{ static_rev() }}"></script>
-    <script src="/static/js/api.js?v={{ static_rev() }}"></script>
-    <script src="/static/js/ui.js?v={{ static_rev() }}"></script>
-    <script src="/static/js/app.js?v={{ static_rev() }}"></script>
+    <script src="{{ request.url_for('static', path='js/common.js') }}?v={{ static_rev() }}"></script>
+    <script src="{{ request.url_for('static', path='js/api.js') }}?v={{ static_rev() }}"></script>
+    <script src="{{ request.url_for('static', path='js/ui.js') }}?v={{ static_rev() }}"></script>
+    <script src="{{ request.url_for('static', path='js/app.js') }}?v={{ static_rev() }}"></script>
   </head>
   <body class="bg-surface text-foreground min-h-screen">
     <nav class="px-4 sm:px-6 py-4 border-b border-surface-subtle bg-surface-subtle shadow-sm sticky top-0 z-50 overflow-hidden">
       <div class="flex items-center gap-3">
         <a href="/" class="flex items-center gap-3 mr-6">
-          <img src="/static/img/mediaforce-logo.svg" alt="Mediaforce" class="h-8 w-8" />
+          <img src="{{ request.url_for('static', path='img/mediaforce-logo.svg') }}" alt="Mediaforce" class="h-8 w-8" />
           <span class="text-xl font-bold text-accent tracking-tight">Mediaforce</span>
         </a>
 
@@ -63,8 +63,10 @@
             </svg>
           </a>
           <form class="hidden sm:flex relative" action="/search" method="get" autocomplete="off">
+            <label for="navSearch" class="hidden">Search</label>
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="absolute left-3 top-1/2 -translate-y-1/2 text-foreground-muted pointer-events-none"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
             <input
+              id="navSearch"
               type="text"
               name="q"
               placeholder="Search..."

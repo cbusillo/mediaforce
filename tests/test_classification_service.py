@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import pathlib
 
 from mediaforce.domain.types import ClassificationResult, MediaInfo, SourceTier

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import pathlib
 import platform as platform_mod
 import re
@@ -206,7 +204,6 @@ def record_encode_result(
 
 
 def find_ffmpeg() -> Optional[str]:
-    """Find ffmpeg executable."""
     for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg"]:
         if shutil.which(candidate):
             return candidate
@@ -214,7 +211,6 @@ def find_ffmpeg() -> Optional[str]:
 
 
 def choose_output_format(info: MediaInfo) -> str:
-    """Select pixel format; prefer 10-bit only when useful."""
     if info.video_bit_depth and info.video_bit_depth > 8:
         return "yuv420p10le"
     if info.is_hdr:
@@ -227,14 +223,12 @@ def apply_downscale_filter(
     info: MediaInfo,
     max_height: Optional[int],
 ) -> list[str]:
-    """Append a scale filter if source is taller than max_height."""
     if not max_height or not info.video_height:
         return input_filters
 
     if info.video_height <= max_height:
         return input_filters
 
-    # Keep width mod-2, preserve aspect
     scale_expr = f"scale=-2:{max_height}"
     new_filters = input_filters.copy()
     new_filters.append(scale_expr)
@@ -242,19 +236,16 @@ def apply_downscale_filter(
 
 
 def is_english_track(track: dict) -> bool:
-    """Check if a track is English."""
     lang = (track.get("language") or "").lower()
     return lang in ("eng", "en", "english")
 
 
 def is_undefined_track(track: dict) -> bool:
-    """Check if a track has no/undefined language."""
     lang = track.get("language")
     return lang is None or lang.lower() in ("", "und", "unk", "unknown")
 
 
 def select_audio_tracks(audio_tracks: list[dict]) -> list[dict]:
-    """Select which audio tracks to keep."""
     if not audio_tracks:
         return []
 
@@ -270,13 +261,12 @@ def select_audio_tracks(audio_tracks: list[dict]) -> list[dict]:
 
 
 def select_subtitle_tracks(subtitle_tracks: list[dict]) -> list[dict]:
-    """Select which subtitle tracks to keep."""
-    TEXT_SUBTITLE_CODECS = {"subrip", "srt", "mov_text", "text"}
+    text_subtitle_codecs = {"subrip", "srt", "mov_text", "text"}
 
     selected = []
     for track in subtitle_tracks:
         codec = (track.get("codec") or "").lower()
-        if codec not in TEXT_SUBTITLE_CODECS:
+        if codec not in text_subtitle_codecs:
             continue
         if is_english_track(track) or is_undefined_track(track):
             selected.append(track)
@@ -289,14 +279,13 @@ def select_subtitle_tracks(subtitle_tracks: list[dict]) -> list[dict]:
 
 
 def get_opus_target_bitrate(channels: int) -> int:
-    """Get target Opus bitrate for channel count."""
-    target_bitrates = {
+    channel_bitrate_map = {
         1: 64,
         2: 128,
         6: 256,
         8: 384,
     }
-    return target_bitrates.get(channels, min(384, 128 + (channels - 2) * 48))
+    return channel_bitrate_map.get(channels, min(384, 128 + (channels - 2) * 48))
 
 
 def build_ffmpeg_command(
@@ -308,7 +297,6 @@ def build_ffmpeg_command(
     hw_decode: bool = False,
     hw_encode: bool = False,
 ) -> list[str]:
-    """Build ffmpeg command for AV1 encoding."""
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
         raise RuntimeError("ffmpeg not found")
@@ -320,10 +308,6 @@ def build_ffmpeg_command(
         if system == "darwin":
             cmd.extend(["-hwaccel", "videotoolbox"])
         elif system == "linux":
-            # Only use CUDA when an NVIDIA device is present and we have nvidia-smi
-            # This logic was originally in core.py, reproducing it here.
-            # Assuming if the user asks for hw_decode on linux, they likely have it,
-            # but checking paths is safer.
             if pathlib.Path("/dev/nvidia0").exists() and shutil.which("nvidia-smi"):
                 cmd.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
 

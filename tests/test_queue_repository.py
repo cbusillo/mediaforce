@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from sqlmodel import Session, SQLModel, create_engine
 
 from mediaforce.db.models import MediaItem

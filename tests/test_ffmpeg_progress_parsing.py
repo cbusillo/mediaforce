@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 # mypy: ignore-errors
 
 from mediaforce.services.encoder import parse_ffmpeg_progress

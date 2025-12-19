@@ -11,11 +11,11 @@
     }
 
     const resp = await fetch(url, init);
-    let data = null;
+    let data;
     try {
       data = await resp.json();
     } catch (_) {
-      data = null;
+      data = undefined;
     }
 
     if (!resp.ok) {
@@ -35,4 +35,3 @@
 
   window.mfApi = { requestJson, getJson, postJson };
 })();
-

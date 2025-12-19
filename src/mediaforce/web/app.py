@@ -13,8 +13,9 @@ import os
 import pathlib
 import platform as platform_mod
 import sys
+from dataclasses import asdict
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Callable, Any, Iterable, Iterator, Sequence
 from mediaforce.config.logging import configure_logging, env_log_config
 
@@ -23,6 +24,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+from sqlalchemy import delete, desc, func
+from sqlmodel import Session, select
 
 from mediaforce.config.settings import AppSettings, LibrarySettings, load_app_settings, save_app_settings, ENGINE
 from mediaforce.db.repository.session import session_scope
@@ -35,7 +38,24 @@ from mediaforce.db.repository.progress import ProgressRepository
 from mediaforce.config.paths import default_transcode_root, get_media_roots, iter_libraries_for_current_host, normalize_path
 from mediaforce.config.settings import INVENTORY_DB
 from mediaforce.domain.types import OutlierResult, QualityMetrics
+from mediaforce.domain.types import TierSettings
 from mediaforce.domain.types import MediaInfo
+from mediaforce.db import (
+    MediaItem,
+    EncodeResult,
+    ShowOverride,
+    WorkerRegistry,
+    WorkerCommand,
+    WorkerControl,
+    ProfileEvaluation,
+    ProfileSettingsSource,
+    VmafSample,
+    ProfileChoiceFeedback,
+    RetrainingCandidate,
+    EncodeProgress,
+    now_iso,
+    ensure_schema,
+)
 from mediaforce.services.encoder import record_encode_result
 from mediaforce.services.progress import (
     finish_progress_tracking,
@@ -61,6 +81,7 @@ from mediaforce.services.quality_loop import (
     finalize_profile_evaluation,
     start_profile_evaluation,
 )
+from mediaforce.web.charts import sparkline_svg
 
 
 def _validate_transcode_root(transcode_root: pathlib.Path) -> tuple[bool, str]:
@@ -158,27 +179,6 @@ def _unwrap_count(value: Any, default: int = 0) -> int:
         return int(value[0])
     except Exception:
         return default
-from mediaforce.domain.types import TierSettings
-from mediaforce.db import (
-    MediaItem,
-    EncodeResult,
-    ShowOverride,
-    WorkerRegistry,
-    WorkerCommand,
-    WorkerControl,
-    ProfileEvaluation,
-    ProfileSettingsSource,
-    VmafSample,
-    ProfileChoiceFeedback,
-    RetrainingCandidate,
-    EncodeProgress,
-    now_iso,
-    ensure_schema,
-)
-from sqlalchemy import func, desc, delete
-from sqlmodel import select, Session
-from dataclasses import asdict
-from mediaforce.web.charts import sparkline_svg
 
 IS_MAC = platform_mod.system() == "Darwin"
 # Ensure the base logger is configured for shared service logs that emit events
@@ -608,7 +608,8 @@ async def raw_file(filename: str):
 @app.get("/raw/manifest.json")
 async def raw_manifest():
     """Expose a simple manifest with version + sha256 hashes for allowed raw files."""
-    manifest = {"version": datetime.utcnow().isoformat() + "Z", "files": {}}
+    version = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    manifest = {"version": version, "files": {}}
     base = PROJECT_ROOT
     for export_name, rel_path in ALLOWED_RAW_FILES.items():
         p = base / rel_path
@@ -1685,7 +1686,7 @@ def _queue_cache_get(library_root: str):
     entry = QUEUE_CACHE.get(library_root)
     if not entry:
         return None
-    if entry.get("expires", 0) < datetime.utcnow().timestamp():
+    if entry.get("expires", 0) < datetime.now(tz=timezone.utc).timestamp():
         QUEUE_CACHE.pop(library_root, None)
         return None
     return entry.get("shows")
@@ -1693,7 +1694,7 @@ def _queue_cache_get(library_root: str):
 
 def _queue_cache_set(library_root: str, shows: list[dict]):
     QUEUE_CACHE[library_root] = {
-        "expires": datetime.utcnow().timestamp() + QUEUE_CACHE_TTL,
+        "expires": datetime.now(tz=timezone.utc).timestamp() + QUEUE_CACHE_TTL,
         "shows": shows,
     }
 
@@ -1702,7 +1703,7 @@ def _queue_totals_get(cache_key: str):
     entry = QUEUE_TOTALS_CACHE.get(cache_key)
     if not entry:
         return None
-    if entry.get("expires", 0) < datetime.utcnow().timestamp():
+    if entry.get("expires", 0) < datetime.now(tz=timezone.utc).timestamp():
         QUEUE_TOTALS_CACHE.pop(cache_key, None)
         return None
     return entry.get("totals")
@@ -1710,14 +1711,9 @@ def _queue_totals_get(cache_key: str):
 
 def _queue_totals_set(cache_key: str, totals: dict):
     QUEUE_TOTALS_CACHE[cache_key] = {
-        "expires": datetime.utcnow().timestamp() + QUEUE_TOTALS_TTL,
+        "expires": datetime.now(tz=timezone.utc).timestamp() + QUEUE_TOTALS_TTL,
         "totals": totals,
     }
-
-
-def _aggregate_queue_shows(conn, library_root: str) -> list[dict]:
-    # Deprecated; shows are now fetched with ordered/limited SQL in queue_shows_view
-    return []
 
 
 def _resolve_library(request: Request) -> str:
@@ -1877,171 +1873,6 @@ async def queue_seasons_view(
     )
 
 
-async def queue_episodes_view(
-    request: Request, conn, show: str, season: str, page: int, per_page: int, library_root: str
-):
-    """View episodes for a specific show/season."""
-    if season == "Files":
-        like_pattern = f"{library_root}/{show}/%"
-    else:
-        like_pattern = f"{library_root}/{show}/{season}/%"
-
-    sort = request.query_params.get("sort", "priority")
-    direction = request.query_params.get("order", "desc").lower()
-    direction = "desc" if direction not in ["asc", "desc"] else direction
-
-    sort_map = {
-        "file": "filename COLLATE NOCASE",
-        "size": "size_bytes",
-        "savings": "potential_savings_bytes",
-        "tier": "detected_tier",
-        "priority": "priority_score",
-        "bitrate": "bitrate_kbps",
-        "duration": "duration_sec",
-    }
-    sort_expr = sort_map.get(sort, "priority_score")
-
-    # Total count and savings
-    total_row = conn.execute(
-        """
-        SELECT COUNT(*) as total, SUM(potential_savings_bytes) as total_savings,
-               MIN(pe.status) as eval_status,
-               MIN(pe.median_vmaf) as eval_median,
-               MIN(pe.min_vmaf) as eval_min,
-               MIN(pe.id) as eval_id
-        FROM media_inventory mi
-        LEFT JOIN profile_evaluations pe ON pe.media_id = mi.id
-        WHERE mi.status = 'pending' AND mi.path LIKE ?
-        """,
-        (like_pattern,),
-    ).fetchone()
-    total = total_row["total"] or 0
-    total_savings = total_row["total_savings"] or 0
-
-    total_pages = max(1, (total + per_page - 1) // per_page)
-    page = max(1, min(page, total_pages))
-    offset = (page - 1) * per_page
-    page_range = list(range(max(1, page - 2), min(total_pages + 1, page + 3)))
-
-    cursor = conn.execute(
-        f"""
-        SELECT mi.id, mi.path, mi.size_bytes, mi.detected_tier, mi.priority_score, mi.bitrate_kbps,
-               mi.duration_sec, mi.is_interlaced, mi.potential_savings_bytes,
-               mi.video_codec, mi.video_profile, mi.resolution, mi.width, mi.height,
-               mi.bit_depth, mi.frame_rate, mi.is_hdr, mi.hdr_format, mi.audio_tracks, mi.subtitle_tracks,
-               mi.tier_reasoning,
-               pe.id as eval_id,
-               pe.status as eval_status,
-               pe.median_vmaf as eval_median,
-               pe.min_vmaf as eval_min
-        FROM media_inventory mi
-        LEFT JOIN profile_evaluations pe ON pe.media_id = mi.id
-        WHERE mi.status = 'pending' AND mi.path LIKE ?
-        ORDER BY {sort_expr} {direction}
-        LIMIT ? OFFSET ?
-        """,
-        (like_pattern, per_page, offset),
-    )
-
-    episodes = []
-    total_savings = 0
-    for row in cursor.fetchall():
-        savings = row["potential_savings_bytes"] or 0
-        total_savings += savings
-
-        # Parse audio tracks
-        audio_info = "—"
-        if row["audio_tracks"]:
-            try:
-                tracks = json.loads(row["audio_tracks"])
-                audio_info = ", ".join(
-                    f"{t.get('codec', '—')} {t.get('channels', '—')}ch"
-                    for t in tracks[:3]  # Show first 3
-                )
-                if len(tracks) > 3:
-                    audio_info += f" (+{len(tracks) - 3})"
-            except Exception:
-                pass
-
-        # Parse subtitle tracks
-        sub_count = 0
-        if row["subtitle_tracks"]:
-            try:
-                sub_count = len(json.loads(row["subtitle_tracks"]))
-            except Exception:
-                pass
-
-        eval_obj = None
-        if row["profile_eval_id"]:
-            eval_obj = conn.execute(
-                "SELECT * FROM profile_evaluations WHERE id = ?", (row["profile_eval_id"],)
-            ).fetchone()
-
-        episodes.append(
-            {
-                "id": row["id"],
-                "path": row["path"],
-                "filename": pathlib.Path(row["path"]).name,
-                "size": format_size(row["size_bytes"]),
-                "size_bytes": row["size_bytes"],
-                "detected_tier": row["detected_tier"],
-                "priority_score": row["priority_score"],
-                "bitrate": f"{row['bitrate_kbps']}k" if row["bitrate_kbps"] else "—",
-                "bitrate_kbps": row["bitrate_kbps"],
-                "duration": format_duration(row["duration_sec"]),
-                "is_interlaced": row["is_interlaced"],
-                "savings": format_size(savings) if savings else "—",
-                "savings_bytes": savings,
-                # Expanded details
-                "video_codec": row["video_codec"] or "—",
-                "video_profile": row["video_profile"] or "",
-                "resolution": row["resolution"] or f"{row['width']}x{row['height']}" if row["width"] else "—",
-                "bit_depth": row["bit_depth"],
-                "frame_rate": row["frame_rate"] or "—",
-                "is_hdr": row["is_hdr"],
-                "hdr_format": row["hdr_format"],
-                "audio_info": audio_info,
-                "subtitle_count": sub_count,
-                "tier_reasoning": row["tier_reasoning"] or "",
-                "eval_status": eval_obj["status"] if eval_obj else None,
-                "eval_median": eval_obj["median_vmaf"] if eval_obj else None,
-                "eval_min": eval_obj["min_vmaf"] if eval_obj else None,
-                "eval_id": eval_obj["id"] if eval_obj else None,
-            }
-        )
-
-    return templates.TemplateResponse(
-        request,
-        "queue.html",
-        {
-            "request": request,
-            "title": f"Queue - {show} - {season}",
-            "active": "queue",
-            "view_mode": "episodes",
-            "show_name": show,
-            "season_name": season,
-            "episodes": episodes,
-            "total": total,
-            "total_files": total,
-            "total_savings": format_size(total_savings),
-            "page": page,
-            "per_page": per_page,
-            "total_pages": total_pages,
-            "page_range": page_range,
-            "breadcrumbs": [
-                {"name": "All Shows", "url": "/queue"},
-                {"name": show, "url": f"/queue?show={show}"},
-            ],
-            "pagination_url": build_pagination_url(request),
-            "workers": get_worker_status(library_root),
-            "sort": sort,
-            "order": direction,
-            "watch_status": _watch_status_snapshot(),
-            "nav_status": _nav_status(),
-        },
-    )
-
-
 @app.get("/search", response_class=HTMLResponse)
 async def search_page(
     request: Request,
@@ -2193,7 +2024,7 @@ async def completed(request: Request):
     )
 
 
-@app.get("/export/completed.csv")
+@app.get("/export/completed.csv", name="export_completed_csv")
 async def export_completed_csv(
     limit: int = Query(5000, ge=1, le=50_000),
 ):
@@ -2278,7 +2109,7 @@ async def export_completed_csv(
     return _csv_response(filename="mediaforce-completed.csv", header=header, rows=iter_rows())
 
 
-@app.get("/export/stats/daily.csv")
+@app.get("/export/stats/daily.csv", name="export_stats_daily_csv")
 async def export_stats_daily_csv(
     days: int = Query(30, ge=7, le=365),
 ):
@@ -2330,7 +2161,7 @@ async def export_stats_daily_csv(
     )
 
 
-@app.get("/export/stats/tiers.csv")
+@app.get("/export/stats/tiers.csv", name="export_stats_tiers_csv")
 async def export_stats_tiers_csv(
     days: int = Query(30, ge=7, le=365),
 ):

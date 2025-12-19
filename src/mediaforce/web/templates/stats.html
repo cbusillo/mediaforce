@@ -1,8 +1,8 @@
 {% extends "base.html" %} {% from "partials/ui_macros.html" import page_header, table_empty_row, toolbar_chip %} {% block content %}
 {% call page_header("Analytics", "Stats", "Compression savings, throughput, and quality over time.") %}
 <div class="flex flex-wrap items-center gap-2">
-  <a class="btn btn-sm" href="/export/stats/daily.csv?days={{ window_days }}" download>Daily CSV</a>
-  <a class="btn btn-sm" href="/export/stats/tiers.csv?days={{ window_days }}" download>Tiers CSV</a>
+  <a class="btn btn-sm" href="{{ request.url_for('export_stats_daily_csv') }}?days={{ window_days }}" download>Daily CSV</a>
+  <a class="btn btn-sm" href="{{ request.url_for('export_stats_tiers_csv') }}?days={{ window_days }}" download>Tiers CSV</a>
   {{ toolbar_chip('Refresh', 'window.location.reload()') }}
   <form class="flex items-center gap-2" method="get" action="/stats">
     <label class="text-sm text-foreground-muted" for="days">Window</label>

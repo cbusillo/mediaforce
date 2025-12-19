@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 import argparse
 import pathlib
 
 from sqlmodel import SQLModel, Session, create_engine
 
 import mediaforce.core as core
+import mediaforce.services.orchestrator as orchestrator
+import mediaforce.config.paths as paths
 from mediaforce.db import EncodeResult, MediaItem
 from mediaforce.services.promote import ProbeSummary
 
@@ -51,11 +51,12 @@ def test_cmd_promote_rolls_back_on_db_commit_failure(tmp_path: pathlib.Path, mon
 
     monkeypatch.setattr(promote, "probe_with_ffprobe", fake_probe)
 
-    monkeypatch.setattr(core, "get_media_roots", lambda: [str(media_root)])
+    monkeypatch.setattr(paths, "get_media_roots", lambda: [str(media_root)])
+    monkeypatch.setattr(orchestrator, "get_media_roots", lambda: [str(media_root)])
 
     db_path = tmp_path / "inventory.db"
     db_path.touch()
-    monkeypatch.setattr(core, "get_db_path", lambda _=None: db_path)
+    monkeypatch.setattr(orchestrator, "get_db_path", lambda _=None: db_path)
 
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
     SQLModel.metadata.create_all(engine)
@@ -75,7 +76,7 @@ def test_cmd_promote_rolls_back_on_db_commit_failure(tmp_path: pathlib.Path, mon
         raise RuntimeError("commit failed")
 
     monkeypatch.setattr(session, "commit", fail_commit)
-    monkeypatch.setattr(core, "init_db", lambda _: session)
+    monkeypatch.setattr(orchestrator, "init_db", lambda _: session)
 
     args = argparse.Namespace(
         path=str(library_path),

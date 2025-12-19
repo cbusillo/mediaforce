@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from mediaforce.config.paths import find_library_for_path, iter_libraries_for_current_host
 from mediaforce.config.settings import AppSettings, LibrarySettings
 

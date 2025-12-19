@@ -1,6 +1,4 @@
 """Repository helpers."""
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Any, Generic, Iterable, Optional, Sequence, Type, TypeVar
 

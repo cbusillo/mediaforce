@@ -1,13 +1,11 @@
-from __future__ import annotations
-
 import hashlib
 import json
 import urllib.request
 from datetime import datetime
 from typing import Optional
 
-from sqlmodel import Session, select
-from sqlalchemy import text
+from sqlmodel import Session, select, col
+from sqlalchemy import desc
 
 from mediaforce.config.settings import AppSettings, LibrarySettings
 from mediaforce.db import ProfileSettingsSource
@@ -83,8 +81,8 @@ def ensure_active_profile_settings(
 
     src = session.exec(
         select(ProfileSettingsSource)
-        .where(ProfileSettingsSource.is_active == True)  # noqa: E712
-        .order_by(text("id DESC"))
+        .where(col(ProfileSettingsSource.is_active).is_(True))
+        .order_by(desc(ProfileSettingsSource.id))
     ).first()
 
     if remote_url is None:

@@ -82,8 +82,7 @@
     document.getElementById("modalShowName").textContent = showName;
 
     const row = document.querySelector(`tr[data-show="${CSS.escape(showName)}"]`);
-    const currentTier = row?.dataset.override || row?.dataset.tier || "good";
-    document.getElementById("modalTier").value = currentTier;
+    document.getElementById("modalTier").value = row?.dataset.override || row?.dataset.tier || "good";
 
     document.getElementById("overrideModal").style.display = "block";
   };

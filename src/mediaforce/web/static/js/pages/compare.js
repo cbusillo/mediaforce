@@ -63,8 +63,7 @@
     const durSource = isFinite(source.duration) ? source.duration : 0;
     const durEncoded = isFinite(encoded.duration) ? encoded.duration : 0;
     const dur = Math.max(durSource, durEncoded, 0);
-    const pct = dur > 0 ? (masterTime / dur) * 100 : 0;
-    seekBar.value = pct;
+    seekBar.value = dur > 0 ? (masterTime / dur) * 100 : 0;
     timeDisplay.textContent = `${formatTimeHMS(masterTime)} / ${formatTimeHMS(dur)}`;
   }
 

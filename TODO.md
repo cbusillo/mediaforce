@@ -4,31 +4,21 @@ Keep this list short and current. Completed work should live in git history.
 
 ## Now (UI/UX + Cleanup)
 
-- [ ] **Standardize web UI**
-  - Use shared macros (`partials/ui_macros.html`) and shared JS (`static/js/ui.js`)
-    across all pages.
-  - Align page headers, toolbars, buttons, and empty states with `Review` as the
-    baseline.
+- [ ] **Post-transfer validation**
+  - After library transfer completes: run a full scan, verify shows/queue/review
+    pages load real data, and confirm encode + review flows end-to-end.
 
-- [ ] **Review workflow UX**
-  - Keep row-details inline (no popups) and highlight “attention needed” changes
-    (track count changes, codec/profile changes, VMAF outliers).
-  - Reduce table clutter (short filename display; show full details on expand +
-    compare).
+- [ ] **Inspection cleanup pass**
+  - Triage remaining PyCharm warnings that represent real runtime issues vs.
+    static-analysis false positives (SQLModel typing, JS template entrypoints).
+  - Keep generated assets excluded (Tailwind output), keep sources inspectable.
 
-- [ ] **Compare page UX**
-  - Keep controls/actions pinned at the top.
-  - Make layout predictable (fit/fill toggle; consistent sizing; show inspection
-    inline).
-
-- [ ] **Remove legacy/duplicated UI code**
-  - Delete unused handlers/templates and converge on a single pattern for worker
-    controls, filtering, and status messaging.
+- [ ] **Reduce docstring/comment noise**
+  - Remove redundant docstrings/comments that restate function names.
+  - Prefer descriptive names and small functions over inline commentary.
 
 ## Soon (Pipeline & Data Hygiene)
 
-- [ ] **Data reset tooling**
-  - Add safe UI/API action(s) to clear review/queue state and reconcile transcode
-    location contents.
-  - Ensure this respects per-host library mappings and does not delete original
-    media.
+- [ ] **Operational polish**
+  - Decide whether to self-host third-party assets (fonts/HTMX) to reduce IDE
+    noise and improve offline reliability.

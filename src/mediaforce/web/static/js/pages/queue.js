@@ -181,8 +181,7 @@
       const data = await resp.json();
       loadedShows[showName] = data.seasons;
 
-      const html = renderSeasonsTable(showName, data.seasons || []);
-      container.querySelector("td").innerHTML = html;
+      container.querySelector("td").innerHTML = renderSeasonsTable(showName, data.seasons || []);
 
       if (Array.isArray(data.seasons) && data.seasons.length === 1 && data.seasons[0].season_name === "Files") {
         const seasonName = data.seasons[0].season_name;

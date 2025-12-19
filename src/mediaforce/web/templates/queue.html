@@ -232,5 +232,5 @@
     workers: {{ workers | default([]) | tojson | safe }},
   };
 </script>
-<script src="/static/js/pages/queue.js?v={{ static_rev() }}"></script>
+<script src="{{ request.url_for('static', path='js/pages/queue.js') }}?v={{ static_rev() }}"></script>
 {% endblock %}

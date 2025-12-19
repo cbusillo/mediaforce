@@ -1,10 +1,8 @@
-from __future__ import annotations
-
 import pathlib
 from datetime import datetime, timedelta
 from typing import Optional, Callable
 
-from sqlalchemy import func, text
+from sqlalchemy import func
 from sqlmodel import Session, select, col
 
 from mediaforce.db.models import EncodeProgress, EncodeResult, Library, MediaItem
@@ -12,20 +10,28 @@ from mediaforce.db import now_iso as default_now_iso
 
 
 def recalculate_priorities(session: Session, max_age: int, calculate_priority: Callable) -> None:
-    """Recalculate priority scores using actual max_savings from the database."""
-
-    row = session.exec(  # type: ignore[call-overload]
-        text(
-            """
-            SELECT MAX(potential_savings_bytes)
-            FROM media_inventory
-            WHERE status = 'pending'
-              AND potential_savings_bytes IS NOT NULL
-              AND potential_savings_bytes > 0
-            """
+    savings_col = col(MediaItem.potential_savings_bytes)
+    max_row = session.exec(
+        select(func.max(savings_col)).where(
+            MediaItem.status == "pending",
+            savings_col.is_not(None),
+            savings_col > 0,
         )
     ).first()
-    max_savings = row[0] if row and row[0] else 1
+
+    max_savings_value: int | None
+    if max_row is None:
+        max_savings_value = None
+    elif isinstance(max_row, int):
+        max_savings_value = max_row
+    else:
+        # SQLModel/SQLAlchemy may return a 1-tuple/Row here.
+        try:
+            max_savings_value = int(max_row[0]) if max_row[0] is not None else None
+        except Exception:
+            max_savings_value = None
+
+    max_savings = max_savings_value if max_savings_value and max_savings_value > 0 else 1
 
     pending = session.exec(select(MediaItem).where(MediaItem.status == "pending")).all()
     now = datetime.now().isoformat()
@@ -41,15 +47,10 @@ def check_missing_outputs(
     session: Session,
     now_iso: Callable[[], str] = default_now_iso,
 ) -> tuple[int, list[dict[str, str]]]:
-    """Check for completed encodes with missing output files and reset to pending.
-
-    Returns (count, list of {"source": ..., "output": ...} entries reset).
-    """
-
     joins = session.exec(
         select(MediaItem.id, MediaItem.path, EncodeResult.output_path)
         .join(EncodeResult, EncodeResult.source_id == MediaItem.id)
-        .where(MediaItem.status == "encoded", EncodeResult.output_path != None)  # noqa: E711
+        .where(MediaItem.status == "encoded", col(EncodeResult.output_path).is_not(None))
     ).all()
 
     missing_count = 0
@@ -113,7 +114,7 @@ def claim_next_file(
     stale_items = session.exec(
         select(MediaItem).where(
             col(MediaItem.status) == "encoding",
-            col(MediaItem.claimed_at) != None,  # noqa: E711
+            col(MediaItem.claimed_at).is_not(None),
             col(MediaItem.claimed_at) < stale_cutoff,
         )
     ).all()
@@ -155,7 +156,7 @@ def claim_next_file(
     stalled_items = session.exec(
         select(MediaItem).where(
             col(MediaItem.status) == "encoding",
-            col(MediaItem.claimed_at) != None,  # noqa: E711
+            col(MediaItem.claimed_at).is_not(None),
             col(MediaItem.claimed_at) < progress_cutoff,
         )
     ).all()
@@ -240,8 +241,8 @@ def claim_next_file(
         .join(Library, MediaItem.library_id == Library.id, isouter=True)
         .where(
             col(MediaItem.status) == "pending",
-            ((col(MediaItem.claimed_by) == None) | (col(MediaItem.claimed_by) == machine)),  # noqa: E711
-            ((col(MediaItem.cooldown_until) == None) | (col(MediaItem.cooldown_until) <= now_str)),  # noqa: E711
+            (col(MediaItem.claimed_by).is_(None) | (col(MediaItem.claimed_by) == machine)),
+            (col(MediaItem.cooldown_until).is_(None) | (col(MediaItem.cooldown_until) <= now_str)),
         )
         .order_by(MediaItem.manual_priority, weight_expr.desc())
         .limit(1)
@@ -298,7 +299,7 @@ def encode_rows_with_sizes(session: Session):
         select(EncodeResult.output_size_bytes, MediaItem.size_bytes)
         .join(MediaItem, EncodeResult.source_id == MediaItem.id)
         .where(
-            col(EncodeResult.output_size_bytes) != None,  # noqa: E711
+            col(EncodeResult.output_size_bytes).is_not(None),
             col(EncodeResult.output_size_bytes) > 0,
         )
     ).all()

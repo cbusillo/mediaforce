@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from sqlmodel import SQLModel, Session, create_engine, select
 
 from mediaforce.services.scanner import calculate_priority, recalculate_priorities
