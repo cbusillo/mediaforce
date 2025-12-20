@@ -31,8 +31,8 @@ values that change (versions, hostnames, mounts).
 ## Style Baseline (borrowed from odoo-ai)
 
 - See `../odoo-ai/docs/policies/coding-standards.md` for naming/DRY rules and docs-as-code mindset.
-- Python style: `../odoo-ai/docs/style/python.md` — type hints everywhere, f-strings only, early returns, small
-  single-purpose functions, avoid blanket `except Exception`, prefer descriptive names over comments.
+- Python style: `../odoo-ai/docs/style/python.md` — type hint function signatures and public shapes; rely on inference
+  for locals when possible; avoid `# type: ignore`/suppression directives unless the issue is understood and justified.
 - Testing style: `../odoo-ai/docs/style/testing.md` and `testing-advanced.md` for patterns; adapt when we add a test
   suite here.
 - Keep this section thin; if we adopt repo-local style pages, link them here and deprecate cross-repo references.
@@ -48,7 +48,8 @@ values that change (versions, hostnames, mounts).
   iterating; only run `tailwind:build` for release output and avoid committing the minified one-line CSS. If you do
   build, rerun `tailwind:dev` before committing.
 - Logging: avoid `print`; use structured logging helpers from `config/logging.py` (`log_info`, `log_warn`, `log_error`). Configure via env: `MEDIAFORCE_LOG_LEVEL` (default INFO), optional `MEDIAFORCE_LOG_FILE=/path/to/mediaforce.jsonl`.
-- Python version baseline is modern; avoid adding `from __future__` imports in new code.
+- Python version baseline: prefer referencing the source of truth (`pyproject.toml` `requires-python`, and any Docker
+  image/runtime docs) instead of hardcoding.
 
 ## Future-Proofing
 

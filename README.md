@@ -33,7 +33,7 @@ scan → queue → encode → verify → promote
 - `src/mediaforce/db/` — SQLModel models and DB helpers (SQLite settings/inventory).
 - `src/mediaforce/cli/` — CLI entrypoint shim (`mediaforce` console script).
 - `src/mediaforce/web/` — FastAPI app, routes, templates, and static assets (`mediaforce-web`).
-- `docs/` — contributor docs (e.g., `hosts.example.md`).
+- `docs/` — contributor docs (e.g., `hosts.local.md`, which is gitignored).
 - `docs/workers.md` — how to run remote workers (systemd/launchd) and deploy updates.
 - `TODO.md` — roadmap/features in progress.
 - See `docs/architecture.md` for refactor goals and next steps.
@@ -55,7 +55,7 @@ scan → queue → encode → verify → promote
 
 ## Requirements
 
-- Python 3.13+
+- Python 3.14+
 - ffmpeg with libsvtav1 encoder
 - ffprobe (usually bundled with ffmpeg)
 
@@ -305,13 +305,13 @@ Captured during encoding for analysis:
 Real-time monitoring and management interface.
 
 ```bash
-# Start the web server (default port 8765)
+# Start the web server (default port 5555)
 uv run mediaforce-web
 # or module style (no root scripts required)
 uv run mediaforce.web
 
 # Custom port
-uv run mediaforce-web --port 5555
+uv run mediaforce-web --port 8765
 ```
 
 ### Pages

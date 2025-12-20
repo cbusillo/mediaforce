@@ -109,7 +109,7 @@ Load it with: `launchctl load ~/Library/LaunchAgents/com.mediaforce.worker.plist
 
 ## Docker (Recommended for Linux/NAS)
 
-A pre-built environment with `ffmpeg` (SVT-AV1) and Python 3.13 is available via the `Dockerfile.worker`.
+A pre-built environment with `ffmpeg` (SVT-AV1) and Python 3.14 is available via the `Dockerfile.worker`.
 
 ```bash
 # Build the image

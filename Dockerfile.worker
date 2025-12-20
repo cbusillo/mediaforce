@@ -1,7 +1,7 @@
 # Dockerfile.worker
-# Builds a Mediaforce worker image with Python 3.13 and FFmpeg (with SVT-AV1)
+# Builds a Mediaforce worker image with Python 3.14 and FFmpeg (with SVT-AV1)
 
-FROM python:3.13-slim-bookworm AS builder
+FROM python:3.14-slim-bookworm AS builder
 
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
@@ -23,7 +23,7 @@ RUN uv sync --frozen --no-dev
 
 # =============================================================================
 
-FROM python:3.13-slim-bookworm
+FROM python:3.14-slim-bookworm
 
 # Install runtime deps
 RUN apt-get update && apt-get install -y \
