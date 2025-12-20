@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from sqlalchemy import func
 from sqlmodel import Session, select as _select  # type: ignore[reportMissingImports]
@@ -44,9 +44,12 @@ class StatsRepository:
         self.session = session
 
     def totals(self, *, since: Optional[datetime] = None) -> EncodeTotals:
-        output_size: Any = EncodeResult.output_size_bytes
-        size_bytes: Any = MediaItem.size_bytes
-        completed_at: Any = EncodeResult.completed_at
+        media_cols = cast(Any, MediaItem.__table__.c)
+        encode_cols = cast(Any, EncodeResult.__table__.c)
+
+        output_size: Any = encode_cols.output_size_bytes
+        size_bytes: Any = media_cols.size_bytes
+        completed_at: Any = encode_cols.completed_at
 
         where = [
             output_size.is_not(None),
@@ -63,13 +66,14 @@ class StatsRepository:
 
         stmt: Any = (
             select(
-                func.count(EncodeResult.id),
+                func.count(encode_cols.id),
                 func.coalesce(func.sum(size_bytes), 0),
                 func.coalesce(func.sum(output_size), 0),
                 func.avg(reduction_expr),
-                func.avg(EncodeResult.encode_speed),
+                func.avg(encode_cols.encode_speed),
             )
-            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
+            .select_from(EncodeResult.__table__)
+            .join(MediaItem.__table__, encode_cols.source_id == media_cols.id)
             .where(*where)
         )
 
@@ -96,9 +100,12 @@ class StatsRepository:
         start_day = end_day - timedelta(days=days - 1)
         since = datetime.combine(start_day, datetime.min.time())
 
-        output_size: Any = EncodeResult.output_size_bytes
-        size_bytes: Any = MediaItem.size_bytes
-        completed_at: Any = EncodeResult.completed_at
+        media_cols = cast(Any, MediaItem.__table__.c)
+        encode_cols = cast(Any, EncodeResult.__table__.c)
+
+        output_size: Any = encode_cols.output_size_bytes
+        size_bytes: Any = media_cols.size_bytes
+        completed_at: Any = encode_cols.completed_at
 
         day_key = func.substr(completed_at, 1, 10)
         size_den = func.nullif(size_bytes, 0)
@@ -107,13 +114,14 @@ class StatsRepository:
         stmt: Any = (
             select(
                 day_key.label("day"),
-                func.count(EncodeResult.id).label("encodes"),
+                func.count(encode_cols.id).label("encodes"),
                 func.coalesce(func.sum(size_bytes), 0).label("source_bytes"),
                 func.coalesce(func.sum(output_size), 0).label("output_bytes"),
                 func.avg(reduction_expr).label("avg_reduction"),
-                func.avg(EncodeResult.encode_speed).label("avg_speed"),
+                func.avg(encode_cols.encode_speed).label("avg_speed"),
             )
-            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
+            .select_from(EncodeResult.__table__)
+            .join(MediaItem.__table__, encode_cols.source_id == media_cols.id)
             .where(
                 completed_at.is_not(None),
                 completed_at >= since.isoformat(),
@@ -169,10 +177,13 @@ class StatsRepository:
         return results
 
     def reduction_by_tier(self, *, since: Optional[datetime] = None) -> list[TierEncodeStats]:
-        output_size: Any = EncodeResult.output_size_bytes
-        size_bytes: Any = MediaItem.size_bytes
-        completed_at: Any = EncodeResult.completed_at
-        tier: Any = EncodeResult.tier
+        media_cols = cast(Any, MediaItem.__table__.c)
+        encode_cols = cast(Any, EncodeResult.__table__.c)
+
+        output_size: Any = encode_cols.output_size_bytes
+        size_bytes: Any = media_cols.size_bytes
+        completed_at: Any = encode_cols.completed_at
+        tier: Any = encode_cols.tier
 
         where = [
             tier.is_not(None),
@@ -192,11 +203,12 @@ class StatsRepository:
         stmt: Any = (
             select(
                 tier,
-                func.count(EncodeResult.id).label("encodes"),
+                func.count(encode_cols.id).label("encodes"),
                 saved_expr.label("saved_bytes"),
                 func.avg(reduction_expr).label("avg_reduction"),
             )
-            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
+            .select_from(EncodeResult.__table__)
+            .join(MediaItem.__table__, encode_cols.source_id == media_cols.id)
             .where(*where)
             .group_by(tier)
             .order_by(tier)

@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from sqlalchemy import func
 from sqlmodel import select as _select  # type: ignore[reportMissingImports]
@@ -17,44 +17,52 @@ class EncodeRepository(BaseRepository[EncodeResult]):
         super().__init__(session, EncodeResult)
 
     def list_recent(self, pagination: Optional[Pagination] = None) -> Page[EncodeResult]:
-        return self.list(order_by=desc(EncodeResult.completed_at), pagination=pagination)
+        encode_cols = cast(Any, EncodeResult.__table__.c)
+        return self.list(order_by=desc(encode_cols.completed_at), pagination=pagination)
 
     def list_pending_review(self, pagination: Optional[Pagination] = None) -> Page[EncodeResult]:
-        where = EncodeResult.review_status == "pending"
-        return self.list(where=where, order_by=desc(EncodeResult.completed_at), pagination=pagination)
+        encode_cols = cast(Any, EncodeResult.__table__.c)
+        where = encode_cols.review_status == "pending"
+        return self.list(where=where, order_by=desc(encode_cols.completed_at), pagination=pagination)
 
     def recent_completions(self, *, limit: int) -> list[tuple]:
-        output_size: Any = EncodeResult.output_size_bytes
-        completed_at: Any = EncodeResult.completed_at
+        encode_cols = cast(Any, EncodeResult.__table__.c)
+        media_cols = cast(Any, MediaItem.__table__.c)
+        output_size: Any = encode_cols.output_size_bytes
+        completed_at: Any = encode_cols.completed_at
         return (
             self.session.exec(
                 select(
-                    MediaItem.path,
-                    MediaItem.size_bytes,
+                    media_cols.path,
+                    media_cols.size_bytes,
                     output_size,
                     completed_at,
-                    MediaItem.detected_tier,
-                    EncodeResult.id,
+                    media_cols.detected_tier,
+                    encode_cols.id,
                 )
-                .join(MediaItem, EncodeResult.source_id == MediaItem.id)
+                .select_from(EncodeResult.__table__)
+                .join(MediaItem.__table__, encode_cols.source_id == media_cols.id)
                 .where(
                     output_size.is_not(None),
                     output_size > 0,
                 )
-                .order_by(completed_at.desc())
+                .order_by(desc(completed_at))
                 .limit(limit)
             ).all()
         )
 
     def space_saved_bytes(self) -> int:
-        output_size: Any = EncodeResult.output_size_bytes
-        size_bytes: Any = MediaItem.size_bytes
+        encode_cols = cast(Any, EncodeResult.__table__.c)
+        media_cols = cast(Any, MediaItem.__table__.c)
+        output_size: Any = encode_cols.output_size_bytes
+        size_bytes: Any = media_cols.size_bytes
         row = self.session.exec(
             select(
                 func.coalesce(func.sum(size_bytes), 0),
                 func.coalesce(func.sum(output_size), 0),
             )
-            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
+            .select_from(EncodeResult.__table__)
+            .join(MediaItem.__table__, encode_cols.source_id == media_cols.id)
             .where(
                 output_size.is_not(None),
                 output_size > 0,

@@ -1,10 +1,54 @@
 (function () {
   if (window.location.pathname !== "/queue") return;
 
+  /** @typedef {{ machine: string }} WorkerInfo */
+  /**
+   * @typedef {{
+   *   season_name: string,
+   *   file_count: number,
+   *   total_size: string,
+   *   total_savings: string,
+   *   total_size_bytes?: number,
+   *   total_savings_bytes?: number,
+   *   max_priority: number
+   * }} QueueSeason
+   */
+  /**
+   * @typedef {{
+   *   id: number,
+   *   path: string,
+   *   filename: string,
+   *   size: string,
+   *   size_bytes?: number,
+   *   savings: string,
+   *   savings_bytes?: number,
+   *   priority_score: number,
+   *   bitrate: string,
+   *   bitrate_kbps?: number,
+   *   duration: string,
+   *   duration_sec?: number,
+   *   detected_tier: string,
+   *   video_codec?: string,
+   *   video_profile?: string,
+   *   height?: number,
+   *   resolution?: string,
+   *   audio_info?: string,
+   *   subtitle_count?: number,
+   *   tier_reasoning?: string,
+   *   bit_depth?: number,
+   *   frame_rate?: string,
+   *   is_hdr?: boolean,
+   *   hdr_format?: string,
+   *   is_interlaced?: boolean,
+   *   skip_reason?: string
+   * }} QueueEpisode
+   */
+
   const page = window.mfUi?.getPageData?.() || {};
   const libraryRoot = page.library_root || "";
   const currentSort = page.sort || "priority";
   const currentOrder = page.order || "desc";
+  /** @type {WorkerInfo[]} */
   const workers = Array.isArray(page.workers) ? page.workers : [];
 
   const loadedShows = {};
@@ -178,6 +222,7 @@
       const resp = await fetch(
         `/api/queue/seasons/${encodeURIComponent(showName)}?library=${encodeURIComponent(libraryRoot)}&sort=${encodeURIComponent(currentSort)}&order=${encodeURIComponent(currentOrder)}`,
       );
+      /** @type {{seasons: QueueSeason[]}} */
       const data = await resp.json();
       loadedShows[showName] = data.seasons;
 
@@ -198,6 +243,7 @@
     }
   }
 
+  /** @param {string} showName @param {QueueSeason[]} seasons */
   function renderSeasonsTable(showName, seasons) {
     if (!seasons.length) return '<div class="loading">No seasons found</div>';
 
@@ -266,6 +312,7 @@
       const resp = await fetch(
         `/api/queue/episodes/${encodeURIComponent(showName)}/${encodeURIComponent(seasonName)}?library=${encodeURIComponent(libraryRoot)}&sort=${encodeURIComponent(currentSort)}&order=${encodeURIComponent(currentOrder)}`,
       );
+      /** @type {{episodes: QueueEpisode[]}} */
       const data = await resp.json();
       loadedSeasons[key] = data.episodes;
       container.querySelector("td").innerHTML = renderEpisodesTable(data.episodes || []);
@@ -280,6 +327,7 @@
     }
   }
 
+  /** @param {QueueEpisode[]} episodes */
   function renderEpisodesTable(episodes) {
     if (!episodes.length) return '<div class="loading">No episodes found</div>';
 
@@ -341,6 +389,7 @@
     return html;
   }
 
+  /** @param {QueueEpisode} ep */
   function renderEpisodeDetails(ep) {
     let html = `<div class="episode-details">
         <div class="detail-grid">
@@ -614,7 +663,7 @@
 
   function openCard(showName) {
     const tableView = document.getElementById("tableView");
-    if (tableView?.classList.contains("hidden")) {
+    if (tableView && tableView.classList.contains("hidden")) {
       const url = new URL(window.location.href);
       url.searchParams.set("view", "table");
       url.searchParams.set("open_show", showName);

@@ -5,12 +5,12 @@ import shutil
 import subprocess
 import time
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 from sqlmodel import Session
 
 from mediaforce.db.models import EncodeResult
-from mediaforce.domain.types import QualityMetrics, MediaInfo, TierSettings
+from mediaforce.domain.types import QualityMetrics, MediaInfo, TierSettings, OutlierResult
 
 DENOISE_FILTERS: dict[str, str] = {
     "light": "hqdn3d=2:2:3:3",
@@ -101,7 +101,7 @@ def run_ffmpeg_with_progress(
         bufsize=1,
     )
 
-    accumulated: dict[str, Any] = {}
+    accumulated: dict[str, float | int] = {}
     last_update = time.time()
 
     while True:
@@ -154,7 +154,7 @@ def record_encode_result(
     started_at: str,
     error_msg: Optional[str] = None,
     metrics: Optional[QualityMetrics] = None,
-    outlier_result: Optional[Any] = None,
+    outlier_result: Optional[OutlierResult] = None,
     profile_eval_id: Optional[int] = None,
 ) -> int:
     completed_at = datetime.now().isoformat()
@@ -199,7 +199,9 @@ def record_encode_result(
     session.add(result)
     session.commit()
     session.refresh(result)
-    return int(result.id)  # type: ignore[arg-type]
+    if result.id is None:
+        raise ValueError("Encode result ID was not assigned after insert")
+    return int(result.id)
 
 
 def find_ffmpeg() -> Optional[str]:

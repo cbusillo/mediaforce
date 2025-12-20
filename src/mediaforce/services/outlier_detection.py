@@ -1,37 +1,13 @@
 import pathlib
-from dataclasses import dataclass
 from typing import Optional
 
-from mediaforce.domain.types import QualityMetrics
+from mediaforce.domain.types import (
+    DEFAULT_OUTLIER_THRESHOLDS,
+    OutlierResult,
+    OutlierThresholds,
+    QualityMetrics,
+)
 from mediaforce.services.media_probe import probe_media
-
-
-@dataclass
-class OutlierThresholds:
-    min_vmaf: float = 85.0
-    min_ssim: float = 0.92
-    min_psnr: float = 32.0
-
-    min_compression_ratio: float = 0.15  # Too aggressive (<15% of original)
-    max_compression_ratio: float = 0.75  # Too weak (>75% of original)
-
-    min_bitrate_1080p: int = 800
-    max_bitrate_1080p: int = 6000
-    min_bitrate_720p: int = 500
-    max_bitrate_720p: int = 4000
-    min_bitrate_480p: int = 300
-    max_bitrate_480p: int = 2000
-
-DEFAULT_OUTLIER_THRESHOLDS = OutlierThresholds()
-
-
-@dataclass
-class OutlierResult:
-    is_outlier: bool
-    reasons: list[str]
-    metrics: Optional[QualityMetrics] = None
-    compression_ratio: Optional[float] = None
-    output_bitrate_kbps: Optional[int] = None
 
 
 def check_for_outliers(

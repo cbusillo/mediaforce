@@ -69,11 +69,11 @@
   }
 
   function formatTrack(track) {
-    const codec = track?.codec || track?.codec_name || "?";
+    const codec = track?.codec || track?.["codec_name"] || "?";
     const channels = track?.channels;
-    const bitrate = track?.bitrate_kbps || track?.bit_rate_kbps;
-    const rate = track?.sample_rate_hz || track?.sample_rate || track?.sampleRate;
-    const lang = track?.language || track?.tags?.language;
+    const bitrate = track?.bitrate_kbps || track?.["bit_rate_kbps"];
+    const rate = track?.["sample_rate_hz"] || track?.["sample_rate"] || track?.sampleRate;
+    const lang = track?.language || track?.["tags"]?.["language"];
     const parts = [codec.toString().toUpperCase()];
     if (channels) parts.push(`${channels}ch`);
     if (bitrate) parts.push(`${bitrate}k`);
@@ -83,9 +83,9 @@
   }
 
   function trackSignature(track) {
-    const codec = (track?.codec || track?.codec_name || "?").toString().toUpperCase();
+    const codec = (track?.codec || track?.["codec_name"] || "?").toString().toUpperCase();
     const channels = track?.channels ? `${track.channels}ch` : "";
-    const lang = track?.language || track?.tags?.language || "";
+    const lang = track?.language || track?.["tags"]?.["language"] || "";
     return [codec, channels, lang].filter(Boolean).join(" ") || "?";
   }
 
@@ -100,34 +100,34 @@
 
   function renderInspection(payload) {
     const src = payload?.source || {};
-    const enc = payload?.encoded || {};
-    const evalObj = payload?.evaluation || null;
-    const probe = payload?.probe || {};
+    const enc = payload?.["encoded"] || {};
+    const evalObj = payload?.["evaluation"] || null;
+    const probe = payload?.["probe"] || {};
 
-    const reduction = payload?.reduction_pct;
+    const reduction = payload?.["reduction_pct"];
     const reductionText =
       reduction === null || reduction === undefined
         ? "-"
         : `${(reduction >= 0 ? "-" : "+")}${Math.abs(reduction).toFixed(0)}%`;
 
-    const vmaf = enc?.quality?.vmaf;
-    const ssim = enc?.quality?.ssim;
-    const psnr = enc?.quality?.psnr;
+    const vmaf = enc?.quality?.["vmaf"];
+    const ssim = enc?.quality?.["ssim"];
+    const psnr = enc?.quality?.["psnr"];
 
     const srcProbe = probe?.source;
-    const encProbe = probe?.encoded;
+    const encProbe = probe?.["encoded"];
 
     const renderStreamCard = (title, base, probeInfo) => {
       const v = base?.video || {};
       const pvid = probeInfo?.video || {};
-      const aud = base?.audio_tracks || [];
-      const sub = base?.subtitle_tracks || [];
-      const paud = probeInfo?.audio_tracks || [];
-      const psub = probeInfo?.subtitle_tracks || [];
+      const aud = base?.["audio_tracks"] || [];
+      const sub = base?.["subtitle_tracks"] || [];
+      const paud = probeInfo?.["audio_tracks"] || [];
+      const psub = probeInfo?.["subtitle_tracks"] || [];
 
       const videoLines = [
         kv("Path", base?.path || "-"),
-        kv("Exists", base?.exists ? "yes" : "no"),
+        kv("Exists", base?.["exists"] ? "yes" : "no"),
         kv("Size", base?.size || "-"),
         kv("Duration", base?.duration || "-"),
         kv("Video codec", v?.codec || pvid?.codec || "-"),
@@ -178,14 +178,14 @@
       return 3;
     };
 
-    const serverAlerts = Array.isArray(payload?.attention_alerts) ? payload.attention_alerts : null;
+    const serverAlerts = Array.isArray(payload?.["attention_alerts"]) ? payload["attention_alerts"] : null;
     if (serverAlerts && serverAlerts.length) {
       serverAlerts.forEach((a) => {
-        pushAlert(a.message || a.text || "", a.severity || a.tone || "warning", a.short || null);
+        pushAlert(a?.["message"] || a?.["text"] || "", a?.["severity"] || a?.["tone"] || "warning", a?.["short"] || null);
       });
     } else {
-    const sourceTracks = (srcProbe?.audio_tracks || src?.audio_tracks || []).filter(Boolean);
-    const encodedTracks = (encProbe?.audio_tracks || enc?.audio_tracks || []).filter(Boolean);
+    const sourceTracks = (srcProbe?.["audio_tracks"] || src?.["audio_tracks"] || []).filter(Boolean);
+    const encodedTracks = (encProbe?.["audio_tracks"] || enc?.["audio_tracks"] || []).filter(Boolean);
     if (sourceTracks.length && encodedTracks.length && sourceTracks.length !== encodedTracks.length) {
       pushAlert(`Audio tracks changed: ${sourceTracks.length} → ${encodedTracks.length}`, "warning");
     } else if (sourceTracks.length && encodedTracks.length) {
@@ -198,15 +198,15 @@
         }
       }
     }
-    const sourceSubs = (srcProbe?.subtitle_tracks || src?.subtitle_tracks || []).filter(Boolean);
-    const encodedSubs = (encProbe?.subtitle_tracks || enc?.subtitle_tracks || []).filter(Boolean);
+    const sourceSubs = (srcProbe?.["subtitle_tracks"] || src?.["subtitle_tracks"] || []).filter(Boolean);
+    const encodedSubs = (encProbe?.["subtitle_tracks"] || enc?.["subtitle_tracks"] || []).filter(Boolean);
     if (sourceSubs.length !== encodedSubs.length) {
       pushAlert(`Subtitle tracks changed: ${sourceSubs.length} → ${encodedSubs.length}`, "warning");
     } else if (sourceSubs.length && encodedSubs.length) {
       const max = Math.min(sourceSubs.length, encodedSubs.length, 8);
       for (let i = 0; i < max; i++) {
-        const sLang = sourceSubs[i]?.language || sourceSubs[i]?.tags?.language || "";
-        const eLang = encodedSubs[i]?.language || encodedSubs[i]?.tags?.language || "";
+        const sLang = sourceSubs[i]?.language || sourceSubs[i]?.["tags"]?.["language"] || "";
+        const eLang = encodedSubs[i]?.language || encodedSubs[i]?.["tags"]?.["language"] || "";
         if (sLang && eLang && sLang !== eLang) {
           pushAlert(`Subtitle #${i + 1} language: ${sLang} → ${eLang}`, "warning");
         }
@@ -240,8 +240,8 @@
         pushAlert(`Video bitrate up: ${sVid.bitrate_kbps}k → ${eVid.bitrate_kbps}k`, "warning");
       }
     }
-    if (enc?.quality?.vmaf !== null && enc?.quality?.vmaf !== undefined) {
-      const v = Number(enc.quality.vmaf);
+    if (enc?.quality?.["vmaf"] !== null && enc?.quality?.["vmaf"] !== undefined) {
+      const v = Number(enc.quality["vmaf"]);
       if (!Number.isNaN(v) && v < 85) pushAlert(`Low VMAF: ${v.toFixed(1)}`, "warning");
     }
     if (reduction !== null && reduction !== undefined && reduction < 0) {
@@ -258,13 +258,13 @@
         ${kv("VMAF", formatMaybeNumber(vmaf, 1))}
         ${kv("SSIM", formatMaybeNumber(ssim, 4))}
         ${kv("PSNR", formatMaybeNumber(psnr, 2))}
-        ${kv("Compression", enc?.quality?.compression_ratio ? formatMaybeNumber(enc.quality.compression_ratio, 3) : "-")}
-        ${kv("CRF", enc?.settings?.crf ?? "-")}
-        ${kv("Preset", enc?.settings?.preset ?? "-")}
-        ${kv("Denoise", enc?.settings?.denoise ?? "-")}
-        ${kv("Film grain", enc?.settings?.film_grain ?? "-")}
+        ${kv("Compression", enc?.quality?.["compression_ratio"] ? formatMaybeNumber(enc.quality["compression_ratio"], 3) : "-")}
+        ${kv("CRF", enc?.["settings"]?.["crf"] ?? "-")}
+        ${kv("Preset", enc?.["settings"]?.["preset"] ?? "-")}
+        ${kv("Denoise", enc?.["settings"]?.["denoise"] ?? "-")}
+        ${kv("Film grain", enc?.["settings"]?.["film_grain"] ?? "-")}
         ${kv("Machine", enc?.machine ?? "-")}
-        ${kv("Completed", enc?.timestamps?.completed_at ?? "-")}
+        ${kv("Completed", enc?.["timestamps"]?.["completed_at"] ?? "-")}
       </div>
     `;
 
@@ -274,11 +274,21 @@
           <div class="section-heading">
             <div class="section-title">Profile Evaluation</div>
           </div>
-          ${kv("Selected profile", evalObj.selected_profile)}
+          ${kv("Selected profile", evalObj?.["selected_profile"])}
           ${kv("Decision", evalObj.decision)}
           ${kv("Status", evalObj.status)}
-          ${kv("VMAF summary", evalObj.median_vmaf ? `med ${formatMaybeNumber(evalObj.median_vmaf, 1)} · min ${formatMaybeNumber(evalObj.min_vmaf, 1)}` : "-")}
-          ${kv("Thresholds", evalObj.threshold_median ? `${evalObj.threshold_min ?? "-"}/${evalObj.threshold_median ?? "-"}/${evalObj.threshold_max ?? "-"}` : "-")}
+          ${kv(
+            "VMAF summary",
+            evalObj?.["median_vmaf"]
+              ? `med ${formatMaybeNumber(evalObj["median_vmaf"], 1)} · min ${formatMaybeNumber(evalObj["min_vmaf"], 1)}`
+              : "-",
+          )}
+          ${kv(
+            "Thresholds",
+            evalObj?.["threshold_median"]
+              ? `${evalObj["threshold_min"] ?? "-"}/${evalObj["threshold_median"] ?? "-"}/${evalObj["threshold_max"] ?? "-"}`
+              : "-",
+          )}
         </div>
       `
       : "";
@@ -401,7 +411,7 @@
     try {
       const resp = await window.mfApi.postJson("/api/workers/cleanup", { older_than_days: 30, offline_only: true });
       if (resp.ok && resp.data?.success) {
-        const n = (resp.data.deleted || resp.data.removed || []).length;
+        const n = (resp?.data?.["deleted"] || resp?.data?.["removed"] || []).length;
         setStatus(statusEl, n ? `Cleared ${n} offline worker(s).` : "Cleared.", "success");
         setTimeout(() => setStatus(statusEl, "", "muted"), 1500);
         dispatchWorkersRefresh();

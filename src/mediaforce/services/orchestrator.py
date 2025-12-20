@@ -8,7 +8,7 @@ import platform
 import re
 import json
 from datetime import datetime, timedelta
-from typing import Any, Optional, List, Callable
+from typing import Any, Optional, List, Callable, TypedDict, cast
 
 from sqlmodel import Session, select, desc, func, col
 from mediaforce.config.logging import log_event, CLI_LOGGER
@@ -41,6 +41,30 @@ from mediaforce.services.queue import check_missing_outputs
 from mediaforce.services.promote import promote_encoded_file_atomic, rollback_promote
 from mediaforce.services.outlier_detection import check_for_outliers, OutlierResult
 from mediaforce.db import MediaItem, EncodeResult, now_iso
+
+
+class QueueItemSummary(TypedDict):
+    id: Optional[int]
+    path: str
+    priority_score: Optional[float]
+    size_bytes: Optional[int]
+    potential_savings_bytes: Optional[int]
+    tier: Optional[str]
+    bitrate_kbps: Optional[int]
+    library_id: Optional[str]
+
+
+class QueueTotalsPayload(TypedDict):
+    count: int
+    total_bytes: int
+
+
+class SpaceSavedPayload(TypedDict):
+    encodes: int
+    source_bytes: int
+    output_bytes: int
+    saved_bytes: int
+    saved_pct: float
 
 
 def format_duration(seconds: Optional[float]) -> str:
@@ -393,10 +417,13 @@ def run_queue(args: argparse.Namespace) -> int:
     session = init_db(db_path)
     limit = args.limit or 20
 
-    rows = session.exec(
+    media_cols = cast(Any, MediaItem.__table__.c)
+    encode_cols = cast(Any, EncodeResult.__table__.c)
+
+    rows: list[MediaItem] = session.exec(
         select(MediaItem)
-        .where(MediaItem.status == "pending")
-        .order_by(desc(MediaItem.priority_score))
+        .where(media_cols.status == "pending")
+        .order_by(desc(media_cols.priority_score))
         .limit(limit)
     ).all()
 
@@ -404,7 +431,7 @@ def run_queue(args: argparse.Namespace) -> int:
         log_event(logging.INFO, "queue_empty", library=str(library_root), limit=limit)
         return 0
 
-    items: list[dict[str, Any]] = []
+    items: list[QueueItemSummary] = []
     for row in rows:
         items.append(
             {
@@ -420,28 +447,29 @@ def run_queue(args: argparse.Namespace) -> int:
         )
 
     log_event(logging.INFO, "inventory_summary")
-    summary = session.exec(
-        select(MediaItem.status, MediaItem.id, MediaItem.size_bytes)
+    summary: list[tuple[str, int, int | None]] = session.exec(
+        select(media_cols.status, media_cols.id, media_cols.size_bytes)
     ).all()
     totals: dict[str, tuple[int, int]] = {}
     for status, mid, size_bytes in summary:
         cnt, total = totals.get(status, (0, 0))
         totals[status] = (cnt + 1, total + (size_bytes or 0))
 
-    totals_payload: dict[str, dict[str, Any]] = {}
+    totals_payload: dict[str, QueueTotalsPayload] = {}
     for status, (cnt, total_bytes) in totals.items():
         totals_payload[status] = {
             "count": cnt,
             "total_bytes": total_bytes,
         }
 
-    encode_rows = session.exec(
-        select(EncodeResult.output_size_bytes, MediaItem.size_bytes)
-        .join(MediaItem, EncodeResult.source_id == MediaItem.id)
-        .where(func.coalesce(EncodeResult.output_size_bytes, 0) > 0)
+    encode_rows: list[tuple[int | None, int | None]] = session.exec(
+        select(encode_cols.output_size_bytes, media_cols.size_bytes)
+        .select_from(EncodeResult.__table__)
+        .join(MediaItem.__table__, encode_cols.source_id == media_cols.id)
+        .where(func.coalesce(encode_cols.output_size_bytes, 0) > 0)
     ).all()
 
-    space_saved_payload: Optional[dict[str, Any]] = None
+    space_saved_payload: Optional[SpaceSavedPayload] = None
     if encode_rows:
         source_bytes = sum(src or 0 for _, src in encode_rows)
         output_bytes = sum(out or 0 for out, _ in encode_rows)
@@ -552,8 +580,10 @@ def run_promote(args: argparse.Namespace) -> int:
 
             if session:
                 try:
+                    media_cols = cast(Any, MediaItem.__table__.c)
+                    encode_cols = cast(Any, EncodeResult.__table__.c)
                     now_str = now_iso()
-                    item = session.exec(select(MediaItem).where(col(MediaItem.path) == str(source_path))).first()
+                    item = session.exec(select(MediaItem).where(media_cols.path == str(source_path))).first()
                     if item:
                         item.status = "completed"
                         item.path = str(result.dest_path)
@@ -561,7 +591,7 @@ def run_promote(args: argparse.Namespace) -> int:
                         session.add(item)
 
                     enc = session.exec(
-                        select(EncodeResult).where(col(EncodeResult.source_path) == str(source_path))
+                        select(EncodeResult).where(encode_cols.source_path == str(source_path))
                     ).first()
                     if enc:
                         enc.promoted = True
@@ -604,18 +634,19 @@ def run_purge_backups(args: argparse.Namespace) -> int:
 
     session = init_db(db_path)
     try:
+        encode_cols = cast(Any, EncodeResult.__table__.c)
         stmt: Any = (
             select(EncodeResult)
             .where(
-                col(EncodeResult.promoted).is_(True),
-                col(EncodeResult.promoted_at).is_not(None),
-                col(EncodeResult.promoted_at) < cutoff_iso,
-                col(EncodeResult.source_backup_path).is_not(None),
-                col(EncodeResult.output_path).is_not(None),
+                encode_cols.promoted.is_(True),
+                encode_cols.promoted_at.is_not(None),
+                encode_cols.promoted_at < cutoff_iso,
+                encode_cols.source_backup_path.is_not(None),
+                encode_cols.output_path.is_not(None),
             )
-            .order_by(EncodeResult.promoted_at)
+            .order_by(encode_cols.promoted_at)
         )
-        candidates = session.exec(stmt).all()
+        candidates: list[EncodeResult] = session.exec(stmt).all()
     finally:
         session.close()
 
@@ -817,10 +848,12 @@ def run_review_list(args: argparse.Namespace) -> int:
         return 1
         
     session = init_db(db_path)
+
+    encode_cols = cast(Any, EncodeResult.__table__.c)
     
     stmt: Any = select(EncodeResult)
     if not args.all:
-        stmt = stmt.where(col(EncodeResult.is_outlier).is_(True), col(EncodeResult.review_status) == "pending")
+        stmt = stmt.where(encode_cols.is_outlier.is_(True), encode_cols.review_status == "pending")
 
     results = session.exec(stmt).all()
     items = []

@@ -5,9 +5,23 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TypedDict
 
 from mediaforce.config.logging import log_event
+
+
+class NotificationPayload(TypedDict):
+    ts: str
+    event: str
+    summary: str
+    data: dict[str, Any]
+    text: str
+    content: str
+
+
+class NotificationResult(TypedDict):
+    sent: int
+    failed: int
 
 
 HttpPost = Callable[[str, bytes, dict[str, str], float], None]
@@ -62,9 +76,9 @@ def build_notification_payload(
     event: str,
     summary: str,
     data: dict[str, Any],
-) -> dict[str, Any]:
+) -> NotificationPayload:
     ts = datetime.now(timezone.utc).isoformat()
-    payload: dict[str, Any] = {
+    payload: NotificationPayload = {
         "ts": ts,
         "event": event,
         "summary": summary,
@@ -78,7 +92,7 @@ def build_notification_payload(
 def send_webhook(
     *,
     url: str,
-    payload: dict[str, Any],
+    payload: NotificationPayload,
     timeout_seconds: float,
     http_post: HttpPost = _default_http_post,
     logger: Optional[logging.Logger] = None,
@@ -116,7 +130,7 @@ def send_notifications(
     config: Optional[NotificationConfig] = None,
     http_post: HttpPost = _default_http_post,
     logger: Optional[logging.Logger] = None,
-) -> dict[str, int]:
+) -> NotificationResult:
     cfg = config or load_notification_config()
     if not cfg.enabled:
         return {"sent": 0, "failed": 0}

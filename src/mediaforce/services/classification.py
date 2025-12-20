@@ -1,6 +1,12 @@
-from typing import Any, Optional
+from typing import Optional, TypedDict
 
 from mediaforce.domain.types import ClassificationResult, MediaInfo, SourceTier, TierSettings
+
+
+class VmafStats(TypedDict, total=False):
+    median: float
+    min: float
+    max: float
 
 
 TIER_SETTINGS: dict[SourceTier, TierSettings] = {
@@ -127,7 +133,7 @@ def classify_source(
 
 def adjust_tier_with_vmaf(
     classification: ClassificationResult,
-    vmaf_stats: dict[str, Any],
+    vmaf_stats: VmafStats,
 ) -> ClassificationResult:
     median = vmaf_stats.get("median")
     vmin = vmaf_stats.get("min")

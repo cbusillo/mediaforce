@@ -107,7 +107,7 @@
     });
     const data = resp.data;
     if (resp.ok && data?.success) {
-      window.mfUi?.setStatus?.(status, `Updated ${data.updated} episode(s).`, "success");
+      window.mfUi?.setStatus?.(status, `Updated ${data["updated"]} episode(s).`, "success");
       window.location.reload();
     } else {
       window.mfUi?.setStatus?.(status, data?.error || resp.error || "Failed to apply tier.", "danger");

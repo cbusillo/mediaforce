@@ -282,10 +282,13 @@ def finalize_profile_evaluation(
         thresholds=thresholds,
     )
 
+    if ev.id is None:
+        raise ValueError("Evaluation ID was not assigned before storing samples")
+    evaluation_id = int(ev.id)
     for sample in sample_results:
         session.add(
             VmafSample(
-                evaluation_id=ev.id,  # type: ignore[arg-type]
+                evaluation_id=evaluation_id,
                 sample_kind=sample.kind,
                 start_sec=sample.start_sec,
                 duration_sec=sample.duration_sec,

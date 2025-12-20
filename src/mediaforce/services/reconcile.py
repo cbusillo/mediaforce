@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from typing import TypedDict
 
 from sqlalchemy import func
 from sqlmodel import Session, select
@@ -6,14 +7,19 @@ from sqlmodel import Session, select
 from mediaforce.db.models import EncodeProgress, MediaItem
 
 
+class ReconcileResult(TypedDict):
+    reset_to_pending: int
+    force_to_encoding: int
+
+
 def reconcile_queue_state(
     session: Session,
     *,
     progress_stale_seconds: int = 10 * 60,
-) -> dict[str, int]:
+) -> ReconcileResult:
     now = datetime.now()
     cutoff = (now - timedelta(seconds=int(progress_stale_seconds))).isoformat()
-    changed = {"reset_to_pending": 0, "force_to_encoding": 0}
+    changed: ReconcileResult = {"reset_to_pending": 0, "force_to_encoding": 0}
 
     for progress in session.exec(select(EncodeProgress)).all():
         item = session.get(MediaItem, int(progress.source_id))

@@ -7,7 +7,7 @@ import platform
 import shutil
 import subprocess
 import sys
-from typing import Any, Dict
+from typing import Any, TypedDict
 
 from mediaforce.config.logging import (
     configure_logging,
@@ -36,13 +36,23 @@ def log_error(message: str, **fields: Any) -> None:
     log_event(logging.ERROR, message, **fields)
 
 
-def detect_platform() -> Dict[str, Any]:
-    info: Dict[str, Any] = {
+class PlatformInfo(TypedDict):
+    system: str
+    machine: str
+    hostname: str
+    has_nvidia: bool
+    media_roots: list[str]
+    nvidia_gpus: list[str]
+
+
+def detect_platform() -> PlatformInfo:
+    info: PlatformInfo = {
         "system": platform.system(),
         "machine": platform.machine(),
         "hostname": platform.node(),
         "has_nvidia": False,
         "media_roots": [],
+        "nvidia_gpus": [],
     }
 
     if info["system"] == "Linux":
@@ -89,8 +99,8 @@ def cmd_status(args: argparse.Namespace) -> int:
             log_info("hardware_gpu", type="apple_silicon")
         else:
             log_info("hardware_gpu", type="intel_mac")
-    elif info.get("has_nvidia"):
-        log_info("hardware_gpu", type="nvidia", gpus=info.get("nvidia_gpus", []))
+    elif info["has_nvidia"]:
+        log_info("hardware_gpu", type="nvidia", gpus=info["nvidia_gpus"])
     else:
         log_info("hardware_gpu", type="none")
 

@@ -1,19 +1,21 @@
 import pathlib
 from datetime import datetime, timedelta
-from typing import Optional, Callable
+from typing import Optional, Callable, Any, cast
 
 from sqlalchemy import func
-from sqlmodel import Session, select, col
+from sqlmodel import Session, select
 
 from mediaforce.db.models import EncodeProgress, EncodeResult, Library, MediaItem
 from mediaforce.db import now_iso as default_now_iso
 
 
 def recalculate_priorities(session: Session, max_age: int, calculate_priority: Callable) -> None:
-    savings_col = col(MediaItem.potential_savings_bytes)
+    media_cols = cast(Any, MediaItem.__table__.c)
+    savings_col = media_cols.potential_savings_bytes
+    status_col = media_cols.status
     max_row = session.exec(
         select(func.max(savings_col)).where(
-            MediaItem.status == "pending",
+            status_col == "pending",
             savings_col.is_not(None),
             savings_col > 0,
         )
@@ -27,12 +29,12 @@ def recalculate_priorities(session: Session, max_age: int, calculate_priority: C
     else:
         try:
             max_savings_value = int(max_row[0]) if max_row[0] is not None else None
-        except Exception:
+        except (TypeError, ValueError, IndexError):
             max_savings_value = None
 
     max_savings = max_savings_value if max_savings_value and max_savings_value > 0 else 1
 
-    pending = session.exec(select(MediaItem).where(MediaItem.status == "pending")).all()
+    pending = session.exec(select(MediaItem).where(media_cols.status == "pending")).all()
     now = datetime.now().isoformat()
     for item in pending:
         priority = calculate_priority(item.potential_savings_bytes, item.mtime or 0, max_savings, max_age)
@@ -46,10 +48,14 @@ def check_missing_outputs(
     session: Session,
     now_iso: Callable[[], str] = default_now_iso,
 ) -> tuple[int, list[dict[str, str]]]:
+    media_cols = cast(Any, MediaItem.__table__.c)
+    encode_cols = cast(Any, EncodeResult.__table__.c)
+
     joins = session.exec(
-        select(MediaItem.id, MediaItem.path, EncodeResult.output_path)
-        .join(EncodeResult, EncodeResult.source_id == MediaItem.id)
-        .where(MediaItem.status == "encoded", col(EncodeResult.output_path).is_not(None))
+        select(media_cols.id, media_cols.path, encode_cols.output_path)
+        .select_from(MediaItem.__table__)
+        .join(EncodeResult.__table__, encode_cols.source_id == media_cols.id)
+        .where(media_cols.status == "encoded", encode_cols.output_path.is_not(None))
     ).all()
 
     missing_count = 0
@@ -108,11 +114,15 @@ def claim_next_file(
     now_str = now_iso()
     stale_cutoff = (now - timedelta(seconds=stale_seconds)).isoformat()
 
+    media_cols = cast(Any, MediaItem.__table__.c)
+    progress_cols = cast(Any, EncodeProgress.__table__.c)
+    library_cols = cast(Any, Library.__table__.c)
+
     stale_items = session.exec(
         select(MediaItem).where(
-            col(MediaItem.status) == "encoding",
-            col(MediaItem.claimed_at).is_not(None),
-            col(MediaItem.claimed_at) < stale_cutoff,
+            media_cols.status == "encoding",
+            media_cols.claimed_at.is_not(None),
+            media_cols.claimed_at < stale_cutoff,
         )
     ).all()
     for item in stale_items:
@@ -151,9 +161,9 @@ def claim_next_file(
 
     active_progress_source_ids: set[int] = set()
     for row in session.exec(
-        select(EncodeProgress.source_id).where(
-            col(EncodeProgress.updated_at).is_not(None),
-            col(EncodeProgress.updated_at) >= progress_cutoff,
+        select(progress_cols.source_id).where(
+            progress_cols.updated_at.is_not(None),
+            progress_cols.updated_at >= progress_cutoff,
         )
     ).all():
         value = _coerce_int(row)
@@ -162,9 +172,9 @@ def claim_next_file(
 
     stalled_items = session.exec(
         select(MediaItem).where(
-            col(MediaItem.status) == "encoding",
-            col(MediaItem.claimed_at).is_not(None),
-            col(MediaItem.claimed_at) < progress_cutoff,
+            media_cols.status == "encoding",
+            media_cols.claimed_at.is_not(None),
+            media_cols.claimed_at < progress_cutoff,
         )
     ).all()
     dirty = False
@@ -188,10 +198,10 @@ def claim_next_file(
 
     active_progress_source_ids_for_machine: set[int] = set()
     for row in session.exec(
-        select(EncodeProgress.source_id).where(
-            col(EncodeProgress.machine) == machine,
-            col(EncodeProgress.updated_at).is_not(None),
-            col(EncodeProgress.updated_at) >= progress_cutoff,
+        select(progress_cols.source_id).where(
+            progress_cols.machine == machine,
+            progress_cols.updated_at.is_not(None),
+            progress_cols.updated_at >= progress_cutoff,
         )
     ).all():
         value = _coerce_int(row)
@@ -200,8 +210,8 @@ def claim_next_file(
 
     claimed_for_machine = session.exec(
         select(MediaItem).where(
-            MediaItem.status == "encoding",
-            MediaItem.claimed_by == machine,
+            media_cols.status == "encoding",
+            media_cols.claimed_by == machine,
         )
     ).all()
 
@@ -213,7 +223,7 @@ def claim_next_file(
             continue
         if item.claimed_at is None:
             continue
-        if col(MediaItem.claimed_at) < progress_cutoff:
+        if item.claimed_at < progress_cutoff:
             item.status = "pending"
             item.claimed_by = None
             item.claimed_at = None
@@ -224,26 +234,25 @@ def claim_next_file(
         session.commit()
 
     active_claim_count = session.exec(
-        select(func.count()).select_from(MediaItem).where(
-            MediaItem.status == "encoding",
-            MediaItem.claimed_by == machine,
+        select(func.count()).select_from(MediaItem.__table__).where(
+            media_cols.status == "encoding",
+            media_cols.claimed_by == machine,
         )
     ).one()
     if active_claim_count and int(active_claim_count or 0) > 0:
         return None
 
-    weight_expr = func.coalesce(MediaItem.priority_score, 0) * func.coalesce(Library.weight, 1)
-    cooldown_until = MediaItem.cooldown_until
+    weight_expr = func.coalesce(media_cols.priority_score, 0) * func.coalesce(library_cols.weight, 1)
     now_str = now_iso()
     weighted = session.exec(
-        select(MediaItem, Library.weight)
-        .join(Library, MediaItem.library_id == Library.id, isouter=True)
+        select(MediaItem, library_cols.weight)
+        .join(Library, media_cols.library_id == library_cols.id, isouter=True)
         .where(
-            col(MediaItem.status) == "pending",
-            (col(MediaItem.claimed_by).is_(None) | (col(MediaItem.claimed_by) == machine)),
-            (col(MediaItem.cooldown_until).is_(None) | (col(MediaItem.cooldown_until) <= now_str)),
+            media_cols.status == "pending",
+            (media_cols.claimed_by.is_(None) | (media_cols.claimed_by == machine)),
+            (media_cols.cooldown_until.is_(None) | (media_cols.cooldown_until <= now_str)),
         )
-        .order_by(MediaItem.manual_priority, weight_expr.desc())
+        .order_by(media_cols.manual_priority, weight_expr.desc())
         .limit(1)
     ).first()
 
@@ -283,22 +292,26 @@ def claim_next_file(
 
 
 def queue_listing(session: Session, limit: int):
+    media_cols = cast(Any, MediaItem.__table__.c)
     return (
         session.exec(
             select(MediaItem)
-            .where(MediaItem.status == "pending")
-            .order_by(func.coalesce(MediaItem.priority_score, 0).desc())
+            .where(media_cols.status == "pending")
+            .order_by(func.coalesce(media_cols.priority_score, 0).desc())
             .limit(limit)
         ).all()
     )
 
 
 def encode_rows_with_sizes(session: Session):
+    media_cols = cast(Any, MediaItem.__table__.c)
+    encode_cols = cast(Any, EncodeResult.__table__.c)
     return session.exec(
-        select(EncodeResult.output_size_bytes, MediaItem.size_bytes)
-        .join(MediaItem, EncodeResult.source_id == MediaItem.id)
+        select(encode_cols.output_size_bytes, media_cols.size_bytes)
+        .select_from(EncodeResult.__table__)
+        .join(MediaItem.__table__, encode_cols.source_id == media_cols.id)
         .where(
-            col(EncodeResult.output_size_bytes).is_not(None),
-            col(EncodeResult.output_size_bytes) > 0,
+            encode_cols.output_size_bytes.is_not(None),
+            encode_cols.output_size_bytes > 0,
         )
     ).all()

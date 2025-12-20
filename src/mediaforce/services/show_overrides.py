@@ -1,7 +1,7 @@
 import json
 import pathlib
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Optional
 
 from sqlmodel import Session
 
@@ -67,7 +67,7 @@ def import_show_config_json(
             skipped += 1
             continue
 
-        cfg: dict[str, Any] = cfg_raw
+        cfg: dict[str, object] = cfg_raw
         tier_raw = cfg.get("tier")
         tier = tier_raw.strip().lower() if isinstance(tier_raw, str) and tier_raw.strip() else None
         if tier is not None and tier not in _VALID_TIERS:
@@ -84,7 +84,7 @@ def import_show_config_json(
 
         max_height: Optional[int] = None
         mh_raw = cfg.get("max_height")
-        if mh_raw is not None:
+        if isinstance(mh_raw, (int, float, str)):
             try:
                 mh_val = int(mh_raw)
                 if mh_val > 0:
