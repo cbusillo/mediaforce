@@ -34,7 +34,9 @@ def start_progress_tracking(
     session.add(progress)
     session.commit()
     session.refresh(progress)
-    return int(progress.id)  # type: ignore[arg-type]
+    if progress.id is None:
+        raise ValueError("Progress ID was not assigned after insert")
+    return int(progress.id)
 
 
 def update_progress(
@@ -95,15 +97,19 @@ def upsert_heartbeat(
     *,
     machine: str,
     sample_path: Optional[str] = None,
+    status_message: Optional[str] = None,
     now_iso: Callable[[], str] = default_now_iso,
 ) -> None:
     now_str = now_iso()
+    existing = session.get(WorkerRegistry, machine)
+    role = existing.role if existing and existing.role else "encoder"
     session.merge(
         WorkerRegistry(
             machine=machine,
-            role="encoder",
+            role=role,
             last_seen=now_str,
             sample_path=sample_path,
+            status_message=status_message,
         )
     )
     session.commit()

@@ -12,7 +12,8 @@ import sys
 from dataclasses import asdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Callable, Any, Iterable, Iterator, Sequence
+from typing import Optional, Callable, Any, Iterable, Iterator, Sequence, TypedDict, cast
+from urllib.parse import quote
 from mediaforce.config.logging import configure_logging, env_log_config
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
@@ -21,7 +22,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Str
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from sqlalchemy import delete, desc, func
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from mediaforce.config.settings import AppSettings, LibrarySettings, load_app_settings, save_app_settings, ENGINE
 from mediaforce.db.repository.session import session_scope
@@ -31,7 +32,15 @@ from mediaforce.db.repository.base import Pagination
 from mediaforce.db.repository.stats import StatsRepository
 from mediaforce.db.repository.encode import EncodeRepository
 from mediaforce.db.repository.progress import ProgressRepository
-from mediaforce.config.paths import default_transcode_root, get_media_roots, iter_libraries_for_current_host, normalize_path
+from mediaforce.config.paths import (
+    MEDIA_ROOTS_LINUX,
+    MEDIA_ROOTS_MAC,
+    canonicalize_mount_prefix_for_current_host,
+    default_transcode_root,
+    get_media_roots,
+    normalize_path,
+    iter_libraries_for_current_host,
+)
 from mediaforce.config.settings import INVENTORY_DB
 from mediaforce.domain.types import OutlierResult, QualityMetrics
 from mediaforce.domain.types import TierSettings
@@ -68,7 +77,7 @@ from mediaforce.services.promote import (
     rollback_from_manifest,
     rollback_promote,
 )
-from mediaforce.services.reconcile import reconcile_queue_state
+from mediaforce.services.reconcile import ReconcileResult, reconcile_queue_state
 from mediaforce.services.quality_feedback import flag_profile_choice
 from mediaforce.services.quality_loop import (
     VmafSampleResult,
@@ -80,28 +89,87 @@ from mediaforce.services.quality_loop import (
 from mediaforce.web.charts import sparkline_svg
 
 
-def _validate_transcode_root(transcode_root: pathlib.Path) -> tuple[bool, str]:
-    try:
-        root = transcode_root.resolve()
-    except Exception:
-        return False, "Invalid path"
+def _swap_known_mount_prefixes(path: pathlib.Path) -> list[pathlib.Path]:
+    """Return mount-prefix variants (macOS <-> Linux) without requiring the path to exist."""
 
-    media_roots = [pathlib.Path(r).resolve() for r in get_media_roots()]
-    if root in media_roots:
-        return False, "Refusing: transcode root is a media root"
+    raw = str(path)
+    candidates: list[pathlib.Path] = [path]
 
-    allowed = False
-    for mr in media_roots:
-        try:
-            if root == (mr / "transcode"):
-                allowed = True
-                break
-        except Exception:
+    for mac_root in MEDIA_ROOTS_MAC:
+        linux_root = mac_root.replace("/Volumes/", "/mnt/")
+        if raw == mac_root or raw.startswith(mac_root.rstrip("/") + "/"):
+            candidates.append(pathlib.Path(raw.replace(mac_root, linux_root, 1)))
+
+    for linux_root in MEDIA_ROOTS_LINUX:
+        mac_root = linux_root.replace("/mnt/", "/Volumes/")
+        if raw == linux_root or raw.startswith(linux_root.rstrip("/") + "/"):
+            candidates.append(pathlib.Path(raw.replace(linux_root, mac_root, 1)))
+
+    out: list[pathlib.Path] = []
+    seen: set[str] = set()
+    for p in candidates:
+        key = str(p)
+        if key in seen:
             continue
-    if not allowed:
-        return False, "Refusing: transcode root must be <media_root>/transcode"
+        seen.add(key)
+        out.append(p)
+    return out
 
-    return True, "ok"
+
+def _validate_transcode_root(
+    transcode_root: pathlib.Path,
+    *,
+    settings: Optional[AppSettings] = None,
+) -> tuple[bool, str]:
+    raw_str = str(transcode_root).strip()
+    if not raw_str:
+        return False, "Invalid path"
+    if raw_str.startswith("~"):
+        return False, "Refusing: transcode root must be an absolute path (no ~)"
+    raw = pathlib.Path(raw_str)
+    if not raw.is_absolute():
+        return False, "Refusing: transcode root must be an absolute path"
+
+    media_root_candidates: list[pathlib.Path] = [
+        *(pathlib.Path(r) for r in MEDIA_ROOTS_MAC),
+        *(pathlib.Path(r) for r in MEDIA_ROOTS_LINUX),
+    ]
+
+    library_root_candidates: list[pathlib.Path] = []
+    if settings is not None:
+        for lib in settings.libraries:
+            for root_str in [lib.mac_path, lib.linux_path]:
+                if not root_str:
+                    continue
+                library_root_candidates.extend(_swap_known_mount_prefixes(pathlib.Path(root_str)))
+
+    def _safe_resolve(p: pathlib.Path) -> Optional[pathlib.Path]:
+        try:
+            return p.resolve()
+        except Exception:
+            return None
+
+    base_roots: list[pathlib.Path] = []
+    for p in [*media_root_candidates, *library_root_candidates]:
+        resolved = _safe_resolve(p)
+        if resolved is None:
+            continue
+        base_roots.append(resolved)
+
+    allowed_roots = {base / "transcode" for base in base_roots}
+    for candidate in _swap_known_mount_prefixes(raw):
+        root = _safe_resolve(candidate)
+        if root is None:
+            continue
+
+        for base in base_roots:
+            if root == base:
+                return False, "Refusing: transcode root must be a dedicated /transcode folder"
+
+        if root in allowed_roots:
+            return True, "ok"
+
+    return False, "Refusing: transcode root must be <media_or_library_root>/transcode"
 
 
 def _cleanup_transcode_root(transcode_root: pathlib.Path, dry_run: bool) -> dict:
@@ -287,6 +355,10 @@ def _canonical_machine_name(machine: str) -> str:
 def _apply_worker_controls(session: Session, workers: list[dict]) -> list[dict]:
     global_row = session.get(WorkerControl, "global")
     global_mode = (global_row.mode if global_row else None) or "run"
+    settings = load_app_settings()
+    library_roots = {
+        str(normalize_path(pathlib.Path(root))) for _, root in iter_libraries_for_current_host(settings)
+    }
 
     updated: list[dict] = []
     for w in workers:
@@ -308,7 +380,26 @@ def _apply_worker_controls(session: Session, workers: list[dict]) -> list[dict]:
         w2["control_mode"] = mode
         w2["override_mode"] = override_mode
         w2["global_mode"] = global_mode
-        w2["state"] = state or w2.get("state")
+        w2_state = state or w2.get("state")
+        status_message = str(w2.get("status_message") or "")
+        sample_path = str(w2.get("sample_path") or "")
+        if status_message:
+            w2["sample_path"] = status_message
+
+        if (
+            w2_state in {"waiting", "paused"}
+            and not (w2.get("active") or 0)
+            and sample_path
+        ):
+            try:
+                normalized = str(normalize_path(pathlib.Path(sample_path)))
+            except Exception:
+                normalized = sample_path
+            if normalized in library_roots:
+                w2_state = "unavailable"
+                w2["sample_path"] = f"Library not mounted: {sample_path}"
+
+        w2["state"] = w2_state
         updated.append(w2)
     return updated
 
@@ -418,8 +509,110 @@ WATCH_STATUS: dict = {
 
 SCAN_STATUS: dict[str, str] = {}
 
+class ReconcileStatus(TypedDict):
+    updated_at: Optional[str]
+    result: Optional[ReconcileResult]
+    error: Optional[str]
+
+
+class ManifestFileEntry(TypedDict):
+    sha256: str
+    size: int
+
+
+class RawManifest(TypedDict):
+    version: str
+    files: dict[str, ManifestFileEntry]
+
+
+class ShowStatsInternal(TypedDict):
+    name: str
+    total: int
+    pending: int
+    encoding: int
+    encoded: int
+    completed: int
+    tiers: dict[str, int]
+    library_counts: dict[str, int]
+
+
+class ShowStats(TypedDict):
+    name: str
+    total: int
+    pending: int
+    encoding: int
+    encoded: int
+    completed: int
+    detected_tier: Optional[str]
+    override_tier: Optional[str]
+    library_id: Optional[str]
+
+
+class MovieStatsInternal(TypedDict):
+    name: str
+    library_id: Optional[str]
+    group_mode: str
+    total: int
+    pending: int
+    encoding: int
+    encoded: int
+    completed: int
+    tiers: dict[str, int]
+
+
+class MovieStats(TypedDict):
+    name: str
+    library_id: Optional[str]
+    group_mode: str
+    total: int
+    pending: int
+    encoding: int
+    encoded: int
+    completed: int
+    detected_tier: Optional[str]
+
+
+class CleanupReviewResult(TypedDict, total=False):
+    deleted: int
+    reset: int
+
+
+class CleanupQueueResult(TypedDict):
+    reset: int
+
+
+class CleanupTranscodeResult(TypedDict, total=False):
+    success: bool
+    error: str
+    transcode_root: str
+    deleted_files: int
+    bytes_freed: int
+
+
+class CleanupResetAllResults(TypedDict, total=False):
+    review: CleanupReviewResult
+    queue: CleanupQueueResult
+    transcode: CleanupTranscodeResult
+
+
+class ActiveEncodePayload(TypedDict):
+    filename: str
+    path: Optional[str]
+    show_name: Optional[str]
+    machine: Optional[str]
+    tier: Optional[str]
+    started_at: Optional[str]
+    percent_complete: float
+    speed: float
+    eta: Optional[str]
+    phase: str
+    frame: int
+    total_frames: Optional[int]
+    fps: float
+
+
 RECONCILE_TASK: Optional[asyncio.Task] = None
-RECONCILE_LAST: dict[str, Any] = {"updated_at": None, "result": None, "error": None}
+RECONCILE_LAST: ReconcileStatus = {"updated_at": None, "result": None, "error": None}
 
 
 @asynccontextmanager
@@ -435,7 +628,7 @@ async def _lifespan(_app: FastAPI):
     except Exception:
         WATCH_STATUS.update({"running": False, "message": "watch start failed"})
 
-    async def reconcile_runner():
+    async def reconcile_runner() -> None:
         while True:
             try:
                 with session_scope() as session:
@@ -472,7 +665,7 @@ app.router.lifespan_context = _lifespan
 
 
 @app.post("/api/reconcile/run")
-async def api_reconcile_run():
+async def api_reconcile_run() -> dict[str, object]:
     with session_scope() as session:
         result = reconcile_queue_state(session)
     RECONCILE_LAST.update({"updated_at": datetime.now().isoformat(), "result": result, "error": None})
@@ -480,7 +673,7 @@ async def api_reconcile_run():
 
 
 @app.get("/api/reconcile/status")
-async def api_reconcile_status():
+async def api_reconcile_status() -> dict[str, object]:
     return {"success": True, "status": RECONCILE_LAST}
 
 
@@ -535,7 +728,7 @@ ALLOWED_RAW_FILES: dict[str, str] = _build_allowed_raw_files()
 
 
 @app.get("/raw/{filename:path}", response_class=PlainTextResponse)
-async def raw_file(filename: str):
+async def raw_file(filename: str) -> Any:
     if filename == "manifest.json":
         return JSONResponse(await raw_manifest())
     if filename not in ALLOWED_RAW_FILES:
@@ -550,9 +743,9 @@ async def raw_file(filename: str):
 
 
 @app.get("/raw/manifest.json")
-async def raw_manifest():
+async def raw_manifest() -> RawManifest:
     version = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
-    manifest = {"version": version, "files": {}}
+    manifest: RawManifest = {"version": version, "files": {}}
     base = PROJECT_ROOT
     for export_name, rel_path in ALLOWED_RAW_FILES.items():
         p = base / rel_path
@@ -576,6 +769,8 @@ QUEUE_CACHE: dict[str, dict] = {}  # reserved for future use
 QUEUE_CACHE_TTL = 10  # seconds
 QUEUE_TOTALS_CACHE: dict[str, dict] = {}
 QUEUE_TOTALS_TTL = 15  # seconds
+OVERVIEW_COUNTS_CACHE: dict[str, dict] = {}
+OVERVIEW_COUNTS_TTL = 60  # seconds
 
 
 def _get_watch_libraries() -> list[str]:
@@ -604,7 +799,7 @@ async def _start_watch_task() -> dict:
         )
         return WATCH_STATUS
 
-    async def runner():
+    async def runner() -> None:
         WATCH_STATUS.update(
             {
                 "running": True,
@@ -698,6 +893,7 @@ class WorkerClaimRequest(BaseModel):
     machine: str
     available: bool = True
     sample_path: Optional[str] = None
+    status_message: Optional[str] = None
 
 
 class WorkerReleaseRequest(BaseModel):
@@ -834,6 +1030,11 @@ class SettingsUpdateRequest(BaseModel):
     offpeak_enabled: bool = False
     offpeak_start: str = "00:00"
     offpeak_end: str = "05:00"
+    transcode_root: Optional[str] = None
+
+
+class ValidateTranscodeRootRequest(BaseModel):
+    transcode_root: Optional[str] = None
 
 
 class WatchToggleRequest(BaseModel):
@@ -949,19 +1150,25 @@ def _serialize_media_info(info: MediaInfo) -> dict:
 
 
 def _compute_stats(session: Session) -> dict:
+    media_cols = cast(Any, MediaItem.__table__.c)
+    encode_cols = cast(Any, EncodeResult.__table__.c)
+    progress_cols = EncodeProgress.__table__.c
+
+    source_size_bytes = media_cols.size_bytes
+    output_size_bytes = encode_cols.output_size_bytes
+
     totals = session.exec(
-        select(func.sum(MediaItem.size_bytes), func.sum(EncodeResult.output_size_bytes))
-        .join(EncodeResult, EncodeResult.source_id == MediaItem.id)
-        .where(EncodeResult.output_size_bytes.is_not(None), EncodeResult.output_size_bytes > 0)  # type: ignore[union-attr]
+        select(func.sum(source_size_bytes), func.sum(output_size_bytes))
+        .select_from(EncodeResult.__table__)
+        .join(MediaItem.__table__, encode_cols.source_id == media_cols.id)
+        .where(output_size_bytes.is_not(None), output_size_bytes > 0)
     ).one_or_none()
     total_in, total_out = totals if totals else (0, 0)
     saved_bytes = (total_in or 0) - (total_out or 0)
 
-    encodes = session.exec(
-        select(func.count(EncodeResult.id)).where(EncodeResult.output_size_bytes.is_not(None))  # type: ignore[union-attr]
-    ).one()
+    encodes = session.exec(select(func.count(encode_cols.id)).where(output_size_bytes.is_not(None))).one()
     active = session.exec(
-        select(func.count()).select_from(EncodeProgress).where(EncodeProgress.percent_complete < 100)
+        select(func.count()).select_from(EncodeProgress.__table__).where(progress_cols.percent_complete < 100)
     ).one()
     return {
         "saved_bytes": saved_bytes,
@@ -1021,6 +1228,7 @@ def extract_show_name(path: str) -> Optional[str]:
 
 templates.env.filters["format_size"] = format_size
 templates.env.filters["format_duration"] = format_duration
+templates.env.filters.setdefault("urlencode", lambda value: quote(str(value)))
 
 
 def build_pagination_url(request: Request) -> Callable[[int], str]:
@@ -1033,6 +1241,71 @@ def build_pagination_url(request: Request) -> Callable[[int], str]:
     return pagination_url
 
 
+def _count_shows(session: Session) -> int:
+    media_cols = cast(Any, MediaItem.__table__.c)
+    rows = session.exec(select(media_cols.path).where(media_cols.path.like("%/Season %"))).all()
+    shows = set()
+    for path in rows:
+        show_name = extract_show_name(path)
+        if show_name:
+            shows.add(show_name)
+    return len(shows)
+
+
+def _count_movies(session: Session, settings: AppSettings) -> int:
+    library_roots = {
+        lib.id: root
+        for lib, root in iter_libraries_for_current_host(settings)
+        if (lib.media_type or "").lower() != "tv"
+    }
+    library_ids = list(library_roots.keys())
+    if not library_ids:
+        return 0
+
+    media_cols = cast(Any, MediaItem.__table__.c)
+    rows = session.exec(
+        select(media_cols.path, media_cols.library_id).where(media_cols.library_id.in_(library_ids))
+    ).all()
+    groups: set[tuple[str, Optional[str], str]] = set()
+    for path, library_id in rows:
+        if not path:
+            continue
+        root = library_roots.get(library_id or "")
+        if root is None:
+            continue
+
+        path_local = canonicalize_mount_prefix_for_current_host(pathlib.Path(path))
+        try:
+            rel_path = path_local.relative_to(root)
+        except Exception:
+            continue
+
+        group_mode = "folder" if len(rel_path.parts) > 1 else "file"
+        title = rel_path.stem if group_mode == "file" else rel_path.parts[0]
+        groups.add((title, library_id, group_mode))
+
+    return len(groups)
+
+
+def _get_overview_counts(session: Session, settings: AppSettings) -> dict[str, int]:
+    now = datetime.now(tz=timezone.utc).timestamp()
+    entry = OVERVIEW_COUNTS_CACHE.get("global")
+    if entry and entry.get("expires", 0) > now:
+        cached = entry.get("counts")
+        if isinstance(cached, dict):
+            return cached
+
+    counts = {
+        "shows": _count_shows(session),
+        "movies": _count_movies(session, settings),
+    }
+    OVERVIEW_COUNTS_CACHE["global"] = {
+        "expires": now + OVERVIEW_COUNTS_TTL,
+        "counts": counts,
+    }
+    return counts
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     host_name = platform_mod.node()
@@ -1040,6 +1313,8 @@ async def dashboard(request: Request):
     error = None
     if not library_root:
         error = "No accessible library root found. Mount /Volumes or /mnt media shares."
+
+    settings = load_app_settings()
 
     with session_scope() as session:
         media_repo = MediaRepository(session)
@@ -1097,6 +1372,7 @@ async def dashboard(request: Request):
 
         lib_status = get_library_status(session)
         workers = progress_repo.list_workers()
+        overview_counts = _get_overview_counts(session, settings)
 
     stats = {
         "pending": status_counts.get("pending", 0),
@@ -1105,6 +1381,7 @@ async def dashboard(request: Request):
         "completed": status_counts.get("completed", 0),
         "space_saved_gb": f"{space_saved_gb:.1f}",
     }
+    queue_count = stats["pending"] + stats["encoding"] + status_counts.get("paused", 0)
 
     return templates.TemplateResponse(
         request,
@@ -1114,6 +1391,11 @@ async def dashboard(request: Request):
             "title": "Dashboard",
             "active": "dashboard",
             "stats": stats,
+            "overview_counts": {
+                "shows": overview_counts.get("shows", 0),
+                "movies": overview_counts.get("movies", 0),
+                "queue": queue_count,
+            },
             "active_encodes": active_encodes,
             "recent_completions": recent_completions,
             "tier_counts": tier_counts,
@@ -1317,6 +1599,23 @@ async def settings_page(request: Request):
     global_max_height = settings.global_max_height
 
     lib_status = get_library_status()
+    allowed_transcode_roots = [
+        *(f"{normalize_path(pathlib.Path(root))}/transcode" for root in get_media_roots()),
+        *(
+            f"{normalize_path(pathlib.Path(root))}/transcode"
+            for _, root in iter_libraries_for_current_host(settings)
+        ),
+    ]
+    allowed_transcode_roots = sorted({str(r) for r in allowed_transcode_roots})
+    transcode_root_example = allowed_transcode_roots[0] if allowed_transcode_roots else None
+    transcode_root_suggestions: list[str] = []
+    for candidate in [settings.transcode_root, default_transcode_root(), *allowed_transcode_roots]:
+        if not candidate:
+            continue
+        if candidate not in transcode_root_suggestions:
+            transcode_root_suggestions.append(candidate)
+        if len(transcode_root_suggestions) >= 2:
+            break
 
     api_url_hint = os.getenv("MEDIAFORCE_API_URL") or str(request.base_url).rstrip("/")
 
@@ -1335,6 +1634,9 @@ async def settings_page(request: Request):
             "lib_status": lib_status,
             "api_url_hint": api_url_hint,
             "transcode_root_default": default_transcode_root(),
+            "transcode_root_setting": settings.transcode_root,
+            "transcode_root_example": transcode_root_example,
+            "transcode_root_suggestions": transcode_root_suggestions,
             "nav_status": _nav_status(),
         },
     )
@@ -1639,8 +1941,14 @@ def _resolve_library(request: Request) -> str:
     libs = [str(root) for _, root in iter_libraries_for_current_host(settings)]
     existing = [lib for lib in libs if pathlib.Path(lib).exists()]
 
-    if lib_param and pathlib.Path(lib_param).exists():
-        return lib_param
+    if lib_param:
+        for lib, root in iter_libraries_for_current_host(settings):
+            if lib_param == lib.id:
+                return str(root)
+        if lib_param in libs:
+            return lib_param
+        if pathlib.Path(lib_param).exists():
+            return lib_param
     if existing:
         return existing[0]
     if libs:
@@ -1812,48 +2120,58 @@ async def search_page(
             },
         )
 
+    media_cols = MediaItem.__table__.c
+    encode_cols = EncodeResult.__table__.c
+
     filters = []
     if q:
-        filters.append(func.lower(MediaItem.path).like(f"%{q.lower()}%"))
+        filters.append(func.lower(media_cols.path).like(f"%{q.lower()}%"))
     if status:
-        filters.append(MediaItem.status == status)
+        filters.append(media_cols.status == status)
     if tier:
-        filters.append(MediaItem.detected_tier == tier)
+        filters.append(media_cols.detected_tier == tier)
 
     with session_scope() as session:
+        select_columns = (
+            media_cols.id.label("id"),
+            media_cols.path.label("path"),
+            media_cols.status.label("status"),
+            media_cols.detected_tier.label("detected_tier"),
+            media_cols.size_bytes.label("size_bytes"),
+            media_cols.updated_at.label("updated_at"),
+            func.coalesce(encode_cols.output_size_bytes, 0).label("output_size_bytes"),
+            encode_cols.completed_at.label("completed_at"),
+        )
         stmt = (
-            select(
-                MediaItem.id,
-                MediaItem.path,
-                MediaItem.status,
-                MediaItem.detected_tier,
-                MediaItem.size_bytes,
-                MediaItem.updated_at,
-                func.coalesce(EncodeResult.output_size_bytes, 0).label("output_size_bytes"),
-                EncodeResult.completed_at,
-            )
-            .select_from(MediaItem)
-            .join(EncodeResult, EncodeResult.source_id == MediaItem.id, isouter=True)
+            select(*select_columns)
+            .select_from(MediaItem.__table__)
+            .join(EncodeResult.__table__, encode_cols.source_id == media_cols.id, isouter=True)
         )
         if filters:
             stmt = stmt.where(*filters)
-        stmt = stmt.order_by(MediaItem.updated_at.desc()).limit(200)  # type: ignore[attr-defined]
+        stmt = stmt.order_by(desc(media_cols.updated_at)).limit(200)
         rows = session.exec(stmt).all()
 
     results = []
-    for row in rows:
+    for (
+        _rid,
+        path,
+        status_val,
+        detected_tier_val,
+        size_bytes,
+        updated_at,
+        output_size,
+        _completed_at,
+    ) in rows:
         reduction = 0
-        output_size = row.output_size_bytes if hasattr(row, "output_size_bytes") else row[6]
-        size_bytes = row.size_bytes if hasattr(row, "size_bytes") else row[4]
-        updated_at = row.updated_at if hasattr(row, "updated_at") else row[5]
         if output_size and size_bytes:
             reduction = int((1 - output_size / size_bytes) * 100)
         results.append(
             {
-                "path": row.path,
-                "filename": pathlib.Path(row.path).name,
-                "status": row.status,
-                "tier": row.detected_tier,
+                "path": path,
+                "filename": pathlib.Path(path).name,
+                "status": status_val,
+                "tier": detected_tier_val,
                 "size": format_size(size_bytes),
                 "reduction": reduction,
                 "updated_at": updated_at[:16] if updated_at else None,
@@ -1880,24 +2198,29 @@ async def search_page(
 
 @app.get("/completed", response_class=HTMLResponse)
 async def completed(request: Request):
+    media_cols = cast(Any, MediaItem.__table__.c)
+    encode_cols = cast(Any, EncodeResult.__table__.c)
+
     with session_scope() as session:
+        select_columns = (
+            encode_cols.id,
+            media_cols.path,
+            media_cols.size_bytes,
+            media_cols.detected_tier,
+            encode_cols.output_size_bytes,
+            encode_cols.vmaf,
+            encode_cols.promoted_at,
+        )
         rows = session.exec(
-            select(
-                EncodeResult.id,
-                MediaItem.path,
-                MediaItem.size_bytes,
-                MediaItem.detected_tier,
-                EncodeResult.output_size_bytes,
-                EncodeResult.vmaf,
-                EncodeResult.promoted_at,
-            )
-            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
+            select(*select_columns)
+            .select_from(EncodeResult.__table__)
+            .join(MediaItem.__table__, encode_cols.source_id == media_cols.id)
             .where(
-                MediaItem.status == "completed",
-                EncodeResult.output_size_bytes.is_not(None),  # type: ignore[attr-defined]
-                EncodeResult.output_size_bytes > 0,
+                media_cols.status == "completed",
+                encode_cols.output_size_bytes.is_not(None),
+                encode_cols.output_size_bytes > 0,
             )
-            .order_by(EncodeResult.promoted_at.desc())  # type: ignore[attr-defined]
+            .order_by(desc(encode_cols.promoted_at))
             .limit(100)
         ).all()
 
@@ -1938,27 +2261,31 @@ async def completed(request: Request):
 async def export_completed_csv(
     limit: int = Query(5000, ge=1, le=50_000),
 ):
+    media_cols = cast(Any, MediaItem.__table__.c)
+    encode_cols = cast(Any, EncodeResult.__table__.c)
+
     with session_scope() as session:
         rows = session.exec(
             select(
-                EncodeResult.id,
-                MediaItem.library_id,
-                MediaItem.path,
-                MediaItem.size_bytes,
-                EncodeResult.output_path,
-                EncodeResult.output_size_bytes,
-                EncodeResult.tier,
-                EncodeResult.vmaf,
-                EncodeResult.machine,
-                EncodeResult.promoted_at,
+                encode_cols.id,
+                media_cols.library_id,
+                media_cols.path,
+                media_cols.size_bytes,
+                encode_cols.output_path,
+                encode_cols.output_size_bytes,
+                encode_cols.tier,
+                encode_cols.vmaf,
+                encode_cols.machine,
+                encode_cols.promoted_at,
             )
-            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
+            .select_from(EncodeResult.__table__)
+            .join(MediaItem.__table__, encode_cols.source_id == media_cols.id)
             .where(
-                MediaItem.status == "completed",
-                EncodeResult.output_size_bytes.is_not(None),  # type: ignore[attr-defined]
-                EncodeResult.output_size_bytes > 0,
+                media_cols.status == "completed",
+                encode_cols.output_size_bytes.is_not(None),
+                encode_cols.output_size_bytes > 0,
             )
-            .order_by(desc(EncodeResult.promoted_at))  # type: ignore[attr-defined]
+            .order_by(desc(encode_cols.promoted_at))
             .limit(limit)
         ).all()
 
@@ -2109,10 +2436,16 @@ async def review(
         per_page = 50
 
     with session_scope() as session:
+        media_cols = cast(Any, MediaItem.__table__.c)
+        encode_cols = cast(Any, EncodeResult.__table__.c)
+        eval_cols = cast(Any, ProfileEvaluation.__table__.c)
+        retrain_cols = cast(Any, RetrainingCandidate.__table__.c)
+
         count_stmt = (
-            select(func.count(EncodeResult.id))
-            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
-            .where(MediaItem.status == "encoded", EncodeResult.output_size_bytes > 0)
+            select(func.count(encode_cols.id))
+            .select_from(EncodeResult.__table__)
+            .join(MediaItem.__table__, encode_cols.source_id == media_cols.id)
+            .where(media_cols.status == "encoded", encode_cols.output_size_bytes > 0)
         )
         total_items = session.exec(count_stmt).one() or 0
         total_pages = max(1, (total_items + per_page - 1) // per_page)
@@ -2122,11 +2455,11 @@ async def review(
         encodes = []
         stmt = (
             select(EncodeResult, MediaItem, ProfileEvaluation, RetrainingCandidate)
-            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
-            .outerjoin(ProfileEvaluation, ProfileEvaluation.id == EncodeResult.profile_eval_id)
-            .outerjoin(RetrainingCandidate, RetrainingCandidate.evaluation_id == ProfileEvaluation.id)
-            .where(MediaItem.status == "encoded", EncodeResult.output_size_bytes > 0)
-            .order_by(desc(EncodeResult.completed_at))
+            .join(MediaItem, encode_cols.source_id == media_cols.id)
+            .outerjoin(ProfileEvaluation, eval_cols.id == encode_cols.profile_eval_id)
+            .outerjoin(RetrainingCandidate, retrain_cols.evaluation_id == eval_cols.id)
+            .where(media_cols.status == "encoded", encode_cols.output_size_bytes > 0)
+            .order_by(desc(encode_cols.completed_at))
             .limit(per_page)
             .offset(offset)
         )
@@ -2210,24 +2543,28 @@ async def review(
 @app.get("/compare/{encode_id}", response_class=HTMLResponse)
 async def compare(request: Request, encode_id: int):
     with session_scope() as session:
+        media_cols = cast(Any, MediaItem.__table__.c)
+        encode_cols = cast(Any, EncodeResult.__table__.c)
+
         row = session.exec(
             select(
-                EncodeResult.output_size_bytes,
-                EncodeResult.crf,
-                EncodeResult.preset,
-                EncodeResult.vmaf,
-                EncodeResult.ssim,
-                MediaItem.path.label("source_path"),  # type: ignore[attr-defined]
-                MediaItem.size_bytes.label("source_size"),  # type: ignore[attr-defined]
-                MediaItem.video_codec,
-                MediaItem.detected_tier,
-                MediaItem.is_interlaced,
+                encode_cols.output_size_bytes.label("output_size_bytes"),
+                encode_cols.crf.label("crf"),
+                encode_cols.preset.label("preset"),
+                encode_cols.vmaf.label("vmaf"),
+                encode_cols.ssim.label("ssim"),
+                media_cols.path.label("source_path"),
+                media_cols.size_bytes.label("source_size"),
+                media_cols.video_codec.label("video_codec"),
+                media_cols.detected_tier.label("detected_tier"),
+                media_cols.is_interlaced.label("is_interlaced"),
             )
-            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
-            .where(EncodeResult.id == encode_id)
+            .select_from(EncodeResult.__table__)
+            .join(MediaItem.__table__, encode_cols.source_id == media_cols.id)
+            .where(encode_cols.id == encode_id)
         ).first()
 
-        if not row:
+        if row is None:
             return templates.TemplateResponse(
                 request,
                 "error.html",
@@ -2294,12 +2631,14 @@ async def compare(request: Request, encode_id: int):
 @app.get("/shows", response_class=HTMLResponse)
 async def shows(request: Request):
     with session_scope() as session:
+        media_cols = cast(Any, MediaItem.__table__.c)
         rows = session.exec(
-            select(MediaItem.path, MediaItem.status, MediaItem.detected_tier).where(MediaItem.path.like("%/Season %"))
+            select(media_cols.path, media_cols.status, media_cols.detected_tier, media_cols.library_id)
+            .where(media_cols.path.like("%/Season %"))
         ).all()
 
-        show_data: dict[str, dict[str, Any]] = {}
-        for path, status, detected_tier in rows:
+        show_data: dict[str, ShowStatsInternal] = {}
+        for path, status, detected_tier, library_id in rows:
             show_name = extract_show_name(path)
             if not show_name:
                 continue
@@ -2313,6 +2652,7 @@ async def shows(request: Request):
                     "encoded": 0,
                     "completed": 0,
                     "tiers": {},
+                    "library_counts": {},
                 }
 
             show_data[show_name]["total"] += 1
@@ -2320,22 +2660,40 @@ async def shows(request: Request):
                 show_data[show_name][status] += 1
 
             if detected_tier:
-                show_data[show_name]["tiers"][detected_tier] = show_data[show_name]["tiers"].get(detected_tier, 0) + 1
+                tier_counts = show_data[show_name]["tiers"]
+                tier_counts[detected_tier] = tier_counts.get(detected_tier, 0) + 1
 
-        for show in show_data.values():
-            if show["tiers"]:
-                show["detected_tier"] = max(show["tiers"].items(), key=lambda x: x[1])[0]
-            else:
-                show["detected_tier"] = None
-            del show["tiers"]
+            if library_id:
+                lib_counts = show_data[show_name]["library_counts"]
+                lib_counts[library_id] = lib_counts.get(library_id, 0) + 1
 
-        overrides_rows = session.exec(select(ShowOverride.show_name, ShowOverride.default_tier)).all()
+        show_cols = cast(Any, ShowOverride.__table__.c)
+        overrides_rows = session.exec(select(show_cols.show_name, show_cols.default_tier)).all()
         overrides = {row[0]: row[1] for row in overrides_rows}
 
+        shows_list: list[ShowStats] = []
         for show in show_data.values():
-            show["override_tier"] = overrides.get(show["name"])
+            detected_tier = max(show["tiers"].items(), key=lambda x: x[1])[0] if show["tiers"] else None
+            library_id = (
+                max(show["library_counts"].items(), key=lambda x: x[1])[0]
+                if show["library_counts"]
+                else None
+            )
+            shows_list.append(
+                {
+                    "name": show["name"],
+                    "total": show["total"],
+                    "pending": show["pending"],
+                    "encoding": show["encoding"],
+                    "encoded": show["encoded"],
+                    "completed": show["completed"],
+                    "detected_tier": detected_tier,
+                    "override_tier": overrides.get(show["name"]),
+                    "library_id": library_id,
+                }
+            )
 
-    shows_list = sorted(show_data.values(), key=lambda x: x["name"].lower())
+    shows_list = sorted(shows_list, key=lambda x: x["name"].lower())
 
     return templates.TemplateResponse(
         request,
@@ -2350,13 +2708,109 @@ async def shows(request: Request):
     )
 
 
+@app.get("/movies", response_class=HTMLResponse)
+async def movies(request: Request):
+    settings = load_app_settings()
+    library_roots = {
+        lib.id: root
+        for lib, root in iter_libraries_for_current_host(settings)
+        if (lib.media_type or "").lower() != "tv"
+    }
+    library_ids = list(library_roots.keys())
+
+    movies_list: list[MovieStats] = []
+    if library_ids:
+        with session_scope() as session:
+            media_cols = cast(Any, MediaItem.__table__.c)
+            rows = session.exec(
+                select(
+                    media_cols.path,
+                    media_cols.status,
+                    media_cols.detected_tier,
+                    media_cols.library_id,
+                ).where(media_cols.library_id.in_(library_ids))
+            ).all()
+
+            movie_data: dict[tuple[str, Optional[str], str], MovieStatsInternal] = {}
+            for path, status, detected_tier, library_id in rows:
+                if not path:
+                    continue
+                root = library_roots.get(library_id or "")
+                if root is None:
+                    continue
+
+                path_local = canonicalize_mount_prefix_for_current_host(pathlib.Path(path))
+                try:
+                    rel_path = path_local.relative_to(root)
+                except Exception:
+                    continue
+
+                group_mode = "folder" if len(rel_path.parts) > 1 else "file"
+                title = rel_path.stem if group_mode == "file" else rel_path.parts[0]
+
+                key = (title, library_id, group_mode)
+                if key not in movie_data:
+                    movie_data[key] = {
+                        "name": title,
+                        "library_id": library_id,
+                        "group_mode": group_mode,
+                        "total": 0,
+                        "pending": 0,
+                        "encoding": 0,
+                        "encoded": 0,
+                        "completed": 0,
+                        "tiers": {},
+                    }
+
+                movie_data[key]["total"] += 1
+                if status in ["pending", "encoding", "encoded", "completed"]:
+                    movie_data[key][status] += 1
+
+                if detected_tier:
+                    tier_counts = movie_data[key]["tiers"]
+                    tier_counts[detected_tier] = tier_counts.get(detected_tier, 0) + 1
+
+            for movie in movie_data.values():
+                detected_tier = max(movie["tiers"].items(), key=lambda x: x[1])[0] if movie["tiers"] else None
+                movies_list.append(
+                    {
+                        "name": movie["name"],
+                        "library_id": movie["library_id"],
+                        "group_mode": movie["group_mode"],
+                        "total": movie["total"],
+                        "pending": movie["pending"],
+                        "encoding": movie["encoding"],
+                        "encoded": movie["encoded"],
+                        "completed": movie["completed"],
+                        "detected_tier": detected_tier,
+                    }
+                )
+
+    movies_list = sorted(movies_list, key=lambda x: x["name"].lower())
+
+    return templates.TemplateResponse(
+        request,
+        "movies.html",
+        {
+            "request": request,
+            "title": "Movies",
+            "active": "movies",
+            "movies": movies_list,
+            "nav_status": _nav_status(),
+        },
+    )
+
+
 @app.get("/video/{video_type}/{encode_id}")
 async def serve_video(video_type: str, encode_id: int):
     with session_scope() as session:
+        media_cols = cast(Any, MediaItem.__table__.c)
+        encode_cols = cast(Any, EncodeResult.__table__.c)
         row = session.exec(
-            select(EncodeResult.output_path, MediaItem.path.label("source_path"))
-            .join(MediaItem, EncodeResult.source_id == MediaItem.id)
-            .where(EncodeResult.id == encode_id)
+            select(encode_cols.output_path, media_cols.path.label("source_path"))
+            .select_from(EncodeResult.__table__)
+            .join(MediaItem.__table__, encode_cols.source_id == media_cols.id)
+            .where(encode_cols.id == encode_id)
         ).first()
 
     if not row:
@@ -2395,10 +2849,10 @@ async def api_promote(encode_id: int):
             if not encode.output_path:
                 return {"success": False, "error": "Encoded file path missing"}
 
-            output_path = normalize_path(pathlib.Path(encode.output_path))
-            source_path = normalize_path(pathlib.Path(item.path))
+            output_path: pathlib.Path = normalize_path(pathlib.Path(encode.output_path))
+            source_path: pathlib.Path = normalize_path(pathlib.Path(item.path))
 
-            if not output_path.exists():
+            if not pathlib.Path(output_path).exists():
                 return {"success": False, "error": "Encoded file not found"}
 
             dest_path = source_path.parent / output_path.name
@@ -2719,10 +3173,11 @@ async def api_apply_tier_to_show(data: ApplyTierRequest):
 
     with session_scope() as session:
         try:
+            media_cols = cast(Any, MediaItem.__table__.c)
             items = session.exec(
                 select(MediaItem).where(
-                    MediaItem.status == "pending",
-                    MediaItem.path.like(f"%/{data.show_name}/Season %"),
+                    media_cols.status == "pending",
+                    media_cols.path.like(f"%/{data.show_name}/Season %"),
                 )
             ).all()
             now_str = now_iso()
@@ -2826,11 +3281,29 @@ async def api_update_settings(data: SettingsUpdateRequest):
             offpeak_enabled=data.offpeak_enabled,
             offpeak_start=data.offpeak_start,
             offpeak_end=data.offpeak_end,
+            transcode_root=(data.transcode_root or "").strip() or None,
         )
+        if settings.transcode_root:
+            ok, reason = _validate_transcode_root(pathlib.Path(settings.transcode_root), settings=settings)
+            if not ok:
+                return {"success": False, "error": reason}
         save_app_settings(settings)
         return {"success": True}
     except Exception as exc:  # pragma: no cover - defensive
         return {"success": False, "error": str(exc)}
+
+
+@app.post("/api/validate/transcode-root")
+async def api_validate_transcode_root(data: ValidateTranscodeRootRequest):
+    transcode_raw = (data.transcode_root or "").strip()
+    if not transcode_raw:
+        return {"success": True, "valid": False, "message": "Enter a transcode root to validate."}
+    transcode_root = pathlib.Path(transcode_raw).expanduser()
+    ok, reason = _validate_transcode_root(transcode_root, settings=load_app_settings())
+    if ok:
+        normalized = str(normalize_path(transcode_root))
+        return {"success": True, "valid": True, "message": f"Looks good: {normalized}"}
+    return {"success": True, "valid": False, "message": reason}
 
 
 @app.post("/api/cleanup/reset-queue")
@@ -2882,8 +3355,8 @@ async def api_cleanup_clear_review(data: CleanupClearReviewRequest):
 
 @app.post("/api/cleanup/transcode-files")
 async def api_cleanup_transcode_files(data: CleanupTranscodeFilesRequest):
-    transcode_root = pathlib.Path(data.transcode_root or default_transcode_root())
-    ok, reason = _validate_transcode_root(transcode_root)
+    transcode_root = pathlib.Path(data.transcode_root or default_transcode_root()).expanduser()
+    ok, reason = _validate_transcode_root(transcode_root, settings=load_app_settings())
     if not ok:
         return {"success": False, "error": reason}
 
@@ -2906,7 +3379,7 @@ async def api_cleanup_reset_all(data: CleanupResetAllRequest):
     if not data.confirm:
         return {"success": False, "error": "Confirmation required"}
 
-    results: dict[str, Any] = {}
+    results: CleanupResetAllResults = {}
 
     with session_scope() as session:
         items = session.exec(select(MediaItem)).all()
@@ -2940,8 +3413,8 @@ async def api_cleanup_reset_all(data: CleanupResetAllRequest):
         results["queue"] = {"reset": affected}
 
     if data.clean_transcode_files:
-        transcode_root = pathlib.Path(data.transcode_root or default_transcode_root())
-        ok, reason = _validate_transcode_root(transcode_root)
+        transcode_root = pathlib.Path(data.transcode_root or default_transcode_root()).expanduser()
+        ok, reason = _validate_transcode_root(transcode_root, settings=load_app_settings())
         if not ok:
             results["transcode"] = {"success": False, "error": reason}
         else:
@@ -3036,7 +3509,8 @@ async def api_workers_cleanup(data: WorkerCleanupRequest):
         cutoff = (datetime.now() - timedelta(days=older_days)).isoformat()
         deleted: list[str] = []
 
-        for row in session.exec(select(WorkerRegistry)).all():
+        registry_rows: list[WorkerRegistry] = session.exec(select(WorkerRegistry)).all()
+        for row in registry_rows:
             last_seen = str(getattr(row, "last_seen", "") or "")
             if not last_seen:
                 continue
@@ -3071,7 +3545,8 @@ async def api_workers_normalize(data: WorkerNormalizeRequest):
 
     with session_scope() as session:
         merged: list[dict[str, str]] = []
-        for row in session.exec(select(WorkerRegistry)).all():
+        registry_rows: list[WorkerRegistry] = session.exec(select(WorkerRegistry)).all()
+        for row in registry_rows:
             src = str(row.machine)
             if "." not in src:
                 continue
@@ -3104,11 +3579,19 @@ async def api_worker_control_state():
     with session_scope() as session:
         global_row = session.get(WorkerControl, "global")
         global_mode = (global_row.mode if global_row else None) or "run"
-        overrides = session.exec(select(WorkerControl).where(WorkerControl.key.like("worker:%"))).all()
+        control_cols = cast(Any, WorkerControl.__table__.c)
+        overrides = session.exec(
+            select(control_cols.key.label("key"), control_cols.mode.label("mode"))
+            .select_from(WorkerControl.__table__)
+            .where(control_cols.key.like("worker:%"))
+        ).all()
+
         per_worker: dict[str, str] = {}
-        for row in overrides:
-            machine = str(row.key).split(":", 1)[1] if ":" in str(row.key) else str(row.key)
-            per_worker[machine] = row.mode
+        for key_val, mode_val in overrides:
+            key = str(key_val or "")
+            machine = key.split(":", 1)[1] if ":" in key else key
+            if machine:
+                per_worker[machine] = str(mode_val or "")
         return {"success": True, "global": global_mode, "overrides": per_worker}
 
 
@@ -3215,7 +3698,13 @@ async def api_worker_claim(data: WorkerClaimRequest):
         cmd = session.get(WorkerCommand, f"worker:{machine}")
         stop_now = bool(cmd.stop_now) if cmd else False
         reported_sample_path = (data.sample_path or "").strip() if data.sample_path else None
-        upsert_heartbeat(session, machine=machine, sample_path=reported_sample_path)
+        status_message = (data.status_message or "").strip() if data.status_message else None
+        upsert_heartbeat(
+            session,
+            machine=machine,
+            sample_path=reported_sample_path,
+            status_message=status_message,
+        )
 
         if not bool(getattr(data, "available", True)):
             return {"success": True, "claimed": None, "control": {"mode": mode, "stop_now": stop_now}}
@@ -3439,6 +3928,7 @@ async def api_get_settings():
                 "offpeak_enabled": settings.offpeak_enabled,
                 "offpeak_start": settings.offpeak_start,
                 "offpeak_end": settings.offpeak_end,
+                "transcode_root": settings.transcode_root,
                 "libraries": [asdict(lib) for lib in settings.libraries],
             },
         }
@@ -3449,7 +3939,7 @@ async def api_get_settings():
 @app.get("/api/active-encodes")
 async def api_active_encodes(request: Request):
     library_root = (request.query_params.get("library") or "").strip()
-    encodes: list[dict[str, Any]] = []
+    encodes: list[ActiveEncodePayload] = []
     with session_scope() as session:
         rows = ProgressRepository(session).list_active(library_root=library_root)
 
@@ -3464,30 +3954,32 @@ async def api_active_encodes(request: Request):
                     "machine": prog.machine,
                     "tier": prog.tier,
                     "started_at": prog.started_at[:16] if prog.started_at else None,
-                    "percent_complete": prog.percent_complete or 0,
-                    "speed": prog.speed or 0,
+                    "percent_complete": float(prog.percent_complete or 0.0),
+                    "speed": float(prog.speed or 0.0),
                     "eta": eta_display,
                     "phase": prog.phase or "encoding",
                     "frame": prog.frame or 0,
                     "total_frames": prog.total_frames,
-                    "fps": prog.fps or 0,
+                    "fps": float(prog.fps or 0.0),
                 }
             )
 
         # Fallback: if workers have claimed items but the master missed progress
         # initialization (e.g., master restart during encode), show a minimal
         # placeholder so the dashboard still lists the machine.
-        existing_keys = {(e.get("machine"), e.get("path")) for e in encodes}
+        existing_keys = {(e["machine"], e["path"]) for e in encodes}
         cutoff = (datetime.now() - timedelta(hours=8)).isoformat()
+        media_cols = cast(Any, MediaItem.__table__.c)
         stmt = select(MediaItem).where(
-            MediaItem.status == "encoding",
-            MediaItem.claimed_by.is_not(None),  # type: ignore[union-attr]
-            MediaItem.claimed_at.is_not(None),  # type: ignore[union-attr]
-            MediaItem.claimed_at >= cutoff,  # type: ignore[operator]
+            media_cols.status == "encoding",
+            media_cols.claimed_by.is_not(None),
+            media_cols.claimed_at.is_not(None),
+            media_cols.claimed_at >= cutoff,
         )
         if library_root:
-            stmt = stmt.where(MediaItem.path.like(f"{library_root}/%"))
-        for item in session.exec(stmt).all():
+            stmt = stmt.where(media_cols.path.like(f"{library_root}/%"))
+        claimed_items: list[MediaItem] = session.exec(stmt).all()
+        for item in claimed_items:
             key = (item.claimed_by, item.path)
             if key in existing_keys:
                 continue
@@ -3499,13 +3991,13 @@ async def api_active_encodes(request: Request):
                     "machine": item.claimed_by,
                     "tier": item.detected_tier,
                     "started_at": (item.claimed_at or "")[:16] if item.claimed_at else None,
-                    "percent_complete": 0,
-                    "speed": 0,
+                    "percent_complete": 0.0,
+                    "speed": 0.0,
                     "eta": None,
                     "phase": "starting",
                     "frame": 0,
                     "total_frames": None,
-                    "fps": 0,
+                    "fps": 0.0,
                 }
             )
 
@@ -3539,7 +4031,9 @@ async def api_get_evaluation(eval_id: int):
         feedback = session.exec(
             select(ProfileChoiceFeedback).where(ProfileChoiceFeedback.evaluation_id == eval_id)
         ).all()
-        retrain = session.exec(select(RetrainingCandidate).where(RetrainingCandidate.evaluation_id == eval_id)).first()
+        retrain: RetrainingCandidate | None = session.exec(
+            select(RetrainingCandidate).where(RetrainingCandidate.evaluation_id == eval_id)
+        ).first()
         retrain_payload = None
         if retrain:
             retrain_payload = {
@@ -3845,7 +4339,9 @@ async def api_queue_add(data: QueueAddRequest):
     path = pathlib.Path(data.path).resolve()
     with session_scope() as session:
         repo = MediaRepository(session)
-        existing = session.exec(select(MediaItem).where(MediaItem.path == str(path))).first()
+        existing: MediaItem | None = session.exec(
+            select(MediaItem).where(MediaItem.path == str(path))
+        ).first()
         if existing:
             existing.status = "pending"
             existing.skip_reason = None

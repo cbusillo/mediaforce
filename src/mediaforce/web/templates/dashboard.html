@@ -6,6 +6,12 @@
 </div>
 {% endcall %}
 
+<div class="flex flex-wrap items-center gap-2 mb-6">
+  <a class="pill" href="/shows">Shows <span class="font-semibold text-foreground">{{ overview_counts.shows }}</span></a>
+  <a class="pill" href="/movies">Movies <span class="font-semibold text-foreground">{{ overview_counts.movies }}</span></a>
+  <a class="pill" href="/queue">Queue <span class="font-semibold text-foreground">{{ overview_counts.queue }}</span></a>
+</div>
+
 {% if lib_status %}
 <div class="card mb-6">
   <div class="section-heading">

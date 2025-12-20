@@ -16,6 +16,7 @@ class AppSetting(SQLModel, table=True):  # type: ignore[misc,call-arg]
     offpeak_enabled: bool = False
     offpeak_start: Optional[str] = "00:00"
     offpeak_end: Optional[str] = "05:00"
+    transcode_root: Optional[str] = None
 
 
 class Library(SQLModel, table=True):  # type: ignore[misc,call-arg]
@@ -235,6 +236,7 @@ class WorkerRegistry(SQLModel, table=True):  # type: ignore[misc,call-arg]
     role: str = "encoder"  # encoder|watcher
     last_seen: str = Field(default_factory=now_iso)
     sample_path: Optional[str] = None
+    status_message: Optional[str] = None
 
 
 class WorkerControl(SQLModel, table=True):  # type: ignore[misc,call-arg]
@@ -268,22 +270,31 @@ def ensure_schema(engine: Engine) -> None:
 
     # SQLite: SQLModel's create_all won't add columns; backfill schema changes here.
     with engine.begin() as conn:
-        rows = list(conn.exec_driver_sql("PRAGMA table_info(media_inventory)").fetchall())
-        columns: set[str] = set()
-        for row in rows:
-            name = None
-            try:
-                name = row["name"]  # type: ignore[index]
-            except Exception:
-                try:
+        def _table_columns(table: str) -> set[str]:
+            rows = list(conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall())
+            columns: set[str] = set()
+            for row in rows:
+                name = None
+                mapping = getattr(row, "_mapping", None)
+                if mapping is not None:
+                    name = getattr(mapping, "get", lambda _key, _default=None: None)("name")
+                if name is None and isinstance(row, (tuple, list)) and len(row) > 1:
                     name = row[1]
-                except Exception:
-                    name = None
-            if isinstance(name, str) and name:
-                columns.add(name)
+                if isinstance(name, str) and name:
+                    columns.add(name)
+            return columns
 
-        if "cooldown_until" not in columns:
+        inventory_cols = _table_columns("media_inventory")
+        if "cooldown_until" not in inventory_cols:
             conn.exec_driver_sql("ALTER TABLE media_inventory ADD COLUMN cooldown_until TEXT")
+
+        appsetting_cols = _table_columns("appsetting")
+        if "transcode_root" not in appsetting_cols:
+            conn.exec_driver_sql("ALTER TABLE appsetting ADD COLUMN transcode_root TEXT")
+
+        worker_cols = _table_columns("worker_registry")
+        if "status_message" not in worker_cols:
+            conn.exec_driver_sql("ALTER TABLE worker_registry ADD COLUMN status_message TEXT")
 
 
 def init_engine(db_path: str):

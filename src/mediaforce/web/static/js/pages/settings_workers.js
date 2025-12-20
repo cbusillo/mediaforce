@@ -35,35 +35,70 @@
       return;
     }
 
+    function labelize(value) {
+      if (!value) return "";
+      return String(value)
+        .split("_")
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
+    }
+
+    function formatMode(value) {
+      if (!value) return "—";
+      const norm = String(value).toLowerCase();
+      if (norm === "run") return "Run";
+      if (norm === "drain") return "Pause";
+      if (norm === "stop") return "Stop";
+      return labelize(norm);
+    }
+
+    function stateBadge(state) {
+      const norm = String(state || "").toLowerCase();
+      if (norm === "encoding") return { label: "Encoding", cls: "pill pill-on animate-pulse" };
+      if (norm === "starting") return { label: "Starting", cls: "pill pill-on" };
+      if (norm === "paused") return { label: "Paused", cls: "pill pill-off" };
+      if (norm === "waiting") return { label: "Waiting", cls: "pill" };
+      if (norm === "unavailable") return { label: "Unavailable", cls: "pill" };
+      if (norm === "stopping") return { label: "Stopping", cls: "pill pill-off" };
+      if (norm === "stopped") return { label: "Stopped", cls: "pill pill-off" };
+      if (norm === "offline") return { label: "Offline", cls: "pill pill-off" };
+      if (norm === "idle") return { label: "Idle", cls: "pill pill-off" };
+      if (!norm) return { label: "—", cls: "pill" };
+      return { label: labelize(norm), cls: "pill" };
+    }
+
     list.forEach((w) => {
       const tr = document.createElement("tr");
       const machine = w.machine || "-";
-      const state = w.state || "-";
-      const mode = w.control_mode || "-";
-      const override = w.override_mode || "-";
+      const state = w.state || "";
+      const mode = w.control_mode || "";
+      const override = w.override_mode || "";
       const active = w.active || 0;
       const percent = typeof w.percent_complete === "number" ? w.percent_complete : 0;
       const progressLabel = state === "encoding" ? (percent > 0 ? `${Math.round(percent)}%` : "Starting…") : "—";
       const lastSeen = w.updated_at || "-";
-      const message = w.sample_path || w.samplePath || "-";
+      const message = w.sample_path || w["samplePath"] || "-";
       const safeMachine = String(machine).replace(/'/g, "\\'");
+      const badge = stateBadge(state);
+      const modeLabel = formatMode(mode);
+      const overrideLabel = override ? formatMode(override) : "—";
 
       const canControl = machine && machine !== "-";
       const actions = !canControl
         ? ""
         : `<div class="flex items-center gap-1 flex-nowrap whitespace-nowrap">` +
-          `<button class="btn btn-xs btn-success" onclick="settingsSetWorkerMode('${safeMachine}','run')">Run</button>` +
-          `<button class="btn btn-xs btn-warning" onclick="settingsSetWorkerMode('${safeMachine}','drain')">Pause</button>` +
-          `<button class="btn btn-xs btn-danger" title="Stop now (kills ffmpeg and requeues)" onclick="settingsStopNow('${safeMachine}')">Stop</button>` +
-          (w.override_mode ? `<button class="btn btn-xs" onclick="settingsClearWorkerOverride('${safeMachine}')">Clear</button>` : "") +
-          (state === "offline" ? `<button class="btn btn-xs" onclick="settingsDeleteWorker('${safeMachine}')">Remove</button>` : "") +
+          `<button class="btn btn-sm btn-success" onclick="settingsSetWorkerMode('${safeMachine}','run')">Run</button>` +
+          `<button class="btn btn-sm btn-warning" onclick="settingsSetWorkerMode('${safeMachine}','drain')">Pause</button>` +
+          `<button class="btn btn-sm btn-danger" title="Stop now (kills ffmpeg and requeues)" onclick="settingsStopNow('${safeMachine}')">Stop</button>` +
+          (w.override_mode ? `<button class="btn btn-sm" onclick="settingsClearWorkerOverride('${safeMachine}')">Clear</button>` : "") +
+          (state === "offline" ? `<button class="btn btn-sm" onclick="settingsDeleteWorker('${safeMachine}')">Remove</button>` : "") +
           `</div>`;
 
       tr.innerHTML = `
         <td>${machine}</td>
-        <td>${state}</td>
-        <td>${mode}</td>
-        <td>${override}</td>
+        <td><span class="${badge.cls}" title="${labelize(state)}">${badge.label}</span></td>
+        <td>${modeLabel}</td>
+        <td>${overrideLabel}</td>
         <td>${active}</td>
         <td>${progressLabel}</td>
         <td>${lastSeen}</td>
@@ -87,7 +122,7 @@
         // `updated_at` can change on every poll (causing a visible flicker). Only
         // track at minute precision so the UI remains stable.
         updated_at: (w.updated_at || "").slice(0, 16),
-        sample_path: w.sample_path || w.samplePath || "",
+        sample_path: w.sample_path || w["samplePath"] || "",
       }))
       .sort((a, b) => a.machine.localeCompare(b.machine));
   }
@@ -280,7 +315,7 @@
     setStatus("Normalizing…", "warning");
     const resp = await window.mfApi.postJson("/api/workers/normalize", { older_than_days: 7, offline_only: true });
     if (resp.ok && resp.data?.success) {
-      const n = (resp.data.merged || []).length;
+      const n = (resp.data["merged"] || []).length;
       setStatus(`Merged ${n} worker(s).`, "success");
       await refresh();
     } else {
@@ -295,8 +330,8 @@
     const resp = await window.mfApi.postJson("/api/reconcile/run", {});
     if (resp.ok && resp.data?.success) {
       const r = resp.data.result || {};
-      const reset = r.reset_to_pending || 0;
-      const force = r.force_to_encoding || 0;
+      const reset = r["reset_to_pending"] || 0;
+      const force = r["force_to_encoding"] || 0;
       setStatus(`Reconciled: reset=${reset}, forced=${force}.`, reset || force ? "warning" : "success");
     } else {
       setStatus(resp.data?.error || resp.error || "Reconcile failed.", "danger");

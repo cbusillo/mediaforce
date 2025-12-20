@@ -7,6 +7,41 @@
   const watchStart = document.getElementById("watch-start");
   const watchStop = document.getElementById("watch-stop");
   const addLibraryBtn = document.getElementById("add-library");
+  const transcodeInput = document.getElementById("transcode-root");
+  const transcodeStatus = document.getElementById("transcode-root-status");
+  let transcodeTimer = null;
+
+  function setTranscodeStatus(text, level) {
+    window.mfUi?.setStatus(transcodeStatus, text, level || "muted");
+  }
+
+  async function validateTranscodeRoot({ loud = false } = {}) {
+    if (!transcodeInput || !transcodeStatus) return;
+    const value = transcodeInput.value.trim();
+    if (!value) {
+      setTranscodeStatus("", "muted");
+      return;
+    }
+    if (loud) setTranscodeStatus("Validating…", "warning");
+    try {
+      const resp = await window.mfApi.postJson("/api/validate/transcode-root", { transcode_root: value });
+      if (resp.ok && resp.data?.success) {
+        if (resp.data.valid) setTranscodeStatus(resp.data.message || "Looks good.", "success");
+        else setTranscodeStatus(resp.data.message || "Invalid transcode root.", "danger");
+      } else {
+        setTranscodeStatus(resp.data?.error || resp.error || "Failed to validate.", "danger");
+      }
+    } catch (_) {
+      setTranscodeStatus("Failed to validate.", "danger");
+    }
+  }
+
+  function scheduleTranscodeValidation({ loud = false } = {}) {
+    if (transcodeTimer) clearTimeout(transcodeTimer);
+    transcodeTimer = setTimeout(() => {
+      void validateTranscodeRoot({ loud });
+    }, 400);
+  }
 
   function buildLibrariesPayload(formData) {
     const libraries = [];
@@ -119,6 +154,7 @@
     const offpeak_enabled = offpeakEnabledEl ? offpeakEnabledEl.checked : false;
     const offpeak_start = document.querySelector('input[name="offpeak_start"]')?.value || "00:00";
     const offpeak_end = document.querySelector('input[name="offpeak_end"]')?.value || "05:00";
+    const transcodeRoot = document.getElementById("transcode-root")?.value || "";
 
     window.mfUi?.setStatus(statusEl, "Saving…", "warning");
 
@@ -130,6 +166,7 @@
         offpeak_enabled,
         offpeak_start,
         offpeak_end,
+        transcode_root: transcodeRoot,
       });
       if (resp.ok && resp.data?.success) {
         window.mfUi?.setStatus(statusEl, "Settings saved.", "success");
@@ -147,8 +184,8 @@
       const resp = await window.mfApi.postJson("/api/watch", { action });
       if (resp.ok && resp.data?.success) {
         const st = resp.data.status || {};
-        const msg = `Watcher: ${st.running ? "Running" : "Stopped"}${st.message ? " (" + st.message + ")" : ""}`;
-        window.mfUi?.setStatus(watchStatus, msg, st.running ? "success" : "muted");
+        const msg = `Watcher: ${st["running"] ? "Running" : "Stopped"}${st["message"] ? " (" + st["message"] + ")" : ""}`;
+        window.mfUi?.setStatus(watchStatus, msg, st["running"] ? "success" : "muted");
       } else {
         window.mfUi?.setStatus(watchStatus, resp.data?.error || resp.error || "Failed to toggle watcher", "danger");
       }
@@ -162,6 +199,22 @@
 
   addLibraryBtn?.addEventListener("click", () => addLibraryRow());
   wireScanButtons(document);
+
+  if (transcodeInput) {
+    transcodeInput.addEventListener("input", () => scheduleTranscodeValidation({ loud: false }));
+    transcodeInput.addEventListener("blur", () => scheduleTranscodeValidation({ loud: true }));
+    scheduleTranscodeValidation({ loud: false });
+  }
+
+  document.querySelectorAll("[data-transcode-suggestion]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const suggestion = btn.getAttribute("data-transcode-suggestion") || "";
+      if (transcodeInput && suggestion) {
+        transcodeInput.value = suggestion;
+        scheduleTranscodeValidation({ loud: true });
+      }
+    });
+  });
 
   const cleanupStatus = document.getElementById("cleanup-status");
   const previewResult = document.getElementById("cleanup-preview-result");
@@ -206,8 +259,8 @@
       transcode_root: root,
     });
     if (resp.ok && resp.data?.success) {
-      const n = (resp.data.deleted_files || []).length;
-      const mb = ((resp.data.bytes_freed || 0) / 1024 / 1024).toFixed(1);
+      const n = (resp.data["deleted_files"] || []).length;
+      const mb = ((resp.data["bytes_freed"] || 0) / 1024 / 1024).toFixed(1);
       if (previewResult) previewResult.textContent = `Would delete ${n} file(s) (~${mb} MB).`;
       window.mfUi?.setStatus(cleanupStatus, "Preview ready.", "success");
       setTimeout(() => window.mfUi?.setStatus(cleanupStatus, "", "muted"), 1500);
@@ -228,8 +281,8 @@
       transcode_root: root,
     });
     if (resp.ok && resp.data?.success) {
-      const n = (resp.data.deleted_files || []).length;
-      const mb = ((resp.data.bytes_freed || 0) / 1024 / 1024).toFixed(1);
+      const n = (resp.data["deleted_files"] || []).length;
+      const mb = ((resp.data["bytes_freed"] || 0) / 1024 / 1024).toFixed(1);
       if (previewResult) previewResult.textContent = `Deleted ${n} file(s) (~${mb} MB).`;
       window.mfUi?.setStatus(cleanupStatus, `Deleted ${n} file(s).`, "success");
     } else {

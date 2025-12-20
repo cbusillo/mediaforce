@@ -52,7 +52,15 @@ def load_remote_settings(url: str) -> Optional[AppSettings]:
     if not libraries:
         return None
 
-    return AppSettings(libraries=libraries, global_max_height=global_max_height)
+    transcode_root = settings_payload.get("transcode_root")
+    if isinstance(transcode_root, str) and not transcode_root.strip():
+        transcode_root = None
+
+    return AppSettings(
+        libraries=libraries,
+        global_max_height=global_max_height,
+        transcode_root=str(transcode_root) if transcode_root else None,
+    )
 
 
 def _fetch_remote_profile_settings(url: str, existing_etag: str | None = None) -> tuple[Optional[str], Optional[str]]:

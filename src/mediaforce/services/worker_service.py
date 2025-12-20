@@ -13,12 +13,14 @@ import urllib.request
 import queue
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Mapping, Optional, TYPE_CHECKING, TypedDict
 
 from sqlmodel import Session
 
 from mediaforce.config.logging import log_event
 from mediaforce.config.paths import (
+    canonicalize_mount_prefix_for_current_host,
+    default_transcode_root,
     get_db_path,
     get_library_root,
     get_media_roots,
@@ -52,7 +54,14 @@ from mediaforce.services.encoder import (
 )
 from mediaforce.services.remote_settings import load_remote_settings, ensure_active_profile_settings
 from mediaforce.services.watch import watch_libraries
-from mediaforce.services.worker_api import WorkerApiClient, WorkerApiError
+from mediaforce.services.worker_api import (
+    EvaluationSubmitResponse,
+    WorkerApiClient,
+    WorkerApiError,
+    WorkerEncodeReportPayload,
+    WorkerMetricsPayload,
+    WorkerOutlierPayload,
+)
 from mediaforce.services.quality_loop import (
     build_motion_weighted_plan,
     run_profile_quality_loop,
@@ -73,6 +82,61 @@ AUTOUPDATE_FILES: list[str] = []
 
 STALE_CLAIM_SECONDS = 8 * 60 * 60
 REMOTE_SETTINGS_URL_GLOBAL: str | None = None
+
+
+class VmafSamplePayload(TypedDict):
+    kind: str
+    start_sec: float
+    duration_sec: float
+    weight: float
+    vmaf: float
+
+
+class EvaluationSummaryPayload(TypedDict):
+    weighted: Optional[float]
+    minimum: Optional[float]
+    median: Optional[float]
+
+
+def _coerce_float(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_str(value: object, default: str) -> str:
+    if value is None:
+        return default
+    return str(value)
+
+
+def _parse_evaluation_submit_response(
+    response: EvaluationSubmitResponse,
+    *,
+    fallback_tier: str,
+) -> tuple[str, str, str, EvaluationSummaryPayload]:
+    initial_profile = _coerce_str(response.initial_profile, fallback_tier)
+    selected_profile = _coerce_str(response.selected_profile, fallback_tier)
+    decision = _coerce_str(response.decision, "keep")
+
+    summary_payload: EvaluationSummaryPayload = {
+        "weighted": None,
+        "minimum": None,
+        "median": None,
+    }
+    if response.summary is not None:
+        summary_payload["weighted"] = _coerce_float(response.summary.weighted)
+        summary_payload["minimum"] = _coerce_float(response.summary.min)
+        summary_payload["median"] = _coerce_float(response.summary.median)
+
+    return initial_profile, selected_profile, decision, summary_payload
 
 
 def _download_file(url: str, dest: pathlib.Path, expected_sha256: str | None = None) -> bool:
@@ -215,7 +279,7 @@ def run_ffmpeg_with_progress_api(
 
     threading.Thread(target=_drain_stdout, daemon=True).start()
 
-    accumulated: dict[str, Any] = {}
+    accumulated: dict[str, float | int] = {}
     last_update = time.time()
     last_control_check = time.time()
 
@@ -345,9 +409,6 @@ def run_worker_loop(
             log_event(40, "run_db_missing", db=str(db_path))
             return 1
 
-    transcode_root = pathlib.Path(output_dir_str)
-    transcode_root.mkdir(parents=True, exist_ok=True)
-
     until_time = None
     if until:
         until_time = parse_until_time(until)
@@ -355,9 +416,6 @@ def run_worker_loop(
             log_event(40, "run_until_invalid", value=until)
             return 1
         log_event(20, "run_until_set", until=until)
-
-    machine = _resolve_machine_name()
-    log_event(20, "run_start", machine=machine, library=str(library_root), output=str(transcode_root))
 
     if autoupdate_url:
         if maybe_autoupdate(autoupdate_url, AUTOUPDATE_FILES):
@@ -374,6 +432,22 @@ def run_worker_loop(
             log_event(30, "remote_settings_load_failed", url=settings_url)
     if app_settings is None:
         app_settings = load_app_settings()
+
+    transcode_root_str = output_dir_str
+    if use_api and app_settings.transcode_root:
+        try:
+            default_root = default_transcode_root()
+        except Exception:
+            default_root = ""
+        if output_dir_str == default_root:
+            transcode_root_str = app_settings.transcode_root
+
+    transcode_root = canonicalize_mount_prefix_for_current_host(pathlib.Path(transcode_root_str).expanduser())
+    transcode_root = normalize_path(transcode_root)
+    transcode_root.mkdir(parents=True, exist_ok=True)
+
+    machine = _resolve_machine_name()
+    log_event(20, "run_start", machine=machine, library=str(library_root), output=str(transcode_root))
 
     if max_concurrency:
         app_settings.max_concurrency = max(max_concurrency, 1)
@@ -417,6 +491,7 @@ def run_worker_loop(
     while True:
         check_autoupdate()
         library_available = True
+        library_status_message = None
         if use_api:
             try:
                 path.stat()
@@ -424,6 +499,7 @@ def run_worker_loop(
                 library_available = True
             except FileNotFoundError:
                 library_available = False
+                library_status_message = f"Library not mounted: {path}"
 
         if until_time and datetime.now() >= until_time:
             log_event(20, "run_until_reached", until=until)
@@ -447,6 +523,7 @@ def run_worker_loop(
                     machine=machine,
                     available=library_available,
                     sample_path=(str(path) if not library_available else None),
+                    status_message=library_status_message,
                 )
             except WorkerApiError as e:
                 log_event(40, "worker_api_claim_failed", error=str(e))
@@ -618,7 +695,7 @@ def run_worker_loop(
                             window_bitrate=window_bitrate,
                         )
 
-                        samples_payload: list[dict[str, Any]] = []
+                        samples_payload: list[VmafSamplePayload] = []
                         for item in plan:
                             enc_path, enc_size = encode_sample_clip(
                                 source_path,
@@ -660,19 +737,22 @@ def run_worker_loop(
                             target_height=target_height,
                             target_height_reason=target_height_reason,
                         )
+                        initial_profile, selected_profile, decision, eval_summary = (
+                            _parse_evaluation_submit_response(resp, fallback_tier=tier)
+                        )
                         loop_result = SimpleNamespace(
                             evaluation_id=eval_id,
-                            initial_profile=resp.get("initial_profile") or tier,
-                            selected_profile=resp.get("selected_profile") or tier,
-                            decision=resp.get("decision") or "keep",
+                            initial_profile=initial_profile,
+                            selected_profile=selected_profile,
+                            decision=decision,
                             summary=SimpleNamespace(
-                                weighted=(resp.get("summary") or {}).get("weighted"),
-                                minimum=(resp.get("summary") or {}).get("min"),
-                                median=(resp.get("summary") or {}).get("median"),
+                                weighted=eval_summary.get("weighted"),
+                                minimum=eval_summary.get("minimum"),
+                                median=eval_summary.get("median"),
                             ),
                             thresholds=SimpleNamespace(
-                                min_vmaf=(_thresholds or {}).get("min"),
-                                median_vmaf=(_thresholds or {}).get("median"),
+                                min_vmaf=_thresholds.min,
+                                median_vmaf=_thresholds.median,
                             ),
                         )
                     except WorkerApiError as e:
@@ -841,37 +921,42 @@ def run_worker_loop(
                       log_event(40, "verify_exception", error=str(e))
 
             if use_api and api_client is not None:
-                 payload = {
-                     "source_id": int(claimed["id"]),
-                     "source_path": str(source_path),
-                     "tier": tier,
-                     "crf": settings.crf,
-                     "preset": settings.preset,
-                     "film_grain": settings.film_grain,
-                     "denoise": settings.denoise,
-                     "output_path": str(output_path),
-                     "output_size_bytes": int(output_size),
-                     "output_bitrate_kbps": output_bitrate,
-                     "source_size_bytes": int(source_size),
-                     "machine": machine,
-                     "started_at": started_at,
-                     "success": True,
-                     "profile_eval_id": eval_obj_id,
-                     "progress_id": progress_id,
-                 }
+                 metrics_payload = None
                  if metrics:
-                      payload["metrics"] = {
-                           "ssim": metrics.ssim,
-                           "psnr": metrics.psnr,
-                           "vmaf": metrics.vmaf,
-                           "sample_duration_sec": metrics.sample_duration_sec,
-                           "sample_start_sec": metrics.sample_start_sec,
-                      }
+                      metrics_payload = WorkerMetricsPayload(
+                           ssim=metrics.ssim,
+                           psnr=metrics.psnr,
+                           vmaf=metrics.vmaf,
+                           sample_duration_sec=metrics.sample_duration_sec,
+                           sample_start_sec=metrics.sample_start_sec,
+                      )
+                 outlier_payload = None
                  if outlier_result:
-                      payload["outlier"] = {
-                           "is_outlier": outlier_result.is_outlier,
-                           "reasons": outlier_result.reasons,
-                      }
+                      outlier_payload = WorkerOutlierPayload(
+                           is_outlier=outlier_result.is_outlier,
+                           reasons=list(outlier_result.reasons or []),
+                      )
+
+                 payload = WorkerEncodeReportPayload(
+                      source_id=int(claimed["id"]),
+                      source_path=str(source_path),
+                      tier=tier,
+                      crf=settings.crf,
+                      preset=settings.preset,
+                      film_grain=settings.film_grain,
+                      denoise=settings.denoise,
+                      output_path=str(output_path),
+                      output_size_bytes=int(output_size),
+                      output_bitrate_kbps=output_bitrate,
+                      source_size_bytes=int(source_size),
+                      machine=machine,
+                      started_at=started_at,
+                      success=True,
+                      profile_eval_id=eval_obj_id,
+                      progress_id=progress_id,
+                      metrics=metrics_payload,
+                      outlier=outlier_payload,
+                 )
                  try:
                      api_client.report_encode_result(payload=payload)
                  except WorkerApiError:
@@ -933,25 +1018,25 @@ def run_worker_loop(
             log_event(40, "encode_failed", error=error_msg)
             
             if use_api and api_client is not None:
-                 payload = {
-                     "source_id": int(claimed["id"]),
-                     "source_path": str(source_path),
-                     "tier": tier,
-                     "crf": settings.crf,
-                     "preset": settings.preset,
-                     "film_grain": settings.film_grain,
-                     "denoise": settings.denoise,
-                     "output_path": str(output_path),
-                     "output_size_bytes": 0,
-                     "output_bitrate_kbps": None,
-                     "source_size_bytes": int(source_path.stat().st_size),
-                     "machine": machine,
-                     "started_at": started_at,
-                     "success": False,
-                     "error_message": error_msg,
-                     "profile_eval_id": eval_obj_id,
-                     "progress_id": progress_id,
-                 }
+                 payload = WorkerEncodeReportPayload(
+                      source_id=int(claimed["id"]),
+                      source_path=str(source_path),
+                      tier=tier,
+                      crf=settings.crf,
+                      preset=settings.preset,
+                      film_grain=settings.film_grain,
+                      denoise=settings.denoise,
+                      output_path=str(output_path),
+                      output_size_bytes=0,
+                      output_bitrate_kbps=None,
+                      source_size_bytes=int(source_path.stat().st_size),
+                      machine=machine,
+                      started_at=started_at,
+                      success=False,
+                      error_message=error_msg,
+                      profile_eval_id=eval_obj_id,
+                      progress_id=progress_id,
+                 )
                  try:
                       api_client.report_encode_result(payload=payload)
                  except WorkerApiError:

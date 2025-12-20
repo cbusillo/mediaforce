@@ -38,6 +38,7 @@ class AppSettings:
     offpeak_enabled: bool = False
     offpeak_start: str = "00:00"
     offpeak_end: str = "05:00"
+    transcode_root: Optional[str] = None
 
 
 def _default_app_settings() -> AppSettings:
@@ -71,27 +72,50 @@ def load_app_settings() -> AppSettings:
             with Session(ENGINE) as session:
                 setting = session.get(AppSetting, 1)
                 gmh = setting.global_max_height if setting else None
-                libs = session.exec(select(Library)).all()
-                if libs:
+
+                lib_cols = Library.__table__.c
+                lib_rows = session.exec(
+                    select(
+                        lib_cols.id,
+                        lib_cols.name,
+                        lib_cols.media_type,
+                        lib_cols.mac_path,
+                        lib_cols.linux_path,
+                        lib_cols.watch,
+                        lib_cols.max_height,
+                        lib_cols.weight,
+                    ).select_from(Library.__table__)
+                ).all()
+                if lib_rows:
                     return AppSettings(
                         libraries=[
                             LibrarySettings(
-                                id=lib.id,
-                                name=lib.name,
-                                media_type=lib.media_type,
-                                mac_path=lib.mac_path,
-                                linux_path=lib.linux_path,
-                                watch=lib.watch,
-                                max_height=lib.max_height,
-                                weight=lib.weight,
+                                id=str(id_),
+                                name=str(name),
+                                media_type=str(media_type),
+                                mac_path=str(mac_path),
+                                linux_path=str(linux_path),
+                                watch=bool(watch),
+                                max_height=max_height,
+                                weight=float(weight) if weight is not None else 1.0,
                             )
-                            for lib in libs
+                            for (
+                                id_,
+                                name,
+                                media_type,
+                                mac_path,
+                                linux_path,
+                                watch,
+                                max_height,
+                                weight,
+                            ) in lib_rows
                         ],
                         global_max_height=gmh,
                         max_concurrency=setting.max_concurrency if setting else 1,
                         offpeak_enabled=setting.offpeak_enabled if setting else False,
                         offpeak_start=(setting.offpeak_start or "00:00") if setting else "00:00",
                         offpeak_end=(setting.offpeak_end or "05:00") if setting else "05:00",
+                        transcode_root=(setting.transcode_root or None) if setting else None,
                     )
         except Exception:
             pass
@@ -107,6 +131,7 @@ def save_app_settings(settings: AppSettings) -> None:
         setting.offpeak_enabled = settings.offpeak_enabled
         setting.offpeak_start = settings.offpeak_start
         setting.offpeak_end = settings.offpeak_end
+        setting.transcode_root = settings.transcode_root
         session.add(setting)
         session.exec(delete(Library))
         for lib in settings.libraries:

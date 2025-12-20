@@ -19,7 +19,7 @@
           onchange="switchLibrary(this.value)"
         >
           {% for lib in libraries %}
-          <option value="{{ lib }}">{{ lib }}</option>
+          <option value="{{ lib }}" {% if lib == library_root %}selected{% endif %}>{{ lib }}</option>
           {% endfor %}
         </select>
       </label>

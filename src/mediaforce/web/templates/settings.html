@@ -46,6 +46,26 @@
         </div>
 
         <div class="space-y-1">
+            <label for="transcode-root" class="form-label">Transcode Root</label>
+            <input id="transcode-root" class="form-input w-full max-w-3xl" type="text" name="transcode_root" value="{{ transcode_root_setting or transcode_root_default }}" aria-label="Transcode root">
+            <div class="text-foreground-muted text-sm">
+                Must be a dedicated <code class="font-mono">/transcode</code> folder under a configured media or library root.
+                {% if transcode_root_example %}
+                    Example: <code class="font-mono">{{ transcode_root_example }}</code>
+                {% endif %}
+            </div>
+            {% if transcode_root_suggestions %}
+            <div class="flex flex-wrap items-center gap-2 text-sm text-foreground-muted">
+                <span>Quick picks:</span>
+                {% for suggestion in transcode_root_suggestions %}
+                    <button type="button" class="btn btn-xs" data-transcode-suggestion="{{ suggestion }}">{{ suggestion }}</button>
+                {% endfor %}
+            </div>
+            {% endif %}
+            <div id="transcode-root-status" class="text-sm text-foreground-muted"></div>
+        </div>
+
+        <div class="space-y-1">
             <label class="form-label">Off-peak Window</label>
             <div class="flex items-center gap-2">
                 <input type="checkbox" name="offpeak_enabled" id="offpeak-enabled" aria-label="Enable off-peak window" {% if settings.offpeak_enabled %}checked{% endif %}>
@@ -198,12 +218,12 @@
     </div>
 
     <div class="overflow-auto">
-        <table id="settingsWorkersTable" class="table-auto w-full text-sm table-zebra table-compact">
-            <thead>
+            <table id="settingsWorkersTable" class="table-auto w-full text-sm table-zebra table-compact">
+              <thead>
                 <tr>
-                    <th>Host</th>
-                    <th>State</th>
-                    <th>Mode</th>
+                  <th>Host</th>
+                  <th>State</th>
+                  <th>Mode</th>
                     <th>Override</th>
                     <th>Active</th>
                     <th>Progress</th>
@@ -269,10 +289,10 @@ MEDIAFORCE_MACHINE_NAME=&lt;short-hostname&gt;</code></pre>
         <div class="font-medium text-foreground">Clean Transcode Folder</div>
         <div class="text-sm text-foreground-muted">
             Deletes files under the transcode root for this host.
-            <span class="text-foreground">Only</span> <code class="font-mono">&lt;media_root&gt;/transcode</code> is allowed.
+            Uses the same validation rules as the Transcode Root setting above.
         </div>
         <div class="flex flex-wrap items-center gap-2">
-            <input id="cleanup-transcode-root" class="form-input w-96" type="text" value="{{ transcode_root_default }}" aria-label="Transcode root" />
+            <input id="cleanup-transcode-root" class="form-input w-full max-w-3xl" type="text" value="{{ transcode_root_setting or transcode_root_default }}" aria-label="Transcode root" />
             <button type="button" id="cleanup-preview" class="btn btn-sm">Preview</button>
             <button type="button" id="cleanup-apply" class="btn btn-sm btn-danger">Delete Files</button>
         </div>

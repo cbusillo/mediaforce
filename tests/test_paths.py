@@ -1,4 +1,8 @@
-from mediaforce.config.paths import find_library_for_path, iter_libraries_for_current_host
+from mediaforce.config.paths import (
+    canonicalize_mount_prefix_for_current_host,
+    find_library_for_path,
+    iter_libraries_for_current_host,
+)
 from mediaforce.config.settings import AppSettings, LibrarySettings
 
 
@@ -65,3 +69,18 @@ def test_find_library_for_path_matches_configured_root(monkeypatch, tmp_path):
     assert resolved is not None
     assert str(resolved) == str(root)
 
+
+def test_canonicalize_mount_prefix_for_current_host_linux(monkeypatch):
+    from mediaforce.config import paths as paths_mod
+
+    monkeypatch.setattr(paths_mod.platform, "system", lambda: "Linux")
+    out = canonicalize_mount_prefix_for_current_host(paths_mod.pathlib.Path("/Volumes/media/tv"))
+    assert str(out) == "/mnt/media/tv"
+
+
+def test_canonicalize_mount_prefix_for_current_host_mac(monkeypatch):
+    from mediaforce.config import paths as paths_mod
+
+    monkeypatch.setattr(paths_mod.platform, "system", lambda: "Darwin")
+    out = canonicalize_mount_prefix_for_current_host(paths_mod.pathlib.Path("/mnt/media/tv"))
+    assert str(out) == "/Volumes/media/tv"

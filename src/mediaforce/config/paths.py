@@ -45,6 +45,31 @@ def normalize_path(path: pathlib.Path) -> pathlib.Path:
     return path
 
 
+def canonicalize_mount_prefix_for_current_host(path: pathlib.Path) -> pathlib.Path:
+    """Swap /Volumes/... <-> /mnt/... prefixes based on current host OS.
+
+    Unlike `normalize_path`, this does not require the target path to exist. This is
+    useful when creating directories (e.g., transcode roots) where the other-host
+    mount style would otherwise cause writes under a non-existent prefix.
+    """
+
+    raw = str(path)
+    is_mac = platform.system() == "Darwin"
+
+    if is_mac:
+        for linux_root in MEDIA_ROOTS_LINUX:
+            mac_root = linux_root.replace("/mnt/", "/Volumes/")
+            if raw == linux_root or raw.startswith(linux_root.rstrip("/") + "/"):
+                return pathlib.Path(raw.replace(linux_root, mac_root, 1))
+        return path
+
+    for mac_root in MEDIA_ROOTS_MAC:
+        linux_root = mac_root.replace("/Volumes/", "/mnt/")
+        if raw == mac_root or raw.startswith(mac_root.rstrip("/") + "/"):
+            return pathlib.Path(raw.replace(mac_root, linux_root, 1))
+    return path
+
+
 def iter_libraries_for_current_host(
     settings: Optional[AppSettings] = None,
 ) -> list[tuple[LibrarySettings, pathlib.Path]]:
