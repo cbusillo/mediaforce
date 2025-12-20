@@ -12,6 +12,7 @@
   }
   nav {
     @apply bg-surface-subtle text-foreground px-4 sm:px-6 py-4 border-b border-accent/30 shadow-sm;
+    border-color: var(--panel-border);
   }
   nav .logo {
     @apply text-xl font-semibold text-accent mr-2;
@@ -39,14 +40,37 @@
   }
   th {
     @apply text-left uppercase tracking-wide text-foreground-muted font-medium pb-2 border-b border-surface-subtle;
+    border-color: var(--panel-border);
   }
   td {
     @apply py-2 border-b border-surface-subtle text-foreground;
+    border-color: var(--panel-border);
   }
   input[type="text"],
   input[type="number"],
-  input[type="search"] {
-    @apply px-3 py-2 text-sm rounded-md border border-surface-subtle bg-surface-card text-foreground placeholder:text-foreground-muted outline-none;
+  input[type="search"],
+  textarea,
+  select {
+    @apply px-3 py-2 text-sm rounded-md border border-surface-subtle bg-surface-card text-foreground placeholder:text-foreground-muted outline-none transition-colors duration-150;
+    border: var(--input-border-width) solid var(--input-border);
+    border-color: var(--input-border);
+    background-color: var(--input-bg);
+    box-shadow: var(--input-shadow);
+  }
+  input[type="text"]:hover,
+  input[type="number"]:hover,
+  input[type="search"]:hover,
+  textarea:hover,
+  select:hover {
+    border-color: var(--input-border-hover);
+  }
+  input[type="text"]:focus,
+  input[type="number"]:focus,
+  input[type="search"]:focus,
+  textarea:focus,
+  select:focus {
+    border-color: var(--input-border-focus);
+    box-shadow: var(--input-shadow-focus);
   }
 }
 
@@ -93,6 +117,8 @@
   }
   .card {
     @apply bg-surface-card border border-surface-subtle rounded-lg p-4 space-y-3 shadow;
+    border-color: var(--panel-border);
+    box-shadow: var(--panel-shadow);
   }
   .table-zebra tr:nth-child(even) {
     @apply bg-surface-subtle/60;
@@ -100,11 +126,36 @@
   .form-label {
     @apply text-sm font-medium text-foreground-muted;
   }
+  .input-icon-left {
+    @apply pl-10;
+  }
   .form-input {
-    @apply px-3 py-2 text-sm rounded-md border border-surface-subtle bg-surface-card text-foreground placeholder:text-foreground-muted outline-none;
+    @apply px-3 py-2 text-sm rounded-md border border-surface-subtle bg-surface-card text-foreground placeholder:text-foreground-muted outline-none transition-colors duration-150;
+    border: var(--input-border-width) solid var(--input-border);
+    border-color: var(--input-border);
+    background-color: var(--input-bg);
+    box-shadow: var(--input-shadow);
+  }
+  .form-input:hover {
+    border-color: var(--input-border-hover);
+  }
+  .form-input:focus {
+    border-color: var(--input-border-focus);
+    box-shadow: var(--input-shadow-focus);
   }
   .form-select {
-    @apply px-3 py-2 text-sm rounded-md border border-surface-subtle bg-surface-card text-foreground outline-none;
+    @apply px-3 py-2 text-sm rounded-md border border-surface-subtle bg-surface-card text-foreground outline-none transition-colors duration-150;
+    border: var(--input-border-width) solid var(--input-border);
+    border-color: var(--input-border);
+    background-color: var(--input-bg);
+    box-shadow: var(--input-shadow);
+  }
+  .form-select:hover {
+    border-color: var(--input-border-hover);
+  }
+  .form-select:focus {
+    border-color: var(--input-border-focus);
+    box-shadow: var(--input-shadow-focus);
   }
   .section-heading {
     @apply flex items-center justify-between gap-2 mb-2;
@@ -121,11 +172,87 @@
   .modal-card {
     @apply bg-surface-card rounded-lg p-6 max-w-xl w-full border border-surface-subtle shadow-xl space-y-4;
   }
+  .page-header {
+    @apply border border-surface-subtle;
+    border-color: var(--panel-border);
+  }
+  .page-header__kicker {
+    @apply text-xs uppercase tracking-[0.18em] text-foreground-muted font-medium;
+  }
+  .review-toolbar {
+    @apply border border-surface-subtle;
+    border-color: var(--panel-border);
+  }
+  .review-toolbar__row {
+    @apply flex flex-wrap items-center justify-between gap-3;
+  }
+  .review-toolbar__row--filters {
+    @apply items-center gap-3;
+  }
+  .review-toolbar__label {
+    @apply text-foreground-muted text-sm font-medium;
+  }
+  .filter-chip {
+    @apply inline-flex items-center gap-1 px-3 py-1.5 rounded-full border border-surface-subtle text-sm text-foreground-muted bg-surface-card transition;
+    border-color: var(--input-border);
+  }
+  .filter-chip:hover {
+    @apply text-foreground;
+    border-color: var(--input-border-hover);
+  }
+  .filter-chip--active {
+    @apply text-foreground border-accent bg-accent/10;
+  }
   .chip {
     @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-subtle text-sm text-foreground;
   }
   .hover-preview {
     @apply fixed z-[1200] p-2 rounded-lg bg-surface-card border border-surface-subtle shadow-xl space-y-1;
+  }
+  .hover-preview__label {
+    @apply text-xs text-foreground-muted;
+  }
+  .hover-preview__video {
+    @apply w-[220px] h-[132px] bg-black rounded object-cover;
+  }
+  .card-grid {
+    @apply grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3;
+  }
+  .mini-card {
+    @apply bg-surface-card border border-surface-subtle rounded-lg p-3 space-y-1 shadow-sm hover:shadow-md transition;
+  }
+  .show-row {
+    @apply cursor-pointer hover:bg-surface-subtle transition-colors;
+  }
+  .season-row {
+    @apply cursor-pointer bg-surface-card/70 hover:bg-surface-card transition-colors;
+  }
+  .episode-row {
+    @apply cursor-pointer bg-surface-subtle hover:bg-surface transition-colors;
+  }
+  .expand-icon {
+    @apply cursor-pointer inline-block text-xs text-foreground-muted transition-transform duration-200 hover:text-accent;
+  }
+  .expand-icon.expanded {
+    @apply rotate-90;
+  }
+  .nested-container {
+    @apply p-0 bg-surface-subtle rounded-lg;
+  }
+  .nested-table-wrapper {
+    @apply px-2 py-2 pl-6;
+  }
+  .nested-table {
+    @apply w-full border-collapse m-0 text-sm;
+  }
+  .nested-table th {
+    @apply px-3 py-2 text-left border-b border-surface-subtle text-foreground-muted uppercase text-[0.75rem] font-semibold tracking-wide;
+  }
+  .nested-table td {
+    @apply px-3 py-2 border-b border-surface-subtle text-foreground;
+  }
+  .loading {
+    @apply px-4 py-3 text-foreground-muted italic;
   }
   .toast {
     @apply fixed top-4 right-4 bg-surface-card border border-accent text-foreground px-4 py-3 rounded-lg shadow-xl z-50 transition-opacity duration-200;
@@ -217,6 +344,15 @@
     --foreground: #0f172a;
     --foreground-muted: #475569;
     --border-subtle: #e2e8f0;
+    --input-bg: #ffffff;
+    --input-border: #cbd5e1;
+    --input-border-hover: #94a3b8;
+    --input-border-focus: #38bdf8;
+    --input-shadow: 0 0 0 1px rgba(15, 23, 42, 0.04), 0 1px 2px rgba(15, 23, 42, 0.05);
+    --input-shadow-focus: 0 0 0 3px rgba(56, 189, 248, 0.25);
+    --input-border-width: 1px;
+    --panel-border: rgba(148, 163, 184, 0.6);
+    --panel-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
   }
 
   .dark {
@@ -226,7 +362,16 @@
     --surface-muted: #0b1220;
     --foreground: #e5e7eb;
     --foreground-muted: #9ca3af;
-    --border-subtle: #1f2937;
+    --border-subtle: #334155;
+    --input-bg: #0b1424;
+    --input-border: rgba(148, 163, 184, 0.55);
+    --input-border-hover: rgba(148, 163, 184, 0.8);
+    --input-border-focus: rgba(147, 197, 253, 0.9);
+    --input-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 2px 10px rgba(2, 6, 23, 0.55);
+    --input-shadow-focus: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 3px rgba(59, 130, 246, 0.28);
+    --input-border-width: 1px;
+    --panel-border: rgba(148, 163, 184, 0.25);
+    --panel-shadow: 0 16px 32px rgba(2, 6, 23, 0.55), 0 0 0 1px rgba(148, 163, 184, 0.12);
   }
 
   .bg-surface {
