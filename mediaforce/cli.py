@@ -8,14 +8,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Sequence
 
-from media_harness.config import DEFAULT_CONFIG_PATH, HarnessConfig, load_config
-from media_harness.db import open_db
-from media_harness.execution import describe_item_plan, encode_manifest_items, promote_manifest_items, validate_manifest_items
-from media_harness.folder_profiles import inspect_prefix
-from media_harness.planner import build_manifest_item, recommend_item
-from media_harness.review import generate_compare_clips
-from media_harness.scanner import scan_library
-from media_harness.state_cleanup import purge_transient_artifacts
+from mediaforce.config import DEFAULT_CONFIG_PATH, HarnessConfig, load_config
+from mediaforce.db import open_db
+from mediaforce.execution import describe_item_plan, encode_manifest_items, promote_manifest_items, validate_manifest_items
+from mediaforce.folder_profiles import inspect_prefix
+from mediaforce.planner import build_manifest_item, recommend_item
+from mediaforce.review import generate_compare_clips
+from mediaforce.scanner import scan_library
+from mediaforce.state_cleanup import purge_transient_artifacts
 
 
 def build_parser() -> argparse.ArgumentParser:

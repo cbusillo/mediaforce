@@ -7,9 +7,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from media_harness.config import HarnessConfig
-from media_harness.planner import build_manifest_item, recommend_item
-from media_harness.scanner import scan_library
+from mediaforce.config import HarnessConfig
+from mediaforce.planner import build_manifest_item, recommend_item
+from mediaforce.scanner import scan_library
 
 
 def select_candidates(

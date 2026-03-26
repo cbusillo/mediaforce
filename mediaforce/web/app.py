@@ -23,13 +23,13 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from media_harness.advisor import AdvisorResponse, TuningPolicyResponse, apply_seed_policy, request_note_tuning, request_seed_policy
-from media_harness.binaries import ffmpeg_binary
-from media_harness.calibration_jobs import claim_next_queued_calibration_job, load_job, load_latest_job, list_queue_summary, queue_position, save_job
-from media_harness.config import DEFAULT_CONFIG_PATH, HarnessConfig, load_config, load_runtime_settings, save_runtime_settings
-from media_harness.db import open_db
-from media_harness.encode_queue import DEFAULT_SCHEDULER_POLICY, ensure_queue_state, load_active_encode_job, load_encode_job, load_latest_encode_job, load_queue_state, queue_position as encode_queue_position, save_encode_job, save_queue_state, summarize_encode_queue
-from media_harness.execution import (
+from mediaforce.advisor import AdvisorResponse, TuningPolicyResponse, apply_seed_policy, request_note_tuning, request_seed_policy
+from mediaforce.binaries import ffmpeg_binary
+from mediaforce.calibration_jobs import claim_next_queued_calibration_job, load_job, load_latest_job, list_queue_summary, queue_position, save_job
+from mediaforce.config import DEFAULT_CONFIG_PATH, HarnessConfig, load_config, load_runtime_settings, save_runtime_settings
+from mediaforce.db import open_db
+from mediaforce.encode_queue import DEFAULT_SCHEDULER_POLICY, ensure_queue_state, load_active_encode_job, load_encode_job, load_latest_encode_job, load_queue_state, queue_position as encode_queue_position, save_encode_job, save_queue_state, summarize_encode_queue
+from mediaforce.execution import (
     build_svt_params,
     describe_item_plan,
     encode_manifest_items,
@@ -37,10 +37,10 @@ from media_harness.execution import (
     search_quality_for_source,
     validate_manifest_items,
 )
-from media_harness.folder_profiles import inspect_prefix
-from media_harness.process_control import ManagedProcessController, ProcessCancelledError
-from media_harness.planner import build_manifest_item
-from media_harness.remote import (
+from mediaforce.folder_profiles import inspect_prefix
+from mediaforce.process_control import ManagedProcessController, ProcessCancelledError
+from mediaforce.planner import build_manifest_item
+from mediaforce.remote import (
     DEFAULT_HOST_CAPABILITIES,
     HostStatus,
     collect_host_statuses,
@@ -48,17 +48,17 @@ from media_harness.remote import (
     prepare_remote_host_with_password,
     reset_remote_host_trust,
 )
-from media_harness.run_manifests import create_folder_manifest
-from media_harness.review import (
+from mediaforce.run_manifests import create_folder_manifest
+from mediaforce.review import (
     encode_preview_clips,
     generate_compare_clips,
     generate_compare_clips_from_previews,
     recommend_review_timestamps,
 )
-from media_harness.quality import run_sample_encode, select_quality_metric
-from media_harness.scanner import scan_library
-from media_harness.state_cleanup import purge_transient_artifacts
-from media_harness.tuning_memory import promote_learning_artifact, record_tuning_session, retrieve_learning_context
+from mediaforce.quality import run_sample_encode, select_quality_metric
+from mediaforce.scanner import scan_library
+from mediaforce.state_cleanup import purge_transient_artifacts
+from mediaforce.tuning_memory import promote_learning_artifact, record_tuning_session, retrieve_learning_context
 
 MIN_RECOMMENDED_SAVINGS_BYTES = 100 * 1024 * 1024
 FULL_SCAN_STALE_AFTER = timedelta(hours=24)
@@ -734,7 +734,7 @@ def main() -> None:
         os.environ.setdefault("MEDIAFORCE_CONFIG_PATH", config_path)
         os.environ.setdefault("MEDIA_HARNESS_CONFIG_PATH", config_path)
         uvicorn.run(
-            "media_harness.web.app:create_reloadable_app",
+            "mediaforce.web.app:create_reloadable_app",
             host=host,
             port=port,
             reload=True,

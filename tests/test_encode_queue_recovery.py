@@ -10,14 +10,14 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 
-from media_harness.config import ConfigPaths, HarnessConfig
-from media_harness.db import open_db
-from media_harness.encode_queue import load_encode_job, load_queue_state, save_encode_job, save_queue_state
-from media_harness.quality import QualitySearchResult, SampleEncodeResult
-from media_harness import execution, remote
-from media_harness.remote import HostStatus
-from media_harness.review import CompareClip, EncodedPreviewClip
-from media_harness.web import app as web_app
+from mediaforce.config import ConfigPaths, HarnessConfig
+from mediaforce.db import open_db
+from mediaforce.encode_queue import load_encode_job, load_queue_state, save_encode_job, save_queue_state
+from mediaforce.quality import QualitySearchResult, SampleEncodeResult
+from mediaforce import execution, remote
+from mediaforce.remote import HostStatus
+from mediaforce.review import CompareClip, EncodedPreviewClip
+from mediaforce.web import app as web_app
 
 
 class EncodeQueueRecoveryTests(unittest.TestCase):
@@ -178,7 +178,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             },
         ]
         with open_db(self.config.paths.db_path) as connection:
-            with patch("media_harness.web.app._host_runtime_rows", return_value=statuses):
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
         self.assertIsNotNone(host_payload)
         assert host_payload is not None
@@ -227,7 +227,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 {
                     "label": "Remote A",
                     "host": "remote-a",
-                    "repo_path": "/srv/media-harness",
+                    "repo_path": "/srv/mediaforce",
                     "wake_mac": "aa:bb:cc:dd:ee:ff",
                     "priority": "20",
                     "max_parallel_encodes": "3",
@@ -428,7 +428,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 repo_path=str(self.root),
             )
         ]
-        with patch("media_harness.web.app.collect_host_statuses", return_value=statuses):
+        with patch("mediaforce.web.app.collect_host_statuses", return_value=statuses):
             host = web_app._resolve_sample_host(self.config, "local")
         self.assertEqual(host.key, "cbusillo@localhost")
 
@@ -446,7 +446,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 repo_path=str(self.root),
             )
         ]
-        with patch("media_harness.web.app.collect_host_statuses", return_value=statuses):
+        with patch("mediaforce.web.app.collect_host_statuses", return_value=statuses):
             host = web_app._resolve_sample_host(self.config, "cbusillo@m1-mini")
         self.assertEqual(host.key, "cbusillo@m1-mini")
 
@@ -464,17 +464,17 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 repo_path=str(self.root),
             )
         ]
-        with patch("media_harness.web.app.collect_host_statuses", return_value=statuses):
+        with patch("mediaforce.web.app.collect_host_statuses", return_value=statuses):
             with self.assertRaises(HTTPException) as exc_info:
                 web_app._resolve_sample_host(self.config, "remote-a")
         self.assertEqual(exc_info.exception.status_code, 400)
         self.assertEqual(exc_info.exception.detail, "Unknown sampled calibration host")
 
-    @patch("media_harness.web.app.generate_compare_clips_from_previews")
-    @patch("media_harness.web.app.encode_preview_clips")
-    @patch("media_harness.web.app.recommend_review_timestamps")
-    @patch("media_harness.web.app.run_sample_encode")
-    @patch("media_harness.web.app.search_quality_for_source")
+    @patch("mediaforce.web.app.generate_compare_clips_from_previews")
+    @patch("mediaforce.web.app.encode_preview_clips")
+    @patch("mediaforce.web.app.recommend_review_timestamps")
+    @patch("mediaforce.web.app.run_sample_encode")
+    @patch("mediaforce.web.app.search_quality_for_source")
     def test_run_sampled_calibration_passes_remote_host_to_remote_work(
         self,
         search_quality_mock,
@@ -584,7 +584,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             {"host": "cbusillo@example-host", "label": "Remote"},
         ]
         self.config.raw["remote_hosts"] = configured_hosts
-        with patch("media_harness.remote._remote_host_status", side_effect=lambda config, host: HostStatus(
+        with patch("mediaforce.remote._remote_host_status", side_effect=lambda config, host: HostStatus(
             key=str(host["host"]),
             label=str(host["label"]),
             mode="ssh",
@@ -620,9 +620,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             ]
         )
         with patch(
-            "media_harness.remote._run_remote_ssh",
+            "mediaforce.remote._run_remote_ssh",
             return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
-        ), patch("media_harness.remote._learn_remote_wake_mac"):
+        ), patch("mediaforce.remote._learn_remote_wake_mac"):
             status = remote._remote_host_status(self.config, host)
         self.assertFalse(status.available)
         self.assertIn(remote.AB_AV1_MISSING_ISSUE, status.issues)
@@ -650,9 +650,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             ]
         )
         with patch(
-            "media_harness.remote._run_remote_ssh",
+            "mediaforce.remote._run_remote_ssh",
             return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
-        ), patch("media_harness.remote._learn_remote_wake_mac"):
+        ), patch("mediaforce.remote._learn_remote_wake_mac"):
             status = remote._remote_host_status(self.config, host)
         self.assertFalse(status.available)
         self.assertIn(remote.SAMPLE_METRIC_MISSING_ISSUE, status.issues)
@@ -680,9 +680,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             ]
         )
         with patch(
-            "media_harness.remote._run_remote_ssh",
+            "mediaforce.remote._run_remote_ssh",
             return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
-        ), patch("media_harness.remote._learn_remote_wake_mac"):
+        ), patch("mediaforce.remote._learn_remote_wake_mac"):
             status = remote._remote_host_status(self.config, host)
         self.assertTrue(status.available)
         self.assertNotIn(remote.AB_AV1_MISSING_ISSUE, status.issues)
@@ -705,9 +705,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             repo_path=None,
         )
         with patch(
-            "media_harness.remote._run_remote_ssh",
+            "mediaforce.remote._run_remote_ssh",
             return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
-        ) as run_remote_ssh_mock, patch("media_harness.remote._remote_host_status", return_value=ready_status):
+        ) as run_remote_ssh_mock, patch("mediaforce.remote._remote_host_status", return_value=ready_status):
             result = remote._finish_remote_host_prepare(self.config, host, prep_steps=[])
         self.assertTrue(result.ok)
         self.assertIn("Installed ffmpeg-full with Homebrew for sampled calibration hosts when required.", result.performed_steps)
@@ -721,7 +721,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         temp_output = self.root / "staging" / "episode.partial.mkv"
         staging_path = self.root / "staging" / "episode.mkv"
         with patch(
-            "media_harness.execution.run_command",
+            "mediaforce.execution.run_command",
             return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
         ) as run_command_mock:
             execution._run_encode_command(
@@ -750,7 +750,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             }
         ]
         with open_db(self.config.paths.db_path) as connection:
-            with patch("media_harness.web.app._host_runtime_rows", return_value=statuses):
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, {"bypass_schedule": False})
         self.assertIsNone(host_payload)
         self.assertEqual(waiting_reason, "waiting for host capacity to free up")

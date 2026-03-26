@@ -75,9 +75,10 @@ the review clips and saved calibration summary remain.
 
 - preferred CLI entry points: `mediaforce`, `mediaforce-web`
 - compatibility CLI entry points: `media-harness`, `media-harness-web`
+- `bin/mediaforce.py`: preferred Python entry point
 - `bin/media_harness.py`: compatibility Python entry point
 - `config/defaults.toml`: checked-in encode defaults and policy defaults
-- `media_harness/`: internal Python package name retained for compatibility
+- `mediaforce/`: internal Python package
 - runtime state: stored under `~/Library/Application Support/media-harness/`
   and `~/Library/Caches/media-harness/review/`
 

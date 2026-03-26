@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from media_harness.binaries import ffmpeg_binary
-from media_harness.process_control import ManagedProcessController, run_command
-from media_harness.remote import run_remote_command
+from mediaforce.binaries import ffmpeg_binary
+from mediaforce.process_control import ManagedProcessController, run_command
+from mediaforce.remote import run_remote_command
 
 
 RESULT_RE = re.compile(

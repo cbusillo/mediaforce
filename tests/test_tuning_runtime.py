@@ -6,10 +6,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from media_harness.advisor import apply_seed_policy, request_note_tuning
-from media_harness.config import ConfigPaths, HarnessConfig
-from media_harness.db import open_db
-from media_harness.tuning_memory import promote_learning_artifact, record_tuning_session, retrieve_learning_context
+from mediaforce.advisor import apply_seed_policy, request_note_tuning
+from mediaforce.config import ConfigPaths, HarnessConfig
+from mediaforce.db import open_db
+from mediaforce.tuning_memory import promote_learning_artifact, record_tuning_session, retrieve_learning_context
 
 
 class TuningRuntimeTests(unittest.TestCase):
@@ -65,7 +65,7 @@ class TuningRuntimeTests(unittest.TestCase):
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
 
-        with patch("media_harness.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -108,7 +108,7 @@ class TuningRuntimeTests(unittest.TestCase):
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
 
-        with patch("media_harness.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={

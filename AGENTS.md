@@ -1,33 +1,19 @@
 # Mediaforce Agent Guide
 
-This file is authoritative for project-specific facts that are easy to miss at
-session start.
+Only session-start facts that are easy to miss belong here.
 
-## Canonical identity
-
-- GitHub repo: `cbusillo/mediaforce`
-- Branch: `main`
-
-## Naming that is intentionally mixed
+## Name and shape
 
 - Product/repo name: `mediaforce`
-- Internal Python package: `media_harness`
+- Internal Python package: `mediaforce`
 - Preferred CLI entrypoints: `mediaforce`, `mediaforce-web`
-- Compatibility CLI entrypoints still exist: `media-harness`,
+- Legacy compatibility CLI entrypoints still exist: `media-harness`,
   `media-harness-web`
+- Backend/API lives in `mediaforce/web/app.py`
+- Frontend lives in `frontend/`
+- FastAPI serves `frontend/build/` when that bundle exists
 
-Do not start a rename sweep from `media_harness` to `mediaforce` unless the
-task explicitly calls for it. The mixed naming is deliberate for now.
-
-## Architecture
-
-- Backend/API: FastAPI in `media_harness/web/app.py`
-- Core backend logic: `media_harness/`
-- Frontend: SvelteKit SPA in `frontend/`
-- Built frontend bundle is served by FastAPI from `frontend/build/` when
-  present, or from the packaged wheel include path when installed.
-
-## Runtime and state
+## Runtime gotchas
 
 - Durable state lives outside the repo under
   `~/Library/Application Support/media-harness/`
@@ -35,41 +21,25 @@ task explicitly calls for it. The mixed naming is deliberate for now.
 - Source libraries are expected at `/Volumes/media/movies` and
   `/Volumes/media/tv`
 - Staging root is expected at `/Volumes/media/transcode`
+- Do not reintroduce checked-in runtime state, SQLite databases, or review
+  media artifacts into the repo
 
-Do not reintroduce checked-in runtime state, SQLite databases, or review media
-artifacts into the repo.
-
-## Current working assumptions
-
-- The current product is semi-automated, not fully unattended.
-- Promotion remains an explicit operator action after review.
-- The active frontend is the SvelteKit UI, not the older refreshing page flow.
-- The most likely near-term work is UI/UX regression cleanup after the move to
-  SvelteKit.
-
-## Validation commands
+## Validation defaults
 
 - Backend targeted tests:
   `uv run --with pytest pytest tests/test_encode_queue_recovery.py tests/test_tuning_runtime.py`
-- Frontend type/Svelte checks:
-  `cd frontend && npm run check`
-- CLI smoke:
-  `uv run mediaforce --help`
+- Frontend checks: `cd frontend && npm run check`
+- CLI smoke: `uv run mediaforce --help`
 
-Prefer these targeted checks unless the task clearly needs something broader.
+## UI dev reminder
 
-## Frontend workflow
+- Backend dev launcher: `scripts/mediaforce-web-dev.sh start`
+- Frontend dev server: `cd frontend && npm run dev`
+- Vite proxies `/api/*` and `/review-media/*` to `127.0.0.1:8777`
+- When changing UI, validate in a real browser
 
-- Start backend from repo root with `scripts/mediaforce-web-dev.sh start`
-- Start frontend dev server from `frontend/` with `npm run dev`
-- Vite proxies `/api/*` and `/review-media/*` to the backend on `127.0.0.1:8777`
+## Further reading
 
-When changing UI, validate in a real browser and prefer browser-visible proof
-over code-only reasoning.
-
-## Collaboration notes
-
-- `README.md` is the durable operator/developer overview.
-- `TODO.md` is the current project priority list.
-- `HANDOFF.md` is the current-session summary for the next agent.
-
+- `README.md`: durable operator and developer overview
+- `TODO.md`: current priorities
+- `HANDOFF.md`: current-session handoff notes

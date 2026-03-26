@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from media_harness.config import HarnessConfig
+from mediaforce.config import HarnessConfig
 
 
 @dataclass(slots=True)

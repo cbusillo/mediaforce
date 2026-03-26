@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from media_harness.config import HarnessConfig, load_runtime_settings, save_runtime_settings
+from mediaforce.config import HarnessConfig, load_runtime_settings, save_runtime_settings
 
 DEFAULT_HOST_CAPABILITIES = ("encode_queue",)
 DEFAULT_WAKE_WAIT_SECONDS = 60
@@ -405,7 +405,7 @@ def _finish_remote_host_prepare(
             [
                 'if [ -z "$AB_AV1_BIN" ]; then',
                 '  if [ -n "$BREW_BIN" ]; then',
-                '    HOMEBREW_NO_AUTO_UPDATE=1 "$BREW_BIN" install ab-av1 >/tmp/media-harness-brew.log 2>&1 || { cat /tmp/media-harness-brew.log; exit 23; }',
+                '    HOMEBREW_NO_AUTO_UPDATE=1 "$BREW_BIN" install ab-av1 >/tmp/mediaforce-brew.log 2>&1 || { cat /tmp/mediaforce-brew.log; exit 23; }',
                 '  else',
                 '    echo "ab-av1 is missing and Homebrew is unavailable for automatic install." >&2',
                 '    exit 24',
@@ -521,7 +521,7 @@ def _remote_ffmpeg_install_commands(*, sample_calibration: bool) -> list[str]:
     if sample_calibration:
         return [
             'if [ -n "$BREW_BIN" ]; then',
-            '  HOMEBREW_NO_AUTO_UPDATE=1 "$BREW_BIN" install ffmpeg-full >/tmp/media-harness-brew.log 2>&1 || { cat /tmp/media-harness-brew.log; exit 21; }',
+            '  HOMEBREW_NO_AUTO_UPDATE=1 "$BREW_BIN" install ffmpeg-full >/tmp/mediaforce-brew.log 2>&1 || { cat /tmp/mediaforce-brew.log; exit 21; }',
             'else',
             '  echo "ffmpeg-full is required for sampled calibration and Homebrew is unavailable for automatic install." >&2',
             '  exit 22',
@@ -530,7 +530,7 @@ def _remote_ffmpeg_install_commands(*, sample_calibration: bool) -> list[str]:
     return [
         'if [ -z "$FFMPEG_BIN" ]; then',
         '  if [ -n "$BREW_BIN" ]; then',
-        '    HOMEBREW_NO_AUTO_UPDATE=1 "$BREW_BIN" install ffmpeg >/tmp/media-harness-brew.log 2>&1 || { cat /tmp/media-harness-brew.log; exit 21; }',
+        '    HOMEBREW_NO_AUTO_UPDATE=1 "$BREW_BIN" install ffmpeg >/tmp/mediaforce-brew.log 2>&1 || { cat /tmp/mediaforce-brew.log; exit 21; }',
         '  else',
         '    echo "ffmpeg is missing and Homebrew is unavailable for automatic install." >&2',
         '    exit 22',
@@ -1119,7 +1119,7 @@ def _bootstrap_remote_macos(host: dict[str, Any], password: str, *, issues: list
         '  echo "HARNESS_BOOTSTRAP_ERROR|sudo_auth" >&2',
         '  exit 41',
         'fi',
-        'ASKPASS_SCRIPT="$(mktemp /tmp/media-harness-askpass.XXXXXX)"',
+        'ASKPASS_SCRIPT="$(mktemp /tmp/mediaforce-askpass.XXXXXX)"',
         'trap "rm -f \"$ASKPASS_SCRIPT\"" EXIT',
         "cat > \"$ASKPASS_SCRIPT\" <<'EOF'",
         '#!/bin/sh',

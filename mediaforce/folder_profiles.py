@@ -6,7 +6,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from media_harness.config import HarnessConfig
+from mediaforce.config import HarnessConfig
 
 
 def inspect_prefix(connection: sqlite3.Connection, config: HarnessConfig, prefix: str) -> dict[str, Any]:

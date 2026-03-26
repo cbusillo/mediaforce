@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from media_harness.binaries import ffmpeg_binary, ffprobe_binary
-from media_harness.remote import copy_remote_file_to_local, run_remote_command
+from mediaforce.binaries import ffmpeg_binary, ffprobe_binary
+from mediaforce.remote import copy_remote_file_to_local, run_remote_command
 
 
 PTS_TIME_RE = re.compile(r"pts_time:(?P<pts>[0-9]+(?:\.[0-9]+)?)")
@@ -150,7 +150,7 @@ def _encode_preview_clips_remote(
     crf: float,
     svt_params: list[str],
 ) -> list[EncodedPreviewClip]:
-    remote_root = Path("/tmp") / f"media-harness-preview-{uuid.uuid4().hex[:12]}"
+    remote_root = Path("/tmp") / f"mediaforce-preview-{uuid.uuid4().hex[:12]}"
     run_remote_command(host, ["mkdir", "-p", str(remote_root)], timeout=30)
     encoded: list[EncodedPreviewClip] = []
     try:

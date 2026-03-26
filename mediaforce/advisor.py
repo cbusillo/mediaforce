@@ -153,7 +153,7 @@ def apply_seed_policy(base_policy: dict[str, Any], proposed_policy: dict[str, An
 
 
 def _run_code_prompt(*, project_root: Path, prompt: str, max_seconds: int) -> AdvisorResponse:
-    with tempfile.NamedTemporaryFile(prefix="media-harness-advice-", suffix=".txt", delete=False) as handle:
+    with tempfile.NamedTemporaryFile(prefix="mediaforce-advice-", suffix=".txt", delete=False) as handle:
         output_path = Path(handle.name)
     cmd = [
         "code",

@@ -7,10 +7,10 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from media_harness.config import HarnessConfig
-from media_harness.planner import recommend_item
-from media_harness.probe import probe_media
-from media_harness.utils import file_fingerprint, timestamp
+from mediaforce.config import HarnessConfig
+from mediaforce.planner import recommend_item
+from mediaforce.probe import probe_media
+from mediaforce.utils import file_fingerprint, timestamp
 
 
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mp4", ".ts"}

@@ -4,7 +4,7 @@ import shutil
 import time
 from pathlib import Path
 
-from media_harness.config import HarnessConfig
+from mediaforce.config import HarnessConfig
 
 
 SECONDS_PER_DAY = 86400

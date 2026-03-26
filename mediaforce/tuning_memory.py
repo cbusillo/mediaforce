@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from media_harness.config import HarnessConfig
+from mediaforce.config import HarnessConfig
 
 
 def learned_memory_dir(config: HarnessConfig) -> Path:

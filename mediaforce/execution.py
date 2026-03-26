@@ -10,13 +10,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from media_harness.binaries import ffmpeg_binary
-from media_harness.config import HarnessConfig
-from media_harness.process_control import ManagedProcessController, run_command
-from media_harness.probe import probe_media
-from media_harness.quality import QualitySearchError, QualitySearchResult, run_crf_search, select_quality_metric
-from media_harness.remote import remote_shell_path_export_line
-from media_harness.utils import file_fingerprint, timestamp
+from mediaforce.binaries import ffmpeg_binary
+from mediaforce.config import HarnessConfig
+from mediaforce.process_control import ManagedProcessController, run_command
+from mediaforce.probe import probe_media
+from mediaforce.quality import QualitySearchError, QualitySearchResult, run_crf_search, select_quality_metric
+from mediaforce.remote import remote_shell_path_export_line
+from mediaforce.utils import file_fingerprint, timestamp
 
 
 TEXT_SUBTITLE_CODECS = {"ass", "mov_text", "srt", "ssa", "subrip", "text", "webvtt"}
