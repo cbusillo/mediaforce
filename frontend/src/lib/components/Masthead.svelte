@@ -14,8 +14,8 @@
 	<div class="brand-block">
 		<div class="brand-row">
 			<a class="brand-link" href={resolve('/')}>
-				<span class="brand-mark">Media Calibration Bench</span>
-				<span class="brand-name serif">AV1 tuning studio</span>
+				<span class="brand-mark">Mediaforce</span>
+				<span class="brand-name serif">AV1 calibration bench</span>
 			</a>
 			<span class="route-pill">{currentPageLabel(page.url.pathname)}</span>
 		</div>

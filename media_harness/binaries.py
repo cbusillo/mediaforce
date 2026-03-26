@@ -14,8 +14,9 @@ _HOMEBREW_BINARIES = {
 
 @lru_cache(maxsize=None)
 def media_binary(name: str) -> str:
-    env_name = f"MEDIA_HARNESS_{name.upper()}"
-    override = os.environ.get(env_name)
+    override = os.environ.get(f"MEDIAFORCE_{name.upper()}") or os.environ.get(
+        f"MEDIA_HARNESS_{name.upper()}"
+    )
     if override:
         return override
 

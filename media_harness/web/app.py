@@ -160,7 +160,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         _recover_encode_queue(connection, config)
     _start_calibration_queue_worker(config)
     _start_encode_queue_worker(config)
-    app = FastAPI(title="Media Harness Calibration Bench")
+    app = FastAPI(title="Mediaforce Calibration Bench")
     cleanup_lock = threading.Lock()
     review_dir = config.paths.review_dir
     packaged_frontend_build_dir = Path(__file__).resolve().parent / "frontend_build"
@@ -727,10 +727,12 @@ def main() -> None:
     _load_project_env_file()
     config = load_config(DEFAULT_CONFIG_PATH)
     host = _default_web_host()
-    port = int(os.environ.get("MEDIA_HARNESS_WEB_PORT", "8765"))
+    port = int(_preferred_env("MEDIAFORCE_WEB_PORT", "MEDIA_HARNESS_WEB_PORT") or "8777")
     reload_enabled = _default_web_reload_enabled()
     if reload_enabled:
-        os.environ.setdefault("MEDIA_HARNESS_CONFIG_PATH", str(config.paths.config_path))
+        config_path = str(config.paths.config_path)
+        os.environ.setdefault("MEDIAFORCE_CONFIG_PATH", config_path)
+        os.environ.setdefault("MEDIA_HARNESS_CONFIG_PATH", config_path)
         uvicorn.run(
             "media_harness.web.app:create_reloadable_app",
             host=host,
@@ -750,7 +752,10 @@ def main() -> None:
 
 
 def create_reloadable_app() -> FastAPI:
-    config_path = Path(os.environ.get("MEDIA_HARNESS_CONFIG_PATH", str(DEFAULT_CONFIG_PATH))).expanduser()
+    config_path = Path(
+        _preferred_env("MEDIAFORCE_CONFIG_PATH", "MEDIA_HARNESS_CONFIG_PATH")
+        or str(DEFAULT_CONFIG_PATH)
+    ).expanduser()
     return create_app(config_path)
 
 
@@ -780,17 +785,25 @@ def _parse_project_env_value(value: str) -> str:
 
 
 def _default_web_reload_enabled() -> bool:
-    explicit_value = os.environ.get("MEDIA_HARNESS_WEB_RELOAD")
+    explicit_value = _preferred_env("MEDIAFORCE_WEB_RELOAD", "MEDIA_HARNESS_WEB_RELOAD")
     if explicit_value is not None:
         return explicit_value.strip().lower() in {"1", "true", "yes", "on"}
     return False
 
 
 def _default_web_host() -> str:
-    explicit_host = os.environ.get("MEDIA_HARNESS_WEB_HOST")
+    explicit_host = _preferred_env("MEDIAFORCE_WEB_HOST", "MEDIA_HARNESS_WEB_HOST")
     if explicit_host is not None:
         return explicit_host
     return "127.0.0.1"
+
+
+def _preferred_env(*names: str, default: str | None = None) -> str | None:
+    for name in names:
+        value = os.environ.get(name)
+        if value is not None:
+            return value
+    return default
 
 
 def _settings_library_rows(source_root_map: dict[str, Path], *, min_rows: int = 3) -> list[dict[str, str]]:

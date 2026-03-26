@@ -10,7 +10,7 @@
 
 <svelte:head>
 	<link rel="icon" href={favicon} />
-	<title>Media Harness</title>
+	<title>Mediaforce</title>
 </svelte:head>
 
 <PageShell>

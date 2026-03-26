@@ -133,7 +133,7 @@
 </script>
 
 <svelte:head>
-	<title>Settings · Media Harness</title>
+	<title>Settings · Mediaforce</title>
 </svelte:head>
 
 <div class="page-stack">

@@ -57,7 +57,7 @@
 </script>
 
 <svelte:head>
-	<title>Folders · Media Harness</title>
+	<title>Folders · Mediaforce</title>
 </svelte:head>
 
 <div class="page-stack">

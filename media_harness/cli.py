@@ -171,7 +171,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         play=args.play,
                     )
                 else:
-                    print("\nNext step: uv run media-harness review --play")
+                    print("\nNext step: uv run mediaforce review --play")
             return 0
 
         if args.command == "run":
@@ -202,7 +202,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output_dir=default_review_dir,
                 play=args.play,
             )
-            print("\nNext step: uv run media-harness approve")
+            print("\nNext step: uv run mediaforce approve")
             return 0
 
         if args.command == "review":
@@ -459,7 +459,7 @@ def _resolve_manifest_path(connection: sqlite3.Connection, manifest_path: Path |
         "SELECT output_path FROM run_manifests ORDER BY created_at DESC LIMIT 1"
     ).fetchone()
     if row is None:
-        raise FileNotFoundError("No run manifest found. Start with media-harness campaign or plan.")
+        raise FileNotFoundError("No run manifest found. Start with mediaforce campaign or plan.")
     return Path(str(row["output_path"]))
 
 

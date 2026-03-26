@@ -1,6 +1,6 @@
 # Mediaforce
 
-Mediaforce is the standalone v2 home for the media encoding harness.
+Mediaforce is the standalone v2 home for this media encoding workflow.
 
 This project is the first-pass replacement for the old ad hoc AV1 helper
 scripts. It is built for a semi-automated workflow:
@@ -52,12 +52,16 @@ Runtime artifacts now live outside the repo by default:
 - runtime settings: `~/Library/Application Support/media-harness/runtime-settings.json`
 - learned memory artifacts: `~/Library/Application Support/media-harness/learned-memory/`
 
+The product name is now `Mediaforce`, but these runtime directories still use
+the older `media-harness` path names for compatibility with existing local
+state.
+
 That keeps the repository focused on code and policy while allowing the local
 catalog, manifests, scan jobs, and calibration artifacts to survive repo moves
 or fresh clones.
 
 Transient calibration artifacts are also cleaned up automatically. By default,
-the harness purges cached review clips, temporary calibration manifests, and
+Mediaforce purges cached review clips, temporary calibration manifests, and
 `/Volumes/media/transcode/_calibration/` scratch outputs after `14` days.
 While the web UI or CLI is in active use, it also retries that cleanup sweep at
 most once per hour so stale files get another chance to disappear if an earlier
@@ -69,18 +73,21 @@ the review clips and saved calibration summary remain.
 
 ## Layout
 
-- `bin/media_harness.py`: CLI entry point
+- preferred CLI entry points: `mediaforce`, `mediaforce-web`
+- compatibility CLI entry points: `media-harness`, `media-harness-web`
+- `bin/media_harness.py`: compatibility Python entry point
 - `config/defaults.toml`: checked-in encode defaults and policy defaults
-- `media_harness/`: scanner, planner, SQLite helpers
+- `media_harness/`: internal Python package name retained for compatibility
 - runtime state: stored under `~/Library/Application Support/media-harness/`
   and `~/Library/Caches/media-harness/review/`
 
 ## Commands
 
-On macOS, the harness now prefers Homebrew's `ffmpeg-full` and `ffprobe` from
+On macOS, Mediaforce now prefers Homebrew's `ffmpeg-full` and `ffprobe` from
 `/opt/homebrew/opt/ffmpeg-full/bin` when present so VMAF support survives PATH
-changes and normal formula upgrades. You can still override either binary with
-`MEDIA_HARNESS_FFMPEG` or `MEDIA_HARNESS_FFPROBE`.
+changes and normal formula upgrades. You can override either binary with
+`MEDIAFORCE_FFMPEG` or `MEDIAFORCE_FFPROBE`; the legacy
+`MEDIA_HARNESS_FFMPEG` and `MEDIA_HARNESS_FFPROBE` names still work too.
 
 The web UI also auto-starts background catalog refreshes when the full library
 view is empty or stale, and it auto-refreshes the current folder before
@@ -93,7 +100,7 @@ has been explicitly saved to the folder profile, `Queue Folder Encode` is
 unlocked so the real folder job can enter the encode queue without letting a
 stale unsaved preview slip into production work.
 
-You can run the harness either directly with `python3` or through `uv`:
+You can run Mediaforce either directly with `python3` or through `uv`:
 
 ```bash
 uv run mediaforce report --limit 10
@@ -259,7 +266,7 @@ uv run mediaforce compare \
 
 `config/defaults.toml` is the source of truth for checked-in encode defaults.
 Machine-specific libraries, transcode roots, and remote hosts should live in
-runtime settings instead of repo-tracked config. The harness resolves settings
+runtime settings instead of repo-tracked config. Mediaforce resolves settings
 in this order:
 
 1. Global defaults
@@ -288,7 +295,9 @@ host definitions so those environment details stay off the checked-in repo.
 Use that local `.env` file for machine-specific web launcher settings like bind
 address, port, and reload mode. A checked-in template lives at
 `.env.example`. Shell environment variables still win
-over the file, so you can override any setting for a single launch.
+over the file, so you can override any setting for a single launch. Prefer the
+`MEDIAFORCE_WEB_*` variable names; the older `MEDIA_HARNESS_WEB_*` names remain
+supported for compatibility.
 
 The web UI is now split cleanly:
 
@@ -307,7 +316,7 @@ proxies `/api/*` and `/review-media/*` back to the FastAPI backend. For the
 single-server local UI, build the frontend with `npm run build`; FastAPI will
 then serve the built SPA from `frontend/build/`.
 
-Host configuration is now unified too: the harness no longer injects a special
+Host configuration is now unified too: Mediaforce no longer injects a special
 synthetic local host. If you want the current machine to participate in sample
 or encode-host decisions, add it as a normal SSH host entry such as
 `cbusillo@localhost`, then set its priority and capabilities in Settings like
@@ -322,7 +331,7 @@ that is actually running the work.
 For a blank remote Mac, first turn on Remote Login so SSH answers. Once that is
 reachable, the runtime settings UI can finish setup from the web surface: if
 the host only needs first-time trust, enter the remote account password once so
-the harness can install this Mac's SSH public key, then let the prep step
+Mediaforce can install this Mac's SSH public key, then let the prep step
 create remote paths and install `ffmpeg-full` plus `ab-av1` for
 `sample_calibration` hosts when possible. Those sample hosts now verify
 `libvmaf`/`xpsnr` metric support and `libsvtav1` before they show as ready.

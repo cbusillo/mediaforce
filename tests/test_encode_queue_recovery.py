@@ -370,25 +370,44 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             with patch.object(Path, "exists", autospec=True) as exists_mock:
                 exists_mock.side_effect = lambda path: path == env_path
                 with patch.object(Path, "read_text", autospec=True, return_value=(
-                    "MEDIA_HARNESS_WEB_HOST=0.0.0.0\n"
-                    "MEDIA_HARNESS_WEB_PORT=8777\n"
-                    "MEDIA_HARNESS_WEB_RELOAD=true\n"
+                    "MEDIAFORCE_WEB_HOST=0.0.0.0\n"
+                    "MEDIAFORCE_WEB_PORT=8777\n"
+                    "MEDIAFORCE_WEB_RELOAD=true\n"
                 )):
-                    with patch.dict(os.environ, {"MEDIA_HARNESS_WEB_PORT": "9999"}, clear=True):
+                    with patch.dict(os.environ, {"MEDIAFORCE_WEB_PORT": "9999"}, clear=True):
                         web_app._load_project_env_file()
-                        self.assertEqual(os.environ["MEDIA_HARNESS_WEB_HOST"], "0.0.0.0")
-                        self.assertEqual(os.environ["MEDIA_HARNESS_WEB_PORT"], "9999")
-                        self.assertEqual(os.environ["MEDIA_HARNESS_WEB_RELOAD"], "true")
+                        self.assertEqual(os.environ["MEDIAFORCE_WEB_HOST"], "0.0.0.0")
+                        self.assertEqual(os.environ["MEDIAFORCE_WEB_PORT"], "9999")
+                        self.assertEqual(os.environ["MEDIAFORCE_WEB_RELOAD"], "true")
 
     def test_default_web_host_and_reload_use_neutral_fallbacks(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(web_app._default_web_host(), "127.0.0.1")
             self.assertFalse(web_app._default_web_reload_enabled())
 
-    def test_explicit_env_controls_host_and_reload(self) -> None:
+    def test_mediaforce_env_controls_host_and_reload(self) -> None:
+        with patch.dict(os.environ, {"MEDIAFORCE_WEB_HOST": "0.0.0.0", "MEDIAFORCE_WEB_RELOAD": "true"}, clear=True):
+            self.assertEqual(web_app._default_web_host(), "0.0.0.0")
+            self.assertTrue(web_app._default_web_reload_enabled())
+
+    def test_legacy_env_controls_host_and_reload(self) -> None:
         with patch.dict(os.environ, {"MEDIA_HARNESS_WEB_HOST": "0.0.0.0", "MEDIA_HARNESS_WEB_RELOAD": "true"}, clear=True):
             self.assertEqual(web_app._default_web_host(), "0.0.0.0")
             self.assertTrue(web_app._default_web_reload_enabled())
+
+    def test_mediaforce_env_takes_precedence_over_legacy_web_env(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "MEDIAFORCE_WEB_HOST": "127.0.0.1",
+                "MEDIAFORCE_WEB_RELOAD": "false",
+                "MEDIA_HARNESS_WEB_HOST": "0.0.0.0",
+                "MEDIA_HARNESS_WEB_RELOAD": "true",
+            },
+            clear=True,
+        ):
+            self.assertEqual(web_app._default_web_host(), "127.0.0.1")
+            self.assertFalse(web_app._default_web_reload_enabled())
 
     def test_parse_project_env_value_strips_matching_quotes(self) -> None:
         self.assertEqual(web_app._parse_project_env_value('"0.0.0.0"'), "0.0.0.0")

@@ -1,6 +1,6 @@
 # Mediaforce Frontend
 
-This is the SvelteKit frontend for the media harness calibration bench.
+This is the SvelteKit frontend for the Mediaforce calibration bench.
 
 It owns the operator UI for:
 

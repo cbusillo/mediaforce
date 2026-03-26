@@ -140,7 +140,7 @@
 </script>
 
 <svelte:head>
-	<title>{folder.prefix} · Media Harness</title>
+	<title>{folder.prefix} · Mediaforce</title>
 </svelte:head>
 
 <div class="page-stack">
