@@ -1,0 +1,19 @@
+# Folder-specific overrides live here so campaign tuning stays separate from the
+# global defaults. Add one [[overrides]] block per folder prefix.
+
+[[overrides]]
+path_prefix = "tv/Suits"
+note = "1080p BluRay drama with large H.264 + DTS seasons; good AV1 + Opus target."
+
+[overrides.video]
+default_grain = 0
+target_xpsnr = 35.5
+min_target_xpsnr = 34.5
+max_encoded_percent = 55
+
+[overrides.audio]
+surround_5_1_opus_bitrate = "224k"
+
+[overrides.planning]
+extra_score = 18
+small_file_penalty = -4

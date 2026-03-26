@@ -1,0 +1,104 @@
+[config]
+include_files = ["folder-defaults.toml"]
+
+[state]
+db_path = "~/Library/Application Support/media-harness/library.sqlite3"
+run_manifest_dir = "~/Library/Application Support/media-harness/runs"
+web_state_dir = "~/Library/Application Support/media-harness/web"
+review_dir = "~/Library/Caches/media-harness/review"
+
+[state.cleanup]
+transient_artifact_retention_days = 14
+periodic_sweep_minutes = 60
+
+[media]
+staging_root = "/Volumes/media/transcode"
+archive_root = "/Volumes/media/transcode/_replaced"
+output_container = "mkv"
+
+[media.source_roots]
+movies = "/Volumes/media/movies"
+tv = "/Volumes/media/tv"
+
+[video]
+encoder = "libsvtav1"
+pixel_format = "yuv420p10le"
+preset = 4
+crf_search = true
+quality_metric = "auto"
+target_vmaf = 95.0
+target_xpsnr = 41.0
+min_target_vmaf = 93.0
+min_target_xpsnr = 35.0
+target_relax_step_vmaf = 0.5
+target_relax_step_xpsnr = 1.0
+sample_every = "8m"
+sample_duration = "20s"
+min_crf = 18
+max_crf = 38
+max_encoded_percent = 80
+default_grain = 8
+grain_denoise = 0
+thorough = true
+
+[audio]
+keep_languages = ["eng"]
+copy_codecs = ["aac", "opus"]
+convert_to_opus_codecs = [
+  "ac3",
+  "eac3",
+  "dts",
+  "dtshd",
+  "flac",
+  "pcm_s16le",
+  "pcm_s24le",
+  "truehd",
+]
+stereo_opus_bitrate = "128k"
+surround_5_1_opus_bitrate = "256k"
+surround_7_1_opus_bitrate = "320k"
+
+[subtitle]
+keep_languages = ["eng"]
+prefer_text = true
+keep_forced = true
+default_mode = "first_english"
+
+[planning]
+default_limit = 20
+size_weight = 10
+large_file_gib = 4.0
+large_file_bonus = 25
+small_file_gib = 1.5
+small_file_penalty = -15
+multi_audio_bonus = 6
+english_subtitle_bonus = 3
+missing_english_audio_penalty = -30
+
+[validation]
+require_size_reduction = true
+
+[planning.codec_bonus]
+h264 = 40
+hevc = 12
+h265 = 12
+av1 = -45
+default = 18
+
+[planning.bucket_thresholds]
+priority_encode = 70
+review_encode = 35
+
+[[overrides]]
+path_prefix = "movies"
+note = "Movies tend to be the best space-recovery targets."
+
+[overrides.planning]
+extra_score = 8
+
+[[overrides]]
+path_prefix = "tv"
+note = "TV episodes are often smaller, but season-level batching matters."
+
+[overrides.planning]
+small_file_penalty = -8

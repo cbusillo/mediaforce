@@ -1,0 +1,143 @@
+:root {
+	--page-bg: #f0ead9;
+	--page-grad-top: #fbf8f1;
+	--page-grad-bottom: #efe6d4;
+	--surface-1: rgba(255, 252, 246, 0.94);
+	--surface-2: rgba(255, 255, 255, 0.74);
+	--surface-3: rgba(255, 255, 255, 0.54);
+	--surface-accent: linear-gradient(135deg, rgba(15, 118, 110, 0.1), rgba(214, 195, 165, 0.22));
+	--ink: #17231f;
+	--ink-muted: #52655e;
+	--ink-soft: #6f7f79;
+	--accent: #0f766e;
+	--accent-deep: #0e615a;
+	--border: rgba(23, 35, 31, 0.1);
+	--border-strong: rgba(15, 118, 110, 0.2);
+	--ok: #2f6b3e;
+	--warn: #c2410c;
+	--shadow-lg: 0 26px 70px rgba(23, 35, 31, 0.12);
+	--shadow-md: 0 14px 42px rgba(23, 35, 31, 0.08);
+	--radius-xl: 2rem;
+	--radius-lg: 1.5rem;
+	--radius-md: 1rem;
+	--radius-pill: 999px;
+	--space-1: 0.35rem;
+	--space-2: 0.75rem;
+	--space-3: 1rem;
+	--space-4: 1.25rem;
+	--space-5: 1.75rem;
+	--space-6: 2.5rem;
+	--shell-width: min(1180px, calc(100vw - 2rem));
+	font-synthesis: none;
+	text-rendering: optimizeLegibility;
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html {
+	background: var(--page-bg);
+}
+
+body {
+	margin: 0;
+	min-height: 100vh;
+	font-family: 'Avenir Next', 'Segoe UI', sans-serif;
+	color: var(--ink);
+	background: linear-gradient(
+		160deg,
+		var(--page-grad-top) 0%,
+		var(--page-bg) 55%,
+		var(--page-grad-bottom) 100%
+	);
+}
+
+body::before {
+	content: '';
+	position: fixed;
+	inset: 0;
+	pointer-events: none;
+	background-image: radial-gradient(circle at 1px 1px, rgba(23, 35, 31, 0.045) 1px, transparent 0);
+	background-size: 18px 18px;
+	opacity: 0.14;
+	mix-blend-mode: multiply;
+	mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.55), transparent 92%);
+}
+
+a {
+	color: inherit;
+	text-decoration: none;
+}
+
+button,
+input,
+textarea,
+select {
+	font: inherit;
+}
+
+button {
+	border: 0;
+	padding: 0;
+	background: transparent;
+	color: inherit;
+	cursor: pointer;
+}
+
+h1,
+h2,
+h3,
+p,
+dl,
+dd,
+dt,
+ul {
+	margin: 0;
+}
+
+ul {
+	padding-left: 1.15rem;
+}
+
+.serif {
+	font-family: 'Iowan Old Style', 'Georgia', serif;
+	letter-spacing: -0.03em;
+}
+
+.eyebrow-copy {
+	font-size: 0.74rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.16em;
+	color: var(--accent-deep);
+}
+
+.lede-copy {
+	color: var(--ink-muted);
+	line-height: 1.6;
+}
+
+.muted-copy {
+	color: var(--ink-soft);
+	line-height: 1.55;
+}
+
+.mono-copy {
+	font-family: 'SFMono-Regular', 'Menlo', monospace;
+	overflow-wrap: anywhere;
+}
+
+.visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0, 0, 0, 0);
+	white-space: nowrap;
+	border: 0;
+}

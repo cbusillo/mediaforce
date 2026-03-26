@@ -1,450 +1,349 @@
 # Mediaforce
 
-Content-aware media encoding for TV and movie libraries. Automatically analyzes
-source quality and applies appropriate compression settings.
+Mediaforce is the standalone v2 home for the media encoding harness.
 
-## Philosophy
+This project is the first-pass replacement for the old ad hoc AV1 helper
+scripts. It is built for a semi-automated workflow:
 
-**Maximum compression with watchable quality, not source fidelity.**
+- scan only `/Volumes/media/movies` and `/Volumes/media/tv`
+- keep durable state in SQLite
+- apply media-wide defaults with per-folder overrides
+- generate run manifests in priority order
+- stage outputs under `/Volumes/media/transcode`
+- validate and promote after review
 
-- Clean, modern content gets efficient encoding that preserves detail
-- Noisy, grainy, or upscaled content gets denoised—don't waste bits on artifacts
-- Old Star Trek shouldn't use more bitrate than modern prestige TV
+The current implementation focuses on discovery and planning. It does not yet
+assume fully unattended execution. Encoding, machine validation, and promotion
+are implemented, but promotion is still an explicit operator action after
+review.
 
-## Supported Platforms
+## Scope
 
-| OS                           | CPU/GPU                                | Notes                                                       |
-|------------------------------|----------------------------------------|-------------------------------------------------------------|
-| macOS 13+                    | Apple Silicon                          | Tested with Homebrew ffmpeg + libsvtav1                     |
-| Linux (Ubuntu/Debian/Fedora) | x86_64 + NVIDIA (NVDEC/NVENC optional) | ffmpeg with libsvtav1; CUDA only needed for hardware decode |
+- Source roots: `/Volumes/media/movies`, `/Volumes/media/tv`
+- Staging root: `/Volumes/media/transcode`
+- Ignored roots: `downloads`, `books`, and the contents of `transcode`
 
-Paths are automatically normalized between platforms (e.g., `/Volumes/media` ↔ `/mnt/media`).
+## Current approach
 
-## Pipeline
+- Use the Mac Studio as the primary AV1 encode host.
+- Keep durable library state in SQLite and manifest files outside the repo.
+- Use human-edited policy manifests with per-folder overrides.
+- Generate run manifests in priority order rather than attempting a full,
+  unattended library rewrite.
+- Review staged outputs before promotion.
 
-```
-scan → queue → encode → verify → promote
-```
+## Status
 
-## Project Layout
+The current implementation covers:
 
-- `src/mediaforce/core.py` — main application logic (settings, queue, encoder, scanner).
-- `src/mediaforce/config/` — shared config helpers (`settings`, structured `logging`).
-- `src/mediaforce/db/` — SQLModel models and DB helpers (SQLite settings/inventory).
-- `src/mediaforce/cli/` — CLI entrypoint shim (`mediaforce` console script).
-- `src/mediaforce/web/` — FastAPI app, routes, templates, and static assets (`mediaforce-web`).
-- `docs/` — contributor docs (e.g., `hosts.local.md`, which is gitignored).
-- `docs/workers.md` — how to run remote workers (systemd/launchd) and deploy updates.
-- `TODO.md` — roadmap/features in progress.
-- See `docs/architecture.md` for refactor goals and next steps.
+- discovery and inventory into SQLite
+- run-manifest generation
+- staged encode execution
+- machine validation
+- side-by-side compare clip generation for approval
+- explicit promotion with original-file archival under the transcode root
 
-1. **Scan**: Inventory library, probe all files for metadata
-2. **Queue**: Prioritize by age + size (oldest/biggest first)
-3. **Encode**: Apply tier-appropriate settings to transcode folder
-4. **Verify**: Optional VMAF/SSIM spot-check to catch encoding disasters
-5. **Promote**: Replace originals with encoded files, rename sidecars
+## Runtime state
 
-## Source Quality Tiers
+Runtime artifacts now live outside the repo by default:
 
-| Tier       | Typical Content                  | Strategy                              |
-|------------|----------------------------------|---------------------------------------|
-| `pristine` | Modern streaming, Blu-ray        | CRF 26, no denoise, preserve detail   |
-| `good`     | Most HD TV                       | CRF 28, light film-grain synthesis    |
-| `mediocre` | Older HD, moderate grain/noise   | CRF 30, light denoise (hqdn3d)        |
-| `poor`     | Upscaled SD, heavy noise/grain   | CRF 32, heavy denoise (nlmeans)       |
+- durable state: `~/Library/Application Support/media-harness/`
+- disposable review clips: `~/Library/Caches/media-harness/review/`
+- runtime settings: `~/Library/Application Support/media-harness/runtime-settings.json`
+- learned memory artifacts: `~/Library/Application Support/media-harness/learned-memory/`
 
-## Requirements
+That keeps the repository focused on code and policy while allowing the local
+catalog, manifests, scan jobs, and calibration artifacts to survive repo moves
+or fresh clones.
 
-- Python 3.14+
-- ffmpeg with libsvtav1 encoder
-- ffprobe (usually bundled with ffmpeg)
+Transient calibration artifacts are also cleaned up automatically. By default,
+the harness purges cached review clips, temporary calibration manifests, and
+`/Volumes/media/transcode/_calibration/` scratch outputs after `14` days.
+While the web UI or CLI is in active use, it also retries that cleanup sweep at
+most once per hour so stale files get another chance to disappear if an earlier
+pass raced or only cleaned up partially.
 
-```bash
-# macOS
-brew install ffmpeg
+Completed calibration jobs also clean up their own temporary manifest and
+scratch encode directory right away after compare clips are generated, so only
+the review clips and saved calibration summary remain.
 
-# Verify SVT-AV1 support (current default encoder)
-ffmpeg -encoders | grep svt
-```
+## Layout
 
-## Configuration
+- `bin/media_harness.py`: CLI entry point
+- `config/defaults.toml`: checked-in encode defaults and policy defaults
+- `media_harness/`: scanner, planner, SQLite helpers
+- runtime state: stored under `~/Library/Application Support/media-harness/`
+  and `~/Library/Caches/media-harness/review/`
 
-- Unified state lives at `~/.config/mediaforce/mediaforce.db` (settings + inventory).
-- Library roots and weights are defined in the settings JSON/DB; defaults cover `/Volumes/media` on macOS and `/mnt/media` on Linux.
-- Global settings include `max_concurrency` (per-host encode slots) and optional off-peak window (e.g., 00:00–05:00) enforced by workers.
-- Logs are structured JSON to stdout. Set `MEDIAFORCE_LOG_LEVEL` (default `INFO`) and optional `MEDIAFORCE_LOG_FILE=/path/to/mediaforce.jsonl` to mirror logs to a JSONL file.
+## Commands
 
-### Workers (Remote Encoders)
+On macOS, the harness now prefers Homebrew's `ffmpeg-full` and `ffprobe` from
+`/opt/homebrew/opt/ffmpeg-full/bin` when present so VMAF support survives PATH
+changes and normal formula upgrades. You can still override either binary with
+`MEDIA_HARNESS_FFMPEG` or `MEDIA_HARNESS_FFPROBE`.
 
-Workers connect to the master Web UI over the Worker API. Configure each worker with:
+The web UI also auto-starts background catalog refreshes when the full library
+view is empty or stale, and it auto-refreshes the current folder before
+showing calibration actions when that folder's scan data is stale.
 
-```bash
-MEDIAFORCE_API_URL=<http://master-host:5555>
-MEDIAFORCE_API_TOKEN=<shared secret>
-MEDIAFORCE_MACHINE_NAME=<short-hostname>
-```
+Folder calibration now uses a simple operator flow by default: sampled
+calibrations use `ab-av1` file-wide samples for fast full-size estimates plus
+short hotspot preview clips for visual review. Once the current sampled draft
+has been explicitly saved to the folder profile, `Queue Folder Encode` is
+unlocked so the real folder job can enter the encode queue without letting a
+stale unsaved preview slip into production work.
 
-Notes:
-- `MEDIAFORCE_MACHINE_NAME` should be a stable, short identifier (e.g. `tdarr`, `chris-mbp`).
-- If not set, Mediaforce falls back to the local hostname and strips any domain portion.
-- The Web UI also canonicalizes dotted names (e.g. `foo.local` → `foo`) to reduce duplicates.
-
-In the Web UI, go to **Settings → Workers** to see live worker state, global mode, and queue counts.
-
-### Deploying to Remote Hosts
-
-For simple “push a new build” workflows (no git required on the remote), use:
-
-```bash
-# Build a bundle that does NOT ship .env
-scripts/deploy_bundle.sh /tmp/mediaforce-bundle.tgz
-
-# Linux + systemd
-scripts/deploy_remote.sh user@linux-host /opt/mediaforce /tmp/mediaforce-bundle.tgz --systemd mediaforce-worker
-
-# macOS + launchd
-scripts/deploy_remote.sh user@mac-host /Users/user/Developer/mediaforce /tmp/mediaforce-bundle.tgz --launchd com.mediaforce.worker
-```
-
-This bundle intentionally excludes `.env` so per-host secrets and identifiers remain local.
-
-## Usage
-
-### Check Platform Status
+You can run the harness either directly with `python3` or through `uv`:
 
 ```bash
-uv run mediaforce status
+uv run mediaforce report --limit 10
 ```
 
-### Single Episode Test
+Run a sample scan:
 
 ```bash
-# Analyze and show what would happen (dry run)
-uv run mediaforce analyze "/path/to/episode.mkv"
-
-# Encode single file
-uv run mediaforce encode "/path/to/episode.mkv" -o "/path/to/output/" --hw-decode
-
-# Encode with manual tier override
-uv run mediaforce encode "/path/to/episode.mkv" -o "/path/to/output/" --tier pristine --hw-decode
+uv run mediaforce scan --limit 25
 ```
 
-### Season Batch
+Scan a specific show or folder:
 
 ```bash
-# Analyze entire season
-uv run mediaforce analyze "/path/to/Show/Season 1/"
-
-# Encode season (processes all video files)
-uv run mediaforce encode "/path/to/Show/Season 1/" -o "/path/to/output/"
+uv run mediaforce scan \
+  --prefix "tv/Futurama"
 ```
 
-### Show Overrides
-
-Show-level defaults (like forcing a specific tier for a show) are managed via the
-Web UI (**Shows** page) and stored in `~/.config/mediaforce/mediaforce.db`.
-
-Legacy note: `show_config.json` is no longer read during normal operation.
-If you have one from an older version, import it once:
+Inspect a folder and print a suggested override block:
 
 ```bash
-uv run mediaforce import-show-config --apply
+uv run mediaforce inspect-folder "tv/Suits"
 ```
 
-(Omit `--apply` for a dry-run.) After importing, delete `show_config.json`.
-
-## Technical Details
-
-### Encoder: SVT-AV1 via ffmpeg
-
-We use ffmpeg with libsvtav1 directly for full control over encoding parameters.
-
-Key settings by tier:
-
-```
-pristine: -crf 26 -preset 5 -svtav1-params film-grain=0
-good:     -crf 28 -preset 5 -svtav1-params film-grain=8
-mediocre: -crf 30 -preset 6 -svtav1-params film-grain=4 + hqdn3d denoise
-poor:     -crf 32 -preset 6 + nlmeans denoise
-```
-
-### Classification Heuristics
-
-Source quality is estimated from:
-- **Bitrate efficiency**: High bitrate + low resolution = noisy source
-- **Codec age**: MPEG-2, older H.264 profiles suggest older masters
-- **Resolution vs. content era**: 1080p show from 1995 = upscaled
-- **Manual overrides**: show-level overrides from the Web UI/settings DB
-
-### Audio Handling
-
-**Codec: Opus** (best quality/size ratio, Plex transcodes for rare incompatible devices)
-
-| Channels | Target Bitrate |
-|----------|----------------|
-| Mono     | 64 kbps        |
-| Stereo   | 128 kbps       |
-| 5.1      | 256 kbps       |
-| 7.1      | 384 kbps       |
-
-**Smart passthrough/conversion:**
-
-| Source Codec                    | Action                 |
-|---------------------------------|------------------------|
-| Opus ≤ target                   | Passthrough (copy)     |
-| AAC ≤ target                    | Passthrough (copy)     |
-| AAC > target                    | Convert to Opus        |
-| AC3/EAC3/DTS/MP3                | Always convert to Opus |
-| Lossless (FLAC, TrueHD, DTS-HD) | Always convert to Opus |
-
-**Track selection:**
-- Keep English tracks only
-- If no English found, keep undefined/untagged tracks as fallback
-- If nothing matches, keep first track (never remove all audio)
-
-### Subtitle Handling
-
-**Keep English text-based subtitles only** (SRT, MOV_TEXT, SUBRIP).
-
-Drop image-based formats (PGS, VobSub) and styled formats (ASS/SSA) since they're
-incompatible with MP4 container. Bazarr handles subtitle acquisition for missing content.
-
-## Output Naming
-
-```
-Original:  Show.S01E01.Episode.Title.1080p.BluRay.x264.mkv
-Output:    Show.S01E01.Episode.Title.1080p.AV1.mp4
-```
-
-## Queue System
-
-### Inventory Database
-
-A single SQLite database lives at `~/.config/mediaforce/mediaforce.db` and stores:
-- Full source metadata (codec, resolution, bitrate, duration, audio/subtitle tracks)
-- Detected tier, classification reasoning, manual priority bumps
-- Encode status/results/progress with quality metrics
-- Multi-machine coordination (claim/release locking)
-
-### Commands
+Start a folder campaign in one command:
 
 ```bash
-# Scan library and populate inventory (no encoding)
-uv run mediaforce scan /Volumes/media/tv
-
-# Show queue (what would be encoded next)
-uv run mediaforce queue /Volumes/media/tv --limit 20
-
-# Dry run - show what would happen
-uv run mediaforce encode /Volumes/media/tv --dry-run
-
-# Encode to transcode folder (don't replace originals)
-uv run mediaforce encode /Volumes/media/tv --no-replace
-
-# Encode and replace originals
-uv run mediaforce encode /Volumes/media/tv
-
-# Promote pending encodes (after --no-replace verification)
-uv run mediaforce promote /Volumes/media/tv
-
-# Promotion keeps a hidden backup of the original by default.
-# Periodically purge old backups (dry-run by default):
-uv run mediaforce purge-backups --older-than-days 30
-
-# Apply deletion (only deletes backups for successfully-promoted items
-# older than the threshold, and only when the promoted file exists):
-uv run mediaforce purge-backups --older-than-days 30 --apply
+uv run mediaforce campaign \
+  "tv/Suits/Season 5"
 ```
 
-### Priority Scoring
-
-Files are prioritized by: `(age_normalized * 0.5) + (size_normalized * 0.5)`
-
-- **Age**: Older files encode first (already watched or less urgent)
-- **Size**: Larger files encode first (more space savings)
-
-### Skip Rules
-
-- **Native AV1**: Marked `skipped_native_av1` (review later for high-bitrate re-encode)
-- **HDR content**: Marked `skipped_hdr` (requires tone-mapping decisions)
-- **Already encoded**: Skip files with completed encode in DB
-
-### Multi-Machine Operation
-
-Multiple machines can encode simultaneously:
-- Each claims a file by writing `status='encoding', machine='hostname'`
-- Stale claims (crashed machine) detected by timestamp, auto-reclaimed
-- Encodes output to shared transcode folder (`/Volumes/media/transcode`)
-
-### Night Scheduling
-
-For cheap power windows (e.g., 12 AM - 5 AM):
+For the simplest operator flow, start a run instead:
 
 ```bash
-# crontab entry
-0 0 * * * cd /path/to/repo && uv run mediaforce encode /Volumes/media/tv --until 05:00
+uv run mediaforce run \
+  "tv/Suits/Season 5" \
+  --play
 ```
 
-The `--until` flag finishes the current file then stops after the specified time.
+`campaign` will:
 
-### Sidecar Handling
+- rescan that folder prefix
+- print the folder summary and suggested override block
+- write a run manifest for the matching items in that folder
+- print the first item plan in plain English
 
-When promoting, associated files are renamed to match:
-- `.nfo`, `.srt`, `.sub`, `.idx` (metadata/subtitles)
-- `-poster.jpg`, `-fanart.jpg`, `-thumb.jpg` (artwork)
+`run` will do the same setup work and then immediately:
 
-### Quality Metrics
+- encode item 0
+- validate item 0
+- render compare clips for harder/high-complexity parts of the source
+- optionally play the first compare clip
+- print the next approval step
 
-Captured during encoding for analysis:
-- **Bitrate ratio**: output_bps / source_bps
-- **PSNR/SSIM**: Fast quality check (built into ffmpeg)
-- **VMAF**: Perceptual quality score (optional, sample clips only)
+After a campaign, the rest of the commands default to the latest manifest, so
+you do not need to paste the run path each time.
 
-## Web Dashboard
-
-Real-time monitoring and management interface.
+Review the first item from the latest run:
 
 ```bash
-# Start the web server (default port 5555)
-uv run mediaforce-web
-# or module style (no root scripts required)
-uv run mediaforce.web
-
-# Custom port
-uv run mediaforce-web --port 8765
+uv run mediaforce review --play
 ```
 
-### Pages
-
-| Page          | URL          | Description                                                            |
-|---------------|--------------|------------------------------------------------------------------------|
-| **Dashboard** | `/`          | Overview stats, live active-encodes, recent completions, space savings |
-| **Queue**     | `/queue`     | Pending files with expandable show/season/episode hierarchy            |
-| **Completed** | `/completed` | Successfully promoted files                                            |
-| **Review**    | `/review`    | Quality outliers and size-increase encodes needing attention           |
-| **Shows**     | `/shows`     | Per-show tier overrides management                                     |
-The **Settings** tab (`/settings`) exposes the global library configuration
-used by the CLI, web UI, and background watchers.
-
-### Queue Features
-
-- **Hierarchical view**: Expandable Show → Season → Episode drill-down
-- **Episode details**: Video codec, resolution, bitrate, audio tracks, tier reasoning
-- **Estimated savings**: Per-show and per-file space savings predictions
-- **Expand/Collapse All**: Quick navigation buttons
-- **Server pagination + cached totals**: Priority-ordered pages with cached counts for snappy navigation
-- **Worker panel**: Shows active workers from encode progress with per-episode bump and send-to-worker actions
-
-### Live Monitoring
-
-- **Active encodes polling**: Dashboard auto-refreshes active encodes via `/api/active-encodes` every 3s (progress %, speed, ETA, frames).
-
-### API Endpoints
+Approve the reviewed item from the latest run:
 
 ```bash
-# Queue drill-down
-GET /api/queue/seasons/{show_name}
-GET /api/queue/episodes/{show_name}/{season_name}
-
-# Actions
-POST /api/promote/{id}
-POST /api/reject/{id}
-POST /api/show-override
-POST /api/apply-tier-to-show
-POST /api/settings
-
-## Global Settings & Libraries
-
-Library configuration now lives in the SQLite settings DB at
-`~/.config/mediaforce/mediaforce.db` and is shared by the CLI, web UI, and
-workers. Edit it via the **Settings** tab (`/settings`) or the
-`/api/settings` endpoint; workers can also pull `--settings-url` pointing to
-`/api/settings/current`.
-
-The settings API returns JSON shaped like:
-
-```json
-{
-  "settings": {
-    "global_max_height": 2160,
-    "max_concurrency": 2,
-    "offpeak_enabled": false,
-    "offpeak_start": "00:00",
-    "offpeak_end": "05:00",
-    "libraries": [
-      {
-        "id": "tv",
-        "name": "TV Library",
-        "media_type": "tv",
-        "mac_path": "/Volumes/media/tv",
-        "linux_path": "/mnt/media/tv",
-        "watch": true,
-        "max_height": null,
-        "weight": 1.0
-      }
-    ]
-  }
-}
+uv run mediaforce approve
 ```
 
-Fresh installs seed two libraries with sensible caps: TV at 1080p and Movies
-at 2160p, with a global fallback cap of 1080p when no library match is found.
-
-When the app needs a library root for the current host, it chooses the
-macOS path on Darwin and the Linux path on Linux, keeping queue and DB
-paths consistent across machines.
-
-## Automatic Library Watch
-
-The encoder can watch configured libraries for new video files and
-automatically queue them via the existing scan pipeline.
-
-Requirements:
-
-- `watchfiles` Python package (declared in `pyproject.toml`)
-- Libraries with `watch` enabled in settings (via the Settings page/API)
-
-Start a watcher on the local host:
+Report the best current candidates:
 
 ```bash
-uv run mediaforce watch
+uv run mediaforce report --limit 15
 ```
 
-For each watched library on this host, the watcher:
-
-- Monitors the library root recursively
-- Detects new or modified files with known video extensions
-- Normalizes the path between `/Volumes` and `/mnt` when needed
-- Inserts/updates the file in the `media_inventory` database using the same
-  logic as `scan`
-- Recalculates priorities so new entries are correctly ordered in the queue
-
-This pairs with `mediaforce run` (or `python -m mediaforce run`) on worker
-nodes.
-
-Recommended: run workers in **API mode** so they don’t open SQLite directly on
-multiple hosts. Set `MEDIAFORCE_API_URL` (or pass `--api-url`) and the worker
-will claim work + report progress/results via the web API.
-
-If you want to restrict worker endpoints, set `MEDIAFORCE_API_TOKEN` on the web
-server and on all workers. Workers will send `Authorization: Bearer <token>` to
-`/api/worker/*` and the quality-loop evaluation submit endpoints.
-
-## Development
+Generate a reviewable run manifest:
 
 ```bash
-# Run tests
-python3 -m pytest tests/
-
-# Type checking
-python3 -m mypy src/mediaforce
+uv run mediaforce plan \
+  --prefix "movies" \
+  --limit 10
 ```
 
-## Workers (unified scheduler)
-- Single worker can handle all libraries from the unified database at `~/.config/mediaforce/mediaforce.db`.
-- Recommended: set `MEDIAFORCE_API_URL=http://<host>:5555` (or pass `--api-url`) so workers coordinate via the API instead of direct SQLite.
-- Optional: set `MEDIAFORCE_API_TOKEN=<shared secret>` on the server + workers to require auth for worker claim/progress/report endpoints.
-- Example systemd unit: `mediaforce-worker.service` -> `uv run python -m mediaforce run /mnt/media --output /mnt/media/transcode --api-url http://192.168.1.3:5555 --autoupdate-url http://192.168.1.3:5555/raw/ --autoupdate-interval 3600 --hw-decode`.
-- Per-library weights and max heights come from settings; manual bumps use `manual_priority` (lower numbers encode first). `max_concurrency` and off-peak window can be set in the web Settings page.
+Run manifests are written under
+`~/Library/Application Support/media-harness/runs/` by default and contain:
 
-Workers pull settings from the master (`/api/settings/current`) and code from `/raw/manifest.json` with hourly autoupdate and self-restart on change.
+- source file path
+- resolved policy for that file
+- recommendation bucket and score
+- staging output path under `/Volumes/media/transcode`
+- audio/subtitle summaries for review
+
+Encode one or more items from a run manifest:
+
+```bash
+uv run mediaforce encode \
+  --index 0
+```
+
+Encode every item from the latest manifest:
+
+```bash
+uv run mediaforce encode --all
+```
+
+Run machine validation against staged outputs:
+
+```bash
+uv run mediaforce validate \
+  --index 0
+```
+
+Validate every staged item from the latest manifest:
+
+```bash
+uv run mediaforce validate --all
+```
+
+Promote a validated encode into the library:
+
+```bash
+uv run mediaforce promote \
+  --index 0
+```
+
+Promote everything from the latest manifest after approval:
+
+```bash
+uv run mediaforce promote --all
+```
+
+Generate side-by-side approval clips from the source and staged outputs:
+
+```bash
+uv run mediaforce compare \
+  --index 0
+```
+
+Generate review clips for all items from the latest manifest:
+
+```bash
+uv run mediaforce compare --all --play
+```
+
+Without explicit timestamps, `compare` now tries to pick scene-change moments
+from the source automatically and falls back to evenly spaced review points if
+scene analysis does not yield useful candidates.
+
+By default `compare` renders three evenly spaced visual review clips. You can
+override that with explicit timestamps, for example:
+
+```bash
+uv run mediaforce compare \
+  ~/Library/Application\ Support/media-harness/runs/run-abc123.json \
+  --index 0 \
+  --timestamp 120 \
+  --timestamp 640 \
+  --timestamp 1100 \
+  --play
+```
+
+## Policy model
+
+`config/defaults.toml` is the source of truth for checked-in encode defaults.
+Machine-specific libraries, transcode roots, and remote hosts should live in
+runtime settings instead of repo-tracked config. The harness resolves settings
+in this order:
+
+1. Global defaults
+2. Matching per-folder overrides from `config/folder-defaults.toml` in
+   declaration order
+3. Runtime environment overrides from
+   `~/Library/Application Support/media-harness/runtime-settings.json`
+
+This first version intentionally does **not** silently skip codecs or folders.
+It ranks and labels items, but leaves the final decision in the manifest and
+review loop.
+
+`report`, `encode`, and `validate` all surface source-vs-staged size deltas so
+you can see the storage win before promotion.
+
+## Folder defaults
+
+Keep campaign tuning in [config/folder-defaults.toml](config/folder-defaults.toml).
+That file is where per-show or per-season starting policies should live.
+
+Use the web Settings page for local libraries, the transcode folder, and remote
+host definitions so those environment details stay off the checked-in repo.
+
+`mediaforce-web` now reads optional startup defaults from
+`.env` before falling back to the process environment.
+Use that local `.env` file for machine-specific web launcher settings like bind
+address, port, and reload mode. A checked-in template lives at
+`.env.example`. Shell environment variables still win
+over the file, so you can override any setting for a single launch.
+
+The web UI is now split cleanly:
+
+- FastAPI serves the backend API and review media.
+- A SvelteKit frontend lives under `frontend/`.
+
+For local backend work, use
+`scripts/mediaforce-web-dev.sh` with
+`start|stop|restart|status|smoke`. It uses the repo-local `.env`, writes a pid
+file and log under `~/Library/Application Support/media-harness/`, and the
+`smoke` action checks `/`, `/api/dashboard`, `/api/settings`, and `/api/hosts`.
+
+For frontend development, run the Svelte app from
+`frontend/` with `npm run dev`. The Vite dev server
+proxies `/api/*` and `/review-media/*` back to the FastAPI backend. For the
+single-server local UI, build the frontend with `npm run build`; FastAPI will
+then serve the built SPA from `frontend/build/`.
+
+Host configuration is now unified too: the harness no longer injects a special
+synthetic local host. If you want the current machine to participate in sample
+or encode-host decisions, add it as a normal SSH host entry such as
+`cbusillo@localhost`, then set its priority and capabilities in Settings like
+any other host.
+
+Each host can now declare its own `max_parallel_encodes` limit and pick a
+structured schedule instead of typing profile keys by hand. `Always` is the
+built-in default, and you can add named windows when a machine should only run
+during certain hours. Those windows are evaluated in the local time of the host
+that is actually running the work.
+
+For a blank remote Mac, first turn on Remote Login so SSH answers. Once that is
+reachable, the runtime settings UI can finish setup from the web surface: if
+the host only needs first-time trust, enter the remote account password once so
+the harness can install this Mac's SSH public key, then let the prep step
+create remote paths and install `ffmpeg-full` plus `ab-av1` for
+`sample_calibration` hosts when possible. Those sample hosts now verify
+`libvmaf`/`xpsnr` metric support and `libsvtav1` before they show as ready.
+Shared media mounts still need to exist on the remote host before it will show
+as ready.
+
+Sampled calibration and AI note tuning can now run on any configured host with
+the `sample_calibration` capability. The folder page uses one AI-guided sample
+note box instead of separate baseline/tuning actions, lets the operator choose
+the sample host, and still keeps `Queue Folder Encode` hostless so the encode
+queue can dispatch it automatically. Runtime settings now carry remote host
+priority, per-host queue capabilities, explicit schedule selections, and a
+per-job `Bypass scheduler` escape hatch for urgent runs.
+
+Each note-driven tuning attempt is now recorded in SQLite, and successful
+cross-folder learnings are promoted to markdown artifacts under the learned
+memory directory so future tuning requests can retrieve concise prior guidance.
+
+The current starter profile includes `tv/Suits`, because it is a high-value AV1
+target: large 1080p H.264 episodes with DTS 5.1 audio and low grain.
+
+Promotion moves the original source into `/Volumes/media/transcode/_replaced`
+before replacing it with the staged `.mkv`, which keeps rollback straightforward
+without leaving the active library in an ambiguous state.
