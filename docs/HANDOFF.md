@@ -21,11 +21,10 @@ and any workflow gaps caused by the migration.
 ## Start here
 
 - Read `AGENTS.md` for project-specific facts that are easy to miss.
-- Use `TODO.md` as the current priority list.
+- Use `docs/TODO.md` as the current priority list.
 
 ## Suggested next move
 
 Pick one operator-critical Svelte route, validate it in a real browser, compare
 it against the expected workflow, and close the highest-impact regression you
 find first.
-

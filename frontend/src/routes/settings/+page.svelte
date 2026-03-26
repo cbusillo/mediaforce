@@ -229,10 +229,7 @@
 							</label>
 							<label class="field-block">
 								<span class="eyebrow-copy">Repo path</span>
-								<input
-									bind:value={host.repo_path}
-									placeholder="/Users/.../mediaforce"
-								/>
+								<input bind:value={host.repo_path} placeholder="/Users/.../mediaforce" />
 							</label>
 							<label class="field-block">
 								<span class="eyebrow-copy">Wake MAC</span>

@@ -2,44 +2,37 @@
 
 Only session-start facts that are easy to miss belong here.
 
-## Name and shape
+## Naming
 
 - Product/repo name: `mediaforce`
 - Internal Python package: `mediaforce`
 - Preferred CLI entrypoints: `mediaforce`, `mediaforce-web`
 - Legacy compatibility CLI entrypoints still exist: `media-harness`,
   `media-harness-web`
-- Backend/API lives in `mediaforce/web/app.py`
-- Frontend lives in `frontend/`
-- FastAPI serves `frontend/build/` when that bundle exists
 
-## Runtime gotchas
+## Repo facts
 
-- Durable state lives outside the repo under
-  `~/Library/Application Support/media-harness/`
-- Review media cache lives under `~/Library/Caches/media-harness/review/`
-- Source libraries are expected at `/Volumes/media/movies` and
-  `/Volumes/media/tv`
-- Staging root is expected at `/Volumes/media/transcode`
+- Runtime state and review media live outside the repo
+- Machine-local paths come from config/runtime settings, not code-level
+  invariants
 - Do not reintroduce checked-in runtime state, SQLite databases, or review
   media artifacts into the repo
 
-## Validation defaults
+## Defaults
 
 - Backend targeted tests:
   `uv run --with pytest pytest tests/test_encode_queue_recovery.py tests/test_tuning_runtime.py`
 - Frontend checks: `cd frontend && npm run check`
 - CLI smoke: `uv run mediaforce --help`
+- UI changes: validate in a real browser
+- Follow `docs/style/index.md` plus
+  `docs/policies/coding-standards.md`
+- Before commits or ending a session, satisfy
+  `docs/policies/acceptance-gate.md`
 
-## UI dev reminder
-
-- Backend dev launcher: `scripts/mediaforce-web-dev.sh start`
-- Frontend dev server: `cd frontend && npm run dev`
-- Vite proxies `/api/*` and `/review-media/*` to `127.0.0.1:8777`
-- When changing UI, validate in a real browser
-
-## Further reading
+## See also
 
 - `README.md`: durable operator and developer overview
-- `TODO.md`: current priorities
-- `HANDOFF.md`: current-session handoff notes
+- `docs/README.md`: docs table of contents
+- `docs/TODO.md`: current priorities
+- `docs/HANDOFF.md`: current-session handoff notes

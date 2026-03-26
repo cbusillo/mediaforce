@@ -5,11 +5,11 @@ Mediaforce is the standalone v2 home for this media encoding workflow.
 This project is the first-pass replacement for the old ad hoc AV1 helper
 scripts. It is built for a semi-automated workflow:
 
-- scan only `/Volumes/media/movies` and `/Volumes/media/tv`
+- scan the configured source roots
 - keep durable state in SQLite
 - apply media-wide defaults with per-folder overrides
 - generate run manifests in priority order
-- stage outputs under `/Volumes/media/transcode`
+- stage outputs under the configured transcode root
 - validate and promote after review
 
 The current implementation focuses on discovery and planning. It does not yet
@@ -19,9 +19,13 @@ review.
 
 ## Scope
 
-- Source roots: `/Volumes/media/movies`, `/Volumes/media/tv`
-- Staging root: `/Volumes/media/transcode`
+- Source roots: taken from checked-in defaults plus runtime settings
+- Staging root: taken from checked-in defaults plus runtime settings
 - Ignored roots: `downloads`, `books`, and the contents of `transcode`
+
+The current checked-in defaults point at `/Volumes/media/movies`,
+`/Volumes/media/tv`, and `/Volumes/media/transcode`, but those are config
+defaults rather than product-level invariants.
 
 ## Current approach
 
@@ -54,7 +58,8 @@ Runtime artifacts now live outside the repo by default:
 
 The product name is now `Mediaforce`, but these runtime directories still use
 the older `media-harness` path names for compatibility with existing local
-state.
+state. Like the media roots above, these are defaults and conventions from the
+current config/runtime layout, not hard-coded product requirements.
 
 That keeps the repository focused on code and policy while allowing the local
 catalog, manifests, scan jobs, and calibration artifacts to survive repo moves

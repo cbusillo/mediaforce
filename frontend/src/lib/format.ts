@@ -20,7 +20,8 @@ export function titleCase(value: string): string {
 }
 
 export function formatTimestamp(seconds: number): string {
-	const minutes = Math.floor(seconds / 60);
-	const remaining = Math.round(seconds % 60);
+	const roundedSeconds = Math.round(seconds);
+	const minutes = Math.floor(roundedSeconds / 60);
+	const remaining = roundedSeconds % 60;
 	return `${minutes}m ${remaining}s`;
 }
