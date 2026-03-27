@@ -29,6 +29,7 @@
 	:global(.hero-card) {
 		display: grid;
 		grid-template-columns: minmax(0, 1.15fr) minmax(180px, 240px) minmax(240px, 0.85fr);
+		grid-template-areas: 'copy meta aside';
 		gap: var(--space-4);
 		align-items: start;
 		background: var(--surface-spotlight);
@@ -41,11 +42,17 @@
 		gap: var(--space-3);
 	}
 
+	.copy-block {
+		grid-area: copy;
+	}
+
 	.meta-block {
+		grid-area: meta;
 		align-content: start;
 	}
 
 	.aside-block {
+		grid-area: aside;
 		color: var(--ink-muted);
 		font-size: 0.98rem;
 		line-height: 1.55;
@@ -55,9 +62,22 @@
 		border: 1px solid rgba(23, 35, 31, 0.08);
 	}
 
-	@media (max-width: 980px) {
+	@media (max-width: 1180px) {
+		:global(.hero-card) {
+			grid-template-columns: minmax(0, 1fr) minmax(240px, 300px);
+			grid-template-areas:
+				'copy meta'
+				'aside meta';
+		}
+	}
+
+	@media (max-width: 760px) {
 		:global(.hero-card) {
 			grid-template-columns: 1fr;
+			grid-template-areas:
+				'copy'
+				'meta'
+				'aside';
 			gap: var(--space-3);
 		}
 	}

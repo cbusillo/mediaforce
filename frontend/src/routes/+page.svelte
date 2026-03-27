@@ -84,34 +84,36 @@
 				lede="Start with the biggest reclaim, validate with a sample, then send the full folder only when the draft looks right."
 				size="display"
 			/>
-			<div class="hero-fact-grid">
-				{#each heroFacts as fact (fact.label)}
-					<div class="hero-fact-card">
-						<p class="eyebrow-copy">{fact.label}</p>
-						<p class="hero-fact-value">{fact.value}</p>
-					</div>
-				{/each}
-			</div>
 		{/snippet}
 
 		{#snippet meta()}
-			<div class="pill-column">
-				{#if metricsReady}
-					<Pill label="All metrics ready" variant="ok" wide />
-				{:else}
-					<Pill
-						label={`VMAF ${dashboard.metric_support.vmaf ? 'ready' : 'missing'}`}
-						variant={dashboard.metric_support.vmaf ? 'ok' : 'warn'}
-					/>
-					<Pill
-						label={`XPSNR ${dashboard.metric_support.xpsnr ? 'ready' : 'missing'}`}
-						variant={dashboard.metric_support.xpsnr ? 'ok' : 'warn'}
-					/>
-					<Pill
-						label={`SSIM ${dashboard.metric_support.ssim ? 'ready' : 'missing'}`}
-						variant={dashboard.metric_support.ssim ? 'ok' : 'warn'}
-					/>
-				{/if}
+			<div class="hero-support-column">
+				<div class="hero-stat-list" aria-label="Strategy summary">
+					{#each heroFacts as fact (fact.label)}
+						<div class="hero-stat-row">
+							<p class="eyebrow-copy">{fact.label}</p>
+							<p class="hero-stat-value">{fact.value}</p>
+						</div>
+					{/each}
+				</div>
+				<div class="pill-column">
+					{#if metricsReady}
+						<Pill label="All metrics ready" variant="ok" wide />
+					{:else}
+						<Pill
+							label={`VMAF ${dashboard.metric_support.vmaf ? 'ready' : 'missing'}`}
+							variant={dashboard.metric_support.vmaf ? 'ok' : 'warn'}
+						/>
+						<Pill
+							label={`XPSNR ${dashboard.metric_support.xpsnr ? 'ready' : 'missing'}`}
+							variant={dashboard.metric_support.xpsnr ? 'ok' : 'warn'}
+						/>
+						<Pill
+							label={`SSIM ${dashboard.metric_support.ssim ? 'ready' : 'missing'}`}
+							variant={dashboard.metric_support.ssim ? 'ok' : 'warn'}
+						/>
+					{/if}
+				</div>
 			</div>
 		{/snippet}
 
@@ -167,19 +169,24 @@
 		{/each}
 	</div>
 
-	<div class="section-stack">
-		<SectionHead
-			eyebrow="Folders"
-			heading="Start with the biggest wins"
-			lede="Pick a library slice and move from candidate folders into representative-file tuning."
-			size="section"
-		/>
-		<div class="folder-grid">
-			{#each dashboard.folders as folder (folder.prefix)}
-				<FolderCard {folder} />
-			{/each}
+	<Panel variant="inset" class="folder-section" padding="1.2rem 1.3rem 1.4rem">
+		<div class="section-stack">
+			<div class="section-header-row">
+				<SectionHead
+					eyebrow="Folders"
+					heading="Candidate folders"
+					lede="Sorted by estimated reclaim so the strongest space-saving bets stay first."
+					size="compact"
+				/>
+				<p class="section-kicker muted-copy">Open a folder to start representative-file tuning.</p>
+			</div>
+			<div class="folder-grid">
+				{#each dashboard.folders as folder (folder.prefix)}
+					<FolderCard {folder} />
+				{/each}
+			</div>
 		</div>
-	</div>
+	</Panel>
 
 	<Panel variant="inset">
 		<div class="panel-stack">
@@ -230,25 +237,37 @@
 		align-content: start;
 	}
 
-	.hero-fact-grid {
+	.hero-support-column {
 		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
 		gap: var(--space-3);
+		align-content: start;
 	}
 
-	.hero-fact-card {
+	.hero-stat-list {
 		display: grid;
-		gap: var(--space-1);
-		padding: 0.85rem 0.95rem;
+		gap: 0.65rem;
+	}
+
+	.hero-stat-row {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		gap: 0.8rem;
+		padding: 0.6rem 0.7rem;
 		border-radius: var(--radius-md);
 		background: rgba(255, 255, 255, 0.52);
 		border: 1px solid rgba(23, 35, 31, 0.08);
 	}
 
-	.hero-fact-value {
-		font-size: 1.15rem;
+	.hero-stat-row :global(.eyebrow-copy) {
+		font-size: 0.72rem;
+	}
+
+	.hero-stat-value {
+		font-size: 1.02rem;
 		font-weight: 700;
 		line-height: 1.2;
+		text-align: right;
 	}
 
 	.action-row {
@@ -257,13 +276,35 @@
 		flex-wrap: wrap;
 	}
 
+	.section-header-row {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		gap: var(--space-3);
+		align-items: end;
+		padding-bottom: 0.95rem;
+		border-bottom: 1px solid rgba(23, 35, 31, 0.08);
+	}
+
+	.section-kicker {
+		max-width: 18rem;
+		font-size: 0.88rem;
+		line-height: 1.45;
+		text-align: right;
+	}
+
 	@media (max-width: 860px) {
 		.queue-grid {
 			grid-template-columns: 1fr;
 		}
 
-		.hero-fact-grid {
+		.section-header-row {
 			grid-template-columns: 1fr;
+			align-items: start;
+		}
+
+		.section-kicker {
+			max-width: none;
+			text-align: left;
 		}
 	}
 
