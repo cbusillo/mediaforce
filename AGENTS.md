@@ -28,6 +28,9 @@ Only session-start facts that are easy to miss belong here.
 - For browser exploration by subagents, explicitly use the `browser-ui-review`
   skill. Run a tiny smoke test only for the first such task in a session or
   when browser access/approvals are uncertain.
+- When launching browser subagents via `agent.create`, prefer `write: true`
+  even for read-only exploration. In this harness, read-only subagents may hit
+  browser-tool permission blockers that writable worktree agents avoid.
 - Do not assume `agent.create` subagents share the main session browser tool;
   if browser access is blocked, treat it as a harness/permissions issue rather
   than evidence that the site itself is broken.

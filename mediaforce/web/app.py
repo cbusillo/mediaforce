@@ -127,6 +127,13 @@ ENCODE_QUEUE_WORKER_STARTED = False
 FOLDER_CARD_CACHE_LOCK = threading.Lock()
 FOLDER_CARD_CACHE_KEY: tuple[str, int] | None = None
 FOLDER_CARD_CACHE_VALUE: list[FolderCard] = []
+HOST_STATUS_CACHE_LOCK = threading.Lock()
+HOST_STATUS_CACHE_KEY: tuple[str, int, int] | None = None
+HOST_STATUS_CACHE_FETCHED_AT = 0.0
+HOST_STATUS_CACHE_VALUE: list[HostStatus] = []
+HOST_STATUS_CACHE_REFRESH_FUTURE: Future[tuple[tuple[str, int, int], list[HostStatus]]] | None = None
+HOST_STATUS_CACHE_TTL_SECONDS = 15.0
+HOST_STATUS_CACHE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="host-status")
 CALIBRATION_REVIEW_FIELDS = {
     "accepted_at",
     "accepted_draft_hash",
@@ -171,6 +178,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     if frontend_app_dir.exists():
         app.mount("/_app", StaticFiles(directory=str(frontend_app_dir)), name="frontend_app")
     app.state.config = config
+    _refresh_host_status_cache(config)
 
     @app.middleware("http")
     async def periodic_cleanup(request: Request, call_next: Any) -> Any:
@@ -288,6 +296,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         save_runtime_settings(config.paths.runtime_settings_path, merged_runtime_settings)
         config = load_config(config.paths.config_path)
         app.state.config = config
+        _refresh_host_status_cache(config)
         return {"ok": True, "message": "Settings saved.", "settings": _settings_page_payload(saved=True)}
 
     @app.post("/api/settings")
@@ -310,6 +319,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         result = prepare_remote_host_with_password(config, host_key, password=remote_password or None)
         config = load_config(config.paths.config_path)
         app.state.config = config
+        _refresh_host_status_cache(config)
         notice = result.message if not result.detail else f"{result.message} Details: {result.detail}"
         return {"ok": result.ok, "message": notice, "kind": "success" if result.ok else "error"}
 
@@ -328,6 +338,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         result = reset_remote_host_trust(config, host_key)
         config = load_config(config.paths.config_path)
         app.state.config = config
+        _refresh_host_status_cache(config)
         notice = result.message if not result.detail else f"{result.message} Details: {result.detail}"
         return {"ok": result.ok, "message": notice, "kind": "success" if result.ok else "error"}
 
@@ -1042,7 +1053,22 @@ def _stringify_pathlike(value: Any) -> str:
     return ""
 
 
-def _safe_collect_host_statuses(config: HarnessConfig) -> list[HostStatus]:
+def _host_status_cache_key(config: HarnessConfig) -> tuple[str, int, int]:
+    return (
+        str(config.paths.config_path),
+        _path_mtime_ns(config.paths.config_path),
+        _path_mtime_ns(config.paths.runtime_settings_path),
+    )
+
+
+def _path_mtime_ns(path: Path) -> int:
+    try:
+        return path.stat().st_mtime_ns
+    except FileNotFoundError:
+        return -1
+
+
+def _collect_host_statuses_with_fallback(config: HarnessConfig) -> list[HostStatus]:
     try:
         return collect_host_statuses(config)
     except Exception as exc:
@@ -1060,6 +1086,74 @@ def _safe_collect_host_statuses(config: HarnessConfig) -> list[HostStatus]:
                 detail=str(exc),
             )
         ]
+
+
+def _host_status_refresh_payload(config: HarnessConfig) -> tuple[tuple[str, int, int], list[HostStatus]]:
+    return (_host_status_cache_key(config), _collect_host_statuses_with_fallback(config))
+
+
+def _complete_host_status_refresh_if_ready() -> None:
+    global HOST_STATUS_CACHE_KEY
+    global HOST_STATUS_CACHE_FETCHED_AT
+    global HOST_STATUS_CACHE_VALUE
+    global HOST_STATUS_CACHE_REFRESH_FUTURE
+
+    with HOST_STATUS_CACHE_LOCK:
+        future = HOST_STATUS_CACHE_REFRESH_FUTURE
+        if future is None or not future.done():
+            return
+        HOST_STATUS_CACHE_REFRESH_FUTURE = None
+
+    try:
+        cache_key, statuses = future.result()
+    except Exception:
+        return
+
+    with HOST_STATUS_CACHE_LOCK:
+        HOST_STATUS_CACHE_KEY = cache_key
+        HOST_STATUS_CACHE_FETCHED_AT = time.monotonic()
+        HOST_STATUS_CACHE_VALUE = list(statuses)
+
+
+def _refresh_host_status_cache(config: HarnessConfig) -> list[HostStatus]:
+    global HOST_STATUS_CACHE_KEY
+    global HOST_STATUS_CACHE_FETCHED_AT
+    global HOST_STATUS_CACHE_VALUE
+    global HOST_STATUS_CACHE_REFRESH_FUTURE
+
+    cache_key, statuses = _host_status_refresh_payload(config)
+    with HOST_STATUS_CACHE_LOCK:
+        HOST_STATUS_CACHE_KEY = cache_key
+        HOST_STATUS_CACHE_FETCHED_AT = time.monotonic()
+        HOST_STATUS_CACHE_VALUE = list(statuses)
+        HOST_STATUS_CACHE_REFRESH_FUTURE = None
+    return list(statuses)
+
+
+def _schedule_host_status_refresh(config: HarnessConfig) -> None:
+    global HOST_STATUS_CACHE_REFRESH_FUTURE
+
+    _complete_host_status_refresh_if_ready()
+    with HOST_STATUS_CACHE_LOCK:
+        if HOST_STATUS_CACHE_REFRESH_FUTURE is not None:
+            return
+        HOST_STATUS_CACHE_REFRESH_FUTURE = HOST_STATUS_CACHE_EXECUTOR.submit(_host_status_refresh_payload, config)
+
+
+def _safe_collect_host_statuses(config: HarnessConfig) -> list[HostStatus]:
+    _complete_host_status_refresh_if_ready()
+    cache_key = _host_status_cache_key(config)
+    with HOST_STATUS_CACHE_LOCK:
+        cached_matches = HOST_STATUS_CACHE_KEY == cache_key and bool(HOST_STATUS_CACHE_VALUE)
+        cache_fresh = cached_matches and (time.monotonic() - HOST_STATUS_CACHE_FETCHED_AT) < HOST_STATUS_CACHE_TTL_SECONDS
+        cached_statuses = list(HOST_STATUS_CACHE_VALUE) if cached_matches else []
+
+    if cache_fresh:
+        return cached_statuses
+    if cached_statuses:
+        _schedule_host_status_refresh(config)
+        return cached_statuses
+    return _refresh_host_status_cache(config)
 
 
 def _host_runtime_rows(connection: Any, config: HarnessConfig, *, now: datetime | None = None) -> list[dict[str, Any]]:
