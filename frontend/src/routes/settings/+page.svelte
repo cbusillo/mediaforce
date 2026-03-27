@@ -202,7 +202,19 @@
 								<input bind:value={library.path} placeholder="/Volumes/media/movies" />
 							</label>
 							<div class="editor-actions compact-actions">
-								<Button variant="ghost" onclick={() => removeLibrary(index)}>Remove</Button>
+								<button
+									type="button"
+									class="icon-button danger"
+									aria-label="Remove library"
+									title="Remove library"
+									onclick={() => removeLibrary(index)}
+								>
+									<svg viewBox="0 0 24 24" aria-hidden="true">
+										<path
+											d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 7h2v7h-2v-7Zm4 0h2v7h-2v-7ZM7 10h2v7H7v-7Zm-1 10h12a2 2 0 0 0 2-2V8H4v10a2 2 0 0 0 2 2Z"
+										/>
+									</svg>
+								</button>
 							</div>
 						</div>
 					{/each}
@@ -378,7 +390,19 @@
 							/>
 						</label>
 						<div class="editor-actions compact-actions">
-							<Button variant="ghost" onclick={() => removeSchedule(index)}>Remove</Button>
+							<button
+								type="button"
+								class="icon-button danger"
+								aria-label="Remove schedule window"
+								title="Remove schedule window"
+								onclick={() => removeSchedule(index)}
+							>
+								<svg viewBox="0 0 24 24" aria-hidden="true">
+									<path
+										d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 7h2v7h-2v-7Zm4 0h2v7h-2v-7ZM7 10h2v7H7v-7Zm-1 10h12a2 2 0 0 0 2-2V8H4v10a2 2 0 0 0 2 2Z"
+									/>
+								</svg>
+							</button>
 						</div>
 					</div>
 				{/each}
@@ -387,23 +411,17 @@
 	</Panel>
 </div>
 
-<div class={`settings-save-bar ${isDirty ? 'dirty' : 'saved'}`.trim()}>
-	<div class="settings-save-shell">
-		<div>
-			<p class="eyebrow-copy">{isDirty ? 'Unsaved Changes' : 'Saved'}</p>
-			<p class="muted-copy">
-				{#if isDirty}
-					Unsaved changes are ready to write to the runtime settings file.
-				{:else}
-					All settings are synced with the runtime file.
-				{/if}
-			</p>
+{#if isDirty}
+	<div class="settings-save-bar dirty">
+		<div class="settings-save-shell">
+			<div>
+				<p class="eyebrow-copy">Unsaved Changes</p>
+				<p class="muted-copy">Unsaved changes are ready to write to the runtime settings file.</p>
+			</div>
+			<Button loading={isSaving} onclick={saveSettings}>Save Runtime Settings</Button>
 		</div>
-		<Button loading={isSaving} disabled={!isDirty} onclick={saveSettings}
-			>Save Runtime Settings</Button
-		>
 	</div>
-</div>
+{/if}
 
 <style>
 	.page-stack,
@@ -682,11 +700,6 @@
 		box-shadow: 0 16px 36px rgba(23, 35, 31, 0.14);
 		backdrop-filter: blur(18px);
 		pointer-events: auto;
-	}
-
-	.settings-save-bar.saved .settings-save-shell {
-		background: rgba(248, 245, 239, 0.84);
-		box-shadow: 0 10px 24px rgba(23, 35, 31, 0.1);
 	}
 
 	.settings-save-bar .muted-copy {
