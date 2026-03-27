@@ -1,15 +1,32 @@
 <script lang="ts">
 	import type { HostRuntime } from '$lib/api/types';
 	import Panel from '$lib/components/Panel.svelte';
-	import Pill from '$lib/components/Pill.svelte';
 	import { titleCase } from '$lib/format';
 
 	let { host }: { host: HostRuntime } = $props();
 
 	const stateVariant = $derived(host.available ? 'ok' : 'warn');
+	const supportingDetails = $derived.by(() => {
+		const details: string[] = [];
+
+		if (host.schedule_detail) {
+			details.push(`Schedule: ${host.schedule_detail}`);
+		}
+
+		if (host.capabilities.length) {
+			details.push(
+				`Capabilities: ${host.capabilities.map((capability) => titleCase(capability)).join(' · ')}`
+			);
+		}
+
+		return details;
+	});
 </script>
 
-<Panel class="host-card" padding="0.9rem 1rem 1rem">
+<Panel
+	class={`host-card ${host.available ? 'ready' : 'attention'}`.trim()}
+	padding="0.85rem 0.95rem 0.95rem"
+>
 	<div class="head-row">
 		<div class="title-block">
 			<h3>{host.label}</h3>
@@ -35,17 +52,10 @@
 		</div>
 	{/if}
 
-	{#if host.schedule_detail}
-		<div class="detail-block">
-			<p class="eyebrow-copy">Schedule</p>
-			<p class="muted-copy">{host.schedule_detail}</p>
-		</div>
-	{/if}
-
-	{#if host.capabilities.length}
-		<div class="pill-row">
-			{#each host.capabilities as capability (capability)}
-				<Pill label={titleCase(capability)} variant="neutral" />
+	{#if supportingDetails.length}
+		<div class="supporting-strip muted-copy" aria-label="Host details">
+			{#each supportingDetails as detail (detail)}
+				<span>{detail}</span>
 			{/each}
 		</div>
 	{/if}
@@ -65,7 +75,7 @@
 <style>
 	:global(.host-card) {
 		display: grid;
-		gap: var(--space-2);
+		gap: 0.7rem;
 	}
 
 	.head-row {
@@ -132,9 +142,9 @@
 	.meta-strip {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 0.55rem;
+		gap: 0.45rem;
 		color: var(--ink-soft);
-		font-size: 0.86rem;
+		font-size: 0.84rem;
 		line-height: 1.35;
 	}
 
@@ -147,16 +157,24 @@
 	.detail-block {
 		display: grid;
 		gap: 0.2rem;
-		padding: 0.75rem 0.85rem;
+		padding: 0.65rem 0.8rem;
 		border-radius: var(--radius-md);
 		background: rgba(255, 255, 255, 0.5);
 		border: 1px solid rgba(23, 35, 31, 0.06);
 	}
 
-	.pill-row {
+	.supporting-strip {
 		display: flex;
-		gap: 0.45rem;
 		flex-wrap: wrap;
+		gap: 0.4rem;
+		font-size: 0.8rem;
+		line-height: 1.4;
+	}
+
+	.supporting-strip span:not(:last-child)::after {
+		content: '·';
+		margin-left: 0.4rem;
+		color: rgba(23, 35, 31, 0.26);
 	}
 
 	.issues-box {
