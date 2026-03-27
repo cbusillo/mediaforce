@@ -25,12 +25,37 @@
 
 	const settings = $derived(data.settings);
 	const hosts = $derived(data.hosts);
+	const runtimeHostsByKey = $derived.by(() => new Map(hosts.hosts.map((host) => [host.key, host])));
 
 	let libraries = $state<SettingsLibrary[]>([]);
 	let remoteHosts = $state<SettingsHost[]>([]);
 	let scheduleProfiles = $state<ScheduleProfile[]>([]);
 	let transcodeRoot = $state('');
 	let isSaving = $state(false);
+
+	const initialSettingsDraft = $derived.by(() => ({
+		libraries: settings.libraries
+			.filter((library) => library.key || library.path)
+			.map((library) => ({ ...library })),
+		remote_hosts: settings.remote_hosts
+			.filter((host) => host.label || host.host)
+			.map((host) => ({ ...host, capabilities: [...host.capabilities] })),
+		transcode_root: settings.transcode_root,
+		schedule_profiles: settings.schedule_profiles
+			.filter((profile) => profile.key || profile.label)
+			.map((profile) => ({ ...profile }))
+	}));
+
+	const currentSettingsDraft = $derived.by(() => ({
+		libraries: libraries.map((library) => ({ ...library })),
+		remote_hosts: remoteHosts.map((host) => ({ ...host, capabilities: [...host.capabilities] })),
+		transcode_root: transcodeRoot,
+		schedule_profiles: scheduleProfiles.map((profile) => ({ ...profile }))
+	}));
+
+	const isDirty = $derived(
+		JSON.stringify(currentSettingsDraft) !== JSON.stringify(initialSettingsDraft)
+	);
 
 	$effect(() => {
 		if (!libraries.length) {
@@ -137,21 +162,18 @@
 </svelte:head>
 
 <div class="page-stack">
-	<Panel>
+	<Panel padding="1.05rem 1.2rem">
 		<div class="settings-hero">
 			<SectionHead
 				eyebrow="Runtime Settings"
-				heading="Tune machine paths and remote workers without spelunking through config files"
-				lede="Use one coherent control surface for libraries, transcode roots, remote hosts, and queue windows."
-				size="section"
+				heading="Configure libraries, hosts, and queue windows"
+				lede="The runtime file below is the live machine-specific contract."
+				size="compact"
 			/>
 			<div class="path-card compact-paths">
 				<p class="eyebrow-copy">Paths</p>
 				<p class="mono-copy">Runtime file: {settings.runtime_settings_path}</p>
 				<p class="mono-copy">Repo defaults: {settings.repo_config_path}</p>
-				<div class="hero-actions">
-					<Button loading={isSaving} onclick={saveSettings}>Save Runtime Settings</Button>
-				</div>
 			</div>
 		</div>
 	</Panel>
@@ -164,6 +186,7 @@
 						eyebrow="Libraries"
 						heading="Mounted media roots"
 						lede="These become the top-level prefixes in the harness."
+						size="compact"
 					/>
 					<Button variant="secondary" onclick={addLibrary}>Add Library</Button>
 				</div>
@@ -193,6 +216,7 @@
 					eyebrow="Transcode"
 					heading="Scratch and replacement root"
 					lede="Archive path is derived automatically from the transcode root."
+					size="compact"
 				/>
 				<label class="field-block">
 					<span class="eyebrow-copy">Transcode root</span>
@@ -211,13 +235,15 @@
 			<div class="section-row">
 				<SectionHead
 					eyebrow="Hosts"
-					heading="Remote encode machines"
-					lede="Host policy should be explicit, scannable, and easy to edit."
+					heading="Remote workers"
+					lede="Edit policy and see the live runtime state in the same place."
+					size="compact"
 				/>
 				<Button variant="secondary" onclick={addHost}>Add Host</Button>
 			</div>
 			<div class="row-stack">
 				{#each remoteHosts as host, index (`host-${host.index || index}`)}
+					{@const runtimeHost = runtimeHostsByKey.get(host.host) ?? null}
 					<div class="editor-card host-card-editor">
 						<div class="host-head">
 							<div>
@@ -227,51 +253,77 @@
 									{host.host || 'Set an SSH target to bring this host online.'}
 								</p>
 							</div>
-							<Button variant="ghost" onclick={() => removeHost(index)}>Remove Host</Button>
+							<button
+								type="button"
+								class="icon-button danger"
+								aria-label="Remove host"
+								title="Remove host"
+								onclick={() => removeHost(index)}
+							>
+								<svg viewBox="0 0 24 24" aria-hidden="true">
+									<path
+										d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 7h2v7h-2v-7Zm4 0h2v7h-2v-7ZM7 10h2v7H7v-7Zm-1 10h12a2 2 0 0 0 2-2V8H4v10a2 2 0 0 0 2 2Z"
+									/>
+								</svg>
+							</button>
 						</div>
-						<div class="two-col">
-							<label class="field-block">
-								<span class="eyebrow-copy">Label</span>
-								<input bind:value={host.label} placeholder="M4 Studio" />
-							</label>
-							<label class="field-block">
-								<span class="eyebrow-copy">SSH host</span>
-								<input bind:value={host.host} placeholder="cbusillo@localhost" />
-							</label>
-							<label class="field-block">
-								<span class="eyebrow-copy">Repo path</span>
-								<input bind:value={host.repo_path} placeholder="/Users/.../mediaforce" />
-							</label>
-							<label class="field-block">
-								<span class="eyebrow-copy">Wake MAC</span>
-								<input bind:value={host.wake_mac} placeholder="Optional" />
-							</label>
-							<label class="field-block">
-								<span class="eyebrow-copy">Priority</span>
-								<input bind:value={host.priority} />
-							</label>
-							<label class="field-block">
-								<span class="eyebrow-copy">Parallel encodes</span>
-								<input bind:value={host.max_parallel_encodes} />
-							</label>
-							<label class="field-block">
-								<span class="eyebrow-copy">Schedule profile</span>
-								<select bind:value={host.schedule_profile}>
-									{#each settings.schedule_profile_options as option (option.key)}
-										<option value={option.key}>{option.label}</option>
-									{/each}
-								</select>
-							</label>
+						<div class="host-editor-layout">
+							<div class="two-col">
+								<label class="field-block">
+									<span class="eyebrow-copy">Label</span>
+									<input bind:value={host.label} placeholder="M4 Studio" />
+								</label>
+								<label class="field-block">
+									<span class="eyebrow-copy">SSH host</span>
+									<input bind:value={host.host} placeholder="cbusillo@localhost" />
+								</label>
+								<label class="field-block">
+									<span class="eyebrow-copy">Repo path</span>
+									<input bind:value={host.repo_path} placeholder="/Users/.../mediaforce" />
+								</label>
+								<label class="field-block">
+									<span class="eyebrow-copy">Wake MAC</span>
+									<input bind:value={host.wake_mac} placeholder="Optional" />
+								</label>
+								<label class="field-block">
+									<span class="eyebrow-copy">Priority</span>
+									<input type="number" min="0" step="1" bind:value={host.priority} />
+								</label>
+								<label class="field-block">
+									<span class="eyebrow-copy">Parallel encodes</span>
+									<input type="number" min="1" step="1" bind:value={host.max_parallel_encodes} />
+								</label>
+								<label class="field-block host-schedule-field">
+									<span class="eyebrow-copy">Schedule profile</span>
+									<div class="select-shell">
+										<select bind:value={host.schedule_profile}>
+											{#each settings.schedule_profile_options as option (option.key)}
+												<option value={option.key}>{option.label}</option>
+											{/each}
+										</select>
+									</div>
+								</label>
+							</div>
+							{#if runtimeHost}
+								<div class="host-runtime-column">
+									<p class="eyebrow-copy">Live Status</p>
+									<HostCard host={runtimeHost} />
+								</div>
+							{/if}
 						</div>
 						<div class="capability-row">
 							{#each settings.host_capability_options as capability (capability.key)}
-								<label class="capability-pill">
+								<label
+									class={`capability-pill ${host.capabilities.includes(capability.key) ? 'checked' : ''}`.trim()}
+								>
 									<input
 										type="checkbox"
+										class="visually-hidden"
 										checked={host.capabilities.includes(capability.key)}
 										onchange={() => toggleCapability(index, capability.key)}
 									/>
-									<span>{capability.label}</span>
+									<span class="capability-mark" aria-hidden="true">✓</span>
+									<span class="capability-label">{capability.label}</span>
 								</label>
 							{/each}
 						</div>
@@ -281,59 +333,75 @@
 		</div>
 	</Panel>
 
-	<div class="settings-grid">
-		<Panel>
-			<div class="panel-stack">
-				<div class="section-row">
-					<SectionHead
-						eyebrow="Schedule Profiles"
-						heading="Custom queue windows"
-						lede={settings.encode_queue_scheduler.summary}
-					/>
-					<Button variant="secondary" onclick={addSchedule}>Add Window</Button>
-				</div>
-				<div class="row-stack">
-					{#each scheduleProfiles as profile, index (`profile-${profile.index || index}`)}
-						<div class="editor-card schedule-editor">
-							<label class="field-block">
-								<span class="eyebrow-copy">Key</span>
-								<input bind:value={profile.key} placeholder="quiet_hours" />
-							</label>
-							<label class="field-block">
-								<span class="eyebrow-copy">Label</span>
-								<input bind:value={profile.label} placeholder="Quiet Hours" />
-							</label>
-							<label class="field-block">
-								<span class="eyebrow-copy">Start</span>
-								<input bind:value={profile.start_hour} placeholder="0-23" />
-							</label>
-							<label class="field-block">
-								<span class="eyebrow-copy">End</span>
-								<input bind:value={profile.end_hour} placeholder="0-23" />
-							</label>
-							<div class="editor-actions compact-actions">
-								<Button variant="ghost" onclick={() => removeSchedule(index)}>Remove</Button>
-							</div>
-						</div>
-					{/each}
-				</div>
-			</div>
-		</Panel>
-
-		<Panel>
-			<div class="panel-stack">
+	<Panel>
+		<div class="panel-stack">
+			<div class="section-row">
 				<SectionHead
-					eyebrow="Runtime Status"
-					heading="Current host state"
-					lede="These runtime snapshots stay visible while you edit host policy."
+					eyebrow="Schedule Profiles"
+					heading="Custom queue windows"
+					lede={settings.encode_queue_scheduler.summary}
+					size="compact"
 				/>
-				<div class="host-grid">
-					{#each hosts.hosts as host (host.key)}
-						<HostCard {host} />
-					{/each}
-				</div>
+				<Button variant="secondary" onclick={addSchedule}>Add Window</Button>
 			</div>
-		</Panel>
+			<div class="row-stack">
+				{#each scheduleProfiles as profile, index (`profile-${profile.index || index}`)}
+					<div class="editor-card schedule-editor">
+						<label class="field-block">
+							<span class="eyebrow-copy">Key</span>
+							<input bind:value={profile.key} placeholder="quiet_hours" />
+						</label>
+						<label class="field-block">
+							<span class="eyebrow-copy">Label</span>
+							<input bind:value={profile.label} placeholder="Quiet Hours" />
+						</label>
+						<label class="field-block">
+							<span class="eyebrow-copy">Start</span>
+							<input
+								type="number"
+								min="0"
+								max="23"
+								step="1"
+								bind:value={profile.start_hour}
+								placeholder="0-23"
+							/>
+						</label>
+						<label class="field-block">
+							<span class="eyebrow-copy">End</span>
+							<input
+								type="number"
+								min="0"
+								max="23"
+								step="1"
+								bind:value={profile.end_hour}
+								placeholder="0-23"
+							/>
+						</label>
+						<div class="editor-actions compact-actions">
+							<Button variant="ghost" onclick={() => removeSchedule(index)}>Remove</Button>
+						</div>
+					</div>
+				{/each}
+			</div>
+		</div>
+	</Panel>
+</div>
+
+<div class={`settings-save-bar ${isDirty ? 'dirty' : 'saved'}`.trim()}>
+	<div class="settings-save-shell">
+		<div>
+			<p class="eyebrow-copy">{isDirty ? 'Unsaved Changes' : 'Saved'}</p>
+			<p class="muted-copy">
+				{#if isDirty}
+					Unsaved changes are ready to write to the runtime settings file.
+				{:else}
+					All settings are synced with the runtime file.
+				{/if}
+			</p>
+		</div>
+		<Button loading={isSaving} disabled={!isDirty} onclick={saveSettings}
+			>Save Runtime Settings</Button
+		>
 	</div>
 </div>
 
@@ -345,10 +413,14 @@
 		gap: var(--space-3);
 	}
 
+	.page-stack {
+		padding-bottom: 6.5rem;
+	}
+
 	.settings-hero {
 		display: grid;
-		grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
-		gap: var(--space-4);
+		grid-template-columns: minmax(0, 1fr) minmax(320px, 0.9fr);
+		gap: var(--space-3);
 		align-items: start;
 	}
 
@@ -379,12 +451,7 @@
 
 	.compact-paths {
 		background: rgba(255, 255, 255, 0.62);
-	}
-
-	.hero-actions {
-		display: flex;
-		justify-content: flex-start;
-		padding-top: var(--space-2);
+		gap: 0.65rem;
 	}
 
 	.library-editor {
@@ -393,7 +460,9 @@
 	}
 
 	.two-col {
+		display: grid;
 		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: var(--space-3);
 		align-items: start;
 	}
 
@@ -412,9 +481,40 @@
 		width: 100%;
 		padding: 0.85rem 1rem;
 		border-radius: var(--radius-md);
-		border: 1px solid rgba(23, 35, 31, 0.12);
-		background: rgba(255, 255, 255, 0.78);
+		border: 1px solid rgba(23, 35, 31, 0.14);
+		background: rgba(255, 255, 255, 0.9);
 		color: var(--ink);
+		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+	}
+
+	input::placeholder {
+		color: rgba(82, 101, 94, 0.6);
+	}
+
+	input[type='number'] {
+		padding-right: 0.7rem;
+	}
+
+	.select-shell {
+		position: relative;
+	}
+
+	.select-shell::after {
+		content: '';
+		position: absolute;
+		right: 1rem;
+		top: 50%;
+		width: 0.55rem;
+		height: 0.55rem;
+		border-right: 2px solid rgba(82, 101, 94, 0.82);
+		border-bottom: 2px solid rgba(82, 101, 94, 0.82);
+		transform: translateY(-65%) rotate(45deg);
+		pointer-events: none;
+	}
+
+	.select-shell select {
+		appearance: none;
+		padding-right: 2.5rem;
 	}
 
 	.host-card-editor {
@@ -422,17 +522,67 @@
 		background: rgba(255, 255, 255, 0.66);
 	}
 
+	.host-editor-layout {
+		display: grid;
+		grid-template-columns: minmax(0, 1.15fr) minmax(250px, 0.85fr);
+		gap: var(--space-3);
+		align-items: start;
+	}
+
+	.host-runtime-column {
+		display: grid;
+		gap: 0.6rem;
+	}
+
+	.host-runtime-column :global(.host-card) {
+		height: 100%;
+	}
+
+	.host-schedule-field {
+		grid-column: 1 / -1;
+	}
+
 	.host-head {
 		display: flex;
 		justify-content: space-between;
 		gap: var(--space-3);
 		align-items: start;
-		flex-wrap: wrap;
+		flex-wrap: nowrap;
 	}
 
 	h3 {
 		font-size: 1.15rem;
 		line-height: 1.1;
+	}
+
+	.icon-button {
+		flex: 0 0 auto;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 2.45rem;
+		height: 2.45rem;
+		border-radius: 0.85rem;
+		border: 1px solid rgba(138, 68, 19, 0.14);
+		background: rgba(255, 255, 255, 0.78);
+		color: #8a4413;
+		transition:
+			transform 150ms ease,
+			background-color 150ms ease,
+			border-color 150ms ease,
+			box-shadow 150ms ease;
+	}
+
+	.icon-button:hover {
+		transform: translateY(-1px);
+		background: #efe2d8;
+		border-color: rgba(138, 68, 19, 0.2);
+	}
+
+	.icon-button svg {
+		width: 1.05rem;
+		height: 1.05rem;
+		fill: currentColor;
 	}
 
 	.capability-row {
@@ -444,12 +594,53 @@
 	.capability-pill {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.45rem;
-		padding: 0.6rem 0.85rem;
+		gap: 0.55rem;
+		padding: 0.65rem 0.9rem;
 		border-radius: var(--radius-pill);
-		border: 1px solid rgba(15, 118, 110, 0.16);
-		background: rgba(15, 118, 110, 0.08);
+		border: 1px solid rgba(23, 35, 31, 0.1);
+		background: rgba(255, 255, 255, 0.72);
+		color: var(--ink-soft);
+		cursor: pointer;
+		transition:
+			transform 150ms ease,
+			background-color 150ms ease,
+			border-color 150ms ease,
+			color 150ms ease,
+			box-shadow 150ms ease;
+	}
+
+	.capability-pill:hover {
+		transform: translateY(-1px);
+		border-color: rgba(15, 118, 110, 0.16);
+	}
+
+	.capability-pill.checked {
+		background: rgba(15, 118, 110, 0.1);
+		border-color: rgba(15, 118, 110, 0.24);
 		color: var(--accent-deep);
+	}
+
+	.capability-mark {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.15rem;
+		height: 1.15rem;
+		border-radius: 999px;
+		background: rgba(23, 35, 31, 0.08);
+		color: transparent;
+		font-size: 0.72rem;
+		font-weight: 700;
+		line-height: 1;
+	}
+
+	.capability-pill.checked .capability-mark {
+		background: var(--accent);
+		color: white;
+	}
+
+	.capability-label {
+		font-weight: 600;
 	}
 
 	.editor-actions {
@@ -467,10 +658,45 @@
 		gap: var(--space-4);
 	}
 
+	.settings-save-bar {
+		position: fixed;
+		left: 0;
+		right: 0;
+		bottom: 1rem;
+		z-index: 20;
+		pointer-events: none;
+		padding: 0 1rem;
+	}
+
+	.settings-save-shell {
+		width: min(780px, calc(100vw - 2rem));
+		margin: 0 auto;
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: var(--space-3);
+		padding: 0.7rem 0.85rem;
+		border-radius: 1.1rem;
+		border: 1px solid rgba(23, 35, 31, 0.1);
+		background: rgba(255, 252, 246, 0.94);
+		box-shadow: 0 16px 36px rgba(23, 35, 31, 0.14);
+		backdrop-filter: blur(18px);
+		pointer-events: auto;
+	}
+
+	.settings-save-bar.saved .settings-save-shell {
+		background: rgba(248, 245, 239, 0.84);
+		box-shadow: 0 10px 24px rgba(23, 35, 31, 0.1);
+	}
+
+	.settings-save-bar .muted-copy {
+		font-size: 0.94rem;
+	}
+
 	@media (max-width: 980px) {
 		.settings-grid,
 		.settings-hero,
-		.two-col,
+		.host-editor-layout,
 		.library-editor,
 		.schedule-editor {
 			grid-template-columns: 1fr;
@@ -478,6 +704,19 @@
 	}
 
 	@media (max-width: 720px) {
+		.two-col {
+			grid-template-columns: 1fr;
+		}
+
+		.settings-save-shell {
+			align-items: stretch;
+			flex-direction: column;
+		}
+
+		.host-head {
+			flex-wrap: wrap;
+		}
+
 		.host-grid {
 			grid-template-columns: 1fr;
 		}
