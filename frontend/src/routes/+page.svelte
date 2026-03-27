@@ -1,11 +1,11 @@
 <script lang="ts">
 	import type { DashboardPayload, HostsPayload } from '$lib/api/types';
-	import { invalidateAll } from '$app/navigation';
+	import { goto, invalidateAll } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { postJson } from '$lib/api/client';
 	import Button from '$lib/components/Button.svelte';
 	import FolderCard from '$lib/components/FolderCard.svelte';
-	import { formatGiB } from '$lib/format';
+	import { formatGiB, hostSettingsAnchor } from '$lib/format';
 	import HeroCard from '$lib/components/HeroCard.svelte';
 	import HostCard from '$lib/components/HostCard.svelte';
 	import Panel from '$lib/components/Panel.svelte';
@@ -78,6 +78,11 @@
 		} finally {
 			queueAction = null;
 		}
+	}
+
+	async function openHostSettings(hostKey: string) {
+		await goto(resolve('/settings'));
+		window.location.hash = hostSettingsAnchor(hostKey);
 	}
 </script>
 
@@ -206,7 +211,7 @@
 			</div>
 			<div id="remote-hosts" class="host-grid">
 				{#each hosts.hosts as host (host.key)}
-					<HostCard {host} />
+					<HostCard {host} onSettingsClick={() => openHostSettings(host.key)} />
 				{/each}
 			</div>
 		</div>

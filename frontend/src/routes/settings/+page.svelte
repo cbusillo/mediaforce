@@ -10,6 +10,7 @@
 	} from '$lib/api/types';
 	import Button from '$lib/components/Button.svelte';
 	import HostCard from '$lib/components/HostCard.svelte';
+	import { hostSettingsAnchor } from '$lib/format';
 	import Panel from '$lib/components/Panel.svelte';
 	import SectionHead from '$lib/components/SectionHead.svelte';
 	import { toasts } from '$lib/stores/toasts';
@@ -321,7 +322,10 @@
 			<div class="row-stack">
 				{#each remoteHosts as host, index (`host-${host.index || index}`)}
 					{@const runtimeHost = runtimeHostsByKey.get(host.host) ?? null}
-					<div class="editor-card host-card-editor">
+					<div
+						id={hostSettingsAnchor(host.host || `host-${index}`)}
+						class="editor-card host-card-editor"
+					>
 						<div class="host-head">
 							<div>
 								<p class="eyebrow-copy">Remote worker</p>

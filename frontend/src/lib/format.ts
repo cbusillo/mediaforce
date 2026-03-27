@@ -25,3 +25,16 @@ export function formatTimestamp(seconds: number): string {
 	const remaining = roundedSeconds % 60;
 	return `${minutes}m ${remaining}s`;
 }
+
+export function toAnchorFragment(value: string): string {
+	const normalized = value
+		.toLowerCase()
+		.replaceAll(/[^a-z0-9]+/g, '-')
+		.replaceAll(/^-+|-+$/g, '');
+
+	return normalized || 'item';
+}
+
+export function hostSettingsAnchor(hostKey: string): string {
+	return `remote-worker-${toAnchorFragment(hostKey)}`;
+}
