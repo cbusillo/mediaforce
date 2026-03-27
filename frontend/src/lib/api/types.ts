@@ -72,6 +72,7 @@ export interface HostRuntime {
 	active_encode_count: number;
 	schedule_profile_label: string;
 	schedule_detail: string;
+	schedule_open?: boolean;
 	active_flag: string;
 	active_reason: string;
 	repo_path?: string;

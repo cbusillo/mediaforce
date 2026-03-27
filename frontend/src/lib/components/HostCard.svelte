@@ -5,7 +5,32 @@
 
 	let { host }: { host: HostRuntime } = $props();
 
-	const stateVariant = $derived(host.available ? 'ok' : 'warn');
+	type StateTone = 'ok' | 'warn' | 'hold' | 'neutral';
+
+	const stateChip = $derived.by(() => {
+		if (!host.available) {
+			return { label: 'Attention', tone: 'warn' as StateTone };
+		}
+
+		if (host.queue_active) {
+			return { label: 'Ready', tone: 'ok' as StateTone };
+		}
+
+		if (host.schedule_open === false) {
+			return { label: 'Window Closed', tone: 'hold' as StateTone };
+		}
+
+		if (host.active_reason === 'parallel encode slots are full') {
+			return { label: 'Busy', tone: 'neutral' as StateTone };
+		}
+
+		if (host.active_reason === 'encode queue capability disabled') {
+			return { label: 'Disabled', tone: 'neutral' as StateTone };
+		}
+
+		return { label: 'Standby', tone: 'neutral' as StateTone };
+	});
+
 	const supportingDetails = $derived.by(() => {
 		const details: string[] = [];
 
@@ -23,18 +48,15 @@
 	});
 </script>
 
-<Panel
-	class={`host-card ${host.available ? 'ready' : 'attention'}`.trim()}
-	padding="0.85rem 0.95rem 0.95rem"
->
+<Panel class={`host-card ${stateChip.tone}`.trim()} padding="0.85rem 0.95rem 0.95rem">
 	<div class="head-row">
 		<div class="title-block">
 			<h3>{host.label}</h3>
 			<p class="muted-copy host-key">{host.key}</p>
 		</div>
-		<span class={`state-chip ${stateVariant}`.trim()}>
+		<span class={`state-chip ${stateChip.tone}`.trim()}>
 			<span class="state-dot"></span>
-			{host.available ? 'Ready' : 'Attention'}
+			{stateChip.label}
 		</span>
 	</div>
 
@@ -129,6 +151,18 @@
 		background: rgba(194, 65, 12, 0.1);
 		color: var(--warn);
 		border-color: rgba(194, 65, 12, 0.18);
+	}
+
+	.state-chip.hold {
+		background: rgba(180, 83, 9, 0.1);
+		color: #9a5b00;
+		border-color: rgba(180, 83, 9, 0.18);
+	}
+
+	.state-chip.neutral {
+		background: rgba(255, 255, 255, 0.76);
+		color: var(--ink-soft);
+		border-color: rgba(23, 35, 31, 0.12);
 	}
 
 	.state-dot {
