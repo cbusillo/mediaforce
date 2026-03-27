@@ -31,16 +31,16 @@
 	}
 
 	h2 {
-		font-size: clamp(1.8rem, 2.6vw, 2.35rem);
-		line-height: 1.06;
+		font-size: clamp(1.65rem, 2.4vw, 2.15rem);
+		line-height: 1.04;
 	}
 
 	h2.display {
-		font-size: clamp(2.4rem, 4.4vw, 4rem);
+		font-size: clamp(2.25rem, 4vw, 3.35rem);
 	}
 
 	h2.compact {
-		font-size: clamp(1.25rem, 2vw, 1.65rem);
+		font-size: clamp(1.2rem, 1.8vw, 1.55rem);
 		letter-spacing: -0.02em;
 	}
 </style>

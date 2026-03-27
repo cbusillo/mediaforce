@@ -2,12 +2,6 @@
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import Panel from '$lib/components/Panel.svelte';
-
-	function currentPageLabel(pathname: string) {
-		if (pathname === '/settings') return 'Settings';
-		if (pathname.startsWith('/folders/')) return 'Folder Studio';
-		return 'Dashboard';
-	}
 </script>
 
 <Panel class="masthead" padding="1rem 1.25rem">
@@ -17,11 +11,7 @@
 				<span class="brand-mark">Mediaforce</span>
 				<span class="brand-name serif">AV1 calibration bench</span>
 			</a>
-			<span class="route-pill">{currentPageLabel(page.url.pathname)}</span>
 		</div>
-		<p class="lede-copy brand-note">
-			Hard-scene previews, queue controls, and profile tuning without fragment-driven layout jumps.
-		</p>
 	</div>
 
 	<nav class="nav-row" aria-label="Primary">
@@ -57,18 +47,16 @@
 	}
 
 	.brand-block {
-		gap: var(--space-2);
-		flex-direction: column;
-		align-items: flex-start;
+		gap: 0;
 	}
 
 	.brand-row {
-		gap: var(--space-3);
+		gap: 0.85rem;
 		flex-wrap: wrap;
 	}
 
 	.brand-link {
-		gap: 0.8rem;
+		gap: 0.7rem;
 		flex-wrap: wrap;
 	}
 
@@ -81,29 +69,9 @@
 	}
 
 	.brand-name {
-		font-size: clamp(1.4rem, 2.2vw, 1.9rem);
+		font-size: clamp(1.35rem, 2vw, 1.8rem);
 		line-height: 1;
 		color: var(--ink);
-	}
-
-	.brand-note {
-		max-width: 58ch;
-		font-size: 0.98rem;
-	}
-
-	.route-pill {
-		display: inline-flex;
-		align-items: center;
-		min-height: 2rem;
-		padding: 0.3rem 0.8rem;
-		border-radius: var(--radius-pill);
-		background: rgba(15, 118, 110, 0.1);
-		border: 1px solid rgba(15, 118, 110, 0.14);
-		color: var(--accent-deep);
-		font-size: 0.82rem;
-		font-weight: 700;
-		letter-spacing: 0.04em;
-		text-transform: uppercase;
 	}
 
 	.nav-row {
@@ -116,8 +84,8 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		min-height: 2.8rem;
-		padding: 0.72rem 1rem;
+		min-height: 2.55rem;
+		padding: 0.65rem 1rem;
 		border-radius: var(--radius-pill);
 		border: 1px solid rgba(23, 35, 31, 0.08);
 		background: rgba(255, 255, 255, 0.56);

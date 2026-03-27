@@ -5,7 +5,11 @@
 	--surface-1: rgba(255, 252, 246, 0.94);
 	--surface-2: rgba(255, 255, 255, 0.74);
 	--surface-3: rgba(255, 255, 255, 0.54);
+	--surface-strong: rgba(255, 250, 242, 0.97);
 	--surface-accent: linear-gradient(135deg, rgba(15, 118, 110, 0.1), rgba(214, 195, 165, 0.22));
+	--surface-spotlight:
+		radial-gradient(circle at top left, rgba(15, 118, 110, 0.14), transparent 48%),
+		linear-gradient(135deg, rgba(255, 255, 255, 0.84), rgba(246, 237, 220, 0.9));
 	--ink: #17231f;
 	--ink-muted: #52655e;
 	--ink-soft: #6f7f79;
@@ -27,7 +31,8 @@
 	--space-4: 1.25rem;
 	--space-5: 1.75rem;
 	--space-6: 2.5rem;
-	--shell-width: min(1180px, calc(100vw - 2rem));
+	--space-7: 3.5rem;
+	--shell-width: min(1240px, calc(100vw - 2rem));
 	font-synthesis: none;
 	text-rendering: optimizeLegibility;
 	-webkit-font-smoothing: antialiased;
@@ -55,6 +60,17 @@ body {
 	);
 }
 
+body::after {
+	content: '';
+	position: fixed;
+	inset: 0;
+	pointer-events: none;
+	background:
+		radial-gradient(circle at top right, rgba(15, 118, 110, 0.08), transparent 28%),
+		radial-gradient(circle at 18% 22%, rgba(214, 195, 165, 0.12), transparent 22%);
+	opacity: 0.8;
+}
+
 body::before {
 	content: '';
 	position: fixed;
@@ -72,11 +88,34 @@ a {
 	text-decoration: none;
 }
 
+a:hover {
+	text-decoration: none;
+}
+
 button,
 input,
 textarea,
 select {
 	font: inherit;
+}
+
+input,
+textarea,
+select {
+	transition:
+		border-color 150ms ease,
+		box-shadow 150ms ease,
+		background-color 150ms ease;
+}
+
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+button:focus-visible,
+a:focus-visible {
+	outline: none;
+	box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.18);
+	border-color: rgba(15, 118, 110, 0.3);
 }
 
 button {

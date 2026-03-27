@@ -28,9 +28,10 @@
 <style>
 	:global(.hero-card) {
 		display: grid;
-		grid-template-columns: minmax(0, 1.3fr) auto minmax(260px, 0.9fr);
-		gap: var(--space-5);
+		grid-template-columns: minmax(0, 1.15fr) minmax(180px, 240px) minmax(240px, 0.85fr);
+		gap: var(--space-4);
 		align-items: start;
+		background: var(--surface-spotlight);
 	}
 
 	.copy-block,
@@ -41,18 +42,23 @@
 	}
 
 	.meta-block {
-		align-content: center;
+		align-content: start;
 	}
 
 	.aside-block {
 		color: var(--ink-muted);
-		font-size: 1rem;
+		font-size: 0.98rem;
 		line-height: 1.55;
+		padding: 1rem 1.05rem;
+		border-radius: var(--radius-md);
+		background: rgba(255, 255, 255, 0.52);
+		border: 1px solid rgba(23, 35, 31, 0.08);
 	}
 
 	@media (max-width: 980px) {
 		:global(.hero-card) {
 			grid-template-columns: 1fr;
+			gap: var(--space-3);
 		}
 	}
 </style>

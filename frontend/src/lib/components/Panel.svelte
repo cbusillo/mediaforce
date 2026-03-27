@@ -28,6 +28,8 @@
 		border: 1px solid var(--border);
 		box-shadow: var(--shadow-md);
 		backdrop-filter: blur(20px);
+		position: relative;
+		overflow: clip;
 	}
 
 	.panel.accent {
@@ -36,5 +38,14 @@
 
 	.panel.inset {
 		background: var(--surface-3);
+	}
+
+	.panel::after {
+		content: '';
+		position: absolute;
+		inset: auto 0 0;
+		height: 1px;
+		background: linear-gradient(90deg, transparent, rgba(15, 118, 110, 0.12), transparent);
+		pointer-events: none;
 	}
 </style>

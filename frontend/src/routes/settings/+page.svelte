@@ -141,7 +141,7 @@
 		<div class="settings-hero">
 			<SectionHead
 				eyebrow="Runtime Settings"
-				heading="Keep machine paths and remote hosts out of checked-in config"
+				heading="Tune machine paths and remote workers without spelunking through config files"
 				lede="Use one coherent control surface for libraries, transcode roots, remote hosts, and queue windows."
 				size="section"
 			/>
@@ -149,13 +149,12 @@
 				<p class="eyebrow-copy">Paths</p>
 				<p class="mono-copy">Runtime file: {settings.runtime_settings_path}</p>
 				<p class="mono-copy">Repo defaults: {settings.repo_config_path}</p>
+				<div class="hero-actions">
+					<Button loading={isSaving} onclick={saveSettings}>Save Runtime Settings</Button>
+				</div>
 			</div>
 		</div>
 	</Panel>
-
-	<div class="save-row">
-		<Button loading={isSaving} onclick={saveSettings}>Save Runtime Settings</Button>
-	</div>
 
 	<div class="settings-grid">
 		<Panel>
@@ -170,7 +169,7 @@
 				</div>
 				<div class="row-stack">
 					{#each libraries as library, index (`library-${index}`)}
-						<div class="editor-card two-col">
+						<div class="editor-card library-editor">
 							<label class="field-block">
 								<span class="eyebrow-copy">Library name</span>
 								<input bind:value={library.key} placeholder="movies" />
@@ -179,7 +178,9 @@
 								<span class="eyebrow-copy">Mounted path</span>
 								<input bind:value={library.path} placeholder="/Volumes/media/movies" />
 							</label>
-							<Button variant="ghost" onclick={() => removeLibrary(index)}>Remove</Button>
+							<div class="editor-actions compact-actions">
+								<Button variant="ghost" onclick={() => removeLibrary(index)}>Remove</Button>
+							</div>
 						</div>
 					{/each}
 				</div>
@@ -218,6 +219,16 @@
 			<div class="row-stack">
 				{#each remoteHosts as host, index (`host-${index}-${host.host || host.label}`)}
 					<div class="editor-card host-card-editor">
+						<div class="host-head">
+							<div>
+								<p class="eyebrow-copy">Remote worker</p>
+								<h3>{host.label || 'Untitled host'}</h3>
+								<p class="muted-copy">
+									{host.host || 'Set an SSH target to bring this host online.'}
+								</p>
+							</div>
+							<Button variant="ghost" onclick={() => removeHost(index)}>Remove Host</Button>
+						</div>
 						<div class="two-col">
 							<label class="field-block">
 								<span class="eyebrow-copy">Label</span>
@@ -264,9 +275,6 @@
 								</label>
 							{/each}
 						</div>
-						<div class="editor-actions">
-							<Button variant="ghost" onclick={() => removeHost(index)}>Remove Host</Button>
-						</div>
 					</div>
 				{/each}
 			</div>
@@ -286,7 +294,7 @@
 				</div>
 				<div class="row-stack">
 					{#each scheduleProfiles as profile, index (`profile-${index}-${profile.key}`)}
-						<div class="editor-card two-col compact-card">
+						<div class="editor-card schedule-editor">
 							<label class="field-block">
 								<span class="eyebrow-copy">Key</span>
 								<input bind:value={profile.key} placeholder="quiet_hours" />
@@ -297,13 +305,15 @@
 							</label>
 							<label class="field-block">
 								<span class="eyebrow-copy">Start</span>
-								<input bind:value={profile.start_hour} />
+								<input bind:value={profile.start_hour} placeholder="0-23" />
 							</label>
 							<label class="field-block">
 								<span class="eyebrow-copy">End</span>
-								<input bind:value={profile.end_hour} />
+								<input bind:value={profile.end_hour} placeholder="0-23" />
 							</label>
-							<Button variant="ghost" onclick={() => removeSchedule(index)}>Remove</Button>
+							<div class="editor-actions compact-actions">
+								<Button variant="ghost" onclick={() => removeSchedule(index)}>Remove</Button>
+							</div>
 						</div>
 					{/each}
 				</div>
@@ -332,18 +342,13 @@
 	.panel-stack,
 	.row-stack {
 		display: grid;
-		gap: var(--space-4);
-	}
-
-	.save-row {
-		display: flex;
-		justify-content: flex-end;
+		gap: var(--space-3);
 	}
 
 	.settings-hero {
 		display: grid;
-		grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
-		gap: var(--space-5);
+		grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+		gap: var(--space-4);
 		align-items: start;
 	}
 
@@ -366,10 +371,25 @@
 	.editor-card {
 		display: grid;
 		gap: var(--space-3);
-		padding: 1rem 1.1rem;
+		padding: 0.95rem 1rem;
 		border-radius: var(--radius-md);
 		background: var(--surface-2);
 		border: 1px solid rgba(23, 35, 31, 0.08);
+	}
+
+	.compact-paths {
+		background: rgba(255, 255, 255, 0.62);
+	}
+
+	.hero-actions {
+		display: flex;
+		justify-content: flex-start;
+		padding-top: var(--space-2);
+	}
+
+	.library-editor {
+		grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.3fr) auto;
+		align-items: end;
 	}
 
 	.two-col {
@@ -377,8 +397,9 @@
 		align-items: start;
 	}
 
-	.compact-card {
+	.schedule-editor {
 		grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+		align-items: end;
 	}
 
 	.field-block {
@@ -398,6 +419,20 @@
 
 	.host-card-editor {
 		gap: var(--space-4);
+		background: rgba(255, 255, 255, 0.66);
+	}
+
+	.host-head {
+		display: flex;
+		justify-content: space-between;
+		gap: var(--space-3);
+		align-items: start;
+		flex-wrap: wrap;
+	}
+
+	h3 {
+		font-size: 1.15rem;
+		line-height: 1.1;
 	}
 
 	.capability-row {
@@ -422,6 +457,10 @@
 		justify-content: flex-end;
 	}
 
+	.compact-actions {
+		align-items: end;
+	}
+
 	.host-grid {
 		display: grid;
 		grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
@@ -432,12 +471,15 @@
 		.settings-grid,
 		.settings-hero,
 		.two-col,
-		.compact-card {
+		.library-editor,
+		.schedule-editor {
 			grid-template-columns: 1fr;
 		}
+	}
 
-		.save-row {
-			justify-content: start;
+	@media (max-width: 720px) {
+		.host-grid {
+			grid-template-columns: 1fr;
 		}
 	}
 </style>

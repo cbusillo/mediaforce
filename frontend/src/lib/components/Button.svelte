@@ -27,14 +27,17 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		padding: 0.92rem 1.18rem;
+		gap: 0.35rem;
+		padding: 0.82rem 1.05rem;
 		border-radius: var(--radius-md);
 		font-weight: 700;
+		letter-spacing: -0.01em;
 		transition:
 			transform 150ms ease,
 			opacity 150ms ease,
 			background-color 150ms ease,
-			border-color 150ms ease;
+			border-color 150ms ease,
+			box-shadow 150ms ease;
 	}
 
 	.button:hover:not(:disabled) {
@@ -47,18 +50,19 @@
 	}
 
 	.primary {
-		background: var(--accent);
+		background: linear-gradient(135deg, var(--accent), #167d73);
 		color: white;
+		box-shadow: 0 10px 24px rgba(15, 118, 110, 0.18);
 	}
 
 	.secondary {
-		background: #d9ebe8;
+		background: #dcecea;
 		color: var(--accent-deep);
 	}
 
 	.ghost {
 		border: 1px solid var(--border);
-		background: transparent;
+		background: rgba(255, 255, 255, 0.64);
 		color: var(--ink);
 	}
 

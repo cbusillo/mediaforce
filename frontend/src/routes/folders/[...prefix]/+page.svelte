@@ -4,7 +4,6 @@
 	import { invalidateAll } from '$app/navigation';
 	import { postJson } from '$lib/api/client';
 	import Button from '$lib/components/Button.svelte';
-	import HeroCard from '$lib/components/HeroCard.svelte';
 	import HostCard from '$lib/components/HostCard.svelte';
 	import Panel from '$lib/components/Panel.svelte';
 	import Pill from '$lib/components/Pill.svelte';
@@ -26,6 +25,8 @@
 	};
 	type FolderQueueSample = { running_count?: number; queued_count?: number };
 	type FolderCalibrationQueue = { sample?: FolderQueueSample };
+	type SampleHostOption = { key?: string; label?: string; detail?: string; available?: boolean };
+	type ReviewGate = { can_confirm_full?: boolean; message?: string };
 
 	let {
 		data
@@ -46,12 +47,20 @@
 	const calibrationQueue = $derived(
 		(folder.calibration_queue as FolderCalibrationQueue | undefined) ?? {}
 	);
+	const sampleHostOptions = $derived(
+		(folder.sample_host_options as SampleHostOption[] | undefined) ?? []
+	);
+	const reviewGate = $derived((folder.review_gate as ReviewGate | undefined) ?? {});
 	const apiPrefix = $derived(
 		folder.prefix
 			.split('/')
 			.map((segment) => encodeURIComponent(segment))
 			.join('/')
 	);
+	const selectedHostOption = $derived(
+		sampleHostOptions.find((option) => String(option.key ?? '') === selectedHost) ?? null
+	);
+	const canRunSample = $derived(selectedHostOption?.available === true);
 	let note = $state('');
 	let selectedHost = $state('');
 	let actionState = $state<string | null>(null);
@@ -69,9 +78,17 @@
 	);
 
 	$effect(() => {
-		if (!selectedHost) {
-			selectedHost = String(folder.sample_host_key ?? folder.sample_host_options?.[0]?.key ?? '');
-		}
+		const preferred = String(folder.sample_host_key || '').trim();
+		const currentStillExists = sampleHostOptions.some(
+			(option) => String(option.key ?? '') === selectedHost
+		);
+		if (currentStillExists) return;
+
+		const nextHost =
+			preferred ||
+			String(sampleHostOptions.find((option) => option.available)?.key ?? '') ||
+			String(sampleHostOptions[0]?.key ?? '');
+		selectedHost = nextHost;
 	});
 
 	async function runSample() {
@@ -146,23 +163,28 @@
 <div class="page-stack">
 	<nav class="breadcrumb-row">
 		<a href={resolve('/')}>Folders</a>
-		<span>/</span>
+		<span aria-hidden="true">›</span>
 		<span>{folder.prefix}</span>
 	</nav>
 
-	<HeroCard>
-		{#snippet copy()}
+	<Panel class="folder-header" padding="1.35rem 1.45rem">
+		<div class="folder-header-grid">
 			<SectionHead
 				eyebrow="Calibration Studio"
 				heading={folder.prefix}
 				lede="Tune this folder with hard-scene samples before you run the real batch."
-				size="display"
+				size="section"
 			/>
-		{/snippet}
-		{#snippet aside()}
-			<p>{folder.metric_status_copy}</p>
-		{/snippet}
-	</HeroCard>
+			<div class="folder-header-side">
+				<p class="lede-copy">{folder.metric_status_copy}</p>
+				<div class="pill-row">
+					{#each factItems.slice(0, 3) as item (item.label)}
+						<Pill label={`${item.label}: ${item.value}`} variant="neutral" wide />
+					{/each}
+				</div>
+			</div>
+		</div>
+	</Panel>
 
 	{#if status.folder_scan_job && (status.folder_scan_status === 'queued' || status.folder_scan_status === 'running')}
 		<StatusBanner
@@ -185,6 +207,74 @@
 			detail={`Action: ${String(calibrationJob.action ?? '')} · Host: ${String(calibrationJob.host?.label ?? '')}`}
 		/>
 	{/if}
+
+	<Panel>
+		<div class="panel-stack">
+			<SectionHead
+				eyebrow="Calibration"
+				heading="Tune with fast samples, then queue the folder encode"
+				lede="Actions live up front so you can review the folder state and move immediately."
+				size="section"
+			/>
+			<div class="pill-row">
+				<Pill
+					label={`Sample queue: ${String(calibrationQueue.sample?.running_count ?? 0)} running · ${String(calibrationQueue.sample?.queued_count ?? 0)} queued`}
+					variant="neutral"
+					wide
+				/>
+				<Pill
+					label={`Encode queue: ${folder.encode_queue_summary ?? 'idle'}`}
+					variant="ghost"
+					wide
+				/>
+			</div>
+			<div class="sample-host-grid">
+				{#each sampleHostOptions as option (String(option.key ?? ''))}
+					<button
+						type="button"
+						class:selected={selectedHost === String(option.key ?? '')}
+						class:disabled={!option.available}
+						class="sample-host-card"
+						disabled={!option.available}
+						onclick={() => (selectedHost = String(option.key ?? ''))}
+					>
+						<p class="eyebrow-copy">{option.available ? 'Ready for sample' : 'Unavailable'}</p>
+						<p class="sample-host-label">{String(option.label ?? 'Unknown host')}</p>
+						<p class="muted-copy">{String(option.detail ?? '')}</p>
+					</button>
+				{/each}
+			</div>
+			<p class="muted-copy">{selectedHostOption?.detail ?? folder.sample_host_help_text}</p>
+			<label class="field-block">
+				<span class="eyebrow-copy">Tuning note</span>
+				<textarea
+					bind:value={note}
+					rows="3"
+					placeholder="Describe what looks wrong, or leave blank for the first AI-guided sample."
+				></textarea>
+			</label>
+			<div class="action-row">
+				<Button loading={actionState === 'sample'} disabled={!canRunSample} onclick={runSample}
+					>Start AI-Guided Sample</Button
+				>
+				<Button variant="secondary" loading={actionState === 'save'} onclick={saveProfile}
+					>Save Draft</Button
+				>
+				<Button
+					variant="ghost"
+					loading={actionState === 'encode'}
+					disabled={!reviewGate.can_confirm_full}
+					onclick={queueEncode}>Queue Folder Encode</Button
+				>
+			</div>
+			<div class="action-note">
+				<p class="eyebrow-copy">Next step</p>
+				<p class="lede-copy">
+					{String(reviewGate.message ?? 'Run or review a calibration to continue.')}
+				</p>
+			</div>
+		</div>
+	</Panel>
 
 	<div class="two-up">
 		<Panel>
@@ -278,74 +368,25 @@
 			</div>
 		</Panel>
 	</div>
-
-	<Panel>
-		<div class="panel-stack">
-			<SectionHead
-				eyebrow="Calibration"
-				heading="Tune with fast samples, then queue the folder encode"
-				lede="Actions now live in one stable control surface instead of HTML fragments that reflow the page."
-				size="section"
-			/>
-			<div class="pill-row">
-				<Pill
-					label={`Sample queue: ${String(calibrationQueue.sample?.running_count ?? 0)} running · ${String(calibrationQueue.sample?.queued_count ?? 0)} queued`}
-					variant="neutral"
-					wide
-				/>
-				<Pill
-					label={`Encode queue: ${folder.encode_queue_summary ?? 'idle'}`}
-					variant="ghost"
-					wide
-				/>
-			</div>
-			<div class="control-grid">
-				<label class="field-block">
-					<span class="eyebrow-copy">Run sample on</span>
-					<select bind:value={selectedHost}>
-						{#each folder.sample_host_options ?? [] as option (String(option.key))}
-							<option value={String(option.key)} disabled={!option.available}
-								>{String(option.label)}</option
-							>
-						{/each}
-					</select>
-					<span class="muted-copy">{folder.sample_host_help_text}</span>
-				</label>
-				<label class="field-block note-field">
-					<span class="eyebrow-copy">Tuning note</span>
-					<textarea
-						bind:value={note}
-						rows="3"
-						placeholder="Describe what looks wrong, or leave blank for the first AI-guided sample."
-					></textarea>
-				</label>
-			</div>
-			<div class="action-row">
-				<Button loading={actionState === 'sample'} onclick={runSample}
-					>Start AI-Guided Sample</Button
-				>
-				<Button variant="secondary" loading={actionState === 'save'} onclick={saveProfile}
-					>Save Draft</Button
-				>
-				<Button variant="ghost" loading={actionState === 'encode'} onclick={queueEncode}
-					>Queue Folder Encode</Button
-				>
-			</div>
-			<div class="action-note">
-				<p class="eyebrow-copy">Next step</p>
-				<p class="lede-copy">
-					{String(folder.review_gate?.message ?? 'Run or review a calibration to continue.')}
-				</p>
-			</div>
-		</div>
-	</Panel>
 </div>
 
 <style>
 	.page-stack,
 	.panel-stack {
 		display: grid;
+		gap: var(--space-3);
+	}
+
+	.folder-header-grid {
+		display: grid;
+		grid-template-columns: minmax(0, 1.05fr) minmax(280px, 0.95fr);
 		gap: var(--space-4);
+		align-items: start;
+	}
+
+	.folder-header-side {
+		display: grid;
+		gap: var(--space-3);
 	}
 
 	.breadcrumb-row {
@@ -402,7 +443,7 @@
 
 	.host-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+		grid-template-columns: repeat(2, minmax(0, 1fr));
 		gap: var(--space-3);
 	}
 
@@ -414,10 +455,37 @@
 		background: var(--surface-3);
 	}
 
-	.control-grid {
+	.sample-host-grid {
 		display: grid;
-		grid-template-columns: minmax(220px, 0.7fr) minmax(0, 1.3fr);
+		grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 		gap: var(--space-3);
+	}
+
+	.sample-host-card {
+		display: grid;
+		gap: var(--space-2);
+		padding: 1rem;
+		border-radius: var(--radius-md);
+		border: 1px solid rgba(23, 35, 31, 0.1);
+		background: rgba(255, 255, 255, 0.6);
+		text-align: left;
+	}
+
+	.sample-host-card.selected {
+		border-color: rgba(15, 118, 110, 0.34);
+		background: rgba(15, 118, 110, 0.1);
+		box-shadow: 0 10px 30px rgba(15, 118, 110, 0.12);
+	}
+
+	.sample-host-card.disabled {
+		opacity: 0.7;
+		cursor: not-allowed;
+	}
+
+	.sample-host-label {
+		font-size: 1.05rem;
+		font-weight: 700;
+		line-height: 1.2;
 	}
 
 	.field-block {
@@ -425,7 +493,6 @@
 		gap: var(--space-2);
 	}
 
-	select,
 	textarea {
 		width: 100%;
 		padding: 0.9rem 1rem;
@@ -440,10 +507,6 @@
 		resize: vertical;
 	}
 
-	.note-field {
-		grid-column: span 2;
-	}
-
 	.action-row {
 		display: flex;
 		gap: var(--space-2);
@@ -451,15 +514,18 @@
 	}
 
 	@media (max-width: 900px) {
+		.folder-header-grid,
 		.two-up,
 		.fact-grid,
-		.draft-grid,
-		.control-grid {
+		.draft-grid {
 			grid-template-columns: 1fr;
 		}
+	}
 
-		.note-field {
-			grid-column: auto;
+	@media (max-width: 720px) {
+		.host-grid,
+		.sample-host-grid {
+			grid-template-columns: 1fr;
 		}
 	}
 </style>

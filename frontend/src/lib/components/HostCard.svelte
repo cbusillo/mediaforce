@@ -60,6 +60,7 @@
 		justify-content: space-between;
 		gap: var(--space-3);
 		align-items: start;
+		flex-wrap: wrap;
 	}
 
 	h3 {
