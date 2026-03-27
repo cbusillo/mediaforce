@@ -734,7 +734,35 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
         ssh_cmd = run_command_mock.call_args.args[0]
         self.assertEqual(ssh_cmd[0], "ssh")
+        self.assertIn("StrictHostKeyChecking=accept-new", ssh_cmd)
+        self.assertIn("UpdateHostKeys=yes", ssh_cmd)
+        self.assertIn("CheckHostIP=no", ssh_cmd)
         self.assertIn("/opt/homebrew/opt/ffmpeg-full/bin", ssh_cmd[-1])
+
+    def test_run_remote_ssh_uses_alias_friendly_ssh_options(self) -> None:
+        host: dict[str, object] = {"host": "cbusillo@chris-mini.local"}
+        with patch(
+            "mediaforce.remote.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
+        ) as run_mock:
+            remote._run_remote_ssh(host, "true", timeout=5, wake_before_connect=False)
+        ssh_cmd = run_mock.call_args.args[0]
+        self.assertEqual(ssh_cmd[0], "ssh")
+        self.assertIn("StrictHostKeyChecking=accept-new", ssh_cmd)
+        self.assertIn("UpdateHostKeys=yes", ssh_cmd)
+        self.assertIn("CheckHostIP=no", ssh_cmd)
+        self.assertIn("BatchMode=yes", ssh_cmd)
+        self.assertIn("ConnectTimeout=5", ssh_cmd)
+
+    def test_classify_ssh_failure_for_new_alias_trust_prompt(self) -> None:
+        classification = remote._classify_ssh_failure(
+            "The authenticity of host 'chris-mini.local' can't be established. "
+            "This host key is known by the following other names/addresses: chris-mini.shiny. "
+            "Are you sure you want to continue connecting (yes/no/[fingerprint])?"
+        )
+        self.assertEqual(classification["message"], "SSH trust needs confirmation")
+        self.assertFalse(classification["setup_supported"])
+        self.assertFalse(classification["trust_reset_supported"])
 
     def test_select_encode_host_respects_parallel_limit(self) -> None:
         statuses = [

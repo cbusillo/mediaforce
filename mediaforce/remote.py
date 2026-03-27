@@ -108,12 +108,7 @@ def copy_remote_file_to_local(
         [
             "scp",
             "-q",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5",
+            *ssh_client_options(batch_mode=True),
             f"{ssh_host}:{remote_path}",
             str(local_path),
         ],
@@ -572,6 +567,21 @@ def _needs_initial_ssh_key_install(status: HostStatus) -> bool:
     return status.message == "SSH access setup required"
 
 
+def ssh_client_options(*, batch_mode: bool = True, connect_timeout_seconds: int = 5) -> list[str]:
+    options = [
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "UpdateHostKeys=yes",
+        "-o",
+        "CheckHostIP=no",
+    ]
+    if batch_mode:
+        options.extend(["-o", "BatchMode=yes"])
+    options.extend(["-o", f"ConnectTimeout={connect_timeout_seconds}"])
+    return options
+
+
 def _run_remote_ssh(
     host: dict[str, object],
     *remote_args: str,
@@ -587,10 +597,8 @@ def _run_remote_ssh(
     cmd = ["ssh"]
     if identity_file is not None:
         cmd.extend(["-i", str(identity_file), "-o", "IdentitiesOnly=yes"])
-    cmd.extend(["-o", "StrictHostKeyChecking=accept-new"])
-    if batch_mode:
-        cmd.extend(["-o", "BatchMode=yes"])
-    cmd.extend(["-o", "ConnectTimeout=5", ssh_host, *remote_args])
+    cmd.extend(ssh_client_options(batch_mode=batch_mode))
+    cmd.extend([ssh_host, *remote_args])
     return subprocess.run(
         cmd,
         check=False,
@@ -934,6 +942,21 @@ def _classify_ssh_failure(detail: str) -> dict[str, Any]:
             "trust_reset_supported": False,
             "show_detail": True,
         }
+    if (
+        "the authenticity of host" in lowered
+        or "are you sure you want to continue connecting" in lowered
+        or "host key is known by the following other names" in lowered
+    ):
+        return {
+            "message": "SSH trust needs confirmation",
+            "issues": [
+                "SSH reached the machine, but this hostname or alias still needs to be trusted. Verify the host, then retry or connect once manually to record the new alias."
+            ],
+            "setup_supported": False,
+            "setup_requires_password": False,
+            "trust_reset_supported": False,
+            "show_detail": True,
+        }
     if "connection refused" in lowered or "operation timed out" in lowered or "no route to host" in lowered:
         return {
             "message": "Turn on SSH first",
@@ -1001,8 +1024,7 @@ def _install_local_ssh_key(host: dict[str, Any], password: str) -> HostSetupResu
     public_key_text = public_key.read_text().strip()
     install_cmd = [
         "ssh",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
+        *ssh_client_options(batch_mode=False),
         "-o",
         "PreferredAuthentications=password,keyboard-interactive",
         "-o",

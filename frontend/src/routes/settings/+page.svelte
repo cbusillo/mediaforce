@@ -217,7 +217,7 @@
 				<Button variant="secondary" onclick={addHost}>Add Host</Button>
 			</div>
 			<div class="row-stack">
-				{#each remoteHosts as host, index (`host-${index}-${host.host || host.label}`)}
+				{#each remoteHosts as host, index (`host-${host.index || index}`)}
 					<div class="editor-card host-card-editor">
 						<div class="host-head">
 							<div>
@@ -293,7 +293,7 @@
 					<Button variant="secondary" onclick={addSchedule}>Add Window</Button>
 				</div>
 				<div class="row-stack">
-					{#each scheduleProfiles as profile, index (`profile-${index}-${profile.key}`)}
+					{#each scheduleProfiles as profile, index (`profile-${profile.index || index}`)}
 						<div class="editor-card schedule-editor">
 							<label class="field-block">
 								<span class="eyebrow-copy">Key</span>

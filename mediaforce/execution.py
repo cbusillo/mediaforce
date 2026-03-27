@@ -15,7 +15,7 @@ from mediaforce.config import HarnessConfig
 from mediaforce.process_control import ManagedProcessController, run_command
 from mediaforce.probe import probe_media
 from mediaforce.quality import QualitySearchError, QualitySearchResult, run_crf_search, select_quality_metric
-from mediaforce.remote import remote_shell_path_export_line
+from mediaforce.remote import remote_shell_path_export_line, ssh_client_options
 from mediaforce.utils import file_fingerprint, timestamp
 
 
@@ -633,10 +633,7 @@ def _run_encode_command(
     )
     ssh_cmd = [
         "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=5",
+        *ssh_client_options(batch_mode=True),
         ssh_host,
         "sh",
         "-lc",
