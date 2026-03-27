@@ -46,6 +46,15 @@
 
 		return details;
 	});
+
+	const runtimeFacts = $derived.by(() => {
+		const facts = [host.schedule_profile_label, `P${host.priority}`];
+
+		facts.push(`${host.max_parallel_encodes} lane${host.max_parallel_encodes === 1 ? '' : 's'}`);
+		facts.push(host.active_encode_count > 0 ? `${host.active_encode_count} running` : 'Idle');
+
+		return facts;
+	});
 </script>
 
 <Panel class={`host-card ${stateChip.tone}`.trim()} padding="0.85rem 0.95rem 0.95rem">
@@ -61,10 +70,9 @@
 	</div>
 
 	<div class="meta-strip">
-		<span>{host.schedule_profile_label}</span>
-		<span>P{host.priority}</span>
-		<span>{host.max_parallel_encodes}x encodes</span>
-		<span>{host.active_encode_count} running</span>
+		{#each runtimeFacts as fact (fact)}
+			<span>{fact}</span>
+		{/each}
 	</div>
 
 	{#if host.message}
@@ -98,6 +106,31 @@
 	:global(.host-card) {
 		display: grid;
 		gap: 0.7rem;
+	}
+
+	:global(.host-card)::before {
+		content: '';
+		position: absolute;
+		inset: 0 auto 0 0;
+		width: 4px;
+		background: rgba(23, 35, 31, 0.1);
+		pointer-events: none;
+	}
+
+	:global(.host-card.ok)::before {
+		background: linear-gradient(180deg, rgba(47, 107, 62, 0.9), rgba(47, 107, 62, 0.28));
+	}
+
+	:global(.host-card.warn)::before {
+		background: linear-gradient(180deg, rgba(194, 65, 12, 0.9), rgba(194, 65, 12, 0.28));
+	}
+
+	:global(.host-card.hold)::before {
+		background: linear-gradient(180deg, rgba(180, 83, 9, 0.85), rgba(180, 83, 9, 0.24));
+	}
+
+	:global(.host-card.neutral)::before {
+		background: linear-gradient(180deg, rgba(82, 101, 94, 0.62), rgba(82, 101, 94, 0.18));
 	}
 
 	.head-row {
@@ -177,15 +210,18 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 0.45rem;
-		color: var(--ink-soft);
-		font-size: 0.84rem;
+		font-size: 0.79rem;
 		line-height: 1.35;
 	}
 
-	.meta-strip span:not(:last-child)::after {
-		content: '·';
-		margin-left: 0.55rem;
-		color: rgba(23, 35, 31, 0.3);
+	.meta-strip span {
+		display: inline-flex;
+		align-items: center;
+		padding: 0.34rem 0.62rem;
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.68);
+		border: 1px solid rgba(23, 35, 31, 0.08);
+		color: var(--ink-soft);
 	}
 
 	.detail-block {
@@ -200,15 +236,15 @@
 	.supporting-strip {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 0.4rem;
+		gap: 0.5rem;
 		font-size: 0.8rem;
 		line-height: 1.4;
 	}
 
-	.supporting-strip span:not(:last-child)::after {
-		content: '·';
-		margin-left: 0.4rem;
-		color: rgba(23, 35, 31, 0.26);
+	.supporting-strip span {
+		display: inline-flex;
+		align-items: center;
+		padding: 0.18rem 0;
 	}
 
 	.issues-box {

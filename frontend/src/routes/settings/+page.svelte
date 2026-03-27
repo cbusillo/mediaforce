@@ -243,12 +243,12 @@
 	</div>
 
 	<Panel>
-		<div class="panel-stack">
+		<div id="schedule-profiles" class="panel-stack">
 			<div class="section-row">
 				<SectionHead
 					eyebrow="Schedule Profiles"
 					heading="Custom queue windows"
-					lede={settings.encode_queue_scheduler.summary}
+					lede="Define reusable host windows for machines that should only accept queue work at certain times."
 					size="compact"
 				/>
 				<Button variant="secondary" onclick={addSchedule}>Add Window</Button>
@@ -308,7 +308,7 @@
 	</Panel>
 
 	<Panel>
-		<div class="panel-stack">
+		<div id="remote-workers" class="panel-stack">
 			<div class="section-row">
 				<SectionHead
 					eyebrow="Hosts"
