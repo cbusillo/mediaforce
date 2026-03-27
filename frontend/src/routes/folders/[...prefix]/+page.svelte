@@ -352,22 +352,23 @@
 				</div>
 			</div>
 		</Panel>
-
-		<Panel>
-			<div class="panel-stack">
-				<SectionHead
-					eyebrow="Host Status"
-					heading="Where you can run this calibration"
-					size="section"
-				/>
-				<div class="host-grid">
-					{#each hosts.hosts as host (host.key)}
-						<HostCard {host} />
-					{/each}
-				</div>
-			</div>
-		</Panel>
 	</div>
+
+	<Panel>
+		<div class="panel-stack">
+			<SectionHead
+				eyebrow="Host Status"
+				heading="Where this calibration can run"
+				lede="Readiness, queue pressure, and host issues stay together so you can pick the next machine quickly."
+				size="section"
+			/>
+			<div class="host-grid">
+				{#each hosts.hosts as host (host.key)}
+					<HostCard {host} />
+				{/each}
+			</div>
+		</div>
+	</Panel>
 </div>
 
 <style>
@@ -443,7 +444,7 @@
 
 	.host-grid {
 		display: grid;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
+		grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
 		gap: var(--space-3);
 	}
 
