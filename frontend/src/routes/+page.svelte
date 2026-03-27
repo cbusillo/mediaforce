@@ -29,6 +29,11 @@
 	const foldersPending = $derived.by(() =>
 		dashboard.folders.reduce((total, folder) => total + folder.pending_count, 0)
 	);
+	const encodeCapableHosts = $derived.by(
+		() => hosts.hosts.filter((host) => host.capabilities.includes('encode_queue')).length
+	);
+	const readyHosts = $derived.by(() => hosts.hosts.filter((host) => host.queue_active).length);
+	const reachableHosts = $derived.by(() => hosts.hosts.filter((host) => host.available).length);
 	const heroFacts = $derived.by(() => [
 		{ label: 'Top folders', value: String(dashboard.folders.length) },
 		{ label: 'Pending items', value: String(foldersPending) },
@@ -144,6 +149,10 @@
 								: 'running'}{#if dashboard.encode_queue.state.stop_requested}
 								· stop requested{/if}
 						</p>
+						<p class="muted-copy worker-summary">
+							Workers ready now: {readyHosts} of {encodeCapableHosts}{#if reachableHosts !== encodeCapableHosts}
+								· {reachableHosts} mounted{/if}
+						</p>
 						<div class="action-row">
 							<Button
 								variant="secondary"
@@ -257,6 +266,10 @@
 		border-radius: var(--radius-md);
 		background: rgba(255, 255, 255, 0.52);
 		border: 1px solid rgba(23, 35, 31, 0.08);
+	}
+
+	.worker-summary {
+		padding-top: 0.1rem;
 	}
 
 	.hero-stat-row :global(.eyebrow-copy) {

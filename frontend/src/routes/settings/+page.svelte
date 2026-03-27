@@ -246,6 +246,71 @@
 		<div class="panel-stack">
 			<div class="section-row">
 				<SectionHead
+					eyebrow="Schedule Profiles"
+					heading="Custom queue windows"
+					lede={settings.encode_queue_scheduler.summary}
+					size="compact"
+				/>
+				<Button variant="secondary" onclick={addSchedule}>Add Window</Button>
+			</div>
+			<div class="row-stack">
+				{#each scheduleProfiles as profile, index (`profile-${profile.index || index}`)}
+					<div class="editor-card schedule-editor">
+						<label class="field-block">
+							<span class="eyebrow-copy">Key</span>
+							<input bind:value={profile.key} placeholder="quiet_hours" />
+						</label>
+						<label class="field-block">
+							<span class="eyebrow-copy">Label</span>
+							<input bind:value={profile.label} placeholder="Quiet Hours" />
+						</label>
+						<label class="field-block">
+							<span class="eyebrow-copy">Start</span>
+							<input
+								type="number"
+								min="0"
+								max="23"
+								step="1"
+								bind:value={profile.start_hour}
+								placeholder="0-23"
+							/>
+						</label>
+						<label class="field-block">
+							<span class="eyebrow-copy">End</span>
+							<input
+								type="number"
+								min="0"
+								max="23"
+								step="1"
+								bind:value={profile.end_hour}
+								placeholder="0-23"
+							/>
+						</label>
+						<div class="editor-actions compact-actions">
+							<button
+								type="button"
+								class="icon-button danger"
+								aria-label="Remove schedule window"
+								title="Remove schedule window"
+								onclick={() => removeSchedule(index)}
+							>
+								<svg viewBox="0 0 24 24" aria-hidden="true">
+									<path
+										d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 7h2v7h-2v-7Zm4 0h2v7h-2v-7ZM7 10h2v7H7v-7Zm-1 10h12a2 2 0 0 0 2-2V8H4v10a2 2 0 0 0 2 2Z"
+									/>
+								</svg>
+							</button>
+						</div>
+					</div>
+				{/each}
+			</div>
+		</div>
+	</Panel>
+
+	<Panel>
+		<div class="panel-stack">
+			<div class="section-row">
+				<SectionHead
 					eyebrow="Hosts"
 					heading="Remote workers"
 					lede="Edit policy and see the live runtime state in the same place."
@@ -338,71 +403,6 @@
 									<span class="capability-label">{capability.label}</span>
 								</label>
 							{/each}
-						</div>
-					</div>
-				{/each}
-			</div>
-		</div>
-	</Panel>
-
-	<Panel>
-		<div class="panel-stack">
-			<div class="section-row">
-				<SectionHead
-					eyebrow="Schedule Profiles"
-					heading="Custom queue windows"
-					lede={settings.encode_queue_scheduler.summary}
-					size="compact"
-				/>
-				<Button variant="secondary" onclick={addSchedule}>Add Window</Button>
-			</div>
-			<div class="row-stack">
-				{#each scheduleProfiles as profile, index (`profile-${profile.index || index}`)}
-					<div class="editor-card schedule-editor">
-						<label class="field-block">
-							<span class="eyebrow-copy">Key</span>
-							<input bind:value={profile.key} placeholder="quiet_hours" />
-						</label>
-						<label class="field-block">
-							<span class="eyebrow-copy">Label</span>
-							<input bind:value={profile.label} placeholder="Quiet Hours" />
-						</label>
-						<label class="field-block">
-							<span class="eyebrow-copy">Start</span>
-							<input
-								type="number"
-								min="0"
-								max="23"
-								step="1"
-								bind:value={profile.start_hour}
-								placeholder="0-23"
-							/>
-						</label>
-						<label class="field-block">
-							<span class="eyebrow-copy">End</span>
-							<input
-								type="number"
-								min="0"
-								max="23"
-								step="1"
-								bind:value={profile.end_hour}
-								placeholder="0-23"
-							/>
-						</label>
-						<div class="editor-actions compact-actions">
-							<button
-								type="button"
-								class="icon-button danger"
-								aria-label="Remove schedule window"
-								title="Remove schedule window"
-								onclick={() => removeSchedule(index)}
-							>
-								<svg viewBox="0 0 24 24" aria-hidden="true">
-									<path
-										d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 7h2v7h-2v-7Zm4 0h2v7h-2v-7ZM7 10h2v7H7v-7Zm-1 10h12a2 2 0 0 0 2-2V8H4v10a2 2 0 0 0 2 2Z"
-									/>
-								</svg>
-							</button>
 						</div>
 					</div>
 				{/each}
