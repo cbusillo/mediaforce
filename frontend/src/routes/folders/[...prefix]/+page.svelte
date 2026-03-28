@@ -66,6 +66,8 @@
 	};
 	type FolderQueueSample = { running_count?: number; queued_count?: number };
 	type FolderCalibrationQueue = { sample?: FolderQueueSample };
+	type FolderCompareClip = { timestamp_seconds?: number };
+	type FolderCalibrationState = { compare_clips?: FolderCompareClip[] };
 	type SampleHostOption = { key?: string; label?: string; detail?: string; available?: boolean };
 	type ReviewGate = { can_confirm_full?: boolean; message?: string };
 	type BreadcrumbHref = '/' | `/folders/${string}`;
@@ -449,6 +451,7 @@
 	const sampleHostOptions = $derived(
 		(folder.sample_host_options as SampleHostOption[] | undefined) ?? []
 	);
+	const calibration = $derived((folder.calibration as FolderCalibrationState | undefined) ?? {});
 	const reviewGate = $derived((folder.review_gate as ReviewGate | undefined) ?? {});
 	const apiPrefix = $derived(
 		folder.prefix
@@ -507,12 +510,15 @@
 			)
 	);
 
-	const hotSpotPills = $derived.by(() => {
+	const reviewMomentPills = $derived.by(() => {
 		const labels = ['Early review', 'Midpoint review', 'Late review'];
-		return (folder.hot_spots ?? []).map((timestamp, index) => ({
+		return (calibration.compare_clips ?? []).map((clip, index) => {
+			const timestamp = Number(clip.timestamp_seconds ?? 0);
+			return {
 			key: `${index}-${timestamp}`,
 			label: `${labels[index] ?? `Compare clip ${index + 1}`}: ${formatTimestamp(timestamp)}`
-		}));
+			};
+		});
 	});
 
 	const factItems = $derived.by(() =>
@@ -1032,15 +1038,17 @@
 						</div>
 					</div>
 				</div>
-				<div class="review-block hotspot-block">
-					<p class="eyebrow-copy">Review moments</p>
-					<p class="muted-copy">Representative review moments pulled from the sample timeline.</p>
-					<div class="pill-row">
-						{#each hotSpotPills as pill (pill.key)}
-							<Pill label={pill.label} variant="neutral" />
-						{/each}
+				{#if reviewMomentPills.length}
+					<div class="review-block hotspot-block">
+						<p class="eyebrow-copy">Review moments</p>
+						<p class="muted-copy">Captured compare clips from the latest sampled draft.</p>
+						<div class="pill-row">
+							{#each reviewMomentPills as pill (pill.key)}
+								<Pill label={pill.label} variant="neutral" />
+							{/each}
+						</div>
 					</div>
-				</div>
+				{/if}
 				<div class="review-block folder-snapshot-block">
 					<p class="eyebrow-copy">Folder state</p>
 					<div class="snapshot-grid">
