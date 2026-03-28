@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -329,6 +330,59 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(remote_rows[0]["schedule_profile"], "always")
         self.assertEqual(remote_rows[0]["capabilities"], ["encode_queue", "sample_calibration"])
 
+    def test_full_scan_becomes_stale_when_library_roots_change(self) -> None:
+        source_path = self._create_source_file("episode-a.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(connection, source_path)
+            now = web_app._now_iso()
+            connection.execute(
+                """
+                INSERT INTO scan_runs(
+                    scan_id, started_at, completed_at, roots_json, scope, prefixes_json,
+                    file_count, reprobed_count, unchanged_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("scan-1", now, now, json.dumps(self.config.raw["media"]["source_roots"]), "full", None, 1, 0, 0),
+            )
+
+            web_app._save_catalog_signature(self.config)
+            self.assertFalse(web_app._scan_is_stale(connection, self.config, prefix=None))
+
+            self.config.raw["media"]["source_roots"]["movies"] = str(self.root / "source" / "movies")
+
+            self.assertTrue(web_app._scan_is_stale(connection, self.config, prefix=None))
+
+    def test_full_scan_becomes_stale_after_fifteen_minutes(self) -> None:
+        source_path = self._create_source_file("episode-b.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(connection, source_path)
+            completed_at = (datetime.now(UTC) - timedelta(minutes=16)).isoformat(timespec="seconds")
+            connection.execute(
+                """
+                INSERT INTO scan_runs(
+                    scan_id, started_at, completed_at, roots_json, scope, prefixes_json,
+                    file_count, reprobed_count, unchanged_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "scan-older-than-threshold",
+                    completed_at,
+                    completed_at,
+                    json.dumps(self.config.raw["media"]["source_roots"]),
+                    "full",
+                    None,
+                    1,
+                    0,
+                    0,
+                ),
+            )
+
+            web_app._save_catalog_signature(self.config)
+
+            self.assertTrue(web_app._scan_is_stale(connection, self.config, prefix=None))
+
     def test_scheduler_uses_host_local_time_for_windows(self) -> None:
         policy = web_app._normalize_encode_queue_scheduler(
             {"mode": "night", "start_hour": 22, "end_hour": 6, "timezone": "host_local"}
@@ -363,6 +417,53 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             web_app._scheduler_allows_encode_run(policy, now=now, host_payload={}),
             expected,
         )
+
+    def test_scheduler_preserves_midnight_start_hour_for_host_local_windows(self) -> None:
+        policy = web_app._normalize_encode_queue_scheduler(
+            {"mode": "night", "start_hour": 0, "end_hour": 5, "timezone": "host_local"}
+        )
+
+        self.assertFalse(
+            web_app._scheduler_allows_encode_run(
+                policy,
+                now=web_app._parse_iso("2026-03-25T03:30:00+00:00"),
+                host_payload={"utc_offset_minutes": -240},
+            )
+        )
+        self.assertTrue(
+            web_app._scheduler_allows_encode_run(
+                policy,
+                now=web_app._parse_iso("2026-03-25T05:30:00+00:00"),
+                host_payload={"utc_offset_minutes": -240},
+            )
+        )
+
+    def test_folder_cards_count_validated_items_as_pending_until_promoted(self) -> None:
+        first = self._create_source_file("episode-pending.mkv")
+        second = self._create_source_file("episode-validated.mkv")
+        third = self._create_source_file("episode-promoted.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            first_id = self._insert_library_item(connection, first, status="planned")
+            second_id = self._insert_library_item(connection, second, status="validated")
+            third_id = self._insert_library_item(connection, third, status="promoted")
+            for item_id in (first_id, second_id, third_id):
+                connection.execute(
+                    "UPDATE library_items SET size_bytes = ?, rel_path = ?, parent_dir = ? WHERE id = ?",
+                    (2 * 1024 * 1024 * 1024, f"tv/show/Season 1/item-{item_id}.mkv", "tv/show/Season 1", item_id),
+                )
+
+            cards = web_app._list_folder_cards(connection)
+
+        matching_cards = [card for card in cards if card.prefix == "tv/show/Season 1"]
+        self.assertEqual(len(matching_cards), 1)
+        card = matching_cards[0]
+        self.assertEqual(card.prefix, "tv/show/Season 1")
+        self.assertEqual(card.item_count, 3)
+        self.assertEqual(card.pending_count, 2)
+        self.assertEqual(card.statuses["planned"], 1)
+        self.assertEqual(card.statuses["validated"], 1)
+        self.assertEqual(card.statuses["promoted"], 1)
 
     def test_project_env_loader_sets_defaults_without_overriding_shell_env(self) -> None:
         env_path = Path.home() / "Developer" / "claude-local-machine" / "projects" / "media-encoding" / ".env"

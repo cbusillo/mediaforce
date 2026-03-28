@@ -26,18 +26,30 @@ Only session-start facts that are easy to miss belong here.
 - CLI smoke: `uv run mediaforce --help`
 - UI changes: validate in a real browser
 - For browser exploration by subagents, explicitly use the `browser-ui-review`
-  skill. Run a tiny smoke test only for the first such task in a session or
-  when browser access/approvals are uncertain.
-- When launching browser subagents via `agent.create`, prefer `write: true`
-  even for read-only exploration. In this harness, read-only subagents may hit
-  browser-tool permission blockers that writable worktree agents avoid.
-- Do not assume `agent.create` subagents share the main session browser tool;
-  if browser access is blocked, treat it as a harness/permissions issue rather
-  than evidence that the site itself is broken.
+  skill and follow the browser review launch contract below.
 - Follow `docs/style/index.md` plus
   `docs/policies/coding-standards.md`
 - Before commits or ending a session, satisfy
   `docs/policies/acceptance-gate.md`
+
+## Browser Review Launch Contract
+
+- For the first browser-review subagent in a session, run a tiny smoke pass
+  before the full critique: open the page, wait for a known selector, capture a
+  screenshot, and confirm the page title/URL.
+- Launch browser-review subagents with `write: true` and explicitly mention the
+  `browser-ui-review` skill in the task prompt.
+- The prompt should require this exact order:
+  1. open the live page in a browser
+  2. wait for an app-specific ready selector
+  3. interact enough to inspect the real UI state
+  4. capture at least one screenshot artifact under `scratch/ui-checks/`
+  5. report findings from the browser-visible result
+- The prompt should also require the result to begin with a one-line browser
+  status: `Browser review succeeded` or `BROWSER BLOCKED`.
+- If `BROWSER BLOCKED` occurs, fix the launch/harness problem and rerun the
+  review. Do not present the blocked subagent's code-informed notes as the
+  requested review.
 
 ## See also
 

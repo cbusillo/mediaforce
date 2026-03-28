@@ -61,8 +61,16 @@ from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.tuning_memory import promote_learning_artifact, record_tuning_session, retrieve_learning_context
 
 MIN_RECOMMENDED_SAVINGS_BYTES = 100 * 1024 * 1024
-FULL_SCAN_STALE_AFTER = timedelta(hours=24)
+FULL_SCAN_STALE_AFTER = timedelta(minutes=15)
 PREFIX_SCAN_STALE_AFTER = timedelta(minutes=15)
+DEFAULT_LIBRARY_COLOR_PALETTE = (
+    "#a16207",
+    "#4e6fa6",
+    "#c2410c",
+    "#0f766e",
+    "#7c6142",
+    "#6b7280",
+)
 SCAN_RETRY_COOLDOWN = timedelta(minutes=5)
 CALIBRATION_JOB_NOTICE_AFTER = timedelta(hours=1)
 SAMPLE_CALIBRATION_CONCURRENCY = 2
@@ -156,6 +164,7 @@ class FolderCard:
     sort_score: float
     statuses: dict[str, int]
     video_codecs: dict[str, int]
+    details_loading: bool = False
 
 
 def create_app(config_path: Path | None = None) -> FastAPI:
@@ -191,7 +200,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         saved: bool = False,
         host_notice: str | None = None,
         host_notice_kind: str | None = None,
-        libraries: list[dict[str, str]] | None = None,
+        libraries: list[dict[str, Any]] | None = None,
         remote_hosts: list[dict[str, str]] | None = None,
         transcode_root: str | None = None,
         encode_queue_scheduler: dict[str, Any] | None = None,
@@ -227,18 +236,29 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             "repo_config_path": str(config.paths.config_path),
         }
 
-    def _dashboard_content_payload() -> dict[str, Any]:
+    def _dashboard_summary_payload() -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection:
             scan_job = _maybe_schedule_scan(connection, config, prefix=None)
-            folders = _cached_folder_cards(config, connection)
+            preview_folders = _preview_folder_cards(connection)
             calibration_queue = list_queue_summary(connection)
             encode_queue = _decorate_encode_queue_for_scheduler(config, summarize_encode_queue(connection))
         return {
-			"folders": [asdict(folder) for folder in folders],
+            "library_colors": _library_color_map_for_config(config),
             "scan_job": scan_job,
             "calibration_queue": calibration_queue,
             "encode_queue": encode_queue,
+            "folders_preview": [asdict(folder) for folder in preview_folders],
+            "catalog_empty": not preview_folders,
+            "folder_cache_key": str(_folder_card_cache_key(config)[1]),
+        }
+
+    def _dashboard_folders_payload() -> dict[str, Any]:
+        with open_db(config.paths.db_path) as connection:
+            folders = _cached_folder_cards(config, connection)
+        return {
+            "folders": [asdict(folder) for folder in folders],
             "catalog_empty": not folders,
+            "folder_cache_key": str(_folder_card_cache_key(config)[1]),
         }
 
     def _folder_status_payload(normalized_prefix: str) -> dict[str, Any]:
@@ -263,11 +283,15 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         metric_support = _metric_support()
         return JSONResponse(
             {
-                **_dashboard_content_payload(),
+                **_dashboard_summary_payload(),
 				"metric_support": dict(metric_support),
                 "metric_status_copy": _metric_status_copy(metric_support),
             }
         )
+
+    @app.get("/api/dashboard/folders")
+    def api_dashboard_folders() -> JSONResponse:
+        return JSONResponse(_dashboard_folders_payload())
 
     @app.get("/api/settings")
     def api_settings() -> JSONResponse:
@@ -293,9 +317,14 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         )
         existing_runtime_settings = load_runtime_settings(config.paths.runtime_settings_path)
         merged_runtime_settings = _merge_runtime_settings_payload(existing_runtime_settings, payload)
+        libraries_changed = _runtime_source_roots(existing_runtime_settings) != _runtime_source_roots(merged_runtime_settings)
         save_runtime_settings(config.paths.runtime_settings_path, merged_runtime_settings)
         config = load_config(config.paths.config_path)
         app.state.config = config
+        if libraries_changed:
+            _reset_folder_card_cache()
+            with open_db(config.paths.db_path) as connection:
+                _maybe_schedule_scan(connection, config, prefix=None)
         _refresh_host_status_cache(config)
         return {"ok": True, "message": "Settings saved.", "settings": _settings_page_payload(saved=True)}
 
@@ -818,13 +847,21 @@ def _preferred_env(*names: str, default: str | None = None) -> str | None:
 
 
 def _settings_library_rows(source_root_map: dict[str, Path], *, min_rows: int = 3) -> list[dict[str, str]]:
-    rows = [{"key": key, "path": str(path)} for key, path in source_root_map.items()]
+    rows = [
+        {
+            "key": key,
+            "path": str(path),
+            "color": DEFAULT_LIBRARY_COLOR_PALETTE[index % len(DEFAULT_LIBRARY_COLOR_PALETTE)],
+        }
+        for index, (key, path) in enumerate(source_root_map.items())
+    ]
     return _index_settings_library_rows(rows, min_rows=1)
 
 
 def _settings_library_rows_for_config(config: HarnessConfig, *, min_rows: int = 3) -> list[dict[str, str]]:
     media = config.raw.get("media")
     source_roots = media.get("source_roots") if isinstance(media, dict) else None
+    library_colors = _library_color_map_for_config(config)
     rows: list[dict[str, str]] = []
     if isinstance(source_roots, dict):
         for key, value in source_roots.items():
@@ -832,14 +869,22 @@ def _settings_library_rows_for_config(config: HarnessConfig, *, min_rows: int = 
             path_text = _stringify_pathlike(value)
             if not key_text and not path_text:
                 continue
-            rows.append({"key": key_text, "path": path_text})
+            rows.append({"key": key_text, "path": path_text, "color": library_colors.get(key_text, '')})
     return _index_settings_library_rows(rows, min_rows=min_rows)
 
 
 def _index_settings_library_rows(rows: list[dict[str, str]], *, min_rows: int = 1) -> list[dict[str, str]]:
-    indexed = [{"index": str(index), "key": row.get("key", ""), "path": row.get("path", "")} for index, row in enumerate(rows)]
+    indexed = [
+        {
+            "index": str(index),
+            "key": row.get("key", ""),
+            "path": row.get("path", ""),
+            "color": row.get("color", ""),
+        }
+        for index, row in enumerate(rows)
+    ]
     while len(indexed) < min_rows:
-        indexed.append({"index": str(len(indexed)), "key": "", "path": ""})
+        indexed.append({"index": str(len(indexed)), "key": "", "path": "", "color": "#0f766e"})
     return indexed
 
 
@@ -1243,7 +1288,7 @@ def _default_sample_host_key_from_statuses(statuses: list[HostStatus]) -> str:
 
 def _sample_calibration_host_statuses(config: HarnessConfig) -> list[HostStatus]:
     hosts: list[HostStatus] = []
-    for status in collect_host_statuses(config):
+    for status in _safe_collect_host_statuses(config):
         capabilities = {capability.lower() for capability in status.capabilities}
         if "sample_calibration" in capabilities:
             hosts.append(status)
@@ -1314,13 +1359,14 @@ def _settings_form_indexes(form_data: dict[str, str], prefix: str) -> list[int]:
 
 def _build_runtime_settings_payload(
     *,
-    libraries: list[dict[str, str]],
+    libraries: list[dict[str, Any]],
     remote_hosts: list[dict[str, Any]],
     transcode_root: str,
     encode_queue_scheduler: dict[str, Any],
     schedule_profiles: list[dict[str, str]],
 ) -> dict[str, Any]:
     source_roots: dict[str, str] = {}
+    library_colors: dict[str, str] = {}
     for row in libraries:
         key_text = row.get("key", "").strip()
         path_text = row.get("path", "").strip()
@@ -1332,8 +1378,12 @@ def _build_runtime_settings_payload(
         if normalized_key in source_roots:
             raise ValueError(f"Duplicate library name: {normalized_key}")
         source_roots[normalized_key] = str(Path(path_text).expanduser())
+        color_text = _normalize_library_color(row.get("color"))
+        if color_text is not None:
+            library_colors[normalized_key] = color_text
     if not source_roots:
         raise ValueError("Add at least one library before saving settings.")
+    library_colors = _library_color_map_from_source_roots(source_roots, library_colors)
 
     normalized_remotes: list[dict[str, Any]] = []
     for row in remote_hosts:
@@ -1418,6 +1468,7 @@ def _build_runtime_settings_payload(
     return {
         "media": {
             "source_roots": source_roots,
+            "library_colors": library_colors,
             "staging_root": str(staging_root),
             "archive_root": str(staging_root / "_replaced"),
         },
@@ -1441,6 +1492,60 @@ def _merge_runtime_settings_payload(existing: dict[str, Any], updates: dict[str,
             continue
         merged[key] = value
     return merged
+
+
+def _runtime_source_roots(payload: dict[str, Any]) -> dict[str, str]:
+    media = payload.get("media")
+    if not isinstance(media, dict):
+        return {}
+    source_roots = media.get("source_roots")
+    if not isinstance(source_roots, dict):
+        return {}
+    normalized: dict[str, str] = {}
+    for key, value in source_roots.items():
+        key_text = str(key).strip()
+        value_text = str(value).strip()
+        if key_text and value_text:
+            normalized[key_text] = str(Path(value_text).expanduser())
+    return normalized
+
+
+def _normalize_library_color(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", text):
+        return None
+    return text.lower()
+
+
+def _runtime_library_colors(payload: dict[str, Any]) -> dict[str, str]:
+    media = payload.get("media")
+    if not isinstance(media, dict):
+        return {}
+    library_colors = media.get("library_colors")
+    if not isinstance(library_colors, dict):
+        return {}
+    normalized: dict[str, str] = {}
+    for key, value in library_colors.items():
+        key_text = str(key).strip()
+        color_text = _normalize_library_color(value)
+        if key_text and color_text:
+            normalized[key_text] = color_text
+    return normalized
+
+
+def _library_color_map_from_source_roots(source_roots: dict[str, str], configured_colors: dict[str, str] | None = None) -> dict[str, str]:
+    resolved: dict[str, str] = {}
+    colors = configured_colors or {}
+    for index, key in enumerate(source_roots):
+        resolved[key] = colors.get(key) or DEFAULT_LIBRARY_COLOR_PALETTE[index % len(DEFAULT_LIBRARY_COLOR_PALETTE)]
+    return resolved
+
+
+def _library_color_map_for_config(config: HarnessConfig) -> dict[str, str]:
+    return _library_color_map_from_source_roots(
+        _runtime_source_roots(config.raw),
+        _runtime_library_colors(config.raw),
+    )
 
 
 def _normalize_library_key(value: str) -> str:
@@ -1482,7 +1587,7 @@ def _list_folder_cards(connection: Any) -> list[FolderCard]:
         card.average_age_days += age_days
         status = str(row["status"] or "unknown")
         codec = str(row["video_codec"] or "unknown")
-        if status in {"discovered", "planned"}:
+        if status != "promoted":
             estimated_savings = _estimate_savings_bytes(
                 size_bytes=size_bytes,
                 video_codec=codec,
@@ -1507,11 +1612,7 @@ def _list_folder_cards(connection: Any) -> list[FolderCard]:
 
 def _cached_folder_cards(config: HarnessConfig, connection: Any) -> list[FolderCard]:
     global FOLDER_CARD_CACHE_KEY, FOLDER_CARD_CACHE_VALUE
-    try:
-        db_mtime_ns = config.paths.db_path.stat().st_mtime_ns
-    except OSError:
-        db_mtime_ns = 0
-    cache_key = (str(config.paths.db_path), db_mtime_ns)
+    cache_key = _folder_card_cache_key(config)
     with FOLDER_CARD_CACHE_LOCK:
         if FOLDER_CARD_CACHE_KEY == cache_key:
             return list(FOLDER_CARD_CACHE_VALUE)
@@ -1520,6 +1621,72 @@ def _cached_folder_cards(config: HarnessConfig, connection: Any) -> list[FolderC
         FOLDER_CARD_CACHE_KEY = cache_key
         FOLDER_CARD_CACHE_VALUE = list(cards)
     return cards
+
+
+def _reset_folder_card_cache() -> None:
+    global FOLDER_CARD_CACHE_KEY, FOLDER_CARD_CACHE_VALUE
+    with FOLDER_CARD_CACHE_LOCK:
+        FOLDER_CARD_CACHE_KEY = None
+        FOLDER_CARD_CACHE_VALUE = []
+
+
+def _preview_folder_cards(connection: Any) -> list[FolderCard]:
+    rows = connection.execute(
+        "SELECT rel_path, size_bytes, status, video_codec, audio_summary_json FROM library_items WHERE status != 'missing' ORDER BY rel_path"
+    ).fetchall()
+    grouped: dict[str, FolderCard] = {}
+    for row in rows:
+        rel_path = str(row["rel_path"])
+        group = _folder_group(rel_path)
+        if group is None:
+            continue
+        prefix, title, subtitle, scope_label = group
+        card = grouped.get(prefix)
+        if card is None:
+            card = FolderCard(
+                prefix=prefix,
+                title=title,
+                subtitle=subtitle,
+                scope_label=scope_label,
+                item_count=0,
+                pending_count=0,
+                total_size_bytes=0,
+                estimated_savings_bytes=0,
+                average_age_days=0.0,
+                sort_score=0.0,
+                statuses={},
+                video_codecs={},
+                details_loading=True,
+            )
+            grouped[prefix] = card
+        card.item_count += 1
+        size_bytes = int(row["size_bytes"])
+        card.total_size_bytes += size_bytes
+        status = str(row["status"] or "unknown")
+        codec = str(row["video_codec"] or "unknown")
+        if status != "promoted":
+            card.pending_count += 1
+            card.estimated_savings_bytes += _estimate_savings_bytes(
+                size_bytes=size_bytes,
+                video_codec=codec,
+                audio_summary_json=str(row["audio_summary_json"] or "[]"),
+            )
+        card.statuses[status] = card.statuses.get(status, 0) + 1
+        card.video_codecs[codec] = card.video_codecs.get(codec, 0) + 1
+    cards = [
+        card
+        for card in grouped.values()
+        if card.pending_count > 0 and card.estimated_savings_bytes >= MIN_RECOMMENDED_SAVINGS_BYTES
+    ]
+    return sorted(cards, key=lambda item: (item.estimated_savings_bytes, item.total_size_bytes), reverse=True)
+
+
+def _folder_card_cache_key(config: HarnessConfig) -> tuple[str, int]:
+    try:
+        db_mtime_ns = config.paths.db_path.stat().st_mtime_ns
+    except OSError:
+        db_mtime_ns = 0
+    return (str(config.paths.db_path), db_mtime_ns)
 
 
 def _sample_item(connection: Any, config: HarnessConfig, prefix: str) -> dict[str, Any] | None:
@@ -1744,8 +1911,14 @@ def _scheduler_allows_encode_run(
             local_now = current.astimezone(ZoneInfo(timezone_name))
         except ZoneInfoNotFoundError:
             local_now = current.astimezone()
-    start_hour = int(policy.get("start_hour") or int(str(DEFAULT_SCHEDULER_POLICY["start_hour"])))
-    end_hour = int(policy.get("end_hour") or int(str(DEFAULT_SCHEDULER_POLICY["end_hour"])))
+    start_hour_value = policy.get("start_hour")
+    if start_hour_value is None:
+        start_hour_value = DEFAULT_SCHEDULER_POLICY["start_hour"]
+    end_hour_value = policy.get("end_hour")
+    if end_hour_value is None:
+        end_hour_value = DEFAULT_SCHEDULER_POLICY["end_hour"]
+    start_hour = int(str(start_hour_value))
+    end_hour = int(str(end_hour_value))
     if start_hour == end_hour:
         return True
     current_hour = local_now.hour
@@ -1840,6 +2013,34 @@ def _job_file(config: HarnessConfig, prefix: str) -> Path:
 def _scan_job_file(config: HarnessConfig, prefix: str | None) -> Path:
     name = "full-catalog" if prefix is None else f"prefix-{prefix}"
     return _state_web_dir(config) / f"scan-{_slug(name)}.job.json"
+
+
+def _catalog_signature_file(config: HarnessConfig) -> Path:
+    return _state_web_dir(config) / "full-catalog.signature.json"
+
+
+def _current_catalog_signature(config: HarnessConfig) -> dict[str, Any]:
+    return {"source_roots": _runtime_source_roots(config.raw)}
+
+
+def _load_catalog_signature(config: HarnessConfig) -> dict[str, Any] | None:
+    path = _catalog_signature_file(config)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    source_roots = payload.get("source_roots")
+    if not isinstance(source_roots, dict):
+        return None
+    return {"source_roots": _runtime_source_roots({"media": {"source_roots": source_roots}})}
+
+
+def _save_catalog_signature(config: HarnessConfig) -> None:
+    _catalog_signature_file(config).write_text(json.dumps(_current_catalog_signature(config), indent=2) + "\n")
 
 
 def _calibration_draft_hash(payload: dict[str, Any]) -> str:
@@ -2029,7 +2230,7 @@ def _maybe_schedule_scan(connection: Any, config: HarnessConfig, prefix: str | N
         job = _expire_scan_job(config, prefix, job)
     if job and job.get("status") in {"queued", "running"}:
         return job
-    if not _scan_is_stale(connection, prefix):
+    if not _scan_is_stale(connection, config, prefix):
         return job
     if job and job.get("status") == "failed":
         finished_at = _parse_iso(job.get("finished_at") or job.get("started_at"))
@@ -2062,8 +2263,10 @@ def _maybe_schedule_scan(connection: Any, config: HarnessConfig, prefix: str | N
     return job_payload
 
 
-def _scan_is_stale(connection: Any, prefix: str | None) -> bool:
+def _scan_is_stale(connection: Any, config: HarnessConfig, prefix: str | None) -> bool:
     if prefix is None:
+        if _load_catalog_signature(config) != _current_catalog_signature(config):
+            return True
         item_count = int(connection.execute("SELECT COUNT(*) FROM library_items").fetchone()[0])
         if item_count == 0:
             return True
@@ -3142,6 +3345,9 @@ def _run_scan_job(*, config_path: Path, prefix: str | None, job_id: str) -> None
     try:
         with open_db(config.paths.db_path) as connection:
             stats = scan_library(connection, config, prefixes=[prefix] if prefix else None, limit=None)
+        if prefix is None:
+            _save_catalog_signature(config)
+            _reset_folder_card_cache()
         _save_scan_job_state(
             config,
             prefix,
