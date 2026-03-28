@@ -93,13 +93,17 @@
 		subtitle_summary?: SampleSubtitleTrack[];
 		resolved_policy?: FolderPolicy;
 	};
+	type ComparisonValue = {
+		headline: string;
+		detail?: string;
+	};
 	type ComparisonRow = {
 		label: string;
-		current: string;
-		draft: string;
-		note?: string;
+		current: ComparisonValue;
+		draft: ComparisonValue;
 		changed: boolean;
 	};
+	type SteadyComparisonRow = { label: string; value: string };
 	type SampleHostCard = {
 		key: string;
 		label: string;
@@ -190,41 +194,44 @@
 		return trimmed.toUpperCase();
 	}
 
-	function summarizeAudioTrack(track: SampleAudioTrack | null): string {
-		if (!track) return 'No audio track found';
-		const parts = [
-			codecLabel(track.codec_name),
-			channelLabel(track.channels),
-			formatBitrateCopy(track.bit_rate),
-			formatLanguageCopy(track.language),
-			track.default ? 'default' : null
-		].filter(Boolean);
-		return parts.join(' · ');
+	function compactCopy(parts: Array<string | null | undefined>): string {
+		return parts.filter(Boolean).join(' · ');
 	}
 
-	function summarizeAudioPlan(plan: FolderItemPlan['audio'] | undefined): string {
-		if (!plan) return 'No draft audio plan yet';
-		const parts = [
-			codecLabel(plan.output_codec),
-			channelLabel(plan.channels),
-			formatBitrateCopy(plan.output_bitrate),
-			formatLanguageCopy(plan.language)
-		].filter(Boolean);
+	function comparisonValue(headline: string, detail?: string | null): ComparisonValue {
+		return detail ? { headline, detail } : { headline };
+	}
+
+	function summarizeAudioTrack(track: SampleAudioTrack | null): ComparisonValue {
+		if (!track) return comparisonValue('No audio track found');
+		return comparisonValue(
+			compactCopy([codecLabel(track.codec_name), formatBitrateCopy(track.bit_rate)]),
+			compactCopy([
+				channelLabel(track.channels),
+				formatLanguageCopy(track.language),
+				track.default ? 'default' : null
+			])
+		);
+	}
+
+	function summarizeAudioPlan(plan: FolderItemPlan['audio'] | undefined): ComparisonValue {
+		if (!plan) return comparisonValue('No draft audio plan yet');
 		const trackSummary =
 			Number(plan.kept_track_count ?? 0) > 0 && Number(plan.source_track_count ?? 0) > 0
 				? `keep ${plan.kept_track_count} of ${plan.source_track_count} tracks`
 				: null;
-		if (plan.action === 'copy') {
-			parts.push('copy current track');
-		}
-		if (trackSummary) {
-			parts.push(trackSummary);
-		}
-		return parts.join(' · ');
+		return comparisonValue(
+			compactCopy([codecLabel(plan.output_codec), formatBitrateCopy(plan.output_bitrate)]),
+			compactCopy([
+				channelLabel(plan.channels),
+				formatLanguageCopy(plan.language),
+				plan.action === 'copy' ? 'copy current track' : trackSummary
+			])
+		);
 	}
 
-	function summarizeSubtitleSource(tracks: SampleSubtitleTrack[]): string {
-		if (tracks.length === 0) return 'No subtitle tracks';
+	function summarizeSubtitleSource(tracks: SampleSubtitleTrack[]): ComparisonValue {
+		if (tracks.length === 0) return comparisonValue('No subtitle tracks');
 		const grouped: Record<string, number> = {};
 		tracks.forEach((track) => {
 			const parts = [formatLanguageCopy(track.language), codecLabel(track.codec_name)].filter(
@@ -238,27 +245,31 @@
 			.slice(0, 3)
 			.map(([label, count]) => (count > 1 ? `${label} x${count}` : label));
 		const suffix = tracks.length > 3 ? ` · +${tracks.length - 3} more` : '';
-		return `${tracks.length} track${tracks.length === 1 ? '' : 's'} · ${preview.join(' · ')}${suffix}`;
+		return comparisonValue(
+			`${tracks.length} subtitle track${tracks.length === 1 ? '' : 's'}`,
+			`${preview.join(' · ')}${suffix}`
+		);
 	}
 
 	function summarizeSubtitlePlan(
 		plan: FolderItemPlan['subtitles'] | undefined,
 		preferText: boolean
-	): string {
-		if (!plan) return 'No subtitle draft yet';
+	): ComparisonValue {
+		if (!plan) return comparisonValue('No subtitle draft yet');
 		const kept = Number(plan.kept_track_count ?? 0);
-		if (kept === 0) return 'No subtitles kept';
+		if (kept === 0) return comparisonValue('No subtitles kept');
 		const languages = (plan.languages ?? [])
 			.map((language) => formatLanguageCopy(language))
 			.filter(Boolean);
 		const codecs = (plan.codecs ?? []).map((codec) => codecLabel(codec));
-		const parts = [
-			`keep ${kept} track${kept === 1 ? '' : 's'}`,
-			languages.length ? languages.join(', ') : null,
-			codecs.length ? codecs.join(', ') : null,
-			preferText ? 'prefer text' : 'allow image subtitles'
-		].filter(Boolean);
-		return parts.join(' · ');
+		return comparisonValue(
+			`Keep ${kept} subtitle track${kept === 1 ? '' : 's'}`,
+			compactCopy([
+				languages.length ? languages.join(', ') : null,
+				codecs.length ? codecs.join(', ') : null,
+				preferText ? 'prefer text' : 'allow image subtitles'
+			])
+		);
 	}
 
 	function metricPreferenceLabel(
@@ -290,35 +301,39 @@
 	function summarizeMetricPolicy(
 		policyValue: FolderPolicy | undefined,
 		metricSupport: FolderPayload['metric_support']
-	): string {
+	): ComparisonValue {
 		const video = policyValue?.video ?? {};
 		const resolved = resolveMetricLabel(video.quality_metric, metricSupport);
 		const target = resolved === 'VMAF' ? video.target_vmaf : video.target_xpsnr;
 		const floor = resolved === 'VMAF' ? video.min_target_vmaf : video.min_target_xpsnr;
-		const parts = [metricPreferenceLabel(video.quality_metric, resolved)];
-		if (target != null) parts.push(`target ${target}`);
-		if (floor != null) parts.push(`floor ${floor}`);
-		return parts.join(' · ');
+		return comparisonValue(
+			metricPreferenceLabel(video.quality_metric, resolved),
+			compactCopy([
+				target != null ? `target ${target}` : null,
+				floor != null ? `floor ${floor}` : null
+			])
+		);
 	}
 
-	function summarizeMetricPlan(plan: FolderItemPlan['video'] | undefined): string {
-		if (!plan) return 'No draft video metric yet';
-		const parts = [
-			metricPreferenceLabel(plan.quality_metric, String(plan.quality_metric ?? '').toUpperCase())
-		];
-		if (plan.target != null) parts.push(`target ${plan.target}`);
-		if (plan.min_target != null) parts.push(`floor ${plan.min_target}`);
-		return parts.join(' · ');
+	function summarizeMetricPlan(plan: FolderItemPlan['video'] | undefined): ComparisonValue {
+		if (!plan) return comparisonValue('No draft video metric yet');
+		return comparisonValue(
+			metricPreferenceLabel(plan.quality_metric, String(plan.quality_metric ?? '').toUpperCase()),
+			compactCopy([
+				plan.target != null ? `target ${plan.target}` : null,
+				plan.min_target != null ? `floor ${plan.min_target}` : null
+			])
+		);
 	}
 
-	function compareValues(current: string, draft: string): boolean {
-		return current.trim() !== draft.trim();
-	}
-
-	function pathDirectory(value: string | null | undefined): string {
-		const trimmed = String(value ?? '').trim();
-		if (!trimmed || !trimmed.includes('/')) return '';
-		return trimmed.split('/').slice(0, -1).join(' / ');
+	function compareValues(
+		current: ComparisonValue | string,
+		draft: ComparisonValue | string
+	): boolean {
+		const left =
+			typeof current === 'string' ? current : `${current.headline} ${current.detail ?? ''}`;
+		const right = typeof draft === 'string' ? draft : `${draft.headline} ${draft.detail ?? ''}`;
+		return left.trim() !== right.trim();
 	}
 
 	function pathFilename(value: string | null | undefined): string {
@@ -526,7 +541,6 @@
 		factItems.filter((item) => !['Items', 'Total Size'].includes(item.label))
 	);
 	const representativePath = $derived(String(sampleItem.rel_path ?? '').trim());
-	const representativeDirectory = $derived(pathDirectory(representativePath));
 	const representativeFilenameStem = $derived(pathStem(representativePath));
 	const representativeFilenameTokens = $derived.by(() =>
 		softWrapTokens(representativeFilenameStem)
@@ -538,18 +552,19 @@
 	});
 	const streamComparisonRows = $derived.by(() => {
 		const rows: ComparisonRow[] = [];
-		const currentVideo = [codecLabel(sampleItem.video_codec), representativeExtension]
-			.filter(Boolean)
-			.join(' · ');
-		const draftVideoParts = [codecLabel(itemPlan.video?.output_codec), representativeExtension]
-			.filter(Boolean)
-			.join(' · ');
+		const currentVideo = comparisonValue(
+			codecLabel(sampleItem.video_codec),
+			representativeExtension ?? undefined
+		);
+		const draftVideo = comparisonValue(
+			codecLabel(itemPlan.video?.output_codec),
+			representativeExtension ?? undefined
+		);
 		rows.push({
 			label: 'Video stream',
-			current: currentVideo || 'Unknown video',
-			draft: draftVideoParts || 'Draft not ready',
-			note: 'What codec and container the representative encode will start from and write back.',
-			changed: compareValues(currentVideo || 'Unknown video', draftVideoParts || 'Draft not ready')
+			current: currentVideo,
+			draft: draftVideo,
+			changed: compareValues(currentVideo, draftVideo)
 		});
 
 		const currentAudio = summarizeAudioTrack(representativeAudioTrack);
@@ -558,7 +573,6 @@
 			label: 'Primary audio',
 			current: currentAudio,
 			draft: draftAudio,
-			note: 'Shows the lead track operator review is really making a choice about.',
 			changed: compareValues(currentAudio, draftAudio)
 		});
 
@@ -573,7 +587,6 @@
 			label: 'Subtitles',
 			current: currentSubs,
 			draft: draftSubs,
-			note: 'Helps confirm which subtitle languages and formats survive the encode.',
 			changed: compareValues(currentSubs, draftSubs)
 		});
 
@@ -587,48 +600,59 @@
 			label: 'Quality guardrail',
 			current: currentMetric,
 			draft: draftMetric,
-			note: 'Metric, target, and floor decide how aggressive this draft is allowed to be.',
 			changed: compareValues(currentMetric, draftMetric)
 		});
 
-		const currentCap = `${String(baselinePolicy.video?.max_encoded_percent ?? 'n/a')}%`;
-		const draftCap = `${String(itemPlan.video?.max_encoded_percent ?? policy.video?.max_encoded_percent ?? 'n/a')}%`;
+		const currentCap = comparisonValue(
+			`${String(baselinePolicy.video?.max_encoded_percent ?? 'n/a')}%`
+		);
+		const draftCap = comparisonValue(
+			`${String(itemPlan.video?.max_encoded_percent ?? policy.video?.max_encoded_percent ?? 'n/a')}%`
+		);
 		rows.push({
 			label: 'Size ceiling',
 			current: currentCap,
 			draft: draftCap,
-			note: 'A lower cap squeezes harder. A higher cap protects quality but saves less space.',
 			changed: compareValues(currentCap, draftCap)
 		});
 
-		const currentGrain = String(baselinePolicy.video?.default_grain ?? 'n/a');
-		const draftGrain = String(
-			itemPlan.video?.default_grain ?? policy.video?.default_grain ?? 'n/a'
+		const currentGrain = comparisonValue(String(baselinePolicy.video?.default_grain ?? 'n/a'));
+		const draftGrain = comparisonValue(
+			String(itemPlan.video?.default_grain ?? policy.video?.default_grain ?? 'n/a')
 		);
 		rows.push({
 			label: 'Film grain',
 			current: currentGrain,
 			draft: draftGrain,
-			note: 'Useful when the sample starts looking too clean or too noisy.',
 			changed: compareValues(currentGrain, draftGrain)
 		});
 
-		const currentSurround =
-			formatBitrateCopy(baselinePolicy.audio?.surround_5_1_opus_bitrate) ?? 'n/a';
-		const draftSurround =
+		const currentSurround = comparisonValue(
+			formatBitrateCopy(baselinePolicy.audio?.surround_5_1_opus_bitrate) ?? 'n/a'
+		);
+		const draftSurround = comparisonValue(
 			formatBitrateCopy(
 				policy.audio?.surround_5_1_opus_bitrate ?? itemPlan.audio?.output_bitrate
-			) ?? 'n/a';
+			) ?? 'n/a'
+		);
 		rows.push({
 			label: '5.1 Opus budget',
 			current: currentSurround,
 			draft: draftSurround,
-			note: 'This is the bitrate budget that matters most when surround gets converted to Opus.',
 			changed: compareValues(currentSurround, draftSurround)
 		});
 
 		return rows;
 	});
+	const changedPolicyRows = $derived.by(() => policyComparisonRows.filter((row) => row.changed));
+	const steadyPolicyRows = $derived.by<SteadyComparisonRow[]>(() =>
+		policyComparisonRows
+			.filter((row) => !row.changed)
+			.map((row) => ({
+				label: row.label,
+				value: compactCopy([row.current.headline, row.current.detail ?? 'unchanged'])
+			}))
+	);
 
 	$effect(() => {
 		const preferred = String(folder.sample_host_key || '').trim();
@@ -775,7 +799,7 @@
 		/>
 	{/if}
 
-	<div class="workflow-grid">
+	<div class="workflow-stack">
 		<Panel>
 			<div class="panel-stack">
 				<SectionHead
@@ -788,88 +812,98 @@
 					<Pill label={sampleQueueLabel} variant="neutral" wide />
 					<Pill label={encodeQueueLabel} variant="ghost" wide />
 				</div>
-				<div class="sample-host-grid">
-					{#each sampleHostCards as hostCard (hostCard.key)}
-						<button
-							type="button"
-							class:selected={selectedHost === hostCard.key}
-							class:disabled={!hostCard.available}
-							class:preferred={hostCard.preferred}
-							class="sample-host-card"
-							disabled={!hostCard.available}
-							onclick={() => (selectedHost = hostCard.key)}
-						>
-							<div class="sample-host-topline">
-								<p class="eyebrow-copy">
-									{hostCard.available ? 'Ready for sample' : 'Unavailable'}
-								</p>
-								{#if hostCard.preferred}
-									<span class="sample-host-badge">Recommended</span>
+				<div class="run-layout">
+					<div class="run-host-column">
+						<div class="sample-host-grid">
+							{#each sampleHostCards as hostCard (hostCard.key)}
+								<button
+									type="button"
+									class:selected={selectedHost === hostCard.key}
+									class:disabled={!hostCard.available}
+									class:preferred={hostCard.preferred}
+									class="sample-host-card"
+									disabled={!hostCard.available}
+									onclick={() => (selectedHost = hostCard.key)}
+								>
+									<div class="sample-host-topline">
+										<p class="eyebrow-copy">
+											{hostCard.available ? 'Ready for sample' : 'Unavailable'}
+										</p>
+										{#if hostCard.preferred}
+											<span class="sample-host-badge">Recommended</span>
+										{/if}
+									</div>
+									<p class="sample-host-label">{hostCard.label}</p>
+									{#if hostCard.detail && hostCard.detail !== hostCard.label}
+										<p class="muted-copy">{hostCard.detail}</p>
+									{/if}
+									<div class="sample-host-meta">
+										{#if hostCard.runtime}
+											<span>P{hostCard.runtime.priority}</span>
+										{/if}
+										{#if compactScheduleCopy(hostCard.runtime)}
+											<span>{compactScheduleCopy(hostCard.runtime)}</span>
+										{/if}
+									</div>
+									{#if hostCapacityCopy(hostCard.runtime)}
+										<p class="sample-host-capacity">{hostCapacityCopy(hostCard.runtime)}</p>
+									{/if}
+								</button>
+							{/each}
+						</div>
+						{#if !selectedHostRuntime && folder.sample_host_help_text}
+							<p class="muted-copy host-selection-note">{folder.sample_host_help_text}</p>
+						{/if}
+					</div>
+					<div class="run-action-column">
+						<div class="action-row">
+							<Button
+								loading={actionState === 'sample'}
+								disabled={!canRunSample}
+								onclick={runSample}>Start AI-Guided Sample</Button
+							>
+							<Button
+								variant="secondary"
+								loading={actionState === 'save'}
+								onclick={saveProfile}>Save Draft</Button
+							>
+							<div class="queue-action-block">
+								<Button
+									variant="ghost"
+									loading={actionState === 'encode'}
+									disabled={!reviewGate.can_confirm_full}
+									onclick={queueEncode}>Queue Folder Encode</Button
+								>
+								{#if !reviewGate.can_confirm_full}
+									<p class="inline-gate-copy">
+										<span class="eyebrow-copy">Blocked</span>
+										{String(reviewGate.message ?? 'Run or review a calibration to continue.')}
+									</p>
 								{/if}
 							</div>
-							<p class="sample-host-label">{hostCard.label}</p>
-							{#if hostCard.detail && hostCard.detail !== hostCard.label}
-								<p class="muted-copy">{hostCard.detail}</p>
-							{/if}
-							<div class="sample-host-meta">
-								{#if hostCard.runtime}
-									<span>P{hostCard.runtime.priority}</span>
-								{/if}
-								{#if compactScheduleCopy(hostCard.runtime)}
-									<span>{compactScheduleCopy(hostCard.runtime)}</span>
-								{/if}
-							</div>
-							{#if hostCapacityCopy(hostCard.runtime)}
-								<p class="sample-host-capacity">{hostCapacityCopy(hostCard.runtime)}</p>
-							{/if}
-						</button>
-					{/each}
-				</div>
-				{#if !selectedHostRuntime && folder.sample_host_help_text}
-					<p class="muted-copy host-selection-note">{folder.sample_host_help_text}</p>
-				{/if}
-				<div class="action-row">
-					<Button loading={actionState === 'sample'} disabled={!canRunSample} onclick={runSample}
-						>Start AI-Guided Sample</Button
-					>
-					<Button variant="secondary" loading={actionState === 'save'} onclick={saveProfile}
-						>Save Draft</Button
-					>
-					<div class="queue-action-block">
-						<Button
-							variant="ghost"
-							loading={actionState === 'encode'}
-							disabled={!reviewGate.can_confirm_full}
-							onclick={queueEncode}>Queue Folder Encode</Button
-						>
-						{#if !reviewGate.can_confirm_full}
-							<p class="inline-gate-copy">
-								<span class="eyebrow-copy">Blocked</span>
-								{String(reviewGate.message ?? 'Run or review a calibration to continue.')}
-							</p>
+						</div>
+						<div class="note-row">
+							<button
+								type="button"
+								class="note-toggle"
+								aria-expanded={noteExpanded}
+								onclick={() => (noteExpanded = !noteExpanded)}
+							>
+								{noteExpanded ? 'Hide optional tuning note' : 'Add optional tuning note'}
+							</button>
+						</div>
+						{#if noteExpanded}
+							<label class="field-block note-panel">
+								<span class="eyebrow-copy">Tuning note</span>
+								<textarea
+									bind:value={note}
+									rows="3"
+									placeholder="Describe what looks wrong, or leave blank for the first AI-guided sample."
+								></textarea>
+							</label>
 						{/if}
 					</div>
 				</div>
-				<div class="note-row">
-					<button
-						type="button"
-						class="note-toggle"
-						aria-expanded={noteExpanded}
-						onclick={() => (noteExpanded = !noteExpanded)}
-					>
-						{noteExpanded ? 'Hide optional tuning note' : 'Add optional tuning note'}
-					</button>
-				</div>
-				{#if noteExpanded}
-					<label class="field-block note-panel">
-						<span class="eyebrow-copy">Tuning note</span>
-						<textarea
-							bind:value={note}
-							rows="3"
-							placeholder="Describe what looks wrong, or leave blank for the first AI-guided sample."
-						></textarea>
-					</label>
-				{/if}
 			</div>
 		</Panel>
 
@@ -878,7 +912,7 @@
 				<SectionHead
 					eyebrow="2. Review the draft"
 					heading="Check what this run will test"
-					lede="Representative file details, before-and-after draft comparisons, and review moments stay together so you can decide whether this draft is worth saving or queueing."
+					lede="Keep the same decision detail, but scan it as a compact diff instead of a wall of cards."
 					size="section"
 				/>
 				<div class="review-grid">
@@ -888,9 +922,6 @@
 							class="representative-path-shell"
 							title={representativePath || 'No representative file yet'}
 						>
-							{#if representativeDirectory}
-								<p class="representative-directory muted-copy">{representativeDirectory}</p>
-							{/if}
 							<h3 class="review-block-title representative-file-name">
 								{#each representativeFilenameTokens as token, index (`${index}-${token}`)}
 									<span>{token}</span><wbr />
@@ -909,23 +940,10 @@
 									variant="neutral"
 								/>
 							</div>
+							<p class="muted-copy representative-support-copy">
+								Representative pick for the preview clips and the draft diff below.
+							</p>
 						</div>
-						<ul class="detail-list muted-copy">
-							<li>
-								Source size: {formatGiB(Number(sampleItem.source_size_bytes ?? 0), 2)}
-							</li>
-							<li>
-								Video: {codecLabel(itemPlan.video?.source_codec)} to {codecLabel(
-									itemPlan.video?.output_codec
-								)}
-							</li>
-							<li>
-								Audio: {codecLabel(itemPlan.audio?.source_codec)} to {codecLabel(
-									itemPlan.audio?.output_codec
-								)}
-							</li>
-							<li>Subtitles kept: {String(itemPlan.subtitles?.kept_track_count ?? '0')}</li>
-						</ul>
 					</div>
 					<div class="review-block">
 						<p class="eyebrow-copy">Draft comparison</p>
@@ -933,37 +951,31 @@
 							<div class="comparison-group">
 								<div class="comparison-group-head">
 									<h3 class="comparison-group-title">Source media to draft output</h3>
-									<p class="muted-copy">
-										Use this to confirm the representative file is changing in the way you expect.
-									</p>
 								</div>
-								<div class="comparison-list">
+								<div class="comparison-table-head" aria-hidden="true">
+									<span>Current</span>
+									<span>Draft</span>
+								</div>
+								<div class="comparison-list compact-list">
 									{#each streamComparisonRows as row (row.label)}
-										<article class="comparison-row">
+										<article class="comparison-row compact-row changed-row">
 											<div class="comparison-row-head">
-												<div>
-													<p class="comparison-label">{row.label}</p>
-													{#if row.note}
-														<p class="comparison-note">{row.note}</p>
-													{/if}
-												</div>
-												<span
-													class:changed-pill={row.changed}
-													class:steady-pill={!row.changed}
-													class="comparison-status-pill"
-												>
-													{row.changed ? 'Changed' : 'Steady'}
-												</span>
+												<p class="comparison-label">{row.label}</p>
+												<span class="comparison-status-pill changed-pill">Changed</span>
 											</div>
 											<div class="comparison-values">
 												<div class="comparison-value-card">
-													<p class="eyebrow-copy">Current</p>
-													<p class="comparison-copy">{row.current}</p>
+													<p class="comparison-copy">{row.current.headline}</p>
+													{#if row.current.detail}
+														<p class="comparison-subcopy">{row.current.detail}</p>
+													{/if}
 												</div>
 												<div class="comparison-arrow" aria-hidden="true">→</div>
 												<div class="comparison-value-card draft-value-card">
-													<p class="eyebrow-copy">Draft</p>
-													<p class="comparison-copy">{row.draft}</p>
+													<p class="comparison-copy">{row.draft.headline}</p>
+													{#if row.draft.detail}
+														<p class="comparison-subcopy">{row.draft.detail}</p>
+													{/if}
 												</div>
 											</div>
 										</article>
@@ -973,43 +985,49 @@
 							<div class="comparison-group">
 								<div class="comparison-group-head">
 									<h3 class="comparison-group-title">Current policy to draft policy</h3>
-									<p class="muted-copy">
-										Shows the control values that will actually move if you save or queue this
-										draft.
-									</p>
 								</div>
-								<div class="comparison-list">
-									{#each policyComparisonRows as row (row.label)}
-										<article class="comparison-row">
+								<div class="comparison-table-head" aria-hidden="true">
+									<span>Current</span>
+									<span>Draft</span>
+								</div>
+								<div class="comparison-list compact-list">
+									{#each changedPolicyRows as row (row.label)}
+										<article class="comparison-row compact-row changed-row">
 											<div class="comparison-row-head">
-												<div>
-													<p class="comparison-label">{row.label}</p>
-													{#if row.note}
-														<p class="comparison-note">{row.note}</p>
-													{/if}
-												</div>
-												<span
-													class:changed-pill={row.changed}
-													class:steady-pill={!row.changed}
-													class="comparison-status-pill"
-												>
-													{row.changed ? 'Changed' : 'Same as current'}
-												</span>
+												<p class="comparison-label">{row.label}</p>
+												<span class="comparison-status-pill changed-pill">Changed</span>
 											</div>
 											<div class="comparison-values">
 												<div class="comparison-value-card">
-													<p class="eyebrow-copy">Current</p>
-													<p class="comparison-copy">{row.current}</p>
+													<p class="comparison-copy">{row.current.headline}</p>
+													{#if row.current.detail}
+														<p class="comparison-subcopy">{row.current.detail}</p>
+													{/if}
 												</div>
 												<div class="comparison-arrow" aria-hidden="true">→</div>
 												<div class="comparison-value-card draft-value-card">
-													<p class="eyebrow-copy">Draft</p>
-													<p class="comparison-copy">{row.draft}</p>
+													<p class="comparison-copy">{row.draft.headline}</p>
+													{#if row.draft.detail}
+														<p class="comparison-subcopy">{row.draft.detail}</p>
+													{/if}
 												</div>
 											</div>
 										</article>
 									{/each}
 								</div>
+								{#if steadyPolicyRows.length}
+									<div class="steady-summary-block">
+										<p class="eyebrow-copy">No other policy changes</p>
+										<div class="steady-summary-list">
+											{#each steadyPolicyRows as row (row.label)}
+												<div class="steady-summary-row">
+													<p class="steady-summary-label">{row.label}</p>
+													<p class="steady-summary-value">{row.value}</p>
+												</div>
+											{/each}
+										</div>
+									</div>
+								{/if}
 							</div>
 						</div>
 					</div>
@@ -1088,9 +1106,8 @@
 		font-weight: 700;
 	}
 
-	.workflow-grid {
+	.workflow-stack {
 		display: grid;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
 		gap: var(--space-4);
 	}
 
@@ -1109,11 +1126,6 @@
 		line-height: 1.35;
 	}
 
-	.detail-list {
-		display: grid;
-		gap: var(--space-2);
-	}
-
 	.pill-row {
 		display: flex;
 		gap: var(--space-2);
@@ -1126,10 +1138,24 @@
 		gap: var(--space-3);
 	}
 
+	.run-layout {
+		display: grid;
+		grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+		gap: var(--space-4);
+		align-items: start;
+	}
+
+	.run-action-column {
+		display: grid;
+		gap: var(--space-3);
+		align-content: start;
+	}
+
 	.sample-host-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+		grid-template-columns: repeat(auto-fit, minmax(240px, 320px));
 		gap: var(--space-3);
+		justify-content: start;
 	}
 
 	.sample-host-card {
@@ -1265,8 +1291,9 @@
 
 	.review-grid {
 		display: grid;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
+		grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
 		gap: var(--space-3);
+		align-items: start;
 	}
 
 	.review-block {
@@ -1279,9 +1306,9 @@
 	}
 
 	.review-block-title {
-		font-size: 1rem;
+		font-size: 1.14rem;
 		font-weight: 700;
-		line-height: 1.35;
+		line-height: 1.25;
 	}
 
 	.representative-block {
@@ -1299,15 +1326,9 @@
 		border: 1px solid rgba(15, 118, 110, 0.12);
 	}
 
-	.representative-directory {
-		font-size: 0.82rem;
-		letter-spacing: 0.03em;
-		word-break: break-word;
-	}
-
 	.representative-file-name {
 		font-size: 1.05rem;
-		line-height: 1.4;
+		line-height: 1.32;
 		overflow-wrap: anywhere;
 	}
 
@@ -1317,6 +1338,11 @@
 		flex-wrap: wrap;
 	}
 
+	.representative-support-copy {
+		font-size: 0.88rem;
+		line-height: 1.45;
+	}
+
 	.comparison-stack {
 		display: grid;
 		gap: var(--space-3);
@@ -1324,12 +1350,11 @@
 
 	.comparison-group {
 		display: grid;
-		gap: 0.85rem;
+		gap: 0.7rem;
 	}
 
 	.comparison-group-head {
 		display: grid;
-		gap: 0.35rem;
 	}
 
 	.comparison-group-title {
@@ -1340,22 +1365,50 @@
 
 	.comparison-list {
 		display: grid;
-		gap: 0.85rem;
+		gap: 0.6rem;
+	}
+
+	.comparison-table-head {
+		display: grid;
+		grid-template-columns: minmax(180px, 220px) minmax(0, 1fr) auto minmax(0, 1fr);
+		gap: 0.75rem;
+		padding: 0 0.2rem;
+		font-size: 0.72rem;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--ink-soft);
+	}
+
+	.comparison-table-head span:first-child {
+		grid-column: 2;
+	}
+
+	.comparison-table-head span:last-child {
+		grid-column: 4;
 	}
 
 	.comparison-row {
 		display: grid;
-		gap: 0.75rem;
-		padding: 0.9rem 0.95rem;
+		gap: 0.5rem;
+		padding: 0.8rem 0.9rem;
 		border-radius: calc(var(--radius-md) - 0.12rem);
 		background: rgba(255, 255, 255, 0.62);
 		border: 1px solid rgba(23, 35, 31, 0.08);
 	}
 
+	.compact-row {
+		grid-template-columns: minmax(180px, 220px) minmax(0, 1fr) auto minmax(0, 1fr);
+		align-items: center;
+	}
+
+	.changed-row {
+		background: linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(255, 255, 255, 0.72));
+	}
+
 	.comparison-row-head {
-		display: flex;
-		justify-content: space-between;
-		gap: var(--space-3);
+		display: grid;
+		gap: 0.4rem;
 		align-items: start;
 	}
 
@@ -1365,17 +1418,11 @@
 		line-height: 1.3;
 	}
 
-	.comparison-note {
-		margin-top: 0.2rem;
-		font-size: 0.84rem;
-		line-height: 1.45;
-		color: var(--ink-soft);
-	}
-
 	.comparison-status-pill {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
+		justify-self: start;
 		padding: 0.22rem 0.58rem;
 		border-radius: 999px;
 		font-size: 0.72rem;
@@ -1390,13 +1437,9 @@
 		color: var(--accent-deep);
 	}
 
-	.steady-pill {
-		background: rgba(23, 35, 31, 0.08);
-		color: var(--ink-soft);
-	}
-
 	.comparison-values {
 		display: grid;
+		grid-column: 2 / 5;
 		grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
 		gap: 0.75rem;
 		align-items: stretch;
@@ -1417,10 +1460,16 @@
 	}
 
 	.comparison-copy {
-		font-size: 0.95rem;
+		font-size: 0.98rem;
 		font-weight: 600;
-		line-height: 1.5;
+		line-height: 1.35;
 		word-break: break-word;
+	}
+
+	.comparison-subcopy {
+		font-size: 0.82rem;
+		line-height: 1.45;
+		color: var(--ink-soft);
 	}
 
 	.comparison-arrow {
@@ -1429,6 +1478,40 @@
 		font-size: 1.15rem;
 		font-weight: 800;
 		color: var(--ink-soft);
+	}
+
+	.steady-summary-block {
+		display: grid;
+		gap: 0.55rem;
+		padding-top: 0.2rem;
+	}
+
+	.steady-summary-list {
+		display: grid;
+		gap: 0.45rem;
+	}
+
+	.steady-summary-row {
+		display: flex;
+		justify-content: space-between;
+		gap: var(--space-3);
+		padding: 0.65rem 0.8rem;
+		border-radius: calc(var(--radius-md) - 0.18rem);
+		background: rgba(255, 255, 255, 0.48);
+		border: 1px solid rgba(23, 35, 31, 0.06);
+	}
+
+	.steady-summary-label {
+		font-size: 0.88rem;
+		font-weight: 600;
+		line-height: 1.35;
+	}
+
+	.steady-summary-value {
+		font-size: 0.84rem;
+		line-height: 1.4;
+		color: var(--ink-soft);
+		text-align: right;
 	}
 
 	.hotspot-block,
@@ -1448,10 +1531,23 @@
 
 	@media (max-width: 900px) {
 		.folder-header-grid,
-		.workflow-grid,
+		.run-layout,
 		.review-grid,
 		.snapshot-grid {
 			grid-template-columns: 1fr;
+		}
+
+		.compact-row,
+		.comparison-table-head {
+			grid-template-columns: 1fr;
+		}
+
+		.comparison-values {
+			grid-column: auto;
+		}
+
+		.comparison-table-head {
+			display: none;
 		}
 
 		.comparison-values {
@@ -1460,6 +1556,15 @@
 
 		.comparison-arrow {
 			display: none;
+		}
+
+		.steady-summary-row {
+			grid-template-columns: 1fr;
+			display: grid;
+		}
+
+		.steady-summary-value {
+			text-align: left;
 		}
 	}
 
