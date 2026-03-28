@@ -1,7 +1,6 @@
 <script lang="ts">
 	import type { HostRuntime } from '$lib/api/types';
 	import Panel from '$lib/components/Panel.svelte';
-	import { titleCase } from '$lib/format';
 
 	let {
 		host,
@@ -12,6 +11,10 @@
 	} = $props();
 
 	type StateTone = 'ok' | 'warn' | 'hold' | 'neutral';
+	const capabilityLabels: Record<string, string> = {
+		encode_queue: 'Queue',
+		sample_calibration: 'Sample'
+	};
 
 	const hostTone = $derived.by(() => {
 		if (!host.available) {
@@ -37,29 +40,20 @@
 		return 'neutral' as StateTone;
 	});
 
-	const runtimeFacts = $derived.by(() => {
-		const facts = [host.schedule_profile_label, `P${host.priority}`];
-
-		if (host.schedule_detail) {
-			facts.push(host.schedule_detail);
+	const hostDetail = $derived.by(() => {
+		if (!host.schedule_detail || host.schedule_profile_label === 'Always') {
+			return null;
 		}
 
-		facts.push(`${host.max_parallel_encodes} lane${host.max_parallel_encodes === 1 ? '' : 's'}`);
-
-		if (host.active_encode_count > 0) {
-			facts.push(`${host.active_encode_count} running`);
-		}
-
-		return facts;
+		return host.schedule_detail
+			.replace(/^window\s+/i, '')
+			.replace(/\s+in host local time$/i, ' local time');
 	});
-
-	const capabilityFacts = $derived.by(() =>
-		host.capabilities.map((capability) => titleCase(capability))
-	);
 
 	const attentionCard = $derived.by(() => {
 		if (!host.available) {
 			return {
+				label: 'Needs attention',
 				message: host.message,
 				detail: host.issues[0] ?? null,
 				linkLabel: onSettingsClick ? 'Open host settings' : null
@@ -68,6 +62,7 @@
 
 		if (host.active_reason === 'encode queue capability disabled') {
 			return {
+				label: 'Needs setup',
 				message: 'Encode queue capability disabled',
 				detail: onSettingsClick ? 'Enable queue support for this worker in Settings.' : null,
 				linkLabel: onSettingsClick ? 'Open host settings' : null
@@ -76,6 +71,55 @@
 
 		return null;
 	});
+
+	const statusChip = $derived.by(() => {
+		if (attentionCard) {
+			return null;
+		}
+
+		if (host.queue_active) {
+			return { label: 'Ready', tone: 'ok' as const };
+		}
+
+		if (host.schedule_open === false) {
+			return { label: 'Window', tone: 'hold' as const };
+		}
+
+		if (host.active_reason === 'parallel encode slots are full') {
+			return { label: 'At Capacity', tone: 'neutral' as const };
+		}
+
+		return { label: 'Mounted', tone: 'neutral' as const };
+	});
+
+	const statusTrayLabel = $derived(host.schedule_profile_label);
+
+	const statusTrayHeadline = $derived.by(() => {
+		const laneLabel = `lane${host.max_parallel_encodes === 1 ? '' : 's'}`;
+
+		if (host.active_encode_count > 0) {
+			return `${host.active_encode_count} of ${host.max_parallel_encodes} ${laneLabel} running`;
+		}
+
+		if (host.queue_active) {
+			return `${host.max_parallel_encodes} ${laneLabel} available`;
+		}
+
+		if (host.schedule_open === false) {
+			return `${host.max_parallel_encodes} ${laneLabel} waiting on schedule`;
+		}
+
+		if (host.active_reason === 'parallel encode slots are full') {
+			return `${host.max_parallel_encodes} ${laneLabel} busy`;
+		}
+
+		return `${host.max_parallel_encodes} ${laneLabel} mounted`;
+	});
+
+	const metadataPills = $derived.by(() => [
+		`P${host.priority}`,
+		...host.capabilities.map((capability) => capabilityLabels[capability] ?? capability.replace(/_/g, ' '))
+	]);
 </script>
 
 <Panel class={`host-card ${hostTone}`.trim()} padding="0.8rem 0.9rem 0.92rem">
@@ -84,30 +128,41 @@
 			<h3>{host.label}</h3>
 			<p class="muted-copy host-key">{host.key}</p>
 		</div>
-		{#if attentionCard}
-			<span class="state-chip warn">
-				<span class="state-dot"></span>
-				Attention
-			</span>
+		{#if statusChip}
+			{#if statusChip.tone === 'hold' && onSettingsClick}
+				<button
+					type="button"
+					class={`state-chip state-chip-button ${statusChip.tone}`.trim()}
+					onclick={onSettingsClick}
+				>
+					{statusChip.label}
+				</button>
+			{:else}
+				<span class={`state-chip ${statusChip.tone}`.trim()}>{statusChip.label}</span>
+			{/if}
 		{/if}
 	</div>
 
-	<div class="meta-strip">
-		{#each runtimeFacts as fact (fact)}
-			<span>{fact}</span>
-		{/each}
-	</div>
-
-	{#if capabilityFacts.length}
-		<div class="supporting-strip" aria-label="Host capabilities">
-			{#each capabilityFacts as capability (capability)}
-				<span>{capability}</span>
-			{/each}
+	{#if !attentionCard}
+		<div class={`status-tray ${hostTone}`.trim()}>
+			<div class="tray-copy">
+				<p class="tray-kicker">{statusTrayLabel}</p>
+				<p class="tray-headline">{statusTrayHeadline}</p>
+				{#if hostDetail}
+					<p class="host-detail muted-copy">{hostDetail}</p>
+				{/if}
+			</div>
+			<div class="meta-pill-row" aria-label="Host metadata">
+				{#each metadataPills as pill (pill)}
+					<span class={`meta-pill ${pill.startsWith('P') ? 'priority' : ''}`.trim()}>{pill}</span>
+				{/each}
+			</div>
 		</div>
 	{/if}
 
 	{#if attentionCard}
 		<div class="issues-box">
+			<p class="attention-kicker">{attentionCard.label}</p>
 			<p>{attentionCard.message}</p>
 			{#if attentionCard.detail}
 				<p class="muted-copy">{attentionCard.detail}</p>
@@ -124,7 +179,9 @@
 <style>
 	:global(.host-card) {
 		display: grid;
+		grid-template-rows: auto 1fr;
 		gap: 0.7rem;
+		align-content: start;
 	}
 
 	:global(.host-card)::before {
@@ -171,16 +228,14 @@
 	}
 
 	.head-row {
-		display: flex;
-		justify-content: space-between;
-		gap: var(--space-2);
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		column-gap: var(--space-2);
 		align-items: start;
-		flex-wrap: wrap;
 	}
 
 	.title-block {
 		min-width: 0;
-		flex: 1 1 180px;
 	}
 
 	h3 {
@@ -194,83 +249,179 @@
 
 	.host-key {
 		font-size: 0.84rem;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.state-chip {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.45rem;
-		padding: 0.28rem 0.58rem;
-		border-radius: var(--radius-pill);
-		font-size: 0.76rem;
+		padding: 0.32rem 0.62rem;
+		border-radius: 999px;
+		font-size: 0.74rem;
 		font-weight: 700;
 		line-height: 1;
 		white-space: nowrap;
-		background: rgba(15, 118, 110, 0.08);
-		color: var(--accent-deep);
-		border: 1px solid rgba(15, 118, 110, 0.14);
+		border: 1px solid rgba(23, 35, 31, 0.1);
+		background: rgba(255, 255, 255, 0.84);
+		color: var(--ink-soft);
 	}
 
-	.state-chip.warn {
-		background: rgba(194, 65, 12, 0.1);
-		color: var(--warn);
-		border-color: rgba(194, 65, 12, 0.18);
+	.state-chip.ok {
+		background: rgba(47, 107, 62, 0.12);
+		border-color: rgba(47, 107, 62, 0.18);
+		color: #2f6b3e;
 	}
 
-	.state-dot {
-		width: 0.45rem;
-		height: 0.45rem;
+	.state-chip.ok::before {
+		content: '';
+		width: 0.38rem;
+		height: 0.38rem;
+		margin-right: 0.34rem;
 		border-radius: 999px;
 		background: currentColor;
-		flex: 0 0 auto;
 	}
 
-	.meta-strip {
+	.state-chip.hold {
+		background: rgba(180, 83, 9, 0.11);
+		border-color: rgba(180, 83, 9, 0.18);
+		color: #9a5512;
+	}
+
+	.state-chip.neutral {
+		background: rgba(82, 101, 94, 0.08);
+		border-color: rgba(82, 101, 94, 0.14);
+		color: var(--ink-soft);
+	}
+
+	.state-chip-button {
+		cursor: pointer;
+		transition:
+			transform 150ms ease,
+			background-color 150ms ease,
+			border-color 150ms ease;
+	}
+
+	.state-chip-button:hover {
+		transform: translateY(-1px);
+	}
+
+	.status-tray {
 		display: flex;
-		flex-wrap: wrap;
-		gap: 0.38rem;
+		flex-direction: column;
+		gap: 0.7rem;
+		padding: 0.82rem 0.88rem;
+		border-radius: var(--radius-md);
+		border: 1px solid rgba(23, 35, 31, 0.08);
+		height: 100%;
+		box-sizing: border-box;
+	}
+
+	.status-tray.ok {
+		background: rgba(47, 107, 62, 0.06);
+		border-color: rgba(47, 107, 62, 0.14);
+	}
+
+	.status-tray.hold {
+		background: rgba(180, 83, 9, 0.07);
+		border-color: rgba(180, 83, 9, 0.14);
+	}
+
+	.status-tray.neutral {
+		background: rgba(23, 35, 31, 0.04);
+		border-color: rgba(23, 35, 31, 0.08);
+	}
+
+	.tray-copy,
+	.host-detail {
+		margin: 0;
+	}
+
+	.tray-copy {
+		display: grid;
+		gap: 0.18rem;
+	}
+
+	.tray-kicker {
+		margin: 0;
+		font-size: 0.69rem;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--accent-deep);
+	}
+
+	:global(.host-card.ok) .tray-kicker {
+		color: var(--ok);
+	}
+
+	:global(.host-card.hold) .tray-kicker {
+		color: #9a5512;
+	}
+
+	.tray-headline {
+		margin: 0;
+		font-size: 0.95rem;
+		font-weight: 700;
+		line-height: 1.2;
+		color: var(--ink);
+	}
+
+	.host-detail {
 		font-size: 0.76rem;
 		line-height: 1.35;
 	}
 
-	.meta-strip span {
+	.meta-pill-row {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.36rem;
+		margin-top: auto;
+		padding-top: 0.2rem;
+	}
+
+	.meta-pill {
 		display: inline-flex;
 		align-items: center;
-		padding: 0.32rem 0.56rem;
+		padding: 0.24rem 0.5rem;
 		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.68);
+		background: rgba(255, 255, 255, 0.72);
 		border: 1px solid rgba(23, 35, 31, 0.08);
+		font-size: 0.72rem;
+		font-weight: 700;
+		line-height: 1;
 		color: var(--ink-soft);
 	}
 
-	.supporting-strip {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.42rem;
-		font-size: 0.76rem;
-		line-height: 1.4;
-	}
-
-	.supporting-strip span {
-		display: inline-flex;
-		align-items: center;
-		padding: 0.34rem 0.58rem;
-		border-radius: 999px;
-		background: rgba(15, 118, 110, 0.08);
-		border: 1px solid rgba(15, 118, 110, 0.12);
-		color: var(--accent-deep);
+	.meta-pill.priority {
+		background: rgba(23, 35, 31, 0.08);
+		border-color: rgba(23, 35, 31, 0.12);
+		color: var(--ink);
 	}
 
 	.issues-box {
-		display: grid;
-		gap: 0.32rem;
-		padding: 0.72rem 0.8rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.36rem;
+		padding: 0.82rem 0.88rem;
 		border-radius: var(--radius-md);
-		background: rgba(194, 65, 12, 0.06);
-		border: 1px solid rgba(194, 65, 12, 0.14);
+		background: rgba(194, 65, 12, 0.07);
+		border: 1px solid rgba(194, 65, 12, 0.16);
+		height: 100%;
+		box-sizing: border-box;
 	}
 
-	.issues-box p:first-child {
+	.attention-kicker {
+		margin: 0;
+		font-size: 0.72rem;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--warn);
+	}
+
+	.issues-box p:nth-child(2) {
 		margin: 0;
 		font-weight: 700;
 		color: var(--warn);
@@ -285,7 +436,7 @@
 		align-items: center;
 		justify-content: center;
 		width: fit-content;
-		margin-top: 0.15rem;
+		margin-top: auto;
 		padding: 0.42rem 0.68rem;
 		border-radius: 999px;
 		border: 1px solid rgba(194, 65, 12, 0.16);

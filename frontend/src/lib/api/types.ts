@@ -17,6 +17,7 @@ export interface FolderCard {
 	sort_score: number;
 	statuses: Record<string, number>;
 	video_codecs: Record<string, number>;
+	details_loading: boolean;
 }
 
 export interface QueueLane {
@@ -44,8 +45,9 @@ export interface EncodeQueueSummary {
 	};
 }
 
-export interface DashboardPayload {
-	folders: FolderCard[];
+export interface DashboardSummaryPayload {
+	folders_preview: FolderCard[];
+	library_colors: Record<string, string>;
 	scan_job: Record<string, unknown> | null;
 	calibration_queue: {
 		sample: QueueLane;
@@ -54,8 +56,15 @@ export interface DashboardPayload {
 	};
 	encode_queue: EncodeQueueSummary;
 	catalog_empty: boolean;
+	folder_cache_key: string;
 	metric_support: MetricSupport;
 	metric_status_copy: string;
+}
+
+export interface DashboardFoldersPayload {
+	folders: FolderCard[];
+	catalog_empty: boolean;
+	folder_cache_key: string;
 }
 
 export interface HostRuntime {
@@ -88,6 +97,7 @@ export interface SettingsLibrary {
 	index: string;
 	key: string;
 	path: string;
+	color: string;
 }
 
 export interface SettingsHost {

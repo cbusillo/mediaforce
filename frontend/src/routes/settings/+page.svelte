@@ -80,7 +80,10 @@
 	});
 
 	function addLibrary() {
-		libraries = [...libraries, { index: String(libraries.length), key: '', path: '' }];
+		libraries = [
+			...libraries,
+			{ index: String(libraries.length), key: '', path: '', color: '#0f766e' }
+		];
 	}
 
 	function addHost() {
@@ -201,6 +204,13 @@
 							<label class="field-block">
 								<span class="eyebrow-copy">Mounted path</span>
 								<input bind:value={library.path} placeholder="/Volumes/media/movies" />
+							</label>
+							<label class="field-block color-field">
+								<span class="eyebrow-copy">Accent color</span>
+								<div class="color-control">
+									<input type="color" bind:value={library.color} aria-label="Library accent color" />
+									<p class="mono-copy color-value">{library.color}</p>
+								</div>
 							</label>
 							<div class="editor-actions compact-actions">
 								<button
@@ -477,8 +487,24 @@
 	}
 
 	.library-editor {
-		grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.3fr) auto;
+		grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr) minmax(0, 150px) auto;
 		align-items: end;
+	}
+
+	.color-field {
+		min-width: 0;
+	}
+
+	.color-control {
+		display: grid;
+		grid-template-columns: 3rem minmax(0, 1fr);
+		gap: 0.65rem;
+		align-items: center;
+	}
+
+	.color-value {
+		margin: 0;
+		font-size: 0.82rem;
 	}
 
 	.two-col {
@@ -515,6 +541,13 @@
 
 	input[type='number'] {
 		padding-right: 0.7rem;
+	}
+
+	input[type='color'] {
+		padding: 0.2rem;
+		height: 3rem;
+		min-width: 3rem;
+		cursor: pointer;
 	}
 
 	.select-shell {
