@@ -89,12 +89,16 @@
 		rel_path?: string;
 		source_size_bytes?: number;
 		video_codec?: string;
+		video_bitrate?: number;
+		width?: number;
+		height?: number;
 		container?: string;
 		duration_seconds?: number;
 		audio_summary?: SampleAudioTrack[];
 		subtitle_summary?: SampleSubtitleTrack[];
 		resolved_policy?: FolderPolicy;
 	};
+	type SnapshotItem = { label: string; value: string; detail?: string };
 	type ComparisonValue = {
 		headline: string;
 		detail?: string;
@@ -190,6 +194,29 @@
 		return trimmed;
 	}
 
+	function formatPercentCopy(value: number | string | null | undefined): string {
+		if (value == null || value === '') return 'n/a';
+		const trimmed = String(value).trim();
+		if (!trimmed || trimmed.toLowerCase() === 'n/a') return 'n/a';
+		return `${trimmed}%`;
+	}
+
+	function formatResolutionCopy(
+		width: number | string | null | undefined,
+		height: number | string | null | undefined
+	): string | null {
+		const parsedWidth = Number(width ?? 0);
+		const parsedHeight = Number(height ?? 0);
+		if (!Number.isFinite(parsedWidth) || !Number.isFinite(parsedHeight)) return null;
+		if (parsedWidth <= 0 || parsedHeight <= 0) return null;
+		return `${parsedWidth.toLocaleString('en-US')}x${parsedHeight.toLocaleString('en-US')}`;
+	}
+
+	function inferResolutionFromPath(value: string | null | undefined): string | null {
+		const match = String(value ?? '').match(/(?:^|[.\s_-])(4320p|2160p|1440p|1080p|720p|576p|480p)(?:$|[.\s_-])/i);
+		return match ? match[1].toLowerCase() : null;
+	}
+
 	function formatLanguageCopy(value: string | null | undefined): string | null {
 		const trimmed = String(value ?? '').trim();
 		if (!trimmed || trimmed === 'und') return null;
@@ -274,19 +301,6 @@
 		);
 	}
 
-	function metricPreferenceLabel(
-		metric: string | null | undefined,
-		resolvedMetric: string | null | undefined
-	): string {
-		const raw = String(metric ?? 'auto')
-			.trim()
-			.toLowerCase();
-		if (raw === 'auto') {
-			return resolvedMetric ? `Auto -> ${resolvedMetric}` : 'Auto';
-		}
-		return raw.toUpperCase();
-	}
-
 	function resolveMetricLabel(
 		metric: string | null | undefined,
 		metricSupport: FolderPayload['metric_support']
@@ -309,7 +323,7 @@
 		const target = resolved === 'VMAF' ? video.target_vmaf : video.target_xpsnr;
 		const floor = resolved === 'VMAF' ? video.min_target_vmaf : video.min_target_xpsnr;
 		return comparisonValue(
-			metricPreferenceLabel(video.quality_metric, resolved),
+			resolved,
 			compactCopy([
 				target != null ? `target ${target}` : null,
 				floor != null ? `floor ${floor}` : null
@@ -320,7 +334,7 @@
 	function summarizeMetricPlan(plan: FolderItemPlan['video'] | undefined): ComparisonValue {
 		if (!plan) return comparisonValue('No draft video metric yet');
 		return comparisonValue(
-			metricPreferenceLabel(plan.quality_metric, String(plan.quality_metric ?? '').toUpperCase()),
+			String(plan.quality_metric ?? '').toUpperCase() || 'n/a',
 			compactCopy([
 				plan.target != null ? `target ${plan.target}` : null,
 				plan.min_target != null ? `floor ${plan.min_target}` : null
@@ -543,15 +557,29 @@
 		)
 	);
 	const encodeQueueLabel = $derived.by(() => encodeQueueSummaryCopy(folder.encode_queue_summary));
-	const folderSnapshotItems = $derived.by(() =>
-		factItems.filter((item) => !['Items', 'Total Size'].includes(item.label))
-	);
+	const folderSnapshotItems = $derived.by<SnapshotItem[]>(() => {
+		const discoveredCount = Number(folder.summary?.statuses?.discovered ?? 0);
+		return factItems
+			.filter((item) => !['Items', 'Total Size'].includes(item.label))
+			.map((item) => ({
+				label: item.label,
+				value: item.value,
+				detail:
+					item.label === 'Statuses' && discoveredCount > 0
+						? `${discoveredCount} item${discoveredCount === 1 ? '' : 's'} still have scanned defaults and would inherit the saved folder policy.`
+						: undefined
+			}));
+	});
 	const representativePath = $derived(String(sampleItem.rel_path ?? '').trim());
 	const representativeFilenameStem = $derived(pathStem(representativePath));
 	const representativeFilenameTokens = $derived.by(() =>
 		softWrapTokens(representativeFilenameStem)
 	);
 	const representativeExtension = $derived(pathExtension(representativePath));
+	const representativeResolution = $derived.by(
+		() => formatResolutionCopy(sampleItem.width, sampleItem.height) ?? inferResolutionFromPath(representativePath)
+	);
+	const representativeVideoBitrate = $derived.by(() => formatBitrateCopy(sampleItem.video_bitrate));
 	const representativeAudioTrack = $derived.by(() => {
 		const tracks = (sampleItem.audio_summary ?? []) as SampleAudioTrack[];
 		return tracks.find((track) => Boolean(track.default)) ?? tracks[0] ?? null;
@@ -609,11 +637,9 @@
 			changed: compareValues(currentMetric, draftMetric)
 		});
 
-		const currentCap = comparisonValue(
-			`${String(baselinePolicy.video?.max_encoded_percent ?? 'n/a')}%`
-		);
+		const currentCap = comparisonValue(formatPercentCopy(baselinePolicy.video?.max_encoded_percent));
 		const draftCap = comparisonValue(
-			`${String(itemPlan.video?.max_encoded_percent ?? policy.video?.max_encoded_percent ?? 'n/a')}%`
+			formatPercentCopy(itemPlan.video?.max_encoded_percent ?? policy.video?.max_encoded_percent)
 		);
 		rows.push({
 			label: 'Size ceiling',
@@ -646,6 +672,32 @@
 			current: currentSurround,
 			draft: draftSurround,
 			changed: compareValues(currentSurround, draftSurround)
+		});
+
+		const currentStereo = comparisonValue(
+			formatBitrateCopy(baselinePolicy.audio?.stereo_opus_bitrate) ?? 'n/a'
+		);
+		const draftStereo = comparisonValue(
+			formatBitrateCopy(policy.audio?.stereo_opus_bitrate) ?? 'n/a'
+		);
+		rows.push({
+			label: '2.0 Opus budget',
+			current: currentStereo,
+			draft: draftStereo,
+			changed: compareValues(currentStereo, draftStereo)
+		});
+
+		const currentWide = comparisonValue(
+			formatBitrateCopy(baselinePolicy.audio?.surround_7_1_opus_bitrate) ?? 'n/a'
+		);
+		const draftWide = comparisonValue(
+			formatBitrateCopy(policy.audio?.surround_7_1_opus_bitrate) ?? 'n/a'
+		);
+		rows.push({
+			label: '7.1 Opus budget',
+			current: currentWide,
+			draft: draftWide,
+			changed: compareValues(currentWide, draftWide)
 		});
 
 		return rows;
@@ -930,6 +982,9 @@
 										<div class="fact-card compact-fact-card">
 											<p class="eyebrow-copy">{item.label}</p>
 											<p class="fact-value">{item.value}</p>
+											{#if item.detail}
+												<p class="muted-copy snapshot-detail-copy">{item.detail}</p>
+											{/if}
 										</div>
 									{/each}
 								</div>
@@ -949,10 +1004,16 @@
 										{#if representativeExtension}
 											<Pill label={representativeExtension} variant="neutral" />
 										{/if}
+										{#if representativeResolution}
+											<Pill label={representativeResolution} variant="neutral" />
+										{/if}
 										<Pill
 											label={`Size ${formatGiB(Number(sampleItem.source_size_bytes ?? 0), 2)}`}
 											variant="neutral"
 										/>
+										{#if representativeVideoBitrate}
+											<Pill label={`Video ${representativeVideoBitrate}`} variant="neutral" />
+										{/if}
 										<Pill
 											label={`Length ${formatTimestamp(Number(sampleItem.duration_seconds ?? 0))}`}
 											variant="neutral"
@@ -1547,6 +1608,11 @@
 
 	.compact-fact-card {
 		background: rgba(255, 255, 255, 0.58);
+	}
+
+	.snapshot-detail-copy {
+		font-size: 0.82rem;
+		line-height: 1.45;
 	}
 
 	@media (max-width: 900px) {
