@@ -915,44 +915,68 @@
 
 		<Panel variant="accent">
 			<div class="panel-stack">
-				<SectionHead
-					eyebrow="2. Review the draft"
-					heading="Check what this run will test"
-					lede="Keep the same decision detail, but scan it as a compact diff instead of a wall of cards."
-					size="section"
-				/>
-				<div class="review-grid">
-					<div class="review-block representative-block">
-						<p class="eyebrow-copy">Representative file</p>
-						<div
-							class="representative-path-shell"
-							title={representativePath || 'No representative file yet'}
-						>
-							<h3 class="review-block-title representative-file-name">
-								{#each representativeFilenameTokens as token, index (`${index}-${token}`)}
-									<span>{token}</span><wbr />
-								{/each}
-							</h3>
-							<div class="representative-meta-row">
-								{#if representativeExtension}
-									<Pill label={representativeExtension} variant="neutral" />
-								{/if}
-								<Pill
-									label={`Size ${formatGiB(Number(sampleItem.source_size_bytes ?? 0), 2)}`}
-									variant="neutral"
-								/>
-								<Pill
-									label={`Length ${formatTimestamp(Number(sampleItem.duration_seconds ?? 0))}`}
-									variant="neutral"
-								/>
+					<SectionHead
+						eyebrow="2. Review the draft"
+						heading="Check what this run will test"
+						lede="Keep the same decision detail, but scan it as a compact diff instead of a wall of cards."
+						size="section"
+					/>
+					<div class="review-grid">
+						<div class="review-side-column">
+							<div class="review-block folder-snapshot-block">
+								<p class="eyebrow-copy">Folder state</p>
+								<div class="snapshot-grid">
+									{#each folderSnapshotItems as item (item.label)}
+										<div class="fact-card compact-fact-card">
+											<p class="eyebrow-copy">{item.label}</p>
+											<p class="fact-value">{item.value}</p>
+										</div>
+									{/each}
+								</div>
 							</div>
-							<p class="muted-copy representative-support-copy">
-								Representative pick for the preview clips and the draft diff below.
-							</p>
+							<div class="review-block representative-block">
+								<p class="eyebrow-copy">Representative file</p>
+								<div
+									class="representative-path-shell"
+									title={representativePath || 'No representative file yet'}
+								>
+									<h3 class="review-block-title representative-file-name">
+										{#each representativeFilenameTokens as token, index (`${index}-${token}`)}
+											<span>{token}</span><wbr />
+										{/each}
+									</h3>
+									<div class="representative-meta-row">
+										{#if representativeExtension}
+											<Pill label={representativeExtension} variant="neutral" />
+										{/if}
+										<Pill
+											label={`Size ${formatGiB(Number(sampleItem.source_size_bytes ?? 0), 2)}`}
+											variant="neutral"
+										/>
+										<Pill
+											label={`Length ${formatTimestamp(Number(sampleItem.duration_seconds ?? 0))}`}
+											variant="neutral"
+										/>
+									</div>
+									<p class="muted-copy representative-support-copy">
+										Representative pick for the preview clips and the draft diff below.
+									</p>
+								</div>
+							</div>
+							{#if reviewMomentPills.length}
+								<div class="review-block hotspot-block">
+									<p class="eyebrow-copy">Review moments</p>
+									<p class="muted-copy">Captured compare clips from the latest sampled draft.</p>
+									<div class="pill-row">
+										{#each reviewMomentPills as pill (pill.key)}
+											<Pill label={pill.label} variant="neutral" />
+										{/each}
+									</div>
+								</div>
+							{/if}
 						</div>
-					</div>
-					<div class="review-block">
-						<p class="eyebrow-copy">Draft comparison</p>
+						<div class="review-block">
+							<p class="eyebrow-copy">Draft comparison</p>
 						<div class="comparison-stack">
 							<div class="comparison-group">
 								<div class="comparison-group-head">
@@ -1036,32 +1060,10 @@
 								{/if}
 							</div>
 						</div>
-					</div>
-				</div>
-				{#if reviewMomentPills.length}
-					<div class="review-block hotspot-block">
-						<p class="eyebrow-copy">Review moments</p>
-						<p class="muted-copy">Captured compare clips from the latest sampled draft.</p>
-						<div class="pill-row">
-							{#each reviewMomentPills as pill (pill.key)}
-								<Pill label={pill.label} variant="neutral" />
-							{/each}
 						</div>
 					</div>
-				{/if}
-				<div class="review-block folder-snapshot-block">
-					<p class="eyebrow-copy">Folder state</p>
-					<div class="snapshot-grid">
-						{#each folderSnapshotItems as item (item.label)}
-							<div class="fact-card compact-fact-card">
-								<p class="eyebrow-copy">{item.label}</p>
-								<p class="fact-value">{item.value}</p>
-							</div>
-						{/each}
-					</div>
 				</div>
-			</div>
-		</Panel>
+			</Panel>
 	</div>
 
 	<Panel>
@@ -1304,6 +1306,12 @@
 		align-items: start;
 	}
 
+	.review-side-column {
+		display: grid;
+		gap: var(--space-3);
+		align-content: start;
+	}
+
 	.review-block {
 		display: grid;
 		gap: var(--space-2);
@@ -1531,6 +1539,10 @@
 		display: grid;
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 		gap: var(--space-3);
+	}
+
+	.folder-snapshot-block .snapshot-grid {
+		gap: var(--space-2);
 	}
 
 	.compact-fact-card {
