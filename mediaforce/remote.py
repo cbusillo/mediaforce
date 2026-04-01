@@ -59,14 +59,13 @@ def collect_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
 def run_remote_command(
         host: dict[str, object],
         command: list[str],
-        *,
         timeout: int,
         input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return run_remote_command_impl(
         host,
         command,
-        timeout=timeout,
+        timeout,
         input_text=input_text,
         ssh_target_for_host=ssh_target_for_host,
         remote_shell_path_export_line=remote_shell_path_export_line,
@@ -78,14 +77,13 @@ def copy_remote_file_to_local(
         host: dict[str, object],
         remote_path: Path,
         local_path: Path,
-        *,
         timeout: int,
 ) -> None:
     return copy_remote_file_to_local_impl(
         host,
         remote_path,
         local_path,
-        timeout=timeout,
+        timeout,
         ssh_target_for_host=ssh_target_for_host,
         ensure_remote_awake_for_ssh=_ensure_remote_awake_for_ssh,
         ssh_client_options_func=ssh_client_options,

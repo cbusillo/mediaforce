@@ -51,7 +51,6 @@ def cached_folder_cards(
         if _FOLDER_CARD_CACHE_KEY == cache_key:
             return list(_FOLDER_CARD_CACHE_VALUE)
     cards = list_folder_cards(
-        config,
         connection,
         minimum_recommended_savings_bytes=minimum_recommended_savings_bytes,
         folder_group=folder_group,
@@ -74,7 +73,6 @@ def reset_folder_card_cache() -> None:
 
 
 def preview_folder_cards(
-        config: MediaforceConfig,
         connection: sqlite3.Connection,
         *,
         minimum_recommended_savings_bytes: int,
@@ -135,7 +133,6 @@ def preview_folder_cards(
 
 
 def list_folder_cards(
-        config: MediaforceConfig,
         connection: sqlite3.Connection,
         *,
         minimum_recommended_savings_bytes: int,

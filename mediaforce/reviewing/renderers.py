@@ -158,7 +158,7 @@ def render_encoded_preview_clip_remote(
     if encoder == "libsvtav1":
         cmd.extend(["-svtav1-params", ":".join(svt_params)])
     cmd.append(str(remote_output_path))
-    result = run_remote_command(host, cmd, timeout=remote_preview_timeout_seconds)
+    result = run_remote_command(host, cmd, remote_preview_timeout_seconds)
     _raise_on_failure(result, "Preview sample encode failed")
 
 

@@ -88,7 +88,7 @@ def encode_preview_clips_remote(
         encoded_preview_clip_factory: Callable[..., Any],
 ) -> list[Any]:
     remote_root = Path("/tmp") / f"mediaforce-preview-{uuid_factory().hex[:12]}"
-    run_remote_command(host, ["mkdir", "-p", str(remote_root)], timeout=30)
+    run_remote_command(host, ["mkdir", "-p", str(remote_root)], 30)
     encoded: list[Any] = []
     try:
         for clip_number, clip_time in enumerate(timestamps, start=1):
@@ -108,7 +108,7 @@ def encode_preview_clips_remote(
                 crf=crf,
                 svt_params=svt_params,
             )
-            copy_remote_file_to_local(host, remote_output_path, output_path, timeout=remote_preview_timeout_seconds)
+            copy_remote_file_to_local(host, remote_output_path, output_path, remote_preview_timeout_seconds)
             encoded.append(
                 encoded_preview_clip_factory(
                     output_path=output_path,
@@ -119,7 +119,7 @@ def encode_preview_clips_remote(
             )
     finally:
         try:
-            run_remote_command(host, ["rm", "-rf", str(remote_root)], timeout=30)
+            run_remote_command(host, ["rm", "-rf", str(remote_root)], 30)
         except Exception:
             pass
     return encoded

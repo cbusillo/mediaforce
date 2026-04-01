@@ -236,7 +236,7 @@ def _run_quality_command(
     host_mode = execution_mode_for_host(host)
     if host_mode != "ssh":
         return run_command(cmd, process_controller=process_controller)
-    return run_remote_command(host or {}, cmd, timeout=REMOTE_QUALITY_TIMEOUT_SECONDS)
+    return run_remote_command(host or {}, cmd, REMOTE_QUALITY_TIMEOUT_SECONDS)
 
 
 @lru_cache(maxsize=1)

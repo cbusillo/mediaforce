@@ -802,7 +802,6 @@ def _list_folder_cards(config: MediaforceConfig, connection: sqlite3.Connection)
 
 def _preview_folder_cards(config: MediaforceConfig, connection: sqlite3.Connection) -> list[FolderCard]:
     return preview_folder_cards(
-        config,
         connection,
         minimum_recommended_savings_bytes=MIN_RECOMMENDED_SAVINGS_BYTES,
         folder_group=_folder_group,

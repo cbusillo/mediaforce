@@ -2738,11 +2738,22 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         output_dir.mkdir(parents=True, exist_ok=True)
         remote_calls: list[list[str]] = []
 
-        def remote_command_side_effect(_host: dict[str, object], cmd: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+        def remote_command_side_effect(
+                _host: dict[str, object],
+                cmd: list[str],
+                timeout: int,
+        ) -> subprocess.CompletedProcess[str]:
+            self.assertIn(timeout, (30, review.REMOTE_PREVIEW_TIMEOUT_SECONDS))
             remote_calls.append(cmd)
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
-        def copy_side_effect(_host: dict[str, object], _remote_path: Path, local_path: Path, timeout: int) -> None:
+        def copy_side_effect(
+                _host: dict[str, object],
+                _remote_path: Path,
+                local_path: Path,
+                timeout: int,
+        ) -> None:
+            self.assertEqual(timeout, review.REMOTE_PREVIEW_TIMEOUT_SECONDS)
             local_path.write_bytes(b"preview")
 
         with patch("mediaforce.review.run_remote_command", side_effect=remote_command_side_effect), patch(
