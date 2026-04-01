@@ -24,7 +24,7 @@
 	} = $props();
 </script>
 
-<HeroCard>
+<HeroCard asideText={metricStatusCopy}>
 	{#snippet copy()}
 		<SectionHead
 			eyebrow="Current Strategy"
@@ -63,10 +63,6 @@
 				{/if}
 			</div>
 		</div>
-	{/snippet}
-
-	{#snippet aside()}
-		<p>{metricStatusCopy}</p>
 	{/snippet}
 </HeroCard>
 

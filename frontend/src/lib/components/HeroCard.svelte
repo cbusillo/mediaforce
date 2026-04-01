@@ -6,11 +6,13 @@
 		copy,
 		meta,
 		aside,
+		asideText,
 		padding = '1.6rem 1.75rem'
 	}: {
 		copy?: Snippet;
 		meta?: Snippet;
 		aside?: Snippet;
+		asideText?: string;
 		padding?: string;
 	} = $props();
 </script>
@@ -22,6 +24,10 @@
 	{/if}
 	{#if aside}
 		<aside class="aside-block">{@render aside()}</aside>
+	{:else if asideText}
+		<aside class="aside-block">
+			<p>{asideText}</p>
+		</aside>
 	{/if}
 </Panel>
 
