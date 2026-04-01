@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="Black">
+    <option name="sdkName" value="uv (mediaforce)" />
+  </component>
+  <component name="RuffConfiguration">
+    <option name="enabled" value="true" />
+    <option name="executableDiscoveryMode" value="PATH" />
+    <option name="formatting" value="false" />
+    <option name="sortImports" value="false" />
+  </component>
+</project>
