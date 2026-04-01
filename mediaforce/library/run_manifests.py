@@ -1,17 +1,17 @@
 import json
-import sqlite3
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.db import DBClient
 from mediaforce.library.planner import build_manifest_item, recommend_item
 from mediaforce.library.scanner import scan_library
 
 
 def select_candidates(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         *,
         statuses: list[str],
@@ -41,7 +41,7 @@ def select_candidates(
     if limit is not None:
         query += " LIMIT ?"
         params.append(limit)
-    rows = [dict(row) for row in connection.execute(query, params).fetchall()]
+    rows = [dict(row) for row in connection.exec_driver_sql(query, tuple(params)).mappings().fetchall()]
     if buckets:
         rows = [row for row in rows if recommend_item(row, config).bucket in buckets]
     return rows
@@ -63,7 +63,7 @@ def build_run_manifest(rows: list[dict[str, Any]], config: MediaforceConfig) -> 
 
 
 def write_manifest(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         manifest: dict[str, Any],
         output_path: Path | None = None,
@@ -76,7 +76,7 @@ def write_manifest(
         "item_count": len(manifest["items"]),
         "sources": [item["source_path"] for item in manifest["items"]],
     }
-    connection.execute(
+    connection.exec_driver_sql(
         "INSERT INTO run_manifests(run_id, created_at, output_path, selection_json, item_count) VALUES (?, ?, ?, ?, ?)",
         (
             manifest["run_id"],
@@ -87,7 +87,7 @@ def write_manifest(
         ),
     )
     if manifest["items"]:
-        connection.executemany(
+        connection.exec_driver_sql(
             "UPDATE library_items SET status = 'planned', updated_at = ? WHERE source_path = ?",
             [(manifest["created_at"], item["source_path"]) for item in manifest["items"]],
         )
@@ -95,7 +95,7 @@ def write_manifest(
 
 
 def create_folder_manifest(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         *,
         prefix: str,

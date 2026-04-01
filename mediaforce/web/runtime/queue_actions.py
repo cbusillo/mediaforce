@@ -1,5 +1,4 @@
 from typing import Any
-import sqlite3
 
 from mediaforce.tuning.calibration_jobs import load_job
 from mediaforce.core.config import MediaforceConfig
@@ -45,14 +44,14 @@ def stop_calibration_queue_action(
 ) -> dict[str, Any]:
     stopped_message = "Calibration queue job was stopped and cleaned up."
     with connection_factory() as connection:
-        active_rows = connection.execute(
+        active_rows = connection.exec_driver_sql(
             """
             SELECT prefix
             FROM calibration_jobs
             WHERE status IN ('queued', 'running')
             ORDER BY created_at, rowid
             """
-        ).fetchall()
+        ).mappings().fetchall()
         active_prefixes = [str(row["prefix"]) for row in active_rows]
         for prefix in active_prefixes:
             payload = load_job_state(connection, config, prefix)

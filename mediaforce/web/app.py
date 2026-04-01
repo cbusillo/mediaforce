@@ -4,7 +4,6 @@ import logging
 import os
 import re
 import shutil
-import sqlite3
 import threading
 import time
 from collections.abc import Awaitable, Callable
@@ -28,7 +27,7 @@ from mediaforce.tuning.calibration_jobs import load_active_job, load_job, \
     list_queue_summary
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, load_runtime_settings, \
     save_runtime_settings
-from mediaforce.core.db import open_db
+from mediaforce.core.db import DBClient, open_db
 from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY, ensure_queue_state, load_latest_encode_job, \
     queue_position as encode_queue_position, save_encode_job, summarize_encode_queue
 from mediaforce.execution import (
@@ -507,7 +506,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             200,
         )
 
-    def _recent_tuning_sessions(connection: sqlite3.Connection, prefix: str, limit: int = 8) -> list[dict[str, Any]]:
+    def _recent_tuning_sessions(connection: DBClient, prefix: str, limit: int = 8) -> list[dict[str, Any]]:
         return recent_tuning_sessions(connection, prefix, load_json_object=_load_json_object, limit=limit)
 
     def _proposal_signal_copy(
@@ -788,7 +787,7 @@ def _reset_folder_card_cache() -> None:
     reset_folder_card_cache()
 
 
-def _list_folder_cards(config: MediaforceConfig, connection: sqlite3.Connection) -> list[FolderCard]:
+def _list_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
     return cached_folder_cards(
         config,
         connection,
@@ -800,7 +799,7 @@ def _list_folder_cards(config: MediaforceConfig, connection: sqlite3.Connection)
     )
 
 
-def _preview_folder_cards(config: MediaforceConfig, connection: sqlite3.Connection) -> list[FolderCard]:
+def _preview_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
     return preview_folder_cards(
         connection,
         minimum_recommended_savings_bytes=MIN_RECOMMENDED_SAVINGS_BYTES,
@@ -811,7 +810,7 @@ def _preview_folder_cards(config: MediaforceConfig, connection: sqlite3.Connecti
 
 
 def _host_runtime_rows(
-        connection: sqlite3.Connection, config: MediaforceConfig, *, now: datetime | None = None
+        connection: DBClient, config: MediaforceConfig, *, now: datetime | None = None
 ) -> list[dict[str, Any]]:
     return host_runtime_rows(
         connection,
@@ -971,8 +970,8 @@ def _folder_review_badge(config: MediaforceConfig, prefix: str) -> dict[str, str
     return {"label": None, "tone": None}
 
 
-def _sample_item(connection: sqlite3.Connection, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
-    rows = connection.execute(
+def _sample_item(connection: DBClient, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+    row = connection.exec_driver_sql(
         """
         SELECT *
         FROM library_items
@@ -982,11 +981,10 @@ def _sample_item(connection: sqlite3.Connection, config: MediaforceConfig, prefi
         LIMIT 1
         """,
         (f"{prefix}%",),
-    ).fetchall()
-    if not rows:
+    ).mappings().fetchone()
+    if row is None:
         return None
-    row = dict(rows[0])
-    return build_manifest_item(row, config)
+    return build_manifest_item(dict(row), config)
 
 
 _metric_support = runtime_metric_support
@@ -1412,12 +1410,12 @@ def _calibration_run_deps() -> CalibrationRunDeps:
     )
 
 
-def _load_job_state(connection: sqlite3.Connection, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+def _load_job_state(connection: DBClient, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
     return runtime_load_job_state(connection, config, prefix, _job_runtime_deps())
 
 
 def _save_job_state(
-        connection: sqlite3.Connection, config: MediaforceConfig, prefix: str, payload: dict[str, Any]
+        connection: DBClient, config: MediaforceConfig, prefix: str, payload: dict[str, Any]
 ) -> None:
     runtime_save_job_state(connection, config, prefix, payload, _job_runtime_deps())
 
@@ -1427,7 +1425,7 @@ def _calibration_job_belongs_to_current_process(job: dict[str, Any]) -> bool:
 
 
 def _expire_calibration_job(
-        connection: sqlite3.Connection, config: MediaforceConfig, prefix: str, job: dict[str, Any]
+        connection: DBClient, config: MediaforceConfig, prefix: str, job: dict[str, Any]
 ) -> dict[str, Any]:
     return runtime_expire_calibration_job(connection, config, prefix, job, _job_runtime_deps())
 
@@ -1441,16 +1439,16 @@ def _save_scan_job_state(config: MediaforceConfig, prefix: str | None, payload: 
 
 
 def _maybe_schedule_scan(
-        connection: sqlite3.Connection, config: MediaforceConfig, prefix: str | None
+        connection: DBClient, config: MediaforceConfig, prefix: str | None
 ) -> dict[str, Any] | None:
     return runtime_maybe_schedule_scan(connection, config, prefix, _job_runtime_deps())
 
 
-def _scan_is_stale(connection: sqlite3.Connection, config: MediaforceConfig, prefix: str | None) -> bool:
+def _scan_is_stale(connection: DBClient, config: MediaforceConfig, prefix: str | None) -> bool:
     return runtime_scan_is_stale(connection, config, prefix, _job_runtime_deps())
 
 
-def _latest_scan_completed_at(connection: sqlite3.Connection, prefix: str | None) -> datetime | None:
+def _latest_scan_completed_at(connection: DBClient, prefix: str | None) -> datetime | None:
     return runtime_latest_scan_completed_at(connection, prefix)
 
 
@@ -1459,7 +1457,7 @@ def _scan_process_is_alive(pid: JSONValue) -> bool:
 
 
 def _active_scan_from_db(
-        connection: sqlite3.Connection, config: MediaforceConfig, prefix: str | None
+        connection: DBClient, config: MediaforceConfig, prefix: str | None
 ) -> dict[str, Any] | None:
     return runtime_active_scan_from_db(connection, config, prefix, _job_runtime_deps())
 
@@ -1637,7 +1635,7 @@ def _prune_empty_parents(path: Path, *, stop_at: Path) -> None:
 
 
 def _clear_folder_tuning_state(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         *,
         config: MediaforceConfig,
         prefix: str,
@@ -1659,21 +1657,21 @@ def _clear_folder_tuning_state(
     review_targets = _review_cleanup_targets(config, calibration_payload)
     review_pack_dir = _review_pack_dir(config, prefix)
     review_pack_present = review_pack_dir.exists()
-    artifact_rows = connection.execute(
+    artifact_rows = connection.exec_driver_sql(
         "SELECT artifact_path FROM learning_artifacts WHERE prefix = ?",
         (prefix,),
-    ).fetchall()
+    ).mappings().fetchall()
     artifact_paths = [Path(str(row["artifact_path"])) for row in artifact_rows if
                       str(row["artifact_path"] or "").strip()]
     session_count = int(
-        connection.execute("SELECT COUNT(*) FROM tuning_sessions WHERE prefix = ?", (prefix,)).fetchone()[0]
+        connection.exec_driver_sql("SELECT COUNT(*) FROM tuning_sessions WHERE prefix = ?", (prefix,)).fetchone()[0]
     )
     job_count = int(
-        connection.execute("SELECT COUNT(*) FROM calibration_jobs WHERE prefix = ?", (prefix,)).fetchone()[0]
+        connection.exec_driver_sql("SELECT COUNT(*) FROM calibration_jobs WHERE prefix = ?", (prefix,)).fetchone()[0]
     )
 
-    connection.execute("DELETE FROM tuning_sessions WHERE prefix = ?", (prefix,))
-    connection.execute("DELETE FROM calibration_jobs WHERE prefix = ?", (prefix,))
+    connection.exec_driver_sql("DELETE FROM tuning_sessions WHERE prefix = ?", (prefix,))
+    connection.exec_driver_sql("DELETE FROM calibration_jobs WHERE prefix = ?", (prefix,))
 
     _remove_path_if_exists(calibration_path)
     _remove_path_if_exists(_advice_file(config, prefix))
@@ -1737,11 +1735,11 @@ def _now_iso() -> str:
     return datetime.now(tz=UTC).isoformat(timespec="seconds")
 
 
-def _recover_calibration_jobs(connection: sqlite3.Connection, config: MediaforceConfig) -> None:
-    running_rows = connection.execute(
+def _recover_calibration_jobs(connection: DBClient, config: MediaforceConfig) -> None:
+    running_rows = connection.exec_driver_sql(
         "SELECT job_id FROM calibration_jobs WHERE status = 'running' AND (owner_pid IS NULL OR owner_pid != ?)",
         (os.getpid(),),
-    ).fetchall()
+    ).mappings().fetchall()
     for row in running_rows:
         payload = load_job(connection, str(row["job_id"]))
         if payload is None:
@@ -1749,12 +1747,12 @@ def _recover_calibration_jobs(connection: sqlite3.Connection, config: Mediaforce
         _expire_calibration_job(connection, config, str(payload["prefix"]), payload)
 
 
-def _recover_encode_queue(connection: sqlite3.Connection, config: MediaforceConfig) -> None:
+def _recover_encode_queue(connection: DBClient, config: MediaforceConfig) -> None:
     runtime_recover_encode_queue(connection, config, _encode_queue_runtime_deps())
 
 
 def _reconcile_encode_jobs(
-        connection: sqlite3.Connection, config: MediaforceConfig, *, restart_recovery: bool = False
+        connection: DBClient, config: MediaforceConfig, *, restart_recovery: bool = False
 ) -> None:
     runtime_reconcile_encode_jobs(connection, config, _encode_queue_runtime_deps(), restart_recovery=restart_recovery)
 
@@ -1764,7 +1762,7 @@ def _encode_job_manifest_totals(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def _transition_encode_job_failure(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         job: dict[str, Any],
         *,
@@ -1781,7 +1779,7 @@ def _transition_encode_job_failure(
     )
 
 
-def _select_encode_host(connection: sqlite3.Connection, config: MediaforceConfig, job: dict[str, Any]) -> tuple[
+def _select_encode_host(connection: DBClient, config: MediaforceConfig, job: dict[str, Any]) -> tuple[
     dict[str, Any] | None, str | None]:
     return runtime_select_encode_host(connection, config, job, _encode_queue_runtime_deps())
 
@@ -1864,7 +1862,7 @@ def _maybe_seed_baseline_policy(
         base_policy: dict[str, Any],
         sample_item: dict[str, Any],
         existing_calibration: dict[str, Any] | None,
-        connection: sqlite3.Connection,
+        connection: DBClient,
 ) -> dict[str, Any] | None:
     return runtime_maybe_seed_baseline_policy(
         config=config,
@@ -1920,7 +1918,7 @@ def _process_encode_queue_once(*, config_path: Path) -> None:
 
 
 def _load_next_runnable_encode_job(
-        connection: sqlite3.Connection, config: MediaforceConfig
+        connection: DBClient, config: MediaforceConfig
 ) -> dict[str, Any] | None:
     return runtime_load_next_runnable_encode_job(connection, config, _encode_queue_runtime_deps())
 
@@ -1938,12 +1936,12 @@ def _run_periodic_cleanup(config: MediaforceConfig, cleanup_lock: threading.Lock
         cleanup_lock.release()
 
 
-def _snapshot_staged_artifact(connection: sqlite3.Connection, library_item_id: int) -> dict[str, Any] | None:
+def _snapshot_staged_artifact(connection: DBClient, library_item_id: int) -> dict[str, Any] | None:
     return runtime_snapshot_staged_artifact(connection, library_item_id, CALIBRATION_STAGED_ARTIFACT_COLUMNS)
 
 
 def _restore_staged_artifact(
-        connection: sqlite3.Connection, library_item_id: int, snapshot: dict[str, Any] | None
+        connection: DBClient, library_item_id: int, snapshot: dict[str, Any] | None
 ) -> None:
     runtime_restore_staged_artifact(connection, library_item_id, snapshot, CALIBRATION_STAGED_ARTIFACT_COLUMNS)
 
@@ -2012,7 +2010,7 @@ def _run_sampled_calibration(
 
 def _run_full_calibration(
         *,
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         prefix: str,
         action: str,

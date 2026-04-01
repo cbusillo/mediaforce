@@ -1,18 +1,18 @@
 from dataclasses import asdict
 from datetime import UTC, datetime
 import json
-from typing import Any
-import sqlite3
 import time
+from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.db import DBClient
 from mediaforce.encoding.encode_queue import list_encode_jobs
 from mediaforce.remote import HostStatus, collect_host_statuses, host_status_targets_current_machine, \
     normalize_host_media_access, run_host_lifecycle_command
 
 
 def host_runtime_rows(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         *,
         safe_collect_statuses: Any,
@@ -101,9 +101,9 @@ def host_runtime_rows(
     return rows
 
 
-def running_encode_counts_by_host(connection: sqlite3.Connection) -> dict[str, int]:
+def running_encode_counts_by_host(connection: DBClient) -> dict[str, int]:
     counts: dict[str, int] = {}
-    rows = connection.execute("SELECT host_json FROM encode_jobs WHERE status = 'running'").fetchall()
+    rows = connection.exec_driver_sql("SELECT host_json FROM encode_jobs WHERE status = 'running'").mappings().fetchall()
     for row in rows:
         try:
             payload = json.loads(str(row["host_json"] or "{}"))

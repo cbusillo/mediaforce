@@ -143,10 +143,10 @@ def generate_compare_clips(
     generated: list[Any] = []
     for index in indexes:
         item = manifest["items"][index]
-        stage_row = connection.execute(
+        stage_row = connection.exec_driver_sql(
             "SELECT staging_path FROM staged_artifacts WHERE library_item_id = ?",
             (item["library_item_id"],),
-        ).fetchone()
+        ).mappings().fetchone()
         if stage_row is None:
             raise FileNotFoundError(f"No staged artifact found for item {item['library_item_id']}")
 

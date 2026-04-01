@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "defaults.toml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "defaults.toml"
 
 
 @dataclass(frozen=True)

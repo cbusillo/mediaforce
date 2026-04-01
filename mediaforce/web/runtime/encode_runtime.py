@@ -1,7 +1,6 @@
 import json
 import os
 import socket
-import sqlite3
 import threading
 import time
 from dataclasses import dataclass
@@ -10,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db import open_db
+from mediaforce.core.db import DBClient, open_db
 from mediaforce.encoding.encode_queue import ensure_queue_state, load_active_encode_job, load_encode_job, load_queue_state, \
     save_encode_job, save_queue_state
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
@@ -41,7 +40,7 @@ class EncodeQueueRuntimeDeps:
 
 
 def recover_encode_queue(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         deps: EncodeQueueRuntimeDeps,
 ) -> None:
@@ -49,14 +48,14 @@ def recover_encode_queue(
 
 
 def reconcile_encode_jobs(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         deps: EncodeQueueRuntimeDeps,
         *,
         restart_recovery: bool = False,
 ) -> None:
     now = datetime.now(tz=UTC)
-    running_rows = connection.execute("SELECT job_id FROM encode_jobs WHERE status = 'running'").fetchall()
+    running_rows = connection.exec_driver_sql("SELECT job_id FROM encode_jobs WHERE status = 'running'").mappings().fetchall()
     for row in running_rows:
         payload = load_encode_job(connection, str(row["job_id"]))
         if payload is None:
@@ -79,9 +78,9 @@ def reconcile_encode_jobs(
             error_message=failure_message,
         )
 
-    retry_backoff_rows = connection.execute(
+    retry_backoff_rows = connection.exec_driver_sql(
         "SELECT job_id FROM encode_jobs WHERE status = 'retry_backoff' ORDER BY created_at , rowid "
-    ).fetchall()
+    ).mappings().fetchall()
     for row in retry_backoff_rows:
         payload = load_encode_job(connection, str(row["job_id"]))
         if payload is None:
@@ -101,7 +100,7 @@ def reconcile_encode_jobs(
 
     state = load_queue_state(connection)
     running_count = int(
-        connection.execute("SELECT COUNT(*) FROM encode_jobs WHERE status = 'running'").fetchone()[0]
+        connection.exec_driver_sql("SELECT COUNT(*) FROM encode_jobs WHERE status = 'running'").fetchone()[0]
     )
     if running_count == 0 and (state.get("active_job_id") or state.get("stop_requested")):
         state.update({"active_job_id": None, "stop_requested": False, "updated_at": deps.now_iso()})
@@ -133,7 +132,7 @@ def encode_job_manifest_totals(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def transition_encode_job_failure(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         job: dict[str, Any],
         deps: EncodeQueueRuntimeDeps,
@@ -203,7 +202,7 @@ def transition_encode_job_failure(
 
 
 def select_encode_host(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         job: dict[str, Any],
         deps: EncodeQueueRuntimeDeps,
@@ -381,13 +380,13 @@ def process_encode_queue_once(*, config_path: Path, deps: EncodeQueueRuntimeDeps
 
 
 def load_next_runnable_encode_job(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         deps: EncodeQueueRuntimeDeps,
 ) -> dict[str, Any] | None:
-    rows = connection.execute(
+    rows = connection.exec_driver_sql(
         "SELECT job_id FROM encode_jobs WHERE status = 'queued' ORDER BY created_at , rowid "
-    ).fetchall()
+    ).mappings().fetchall()
     for row in rows:
         job = load_encode_job(connection, str(row["job_id"]))
         if job is None:
@@ -640,7 +639,7 @@ def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) ->
 
 
 def _cleanup_encode_retry_artifacts(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         *,
         manifest_path: Path,
         deps: EncodeQueueRuntimeDeps,
@@ -660,16 +659,16 @@ def _cleanup_encode_retry_artifacts(
         library_item_id = item.get("library_item_id")
         if library_item_id is None:
             continue
-        stage_row = connection.execute(
+        stage_row = connection.exec_driver_sql(
             "SELECT promoted_at FROM staged_artifacts WHERE library_item_id = ?",
             (library_item_id,),
-        ).fetchone()
+        ).mappings().fetchone()
         if stage_row is not None and not stage_row["promoted_at"]:
-            connection.execute(
+            connection.exec_driver_sql(
                 "DELETE FROM staged_artifacts WHERE library_item_id = ?",
                 (library_item_id,),
             )
-        connection.execute(
+        connection.exec_driver_sql(
             """
             UPDATE library_items
             SET status     = CASE WHEN status = 'promoted' THEN status ELSE 'planned' END,

@@ -1,4 +1,3 @@
-import sqlite3
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -6,6 +5,7 @@ from typing import Any, Callable
 
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.db import DBClient
 from mediaforce.encoding.commands import build_ffmpeg_command as _build_ffmpeg_command_impl
 from mediaforce.encoding.helpers import _build_streaming_remote_ffmpeg_command as _build_streaming_remote_ffmpeg_command_impl, \
     _streaming_output_args_for_path as _streaming_output_args_for_path_impl, \
@@ -58,7 +58,7 @@ class EncodeResult:
 
 
 def encode_manifest_items(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         manifest_path: Path,
         manifest: dict[str, Any],
@@ -144,7 +144,7 @@ def resolve_item_staging_path(
 
 
 def encode_one_item(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         manifest_path: Path,
         manifest: dict[str, Any],
@@ -205,7 +205,7 @@ def search_quality_for_source(
 
 
 def validate_manifest_items(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         manifest: dict[str, Any],
         indexes: list[int],
@@ -218,7 +218,7 @@ def validate_manifest_items(
     return results
 
 
-def validate_one_item(connection: sqlite3.Connection, config: MediaforceConfig, item: dict[str, Any]) -> dict[str, Any]:
+def validate_one_item(connection: DBClient, config: MediaforceConfig, item: dict[str, Any]) -> dict[str, Any]:
     return validate_one_item_impl(
         connection,
         config,
@@ -232,7 +232,7 @@ def validate_one_item(connection: sqlite3.Connection, config: MediaforceConfig, 
 
 
 def promote_manifest_items(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         manifest: dict[str, Any],
         indexes: list[int],
@@ -245,7 +245,7 @@ def promote_manifest_items(
     return promoted_paths
 
 
-def promote_one_item(connection: sqlite3.Connection, config: MediaforceConfig, item: dict[str, Any], *,
+def promote_one_item(connection: DBClient, config: MediaforceConfig, item: dict[str, Any], *,
                      force: bool) -> Path:
     return promote_one_item_impl(
         connection,
@@ -489,7 +489,7 @@ def _parse_bitrate_text(value: str) -> int:
     return _parse_bitrate_text_impl(value)
 
 
-def _record_event(connection: sqlite3.Connection, library_item_id: int, event_type: str,
+def _record_event(connection: DBClient, library_item_id: int, event_type: str,
                   details: dict[str, Any]) -> None:
     return _record_event_impl(connection, library_item_id, event_type, details)
 

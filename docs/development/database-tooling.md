@@ -1,33 +1,54 @@
 # Database Tooling
 
-Use the checked-in SQL assets under `mediaforce/core/sql/` as the source of
-truth for Mediaforce's SQLite schema.
+Use SQLAlchemy table metadata plus Alembic revisions as the source of truth for
+Mediaforce's SQLite schema.
 
 ## Why
 
-- `mediaforce/core/db.py` now loads `mediaforce/core/sql/schema.sql` at runtime
-  instead of embedding the schema as a Python string.
-- Backward-compatibility migrations that PyCharm previously flagged now live in
-  `mediaforce/core/sql/migrations/`.
-- This gives PyCharm real `.sql` files it can parse and resolve instead of
-  trying to infer schema state from Python string literals.
+- `mediaforce/core/db.py` now boots databases through Alembic revisions instead
+  of applying ad hoc runtime schema patches.
+- `mediaforce/core/db_tables.py` defines the current SQLAlchemy metadata shape.
+- `mediaforce/core/alembic/versions/` records the ordered schema history used
+  for both fresh databases and legacy upgrades.
+- `mediaforce/core/sql/schema.sql` remains the compatibility bridge for very
+  old pre-Alembic databases and should stay aligned with the initial revision,
+  not with later head-only changes.
 
 ## PyCharm setup
 
 1. Open the `Database` tool window.
 2. Add a SQLite data source for your local Mediaforce database if you want live
    data inspection.
-3. Add a DDL data source that points at `mediaforce/core/sql/schema.sql`.
-4. Refresh introspection after schema changes.
+3. If you want a static schema reference, inspect the current metadata in
+   `mediaforce/core/db_tables.py` and the ordered revisions under
+   `mediaforce/core/alembic/versions/`.
+4. Refresh introspection after migration changes.
 
 ## Workflow expectations
 
-- When the SQLite schema changes, update `mediaforce/core/sql/schema.sql` in the
-  same commit.
-- If an existing on-disk database needs compatibility work, add or update a
-  targeted SQL asset under `mediaforce/core/sql/migrations/` and keep the
-  corresponding Python guard in `mediaforce/core/db.py`.
-- Migration assets should stay self-contained enough for PyCharm to resolve the
-  target table and columns without relying on file-level suppressions.
-- Prefer editing SQL in the checked-in `.sql` files rather than reintroducing
-  large inline SQL blocks in Python.
+- When the SQLite schema changes, update `mediaforce/core/db_tables.py` and add
+  a new Alembic revision under `mediaforce/core/alembic/versions/` in the same
+  change.
+- Keep Alembic revisions hand-authored and SQLite-aware. Prefer explicit DDL or
+  well-understood Alembic operations over broad autogeneration assumptions.
+- Preserve `mediaforce/core/sql/schema.sql` as the initial bridge for legacy
+  databases. Update it only when the initial normalized baseline truly changes.
+- Add or update regression coverage in `tests/test_db_runtime.py` whenever the
+  legacy bridge, head revision, or migration ordering changes.
+- Validate schema work with:
+  - `PYTHONPATH=. uv run --with pytest pytest tests/test_db_runtime.py`
+  - `PYTHONPATH=. uv run --with pytest pytest`
+    `tests/test_encode_queue_recovery.py tests/test_tuning_runtime.py`
+  - `uv run mediaforce --help`
+
+## Creating a new migration
+
+1. Update `mediaforce/core/db_tables.py` to reflect the desired head schema.
+2. Add a new Alembic revision file under `mediaforce/core/alembic/versions/`
+   with explicit `upgrade()` and `downgrade()` steps.
+3. If the change must also apply to pre-Alembic databases, make sure the legacy
+   bridge in `mediaforce/core/db_migrations.py` still normalizes old databases
+   to the initial revision before the new revision runs.
+4. Add or update tests proving both fresh-database and legacy-database upgrade
+   behavior.
+5. Run the validation commands above before closing the change.

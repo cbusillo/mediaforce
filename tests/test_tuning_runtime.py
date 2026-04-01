@@ -444,7 +444,7 @@ class TuningRuntimeTests(unittest.TestCase):
             artifact_path = self.root / "learned-memory" / "artifact.md"
             artifact_path.parent.mkdir(parents=True, exist_ok=True)
             artifact_path.write_text("artifact")
-            connection.execute(
+            connection.exec_driver_sql(
                 """
                 INSERT INTO learning_artifacts(artifact_id, session_id, prefix, title, artifact_path, summary,
                                                tags_json, created_at, updated_at)
@@ -462,7 +462,7 @@ class TuningRuntimeTests(unittest.TestCase):
                     "2026-03-30T00:00:00+00:00",
                 ),
             )
-            connection.execute(
+            connection.exec_driver_sql(
                 """
                 INSERT INTO calibration_jobs(job_id, prefix, status, lane, action, host_json, notes, policy_json,
                                              sample_item_json, created_at, updated_at)
@@ -487,11 +487,11 @@ class TuningRuntimeTests(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             self.assertEqual(
-                connection.execute("SELECT COUNT(*) FROM tuning_sessions WHERE prefix = ?", (prefix,)).fetchone()[0],
+                connection.exec_driver_sql("SELECT COUNT(*) FROM tuning_sessions WHERE prefix = ?", (prefix,)).fetchone()[0],
                 0,
             )
             self.assertEqual(
-                connection.execute("SELECT COUNT(*) FROM calibration_jobs WHERE prefix = ?", (prefix,)).fetchone()[0],
+                connection.exec_driver_sql("SELECT COUNT(*) FROM calibration_jobs WHERE prefix = ?", (prefix,)).fetchone()[0],
                 0,
             )
 
@@ -546,7 +546,7 @@ class TuningRuntimeTests(unittest.TestCase):
     def test_clear_folder_tuning_state_refuses_active_job(self) -> None:
         prefix = "tv/House/Season 2"
         with open_db(self.config.paths.db_path) as connection:
-            connection.execute(
+            connection.exec_driver_sql(
                 """
                 INSERT INTO calibration_jobs(job_id, prefix, status, lane, action, host_json, notes, policy_json,
                                              sample_item_json, created_at, updated_at)

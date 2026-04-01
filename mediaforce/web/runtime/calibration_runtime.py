@@ -1,13 +1,12 @@
 import json
 import shutil
-import sqlite3
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from mediaforce.core.config import MediaforceConfig, load_config
-from mediaforce.core.db import open_db
+from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.state_cleanup import purge_transient_artifacts
 
@@ -39,28 +38,28 @@ class CalibrationRunDeps:
 
 
 def snapshot_staged_artifact(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         library_item_id: int,
         staged_artifact_columns: tuple[str, ...],
 ) -> dict[str, Any] | None:
     columns = ", ".join(staged_artifact_columns)
-    row = connection.execute(
+    row = connection.exec_driver_sql(
         f"SELECT {columns} FROM staged_artifacts WHERE library_item_id = ?",
         (library_item_id,),
-    ).fetchone()
+    ).mappings().fetchone()
     if row is None:
         return None
     return {column: row[column] for column in staged_artifact_columns}
 
 
 def restore_staged_artifact(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         library_item_id: int,
         snapshot: dict[str, Any] | None,
         staged_artifact_columns: tuple[str, ...],
 ) -> None:
     if snapshot is None:
-        connection.execute("DELETE FROM staged_artifacts WHERE library_item_id = ?", (library_item_id,))
+        connection.exec_driver_sql("DELETE FROM staged_artifacts WHERE library_item_id = ?", (library_item_id,))
         return
 
     columns = ", ".join(staged_artifact_columns)
@@ -71,7 +70,7 @@ def restore_staged_artifact(
         if column != "library_item_id"
     )
     values = tuple(snapshot[column] for column in staged_artifact_columns)
-    connection.execute(
+    connection.exec_driver_sql(
         f"""
         INSERT INTO staged_artifacts ({columns})
         VALUES ({placeholders})
@@ -365,7 +364,7 @@ def run_sampled_calibration(
 
 def run_full_calibration(
         *,
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         prefix: str,
         action: str,

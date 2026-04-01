@@ -60,6 +60,14 @@ That keeps the repository focused on code and policy while allowing the local
 catalog, manifests, scan jobs, and calibration artifacts to survive repo moves
 or fresh clones.
 
+Database schema changes are now managed through SQLAlchemy 2.x plus Alembic.
+Opening the app against a database will auto-apply Alembic migrations, and
+legacy pre-Alembic databases are normalized to the initial revision before
+subsequent Alembic upgrades run.
+
+For migration authoring and review workflow, see
+`docs/development/database-tooling.md`.
+
 Transient calibration artifacts are also cleaned up automatically. By default,
 Mediaforce purges cached review clips, temporary calibration manifests, and
 `/Volumes/media/transcode/_calibration/` scratch outputs after `14` days.

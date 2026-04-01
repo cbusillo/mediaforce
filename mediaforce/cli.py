@@ -1,13 +1,12 @@
 import argparse
 import json
-import sqlite3
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Sequence
 
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config
-from mediaforce.core.db import open_db
+from mediaforce.core.db import DBClient, open_db
 from mediaforce.execution import describe_item_plan, encode_manifest_items, promote_manifest_items, \
     validate_manifest_items
 from mediaforce.library.folder_profiles import inspect_prefix
@@ -323,7 +322,7 @@ def _add_manifest_selection_args(parser: argparse.ArgumentParser, *, require_man
 
 
 def _select_candidates(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         statuses: list[str],
         prefixes: list[str],
@@ -355,7 +354,7 @@ def _select_candidates(
         query += " LIMIT ?"
         params.append(limit)
 
-    rows = [dict(row) for row in connection.execute(query, params).fetchall()]
+    rows = [dict(row) for row in connection.exec_driver_sql(query, tuple(params)).mappings().fetchall()]
     if buckets:
         rows = [row for row in rows if recommend_item(row, config).bucket in buckets]
     return rows
@@ -401,7 +400,7 @@ def _build_run_manifest(rows: list[dict[str, Any]], config: MediaforceConfig) ->
 
 
 def _write_manifest(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         manifest: dict[str, Any],
         output_path: Path | None,
@@ -415,7 +414,7 @@ def _write_manifest(
         "item_count": len(manifest["items"]),
         "sources": [item["source_path"] for item in manifest["items"]],
     }
-    connection.execute(
+    connection.exec_driver_sql(
         "INSERT INTO run_manifests(run_id, created_at, output_path, selection_json, item_count) VALUES (?, ?, ?, ?, ?)",
         (
             manifest["run_id"],
@@ -427,7 +426,7 @@ def _write_manifest(
     )
 
     if manifest["items"]:
-        connection.executemany(
+        connection.exec_driver_sql(
             "UPDATE library_items SET status = 'planned', updated_at = ? WHERE source_path = ?",
             [(manifest["created_at"], item["source_path"]) for item in manifest["items"]],
         )
@@ -440,7 +439,7 @@ def _load_manifest(path: Path) -> dict[str, Any]:
 
 
 def _create_campaign_manifest(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         *,
         prefix: str,
@@ -468,12 +467,12 @@ def _create_campaign_manifest(
     return manifest, manifest_path
 
 
-def _resolve_manifest_path(connection: sqlite3.Connection, manifest_path: Path | None) -> Path:
+def _resolve_manifest_path(connection: DBClient, manifest_path: Path | None) -> Path:
     if manifest_path is not None:
         return manifest_path
-    row = connection.execute(
+    row = connection.exec_driver_sql(
         "SELECT output_path FROM run_manifests ORDER BY created_at DESC LIMIT 1"
-    ).fetchone()
+    ).mappings().fetchone()
     if row is None:
         raise FileNotFoundError("No run manifest found. Start with mediaforce campaign or plan.")
     return Path(str(row["output_path"]))
@@ -561,7 +560,7 @@ def _print_manifest_item(item: dict[str, Any], index: int) -> None:
 
 
 def _run_review(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         manifest_path: Path,
         manifest: dict[str, Any],

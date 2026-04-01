@@ -1,12 +1,12 @@
 import json
 import os
-import sqlite3
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.db import DBClient
 from mediaforce.library.planner import recommend_item
 from mediaforce.library.probe import probe_media
 from mediaforce.core.utils import file_fingerprint, timestamp
@@ -25,14 +25,14 @@ class ScanStats:
     total_seen: int = 0
 
 
-def scan_library(connection: sqlite3.Connection, config: MediaforceConfig, prefixes: list[str] | None = None,
+def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[str] | None = None,
                  limit: int | None = None) -> ScanStats:
     scan_id = uuid.uuid4().hex
     started_at = timestamp()
     roots_json = json.dumps(sorted(config.source_root_map.keys()))
     normalized_prefixes = sorted({prefix.strip("/") for prefix in prefixes or [] if prefix.strip("/")})
     scope = "prefix" if normalized_prefixes else "full"
-    connection.execute(
+    connection.exec_driver_sql(
         "INSERT INTO scan_runs(scan_id, started_at, owner_pid, last_progress_at, roots_json, scope, prefixes_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
             scan_id,
@@ -58,13 +58,13 @@ def scan_library(connection: sqlite3.Connection, config: MediaforceConfig, prefi
             stats.total_seen += 1
 
             stat_result = file_path.stat()
-            row = connection.execute(
+            row = connection.exec_driver_sql(
                 "SELECT * FROM library_items WHERE source_path = ?",
                 (source_path,),
-            ).fetchone()
+            ).mappings().fetchone()
 
             if row and row["size_bytes"] == stat_result.st_size and row["mtime_ns"] == stat_result.st_mtime_ns:
-                connection.execute(
+                connection.exec_driver_sql(
                     """
                     UPDATE library_items
                     SET last_scan_id = ?,
@@ -130,7 +130,7 @@ def scan_library(connection: sqlite3.Connection, config: MediaforceConfig, prefi
             )
 
             if row is None:
-                connection.execute(
+                connection.exec_driver_sql(
                     """
                     INSERT INTO library_items (source_path, rel_path, media_root, parent_dir, file_name, container,
                                                size_bytes, mtime_ns, fingerprint, duration_seconds, video_codec,
@@ -146,7 +146,7 @@ def scan_library(connection: sqlite3.Connection, config: MediaforceConfig, prefi
                 )
                 stats.discovered += 1
             else:
-                connection.execute(
+                connection.exec_driver_sql(
                     """
                     UPDATE library_items
                     SET rel_path                  = ?,
@@ -202,14 +202,14 @@ def scan_library(connection: sqlite3.Connection, config: MediaforceConfig, prefi
               AND status != 'missing'
         """
         params = (started_at, *config.source_root_map.keys(), *seen_paths)
-        cursor = connection.execute(query, params)
+        cursor = connection.exec_driver_sql(query, params)
         stats.missing = cursor.rowcount if cursor.rowcount != -1 else 0
         pending_writes = _flush_scan_progress(connection, scan_id, stats, pending_writes + 1)
 
     _flush_scan_progress(connection, scan_id, stats, pending_writes, force=True)
 
     completed_at = timestamp()
-    connection.execute(
+    connection.exec_driver_sql(
         """
         UPDATE scan_runs
         SET completed_at     = ?,
@@ -233,7 +233,7 @@ def scan_library(connection: sqlite3.Connection, config: MediaforceConfig, prefi
 
 
 def _flush_scan_progress(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         scan_id: str,
         stats: ScanStats,
         pending_writes: int,
@@ -242,7 +242,7 @@ def _flush_scan_progress(
 ) -> int:
     if not force and pending_writes < SCAN_COMMIT_INTERVAL:
         return pending_writes
-    connection.execute(
+    connection.exec_driver_sql(
         """
         UPDATE scan_runs
         SET last_progress_at = ?,

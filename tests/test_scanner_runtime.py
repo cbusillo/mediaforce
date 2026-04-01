@@ -22,6 +22,10 @@ class _FakeConnection:
         self.statements.append(sql)
         return _FakeCursor()
 
+    def exec_driver_sql(self, sql: str, _params: object | None = None) -> _FakeCursor:
+        self.statements.append(sql)
+        return _FakeCursor()
+
     def commit(self) -> None:
         self.commit_count += 1
 

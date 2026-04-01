@@ -1,10 +1,10 @@
 import json
 import shutil
-import sqlite3
 from pathlib import Path
 from typing import Any, Callable
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.db import DBClient
 
 
 def finalize_output_path(temp_output: Path, staging_path: Path) -> None:
@@ -17,7 +17,7 @@ def finalize_output_path(temp_output: Path, staging_path: Path) -> None:
 
 
 def validate_one_item(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         item: dict[str, Any],
         *,
@@ -25,12 +25,12 @@ def validate_one_item(
         source_has_preservable_subtitles: Callable[[list[dict[str, Any]]], bool],
         check: Callable[[dict[str, Any], bool, str], None],
         timestamp: Callable[[], str],
-        record_event: Callable[[sqlite3.Connection, int, str, dict[str, Any]], None],
+        record_event: Callable[[DBClient, int, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
-    row = connection.execute(
+    row = connection.exec_driver_sql(
         "SELECT * FROM staged_artifacts WHERE library_item_id = ?",
         (item["library_item_id"],),
-    ).fetchone()
+    ).mappings().fetchone()
     if row is None:
         raise FileNotFoundError(f"No staged artifact found for item {item['library_item_id']}")
 
@@ -70,12 +70,12 @@ def validate_one_item(
         check(validation, staged_size_bytes < source_size_bytes, "staged file is smaller than source")
 
     now = timestamp()
-    connection.execute(
+    connection.exec_driver_sql(
         "UPDATE staged_artifacts SET validation_json = ?, validated_at = ?, updated_at = ? WHERE library_item_id = ?",
         (json.dumps(validation, separators=(",", ":")), now, now, item["library_item_id"]),
     )
     if validation["passed"]:
-        connection.execute(
+        connection.exec_driver_sql(
             "UPDATE library_items SET status = 'validated', updated_at = ? WHERE id = ?",
             (now, item["library_item_id"]),
         )
@@ -85,7 +85,7 @@ def validate_one_item(
 
 
 def promote_one_item(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         item: dict[str, Any],
         *,
@@ -93,12 +93,12 @@ def promote_one_item(
         probe_media: Callable[[Path], Any],
         file_fingerprint: Callable[[Path, Any, float | None], str],
         timestamp: Callable[[], str],
-        record_event: Callable[[sqlite3.Connection, int, str, dict[str, Any]], None],
+        record_event: Callable[[DBClient, int, str, dict[str, Any]], None],
 ) -> Path:
-    stage_row = connection.execute(
+    stage_row = connection.exec_driver_sql(
         "SELECT * FROM staged_artifacts WHERE library_item_id = ?",
         (item["library_item_id"],),
-    ).fetchone()
+    ).mappings().fetchone()
     if stage_row is None:
         raise FileNotFoundError(f"No staged artifact found for item {item['library_item_id']}")
     validation = json.loads(stage_row["validation_json"] or "{}")
@@ -128,7 +128,7 @@ def promote_one_item(
     rel_path = str(destination_path.relative_to(config.source_root_map[item["media_root"]].parent))
     parent_dir = str(destination_path.parent.relative_to(config.source_root_map[item["media_root"]].parent))
 
-    connection.execute(
+    connection.exec_driver_sql(
         """
         UPDATE library_items
         SET source_path               = ?,
@@ -186,7 +186,7 @@ def promote_one_item(
             item["library_item_id"],
         ),
     )
-    connection.execute(
+    connection.exec_driver_sql(
         """
         UPDATE staged_artifacts
         SET promoted_at          = ?,

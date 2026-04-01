@@ -1,7 +1,15 @@
 import json
-import sqlite3
-from typing import Any, TypeVar
+from typing import Any
+from typing import TypeVar
 
+from sqlalchemy import func
+from sqlalchemy import literal_column
+from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+from mediaforce.core.db import DBClient
+from mediaforce.core.db import DBRow
+from mediaforce.core.db_tables import calibration_jobs
 from mediaforce.core.type_defs import JSONValue
 
 T = TypeVar("T")
@@ -9,43 +17,43 @@ T = TypeVar("T")
 ACTIVE_JOB_STATUSES = {"queued", "running", "pending_review"}
 
 
-def load_latest_job(connection: sqlite3.Connection, prefix: str) -> dict[str, Any] | None:
+def load_latest_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
     row = connection.execute(
-        "SELECT * FROM calibration_jobs WHERE prefix = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
-        (prefix,),
-    ).fetchone()
+        _calibration_job_select()
+        .where(calibration_jobs.c.prefix == prefix)
+        .order_by(calibration_jobs.c.created_at.desc(), _rowid_column().desc())
+        .limit(1)
+    ).mappings().fetchone()
     return _hydrate_job(row) if row is not None else None
 
 
-def load_job(connection: sqlite3.Connection, job_id: str) -> dict[str, Any] | None:
-    row = connection.execute("SELECT * FROM calibration_jobs WHERE job_id = ?", (job_id,)).fetchone()
+def load_job(connection: DBClient, job_id: str) -> dict[str, Any] | None:
+    row = connection.execute(_calibration_job_select().where(calibration_jobs.c.job_id == job_id)).mappings().fetchone()
     return _hydrate_job(row) if row is not None else None
 
 
-def load_active_job(connection: sqlite3.Connection, prefix: str) -> dict[str, Any] | None:
+def load_active_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
     row = connection.execute(
-        """
-        SELECT *
-        FROM calibration_jobs
-        WHERE prefix = ?
-          AND status IN ('queued', 'running', 'pending_review')
-        ORDER BY created_at DESC, rowid DESC
-        LIMIT 1
-        """,
-        (prefix,),
-    ).fetchone()
+        _calibration_job_select()
+        .where(calibration_jobs.c.prefix == prefix)
+        .where(calibration_jobs.c.status.in_(tuple(ACTIVE_JOB_STATUSES)))
+        .order_by(calibration_jobs.c.created_at.desc(), _rowid_column().desc())
+        .limit(1)
+    ).mappings().fetchone()
     return _hydrate_job(row) if row is not None else None
 
 
-def list_queued_jobs(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+def list_queued_jobs(connection: DBClient) -> list[dict[str, Any]]:
     rows = connection.execute(
-        "SELECT * FROM calibration_jobs WHERE status = 'queued' ORDER BY created_at ASC, rowid ASC"
-    ).fetchall()
+        _calibration_job_select()
+        .where(calibration_jobs.c.status == "queued")
+        .order_by(calibration_jobs.c.created_at.asc(), _rowid_column().asc())
+    ).mappings().fetchall()
     return [_hydrate_job(row) for row in rows]
 
 
 def claim_next_queued_calibration_job(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         *,
         lane: str,
         owner_pid: int,
@@ -62,7 +70,7 @@ def claim_next_queued_calibration_job(
         query.append(f"prefix NOT IN ({placeholders})")
         params.extend(excluded_prefixes)
     where_clause = " AND ".join(query)
-    row = connection.execute(
+    row = connection.exec_driver_sql(
         f"""
         WITH candidate AS (
             SELECT job_id
@@ -83,19 +91,16 @@ def claim_next_queued_calibration_job(
         RETURNING *
         """,
         tuple(params + [owner_pid, started_at, started_at]),
-    ).fetchone()
+    ).mappings().fetchone()
     return _hydrate_job(row) if row is not None else None
 
 
-def list_queue_summary(connection: sqlite3.Connection, *, limit_per_lane: int = 6) -> dict[str, Any]:
+def list_queue_summary(connection: DBClient, *, limit_per_lane: int = 6) -> dict[str, Any]:
     rows = connection.execute(
-        """
-        SELECT *
-        FROM calibration_jobs
-        WHERE status IN ('queued', 'running', 'pending_review')
-        ORDER BY created_at ASC, rowid ASC
-        """
-    ).fetchall()
+        _calibration_job_select()
+        .where(calibration_jobs.c.status.in_(("queued", "running", "pending_review")))
+        .order_by(calibration_jobs.c.created_at.asc(), _rowid_column().asc())
+    ).mappings().fetchall()
     summary: dict[str, Any] = {
         "sample": {"running": [], "queued": [], "pending_review": [], "running_count": 0, "queued_count": 0,
                    "pending_review_count": 0},
@@ -118,11 +123,12 @@ def list_queue_summary(connection: sqlite3.Connection, *, limit_per_lane: int = 
     return summary
 
 
-def queue_position(connection: sqlite3.Connection, job_id: str) -> tuple[int, int] | None:
+def queue_position(connection: DBClient, job_id: str) -> tuple[int, int] | None:
     row = connection.execute(
-        "SELECT lane, created_at, rowid FROM calibration_jobs WHERE job_id = ? AND status = 'queued'",
-        (job_id,),
-    ).fetchone()
+        select(calibration_jobs.c.lane, calibration_jobs.c.created_at, _rowid_column())
+        .where(calibration_jobs.c.job_id == job_id)
+        .where(calibration_jobs.c.status == "queued")
+    ).mappings().fetchone()
     if row is None:
         return None
     lane = str(row["lane"])
@@ -130,37 +136,35 @@ def queue_position(connection: sqlite3.Connection, job_id: str) -> tuple[int, in
     rowid = int(row["rowid"])
     position = int(
         connection.execute(
-            """
-            SELECT COUNT(*)
-            FROM calibration_jobs
-            WHERE lane = ?
-              AND status = 'queued'
-              AND (created_at < ? OR (created_at = ? AND rowid <= ?))
-            """,
-            (lane, created_at, created_at, rowid),
+            select(func.count())
+            .select_from(calibration_jobs)
+            .where(calibration_jobs.c.lane == lane)
+            .where(calibration_jobs.c.status == "queued")
+            .where(
+                (calibration_jobs.c.created_at < created_at)
+                | ((calibration_jobs.c.created_at == created_at) & (_rowid_column() <= rowid))
+            )
         ).fetchone()[0]
     )
     total = int(
         connection.execute(
-            "SELECT COUNT(*) FROM calibration_jobs WHERE lane = ? AND status = 'queued'",
-            (lane,),
+            select(func.count())
+            .select_from(calibration_jobs)
+            .where(calibration_jobs.c.lane == lane)
+            .where(calibration_jobs.c.status == "queued")
         ).fetchone()[0]
     )
     return position, total
 
 
-def save_job(connection: sqlite3.Connection, payload: dict[str, Any]) -> None:
+def save_job(connection: DBClient, payload: dict[str, Any]) -> None:
     values = _serialize_job(payload)
-    columns = ", ".join(values.keys())
-    placeholders = ", ".join("?" for _ in values)
-    updates = ", ".join(f"{column} = excluded.{column}" for column in values if column != "job_id")
+    statement = sqlite_insert(calibration_jobs).values(**values)
     connection.execute(
-        f"""
-        INSERT INTO calibration_jobs ({columns})
-        VALUES ({placeholders})
-        ON CONFLICT(job_id) DO UPDATE SET {updates}
-        """,
-        tuple(values.values()),
+        statement.on_conflict_do_update(
+            index_elements=[calibration_jobs.c.job_id],
+            set_={column: getattr(statement.excluded, column) for column in values if column != "job_id"},
+        )
     )
 
 
@@ -188,12 +192,12 @@ def _serialize_job(payload: dict[str, Any]) -> dict[str, Any]:
         "started_at": payload.get("started_at"),
         "finished_at": payload.get("finished_at"),
         "updated_at": str(
-            payload.get("updated_at") or payload.get("finished_at") or payload.get("started_at") or payload[
-                "created_at"]),
+            payload.get("updated_at") or payload.get("finished_at") or payload.get("started_at") or payload["created_at"]
+        ),
     }
 
 
-def _hydrate_job(row: sqlite3.Row) -> dict[str, Any]:
+def _hydrate_job(row: DBRow) -> dict[str, Any]:
     payload = {
         "job_id": str(row["job_id"]),
         "prefix": str(row["prefix"]),
@@ -237,3 +241,11 @@ def _dumps_optional(value: JSONValue) -> str | None:
     if value is None:
         return None
     return json.dumps(value, sort_keys=True)
+
+
+def _calibration_job_select() -> Any:
+    return select(*calibration_jobs.c, _rowid_column())
+
+
+def _rowid_column() -> Any:
+    return literal_column("rowid").label("rowid")

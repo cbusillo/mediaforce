@@ -1,18 +1,18 @@
 import json
-import sqlite3
 from typing import Any
 
+from mediaforce.core.db import DBClient
 from mediaforce.core.type_defs import JSONValue
 
 
 def recent_tuning_sessions(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         prefix: str,
         *,
         load_json_object: Any,
         limit: int = 8,
 ) -> list[dict[str, Any]]:
-    rows = connection.execute(
+    rows = connection.exec_driver_sql(
         """
         SELECT session_id,
                note,
@@ -28,7 +28,7 @@ def recent_tuning_sessions(
         LIMIT ?
         """,
         (prefix, limit),
-    ).fetchall()
+    ).mappings().fetchall()
     sessions: list[dict[str, Any]] = []
     for row in rows:
         note = str(row["note"] or "").strip()

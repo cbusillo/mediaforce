@@ -1,11 +1,11 @@
 import json
 import re
-import sqlite3
 import uuid
 from pathlib import Path
 from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.db import DBClient
 
 
 def learned_memory_dir(config: MediaforceConfig) -> Path:
@@ -15,7 +15,7 @@ def learned_memory_dir(config: MediaforceConfig) -> Path:
 
 
 def record_tuning_session(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         *,
         prefix: str,
         note: str,
@@ -25,7 +25,7 @@ def record_tuning_session(
         created_at: str,
 ) -> str:
     session_id = uuid.uuid4().hex[:12]
-    connection.execute(
+    connection.exec_driver_sql(
         """
         INSERT INTO tuning_sessions(session_id, prefix, note, summary, diagnosis, confidence,
                                     evidence_checked_json, suggested_follow_up, prompt_version,
@@ -55,7 +55,7 @@ def record_tuning_session(
 
 
 def promote_learning_artifact(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         *,
         session_id: str,
@@ -91,7 +91,7 @@ def promote_learning_artifact(
             created_at=created_at,
         )
     )
-    connection.execute(
+    connection.exec_driver_sql(
         """
         INSERT INTO learning_artifacts(artifact_id, session_id, prefix, title, artifact_path, summary,
                                        tags_json, created_at, updated_at)
@@ -118,16 +118,16 @@ def promote_learning_artifact(
 
 
 def retrieve_learning_context(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         *,
         prefix: str,
         sample_item: dict[str, Any],
         note: str,
         limit: int = 3,
 ) -> list[dict[str, Any]]:
-    candidate_rows = connection.execute(
+    candidate_rows = connection.exec_driver_sql(
         "SELECT title, artifact_path, summary, tags_json, updated_at FROM learning_artifacts ORDER BY updated_at DESC"
-    ).fetchall()
+    ).mappings().fetchall()
     desired_tags = set(_artifact_tags(prefix=prefix, sample_item=sample_item, note=note, response={}))
     ranked: list[tuple[int, dict[str, Any]]] = []
     for row in candidate_rows:
@@ -156,7 +156,7 @@ def retrieve_learning_context(
 
 
 def record_visual_approval_artifact(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         *,
         prefix: str,
@@ -176,7 +176,7 @@ def record_visual_approval_artifact(
     summary = str((run_verdict or {}).get("summary") or "Operator approved this sampled calibration after review.")
     diagnosis = "Visual approval recorded so future tuning can learn from this accepted draft."
     evidence_checked = ["operator_visual_review", "sample_result", "saved_policy"]
-    connection.execute(
+    connection.exec_driver_sql(
         """
         INSERT INTO tuning_sessions(session_id, prefix, note, summary, diagnosis, confidence,
                                     evidence_checked_json, suggested_follow_up, prompt_version,
@@ -221,7 +221,7 @@ def record_visual_approval_artifact(
             created_at=created_at,
         )
     )
-    connection.execute(
+    connection.exec_driver_sql(
         """
         INSERT INTO learning_artifacts(artifact_id, session_id, prefix, title, artifact_path, summary,
                                        tags_json, created_at, updated_at)

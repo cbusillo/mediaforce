@@ -1,7 +1,6 @@
 import errno
 import json
 import os
-import sqlite3
 import threading
 import uuid
 from collections.abc import Callable
@@ -13,7 +12,7 @@ from typing import Any
 
 from mediaforce.tuning.calibration_jobs import claim_next_queued_calibration_job, load_latest_job, queue_position, save_job
 from mediaforce.core.config import MediaforceConfig, load_config
-from mediaforce.core.db import open_db
+from mediaforce.core.db import DBClient, DBRow, open_db
 from mediaforce.core.process_control import ManagedProcessController
 from mediaforce.library.scanner import scan_library
 from mediaforce.state_cleanup import purge_transient_artifacts
@@ -60,7 +59,7 @@ class CalibrationQueueRuntimeDeps:
 
 
 def load_job_state(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         prefix: str,
         deps: JobRuntimeDeps,
@@ -85,7 +84,7 @@ def load_job_state(
 
 
 def save_job_state(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         prefix: str,
         payload: dict[str, Any],
@@ -101,7 +100,7 @@ def calibration_job_belongs_to_current_process(job: dict[str, Any]) -> bool:
 
 
 def expire_calibration_job(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         prefix: str,
         job: dict[str, Any],
@@ -138,7 +137,7 @@ def save_scan_job_state(
 
 
 def maybe_schedule_scan(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         prefix: str | None,
         deps: JobRuntimeDeps,
@@ -300,14 +299,14 @@ def process_calibration_queue_once(*, config_path: Any, deps: CalibrationQueueRu
         "full": deps.full_calibration_concurrency,
     }
     with open_db(config.paths.db_path) as connection:
-        active_rows = connection.execute(
+        active_rows = connection.exec_driver_sql(
             """
             SELECT job_id, lane, prefix, status
             FROM calibration_jobs
             WHERE status IN ('running', 'pending_review')
             ORDER BY created_at, rowid
             """
-        ).fetchall()
+        ).mappings().fetchall()
         running_by_lane = {lane: 0 for lane in capacities}
         active_prefixes: set[str] = set()
         for row in active_rows:
@@ -355,7 +354,7 @@ def process_calibration_queue_once(*, config_path: Any, deps: CalibrationQueueRu
 
 
 def scan_is_stale(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         prefix: str | None,
         deps: JobRuntimeDeps,
@@ -363,7 +362,7 @@ def scan_is_stale(
     if prefix is None:
         if deps.load_catalog_signature(config) != deps.current_catalog_signature(config):
             return True
-        item_count = int(connection.execute("SELECT COUNT(*) FROM library_items").fetchone()[0])
+        item_count = int(connection.exec_driver_sql("SELECT COUNT(*) FROM library_items").fetchone()[0])
         if item_count == 0:
             return True
         latest = latest_scan_completed_at(connection, prefix=None)
@@ -372,7 +371,7 @@ def scan_is_stale(
         return datetime.now(tz=UTC) - latest > deps.full_scan_stale_after
 
     item_count = int(
-        connection.execute("SELECT COUNT(*) FROM library_items WHERE rel_path LIKE ?", (f"{prefix}%",)).fetchone()[0]
+        connection.exec_driver_sql("SELECT COUNT(*) FROM library_items WHERE rel_path LIKE ?", (f"{prefix}%",)).fetchone()[0]
     )
     if item_count == 0:
         return True
@@ -382,10 +381,10 @@ def scan_is_stale(
     return datetime.now(tz=UTC) - latest > deps.prefix_scan_stale_after
 
 
-def latest_scan_completed_at(connection: sqlite3.Connection, prefix: str | None) -> datetime | None:
-    rows = connection.execute(
+def latest_scan_completed_at(connection: DBClient, prefix: str | None) -> datetime | None:
+    rows = connection.exec_driver_sql(
         "SELECT completed_at, started_at, scope, prefixes_json FROM scan_runs ORDER BY started_at DESC LIMIT 250"
-    ).fetchall()
+    ).mappings().fetchall()
     for row in rows:
         scope = str(row["scope"] or "unknown")
         completed = _parse_iso(row["completed_at"] or row["started_at"])
@@ -412,14 +411,14 @@ def latest_scan_completed_at(connection: sqlite3.Connection, prefix: str | None)
 
 
 def active_scan_from_db(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         prefix: str | None,
         deps: JobRuntimeDeps,
 ) -> dict[str, Any] | None:
-    rows = connection.execute(
+    rows = connection.exec_driver_sql(
         "SELECT scan_id, started_at, scope, prefixes_json, owner_pid, last_progress_at, file_count, reprobed_count, unchanged_count FROM scan_runs WHERE completed_at IS NULL ORDER BY started_at DESC LIMIT 25"
-    ).fetchall()
+    ).mappings().fetchall()
     for row in rows:
         matched_prefix = _scan_run_matches_prefix(row, prefix)
         if matched_prefix is _MISSING:
@@ -513,7 +512,7 @@ def _parse_iso(value: JSONValue) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
-def _scan_run_matches_prefix(row: sqlite3.Row, prefix: str | None) -> str | None | object:
+def _scan_run_matches_prefix(row: DBRow, prefix: str | None) -> str | None | object:
     scope = str(row["scope"] or "unknown")
     if prefix is None:
         if scope in {"full", "unknown"}:
@@ -534,15 +533,15 @@ def _scan_run_matches_prefix(row: sqlite3.Row, prefix: str | None) -> str | None
     return _MISSING
 
 
-def _expire_scan_run(connection: sqlite3.Connection, scan_id: str) -> None:
-    connection.execute(
+def _expire_scan_run(connection: DBClient, scan_id: str) -> None:
+    connection.exec_driver_sql(
         "UPDATE scan_runs SET completed_at = COALESCE(completed_at, ?) WHERE scan_id = ?",
         (_now_iso(), scan_id),
     )
     connection.commit()
 
 
-def _scan_job_progress(row: sqlite3.Row) -> dict[str, int]:
+def _scan_job_progress(row: DBRow) -> dict[str, int]:
     return {
         "items_seen": int(row["file_count"] or 0),
         "updated_paths": int(row["reprobed_count"] or 0),

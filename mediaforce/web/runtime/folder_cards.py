@@ -1,10 +1,10 @@
-import sqlite3
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.db import DBClient
 
 FolderGroup = tuple[str, str, str, str]
 FolderBadge = dict[str, str | None]
@@ -36,7 +36,7 @@ _FOLDER_CARD_CACHE_VALUE: list[FolderCard] = []
 
 def cached_folder_cards(
         config: MediaforceConfig,
-        connection: sqlite3.Connection,
+        connection: DBClient,
         *,
         minimum_recommended_savings_bytes: int,
         folder_group: Callable[[str], FolderGroup | None],
@@ -73,17 +73,17 @@ def reset_folder_card_cache() -> None:
 
 
 def preview_folder_cards(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         *,
         minimum_recommended_savings_bytes: int,
         folder_group: Callable[[str], FolderGroup | None],
         estimate_savings_bytes: Callable[..., int],
         review_badge_for_prefix: Callable[[str], FolderBadge],
 ) -> list[FolderCard]:
-    rows = connection.execute(
+    rows = connection.exec_driver_sql(
         "SELECT rel_path, size_bytes, status, video_codec, audio_summary_json "
         "FROM library_items WHERE status != 'missing' ORDER BY rel_path"
-    ).fetchall()
+    ).mappings().fetchall()
     grouped: dict[str, FolderCard] = {}
     for row in rows:
         rel_path = str(row["rel_path"])
@@ -133,7 +133,7 @@ def preview_folder_cards(
 
 
 def list_folder_cards(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         *,
         minimum_recommended_savings_bytes: int,
         folder_group: Callable[[str], FolderGroup | None],
@@ -141,10 +141,10 @@ def list_folder_cards(
         estimate_savings_bytes: Callable[..., int],
         review_badge_for_prefix: Callable[[str], FolderBadge],
 ) -> list[FolderCard]:
-    rows = connection.execute(
+    rows = connection.exec_driver_sql(
         "SELECT rel_path, source_path, size_bytes, status, video_codec, audio_summary_json "
         "FROM library_items WHERE status != 'missing' ORDER BY rel_path"
-    ).fetchall()
+    ).mappings().fetchall()
     grouped: dict[str, FolderCard] = {}
     for row in rows:
         rel_path = str(row["rel_path"])

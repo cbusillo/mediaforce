@@ -1,13 +1,13 @@
 import json
-import sqlite3
 from pathlib import Path
 from typing import Any, Callable
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.db import DBClient
 
 
 def encode_manifest_items(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         manifest_path: Path,
         manifest: dict[str, Any],
@@ -116,7 +116,7 @@ def describe_item_plan(
 
 
 def encode_one_item(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         config: MediaforceConfig,
         manifest_path: Path,
         manifest: dict[str, Any],
@@ -134,7 +134,7 @@ def encode_one_item(
         select_streams: Callable[[dict[str, Any]], dict[str, Any]],
         build_ffmpeg_command: Callable[..., list[str]],
         timestamp: Callable[[], str],
-        record_event: Callable[[sqlite3.Connection, int, str, dict[str, Any]], None],
+        record_event: Callable[[DBClient, int, str, dict[str, Any]], None],
         run_encode_command: Callable[..., Any],
         finalize_output_path: Callable[[Path, Path], None],
         probe_media: Callable[[Path], Any],
@@ -177,7 +177,7 @@ def encode_one_item(
 
     started_at = timestamp()
     record_event(connection, item["library_item_id"], "encoding_started", {"manifest": str(manifest_path), "item_index": index})
-    connection.execute(
+    connection.exec_driver_sql(
         "UPDATE library_items SET status = 'encoding', updated_at = ? WHERE id = ?",
         (started_at, item["library_item_id"]),
     )
@@ -215,7 +215,7 @@ def encode_one_item(
     staged_fingerprint = file_fingerprint(staging_path, staged_stat, staged_probe.duration_seconds)
     now = timestamp()
 
-    connection.execute(
+    connection.exec_driver_sql(
         """
         INSERT INTO staged_artifacts (library_item_id, manifest_run_id, manifest_path, item_index, source_fingerprint,
                                       staging_path, staging_size_bytes, staging_mtime_ns, staging_fingerprint,
@@ -261,7 +261,7 @@ def encode_one_item(
             now,
         ),
     )
-    connection.execute(
+    connection.exec_driver_sql(
         "UPDATE library_items SET status = 'encoded', updated_at = ? WHERE id = ?",
         (now, item["library_item_id"]),
     )

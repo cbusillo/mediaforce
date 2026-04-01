@@ -1,19 +1,19 @@
 import json
-import sqlite3
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.db import DBClient
 
 
-def inspect_prefix(connection: sqlite3.Connection, config: MediaforceConfig, prefix: str) -> dict[str, Any]:
+def inspect_prefix(connection: DBClient, config: MediaforceConfig, prefix: str) -> dict[str, Any]:
     rows = [
         dict(row)
-        for row in connection.execute(
+        for row in connection.exec_driver_sql(
             "SELECT * FROM library_items WHERE rel_path LIKE ? ORDER BY rel_path",
             (f"{prefix}%",),
-        ).fetchall()
+        ).mappings().fetchall()
     ]
     if not rows:
         return {"prefix": prefix, "item_count": 0, "rows": []}

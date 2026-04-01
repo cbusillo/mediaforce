@@ -20,6 +20,7 @@ from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
 from mediaforce.remote import HostStatus
 from mediaforce.review import BrowserReviewClip, CompareClip, EncodedPreviewClip
 from mediaforce.web import app as web_app
+from mediaforce.web.runtime import encode_runtime, job_runtime
 
 
 class EncodeQueueRecoveryTests(unittest.TestCase):
@@ -69,12 +70,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(job["last_host"]["key"], "remote-a")
             self.assertFalse(staging_path.exists())
             self.assertFalse(partial_path.exists())
-            stage_row = connection.execute(
+            stage_row = connection.exec_driver_sql(
                 "SELECT promoted_at FROM staged_artifacts WHERE library_item_id = ?",
                 (item_id,),
-            ).fetchone()
+            ).mappings().fetchone()
             self.assertIsNone(stage_row)
-            item_status = connection.execute(
+            item_status = connection.exec_driver_sql(
                 "SELECT status FROM library_items WHERE id = ?",
                 (item_id,),
             ).fetchone()[0]
@@ -633,7 +634,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with open_db(self.config.paths.db_path) as connection:
             self._insert_library_item(connection, source_path)
             now = web_app._now_iso()
-            connection.execute(
+            connection.exec_driver_sql(
                 """
                 INSERT INTO scan_runs(scan_id, started_at, completed_at, roots_json, scope, prefixes_json,
                                       file_count, reprobed_count, unchanged_count)
@@ -655,7 +656,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with open_db(self.config.paths.db_path) as connection:
             self._insert_library_item(connection, source_path)
             completed_at = (datetime.now(UTC) - timedelta(minutes=16)).isoformat(timespec="seconds")
-            connection.execute(
+            connection.exec_driver_sql(
                 """
                 INSERT INTO scan_runs(scan_id, started_at, completed_at, roots_json, scope, prefixes_json,
                                       file_count, reprobed_count, unchanged_count)
@@ -681,7 +682,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
     def test_orphaned_scan_run_is_expired_before_rescheduling(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             now = web_app._now_iso()
-            connection.execute(
+            connection.exec_driver_sql(
                 """
                 INSERT INTO scan_runs(scan_id, started_at, completed_at, owner_pid, roots_json, scope, prefixes_json,
                                       file_count, reprobed_count, unchanged_count)
@@ -727,10 +728,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(job["status"], "queued")
             fake_thread.start.assert_called_once()
 
-            stale_row = connection.execute(
+            stale_row = connection.exec_driver_sql(
                 "SELECT completed_at FROM scan_runs WHERE scan_id = ?",
                 ("scan-stale",),
-            ).fetchone()
+            ).mappings().fetchone()
             self.assertIsNotNone(stale_row)
             assert stale_row is not None
             self.assertIsNotNone(stale_row["completed_at"])
@@ -806,7 +807,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             second_id = self._insert_library_item(connection, second, status="validated")
             third_id = self._insert_library_item(connection, third, status="promoted")
             for item_id in (first_id, second_id, third_id):
-                connection.execute(
+                connection.exec_driver_sql(
                     "UPDATE library_items SET size_bytes = ?, rel_path = ?, parent_dir = ? WHERE id = ?",
                     (2 * 1024 * 1024 * 1024, f"tv/show/Season 1/item-{item_id}.mkv", "tv/show/Season 1", item_id),
                 )
@@ -1923,7 +1924,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         with open_db(self.config.paths.db_path) as connection:
             item_id = self._insert_library_item(connection, source_path, status="encoded")
-            connection.execute(
+            connection.exec_driver_sql(
                 "INSERT INTO staged_artifacts(library_item_id, staging_path, updated_at) VALUES (?, ?, ?)",
                 (item_id, str(staging_path), web_app._now_iso()),
             )
@@ -1940,11 +1941,11 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 {"passed": True, "message": "forced-only subtitle outputs stay flagged forced"},
                 validation["checks"],
             )
-            stored_status = connection.execute(
+            stored_status = connection.exec_driver_sql(
                 "SELECT status FROM library_items WHERE id = ?",
                 (item_id,),
             ).fetchone()[0]
-            stored_validation = connection.execute(
+            stored_validation = connection.exec_driver_sql(
                 "SELECT validation_json FROM staged_artifacts WHERE library_item_id = ?",
                 (item_id,),
             ).fetchone()[0]
@@ -1976,7 +1977,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         with open_db(self.config.paths.db_path) as connection:
             item_id = self._insert_library_item(connection, source_path, status="validated")
-            connection.execute(
+            connection.exec_driver_sql(
                 "INSERT INTO staged_artifacts(library_item_id, staging_path, validation_json, updated_at) VALUES (?, ?, ?, ?)",
                 (item_id, str(staging_path), json.dumps({"passed": True}), web_app._now_iso()),
             )
@@ -1998,14 +1999,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertTrue(archived_source.exists())
             self.assertFalse(staging_path.exists())
 
-            library_row = connection.execute(
+            library_row = connection.exec_driver_sql(
                 "SELECT source_path, rel_path, container, status, fingerprint FROM library_items WHERE id = ?",
                 (item_id,),
-            ).fetchone()
-            staged_row = connection.execute(
+            ).mappings().fetchone()
+            staged_row = connection.exec_driver_sql(
                 "SELECT promoted_path, archived_source_path FROM staged_artifacts WHERE library_item_id = ?",
                 (item_id,),
-            ).fetchone()
+            ).mappings().fetchone()
             self.assertEqual(library_row["source_path"], str(destination_path))
             self.assertEqual(library_row["rel_path"], "tv/show/episode-promote.mp4")
             self.assertEqual(library_row["container"], ".mp4")
@@ -2132,14 +2133,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             self.assertEqual(result.staging_path, staging_path)
             self.assertTrue(staging_path.exists())
-            artifact_row = connection.execute(
+            artifact_row = connection.exec_driver_sql(
                 "SELECT staging_path, quality_metric, quality_score, staging_fingerprint FROM staged_artifacts WHERE library_item_id = ?",
                 (item_id,),
-            ).fetchone()
-            item_row = connection.execute(
+            ).mappings().fetchone()
+            item_row = connection.exec_driver_sql(
                 "SELECT status FROM library_items WHERE id = ?",
                 (item_id,),
-            ).fetchone()
+            ).mappings().fetchone()
             self.assertEqual(artifact_row["staging_path"], str(staging_path))
             self.assertEqual(artifact_row["quality_metric"], "XPSNR")
             self.assertEqual(artifact_row["quality_score"], 41.5)
@@ -2871,7 +2872,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         compare_clip = review.CompareClip(output_path=self.root / "compare.mkv", timestamp_seconds=30.0, duration_seconds=8.0)
         with open_db(self.config.paths.db_path) as connection:
             item_id = self._insert_library_item(connection, source_path, status="validated")
-            connection.execute(
+            connection.exec_driver_sql(
                 "INSERT INTO staged_artifacts(library_item_id, staging_path, updated_at) VALUES (?, ?, ?)",
                 (item_id, str(staged_path), web_app._now_iso()),
             )
@@ -2925,6 +2926,107 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertLess(
             folder_route_paths.index("/api/folders/{prefix:path}/status"),
             folder_route_paths.index("/api/folders/{prefix:path}"),
+        )
+
+    def test_folder_api_route_returns_payload_for_seeded_prefix(self) -> None:
+        source_path = self._create_source_file("episode-folder.mkv")
+        self.config.raw.update(
+            {
+                "video": {
+                    "quality_metric": "auto",
+                    "target_vmaf": 94,
+                    "min_target_vmaf": 92,
+                    "target_xpsnr": 36,
+                    "min_target_xpsnr": 34,
+                    "max_encoded_percent": 100,
+                    "default_grain": 0,
+                },
+                "audio": {},
+                "subtitle": {},
+                "planning": {},
+            }
+        )
+        self.config.raw["media"]["output_container"] = "mkv"
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path)
+            connection.exec_driver_sql(
+                "UPDATE library_items SET audio_summary_json = ? WHERE id = ?",
+                (json.dumps([{"index": 0, "codec": "aac", "channels": 2, "language": "eng"}]), item_id),
+            )
+            connection.commit()
+
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.purge_transient_artifacts"
+        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
+            "mediaforce.web.app._start_encode_queue_worker"
+        ):
+            app = web_app.create_app(self.config.paths.config_path)
+
+        folder_endpoint = next(
+            route.endpoint
+            for route in app.router.routes
+            if getattr(route, "path", "") == "/api/folders/{prefix:path}"
+        )
+        with patch("mediaforce.web.app._maybe_schedule_scan", return_value=None), patch(
+            "mediaforce.web.app._sample_calibration_host_statuses", return_value=[]
+        ):
+            response = folder_endpoint("tv/show")
+        payload = json.loads(response.body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(payload["pending"])
+        self.assertEqual(payload["prefix"], "tv/show")
+        self.assertEqual(payload["sample_item"]["rel_path"], "tv/show/episode-folder.mkv")
+        self.assertIn("summary", payload)
+
+    def test_process_calibration_queue_once_handles_plain_connection_queries(self) -> None:
+        deps = web_app._calibration_queue_runtime_deps()
+        deps.run_calibration_job = Mock()
+
+        with patch("mediaforce.web.runtime.job_runtime.load_config", return_value=self.config):
+            job_runtime.process_calibration_queue_once(config_path=self.config.paths.config_path, deps=deps)
+
+        deps.run_calibration_job.assert_not_called()
+
+    def test_load_next_runnable_encode_job_supports_plain_sqlalchemy_connection(self) -> None:
+        source_path = self._create_source_file("episode-queued.mkv")
+        staging_path = self._staging_path("episode-queued.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path)
+            self._write_manifest(
+                "manifest-queued.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-queued-runtime",
+                manifest_name="manifest-queued.json",
+                host={},
+                status="queued",
+                attempt_count=0,
+            )
+            connection.commit()
+
+            deps = Mock()
+            deps.now_iso.return_value = web_app._now_iso()
+
+            with patch(
+                    "mediaforce.web.runtime.encode_runtime.select_encode_host",
+                    return_value=({"key": "local", "label": "Local", "mode": "local"}, None),
+            ):
+                job = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
+
+            self.assertIsNotNone(job)
+            assert job is not None
+            self.assertEqual(job["job_id"], "job-queued-runtime")
+            self.assertEqual(job["host"]["key"], "local")
+
+    def test_default_config_path_points_to_repo_config_defaults(self) -> None:
+        self.assertEqual(
+            web_app.DEFAULT_CONFIG_PATH.resolve(),
+            (Path(__file__).resolve().parents[1] / "config" / "defaults.toml").resolve(),
         )
 
     def test_stop_calibration_queue_cancels_running_jobs_and_cleans_queued_jobs(self) -> None:
@@ -3109,10 +3211,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         return self.root / "staging" / "tv" / "show" / name
 
     @staticmethod
-    def _insert_library_item(connection: sqlite3.Connection, source_path: Path, *,
+    def _insert_library_item(connection: Any, source_path: Path, *,
                              status: str = "planned") -> int:
         now = web_app._now_iso()
-        connection.execute(
+        connection.exec_driver_sql(
             """
             INSERT INTO library_items(source_path, rel_path, media_root, parent_dir, file_name, container,
                                       size_bytes, mtime_ns, fingerprint, duration_seconds, video_codec,
@@ -3141,11 +3243,11 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 status,
             ),
         )
-        return int(connection.execute("SELECT id FROM library_items ORDER BY id DESC LIMIT 1").fetchone()[0])
+        return int(connection.exec_driver_sql("SELECT id FROM library_items ORDER BY id DESC LIMIT 1").fetchone()[0])
 
     @staticmethod
-    def _insert_staged_artifact(connection: sqlite3.Connection, library_item_id: int, staging_path: Path) -> None:
-        connection.execute(
+    def _insert_staged_artifact(connection: Any, library_item_id: int, staging_path: Path) -> None:
+        connection.exec_driver_sql(
             "INSERT INTO staged_artifacts(library_item_id, staging_path, updated_at) VALUES (?, ?, ?)",
             (library_item_id, str(staging_path), web_app._now_iso()),
         )
@@ -3158,7 +3260,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
     def _save_job(
             self,
-            connection: sqlite3.Connection,
+            connection: Any,
             *,
             job_id: str,
             manifest_name: str,

@@ -1,6 +1,5 @@
 import json
 import re
-import sqlite3
 import subprocess
 import hashlib
 from pathlib import Path
@@ -9,6 +8,7 @@ from typing import Any
 from mediaforce.advisor import apply_seed_policy, request_run_verdict, request_seed_policy
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.db import DBClient
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.core.type_defs import JSONValue
 
@@ -566,7 +566,7 @@ def maybe_seed_baseline_policy(
         base_policy: dict[str, Any],
         sample_item: dict[str, Any],
         existing_calibration: dict[str, Any] | None,
-        connection: sqlite3.Connection,
+        connection: DBClient,
 ) -> dict[str, Any] | None:
     if action != "baseline" or existing_calibration is not None:
         return None

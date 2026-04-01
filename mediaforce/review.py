@@ -1,5 +1,4 @@
 import re
-import sqlite3
 import subprocess
 import uuid
 from dataclasses import dataclass
@@ -7,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from mediaforce.core.binaries import ffmpeg_binary, ffprobe_binary
+from mediaforce.core.db import DBClient
 from mediaforce.encoding.ffmpeg import ffmpeg_hwaccel_input_args
 from mediaforce.core.process_control import ManagedProcessController, run_command
 from mediaforce.remote import copy_remote_file_to_local, execution_mode_for_host, run_remote_command
@@ -103,7 +103,7 @@ def render_audio_spectrogram_compare(
 
 
 def generate_compare_clips(
-        connection: sqlite3.Connection,
+        connection: DBClient,
         manifest: dict[str, Any],
         indexes: list[int],
         *,

@@ -1,13 +1,12 @@
 import uuid
 from dataclasses import asdict, dataclass
-import sqlite3
 from typing import Any
 
 from fastapi import HTTPException
 
 from mediaforce.advisor import apply_seed_policy, request_note_tuning
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db import open_db
+from mediaforce.core.db import DBClient, open_db
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.tuning.tuning_memory import promote_learning_artifact, retrieve_learning_context
 
@@ -222,7 +221,7 @@ def _seed_preview_action(
         config: MediaforceConfig,
         deps: FolderAiTuneDeps,
         *,
-        connection: sqlite3.Connection,
+        connection: DBClient,
         normalized_prefix: str,
         trimmed_note: str,
         host: Any,
@@ -338,7 +337,7 @@ def _tuned_preview_action(
         config: MediaforceConfig,
         deps: FolderAiTuneDeps,
         *,
-        connection: sqlite3.Connection,
+        connection: DBClient,
         normalized_prefix: str,
         trimmed_note: str,
         host: Any,
