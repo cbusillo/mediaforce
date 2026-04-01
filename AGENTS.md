@@ -7,8 +7,6 @@ Only session-start facts that are easy to miss belong here.
 - Product/repo name: `mediaforce`
 - Internal Python package: `mediaforce`
 - Preferred CLI entrypoints: `mediaforce`, `mediaforce-web`
-- Legacy compatibility CLI entrypoints still exist: `media-harness`,
-  `media-harness-web`
 
 ## Repo facts
 
@@ -47,7 +45,7 @@ Only session-start facts that are easy to miss belong here.
   5. report findings from the browser-visible result
 - The prompt should also require the result to begin with a one-line browser
   status: `Browser review succeeded` or `BROWSER BLOCKED`.
-- If `BROWSER BLOCKED` occurs, fix the launch/harness problem and rerun the
+- If `BROWSER BLOCKED` occurs, fix the browser-launch problem and rerun the
   review. Do not present the blocked subagent's code-informed notes as the
   requested review.
 

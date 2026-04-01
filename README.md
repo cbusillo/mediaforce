@@ -51,15 +51,10 @@ The current implementation covers:
 
 Runtime artifacts now live outside the repo by default:
 
-- durable state: `~/Library/Application Support/media-harness/`
-- disposable review clips: `~/Library/Caches/media-harness/review/`
-- runtime settings: `~/Library/Application Support/media-harness/runtime-settings.json`
-- learned memory artifacts: `~/Library/Application Support/media-harness/learned-memory/`
-
-The product name is now `Mediaforce`, but these runtime directories still use
-the older `media-harness` path names for compatibility with existing local
-state. Like the media roots above, these are defaults and conventions from the
-current config/runtime layout, not hard-coded product requirements.
+- durable state: `~/Library/Application Support/mediaforce/`
+- disposable review clips: `~/Library/Caches/mediaforce/review/`
+- runtime settings: `~/Library/Application Support/mediaforce/runtime-settings.json`
+- learned memory artifacts: `~/Library/Application Support/mediaforce/learned-memory/`
 
 That keeps the repository focused on code and policy while allowing the local
 catalog, manifests, scan jobs, and calibration artifacts to survive repo moves
@@ -78,22 +73,19 @@ the review clips and saved calibration summary remain.
 
 ## Layout
 
-- preferred CLI entry points: `mediaforce`, `mediaforce-web`
-- compatibility CLI entry points: `media-harness`, `media-harness-web`
-- `bin/mediaforce.py`: preferred Python entry point
-- `bin/media_harness.py`: compatibility Python entry point
+- CLI entry points: `mediaforce`, `mediaforce-web`
+- `bin/mediaforce.py`: Python entry point
 - `config/defaults.toml`: checked-in encode defaults and policy defaults
 - `mediaforce/`: internal Python package
-- runtime state: stored under `~/Library/Application Support/media-harness/`
-  and `~/Library/Caches/media-harness/review/`
+- runtime state: stored under `~/Library/Application Support/mediaforce/`
+  and `~/Library/Caches/mediaforce/review/`
 
 ## Commands
 
 On macOS, Mediaforce now prefers Homebrew's `ffmpeg-full` and `ffprobe` from
 `/opt/homebrew/opt/ffmpeg-full/bin` when present so VMAF support survives PATH
 changes and normal formula upgrades. You can override either binary with
-`MEDIAFORCE_FFMPEG` or `MEDIAFORCE_FFPROBE`; the legacy
-`MEDIA_HARNESS_FFMPEG` and `MEDIA_HARNESS_FFPROBE` names still work too.
+`MEDIAFORCE_FFMPEG` or `MEDIAFORCE_FFPROBE`.
 
 The web UI also auto-starts background catalog refreshes when the full library
 view is empty or stale, and it auto-refreshes the current folder before
@@ -191,7 +183,7 @@ uv run mediaforce plan \
 ```
 
 Run manifests are written under
-`~/Library/Application Support/media-harness/runs/` by default and contain:
+`~/Library/Application Support/mediaforce/runs/` by default and contain:
 
 - source file path
 - resolved policy for that file
@@ -260,7 +252,7 @@ override that with explicit timestamps, for example:
 
 ```bash
 uv run mediaforce compare \
-  ~/Library/Application\ Support/media-harness/runs/run-abc123.json \
+  ~/Library/Application\ Support/mediaforce/runs/run-abc123.json \
   --index 0 \
   --timestamp 120 \
   --timestamp 640 \
@@ -279,7 +271,7 @@ in this order:
 2. Matching per-folder overrides from `config/folder-defaults.toml` in
    declaration order
 3. Runtime environment overrides from
-   `~/Library/Application Support/media-harness/runtime-settings.json`
+   `~/Library/Application Support/mediaforce/runtime-settings.json`
 
 This first version intentionally does **not** silently skip codecs or folders.
 It ranks and labels items, but leaves the final decision in the manifest and
@@ -302,8 +294,20 @@ Use that local `.env` file for machine-specific web launcher settings like bind
 address, port, and reload mode. A checked-in template lives at
 `.env.example`. Shell environment variables still win
 over the file, so you can override any setting for a single launch. Prefer the
-`MEDIAFORCE_WEB_*` variable names; the older `MEDIA_HARNESS_WEB_*` names remain
-supported for compatibility.
+`MEDIAFORCE_WEB_*` variable names.
+
+The frontend dev server now reads the same repo-local `.env` file. The clearest
+local setup is:
+
+- `MEDIAFORCE_WEB_PORT=8777` for the FastAPI app
+- `MEDIAFORCE_FRONTEND_DEV_PORT=4173` for `cd frontend && npm run dev`
+- `MEDIAFORCE_FRONTEND_API_ORIGIN=http://127.0.0.1:8777` so the frontend dev
+  server proxies API requests to the backend explicitly
+
+That means the two useful local URLs are:
+
+- `http://127.0.0.1:4173` while actively editing the frontend in dev mode
+- `http://127.0.0.1:8777` when checking the backend-served built app
 
 The web UI is now split cleanly:
 
@@ -313,7 +317,7 @@ The web UI is now split cleanly:
 For local backend work, use
 `scripts/mediaforce-web-dev.sh` with
 `start|stop|restart|status|smoke`. It uses the repo-local `.env`, writes a pid
-file and log under `~/Library/Application Support/media-harness/`, and the
+file and log under `~/Library/Application Support/mediaforce/`, and the
 `smoke` action checks `/`, `/api/dashboard`, `/api/settings`, and `/api/hosts`.
 
 For frontend development, run the Svelte app from

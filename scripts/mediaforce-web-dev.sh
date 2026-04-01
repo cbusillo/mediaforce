@@ -3,9 +3,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STATE_DIR="${HOME}/Library/Application Support/media-harness"
+STATE_DIR="${HOME}/Library/Application Support/mediaforce"
 PID_FILE="${STATE_DIR}/mediaforce-web.pid"
-LEGACY_PID_FILE="${STATE_DIR}/media-harness-web.pid"
 LOG_FILE="${STATE_DIR}/mediaforce-web.log"
 
 load_env() {
@@ -15,8 +14,8 @@ load_env() {
 		source "${ROOT_DIR}/.env"
 		set +a
 	fi
-	HOST="${MEDIAFORCE_WEB_HOST:-${MEDIA_HARNESS_WEB_HOST:-127.0.0.1}}"
-	PORT="${MEDIAFORCE_WEB_PORT:-${MEDIA_HARNESS_WEB_PORT:-8777}}"
+	HOST="${MEDIAFORCE_WEB_HOST:-127.0.0.1}"
+	PORT="${MEDIAFORCE_WEB_PORT:-8777}"
 }
 
 current_pid_file() {
@@ -24,21 +23,16 @@ current_pid_file() {
 		printf '%s\n' "${PID_FILE}"
 		return 0
 	fi
-	if [[ -f "${LEGACY_PID_FILE}" ]]; then
-		printf '%s\n' "${LEGACY_PID_FILE}"
-		return 0
-	fi
 	return 1
 }
 
 web_binary() {
 	local preferred="${ROOT_DIR}/.venv/bin/mediaforce-web"
-	local legacy="${ROOT_DIR}/.venv/bin/media-harness-web"
 	if [[ -x "${preferred}" ]]; then
 		printf '%s\n' "${preferred}"
 		return 0
 	fi
-	printf '%s\n' "${legacy}"
+	printf '%s\n' "${preferred}"
 }
 
 is_running() {
@@ -64,7 +58,7 @@ start_server() {
 		echo "mediaforce-web already running on ${HOST}:${PORT} (pid $(running_pid))"
 		return 0
 	fi
-	rm -f "${PID_FILE}" "${LEGACY_PID_FILE}"
+	rm -f "${PID_FILE}"
 	(
 		cd "${ROOT_DIR}"
 		nohup "$(web_binary)" >>"${LOG_FILE}" 2>&1 &
@@ -76,14 +70,14 @@ start_server() {
 
 stop_server() {
 	if ! is_running; then
-		rm -f "${PID_FILE}" "${LEGACY_PID_FILE}"
+		rm -f "${PID_FILE}"
 		echo "mediaforce-web is not running"
 		return 0
 	fi
 	local pid
 	pid="$(running_pid)"
 	kill "${pid}"
-	rm -f "${PID_FILE}" "${LEGACY_PID_FILE}"
+	rm -f "${PID_FILE}"
 	echo "stopped mediaforce-web (pid ${pid})"
 }
 

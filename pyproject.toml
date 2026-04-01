@@ -16,11 +16,15 @@ dependencies = [
 [project.scripts]
 mediaforce = "mediaforce.cli:main"
 mediaforce-web = "mediaforce.web.app:main"
-media-harness = "mediaforce.cli:main"
-media-harness-web = "mediaforce.web.app:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["mediaforce"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "frontend/build" = "mediaforce/web/frontend_build"
+
+[tool.ruff]
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["ANN001", "ANN002", "ANN003", "ANN202"]

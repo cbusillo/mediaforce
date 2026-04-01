@@ -17,6 +17,9 @@
 - Audit the folder workstation at
   `frontend/src/routes/folders/[...prefix]/+page.svelte`, especially anything
   related to calibration state, action gating, and host status visibility.
+- During the later folders-page UI/UX pass, make long-running work much more
+  obvious with a clearly animated in-progress indicator instead of relying on
+  subtle or static status copy.
 - Audit the settings page at `frontend/src/routes/settings/+page.svelte` for
   missing controls, persistence issues, or placeholders that still reflect
   migration-era assumptions.
@@ -38,4 +41,3 @@
 - Prefer the targeted backend and frontend checks from `AGENTS.md`.
 - Do not call the migration done just because pages render; confirm that the
   operator workflow is still good.
-
