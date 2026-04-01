@@ -1,77 +1,149 @@
-from __future__ import annotations
-
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
 import socket
+import sqlite3
 import subprocess
 import threading
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta, timezone
-from functools import lru_cache, partial
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
-from mediaforce.advisor import AdvisorResponse, TuningPolicyResponse, apply_seed_policy, request_note_tuning, request_seed_policy
+from mediaforce.advisor import (
+    AdvisorResponse,
+    TuningPolicyResponse,
+    apply_seed_policy,
+    request_run_verdict,
+    request_seed_policy,
+)
 from mediaforce.binaries import ffmpeg_binary
-from mediaforce.calibration_jobs import claim_next_queued_calibration_job, load_job, load_latest_job, list_queue_summary, queue_position, save_job
-from mediaforce.config import DEFAULT_CONFIG_PATH, HarnessConfig, load_config, load_runtime_settings, save_runtime_settings
+from mediaforce.calibration_jobs import load_active_job, load_job, \
+    list_queue_summary
+from mediaforce.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, load_runtime_settings, \
+    save_runtime_settings
 from mediaforce.db import open_db
-from mediaforce.encode_queue import DEFAULT_SCHEDULER_POLICY, ensure_queue_state, load_active_encode_job, load_encode_job, load_latest_encode_job, load_queue_state, queue_position as encode_queue_position, save_encode_job, save_queue_state, summarize_encode_queue
+from mediaforce.encode_queue import DEFAULT_SCHEDULER_POLICY, ensure_queue_state, list_encode_jobs, \
+    load_active_encode_job, load_encode_job, load_latest_encode_job, load_queue_state, \
+    queue_position as encode_queue_position, save_encode_job, save_queue_state, summarize_encode_queue
 from mediaforce.execution import (
     build_svt_params,
     describe_item_plan,
     encode_manifest_items,
+    effective_video_preset,
     estimate_output_overhead_bytes,
     search_quality_for_source,
     validate_manifest_items,
 )
 from mediaforce.folder_profiles import inspect_prefix
-from mediaforce.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.planner import build_manifest_item
+from mediaforce.process_control import ManagedProcessController, ProcessCancelledError
+from mediaforce.quality import run_sample_encode, select_quality_metric
 from mediaforce.remote import (
-    DEFAULT_HOST_CAPABILITIES,
+    DEFAULT_HOST_MEDIA_ACCESS,
     HostStatus,
     collect_host_statuses,
     host_status_targets_current_machine,
     prepare_remote_host_with_password,
     reset_remote_host_trust,
+    run_host_lifecycle_command,
 )
-from mediaforce.run_manifests import create_folder_manifest
 from mediaforce.review import (
     encode_preview_clips,
     generate_compare_clips,
     generate_compare_clips_from_previews,
     recommend_review_timestamps,
+    render_source_review_clips,
 )
-from mediaforce.quality import run_sample_encode, select_quality_metric
-from mediaforce.scanner import scan_library
 from mediaforce.state_cleanup import purge_transient_artifacts
-from mediaforce.tuning_memory import promote_learning_artifact, record_tuning_session, retrieve_learning_context
+from mediaforce.tuning_memory import (
+    record_visual_approval_artifact,
+)
+from mediaforce.type_defs import JSONValue
+from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_folders_payload, \
+    dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
+    FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
+    folder_ai_tune_action, folder_ai_tune_confirm_action, folder_ai_tune_preview_action, \
+    folder_card_cache_key, folder_status_payload, host_config_for_key, host_lifecycle_start_command, \
+    host_lifecycle_start_timeout_seconds, host_lifecycle_stop_command, host_runtime_rows, \
+    load_calibration_state, load_json_object, load_pending_proposal, \
+    multimodal_review_pack_public_view, pause_encode_queue_action, pending_proposal_public_view, \
+    planned_audio_review_context, preview_folder_cards, proposal_alignment_issue, \
+    proposal_context_snapshot, proposal_signal_copy, queue_folder_encode_action, recent_tuning_sessions, \
+    refresh_host_status_cache, reset_folder_card_cache, resume_encode_queue_action, review_media_context, \
+    review_pack_dir, review_pair_key, review_pairs, safe_collect_host_statuses, save_advice_state, \
+    save_calibration_state, save_pending_proposal, save_profile_action, \
+    sample_calibration_host_statuses, sample_host_options, sample_host_options_from_statuses, \
+    settings_page_payload, stop_calibration_queue_action, stop_encode_queue_action, \
+    build_multimodal_review_pack, build_tuning_runtime_toolbelt
+from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_db as runtime_active_scan_from_db, \
+    CalibrationQueueRuntimeDeps, calibration_queue_worker_loop as runtime_calibration_queue_worker_loop, \
+    calibration_job_belongs_to_current_process as runtime_calibration_job_belongs_to_current_process, \
+    dispatch_calibration_job as runtime_dispatch_calibration_job, \
+    expire_calibration_job as runtime_expire_calibration_job, \
+    latest_scan_completed_at as runtime_latest_scan_completed_at, \
+    load_job_state as runtime_load_job_state, load_scan_job_state as runtime_load_scan_job_state, \
+    maybe_schedule_scan as runtime_maybe_schedule_scan, process_calibration_queue_once as runtime_process_calibration_queue_once, \
+    run_scan_job as runtime_run_scan_job, save_job_state as runtime_save_job_state, \
+    save_scan_job_state as runtime_save_scan_job_state, scan_is_stale as runtime_scan_is_stale, \
+    scan_job_belongs_to_current_process as runtime_scan_job_belongs_to_current_process, \
+    scan_process_is_alive as runtime_scan_process_is_alive
+from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
+    restore_staged_artifact as runtime_restore_staged_artifact, \
+    run_calibration_job as runtime_run_calibration_job, \
+    run_full_calibration as runtime_run_full_calibration, \
+    run_sampled_calibration as runtime_run_sampled_calibration, \
+    remove_path as runtime_remove_path, snapshot_staged_artifact as runtime_snapshot_staged_artifact
+from mediaforce.web.routes import register_dashboard_routes, register_folder_routes, register_frontend_routes, \
+    register_host_routes, register_queue_routes, register_settings_routes
+from mediaforce.web.settings_runtime import (
+    ALWAYS_SCHEDULE_PROFILE,
+    DEFAULT_HOST_MAX_PARALLEL_ENCODES,
+    DEFAULT_HOST_SCHEDULE_PROFILE,
+    HOST_CAPABILITY_OPTIONS,
+    build_runtime_settings_payload as _build_runtime_settings_payload,
+    canonical_schedule_profile_key as _canonical_schedule_profile_key,
+    host_max_parallel_encodes as _host_max_parallel_encodes,
+    host_schedule_profile_key as _host_schedule_profile_key,
+    index_schedule_profile_rows as _index_schedule_profile_rows,
+    index_settings_library_rows as _index_settings_library_rows,
+    index_settings_remote_rows as _index_settings_remote_rows,
+    library_color_map_for_config as _library_color_map_for_config,
+    merge_runtime_settings_payload as _merge_runtime_settings_payload,
+    normalize_encode_queue_scheduler as _normalize_encode_queue_scheduler,
+    normalize_host_source_root_overrides as _normalize_host_source_root_overrides,
+    normalize_library_color as _normalize_library_color,
+    normalize_library_key as _normalize_library_key,
+    runtime_library_colors as _runtime_library_colors,
+    runtime_source_roots as _runtime_source_roots,
+    schedule_profile_options as _schedule_profile_options,
+    settings_archive_root as _settings_archive_root,
+    settings_library_rows_for_config as _settings_library_rows_for_config,
+    settings_remote_rows_for_config as _settings_remote_rows_for_config,
+    settings_schedule_profile_rows_for_config as _settings_schedule_profile_rows_for_config,
+    settings_transcode_root_value as _settings_transcode_root_value,
+)
+
+LOGGER = logging.getLogger(__name__)
 
 MIN_RECOMMENDED_SAVINGS_BYTES = 100 * 1024 * 1024
 FULL_SCAN_STALE_AFTER = timedelta(minutes=15)
 PREFIX_SCAN_STALE_AFTER = timedelta(minutes=15)
-DEFAULT_LIBRARY_COLOR_PALETTE = (
-    "#a16207",
-    "#4e6fa6",
-    "#c2410c",
-    "#0f766e",
-    "#7c6142",
-    "#6b7280",
-)
 SCAN_RETRY_COOLDOWN = timedelta(minutes=5)
+SCAN_INTERRUPTED_ERROR = "Background scan was interrupted by a web process restart."
 CALIBRATION_JOB_NOTICE_AFTER = timedelta(hours=1)
 SAMPLE_CALIBRATION_CONCURRENCY = 2
 FULL_CALIBRATION_CONCURRENCY = 1
@@ -79,23 +151,13 @@ CALIBRATION_QUEUE_POLL_SECONDS = 2.0
 ENCODE_QUEUE_POLL_SECONDS = 2.0
 ENCODE_JOB_LEASE_SECONDS = 45
 ENCODE_JOB_HEARTBEAT_SECONDS = 10.0
+ENCODE_JOB_PROGRESS_WRITE_INTERVAL_SECONDS = 1.0
 ENCODE_JOB_RETRY_BASE_DELAY_SECONDS = 60
 ENCODE_JOB_RETRY_MAX_DELAY_SECONDS = 15 * 60
 ENCODE_JOB_MAX_ATTEMPTS = 3
+HOST_LIFECYCLE_COMMAND_TIMEOUT_SECONDS = 30
+HOST_LIFECYCLE_POLL_SECONDS = 2.0
 ENCODE_HOST_COOLDOWN_SECONDS = 10 * 60
-ALWAYS_SCHEDULE_PROFILE = "always"
-LEGACY_QUEUE_WINDOW_SCHEDULE_PROFILE = "queue_window"
-LEGACY_DEFAULT_SCHEDULE_PROFILE = "default"
-DEFAULT_HOST_SCHEDULE_PROFILE = ALWAYS_SCHEDULE_PROFILE
-DEFAULT_HOST_MAX_PARALLEL_ENCODES = 1
-HOST_CAPABILITY_OPTIONS = (
-    {"key": "encode_queue", "label": "Queue encodes", "help": "Allow this host to run queued folder encodes."},
-    {
-        "key": "sample_calibration",
-        "label": "Sample calibration",
-        "help": "Allow this host to handle sampled calibration work and AI-guided sample retries.",
-    },
-)
 CALIBRATION_STAGED_ARTIFACT_COLUMNS = (
     "library_item_id",
     "manifest_run_id",
@@ -127,21 +189,13 @@ CALIBRATION_EXECUTORS = {
 }
 CALIBRATION_SUBMISSIONS: set[str] = set()
 CALIBRATION_SUBMISSIONS_LOCK = threading.Lock()
+CALIBRATION_QUEUE_PROCESSES: dict[str, ManagedProcessController] = {}
+CALIBRATION_QUEUE_PROCESSES_LOCK = threading.Lock()
 CALIBRATION_QUEUE_WORKER_LOCK = threading.Lock()
 CALIBRATION_QUEUE_WORKER_STARTED = False
 ENCODE_QUEUE_PROCESS = ManagedProcessController()
 ENCODE_QUEUE_WORKER_LOCK = threading.Lock()
 ENCODE_QUEUE_WORKER_STARTED = False
-FOLDER_CARD_CACHE_LOCK = threading.Lock()
-FOLDER_CARD_CACHE_KEY: tuple[str, int] | None = None
-FOLDER_CARD_CACHE_VALUE: list[FolderCard] = []
-HOST_STATUS_CACHE_LOCK = threading.Lock()
-HOST_STATUS_CACHE_KEY: tuple[str, int, int] | None = None
-HOST_STATUS_CACHE_FETCHED_AT = 0.0
-HOST_STATUS_CACHE_VALUE: list[HostStatus] = []
-HOST_STATUS_CACHE_REFRESH_FUTURE: Future[tuple[tuple[str, int, int], list[HostStatus]]] | None = None
-HOST_STATUS_CACHE_TTL_SECONDS = 15.0
-HOST_STATUS_CACHE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="host-status")
 CALIBRATION_REVIEW_FIELDS = {
     "accepted_at",
     "accepted_draft_hash",
@@ -149,22 +203,270 @@ CALIBRATION_REVIEW_FIELDS = {
     "draft_hash",
 }
 
+_NOTE_VMAF_PATTERNS = (
+    re.compile(r"\b(?P<target>\d{2}(?:\.\d+)?)\s*vmaf\b", re.IGNORECASE),
+    re.compile(r"\bvmaf\s*(?:target|around|at|to|of|=)?\s*(?P<target>\d{2}(?:\.\d+)?)\b", re.IGNORECASE),
+)
+_NOTE_XPSNR_PATTERNS = (
+    re.compile(r"\b(?P<target>\d{2}(?:\.\d+)?)\s*xpsnr\b", re.IGNORECASE),
+    re.compile(r"\bxpsnr\s*(?:target|around|at|to|of|=)?\s*(?P<target>\d{2}(?:\.\d+)?)\b", re.IGNORECASE),
+)
+_NOTE_SIZE_BUDGET_PATTERNS = (
+    re.compile(
+        r"\b(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>kb|mb|gb|tb)\s*(?:per|/)\s*(?:episode|ep|file)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>kb|mb|gb|tb)\s*(?:each|an?)\s*(?:episode|ep|file)\b",
+        re.IGNORECASE,
+    ),
+)
+_SIZE_BUDGET_UNIT_BYTES = {
+    "kb": 1024,
+    "mb": 1024 * 1024,
+    "gb": 1024 * 1024 * 1024,
+    "tb": 1024 * 1024 * 1024 * 1024,
+}
 
-@dataclass(slots=True)
-class FolderCard:
-    prefix: str
-    title: str
-    subtitle: str
-    scope_label: str
-    item_count: int
-    pending_count: int
-    total_size_bytes: int
-    estimated_savings_bytes: int
-    average_age_days: float
-    sort_score: float
-    statuses: dict[str, int]
-    video_codecs: dict[str, int]
-    details_loading: bool = False
+
+def _parse_audio_bitrate_kbps(value: JSONValue, fallback: float) -> float:
+    stripped = str(value or "").strip().lower().removesuffix("kbps").removesuffix("k")
+    try:
+        parsed = float(stripped)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback
+
+
+def _sample_audio_target_kbps(sample_item: dict[str, Any] | None) -> float:
+    if not isinstance(sample_item, dict):
+        return 160.0
+    audio_policy = dict((sample_item.get("resolved_policy") or {}).get("audio") or {})
+    audio_tracks = list(sample_item.get("audio_summary") or [])
+    channels = 0
+    for track in audio_tracks:
+        try:
+            channels = max(channels, int(track.get("channels") or 0))
+        except (TypeError, ValueError):
+            continue
+    if channels >= 8:
+        return _parse_audio_bitrate_kbps(audio_policy.get("surround_7_1_opus_bitrate"), 320.0)
+    if channels >= 6:
+        return _parse_audio_bitrate_kbps(audio_policy.get("surround_5_1_opus_bitrate"), 224.0)
+    return _parse_audio_bitrate_kbps(audio_policy.get("stereo_opus_bitrate"), 128.0)
+
+
+def _size_budget_feasibility(*, source_percent: float | None, video_bitrate_kbps: float | None) -> tuple[str, bool]:
+    if source_percent is None or video_bitrate_kbps is None:
+        return "unknown", False
+    if source_percent <= 10.0 or video_bitrate_kbps <= 500.0:
+        return "unreasonable", True
+    if source_percent <= 20.0 or video_bitrate_kbps <= 900.0:
+        return "aggressive", False
+    return "reasonable", False
+
+
+def _size_budget_request(trimmed: str, sample_item: dict[str, Any] | None) -> dict[str, Any] | None:
+    for pattern in _NOTE_SIZE_BUDGET_PATTERNS:
+        match = pattern.search(trimmed)
+        if not match:
+            continue
+        unit = str(match.group("unit") or "").strip().lower()
+        multiplier = _SIZE_BUDGET_UNIT_BYTES.get(unit)
+        if multiplier is None:
+            continue
+        try:
+            amount = float(match.group("amount"))
+        except (TypeError, ValueError):
+            continue
+        budget_bytes = int(round(amount * multiplier))
+        source_size_bytes = None
+        duration_seconds = None
+        if isinstance(sample_item, dict):
+            try:
+                source_size_bytes = float(sample_item.get("source_size_bytes") or 0)
+            except (TypeError, ValueError):
+                source_size_bytes = None
+            try:
+                duration_seconds = float(sample_item.get("duration_seconds") or 0)
+            except (TypeError, ValueError):
+                duration_seconds = None
+        audio_kbps = _sample_audio_target_kbps(sample_item)
+        estimated_audio_bytes = None
+        estimated_video_bitrate_kbps = None
+        estimated_source_percent = None
+        if duration_seconds and duration_seconds > 0:
+            estimated_audio_bytes = int(round((audio_kbps * 1000.0 / 8.0) * duration_seconds))
+            remaining_video_bytes = max(budget_bytes - estimated_audio_bytes, 0)
+            estimated_video_bitrate_kbps = round((remaining_video_bytes * 8.0 / duration_seconds) / 1000.0, 1)
+        if source_size_bytes and source_size_bytes > 0:
+            estimated_source_percent = round((budget_bytes / source_size_bytes) * 100.0, 2)
+        feasibility, requires_confirmation = _size_budget_feasibility(
+            source_percent=estimated_source_percent,
+            video_bitrate_kbps=estimated_video_bitrate_kbps,
+        )
+        return {
+            "source": "operator_note",
+            "honor_mode": "size_budget_experiment",
+            "request_type": "size_budget",
+            "budget_bytes": budget_bytes,
+            "budget_label": f"{amount:g} {unit.upper()} per episode",
+            "request_text": trimmed,
+            "estimated_source_percent": estimated_source_percent,
+            "estimated_audio_bytes": estimated_audio_bytes,
+            "estimated_video_bitrate_kbps": estimated_video_bitrate_kbps,
+            "feasibility": feasibility,
+            "requires_confirmation": requires_confirmation,
+        }
+    return None
+
+
+def _operator_requested_experiment(note: str, sample_item: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    trimmed = note.strip()
+    if not trimmed:
+        return None
+
+    size_budget_request = _size_budget_request(trimmed, sample_item)
+    if size_budget_request:
+        return size_budget_request
+
+    for pattern in _NOTE_VMAF_PATTERNS:
+        match = pattern.search(trimmed)
+        if not match:
+            continue
+        try:
+            target = float(match.group("target"))
+        except (TypeError, ValueError):
+            continue
+        target = round(max(80.0, min(target, 98.0)), 2)
+        min_target = round(min(target, max(75.0, target - 2.0)), 2)
+        return {
+            "source": "operator_note",
+            "honor_mode": "literal_experiment",
+            "request_type": "metric_target",
+            "metric": "vmaf",
+            "target": target,
+            "applied_policy": {
+                "video": {
+                    "target_vmaf": target,
+                    "min_target_vmaf": min_target,
+                }
+            },
+            "request_text": trimmed,
+        }
+
+    for pattern in _NOTE_XPSNR_PATTERNS:
+        match = pattern.search(trimmed)
+        if not match:
+            continue
+        try:
+            target = float(match.group("target"))
+        except (TypeError, ValueError):
+            continue
+        target = round(max(30.0, min(target, 41.0)), 2)
+        min_target = round(min(target, max(29.0, target - 1.0)), 2)
+        return {
+            "source": "operator_note",
+            "honor_mode": "literal_experiment",
+            "request_type": "metric_target",
+            "metric": "xpsnr",
+            "target": target,
+            "applied_policy": {
+                "video": {
+                    "target_xpsnr": target,
+                    "min_target_xpsnr": min_target,
+                }
+            },
+            "request_text": trimmed,
+        }
+    return None
+
+
+def _apply_policy_fragment(policy: dict[str, Any], fragment: dict[str, Any] | None) -> dict[str, Any]:
+    updated_policy = json.loads(json.dumps(policy))
+    for section, values in dict(fragment or {}).items():
+        if not isinstance(values, dict):
+            continue
+        updated_policy.setdefault(section, {}).update(values)
+    return updated_policy
+
+
+def _load_advice_state(config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+    path = _advice_file(config, prefix)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _merge_advice_state(config: MediaforceConfig, prefix: str, patch: dict[str, Any]) -> dict[str, Any]:
+    existing = _load_advice_state(config, prefix) or {}
+    merged = {**existing, **patch}
+    _save_advice_state(config, prefix, merged)
+    return merged
+
+
+def _build_run_verdict_payload(
+        *,
+        prefix: str,
+        calibration_payload: dict[str, Any],
+        advice_state: dict[str, Any] | None,
+) -> dict[str, Any]:
+    sample_result = dict(calibration_payload.get("sample_result") or {})
+    sample_item = dict(calibration_payload.get("sample_item") or {})
+    policy = dict(calibration_payload.get("policy") or {})
+    return {
+        "folder": prefix,
+        "action": calibration_payload.get("action"),
+        "mode": calibration_payload.get("mode"),
+        "operator_note": (advice_state or {}).get("operator_note") or calibration_payload.get("notes") or None,
+        "operator_request": (advice_state or {}).get("operator_request"),
+        "sample_item": {
+            "rel_path": sample_item.get("rel_path"),
+            "source_size_bytes": sample_item.get("source_size_bytes"),
+        },
+        "policy": policy,
+        "sample_result": {
+            "quality_metric": sample_result.get("quality_metric"),
+            "quality_target": sample_result.get("quality_target"),
+            "quality_score": sample_result.get("quality_score"),
+            "chosen_crf": sample_result.get("chosen_crf"),
+            "predicted_total_size_bytes": sample_result.get("predicted_total_size_bytes"),
+            "predicted_encode_percent": sample_result.get("predicted_encode_percent"),
+            "predicted_encode_seconds": sample_result.get("predicted_encode_seconds"),
+        },
+    }
+
+
+def _record_run_verdict(config: MediaforceConfig, prefix: str, calibration_payload: dict[str, Any]) -> None:
+    if str(calibration_payload.get("mode") or "sample") != "sample":
+        return
+    if not calibration_payload.get("sample_result"):
+        return
+    advice_state = _load_advice_state(config, prefix) or {}
+    verdict = request_run_verdict(
+        project_root=config.paths.project_root,
+        payload=_build_run_verdict_payload(
+            prefix=prefix,
+            calibration_payload=calibration_payload,
+            advice_state=advice_state,
+        ),
+    )
+    verdict_payload = {
+        "summary": verdict.summary,
+        "outcome": verdict.outcome,
+        "confidence": verdict.confidence,
+        "next_step": verdict.next_step,
+        "prompt_version": verdict.prompt_version,
+        "evidence_checked": verdict.evidence_checked,
+        "evaluated_at": _now_iso(),
+    }
+    if verdict.raw:
+        verdict_payload["raw"] = verdict.raw
+    _merge_advice_state(config, prefix, {"run_verdict": verdict_payload})
 
 
 def create_app(config_path: Path | None = None) -> FastAPI:
@@ -190,120 +492,85 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     _refresh_host_status_cache(config)
 
     @app.middleware("http")
-    async def periodic_cleanup(request: Request, call_next: Any) -> Any:
+    async def periodic_cleanup(
+            request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
         _run_periodic_cleanup(config, cleanup_lock)
         return await call_next(request)
 
+    @app.on_event("shutdown")
+    async def stop_managed_processes() -> None:
+        for controller in _active_calibration_process_controllers():
+            controller.cancel()
+        ENCODE_QUEUE_PROCESS.cancel()
+
     def _settings_page_payload(
-        *,
-        error: str | None = None,
-        saved: bool = False,
-        host_notice: str | None = None,
-        host_notice_kind: str | None = None,
-        libraries: list[dict[str, Any]] | None = None,
-        remote_hosts: list[dict[str, str]] | None = None,
-        transcode_root: str | None = None,
-        encode_queue_scheduler: dict[str, Any] | None = None,
-        schedule_profiles: list[dict[str, str]] | None = None,
+            *,
+            error: str | None = None,
+            saved: bool = False,
+            host_notice: str | None = None,
+            host_notice_kind: str | None = None,
+            libraries: list[dict[str, Any]] | None = None,
+            remote_hosts: list[dict[str, str]] | None = None,
+            transcode_root: str | None = None,
+            encode_queue_scheduler: dict[str, Any] | None = None,
+            schedule_profiles: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
-        resolved_transcode_root = _settings_transcode_root_value(config) if transcode_root is None else transcode_root
-        resolved_encode_queue_scheduler = (
-            _normalize_encode_queue_scheduler(encode_queue_scheduler)
-            if encode_queue_scheduler is not None
-            else _encode_queue_scheduler_policy(config)
+        return settings_page_payload(
+            config,
+            encode_queue_scheduler_policy=_encode_queue_scheduler_policy,
+            normalize_encode_queue_scheduler=_normalize_encode_queue_scheduler,
+            error=error,
+            saved=saved,
+            host_notice=host_notice,
+            host_notice_kind=host_notice_kind,
+            libraries=libraries,
+            remote_hosts=remote_hosts,
+            transcode_root=transcode_root,
+            encode_queue_scheduler=encode_queue_scheduler,
+            schedule_profiles=schedule_profiles,
         )
-        resolved_schedule_profiles = (
-            _index_schedule_profile_rows(schedule_profiles)
-            if schedule_profiles is not None
-            else _settings_schedule_profile_rows_for_config(config)
-        )
-        return {
-            "error": error,
-            "saved": saved,
-            "host_notice": host_notice,
-            "host_notice_kind": host_notice_kind,
-            "libraries": _index_settings_library_rows(libraries) if libraries is not None else _settings_library_rows_for_config(config),
-            "remote_hosts": _index_settings_remote_rows(remote_hosts) if remote_hosts is not None else _settings_remote_rows_for_config(config),
-            "transcode_root": resolved_transcode_root,
-            "encode_queue_scheduler": resolved_encode_queue_scheduler,
-            "schedule_profiles": resolved_schedule_profiles,
-            "schedule_profile_options": _schedule_profile_options(
-                schedule_profiles=resolved_schedule_profiles,
-            ),
-            "host_capability_options": list(HOST_CAPABILITY_OPTIONS),
-            "archive_root": _settings_archive_root(resolved_transcode_root),
-            "runtime_settings_path": str(config.paths.runtime_settings_path),
-            "repo_config_path": str(config.paths.config_path),
-        }
 
     def _dashboard_summary_payload() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            scan_job = _maybe_schedule_scan(connection, config, prefix=None)
-            preview_folders = _preview_folder_cards(connection)
-            calibration_queue = list_queue_summary(connection)
-            encode_queue = _decorate_encode_queue_for_scheduler(config, summarize_encode_queue(connection))
-        return {
-            "library_colors": _library_color_map_for_config(config),
-            "scan_job": scan_job,
-            "calibration_queue": calibration_queue,
-            "encode_queue": encode_queue,
-            "folders_preview": [asdict(folder) for folder in preview_folders],
-            "catalog_empty": not preview_folders,
-            "folder_cache_key": str(_folder_card_cache_key(config)[1]),
-        }
+        return dashboard_summary_payload(
+            config,
+            folder_card_cache_key=_folder_card_cache_key,
+            preview_folder_cards=_preview_folder_cards,
+            maybe_schedule_scan=_maybe_schedule_scan,
+            decorate_encode_queue_for_scheduler=_decorate_encode_queue_for_scheduler,
+            library_color_map_for_config=_library_color_map_for_config,
+        )
 
     def _dashboard_folders_payload() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            folders = _cached_folder_cards(config, connection)
+        return dashboard_folders_payload(
+            config,
+            folder_card_cache_key=_folder_card_cache_key,
+            list_folder_cards=_list_folder_cards,
+        )
+
+    def _dashboard_api_payload() -> dict[str, Any]:
+        metric_support = _metric_support()
         return {
-            "folders": [asdict(folder) for folder in folders],
-            "catalog_empty": not folders,
-            "folder_cache_key": str(_folder_card_cache_key(config)[1]),
+            **_dashboard_summary_payload(),
+            "metric_support": dict(metric_support),
+            "metric_status_copy": _metric_status_copy(metric_support),
         }
 
     def _folder_status_payload(normalized_prefix: str) -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            calibration_job = _load_job_state(connection, config, normalized_prefix)
-            folder_scan_job = _load_scan_job_state(config, normalized_prefix)
-        polling_active = bool(
-            (calibration_job and calibration_job.get("status") in {"queued", "running"})
-            or (folder_scan_job and folder_scan_job.get("status") in {"queued", "running"})
+        return folder_status_payload(
+            config,
+            normalized_prefix,
+            load_job_state=_load_job_state,
+            load_scan_job_state=_load_scan_job_state,
         )
-        return {
-            "prefix": normalized_prefix,
-            "polling_active": polling_active,
-            "calibration_status": calibration_job.get("status") if calibration_job else "idle",
-            "folder_scan_status": folder_scan_job.get("status") if folder_scan_job else "idle",
-            "calibration_job": calibration_job,
-            "folder_scan_job": folder_scan_job,
-        }
-
-    @app.get("/api/dashboard")
-    def api_dashboard() -> JSONResponse:
-        metric_support = _metric_support()
-        return JSONResponse(
-            {
-                **_dashboard_summary_payload(),
-				"metric_support": dict(metric_support),
-                "metric_status_copy": _metric_status_copy(metric_support),
-            }
-        )
-
-    @app.get("/api/dashboard/folders")
-    def api_dashboard_folders() -> JSONResponse:
-        return JSONResponse(_dashboard_folders_payload())
-
-    @app.get("/api/settings")
-    def api_settings() -> JSONResponse:
-        return JSONResponse(_settings_page_payload())
 
     def _save_settings_action(
-        *,
-        libraries: list[dict[str, str]],
-        remote_hosts: list[dict[str, Any]],
-        transcode_root: str,
-        encode_queue_scheduler: dict[str, Any],
-        schedule_profiles: list[dict[str, str]],
+            *,
+            libraries: list[dict[str, str]],
+            remote_hosts: list[dict[str, Any]],
+            transcode_root: str,
+            encode_queue_scheduler: dict[str, Any],
+            schedule_profiles: list[dict[str, str]],
     ) -> dict[str, Any]:
         nonlocal config
         if not transcode_root:
@@ -317,7 +584,8 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         )
         existing_runtime_settings = load_runtime_settings(config.paths.runtime_settings_path)
         merged_runtime_settings = _merge_runtime_settings_payload(existing_runtime_settings, payload)
-        libraries_changed = _runtime_source_roots(existing_runtime_settings) != _runtime_source_roots(merged_runtime_settings)
+        libraries_changed = _runtime_source_roots(existing_runtime_settings) != _runtime_source_roots(
+            merged_runtime_settings)
         save_runtime_settings(config.paths.runtime_settings_path, merged_runtime_settings)
         config = load_config(config.paths.config_path)
         app.state.config = config
@@ -328,21 +596,6 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         _refresh_host_status_cache(config)
         return {"ok": True, "message": "Settings saved.", "settings": _settings_page_payload(saved=True)}
 
-    @app.post("/api/settings")
-    async def api_settings_save(request: Request) -> JSONResponse:
-        body = await request.json()
-        try:
-            result = _save_settings_action(
-                libraries=[dict(item) for item in body.get("libraries", [])],
-                remote_hosts=[dict(item) for item in body.get("remote_hosts", [])],
-                transcode_root=str(body.get("transcode_root", "")).strip(),
-                encode_queue_scheduler=dict(body.get("encode_queue_scheduler", {})),
-                schedule_profiles=[dict(item) for item in body.get("schedule_profiles", [])],
-            )
-        except ValueError as exc:
-            return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
-        return JSONResponse(result)
-
     def _prepare_host_action(host_key: str, remote_password: str | None = None) -> dict[str, Any]:
         nonlocal config
         result = prepare_remote_host_with_password(config, host_key, password=remote_password or None)
@@ -351,16 +604,6 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         _refresh_host_status_cache(config)
         notice = result.message if not result.detail else f"{result.message} Details: {result.detail}"
         return {"ok": result.ok, "message": notice, "kind": "success" if result.ok else "error"}
-
-    @app.post("/api/hosts/prepare")
-    async def api_host_prepare(request: Request) -> JSONResponse:
-        body = await request.json()
-        return JSONResponse(
-            _prepare_host_action(
-                str(body.get("host_key", "")).strip(),
-                str(body.get("remote_password", "")).strip() or None,
-            )
-        )
 
     def _reset_host_trust_action(host_key: str) -> dict[str, Any]:
         nonlocal config
@@ -371,25 +614,27 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         notice = result.message if not result.detail else f"{result.message} Details: {result.detail}"
         return {"ok": result.ok, "message": notice, "kind": "success" if result.ok else "error"}
 
-    @app.post("/api/hosts/reset-trust")
-    async def api_host_reset_trust(request: Request) -> JSONResponse:
-        body = await request.json()
-        return JSONResponse(_reset_host_trust_action(str(body.get("host_key", "")).strip()))
-
-    @app.get("/api/hosts")
-    def api_hosts(compact: int = 0) -> JSONResponse:
+    def _hosts_payload(compact: int = 0) -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection:
             hosts = _host_runtime_rows(connection, config)
-        return JSONResponse({"compact": bool(compact), "hosts": hosts})
+        return {"compact": bool(compact), "hosts": hosts}
 
-    @app.get("/api/folders/{prefix:path}")
-    def api_folder(prefix: str) -> JSONResponse:
-        context, status_code = _folder_content_payload(prefix.strip("/"))
-        return JSONResponse(context, status_code=status_code)
-
-    @app.get("/api/folders/{prefix:path}/status")
-    def api_folder_status(prefix: str) -> JSONResponse:
-        return JSONResponse(_folder_status_payload(prefix.strip("/")))
+    register_dashboard_routes(
+        app,
+        dashboard_payload=_dashboard_api_payload,
+        dashboard_folders_payload=_dashboard_folders_payload,
+    )
+    register_settings_routes(
+        app,
+        settings_payload=_settings_page_payload,
+        save_settings_action=_save_settings_action,
+    )
+    register_host_routes(
+        app,
+        hosts_payload=_hosts_payload,
+        prepare_host_action=_prepare_host_action,
+        reset_host_trust_action=_reset_host_trust_action,
+    )
 
     def _folder_content_payload(normalized_prefix: str) -> tuple[dict[str, Any], int]:
         with open_db(config.paths.db_path) as connection:
@@ -397,7 +642,8 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             if calibration_job and calibration_job.get("status") in {"queued", "running"}:
                 existing_scan_job = _load_scan_job_state(config, normalized_prefix)
                 folder_scan_job = (
-                    existing_scan_job if existing_scan_job and existing_scan_job.get("status") in {"queued", "running"} else None
+                    existing_scan_job if existing_scan_job and existing_scan_job.get("status") in {"queued",
+                                                                                                   "running"} else None
                 )
             else:
                 folder_scan_job = _maybe_schedule_scan(connection, config, prefix=normalized_prefix)
@@ -424,7 +670,10 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                     },
                     404,
                 )
+            advice_state = _load_advice_state(config, normalized_prefix)
+            pending_proposal = _pending_proposal_public_view(_load_pending_proposal(config, normalized_prefix))
             calibration = _load_calibration_state(config, normalized_prefix)
+            recent_tuning_sessions = _recent_tuning_sessions(connection, normalized_prefix)
             review_gate = _review_gate(calibration)
             hot_spots = _preview_hotspots(sample_item, calibration)
             calibration_queue = list_queue_summary(connection, limit_per_lane=3)
@@ -456,6 +705,9 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 "policy": policy,
                 "hot_spots": hot_spots,
                 "calibration": calibration,
+                "advice": advice_state,
+                "pending_proposal": pending_proposal,
+                "recent_tuning_sessions": recent_tuning_sessions,
                 "review_gate": review_gate,
                 "calibration_queue": calibration_queue,
                 "encode_job": encode_job,
@@ -471,271 +723,177 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             200,
         )
 
+    def _recent_tuning_sessions(connection: sqlite3.Connection, prefix: str, limit: int = 8) -> list[dict[str, Any]]:
+        return recent_tuning_sessions(connection, prefix, load_json_object=_load_json_object, limit=limit)
+
+    def _proposal_signal_copy(
+            note: str,
+            operator_request: dict[str, Any] | None,
+            has_calibration: bool,
+            request_disposition: str | None = None,
+    ) -> str:
+        return proposal_signal_copy(note, operator_request, has_calibration, request_disposition)
+
+    def _load_json_object(raw: str) -> dict[str, Any]:
+        return load_json_object(raw)
+
+    def _proposal_alignment_issue(
+            *,
+            operator_request: dict[str, Any] | None,
+            request_disposition: str | None,
+            current_policy: dict[str, Any],
+            preview_policy: dict[str, Any],
+    ) -> str | None:
+        return proposal_alignment_issue(
+            operator_request=operator_request,
+            request_disposition=request_disposition,
+            current_policy=current_policy,
+            preview_policy=preview_policy,
+        )
+
+    def _folder_ai_tune_deps() -> FolderAiTuneDeps:
+        return FolderAiTuneDeps(
+            resolve_sample_host=_resolve_sample_host,
+            load_job_state=_load_job_state,
+            sample_item=_sample_item,
+            operator_requested_experiment=_operator_requested_experiment,
+            load_calibration_state=_load_calibration_state,
+            metric_support=_metric_support,
+            maybe_seed_baseline_policy=_maybe_seed_baseline_policy,
+            seed_advice_payload=_seed_advice_payload,
+            proposal_alignment_issue=_proposal_alignment_issue,
+            now_iso=_now_iso,
+            proposal_signal_copy=_proposal_signal_copy,
+            proposal_context_snapshot=_proposal_context_snapshot,
+            save_pending_proposal=_save_pending_proposal,
+            pending_proposal_public_view=_pending_proposal_public_view,
+            build_tuning_runtime_toolbelt=_build_tuning_runtime_toolbelt,
+            review_pack_dir=_review_pack_dir,
+            remove_path_if_exists=_remove_path_if_exists,
+            build_multimodal_review_pack=_build_multimodal_review_pack,
+            multimodal_review_pack_public_view=_multimodal_review_pack_public_view,
+            tuning_advice_payload=_tuning_advice_payload,
+            load_pending_proposal=_load_pending_proposal,
+            apply_policy_fragment=_apply_policy_fragment,
+            save_advice_state=_save_advice_state,
+            save_job_state=_save_job_state,
+            clear_pending_proposal=_clear_pending_proposal,
+            record_tuning_session=record_tuning_session,
+        )
+
+
+    def _folder_ai_tune_preview_action(normalized_prefix: str, note: str, host_key: str) -> dict[str, Any]:
+        return folder_ai_tune_preview_action(
+            config,
+            _folder_ai_tune_deps(),
+            normalized_prefix,
+            note,
+            host_key,
+        )
+
+    def _folder_ai_tune_confirm_action(normalized_prefix: str, proposal_id: str) -> dict[str, Any]:
+        return folder_ai_tune_confirm_action(
+            config,
+            _folder_ai_tune_deps(),
+            normalized_prefix,
+            proposal_id,
+        )
+
     def _folder_ai_tune_action(normalized_prefix: str, note: str, host_key: str) -> dict[str, Any]:
-        trimmed_note = note.strip()
-        host = _resolve_sample_host(config, host_key)
-
-        with open_db(config.paths.db_path) as connection:
-            existing_job = _load_job_state(connection, config, normalized_prefix)
-            if existing_job and existing_job.get("status") in {"queued", "running", "pending_review"}:
-                return {"ok": False, "message": "A calibration job is already active for this folder."}
-            summary = inspect_prefix(connection, config, normalized_prefix)
-            sample_item = _sample_item(connection, config, normalized_prefix)
-            if sample_item is None:
-                raise HTTPException(status_code=404, detail=f"No sample item found for {normalized_prefix}")
-            calibration = _load_calibration_state(config, normalized_prefix)
-            if calibration is None:
-                base_policy = dict(sample_item["resolved_policy"] or {})
-                seed_metadata = _maybe_seed_baseline_policy(
-                    config=config,
-                    prefix=normalized_prefix,
-                    action="baseline",
-                    user_note=trimmed_note,
-                    base_policy=base_policy,
-                    sample_item=sample_item,
-                    existing_calibration=None,
-                    connection=connection,
-                )
-                seeded_policy = seed_metadata["policy"] if seed_metadata else base_policy
-                advice_payload = _seed_advice_payload(trimmed_note, seed_metadata)
-                if advice_payload is not None:
-                    _save_advice_state(config, normalized_prefix, advice_payload)
-                job_payload = {
-                    "job_id": uuid.uuid4().hex[:12],
-                    "status": "queued",
-                    "lane": "sample",
-                    "mode": "sample",
-                    "owner_pid": None,
-                    "prefix": normalized_prefix,
-                    "host": asdict(host),
-                    "action": "baseline",
-                    "notes": trimmed_note,
-                    "policy": seeded_policy,
-                    "sample_item": {
-                        "rel_path": sample_item["rel_path"],
-                        "source_path": sample_item["source_path"],
-                        "source_size_bytes": sample_item["source_size_bytes"],
-                    },
-                    "created_at": _now_iso(),
-                    "started_at": None,
-                    "finished_at": None,
-                    "error": None,
-                    "updated_at": _now_iso(),
-                }
-                if seed_metadata:
-                    job_payload.update(seed_metadata["job_fields"])
-                _save_job_state(connection, config, normalized_prefix, job_payload)
-                return {"ok": True, "message": "Queued the initial AI-guided sample.", "job": job_payload}
-            if not trimmed_note:
-                raise HTTPException(status_code=400, detail="Add a note so the tuner knows what to change before running another sample.")
-            current_policy = dict((calibration.get("policy") if calibration else sample_item["resolved_policy"]) or {})
-            metric_support = _metric_support()
-            learning_context = retrieve_learning_context(
-                connection,
-                prefix=normalized_prefix,
-                sample_item=sample_item,
-                note=trimmed_note,
-            )
-            runtime_toolbelt = _build_tuning_runtime_toolbelt(
-                sample_item=sample_item,
-                current_policy=current_policy,
-                calibration=calibration,
-                metric_support=metric_support,
-            )
-            tuning_payload = {
-                "folder": normalized_prefix,
-                "operator_note": trimmed_note,
-                "summary": summary,
-                "sample_item": {
-                    "rel_path": sample_item["rel_path"],
-                    "source_path": sample_item["source_path"],
-                    "source_size_bytes": sample_item["source_size_bytes"],
-                    "video_codec": sample_item["video_codec"],
-                    "duration_seconds": sample_item["duration_seconds"],
-                    "audio_summary": sample_item["audio_summary"],
-                    "subtitle_summary": sample_item["subtitle_summary"],
-                },
-                "policy": current_policy,
-                "recent_calibration": calibration,
-                "metric_support": metric_support,
-                "runtime_toolbelt": runtime_toolbelt,
-                "retrieved_memory": learning_context,
-            }
-        tuning = request_note_tuning(project_root=config.paths.project_root, payload=tuning_payload)
-        tuned_policy, applied_fragment = apply_seed_policy(current_policy, tuning.proposed_policy or {})
-        advice_payload = _tuning_advice_payload(tuning=tuning, note=trimmed_note, applied_fragment=applied_fragment)
-        advice_payload["retrieved_memory"] = learning_context
-
-        with open_db(config.paths.db_path) as connection:
-            session_id = record_tuning_session(
-                connection,
-                prefix=normalized_prefix,
-                note=trimmed_note,
-                response={
-                    **advice_payload,
-                    "prompt_version": tuning.prompt_version,
-                    "proposed_policy": tuning.proposed_policy,
-                },
-                applied_policy=applied_fragment,
-                toolbelt=runtime_toolbelt,
-                created_at=_now_iso(),
-            )
-            advice_payload["session_id"] = session_id
-            learning_artifact = promote_learning_artifact(
-                connection,
-                config,
-                session_id=session_id,
-                prefix=normalized_prefix,
-                note=trimmed_note,
-                sample_item=sample_item,
-                response=advice_payload,
-                applied_policy=applied_fragment,
-                created_at=_now_iso(),
-            )
-            if learning_artifact is not None:
-                advice_payload["learning_artifact"] = learning_artifact
-        _save_advice_state(config, normalized_prefix, advice_payload)
-
-        if not tuning.ok or not applied_fragment:
-            return {
-                "ok": False,
-                "message": "Saved the tuning advice, but no new sample was queued.",
-                "advice": advice_payload,
-            }
-
-        job_payload = {
-            "job_id": uuid.uuid4().hex[:12],
-            "status": "queued",
-            "lane": "sample",
-            "mode": "sample",
-            "owner_pid": None,
-            "prefix": normalized_prefix,
-            "host": asdict(host),
-            "action": "ai_tune",
-            "notes": trimmed_note,
-            "policy": tuned_policy,
-            "sample_item": {
-                "rel_path": sample_item["rel_path"],
-                "source_path": sample_item["source_path"],
-                "source_size_bytes": sample_item["source_size_bytes"],
-            },
-            "created_at": _now_iso(),
-            "started_at": None,
-            "finished_at": None,
-            "error": None,
-            "updated_at": _now_iso(),
-        }
-        with open_db(config.paths.db_path) as connection:
-            _save_job_state(connection, config, normalized_prefix, job_payload)
-        return {"ok": True, "message": "Queued an AI-guided sample retry.", "job": job_payload, "advice": advice_payload}
+        return folder_ai_tune_action(
+            config,
+            _folder_ai_tune_deps(),
+            normalized_prefix,
+            note,
+            host_key,
+        )
 
     def _queue_folder_encode_action(normalized_prefix: str, notes: str, bypass_schedule: bool) -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            existing_job = _load_job_state(connection, config, normalized_prefix)
-            if existing_job and existing_job.get("status") in {"queued", "running", "pending_review"}:
-                return {"ok": False, "message": "A calibration job is already active for this folder."}
-            calibration = _load_calibration_state(config, normalized_prefix)
-            review_gate = _review_gate(calibration)
-            if not review_gate["can_confirm_full"]:
-                raise HTTPException(status_code=400, detail=str(review_gate["message"]))
-            if calibration is None:
-                raise HTTPException(status_code=400, detail="Run a sampled calibration first.")
-            _upsert_override(config.paths.config_path.parent / "folder-defaults.toml", normalized_prefix, calibration["policy"])
-            refreshed_config = load_config(config.paths.config_path)
-            manifest, manifest_path = create_folder_manifest(
-                connection,
-                refreshed_config,
-                prefix=normalized_prefix,
-                limit=None,
-                scan_first=False,
-            )
-            if not manifest["items"]:
-                raise HTTPException(status_code=400, detail="No pending items were found to enqueue for this folder.")
-            queue_job = {
-                "job_id": uuid.uuid4().hex[:12],
-                "prefix": normalized_prefix,
-                "status": "queued",
-                "manifest_path": str(manifest_path),
-                "item_count": len(manifest["items"]),
-                "saved_profile_path": str(config.paths.config_path.parent / "folder-defaults.toml"),
-                "host": {},
-                "notes": notes.strip(),
-                "bypass_schedule": bypass_schedule,
-                "process_pid": None,
-                "error": None,
-                "created_at": _now_iso(),
-                "started_at": None,
-                "finished_at": None,
-                "updated_at": _now_iso(),
-            }
-            save_encode_job(connection, queue_job)
-        return {"ok": True, "message": "Queued the full folder encode.", "job": queue_job}
+        return queue_folder_encode_action(
+            config,
+            normalized_prefix,
+            notes,
+            bypass_schedule,
+            now_iso=_now_iso,
+            load_job_state=_load_job_state,
+            load_calibration_state=_load_calibration_state,
+            review_gate=_review_gate,
+            upsert_override=_upsert_override,
+            save_encode_job=save_encode_job,
+        )
 
     def _save_profile_action(normalized_prefix: str) -> dict[str, Any]:
-        calibration = _load_calibration_state(config, normalized_prefix)
-        if not calibration:
-            raise HTTPException(status_code=400, detail="No draft calibration found for this folder")
-        if str(calibration.get("mode") or "sample") == "sample":
-            calibration["accepted_at"] = _now_iso()
-            calibration["accepted_draft_hash"] = str(calibration.get("draft_hash") or _calibration_draft_hash(calibration))
-            calibration["accepted_sample_job_id"] = str(calibration.get("job_id") or "")
-            _save_calibration_state(config, normalized_prefix, calibration)
-        _upsert_override(config.paths.config_path.parent / "folder-defaults.toml", normalized_prefix, calibration["policy"])
-        return {"ok": True, "message": "Saved the current draft as the folder profile."}
-
-    @app.post("/api/folders/{prefix:path}/ai-tune")
-    async def api_folder_ai_tune(prefix: str, request: Request) -> JSONResponse:
-        body = await request.json()
-        result = _folder_ai_tune_action(prefix.strip("/"), str(body.get("note", "")), str(body.get("host_key", "")))
-        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
-
-    @app.post("/api/folders/{prefix:path}/queue-encode")
-    async def api_folder_queue_encode(prefix: str, request: Request) -> JSONResponse:
-        body = await request.json()
-        result = _queue_folder_encode_action(
-            prefix.strip("/"),
-            str(body.get("notes", "")),
-            bool(body.get("bypass_schedule", False)),
+        return save_profile_action(
+            config,
+            normalized_prefix,
+            now_iso=_now_iso,
+            load_calibration_state=_load_calibration_state,
+            calibration_draft_hash=_calibration_draft_hash,
+            save_calibration_state=_save_calibration_state,
+            load_advice_state=_load_advice_state,
+            record_visual_approval_artifact=record_visual_approval_artifact,
+            merge_advice_state=_merge_advice_state,
+            upsert_override=_upsert_override,
         )
-        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
-
-    @app.post("/api/folders/{prefix:path}/save-profile")
-    def api_folder_save_profile(prefix: str) -> JSONResponse:
-        return JSONResponse(_save_profile_action(prefix.strip("/")))
 
     def _pause_encode_queue_action() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            state = load_queue_state(connection)
-            state.update({"is_paused": True, "updated_at": _now_iso()})
-            save_queue_state(connection, state)
-        return {"ok": True, "message": "Paused the encode queue."}
+        return pause_encode_queue_action(
+            connection_factory=lambda: open_db(config.paths.db_path),
+            config=config,
+            now_iso=_now_iso,
+        )
 
     def _resume_encode_queue_action() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            state = load_queue_state(connection)
-            state.update({"is_paused": False, "stop_requested": False, "updated_at": _now_iso()})
-            save_queue_state(connection, state)
-        return {"ok": True, "message": "Resumed the encode queue."}
+        return resume_encode_queue_action(
+            connection_factory=lambda: open_db(config.paths.db_path),
+            config=config,
+            now_iso=_now_iso,
+        )
 
     def _stop_encode_queue_action() -> dict[str, Any]:
+        return stop_encode_queue_action(
+            connection_factory=lambda: open_db(config.paths.db_path),
+            config=config,
+            now_iso=_now_iso,
+            cancel_queue_process=ENCODE_QUEUE_PROCESS.cancel,
+        )
+
+    def _stop_calibration_queue_action() -> dict[str, Any]:
+        return stop_calibration_queue_action(
+            connection_factory=lambda: open_db(config.paths.db_path),
+            config=config,
+            now_iso=_now_iso,
+            active_calibration_process_controllers=_active_calibration_process_controllers,
+            load_job_state=_load_job_state,
+            save_job_state=_save_job_state,
+        )
+
+    def _clear_folder_tuning_action(normalized_prefix: str) -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection:
-            state = load_queue_state(connection)
-            state.update({"stop_requested": True, "is_paused": True, "updated_at": _now_iso()})
-            save_queue_state(connection, state)
-        ENCODE_QUEUE_PROCESS.cancel()
-        return {"ok": True, "message": "Stopped and cleaned the encode queue."}
+            return _clear_folder_tuning_state(
+                connection,
+                config=config,
+                prefix=normalized_prefix,
+            )
 
-    @app.post("/api/encode-queue/pause")
-    def api_pause_encode_queue() -> JSONResponse:
-        return JSONResponse(_pause_encode_queue_action())
-
-    @app.post("/api/encode-queue/resume")
-    def api_resume_encode_queue() -> JSONResponse:
-        return JSONResponse(_resume_encode_queue_action())
-
-    @app.post("/api/encode-queue/stop")
-    def api_stop_encode_queue() -> JSONResponse:
-        return JSONResponse(_stop_encode_queue_action())
+    register_folder_routes(
+        app,
+        folder_status_payload=_folder_status_payload,
+        folder_content_payload=_folder_content_payload,
+        folder_ai_tune_action=_folder_ai_tune_action,
+        folder_ai_tune_preview_action=_folder_ai_tune_preview_action,
+        folder_ai_tune_confirm_action=_folder_ai_tune_confirm_action,
+        clear_folder_tuning_action=_clear_folder_tuning_action,
+        queue_folder_encode_action=_queue_folder_encode_action,
+        save_profile_action=_save_profile_action,
+    )
+    register_queue_routes(
+        app,
+        pause_encode_queue_action=_pause_encode_queue_action,
+        resume_encode_queue_action=_resume_encode_queue_action,
+        stop_encode_queue_action=_stop_encode_queue_action,
+        stop_calibration_queue_action=_stop_calibration_queue_action,
+    )
 
     def _frontend_index_path() -> Path:
         index_path = frontend_build_dir / "index.html"
@@ -749,16 +907,11 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             )
         return index_path
 
-    @app.get("/", include_in_schema=False)
-    def frontend_root() -> FileResponse:
-        return FileResponse(_frontend_index_path())
-
-    @app.get("/{path:path}", include_in_schema=False)
-    def frontend_catchall(path: str) -> FileResponse:
-        requested = (frontend_build_dir / path).resolve()
-        if requested.is_file() and requested.is_relative_to(frontend_build_dir.resolve()):
-            return FileResponse(requested)
-        return FileResponse(_frontend_index_path())
+    register_frontend_routes(
+        app,
+        frontend_build_dir=frontend_build_dir,
+        frontend_index_path=_frontend_index_path,
+    )
 
     return app
 
@@ -767,12 +920,11 @@ def main() -> None:
     _load_project_env_file()
     config = load_config(DEFAULT_CONFIG_PATH)
     host = _default_web_host()
-    port = int(_preferred_env("MEDIAFORCE_WEB_PORT", "MEDIA_HARNESS_WEB_PORT") or "8777")
+    port = int(_preferred_env("MEDIAFORCE_WEB_PORT") or "8777")
     reload_enabled = _default_web_reload_enabled()
     if reload_enabled:
         config_path = str(config.paths.config_path)
         os.environ.setdefault("MEDIAFORCE_CONFIG_PATH", config_path)
-        os.environ.setdefault("MEDIA_HARNESS_CONFIG_PATH", config_path)
         uvicorn.run(
             "mediaforce.web.app:create_reloadable_app",
             host=host,
@@ -782,20 +934,11 @@ def main() -> None:
             log_level="info",
         )
         return
-    uvicorn.run(
-        create_app(config.paths.config_path),
-        host=host,
-        port=port,
-        reload=False,
-        log_level="info",
-    )
+    uvicorn.run(create_app(config.paths.config_path), host=host, port=port, log_level="info")
 
 
 def create_reloadable_app() -> FastAPI:
-    config_path = Path(
-        _preferred_env("MEDIAFORCE_CONFIG_PATH", "MEDIA_HARNESS_CONFIG_PATH")
-        or str(DEFAULT_CONFIG_PATH)
-    ).expanduser()
+    config_path = Path(_preferred_env("MEDIAFORCE_CONFIG_PATH") or str(DEFAULT_CONFIG_PATH)).expanduser()
     return create_app(config_path)
 
 
@@ -825,14 +968,14 @@ def _parse_project_env_value(value: str) -> str:
 
 
 def _default_web_reload_enabled() -> bool:
-    explicit_value = _preferred_env("MEDIAFORCE_WEB_RELOAD", "MEDIA_HARNESS_WEB_RELOAD")
+    explicit_value = _preferred_env("MEDIAFORCE_WEB_RELOAD")
     if explicit_value is not None:
         return explicit_value.strip().lower() in {"1", "true", "yes", "on"}
     return False
 
 
 def _default_web_host() -> str:
-    explicit_host = _preferred_env("MEDIAFORCE_WEB_HOST", "MEDIA_HARNESS_WEB_HOST")
+    explicit_host = _preferred_env("MEDIAFORCE_WEB_HOST")
     if explicit_host is not None:
         return explicit_host
     return "127.0.0.1"
@@ -846,471 +989,149 @@ def _preferred_env(*names: str, default: str | None = None) -> str | None:
     return default
 
 
-def _settings_library_rows(source_root_map: dict[str, Path], *, min_rows: int = 3) -> list[dict[str, str]]:
-    rows = [
-        {
-            "key": key,
-            "path": str(path),
-            "color": DEFAULT_LIBRARY_COLOR_PALETTE[index % len(DEFAULT_LIBRARY_COLOR_PALETTE)],
-        }
-        for index, (key, path) in enumerate(source_root_map.items())
-    ]
-    return _index_settings_library_rows(rows, min_rows=1)
+def _refresh_host_status_cache(config: MediaforceConfig) -> list[HostStatus]:
+    return refresh_host_status_cache(config)
 
 
-def _settings_library_rows_for_config(config: HarnessConfig, *, min_rows: int = 3) -> list[dict[str, str]]:
-    media = config.raw.get("media")
-    source_roots = media.get("source_roots") if isinstance(media, dict) else None
-    library_colors = _library_color_map_for_config(config)
-    rows: list[dict[str, str]] = []
-    if isinstance(source_roots, dict):
-        for key, value in source_roots.items():
-            key_text = str(key).strip()
-            path_text = _stringify_pathlike(value)
-            if not key_text and not path_text:
-                continue
-            rows.append({"key": key_text, "path": path_text, "color": library_colors.get(key_text, '')})
-    return _index_settings_library_rows(rows, min_rows=min_rows)
+def _safe_collect_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
+    return safe_collect_host_statuses(config)
 
 
-def _index_settings_library_rows(rows: list[dict[str, str]], *, min_rows: int = 1) -> list[dict[str, str]]:
-    indexed = [
-        {
-            "index": str(index),
-            "key": row.get("key", ""),
-            "path": row.get("path", ""),
-            "color": row.get("color", ""),
-        }
-        for index, row in enumerate(rows)
-    ]
-    while len(indexed) < min_rows:
-        indexed.append({"index": str(len(indexed)), "key": "", "path": "", "color": "#0f766e"})
-    return indexed
+def _folder_card_cache_key(config: MediaforceConfig) -> tuple[str, int, int]:
+    return folder_card_cache_key(config)
 
 
-def _settings_remote_rows(remote_hosts: list[dict[str, Any]], *, min_rows: int = 3) -> list[dict[str, Any]]:
-    rows = [
-        {
-            "label": str(host.get("label") or ""),
-            "host": str(host.get("host") or ""),
-            "repo_path": str(host.get("repo_path") or ""),
-            "wake_mac": str(host.get("wake_mac") or host.get("wol_mac") or ""),
-            "priority": str(host.get("priority") or "0"),
-            "max_parallel_encodes": str(_host_max_parallel_encodes(host)),
-            "schedule_profile": _host_schedule_profile_key(host),
-            "capabilities": _normalize_host_capabilities(host.get("capabilities")),
-        }
-        for host in remote_hosts
-    ]
-    return _index_settings_remote_rows(rows, min_rows=1)
+def _reset_folder_card_cache() -> None:
+    reset_folder_card_cache()
 
 
-def _settings_remote_rows_for_config(config: HarnessConfig, *, min_rows: int = 3) -> list[dict[str, Any]]:
-    remote_hosts = config.raw.get("remote_hosts")
-    rows: list[dict[str, Any]] = []
-    if isinstance(remote_hosts, list):
-        for host in remote_hosts:
-            if not isinstance(host, dict):
-                continue
-            rows.append(
-                {
-                    "label": str(host.get("label") or ""),
-                    "host": str(host.get("host") or ""),
-                    "repo_path": str(host.get("repo_path") or ""),
-                    "wake_mac": str(host.get("wake_mac") or host.get("wol_mac") or ""),
-                    "priority": str(host.get("priority") or "0"),
-                    "max_parallel_encodes": str(_host_max_parallel_encodes(host)),
-                    "schedule_profile": _host_schedule_profile_key(host),
-                    "capabilities": _normalize_host_capabilities(host.get("capabilities")),
-                }
-            )
-    return _index_settings_remote_rows(rows, min_rows=min_rows)
-
-
-def _index_settings_remote_rows(rows: list[dict[str, Any]], *, min_rows: int = 1) -> list[dict[str, Any]]:
-    indexed = [
-        {
-            "index": str(index),
-            "label": row.get("label", ""),
-            "host": row.get("host", ""),
-            "repo_path": row.get("repo_path", ""),
-            "wake_mac": row.get("wake_mac", ""),
-            "priority": row.get("priority", "0"),
-            "max_parallel_encodes": row.get("max_parallel_encodes", str(DEFAULT_HOST_MAX_PARALLEL_ENCODES)),
-            "schedule_profile": _canonical_schedule_profile_key(row.get("schedule_profile", DEFAULT_HOST_SCHEDULE_PROFILE)),
-            "capabilities": _normalize_host_capabilities(row.get("capabilities", list(DEFAULT_HOST_CAPABILITIES))),
-        }
-        for index, row in enumerate(rows)
-    ]
-    while len(indexed) < min_rows:
-        indexed.append(
-            {
-                "index": str(len(indexed)),
-                "label": "",
-                "host": "",
-                "repo_path": "",
-                "wake_mac": "",
-                "priority": "0",
-                "max_parallel_encodes": str(DEFAULT_HOST_MAX_PARALLEL_ENCODES),
-                "schedule_profile": DEFAULT_HOST_SCHEDULE_PROFILE,
-                "capabilities": list(DEFAULT_HOST_CAPABILITIES),
-            }
-        )
-    return indexed
-
-
-def _settings_schedule_profile_rows_for_config(config: HarnessConfig, *, min_rows: int = 1) -> list[dict[str, str]]:
-    encode_queue = config.raw.get("encode_queue")
-    raw_profiles = encode_queue.get("schedule_profiles") if isinstance(encode_queue, dict) else None
-    rows: list[dict[str, str]] = []
-    if isinstance(raw_profiles, list):
-        for profile in raw_profiles:
-            if not isinstance(profile, dict):
-                continue
-            key = _canonical_schedule_profile_key(str(profile.get("key") or profile.get("name") or ""))
-            if not key or key == ALWAYS_SCHEDULE_PROFILE:
-                continue
-            normalized = _normalize_encode_queue_scheduler(profile)
-            rows.append(
-                {
-                    "key": key,
-                    "label": str(profile.get("label") or key.replace("_", " ").title()),
-                    "start_hour": str(normalized["start_hour"]),
-                    "end_hour": str(normalized["end_hour"]),
-                }
-            )
-    return _index_schedule_profile_rows(rows, min_rows=min_rows)
-
-
-def _index_schedule_profile_rows(rows: list[dict[str, str]], *, min_rows: int = 1) -> list[dict[str, str]]:
-    indexed = [
-        {
-            "index": str(index),
-            "key": row.get("key", ""),
-            "label": row.get("label", ""),
-            "start_hour": row.get("start_hour", str(DEFAULT_SCHEDULER_POLICY["start_hour"])),
-            "end_hour": row.get("end_hour", str(DEFAULT_SCHEDULER_POLICY["end_hour"])),
-        }
-        for index, row in enumerate(rows)
-    ]
-    while len(indexed) < min_rows:
-        indexed.append(
-            {
-                "index": str(len(indexed)),
-                "key": "",
-                "label": "",
-                "start_hour": str(DEFAULT_SCHEDULER_POLICY["start_hour"]),
-                "end_hour": str(DEFAULT_SCHEDULER_POLICY["end_hour"]),
-            }
-        )
-    return indexed
-
-
-def _normalize_host_capabilities(raw: Any) -> list[str]:
-    if isinstance(raw, str):
-        values = [value.strip() for value in raw.split(",") if value.strip()]
-    elif isinstance(raw, list):
-        values = [str(value).strip() for value in raw if str(value).strip()]
-    else:
-        values = []
-    normalized = sorted({value.lower().replace(" ", "_") for value in values})
-    return normalized or list(DEFAULT_HOST_CAPABILITIES)
-
-
-def _host_capability_enabled(row: dict[str, Any], capability_key: str) -> bool:
-    return capability_key in _normalize_host_capabilities(row.get("capabilities"))
-
-
-def _host_max_parallel_encodes(host: dict[str, Any]) -> int:
-    try:
-        return max(1, int(str(host.get("max_parallel_encodes") or DEFAULT_HOST_MAX_PARALLEL_ENCODES)))
-    except (TypeError, ValueError):
-        return DEFAULT_HOST_MAX_PARALLEL_ENCODES
-
-
-def _normalize_schedule_profile_key(value: str) -> str:
-    return re.sub(r"[^a-z0-9_-]+", "_", value.strip().lower()).strip("_")
-
-
-def _canonical_schedule_profile_key(value: Any) -> str:
-    key = _normalize_schedule_profile_key(str(value or ""))
-    if key in {"", "always", "no_schedule", "none"}:
-        return ALWAYS_SCHEDULE_PROFILE
-    if key in {LEGACY_DEFAULT_SCHEDULE_PROFILE, "queue_default", LEGACY_QUEUE_WINDOW_SCHEDULE_PROFILE}:
-        return ALWAYS_SCHEDULE_PROFILE
-    return key
-
-
-def _host_schedule_profile_key(host: dict[str, Any]) -> str:
-    return _canonical_schedule_profile_key(host.get("schedule_profile") or DEFAULT_HOST_SCHEDULE_PROFILE)
-
-
-def _schedule_profile_options(
-    *,
-    schedule_profiles: list[dict[str, Any]],
-) -> list[dict[str, str]]:
-    options = [
-        {
-            "key": ALWAYS_SCHEDULE_PROFILE,
-            "label": "Always",
-            "summary": "Runs anytime.",
-        },
-    ]
-    for row in schedule_profiles:
-        key = _canonical_schedule_profile_key(row.get("key"))
-        if key == ALWAYS_SCHEDULE_PROFILE:
-            continue
-        policy = _normalize_encode_queue_scheduler(
-            {
-                "mode": "night",
-                "timezone": "host_local",
-                "start_hour": row.get("start_hour"),
-                "end_hour": row.get("end_hour"),
-            }
-        )
-        options.append(
-            {
-                "key": key,
-                "label": str(row.get("label") or key.replace("_", " ").title()),
-                "summary": str(policy["summary"]),
-            }
-        )
-    return options
-
-
-def _settings_transcode_root_value(config: HarnessConfig) -> str:
-    media = config.raw.get("media")
-    return _stringify_pathlike(media.get("staging_root") if isinstance(media, dict) else None)
-
-
-def _settings_archive_root(transcode_root: str) -> str:
-    cleaned_root = transcode_root.strip()
-    if not cleaned_root:
-        return ""
-    return str(Path(cleaned_root).expanduser() / "_replaced")
-
-
-def _stringify_pathlike(value: Any) -> str:
-    if isinstance(value, Path):
-        return str(value.expanduser())
-    if isinstance(value, str):
-        return str(Path(value).expanduser()) if value.strip() else ""
-    return ""
-
-
-def _host_status_cache_key(config: HarnessConfig) -> tuple[str, int, int]:
-    return (
-        str(config.paths.config_path),
-        _path_mtime_ns(config.paths.config_path),
-        _path_mtime_ns(config.paths.runtime_settings_path),
+def _list_folder_cards(config: MediaforceConfig, connection: sqlite3.Connection) -> list[FolderCard]:
+    return cached_folder_cards(
+        config,
+        connection,
+        minimum_recommended_savings_bytes=MIN_RECOMMENDED_SAVINGS_BYTES,
+        folder_group=_folder_group,
+        age_days=_age_days,
+        estimate_savings_bytes=_estimate_savings_bytes,
+        review_badge_for_prefix=lambda prefix: _folder_review_badge(config, prefix),
     )
 
 
-def _path_mtime_ns(path: Path) -> int:
-    try:
-        return path.stat().st_mtime_ns
-    except FileNotFoundError:
-        return -1
+def _preview_folder_cards(config: MediaforceConfig, connection: sqlite3.Connection) -> list[FolderCard]:
+    return preview_folder_cards(
+        config,
+        connection,
+        minimum_recommended_savings_bytes=MIN_RECOMMENDED_SAVINGS_BYTES,
+        folder_group=_folder_group,
+        estimate_savings_bytes=_estimate_savings_bytes,
+        review_badge_for_prefix=lambda prefix: _folder_review_badge(config, prefix),
+    )
 
 
-def _collect_host_statuses_with_fallback(config: HarnessConfig) -> list[HostStatus]:
-    try:
-        return collect_host_statuses(config)
-    except Exception as exc:
-        return [
-            HostStatus(
-                key="host-status-error",
-                label="Host status unavailable",
-                mode="ssh",
-                priority=0,
-                capabilities=[],
-                available=False,
-                message="Host checks could not load with the current runtime settings.",
-                missing_paths=[],
-                issues=["Review the runtime settings values and save the page again."],
-                detail=str(exc),
-            )
-        ]
+def _host_runtime_rows(
+        connection: sqlite3.Connection, config: MediaforceConfig, *, now: datetime | None = None
+) -> list[dict[str, Any]]:
+    return host_runtime_rows(
+        connection,
+        config,
+        safe_collect_statuses=_safe_collect_host_statuses,
+        decorate_encode_job_for_scheduler=_decorate_encode_job_for_scheduler,
+        encode_queue_schedule_profiles=_encode_queue_schedule_profiles,
+        host_max_parallel_encodes=_host_max_parallel_encodes,
+        host_schedule_profile_key=_host_schedule_profile_key,
+        scheduler_allows_encode_run=_scheduler_allows_encode_run,
+        format_eta_seconds=_format_eta_seconds,
+        job_host_key=_job_host_key,
+        always_schedule_profile=ALWAYS_SCHEDULE_PROFILE,
+        default_host_schedule_profile=DEFAULT_HOST_SCHEDULE_PROFILE,
+        now=now,
+    )
 
 
-def _host_status_refresh_payload(config: HarnessConfig) -> tuple[tuple[str, int, int], list[HostStatus]]:
-    return (_host_status_cache_key(config), _collect_host_statuses_with_fallback(config))
+def _host_config_for_key(config: MediaforceConfig, host_key: str) -> dict[str, Any]:
+    return host_config_for_key(config, host_key)
 
 
-def _complete_host_status_refresh_if_ready() -> None:
-    global HOST_STATUS_CACHE_KEY
-    global HOST_STATUS_CACHE_FETCHED_AT
-    global HOST_STATUS_CACHE_VALUE
-    global HOST_STATUS_CACHE_REFRESH_FUTURE
+def _host_lifecycle_start_command(host: dict[str, Any] | None) -> str:
+    return host_lifecycle_start_command(host)
 
-    with HOST_STATUS_CACHE_LOCK:
-        future = HOST_STATUS_CACHE_REFRESH_FUTURE
-        if future is None or not future.done():
-            return
-        HOST_STATUS_CACHE_REFRESH_FUTURE = None
 
-    try:
-        cache_key, statuses = future.result()
-    except Exception:
+def _host_lifecycle_stop_command(host: dict[str, Any] | None) -> str:
+    return host_lifecycle_stop_command(host)
+
+
+def _host_lifecycle_start_timeout_seconds(host: dict[str, Any] | None) -> int:
+    return host_lifecycle_start_timeout_seconds(host)
+
+
+def _fresh_host_status_for_key(config: MediaforceConfig, host_key: str) -> HostStatus | None:
+    for status in collect_host_statuses(config):
+        if status.key == host_key or status.label == host_key:
+            return status
+    return None
+
+
+def _ensure_encode_host_ready(config: MediaforceConfig, host_payload: dict[str, Any] | None) -> bool:
+    host = dict(host_payload or {})
+    host_key = str(host.get("key") or host.get("host") or host.get("label") or "").strip()
+    if not host_key:
+        return False
+    status = _fresh_host_status_for_key(config, host_key)
+    if status is not None and status.available:
+        return False
+    start_command = _host_lifecycle_start_command(host)
+    if not start_command:
+        detail = status.detail if status is not None else None
+        message = status.message if status is not None else "host unavailable"
+        raise RuntimeError(detail or message or "Encode host is not available.")
+    result = run_host_lifecycle_command(host, start_command, timeout=HOST_LIFECYCLE_COMMAND_TIMEOUT_SECONDS)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "host start command failed"
+        raise RuntimeError(detail)
+    deadline = time.monotonic() + _host_lifecycle_start_timeout_seconds(host)
+    while time.monotonic() < deadline:
+        refreshed = _fresh_host_status_for_key(config, host_key)
+        if refreshed is not None and refreshed.available:
+            return True
+        time.sleep(HOST_LIFECYCLE_POLL_SECONDS)
+    refreshed = _fresh_host_status_for_key(config, host_key)
+    if refreshed is not None and refreshed.available:
+        return True
+    detail = refreshed.detail if refreshed is not None else None
+    message = refreshed.message if refreshed is not None else f"Timed out waiting for {host_key}"
+    raise RuntimeError(detail or message or f"Timed out waiting for {host_key}")
+
+
+def _stop_encode_host_if_configured(config: MediaforceConfig, host_payload: dict[str, Any] | None) -> None:
+    _ = config
+    host = dict(host_payload or {})
+    stop_command = _host_lifecycle_stop_command(host)
+    if not stop_command:
         return
-
-    with HOST_STATUS_CACHE_LOCK:
-        HOST_STATUS_CACHE_KEY = cache_key
-        HOST_STATUS_CACHE_FETCHED_AT = time.monotonic()
-        HOST_STATUS_CACHE_VALUE = list(statuses)
-
-
-def _refresh_host_status_cache(config: HarnessConfig) -> list[HostStatus]:
-    global HOST_STATUS_CACHE_KEY
-    global HOST_STATUS_CACHE_FETCHED_AT
-    global HOST_STATUS_CACHE_VALUE
-    global HOST_STATUS_CACHE_REFRESH_FUTURE
-
-    cache_key, statuses = _host_status_refresh_payload(config)
-    with HOST_STATUS_CACHE_LOCK:
-        HOST_STATUS_CACHE_KEY = cache_key
-        HOST_STATUS_CACHE_FETCHED_AT = time.monotonic()
-        HOST_STATUS_CACHE_VALUE = list(statuses)
-        HOST_STATUS_CACHE_REFRESH_FUTURE = None
-    return list(statuses)
+    result = run_host_lifecycle_command(host, stop_command, timeout=HOST_LIFECYCLE_COMMAND_TIMEOUT_SECONDS)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "host stop command failed"
+        raise RuntimeError(detail)
 
 
-def _schedule_host_status_refresh(config: HarnessConfig) -> None:
-    global HOST_STATUS_CACHE_REFRESH_FUTURE
-
-    _complete_host_status_refresh_if_ready()
-    with HOST_STATUS_CACHE_LOCK:
-        if HOST_STATUS_CACHE_REFRESH_FUTURE is not None:
-            return
-        HOST_STATUS_CACHE_REFRESH_FUTURE = HOST_STATUS_CACHE_EXECUTOR.submit(_host_status_refresh_payload, config)
-
-
-def _safe_collect_host_statuses(config: HarnessConfig) -> list[HostStatus]:
-    _complete_host_status_refresh_if_ready()
-    cache_key = _host_status_cache_key(config)
-    with HOST_STATUS_CACHE_LOCK:
-        cached_matches = HOST_STATUS_CACHE_KEY == cache_key and bool(HOST_STATUS_CACHE_VALUE)
-        cache_fresh = cached_matches and (time.monotonic() - HOST_STATUS_CACHE_FETCHED_AT) < HOST_STATUS_CACHE_TTL_SECONDS
-        cached_statuses = list(HOST_STATUS_CACHE_VALUE) if cached_matches else []
-
-    if cache_fresh:
-        return cached_statuses
-    if cached_statuses:
-        _schedule_host_status_refresh(config)
-        return cached_statuses
-    return _refresh_host_status_cache(config)
-
-
-def _host_runtime_rows(connection: Any, config: HarnessConfig, *, now: datetime | None = None) -> list[dict[str, Any]]:
-    statuses = _safe_collect_host_statuses(config)
-    running_counts = _running_encode_counts_by_host(connection)
-    profiles = _encode_queue_schedule_profiles(config)
-    rows: list[dict[str, Any]] = []
-    current_time = now or datetime.now(UTC)
-    for status in statuses:
-        host_config = _host_config_for_key(config, status.key)
-        capabilities = {capability.lower() for capability in status.capabilities}
-        max_parallel_encodes = _host_max_parallel_encodes(host_config)
-        schedule_profile = _host_schedule_profile_key(host_config)
-        policy = dict(profiles.get(schedule_profile) or profiles[DEFAULT_HOST_SCHEDULE_PROFILE])
-        active_encode_count = running_counts.get(status.key, 0)
-        schedule_open = _scheduler_allows_encode_run(policy, now=current_time, host_payload=asdict(status))
-        encode_capable = "encode_queue" in capabilities
-        queue_active = status.available and encode_capable and schedule_open and active_encode_count < max_parallel_encodes
-        if not status.available:
-            active_reason = status.message
-        elif not encode_capable:
-            active_reason = "encode queue capability disabled"
-        elif not schedule_open:
-            active_reason = ""
-        elif active_encode_count >= max_parallel_encodes:
-            active_reason = "parallel encode slots are full"
-        else:
-            active_reason = ""
-        schedule_detail = str(policy["summary"])
-        if schedule_profile == ALWAYS_SCHEDULE_PROFILE and schedule_detail == "runs anytime":
-            schedule_detail = ""
-        rows.append(
-            {
-                **asdict(status),
-                "schedule_profile": schedule_profile,
-                "schedule_profile_label": str(policy.get("label") or "Always"),
-                "scheduler_summary": str(policy["summary"]),
-                "schedule_detail": schedule_detail,
-                "schedule_open": schedule_open,
-                "max_parallel_encodes": max_parallel_encodes,
-                "active_encode_count": active_encode_count,
-                "queue_active": queue_active,
-                "active_flag": "active" if queue_active else "idle",
-                "active_reason": active_reason,
-            }
-        )
-    return rows
-
-
-def _running_encode_counts_by_host(connection: Any) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    rows = connection.execute("SELECT host_json FROM encode_jobs WHERE status = 'running'").fetchall()
-    for row in rows:
-        try:
-            payload = json.loads(str(row["host_json"] or "{}"))
-        except json.JSONDecodeError:
-            continue
-        host_key = str(payload.get("key") or payload.get("host") or "").strip()
-        if not host_key:
-            continue
-        counts[host_key] = counts.get(host_key, 0) + 1
-    return counts
-
-
-def _host_config_for_key(config: HarnessConfig, host_key: str) -> dict[str, Any]:
-    for host in config.remote_hosts:
-        ssh_host = str(host.get("host") or "")
-        label = str(host.get("label") or ssh_host or "remote")
-        if host_key in {ssh_host, label}:
-            return host
-    return {}
-
-
-def _default_sample_host_key(config: HarnessConfig) -> str:
-    return _default_sample_host_key_from_statuses(_sample_calibration_host_statuses(config))
+def _default_sample_host_key(config: MediaforceConfig) -> str:
+    return default_sample_host_key(config, safe_collect_statuses=_safe_collect_host_statuses)
 
 
 def _default_sample_host_key_from_statuses(statuses: list[HostStatus]) -> str:
-    for status in statuses:
-        if status.available and host_status_targets_current_machine(status):
-            return status.key
-    for status in statuses:
-        if status.available:
-            return status.key
-    return ""
+    return default_sample_host_key_from_statuses(statuses)
 
 
-def _sample_calibration_host_statuses(config: HarnessConfig) -> list[HostStatus]:
-    hosts: list[HostStatus] = []
-    for status in _safe_collect_host_statuses(config):
-        capabilities = {capability.lower() for capability in status.capabilities}
-        if "sample_calibration" in capabilities:
-            hosts.append(status)
-    return hosts
+def _sample_calibration_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
+    return sample_calibration_host_statuses(config, safe_collect_statuses=_safe_collect_host_statuses)
 
 
-def _sample_host_options(config: HarnessConfig) -> list[dict[str, Any]]:
-    return _sample_host_options_from_statuses(_sample_calibration_host_statuses(config))
+def _sample_host_options(config: MediaforceConfig) -> list[dict[str, Any]]:
+    return sample_host_options(config, safe_collect_statuses=_safe_collect_host_statuses)
 
 
 def _sample_host_options_from_statuses(statuses: list[HostStatus]) -> list[dict[str, Any]]:
-    options: list[dict[str, Any]] = []
-    for status in statuses:
-        options.append(
-            {
-                "key": status.key,
-                "label": status.label,
-                "detail": status.message if not status.available else ("This machine" if host_status_targets_current_machine(status) else "Remote host"),
-                "available": status.available,
-            }
-        )
-    return options
+    return sample_host_options_from_statuses(statuses)
 
 
 def _sample_host_help_text(sample_host_options: list[dict[str, Any]], selected_key: str) -> str:
@@ -1322,7 +1143,7 @@ def _sample_host_help_text(sample_host_options: list[dict[str, Any]], selected_k
     return "Choose where sampled calibration should run."
 
 
-def _resolve_sample_host(config: HarnessConfig, host_key: str) -> HostStatus:
+def _resolve_sample_host(config: MediaforceConfig, host_key: str) -> HostStatus:
     statuses = {host.key: host for host in _sample_calibration_host_statuses(config)}
     requested_key = host_key.strip()
     if requested_key in {"", "local"}:
@@ -1341,355 +1162,34 @@ def _resolve_sample_host(config: HarnessConfig, host_key: str) -> HostStatus:
 
 
 def _encode_queue_scheduler_from_form(form_data: dict[str, str]) -> dict[str, Any]:
+    _ = form_data
     # The shared Queue Window is retired; hosts now use Always or an explicit
     # custom schedule profile.
     return _normalize_encode_queue_scheduler({"mode": "anytime", "timezone": "host_local"})
 
 
-def _settings_form_indexes(form_data: dict[str, str], prefix: str) -> list[int]:
-    indexes: set[int] = set()
-    for key in form_data:
-        if not key.startswith(prefix):
-            continue
-        suffix = key[len(prefix) :]
-        if suffix.isdigit():
-            indexes.add(int(suffix))
-    return sorted(indexes)
+def _folder_review_badge(config: MediaforceConfig, prefix: str) -> dict[str, str | None]:
+    calibration = _load_calibration_state(config, prefix)
+    if calibration is None:
+        return {"label": None, "tone": None}
+
+    review_gate = _review_gate(calibration)
+    if review_gate.get("status") == "accepted":
+        return {"label": "Approved draft", "tone": "ok"}
+
+    if bool(calibration.get("browser_review_ready")):
+        return {"label": "Ready to review", "tone": "attention"}
+
+    if bool(calibration.get("review_media_ready")):
+        return {"label": "Refresh review", "tone": "warning"}
+
+    if str(calibration.get("mode") or "sample") == "sample":
+        return {"label": "Sample needs rerun", "tone": "warning"}
+
+    return {"label": None, "tone": None}
 
 
-def _build_runtime_settings_payload(
-    *,
-    libraries: list[dict[str, Any]],
-    remote_hosts: list[dict[str, Any]],
-    transcode_root: str,
-    encode_queue_scheduler: dict[str, Any],
-    schedule_profiles: list[dict[str, str]],
-) -> dict[str, Any]:
-    source_roots: dict[str, str] = {}
-    library_colors: dict[str, str] = {}
-    for row in libraries:
-        key_text = row.get("key", "").strip()
-        path_text = row.get("path", "").strip()
-        if not key_text and not path_text:
-            continue
-        normalized_key = _normalize_library_key(key_text)
-        if not normalized_key or not path_text:
-            raise ValueError("Each library row needs both a library name and a mounted path.")
-        if normalized_key in source_roots:
-            raise ValueError(f"Duplicate library name: {normalized_key}")
-        source_roots[normalized_key] = str(Path(path_text).expanduser())
-        color_text = _normalize_library_color(row.get("color"))
-        if color_text is not None:
-            library_colors[normalized_key] = color_text
-    if not source_roots:
-        raise ValueError("Add at least one library before saving settings.")
-    library_colors = _library_color_map_from_source_roots(source_roots, library_colors)
-
-    normalized_remotes: list[dict[str, Any]] = []
-    for row in remote_hosts:
-        label = row.get("label", "").strip()
-        host = row.get("host", "").strip()
-        repo_path = row.get("repo_path", "").strip()
-        wake_mac = row.get("wake_mac", "").strip()
-        if not label and not host and not repo_path and not wake_mac:
-            continue
-        if not host:
-            raise ValueError("Each remote host row needs an SSH host value.")
-        priority_text = row.get("priority", "0").strip() or "0"
-        try:
-            priority = int(priority_text)
-        except ValueError as exc:
-            raise ValueError(f"Host priority must be a whole number for {label or host}.") from exc
-        max_parallel_text = row.get("max_parallel_encodes", str(DEFAULT_HOST_MAX_PARALLEL_ENCODES)).strip()
-        try:
-            max_parallel_encodes = max(1, int(max_parallel_text or str(DEFAULT_HOST_MAX_PARALLEL_ENCODES)))
-        except ValueError as exc:
-            raise ValueError(f"Parallel encodes must be a whole number for {label or host}.") from exc
-        schedule_profile = _canonical_schedule_profile_key(row.get("schedule_profile", DEFAULT_HOST_SCHEDULE_PROFILE))
-        payload: dict[str, Any] = {"host": host}
-        if label:
-            payload["label"] = label
-        if repo_path:
-            payload["repo_path"] = repo_path
-        if wake_mac:
-            payload["wake_mac"] = wake_mac
-        payload["priority"] = str(priority)
-        payload["max_parallel_encodes"] = max_parallel_encodes
-        payload["schedule_profile"] = schedule_profile
-        payload["capabilities"] = _normalize_host_capabilities(row.get("capabilities"))
-        normalized_remotes.append(payload)
-
-    normalized_profiles: list[dict[str, Any]] = []
-    seen_profile_keys: set[str] = {ALWAYS_SCHEDULE_PROFILE}
-    for row in schedule_profiles:
-        key_text = _canonical_schedule_profile_key(row.get("key", ""))
-        label_text = row.get("label", "").strip()
-        start_hour_text = row.get("start_hour", str(DEFAULT_SCHEDULER_POLICY["start_hour"])).strip()
-        end_hour_text = row.get("end_hour", str(DEFAULT_SCHEDULER_POLICY["end_hour"])).strip()
-        if not any((key_text, label_text, start_hour_text, end_hour_text)):
-            continue
-        if not key_text:
-            raise ValueError("Each schedule profile needs a key.")
-        if key_text in seen_profile_keys:
-            raise ValueError(f"Duplicate schedule profile key: {key_text}")
-        normalized = _normalize_encode_queue_scheduler(
-            {
-                "mode": "night",
-                "timezone": "host_local",
-                "start_hour": start_hour_text,
-                "end_hour": end_hour_text,
-            }
-        )
-        normalized_profiles.append(
-            {
-                "key": key_text,
-                "label": label_text or key_text.replace("_", " ").title(),
-                "mode": normalized["mode"],
-                "timezone": normalized["timezone"],
-                "start_hour": normalized["start_hour"],
-                "end_hour": normalized["end_hour"],
-            }
-        )
-        seen_profile_keys.add(key_text)
-
-    invalid_host_profiles = sorted(
-        {
-            str(host.get("schedule_profile") or DEFAULT_HOST_SCHEDULE_PROFILE)
-            for host in normalized_remotes
-            if str(host.get("schedule_profile") or DEFAULT_HOST_SCHEDULE_PROFILE) not in seen_profile_keys
-        }
-    )
-    if invalid_host_profiles:
-        raise ValueError(
-            "Unknown schedule profile for host assignment: " + ", ".join(invalid_host_profiles)
-        )
-
-    staging_root = Path(transcode_root).expanduser()
-    return {
-        "media": {
-            "source_roots": source_roots,
-            "library_colors": library_colors,
-            "staging_root": str(staging_root),
-            "archive_root": str(staging_root / "_replaced"),
-        },
-        "remote_hosts": normalized_remotes,
-        "encode_queue": {
-            "scheduler": _normalize_encode_queue_scheduler(encode_queue_scheduler),
-            "schedule_profiles": normalized_profiles,
-        },
-    }
-
-
-def _merge_runtime_settings_payload(existing: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(existing)
-    if "encode_queue" in updates:
-        merged.pop("heavy_queue", None)
-    for key, value in updates.items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            nested = dict(merged[key])
-            nested.update(value)
-            merged[key] = nested
-            continue
-        merged[key] = value
-    return merged
-
-
-def _runtime_source_roots(payload: dict[str, Any]) -> dict[str, str]:
-    media = payload.get("media")
-    if not isinstance(media, dict):
-        return {}
-    source_roots = media.get("source_roots")
-    if not isinstance(source_roots, dict):
-        return {}
-    normalized: dict[str, str] = {}
-    for key, value in source_roots.items():
-        key_text = str(key).strip()
-        value_text = str(value).strip()
-        if key_text and value_text:
-            normalized[key_text] = str(Path(value_text).expanduser())
-    return normalized
-
-
-def _normalize_library_color(value: Any) -> str | None:
-    text = str(value or "").strip()
-    if not re.fullmatch(r"#[0-9a-fA-F]{6}", text):
-        return None
-    return text.lower()
-
-
-def _runtime_library_colors(payload: dict[str, Any]) -> dict[str, str]:
-    media = payload.get("media")
-    if not isinstance(media, dict):
-        return {}
-    library_colors = media.get("library_colors")
-    if not isinstance(library_colors, dict):
-        return {}
-    normalized: dict[str, str] = {}
-    for key, value in library_colors.items():
-        key_text = str(key).strip()
-        color_text = _normalize_library_color(value)
-        if key_text and color_text:
-            normalized[key_text] = color_text
-    return normalized
-
-
-def _library_color_map_from_source_roots(source_roots: dict[str, str], configured_colors: dict[str, str] | None = None) -> dict[str, str]:
-    resolved: dict[str, str] = {}
-    colors = configured_colors or {}
-    for index, key in enumerate(source_roots):
-        resolved[key] = colors.get(key) or DEFAULT_LIBRARY_COLOR_PALETTE[index % len(DEFAULT_LIBRARY_COLOR_PALETTE)]
-    return resolved
-
-
-def _library_color_map_for_config(config: HarnessConfig) -> dict[str, str]:
-    return _library_color_map_from_source_roots(
-        _runtime_source_roots(config.raw),
-        _runtime_library_colors(config.raw),
-    )
-
-
-def _normalize_library_key(value: str) -> str:
-    return re.sub(r"[^a-z0-9_-]+", "_", value.strip().lower()).strip("_")
-
-
-def _list_folder_cards(connection: Any) -> list[FolderCard]:
-    rows = connection.execute(
-        "SELECT rel_path, source_path, size_bytes, status, video_codec, audio_summary_json FROM library_items WHERE status != 'missing' ORDER BY rel_path"
-    ).fetchall()
-    grouped: dict[str, FolderCard] = {}
-    for row in rows:
-        rel_path = str(row["rel_path"])
-        group = _folder_group(rel_path)
-        if group is None:
-            continue
-        prefix, title, subtitle, scope_label = group
-        card = grouped.get(prefix)
-        if card is None:
-            card = FolderCard(
-                prefix=prefix,
-                title=title,
-                subtitle=subtitle,
-                scope_label=scope_label,
-                item_count=0,
-                pending_count=0,
-                total_size_bytes=0,
-                estimated_savings_bytes=0,
-                average_age_days=0.0,
-                sort_score=0.0,
-                statuses={},
-                video_codecs={},
-            )
-            grouped[prefix] = card
-        card.item_count += 1
-        size_bytes = int(row["size_bytes"])
-        card.total_size_bytes += size_bytes
-        age_days = _age_days(str(row["source_path"]))
-        card.average_age_days += age_days
-        status = str(row["status"] or "unknown")
-        codec = str(row["video_codec"] or "unknown")
-        if status != "promoted":
-            estimated_savings = _estimate_savings_bytes(
-                size_bytes=size_bytes,
-                video_codec=codec,
-                audio_summary_json=str(row["audio_summary_json"] or "[]"),
-            )
-            age_multiplier = _age_multiplier(age_days)
-            card.pending_count += 1
-            card.estimated_savings_bytes += estimated_savings
-            card.sort_score += (estimated_savings / (1024 ** 3)) * age_multiplier
-        card.statuses[status] = card.statuses.get(status, 0) + 1
-        card.video_codecs[codec] = card.video_codecs.get(codec, 0) + 1
-    cards = list(grouped.values())
-    for card in cards:
-        card.average_age_days = round(card.average_age_days / max(card.item_count, 1), 1)
-    cards = [
-        card
-        for card in cards
-        if card.pending_count > 0 and card.estimated_savings_bytes >= MIN_RECOMMENDED_SAVINGS_BYTES
-    ]
-    return sorted(cards, key=lambda item: (item.sort_score, item.estimated_savings_bytes, item.total_size_bytes), reverse=True)
-
-
-def _cached_folder_cards(config: HarnessConfig, connection: Any) -> list[FolderCard]:
-    global FOLDER_CARD_CACHE_KEY, FOLDER_CARD_CACHE_VALUE
-    cache_key = _folder_card_cache_key(config)
-    with FOLDER_CARD_CACHE_LOCK:
-        if FOLDER_CARD_CACHE_KEY == cache_key:
-            return list(FOLDER_CARD_CACHE_VALUE)
-    cards = _list_folder_cards(connection)
-    with FOLDER_CARD_CACHE_LOCK:
-        FOLDER_CARD_CACHE_KEY = cache_key
-        FOLDER_CARD_CACHE_VALUE = list(cards)
-    return cards
-
-
-def _reset_folder_card_cache() -> None:
-    global FOLDER_CARD_CACHE_KEY, FOLDER_CARD_CACHE_VALUE
-    with FOLDER_CARD_CACHE_LOCK:
-        FOLDER_CARD_CACHE_KEY = None
-        FOLDER_CARD_CACHE_VALUE = []
-
-
-def _preview_folder_cards(connection: Any) -> list[FolderCard]:
-    rows = connection.execute(
-        "SELECT rel_path, size_bytes, status, video_codec, audio_summary_json FROM library_items WHERE status != 'missing' ORDER BY rel_path"
-    ).fetchall()
-    grouped: dict[str, FolderCard] = {}
-    for row in rows:
-        rel_path = str(row["rel_path"])
-        group = _folder_group(rel_path)
-        if group is None:
-            continue
-        prefix, title, subtitle, scope_label = group
-        card = grouped.get(prefix)
-        if card is None:
-            card = FolderCard(
-                prefix=prefix,
-                title=title,
-                subtitle=subtitle,
-                scope_label=scope_label,
-                item_count=0,
-                pending_count=0,
-                total_size_bytes=0,
-                estimated_savings_bytes=0,
-                average_age_days=0.0,
-                sort_score=0.0,
-                statuses={},
-                video_codecs={},
-                details_loading=True,
-            )
-            grouped[prefix] = card
-        card.item_count += 1
-        size_bytes = int(row["size_bytes"])
-        card.total_size_bytes += size_bytes
-        status = str(row["status"] or "unknown")
-        codec = str(row["video_codec"] or "unknown")
-        if status != "promoted":
-            card.pending_count += 1
-            card.estimated_savings_bytes += _estimate_savings_bytes(
-                size_bytes=size_bytes,
-                video_codec=codec,
-                audio_summary_json=str(row["audio_summary_json"] or "[]"),
-            )
-        card.statuses[status] = card.statuses.get(status, 0) + 1
-        card.video_codecs[codec] = card.video_codecs.get(codec, 0) + 1
-    cards = [
-        card
-        for card in grouped.values()
-        if card.pending_count > 0 and card.estimated_savings_bytes >= MIN_RECOMMENDED_SAVINGS_BYTES
-    ]
-    return sorted(cards, key=lambda item: (item.estimated_savings_bytes, item.total_size_bytes), reverse=True)
-
-
-def _folder_card_cache_key(config: HarnessConfig) -> tuple[str, int]:
-    try:
-        db_mtime_ns = config.paths.db_path.stat().st_mtime_ns
-    except OSError:
-        db_mtime_ns = 0
-    return (str(config.paths.db_path), db_mtime_ns)
-
-
-def _sample_item(connection: Any, config: HarnessConfig, prefix: str) -> dict[str, Any] | None:
+def _sample_item(connection: sqlite3.Connection, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
     rows = connection.execute(
         """
         SELECT *
@@ -1709,7 +1209,8 @@ def _sample_item(connection: Any, config: HarnessConfig, prefix: str) -> dict[st
 
 def _metric_support() -> dict[str, bool]:
     try:
-        result = subprocess.run([ffmpeg_binary(), "-hide_banner", "-filters"], check=True, capture_output=True, text=True)
+        result = subprocess.run([ffmpeg_binary(), "-hide_banner", "-filters"], check=True, capture_output=True,
+                                text=True)
     except Exception:
         return {"vmaf": False, "xpsnr": False, "ssim": False, "psnr": False}
     output = result.stdout.lower()
@@ -1729,101 +1230,292 @@ def _metric_status_copy(metric_support: dict[str, bool]) -> str:
     return "Neither VMAF nor XPSNR is available from the current ffmpeg tooling, so calibration quality checks will fail until one is installed."
 
 
-def _tuning_policy_focus(policy: dict[str, Any]) -> dict[str, Any]:
-    video = dict((policy.get("video") or {}))
-    audio = dict((policy.get("audio") or {}))
+def _dominant_summary_key(values: JSONValue) -> str | None:
+    if not isinstance(values, dict) or not values:
+        return None
+    best_key: str | None = None
+    best_count = -1
+    for key, value in values.items():
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            continue
+        if count > best_count or (count == best_count and best_key is not None and str(key) < best_key):
+            best_key = str(key)
+            best_count = count
+    return best_key
+
+
+def _resolution_tier(width: JSONValue, height: JSONValue) -> str | None:
+    try:
+        width_value = int(width or 0)
+        height_value = int(height or 0)
+    except (TypeError, ValueError):
+        return None
+    largest_dimension = max(width_value, height_value)
+    if largest_dimension >= 3800:
+        return "2160p"
+    if largest_dimension >= 1900:
+        return "1080p"
+    if largest_dimension >= 1200:
+        return "720p"
+    if width_value > 0 and height_value > 0:
+        return f"{width_value}x{height_value}"
+    return None
+
+
+def _seed_collection_shape(prefix: str) -> str:
+    parts = Path(prefix).parts
+    if len(parts) >= 3 and parts[0].lower() == "tv" and parts[2].lower().startswith("season"):
+        return "tv_season"
+    if len(parts) >= 2 and parts[0].lower() == "tv":
+        return "tv_series"
+    if parts and parts[0].lower() in {"movie", "movies", "films"}:
+        return "movie_folder"
+    return "library_prefix"
+
+
+def _seed_policy_fragment(raw: JSONValue) -> dict[str, Any]:
+    return _tuning_policy_focus(
+        {
+            "video": dict((raw or {}).get("video") or {}),
+            "audio": dict((raw or {}).get("audio") or {}),
+            "subtitle": dict((raw or {}).get("subtitle") or {}),
+        }
+    )
+
+
+def _seed_class_signals(prefix: str, sample_item: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
+    suggested_override_raw = summary.get("suggested_override")
+    suggested_override: dict[str, Any] = dict(suggested_override_raw) if isinstance(suggested_override_raw,
+                                                                                    dict) else {}
+    collection_shape = _seed_collection_shape(prefix)
+    resolution_tier = _resolution_tier(sample_item.get("width"), sample_item.get("height"))
+    dominant_video_codec = _dominant_summary_key(summary.get("video_codecs"))
+    video_codecs = summary.get("video_codecs")
+    positive_signals: list[str] = []
+    caution_flags: list[str] = []
+
+    if collection_shape == "tv_season":
+        positive_signals.append("Folder is a single TV season rather than a broad mixed prefix.")
+    elif collection_shape == "movie_folder":
+        positive_signals.append("Folder is movie-shaped rather than episodic TV.")
+    else:
+        caution_flags.append("Folder shape is broad enough that the seed should stay close to the base policy.")
+
+    if resolution_tier is not None:
+        positive_signals.append(f"Sample item resolves to {resolution_tier}.")
+    else:
+        caution_flags.append("Sample resolution is unknown, so avoid overfitting the first-pass guess.")
+
+    sample_codec = str(sample_item.get("video_codec") or "").strip().lower()
+    if dominant_video_codec and sample_codec and dominant_video_codec == sample_codec:
+        positive_signals.append(f"Sample codec matches the folder majority codec ({dominant_video_codec}).")
+    if isinstance(video_codecs, dict) and len(video_codecs) > 1:
+        caution_flags.append(
+            "Folder mixes multiple video codecs, so one sample item may not represent every episode equally.")
+
+    item_count = int(summary.get("item_count") or 0)
+    if item_count and item_count < 6:
+        caution_flags.append("Small folder sample size means the seed should remain conservative.")
+
+    for reason in list(suggested_override.get("reason") or [])[:2]:
+        if reason:
+            positive_signals.append(str(reason))
+
+    caution_flags.append(
+        "This first-pass seed is only a bounded starting point; measured calibration should confirm any lean move.")
     return {
-        "video": {
-            key: video[key]
-            for key in (
-                "quality_metric",
-                "target_vmaf",
-                "min_target_vmaf",
-                "target_xpsnr",
-                "min_target_xpsnr",
-                "max_encoded_percent",
-                "default_grain",
-            )
-            if key in video
-        },
-        "audio": {
-            key: audio[key]
-            for key in ("surround_5_1_opus_bitrate",)
-            if key in audio
-        },
+        "collection_shape": collection_shape,
+        "sample_resolution_tier": resolution_tier,
+        "dominant_video_codec": dominant_video_codec,
+        "positive_signals": positive_signals,
+        "caution_flags": caution_flags,
     }
+
+
+def _build_seed_policy_payload(
+        *,
+        prefix: str,
+        user_note: str,
+        base_policy: dict[str, Any],
+        sample_item: dict[str, Any],
+        summary: dict[str, Any],
+        metric_support: dict[str, bool],
+) -> dict[str, Any]:
+    suggested_override_raw = summary.get("suggested_override")
+    suggested_override: dict[str, Any] = dict(suggested_override_raw) if isinstance(suggested_override_raw,
+                                                                                    dict) else {}
+    requested_experiment = _operator_requested_experiment(user_note, sample_item)
+    return {
+        "folder": prefix,
+        "goal": "Prefer slightly smaller files when the visual difference is hard to spot, but keep first-pass drafts conservative when the class is uncertain.",
+        "seed_principles": [
+            "Teach media-class taste instead of optimizing one easy title in isolation.",
+            "Prefer small, reversible moves away from the base policy.",
+            "Clean, forgiving TV can lean a little smaller than default.",
+            "Dark, grainy, fast-motion, or uncertain material should stay near the base policy until measured calibration says otherwise.",
+        ],
+        "sample_item": {
+            "rel_path": sample_item["rel_path"],
+            "source_size_bytes": sample_item["source_size_bytes"],
+            "video_codec": sample_item["video_codec"],
+            "video_bitrate": sample_item.get("video_bitrate"),
+            "width": sample_item.get("width"),
+            "height": sample_item.get("height"),
+            "resolution_tier": _resolution_tier(sample_item.get("width"), sample_item.get("height")),
+            "duration_seconds": sample_item["duration_seconds"],
+            "audio_summary": sample_item["audio_summary"],
+            "subtitle_summary": sample_item["subtitle_summary"],
+            "recommendation": sample_item.get("recommendation"),
+            "recommendation_reason": sample_item.get("recommendation_reason"),
+        },
+        "summary": {
+            "item_count": summary.get("item_count"),
+            "total_size_bytes": summary.get("total_size_bytes"),
+            "statuses": summary.get("statuses"),
+            "video_codecs": summary.get("video_codecs"),
+            "audio_codecs": summary.get("audio_codecs"),
+            "seasons": summary.get("seasons"),
+            "dominant_video_codec": _dominant_summary_key(summary.get("video_codecs")),
+            "dominant_audio_codec": _dominant_summary_key(summary.get("audio_codecs")),
+            "suggested_override": {
+                "reason": list(suggested_override.get("reason") or []),
+                "policy_focus": _seed_policy_fragment(suggested_override),
+            },
+        },
+        "class_signals": _seed_class_signals(prefix, sample_item, summary),
+        "base_policy": _tuning_policy_focus(base_policy),
+        "operator_note": user_note or None,
+        "requested_experiment": requested_experiment,
+        "metric_support": metric_support,
+        "preferred_metric": "vmaf" if metric_support.get("vmaf") else (
+            "xpsnr" if metric_support.get("xpsnr") else None),
+    }
+
+
+def _tuning_policy_focus(policy: dict[str, Any]) -> dict[str, Any]:
+    focused: dict[str, Any] = {}
+    for section in ("video", "audio", "subtitle"):
+        raw_section = policy.get(section)
+        if not isinstance(raw_section, dict):
+            continue
+        cleaned: dict[str, Any] = {}
+        for key, value in raw_section.items():
+            if value is None:
+                continue
+            if isinstance(value, (str, int, float, bool)):
+                cleaned[key] = value
+                continue
+            if isinstance(value, list) and all(isinstance(item, (str, int, float, bool)) for item in value):
+                cleaned[key] = list(value)
+        if cleaned:
+            focused[section] = cleaned
+    return focused
+
+
+def _tuning_policy_key_paths(policy: dict[str, Any]) -> list[str]:
+    focused = _tuning_policy_focus(policy)
+    paths: list[str] = []
+    for section in ("video", "audio", "subtitle"):
+        raw_section = focused.get(section)
+        if not isinstance(raw_section, dict):
+            continue
+        for key in raw_section:
+            paths.append(f"{section}.{key}")
+    return paths
+
+
+def _folder_tuning_runtime_deps() -> FolderTuningRuntimeDeps:
+    return FolderTuningRuntimeDeps(
+        tuning_policy_focus=_tuning_policy_focus,
+        summarize_calibration_result=_summarize_calibration_result,
+        tuning_policy_key_paths=_tuning_policy_key_paths,
+        review_media_context=_review_media_context,
+        review_file_from_url=_review_file_from_url,
+        review_url=_review_url,
+        slug=_slug,
+    )
+
+
+def _proposal_context_snapshot(
+        *,
+        goal: str,
+        current_policy: dict[str, Any],
+        sample_item: dict[str, Any],
+        runtime_toolbelt: dict[str, Any] | None = None,
+        learning_context: list[dict[str, Any]] | None = None,
+        recent_calibration: dict[str, Any] | None = None,
+        summary: dict[str, Any] | None = None,
+        metric_support: dict[str, Any] | None = None,
+        requested_experiment: dict[str, Any] | None = None,
+        multimodal_review_pack: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return proposal_context_snapshot(
+        _folder_tuning_runtime_deps(),
+        goal=goal,
+        current_policy=current_policy,
+        sample_item=sample_item,
+        runtime_toolbelt=runtime_toolbelt,
+        learning_context=learning_context,
+        recent_calibration=recent_calibration,
+        summary=summary,
+        metric_support=metric_support,
+        requested_experiment=requested_experiment,
+        multimodal_review_pack=multimodal_review_pack,
+    )
 
 
 def _build_tuning_runtime_toolbelt(
-    *,
-    sample_item: dict[str, Any],
-    current_policy: dict[str, Any],
-    calibration: dict[str, Any] | None,
-    metric_support: dict[str, bool],
+        *,
+        sample_item: dict[str, Any],
+        current_policy: dict[str, Any],
+        calibration: dict[str, Any] | None,
+        metric_support: dict[str, bool],
 ) -> dict[str, Any]:
-    sample_plan_item = dict(sample_item)
-    sample_plan_item["resolved_policy"] = current_policy
-    try:
-        item_plan = describe_item_plan(sample_plan_item)
-        overhead = estimate_output_overhead_bytes(sample_plan_item)
-    except Exception:
-        item_plan = {}
-        overhead = {}
-    sample_result = dict((calibration or {}).get("sample_result") or {})
-    return {
-        "allowed_policy_keys": [
-            "video.target_vmaf",
-            "video.min_target_vmaf",
-            "video.target_xpsnr",
-            "video.min_target_xpsnr",
-            "video.max_encoded_percent",
-            "video.default_grain",
-            "audio.surround_5_1_opus_bitrate",
-        ],
-        "metric_support": metric_support,
-        "current_policy_focus": _tuning_policy_focus(current_policy),
-        "item_plan": item_plan,
-        "estimated_overhead_bytes": overhead,
-        "recent_sample_result": {
-            key: sample_result.get(key)
-            for key in (
-                "chosen_crf",
-                "quality_metric",
-                "quality_target",
-                "quality_score",
-                "predicted_total_size_bytes",
-                "predicted_encode_percent",
-            )
-            if key in sample_result
-        },
-    }
+    return build_tuning_runtime_toolbelt(
+        _folder_tuning_runtime_deps(),
+        sample_item=sample_item,
+        current_policy=current_policy,
+        calibration=calibration,
+        metric_support=metric_support,
+    )
 
 
-def _normalize_encode_queue_scheduler(raw: dict[str, Any] | None) -> dict[str, Any]:
-    default_mode = str(DEFAULT_SCHEDULER_POLICY["mode"])
-    default_start_hour = int(str(DEFAULT_SCHEDULER_POLICY["start_hour"]))
-    default_end_hour = int(str(DEFAULT_SCHEDULER_POLICY["end_hour"]))
-    default_timezone = str(DEFAULT_SCHEDULER_POLICY["timezone"])
-    source = dict(DEFAULT_SCHEDULER_POLICY)
-    if raw:
-        source.update(raw)
-    mode = str(source.get("mode") or default_mode).strip().lower()
-    if mode not in {"anytime", "night"}:
-        mode = default_mode
-    timezone_name = str(source.get("timezone") or default_timezone).strip() or default_timezone
-    if timezone_name == "local":
-        timezone_name = "host_local"
-    scheduler = {
-        "mode": mode,
-        "start_hour": _clamp_hour(source.get("start_hour"), default_start_hour),
-        "end_hour": _clamp_hour(source.get("end_hour"), default_end_hour),
-        "timezone": timezone_name,
-    }
-    scheduler["summary"] = _encode_queue_scheduler_summary(scheduler)
-    return scheduler
+def _build_multimodal_review_pack(
+        *,
+        config: MediaforceConfig,
+        sample_item: dict[str, Any],
+        current_policy: dict[str, Any],
+        calibration: dict[str, Any] | None,
+        output_dir: Path,
+) -> dict[str, Any] | None:
+    return build_multimodal_review_pack(
+        _folder_tuning_runtime_deps(),
+        config=config,
+        sample_item=sample_item,
+        current_policy=current_policy,
+        calibration=calibration,
+        output_dir=output_dir,
+    )
 
 
-def _encode_queue_scheduler_policy(config: HarnessConfig) -> dict[str, Any]:
+def _review_pack_dir(config: MediaforceConfig, prefix: str, request_id: str | None = None) -> Path:
+    return review_pack_dir(_folder_tuning_runtime_deps(), config, prefix, request_id)
+
+
+def _multimodal_review_pack_public_view(
+        config: MediaforceConfig,
+        review_pack: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    return multimodal_review_pack_public_view(_folder_tuning_runtime_deps(), config, review_pack)
+
+
+def _planned_audio_review_context(*, sample_item: dict[str, Any], current_policy: dict[str, Any]) -> dict[str, Any]:
+    return planned_audio_review_context(sample_item=sample_item, current_policy=current_policy)
+
+
+def _encode_queue_scheduler_policy(config: MediaforceConfig) -> dict[str, Any]:
     encode_queue = config.raw.get("encode_queue")
     raw = encode_queue.get("scheduler") if isinstance(encode_queue, dict) else None
     if not isinstance(raw, dict):
@@ -1832,7 +1524,7 @@ def _encode_queue_scheduler_policy(config: HarnessConfig) -> dict[str, Any]:
     return _normalize_encode_queue_scheduler(raw if isinstance(raw, dict) else None)
 
 
-def _encode_queue_schedule_profiles(config: HarnessConfig) -> dict[str, dict[str, Any]]:
+def _encode_queue_schedule_profiles(config: MediaforceConfig) -> dict[str, dict[str, Any]]:
     always = _normalize_encode_queue_scheduler({"mode": "anytime", "timezone": "host_local"})
     always["key"] = ALWAYS_SCHEDULE_PROFILE
     always["label"] = "Always"
@@ -1854,17 +1546,11 @@ def _encode_queue_schedule_profiles(config: HarnessConfig) -> dict[str, dict[str
     return profiles
 
 
-def _schedule_profile_policy_for_host(config: HarnessConfig, host_payload: dict[str, Any] | None) -> dict[str, Any]:
+def _schedule_profile_policy_for_host(config: MediaforceConfig, host_payload: dict[str, Any] | None) -> dict[str, Any]:
     profiles = _encode_queue_schedule_profiles(config)
-    profile_key = _canonical_schedule_profile_key((host_payload or {}).get("schedule_profile") or DEFAULT_HOST_SCHEDULE_PROFILE)
+    profile_key = _canonical_schedule_profile_key(
+        (host_payload or {}).get("schedule_profile") or DEFAULT_HOST_SCHEDULE_PROFILE)
     return dict(profiles.get(profile_key) or profiles[DEFAULT_HOST_SCHEDULE_PROFILE])
-
-
-def _clamp_hour(value: Any, default: int) -> int:
-    try:
-        return max(0, min(23, int(str(value))))
-    except (TypeError, ValueError):
-        return default
 
 
 def _encode_queue_scheduler_summary(policy: dict[str, Any]) -> str:
@@ -1880,7 +1566,8 @@ def _host_schedule_now(current: datetime, host_payload: dict[str, Any] | None) -
             return current.astimezone(timezone(timedelta(minutes=int(offset_minutes))))
     except (TypeError, ValueError):
         pass
-    timezone_name = str((host_payload or {}).get("schedule_timezone") or (host_payload or {}).get("timezone") or "").strip()
+    timezone_name = str(
+        (host_payload or {}).get("schedule_timezone") or (host_payload or {}).get("timezone") or "").strip()
     if timezone_name:
         try:
             return current.astimezone(ZoneInfo(timezone_name))
@@ -1890,11 +1577,11 @@ def _host_schedule_now(current: datetime, host_payload: dict[str, Any] | None) -
 
 
 def _scheduler_allows_encode_run(
-    policy: dict[str, Any],
-    *,
-    bypass_schedule: bool = False,
-    now: datetime | None = None,
-    host_payload: dict[str, Any] | None = None,
+        policy: dict[str, Any],
+        *,
+        bypass_schedule: bool = False,
+        now: datetime | None = None,
+        host_payload: dict[str, Any] | None = None,
 ) -> bool:
     if bypass_schedule or str(policy.get("mode") or "anytime") == "anytime":
         return True
@@ -1927,7 +1614,99 @@ def _scheduler_allows_encode_run(
     return current_hour >= start_hour or current_hour < end_hour
 
 
-def _decorate_encode_job_for_scheduler(config: HarnessConfig, job: dict[str, Any] | None) -> dict[str, Any] | None:
+def _format_eta_seconds(seconds: float | None) -> str | None:
+    if seconds is None or seconds < 0:
+        return None
+    total_seconds = int(round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _float_or_none(value: JSONValue) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _job_host_key(job: dict[str, Any]) -> str:
+    host = dict(job.get("host") or {})
+    return str(host.get("key") or host.get("host") or host.get("label") or "").strip()
+
+
+def _decorate_encode_job_telemetry(job: dict[str, Any]) -> dict[str, Any]:
+    decorated = dict(job)
+    progress = dict(decorated.get("progress") or {})
+    manifest_totals = _encode_job_manifest_totals(decorated)
+    total_duration_seconds = float(
+        progress.get("total_duration_seconds") or manifest_totals["total_duration_seconds"] or 0.0)
+    total_item_count = int(
+        progress.get("total_item_count") or manifest_totals["total_item_count"] or decorated.get("item_count") or 0)
+    overall_completed_duration_seconds = float(progress.get("overall_completed_duration_seconds") or 0.0)
+    remaining_duration_seconds = float(
+        progress.get("remaining_duration_seconds") or max(total_duration_seconds - overall_completed_duration_seconds,
+                                                          0.0))
+    percent_complete = _float_or_none(progress.get("percent_complete"))
+    if percent_complete is None and total_duration_seconds > 0:
+        percent_complete = min(overall_completed_duration_seconds / total_duration_seconds, 1.0) * 100.0
+    fps = _float_or_none(progress.get("fps"))
+    speed = _float_or_none(progress.get("speed"))
+    eta_seconds = _float_or_none(progress.get("eta_seconds"))
+    speed_value = speed if speed not in {None, 0, 0.0} else None
+    if eta_seconds is None and speed_value is not None:
+        eta_seconds = remaining_duration_seconds / speed_value
+    decorated["progress"] = {
+        **progress,
+        "total_duration_seconds": total_duration_seconds,
+        "total_item_count": total_item_count,
+        "overall_completed_duration_seconds": overall_completed_duration_seconds,
+        "remaining_duration_seconds": remaining_duration_seconds,
+        "percent_complete": percent_complete,
+        "fps": fps,
+        "speed": speed,
+        "eta_seconds": eta_seconds,
+        "eta_copy": _format_eta_seconds(eta_seconds),
+    }
+    summary_parts: list[str] = []
+    if percent_complete is not None:
+        summary_parts.append(f"{percent_complete:.0f}%")
+    if speed_value is not None:
+        summary_parts.append(f"{speed:.2f}x")
+    if fps not in {None, 0, 0.0}:
+        summary_parts.append(f"{fps:.1f} fps")
+    eta_copy = decorated["progress"].get("eta_copy")
+    if eta_copy:
+        summary_parts.append(f"Est. ETA {eta_copy}")
+    decorated["telemetry_summary"] = " · ".join(summary_parts)
+    return decorated
+
+
+def _encode_queue_telemetry(encode_queue: dict[str, Any]) -> dict[str, Any]:
+    running_jobs = [dict(job) for job in encode_queue.get("running") or []]
+    queued_jobs = [dict(job) for job in encode_queue.get("queued") or []]
+    aggregate_speed = sum(float(((job.get("progress") or {}).get("speed") or 0.0)) for job in running_jobs)
+    total_remaining_duration_seconds = sum(
+        float(((job.get("progress") or {}).get("remaining_duration_seconds") or 0.0)) for job in running_jobs
+    )
+    total_remaining_duration_seconds += sum(
+        float(((job.get("progress") or {}).get("total_duration_seconds") or 0.0)) for job in queued_jobs
+    )
+    eta_seconds = (total_remaining_duration_seconds / aggregate_speed) if aggregate_speed > 0 else None
+    return {
+        "aggregate_speed": aggregate_speed or None,
+        "eta_seconds": eta_seconds,
+        "eta_copy": _format_eta_seconds(eta_seconds),
+        "running_jobs": len(running_jobs),
+        "queued_jobs": len(queued_jobs),
+    }
+
+
+def _decorate_encode_job_for_scheduler(config: MediaforceConfig, job: dict[str, Any] | None) -> dict[str, Any] | None:
     if job is None:
         return None
     decorated = dict(job)
@@ -1937,12 +1716,14 @@ def _decorate_encode_job_for_scheduler(config: HarnessConfig, job: dict[str, Any
     attempt_count = int(decorated.get("attempt_count") or 0)
     waiting_reason = str(decorated.get("waiting_reason") or "").strip()
     schedule_waiting = (
-        status == "queued"
-        and not _scheduler_allows_encode_run(policy, bypass_schedule=bypass_schedule, host_payload=dict(decorated.get("host") or {}))
+            status == "queued"
+            and not _scheduler_allows_encode_run(policy, bypass_schedule=bypass_schedule,
+                                                 host_payload=dict(decorated.get("host") or {}))
     )
     decorated["schedule_waiting"] = schedule_waiting
     decorated["scheduler_summary"] = str(policy["summary"])
-    decorated["attempt_summary"] = f"attempt {attempt_count} of {ENCODE_JOB_MAX_ATTEMPTS}" if attempt_count else "not started yet"
+    decorated[
+        "attempt_summary"] = f"attempt {attempt_count} of {ENCODE_JOB_MAX_ATTEMPTS}" if attempt_count else "not started yet"
     if status == "running":
         decorated["scheduler_status_copy"] = "running now"
     elif status == "needs_attention":
@@ -1957,10 +1738,10 @@ def _decorate_encode_job_for_scheduler(config: HarnessConfig, job: dict[str, Any
         decorated["scheduler_status_copy"] = f"waiting for {policy['summary']}"
     else:
         decorated["scheduler_status_copy"] = "ready when a worker is free"
-    return decorated
+    return _decorate_encode_job_telemetry(decorated)
 
 
-def _decorate_encode_queue_for_scheduler(config: HarnessConfig, encode_queue: dict[str, Any]) -> dict[str, Any]:
+def _decorate_encode_queue_for_scheduler(config: MediaforceConfig, encode_queue: dict[str, Any]) -> dict[str, Any]:
     policy = _encode_queue_scheduler_policy(config)
     queue_state = dict(encode_queue.get("state") or {})
     queue_state["scheduler"] = policy
@@ -1985,10 +1766,11 @@ def _decorate_encode_queue_for_scheduler(config: HarnessConfig, encode_queue: di
         for job in decorated["queued"]
         if bool(job.get("schedule_waiting")) or str(job.get("status") or "") == "retry_backoff"
     )
+    decorated["telemetry"] = _encode_queue_telemetry(decorated)
     return decorated
 
 
-def _state_web_dir(config: HarnessConfig) -> Path:
+def _state_web_dir(config: MediaforceConfig) -> Path:
     state_dir = config.paths.web_state_dir
     state_dir.mkdir(parents=True, exist_ok=True)
     return state_dir
@@ -1998,32 +1780,36 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
 
 
-def _calibration_file(config: HarnessConfig, prefix: str) -> Path:
+def _calibration_file(config: MediaforceConfig, prefix: str) -> Path:
     return _state_web_dir(config) / f"{_slug(prefix)}.json"
 
 
-def _advice_file(config: HarnessConfig, prefix: str) -> Path:
+def _advice_file(config: MediaforceConfig, prefix: str) -> Path:
     return _state_web_dir(config) / f"{_slug(prefix)}.advice.json"
 
 
-def _job_file(config: HarnessConfig, prefix: str) -> Path:
+def _proposal_file(config: MediaforceConfig, prefix: str) -> Path:
+    return _state_web_dir(config) / f"{_slug(prefix)}.proposal.json"
+
+
+def _job_file(config: MediaforceConfig, prefix: str) -> Path:
     return _state_web_dir(config) / f"{_slug(prefix)}.job.json"
 
 
-def _scan_job_file(config: HarnessConfig, prefix: str | None) -> Path:
+def _scan_job_file(config: MediaforceConfig, prefix: str | None) -> Path:
     name = "full-catalog" if prefix is None else f"prefix-{prefix}"
     return _state_web_dir(config) / f"scan-{_slug(name)}.job.json"
 
 
-def _catalog_signature_file(config: HarnessConfig) -> Path:
+def _catalog_signature_file(config: MediaforceConfig) -> Path:
     return _state_web_dir(config) / "full-catalog.signature.json"
 
 
-def _current_catalog_signature(config: HarnessConfig) -> dict[str, Any]:
+def _current_catalog_signature(config: MediaforceConfig) -> dict[str, Any]:
     return {"source_roots": _runtime_source_roots(config.raw)}
 
 
-def _load_catalog_signature(config: HarnessConfig) -> dict[str, Any] | None:
+def _load_catalog_signature(config: MediaforceConfig) -> dict[str, Any] | None:
     path = _catalog_signature_file(config)
     if not path.exists():
         return None
@@ -2039,7 +1825,7 @@ def _load_catalog_signature(config: HarnessConfig) -> dict[str, Any] | None:
     return {"source_roots": _runtime_source_roots({"media": {"source_roots": source_roots}})}
 
 
-def _save_catalog_signature(config: HarnessConfig) -> None:
+def _save_catalog_signature(config: MediaforceConfig) -> None:
     _catalog_signature_file(config).write_text(json.dumps(_current_catalog_signature(config), indent=2) + "\n")
 
 
@@ -2049,7 +1835,7 @@ def _calibration_draft_hash(payload: dict[str, Any]) -> str:
         for key, value in payload.items()
         if key not in CALIBRATION_REVIEW_FIELDS
     }
-    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
@@ -2073,26 +1859,34 @@ def _review_gate(calibration: dict[str, Any] | None) -> dict[str, Any]:
     accepted_job_id = str(calibration.get("accepted_sample_job_id") or "")
     current_job_id = str(calibration.get("job_id") or "")
     accepted_at = calibration.get("accepted_at")
+    review_media_ready = bool(calibration.get("review_media_ready"))
     can_confirm_full = bool(accepted_at and accepted_hash == current_hash and accepted_job_id == current_job_id)
     if can_confirm_full:
         return {
             "can_confirm_full": True,
-            "message": f"Reviewed sample draft saved at {accepted_at}. Full confirmation is unlocked.",
+            "message": f"Approved sample draft saved at {accepted_at}. Folder encode is unlocked.",
             "status": "accepted",
             "accepted_at": accepted_at,
         }
 
+    if not review_media_ready:
+        return {
+            "can_confirm_full": False,
+            "message": "Review clips are unavailable for this draft. Run a fresh sample before approving it.",
+            "status": "missing_review_media",
+        }
+
     return {
         "can_confirm_full": False,
-        "message": "Save this sampled draft to the folder profile before queueing the folder encode.",
-        "status": "needs_save",
+        "message": "Review the sample clips, then approve this draft to save the folder policy and unlock folder encode.",
+        "status": "needs_approval",
     }
 
 
 def _encode_queue_summary_copy(
-    encode_queue: dict[str, Any],
-    encode_queue_state: dict[str, Any],
-    encode_job: dict[str, Any] | None,
+        encode_queue: dict[str, Any],
+        encode_queue_state: dict[str, Any],
+        encode_job: dict[str, Any] | None,
 ) -> str:
     parts = [
         f"{int(encode_queue.get('running_count') or 0)} running",
@@ -2115,11 +1909,16 @@ def _encode_queue_summary_copy(
     if waiting_count:
         parts.append(f"{waiting_count} waiting")
 
+    queue_eta_copy = str(((encode_queue.get("telemetry") or {}).get("eta_copy") or "")).strip()
+    if queue_eta_copy:
+        parts.append(f"estimated queue finish in {queue_eta_copy}")
+
     attention_count = int(encode_queue.get("needs_attention_count") or 0)
     if attention_count:
         parts.append(f"{attention_count} need attention")
 
-    if encode_job and encode_job.get("scheduler_status_copy") and status in {"queued", "retry_backoff", "running", "needs_attention"}:
+    if encode_job and encode_job.get("scheduler_status_copy") and status in {"queued", "retry_backoff", "running",
+                                                                             "needs_attention"}:
         parts.append(str(encode_job["scheduler_status_copy"]))
 
     if encode_queue_state.get("is_paused"):
@@ -2128,248 +1927,195 @@ def _encode_queue_summary_copy(
     return " · ".join(parts)
 
 
-def _load_calibration_state(config: HarnessConfig, prefix: str) -> dict[str, Any] | None:
-    path = _calibration_file(config, prefix)
-    if not path.exists():
+def _folder_state_deps() -> FolderStateDeps:
+    return FolderStateDeps(
+        review_file_from_url=_review_file_from_url,
+        load_advice_state=_load_advice_state,
+        calibration_draft_hash=_calibration_draft_hash,
+        tuning_policy_focus=_tuning_policy_focus,
+        pending_proposal_trace_public_view=_pending_proposal_trace_public_view,
+    )
+
+
+def _load_calibration_state(config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+    return load_calibration_state(_folder_state_deps(), config, prefix, _calibration_file(config, prefix))
+
+
+def _save_calibration_state(config: MediaforceConfig, prefix: str, payload: dict[str, Any]) -> None:
+    save_calibration_state(_calibration_file(config, prefix), payload, calibration_draft_hash=_calibration_draft_hash)
+
+
+def _review_pairs(
+        source_clips: list[dict[str, Any]],
+        preview_clips: list[dict[str, Any]],
+        compare_clips: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return review_pairs(source_clips, preview_clips, compare_clips)
+
+
+def _review_media_context(calibration: dict[str, Any] | None) -> dict[str, Any]:
+    return review_media_context(calibration)
+
+
+def _review_pair_key(timestamp_seconds: float) -> int:
+    return review_pair_key(timestamp_seconds)
+
+
+def _save_advice_state(config: MediaforceConfig, prefix: str, advice: AdvisorResponse | dict[str, Any]) -> None:
+    save_advice_state(_advice_file(config, prefix), advice)
+
+
+def _load_pending_proposal(config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+    return load_pending_proposal(_proposal_file(config, prefix))
+
+
+def _save_pending_proposal(config: MediaforceConfig, prefix: str, payload: dict[str, Any]) -> None:
+    save_pending_proposal(_proposal_file(config, prefix), payload)
+
+
+def _clear_pending_proposal(config: MediaforceConfig, prefix: str) -> None:
+    clear_pending_proposal(_proposal_file(config, prefix))
+
+
+def _pending_proposal_public_view(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    return pending_proposal_public_view(_folder_state_deps(), payload)
+
+
+def _pending_proposal_trace_public_view(trace: dict[str, Any]) -> dict[str, Any] | None:
+    if not trace:
         return None
-    payload = json.loads(path.read_text())
-    compare_clips = []
-    compare_clips_purged = False
-    for clip in payload.get("compare_clips") or []:
-        review_file = _review_file_from_url(config, str(clip.get("path") or ""))
-        if review_file is None or review_file.exists():
-            compare_clips.append(clip)
-            continue
-        compare_clips_purged = True
-    payload["compare_clips"] = compare_clips
-    payload["compare_clips_purged"] = compare_clips_purged
-    payload.setdefault("mode", "full" if payload.get("encode_result") else "sample")
-    advice_path = _advice_file(config, prefix)
-    if advice_path.exists():
-        payload["advice"] = json.loads(advice_path.read_text())
-    payload["draft_hash"] = _calibration_draft_hash(payload)
-    return payload
+    proposed_policy = trace.get("proposed_policy")
+    context = dict(trace.get("context") or {})
+    if isinstance(context.get("current_policy"), dict):
+        context["current_policy"] = _tuning_policy_focus(dict(context["current_policy"]))
+    return {
+        "prompt_version": trace.get("prompt_version"),
+        "raw_response": trace.get("raw_response"),
+        "proposed_policy": _tuning_policy_focus(dict(proposed_policy or {})) if isinstance(proposed_policy,
+                                                                                           dict) else {},
+        "context": context,
+    }
 
 
-def _save_calibration_state(config: HarnessConfig, prefix: str, payload: dict[str, Any]) -> None:
-    stored_payload = dict(payload)
-    stored_payload["draft_hash"] = _calibration_draft_hash(stored_payload)
-    _calibration_file(config, prefix).write_text(json.dumps(stored_payload, indent=2) + "\n")
+def _job_runtime_deps() -> JobRuntimeDeps:
+    return JobRuntimeDeps(
+        parse_iso=_parse_iso,
+        now_iso=_now_iso,
+        run_scan_job=_run_scan_job,
+        scan_process_is_alive=_scan_process_is_alive,
+        current_catalog_signature=_current_catalog_signature,
+        load_catalog_signature=_load_catalog_signature,
+        load_scan_job_state=_load_scan_job_state,
+        save_scan_job_state=_save_scan_job_state,
+        calibration_job_notice_after=CALIBRATION_JOB_NOTICE_AFTER,
+        full_scan_stale_after=FULL_SCAN_STALE_AFTER,
+        prefix_scan_stale_after=PREFIX_SCAN_STALE_AFTER,
+        scan_retry_cooldown=SCAN_RETRY_COOLDOWN,
+        scan_interrupted_error=SCAN_INTERRUPTED_ERROR,
+        save_catalog_signature=_save_catalog_signature,
+        reset_folder_card_cache=_reset_folder_card_cache,
+    )
 
 
-def _save_advice_state(config: HarnessConfig, prefix: str, advice: AdvisorResponse | dict[str, Any]) -> None:
-    if isinstance(advice, AdvisorResponse):
-        payload = {"ok": advice.ok, "summary": advice.summary, "raw": advice.raw}
-    else:
-        payload = dict(advice)
-    _advice_file(config, prefix).write_text(json.dumps(payload, indent=2) + "\n")
+def _calibration_queue_runtime_deps() -> CalibrationQueueRuntimeDeps:
+    return CalibrationQueueRuntimeDeps(
+        now_iso=_now_iso,
+        run_calibration_job=_run_calibration_job,
+        job_seed_metadata=_job_seed_metadata,
+        save_job_state=_save_job_state,
+        mark_calibration_submission_complete=_mark_calibration_submission_complete,
+        register_calibration_process_controller=_register_calibration_process_controller,
+        unregister_calibration_process_controller=_unregister_calibration_process_controller,
+        submission_cleanup_callback=_submission_cleanup_callback,
+        calibration_submissions=CALIBRATION_SUBMISSIONS,
+        calibration_submissions_lock=CALIBRATION_SUBMISSIONS_LOCK,
+        calibration_executors=CALIBRATION_EXECUTORS,
+        sample_calibration_concurrency=SAMPLE_CALIBRATION_CONCURRENCY,
+        full_calibration_concurrency=FULL_CALIBRATION_CONCURRENCY,
+        calibration_queue_poll_seconds=CALIBRATION_QUEUE_POLL_SECONDS,
+    )
 
 
-def _load_job_state(connection: Any, config: HarnessConfig, prefix: str) -> dict[str, Any] | None:
-    payload = load_latest_job(connection, prefix)
-    if payload is None:
-        return None
-    status = str(payload.get("status") or "")
-    if status == "running" and not _calibration_job_belongs_to_current_process(payload):
-        payload = _expire_calibration_job(connection, config, prefix, payload)
-        status = str(payload.get("status") or "")
-    if status == "queued":
-        position = queue_position(connection, str(payload["job_id"]))
-        if position is not None:
-            payload["queue_position"] = position[0]
-            payload["queue_depth"] = position[1]
-    if status in {"failed", "completed"}:
-        finished_at = _parse_iso(payload.get("finished_at") or payload.get("started_at") or payload.get("created_at"))
-        if finished_at and datetime.now(tz=UTC) - finished_at > CALIBRATION_JOB_NOTICE_AFTER:
-            return None
-    return payload
+def _calibration_run_deps() -> CalibrationRunDeps:
+    return CalibrationRunDeps(
+        now_iso=_now_iso,
+        load_job_state=_load_job_state,
+        sample_item=_sample_item,
+        save_job_state=_save_job_state,
+        save_calibration_state=_save_calibration_state,
+        record_run_verdict=_record_run_verdict,
+        summarize_calibration_result=_summarize_calibration_result,
+        calibration_mode_for_action=_calibration_mode_for_action,
+        effective_video_preset=effective_video_preset,
+        search_quality_for_source=search_quality_for_source,
+        run_sample_encode=run_sample_encode,
+        recommend_review_timestamps=recommend_review_timestamps,
+        encode_preview_clips=encode_preview_clips,
+        render_source_review_clips=render_source_review_clips,
+        generate_compare_clips_from_previews=generate_compare_clips_from_previews,
+        estimate_output_overhead_bytes=estimate_output_overhead_bytes,
+        build_svt_params=build_svt_params,
+        review_url=_review_url,
+        encode_manifest_items=encode_manifest_items,
+        validate_manifest_items=validate_manifest_items,
+        generate_compare_clips=generate_compare_clips,
+        staged_artifact_columns=CALIBRATION_STAGED_ARTIFACT_COLUMNS,
+    )
 
 
-def _save_job_state(connection: Any, config: HarnessConfig, prefix: str, payload: dict[str, Any]) -> None:
-    save_job(connection, {**payload, "prefix": prefix, "updated_at": _now_iso()})
+def _load_job_state(connection: sqlite3.Connection, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+    return runtime_load_job_state(connection, config, prefix, _job_runtime_deps())
+
+
+def _save_job_state(
+        connection: sqlite3.Connection, config: MediaforceConfig, prefix: str, payload: dict[str, Any]
+) -> None:
+    runtime_save_job_state(connection, config, prefix, payload, _job_runtime_deps())
 
 
 def _calibration_job_belongs_to_current_process(job: dict[str, Any]) -> bool:
-    return int(job.get("owner_pid") or -1) == os.getpid()
+    return runtime_calibration_job_belongs_to_current_process(job)
 
 
-def _expire_calibration_job(connection: Any, config: HarnessConfig, prefix: str, job: dict[str, Any]) -> dict[str, Any]:
-    expired = {
-        **job,
-        "status": "failed",
-        "finished_at": _now_iso(),
-        "error": "Calibration was interrupted by a web process restart.",
-    }
-    _save_job_state(connection, config, prefix, expired)
-    return expired
+def _expire_calibration_job(
+        connection: sqlite3.Connection, config: MediaforceConfig, prefix: str, job: dict[str, Any]
+) -> dict[str, Any]:
+    return runtime_expire_calibration_job(connection, config, prefix, job, _job_runtime_deps())
 
 
-def _load_scan_job_state(config: HarnessConfig, prefix: str | None) -> dict[str, Any] | None:
-    path = _scan_job_file(config, prefix)
-    if not path.exists():
-        return None
-    return json.loads(path.read_text())
+def _load_scan_job_state(config: MediaforceConfig, prefix: str | None) -> dict[str, Any] | None:
+    return runtime_load_scan_job_state(config, prefix, _scan_job_file)
 
 
-def _save_scan_job_state(config: HarnessConfig, prefix: str | None, payload: dict[str, Any]) -> None:
-    _scan_job_file(config, prefix).write_text(json.dumps(payload, indent=2) + "\n")
+def _save_scan_job_state(config: MediaforceConfig, prefix: str | None, payload: dict[str, Any]) -> None:
+    runtime_save_scan_job_state(config, prefix, payload, _scan_job_file)
 
 
-def _maybe_schedule_scan(connection: Any, config: HarnessConfig, prefix: str | None) -> dict[str, Any] | None:
-    active_scan = _active_scan_from_db(connection, prefix)
-    if active_scan is not None:
-        return active_scan
-    if prefix is not None:
-        full_job = _load_scan_job_state(config, None)
-        if full_job and full_job.get("status") in {"queued", "running"} and not _scan_job_belongs_to_current_process(full_job):
-            full_job = _expire_scan_job(config, None, full_job)
-        if full_job and full_job.get("status") in {"queued", "running"}:
-            return full_job
-    job = _load_scan_job_state(config, prefix)
-    if job and job.get("status") in {"queued", "running"} and not _scan_job_belongs_to_current_process(job):
-        job = _expire_scan_job(config, prefix, job)
-    if job and job.get("status") in {"queued", "running"}:
-        return job
-    if not _scan_is_stale(connection, config, prefix):
-        return job
-    if job and job.get("status") == "failed":
-        finished_at = _parse_iso(job.get("finished_at") or job.get("started_at"))
-        if finished_at and datetime.now(tz=UTC) - finished_at < SCAN_RETRY_COOLDOWN:
-            return job
-
-    job_payload = {
-        "job_id": uuid.uuid4().hex[:12],
-        "status": "queued",
-        "scope": "full" if prefix is None else "prefix",
-        "prefix": prefix,
-        "owner_pid": os.getpid(),
-        "created_at": _now_iso(),
-        "started_at": None,
-        "finished_at": None,
-        "error": None,
-        "stats": None,
-    }
-    _save_scan_job_state(config, prefix, job_payload)
-    thread = threading.Thread(
-        target=_run_scan_job,
-        kwargs={
-            "config_path": config.paths.config_path,
-            "prefix": prefix,
-            "job_id": str(job_payload["job_id"]),
-        },
-        daemon=True,
-    )
-    thread.start()
-    return job_payload
+def _maybe_schedule_scan(
+        connection: sqlite3.Connection, config: MediaforceConfig, prefix: str | None
+) -> dict[str, Any] | None:
+    return runtime_maybe_schedule_scan(connection, config, prefix, _job_runtime_deps())
 
 
-def _scan_is_stale(connection: Any, config: HarnessConfig, prefix: str | None) -> bool:
-    if prefix is None:
-        if _load_catalog_signature(config) != _current_catalog_signature(config):
-            return True
-        item_count = int(connection.execute("SELECT COUNT(*) FROM library_items").fetchone()[0])
-        if item_count == 0:
-            return True
-        latest = _latest_scan_completed_at(connection, prefix=None)
-        if latest is None:
-            return True
-        return datetime.now(tz=UTC) - latest > FULL_SCAN_STALE_AFTER
-
-    item_count = int(
-        connection.execute("SELECT COUNT(*) FROM library_items WHERE rel_path LIKE ?", (f"{prefix}%",)).fetchone()[0]
-    )
-    if item_count == 0:
-        return True
-    latest = _latest_scan_completed_at(connection, prefix=prefix)
-    if latest is None:
-        return True
-    return datetime.now(tz=UTC) - latest > PREFIX_SCAN_STALE_AFTER
+def _scan_is_stale(connection: sqlite3.Connection, config: MediaforceConfig, prefix: str | None) -> bool:
+    return runtime_scan_is_stale(connection, config, prefix, _job_runtime_deps())
 
 
-def _latest_scan_completed_at(connection: Any, prefix: str | None) -> datetime | None:
-    rows = connection.execute(
-        "SELECT completed_at, started_at, scope, prefixes_json FROM scan_runs ORDER BY started_at DESC LIMIT 250"
-    ).fetchall()
-    for row in rows:
-        scope = str(row["scope"] or "unknown")
-        completed = _parse_iso(row["completed_at"] or row["started_at"])
-        if completed is None:
-            continue
-        if prefix is None:
-            if scope == "full":
-                return completed
-            continue
-
-        if scope == "full":
-            return completed
-        if scope != "prefix":
-            continue
-        try:
-            prefixes = json.loads(row["prefixes_json"] or "[]")
-        except json.JSONDecodeError:
-            prefixes = []
-        for candidate in prefixes:
-            normalized = str(candidate).strip("/")
-            if normalized and prefix.startswith(normalized):
-                return completed
-    return None
+def _latest_scan_completed_at(connection: sqlite3.Connection, prefix: str | None) -> datetime | None:
+    return runtime_latest_scan_completed_at(connection, prefix)
 
 
-def _active_scan_from_db(connection: Any, prefix: str | None) -> dict[str, Any] | None:
-    rows = connection.execute(
-        "SELECT scan_id, started_at, scope, prefixes_json FROM scan_runs WHERE completed_at IS NULL ORDER BY started_at DESC LIMIT 25"
-    ).fetchall()
-    for row in rows:
-        scope = str(row["scope"] or "unknown")
-        if prefix is None:
-            if scope in {"full", "unknown"}:
-                return {
-                    "job_id": str(row["scan_id"]),
-                    "status": "running",
-                    "scope": scope,
-                    "prefix": None,
-                    "created_at": row["started_at"],
-                    "started_at": row["started_at"],
-                    "finished_at": None,
-                    "error": None,
-                    "stats": None,
-                }
-            continue
-
-        if scope in {"full", "unknown"}:
-            return {
-                "job_id": str(row["scan_id"]),
-                "status": "running",
-                "scope": scope,
-                "prefix": prefix,
-                "created_at": row["started_at"],
-                "started_at": row["started_at"],
-                "finished_at": None,
-                "error": None,
-                "stats": None,
-            }
-        try:
-            prefixes = json.loads(row["prefixes_json"] or "[]")
-        except json.JSONDecodeError:
-            prefixes = []
-        for candidate in prefixes:
-            normalized = str(candidate).strip("/")
-            if normalized and prefix.startswith(normalized):
-                return {
-                    "job_id": str(row["scan_id"]),
-                    "status": "running",
-                    "scope": scope,
-                    "prefix": normalized,
-                    "created_at": row["started_at"],
-                    "started_at": row["started_at"],
-                    "finished_at": None,
-                    "error": None,
-                    "stats": None,
-                }
-    return None
+def _scan_process_is_alive(pid: JSONValue) -> bool:
+    return runtime_scan_process_is_alive(pid)
 
 
-def _parse_iso(value: Any) -> datetime | None:
+def _active_scan_from_db(
+        connection: sqlite3.Connection, config: MediaforceConfig, prefix: str | None
+) -> dict[str, Any] | None:
+    return runtime_active_scan_from_db(connection, config, prefix, _job_runtime_deps())
+
+
+def _parse_iso(value: JSONValue) -> datetime | None:
     if not value:
         return None
     try:
@@ -2382,18 +2128,7 @@ def _parse_iso(value: Any) -> datetime | None:
 
 
 def _scan_job_belongs_to_current_process(job: dict[str, Any]) -> bool:
-    return int(job.get("owner_pid") or -1) == os.getpid()
-
-
-def _expire_scan_job(config: HarnessConfig, prefix: str | None, job: dict[str, Any]) -> dict[str, Any]:
-    expired = {
-        **job,
-        "status": "failed",
-        "finished_at": _now_iso(),
-        "error": "Background scan was interrupted by a web process restart.",
-    }
-    _save_scan_job_state(config, prefix, expired)
-    return expired
+    return runtime_scan_job_belongs_to_current_process(job, _scan_process_is_alive)
 
 
 def _calibration_mode_for_action(action: str) -> str:
@@ -2477,12 +2212,12 @@ def _age_multiplier(age_days: float) -> float:
     return 1.0
 
 
-def _review_url(config: HarnessConfig, output_path: Path) -> str:
+def _review_url(config: MediaforceConfig, output_path: Path) -> str:
     relative = output_path.relative_to(config.paths.review_dir)
     return f"/review-media/{relative.as_posix()}"
 
 
-def _review_file_from_url(config: HarnessConfig, value: str) -> Path | None:
+def _review_file_from_url(config: MediaforceConfig, value: str) -> Path | None:
     prefix = "/review-media/"
     if not value.startswith(prefix):
         return None
@@ -2491,6 +2226,130 @@ def _review_file_from_url(config: HarnessConfig, value: str) -> Path | None:
     if not candidate.is_relative_to(review_root):
         return None
     return candidate
+
+
+def _review_cleanup_targets(config: MediaforceConfig, calibration_payload: dict[str, Any] | None) -> list[Path]:
+    if not isinstance(calibration_payload, dict):
+        return []
+    targets: list[Path] = []
+    seen: set[Path] = set()
+    for key in ("compare_clips", "preview_clips", "source_clips"):
+        for clip in calibration_payload.get(key) or []:
+            review_file = _review_file_from_url(config, str((clip or {}).get("path") or ""))
+            if review_file is None:
+                continue
+            if review_file not in seen:
+                seen.add(review_file)
+                targets.append(review_file)
+            try:
+                relative = review_file.relative_to(config.paths.review_dir)
+            except ValueError:
+                continue
+            if not relative.parts:
+                continue
+            root = config.paths.review_dir / relative.parts[0]
+            if root in seen:
+                continue
+            seen.add(root)
+            targets.append(root)
+    return sorted(targets, key=lambda path: len(path.parts), reverse=True)
+
+
+def _remove_path_if_exists(path: Path) -> None:
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+
+
+def _prune_empty_parents(path: Path, *, stop_at: Path) -> None:
+    current = path
+    stop = stop_at.resolve()
+    while True:
+        try:
+            resolved = current.resolve()
+        except OSError:
+            return
+        if resolved == stop:
+            return
+        try:
+            current.rmdir()
+        except FileNotFoundError:
+            current = current.parent
+            continue
+        except OSError:
+            return
+        current = current.parent
+
+
+def _clear_folder_tuning_state(
+        connection: sqlite3.Connection,
+        *,
+        config: MediaforceConfig,
+        prefix: str,
+) -> dict[str, Any]:
+    active_job = load_active_job(connection, prefix)
+    if active_job is not None:
+        return {"ok": False,
+                "message": "A calibration job is still active for this folder. Wait for it to finish before clearing it."}
+
+    calibration_payload = None
+    calibration_path = _calibration_file(config, prefix)
+    if calibration_path.exists():
+        try:
+            loaded = json.loads(calibration_path.read_text())
+            calibration_payload = loaded if isinstance(loaded, dict) else None
+        except (OSError, json.JSONDecodeError):
+            calibration_payload = None
+
+    review_targets = _review_cleanup_targets(config, calibration_payload)
+    review_pack_dir = _review_pack_dir(config, prefix)
+    review_pack_present = review_pack_dir.exists()
+    artifact_rows = connection.execute(
+        "SELECT artifact_path FROM learning_artifacts WHERE prefix = ?",
+        (prefix,),
+    ).fetchall()
+    artifact_paths = [Path(str(row["artifact_path"])) for row in artifact_rows if
+                      str(row["artifact_path"] or "").strip()]
+    session_count = int(
+        connection.execute("SELECT COUNT(*) FROM tuning_sessions WHERE prefix = ?", (prefix,)).fetchone()[0]
+    )
+    job_count = int(
+        connection.execute("SELECT COUNT(*) FROM calibration_jobs WHERE prefix = ?", (prefix,)).fetchone()[0]
+    )
+
+    connection.execute("DELETE FROM tuning_sessions WHERE prefix = ?", (prefix,))
+    connection.execute("DELETE FROM calibration_jobs WHERE prefix = ?", (prefix,))
+
+    _remove_path_if_exists(calibration_path)
+    _remove_path_if_exists(_advice_file(config, prefix))
+    _remove_path_if_exists(_proposal_file(config, prefix))
+    for artifact_path in artifact_paths:
+        _remove_path_if_exists(artifact_path)
+    for review_target in review_targets:
+        _remove_path_if_exists(review_target)
+        if review_target.parent != config.paths.review_dir:
+            _prune_empty_parents(review_target.parent, stop_at=config.paths.review_dir)
+    _remove_path_if_exists(review_pack_dir)
+    if review_pack_dir.parent != config.paths.review_dir:
+        _prune_empty_parents(review_pack_dir.parent, stop_at=config.paths.review_dir)
+
+    return {
+        "ok": True,
+        "message": "Cleared the tuning thread and sampled calibration artifacts for this folder.",
+        "cleared": {
+            "tuning_sessions": session_count,
+            "calibration_jobs": job_count,
+            "review_targets": len(review_targets),
+            "review_pack_artifacts": int(review_pack_present),
+            "learning_artifacts": len(artifact_paths),
+        },
+    }
 
 
 def _upsert_override(file_path: Path, prefix: str, policy: dict[str, Any]) -> None:
@@ -2509,7 +2368,7 @@ def _upsert_override(file_path: Path, prefix: str, policy: dict[str, Any]) -> No
 
 def _render_override_block(prefix: str, policy: dict[str, Any]) -> str:
     lines = ["[[overrides]]", f'path_prefix = "{prefix}"', 'note = "Saved from the calibration bench."', ""]
-    for section in ("video", "audio", "planning"):
+    for section in ("video", "audio", "subtitle", "planning"):
         values = policy.get(section) or {}
         if not values:
             continue
@@ -2529,7 +2388,7 @@ def _now_iso() -> str:
     return datetime.now(tz=UTC).isoformat(timespec="seconds")
 
 
-def _recover_calibration_jobs(connection: Any, config: HarnessConfig) -> None:
+def _recover_calibration_jobs(connection: sqlite3.Connection, config: MediaforceConfig) -> None:
     running_rows = connection.execute(
         "SELECT job_id FROM calibration_jobs WHERE status = 'running' AND (owner_pid IS NULL OR owner_pid != ?)",
         (os.getpid(),),
@@ -2541,11 +2400,13 @@ def _recover_calibration_jobs(connection: Any, config: HarnessConfig) -> None:
         _expire_calibration_job(connection, config, str(payload["prefix"]), payload)
 
 
-def _recover_encode_queue(connection: Any, config: HarnessConfig) -> None:
+def _recover_encode_queue(connection: sqlite3.Connection, config: MediaforceConfig) -> None:
     _reconcile_encode_jobs(connection, config, restart_recovery=True)
 
 
-def _reconcile_encode_jobs(connection: Any, config: HarnessConfig, *, restart_recovery: bool = False) -> None:
+def _reconcile_encode_jobs(
+        connection: sqlite3.Connection, config: MediaforceConfig, *, restart_recovery: bool = False
+) -> None:
     now = datetime.now(tz=UTC)
     running_rows = connection.execute("SELECT job_id FROM encode_jobs WHERE status = 'running'").fetchall()
     for row in running_rows:
@@ -2570,7 +2431,7 @@ def _reconcile_encode_jobs(connection: Any, config: HarnessConfig, *, restart_re
         )
 
     retry_backoff_rows = connection.execute(
-        "SELECT job_id FROM encode_jobs WHERE status = 'retry_backoff' ORDER BY created_at ASC, rowid ASC"
+        "SELECT job_id FROM encode_jobs WHERE status = 'retry_backoff' ORDER BY created_at , rowid "
     ).fetchall()
     for row in retry_backoff_rows:
         payload = load_encode_job(connection, str(row["job_id"]))
@@ -2610,6 +2471,82 @@ def _encode_job_retry_delay_seconds(attempt_count: int) -> int:
     exponent = max(attempt_count - 1, 0)
     delay = ENCODE_JOB_RETRY_BASE_DELAY_SECONDS * (2 ** exponent)
     return min(delay, ENCODE_JOB_RETRY_MAX_DELAY_SECONDS)
+
+
+def _encode_job_manifest_totals(job: dict[str, Any]) -> dict[str, Any]:
+    manifest_path = Path(str(job.get("manifest_path") or "")).expanduser()
+    if not manifest_path.exists():
+        return {
+            "total_item_count": int(job.get("item_count") or 0),
+            "total_duration_seconds": 0.0,
+            "total_source_size_bytes": 0,
+        }
+    try:
+        payload = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {
+            "total_item_count": int(job.get("item_count") or 0),
+            "total_duration_seconds": 0.0,
+            "total_source_size_bytes": 0,
+        }
+    items = list(payload.get("items") or [])
+    return {
+        "total_item_count": len(items) or int(job.get("item_count") or 0),
+        "total_duration_seconds": sum(float(item.get("duration_seconds") or 0.0) for item in items),
+        "total_source_size_bytes": sum(int(item.get("source_size_bytes") or 0) for item in items),
+    }
+
+
+def _initial_encode_job_progress(job: dict[str, Any]) -> dict[str, Any]:
+    manifest_totals = _encode_job_manifest_totals(job)
+    return {
+        **manifest_totals,
+        "completed_item_count": 0,
+        "completed_duration_seconds": 0.0,
+        "overall_completed_duration_seconds": 0.0,
+        "remaining_duration_seconds": float(manifest_totals["total_duration_seconds"]),
+        "percent_complete": 0.0,
+        "progress_state": "starting",
+        "fps": None,
+        "speed": None,
+        "eta_seconds": None,
+        "elapsed_seconds": 0.0,
+        "out_time_seconds": 0.0,
+        "updated_at": _now_iso(),
+    }
+
+
+def _persist_encode_job_progress(config_path: Path, job_id: str, progress: dict[str, Any]) -> None:
+    with open_db(load_config(config_path).paths.db_path) as connection:
+        job = load_encode_job(connection, job_id)
+        if job is None or str(job.get("status") or "") != "running":
+            return
+        job.update({"progress": {**progress, "updated_at": _now_iso()}, "updated_at": _now_iso()})
+        save_encode_job(connection, job)
+
+
+def _finalize_encode_job_progress(job: dict[str, Any], *, terminal_state: str) -> dict[str, Any] | None:
+    progress = dict(job.get("progress") or {})
+    if not progress:
+        return None
+    total_duration_seconds = float(progress.get("total_duration_seconds") or 0.0)
+    total_item_count = int(progress.get("total_item_count") or int(job.get("item_count") or 0))
+    if terminal_state == "completed":
+        progress.update(
+            {
+                "completed_item_count": total_item_count,
+                "completed_duration_seconds": total_duration_seconds,
+                "overall_completed_duration_seconds": total_duration_seconds,
+                "remaining_duration_seconds": 0.0,
+                "percent_complete": 100.0,
+                "eta_seconds": 0.0,
+                "progress_state": "completed",
+                "updated_at": _now_iso(),
+            }
+        )
+        return progress
+    progress.update({"progress_state": terminal_state, "updated_at": _now_iso()})
+    return progress
 
 
 def _encode_failure_is_host_related(failure_kind: str, error_message: str, host_payload: dict[str, Any]) -> bool:
@@ -2653,13 +2590,14 @@ def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) ->
 
 
 def _transition_encode_job_failure(
-    connection: Any,
-    config: HarnessConfig,
-    job: dict[str, Any],
-    *,
-    failure_kind: str,
-    error_message: str,
+        connection: sqlite3.Connection,
+        config: MediaforceConfig,
+        job: dict[str, Any],
+        *,
+        failure_kind: str,
+        error_message: str,
 ) -> None:
+    _ = config
     now = datetime.now(tz=UTC)
     now_iso = now.isoformat(timespec="seconds")
     assigned_host = dict(job.get("host") or {})
@@ -2677,6 +2615,7 @@ def _transition_encode_job_failure(
             "last_failure_at": now_iso,
             "error": error_message,
             "last_host": assigned_host,
+            "progress": _finalize_encode_job_progress(job, terminal_state="needs_attention"),
             "updated_at": now_iso,
         }
     )
@@ -2719,7 +2658,7 @@ def _transition_encode_job_failure(
     save_encode_job(connection, job)
 
 
-def _cleanup_encode_retry_artifacts(connection: Any, *, manifest_path: Path) -> None:
+def _cleanup_encode_retry_artifacts(connection: sqlite3.Connection, *, manifest_path: Path) -> None:
     try:
         manifest = json.loads(manifest_path.read_text())
     except (OSError, json.JSONDecodeError):
@@ -2746,40 +2685,58 @@ def _cleanup_encode_retry_artifacts(connection: Any, *, manifest_path: Path) -> 
         connection.execute(
             """
             UPDATE library_items
-            SET status = CASE WHEN status = 'promoted' THEN status ELSE 'planned' END,
+            SET status     = CASE WHEN status = 'promoted' THEN status ELSE 'planned' END,
                 updated_at = ?
-            WHERE id = ? AND status != 'promoted'
+            WHERE id = ?
+              AND status != 'promoted'
             """,
             (now_iso, library_item_id),
         )
 
 
-def _select_encode_host(connection: Any, config: HarnessConfig, job: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
-    host_rows = sorted(_host_runtime_rows(connection, config), key=lambda status: (-int(status["priority"]), str(status["label"])))
+def _select_encode_host(connection: sqlite3.Connection, config: MediaforceConfig, job: dict[str, Any]) -> tuple[
+    dict[str, Any] | None, str | None]:
+    host_rows = sorted(_host_runtime_rows(connection, config),
+                       key=lambda status: (-int(status["priority"]), str(status["label"])))
     now = datetime.now(tz=UTC)
     bypass_schedule = bool(job.get("bypass_schedule"))
     active_hosts = [
         host
         for host in host_rows
         if bool(host.get("available"))
-        and "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
-        and int(host.get("active_encode_count") or 0) < int(host.get("max_parallel_encodes") or 1)
-        and (
-            bypass_schedule
-            or _scheduler_allows_encode_run(
-                _schedule_profile_policy_for_host(config, host),
-                now=now,
-                host_payload=host,
-            )
-        )
+           and "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
+           and int(host.get("active_encode_count") or 0) < int(host.get("max_parallel_encodes") or 1)
+           and (
+                   bypass_schedule
+                   or _scheduler_allows_encode_run(
+               _schedule_profile_policy_for_host(config, host),
+               now=now,
+               host_payload=host,
+           )
+           )
     ]
     encode_capable_hosts = [
         host
         for host in host_rows
-        if bool(host.get("available"))
-        and "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
+        if "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
     ]
-    if not encode_capable_hosts:
+    startable_hosts = [
+        host
+        for host in host_rows
+        if not bool(host.get("available"))
+           and bool(_host_lifecycle_start_command(host))
+           and "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
+           and int(host.get("active_encode_count") or 0) < int(host.get("max_parallel_encodes") or 1)
+           and (
+                   bypass_schedule
+                   or _scheduler_allows_encode_run(
+               _schedule_profile_policy_for_host(config, host),
+               now=now,
+               host_payload=host,
+           )
+           )
+    ]
+    if not encode_capable_hosts and not startable_hosts:
         return None, "waiting for an available encode host"
 
     cooldown_until = _parse_iso(job.get("host_cooldown_until"))
@@ -2790,26 +2747,36 @@ def _select_encode_host(connection: Any, config: HarnessConfig, job: dict[str, A
         str(last_host.get("host") or ""),
     }
     if cooldown_until is not None and cooldown_until > now and any(blocked_keys):
-        eligible = [
+        eligible_active_hosts = [
             host
             for host in active_hosts
             if str(host.get("key") or "") not in blocked_keys and str(host.get("label") or "") not in blocked_keys
         ]
-        if eligible:
-            return dict(eligible[0]), None
+        if eligible_active_hosts:
+            return dict(eligible_active_hosts[0]), None
+        eligible_startable_hosts = [
+            host
+            for host in startable_hosts
+            if str(host.get("key") or "") not in blocked_keys and str(host.get("label") or "") not in blocked_keys
+        ]
+        if eligible_startable_hosts:
+            return dict(eligible_startable_hosts[0]), None
         host_name = str(last_host.get("label") or last_host.get("key") or "the last host")
         return None, f"waiting for host cooldown to expire on {host_name}"
     if active_hosts:
         return dict(active_hosts[0]), None
-    if any(int(host.get("active_encode_count") or 0) >= int(host.get("max_parallel_encodes") or 1) for host in encode_capable_hosts):
+    if startable_hosts:
+        return dict(startable_hosts[0]), None
+    if any(int(host.get("active_encode_count") or 0) >= int(host.get("max_parallel_encodes") or 1) for host in
+           encode_capable_hosts):
         return None, "waiting for host capacity to free up"
     if any(
-        not _scheduler_allows_encode_run(
-            _schedule_profile_policy_for_host(config, host),
-            now=now,
-            host_payload=host,
-        )
-        for host in encode_capable_hosts
+            not _scheduler_allows_encode_run(
+                _schedule_profile_policy_for_host(config, host),
+                now=now,
+                host_payload=host,
+            )
+            for host in encode_capable_hosts
     ):
         return None, "waiting for a host schedule window"
     return None, "waiting for an available encode host"
@@ -2844,29 +2811,11 @@ def _encode_job_heartbeat_loop(*, config_path: Path, job_id: str, worker_id: str
             save_encode_job(connection, job)
 
 
-def _dispatch_calibration_job(config: HarnessConfig, job_payload: dict[str, Any]) -> None:
-    job_id = str(job_payload["job_id"])
-    with CALIBRATION_SUBMISSIONS_LOCK:
-        if job_id in CALIBRATION_SUBMISSIONS:
-            return
-        CALIBRATION_SUBMISSIONS.add(job_id)
-    lane = str(job_payload.get("lane") or job_payload.get("mode") or "sample")
-    task = partial(
-        _run_calibration_job,
-        config_path=config.paths.config_path,
-        prefix=str(job_payload["prefix"]),
-        action=str(job_payload["action"]),
-        host_data=dict(job_payload.get("host") or {}),
-        notes=str(job_payload.get("notes") or ""),
-        policy=dict(job_payload.get("policy") or {}),
-        job_id=job_id,
-        seed_metadata=_job_seed_metadata(job_payload),
-    )
-    future = CALIBRATION_EXECUTORS[lane].submit(task)
-    future.add_done_callback(_submission_cleanup_callback(job_id))
+def _dispatch_calibration_job(config: MediaforceConfig, job_payload: dict[str, Any]) -> None:
+    runtime_dispatch_calibration_job(config, job_payload, _calibration_queue_runtime_deps())
 
 
-def _start_calibration_queue_worker(config: HarnessConfig) -> None:
+def _start_calibration_queue_worker(config: MediaforceConfig) -> None:
     global CALIBRATION_QUEUE_WORKER_STARTED
     with CALIBRATION_QUEUE_WORKER_LOCK:
         if CALIBRATION_QUEUE_WORKER_STARTED:
@@ -2882,73 +2831,15 @@ def _start_calibration_queue_worker(config: HarnessConfig) -> None:
 
 
 def _calibration_queue_worker_loop(*, config_path: Path) -> None:
-    while True:
-        try:
-            _process_calibration_queue_once(config_path=config_path)
-        except Exception:
-            pass
-        threading.Event().wait(CALIBRATION_QUEUE_POLL_SECONDS)
+    runtime_calibration_queue_worker_loop(
+        config_path=config_path,
+        deps=_calibration_queue_runtime_deps(),
+        logger=LOGGER,
+    )
 
 
 def _process_calibration_queue_once(*, config_path: Path) -> None:
-    config = load_config(config_path)
-    capacities = {
-        "sample": SAMPLE_CALIBRATION_CONCURRENCY,
-        "full": FULL_CALIBRATION_CONCURRENCY,
-    }
-    with open_db(config.paths.db_path) as connection:
-        active_rows = connection.execute(
-            """
-            SELECT job_id, lane, prefix, status
-            FROM calibration_jobs
-            WHERE status IN ('running', 'pending_review')
-            ORDER BY created_at ASC, rowid ASC
-            """
-        ).fetchall()
-        running_by_lane = {lane: 0 for lane in capacities}
-        active_prefixes: set[str] = set()
-        for row in active_rows:
-            lane = str(row["lane"])
-            status = str(row["status"])
-            prefix = str(row["prefix"])
-            active_prefixes.add(prefix)
-            if status == "running" and lane in running_by_lane:
-                running_by_lane[lane] += 1
-
-        for lane, capacity in capacities.items():
-            while running_by_lane[lane] < capacity:
-                started_at = _now_iso()
-                payload = claim_next_queued_calibration_job(
-                    connection,
-                    lane=lane,
-                    owner_pid=os.getpid(),
-                    started_at=started_at,
-                    excluded_prefixes=tuple(sorted(active_prefixes)),
-                )
-                if payload is None:
-                    break
-                connection.commit()
-                try:
-                    _dispatch_calibration_job(config, payload)
-                except Exception as exc:
-                    _mark_calibration_submission_complete(str(payload["job_id"]))
-                    _save_job_state(
-                        connection,
-                        config,
-                        str(payload["prefix"]),
-                        {
-                            **payload,
-                            "status": "failed",
-                            "owner_pid": os.getpid(),
-                            "started_at": payload.get("started_at") or started_at,
-                            "finished_at": _now_iso(),
-                            "error": str(exc),
-                        },
-                    )
-                    connection.commit()
-                    continue
-                active_prefixes.add(str(payload["prefix"]))
-                running_by_lane[lane] += 1
+    runtime_process_calibration_queue_once(config_path=config_path, deps=_calibration_queue_runtime_deps())
 
 
 def _mark_calibration_submission_complete(job_id: str) -> None:
@@ -2956,49 +2847,52 @@ def _mark_calibration_submission_complete(job_id: str) -> None:
         CALIBRATION_SUBMISSIONS.discard(job_id)
 
 
-def _submission_cleanup_callback(job_id: str) -> Any:
-    def _callback(_future: Future[Any]) -> None:
+def _register_calibration_process_controller(job_id: str, controller: ManagedProcessController) -> None:
+    with CALIBRATION_QUEUE_PROCESSES_LOCK:
+        CALIBRATION_QUEUE_PROCESSES[job_id] = controller
+
+
+def _unregister_calibration_process_controller(job_id: str) -> None:
+    with CALIBRATION_QUEUE_PROCESSES_LOCK:
+        CALIBRATION_QUEUE_PROCESSES.pop(job_id, None)
+
+
+def _active_calibration_process_controllers() -> list[ManagedProcessController]:
+    with CALIBRATION_QUEUE_PROCESSES_LOCK:
+        return list(CALIBRATION_QUEUE_PROCESSES.values())
+
+
+def _submission_cleanup_callback(job_id: str) -> Callable[[Future[object]], None]:
+    def _callback(_future: Future[object]) -> None:
         _mark_calibration_submission_complete(job_id)
+        _unregister_calibration_process_controller(job_id)
 
     return _callback
 
 
 def _maybe_seed_baseline_policy(
-    *,
-    config: HarnessConfig,
-    prefix: str,
-    action: str,
-    user_note: str,
-    base_policy: dict[str, Any],
-    sample_item: dict[str, Any],
-    existing_calibration: dict[str, Any] | None,
-    connection: Any,
+        *,
+        config: MediaforceConfig,
+        prefix: str,
+        action: str,
+        user_note: str,
+        base_policy: dict[str, Any],
+        sample_item: dict[str, Any],
+        existing_calibration: dict[str, Any] | None,
+        connection: sqlite3.Connection,
 ) -> dict[str, Any] | None:
     if action != "baseline" or existing_calibration is not None:
         return None
     summary = inspect_prefix(connection, config, prefix)
-    payload = {
-        "folder": prefix,
-        "goal": "Prefer slightly smaller files when the visual difference is hard to spot.",
-        "sample_item": {
-            "rel_path": sample_item["rel_path"],
-            "source_size_bytes": sample_item["source_size_bytes"],
-            "video_codec": sample_item["video_codec"],
-            "duration_seconds": sample_item["duration_seconds"],
-            "audio_summary": sample_item["audio_summary"],
-            "subtitle_summary": sample_item["subtitle_summary"],
-        },
-        "summary": {
-            "item_count": summary.get("item_count"),
-            "total_size_bytes": summary.get("total_size_bytes"),
-            "video_codecs": summary.get("video_codecs"),
-            "audio_codecs": summary.get("audio_codecs"),
-            "seasons": summary.get("seasons"),
-        },
-        "base_policy": base_policy,
-        "operator_note": user_note or None,
-        "metric_support": _metric_support(),
-    }
+    metric_support = _metric_support()
+    payload = _build_seed_policy_payload(
+        prefix=prefix,
+        user_note=user_note,
+        base_policy=base_policy,
+        sample_item=sample_item,
+        summary=summary,
+        metric_support=metric_support,
+    )
     seed_response = request_seed_policy(project_root=config.paths.project_root, payload=payload)
     if not seed_response.ok or not seed_response.proposed_policy:
         return {
@@ -3006,10 +2900,18 @@ def _maybe_seed_baseline_policy(
             "job_fields": {
                 "seed_source": "default",
                 "seed_summary": seed_response.summary,
+                "seed_diagnosis": seed_response.diagnosis,
+                "seed_confidence": seed_response.confidence,
+                "seed_evidence_checked": seed_response.evidence_checked,
+                "seed_suggested_follow_up": seed_response.suggested_follow_up,
+                "seed_request_disposition": seed_response.request_disposition,
+                "seed_request_response": seed_response.request_response,
+                "seed_feasibility_note": seed_response.feasibility_note,
                 "seed_prompt_version": seed_response.prompt_version,
                 "seed_raw_response": seed_response.raw,
                 "seed_proposed_policy": None,
                 "seed_applied_policy": None,
+                "seed_context_payload": payload,
             },
         }
     seeded_policy, applied_fragment = apply_seed_policy(base_policy, seed_response.proposed_policy)
@@ -3019,19 +2921,27 @@ def _maybe_seed_baseline_policy(
         "job_fields": {
             "seed_source": seed_source,
             "seed_summary": seed_response.summary,
+            "seed_diagnosis": seed_response.diagnosis,
+            "seed_confidence": seed_response.confidence,
+            "seed_evidence_checked": seed_response.evidence_checked,
+            "seed_suggested_follow_up": seed_response.suggested_follow_up,
+            "seed_request_disposition": seed_response.request_disposition,
+            "seed_request_response": seed_response.request_response,
+            "seed_feasibility_note": seed_response.feasibility_note,
             "seed_prompt_version": seed_response.prompt_version,
             "seed_raw_response": seed_response.raw,
             "seed_proposed_policy": seed_response.proposed_policy,
             "seed_applied_policy": applied_fragment or None,
+            "seed_context_payload": payload,
         },
     }
 
 
 def _tuning_advice_payload(
-    *,
-    tuning: TuningPolicyResponse,
-    note: str,
-    applied_fragment: dict[str, Any],
+        *,
+        tuning: TuningPolicyResponse,
+        note: str,
+        applied_fragment: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "ok": tuning.ok,
@@ -3040,6 +2950,9 @@ def _tuning_advice_payload(
         "kind": "ai_tune",
         "operator_note": note,
         "prompt_version": tuning.prompt_version,
+        "request_disposition": tuning.request_disposition,
+        "request_response": tuning.request_response,
+        "feasibility_note": tuning.feasibility_note,
         "diagnosis": tuning.diagnosis,
         "confidence": tuning.confidence,
         "evidence_checked": tuning.evidence_checked,
@@ -3061,16 +2974,30 @@ def _seed_advice_payload(note: str, seed_metadata: dict[str, Any] | None) -> dic
         "kind": "seed_baseline",
         "operator_note": note or None,
         "prompt_version": job_fields.get("seed_prompt_version"),
+        "request_disposition": job_fields.get("seed_request_disposition"),
+        "request_response": job_fields.get("seed_request_response"),
+        "feasibility_note": job_fields.get("seed_feasibility_note"),
+        "diagnosis": job_fields.get("seed_diagnosis"),
+        "confidence": job_fields.get("seed_confidence"),
+        "evidence_checked": list(job_fields.get("seed_evidence_checked") or []),
+        "suggested_follow_up": job_fields.get("seed_suggested_follow_up"),
         "applied_policy": job_fields.get("seed_applied_policy"),
     }
 
 
 def _job_seed_metadata(job_payload: dict[str, Any]) -> dict[str, Any] | None:
-    if not any(job_payload.get(key) is not None for key in ("seed_source", "seed_prompt_version", "seed_raw_response", "seed_proposed_policy", "seed_applied_policy")):
+    if not any(job_payload.get(key) is not None for key in
+               ("seed_source", "seed_prompt_version", "seed_raw_response", "seed_proposed_policy",
+                "seed_applied_policy")):
         return None
     return {
         "source": job_payload.get("seed_source"),
         "summary": job_payload.get("seed_summary"),
+        "diagnosis": job_payload.get("seed_diagnosis"),
+        "confidence": job_payload.get("seed_confidence"),
+        "request_disposition": job_payload.get("seed_request_disposition"),
+        "request_response": job_payload.get("seed_request_response"),
+        "feasibility_note": job_payload.get("seed_feasibility_note"),
         "prompt_version": job_payload.get("seed_prompt_version"),
         "raw_response": job_payload.get("seed_raw_response"),
         "proposed_policy": job_payload.get("seed_proposed_policy"),
@@ -3104,12 +3031,13 @@ def _summarize_calibration_result(calibration_payload: dict[str, Any]) -> dict[s
     return summary
 
 
-def _start_encode_queue_worker(config: HarnessConfig) -> None:
+def _start_encode_queue_worker(config: MediaforceConfig) -> None:
     global ENCODE_QUEUE_WORKER_STARTED
     with ENCODE_QUEUE_WORKER_LOCK:
         if ENCODE_QUEUE_WORKER_STARTED:
             return
-        thread = threading.Thread(target=_encode_queue_worker_loop, kwargs={"config_path": config.paths.config_path}, daemon=True)
+        thread = threading.Thread(target=_encode_queue_worker_loop, kwargs={"config_path": config.paths.config_path},
+                                  daemon=True)
         thread.start()
         ENCODE_QUEUE_WORKER_STARTED = True
 
@@ -3161,6 +3089,7 @@ def _process_encode_queue_once(*, config_path: Path) -> None:
                 "waiting_reason": None,
                 "terminal_reason": None,
                 "last_failure_kind": None,
+                "progress": _initial_encode_job_progress(next_job),
                 "updated_at": now_iso,
             }
         )
@@ -3169,9 +3098,11 @@ def _process_encode_queue_once(*, config_path: Path) -> None:
     _run_encode_job(config_path=config_path, job_id=str(next_job["job_id"]))
 
 
-def _load_next_runnable_encode_job(connection: Any, config: HarnessConfig) -> dict[str, Any] | None:
+def _load_next_runnable_encode_job(
+        connection: sqlite3.Connection, config: MediaforceConfig
+) -> dict[str, Any] | None:
     rows = connection.execute(
-        "SELECT job_id FROM encode_jobs WHERE status = 'queued' ORDER BY created_at ASC, rowid ASC"
+        "SELECT job_id FROM encode_jobs WHERE status = 'queued' ORDER BY created_at , rowid "
     ).fetchall()
     for row in rows:
         job = load_encode_job(connection, str(row["job_id"]))
@@ -3203,6 +3134,23 @@ def _run_encode_job(*, config_path: Path, job_id: str) -> None:
         job.update({"process_pid": ENCODE_QUEUE_PROCESS.pid, "updated_at": _now_iso()})
         save_encode_job(connection, job)
 
+    progress_write_lock = threading.Lock()
+    last_progress_write = 0.0
+
+    def report_progress(progress: dict[str, Any]) -> None:
+        nonlocal last_progress_write
+        now_monotonic = time.monotonic()
+        progress_state = str(progress.get("progress_state") or "")
+        if progress_state != "end" and (
+                now_monotonic - last_progress_write) < ENCODE_JOB_PROGRESS_WRITE_INTERVAL_SECONDS:
+            return
+        with progress_write_lock:
+            if progress_state != "end" and (
+                    now_monotonic - last_progress_write) < ENCODE_JOB_PROGRESS_WRITE_INTERVAL_SECONDS:
+                return
+            last_progress_write = now_monotonic
+        _persist_encode_job_progress(config_path, job_id, progress)
+
     heartbeat_stop = threading.Event()
     worker_id = str(job.get("worker_id") or _encode_job_worker_id())
     heartbeat_thread = threading.Thread(
@@ -3220,8 +3168,10 @@ def _run_encode_job(*, config_path: Path, job_id: str) -> None:
     final_status: str | None = None
     failure_kind: str | None = None
     error: str | None = None
+    started_host_for_job = False
     try:
         ENCODE_QUEUE_PROCESS.throw_if_cancelled()
+        started_host_for_job = _ensure_encode_host_ready(config, job.get("host"))
         with open_db(config.paths.db_path) as connection:
             encode_manifest_items(
                 connection,
@@ -3232,6 +3182,7 @@ def _run_encode_job(*, config_path: Path, job_id: str) -> None:
                 overwrite=False,
                 process_controller=ENCODE_QUEUE_PROCESS,
                 host=job.get("host"),
+                progress_callback=report_progress,
             )
         final_status = "completed"
     except ProcessCancelledError:
@@ -3241,6 +3192,11 @@ def _run_encode_job(*, config_path: Path, job_id: str) -> None:
         failure_kind = _classify_encode_failure(exc, job)
         error = str(exc)
     finally:
+        if started_host_for_job:
+            try:
+                _stop_encode_host_if_configured(config, job.get("host"))
+            except Exception as exc:
+                LOGGER.warning("Encode host stop command failed for %s: %s", job_id, exc)
         heartbeat_stop.set()
         heartbeat_thread.join(timeout=1.0)
         with open_db(config.paths.db_path) as connection:
@@ -3262,6 +3218,7 @@ def _run_encode_job(*, config_path: Path, job_id: str) -> None:
                             "terminal_reason": None,
                             "last_failure_kind": None,
                             "host_cooldown_until": None,
+                            "progress": _finalize_encode_job_progress(job, terminal_state=final_status),
                             "updated_at": _now_iso(),
                         }
                     )
@@ -3280,7 +3237,7 @@ def _run_encode_job(*, config_path: Path, job_id: str) -> None:
         ENCODE_QUEUE_PROCESS.reset()
 
 
-def _run_periodic_cleanup(config: HarnessConfig, cleanup_lock: threading.Lock) -> None:
+def _run_periodic_cleanup(config: MediaforceConfig, cleanup_lock: threading.Lock) -> None:
     if not cleanup_lock.acquire(blocking=False):
         return
     try:
@@ -3289,367 +3246,103 @@ def _run_periodic_cleanup(config: HarnessConfig, cleanup_lock: threading.Lock) -
         cleanup_lock.release()
 
 
-def _snapshot_staged_artifact(connection: Any, library_item_id: int) -> dict[str, Any] | None:
-    columns = ", ".join(CALIBRATION_STAGED_ARTIFACT_COLUMNS)
-    row = connection.execute(
-        f"SELECT {columns} FROM staged_artifacts WHERE library_item_id = ?",
-        (library_item_id,),
-    ).fetchone()
-    if row is None:
-        return None
-    return {column: row[column] for column in CALIBRATION_STAGED_ARTIFACT_COLUMNS}
+def _snapshot_staged_artifact(connection: sqlite3.Connection, library_item_id: int) -> dict[str, Any] | None:
+    return runtime_snapshot_staged_artifact(connection, library_item_id, CALIBRATION_STAGED_ARTIFACT_COLUMNS)
 
 
-def _restore_staged_artifact(connection: Any, library_item_id: int, snapshot: dict[str, Any] | None) -> None:
-    if snapshot is None:
-        connection.execute("DELETE FROM staged_artifacts WHERE library_item_id = ?", (library_item_id,))
-        return
-
-    columns = ", ".join(CALIBRATION_STAGED_ARTIFACT_COLUMNS)
-    placeholders = ", ".join("?" for _ in CALIBRATION_STAGED_ARTIFACT_COLUMNS)
-    updates = ", ".join(
-        f"{column} = excluded.{column}"
-        for column in CALIBRATION_STAGED_ARTIFACT_COLUMNS
-        if column != "library_item_id"
-    )
-    values = tuple(snapshot[column] for column in CALIBRATION_STAGED_ARTIFACT_COLUMNS)
-    connection.execute(
-        f"""
-        INSERT INTO staged_artifacts ({columns})
-        VALUES ({placeholders})
-        ON CONFLICT(library_item_id) DO UPDATE SET {updates}
-        """,
-        values,
-    )
+def _restore_staged_artifact(
+        connection: sqlite3.Connection, library_item_id: int, snapshot: dict[str, Any] | None
+) -> None:
+    runtime_restore_staged_artifact(connection, library_item_id, snapshot, CALIBRATION_STAGED_ARTIFACT_COLUMNS)
 
 
 def _remove_path(path: Path | None) -> None:
-    if path is None or not path.exists():
-        return
-    if path.is_dir():
-        shutil.rmtree(path, ignore_errors=True)
-        return
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        return
+    runtime_remove_path(path)
 
 
 def _run_scan_job(*, config_path: Path, prefix: str | None, job_id: str) -> None:
-    config = load_config(config_path)
-    purge_transient_artifacts(config, force=True)
-    job = _load_scan_job_state(config, prefix) or {}
-    job.update({"status": "running", "started_at": _now_iso(), "finished_at": None, "error": None})
-    _save_scan_job_state(config, prefix, job)
-
-    try:
-        with open_db(config.paths.db_path) as connection:
-            stats = scan_library(connection, config, prefixes=[prefix] if prefix else None, limit=None)
-        if prefix is None:
-            _save_catalog_signature(config)
-            _reset_folder_card_cache()
-        _save_scan_job_state(
-            config,
-            prefix,
-            {
-                **job,
-                "job_id": job_id,
-                "status": "completed",
-                "finished_at": _now_iso(),
-                "error": None,
-                "stats": asdict(stats),
-            },
-        )
-    except Exception as exc:
-        _save_scan_job_state(
-            config,
-            prefix,
-            {
-                **job,
-                "job_id": job_id,
-                "status": "failed",
-                "finished_at": _now_iso(),
-                "error": str(exc),
-                "stats": None,
-            },
-        )
-    finally:
-        purge_transient_artifacts(config, force=True)
+    runtime_run_scan_job(config_path=config_path, prefix=prefix, job_id=job_id, deps=_job_runtime_deps())
 
 
 def _run_calibration_job(
-    *,
-    config_path: Path,
-    prefix: str,
-    action: str,
-    host_data: dict[str, Any],
-    notes: str,
-    policy: dict[str, Any],
-    job_id: str,
-    seed_metadata: dict[str, Any] | None,
+        *,
+        config_path: Path,
+        prefix: str,
+        action: str,
+        host_data: dict[str, Any],
+        notes: str,
+        policy: dict[str, Any],
+        job_id: str,
+        seed_metadata: dict[str, Any] | None,
+        process_controller: ManagedProcessController,
 ) -> None:
-    config = load_config(config_path)
-    purge_transient_artifacts(config, force=True)
-    with open_db(config.paths.db_path) as connection:
-        job = _load_job_state(connection, config, prefix) or {}
-        started_at = str(job.get("started_at") or _now_iso())
-        job.update({"status": "running", "started_at": started_at, "finished_at": None, "error": None, "updated_at": _now_iso()})
-        _save_job_state(connection, config, prefix, job)
-
-    calibration_dir: Path | None = None
-    manifest_path: Path | None = None
-    library_item_id: int | None = None
-    staged_artifact_snapshot: dict[str, Any] | None = None
-
-    try:
-        with open_db(config.paths.db_path) as connection:
-            sample_item = _sample_item(connection, config, prefix)
-            if sample_item is None:
-                raise RuntimeError(f"No sample item found for {prefix}")
-            sample_item = dict(sample_item)
-            sample_item["resolved_policy"] = policy
-            library_item_id = int(sample_item["library_item_id"])
-            staged_artifact_snapshot = _snapshot_staged_artifact(connection, library_item_id)
-
-            calibration_run_id = uuid.uuid4().hex[:12]
-            if _calibration_mode_for_action(action) == "full":
-                calibration_payload, manifest_path, calibration_dir = _run_full_calibration(
-                    connection=connection,
-                    config=config,
-                    prefix=prefix,
-                    action=action,
-                    host_data=host_data,
-                    notes=notes,
-                    policy=policy,
-                    seed_metadata=seed_metadata,
-                    sample_item=sample_item,
-                    calibration_run_id=calibration_run_id,
-                )
-            else:
-                calibration_payload, calibration_dir = _run_sampled_calibration(
-                    config=config,
-                    prefix=prefix,
-                    action=action,
-                    host_data=host_data,
-                    notes=notes,
-                    policy=policy,
-                    seed_metadata=seed_metadata,
-                    sample_item=sample_item,
-                    calibration_run_id=calibration_run_id,
-                )
-
-        calibration_payload["job_id"] = job_id
-        _save_calibration_state(config, prefix, calibration_payload)
-        with open_db(config.paths.db_path) as connection:
-            _save_job_state(
-                connection,
-                config,
-                prefix,
-                {
-                    **job,
-                    "job_id": job_id,
-                    "status": "completed",
-                    "finished_at": _now_iso(),
-                    "error": None,
-                    "result": _summarize_calibration_result(calibration_payload),
-                },
-            )
-    except Exception as exc:
-        with open_db(config.paths.db_path) as connection:
-            _save_job_state(
-                connection,
-                config,
-                prefix,
-                {
-                    **job,
-                    "job_id": job_id,
-                    "status": "failed",
-                    "finished_at": _now_iso(),
-                    "error": str(exc),
-                },
-            )
-    finally:
-        if library_item_id is not None:
-            with open_db(config.paths.db_path) as connection:
-                _restore_staged_artifact(connection, library_item_id, staged_artifact_snapshot)
-        _remove_path(manifest_path)
-        _remove_path(calibration_dir)
-        purge_transient_artifacts(config, force=True)
+    runtime_run_calibration_job(
+        config_path=config_path,
+        prefix=prefix,
+        action=action,
+        host_data=host_data,
+        notes=notes,
+        policy=policy,
+        job_id=job_id,
+        seed_metadata=seed_metadata,
+        process_controller=process_controller,
+        deps=_calibration_run_deps(),
+    )
 
 
 def _run_sampled_calibration(
-    *,
-    config: HarnessConfig,
-    prefix: str,
-    action: str,
-    host_data: dict[str, Any],
-    notes: str,
-    policy: dict[str, Any],
-    seed_metadata: dict[str, Any] | None,
-    sample_item: dict[str, Any],
-    calibration_run_id: str,
-) -> tuple[dict[str, Any], Path]:
-    source_path = Path(sample_item["source_path"])
-    video_policy = dict(policy["video"])
-    quality_result = search_quality_for_source(source_path, video_policy, host=host_data)
-    sample_result = run_sample_encode(
-        source_path,
-        preferred_metric=str(video_policy.get("quality_metric", "auto")),
-        crf=quality_result.crf,
-        preset=int(video_policy["preset"]),
-        pixel_format=str(video_policy["pixel_format"]),
-        sample_every=str(video_policy["sample_every"]),
-        sample_duration=str(video_policy["sample_duration"]),
-        svt_params=build_svt_params(video_policy),
-        host=host_data,
+        *,
+        config: MediaforceConfig,
+        prefix: str,
+        action: str,
+        host_data: dict[str, Any],
+        notes: str,
+        policy: dict[str, Any],
+        seed_metadata: dict[str, Any] | None,
+        sample_item: dict[str, Any],
+        calibration_run_id: str,
+        process_controller: ManagedProcessController,
+) -> tuple[dict[str, Any], Path | None]:
+    return runtime_run_sampled_calibration(
+        config=config,
+        prefix=prefix,
+        action=action,
+        host_data=host_data,
+        notes=notes,
+        policy=policy,
+        seed_metadata=seed_metadata,
+        sample_item=sample_item,
+        calibration_run_id=calibration_run_id,
+        process_controller=process_controller,
+        deps=_calibration_run_deps(),
     )
-
-    timestamps = recommend_review_timestamps(
-        source_path,
-        float(sample_item.get("duration_seconds") or 0.0),
-        8.0,
-    )
-    output_dir = config.paths.review_dir / calibration_run_id / "item-00"
-    preview_clips = encode_preview_clips(
-        source_path=source_path,
-        output_dir=output_dir,
-        timestamps=timestamps,
-        duration_seconds=8.0,
-        encoder=str(video_policy["encoder"]),
-        pixel_format=str(video_policy["pixel_format"]),
-        preset=int(video_policy["preset"]),
-        crf=quality_result.crf,
-        svt_params=build_svt_params(video_policy),
-        host=host_data,
-    )
-    compare_clips = generate_compare_clips_from_previews(
-        source_path=source_path,
-        previews=preview_clips,
-        output_dir=output_dir,
-    )
-    overhead = estimate_output_overhead_bytes(sample_item)
-    estimated_total_size_bytes = sample_result.predicted_encode_size_bytes + overhead["total_bytes"]
-
-    payload = {
-        "mode": "sample",
-        "host": host_data,
-        "action": action,
-        "notes": notes,
-        "policy": policy,
-        "policy_seed": seed_metadata,
-        "sample_item": {
-            "rel_path": sample_item["rel_path"],
-            "source_path": sample_item["source_path"],
-            "source_size_bytes": sample_item["source_size_bytes"],
-        },
-        "sample_result": {
-            "chosen_crf": quality_result.crf,
-            "quality_metric": sample_result.metric,
-            "quality_target": quality_result.target,
-            "quality_score": sample_result.score,
-            "predicted_video_size_bytes": sample_result.predicted_encode_size_bytes,
-            "predicted_total_size_bytes": estimated_total_size_bytes,
-            "predicted_encode_percent": (estimated_total_size_bytes / int(sample_item["source_size_bytes"])) * 100,
-            "predicted_encode_seconds": sample_result.predicted_encode_seconds,
-            "estimated_audio_bytes": overhead["audio_bytes"],
-            "estimated_subtitle_bytes": overhead["subtitle_bytes"],
-            "estimated_container_bytes": overhead["container_bytes"],
-            "sample_stdout": sample_result.stdout,
-        },
-        "compare_clips": [
-            {
-                "path": _review_url(config, clip.output_path),
-                "timestamp_seconds": clip.timestamp_seconds,
-                "duration_seconds": clip.duration_seconds,
-            }
-            for clip in compare_clips
-        ],
-        "preview_clips": [
-            {
-                "path": _review_url(config, clip.output_path),
-                "timestamp_seconds": clip.timestamp_seconds,
-                "duration_seconds": clip.duration_seconds,
-                "size_bytes": clip.size_bytes,
-            }
-            for clip in preview_clips
-        ],
-    }
-    return payload, output_dir.parent
 
 
 def _run_full_calibration(
-    *,
-    connection: Any,
-    config: HarnessConfig,
-    prefix: str,
-    action: str,
-    host_data: dict[str, Any],
-    notes: str,
-    policy: dict[str, Any],
-    seed_metadata: dict[str, Any] | None,
-    sample_item: dict[str, Any],
-    calibration_run_id: str,
+        *,
+        connection: sqlite3.Connection,
+        config: MediaforceConfig,
+        prefix: str,
+        action: str,
+        host_data: dict[str, Any],
+        notes: str,
+        policy: dict[str, Any],
+        seed_metadata: dict[str, Any] | None,
+        sample_item: dict[str, Any],
+        calibration_run_id: str,
+        process_controller: ManagedProcessController,
 ) -> tuple[dict[str, Any], Path, Path]:
-    manifest_item = dict(sample_item)
-    rel_output = Path(prefix) / Path(sample_item["source_path"]).name
-    calibration_staging = config.staging_root / "_calibration" / calibration_run_id / rel_output.name
-    calibration_dir = calibration_staging.parent
-    manifest_item["staging_path"] = str(calibration_staging)
-    manifest = {
-        "run_id": calibration_run_id,
-        "created_at": _now_iso(),
-        "config_path": str(config.paths.config_path),
-        "db_path": str(config.paths.db_path),
-        "staging_root": str(config.staging_root),
-        "output_container": config.output_container,
-        "items": [manifest_item],
-    }
-    manifest_path = config.paths.web_state_dir / f"calibration-{calibration_run_id}.json"
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-
-    encode_result = encode_manifest_items(connection, config, manifest_path, manifest, [0], overwrite=True)[0]
-    validation_result = validate_manifest_items(connection, config, manifest, [0])[0]
-    output_dir = config.paths.review_dir / calibration_run_id
-    clips = generate_compare_clips(
-        connection,
-        manifest,
-        [0],
-        output_dir=output_dir,
-        duration_seconds=8.0,
-        timestamps=None,
-        play=False,
+    return runtime_run_full_calibration(
+        connection=connection,
+        config=config,
+        prefix=prefix,
+        action=action,
+        host_data=host_data,
+        notes=notes,
+        policy=policy,
+        seed_metadata=seed_metadata,
+        sample_item=sample_item,
+        calibration_run_id=calibration_run_id,
+        process_controller=process_controller,
+        deps=_calibration_run_deps(),
     )
-    payload = {
-        "mode": "full",
-        "host": host_data,
-        "action": action,
-        "notes": notes,
-        "policy": policy,
-        "policy_seed": seed_metadata,
-        "manifest_path": str(manifest_path),
-        "sample_item": {
-            "rel_path": sample_item["rel_path"],
-            "source_path": sample_item["source_path"],
-            "source_size_bytes": sample_item["source_size_bytes"],
-        },
-        "encode_result": {
-            "staging_path": str(encode_result.staging_path),
-            "source_size_bytes": encode_result.source_size_bytes,
-            "staging_size_bytes": encode_result.staging_size_bytes,
-            "chosen_crf": encode_result.chosen_crf,
-            "quality_metric": encode_result.quality_metric,
-            "quality_target": encode_result.quality_target,
-            "quality_score": encode_result.quality_score,
-        },
-        "validation_result": validation_result,
-        "compare_clips": [
-            {
-                "path": _review_url(config, clip.output_path),
-                "timestamp_seconds": clip.timestamp_seconds,
-                "duration_seconds": clip.duration_seconds,
-            }
-            for clip in clips
-        ],
-    }
-    return payload, manifest_path, calibration_dir

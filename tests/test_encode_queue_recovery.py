@@ -1,23 +1,22 @@
-from __future__ import annotations
-
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
 
-from mediaforce.config import ConfigPaths, HarnessConfig
+from mediaforce import execution, quality, remote, review
+from mediaforce.config import ConfigPaths, MediaforceConfig
 from mediaforce.db import open_db
 from mediaforce.encode_queue import load_encode_job, load_queue_state, save_encode_job, save_queue_state
 from mediaforce.quality import QualitySearchResult, SampleEncodeResult
-from mediaforce import execution, remote
 from mediaforce.remote import HostStatus
-from mediaforce.review import CompareClip, EncodedPreviewClip
+from mediaforce.review import BrowserReviewClip, CompareClip, EncodedPreviewClip
 from mediaforce.web import app as web_app
 
 
@@ -230,6 +229,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     "host": "remote-a",
                     "repo_path": "/srv/mediaforce",
                     "wake_mac": "aa:bb:cc:dd:ee:ff",
+                    "start_command": "ssh prox-main.shiny pct start 103",
+                    "stop_command": "ssh prox-main.shiny pct shutdown 103",
+                    "start_timeout_seconds": "240",
                     "priority": "20",
                     "max_parallel_encodes": "3",
                     "schedule_profile": "late_night",
@@ -253,6 +255,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             payload["remote_hosts"][0]["capabilities"],
             ["encode_queue", "sample_calibration"],
         )
+        self.assertEqual(payload["remote_hosts"][0]["start_command"], "ssh prox-main.shiny pct start 103")
+        self.assertEqual(payload["remote_hosts"][0]["stop_command"], "ssh prox-main.shiny pct shutdown 103")
+        self.assertEqual(payload["remote_hosts"][0]["start_timeout_seconds"], 240)
         self.assertEqual(payload["remote_hosts"][0]["max_parallel_encodes"], 3)
         self.assertEqual(payload["remote_hosts"][0]["schedule_profile"], "late_night")
         self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["key"], "late_night")
@@ -275,6 +280,79 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             schedule_profiles=[],
         )
         self.assertEqual(payload["remote_hosts"][0]["schedule_profile"], "always")
+
+    def test_runtime_settings_payload_normalizes_media_access(self) -> None:
+        payload = web_app._build_runtime_settings_payload(
+            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
+            remote_hosts=[
+                {
+                    "label": "Remote A",
+                    "host": "remote-a",
+                    "priority": "20",
+                    "max_parallel_encodes": "2",
+                    "capabilities": ["encode_queue"],
+                    "media_access": "stream",
+                }
+            ],
+            transcode_root=str(self.root / "staging"),
+            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
+            schedule_profiles=[],
+        )
+        self.assertEqual(payload["remote_hosts"][0]["media_access"], "stream")
+
+    def test_runtime_settings_payload_keeps_host_path_overrides_optional(self) -> None:
+        payload = web_app._build_runtime_settings_payload(
+            libraries=[
+                {"key": "movies", "path": str(self.root / "source" / "movies")},
+                {"key": "tv", "path": str(self.root / "source" / "tv")},
+            ],
+            remote_hosts=[
+                {
+                    "label": "Remote A",
+                    "host": "remote-a",
+                    "priority": "20",
+                    "max_parallel_encodes": "2",
+                    "capabilities": ["encode_queue"],
+                    "staging_root": str(self.root / "remote-staging"),
+                    "source_roots_json": json.dumps(
+                        {
+                            "movies": str(self.root / "remote-movies"),
+                            "tv": str(self.root / "remote-tv"),
+                        }
+                    ),
+                }
+            ],
+            transcode_root=str(self.root / "staging"),
+            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
+            schedule_profiles=[],
+        )
+        self.assertEqual(
+            payload["remote_hosts"][0]["source_roots"],
+            {
+                "movies": str((self.root / "remote-movies").expanduser()),
+                "tv": str((self.root / "remote-tv").expanduser()),
+            },
+        )
+        self.assertEqual(payload["remote_hosts"][0]["staging_root"], str(self.root / "remote-staging"))
+
+    def test_runtime_settings_payload_rejects_unknown_library_override(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unknown library override"):
+            web_app._build_runtime_settings_payload(
+                libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
+                remote_hosts=[
+                    {
+                        "label": "Remote A",
+                        "host": "remote-a",
+                        "priority": "20",
+                        "max_parallel_encodes": "2",
+                        "capabilities": ["encode_queue"],
+                        "source_roots_json": json.dumps({"movies": "/srv/media/movies"}),
+                    }
+                ],
+                transcode_root=str(self.root / "staging"),
+                encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
+                schedule_profiles=[],
+            )
 
     def test_runtime_settings_payload_rejects_unknown_host_schedule_profile(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unknown schedule profile"):
@@ -330,6 +408,223 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(remote_rows[0]["schedule_profile"], "always")
         self.assertEqual(remote_rows[0]["capabilities"], ["encode_queue", "sample_calibration"])
 
+    def test_select_encode_host_can_choose_startable_unavailable_host(self) -> None:
+        host = {
+            "key": "ct103",
+            "host": "ct103",
+            "label": "CT103",
+            "available": False,
+            "priority": 50,
+            "capabilities": ["encode_queue"],
+            "active_encode_count": 0,
+            "max_parallel_encodes": 1,
+            "start_command": "ssh prox-main.shiny pct start 103",
+            "schedule_profile": "always",
+        }
+        job = {"job_id": "job-1", "bypass_schedule": False}
+        with patch("mediaforce.web.app._host_runtime_rows", return_value=[host]):
+            selected_host, waiting_reason = web_app._select_encode_host(None, self.config, job)
+        self.assertIsNotNone(selected_host)
+        assert selected_host is not None
+        self.assertEqual(selected_host["key"], "ct103")
+        self.assertIsNone(waiting_reason)
+
+    def test_host_runtime_rows_include_host_lifecycle_commands(self) -> None:
+        self.config.raw["remote_hosts"] = [
+            {
+                "host": "ct103",
+                "label": "CT103",
+                "start_command": "ssh prox-main.shiny pct start 103",
+                "stop_command": "ssh prox-main.shiny pct shutdown 103",
+                "start_timeout_seconds": 420,
+            }
+        ]
+        status = HostStatus(
+            key="ct103",
+            label="CT103",
+            mode="ssh",
+            priority=50,
+            capabilities=["encode_queue"],
+            available=True,
+            message="Mounted and ready",
+            missing_paths=[],
+        )
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.web.app._safe_collect_host_statuses", return_value=[status]
+        ):
+            rows = web_app._host_runtime_rows(connection, self.config)
+
+        self.assertEqual(rows[0]["start_command"], "ssh prox-main.shiny pct start 103")
+        self.assertEqual(rows[0]["stop_command"], "ssh prox-main.shiny pct shutdown 103")
+        self.assertEqual(rows[0]["start_timeout_seconds"], 420)
+
+    def test_select_encode_host_waits_for_cooldown_when_only_startable_host_is_blocked(self) -> None:
+        job = {
+            "last_host": {"key": "ct103", "label": "CT103", "host": "ct103"},
+            "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+        }
+        statuses = [
+            {
+                "key": "ct103",
+                "label": "CT103",
+                "priority": 50,
+                "capabilities": ["encode_queue"],
+                "available": False,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "start_command": "ssh prox-main.shiny pct start 103",
+                "schedule_profile": "always",
+            }
+        ]
+        with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+            host_payload, waiting_reason = web_app._select_encode_host(None, self.config, job)
+        self.assertIsNone(host_payload)
+        self.assertEqual(waiting_reason, "waiting for host cooldown to expire on CT103")
+
+    def test_select_encode_host_does_not_choose_startable_host_when_capacity_full(self) -> None:
+        statuses = [
+            {
+                "key": "ct103",
+                "label": "CT103",
+                "priority": 50,
+                "capabilities": ["encode_queue"],
+                "available": False,
+                "active_encode_count": 1,
+                "max_parallel_encodes": 1,
+                "start_command": "ssh prox-main.shiny pct start 103",
+                "schedule_profile": "always",
+            }
+        ]
+        with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+            host_payload, waiting_reason = web_app._select_encode_host(None, self.config, {"bypass_schedule": False})
+        self.assertIsNone(host_payload)
+        self.assertEqual(waiting_reason, "waiting for host capacity to free up")
+
+    def test_ensure_encode_host_ready_runs_start_command_and_waits_for_status(self) -> None:
+        host = {
+            "key": "ct103",
+            "host": "ct103",
+            "label": "CT103",
+            "start_command": "ssh prox-main.shiny pct start 103",
+            "start_timeout_seconds": 5,
+        }
+        unavailable = HostStatus(
+            key="ct103",
+            label="CT103",
+            mode="ssh",
+            priority=50,
+            capabilities=["encode_queue"],
+            available=False,
+            message="SSH unavailable",
+            missing_paths=[],
+        )
+        available = HostStatus(
+            key="ct103",
+            label="CT103",
+            mode="ssh",
+            priority=50,
+            capabilities=["encode_queue"],
+            available=True,
+            message="Mounted and ready",
+            missing_paths=[],
+        )
+        with patch(
+                "mediaforce.web.app.collect_host_statuses",
+                side_effect=[[unavailable], [available]],
+        ), patch(
+            "mediaforce.web.app.run_host_lifecycle_command",
+            return_value=subprocess.CompletedProcess(args=["sh"], returncode=0, stdout="", stderr=""),
+        ) as lifecycle_mock, patch("mediaforce.web.app.time.sleep") as sleep_mock:
+            started = web_app._ensure_encode_host_ready(self.config, host)
+        lifecycle_mock.assert_called_once_with(host, "ssh prox-main.shiny pct start 103",
+                                               timeout=web_app.HOST_LIFECYCLE_COMMAND_TIMEOUT_SECONDS)
+        self.assertTrue(started)
+        sleep_mock.assert_not_called()
+
+    def test_ensure_encode_host_ready_returns_false_when_host_already_available(self) -> None:
+        host = {
+            "key": "ct103",
+            "host": "ct103",
+            "label": "CT103",
+            "start_command": "ssh prox-main.shiny pct start 103",
+        }
+        available = HostStatus(
+            key="ct103",
+            label="CT103",
+            mode="ssh",
+            priority=50,
+            capabilities=["encode_queue"],
+            available=True,
+            message="Mounted and ready",
+            missing_paths=[],
+        )
+        with patch("mediaforce.web.app.collect_host_statuses", return_value=[available]), patch(
+                "mediaforce.web.app.run_host_lifecycle_command"
+        ) as lifecycle_mock:
+            started = web_app._ensure_encode_host_ready(self.config, host)
+        self.assertFalse(started)
+        lifecycle_mock.assert_not_called()
+
+    def test_stop_encode_host_if_configured_runs_stop_command(self) -> None:
+        host = {
+            "key": "ct103",
+            "host": "ct103",
+            "label": "CT103",
+            "stop_command": "ssh prox-main.shiny pct shutdown 103",
+        }
+        with patch(
+                "mediaforce.web.app.run_host_lifecycle_command",
+                return_value=subprocess.CompletedProcess(args=["sh"], returncode=0, stdout="", stderr=""),
+        ) as lifecycle_mock:
+            web_app._stop_encode_host_if_configured(self.config, host)
+        lifecycle_mock.assert_called_once_with(host, "ssh prox-main.shiny pct shutdown 103",
+                                               timeout=web_app.HOST_LIFECYCLE_COMMAND_TIMEOUT_SECONDS)
+
+    def test_run_encode_job_skips_stop_when_host_was_already_running(self) -> None:
+        manifest_path = self._write_manifest("manifest-running.json", [{"library_item_id": 1}])
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(
+                connection,
+                job_id="job-running-host",
+                manifest_name=manifest_path.name,
+                host={"key": "ct103", "host": "ct103", "stop_command": "ssh prox-main.shiny pct shutdown 103"},
+                status="running",
+                attempt_count=1,
+                lease_expires_at=web_app._now_iso(),
+            )
+        with patch("mediaforce.web.app._ensure_encode_host_ready", return_value=False), patch(
+                "mediaforce.web.app._stop_encode_host_if_configured"
+        ) as stop_mock, patch(
+            "mediaforce.web.app.encode_manifest_items", return_value=[]
+        ), patch("mediaforce.web.app.load_config", return_value=self.config):
+            web_app._run_encode_job(config_path=self.config.paths.config_path, job_id="job-running-host")
+        stop_mock.assert_not_called()
+
+    def test_run_encode_job_keeps_completed_job_clean_when_stop_command_fails(self) -> None:
+        manifest_path = self._write_manifest("manifest-stop-failure.json", [{"library_item_id": 1}])
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(
+                connection,
+                job_id="job-stop-failure",
+                manifest_name=manifest_path.name,
+                host={"key": "ct103", "host": "ct103", "stop_command": "ssh prox-main.shiny pct shutdown 103"},
+                status="running",
+                attempt_count=1,
+                lease_expires_at=web_app._now_iso(),
+            )
+        with patch("mediaforce.web.app._ensure_encode_host_ready", return_value=True), patch(
+                "mediaforce.web.app._stop_encode_host_if_configured", side_effect=RuntimeError("stop failed")
+        ), patch("mediaforce.web.app.encode_manifest_items", return_value=[]), patch(
+            "mediaforce.web.app.load_config", return_value=self.config
+        ):
+            web_app._run_encode_job(config_path=self.config.paths.config_path, job_id="job-stop-failure")
+        with open_db(self.config.paths.db_path) as connection:
+            job = load_encode_job(connection, "job-stop-failure")
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job["status"], "completed")
+        self.assertIsNone(job["error"])
+
     def test_full_scan_becomes_stale_when_library_roots_change(self) -> None:
         source_path = self._create_source_file("episode-a.mkv")
 
@@ -338,10 +633,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             now = web_app._now_iso()
             connection.execute(
                 """
-                INSERT INTO scan_runs(
-                    scan_id, started_at, completed_at, roots_json, scope, prefixes_json,
-                    file_count, reprobed_count, unchanged_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO scan_runs(scan_id, started_at, completed_at, roots_json, scope, prefixes_json,
+                                      file_count, reprobed_count, unchanged_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 ("scan-1", now, now, json.dumps(self.config.raw["media"]["source_roots"]), "full", None, 1, 0, 0),
             )
@@ -361,10 +655,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             completed_at = (datetime.now(UTC) - timedelta(minutes=16)).isoformat(timespec="seconds")
             connection.execute(
                 """
-                INSERT INTO scan_runs(
-                    scan_id, started_at, completed_at, roots_json, scope, prefixes_json,
-                    file_count, reprobed_count, unchanged_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO scan_runs(scan_id, started_at, completed_at, roots_json, scope, prefixes_json,
+                                      file_count, reprobed_count, unchanged_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     "scan-older-than-threshold",
@@ -382,6 +675,69 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             web_app._save_catalog_signature(self.config)
 
             self.assertTrue(web_app._scan_is_stale(connection, self.config, prefix=None))
+
+    def test_orphaned_scan_run_is_expired_before_rescheduling(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            now = web_app._now_iso()
+            connection.execute(
+                """
+                INSERT INTO scan_runs(scan_id, started_at, completed_at, owner_pid, roots_json, scope, prefixes_json,
+                                      file_count, reprobed_count, unchanged_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "scan-stale",
+                    now,
+                    None,
+                    None,
+                    json.dumps(self.config.raw["media"]["source_roots"]),
+                    "full",
+                    None,
+                    0,
+                    0,
+                    0,
+                ),
+            )
+            web_app._save_scan_job_state(
+                self.config,
+                None,
+                {
+                    "job_id": "scan-stale-job",
+                    "status": "running",
+                    "scope": "full",
+                    "prefix": None,
+                    "owner_pid": 999999,
+                    "created_at": now,
+                    "started_at": now,
+                    "finished_at": None,
+                    "error": None,
+                    "stats": None,
+                },
+            )
+
+            fake_thread = Mock()
+            with patch.object(web_app, "_scan_process_is_alive", return_value=False):
+                with patch.object(web_app.threading, "Thread", return_value=fake_thread):
+                    job = web_app._maybe_schedule_scan(connection, self.config, prefix=None)
+
+            self.assertIsNotNone(job)
+            assert job is not None
+            self.assertEqual(job["status"], "queued")
+            fake_thread.start.assert_called_once()
+
+            stale_row = connection.execute(
+                "SELECT completed_at FROM scan_runs WHERE scan_id = ?",
+                ("scan-stale",),
+            ).fetchone()
+            self.assertIsNotNone(stale_row)
+            assert stale_row is not None
+            self.assertIsNotNone(stale_row["completed_at"])
+
+            refreshed_job = web_app._load_scan_job_state(self.config, None)
+            self.assertIsNotNone(refreshed_job)
+            assert refreshed_job is not None
+            self.assertEqual(refreshed_job["status"], "queued")
+            self.assertNotEqual(refreshed_job["job_id"], "scan-stale-job")
 
     def test_scheduler_uses_host_local_time_for_windows(self) -> None:
         policy = web_app._normalize_encode_queue_scheduler(
@@ -444,7 +800,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         third = self._create_source_file("episode-promoted.mkv")
 
         with open_db(self.config.paths.db_path) as connection:
-            first_id = self._insert_library_item(connection, first, status="planned")
+            first_id = self._insert_library_item(connection, first)
             second_id = self._insert_library_item(connection, second, status="validated")
             third_id = self._insert_library_item(connection, third, status="promoted")
             for item_id in (first_id, second_id, third_id):
@@ -453,7 +809,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     (2 * 1024 * 1024 * 1024, f"tv/show/Season 1/item-{item_id}.mkv", "tv/show/Season 1", item_id),
                 )
 
-            cards = web_app._list_folder_cards(connection)
+            cards = web_app._list_folder_cards(self.config, connection)
 
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 1"]
         self.assertEqual(len(matching_cards), 1)
@@ -471,9 +827,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             with patch.object(Path, "exists", autospec=True) as exists_mock:
                 exists_mock.side_effect = lambda path: path == env_path
                 with patch.object(Path, "read_text", autospec=True, return_value=(
-                    "MEDIAFORCE_WEB_HOST=0.0.0.0\n"
-                    "MEDIAFORCE_WEB_PORT=8777\n"
-                    "MEDIAFORCE_WEB_RELOAD=true\n"
+                        "MEDIAFORCE_WEB_HOST=0.0.0.0\n"
+                        "MEDIAFORCE_WEB_PORT=8777\n"
+                        "MEDIAFORCE_WEB_RELOAD=true\n"
                 )):
                     with patch.dict(os.environ, {"MEDIAFORCE_WEB_PORT": "9999"}, clear=True):
                         web_app._load_project_env_file()
@@ -491,29 +847,219 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(web_app._default_web_host(), "0.0.0.0")
             self.assertTrue(web_app._default_web_reload_enabled())
 
-    def test_legacy_env_controls_host_and_reload(self) -> None:
-        with patch.dict(os.environ, {"MEDIA_HARNESS_WEB_HOST": "0.0.0.0", "MEDIA_HARNESS_WEB_RELOAD": "true"}, clear=True):
-            self.assertEqual(web_app._default_web_host(), "0.0.0.0")
-            self.assertTrue(web_app._default_web_reload_enabled())
-
-    def test_mediaforce_env_takes_precedence_over_legacy_web_env(self) -> None:
-        with patch.dict(
-            os.environ,
-            {
-                "MEDIAFORCE_WEB_HOST": "127.0.0.1",
-                "MEDIAFORCE_WEB_RELOAD": "false",
-                "MEDIA_HARNESS_WEB_HOST": "0.0.0.0",
-                "MEDIA_HARNESS_WEB_RELOAD": "true",
-            },
-            clear=True,
-        ):
-            self.assertEqual(web_app._default_web_host(), "127.0.0.1")
-            self.assertFalse(web_app._default_web_reload_enabled())
-
     def test_parse_project_env_value_strips_matching_quotes(self) -> None:
         self.assertEqual(web_app._parse_project_env_value('"0.0.0.0"'), "0.0.0.0")
         self.assertEqual(web_app._parse_project_env_value("'8777'"), "8777")
         self.assertEqual(web_app._parse_project_env_value("true"), "true")
+
+    def test_review_gate_requires_review_media_before_approval(self) -> None:
+        missing_media_gate = web_app._review_gate(
+            {
+                "mode": "sample",
+                "job_id": "sample-1",
+                "preview_clips": [],
+                "compare_clips": [],
+                "review_media_ready": False,
+            }
+        )
+
+        self.assertEqual(missing_media_gate["status"], "missing_review_media")
+        self.assertFalse(missing_media_gate["can_confirm_full"])
+
+        payload = {
+            "mode": "sample",
+            "job_id": "sample-2",
+            "preview_clips": [{"path": "/review-media/run/item-00/encoded-01.mp4"}],
+            "compare_clips": [],
+            "review_media_ready": True,
+        }
+        payload["accepted_at"] = "2026-03-28T19:10:00+00:00"
+        payload["accepted_draft_hash"] = web_app._calibration_draft_hash(payload)
+        payload["accepted_sample_job_id"] = "sample-2"
+
+        accepted_gate = web_app._review_gate(payload)
+
+        self.assertEqual(accepted_gate["status"], "accepted")
+        self.assertTrue(accepted_gate["can_confirm_full"])
+
+    def test_run_sampled_calibration_keeps_review_directory_for_approval(self) -> None:
+        source_path = self._create_source_file("episode-review.mkv")
+        preview_dir = self.config.paths.review_dir / "run-123" / "item-00"
+        preview_clip = EncodedPreviewClip(
+            output_path=preview_dir / "encoded-01-00-10.mp4",
+            timestamp_seconds=10.0,
+            duration_seconds=8.0,
+            size_bytes=1024,
+        )
+        source_clip = BrowserReviewClip(
+            output_path=preview_dir / "source-01-00-10.mp4",
+            timestamp_seconds=10.0,
+            duration_seconds=8.0,
+            size_bytes=2048,
+        )
+        compare_clip = CompareClip(
+            output_path=preview_dir / "compare-01-00-10.mkv",
+            timestamp_seconds=10.0,
+            duration_seconds=8.0,
+        )
+
+        with patch.object(web_app, "search_quality_for_source",
+                          return_value=QualitySearchResult(27.0, "VMAF", 94.5, 94.6, "ok")):
+            with patch.object(
+                    web_app,
+                    "run_sample_encode",
+                    return_value=SampleEncodeResult("VMAF", 94.6, 18.0, 1200.0, 100_000_000, "ok"),
+            ):
+                with patch.object(web_app, "recommend_review_timestamps", return_value=[10.0]):
+                    with patch.object(web_app, "encode_preview_clips", return_value=[preview_clip]):
+                        with patch.object(web_app, "render_source_review_clips", return_value=[source_clip]):
+                            with patch.object(web_app, "generate_compare_clips_from_previews",
+                                              return_value=[compare_clip]):
+                                with patch.object(
+                                        web_app,
+                                        "estimate_output_overhead_bytes",
+                                        return_value={"audio_bytes": 1, "subtitle_bytes": 2, "container_bytes": 3,
+                                                      "total_bytes": 6},
+                                ):
+                                    payload, cleanup_path = web_app._run_sampled_calibration(
+                                        config=self.config,
+                                        prefix="tv/show",
+                                        action="baseline",
+                                        host_data={"key": "localhost"},
+                                        notes="",
+                                        policy={
+                                            "video": {
+                                                "encoder": "libsvtav1",
+                                                "pixel_format": "yuv420p10le",
+                                                "quality_metric": "auto",
+                                                "sample_every": "8m",
+                                                "sample_duration": "20s",
+                                                "preset": 4,
+                                            },
+                                            "audio": {},
+                                            "subtitle": {},
+                                        },
+                                        seed_metadata=None,
+                                        sample_item={
+                                            "source_path": str(source_path),
+                                            "source_size_bytes": 200_000_000,
+                                            "duration_seconds": 2600.0,
+                                            "rel_path": "tv/show/episode-review.mkv",
+                                        },
+                                        calibration_run_id="run-123",
+                                        process_controller=Mock(),
+                                    )
+
+        self.assertIsNone(cleanup_path)
+        self.assertTrue(payload["preview_clips"][0]["path"].startswith("/review-media/run-123/"))
+        self.assertTrue(payload["source_clips"][0]["path"].startswith("/review-media/run-123/"))
+        self.assertTrue(payload["compare_clips"][0]["path"].startswith("/review-media/run-123/"))
+
+    def test_load_calibration_state_builds_review_pairs_for_browser_player(self) -> None:
+        review_dir = self.config.paths.review_dir / "run-pairs" / "item-00"
+        review_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("source-01-00-10.mp4", "encoded-01-00-10.mp4", "compare-01-00-10.mkv"):
+            (review_dir / name).write_text("clip")
+        calibration_path = web_app._calibration_file(self.config, "tv/show")
+        calibration_path.parent.mkdir(parents=True, exist_ok=True)
+        calibration_path.write_text(
+            json.dumps(
+                {
+                    "mode": "sample",
+                    "job_id": "sample-9",
+                    "source_clips": [
+                        {
+                            "path": "/review-media/run-pairs/item-00/source-01-00-10.mp4",
+                            "timestamp_seconds": 10.0,
+                            "duration_seconds": 8.0,
+                        }
+                    ],
+                    "preview_clips": [
+                        {
+                            "path": "/review-media/run-pairs/item-00/encoded-01-00-10.mp4",
+                            "timestamp_seconds": 10.0,
+                            "duration_seconds": 8.0,
+                        }
+                    ],
+                    "compare_clips": [
+                        {
+                            "path": "/review-media/run-pairs/item-00/compare-01-00-10.mkv",
+                            "timestamp_seconds": 10.0,
+                            "duration_seconds": 8.0,
+                        }
+                    ],
+                }
+            )
+        )
+
+        payload = web_app._load_calibration_state(self.config, "tv/show")
+
+        assert payload is not None
+        self.assertTrue(payload["browser_review_ready"])
+        self.assertEqual(len(payload["review_pairs"]), 1)
+        self.assertEqual(payload["review_pairs"][0]["source_clip"]["path"],
+                         "/review-media/run-pairs/item-00/source-01-00-10.mp4")
+        self.assertEqual(payload["review_pairs"][0]["preview_clip"]["path"],
+                         "/review-media/run-pairs/item-00/encoded-01-00-10.mp4")
+
+    def test_folder_review_badge_marks_ready_and_refresh_states(self) -> None:
+        ready_dir = self.config.paths.review_dir / "run-ready" / "item-00"
+        ready_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("source-01-00-10.mp4", "encoded-01-00-10.mp4"):
+            (ready_dir / name).write_text("clip")
+        ready_calibration = web_app._calibration_file(self.config, "tv/show-ready")
+        ready_calibration.parent.mkdir(parents=True, exist_ok=True)
+        ready_calibration.write_text(
+            json.dumps(
+                {
+                    "mode": "sample",
+                    "job_id": "sample-ready",
+                    "source_clips": [
+                        {
+                            "path": "/review-media/run-ready/item-00/source-01-00-10.mp4",
+                            "timestamp_seconds": 10.0,
+                            "duration_seconds": 8.0,
+                        }
+                    ],
+                    "preview_clips": [
+                        {
+                            "path": "/review-media/run-ready/item-00/encoded-01-00-10.mp4",
+                            "timestamp_seconds": 10.0,
+                            "duration_seconds": 8.0,
+                        }
+                    ],
+                }
+            )
+        )
+
+        refresh_dir = self.config.paths.review_dir / "run-refresh" / "item-00"
+        refresh_dir.mkdir(parents=True, exist_ok=True)
+        (refresh_dir / "compare-01-00-10.mkv").write_text("clip")
+        refresh_calibration = web_app._calibration_file(self.config, "tv/show-refresh")
+        refresh_calibration.write_text(
+            json.dumps(
+                {
+                    "mode": "sample",
+                    "job_id": "sample-refresh",
+                    "compare_clips": [
+                        {
+                            "path": "/review-media/run-refresh/item-00/compare-01-00-10.mkv",
+                            "timestamp_seconds": 10.0,
+                            "duration_seconds": 8.0,
+                        }
+                    ],
+                }
+            )
+        )
+
+        self.assertEqual(
+            web_app._folder_review_badge(self.config, "tv/show-ready"),
+            {"label": "Ready to review", "tone": "attention"},
+        )
+        self.assertEqual(
+            web_app._folder_review_badge(self.config, "tv/show-refresh"),
+            {"label": "Refresh review", "tone": "warning"},
+        )
 
     def test_resolve_sample_host_maps_legacy_local_key_to_self_host(self) -> None:
         statuses = [
@@ -529,7 +1075,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 repo_path=str(self.root),
             )
         ]
-        with patch("mediaforce.web.app.collect_host_statuses", return_value=statuses):
+        with patch("mediaforce.web.app._safe_collect_host_statuses", return_value=statuses):
             host = web_app._resolve_sample_host(self.config, "local")
         self.assertEqual(host.key, "cbusillo@localhost")
 
@@ -547,7 +1093,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 repo_path=str(self.root),
             )
         ]
-        with patch("mediaforce.web.app.collect_host_statuses", return_value=statuses):
+        with patch("mediaforce.web.app._safe_collect_host_statuses", return_value=statuses):
             host = web_app._resolve_sample_host(self.config, "cbusillo@m1-mini")
         self.assertEqual(host.key, "cbusillo@m1-mini")
 
@@ -565,27 +1111,30 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 repo_path=str(self.root),
             )
         ]
-        with patch("mediaforce.web.app.collect_host_statuses", return_value=statuses):
+        with patch("mediaforce.web.app._safe_collect_host_statuses", return_value=statuses):
             with self.assertRaises(HTTPException) as exc_info:
                 web_app._resolve_sample_host(self.config, "remote-a")
         self.assertEqual(exc_info.exception.status_code, 400)
         self.assertEqual(exc_info.exception.detail, "Unknown sampled calibration host")
 
     @patch("mediaforce.web.app.generate_compare_clips_from_previews")
+    @patch("mediaforce.web.app.render_source_review_clips")
     @patch("mediaforce.web.app.encode_preview_clips")
     @patch("mediaforce.web.app.recommend_review_timestamps")
     @patch("mediaforce.web.app.run_sample_encode")
     @patch("mediaforce.web.app.search_quality_for_source")
     def test_run_sampled_calibration_passes_remote_host_to_remote_work(
-        self,
-        search_quality_mock,
-        sample_encode_mock,
-        recommend_timestamps_mock,
-        encode_preview_mock,
-        compare_preview_mock,
+            self,
+            search_quality_mock: Mock,
+            sample_encode_mock: Mock,
+            recommend_timestamps_mock: Mock,
+            encode_preview_mock: Mock,
+            source_review_mock: Mock,
+            compare_preview_mock: Mock,
     ) -> None:
         source_path = self._create_source_file("episode-remote.mkv")
-        preview_path = self.root / "review" / "remote-run" / "item-00" / "encoded-01-12m-00s.mkv"
+        preview_path = self.root / "review" / "remote-run" / "item-00" / "encoded-01-12m-00s.mp4"
+        source_review_path = self.root / "review" / "remote-run" / "item-00" / "source-01-12m-00s.mp4"
         compare_path = self.root / "review" / "remote-run" / "item-00" / "compare-01-12m-00s.mkv"
         host = {"key": "cbusillo@m1-mini", "label": "M1 mini", "mode": "ssh"}
         policy = {
@@ -613,6 +1162,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "rel_path": "tv/show/episode-remote.mkv",
             "source_size_bytes": 1_000_000,
             "duration_seconds": 3600.0,
+            "video_codec": "h264",
             "resolved_policy": policy,
             "audio_summary": [
                 {
@@ -651,6 +1201,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 size_bytes=123_456,
             )
         ]
+        source_review_mock.return_value = [
+            BrowserReviewClip(
+                output_path=source_review_path,
+                timestamp_seconds=720.0,
+                duration_seconds=8.0,
+                size_bytes=123_456,
+            )
+        ]
         compare_preview_mock.return_value = [
             CompareClip(
                 output_path=compare_path,
@@ -669,13 +1227,24 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             seed_metadata=None,
             sample_item=sample_item,
             calibration_run_id="remote-run",
+            process_controller=web_app.ManagedProcessController(),
         )
 
-        search_quality_mock.assert_called_once_with(source_path, policy["video"], host=host)
+        search_quality_mock.assert_called_once_with(
+            source_path,
+            policy["video"],
+            source_codec="h264",
+            width=None,
+            height=None,
+            process_controller=unittest.mock.ANY,
+            host=host,
+        )
         sample_encode_mock.assert_called_once()
         self.assertEqual(sample_encode_mock.call_args.kwargs["host"], host)
+        self.assertEqual(sample_encode_mock.call_args.kwargs["source_codec"], "h264")
         encode_preview_mock.assert_called_once()
         self.assertEqual(encode_preview_mock.call_args.kwargs["host"], host)
+        self.assertEqual(encode_preview_mock.call_args.kwargs["source_codec"], "h264")
         self.assertEqual(payload["host"], host)
         self.assertEqual(payload["compare_clips"][0]["path"], "/review-media/remote-run/item-00/compare-01-12m-00s.mkv")
 
@@ -686,21 +1255,51 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ]
         self.config.raw["remote_hosts"] = configured_hosts
         with patch("mediaforce.remote._remote_host_status", side_effect=lambda config, host: HostStatus(
-            key=str(host["host"]),
-            label=str(host["label"]),
-            mode="ssh",
-            priority=0,
-            capabilities=["encode_queue"],
-            available=True,
-            message="Mounted and ready",
-            missing_paths=[],
-            repo_path=None,
+                key=str(host["host"]),
+                label=str(host["label"]),
+                mode="ssh",
+                priority=0,
+                capabilities=["encode_queue"],
+                available=True,
+                message="Mounted and ready",
+                missing_paths=[],
+                repo_path=None,
         )):
             statuses = remote.collect_host_statuses(self.config)
         self.assertEqual([status.key for status in statuses], ["cbusillo@localhost", "cbusillo@example-host"])
 
+    def test_remote_host_status_targets_current_machine_without_ssh_probe(self) -> None:
+        source_root = Path(next(iter(self.config.source_root_map.values())))
+        source_root.mkdir(parents=True, exist_ok=True)
+        self.config.staging_root.mkdir(parents=True, exist_ok=True)
+        host: dict[str, object] = {
+            "host": "cbusillo@localhost",
+            "label": "Chris-Studio",
+            "capabilities": ["encode_queue", "sample_calibration"],
+            "repo_path": str(self.root),
+        }
+        with patch("mediaforce.remote._run_remote_status_probe") as status_probe_mock, patch(
+                "mediaforce.remote._local_tool_status_snapshot",
+                return_value={
+                    "xcode_clt": True,
+                    "brew": True,
+                    "ffmpeg": True,
+                    "ffmpeg_videotoolbox": True,
+                    "ffmpeg_libvmaf": True,
+                    "ffmpeg_xpsnr": True,
+                    "ffmpeg_libsvtav1": True,
+                    "ab_av1": True,
+                },
+        ):
+            status = remote._remote_host_status(self.config, host)
+
+        status_probe_mock.assert_not_called()
+        self.assertTrue(status.available)
+        self.assertEqual(status.message, "Mounted and ready")
+        self.assertEqual(status.missing_paths, [])
+
     def test_remote_host_status_requires_ab_av1_for_sample_hosts(self) -> None:
-        host = {
+        host: dict[str, object] = {
             "host": "cbusillo@sample-host",
             "label": "Sample Host",
             "capabilities": ["sample_calibration"],
@@ -712,6 +1311,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
+                "tool|ffmpeg_videotoolbox|1",
                 "tool|ffmpeg_libvmaf|1",
                 "tool|ffmpeg_xpsnr|1",
                 "tool|ffmpeg_libsvtav1|1",
@@ -721,16 +1321,80 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             ]
         )
         with patch(
-            "mediaforce.remote._run_remote_ssh",
-            return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
         ), patch("mediaforce.remote._learn_remote_wake_mac"):
             status = remote._remote_host_status(self.config, host)
         self.assertFalse(status.available)
         self.assertIn(remote.AB_AV1_MISSING_ISSUE, status.issues)
         self.assertEqual(status.message, "Needs remote setup")
 
+    def test_remote_host_status_uses_host_path_overrides(self) -> None:
+        host: dict[str, object] = {
+            "host": "cbusillo@encode-host",
+            "label": "Encode Host",
+            "capabilities": ["encode_queue"],
+            "source_roots": {"tv": "/srv/media/tv"},
+            "staging_root": "/srv/media/transcode",
+        }
+        stdout = "\n".join(
+            [
+                "path|/srv/media/tv|1",
+                "path|/srv/media/transcode|1",
+                "tool|xcode_clt|0",
+                "tool|brew|0",
+                "tool|ffmpeg|1",
+                "tool|ffmpeg_videotoolbox|0",
+                "tool|ffmpeg_libvmaf|0",
+                "tool|ffmpeg_xpsnr|0",
+                "tool|ffmpeg_libsvtav1|1",
+                "tool|ab_av1|0",
+                "meta|platform|linux",
+                "time|utc_offset|+0000",
+                "repo|exists|1",
+            ]
+        )
+        with patch(
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
+        ) as run_remote_ssh_mock, patch("mediaforce.remote._learn_remote_wake_mac"):
+            status = remote._remote_host_status(self.config, host)
+        self.assertTrue(status.available)
+        self.assertIn("/srv/media/tv", run_remote_ssh_mock.call_args.kwargs["input_text"])
+        self.assertIn("/srv/media/transcode", run_remote_ssh_mock.call_args.kwargs["input_text"])
+
+    def test_remote_host_status_stream_mode_ignores_missing_library_paths(self) -> None:
+        host: dict[str, object] = {
+            "host": "cbusillo@stream-host",
+            "label": "Stream Host",
+            "capabilities": ["encode_queue"],
+            "media_access": "stream",
+        }
+        stdout = "\n".join(
+            [
+                "tool|xcode_clt|0",
+                "tool|brew|0",
+                "tool|ffmpeg|1",
+                "tool|ffmpeg_videotoolbox|0",
+                "tool|ffmpeg_libvmaf|0",
+                "tool|ffmpeg_xpsnr|0",
+                "tool|ffmpeg_libsvtav1|1",
+                "tool|ab_av1|0",
+                "meta|platform|linux",
+                "time|utc_offset|+0000",
+                "repo|exists|1",
+            ]
+        )
+        with patch(
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
+        ), patch("mediaforce.remote._learn_remote_wake_mac"):
+            status = remote._remote_host_status(self.config, host)
+        self.assertTrue(status.available)
+        self.assertEqual(status.missing_paths, [])
+
     def test_remote_host_status_requires_metric_and_av1_support_for_sample_hosts(self) -> None:
-        host = {
+        host: dict[str, object] = {
             "host": "cbusillo@sample-host",
             "label": "Sample Host",
             "capabilities": ["sample_calibration"],
@@ -742,6 +1406,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
+                "tool|ffmpeg_videotoolbox|1",
                 "tool|ffmpeg_libvmaf|0",
                 "tool|ffmpeg_xpsnr|0",
                 "tool|ffmpeg_libsvtav1|0",
@@ -751,8 +1416,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             ]
         )
         with patch(
-            "mediaforce.remote._run_remote_ssh",
-            return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
         ), patch("mediaforce.remote._learn_remote_wake_mac"):
             status = remote._remote_host_status(self.config, host)
         self.assertFalse(status.available)
@@ -760,7 +1425,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIn(remote.SAMPLE_AV1_ENCODER_MISSING_ISSUE, status.issues)
 
     def test_remote_host_status_allows_encode_only_hosts_without_ab_av1(self) -> None:
-        host = {
+        host: dict[str, object] = {
             "host": "cbusillo@encode-host",
             "label": "Encode Host",
             "capabilities": ["encode_queue"],
@@ -772,6 +1437,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
+                "tool|ffmpeg_videotoolbox|1",
                 "tool|ffmpeg_libvmaf|0",
                 "tool|ffmpeg_xpsnr|0",
                 "tool|ffmpeg_libsvtav1|0",
@@ -781,12 +1447,142 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             ]
         )
         with patch(
-            "mediaforce.remote._run_remote_ssh",
-            return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
         ), patch("mediaforce.remote._learn_remote_wake_mac"):
             status = remote._remote_host_status(self.config, host)
         self.assertTrue(status.available)
         self.assertNotIn(remote.AB_AV1_MISSING_ISSUE, status.issues)
+
+    def test_remote_host_status_requires_videotoolbox_for_encode_hosts(self) -> None:
+        host: dict[str, object] = {
+            "host": "cbusillo@encode-host",
+            "label": "Encode Host",
+            "capabilities": ["encode_queue"],
+        }
+        stdout = "\n".join(
+            [
+                f"path|{self.config.staging_root}|1",
+                f"path|{self.config.archive_root}|1",
+                "tool|xcode_clt|1",
+                "tool|brew|1",
+                "tool|ffmpeg|1",
+                "tool|ffmpeg_videotoolbox|0",
+                "tool|ffmpeg_libvmaf|0",
+                "tool|ffmpeg_xpsnr|0",
+                "tool|ffmpeg_libsvtav1|0",
+                "tool|ab_av1|0",
+                "time|utc_offset|+0000",
+                "repo|exists|1",
+            ]
+        )
+        with patch(
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
+        ), patch("mediaforce.remote._learn_remote_wake_mac"):
+            status = remote._remote_host_status(self.config, host)
+        self.assertFalse(status.available)
+        self.assertIn(remote.VIDEOTOOLBOX_REQUIRED_ISSUE, status.issues)
+
+    def test_remote_host_status_allows_linux_encode_hosts_without_videotoolbox(self) -> None:
+        host: dict[str, object] = {
+            "host": "cbusillo@linux-encode-host",
+            "label": "Linux Encode Host",
+            "capabilities": ["encode_queue"],
+        }
+        stdout = "\n".join(
+            [
+                f"path|{self.config.staging_root}|1",
+                f"path|{self.config.archive_root}|1",
+                "tool|xcode_clt|0",
+                "tool|brew|0",
+                "tool|ffmpeg|1",
+                "tool|ffmpeg_videotoolbox|0",
+                "tool|ffmpeg_libvmaf|0",
+                "tool|ffmpeg_xpsnr|0",
+                "tool|ffmpeg_libsvtav1|1",
+                "tool|ab_av1|0",
+                "meta|platform|linux",
+                "time|utc_offset|+0000",
+                "repo|exists|0",
+            ]
+        )
+        with patch(
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
+        ), patch("mediaforce.remote._learn_remote_wake_mac"):
+            status = remote._remote_host_status(self.config, host)
+        self.assertTrue(status.available)
+        self.assertEqual(status.platform, "linux")
+        self.assertFalse(status.setup_supported)
+        self.assertNotIn(remote.VIDEOTOOLBOX_REQUIRED_ISSUE, status.issues)
+
+    def test_remote_host_status_requires_libsvtav1_for_linux_encode_hosts(self) -> None:
+        host: dict[str, object] = {
+            "host": "cbusillo@linux-encode-host",
+            "label": "Linux Encode Host",
+            "capabilities": ["encode_queue"],
+        }
+        stdout = "\n".join(
+            [
+                f"path|{self.config.staging_root}|1",
+                f"path|{self.config.archive_root}|1",
+                "tool|xcode_clt|0",
+                "tool|brew|0",
+                "tool|ffmpeg|1",
+                "tool|ffmpeg_videotoolbox|0",
+                "tool|ffmpeg_libvmaf|0",
+                "tool|ffmpeg_xpsnr|0",
+                "tool|ffmpeg_libsvtav1|0",
+                "tool|ab_av1|0",
+                "meta|platform|linux",
+                "time|utc_offset|+0000",
+                "repo|exists|1",
+            ]
+        )
+        with patch(
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
+        ), patch("mediaforce.remote._learn_remote_wake_mac"):
+            status = remote._remote_host_status(self.config, host)
+        self.assertFalse(status.available)
+        self.assertFalse(status.setup_supported)
+        self.assertEqual(status.message, "Install AV1 encoder support")
+        self.assertIn(remote.SVT_AV1_REQUIRED_ISSUE, status.issues)
+
+    def test_remote_host_status_marks_linux_sample_hosts_unsupported(self) -> None:
+        host: dict[str, object] = {
+            "host": "cbusillo@linux-sample-host",
+            "label": "Linux Sample Host",
+            "capabilities": ["encode_queue", "sample_calibration"],
+            "repo_path": "/srv/mediaforce",
+        }
+        stdout = "\n".join(
+            [
+                f"path|{self.config.staging_root}|1",
+                f"path|{self.config.archive_root}|1",
+                "tool|xcode_clt|0",
+                "tool|brew|0",
+                "tool|ffmpeg|1",
+                "tool|ffmpeg_videotoolbox|0",
+                "tool|ffmpeg_libvmaf|1",
+                "tool|ffmpeg_xpsnr|1",
+                "tool|ffmpeg_libsvtav1|1",
+                "tool|ab_av1|1",
+                "meta|platform|linux",
+                "time|utc_offset|+0000",
+                "repo|exists|0",
+            ]
+        )
+        with patch(
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
+        ), patch("mediaforce.remote._learn_remote_wake_mac"):
+            status = remote._remote_host_status(self.config, host)
+        self.assertFalse(status.available)
+        self.assertEqual(status.message, "Linux sample unsupported")
+        self.assertIn(remote.LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE, status.issues)
+        self.assertIn("Repo path is missing: /srv/mediaforce", status.issues)
 
     def test_finish_remote_host_prepare_installs_ab_av1_for_sample_hosts(self) -> None:
         host = {
@@ -806,13 +1602,15 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             repo_path=None,
         )
         with patch(
-            "mediaforce.remote._run_remote_ssh",
-            return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
         ) as run_remote_ssh_mock, patch("mediaforce.remote._remote_host_status", return_value=ready_status):
             result = remote._finish_remote_host_prepare(self.config, host, prep_steps=[])
         self.assertTrue(result.ok)
-        self.assertIn("Installed ffmpeg-full with Homebrew for sampled calibration hosts when required.", result.performed_steps)
-        self.assertIn("Installed ab-av1 with Homebrew for sampled calibration if it was missing.", result.performed_steps)
+        self.assertIn("Installed ffmpeg-full with Homebrew for sampled calibration hosts when required.",
+                      result.performed_steps)
+        self.assertIn("Installed ab-av1 with Homebrew for sampled calibration if it was missing.",
+                      result.performed_steps)
         prep_script = run_remote_ssh_mock.call_args.args[3]
         self.assertIn("install ffmpeg-full", prep_script)
         self.assertIn('install ab-av1', prep_script)
@@ -822,8 +1620,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         temp_output = self.root / "staging" / "episode.partial.mkv"
         staging_path = self.root / "staging" / "episode.mkv"
         with patch(
-            "mediaforce.execution.run_command",
-            return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
+                "mediaforce.execution.run_command",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
         ) as run_command_mock:
             execution._run_encode_command(
                 ffmpeg_cmd=ffmpeg_cmd,
@@ -840,11 +1638,435 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIn("CheckHostIP=no", ssh_cmd)
         self.assertIn("/opt/homebrew/opt/ffmpeg-full/bin", ssh_cmd[-1])
 
+    def test_effective_video_preset_bumps_8k_svt_av1_jobs_to_supported_preset(self) -> None:
+        preset = execution.effective_video_preset(
+            {"encoder": "libsvtav1", "preset": 4},
+            width=8000,
+            height=4000,
+        )
+        self.assertEqual(preset, 5)
+
+    def test_effective_video_preset_keeps_non_8k_jobs_unchanged(self) -> None:
+        preset = execution.effective_video_preset(
+            {"encoder": "libsvtav1", "preset": 4},
+            width=3840,
+            height=2160,
+        )
+        self.assertEqual(preset, 4)
+
+    def test_run_encode_command_localhost_ssh_executes_locally(self) -> None:
+        ffmpeg_cmd = ["/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg", "-hide_banner", "-i", "/tmp/in.mkv", "/tmp/out.mkv"]
+        temp_output = self.root / "staging" / "episode.partial.mkv"
+        staging_path = self.root / "staging" / "episode.mkv"
+        with patch(
+                "mediaforce.execution.run_command",
+                return_value=subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr=""),
+        ) as run_command_mock:
+            execution._run_encode_command(
+                ffmpeg_cmd=ffmpeg_cmd,
+                temp_output=temp_output,
+                staging_path=staging_path,
+                overwrite=False,
+                process_controller=None,
+                host={"key": "cbusillo@localhost", "mode": "ssh"},
+            )
+        local_cmd = run_command_mock.call_args.args[0]
+        self.assertEqual(local_cmd[0], "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg")
+        self.assertNotEqual(local_cmd[0], "ssh")
+
+    def test_resolve_item_paths_use_host_overrides(self) -> None:
+        item = {
+            "source_path": "/Volumes/media/tv/show/episode.mkv",
+            "staging_path": "/Volumes/media/transcode/tv/show/episode.mkv",
+            "media_root": "tv",
+            "rel_path": "tv/show/episode.mkv",
+        }
+        host = {
+            "source_roots": {"tv": "/srv/media/tv"},
+            "staging_root": "/srv/media/transcode",
+        }
+        self.config.raw["media"]["output_container"] = "mkv"
+
+        self.assertEqual(
+            execution.resolve_item_source_path(self.config, item, host=host),
+            Path("/srv/media") / "tv/show/episode.mkv",
+        )
+        self.assertEqual(
+            execution.resolve_item_staging_path(self.config, item, host=host),
+            Path("/srv/media/transcode") / "tv/show/episode.mkv",
+        )
+
+    def test_resolve_item_paths_keep_controller_paths_for_stream_hosts(self) -> None:
+        item = {
+            "source_path": "/Volumes/media/tv/show/episode.mkv",
+            "staging_path": "/Volumes/media/transcode/tv/show/episode.mkv",
+            "media_root": "tv",
+            "rel_path": "tv/show/episode.mkv",
+        }
+        host = {
+            "source_roots": {"tv": "/srv/media/tv"},
+            "staging_root": "/srv/media/transcode",
+            "media_access": "stream",
+        }
+        self.assertEqual(
+            execution.resolve_item_source_path(self.config, item, host=host),
+            Path("/Volumes/media/tv/show/episode.mkv"),
+        )
+        self.assertEqual(
+            execution.resolve_item_staging_path(self.config, item, host=host),
+            Path("/Volumes/media/transcode/tv/show/episode.mkv"),
+        )
+
+    def test_build_streaming_remote_ffmpeg_command_uses_pipe_endpoints(self) -> None:
+        cmd = execution._build_streaming_remote_ffmpeg_command(
+            ["/opt/homebrew/bin/ffmpeg", "-y", "-i", "/tmp/input.mkv", "/tmp/output.mkv"],
+            source_path=Path("/tmp/input.mkv"),
+            output_path=Path("/tmp/output.mkv"),
+        )
+        self.assertEqual(cmd[0], "ffmpeg")
+        self.assertIn("pipe:0", cmd)
+        self.assertEqual(cmd[-3:], ["-f", "matroska", "pipe:1"])
+
+    def test_build_streaming_remote_ffmpeg_command_supports_mp4_pipe_output(self) -> None:
+        cmd = execution._build_streaming_remote_ffmpeg_command(
+            ["/opt/homebrew/bin/ffmpeg", "-y", "-i", "/tmp/input.mkv", "/tmp/output.mp4"],
+            source_path=Path("/tmp/input.mkv"),
+            output_path=Path("/tmp/output.mp4"),
+        )
+        self.assertIn("pipe:0", cmd)
+        self.assertIn("-movflags", cmd)
+        self.assertIn("+frag_keyframe+empty_moov+default_base_moof", cmd)
+        self.assertEqual(cmd[-3:], ["-f", "mp4", "pipe:1"])
+
+    def test_search_quality_runs_locally_for_stream_hosts(self) -> None:
+        with patch(
+                "mediaforce.execution.run_crf_search",
+                return_value=QualitySearchResult(crf=28.0, metric="XPSNR", target=41.0, score=41.5, stdout="ok"),
+        ) as run_mock:
+            execution._search_quality(
+                Path("/tmp/input.mkv"),
+                {
+                    "quality_metric": "xpsnr",
+                    "target_xpsnr": 41.0,
+                    "min_target_xpsnr": 40.0,
+                    "target_relax_step_xpsnr": 1.0,
+                    "pixel_format": "yuv420p10le",
+                    "sample_every": "7m",
+                    "sample_duration": "30",
+                    "min_crf": 18,
+                    "max_crf": 34,
+                    "max_encoded_percent": 90,
+                    "preset": 4,
+                    "encoder": "libsvtav1",
+                    "default_grain": 0,
+                    "grain_denoise": 0,
+                },
+                source_codec="h264",
+                host={"mode": "ssh", "platform": "linux", "media_access": "stream"},
+            )
+        self.assertEqual(run_mock.call_args.kwargs["host"]["mode"], "local")
+
+    def test_run_quality_command_localhost_ssh_executes_locally(self) -> None:
+        with patch(
+                "mediaforce.quality.run_command",
+                return_value=subprocess.CompletedProcess(args=["ab-av1"], returncode=0, stdout="{}", stderr=""),
+        ) as run_command_mock, patch("mediaforce.quality.run_remote_command") as run_remote_command_mock:
+            quality._run_quality_command(
+                ["ab-av1", "sample-encode", "-i", "/tmp/input.mkv"],
+                process_controller=None,
+                host={"key": "cbusillo@localhost", "mode": "ssh"},
+            )
+        self.assertEqual(run_command_mock.call_args.args[0][0], "ab-av1")
+        run_remote_command_mock.assert_not_called()
+
+    def test_build_ffmpeg_command_enables_videotoolbox_decode_for_h264_sources(self) -> None:
+        with patch("mediaforce.execution.ffmpeg_binary", return_value="/tmp/ffmpeg"):
+            cmd = execution._build_ffmpeg_command(
+                source_path=Path("/tmp/input.mkv"),
+                staging_path=Path("/tmp/output.mkv"),
+                source_codec="h264",
+                video_policy={
+                    "encoder": "libsvtav1",
+                    "pixel_format": "yuv420p10le",
+                    "default_grain": 0,
+                    "grain_denoise": 0,
+                },
+                preset=4,
+                audio_policy={},
+                subtitle_policy={},
+                selection={
+                    "audio_tracks": [{"index": 1, "codec_name": "aac", "channels": 2}],
+                    "subtitle_tracks": [],
+                },
+                quality=QualitySearchResult(crf=28.0, metric="XPSNR", target=41.0, score=41.5, stdout="ok"),
+            )
+        self.assertEqual(cmd[:5], ["/tmp/ffmpeg", "-y", "-hwaccel", "videotoolbox", "-i"])
+        self.assertIn("mediaforce_encoded_by=mediaforce", cmd)
+        self.assertIn("mediaforce_quality_metric=XPSNR", cmd)
+        self.assertIn("mediaforce_quality_target=41", cmd)
+        self.assertIn("mediaforce_quality_score=41.5", cmd)
+        self.assertIn("mediaforce_chosen_crf=28", cmd)
+
+    def test_build_ffmpeg_command_omits_videotoolbox_decode_for_linux_hosts(self) -> None:
+        with patch("mediaforce.execution.ffmpeg_binary", return_value="/tmp/ffmpeg"):
+            cmd = execution._build_ffmpeg_command(
+                source_path=Path("/tmp/input.mkv"),
+                staging_path=Path("/tmp/output.mkv"),
+                source_codec="h264",
+                video_policy={
+                    "encoder": "libsvtav1",
+                    "pixel_format": "yuv420p10le",
+                    "default_grain": 0,
+                    "grain_denoise": 0,
+                },
+                preset=4,
+                audio_policy={},
+                subtitle_policy={},
+                selection={
+                    "audio_tracks": [{"index": 1, "codec_name": "aac", "channels": 2}],
+                    "subtitle_tracks": [],
+                },
+                quality=QualitySearchResult(crf=28.0, metric="XPSNR", target=41.0, score=41.5, stdout="ok"),
+                host={"platform": "linux", "videotoolbox_available": False},
+            )
+        self.assertEqual(cmd[:3], ["/tmp/ffmpeg", "-y", "-i"])
+
+    def test_run_crf_search_enables_videotoolbox_for_h265_sources(self) -> None:
+        with patch(
+                "mediaforce.quality._run_quality_command",
+                return_value=subprocess.CompletedProcess(args=["ab-av1"], returncode=0, stdout="crf 28 xpsnr 41.5",
+                                                         stderr=""),
+        ) as run_mock:
+            quality.run_crf_search(
+                Path("/tmp/input.mkv"),
+                source_codec="hevc",
+                preferred_metric="xpsnr",
+                metric_target=41.0,
+                preset=4,
+                pixel_format="yuv420p10le",
+                sample_every="12m",
+                sample_duration="20s",
+                min_crf=20,
+                max_crf=35,
+                max_encoded_percent=70,
+                svt_params=[],
+                thorough=False,
+            )
+        cmd = run_mock.call_args.args[0]
+        self.assertIn("--enc-input", cmd)
+        self.assertIn("hwaccel=videotoolbox", cmd)
+
+    def test_run_crf_search_omits_videotoolbox_for_linux_hosts(self) -> None:
+        with patch(
+                "mediaforce.quality._run_quality_command",
+                return_value=subprocess.CompletedProcess(args=["ab-av1"], returncode=0, stdout="crf 28 xpsnr 41.5",
+                                                         stderr=""),
+        ) as run_mock:
+            quality.run_crf_search(
+                Path("/tmp/input.mkv"),
+                source_codec="hevc",
+                preferred_metric="xpsnr",
+                metric_target=41.0,
+                preset=4,
+                pixel_format="yuv420p10le",
+                sample_every="12m",
+                sample_duration="20s",
+                min_crf=20,
+                max_crf=35,
+                max_encoded_percent=70,
+                svt_params=[],
+                thorough=False,
+                host={"platform": "linux", "videotoolbox_available": False},
+            )
+        cmd = run_mock.call_args.args[0]
+        self.assertNotIn("--enc-input", cmd)
+        self.assertNotIn("hwaccel=videotoolbox", cmd)
+
+    def test_ffmpeg_progress_state_parses_key_metrics(self) -> None:
+        progress_state: dict[str, str] = {}
+        self.assertIsNone(execution._update_ffmpeg_progress_state(progress_state, "fps=23.4\n", elapsed_seconds=5.0))
+        self.assertIsNone(execution._update_ffmpeg_progress_state(progress_state, "speed=2.50x\n", elapsed_seconds=5.0))
+        self.assertIsNone(
+            execution._update_ffmpeg_progress_state(progress_state, "out_time_ms=45000000\n", elapsed_seconds=5.0))
+        snapshot = execution._update_ffmpeg_progress_state(progress_state, "progress=continue\n", elapsed_seconds=5.0)
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["fps"], 23.4)
+        self.assertEqual(snapshot["speed"], 2.5)
+        self.assertEqual(snapshot["out_time_seconds"], 45.0)
+        self.assertEqual(snapshot["elapsed_seconds"], 5.0)
+
+    def test_decorate_encode_queue_for_scheduler_adds_queue_eta(self) -> None:
+        manifest_path = self.root / "telemetry-manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "items": [
+                        {"duration_seconds": 60.0, "source_size_bytes": 1000},
+                    ]
+                }
+            )
+        )
+        encode_queue = {
+            "state": {"is_paused": False, "stop_requested": False},
+            "running": [
+                {
+                    "job_id": "running-job",
+                    "prefix": "tv/House/Season 2",
+                    "status": "running",
+                    "manifest_path": str(manifest_path),
+                    "item_count": 1,
+                    "host": {"key": "cbusillo@studio", "schedule_profile": "always"},
+                    "attempt_count": 1,
+                    "progress": {
+                        "remaining_duration_seconds": 120.0,
+                        "speed": 2.0,
+                        "percent_complete": 40.0,
+                    },
+                }
+            ],
+            "queued": [
+                {
+                    "job_id": "queued-job",
+                    "prefix": "tv/House/Season 3",
+                    "status": "queued",
+                    "manifest_path": str(manifest_path),
+                    "item_count": 1,
+                    "host": {},
+                    "attempt_count": 0,
+                    "progress": None,
+                }
+            ],
+            "recent": [],
+            "queued_count": 1,
+            "running_count": 1,
+            "retry_backoff_count": 0,
+            "needs_attention_count": 0,
+        }
+        decorated = web_app._decorate_encode_queue_for_scheduler(self.config, encode_queue)
+        telemetry = decorated.get("telemetry") or {}
+        self.assertAlmostEqual(float(telemetry.get("eta_seconds") or 0.0), 90.0)
+        self.assertEqual(telemetry.get("eta_copy"), "1m 30s")
+        self.assertEqual(decorated["running"][0]["telemetry_summary"], "40% · 2.00x · Est. ETA 1m 0s")
+
+    def test_encode_queue_summary_copy_labels_eta_as_estimated(self) -> None:
+        encode_queue = {
+            "running_count": 1,
+            "queued_count": 2,
+            "queued_waiting_count": 1,
+            "needs_attention_count": 0,
+            "telemetry": {"eta_copy": "12m 0s"},
+        }
+        encode_job = {"status": "queued", "queue_position": 2, "queue_depth": 3}
+
+        summary = web_app._encode_queue_summary_copy(
+            encode_queue,
+            {"is_paused": False},
+            encode_job,
+        )
+
+        self.assertIn("estimated queue finish in 12m 0s", summary)
+
+    def test_host_runtime_rows_include_running_job_telemetry(self) -> None:
+        status = HostStatus(
+            key="cbusillo@studio",
+            label="Studio",
+            mode="ssh",
+            priority=100,
+            capabilities=["encode_queue"],
+            available=True,
+            message="Mounted and ready",
+            missing_paths=[],
+            repo_path=str(self.root),
+            platform="macos",
+            videotoolbox_available=True,
+        )
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.web.app._safe_collect_host_statuses", return_value=[status]
+        ):
+            self._save_job(
+                connection,
+                job_id="running-job",
+                manifest_name="manifest-running.json",
+                host={"key": "cbusillo@studio", "label": "Studio", "mode": "ssh", "schedule_profile": "always"},
+                status="running",
+                attempt_count=1,
+            )
+            job = load_encode_job(connection, "running-job")
+            assert job is not None
+            job["progress"] = {
+                "remaining_duration_seconds": 180.0,
+                "speed": 3.0,
+                "percent_complete": 55.0,
+                "eta_seconds": 60.0,
+            }
+            save_encode_job(connection, job)
+            rows = web_app._host_runtime_rows(connection, self.config)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["running_jobs"][0]["telemetry_summary"], "55% · 3.00x · Est. ETA 1m 0s")
+        self.assertEqual(rows[0]["telemetry"]["eta_copy"], "1m 0s")
+
+    def test_render_source_review_clip_enables_videotoolbox_decode_for_h264_sources(self) -> None:
+        with patch("mediaforce.review.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
+                "mediaforce.review.run_command",
+                return_value=subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr=""),
+        ) as run_mock:
+            review._render_source_review_clip(
+                source_path=Path("/tmp/input.mkv"),
+                source_codec="h264",
+                output_path=Path("/tmp/review.mp4"),
+                clip_time=12.0,
+                duration_seconds=8.0,
+            )
+        cmd = run_mock.call_args.args[0]
+        self.assertEqual(cmd[:9], [
+            "/tmp/ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-ss",
+            "12.000",
+            "-t",
+        ])
+        self.assertIn("-hwaccel", cmd)
+        self.assertIn("videotoolbox", cmd)
+
+    def test_encode_preview_clips_localhost_ssh_executes_locally(self) -> None:
+        output_dir = self.root / "review"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        def create_preview_file(*_args: object, **kwargs: object) -> None:
+            output_path = Path(str(kwargs["output_path"]))
+            output_path.write_bytes(b"preview")
+
+        with patch("mediaforce.review._render_encoded_preview_clip") as render_mock, patch(
+                "mediaforce.review._encode_preview_clips_remote"
+        ) as remote_mock:
+            render_mock.side_effect = create_preview_file
+            clips = review.encode_preview_clips(
+                source_path=Path("/tmp/input.mkv"),
+                output_dir=output_dir,
+                timestamps=[12.0],
+                duration_seconds=8.0,
+                encoder="libsvtav1",
+                pixel_format="yuv420p10le",
+                preset=4,
+                crf=28.0,
+                svt_params=[],
+                host={"key": "cbusillo@localhost", "mode": "ssh"},
+            )
+        render_mock.assert_called_once()
+        remote_mock.assert_not_called()
+        self.assertEqual(len(clips), 1)
+
     def test_run_remote_ssh_uses_alias_friendly_ssh_options(self) -> None:
         host: dict[str, object] = {"host": "cbusillo@chris-mini.local"}
         with patch(
-            "mediaforce.remote.subprocess.run",
-            return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
+                "mediaforce.remote.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
         ) as run_mock:
             remote._run_remote_ssh(host, "true", timeout=5, wake_before_connect=False)
         ssh_cmd = run_mock.call_args.args[0]
@@ -854,6 +2076,137 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIn("CheckHostIP=no", ssh_cmd)
         self.assertIn("BatchMode=yes", ssh_cmd)
         self.assertIn("ConnectTimeout=5", ssh_cmd)
+
+    def test_create_app_registers_folder_status_route_before_catch_all_folder_route(self) -> None:
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.purge_transient_artifacts"
+        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
+            "mediaforce.web.app._start_encode_queue_worker"
+        ):
+            app = web_app.create_app(self.config.paths.config_path)
+
+        folder_route_paths = [
+            route.path
+            for route in app.router.routes
+            if getattr(route, "path", "").startswith("/api/folders/")
+        ]
+        self.assertLess(
+            folder_route_paths.index("/api/folders/{prefix:path}/status"),
+            folder_route_paths.index("/api/folders/{prefix:path}"),
+        )
+
+    def test_stop_calibration_queue_cancels_running_jobs_and_cleans_queued_jobs(self) -> None:
+        running_prefix = "tv/show"
+        queued_prefix = "tv/queued"
+        now = web_app._now_iso()
+        with open_db(self.config.paths.db_path) as connection:
+            web_app._save_job_state(
+                connection,
+                self.config,
+                running_prefix,
+                {
+                    "job_id": "cal-running",
+                    "prefix": running_prefix,
+                    "status": "running",
+                    "lane": "sample",
+                    "action": "baseline",
+                    "host": {"key": "cbusillo@localhost", "label": "M4 Studio"},
+                    "notes": "",
+                    "policy": {},
+                    "sample_item": {},
+                    "owner_pid": os.getpid(),
+                    "created_at": now,
+                    "started_at": now,
+                    "finished_at": None,
+                    "error": None,
+                },
+            )
+            web_app._save_job_state(
+                connection,
+                self.config,
+                queued_prefix,
+                {
+                    "job_id": "cal-queued",
+                    "prefix": queued_prefix,
+                    "status": "queued",
+                    "lane": "sample",
+                    "action": "baseline",
+                    "host": {"key": "cbusillo@localhost", "label": "M4 Studio"},
+                    "notes": "",
+                    "policy": {},
+                    "sample_item": {},
+                    "owner_pid": None,
+                    "created_at": now,
+                    "started_at": None,
+                    "finished_at": None,
+                    "error": None,
+                },
+            )
+            connection.commit()
+
+        controller = Mock()
+        web_app.CALIBRATION_QUEUE_PROCESSES["cal-running"] = controller
+        try:
+            with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                    "mediaforce.web.app.purge_transient_artifacts"
+            ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
+                "mediaforce.web.app._start_encode_queue_worker"
+            ):
+                app = web_app.create_app(self.config.paths.config_path)
+
+            stop_endpoint = next(
+                route.endpoint
+                for route in app.router.routes
+                if getattr(route, "path", "") == "/api/calibration-queue/stop"
+            )
+            response = stop_endpoint()
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("Stopped and cleaned the calibration queue", response.body.decode())
+
+            with open_db(self.config.paths.db_path) as connection:
+                running_job = web_app._load_job_state(connection, self.config, running_prefix)
+                queued_job = web_app._load_job_state(connection, self.config, queued_prefix)
+
+            self.assertIsNotNone(running_job)
+            self.assertIsNotNone(queued_job)
+            assert running_job is not None
+            assert queued_job is not None
+            self.assertEqual(running_job["status"], "failed")
+            self.assertEqual(queued_job["status"], "failed")
+            self.assertEqual(running_job["error"], "Calibration queue job was stopped and cleaned up.")
+            self.assertEqual(queued_job["error"], "Calibration queue job was stopped and cleaned up.")
+            controller.cancel.assert_called_once_with()
+        finally:
+            web_app.CALIBRATION_QUEUE_PROCESSES.clear()
+
+    def test_run_remote_status_probe_retries_timeout_once(self) -> None:
+        host: dict[str, object] = {"host": "cbusillo@chris-mini.local"}
+        timeout_exc = subprocess.TimeoutExpired(cmd=["ssh"], timeout=8)
+        success = subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="ok", stderr="")
+        with patch(
+                "mediaforce.remote._run_remote_ssh",
+                side_effect=[timeout_exc, success],
+        ) as run_remote_ssh_mock, patch("mediaforce.remote.time.sleep") as sleep_mock:
+            result = remote._run_remote_status_probe(host, "echo ok", timeout=8)
+        self.assertEqual(result, success)
+        self.assertEqual(run_remote_ssh_mock.call_count, 2)
+        sleep_mock.assert_called_once_with(remote.REMOTE_STATUS_RETRY_DELAY_SECONDS)
+
+    def test_run_remote_status_probe_does_not_retry_permission_denied(self) -> None:
+        host: dict[str, object] = {"host": "cbusillo@chris-mini.local"}
+        denied = subprocess.CompletedProcess(
+            args=["ssh"],
+            returncode=255,
+            stdout="",
+            stderr="Permission denied (publickey,password).",
+        )
+        with patch("mediaforce.remote._run_remote_ssh", return_value=denied) as run_remote_ssh_mock, patch(
+                "mediaforce.remote.time.sleep"
+        ) as sleep_mock:
+            result = remote._run_remote_status_probe(host, "echo ok", timeout=8)
+        self.assertEqual(result, denied)
+        run_remote_ssh_mock.assert_called_once()
+        sleep_mock.assert_not_called()
 
     def test_classify_ssh_failure_for_new_alias_trust_prompt(self) -> None:
         classification = remote._classify_ssh_failure(
@@ -880,11 +2233,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ]
         with open_db(self.config.paths.db_path) as connection:
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
-                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, {"bypass_schedule": False})
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config,
+                                                                           {"bypass_schedule": False})
         self.assertIsNone(host_payload)
         self.assertEqual(waiting_reason, "waiting for host capacity to free up")
 
-    def _build_config(self) -> HarnessConfig:
+    def _build_config(self) -> MediaforceConfig:
         paths = ConfigPaths(
             project_root=self.root,
             config_path=self.root / "config.toml",
@@ -911,7 +2265,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 }
             },
         }
-        return HarnessConfig(raw=raw, paths=paths)
+        return MediaforceConfig(raw=raw, paths=paths)
 
     def _create_source_file(self, name: str) -> Path:
         path = self.root / "source" / "tv" / "show" / name
@@ -922,16 +2276,16 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
     def _staging_path(self, name: str) -> Path:
         return self.root / "staging" / "tv" / "show" / name
 
-    def _insert_library_item(self, connection, source_path: Path, *, status: str = "planned") -> int:
+    def _insert_library_item(self, connection: sqlite3.Connection, source_path: Path, *,
+                             status: str = "planned") -> int:
         now = web_app._now_iso()
         connection.execute(
             """
-            INSERT INTO library_items(
-                source_path, rel_path, media_root, parent_dir, file_name, container,
-                size_bytes, mtime_ns, fingerprint, duration_seconds, video_codec,
-                audio_summary_json, subtitle_summary_json, last_scan_id, discovered_at,
-                last_seen_at, updated_at, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO library_items(source_path, rel_path, media_root, parent_dir, file_name, container,
+                                      size_bytes, mtime_ns, fingerprint, duration_seconds, video_codec,
+                                      audio_summary_json, subtitle_summary_json, last_scan_id, discovered_at,
+                                      last_seen_at, updated_at, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(source_path),
@@ -956,7 +2310,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         )
         return int(connection.execute("SELECT id FROM library_items ORDER BY id DESC LIMIT 1").fetchone()[0])
 
-    def _insert_staged_artifact(self, connection, library_item_id: int, staging_path: Path) -> None:
+    def _insert_staged_artifact(self, connection: sqlite3.Connection, library_item_id: int, staging_path: Path) -> None:
         connection.execute(
             "INSERT INTO staged_artifacts(library_item_id, staging_path, updated_at) VALUES (?, ?, ?)",
             (library_item_id, str(staging_path), web_app._now_iso()),
@@ -969,17 +2323,17 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         return path
 
     def _save_job(
-        self,
-        connection,
-        *,
-        job_id: str,
-        manifest_name: str,
-        host: dict[str, object],
-        status: str,
-        attempt_count: int,
-        lease_expires_at: str | None = None,
-        retry_not_before: str | None = None,
-        waiting_reason: str | None = None,
+            self,
+            connection: sqlite3.Connection,
+            *,
+            job_id: str,
+            manifest_name: str,
+            host: dict[str, object],
+            status: str,
+            attempt_count: int,
+            lease_expires_at: str | None = None,
+            retry_not_before: str | None = None,
+            waiting_reason: str | None = None,
     ) -> None:
         manifest_path = self.root / "runs" / manifest_name
         now = web_app._now_iso()
