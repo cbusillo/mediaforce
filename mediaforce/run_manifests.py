@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import sqlite3
 import uuid
@@ -7,19 +5,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from mediaforce.config import HarnessConfig
+from mediaforce.config import MediaforceConfig
 from mediaforce.planner import build_manifest_item, recommend_item
 from mediaforce.scanner import scan_library
 
 
 def select_candidates(
-    connection: sqlite3.Connection,
-    config: HarnessConfig,
-    *,
-    statuses: list[str],
-    prefixes: list[str],
-    limit: int | None,
-    buckets: list[str] | None = None,
+        connection: sqlite3.Connection,
+        config: MediaforceConfig,
+        *,
+        statuses: list[str],
+        prefixes: list[str],
+        limit: int | None,
+        buckets: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     query = """
         SELECT
@@ -49,7 +47,7 @@ def select_candidates(
     return rows
 
 
-def build_run_manifest(rows: list[dict[str, Any]], config: HarnessConfig) -> dict[str, Any]:
+def build_run_manifest(rows: list[dict[str, Any]], config: MediaforceConfig) -> dict[str, Any]:
     now = datetime.now(tz=UTC).isoformat(timespec="seconds")
     run_id = uuid.uuid4().hex[:12]
     items = [build_manifest_item(row, config) for row in rows]
@@ -65,10 +63,10 @@ def build_run_manifest(rows: list[dict[str, Any]], config: HarnessConfig) -> dic
 
 
 def write_manifest(
-    connection: sqlite3.Connection,
-    config: HarnessConfig,
-    manifest: dict[str, Any],
-    output_path: Path | None = None,
+        connection: sqlite3.Connection,
+        config: MediaforceConfig,
+        manifest: dict[str, Any],
+        output_path: Path | None = None,
 ) -> Path:
     config.paths.run_manifest_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_path or config.paths.run_manifest_dir / f"run-{manifest['run_id']}.json"
@@ -97,23 +95,17 @@ def write_manifest(
 
 
 def create_folder_manifest(
-    connection: sqlite3.Connection,
-    config: HarnessConfig,
-    *,
-    prefix: str,
-    limit: int | None = None,
-    scan_first: bool = False,
+        connection: sqlite3.Connection,
+        config: MediaforceConfig,
+        *,
+        prefix: str,
+        limit: int | None = None,
+        scan_first: bool = False,
 ) -> tuple[dict[str, Any], Path]:
     if scan_first:
-        scan_library(connection, config, prefixes=[prefix], limit=None)
-    rows = select_candidates(
-        connection,
-        config,
-        statuses=["discovered", "planned", "validated"],
-        prefixes=[prefix],
-        limit=limit,
-        buckets=None,
-    )
+        scan_library(connection, config, prefixes=[prefix])
+    rows = select_candidates(connection, config, statuses=["discovered", "planned", "validated"], prefixes=[prefix],
+                             limit=limit)
     manifest = build_run_manifest(rows, config)
     manifest_path = write_manifest(connection, config, manifest)
     return manifest, manifest_path

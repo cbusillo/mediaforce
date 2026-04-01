@@ -1,8 +1,7 @@
-from __future__ import annotations
-
-import json
 import os
+import platform as platform_module
 import shlex
+import shutil
 import socket
 import subprocess
 import time
@@ -10,15 +9,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from mediaforce.config import HarnessConfig, load_runtime_settings, save_runtime_settings
+from mediaforce.config import MediaforceConfig, load_runtime_settings, save_runtime_settings
+from mediaforce.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQUIRED_ISSUE, has_videotoolbox_hwaccel, \
+    normalize_execution_platform
 
 DEFAULT_HOST_CAPABILITIES = ("encode_queue",)
+DEFAULT_HOST_MEDIA_ACCESS = "mounted"
 DEFAULT_WAKE_WAIT_SECONDS = 60
+REMOTE_STATUS_RETRY_DELAY_SECONDS = 1.0
 REMOTE_SHELL_PATH = "/opt/homebrew/opt/ffmpeg-full/bin:/usr/local/opt/ffmpeg-full/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 FFMPEG_MISSING_ISSUE = "ffmpeg is not installed on the remote PATH."
 AB_AV1_MISSING_ISSUE = "ab-av1 is not installed on the remote PATH."
 SAMPLE_METRIC_MISSING_ISSUE = "ffmpeg is missing both libvmaf and xpsnr support required for sampled calibration."
 SAMPLE_AV1_ENCODER_MISSING_ISSUE = "ffmpeg is missing libsvtav1 support required for sampled calibration."
+LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE = "Sampled calibration is not supported on Linux hosts."
 
 
 @dataclass(slots=True)
@@ -32,6 +36,9 @@ class HostStatus:
     message: str
     missing_paths: list[str]
     repo_path: str | None = None
+    ffmpeg_path: str | None = None
+    platform: str = "unknown"
+    videotoolbox_available: bool | None = None
     utc_offset_minutes: int | None = None
     issues: list[str] = field(default_factory=list)
     detail: str | None = None
@@ -49,7 +56,27 @@ class HostSetupResult:
     requires_password: bool = False
 
 
-def collect_host_statuses(config: HarnessConfig) -> list[HostStatus]:
+def normalize_host_media_access(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized == "stream":
+        return "stream"
+    return DEFAULT_HOST_MEDIA_ACCESS
+
+
+def host_media_access_for_host(host: dict[str, object] | None) -> str:
+    return normalize_host_media_access((host or {}).get("media_access"))
+
+
+def run_host_lifecycle_command(host: dict[str, object], command: str, *, timeout: int) -> subprocess.CompletedProcess[
+    str]:
+    _ = host
+    command_text = str(command or "").strip()
+    if not command_text:
+        raise RuntimeError("Lifecycle command cannot be empty.")
+    return subprocess.run(["sh", "-lc", command_text], capture_output=True, text=True, timeout=timeout)
+
+
+def collect_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
     return [_remote_host_status(config, host) for host in config.remote_hosts]
 
 
@@ -58,11 +85,11 @@ def ssh_target_for_host(host: dict[str, object]) -> str:
 
 
 def run_remote_command(
-    host: dict[str, object],
-    command: list[str],
-    *,
-    timeout: int,
-    input_text: str | None = None,
+        host: dict[str, object],
+        command: list[str],
+        *,
+        timeout: int,
+        input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     ssh_host = ssh_target_for_host(host)
     if not ssh_host:
@@ -90,11 +117,11 @@ def run_remote_command(
 
 
 def copy_remote_file_to_local(
-    host: dict[str, object],
-    remote_path: Path,
-    local_path: Path,
-    *,
-    timeout: int,
+        host: dict[str, object],
+        remote_path: Path,
+        local_path: Path,
+        *,
+        timeout: int,
 ) -> None:
     ssh_host = ssh_target_for_host(host)
     if not ssh_host:
@@ -104,133 +131,87 @@ def copy_remote_file_to_local(
     normalized_host["host"] = ssh_host
     _ensure_remote_awake_for_ssh(normalized_host)
     local_path.parent.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        [
-            "scp",
-            "-q",
-            *ssh_client_options(batch_mode=True),
-            f"{ssh_host}:{remote_path}",
-            str(local_path),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    result = subprocess.run([
+        "scp",
+        "-q",
+        *ssh_client_options(batch_mode=True),
+        f"{ssh_host}:{remote_path}",
+        str(local_path),
+    ], capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "scp download failed"
         raise RuntimeError(detail)
 
 
-def _remote_host_status(config: HarnessConfig, host: dict[str, object]) -> HostStatus:
+def _remote_host_status(config: MediaforceConfig, host: dict[str, object]) -> HostStatus:
     label = str(host.get("label") or host.get("host") or "remote")
     ssh_host = str(host.get("host") or "")
     repo_path = str(host.get("repo_path") or "") or None
     if not ssh_host:
-        return HostStatus(
-            key=label,
+        return HostStatus(key=label, label=label, mode="ssh", priority=_host_priority(host),
+                          capabilities=_host_capabilities(host), available=False,
+                          message="Missing SSH host configuration", missing_paths=[], repo_path=repo_path,
+                          issues=["Add an SSH host to enable remote checks."])
+
+    if host_targets_current_machine({"host": ssh_host}):
+        return _current_machine_host_status(
+            config,
+            host,
+            ssh_host=ssh_host,
             label=label,
-            mode="ssh",
-            priority=_host_priority(host),
-            capabilities=_host_capabilities(host),
-            available=False,
-            message="Missing SSH host configuration",
-            missing_paths=[],
             repo_path=repo_path,
-            issues=["Add an SSH host to enable remote checks."],
-            setup_supported=False,
         )
 
-    paths = [str(path) for path in config.source_root_map.values()] + [str(config.staging_root)]
+    media_access = host_media_access_for_host(host)
+    paths = []
+    if media_access != "stream":
+        paths = [str(path) for path in config.source_root_map_for_host(host).values()] + [
+            str(config.staging_root_for_host(host))]
     repo_check_path = repo_path or ""
     script = _remote_status_script(paths=paths, repo_path=repo_check_path)
     try:
-        result = _run_remote_ssh(
-            host,
-            "sh",
-            "-s",
-            input_text=script,
-            timeout=8,
-            wake_before_connect=False,
-        )
+        result = _run_remote_status_probe(host, script, timeout=8)
     except Exception as exc:
-        return HostStatus(
-            key=ssh_host,
-            label=label,
-            mode="ssh",
-            priority=_host_priority(host),
-            capabilities=_host_capabilities(host),
-            available=False,
-            message="SSH unavailable",
-            missing_paths=[],
-            repo_path=repo_path,
-            issues=["The harness could not reach this host over SSH."],
-            detail=str(exc),
-            setup_supported=False,
-        )
+        return HostStatus(key=ssh_host, label=label, mode="ssh", priority=_host_priority(host),
+                          capabilities=_host_capabilities(host), available=False, message="SSH unavailable",
+                          missing_paths=[], repo_path=repo_path,
+                          issues=["Mediaforce could not reach this host over SSH."], detail=str(exc))
 
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "SSH host unavailable"
         classification = _classify_ssh_failure(detail)
-        return HostStatus(
-            key=ssh_host,
-            label=label,
-            mode="ssh",
-            priority=_host_priority(host),
-            capabilities=_host_capabilities(host),
-            available=False,
-            message=classification["message"],
-            missing_paths=[],
-            repo_path=repo_path,
-            issues=classification["issues"],
-            detail=detail if classification.get("show_detail", True) else None,
-            setup_supported=classification["setup_supported"],
-            setup_requires_password=classification["setup_requires_password"],
-            trust_reset_supported=classification.get("trust_reset_supported", False),
-        )
+        return HostStatus(key=ssh_host, label=label, mode="ssh", priority=_host_priority(host),
+                          capabilities=_host_capabilities(host), available=False, message=classification["message"],
+                          missing_paths=[], repo_path=repo_path, issues=classification["issues"],
+                          detail=detail if classification.get("show_detail", True) else None,
+                          setup_supported=classification["setup_supported"],
+                          setup_requires_password=classification["setup_requires_password"],
+                          trust_reset_supported=classification.get("trust_reset_supported", False))
 
     try:
         payload = _parse_remote_status_output(result.stdout)
     except ValueError:
-        return HostStatus(
-            key=ssh_host,
-            label=label,
-            mode="ssh",
-            priority=_host_priority(host),
-            capabilities=_host_capabilities(host),
-            available=False,
-            message="Remote check returned unreadable output",
-            missing_paths=[],
-            repo_path=repo_path,
-            issues=["The remote host responded, but the capability payload was invalid."],
-            detail=result.stdout.strip() or None,
-            setup_supported=True,
-        )
+        return HostStatus(key=ssh_host, label=label, mode="ssh", priority=_host_priority(host),
+                          capabilities=_host_capabilities(host), available=False,
+                          message="Remote check returned unreadable output", missing_paths=[], repo_path=repo_path,
+                          issues=["The remote host responded, but the capability payload was invalid."],
+                          detail=result.stdout.strip() or None, setup_supported=True)
 
     mounted_paths = {
         str(path_text): bool(exists)
         for path_text, exists in dict(payload.get("paths") or {}).items()
     }
-    _learn_remote_wake_mac(config, host, ssh_host)
-    capability_issues: list[str] = []
+    media_access = host_media_access_for_host(host)
     tools = dict(payload.get("tools") or {})
-    if not bool(tools.get("xcode_clt")):
-        capability_issues.append("Xcode Command Line Tools are not installed on the remote Mac.")
-    if not bool(tools.get("brew")):
-        capability_issues.append("Homebrew is not installed on the remote Mac.")
-    if not bool(tools.get("ffmpeg")):
-        capability_issues.append(FFMPEG_MISSING_ISSUE)
-    if _host_supports_capability(host, "sample_calibration"):
-        if not bool(tools.get("ab_av1")):
-            capability_issues.append(AB_AV1_MISSING_ISSUE)
-        if bool(tools.get("ffmpeg")) and not bool(tools.get("ffmpeg_libsvtav1")):
-            capability_issues.append(SAMPLE_AV1_ENCODER_MISSING_ISSUE)
-        if bool(tools.get("ffmpeg")) and not (
-            bool(tools.get("ffmpeg_libvmaf")) or bool(tools.get("ffmpeg_xpsnr"))
-        ):
-            capability_issues.append(SAMPLE_METRIC_MISSING_ISSUE)
-    if repo_path and not bool(payload.get("repo_path_exists", False)):
-        capability_issues.append(f"Repo path is missing: {repo_path}")
+    platform_name = _status_platform(payload.get("platform"), tools=tools)
+    _learn_remote_wake_mac(config, host, ssh_host)
+    capability_issues = _host_capability_issues(
+        host,
+        tools=tools,
+        platform_name=platform_name,
+        repo_path=repo_path,
+        repo_path_exists=bool(payload.get("repo_path_exists", False)),
+    )
     return _status_from_paths(
         key=ssh_host,
         label=label,
@@ -239,18 +220,168 @@ def _remote_host_status(config: HarnessConfig, host: dict[str, object]) -> HostS
         capabilities=_host_capabilities(host),
         mounted_paths=mounted_paths,
         repo_path=repo_path,
+        ffmpeg_path=str((payload.get("tool_paths") or {}).get("ffmpeg") or "") or None,
+        platform=platform_name,
+        videotoolbox_available=bool(tools.get("ffmpeg_videotoolbox")),
         utc_offset_minutes=_parse_utc_offset_minutes(payload.get("utc_offset")),
         issues=capability_issues,
-        setup_supported=True,
+        setup_supported=_host_setup_supported(platform_name),
         setup_requires_password=_remote_setup_needs_password(capability_issues),
+        require_paths=media_access != "stream",
     )
 
 
-def prepare_remote_host(config: HarnessConfig, host_key: str) -> HostSetupResult:
+def _current_machine_host_status(
+        config: MediaforceConfig,
+        host: dict[str, object],
+        *,
+        ssh_host: str,
+        label: str,
+        repo_path: str | None,
+) -> HostStatus:
+    media_access = host_media_access_for_host(host)
+    mounted_paths = {
+        str(path): path.exists()
+        for path in ([] if media_access == "stream" else [*config.source_root_map_for_host(host).values(),
+                                                          config.staging_root_for_host(host)])
+    }
+    tools = _local_tool_status_snapshot()
+    ffmpeg_bin = _find_local_tool("ffmpeg", fallback_paths=["/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"])
+    platform_name = _local_platform_name()
+    capability_issues = _host_capability_issues(
+        host,
+        tools=tools,
+        platform_name=platform_name,
+        repo_path=repo_path,
+        repo_path_exists=not repo_path or Path(repo_path).expanduser().exists(),
+    )
+    return _status_from_paths(key=ssh_host, label=label, mode="ssh", priority=_host_priority(host),
+                              capabilities=_host_capabilities(host), mounted_paths=mounted_paths, repo_path=repo_path,
+                              ffmpeg_path=ffmpeg_bin, platform=platform_name,
+                              videotoolbox_available=bool(tools.get("ffmpeg_videotoolbox")),
+                              utc_offset_minutes=_local_utc_offset_minutes(), issues=capability_issues,
+                              setup_supported=_host_setup_supported(platform_name),
+                              require_paths=media_access != "stream")
+
+
+def _local_tool_status_snapshot() -> dict[str, bool]:
+    ffmpeg_bin = _find_local_tool("ffmpeg", fallback_paths=["/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"])
+    ffmpeg_filters = _command_output([ffmpeg_bin, "-hide_banner", "-filters"]) if ffmpeg_bin else ""
+    ffmpeg_encoders = _command_output([ffmpeg_bin, "-hide_banner", "-encoders"]) if ffmpeg_bin else ""
+    ffmpeg_hwaccels = _command_output([ffmpeg_bin, "-hide_banner", "-hwaccels"]) if ffmpeg_bin else ""
+    return {
+        "xcode_clt": _command_succeeds(["xcode-select", "-p"]),
+        "brew": bool(_find_local_tool("brew", fallback_paths=["/opt/homebrew/bin/brew", "/usr/local/bin/brew"])),
+        "ffmpeg": bool(ffmpeg_bin),
+        "ffmpeg_videotoolbox": has_videotoolbox_hwaccel(ffmpeg_hwaccels),
+        "ffmpeg_libvmaf": "libvmaf" in ffmpeg_filters.lower(),
+        "ffmpeg_xpsnr": "xpsnr" in ffmpeg_filters.lower(),
+        "ffmpeg_libsvtav1": "libsvtav1" in ffmpeg_encoders.lower(),
+        "ab_av1": bool(
+            _find_local_tool("ab-av1", fallback_paths=["/opt/homebrew/bin/ab-av1", "/usr/local/bin/ab-av1"])),
+    }
+
+
+def _local_platform_name() -> str:
+    return normalize_execution_platform(platform_module.system())
+
+
+def _status_platform(value: object, *, tools: dict[str, bool] | None = None) -> str:
+    normalized = normalize_execution_platform(str(value or ""))
+    if normalized != "unknown":
+        return normalized
+    tool_status = tools or {}
+    if any(key in tool_status for key in ("xcode_clt", "brew", "ffmpeg_videotoolbox")):
+        return "macos"
+    return normalized
+
+
+def _host_setup_supported(platform_name: str) -> bool:
+    return platform_name == "macos"
+
+
+def _host_capability_issues(
+        host: dict[str, object],
+        *,
+        tools: dict[str, bool],
+        platform_name: str,
+        repo_path: str | None,
+        repo_path_exists: bool,
+) -> list[str]:
+    capability_issues: list[str] = []
+    supports_sample = _host_supports_capability(host, "sample_calibration")
+    supports_encode = _host_supports_capability(host, "encode_queue")
+
+    if platform_name == "macos":
+        if not bool(tools.get("xcode_clt")):
+            capability_issues.append("Xcode Command Line Tools are not installed on the remote Mac.")
+        if not bool(tools.get("brew")):
+            capability_issues.append("Homebrew is not installed on the remote Mac.")
+        if not bool(tools.get("ffmpeg")):
+            capability_issues.append(FFMPEG_MISSING_ISSUE)
+        elif not bool(tools.get("ffmpeg_videotoolbox")):
+            capability_issues.append(VIDEOTOOLBOX_REQUIRED_ISSUE)
+        if supports_sample:
+            if not bool(tools.get("ab_av1")):
+                capability_issues.append(AB_AV1_MISSING_ISSUE)
+            if bool(tools.get("ffmpeg")) and not bool(tools.get("ffmpeg_libsvtav1")):
+                capability_issues.append(SAMPLE_AV1_ENCODER_MISSING_ISSUE)
+            if bool(tools.get("ffmpeg")) and not (
+                    bool(tools.get("ffmpeg_libvmaf")) or bool(tools.get("ffmpeg_xpsnr"))
+            ):
+                capability_issues.append(SAMPLE_METRIC_MISSING_ISSUE)
+    elif platform_name == "linux":
+        if not bool(tools.get("ffmpeg")):
+            capability_issues.append(FFMPEG_MISSING_ISSUE)
+        elif supports_encode and not bool(tools.get("ffmpeg_libsvtav1")):
+            capability_issues.append(SVT_AV1_REQUIRED_ISSUE)
+        if supports_sample:
+            capability_issues.append(LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE)
+    else:
+        capability_issues.append("Unsupported remote platform.")
+
+    if repo_path and not repo_path_exists and supports_sample:
+        capability_issues.append(f"Repo path is missing: {repo_path}")
+    return capability_issues
+
+
+def _find_local_tool(name: str, *, fallback_paths: list[str]) -> str | None:
+    discovered = shutil.which(name)
+    if discovered:
+        return discovered
+    for fallback in fallback_paths:
+        candidate = Path(fallback)
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _command_output(command: list[str]) -> str:
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+    except Exception:
+        return ""
+    return result.stdout if result.returncode == 0 else ""
+
+
+def _command_succeeds(command: list[str]) -> bool:
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
+def _local_utc_offset_minutes() -> int | None:
+    text = time.strftime("%z")
+    return _parse_utc_offset_minutes(text)
+
+
+def prepare_remote_host(config: MediaforceConfig, host_key: str) -> HostSetupResult:
     return prepare_remote_host_with_password(config, host_key, password=None)
 
 
-def reset_remote_host_trust(config: HarnessConfig, host_key: str) -> HostSetupResult:
+def reset_remote_host_trust(config: MediaforceConfig, host_key: str) -> HostSetupResult:
     host = _find_remote_host(config, host_key)
     if host is None:
         return HostSetupResult(ok=False, message="Remote host is no longer configured")
@@ -260,13 +391,7 @@ def reset_remote_host_trust(config: HarnessConfig, host_key: str) -> HostSetupRe
     if not lookup_host:
         return HostSetupResult(ok=False, message="Remote host is missing an SSH target")
 
-    result = subprocess.run(
-        ["ssh-keygen", "-R", lookup_host],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
+    result = subprocess.run(["ssh-keygen", "-R", lookup_host], capture_output=True, text=True, timeout=15)
     if result.returncode != 0:
         return HostSetupResult(
             ok=False,
@@ -281,10 +406,10 @@ def reset_remote_host_trust(config: HarnessConfig, host_key: str) -> HostSetupRe
 
 
 def prepare_remote_host_with_password(
-    config: HarnessConfig,
-    host_key: str,
-    *,
-    password: str | None,
+        config: MediaforceConfig,
+        host_key: str,
+        *,
+        password: str | None,
 ) -> HostSetupResult:
     host = _find_remote_host(config, host_key)
     if host is None:
@@ -303,11 +428,18 @@ def prepare_remote_host_with_password(
                 message=f"{status.label} is mounted and ready.",
                 performed_steps=prep_steps,
             )
+        if not status.setup_supported:
+            return HostSetupResult(
+                ok=False,
+                message=status.message,
+                detail=status.detail or "\n".join(status.issues) or None,
+                performed_steps=prep_steps,
+            )
         if _needs_initial_ssh_key_install(status):
             if not password:
                 return HostSetupResult(
                     ok=False,
-                    message="The remote account password is required the first time so the harness can install this Mac's SSH key.",
+                    message="The remote account password is required the first time so Mediaforce can install this Mac's SSH key.",
                     requires_password=True,
                     performed_steps=prep_steps,
                 )
@@ -360,13 +492,13 @@ def prepare_remote_host_with_password(
 
 
 def _finish_remote_host_prepare(
-    config: HarnessConfig,
-    host: dict[str, Any],
-    prep_steps: list[str],
+        config: MediaforceConfig,
+        host: dict[str, Any],
+        prep_steps: list[str],
 ) -> HostSetupResult:
     repo_path = str(host.get("repo_path") or "").strip()
-    staging_root = str(config.staging_root)
-    archive_root = str(config.archive_root)
+    staging_root = str(config.staging_root_for_host(host))
+    archive_root = str(config.archive_root_for_host(host))
     prep_steps.extend(
         [
             "Ensured the transcode and archive directories exist.",
@@ -393,7 +525,7 @@ def _finish_remote_host_prepare(
     prep_steps.append(
         "Installed ffmpeg-full with Homebrew for sampled calibration hosts when required."
         if _host_supports_capability(host, "sample_calibration")
-        else "Installed ffmpeg with Homebrew if it was missing."
+        else "Installed ffmpeg with Homebrew if it was missing or lacked required VideoToolbox decode support."
     )
     if _host_supports_capability(host, "sample_calibration"):
         remote_commands.extend(
@@ -419,7 +551,8 @@ def _finish_remote_host_prepare(
             timeout=900,
         )
     except Exception as exc:
-        return HostSetupResult(ok=False, message="Remote preparation failed", detail=str(exc), performed_steps=prep_steps)
+        return HostSetupResult(ok=False, message="Remote preparation failed", detail=str(exc),
+                               performed_steps=prep_steps)
 
     if result.returncode != 0:
         return HostSetupResult(
@@ -452,22 +585,26 @@ def _finish_remote_host_prepare(
 
 
 def _status_from_paths(
-    *,
-    key: str,
-    label: str,
-    mode: str,
-    priority: int,
-    capabilities: list[str],
-    mounted_paths: dict[str, bool],
-    repo_path: str | None,
-    utc_offset_minutes: int | None = None,
-    issues: list[str] | None = None,
-    setup_supported: bool = False,
-    setup_requires_password: bool = False,
+        *,
+        key: str,
+        label: str,
+        mode: str,
+        priority: int,
+        capabilities: list[str],
+        mounted_paths: dict[str, bool],
+        repo_path: str | None,
+        ffmpeg_path: str | None = None,
+        platform: str = "unknown",
+        videotoolbox_available: bool | None = None,
+        utc_offset_minutes: int | None = None,
+        issues: list[str] | None = None,
+        setup_supported: bool = False,
+        setup_requires_password: bool = False,
+        require_paths: bool = True,
 ) -> HostStatus:
     missing_paths = [path for path, mounted in mounted_paths.items() if not mounted]
     issue_list = list(issues or [])
-    available = len(mounted_paths) > 0 and not missing_paths and not issue_list
+    available = (len(mounted_paths) > 0 or not require_paths) and not missing_paths and not issue_list
     return HostStatus(
         key=key,
         label=label,
@@ -478,6 +615,9 @@ def _status_from_paths(
         message=_host_message(available=available, missing_paths=missing_paths, issues=issue_list),
         missing_paths=missing_paths,
         repo_path=repo_path,
+        ffmpeg_path=ffmpeg_path,
+        platform=platform,
+        videotoolbox_available=videotoolbox_available,
         utc_offset_minutes=utc_offset_minutes,
         issues=issue_list,
         setup_supported=setup_supported,
@@ -523,11 +663,13 @@ def _remote_ffmpeg_install_commands(*, sample_calibration: bool) -> list[str]:
             'fi',
         ]
     return [
-        'if [ -z "$FFMPEG_BIN" ]; then',
+        'FFMPEG_HWACCELS=""',
+        'if [ -n "$FFMPEG_BIN" ]; then FFMPEG_HWACCELS="$("$FFMPEG_BIN" -hide_banner -hwaccels 2>/dev/null || true)"; fi',
+        'if [ -z "$FFMPEG_BIN" ] || ! printf "%s\n" "$FFMPEG_HWACCELS" | grep -qi "videotoolbox"; then',
         '  if [ -n "$BREW_BIN" ]; then',
         '    HOMEBREW_NO_AUTO_UPDATE=1 "$BREW_BIN" install ffmpeg >/tmp/mediaforce-brew.log 2>&1 || { cat /tmp/mediaforce-brew.log; exit 21; }',
         '  else',
-        '    echo "ffmpeg is missing and Homebrew is unavailable for automatic install." >&2',
+        '    echo "ffmpeg is missing or lacks VideoToolbox decode and Homebrew is unavailable for automatic install." >&2',
         '    exit 22',
         '  fi',
         'fi',
@@ -545,15 +687,81 @@ def _parse_utc_offset_minutes(value: object) -> int | None:
 
 
 def _host_message(*, available: bool, missing_paths: list[str], issues: list[str]) -> str:
+    _ = missing_paths
     if available:
         return "Mounted and ready"
+    if any(issue == LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE for issue in issues):
+        return "Linux sample unsupported"
     if any(issue == "Xcode Command Line Tools are not installed on the remote Mac." for issue in issues):
         return "Finish Xcode tools install"
     if any(issue == "Homebrew is not installed on the remote Mac." for issue in issues):
         return "Install Homebrew first"
+    if any(issue == FFMPEG_MISSING_ISSUE for issue in issues):
+        return "Install ffmpeg first"
+    if any(issue == SVT_AV1_REQUIRED_ISSUE for issue in issues):
+        return "Install AV1 encoder support"
     if issues:
         return "Needs remote setup"
     return "Missing required paths"
+
+
+def _run_remote_status_probe(
+        host: dict[str, object],
+        script: str,
+        *,
+        timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    last_exception: Exception | None = None
+    for attempt in range(2):
+        try:
+            result = _run_remote_ssh(
+                host,
+                "sh",
+                "-s",
+                input_text=script,
+                timeout=timeout,
+                wake_before_connect=False,
+            )
+        except Exception as exc:
+            last_exception = exc
+            if attempt == 0 and _should_retry_remote_status_exception(exc):
+                time.sleep(REMOTE_STATUS_RETRY_DELAY_SECONDS)
+                continue
+            raise
+
+        if result.returncode == 0:
+            return result
+        detail = result.stderr.strip() or result.stdout.strip() or ""
+        if attempt == 0 and _should_retry_remote_status_failure(detail):
+            time.sleep(REMOTE_STATUS_RETRY_DELAY_SECONDS)
+            continue
+        return result
+
+    if last_exception is not None:
+        raise last_exception
+    raise RuntimeError("Remote status probe did not produce a result.")
+
+
+def _should_retry_remote_status_exception(exc: Exception) -> bool:
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return True
+    return _should_retry_remote_status_failure(str(exc))
+
+
+def _should_retry_remote_status_failure(detail: str) -> bool:
+    lowered = detail.lower()
+    transient_markers = (
+        "timed out",
+        "operation timed out",
+        "connection reset",
+        "connection reset by peer",
+        "connection closed",
+        "connection closed by remote host",
+        "kex_exchange_identification",
+        "broken pipe",
+        "resource temporarily unavailable",
+    )
+    return any(marker in lowered for marker in transient_markers)
 
 
 def _remote_setup_needs_password(issues: list[str]) -> bool:
@@ -583,13 +791,13 @@ def ssh_client_options(*, batch_mode: bool = True, connect_timeout_seconds: int 
 
 
 def _run_remote_ssh(
-    host: dict[str, object],
-    *remote_args: str,
-    input_text: str | None = None,
-    timeout: int,
-    identity_file: Path | None = None,
-    batch_mode: bool = True,
-    wake_before_connect: bool = True,
+        host: dict[str, object],
+        *remote_args: str,
+        input_text: str | None = None,
+        timeout: int,
+        identity_file: Path | None = None,
+        batch_mode: bool = True,
+        wake_before_connect: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     if wake_before_connect:
         _ensure_remote_awake_for_ssh(host)
@@ -599,18 +807,11 @@ def _run_remote_ssh(
         cmd.extend(["-i", str(identity_file), "-o", "IdentitiesOnly=yes"])
     cmd.extend(ssh_client_options(batch_mode=batch_mode))
     cmd.extend([ssh_host, *remote_args])
-    return subprocess.run(
-        cmd,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        input=input_text,
-    )
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, input=input_text)
 
 
 def _ensure_remote_awake_for_ssh(
-    host: dict[str, object], *, wake_wait_seconds: int = DEFAULT_WAKE_WAIT_SECONDS
+        host: dict[str, object], *, wake_wait_seconds: int = DEFAULT_WAKE_WAIT_SECONDS
 ) -> None:
     mac_address = str(host.get("wake_mac") or host.get("wol_mac") or "").strip()
     if not mac_address:
@@ -670,7 +871,8 @@ def _wake_remote_host_if_configured(host: dict[str, Any]) -> HostSetupResult:
     return HostSetupResult(
         ok=True,
         message="Wake-on-LAN packet sent.",
-        performed_steps=[f"Sent a Wake-on-LAN packet to {mac_address} via {', '.join(f'{addr}:{port}' for addr, port in sent_to)}."],
+        performed_steps=[
+            f"Sent a Wake-on-LAN packet to {mac_address} via {', '.join(f'{addr}:{port}' for addr, port in sent_to)}."],
     )
 
 
@@ -703,7 +905,7 @@ def _local_broadcast_addresses(host: dict[str, Any]) -> list[str]:
             if routed_interface:
                 addresses.extend(_broadcast_addresses_for_interface(routed_interface))
     try:
-        result = subprocess.run(["ifconfig"], check=False, capture_output=True, text=True, timeout=5)
+        result = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5)
     except Exception:
         return list(dict.fromkeys(addresses))
     current_interface = ""
@@ -726,7 +928,7 @@ def _local_broadcast_addresses(host: dict[str, Any]) -> list[str]:
 
 def _interface_for_ip(ip_address: str) -> str | None:
     try:
-        result = subprocess.run(["route", "-n", "get", ip_address], check=False, capture_output=True, text=True, timeout=5)
+        result = subprocess.run(["route", "-n", "get", ip_address], capture_output=True, text=True, timeout=5)
     except Exception:
         return None
     if result.returncode != 0:
@@ -741,7 +943,7 @@ def _interface_for_ip(ip_address: str) -> str | None:
 
 def _broadcast_addresses_for_interface(interface: str) -> list[str]:
     try:
-        result = subprocess.run(["ifconfig", interface], check=False, capture_output=True, text=True, timeout=5)
+        result = subprocess.run(["ifconfig", interface], capture_output=True, text=True, timeout=5)
     except Exception:
         return []
     if result.returncode != 0:
@@ -773,7 +975,7 @@ def _normalize_mac_address(value: str) -> str | None:
     return cleaned.lower()
 
 
-def _learn_remote_wake_mac(config: HarnessConfig, host: dict[str, object], ssh_host: str) -> None:
+def _learn_remote_wake_mac(config: MediaforceConfig, host: dict[str, object], ssh_host: str) -> None:
     if str(host.get("wake_mac") or host.get("wol_mac") or "").strip():
         return
     network_host = _resolved_ssh_network_host(ssh_host)
@@ -791,13 +993,7 @@ def _learn_remote_wake_mac(config: HarnessConfig, host: dict[str, object], ssh_h
 def _resolved_ssh_network_host(ssh_host: str) -> str | None:
     fallback = _ssh_lookup_host(ssh_host)
     try:
-        result = subprocess.run(
-            ["ssh", "-G", ssh_host],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        result = subprocess.run(["ssh", "-G", ssh_host], capture_output=True, text=True, timeout=5)
     except Exception:
         return fallback or None
     if result.returncode != 0:
@@ -826,46 +1022,28 @@ def _looks_like_ipv4_address(value: str) -> bool:
 
 def _mac_from_arp(ip_address: str) -> str | None:
     try:
-        result = subprocess.run(
-            ["arp", "-n", ip_address],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        result = subprocess.run(["arp", "-n", ip_address], capture_output=True, text=True, timeout=5)
     except Exception:
         return None
     output = f"{result.stdout}\n{result.stderr}"
     for token in output.replace("(", " ").replace(")", " ").split():
         normalized = _normalize_mac_address(token)
         if normalized is not None:
-            return ":".join(normalized[index : index + 2] for index in range(0, 12, 2))
+            return ":".join(normalized[index: index + 2] for index in range(0, 12, 2))
     try:
-        subprocess.run(
-            ["ping", "-c", "1", ip_address],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        result = subprocess.run(
-            ["arp", "-n", ip_address],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        subprocess.run(["ping", "-c", "1", ip_address], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(["arp", "-n", ip_address], capture_output=True, text=True, timeout=5)
     except Exception:
         return None
     output = f"{result.stdout}\n{result.stderr}"
     for token in output.replace("(", " ").replace(")", " ").split():
         normalized = _normalize_mac_address(token)
         if normalized is not None:
-            return ":".join(normalized[index : index + 2] for index in range(0, 12, 2))
+            return ":".join(normalized[index: index + 2] for index in range(0, 12, 2))
     return None
 
 
-def _persist_remote_wake_mac(config: HarnessConfig, host: dict[str, object], mac_address: str) -> None:
+def _persist_remote_wake_mac(config: MediaforceConfig, host: dict[str, object], mac_address: str) -> None:
     host["wake_mac"] = mac_address
     try:
         runtime_settings = load_runtime_settings(config.paths.runtime_settings_path)
@@ -878,7 +1056,8 @@ def _persist_remote_wake_mac(config: HarnessConfig, host: dict[str, object], mac
             if not isinstance(entry, dict):
                 continue
             updated_entry = dict(entry)
-            if str(updated_entry.get("host") or "") == target_host and str(updated_entry.get("label") or "") == target_label:
+            if str(updated_entry.get("host") or "") == target_host and str(
+                    updated_entry.get("label") or "") == target_label:
                 updated_entry["wake_mac"] = mac_address
             updated_hosts.append(updated_entry)
         runtime_settings["remote_hosts"] = updated_hosts
@@ -887,7 +1066,7 @@ def _persist_remote_wake_mac(config: HarnessConfig, host: dict[str, object], mac
         return
 
 
-def _find_remote_host(config: HarnessConfig, host_key: str) -> dict[str, Any] | None:
+def _find_remote_host(config: MediaforceConfig, host_key: str) -> dict[str, Any] | None:
     for host in config.remote_hosts:
         ssh_host = str(host.get("host") or "")
         label = str(host.get("label") or ssh_host or "remote")
@@ -901,7 +1080,15 @@ def host_status_targets_current_machine(status: HostStatus) -> bool:
 
 
 def host_targets_current_machine(host: dict[str, object]) -> bool:
-    return _host_lookup_targets_current_machine(_ssh_lookup_host(str(host.get("host") or "")))
+    return _host_lookup_targets_current_machine(_ssh_lookup_host(ssh_target_for_host(host)))
+
+
+def execution_mode_for_host(host: dict[str, object] | None) -> str:
+    host_payload = host or {}
+    mode = str(host_payload.get("mode") or "local").strip().lower() or "local"
+    if mode == "ssh" and host_targets_current_machine(host_payload):
+        return "local"
+    return mode
 
 
 def _host_lookup_targets_current_machine(lookup_host: str) -> bool:
@@ -935,7 +1122,7 @@ def _classify_ssh_failure(detail: str) -> dict[str, Any]:
         return {
             "message": "SSH access setup required",
             "issues": [
-                "Turn on Remote Login on the target Mac, then enter that account password once so the harness can install this Mac's SSH key."
+                "Turn on Remote Login on the target Mac, then enter that account password once so Mediaforce can install this Mac's SSH key."
             ],
             "setup_supported": True,
             "setup_requires_password": True,
@@ -943,9 +1130,9 @@ def _classify_ssh_failure(detail: str) -> dict[str, Any]:
             "show_detail": True,
         }
     if (
-        "the authenticity of host" in lowered
-        or "are you sure you want to continue connecting" in lowered
-        or "host key is known by the following other names" in lowered
+            "the authenticity of host" in lowered
+            or "are you sure you want to continue connecting" in lowered
+            or "host key is known by the following other names" in lowered
     ):
         return {
             "message": "SSH trust needs confirmation",
@@ -961,7 +1148,7 @@ def _classify_ssh_failure(detail: str) -> dict[str, Any]:
         return {
             "message": "Turn on SSH first",
             "issues": [
-                "Enable Remote Login on the target machine first. Once SSH answers, the harness can finish setup automatically."
+                "Enable Remote Login on the target machine first. Once SSH answers, Mediaforce can finish setup automatically."
             ],
             "setup_supported": False,
             "setup_requires_password": False,
@@ -969,10 +1156,10 @@ def _classify_ssh_failure(detail: str) -> dict[str, Any]:
             "show_detail": True,
         }
     if (
-        "could not resolve hostname" in lowered
-        or "name or service not known" in lowered
-        or "temporary failure in name resolution" in lowered
-        or "nodename nor servname provided" in lowered
+            "could not resolve hostname" in lowered
+            or "name or service not known" in lowered
+            or "temporary failure in name resolution" in lowered
+            or "nodename nor servname provided" in lowered
     ):
         return {
             "message": "Fix hostname or DNS first",
@@ -987,7 +1174,7 @@ def _classify_ssh_failure(detail: str) -> dict[str, Any]:
     if "python3" in lowered and ("not found" in lowered or "command not found" in lowered):
         return {
             "message": "python3 is required",
-            "issues": ["Install python3 on the remote host before using it for harness checks."],
+            "issues": ["Install python3 on the remote host before using it for Mediaforce checks."],
             "setup_supported": True,
             "setup_requires_password": False,
             "trust_reset_supported": False,
@@ -995,7 +1182,7 @@ def _classify_ssh_failure(detail: str) -> dict[str, Any]:
         }
     return {
         "message": "SSH unavailable",
-        "issues": ["The harness could not complete the remote capability check."],
+        "issues": ["Mediaforce could not complete the remote capability check."],
         "setup_supported": True,
         "setup_requires_password": False,
         "trust_reset_supported": False,
@@ -1056,14 +1243,7 @@ def _install_local_ssh_key(host: dict[str, Any], password: str) -> HostSetupResu
         ]
     )
     env = {**os.environ, "HARNESS_SSH_PASSWORD": password}
-    result = subprocess.run(
-        ["expect", "-c", expect_script],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=90,
-        env=env,
-    )
+    result = subprocess.run(["expect", "-c", expect_script], capture_output=True, text=True, timeout=90, env=env)
     if result.returncode != 0:
         return HostSetupResult(
             ok=False,
@@ -1078,9 +1258,9 @@ def _install_local_ssh_key(host: dict[str, Any], password: str) -> HostSetupResu
             ok=False,
             message="The SSH key install did not produce working passwordless access.",
             detail=(
-                verify_result.stderr.strip()
-                or verify_result.stdout.strip()
-                or "Check the password you entered and confirm password authentication is allowed for first-time setup."
+                    verify_result.stderr.strip()
+                    or verify_result.stdout.strip()
+                    or "Check the password you entered and confirm password authentication is allowed for first-time setup."
             ),
             requires_password=True,
         )
@@ -1110,7 +1290,6 @@ def _private_key_path_for_public_key(public_key: Path) -> Path | None:
 
 
 def _bootstrap_remote_macos(host: dict[str, Any], password: str, *, issues: list[str]) -> HostSetupResult:
-    ssh_host = str(host.get("host") or "").strip()
     public_key = _default_public_key_path()
     if public_key is None:
         return HostSetupResult(
@@ -1207,31 +1386,21 @@ def _bootstrap_remote_macos(host: dict[str, Any], password: str, *, issues: list
         detail = result.stderr.strip() or result.stdout.strip() or None
         if detail:
             if "HARNESS_BOOTSTRAP_ERROR|xcode_local_install" in detail:
-                return HostSetupResult(
-                    ok=False,
-                    message="Finish Xcode Command Line Tools on the remote Mac first.",
-                    detail=(
-                        "macOS did not expose a usable noninteractive Command Line Tools update over SSH. "
-                        "Open the remote Mac locally, complete the Command Line Tools install, then retry host preparation."
-                    ),
-                    performed_steps=performed_steps,
-                    requires_password=False,
-                )
+                return HostSetupResult(ok=False, message="Finish Xcode Command Line Tools on the remote Mac first.",
+                                       detail=(
+                                           "macOS did not expose a usable noninteractive Command Line Tools update over SSH. "
+                                           "Open the remote Mac locally, complete the Command Line Tools install, then retry host preparation."
+                                       ), performed_steps=performed_steps)
             if wants_xcode and (
-                "No such update" in detail
-                or "No updates are available" in detail
-                or "Command Line Tools for Xcode" in detail
+                    "No such update" in detail
+                    or "No updates are available" in detail
+                    or "Command Line Tools for Xcode" in detail
             ):
-                return HostSetupResult(
-                    ok=False,
-                    message="Finish Xcode Command Line Tools on the remote Mac first.",
-                    detail=(
-                        "macOS did not provide a usable Command Line Tools update over SSH. "
-                        "Open the remote Mac locally, complete the Command Line Tools install, then retry host preparation."
-                    ),
-                    performed_steps=performed_steps,
-                    requires_password=False,
-                )
+                return HostSetupResult(ok=False, message="Finish Xcode Command Line Tools on the remote Mac first.",
+                                       detail=(
+                                           "macOS did not provide a usable Command Line Tools update over SSH. "
+                                           "Open the remote Mac locally, complete the Command Line Tools install, then retry host preparation."
+                                       ), performed_steps=performed_steps)
             if "HARNESS_BOOTSTRAP_ERROR|sudo_auth" in detail:
                 return HostSetupResult(
                     ok=False,
@@ -1244,16 +1413,11 @@ def _bootstrap_remote_macos(host: dict[str, Any], password: str, *, issues: list
                     requires_password=True,
                 )
             if "HARNESS_BOOTSTRAP_ERROR|brew_install_failed" in detail or "Need sudo access on macOS" in detail:
-                return HostSetupResult(
-                    ok=False,
-                    message="Homebrew installation did not complete on the remote Mac.",
-                    detail=(
-                        "The noninteractive Homebrew bootstrap did not finish cleanly over SSH. "
-                        "Complete Homebrew locally on the Mac, then retry host preparation."
-                    ),
-                    performed_steps=performed_steps,
-                    requires_password=False,
-                )
+                return HostSetupResult(ok=False, message="Homebrew installation did not complete on the remote Mac.",
+                                       detail=(
+                                           "The noninteractive Homebrew bootstrap did not finish cleanly over SSH. "
+                                           "Complete Homebrew locally on the Mac, then retry host preparation."
+                                       ), performed_steps=performed_steps)
         return HostSetupResult(
             ok=False,
             message="Remote bootstrap failed.",
@@ -1269,7 +1433,6 @@ def _bootstrap_remote_macos(host: dict[str, Any], password: str, *, issues: list
 
 
 def _request_remote_xcode_install(host: dict[str, Any]) -> HostSetupResult:
-    ssh_host = str(host.get("host") or "").strip()
     public_key = _default_public_key_path()
     if public_key is None:
         return HostSetupResult(
@@ -1310,21 +1473,18 @@ def _request_remote_xcode_install(host: dict[str, Any]) -> HostSetupResult:
             private_key,
             requested_step="The macOS Command Line Tools installer was already pending.",
         )
-    return HostSetupResult(
-        ok=False,
-        message="Could not request the Xcode Command Line Tools installer on the remote Mac.",
-        detail=detail,
-        requires_password=False,
-    )
+    return HostSetupResult(ok=False,
+                           message="Could not request the Xcode Command Line Tools installer on the remote Mac.",
+                           detail=detail)
 
 
 def _wait_for_remote_xcode_install(
-    host: dict[str, Any],
-    private_key: Path,
-    *,
-    requested_step: str,
-    wait_seconds: int = 1200,
-    poll_interval_seconds: int = 10,
+        host: dict[str, Any],
+        private_key: Path,
+        *,
+        requested_step: str,
+        wait_seconds: int = 1200,
+        poll_interval_seconds: int = 10,
 ) -> HostSetupResult:
     deadline = time.monotonic() + wait_seconds
     while time.monotonic() < deadline:
@@ -1336,27 +1496,20 @@ def _wait_for_remote_xcode_install(
             timeout=20,
         )
         if poll.returncode == 0:
-            return HostSetupResult(
-                ok=True,
-                message="Xcode Command Line Tools finished installing on the remote Mac.",
-                performed_steps=[requested_step, "Waited for the Command Line Tools install to complete."],
-                requires_password=False,
-            )
+            return HostSetupResult(ok=True, message="Xcode Command Line Tools finished installing on the remote Mac.",
+                                   performed_steps=[requested_step,
+                                                    "Waited for the Command Line Tools install to complete."])
         time.sleep(poll_interval_seconds)
 
-    return HostSetupResult(
-        ok=False,
-        message="Waiting for Xcode Command Line Tools to finish on the remote Mac.",
-        detail="The installer was requested. Finish it in the remote Mac's GUI; host preparation will continue automatically if it completes before this wait window ends, otherwise click Prepare Host again.",
-        performed_steps=[requested_step],
-        requires_password=False,
-    )
+    return HostSetupResult(ok=False, message="Waiting for Xcode Command Line Tools to finish on the remote Mac.",
+                           detail="The installer was requested. Finish it in the remote Mac's GUI; host preparation will continue automatically if it completes before this wait window ends, otherwise click Prepare Host again.",
+                           performed_steps=[requested_step])
 
 
 def _ssh_lookup_host(ssh_host: str) -> str:
     host_part = ssh_host.rsplit("@", 1)[-1].strip()
     if host_part.startswith("[") and "]" in host_part:
-        return host_part[1 : host_part.index("]")]
+        return host_part[1: host_part.index("]")]
     if host_part.count(":") == 1:
         name, port = host_part.rsplit(":", 1)
         if port.isdigit():
@@ -1372,29 +1525,39 @@ def _remote_status_script(*, paths: list[str], repo_path: str) -> str:
         'if [ -z "$BREW_BIN" ] && [ -x /opt/homebrew/bin/brew ]; then BREW_BIN=/opt/homebrew/bin/brew; fi',
         'if [ -z "$BREW_BIN" ] && [ -x /usr/local/bin/brew ]; then BREW_BIN=/usr/local/bin/brew; fi',
         'FFMPEG_BIN="$(command -v ffmpeg || true)"',
+        'PLATFORM_NAME="$(uname -s 2>/dev/null | tr "[:upper:]" "[:lower:]")"',
+        'if [ "$PLATFORM_NAME" = "darwin" ]; then PLATFORM_NAME="macos"; fi',
         'AB_AV1_BIN="$(command -v ab-av1 || true)"',
         'if [ -z "$AB_AV1_BIN" ] && [ -x /opt/homebrew/bin/ab-av1 ]; then AB_AV1_BIN=/opt/homebrew/bin/ab-av1; fi',
         'if [ -z "$AB_AV1_BIN" ] && [ -x /usr/local/bin/ab-av1 ]; then AB_AV1_BIN=/usr/local/bin/ab-av1; fi',
         'FFMPEG_FILTERS=""',
         'FFMPEG_ENCODERS=""',
+        'FFMPEG_HWACCELS=""',
         'if [ -n "$FFMPEG_BIN" ]; then FFMPEG_FILTERS="$("$FFMPEG_BIN" -hide_banner -filters 2>/dev/null || true)"; fi',
         'if [ -n "$FFMPEG_BIN" ]; then FFMPEG_ENCODERS="$("$FFMPEG_BIN" -hide_banner -encoders 2>/dev/null || true)"; fi',
-        f"for path in {quoted_paths}; do",
-        '  if [ -e "$path" ]; then',
-        '    printf "path|%s|1\\n" "$path"',
-        "  else",
-        '    printf "path|%s|0\\n" "$path"',
-        "  fi",
-        "done",
+        'if [ -n "$FFMPEG_BIN" ]; then FFMPEG_HWACCELS="$("$FFMPEG_BIN" -hide_banner -hwaccels 2>/dev/null || true)"; fi',
         'if xcode-select -p >/dev/null 2>&1; then printf "tool|xcode_clt|1\\n"; else printf "tool|xcode_clt|0\\n"; fi',
         'if [ -n "$BREW_BIN" ]; then printf "tool|brew|1\\n"; else printf "tool|brew|0\\n"; fi',
         'if [ -n "$FFMPEG_BIN" ]; then printf "tool|ffmpeg|1\\n"; else printf "tool|ffmpeg|0\\n"; fi',
+        'if [ -n "$FFMPEG_BIN" ]; then printf "toolpath|ffmpeg|%s\\n" "$FFMPEG_BIN"; fi',
+        'if printf "%s\\n" "$FFMPEG_HWACCELS" | grep -qi "videotoolbox"; then printf "tool|ffmpeg_videotoolbox|1\\n"; else printf "tool|ffmpeg_videotoolbox|0\\n"; fi',
         'if printf "%s\\n" "$FFMPEG_FILTERS" | grep -qi "libvmaf"; then printf "tool|ffmpeg_libvmaf|1\\n"; else printf "tool|ffmpeg_libvmaf|0\\n"; fi',
         'if printf "%s\\n" "$FFMPEG_FILTERS" | grep -qi "xpsnr"; then printf "tool|ffmpeg_xpsnr|1\\n"; else printf "tool|ffmpeg_xpsnr|0\\n"; fi',
         'if printf "%s\\n" "$FFMPEG_ENCODERS" | grep -qi "libsvtav1"; then printf "tool|ffmpeg_libsvtav1|1\\n"; else printf "tool|ffmpeg_libsvtav1|0\\n"; fi',
         'if [ -n "$AB_AV1_BIN" ]; then printf "tool|ab_av1|1\\n"; else printf "tool|ab_av1|0\\n"; fi',
+        'printf "meta|platform|%s\\n" "$PLATFORM_NAME"',
         'printf "time|utc_offset|%s\\n" "$(date +%z)"',
     ]
+    if paths:
+        lines[16:16] = [
+            f"for path in {quoted_paths}; do",
+            '  if [ -e "$path" ]; then',
+            '    printf "path|%s|1\\n" "$path"',
+            "  else",
+            '    printf "path|%s|0\\n" "$path"',
+            "  fi",
+            "done",
+        ]
     if repo_path:
         lines.append(
             f'if [ -e {shlex.quote(repo_path)} ]; then printf "repo|exists|1\\n"; else printf "repo|exists|0\\n"; fi'
@@ -1405,7 +1568,8 @@ def _remote_status_script(*, paths: list[str], repo_path: str) -> str:
 
 
 def _parse_remote_status_output(stdout: str) -> dict[str, Any]:
-    payload: dict[str, Any] = {"paths": {}, "tools": {}, "repo_path_exists": True, "utc_offset": None}
+    payload: dict[str, Any] = {"paths": {}, "tools": {}, "tool_paths": {}, "repo_path_exists": True, "utc_offset": None,
+                               "platform": "unknown"}
     for raw_line in stdout.splitlines():
         line = raw_line.strip()
         if not line:
@@ -1418,9 +1582,13 @@ def _parse_remote_status_output(stdout: str) -> dict[str, Any]:
             payload["paths"][key] = value == "1"
         elif kind == "tool":
             payload["tools"][key] = value == "1"
+        elif kind == "toolpath":
+            payload["tool_paths"][key] = value
         elif kind == "repo":
             payload["repo_path_exists"] = value == "1"
         elif kind == "time":
+            payload[key] = value
+        elif kind == "meta":
             payload[key] = value
         else:
             raise ValueError(f"Unknown remote status kind: {kind}")

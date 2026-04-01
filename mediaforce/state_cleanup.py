@@ -1,17 +1,14 @@
-from __future__ import annotations
-
 import shutil
 import time
 from pathlib import Path
 
-from mediaforce.config import HarnessConfig
-
+from mediaforce.config import MediaforceConfig
 
 SECONDS_PER_DAY = 86400
 SECONDS_PER_MINUTE = 60
 
 
-def purge_transient_artifacts(config: HarnessConfig, *, force: bool = False) -> bool:
+def purge_transient_artifacts(config: MediaforceConfig, *, force: bool = False) -> bool:
     if not force and not _cleanup_is_due(config):
         return False
 
@@ -29,23 +26,23 @@ def purge_transient_artifacts(config: HarnessConfig, *, force: bool = False) -> 
     return True
 
 
-def _retention_days(config: HarnessConfig) -> int:
+def _retention_days(config: MediaforceConfig) -> int:
     cleanup = config.raw.get("state", {}).get("cleanup", {})
     value = cleanup.get("transient_artifact_retention_days", 14)
     return max(int(value), 0)
 
 
-def _cleanup_interval_seconds(config: HarnessConfig) -> int:
+def _cleanup_interval_seconds(config: MediaforceConfig) -> int:
     cleanup = config.raw.get("state", {}).get("cleanup", {})
     value = cleanup.get("periodic_sweep_minutes", 60)
     return max(int(value), 0) * SECONDS_PER_MINUTE
 
 
-def _cleanup_stamp_path(config: HarnessConfig) -> Path:
+def _cleanup_stamp_path(config: MediaforceConfig) -> Path:
     return config.paths.web_state_dir / ".cleanup-stamp"
 
 
-def _cleanup_is_due(config: HarnessConfig) -> bool:
+def _cleanup_is_due(config: MediaforceConfig) -> bool:
     interval_seconds = _cleanup_interval_seconds(config)
     if interval_seconds <= 0:
         return True
@@ -59,7 +56,7 @@ def _cleanup_is_due(config: HarnessConfig) -> bool:
     return time.time() - last_run >= interval_seconds
 
 
-def _write_cleanup_stamp(config: HarnessConfig) -> None:
+def _write_cleanup_stamp(config: MediaforceConfig) -> None:
     stamp_path = _cleanup_stamp_path(config)
     stamp_path.parent.mkdir(parents=True, exist_ok=True)
     stamp_path.touch()

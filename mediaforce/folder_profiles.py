@@ -1,15 +1,13 @@
-from __future__ import annotations
-
 import json
 import sqlite3
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from mediaforce.config import HarnessConfig
+from mediaforce.config import MediaforceConfig
 
 
-def inspect_prefix(connection: sqlite3.Connection, config: HarnessConfig, prefix: str) -> dict[str, Any]:
+def inspect_prefix(connection: sqlite3.Connection, config: MediaforceConfig, prefix: str) -> dict[str, Any]:
     rows = [
         dict(row)
         for row in connection.execute(
@@ -51,7 +49,8 @@ def inspect_prefix(connection: sqlite3.Connection, config: HarnessConfig, prefix
     }
 
 
-def recommend_folder_profile(prefix: str, rows: list[dict[str, Any]], resolved_policy: dict[str, Any]) -> dict[str, Any]:
+def recommend_folder_profile(prefix: str, rows: list[dict[str, Any]], resolved_policy: dict[str, Any]) -> dict[
+    str, Any]:
     video_codecs: Counter[str] = Counter(str(row["video_codec"] or "unknown") for row in rows)
     avg_size_gib = (sum(int(row["size_bytes"]) for row in rows) / max(len(rows), 1)) / (1024 ** 3)
     audio_codecs: Counter[str] = Counter()
@@ -83,7 +82,8 @@ def recommend_folder_profile(prefix: str, rows: list[dict[str, Any]], resolved_p
         suggestion["video"]["default_grain"] = 0
         suggestion["video"]["target_xpsnr"] = 35.5
         suggestion["video"]["min_target_xpsnr"] = 34.5
-        suggestion["reason"].append("Clean catalog TV usually does not need synthetic grain and can tolerate a lower XPSNR floor.")
+        suggestion["reason"].append(
+            "Clean catalog TV usually does not need synthetic grain and can tolerate a lower XPSNR floor.")
 
     return suggestion
 

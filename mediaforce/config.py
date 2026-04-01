@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import copy
 import json
 import shutil
@@ -7,7 +5,6 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "defaults.toml"
 
@@ -24,7 +21,7 @@ class ConfigPaths:
 
 
 @dataclass(frozen=True)
-class HarnessConfig:
+class MediaforceConfig:
     raw: dict[str, Any]
     paths: ConfigPaths
 
@@ -59,13 +56,47 @@ class HarnessConfig:
             for key, value in self.media["source_roots"].items()
         }
 
+    def source_root_map_for_host(self, host: dict[str, Any] | None = None) -> dict[str, Path]:
+        resolved = dict(self.source_root_map)
+        if not isinstance(host, dict):
+            return resolved
+        overrides = host.get("source_roots")
+        if not isinstance(overrides, dict):
+            return resolved
+        for key, value in overrides.items():
+            key_text = str(key or "").strip()
+            path_text = str(value or "").strip()
+            if not key_text or not path_text:
+                continue
+            resolved[key_text] = Path(path_text).expanduser()
+        return resolved
+
     @property
     def staging_root(self) -> Path:
         return Path(self.media["staging_root"]).expanduser()
 
+    def staging_root_for_host(self, host: dict[str, Any] | None = None) -> Path:
+        if not isinstance(host, dict):
+            return self.staging_root
+        value = str(host.get("staging_root") or "").strip()
+        if not value:
+            return self.staging_root
+        return Path(value).expanduser()
+
     @property
     def archive_root(self) -> Path:
         return Path(self.media["archive_root"]).expanduser()
+
+    def archive_root_for_host(self, host: dict[str, Any] | None = None) -> Path:
+        if not isinstance(host, dict):
+            return self.archive_root
+        value = str(host.get("archive_root") or "").strip()
+        if value:
+            return Path(value).expanduser()
+        staging_root = self.staging_root_for_host(host)
+        if staging_root != self.staging_root:
+            return staging_root / "_replaced"
+        return self.archive_root
 
     @property
     def output_container(self) -> str:
@@ -105,7 +136,7 @@ def _resolve_path(base: Path, value: str) -> Path:
     return (base / path).resolve()
 
 
-def load_config(config_path: Path | None = None) -> HarnessConfig:
+def load_config(config_path: Path | None = None) -> MediaforceConfig:
     resolved_config_path = (config_path or DEFAULT_CONFIG_PATH).expanduser().resolve()
     raw = tomllib.loads(resolved_config_path.read_text())
     raw = _merge_optional_configs(raw, resolved_config_path.parent)
@@ -123,8 +154,8 @@ def load_config(config_path: Path | None = None) -> HarnessConfig:
         review_dir=_resolve_path(project_root, state.get("review_dir", "state/review")),
         runtime_settings_path=runtime_settings_path,
     )
-    _migrate_legacy_state(project_root, paths)
-    return HarnessConfig(raw=raw, paths=paths)
+    _migrate_project_state(project_root, paths)
+    return MediaforceConfig(raw=raw, paths=paths)
 
 
 def load_runtime_settings(path: Path) -> dict[str, Any]:
@@ -141,25 +172,29 @@ def save_runtime_settings(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
-def _migrate_legacy_state(project_root: Path, paths: ConfigPaths) -> None:
-    legacy_root = project_root / "state"
-    if not legacy_root.exists():
+def _migrate_project_state(project_root: Path, paths: ConfigPaths) -> None:
+    state_root = project_root / "state"
+    if not state_root.exists():
         return
 
     migrations = (
-        (legacy_root / "library.sqlite3", paths.db_path),
-        (legacy_root / "runs", paths.run_manifest_dir),
-        (legacy_root / "web", paths.web_state_dir),
-        (legacy_root / "review", paths.review_dir),
+        (state_root / "library.sqlite3", paths.db_path),
+        (state_root / "runs", paths.run_manifest_dir),
+        (state_root / "web", paths.web_state_dir),
+        (state_root / "review", paths.review_dir),
     )
     for source, destination in migrations:
         _move_if_needed(source, destination)
 
-    for leftover in (legacy_root / ".DS_Store",):
+    for leftover in (
+            state_root / ".DS_Store",
+            state_root / "mediaforce-web.log",
+            state_root / "mediaforce-web.pid",
+    ):
         if leftover.exists():
             leftover.unlink()
 
-    _remove_empty_dirs(legacy_root)
+    _remove_empty_dirs(state_root)
 
 
 def _move_if_needed(source: Path, destination: Path) -> None:

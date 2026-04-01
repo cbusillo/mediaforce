@@ -1,9 +1,6 @@
-from __future__ import annotations
-
 import json
 import sqlite3
 from typing import Any
-
 
 DEFAULT_QUEUE_NAME = "heavy"
 DEFAULT_SCHEDULER_POLICY = {
@@ -16,7 +13,8 @@ QUEUED_ENCODE_JOB_STATUSES = ("queued", "retry_backoff")
 RECENT_ENCODE_JOB_STATUSES = ("completed", "failed", "stopped", "needs_attention")
 
 
-def ensure_queue_state(connection: sqlite3.Connection, *, queue_name: str = DEFAULT_QUEUE_NAME, updated_at: str) -> None:
+def ensure_queue_state(connection: sqlite3.Connection, *, queue_name: str = DEFAULT_QUEUE_NAME,
+                       updated_at: str) -> None:
     connection.execute(
         """
         INSERT INTO encode_queue_state(queue_name, is_paused, stop_requested, active_job_id, updated_at)
@@ -56,11 +54,10 @@ def save_queue_state(connection: sqlite3.Connection, payload: dict[str, Any]) ->
         """
         INSERT INTO encode_queue_state(queue_name, is_paused, stop_requested, active_job_id, updated_at)
         VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(queue_name) DO UPDATE SET
-            is_paused = excluded.is_paused,
-            stop_requested = excluded.stop_requested,
-            active_job_id = excluded.active_job_id,
-            updated_at = excluded.updated_at
+        ON CONFLICT(queue_name) DO UPDATE SET is_paused      = excluded.is_paused,
+                                              stop_requested = excluded.stop_requested,
+                                              active_job_id  = excluded.active_job_id,
+                                              updated_at     = excluded.updated_at
         """,
         (
             payload["queue_name"],
@@ -75,40 +72,40 @@ def save_queue_state(connection: sqlite3.Connection, payload: dict[str, Any]) ->
 def save_encode_job(connection: sqlite3.Connection, payload: dict[str, Any]) -> None:
     connection.execute(
         """
-        INSERT INTO encode_jobs(
-            job_id, prefix, status, manifest_path, item_count, saved_profile_path,
-            host_json, last_host_json, notes, process_pid, error, bypass_schedule,
-            attempt_count, leased_at, lease_expires_at, heartbeat_at, worker_id,
-            retry_not_before, waiting_reason, terminal_reason, last_failure_kind,
-            last_failure_at, host_cooldown_until, created_at, started_at, finished_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(job_id) DO UPDATE SET
-            prefix = excluded.prefix,
-            status = excluded.status,
-            manifest_path = excluded.manifest_path,
-            item_count = excluded.item_count,
-            saved_profile_path = excluded.saved_profile_path,
-            host_json = excluded.host_json,
-            last_host_json = excluded.last_host_json,
-            notes = excluded.notes,
-            process_pid = excluded.process_pid,
-            error = excluded.error,
-            bypass_schedule = excluded.bypass_schedule,
-            attempt_count = excluded.attempt_count,
-            leased_at = excluded.leased_at,
-            lease_expires_at = excluded.lease_expires_at,
-            heartbeat_at = excluded.heartbeat_at,
-            worker_id = excluded.worker_id,
-            retry_not_before = excluded.retry_not_before,
-            waiting_reason = excluded.waiting_reason,
-            terminal_reason = excluded.terminal_reason,
-            last_failure_kind = excluded.last_failure_kind,
-            last_failure_at = excluded.last_failure_at,
-            host_cooldown_until = excluded.host_cooldown_until,
-            created_at = excluded.created_at,
-            started_at = excluded.started_at,
-            finished_at = excluded.finished_at,
-            updated_at = excluded.updated_at
+        INSERT INTO encode_jobs(job_id, prefix, status, manifest_path, item_count, saved_profile_path,
+                                host_json, last_host_json, notes, process_pid, error, bypass_schedule,
+                                attempt_count, leased_at, lease_expires_at, heartbeat_at, worker_id,
+                                retry_not_before, waiting_reason, terminal_reason, last_failure_kind,
+                                last_failure_at, host_cooldown_until, progress_json, created_at, started_at,
+                                finished_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(job_id) DO UPDATE SET prefix              = excluded.prefix,
+                                          status              = excluded.status,
+                                          manifest_path       = excluded.manifest_path,
+                                          item_count          = excluded.item_count,
+                                          saved_profile_path  = excluded.saved_profile_path,
+                                          host_json           = excluded.host_json,
+                                          last_host_json      = excluded.last_host_json,
+                                          notes               = excluded.notes,
+                                          process_pid         = excluded.process_pid,
+                                          error               = excluded.error,
+                                          bypass_schedule     = excluded.bypass_schedule,
+                                          attempt_count       = excluded.attempt_count,
+                                          leased_at           = excluded.leased_at,
+                                          lease_expires_at    = excluded.lease_expires_at,
+                                          heartbeat_at        = excluded.heartbeat_at,
+                                          worker_id           = excluded.worker_id,
+                                          retry_not_before    = excluded.retry_not_before,
+                                          waiting_reason      = excluded.waiting_reason,
+                                          terminal_reason     = excluded.terminal_reason,
+                                          last_failure_kind   = excluded.last_failure_kind,
+                                          last_failure_at     = excluded.last_failure_at,
+                                          host_cooldown_until = excluded.host_cooldown_until,
+                                          progress_json       = excluded.progress_json,
+                                          created_at          = excluded.created_at,
+                                          started_at          = excluded.started_at,
+                                          finished_at         = excluded.finished_at,
+                                          updated_at          = excluded.updated_at
         """,
         (
             payload["job_id"],
@@ -134,6 +131,7 @@ def save_encode_job(connection: sqlite3.Connection, payload: dict[str, Any]) -> 
             payload.get("last_failure_kind"),
             payload.get("last_failure_at"),
             payload.get("host_cooldown_until"),
+            json.dumps(payload.get("progress") or {}, sort_keys=True) if payload.get("progress") is not None else None,
             payload["created_at"],
             payload.get("started_at"),
             payload.get("finished_at"),
@@ -197,7 +195,8 @@ def queue_position(connection: sqlite3.Connection, job_id: str) -> tuple[int, in
     return position, total
 
 
-def list_encode_jobs(connection: sqlite3.Connection, *, statuses: tuple[str, ...], limit: int = 8) -> list[dict[str, Any]]:
+def list_encode_jobs(connection: sqlite3.Connection, *, statuses: tuple[str, ...], limit: int = 8) -> list[
+    dict[str, Any]]:
     placeholders = ",".join("?" for _ in statuses)
     rows = connection.execute(
         f"SELECT * FROM encode_jobs WHERE status IN ({placeholders}) ORDER BY created_at ASC, rowid ASC LIMIT ?",
@@ -207,7 +206,7 @@ def list_encode_jobs(connection: sqlite3.Connection, *, statuses: tuple[str, ...
 
 
 def summarize_encode_queue(connection: sqlite3.Connection) -> dict[str, Any]:
-    queued = list_encode_jobs(connection, statuses=QUEUED_ENCODE_JOB_STATUSES, limit=8)
+    queued = list_encode_jobs(connection, statuses=QUEUED_ENCODE_JOB_STATUSES)
     running = list_encode_jobs(connection, statuses=("running",), limit=2)
     recent = list_encode_jobs(connection, statuses=RECENT_ENCODE_JOB_STATUSES, limit=6)
     counts = {
@@ -262,6 +261,7 @@ def _hydrate_job(row: sqlite3.Row) -> dict[str, Any]:
         "last_failure_kind": row["last_failure_kind"],
         "last_failure_at": row["last_failure_at"],
         "host_cooldown_until": row["host_cooldown_until"],
+        "progress": json.loads(str(row["progress_json"] or "null")),
         "created_at": row["created_at"],
         "started_at": row["started_at"],
         "finished_at": row["finished_at"],

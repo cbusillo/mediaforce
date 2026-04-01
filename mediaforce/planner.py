@@ -1,11 +1,9 @@
-from __future__ import annotations
-
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from mediaforce.config import HarnessConfig
+from mediaforce.config import MediaforceConfig
 
 
 @dataclass(slots=True)
@@ -15,7 +13,7 @@ class Recommendation:
     reason: str
 
 
-def recommend_item(row: dict[str, Any], config: HarnessConfig) -> Recommendation:
+def recommend_item(row: dict[str, Any], config: MediaforceConfig) -> Recommendation:
     planning = config.resolve_policy(str(row["rel_path"]))["planning"]
     size_gib = float(row["size_bytes"]) / (1024 ** 3)
     video_codec = (row["video_codec"] or "unknown").lower()
@@ -72,7 +70,7 @@ def recommend_item(row: dict[str, Any], config: HarnessConfig) -> Recommendation
     return Recommendation(bucket=bucket, score=round(score, 2), reason=" ".join(reasons))
 
 
-def build_manifest_item(row: dict[str, Any], config: HarnessConfig) -> dict[str, Any]:
+def build_manifest_item(row: dict[str, Any], config: MediaforceConfig) -> dict[str, Any]:
     policy = config.resolve_policy(str(row["rel_path"]))
     staging_root = config.staging_root
     output_rel = Path(row["rel_path"]).with_suffix(f".{config.output_container}")

@@ -1,10 +1,7 @@
-from __future__ import annotations
-
 import os
 import shutil
 from functools import lru_cache
 from pathlib import Path
-
 
 _HOMEBREW_BINARIES = {
     "ffmpeg": Path("/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"),
@@ -14,9 +11,7 @@ _HOMEBREW_BINARIES = {
 
 @lru_cache(maxsize=None)
 def media_binary(name: str) -> str:
-    override = os.environ.get(f"MEDIAFORCE_{name.upper()}") or os.environ.get(
-        f"MEDIA_HARNESS_{name.upper()}"
-    )
+    override = os.environ.get(f"MEDIAFORCE_{name.upper()}")
     if override:
         return override
 

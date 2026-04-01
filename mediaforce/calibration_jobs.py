@@ -1,9 +1,10 @@
-from __future__ import annotations
-
 import json
 import sqlite3
-from typing import Any
+from typing import Any, TypeVar
 
+from mediaforce.type_defs import JSONValue
+
+T = TypeVar("T")
 
 ACTIVE_JOB_STATUSES = {"queued", "running", "pending_review"}
 
@@ -26,7 +27,8 @@ def load_active_job(connection: sqlite3.Connection, prefix: str) -> dict[str, An
         """
         SELECT *
         FROM calibration_jobs
-        WHERE prefix = ? AND status IN ('queued', 'running', 'pending_review')
+        WHERE prefix = ?
+          AND status IN ('queued', 'running', 'pending_review')
         ORDER BY created_at DESC, rowid DESC
         LIMIT 1
         """,
@@ -43,12 +45,12 @@ def list_queued_jobs(connection: sqlite3.Connection) -> list[dict[str, Any]]:
 
 
 def claim_next_queued_calibration_job(
-    connection: sqlite3.Connection,
-    *,
-    lane: str,
-    owner_pid: int,
-    started_at: str,
-    excluded_prefixes: tuple[str, ...] = (),
+        connection: sqlite3.Connection,
+        *,
+        lane: str,
+        owner_pid: int,
+        started_at: str,
+        excluded_prefixes: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
     query = [
         "lane = ?",
@@ -95,8 +97,10 @@ def list_queue_summary(connection: sqlite3.Connection, *, limit_per_lane: int = 
         """
     ).fetchall()
     summary: dict[str, Any] = {
-        "sample": {"running": [], "queued": [], "pending_review": [], "running_count": 0, "queued_count": 0, "pending_review_count": 0},
-        "full": {"running": [], "queued": [], "pending_review": [], "running_count": 0, "queued_count": 0, "pending_review_count": 0},
+        "sample": {"running": [], "queued": [], "pending_review": [], "running_count": 0, "queued_count": 0,
+                   "pending_review_count": 0},
+        "full": {"running": [], "queued": [], "pending_review": [], "running_count": 0, "queued_count": 0,
+                 "pending_review_count": 0},
         "active_count": 0,
     }
     for row in rows:
@@ -183,7 +187,9 @@ def _serialize_job(payload: dict[str, Any]) -> dict[str, Any]:
         "created_at": str(payload["created_at"]),
         "started_at": payload.get("started_at"),
         "finished_at": payload.get("finished_at"),
-        "updated_at": str(payload.get("updated_at") or payload.get("finished_at") or payload.get("started_at") or payload["created_at"]),
+        "updated_at": str(
+            payload.get("updated_at") or payload.get("finished_at") or payload.get("started_at") or payload[
+                "created_at"]),
     }
 
 
@@ -218,7 +224,7 @@ def _hydrate_job(row: sqlite3.Row) -> dict[str, Any]:
     return payload
 
 
-def _loads_optional(raw: Any, *, default: Any) -> Any:
+def _loads_optional(raw: JSONValue, *, default: T) -> JSONValue | T:
     if raw in {None, ""}:
         return default
     try:
@@ -227,7 +233,7 @@ def _loads_optional(raw: Any, *, default: Any) -> Any:
         return default
 
 
-def _dumps_optional(value: Any) -> str | None:
+def _dumps_optional(value: JSONValue) -> str | None:
     if value is None:
         return None
     return json.dumps(value, sort_keys=True)

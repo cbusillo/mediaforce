@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import json
 import sqlite3
@@ -8,9 +6,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Sequence
 
-from mediaforce.config import DEFAULT_CONFIG_PATH, HarnessConfig, load_config
+from mediaforce.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config
 from mediaforce.db import open_db
-from mediaforce.execution import describe_item_plan, encode_manifest_items, promote_manifest_items, validate_manifest_items
+from mediaforce.execution import describe_item_plan, encode_manifest_items, promote_manifest_items, \
+    validate_manifest_items
 from mediaforce.folder_profiles import inspect_prefix
 from mediaforce.planner import build_manifest_item, recommend_item
 from mediaforce.review import generate_compare_clips
@@ -19,13 +18,14 @@ from mediaforce.state_cleanup import purge_transient_artifacts
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Manifest-driven AV1 planning harness")
+    parser = argparse.ArgumentParser(description="Manifest-driven AV1 planning for mediaforce")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="Path to the TOML config file")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     scan_parser = subparsers.add_parser("scan", help="Scan source roots into SQLite state")
-    scan_parser.add_argument("--prefix", action="append", default=[], help="Restrict scan to rel-path prefixes such as tv/Futurama")
+    scan_parser.add_argument("--prefix", action="append", default=[],
+                             help="Restrict scan to rel-path prefixes such as tv/Futurama")
     scan_parser.add_argument("--limit", type=int, help="Only scan the first N matching files")
 
     report_parser = subparsers.add_parser("report", help="Show prioritized candidates from SQLite state")
@@ -39,30 +39,40 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--bucket", action="append", default=[], help="Restrict plan to recommendation buckets")
     plan_parser.add_argument("--output", type=Path, help="Write the manifest to an explicit path")
 
-    inspect_parser = subparsers.add_parser("inspect-folder", help="Summarize one folder prefix and print a suggested override block")
+    inspect_parser = subparsers.add_parser("inspect-folder",
+                                           help="Summarize one folder prefix and print a suggested override block")
     inspect_parser.add_argument("prefix", help="Folder prefix like tv/Suits or tv/Suits/Season 5")
 
-    campaign_parser = subparsers.add_parser("campaign", help="Scan a folder, print its summary, and create a run manifest")
+    campaign_parser = subparsers.add_parser("campaign",
+                                            help="Scan a folder, print its summary, and create a run manifest")
     campaign_parser.add_argument("prefix", help="Folder prefix like tv/Suits/Season 5")
     campaign_parser.add_argument("--limit", type=int, help="Maximum items to put in the run manifest")
-    campaign_parser.add_argument("--bucket", action="append", default=[], help="Restrict campaign items to recommendation buckets")
+    campaign_parser.add_argument("--bucket", action="append", default=[],
+                                 help="Restrict campaign items to recommendation buckets")
     campaign_parser.add_argument("--output", type=Path, help="Write the manifest to an explicit path")
-    campaign_parser.add_argument("--review-first", action="store_true", help="Immediately encode, validate, and compare the first item")
-    campaign_parser.add_argument("--play", action="store_true", help="Open the first generated compare clip when reviewing")
+    campaign_parser.add_argument("--review-first", action="store_true",
+                                 help="Immediately encode, validate, and compare the first item")
+    campaign_parser.add_argument("--play", action="store_true",
+                                 help="Open the first generated compare clip when reviewing")
 
-    run_parser = subparsers.add_parser("run", help="Start a folder run, review the first item, and print the next approval step")
+    run_parser = subparsers.add_parser("run",
+                                       help="Start a folder run, review the first item, and print the next approval step")
     run_parser.add_argument("prefix", help="Folder prefix like tv/Suits/Season 5")
     run_parser.add_argument("--limit", type=int, help="Maximum items to put in the run manifest")
-    run_parser.add_argument("--bucket", action="append", default=[], help="Restrict run items to recommendation buckets")
+    run_parser.add_argument("--bucket", action="append", default=[],
+                            help="Restrict run items to recommendation buckets")
     run_parser.add_argument("--output", type=Path, help="Write the manifest to an explicit path")
     run_parser.add_argument("--duration", type=float, default=8.0, help="Clip duration in seconds")
     run_parser.add_argument("--play", action="store_true", help="Open the first generated compare clip")
 
-    review_parser = subparsers.add_parser("review", help="Encode, validate, and compare one manifest item in a single command")
-    review_parser.add_argument("manifest", nargs="?", type=Path, help="Path to a run manifest JSON file (defaults to latest)")
+    review_parser = subparsers.add_parser("review",
+                                          help="Encode, validate, and compare one manifest item in a single command")
+    review_parser.add_argument("manifest", nargs="?", type=Path,
+                               help="Path to a run manifest JSON file (defaults to latest)")
     review_parser.add_argument("--index", type=int, default=0, help="Manifest item index to review")
     review_parser.add_argument("--duration", type=float, default=8.0, help="Clip duration in seconds")
-    review_parser.add_argument("--timestamp", action="append", type=float, default=[], help="Clip start timestamps in seconds")
+    review_parser.add_argument("--timestamp", action="append", type=float, default=[],
+                               help="Clip start timestamps in seconds")
     review_parser.add_argument(
         "--output-dir",
         type=Path,
@@ -83,15 +93,18 @@ def build_parser() -> argparse.ArgumentParser:
     promote_parser.add_argument("--force", action="store_true", help="Promote even if machine validation failed")
 
     approve_parser = subparsers.add_parser("approve", help="Promote the reviewed item from the latest manifest")
-    approve_parser.add_argument("manifest", nargs="?", type=Path, help="Path to a run manifest JSON file (defaults to latest)")
-    approve_parser.add_argument("--index", action="append", type=int, default=[], help="Manifest item indexes to promote")
+    approve_parser.add_argument("manifest", nargs="?", type=Path,
+                                help="Path to a run manifest JSON file (defaults to latest)")
+    approve_parser.add_argument("--index", action="append", type=int, default=[],
+                                help="Manifest item indexes to promote")
     approve_parser.add_argument("--all", action="store_true", help="Promote all manifest items")
     approve_parser.add_argument("--force", action="store_true", help="Promote even if machine validation failed")
 
     compare_parser = subparsers.add_parser("compare", help="Generate side-by-side approval clips for staged items")
     _add_manifest_selection_args(compare_parser, require_manifest=False)
     compare_parser.add_argument("--duration", type=float, default=8.0, help="Clip duration in seconds")
-    compare_parser.add_argument("--timestamp", action="append", type=float, default=[], help="Clip start timestamps in seconds")
+    compare_parser.add_argument("--timestamp", action="append", type=float, default=[],
+                                help="Clip start timestamps in seconds")
     compare_parser.add_argument(
         "--output-dir",
         type=Path,
@@ -120,7 +133,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "report":
-            rows = _select_candidates(connection, config, args.status or ["discovered", "planned"], args.prefix, args.limit)
+            rows = _select_candidates(connection, config, args.status or ["discovered", "planned"], args.prefix,
+                                      args.limit)
             _print_report(rows, config)
             return 0
 
@@ -226,7 +240,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             manifest_path = _resolve_manifest_path(connection, args.manifest)
             manifest = _load_manifest(manifest_path)
             indexes = _resolve_indexes(manifest, args)
-            encode_results = encode_manifest_items(connection, config, manifest_path, manifest, indexes, overwrite=args.overwrite)
+            encode_results = encode_manifest_items(connection, config, manifest_path, manifest, indexes,
+                                                   overwrite=args.overwrite)
             for result in encode_results:
                 percent = _percent_string(result.staging_size_bytes, result.source_size_bytes)
                 print(
@@ -307,12 +322,12 @@ def _add_manifest_selection_args(parser: argparse.ArgumentParser, *, require_man
 
 
 def _select_candidates(
-    connection: sqlite3.Connection,
-    config: HarnessConfig,
-    statuses: list[str],
-    prefixes: list[str],
-    limit: int | None,
-    buckets: list[str] | None = None,
+        connection: sqlite3.Connection,
+        config: MediaforceConfig,
+        statuses: list[str],
+        prefixes: list[str],
+        limit: int | None,
+        buckets: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     query = """
         SELECT
@@ -345,7 +360,7 @@ def _select_candidates(
     return rows
 
 
-def _print_report(rows: list[dict[str, Any]], config: HarnessConfig) -> None:
+def _print_report(rows: list[dict[str, Any]], config: MediaforceConfig) -> None:
     if not rows:
         print("No matching items found.")
         return
@@ -369,7 +384,7 @@ def _print_report(rows: list[dict[str, Any]], config: HarnessConfig) -> None:
         print(f"  {recommendation.reason}")
 
 
-def _build_run_manifest(rows: list[dict[str, Any]], config: HarnessConfig) -> dict[str, Any]:
+def _build_run_manifest(rows: list[dict[str, Any]], config: MediaforceConfig) -> dict[str, Any]:
     now = datetime.now(tz=UTC).isoformat(timespec="seconds")
     run_id = uuid.uuid4().hex[:12]
     items = [build_manifest_item(row, config) for row in rows]
@@ -385,10 +400,10 @@ def _build_run_manifest(rows: list[dict[str, Any]], config: HarnessConfig) -> di
 
 
 def _write_manifest(
-    connection: sqlite3.Connection,
-    config: HarnessConfig,
-    manifest: dict[str, Any],
-    output_path: Path | None,
+        connection: sqlite3.Connection,
+        config: MediaforceConfig,
+        manifest: dict[str, Any],
+        output_path: Path | None,
 ) -> Path:
     config.paths.run_manifest_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_path or config.paths.run_manifest_dir / f"run-{manifest['run_id']}.json"
@@ -424,15 +439,15 @@ def _load_manifest(path: Path) -> dict[str, Any]:
 
 
 def _create_campaign_manifest(
-    connection: sqlite3.Connection,
-    config: HarnessConfig,
-    *,
-    prefix: str,
-    limit: int | None,
-    buckets: list[str] | None,
-    output_path: Path | None,
+        connection: sqlite3.Connection,
+        config: MediaforceConfig,
+        *,
+        prefix: str,
+        limit: int | None,
+        buckets: list[str] | None,
+        output_path: Path | None,
 ) -> tuple[dict[str, Any], Path]:
-    stats = scan_library(connection, config, prefixes=[prefix], limit=None)
+    stats = scan_library(connection, config, prefixes=[prefix])
     print(
         f"scan_id={stats.scan_id} discovered={stats.discovered} reprobed={stats.reprobed} "
         f"unchanged={stats.unchanged} total_seen={stats.total_seen}"
@@ -531,7 +546,8 @@ def _print_manifest_item(item: dict[str, Any], index: int) -> None:
     if subtitles["kept_track_count"]:
         subtitle_desc = f"{subtitles['kept_track_count']} English track(s)"
     print(f"  item {index}: {item['rel_path']}")
-    print(f"    source={_format_size(int(item['source_size_bytes']))} video={video['source_codec']} -> {video['output_codec']}")
+    print(
+        f"    source={_format_size(int(item['source_size_bytes']))} video={video['source_codec']} -> {video['output_codec']}")
     print(
         f"    quality={video['quality_metric']} target={video['target']:.1f} min={video['min_target']:.1f} "
         f"max_size={video['max_encoded_percent']:.0f}% grain={video['default_grain']}"
@@ -544,17 +560,17 @@ def _print_manifest_item(item: dict[str, Any], index: int) -> None:
 
 
 def _run_review(
-    connection: sqlite3.Connection,
-    config: HarnessConfig,
-    manifest_path: Path,
-    manifest: dict[str, Any],
-    *,
-    index: int,
-    overwrite: bool,
-    duration: float,
-    timestamps: list[float] | None,
-    output_dir: Path,
-    play: bool,
+        connection: sqlite3.Connection,
+        config: MediaforceConfig,
+        manifest_path: Path,
+        manifest: dict[str, Any],
+        *,
+        index: int,
+        overwrite: bool,
+        duration: float,
+        timestamps: list[float] | None,
+        output_dir: Path,
+        play: bool,
 ) -> None:
     item_count = len(manifest.get("items", []))
     if index < 0 or index >= item_count:

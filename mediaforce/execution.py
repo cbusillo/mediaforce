@@ -1,25 +1,29 @@
-from __future__ import annotations
-
+import io
 import json
-import os
 import shlex
 import shutil
 import sqlite3
 import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, cast
 
 from mediaforce.binaries import ffmpeg_binary
-from mediaforce.config import HarnessConfig
-from mediaforce.process_control import ManagedProcessController, run_command
+from mediaforce.config import MediaforceConfig
+from mediaforce.ffmpeg import ffmpeg_hwaccel_input_args
 from mediaforce.probe import probe_media
+from mediaforce.process_control import ManagedProcessController, ProcessCancelledError, run_command
 from mediaforce.quality import QualitySearchError, QualitySearchResult, run_crf_search, select_quality_metric
-from mediaforce.remote import remote_shell_path_export_line, ssh_client_options
+from mediaforce.remote import execution_mode_for_host, host_media_access_for_host, remote_shell_path_export_line, \
+    ssh_client_options
 from mediaforce.utils import file_fingerprint, timestamp
 
-
 TEXT_SUBTITLE_CODECS = {"ass", "mov_text", "srt", "ssa", "subrip", "text", "webvtt"}
+SVT_AV1_MIN_8K_PRESET = 5
+SVT_AV1_8K_DIMENSION_THRESHOLD = 7680
+ENCODE_PROGRESS_ARGS = ["-progress", "pipe:2", "-nostats"]
 
 
 @dataclass(slots=True)
@@ -35,20 +39,51 @@ class EncodeResult:
 
 
 def encode_manifest_items(
-    connection: sqlite3.Connection,
-    config: HarnessConfig,
-    manifest_path: Path,
-    manifest: dict[str, Any],
-    indexes: list[int],
-    overwrite: bool,
-    process_controller: ManagedProcessController | None = None,
-    host: dict[str, Any] | None = None,
+        connection: sqlite3.Connection,
+        config: MediaforceConfig,
+        manifest_path: Path,
+        manifest: dict[str, Any],
+        indexes: list[int],
+        overwrite: bool,
+        process_controller: ManagedProcessController | None = None,
+        host: dict[str, Any] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[EncodeResult]:
     results: list[EncodeResult] = []
+    total_duration_seconds = sum(float(manifest["items"][index].get("duration_seconds") or 0.0) for index in indexes)
+    completed_duration_seconds = 0.0
     for index in indexes:
         if process_controller is not None:
             process_controller.throw_if_cancelled()
         item = manifest["items"][index]
+        item_duration_seconds = float(item.get("duration_seconds") or 0.0)
+
+        def item_progress(snapshot: dict[str, Any]) -> None:
+            if progress_callback is None:
+                return
+            current_out_time_seconds = min(float(snapshot.get("out_time_seconds") or 0.0), item_duration_seconds)
+            overall_completed_duration_seconds = completed_duration_seconds + current_out_time_seconds
+            payload = {
+                **snapshot,
+                "current_item_index": int(index),
+                "current_item_number": len(results) + 1,
+                "current_item_rel_path": str(item.get("rel_path") or item.get("source_path") or ""),
+                "current_item_duration_seconds": item_duration_seconds,
+                "completed_item_count": len(results),
+                "total_item_count": len(indexes),
+                "completed_duration_seconds": completed_duration_seconds,
+                "total_duration_seconds": total_duration_seconds,
+                "overall_completed_duration_seconds": overall_completed_duration_seconds,
+                "remaining_duration_seconds": max(total_duration_seconds - overall_completed_duration_seconds, 0.0),
+            }
+            if total_duration_seconds > 0:
+                payload["percent_complete"] = min(overall_completed_duration_seconds / total_duration_seconds,
+                                                  1.0) * 100.0
+            speed_value = float(payload.get("speed") or 0.0)
+            if speed_value > 0.0:
+                payload["eta_seconds"] = payload["remaining_duration_seconds"] / speed_value
+            progress_callback(payload)
+
         result = encode_one_item(
             connection,
             config,
@@ -59,8 +94,10 @@ def encode_manifest_items(
             overwrite=overwrite,
             process_controller=process_controller,
             host=host,
+            progress_callback=item_progress,
         )
         results.append(result)
+        completed_duration_seconds += item_duration_seconds
     return results
 
 
@@ -117,6 +154,22 @@ def build_svt_params(video_policy: dict[str, Any]) -> list[str]:
     ]
 
 
+def effective_video_preset(
+        video_policy: dict[str, Any],
+        *,
+        width: int | None = None,
+        height: int | None = None,
+) -> int:
+    preset = int(video_policy["preset"])
+    if str(video_policy.get("encoder") or "").lower() != "libsvtav1":
+        return preset
+    largest_dimension = max(int(width or 0), int(height or 0))
+    if largest_dimension < SVT_AV1_8K_DIMENSION_THRESHOLD:
+        return preset
+    # Current SVT-AV1 builds reject 8K-plus sources on slower presets.
+    return max(preset, SVT_AV1_MIN_8K_PRESET)
+
+
 def estimate_output_overhead_bytes(item: dict[str, Any]) -> dict[str, int]:
     selection = _select_streams(item)
     duration_seconds = float(item.get("duration_seconds") or 0.0)
@@ -137,40 +190,87 @@ def estimate_output_overhead_bytes(item: dict[str, Any]) -> dict[str, int]:
     }
 
 
+def resolve_item_source_path(
+        config: MediaforceConfig,
+        item: dict[str, Any],
+        *,
+        host: dict[str, Any] | None = None,
+) -> Path:
+    if host_media_access_for_host(host) == "stream":
+        return Path(str(item["source_path"]))
+    media_root = str(item.get("media_root") or "").strip()
+    rel_path = str(item.get("rel_path") or "").strip()
+    if media_root and rel_path:
+        root = config.source_root_map_for_host(host).get(media_root)
+        if root is not None:
+            return root.parent / Path(rel_path)
+    return Path(str(item["source_path"]))
+
+
+def resolve_item_staging_path(
+        config: MediaforceConfig,
+        item: dict[str, Any],
+        *,
+        host: dict[str, Any] | None = None,
+) -> Path:
+    if host_media_access_for_host(host) == "stream":
+        return Path(str(item["staging_path"]))
+    rel_path = str(item.get("rel_path") or "").strip()
+    if rel_path:
+        return config.staging_root_for_host(host) / Path(rel_path).with_suffix(f".{config.output_container}")
+    return Path(str(item["staging_path"]))
+
+
 def encode_one_item(
-    connection: sqlite3.Connection,
-    config: HarnessConfig,
-    manifest_path: Path,
-    manifest: dict[str, Any],
-    index: int,
-    item: dict[str, Any],
-    *,
-    overwrite: bool,
-    process_controller: ManagedProcessController | None = None,
-    host: dict[str, Any] | None = None,
+        connection: sqlite3.Connection,
+        config: MediaforceConfig,
+        manifest_path: Path,
+        manifest: dict[str, Any],
+        index: int,
+        item: dict[str, Any],
+        *,
+        overwrite: bool,
+        process_controller: ManagedProcessController | None = None,
+        host: dict[str, Any] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> EncodeResult:
-    source_path = Path(item["source_path"])
-    staging_path = Path(item["staging_path"])
+    source_path = resolve_item_source_path(config, item, host=host)
+    staging_path = resolve_item_staging_path(config, item, host=host)
     staging_path.parent.mkdir(parents=True, exist_ok=True)
 
     if staging_path.exists() and not overwrite:
         raise FileExistsError(f"Staging file already exists: {staging_path}")
 
     policy = item["resolved_policy"]
-    quality_result = _search_quality(source_path, policy["video"], process_controller=process_controller)
+    width = int(item.get("width") or 0) or None
+    height = int(item.get("height") or 0) or None
+    preset = effective_video_preset(policy["video"], width=width, height=height)
+    quality_result = _search_quality(
+        source_path,
+        policy["video"],
+        source_codec=str(item.get("video_codec") or ""),
+        width=width,
+        height=height,
+        process_controller=process_controller,
+        host=host,
+    )
     selection = _select_streams(item)
     ffmpeg_cmd = _build_ffmpeg_command(
         source_path=source_path,
         staging_path=staging_path,
+        source_codec=str(item.get("video_codec") or ""),
         video_policy=policy["video"],
+        preset=preset,
         audio_policy=policy["audio"],
         subtitle_policy=policy["subtitle"],
         selection=selection,
         quality=quality_result,
+        host=host,
     )
 
     started_at = timestamp()
-    _record_event(connection, item["library_item_id"], "encoding_started", {"manifest": str(manifest_path), "item_index": index})
+    _record_event(connection, item["library_item_id"], "encoding_started",
+                  {"manifest": str(manifest_path), "item_index": index})
     connection.execute(
         "UPDATE library_items SET status = 'encoding', updated_at = ? WHERE id = ?",
         (started_at, item["library_item_id"]),
@@ -191,6 +291,7 @@ def encode_one_item(
             overwrite=overwrite,
             process_controller=process_controller,
             host=host,
+            progress_callback=progress_callback,
         )
         if result.returncode != 0:
             details = (result.stdout or "").strip()
@@ -210,30 +311,28 @@ def encode_one_item(
 
     connection.execute(
         """
-        INSERT INTO staged_artifacts (
-            library_item_id, manifest_run_id, manifest_path, item_index, source_fingerprint,
-            staging_path, staging_size_bytes, staging_mtime_ns, staging_fingerprint,
-            chosen_crf, quality_metric, quality_target, quality_score, encode_command_json,
-            audio_summary_json, subtitle_summary_json, staged_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(library_item_id) DO UPDATE SET
-            manifest_run_id = excluded.manifest_run_id,
-            manifest_path = excluded.manifest_path,
-            item_index = excluded.item_index,
-            source_fingerprint = excluded.source_fingerprint,
-            staging_path = excluded.staging_path,
-            staging_size_bytes = excluded.staging_size_bytes,
-            staging_mtime_ns = excluded.staging_mtime_ns,
-            staging_fingerprint = excluded.staging_fingerprint,
-            chosen_crf = excluded.chosen_crf,
-            quality_metric = excluded.quality_metric,
-            quality_target = excluded.quality_target,
-            quality_score = excluded.quality_score,
-            encode_command_json = excluded.encode_command_json,
-            audio_summary_json = excluded.audio_summary_json,
-            subtitle_summary_json = excluded.subtitle_summary_json,
-            staged_at = excluded.staged_at,
-            updated_at = excluded.updated_at
+        INSERT INTO staged_artifacts (library_item_id, manifest_run_id, manifest_path, item_index, source_fingerprint,
+                                      staging_path, staging_size_bytes, staging_mtime_ns, staging_fingerprint,
+                                      chosen_crf, quality_metric, quality_target, quality_score, encode_command_json,
+                                      audio_summary_json, subtitle_summary_json, staged_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(library_item_id) DO UPDATE SET manifest_run_id       = excluded.manifest_run_id,
+                                                   manifest_path         = excluded.manifest_path,
+                                                   item_index            = excluded.item_index,
+                                                   source_fingerprint    = excluded.source_fingerprint,
+                                                   staging_path          = excluded.staging_path,
+                                                   staging_size_bytes    = excluded.staging_size_bytes,
+                                                   staging_mtime_ns      = excluded.staging_mtime_ns,
+                                                   staging_fingerprint   = excluded.staging_fingerprint,
+                                                   chosen_crf            = excluded.chosen_crf,
+                                                   quality_metric        = excluded.quality_metric,
+                                                   quality_target        = excluded.quality_target,
+                                                   quality_score         = excluded.quality_score,
+                                                   encode_command_json   = excluded.encode_command_json,
+                                                   audio_summary_json    = excluded.audio_summary_json,
+                                                   subtitle_summary_json = excluded.subtitle_summary_json,
+                                                   staged_at             = excluded.staged_at,
+                                                   updated_at            = excluded.updated_at
         """,
         (
             item["library_item_id"],
@@ -286,19 +385,31 @@ def encode_one_item(
 
 
 def search_quality_for_source(
-    source_path: Path,
-    video_policy: dict[str, Any],
-    *,
-    host: dict[str, Any] | None = None,
+        source_path: Path,
+        video_policy: dict[str, Any],
+        *,
+        source_codec: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        process_controller: ManagedProcessController | None = None,
+        host: dict[str, Any] | None = None,
 ) -> QualitySearchResult:
-    return _search_quality(source_path, video_policy, host=host)
+    return _search_quality(
+        source_path,
+        video_policy,
+        source_codec=source_codec,
+        width=width,
+        height=height,
+        process_controller=process_controller,
+        host=host,
+    )
 
 
 def validate_manifest_items(
-    connection: sqlite3.Connection,
-    config: HarnessConfig,
-    manifest: dict[str, Any],
-    indexes: list[int],
+        connection: sqlite3.Connection,
+        config: MediaforceConfig,
+        manifest: dict[str, Any],
+        indexes: list[int],
 ) -> list[dict[str, Any]]:
     results = []
     for index in indexes:
@@ -308,7 +419,7 @@ def validate_manifest_items(
     return results
 
 
-def validate_one_item(connection: sqlite3.Connection, config: HarnessConfig, item: dict[str, Any]) -> dict[str, Any]:
+def validate_one_item(connection: sqlite3.Connection, config: MediaforceConfig, item: dict[str, Any]) -> dict[str, Any]:
     row = connection.execute(
         "SELECT * FROM staged_artifacts WHERE library_item_id = ?",
         (item["library_item_id"],),
@@ -331,7 +442,8 @@ def validate_one_item(connection: sqlite3.Connection, config: HarnessConfig, ite
 
     _check(validation, staged_probe.video_codec == "av1", "video codec is AV1")
     _check(validation, staged_probe.audio_track_count == 1, "exactly one audio track remains")
-    _check(validation, staged_probe.english_audio_count == staged_probe.audio_track_count, "all audio tracks are tagged English")
+    _check(validation, staged_probe.english_audio_count == staged_probe.audio_track_count,
+           "all audio tracks are tagged English")
 
     source_has_english_subs = _source_has_preservable_subtitles(item.get("subtitle_summary") or [])
     if source_has_english_subs:
@@ -367,11 +479,11 @@ def validate_one_item(connection: sqlite3.Connection, config: HarnessConfig, ite
 
 
 def promote_manifest_items(
-    connection: sqlite3.Connection,
-    config: HarnessConfig,
-    manifest: dict[str, Any],
-    indexes: list[int],
-    force: bool,
+        connection: sqlite3.Connection,
+        config: MediaforceConfig,
+        manifest: dict[str, Any],
+        indexes: list[int],
+        force: bool,
 ) -> list[Path]:
     promoted_paths = []
     for index in indexes:
@@ -380,7 +492,8 @@ def promote_manifest_items(
     return promoted_paths
 
 
-def promote_one_item(connection: sqlite3.Connection, config: HarnessConfig, item: dict[str, Any], *, force: bool) -> Path:
+def promote_one_item(connection: sqlite3.Connection, config: MediaforceConfig, item: dict[str, Any], *,
+                     force: bool) -> Path:
     stage_row = connection.execute(
         "SELECT * FROM staged_artifacts WHERE library_item_id = ?",
         (item["library_item_id"],),
@@ -417,12 +530,31 @@ def promote_one_item(connection: sqlite3.Connection, config: HarnessConfig, item
     connection.execute(
         """
         UPDATE library_items
-        SET source_path = ?, rel_path = ?, parent_dir = ?, file_name = ?, container = ?,
-            size_bytes = ?, mtime_ns = ?, fingerprint = ?, duration_seconds = ?, video_codec = ?,
-            video_bitrate = ?, width = ?, height = ?, pix_fmt = ?, audio_track_count = ?,
-            subtitle_track_count = ?, english_audio_count = ?, english_subtitle_count = ?,
-            default_audio_language = ?, default_subtitle_language = ?, audio_summary_json = ?,
-            subtitle_summary_json = ?, status = 'promoted', updated_at = ?, last_seen_at = ?
+        SET source_path               = ?,
+            rel_path                  = ?,
+            parent_dir                = ?,
+            file_name                 = ?,
+            container                 = ?,
+            size_bytes                = ?,
+            mtime_ns                  = ?,
+            fingerprint               = ?,
+            duration_seconds          = ?,
+            video_codec               = ?,
+            video_bitrate             = ?,
+            width                     = ?,
+            height                    = ?,
+            pix_fmt                   = ?,
+            audio_track_count         = ?,
+            subtitle_track_count      = ?,
+            english_audio_count       = ?,
+            english_subtitle_count    = ?,
+            default_audio_language    = ?,
+            default_subtitle_language = ?,
+            audio_summary_json        = ?,
+            subtitle_summary_json     = ?,
+            status                    = 'promoted',
+            updated_at                = ?,
+            last_seen_at              = ?
         WHERE id = ?
         """,
         (
@@ -456,7 +588,10 @@ def promote_one_item(connection: sqlite3.Connection, config: HarnessConfig, item
     connection.execute(
         """
         UPDATE staged_artifacts
-        SET promoted_at = ?, promoted_path = ?, archived_source_path = ?, updated_at = ?
+        SET promoted_at          = ?,
+            promoted_path        = ?,
+            archived_source_path = ?,
+            updated_at           = ?
         WHERE library_item_id = ?
         """,
         (now, str(destination_path), str(archive_path), now, item["library_item_id"]),
@@ -474,17 +609,25 @@ def promote_one_item(connection: sqlite3.Connection, config: HarnessConfig, item
 
 
 def _search_quality(
-    source_path: Path,
-    video_policy: dict[str, Any],
-    *,
-    process_controller: ManagedProcessController | None = None,
-    host: dict[str, Any] | None = None,
+        source_path: Path,
+        video_policy: dict[str, Any],
+        *,
+        source_codec: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        process_controller: ManagedProcessController | None = None,
+        host: dict[str, Any] | None = None,
 ) -> QualitySearchResult:
+    quality_host = host
+    if host_media_access_for_host(host) == "stream":
+        quality_host = {**(host or {}), "mode": "local"}
     metric_name, default_target = select_quality_metric(str(video_policy.get("quality_metric", "auto")))
     metric_target = float(video_policy.get(f"target_{metric_name.lower()}", default_target))
     min_target = float(video_policy.get(f"min_target_{metric_name.lower()}", metric_target))
-    relax_step = float(video_policy.get(f"target_relax_step_{metric_name.lower()}", 1.0 if metric_name == "xpsnr" else 0.5))
+    relax_step = float(
+        video_policy.get(f"target_relax_step_{metric_name.lower()}", 1.0 if metric_name == "xpsnr" else 0.5))
     svt_params = build_svt_params(video_policy)
+    preset = effective_video_preset(video_policy, width=width, height=height)
     attempted_target = metric_target
     last_error: Exception | None = None
 
@@ -492,9 +635,10 @@ def _search_quality(
         try:
             return run_crf_search(
                 source_path,
+                source_codec=source_codec,
                 preferred_metric=metric_name,
                 metric_target=attempted_target,
-                preset=int(video_policy["preset"]),
+                preset=preset,
                 pixel_format=str(video_policy["pixel_format"]),
                 sample_every=str(video_policy["sample_every"]),
                 sample_duration=str(video_policy["sample_duration"]),
@@ -504,7 +648,7 @@ def _search_quality(
                 svt_params=svt_params,
                 thorough=bool(video_policy.get("thorough", False)),
                 process_controller=process_controller,
-                host=host,
+                host=quality_host,
             )
         except QualitySearchError as exc:
             last_error = exc
@@ -516,18 +660,36 @@ def _search_quality(
 
 
 def _build_ffmpeg_command(
-    *,
-    source_path: Path,
-    staging_path: Path,
-    video_policy: dict[str, Any],
-    audio_policy: dict[str, Any],
-    subtitle_policy: dict[str, Any],
-    selection: dict[str, Any],
-    quality: QualitySearchResult,
+        *,
+        source_path: Path,
+        staging_path: Path,
+        source_codec: str | None,
+        video_policy: dict[str, Any],
+        preset: int,
+        audio_policy: dict[str, Any],
+        subtitle_policy: dict[str, Any],
+        selection: dict[str, Any],
+        quality: QualitySearchResult,
+        host: dict[str, Any] | None = None,
 ) -> list[str]:
+    _ = subtitle_policy
+    mediaforce_tags = {
+        "mediaforce_encoded_by": "mediaforce",
+        "mediaforce_quality_metric": quality.metric,
+        "mediaforce_quality_target": _format_metadata_number(quality.target),
+        "mediaforce_quality_score": _format_metadata_number(quality.score),
+        "mediaforce_chosen_crf": _format_metadata_number(quality.crf),
+    }
     cmd = [
         ffmpeg_binary(),
         "-y",
+        *ffmpeg_hwaccel_input_args(
+            source_codec,
+            platform_name=str((host or {}).get("platform") or "") or None,
+            videotoolbox_available=bool((host or {}).get("videotoolbox_available"))
+            if "videotoolbox_available" in (host or {})
+            else None,
+        ),
         "-i",
         str(source_path),
         "-map_metadata",
@@ -537,6 +699,8 @@ def _build_ffmpeg_command(
         "-map",
         "0:v:0",
     ]
+    for key, value in mediaforce_tags.items():
+        cmd.extend(["-metadata", f"{key}={value}"])
 
     for audio in selection["audio_tracks"]:
         cmd.extend(["-map", f"0:{audio['index']}"])
@@ -550,7 +714,7 @@ def _build_ffmpeg_command(
             "-pix_fmt",
             str(video_policy["pixel_format"]),
             "-preset",
-            str(video_policy["preset"]),
+            str(preset),
             "-crf",
             _format_crf(quality.crf),
             "-svtav1-params",
@@ -585,6 +749,10 @@ def _build_ffmpeg_command(
     return cmd + [str(staging_path)]
 
 
+def _format_metadata_number(value: float) -> str:
+    return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
 def _finalize_output_path(temp_output: Path, staging_path: Path) -> None:
     if temp_output.exists():
         temp_output.replace(staging_path)
@@ -595,21 +763,31 @@ def _finalize_output_path(temp_output: Path, staging_path: Path) -> None:
 
 
 def _run_encode_command(
-    *,
-    ffmpeg_cmd: list[str],
-    temp_output: Path,
-    staging_path: Path,
-    overwrite: bool,
-    process_controller: ManagedProcessController | None,
-    host: dict[str, Any] | None,
+        *,
+        ffmpeg_cmd: list[str],
+        temp_output: Path,
+        staging_path: Path,
+        overwrite: bool,
+        process_controller: ManagedProcessController | None,
+        host: dict[str, Any] | None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    host_mode = str((host or {}).get("mode") or "local")
+    host_mode = execution_mode_for_host(host)
     if host_mode != "ssh":
-        return run_command(
+        return _run_tracked_encode_command(
             ffmpeg_cmd[:-1] + [str(temp_output)],
             process_controller=process_controller,
-            capture_output=True,
-            text=True,
+            progress_callback=progress_callback,
+        )
+
+    if host_media_access_for_host(host) == "stream":
+        return _run_streamed_remote_encode_command(
+            ffmpeg_cmd=ffmpeg_cmd,
+            temp_output=temp_output,
+            source_path=Path(ffmpeg_cmd[ffmpeg_cmd.index("-i") + 1]),
+            process_controller=process_controller,
+            host=host,
+            progress_callback=progress_callback,
         )
 
     ssh_host = str((host or {}).get("key") or (host or {}).get("host") or "").strip()
@@ -618,6 +796,7 @@ def _run_encode_command(
 
     remote_ffmpeg_cmd = list(ffmpeg_cmd[:-1]) + [str(temp_output)]
     remote_ffmpeg_cmd[0] = Path(remote_ffmpeg_cmd[0]).name
+    remote_ffmpeg_cmd = _ffmpeg_command_with_progress(remote_ffmpeg_cmd)
     remote_script_parts = [
         remote_shell_path_export_line(),
         f"mkdir -p {shlex.quote(str(staging_path.parent))}",
@@ -633,13 +812,266 @@ def _run_encode_command(
     )
     ssh_cmd = [
         "ssh",
-        *ssh_client_options(batch_mode=True),
+        *ssh_client_options(),
         ssh_host,
         "sh",
         "-lc",
         " && ".join(remote_script_parts),
     ]
-    return run_command(ssh_cmd, process_controller=process_controller, capture_output=True, text=True)
+    return _run_tracked_process(
+        ssh_cmd,
+        process_controller=process_controller,
+        progress_callback=progress_callback,
+    )
+
+
+def _streaming_output_args_for_path(path: Path) -> list[str]:
+    suffix = path.suffix.lower()
+    if suffix == ".mkv":
+        return ["-f", "matroska"]
+    if suffix in {".mp4", ".m4v", ".mov"}:
+        # Fragmented MP4/MOV can be written to a non-seekable pipe safely.
+        return ["-movflags", "+frag_keyframe+empty_moov+default_base_moof", "-f", "mp4"]
+    if suffix == ".ts":
+        return ["-f", "mpegts"]
+    raise RuntimeError(f"Streaming encode output is not supported for {suffix or 'this file type'}.")
+
+
+def _build_streaming_remote_ffmpeg_command(
+        ffmpeg_cmd: list[str], *, source_path: Path, output_path: Path, executable_path: str | None = None
+) -> list[str]:
+    remote_ffmpeg_cmd = list(ffmpeg_cmd[:-1])
+    remote_ffmpeg_cmd[0] = str(executable_path or Path(remote_ffmpeg_cmd[0]).name)
+    try:
+        source_index = remote_ffmpeg_cmd.index(str(source_path))
+    except ValueError as exc:
+        raise RuntimeError("Streaming encode source path was missing from the ffmpeg command.") from exc
+    remote_ffmpeg_cmd[source_index] = "pipe:0"
+    remote_ffmpeg_cmd = _ffmpeg_command_with_progress(remote_ffmpeg_cmd)
+    return [*remote_ffmpeg_cmd, *_streaming_output_args_for_path(output_path), "pipe:1"]
+
+
+def _run_streamed_remote_encode_command(
+        *,
+        ffmpeg_cmd: list[str],
+        temp_output: Path,
+        source_path: Path,
+        process_controller: ManagedProcessController | None,
+        host: dict[str, Any] | None,
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+) -> subprocess.CompletedProcess[str]:
+    ssh_host = str((host or {}).get("key") or (host or {}).get("host") or "").strip()
+    if not ssh_host:
+        raise RuntimeError("Remote encode host is missing an SSH target.")
+
+    remote_ffmpeg_cmd = _build_streaming_remote_ffmpeg_command(
+        ffmpeg_cmd,
+        source_path=source_path,
+        output_path=temp_output,
+        executable_path=str((host or {}).get("ffmpeg_path") or "") or None,
+    )
+    ssh_cmd = [
+        "ssh",
+        *ssh_client_options(),
+        ssh_host,
+        *remote_ffmpeg_cmd,
+    ]
+
+    process_controller.throw_if_cancelled() if process_controller is not None else None
+    process = subprocess.Popen(ssh_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               bufsize=0)
+    process_handle = cast(subprocess.Popen[str], process)
+    if process_controller is not None:
+        process_controller.attach(process_handle)
+
+    stderr_lines: list[str] = []
+    progress_state: dict[str, str] = {}
+    start_time = time.monotonic()
+
+    def pump_source() -> None:
+        if process.stdin is None:
+            return
+        try:
+            with source_path.open("rb") as source_file:
+                shutil.copyfileobj(source_file, process.stdin, length=1024 * 1024)
+        except BrokenPipeError:
+            return
+        finally:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+
+    def collect_output() -> None:
+        if process.stdout is None:
+            return
+        with temp_output.open("wb") as output_file:
+            shutil.copyfileobj(process.stdout, output_file, length=1024 * 1024)
+        process.stdout.close()
+
+    def consume_stderr() -> None:
+        if process.stderr is None:
+            return
+        stream = io.TextIOWrapper(process.stderr, encoding="utf-8", errors="replace")
+        for line in iter(stream.readline, ""):
+            stderr_lines.append(line)
+            if progress_callback is None:
+                continue
+            snapshot = _update_ffmpeg_progress_state(progress_state, line,
+                                                     elapsed_seconds=time.monotonic() - start_time)
+            if snapshot is not None:
+                progress_callback(snapshot)
+        stream.close()
+
+    source_thread = threading.Thread(target=pump_source, daemon=True)
+    output_thread = threading.Thread(target=collect_output, daemon=True)
+    stderr_thread = threading.Thread(target=consume_stderr, daemon=True)
+    source_thread.start()
+    output_thread.start()
+    stderr_thread.start()
+
+    try:
+        return_code = process.wait()
+    finally:
+        source_thread.join()
+        output_thread.join()
+        stderr_thread.join()
+        if process_controller is not None:
+            process_controller.clear(process_handle)
+
+    if process_controller is not None and process_controller.cancelled:
+        raise ProcessCancelledError("Operation was cancelled.")
+    return subprocess.CompletedProcess(ssh_cmd, return_code, "", "".join(stderr_lines))
+
+
+def _ffmpeg_command_with_progress(command: list[str]) -> list[str]:
+    if command[:3] == [command[0], *ENCODE_PROGRESS_ARGS[:2]]:
+        return command
+    return [command[0], *ENCODE_PROGRESS_ARGS, *command[1:]]
+
+
+def _run_tracked_encode_command(
+        ffmpeg_cmd: list[str],
+        *,
+        process_controller: ManagedProcessController | None,
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+) -> subprocess.CompletedProcess[str]:
+    return _run_tracked_process(
+        _ffmpeg_command_with_progress(ffmpeg_cmd),
+        process_controller=process_controller,
+        progress_callback=progress_callback,
+    )
+
+
+def _run_tracked_process(
+        cmd: list[str],
+        *,
+        process_controller: ManagedProcessController | None,
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+) -> subprocess.CompletedProcess[str]:
+    if process_controller is None and progress_callback is None:
+        return run_command(cmd)
+
+    process_controller.throw_if_cancelled() if process_controller is not None else None
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+    if process_controller is not None:
+        process_controller.attach(process)
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    progress_state: dict[str, str] = {}
+    start_time = time.monotonic()
+
+    def consume_stdout() -> None:
+        if process.stdout is None:
+            return
+        for line in iter(process.stdout.readline, ""):
+            stdout_lines.append(line)
+        process.stdout.close()
+
+    def consume_stderr() -> None:
+        if process.stderr is None:
+            return
+        for line in iter(process.stderr.readline, ""):
+            stderr_lines.append(line)
+            if progress_callback is None:
+                continue
+            snapshot = _update_ffmpeg_progress_state(progress_state, line,
+                                                     elapsed_seconds=time.monotonic() - start_time)
+            if snapshot is not None:
+                progress_callback(snapshot)
+        process.stderr.close()
+
+    stdout_thread = threading.Thread(target=consume_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=consume_stderr, daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+
+    try:
+        return_code = process.wait()
+    finally:
+        stdout_thread.join()
+        stderr_thread.join()
+        if process_controller is not None:
+            process_controller.clear(process)
+
+    if process_controller is not None and process_controller.cancelled:
+        raise ProcessCancelledError("Operation was cancelled.")
+    return subprocess.CompletedProcess(cmd, return_code, "".join(stdout_lines), "".join(stderr_lines))
+
+
+def _update_ffmpeg_progress_state(
+        progress_state: dict[str, str],
+        line: str,
+        *,
+        elapsed_seconds: float,
+) -> dict[str, Any] | None:
+    stripped = line.strip()
+    if not stripped or "=" not in stripped:
+        return None
+    key, value = stripped.split("=", 1)
+    progress_state[key] = value
+    if key != "progress":
+        return None
+    return {
+        "fps": _progress_float(progress_state.get("fps")),
+        "speed": _progress_speed(progress_state.get("speed")),
+        "out_time_seconds": _progress_out_time_seconds(progress_state),
+        "elapsed_seconds": max(elapsed_seconds, 0.0),
+        "progress_state": value,
+    }
+
+
+def _progress_float(value: str | None) -> float | None:
+    try:
+        return float(str(value or "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _progress_speed(value: str | None) -> float | None:
+    text = str(value or "").strip().lower().rstrip("x")
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _progress_out_time_seconds(progress_state: dict[str, str]) -> float | None:
+    raw_microseconds = progress_state.get("out_time_us") or progress_state.get("out_time_ms")
+    if raw_microseconds:
+        try:
+            return float(raw_microseconds) / 1_000_000.0
+        except (TypeError, ValueError):
+            return None
+    text = str(progress_state.get("out_time") or "").strip()
+    if not text:
+        return None
+    try:
+        hours, minutes, seconds = text.split(":", 2)
+        return (int(hours) * 3600) + (int(minutes) * 60) + float(seconds)
+    except (TypeError, ValueError):
+        return None
 
 
 def _select_streams(item: dict[str, Any]) -> dict[str, Any]:
@@ -647,7 +1079,8 @@ def _select_streams(item: dict[str, Any]) -> dict[str, Any]:
     subtitle_tracks = item["subtitle_summary"]
 
     selected_audio = _pick_audio(audio_tracks)
-    selected_subtitles = _pick_subtitles(subtitle_tracks, bool(item["resolved_policy"]["subtitle"].get("prefer_text", True)))
+    selected_subtitles = _pick_subtitles(subtitle_tracks,
+                                         bool(item["resolved_policy"]["subtitle"].get("prefer_text", True)))
 
     return {
         "audio_tracks": [selected_audio],
@@ -660,7 +1093,8 @@ def _pick_audio(audio_tracks: list[dict[str, Any]]) -> dict[str, Any]:
     candidates = english or [track for track in audio_tracks if track.get("language") in {None, "und"}] or audio_tracks
     if not candidates:
         raise ValueError("No audio tracks available")
-    return sorted(candidates, key=lambda track: (-int(track.get("default") or 0), -(int(track.get("channels") or 0)), int(track["index"])))[0]
+    return sorted(candidates, key=lambda track: (-int(track.get("default") or 0), -(int(track.get("channels") or 0)),
+                                                 int(track["index"])))[0]
 
 
 def _pick_subtitles(subtitle_tracks: list[dict[str, Any]], prefer_text: bool) -> list[dict[str, Any]]:
@@ -761,7 +1195,8 @@ def _parse_bitrate_text(value: str) -> int:
     return int(float(stripped))
 
 
-def _record_event(connection: sqlite3.Connection, library_item_id: int, event_type: str, details: dict[str, Any]) -> None:
+def _record_event(connection: sqlite3.Connection, library_item_id: int, event_type: str,
+                  details: dict[str, Any]) -> None:
     connection.execute(
         "INSERT INTO item_events(library_item_id, created_at, event_type, details_json) VALUES (?, ?, ?, ?)",
         (library_item_id, timestamp(), event_type, json.dumps(details, separators=(",", ":"))),

@@ -1,8 +1,5 @@
-from __future__ import annotations
-
 import subprocess
 import threading
-from typing import Any
 
 
 class ProcessCancelledError(RuntimeError):
@@ -63,14 +60,14 @@ class ManagedProcessController:
 
 
 def run_command(
-    cmd: list[str],
-    *,
-    process_controller: ManagedProcessController | None = None,
-    capture_output: bool = True,
-    text: bool = True,
+        cmd: list[str],
+        *,
+        process_controller: ManagedProcessController | None = None,
+        capture_output: bool = True,
+        text: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     if process_controller is None:
-        return subprocess.run(cmd, check=False, capture_output=capture_output, text=text)
+        return subprocess.run(cmd, capture_output=capture_output, text=text)
 
     process_controller.throw_if_cancelled()
     stdout_pipe = subprocess.PIPE if capture_output else None

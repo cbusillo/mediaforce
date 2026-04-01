@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import re
 import subprocess
@@ -8,9 +6,9 @@ from functools import lru_cache
 from pathlib import Path
 
 from mediaforce.binaries import ffmpeg_binary
+from mediaforce.ffmpeg import ab_av1_hwaccel_input_args
 from mediaforce.process_control import ManagedProcessController, run_command
-from mediaforce.remote import run_remote_command
-
+from mediaforce.remote import execution_mode_for_host, run_remote_command
 
 RESULT_RE = re.compile(
     r"crf\s+(?P<crf>[0-9.]+)\s+(?P<metric>VMAF|XPSNR)\s+(?P<score>[0-9.]+)",
@@ -60,21 +58,22 @@ def select_quality_metric(preferred: str) -> tuple[str, float]:
 
 
 def run_crf_search(
-    source_path: Path,
-    *,
-    preferred_metric: str,
-    metric_target: float,
-    preset: int,
-    pixel_format: str,
-    sample_every: str,
-    sample_duration: str,
-    min_crf: int,
-    max_crf: int,
-    max_encoded_percent: int,
-    svt_params: list[str],
-    thorough: bool,
-    process_controller: ManagedProcessController | None = None,
-    host: dict[str, object] | None = None,
+        source_path: Path,
+        *,
+        source_codec: str | None = None,
+        preferred_metric: str,
+        metric_target: float,
+        preset: int,
+        pixel_format: str,
+        sample_every: str,
+        sample_duration: str,
+        min_crf: int,
+        max_crf: int,
+        max_encoded_percent: int,
+        svt_params: list[str],
+        thorough: bool,
+        process_controller: ManagedProcessController | None = None,
+        host: dict[str, object] | None = None,
 ) -> QualitySearchResult:
     metric, _ = select_quality_metric(preferred_metric)
     cmd = [
@@ -99,6 +98,15 @@ def run_crf_search(
         "--max-encoded-percent",
         str(max_encoded_percent),
     ]
+    cmd.extend(
+        ab_av1_hwaccel_input_args(
+            source_codec,
+            platform_name=str((host or {}).get("platform") or "") or None,
+            videotoolbox_available=bool((host or {}).get("videotoolbox_available"))
+            if "videotoolbox_available" in (host or {})
+            else None,
+        )
+    )
     if thorough:
         cmd.append("--thorough")
     for param in svt_params:
@@ -137,17 +145,18 @@ def parse_quality_result(stdout: str) -> QualitySearchResult:
 
 
 def run_sample_encode(
-    source_path: Path,
-    *,
-    preferred_metric: str,
-    crf: float,
-    preset: int,
-    pixel_format: str,
-    sample_every: str,
-    sample_duration: str,
-    svt_params: list[str],
-    process_controller: ManagedProcessController | None = None,
-    host: dict[str, object] | None = None,
+        source_path: Path,
+        *,
+        source_codec: str | None = None,
+        preferred_metric: str,
+        crf: float,
+        preset: int,
+        pixel_format: str,
+        sample_every: str,
+        sample_duration: str,
+        svt_params: list[str],
+        process_controller: ManagedProcessController | None = None,
+        host: dict[str, object] | None = None,
 ) -> SampleEncodeResult:
     metric, _ = select_quality_metric(preferred_metric)
     cmd = [
@@ -170,6 +179,15 @@ def run_sample_encode(
         "--stdout-format",
         "json",
     ]
+    cmd.extend(
+        ab_av1_hwaccel_input_args(
+            source_codec,
+            platform_name=str((host or {}).get("platform") or "") or None,
+            videotoolbox_available=bool((host or {}).get("videotoolbox_available"))
+            if "videotoolbox_available" in (host or {})
+            else None,
+        )
+    )
     for param in svt_params:
         cmd.extend(["--svt", param])
     if metric == "xpsnr":
@@ -210,14 +228,14 @@ def _format_crf(value: float) -> str:
 
 
 def _run_quality_command(
-    cmd: list[str],
-    *,
-    process_controller: ManagedProcessController | None,
-    host: dict[str, object] | None,
+        cmd: list[str],
+        *,
+        process_controller: ManagedProcessController | None,
+        host: dict[str, object] | None,
 ) -> subprocess.CompletedProcess[str]:
-    host_mode = str((host or {}).get("mode") or "local")
+    host_mode = execution_mode_for_host(host)
     if host_mode != "ssh":
-        return run_command(cmd, process_controller=process_controller, capture_output=True, text=True)
+        return run_command(cmd, process_controller=process_controller)
     return run_remote_command(host or {}, cmd, timeout=REMOTE_QUALITY_TIMEOUT_SECONDS)
 
 

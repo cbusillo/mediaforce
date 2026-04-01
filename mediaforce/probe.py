@@ -1,12 +1,9 @@
-from __future__ import annotations
-
 import json
 import subprocess
 from pathlib import Path
 
 from mediaforce.binaries import ffprobe_binary
 from mediaforce.models import ProbeSummary
-
 
 TRACK_FIELDS = ("index", "codec_name", "channels", "bit_rate", "language", "default", "forced")
 
@@ -61,7 +58,8 @@ def probe_media(path: Path) -> ProbeSummary:
         _normalize_language(audio_streams[0]) if audio_streams else None,
     )
     default_subtitle_language = next(
-        (_normalize_language(stream) for stream in subtitle_streams if (stream.get("disposition") or {}).get("default")),
+        (_normalize_language(stream) for stream in subtitle_streams if
+         (stream.get("disposition") or {}).get("default")),
         _normalize_language(subtitle_streams[0]) if subtitle_streams else None,
     )
 

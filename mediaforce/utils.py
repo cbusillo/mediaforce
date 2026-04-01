@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import hashlib
 import os
 from datetime import UTC, datetime
@@ -19,4 +17,4 @@ def file_fingerprint(file_path: Path, stat_result: os.stat_result, duration_seco
             f"{duration_seconds or 0:.3f}",
         ]
     )
-    return hashlib.sha1(material.encode("utf-8"), usedforsecurity=False).hexdigest()
+    return hashlib.sha1(material.encode(), usedforsecurity=False).hexdigest()
