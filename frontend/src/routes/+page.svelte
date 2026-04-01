@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import type {
+		DashboardScanJob,
 		DashboardFoldersPayload,
 		DashboardSummaryPayload,
 		FolderCard as FolderCardData,
@@ -34,19 +35,20 @@
 		};
 	} = $props();
 
-	const initialDashboard = (() => data.dashboard)();
-	const dashboard = $derived(data.dashboard);
+	let dashboardOverride = $state<DashboardSummaryPayload | null>(null);
+	const dashboard = $derived(dashboardOverride ?? data.dashboard);
 	const hosts = $derived(data.hosts);
-	let folders = $state<FolderCardData[]>(initialDashboard.folders_preview);
-	let catalogEmpty = $state(initialDashboard.catalog_empty);
-	let folderLoadState = $state<'loading' | 'ready' | 'error'>(
-		initialDashboard.catalog_empty ? 'ready' : 'loading'
-	);
+	let folders = $state<FolderCardData[]>([]);
+	let catalogEmpty = $state(false);
+	let folderLoadState = $state<'loading' | 'ready' | 'error'>('loading');
 	let folderLoadError = $state<string | null>(null);
 	let activeFolderRequest = 0;
 	let requestedFolderCacheKey = $state<string | null>(null);
 	let pendingStoredDisabledLibraries = $state<string[] | null>(null);
 	let folderLoadController: AbortController | null = null;
+	let dashboardRefreshController: AbortController | null = null;
+	let dashboardRefreshError = $state<string | null>(null);
+	let clockNow = $state(Date.now());
 	const libraryColors = $derived(dashboard.library_colors ?? {});
 	const LIBRARY_FILTER_STORAGE_KEY = 'mediaforce.dashboard.disabledLibraries';
 	const totalEstimatedSavings = $derived.by(() =>
@@ -71,9 +73,19 @@
 			dashboard.calibration_queue.sample.pending_review_count +
 			dashboard.calibration_queue.full.pending_review_count
 	);
+	const calibrationQueueHasWork = $derived.by(
+		() =>
+			dashboard.calibration_queue.sample.running_count +
+				dashboard.calibration_queue.sample.queued_count +
+				dashboard.calibration_queue.full.running_count +
+				dashboard.calibration_queue.full.queued_count >
+			0
+	);
 	const encodeQueueHasWork = $derived.by(
 		() => dashboard.encode_queue.running_count > 0 || dashboard.encode_queue.queued_count > 0
 	);
+	const encodeRunningJobs = $derived(dashboard.encode_queue.running ?? []);
+	const encodeQueueEtaCopy = $derived(dashboard.encode_queue.telemetry?.eta_copy ?? null);
 	const encodeQueueStatus = $derived.by(() => {
 		if (dashboard.encode_queue.state.stop_requested) {
 			return { label: 'Stopping', tone: 'attention' as const };
@@ -101,13 +113,61 @@
 	const metricsReady = $derived(
 		dashboard.metric_support.vmaf && dashboard.metric_support.xpsnr && dashboard.metric_support.ssim
 	);
-	const catalogScanStatus = $derived(String(dashboard.scan_job?.status ?? 'idle'));
+	const catalogScanJob = $derived(dashboard.scan_job as DashboardScanJob | null);
+	const catalogScanStatus = $derived(String(catalogScanJob?.status ?? 'idle'));
 	const catalogScanActive = $derived(
 		catalogScanStatus === 'queued' || catalogScanStatus === 'running'
+	);
+	const catalogScanStats = $derived(
+		catalogScanJob?.stats ?? { items_seen: 0, updated_paths: 0, unchanged: 0 }
+	);
+	const catalogScanLastProgressAt = $derived(
+		catalogScanJob?.last_progress_at ?? catalogScanJob?.started_at ?? null
+	);
+	const catalogScanSecondsSinceProgress = $derived.by(() => {
+		const progressAt = parseIsoDate(catalogScanLastProgressAt);
+		if (!progressAt) {
+			return null;
+		}
+		return Math.max(0, Math.round((clockNow - progressAt.getTime()) / 1000));
+	});
+	const catalogScanLikelyStalled = $derived.by(
+		() => catalogScanStatus === 'running' && (catalogScanSecondsSinceProgress ?? 0) >= 90
 	);
 	const catalogScanHeading = $derived(
 		catalogScanStatus === 'running' ? 'Refreshing libraries now' : 'Library refresh queued'
 	);
+	const catalogScanProgressHeadline = $derived.by(() => {
+		if (catalogScanStatus === 'queued') {
+			return 'The next library refresh is queued and will begin shortly.';
+		}
+		if (catalogScanStats.items_seen > 0) {
+			return `Scanned ${formatCount(catalogScanStats.items_seen)} items so far.`;
+		}
+		return 'Scan worker is active and cataloging the library now.';
+	});
+	const catalogScanStatusCopy = $derived.by(() => {
+		if (dashboardRefreshError) {
+			return `Dashboard updates paused: ${dashboardRefreshError}`;
+		}
+		if (catalogScanLikelyStalled) {
+			return 'Still marked running, but no new progress has been recorded recently. This can happen on a slow mount or if the scan is hung.';
+		}
+		return 'New or changed library roots are being rescanned before this recommendation list updates.';
+	});
+	const catalogScanProgressFacts = $derived.by(() => {
+		const facts: string[] = [];
+		if (catalogScanStats.updated_paths > 0) {
+			facts.push(`${formatCount(catalogScanStats.updated_paths)} new or changed`);
+		}
+		if (catalogScanStats.unchanged > 0) {
+			facts.push(`${formatCount(catalogScanStats.unchanged)} unchanged`);
+		}
+		if (catalogScanLastProgressAt) {
+			facts.push(`Last progress ${formatRelativeTime(catalogScanLastProgressAt, clockNow)}`);
+		}
+		return facts;
+	});
 
 	const folderLibraries = $derived.by(() => {
 		const counts: Record<string, { key: string; label: string; count: number }> = {};
@@ -164,6 +224,7 @@
 	]);
 
 	let queueAction = $state<string | null>(null);
+	let calibrationQueueAction = $state<string | null>(null);
 
 	async function runQueueAction(action: 'pause' | 'resume' | 'stop') {
 		if (
@@ -189,6 +250,31 @@
 		}
 	}
 
+	async function stopCalibrationQueue() {
+		if (
+			browser &&
+			!window.confirm(
+				'Stop active calibrations and clear queued calibration jobs? This cannot be undone.'
+			)
+		) {
+			return;
+		}
+
+		calibrationQueueAction = 'stop';
+		try {
+			const response = await postJson<{ message: string }>(`/api/calibration-queue/stop`, {});
+			toasts.success('Calibration queue updated', response.message);
+			await invalidateAll();
+		} catch (error) {
+			toasts.error(
+				'Calibration queue update failed',
+				error instanceof Error ? error.message : 'Unexpected calibration queue error'
+			);
+		} finally {
+			calibrationQueueAction = null;
+		}
+	}
+
 	async function openHostSettings(hostKey: string) {
 		await goto(resolve('/settings'));
 		window.location.hash = hostSettingsAnchor(hostKey);
@@ -202,6 +288,61 @@
 
 	function enableAllLibraries() {
 		disabledLibraries = [];
+	}
+
+	function parseIsoDate(value: string | null | undefined): Date | null {
+		if (!value) {
+			return null;
+		}
+		const parsed = new Date(value);
+		return Number.isNaN(parsed.getTime()) ? null : parsed;
+	}
+
+	function formatCount(value: number): string {
+		return new Intl.NumberFormat('en-US').format(value);
+	}
+
+	function formatRelativeTime(value: string | null | undefined, now: number): string {
+		const parsed = parseIsoDate(value);
+		if (!parsed) {
+			return 'just now';
+		}
+		const seconds = Math.max(0, Math.round((now - parsed.getTime()) / 1000));
+		if (seconds < 10) {
+			return 'moments ago';
+		}
+		if (seconds < 60) {
+			return `${seconds}s ago`;
+		}
+		const minutes = Math.round(seconds / 60);
+		if (minutes < 60) {
+			return `${minutes}m ago`;
+		}
+		const hours = Math.round(minutes / 60);
+		return `${hours}h ago`;
+	}
+
+	async function loadDashboardSummary() {
+		dashboardRefreshController?.abort();
+		dashboardRefreshController = new AbortController();
+		try {
+			dashboardOverride = await fetchJson<DashboardSummaryPayload>(`/api/dashboard`, fetch, {
+				signal: dashboardRefreshController.signal
+			});
+			dashboardRefreshError = null;
+			clockNow = Date.now();
+			if (dashboardRefreshController.signal.aborted) {
+				return;
+			}
+			dashboardRefreshController = null;
+		} catch (error) {
+			if (error instanceof DOMException && error.name === 'AbortError') {
+				return;
+			}
+			dashboardRefreshError =
+				error instanceof Error ? error.message : 'Unexpected dashboard refresh error';
+			dashboardRefreshController = null;
+		}
 	}
 
 	async function loadFolders(cacheKey: string) {
@@ -265,6 +406,37 @@
 
 	onDestroy(() => {
 		folderLoadController?.abort();
+		dashboardRefreshController?.abort();
+	});
+
+	$effect(() => {
+		if (!browser || !catalogScanActive) {
+			return;
+		}
+
+		clockNow = Date.now();
+		void loadDashboardSummary();
+		const refreshHandle = window.setInterval(() => {
+			void loadDashboardSummary();
+		}, 4000);
+		const clockHandle = window.setInterval(() => {
+			clockNow = Date.now();
+		}, 1000);
+
+		return () => {
+			window.clearInterval(refreshHandle);
+			window.clearInterval(clockHandle);
+		};
+	});
+
+	$effect(() => {
+		if (dashboardOverride !== null) {
+			return;
+		}
+
+		folders = data.dashboard.folders_preview;
+		catalogEmpty = data.dashboard.catalog_empty;
+		folderLoadState = data.dashboard.catalog_empty ? 'ready' : 'loading';
 	});
 
 	$effect(() => {
@@ -390,6 +562,14 @@
 								<span class="queue-pill attention">Pending review: {pendingReviewCount}</span>
 							</div>
 						{/if}
+						<div class="action-row">
+							<Button
+								variant="danger"
+								loading={calibrationQueueAction === 'stop'}
+								disabled={!calibrationQueueHasWork}
+								onclick={stopCalibrationQueue}>Stop + Clean</Button
+							>
+						</div>
 					{:else}
 						<div class="queue-pill-row">
 							<span class={`queue-pill ${encodeQueueStatus.tone}`.trim()}
@@ -426,6 +606,29 @@
 								onclick={() => runQueueAction('stop')}>Stop + Clean</Button
 							>
 						</div>
+						{#if encodeQueueEtaCopy}
+							<p class="queue-telemetry-note muted-copy">Estimated queue finish in {encodeQueueEtaCopy} at the current fleet pace.</p>
+						{/if}
+						{#if encodeRunningJobs.length > 0}
+							<div class="encode-telemetry-list" aria-label="Running encode telemetry">
+								{#each encodeRunningJobs as job (job.job_id)}
+									<div class="encode-telemetry-row">
+										<div>
+											<p class="encode-telemetry-title">{job.prefix}</p>
+											<p class="muted-copy encode-telemetry-detail">
+												{String(job.host?.label ?? job.host?.key ?? 'Worker')}
+												{#if job.progress?.current_item_rel_path}
+													 · {job.progress.current_item_rel_path}
+												{/if}
+											</p>
+										</div>
+										<p class="encode-telemetry-summary">
+											{job.telemetry_summary || job.scheduler_status_copy || 'Running now'}
+										</p>
+									</div>
+								{/each}
+							</div>
+						{/if}
 					{/if}
 				</div>
 			</Panel>
@@ -472,13 +675,31 @@
 				</div>
 			</div>
 			{#if catalogScanActive}
-				<div class="catalog-refresh-banner" role="status" aria-live="polite">
-					<p class="eyebrow-copy">Library Refresh</p>
+				<div
+					class={`catalog-refresh-banner ${catalogScanLikelyStalled ? 'stalled' : 'live'}`.trim()}
+					role="status"
+					aria-live="polite"
+				>
+					<div class="catalog-refresh-header">
+						<p class="eyebrow-copy">Library Refresh</p>
+						<span
+							class={`catalog-refresh-chip ${catalogScanLikelyStalled ? 'stalled' : 'live'}`.trim()}
+						>
+							{catalogScanLikelyStalled ? 'No recent progress' : 'Live progress'}
+						</span>
+					</div>
 					<p>{catalogScanHeading}</p>
 					<p class="muted-copy">
-						New or changed library roots are being rescanned before this recommendation list
-						updates.
+						{catalogScanProgressHeadline}
 					</p>
+					<p class="muted-copy">{catalogScanStatusCopy}</p>
+					{#if catalogScanProgressFacts.length > 0}
+						<div class="catalog-refresh-facts" aria-label="Library scan progress details">
+							{#each catalogScanProgressFacts as fact (fact)}
+								<span>{fact}</span>
+							{/each}
+						</div>
+					{/if}
 				</div>
 			{/if}
 			{#if folderLoadState === 'loading' && folders.length > 0}
@@ -575,11 +796,29 @@
 
 	.catalog-refresh-banner {
 		display: grid;
-		gap: 0.24rem;
+		gap: 0.38rem;
 		padding: 0.78rem 0.88rem;
 		border-radius: var(--radius-md);
 		background: rgba(180, 83, 9, 0.08);
 		border: 1px solid rgba(180, 83, 9, 0.16);
+	}
+
+	.catalog-refresh-banner.live {
+		background: color-mix(in srgb, rgba(15, 118, 110, 0.12) 72%, white);
+		border-color: color-mix(in srgb, rgba(15, 118, 110, 0.24) 82%, white);
+	}
+
+	.catalog-refresh-banner.stalled {
+		background: rgba(180, 83, 9, 0.12);
+		border-color: rgba(180, 83, 9, 0.24);
+	}
+
+	.catalog-refresh-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 0.8rem;
+		flex-wrap: wrap;
 	}
 
 	.catalog-refresh-banner p {
@@ -589,6 +828,50 @@
 	.catalog-refresh-banner p:nth-child(2) {
 		font-weight: 700;
 		color: var(--accent-deep);
+	}
+
+	.catalog-refresh-chip {
+		display: inline-flex;
+		align-items: center;
+		padding: 0.34rem 0.62rem;
+		border-radius: var(--radius-pill);
+		font-size: 0.76rem;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		border: 1px solid rgba(23, 35, 31, 0.12);
+		background: rgba(255, 255, 255, 0.74);
+		color: var(--ink-soft);
+	}
+
+	.catalog-refresh-chip.live {
+		border-color: rgba(15, 118, 110, 0.22);
+		background: rgba(15, 118, 110, 0.12);
+		color: #0f5f59;
+	}
+
+	.catalog-refresh-chip.stalled {
+		border-color: rgba(180, 83, 9, 0.22);
+		background: rgba(180, 83, 9, 0.14);
+		color: #8f450a;
+	}
+
+	.catalog-refresh-facts {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.55rem;
+	}
+
+	.catalog-refresh-facts span {
+		display: inline-flex;
+		align-items: center;
+		padding: 0.34rem 0.56rem;
+		border-radius: var(--radius-pill);
+		font-size: 0.8rem;
+		font-weight: 600;
+		color: var(--ink-soft);
+		background: rgba(255, 255, 255, 0.72);
+		border: 1px solid rgba(23, 35, 31, 0.08);
 	}
 
 	.host-grid {
@@ -724,6 +1007,52 @@
 		display: flex;
 		gap: var(--space-2);
 		flex-wrap: wrap;
+	}
+
+	.queue-telemetry-note {
+		margin: 0;
+		font-size: 0.88rem;
+		line-height: 1.45;
+	}
+
+	.encode-telemetry-list {
+		display: grid;
+		gap: 0.55rem;
+	}
+
+	.encode-telemetry-row {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		gap: 0.9rem;
+		align-items: start;
+		padding: 0.78rem 0.9rem;
+		border-radius: var(--radius-md);
+		background: rgba(255, 255, 255, 0.7);
+		border: 1px solid rgba(23, 35, 31, 0.08);
+	}
+
+	.encode-telemetry-title,
+	.encode-telemetry-detail,
+	.encode-telemetry-summary {
+		margin: 0;
+	}
+
+	.encode-telemetry-title {
+		font-size: 0.92rem;
+		font-weight: 700;
+		color: var(--ink);
+	}
+
+	.encode-telemetry-detail {
+		margin-top: 0.18rem;
+		font-size: 0.84rem;
+	}
+
+	.encode-telemetry-summary {
+		font-size: 0.84rem;
+		font-weight: 700;
+		text-align: right;
+		color: var(--ink-soft);
 	}
 
 	.section-header-row {

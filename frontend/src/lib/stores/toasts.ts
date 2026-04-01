@@ -5,29 +5,84 @@ export type ToastKind = 'success' | 'error' | 'info';
 export type Toast = {
 	id: string;
 	kind: ToastKind;
-	title: string;
-	body: string;
+	eyebrow?: string;
+	heading: string;
+	lede: string;
+	detail?: string;
+	dismissLabel?: string;
+	onDismiss?: () => void;
+	autoCloseMs?: number | null;
 };
 
 const toastsStore = writable<Toast[]>([]);
+const toastTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-function push(kind: ToastKind, title: string, body: string) {
+function clearTimer(id: string) {
+	const timer = toastTimers.get(id);
+	if (!timer) return;
+	clearTimeout(timer);
+	toastTimers.delete(id);
+}
+
+function scheduleRemoval(id: string, autoCloseMs: number | null | undefined) {
+	clearTimer(id);
+	if (autoCloseMs == null || autoCloseMs <= 0) return;
+	const timer = setTimeout(() => {
+		toastTimers.delete(id);
+		toastsStore.update((items) => items.filter((item) => item.id !== id));
+	}, autoCloseMs);
+	toastTimers.set(id, timer);
+}
+
+function upsert(toast: Toast) {
+	let inserted = false;
+	toastsStore.update((items) => {
+		const index = items.findIndex((item) => item.id === toast.id);
+		if (index === -1) {
+			inserted = true;
+			return [toast, ...items];
+		}
+		const next = [...items];
+		next[index] = {
+			...next[index],
+			...toast,
+			id: next[index].id
+		};
+		return next;
+	});
+	scheduleRemoval(toast.id, toast.autoCloseMs);
+	return inserted;
+}
+
+function push(kind: ToastKind, heading: string, lede: string) {
 	const toast: Toast = {
 		id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
 		kind,
-		title,
-		body
+		heading,
+		lede,
+		autoCloseMs: 4500
 	};
-	toastsStore.update((items) => [...items, toast]);
-	setTimeout(() => {
-		toastsStore.update((items) => items.filter((item) => item.id !== toast.id));
-	}, 4500);
+	upsert(toast);
 }
 
 export const toasts = {
 	subscribe: toastsStore.subscribe,
+	upsert,
 	remove(id: string) {
+		clearTimer(id);
 		toastsStore.update((items) => items.filter((item) => item.id !== id));
+	},
+	dismiss(id: string) {
+		let dismissed: Toast | undefined;
+		clearTimer(id);
+		toastsStore.update((items) => {
+			dismissed = items.find((item) => item.id === id);
+			return items.filter((item) => item.id !== id);
+		});
+		const onDismiss = dismissed?.onDismiss;
+		if (onDismiss) {
+			onDismiss();
+		}
 	},
 	success(title: string, body: string) {
 		push('success', title, body);

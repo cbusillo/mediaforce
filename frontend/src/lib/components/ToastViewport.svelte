@@ -1,15 +1,24 @@
 <script lang="ts">
+	import NoticeCard from '$lib/components/NoticeCard.svelte';
 	import { toasts } from '$lib/stores/toasts';
 </script>
 
-<div class="toast-stack">
+<div class="toast-stack" aria-live="polite" aria-atomic="false">
 	{#each $toasts as toast (toast.id)}
-		<div class={`toast ${toast.kind}`}>
-			<div>
-				<p class="eyebrow-copy toast-title">{toast.title}</p>
-				<p class="toast-body">{toast.body}</p>
-			</div>
-			<button aria-label="Dismiss notification" onclick={() => toasts.remove(toast.id)}>×</button>
+		<div
+			class="toast-frame"
+			role={toast.kind === 'error' ? 'alert' : 'status'}
+			aria-live={toast.kind === 'error' ? 'assertive' : 'polite'}
+		>
+			<NoticeCard
+				kind={toast.kind}
+				eyebrow={toast.eyebrow}
+				heading={toast.heading}
+				lede={toast.lede}
+				detail={toast.detail}
+				dismissLabel={toast.dismissLabel ?? 'Dismiss'}
+				onDismiss={() => toasts.dismiss(toast.id)}
+			/>
 		</div>
 	{/each}
 </div>
@@ -17,48 +26,23 @@
 <style>
 	.toast-stack {
 		position: fixed;
-		top: 1.2rem;
-		right: 1.2rem;
-		z-index: 50;
+		top: clamp(1rem, 2vw, 1.35rem);
+		right: clamp(1rem, 2vw, 1.35rem);
+		z-index: 60;
 		display: grid;
 		gap: var(--space-2);
-		width: min(380px, calc(100vw - 2rem));
+		width: min(28rem, calc(100vw - 2rem));
 	}
 
-	.toast {
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto;
-		gap: var(--space-2);
-		align-items: start;
-		padding: 0.95rem 1rem;
-		border-radius: 1.1rem;
-		border: 1px solid var(--border);
-		background: rgba(255, 252, 246, 0.97);
-		box-shadow: var(--shadow-md);
-		backdrop-filter: blur(20px);
+	.toast-frame {
+		width: 100%;
 	}
 
-	.toast.success {
-		border-color: rgba(47, 107, 62, 0.2);
-	}
-
-	.toast.error {
-		border-color: rgba(194, 65, 12, 0.24);
-	}
-
-	.toast-title {
-		margin-bottom: 0.2rem;
-	}
-
-	.toast-body {
-		color: var(--ink-muted);
-		line-height: 1.45;
-	}
-
-	button {
-		width: 2rem;
-		height: 2rem;
-		border-radius: 999px;
-		color: var(--ink-soft);
+	@media (max-width: 640px) {
+		.toast-stack {
+			left: 1rem;
+			right: 1rem;
+			width: auto;
+		}
 	}
 </style>

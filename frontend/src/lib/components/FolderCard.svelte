@@ -26,6 +26,7 @@
 		folder.item_count > 0 ? Math.round((completedCount / folder.item_count) * 100) : 0
 	);
 	const cardThemeStyle = $derived(folderLibraryThemeStyle(libraryColor));
+	const reviewBadgeTone = $derived(folder.review_badge_tone ?? 'neutral');
 	const folderFacts = $derived.by(() => [
 		{ label: 'Estimated reclaim', value: formatGiB(folder.estimated_savings_bytes) },
 		{ label: 'Current size', value: formatGiB(folder.total_size_bytes, 2) },
@@ -44,6 +45,9 @@
 				<div class="badge-row">
 					<span class="folder-badge library">{libraryLabel}</span>
 					<span class="folder-badge scope">{scopeBadgeLabel}</span>
+					{#if folder.review_badge_label}
+						<span class={`folder-badge review ${reviewBadgeTone}`.trim()}>{folder.review_badge_label}</span>
+					{/if}
 				</div>
 				<p class="path-line">{folder.prefix}</p>
 			</div>
@@ -160,6 +164,30 @@
 	.folder-badge.scope {
 		background: var(--library-surface);
 		color: var(--library-text);
+	}
+
+	.folder-badge.review {
+		border-color: rgba(15, 118, 110, 0.18);
+		background: rgba(15, 118, 110, 0.09);
+		color: var(--accent-deep);
+	}
+
+	.folder-badge.review.ok {
+		background: rgba(47, 107, 62, 0.12);
+		border-color: rgba(47, 107, 62, 0.2);
+		color: var(--ok);
+	}
+
+	.folder-badge.review.warning {
+		background: rgba(194, 65, 12, 0.12);
+		border-color: rgba(194, 65, 12, 0.2);
+		color: var(--warn);
+	}
+
+	.folder-badge.review.attention {
+		background: rgba(15, 118, 110, 0.09);
+		border-color: rgba(15, 118, 110, 0.18);
+		color: var(--accent-deep);
 	}
 
 	.card-body {

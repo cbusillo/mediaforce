@@ -17,6 +17,8 @@ export interface FolderCard {
 	sort_score: number;
 	statuses: Record<string, number>;
 	video_codecs: Record<string, number>;
+	review_badge_label?: string | null;
+	review_badge_tone?: string | null;
 	details_loading: boolean;
 }
 
@@ -29,14 +31,50 @@ export interface QueueLane {
 	pending_review_count: number;
 }
 
+export interface EncodeJobProgressTelemetry {
+	total_duration_seconds?: number;
+	remaining_duration_seconds?: number;
+	percent_complete?: number;
+	fps?: number | null;
+	speed?: number | null;
+	eta_seconds?: number | null;
+	eta_copy?: string | null;
+	current_item_number?: number;
+	total_item_count?: number;
+	current_item_rel_path?: string;
+	progress_state?: string;
+}
+
+export interface EncodeQueueJob {
+	job_id: string;
+	prefix: string;
+	status: string;
+	host?: Record<string, unknown>;
+	queue_position?: number;
+	queue_depth?: number;
+	schedule_waiting?: boolean;
+	scheduler_status_copy?: string;
+	telemetry_summary?: string;
+	progress?: EncodeJobProgressTelemetry | null;
+}
+
+export interface EncodeQueueTelemetry {
+	aggregate_speed?: number | null;
+	eta_seconds?: number | null;
+	eta_copy?: string | null;
+	running_jobs?: number;
+	queued_jobs?: number;
+}
+
 export interface EncodeQueueSummary {
 	running_count: number;
 	queued_count: number;
 	queued_waiting_count?: number;
 	needs_attention_count?: number;
-	running: Array<Record<string, unknown>>;
-	queued: Array<Record<string, unknown>>;
-	recent?: Array<Record<string, unknown>>;
+	running: EncodeQueueJob[];
+	queued: EncodeQueueJob[];
+	recent?: EncodeQueueJob[];
+	telemetry?: EncodeQueueTelemetry;
 	state: {
 		is_paused: boolean;
 		stop_requested: boolean;
@@ -45,10 +83,27 @@ export interface EncodeQueueSummary {
 	};
 }
 
+export interface DashboardScanJob {
+	job_id: string;
+	status: string;
+	scope: string;
+	prefix: string | null;
+	created_at: string | null;
+	started_at: string | null;
+	last_progress_at?: string | null;
+	finished_at: string | null;
+	error: string | null;
+	stats: {
+		items_seen: number;
+		updated_paths: number;
+		unchanged: number;
+	} | null;
+}
+
 export interface DashboardSummaryPayload {
 	folders_preview: FolderCard[];
 	library_colors: Record<string, string>;
-	scan_job: Record<string, unknown> | null;
+	scan_job: DashboardScanJob | null;
 	calibration_queue: {
 		sample: QueueLane;
 		full: QueueLane;
@@ -86,6 +141,11 @@ export interface HostRuntime {
 	active_reason: string;
 	repo_path?: string;
 	queue_active?: boolean;
+	setup_supported?: boolean;
+	setup_requires_password?: boolean;
+	trust_reset_supported?: boolean;
+	running_jobs?: EncodeQueueJob[];
+	telemetry?: EncodeQueueTelemetry;
 }
 
 export interface HostsPayload {
@@ -106,10 +166,16 @@ export interface SettingsHost {
 	host: string;
 	repo_path: string;
 	wake_mac: string;
+	start_command: string;
+	stop_command: string;
+	start_timeout_seconds: string;
+	media_access: string;
 	priority: string;
 	max_parallel_encodes: string;
 	schedule_profile: string;
 	capabilities: string[];
+	source_roots_json: string;
+	staging_root: string;
 }
 
 export interface ScheduleProfile {
@@ -164,6 +230,8 @@ export interface FolderPayload {
 	policy?: Record<string, unknown>;
 	hot_spots?: number[];
 	calibration?: Record<string, unknown> | null;
+	advice?: Record<string, unknown> | null;
+	pending_proposal?: Record<string, unknown> | null;
 	review_gate?: Record<string, unknown>;
 	calibration_queue?: Record<string, unknown>;
 	calibration_job?: Record<string, unknown> | null;
@@ -171,12 +239,13 @@ export interface FolderPayload {
 	metric_support: MetricSupport;
 	metric_status_copy: string;
 	resolved_metric?: string;
+	recent_tuning_sessions?: Array<Record<string, unknown>>;
 	sample_host_key?: string;
 	sample_host_options?: Array<Record<string, unknown>>;
 	sample_host_help_text?: string;
-	encode_job?: Record<string, unknown> | null;
-	encode_queue?: Record<string, unknown>;
-	encode_queue_state?: Record<string, unknown>;
+	encode_job?: EncodeQueueJob | null;
+	encode_queue?: EncodeQueueSummary;
+	encode_queue_state?: EncodeQueueSummary['state'];
 	encode_queue_summary?: string;
 	encode_queue_scheduler?: Record<string, unknown>;
 }

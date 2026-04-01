@@ -55,7 +55,7 @@
 			return {
 				label: 'Needs attention',
 				message: host.message,
-				detail: host.issues[0] ?? null,
+				detail: host.detail,
 				linkLabel: onSettingsClick ? 'Open host settings' : null
 			};
 		}
@@ -158,12 +158,37 @@
 				{/each}
 			</div>
 		</div>
+		{#if host.running_jobs && host.running_jobs.length > 0}
+			<div class="running-job-list" aria-label="Active encode jobs on this host">
+				{#each host.running_jobs as job (job.job_id)}
+					<div class="running-job-row">
+						<div>
+							<p class="running-job-title">{job.prefix}</p>
+							<p class="muted-copy running-job-detail">
+								{job.progress?.current_item_rel_path ?? 'Starting encode'}
+							</p>
+						</div>
+						<p class="running-job-summary">{job.telemetry_summary || job.scheduler_status_copy || 'Running now'}</p>
+					</div>
+				{/each}
+			</div>
+		{/if}
 	{/if}
 
 	{#if attentionCard}
 		<div class="issues-box">
 			<p class="attention-kicker">{attentionCard.label}</p>
 			<p>{attentionCard.message}</p>
+			{#if host.issues.length > 0 || host.missing_paths.length > 0}
+				<ul class="issue-list">
+					{#each host.issues as issue (issue)}
+						<li>{issue}</li>
+					{/each}
+					{#each host.missing_paths as path (path)}
+						<li>Missing path: {path}</li>
+					{/each}
+				</ul>
+			{/if}
 			{#if attentionCard.detail}
 				<p class="muted-copy">{attentionCard.detail}</p>
 			{/if}
@@ -429,6 +454,57 @@
 
 	.issues-box p {
 		margin: 0;
+	}
+
+	.issue-list {
+		margin: 0;
+		padding-left: 1rem;
+		display: grid;
+		gap: 0.22rem;
+		color: var(--text-muted);
+		font-size: 0.88rem;
+		line-height: 1.45;
+	}
+
+	.running-job-list {
+		display: grid;
+		gap: 0.42rem;
+		padding-top: 0.1rem;
+	}
+
+	.running-job-row {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		gap: 0.7rem;
+		align-items: start;
+		padding: 0.68rem 0.78rem;
+		border-radius: var(--radius-md);
+		background: rgba(255, 255, 255, 0.72);
+		border: 1px solid rgba(23, 35, 31, 0.08);
+	}
+
+	.running-job-title,
+	.running-job-summary,
+	.running-job-detail {
+		margin: 0;
+	}
+
+	.running-job-title {
+		font-size: 0.9rem;
+		font-weight: 700;
+		color: var(--ink);
+	}
+
+	.running-job-detail {
+		margin-top: 0.18rem;
+		font-size: 0.84rem;
+	}
+
+	.running-job-summary {
+		text-align: right;
+		font-size: 0.84rem;
+		font-weight: 700;
+		color: var(--ink-soft);
 	}
 
 	.attention-link {
