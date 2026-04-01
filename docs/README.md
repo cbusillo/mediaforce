@@ -13,3 +13,8 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 
 - `docs/architecture/module-boundaries.md`: durable backend/frontend module
   boundary map after the structural refactor pass
+
+## Developer workflows
+
+- `docs/development/database-tooling.md`: PyCharm and SQLite schema workflow for
+  `mediaforce/core/sql/`
