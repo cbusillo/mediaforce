@@ -5,9 +5,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from mediaforce.config import MediaforceConfig
-from mediaforce.planner import build_manifest_item, recommend_item
-from mediaforce.scanner import scan_library
+from mediaforce.core.config import MediaforceConfig
+from mediaforce.library.planner import build_manifest_item, recommend_item
+from mediaforce.library.scanner import scan_library
 
 
 def select_candidates(

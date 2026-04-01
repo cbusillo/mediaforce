@@ -4,7 +4,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from mediaforce.config import MediaforceConfig
+from mediaforce.core.config import MediaforceConfig
 
 
 def inspect_prefix(connection: sqlite3.Connection, config: MediaforceConfig, prefix: str) -> dict[str, Any]:

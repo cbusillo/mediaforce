@@ -54,4 +54,5 @@ Only session-start facts that are easy to miss belong here.
 - `README.md`: durable operator and developer overview
 - `docs/README.md`: docs table of contents
 - `docs/TODO.md`: current priorities
-- `docs/HANDOFF.md`: current-session handoff notes
+- `docs/architecture/module-boundaries.md`: durable backend/frontend module
+  boundaries after the structural refactor pass

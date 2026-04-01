@@ -5,8 +5,8 @@ from typing import Any
 import sqlite3
 import time
 
-from mediaforce.config import MediaforceConfig
-from mediaforce.encode_queue import list_encode_jobs
+from mediaforce.core.config import MediaforceConfig
+from mediaforce.encoding.encode_queue import list_encode_jobs
 from mediaforce.remote import HostStatus, collect_host_statuses, host_status_targets_current_machine, \
     normalize_host_media_access, run_host_lifecycle_command
 

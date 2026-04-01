@@ -1,10 +1,10 @@
-from dataclasses import dataclass
-from pathlib import Path
 import sqlite3
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
 
-from mediaforce.config import MediaforceConfig
+from mediaforce.core.config import MediaforceConfig
 
 FolderGroup = tuple[str, str, str, str]
 FolderBadge = dict[str, str | None]
@@ -212,7 +212,7 @@ def folder_card_cache_key(config: MediaforceConfig) -> tuple[str, int, int]:
         db_mtime_ns = config.paths.db_path.stat().st_mtime_ns
     except OSError:
         db_mtime_ns = 0
-    return (str(config.paths.db_path), db_mtime_ns, _web_state_latest_mtime_ns(config))
+    return str(config.paths.db_path), db_mtime_ns, _web_state_latest_mtime_ns(config)
 
 
 def _path_mtime_ns(path: Path) -> int:

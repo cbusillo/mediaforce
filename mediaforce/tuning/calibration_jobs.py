@@ -2,7 +2,7 @@ import json
 import sqlite3
 from typing import Any, TypeVar
 
-from mediaforce.type_defs import JSONValue
+from mediaforce.core.type_defs import JSONValue
 
 T = TypeVar("T")
 

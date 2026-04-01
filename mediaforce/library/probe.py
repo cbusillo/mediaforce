@@ -2,8 +2,8 @@ import json
 import subprocess
 from pathlib import Path
 
-from mediaforce.binaries import ffprobe_binary
-from mediaforce.models import ProbeSummary
+from mediaforce.core.binaries import ffprobe_binary
+from mediaforce.core.models import ProbeSummary
 
 TRACK_FIELDS = ("index", "codec_name", "channels", "bit_rate", "language", "default", "forced")
 

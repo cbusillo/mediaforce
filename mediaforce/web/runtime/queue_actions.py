@@ -1,9 +1,9 @@
 from typing import Any
 import sqlite3
 
-from mediaforce.calibration_jobs import load_job
-from mediaforce.config import MediaforceConfig
-from mediaforce.encode_queue import load_queue_state, save_queue_state
+from mediaforce.tuning.calibration_jobs import load_job
+from mediaforce.core.config import MediaforceConfig
+from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
 
 
 def pause_encode_queue_action(*, connection_factory: Any, config: MediaforceConfig, now_iso: Any) -> dict[str, Any]:

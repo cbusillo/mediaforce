@@ -6,10 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from mediaforce.config import MediaforceConfig
-from mediaforce.planner import recommend_item
-from mediaforce.probe import probe_media
-from mediaforce.utils import file_fingerprint, timestamp
+from mediaforce.core.config import MediaforceConfig
+from mediaforce.library.planner import recommend_item
+from mediaforce.library.probe import probe_media
+from mediaforce.core.utils import file_fingerprint, timestamp
 
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mp4", ".ts"}
 SCAN_COMMIT_INTERVAL = 25

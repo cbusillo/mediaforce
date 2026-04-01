@@ -46,7 +46,9 @@
 					<span class="folder-badge library">{libraryLabel}</span>
 					<span class="folder-badge scope">{scopeBadgeLabel}</span>
 					{#if folder.review_badge_label}
-						<span class={`folder-badge review ${reviewBadgeTone}`.trim()}>{folder.review_badge_label}</span>
+						<span class={`folder-badge review ${reviewBadgeTone}`.trim()}
+							>{folder.review_badge_label}</span
+						>
 					{/if}
 				</div>
 				<p class="path-line">{folder.prefix}</p>

@@ -7,17 +7,23 @@ from unittest.mock import patch
 from mediaforce.advisor import (
     RUN_VERDICT_PROMPT_VERSION,
     SEED_PROMPT_VERSION,
+    _build_prompt,
     _build_tune_prompt,
+    _extract_seed_payload,
     _memory_disabled_code_args,
+    _policy_response_schema,
+    _build_run_verdict_prompt,
+    _try_load_first_json_object,
     _build_seed_prompt,
     apply_seed_policy,
     request_seed_policy,
+    request_tuning_advice,
     request_note_tuning,
     request_run_verdict,
 )
-from mediaforce.config import ConfigPaths, MediaforceConfig
-from mediaforce.db import open_db
-from mediaforce.tuning_memory import (
+from mediaforce.core.config import ConfigPaths, MediaforceConfig
+from mediaforce.core.db import open_db
+from mediaforce.tuning.tuning_memory import (
     promote_learning_artifact,
     record_tuning_session,
     record_visual_approval_artifact,
@@ -115,6 +121,28 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(response.proposed_policy["video"]["target_xpsnr"], 34.5)
         self.assertEqual(response.request_disposition, "honored")
         self.assertIn("smaller", response.request_response)
+        self.assertTrue(commands)
+        self.assertEqual(commands[0][1:7], _memory_disabled_code_args())
+
+    def test_request_tuning_advice_reads_last_message_output(self) -> None:
+        commands: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(kwargs, dict)
+            commands.append(cmd)
+            output_index = cmd.index("--output-last-message") + 1
+            Path(cmd[output_index]).write_text("Recommendation\nTry one smaller sample.")
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+            response = request_tuning_advice(
+                project_root=self.root,
+                payload={"folder": "tv/House/Season 2", "sample_result": {"quality_score": 91.4}},
+            )
+
+        self.assertTrue(response.ok)
+        self.assertEqual(response.summary, "Recommendation")
+        self.assertIn("smaller sample", response.raw)
         self.assertTrue(commands)
         self.assertEqual(commands[0][1:7], _memory_disabled_code_args())
 
@@ -750,6 +778,45 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("clean 1080p catalog TV", prompt)
         self.assertIn("request_response", prompt)
         self.assertIn("honored_with_risk", prompt)
+
+    def test_extract_seed_payload_recovers_json_object_from_wrapped_text(self) -> None:
+        raw = "Here you go:\n```json\n{\"summary\":\"safe\",\"policy\":{\"video\":{}}}\n```"
+
+        payload = _extract_seed_payload(raw)
+
+        self.assertEqual(payload["summary"], "safe")
+        self.assertEqual(payload["policy"], {"video": {}})
+
+    def test_try_load_first_json_object_skips_leading_text(self) -> None:
+        raw = "noise before {\"status\":\"pass\",\"summary\":\"ok\",\"issues\":[]} trailing"
+
+        payload = _try_load_first_json_object(raw)
+
+        assert isinstance(payload, dict)
+        self.assertEqual(payload["status"], "pass")
+
+    def test_policy_response_schema_tracks_policy_shape(self) -> None:
+        schema = _policy_response_schema(
+            {
+                "video": {"target_vmaf": 95.0, "thorough": True},
+                "audio": {"keep_languages": ["eng"], "stereo_opus_bitrate": "128k"},
+                "subtitle": {"prefer_text": True},
+            }
+        )
+
+        self.assertEqual(schema["required"], ["video", "audio", "subtitle"])
+        self.assertEqual(schema["properties"]["video"]["properties"]["target_vmaf"]["type"], ["number", "null"])
+        self.assertEqual(schema["properties"]["video"]["properties"]["thorough"]["type"], ["boolean", "null"])
+        self.assertEqual(schema["properties"]["audio"]["properties"]["keep_languages"]["type"], ["array", "null"])
+
+    def test_generic_and_verdict_prompts_embed_context_and_shape(self) -> None:
+        generic_prompt = _build_prompt({"folder": "tv/House/Season 2", "sample": {"score": 91.4}})
+        verdict_prompt = _build_run_verdict_prompt({"folder": "tv/House/Season 2", "sample_result": {"quality_score": 91.4}})
+
+        self.assertIn("Recommendation, Why, Setting changes, Audio/Subtitles notes", generic_prompt)
+        self.assertIn("tv/House/Season 2", generic_prompt)
+        self.assertIn("acceptable_experiment", verdict_prompt)
+        self.assertIn("sample_result", verdict_prompt)
 
     def test_tune_prompt_mentions_review_media_conversation(self) -> None:
         prompt = _build_tune_prompt(

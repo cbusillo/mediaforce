@@ -3,10 +3,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-from mediaforce.config import MediaforceConfig
-from mediaforce.encode_queue import DEFAULT_SCHEDULER_POLICY
+from mediaforce.core.config import MediaforceConfig
+from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY
 from mediaforce.remote import DEFAULT_HOST_CAPABILITIES, DEFAULT_HOST_MEDIA_ACCESS, normalize_host_media_access
-from mediaforce.type_defs import JSONValue
+from mediaforce.core.type_defs import JSONValue
 
 DEFAULT_LIBRARY_COLOR_PALETTE = (
     "#a16207",

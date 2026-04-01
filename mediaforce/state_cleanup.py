@@ -2,7 +2,7 @@ import shutil
 import time
 from pathlib import Path
 
-from mediaforce.config import MediaforceConfig
+from mediaforce.core.config import MediaforceConfig
 
 SECONDS_PER_DAY = 86400
 SECONDS_PER_MINUTE = 60

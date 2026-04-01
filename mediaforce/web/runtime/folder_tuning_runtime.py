@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from mediaforce.config import MediaforceConfig
+from mediaforce.core.config import MediaforceConfig
 from mediaforce.execution import describe_item_plan, estimate_output_overhead_bytes
 from mediaforce.review import render_audio_spectrogram_compare, render_review_contact_sheet
 

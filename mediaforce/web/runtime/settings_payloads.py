@@ -1,6 +1,6 @@
 from typing import Any
 
-from mediaforce.config import MediaforceConfig
+from mediaforce.core.config import MediaforceConfig
 from mediaforce.web.settings_runtime import HOST_CAPABILITY_OPTIONS, index_schedule_profile_rows, \
     index_settings_library_rows, index_settings_remote_rows, schedule_profile_options, settings_archive_root, \
     settings_library_rows_for_config, settings_remote_rows_for_config, settings_schedule_profile_rows_for_config, \

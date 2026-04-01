@@ -2,13 +2,14 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
-from mediaforce.scanner import scan_library
+from mediaforce.library.scanner import scan_library
 
 
 class _FakeCursor:
     rowcount = -1
 
-    def fetchone(self) -> None:
+    @staticmethod
+    def fetchone() -> None:
         return None
 
 

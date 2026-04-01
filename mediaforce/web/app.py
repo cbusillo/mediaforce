@@ -4,19 +4,15 @@ import logging
 import os
 import re
 import shutil
-import socket
 import sqlite3
-import subprocess
 import threading
 import time
-import uuid
 from collections.abc import Awaitable, Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
@@ -27,18 +23,14 @@ from mediaforce.advisor import (
     AdvisorResponse,
     TuningPolicyResponse,
     apply_seed_policy,
-    request_run_verdict,
-    request_seed_policy,
 )
-from mediaforce.binaries import ffmpeg_binary
-from mediaforce.calibration_jobs import load_active_job, load_job, \
+from mediaforce.tuning.calibration_jobs import load_active_job, load_job, \
     list_queue_summary
-from mediaforce.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, load_runtime_settings, \
+from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, load_runtime_settings, \
     save_runtime_settings
-from mediaforce.db import open_db
-from mediaforce.encode_queue import DEFAULT_SCHEDULER_POLICY, ensure_queue_state, list_encode_jobs, \
-    load_active_encode_job, load_encode_job, load_latest_encode_job, load_queue_state, \
-    queue_position as encode_queue_position, save_encode_job, save_queue_state, summarize_encode_queue
+from mediaforce.core.db import open_db
+from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY, ensure_queue_state, load_latest_encode_job, \
+    queue_position as encode_queue_position, save_encode_job, summarize_encode_queue
 from mediaforce.execution import (
     build_svt_params,
     describe_item_plan,
@@ -48,15 +40,13 @@ from mediaforce.execution import (
     search_quality_for_source,
     validate_manifest_items,
 )
-from mediaforce.folder_profiles import inspect_prefix
-from mediaforce.planner import build_manifest_item
-from mediaforce.process_control import ManagedProcessController, ProcessCancelledError
-from mediaforce.quality import run_sample_encode, select_quality_metric
+from mediaforce.library.folder_profiles import inspect_prefix
+from mediaforce.library.planner import build_manifest_item
+from mediaforce.core.process_control import ManagedProcessController
+from mediaforce.encoding.quality import run_sample_encode, select_quality_metric
 from mediaforce.remote import (
-    DEFAULT_HOST_MEDIA_ACCESS,
     HostStatus,
     collect_host_statuses,
-    host_status_targets_current_machine,
     prepare_remote_host_with_password,
     reset_remote_host_trust,
     run_host_lifecycle_command,
@@ -69,10 +59,12 @@ from mediaforce.review import (
     render_source_review_clips,
 )
 from mediaforce.state_cleanup import purge_transient_artifacts
-from mediaforce.tuning_memory import (
+from mediaforce.tuning.tuning_memory import (
     record_visual_approval_artifact,
 )
-from mediaforce.type_defs import JSONValue
+from mediaforce.core.type_defs import JSONValue
+from mediaforce.web.routes import register_dashboard_routes, register_folder_routes, register_frontend_routes, \
+    register_host_routes, register_queue_routes, register_settings_routes
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_folders_payload, \
     dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
@@ -89,6 +81,49 @@ from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_fo
     sample_calibration_host_statuses, sample_host_options, sample_host_options_from_statuses, \
     settings_page_payload, stop_calibration_queue_action, stop_encode_queue_action, \
     build_multimodal_review_pack, build_tuning_runtime_toolbelt
+from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
+    restore_staged_artifact as runtime_restore_staged_artifact, \
+    run_calibration_job as runtime_run_calibration_job, \
+    run_full_calibration as runtime_run_full_calibration, \
+    run_sampled_calibration as runtime_run_sampled_calibration, \
+    remove_path as runtime_remove_path, snapshot_staged_artifact as runtime_snapshot_staged_artifact
+from mediaforce.web.runtime.encode_runtime import EncodeQueueRuntimeDeps, \
+    encode_job_heartbeat_loop as runtime_encode_job_heartbeat_loop, \
+    encode_job_manifest_totals as runtime_encode_job_manifest_totals, \
+    encode_queue_worker_loop as runtime_encode_queue_worker_loop, \
+    load_next_runnable_encode_job as runtime_load_next_runnable_encode_job, \
+    process_encode_queue_once as runtime_process_encode_queue_once, \
+    reconcile_encode_jobs as runtime_reconcile_encode_jobs, \
+    recover_encode_queue as runtime_recover_encode_queue, \
+    run_encode_job as runtime_run_encode_job, \
+    select_encode_host as runtime_select_encode_host, \
+    transition_encode_job_failure as runtime_transition_encode_job_failure
+from mediaforce.web.runtime.encode_scheduler import EncodeSchedulerDeps, \
+    decorate_encode_job_for_scheduler as runtime_decorate_encode_job_for_scheduler, \
+    decorate_encode_queue_for_scheduler as runtime_decorate_encode_queue_for_scheduler, \
+    encode_queue_schedule_profiles as runtime_encode_queue_schedule_profiles, \
+    encode_queue_scheduler_policy as runtime_encode_queue_scheduler_policy, \
+    encode_queue_summary_copy as runtime_encode_queue_summary_copy, \
+    format_eta_seconds as runtime_format_eta_seconds, \
+    host_schedule_now as runtime_host_schedule_now, \
+    schedule_profile_policy_for_host as runtime_schedule_profile_policy_for_host, \
+    scheduler_allows_encode_run as runtime_scheduler_allows_encode_run
+from mediaforce.web.runtime.folder_tuning_advice import build_run_verdict_payload as runtime_build_run_verdict_payload, \
+    build_seed_policy_payload as runtime_build_seed_policy_payload, \
+    calibration_draft_hash as runtime_calibration_draft_hash, \
+    job_seed_metadata as runtime_job_seed_metadata, metric_status_copy as runtime_metric_status_copy, \
+    metric_support as runtime_metric_support, \
+    maybe_seed_baseline_policy as runtime_maybe_seed_baseline_policy, \
+    operator_requested_experiment as runtime_operator_requested_experiment, \
+    parse_audio_bitrate_kbps as runtime_parse_audio_bitrate_kbps, \
+    record_run_verdict as runtime_record_run_verdict, review_gate as runtime_review_gate, \
+    sample_audio_target_kbps as runtime_sample_audio_target_kbps, \
+    seed_advice_payload as runtime_seed_advice_payload, \
+    summarize_calibration_result as runtime_summarize_calibration_result, \
+    tuning_advice_payload as runtime_tuning_advice_payload, \
+    tuning_policy_focus as runtime_tuning_policy_focus, \
+    tuning_policy_key_paths as runtime_tuning_policy_key_paths, \
+    apply_policy_fragment as runtime_apply_policy_fragment
 from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_db as runtime_active_scan_from_db, \
     CalibrationQueueRuntimeDeps, calibration_queue_worker_loop as runtime_calibration_queue_worker_loop, \
     calibration_job_belongs_to_current_process as runtime_calibration_job_belongs_to_current_process, \
@@ -96,45 +131,27 @@ from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_
     expire_calibration_job as runtime_expire_calibration_job, \
     latest_scan_completed_at as runtime_latest_scan_completed_at, \
     load_job_state as runtime_load_job_state, load_scan_job_state as runtime_load_scan_job_state, \
-    maybe_schedule_scan as runtime_maybe_schedule_scan, process_calibration_queue_once as runtime_process_calibration_queue_once, \
+    maybe_schedule_scan as runtime_maybe_schedule_scan, \
+    process_calibration_queue_once as runtime_process_calibration_queue_once, \
     run_scan_job as runtime_run_scan_job, save_job_state as runtime_save_job_state, \
     save_scan_job_state as runtime_save_scan_job_state, scan_is_stale as runtime_scan_is_stale, \
     scan_job_belongs_to_current_process as runtime_scan_job_belongs_to_current_process, \
     scan_process_is_alive as runtime_scan_process_is_alive
-from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
-    restore_staged_artifact as runtime_restore_staged_artifact, \
-    run_calibration_job as runtime_run_calibration_job, \
-    run_full_calibration as runtime_run_full_calibration, \
-    run_sampled_calibration as runtime_run_sampled_calibration, \
-    remove_path as runtime_remove_path, snapshot_staged_artifact as runtime_snapshot_staged_artifact
-from mediaforce.web.routes import register_dashboard_routes, register_folder_routes, register_frontend_routes, \
-    register_host_routes, register_queue_routes, register_settings_routes
 from mediaforce.web.settings_runtime import (
     ALWAYS_SCHEDULE_PROFILE,
-    DEFAULT_HOST_MAX_PARALLEL_ENCODES,
     DEFAULT_HOST_SCHEDULE_PROFILE,
-    HOST_CAPABILITY_OPTIONS,
     build_runtime_settings_payload as _build_runtime_settings_payload,
     canonical_schedule_profile_key as _canonical_schedule_profile_key,
     host_max_parallel_encodes as _host_max_parallel_encodes,
     host_schedule_profile_key as _host_schedule_profile_key,
-    index_schedule_profile_rows as _index_schedule_profile_rows,
-    index_settings_library_rows as _index_settings_library_rows,
-    index_settings_remote_rows as _index_settings_remote_rows,
     library_color_map_for_config as _library_color_map_for_config,
     merge_runtime_settings_payload as _merge_runtime_settings_payload,
     normalize_encode_queue_scheduler as _normalize_encode_queue_scheduler,
-    normalize_host_source_root_overrides as _normalize_host_source_root_overrides,
-    normalize_library_color as _normalize_library_color,
-    normalize_library_key as _normalize_library_key,
-    runtime_library_colors as _runtime_library_colors,
+    settings_archive_root as _settings_archive_root_runtime,
+    settings_library_rows_for_config as _settings_library_rows_for_config_runtime,
+    settings_remote_rows_for_config as _settings_remote_rows_for_config_runtime,
+    settings_transcode_root_value as _settings_transcode_root_value_runtime,
     runtime_source_roots as _runtime_source_roots,
-    schedule_profile_options as _schedule_profile_options,
-    settings_archive_root as _settings_archive_root,
-    settings_library_rows_for_config as _settings_library_rows_for_config,
-    settings_remote_rows_for_config as _settings_remote_rows_for_config,
-    settings_schedule_profile_rows_for_config as _settings_schedule_profile_rows_for_config,
-    settings_transcode_root_value as _settings_transcode_root_value,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -196,199 +213,12 @@ CALIBRATION_QUEUE_WORKER_STARTED = False
 ENCODE_QUEUE_PROCESS = ManagedProcessController()
 ENCODE_QUEUE_WORKER_LOCK = threading.Lock()
 ENCODE_QUEUE_WORKER_STARTED = False
-CALIBRATION_REVIEW_FIELDS = {
-    "accepted_at",
-    "accepted_draft_hash",
-    "accepted_sample_job_id",
-    "draft_hash",
-}
-
-_NOTE_VMAF_PATTERNS = (
-    re.compile(r"\b(?P<target>\d{2}(?:\.\d+)?)\s*vmaf\b", re.IGNORECASE),
-    re.compile(r"\bvmaf\s*(?:target|around|at|to|of|=)?\s*(?P<target>\d{2}(?:\.\d+)?)\b", re.IGNORECASE),
-)
-_NOTE_XPSNR_PATTERNS = (
-    re.compile(r"\b(?P<target>\d{2}(?:\.\d+)?)\s*xpsnr\b", re.IGNORECASE),
-    re.compile(r"\bxpsnr\s*(?:target|around|at|to|of|=)?\s*(?P<target>\d{2}(?:\.\d+)?)\b", re.IGNORECASE),
-)
-_NOTE_SIZE_BUDGET_PATTERNS = (
-    re.compile(
-        r"\b(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>kb|mb|gb|tb)\s*(?:per|/)\s*(?:episode|ep|file)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"\b(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>kb|mb|gb|tb)\s*(?:each|an?)\s*(?:episode|ep|file)\b",
-        re.IGNORECASE,
-    ),
-)
-_SIZE_BUDGET_UNIT_BYTES = {
-    "kb": 1024,
-    "mb": 1024 * 1024,
-    "gb": 1024 * 1024 * 1024,
-    "tb": 1024 * 1024 * 1024 * 1024,
-}
 
 
-def _parse_audio_bitrate_kbps(value: JSONValue, fallback: float) -> float:
-    stripped = str(value or "").strip().lower().removesuffix("kbps").removesuffix("k")
-    try:
-        parsed = float(stripped)
-    except (TypeError, ValueError):
-        return fallback
-    return parsed if parsed > 0 else fallback
-
-
-def _sample_audio_target_kbps(sample_item: dict[str, Any] | None) -> float:
-    if not isinstance(sample_item, dict):
-        return 160.0
-    audio_policy = dict((sample_item.get("resolved_policy") or {}).get("audio") or {})
-    audio_tracks = list(sample_item.get("audio_summary") or [])
-    channels = 0
-    for track in audio_tracks:
-        try:
-            channels = max(channels, int(track.get("channels") or 0))
-        except (TypeError, ValueError):
-            continue
-    if channels >= 8:
-        return _parse_audio_bitrate_kbps(audio_policy.get("surround_7_1_opus_bitrate"), 320.0)
-    if channels >= 6:
-        return _parse_audio_bitrate_kbps(audio_policy.get("surround_5_1_opus_bitrate"), 224.0)
-    return _parse_audio_bitrate_kbps(audio_policy.get("stereo_opus_bitrate"), 128.0)
-
-
-def _size_budget_feasibility(*, source_percent: float | None, video_bitrate_kbps: float | None) -> tuple[str, bool]:
-    if source_percent is None or video_bitrate_kbps is None:
-        return "unknown", False
-    if source_percent <= 10.0 or video_bitrate_kbps <= 500.0:
-        return "unreasonable", True
-    if source_percent <= 20.0 or video_bitrate_kbps <= 900.0:
-        return "aggressive", False
-    return "reasonable", False
-
-
-def _size_budget_request(trimmed: str, sample_item: dict[str, Any] | None) -> dict[str, Any] | None:
-    for pattern in _NOTE_SIZE_BUDGET_PATTERNS:
-        match = pattern.search(trimmed)
-        if not match:
-            continue
-        unit = str(match.group("unit") or "").strip().lower()
-        multiplier = _SIZE_BUDGET_UNIT_BYTES.get(unit)
-        if multiplier is None:
-            continue
-        try:
-            amount = float(match.group("amount"))
-        except (TypeError, ValueError):
-            continue
-        budget_bytes = int(round(amount * multiplier))
-        source_size_bytes = None
-        duration_seconds = None
-        if isinstance(sample_item, dict):
-            try:
-                source_size_bytes = float(sample_item.get("source_size_bytes") or 0)
-            except (TypeError, ValueError):
-                source_size_bytes = None
-            try:
-                duration_seconds = float(sample_item.get("duration_seconds") or 0)
-            except (TypeError, ValueError):
-                duration_seconds = None
-        audio_kbps = _sample_audio_target_kbps(sample_item)
-        estimated_audio_bytes = None
-        estimated_video_bitrate_kbps = None
-        estimated_source_percent = None
-        if duration_seconds and duration_seconds > 0:
-            estimated_audio_bytes = int(round((audio_kbps * 1000.0 / 8.0) * duration_seconds))
-            remaining_video_bytes = max(budget_bytes - estimated_audio_bytes, 0)
-            estimated_video_bitrate_kbps = round((remaining_video_bytes * 8.0 / duration_seconds) / 1000.0, 1)
-        if source_size_bytes and source_size_bytes > 0:
-            estimated_source_percent = round((budget_bytes / source_size_bytes) * 100.0, 2)
-        feasibility, requires_confirmation = _size_budget_feasibility(
-            source_percent=estimated_source_percent,
-            video_bitrate_kbps=estimated_video_bitrate_kbps,
-        )
-        return {
-            "source": "operator_note",
-            "honor_mode": "size_budget_experiment",
-            "request_type": "size_budget",
-            "budget_bytes": budget_bytes,
-            "budget_label": f"{amount:g} {unit.upper()} per episode",
-            "request_text": trimmed,
-            "estimated_source_percent": estimated_source_percent,
-            "estimated_audio_bytes": estimated_audio_bytes,
-            "estimated_video_bitrate_kbps": estimated_video_bitrate_kbps,
-            "feasibility": feasibility,
-            "requires_confirmation": requires_confirmation,
-        }
-    return None
-
-
-def _operator_requested_experiment(note: str, sample_item: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    trimmed = note.strip()
-    if not trimmed:
-        return None
-
-    size_budget_request = _size_budget_request(trimmed, sample_item)
-    if size_budget_request:
-        return size_budget_request
-
-    for pattern in _NOTE_VMAF_PATTERNS:
-        match = pattern.search(trimmed)
-        if not match:
-            continue
-        try:
-            target = float(match.group("target"))
-        except (TypeError, ValueError):
-            continue
-        target = round(max(80.0, min(target, 98.0)), 2)
-        min_target = round(min(target, max(75.0, target - 2.0)), 2)
-        return {
-            "source": "operator_note",
-            "honor_mode": "literal_experiment",
-            "request_type": "metric_target",
-            "metric": "vmaf",
-            "target": target,
-            "applied_policy": {
-                "video": {
-                    "target_vmaf": target,
-                    "min_target_vmaf": min_target,
-                }
-            },
-            "request_text": trimmed,
-        }
-
-    for pattern in _NOTE_XPSNR_PATTERNS:
-        match = pattern.search(trimmed)
-        if not match:
-            continue
-        try:
-            target = float(match.group("target"))
-        except (TypeError, ValueError):
-            continue
-        target = round(max(30.0, min(target, 41.0)), 2)
-        min_target = round(min(target, max(29.0, target - 1.0)), 2)
-        return {
-            "source": "operator_note",
-            "honor_mode": "literal_experiment",
-            "request_type": "metric_target",
-            "metric": "xpsnr",
-            "target": target,
-            "applied_policy": {
-                "video": {
-                    "target_xpsnr": target,
-                    "min_target_xpsnr": min_target,
-                }
-            },
-            "request_text": trimmed,
-        }
-    return None
-
-
-def _apply_policy_fragment(policy: dict[str, Any], fragment: dict[str, Any] | None) -> dict[str, Any]:
-    updated_policy = json.loads(json.dumps(policy))
-    for section, values in dict(fragment or {}).items():
-        if not isinstance(values, dict):
-            continue
-        updated_policy.setdefault(section, {}).update(values)
-    return updated_policy
+_parse_audio_bitrate_kbps = runtime_parse_audio_bitrate_kbps
+_sample_audio_target_kbps = runtime_sample_audio_target_kbps
+_operator_requested_experiment = runtime_operator_requested_experiment
+_apply_policy_fragment = runtime_apply_policy_fragment
 
 
 def _load_advice_state(config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
@@ -409,64 +239,18 @@ def _merge_advice_state(config: MediaforceConfig, prefix: str, patch: dict[str, 
     return merged
 
 
-def _build_run_verdict_payload(
-        *,
-        prefix: str,
-        calibration_payload: dict[str, Any],
-        advice_state: dict[str, Any] | None,
-) -> dict[str, Any]:
-    sample_result = dict(calibration_payload.get("sample_result") or {})
-    sample_item = dict(calibration_payload.get("sample_item") or {})
-    policy = dict(calibration_payload.get("policy") or {})
-    return {
-        "folder": prefix,
-        "action": calibration_payload.get("action"),
-        "mode": calibration_payload.get("mode"),
-        "operator_note": (advice_state or {}).get("operator_note") or calibration_payload.get("notes") or None,
-        "operator_request": (advice_state or {}).get("operator_request"),
-        "sample_item": {
-            "rel_path": sample_item.get("rel_path"),
-            "source_size_bytes": sample_item.get("source_size_bytes"),
-        },
-        "policy": policy,
-        "sample_result": {
-            "quality_metric": sample_result.get("quality_metric"),
-            "quality_target": sample_result.get("quality_target"),
-            "quality_score": sample_result.get("quality_score"),
-            "chosen_crf": sample_result.get("chosen_crf"),
-            "predicted_total_size_bytes": sample_result.get("predicted_total_size_bytes"),
-            "predicted_encode_percent": sample_result.get("predicted_encode_percent"),
-            "predicted_encode_seconds": sample_result.get("predicted_encode_seconds"),
-        },
-    }
+_build_run_verdict_payload = runtime_build_run_verdict_payload
 
 
 def _record_run_verdict(config: MediaforceConfig, prefix: str, calibration_payload: dict[str, Any]) -> None:
-    if str(calibration_payload.get("mode") or "sample") != "sample":
-        return
-    if not calibration_payload.get("sample_result"):
-        return
-    advice_state = _load_advice_state(config, prefix) or {}
-    verdict = request_run_verdict(
+    runtime_record_run_verdict(
         project_root=config.paths.project_root,
-        payload=_build_run_verdict_payload(
-            prefix=prefix,
-            calibration_payload=calibration_payload,
-            advice_state=advice_state,
-        ),
+        prefix=prefix,
+        calibration_payload=calibration_payload,
+        advice_state=_load_advice_state(config, prefix) or {},
+        merge_advice_state=lambda proposal_prefix, patch: _merge_advice_state(config, proposal_prefix, patch),
+        now_iso=_now_iso,
     )
-    verdict_payload = {
-        "summary": verdict.summary,
-        "outcome": verdict.outcome,
-        "confidence": verdict.confidence,
-        "next_step": verdict.next_step,
-        "prompt_version": verdict.prompt_version,
-        "evidence_checked": verdict.evidence_checked,
-        "evaluated_at": _now_iso(),
-    }
-    if verdict.raw:
-        verdict_payload["raw"] = verdict.raw
-    _merge_advice_state(config, prefix, {"run_verdict": verdict_payload})
 
 
 def create_app(config_path: Path | None = None) -> FastAPI:
@@ -658,7 +442,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             }
             if summary.get("item_count", 0) == 0:
                 status_code = 200 if folder_scan_job and folder_scan_job.get("status") in {"queued", "running"} else 404
-                return ({**base_context, "pending": True, "scan_job": folder_scan_job}, status_code)
+                return {**base_context, "pending": True, "scan_job": folder_scan_job}, status_code
             sample_item = _sample_item(connection, config, normalized_prefix)
             if sample_item is None:
                 return (
@@ -780,7 +564,6 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             clear_pending_proposal=_clear_pending_proposal,
             record_tuning_session=record_tuning_session,
         )
-
 
     def _folder_ai_tune_preview_action(normalized_prefix: str, note: str, host_key: str) -> dict[str, Any]:
         return folder_ai_tune_preview_action(
@@ -1207,131 +990,10 @@ def _sample_item(connection: sqlite3.Connection, config: MediaforceConfig, prefi
     return build_manifest_item(row, config)
 
 
-def _metric_support() -> dict[str, bool]:
-    try:
-        result = subprocess.run([ffmpeg_binary(), "-hide_banner", "-filters"], check=True, capture_output=True,
-                                text=True)
-    except Exception:
-        return {"vmaf": False, "xpsnr": False, "ssim": False, "psnr": False}
-    output = result.stdout.lower()
-    return {
-        "vmaf": "libvmaf" in output,
-        "xpsnr": "xpsnr" in output,
-        "ssim": "ssim" in output,
-        "psnr": " psnr " in output or "\n ts psnr" in output,
-    }
-
-
-def _metric_status_copy(metric_support: dict[str, bool]) -> str:
-    if metric_support.get("vmaf"):
-        return "VMAF is available on this machine, so calibrations can use the preferred perceptual metric."
-    if metric_support.get("xpsnr"):
-        return "This ffmpeg build does not include libvmaf yet, so the app is falling back to XPSNR for calibration right now."
-    return "Neither VMAF nor XPSNR is available from the current ffmpeg tooling, so calibration quality checks will fail until one is installed."
-
-
-def _dominant_summary_key(values: JSONValue) -> str | None:
-    if not isinstance(values, dict) or not values:
-        return None
-    best_key: str | None = None
-    best_count = -1
-    for key, value in values.items():
-        try:
-            count = int(value)
-        except (TypeError, ValueError):
-            continue
-        if count > best_count or (count == best_count and best_key is not None and str(key) < best_key):
-            best_key = str(key)
-            best_count = count
-    return best_key
-
-
-def _resolution_tier(width: JSONValue, height: JSONValue) -> str | None:
-    try:
-        width_value = int(width or 0)
-        height_value = int(height or 0)
-    except (TypeError, ValueError):
-        return None
-    largest_dimension = max(width_value, height_value)
-    if largest_dimension >= 3800:
-        return "2160p"
-    if largest_dimension >= 1900:
-        return "1080p"
-    if largest_dimension >= 1200:
-        return "720p"
-    if width_value > 0 and height_value > 0:
-        return f"{width_value}x{height_value}"
-    return None
-
-
-def _seed_collection_shape(prefix: str) -> str:
-    parts = Path(prefix).parts
-    if len(parts) >= 3 and parts[0].lower() == "tv" and parts[2].lower().startswith("season"):
-        return "tv_season"
-    if len(parts) >= 2 and parts[0].lower() == "tv":
-        return "tv_series"
-    if parts and parts[0].lower() in {"movie", "movies", "films"}:
-        return "movie_folder"
-    return "library_prefix"
-
-
-def _seed_policy_fragment(raw: JSONValue) -> dict[str, Any]:
-    return _tuning_policy_focus(
-        {
-            "video": dict((raw or {}).get("video") or {}),
-            "audio": dict((raw or {}).get("audio") or {}),
-            "subtitle": dict((raw or {}).get("subtitle") or {}),
-        }
-    )
-
-
-def _seed_class_signals(prefix: str, sample_item: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
-    suggested_override_raw = summary.get("suggested_override")
-    suggested_override: dict[str, Any] = dict(suggested_override_raw) if isinstance(suggested_override_raw,
-                                                                                    dict) else {}
-    collection_shape = _seed_collection_shape(prefix)
-    resolution_tier = _resolution_tier(sample_item.get("width"), sample_item.get("height"))
-    dominant_video_codec = _dominant_summary_key(summary.get("video_codecs"))
-    video_codecs = summary.get("video_codecs")
-    positive_signals: list[str] = []
-    caution_flags: list[str] = []
-
-    if collection_shape == "tv_season":
-        positive_signals.append("Folder is a single TV season rather than a broad mixed prefix.")
-    elif collection_shape == "movie_folder":
-        positive_signals.append("Folder is movie-shaped rather than episodic TV.")
-    else:
-        caution_flags.append("Folder shape is broad enough that the seed should stay close to the base policy.")
-
-    if resolution_tier is not None:
-        positive_signals.append(f"Sample item resolves to {resolution_tier}.")
-    else:
-        caution_flags.append("Sample resolution is unknown, so avoid overfitting the first-pass guess.")
-
-    sample_codec = str(sample_item.get("video_codec") or "").strip().lower()
-    if dominant_video_codec and sample_codec and dominant_video_codec == sample_codec:
-        positive_signals.append(f"Sample codec matches the folder majority codec ({dominant_video_codec}).")
-    if isinstance(video_codecs, dict) and len(video_codecs) > 1:
-        caution_flags.append(
-            "Folder mixes multiple video codecs, so one sample item may not represent every episode equally.")
-
-    item_count = int(summary.get("item_count") or 0)
-    if item_count and item_count < 6:
-        caution_flags.append("Small folder sample size means the seed should remain conservative.")
-
-    for reason in list(suggested_override.get("reason") or [])[:2]:
-        if reason:
-            positive_signals.append(str(reason))
-
-    caution_flags.append(
-        "This first-pass seed is only a bounded starting point; measured calibration should confirm any lean move.")
-    return {
-        "collection_shape": collection_shape,
-        "sample_resolution_tier": resolution_tier,
-        "dominant_video_codec": dominant_video_codec,
-        "positive_signals": positive_signals,
-        "caution_flags": caution_flags,
-    }
+_metric_support = runtime_metric_support
+_metric_status_copy = runtime_metric_status_copy
+_tuning_policy_focus = runtime_tuning_policy_focus
+_tuning_policy_key_paths = runtime_tuning_policy_key_paths
 
 
 def _build_seed_policy_payload(
@@ -1343,87 +1005,14 @@ def _build_seed_policy_payload(
         summary: dict[str, Any],
         metric_support: dict[str, bool],
 ) -> dict[str, Any]:
-    suggested_override_raw = summary.get("suggested_override")
-    suggested_override: dict[str, Any] = dict(suggested_override_raw) if isinstance(suggested_override_raw,
-                                                                                    dict) else {}
-    requested_experiment = _operator_requested_experiment(user_note, sample_item)
-    return {
-        "folder": prefix,
-        "goal": "Prefer slightly smaller files when the visual difference is hard to spot, but keep first-pass drafts conservative when the class is uncertain.",
-        "seed_principles": [
-            "Teach media-class taste instead of optimizing one easy title in isolation.",
-            "Prefer small, reversible moves away from the base policy.",
-            "Clean, forgiving TV can lean a little smaller than default.",
-            "Dark, grainy, fast-motion, or uncertain material should stay near the base policy until measured calibration says otherwise.",
-        ],
-        "sample_item": {
-            "rel_path": sample_item["rel_path"],
-            "source_size_bytes": sample_item["source_size_bytes"],
-            "video_codec": sample_item["video_codec"],
-            "video_bitrate": sample_item.get("video_bitrate"),
-            "width": sample_item.get("width"),
-            "height": sample_item.get("height"),
-            "resolution_tier": _resolution_tier(sample_item.get("width"), sample_item.get("height")),
-            "duration_seconds": sample_item["duration_seconds"],
-            "audio_summary": sample_item["audio_summary"],
-            "subtitle_summary": sample_item["subtitle_summary"],
-            "recommendation": sample_item.get("recommendation"),
-            "recommendation_reason": sample_item.get("recommendation_reason"),
-        },
-        "summary": {
-            "item_count": summary.get("item_count"),
-            "total_size_bytes": summary.get("total_size_bytes"),
-            "statuses": summary.get("statuses"),
-            "video_codecs": summary.get("video_codecs"),
-            "audio_codecs": summary.get("audio_codecs"),
-            "seasons": summary.get("seasons"),
-            "dominant_video_codec": _dominant_summary_key(summary.get("video_codecs")),
-            "dominant_audio_codec": _dominant_summary_key(summary.get("audio_codecs")),
-            "suggested_override": {
-                "reason": list(suggested_override.get("reason") or []),
-                "policy_focus": _seed_policy_fragment(suggested_override),
-            },
-        },
-        "class_signals": _seed_class_signals(prefix, sample_item, summary),
-        "base_policy": _tuning_policy_focus(base_policy),
-        "operator_note": user_note or None,
-        "requested_experiment": requested_experiment,
-        "metric_support": metric_support,
-        "preferred_metric": "vmaf" if metric_support.get("vmaf") else (
-            "xpsnr" if metric_support.get("xpsnr") else None),
-    }
-
-
-def _tuning_policy_focus(policy: dict[str, Any]) -> dict[str, Any]:
-    focused: dict[str, Any] = {}
-    for section in ("video", "audio", "subtitle"):
-        raw_section = policy.get(section)
-        if not isinstance(raw_section, dict):
-            continue
-        cleaned: dict[str, Any] = {}
-        for key, value in raw_section.items():
-            if value is None:
-                continue
-            if isinstance(value, (str, int, float, bool)):
-                cleaned[key] = value
-                continue
-            if isinstance(value, list) and all(isinstance(item, (str, int, float, bool)) for item in value):
-                cleaned[key] = list(value)
-        if cleaned:
-            focused[section] = cleaned
-    return focused
-
-
-def _tuning_policy_key_paths(policy: dict[str, Any]) -> list[str]:
-    focused = _tuning_policy_focus(policy)
-    paths: list[str] = []
-    for section in ("video", "audio", "subtitle"):
-        raw_section = focused.get(section)
-        if not isinstance(raw_section, dict):
-            continue
-        for key in raw_section:
-            paths.append(f"{section}.{key}")
-    return paths
+    return runtime_build_seed_policy_payload(
+        prefix=prefix,
+        user_note=user_note,
+        base_policy=base_policy,
+        sample_item=sample_item,
+        summary=summary,
+        metric_support_payload=metric_support,
+    )
 
 
 def _folder_tuning_runtime_deps() -> FolderTuningRuntimeDeps:
@@ -1515,65 +1104,32 @@ def _planned_audio_review_context(*, sample_item: dict[str, Any], current_policy
     return planned_audio_review_context(sample_item=sample_item, current_policy=current_policy)
 
 
+def _encode_scheduler_deps() -> EncodeSchedulerDeps:
+    return EncodeSchedulerDeps(
+        normalize_encode_queue_scheduler=_normalize_encode_queue_scheduler,
+        canonical_schedule_profile_key=_canonical_schedule_profile_key,
+        default_host_schedule_profile=DEFAULT_HOST_SCHEDULE_PROFILE,
+        always_schedule_profile=ALWAYS_SCHEDULE_PROFILE,
+        default_scheduler_policy=DEFAULT_SCHEDULER_POLICY,
+        encode_job_manifest_totals=runtime_encode_job_manifest_totals,
+        encode_job_max_attempts=ENCODE_JOB_MAX_ATTEMPTS,
+    )
+
+
 def _encode_queue_scheduler_policy(config: MediaforceConfig) -> dict[str, Any]:
-    encode_queue = config.raw.get("encode_queue")
-    raw = encode_queue.get("scheduler") if isinstance(encode_queue, dict) else None
-    if not isinstance(raw, dict):
-        legacy_queue = config.raw.get("heavy_queue")
-        raw = legacy_queue.get("scheduler") if isinstance(legacy_queue, dict) else None
-    return _normalize_encode_queue_scheduler(raw if isinstance(raw, dict) else None)
+    return runtime_encode_queue_scheduler_policy(config, _encode_scheduler_deps())
 
 
 def _encode_queue_schedule_profiles(config: MediaforceConfig) -> dict[str, dict[str, Any]]:
-    always = _normalize_encode_queue_scheduler({"mode": "anytime", "timezone": "host_local"})
-    always["key"] = ALWAYS_SCHEDULE_PROFILE
-    always["label"] = "Always"
-    profiles = {ALWAYS_SCHEDULE_PROFILE: always}
-    encode_queue = config.raw.get("encode_queue")
-    raw_profiles = encode_queue.get("schedule_profiles") if isinstance(encode_queue, dict) else None
-    if not isinstance(raw_profiles, list):
-        return profiles
-    for profile in raw_profiles:
-        if not isinstance(profile, dict):
-            continue
-        key = _canonical_schedule_profile_key(str(profile.get("key") or profile.get("name") or ""))
-        if not key or key == ALWAYS_SCHEDULE_PROFILE:
-            continue
-        normalized = _normalize_encode_queue_scheduler(profile)
-        normalized["key"] = key
-        normalized["label"] = str(profile.get("label") or key.replace("_", " ").title())
-        profiles[key] = normalized
-    return profiles
+    return runtime_encode_queue_schedule_profiles(config, _encode_scheduler_deps())
 
 
 def _schedule_profile_policy_for_host(config: MediaforceConfig, host_payload: dict[str, Any] | None) -> dict[str, Any]:
-    profiles = _encode_queue_schedule_profiles(config)
-    profile_key = _canonical_schedule_profile_key(
-        (host_payload or {}).get("schedule_profile") or DEFAULT_HOST_SCHEDULE_PROFILE)
-    return dict(profiles.get(profile_key) or profiles[DEFAULT_HOST_SCHEDULE_PROFILE])
-
-
-def _encode_queue_scheduler_summary(policy: dict[str, Any]) -> str:
-    if str(policy.get("mode") or "anytime") == "night":
-        return f"window {int(policy['start_hour']):02d}:00-{int(policy['end_hour']):02d}:00 in host local time"
-    return "runs anytime"
+    return runtime_schedule_profile_policy_for_host(config, host_payload, _encode_scheduler_deps())
 
 
 def _host_schedule_now(current: datetime, host_payload: dict[str, Any] | None) -> datetime:
-    offset_minutes = (host_payload or {}).get("utc_offset_minutes")
-    try:
-        if offset_minutes is not None:
-            return current.astimezone(timezone(timedelta(minutes=int(offset_minutes))))
-    except (TypeError, ValueError):
-        pass
-    timezone_name = str(
-        (host_payload or {}).get("schedule_timezone") or (host_payload or {}).get("timezone") or "").strip()
-    if timezone_name:
-        try:
-            return current.astimezone(ZoneInfo(timezone_name))
-        except ZoneInfoNotFoundError:
-            pass
-    return current.astimezone()
+    return runtime_host_schedule_now(current, host_payload)
 
 
 def _scheduler_allows_encode_run(
@@ -1583,55 +1139,17 @@ def _scheduler_allows_encode_run(
         now: datetime | None = None,
         host_payload: dict[str, Any] | None = None,
 ) -> bool:
-    if bypass_schedule or str(policy.get("mode") or "anytime") == "anytime":
-        return True
-    current = now or datetime.now(UTC)
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=UTC)
-    timezone_name = str(policy.get("timezone") or "local")
-    if timezone_name == "host_local":
-        local_now = _host_schedule_now(current, host_payload)
-    elif timezone_name == "local":
-        local_now = current.astimezone()
-    else:
-        try:
-            local_now = current.astimezone(ZoneInfo(timezone_name))
-        except ZoneInfoNotFoundError:
-            local_now = current.astimezone()
-    start_hour_value = policy.get("start_hour")
-    if start_hour_value is None:
-        start_hour_value = DEFAULT_SCHEDULER_POLICY["start_hour"]
-    end_hour_value = policy.get("end_hour")
-    if end_hour_value is None:
-        end_hour_value = DEFAULT_SCHEDULER_POLICY["end_hour"]
-    start_hour = int(str(start_hour_value))
-    end_hour = int(str(end_hour_value))
-    if start_hour == end_hour:
-        return True
-    current_hour = local_now.hour
-    if start_hour < end_hour:
-        return start_hour <= current_hour < end_hour
-    return current_hour >= start_hour or current_hour < end_hour
+    return runtime_scheduler_allows_encode_run(
+        policy,
+        _encode_scheduler_deps(),
+        bypass_schedule=bypass_schedule,
+        now=now,
+        host_payload=host_payload,
+    )
 
 
 def _format_eta_seconds(seconds: float | None) -> str | None:
-    if seconds is None or seconds < 0:
-        return None
-    total_seconds = int(round(seconds))
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, secs = divmod(remainder, 60)
-    if hours:
-        return f"{hours}h {minutes}m"
-    if minutes:
-        return f"{minutes}m {secs}s"
-    return f"{secs}s"
-
-
-def _float_or_none(value: JSONValue) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    return runtime_format_eta_seconds(seconds)
 
 
 def _job_host_key(job: dict[str, Any]) -> str:
@@ -1639,135 +1157,12 @@ def _job_host_key(job: dict[str, Any]) -> str:
     return str(host.get("key") or host.get("host") or host.get("label") or "").strip()
 
 
-def _decorate_encode_job_telemetry(job: dict[str, Any]) -> dict[str, Any]:
-    decorated = dict(job)
-    progress = dict(decorated.get("progress") or {})
-    manifest_totals = _encode_job_manifest_totals(decorated)
-    total_duration_seconds = float(
-        progress.get("total_duration_seconds") or manifest_totals["total_duration_seconds"] or 0.0)
-    total_item_count = int(
-        progress.get("total_item_count") or manifest_totals["total_item_count"] or decorated.get("item_count") or 0)
-    overall_completed_duration_seconds = float(progress.get("overall_completed_duration_seconds") or 0.0)
-    remaining_duration_seconds = float(
-        progress.get("remaining_duration_seconds") or max(total_duration_seconds - overall_completed_duration_seconds,
-                                                          0.0))
-    percent_complete = _float_or_none(progress.get("percent_complete"))
-    if percent_complete is None and total_duration_seconds > 0:
-        percent_complete = min(overall_completed_duration_seconds / total_duration_seconds, 1.0) * 100.0
-    fps = _float_or_none(progress.get("fps"))
-    speed = _float_or_none(progress.get("speed"))
-    eta_seconds = _float_or_none(progress.get("eta_seconds"))
-    speed_value = speed if speed not in {None, 0, 0.0} else None
-    if eta_seconds is None and speed_value is not None:
-        eta_seconds = remaining_duration_seconds / speed_value
-    decorated["progress"] = {
-        **progress,
-        "total_duration_seconds": total_duration_seconds,
-        "total_item_count": total_item_count,
-        "overall_completed_duration_seconds": overall_completed_duration_seconds,
-        "remaining_duration_seconds": remaining_duration_seconds,
-        "percent_complete": percent_complete,
-        "fps": fps,
-        "speed": speed,
-        "eta_seconds": eta_seconds,
-        "eta_copy": _format_eta_seconds(eta_seconds),
-    }
-    summary_parts: list[str] = []
-    if percent_complete is not None:
-        summary_parts.append(f"{percent_complete:.0f}%")
-    if speed_value is not None:
-        summary_parts.append(f"{speed:.2f}x")
-    if fps not in {None, 0, 0.0}:
-        summary_parts.append(f"{fps:.1f} fps")
-    eta_copy = decorated["progress"].get("eta_copy")
-    if eta_copy:
-        summary_parts.append(f"Est. ETA {eta_copy}")
-    decorated["telemetry_summary"] = " · ".join(summary_parts)
-    return decorated
-
-
-def _encode_queue_telemetry(encode_queue: dict[str, Any]) -> dict[str, Any]:
-    running_jobs = [dict(job) for job in encode_queue.get("running") or []]
-    queued_jobs = [dict(job) for job in encode_queue.get("queued") or []]
-    aggregate_speed = sum(float(((job.get("progress") or {}).get("speed") or 0.0)) for job in running_jobs)
-    total_remaining_duration_seconds = sum(
-        float(((job.get("progress") or {}).get("remaining_duration_seconds") or 0.0)) for job in running_jobs
-    )
-    total_remaining_duration_seconds += sum(
-        float(((job.get("progress") or {}).get("total_duration_seconds") or 0.0)) for job in queued_jobs
-    )
-    eta_seconds = (total_remaining_duration_seconds / aggregate_speed) if aggregate_speed > 0 else None
-    return {
-        "aggregate_speed": aggregate_speed or None,
-        "eta_seconds": eta_seconds,
-        "eta_copy": _format_eta_seconds(eta_seconds),
-        "running_jobs": len(running_jobs),
-        "queued_jobs": len(queued_jobs),
-    }
-
-
 def _decorate_encode_job_for_scheduler(config: MediaforceConfig, job: dict[str, Any] | None) -> dict[str, Any] | None:
-    if job is None:
-        return None
-    decorated = dict(job)
-    policy = _schedule_profile_policy_for_host(config, dict(decorated.get("host") or {}))
-    status = str(decorated.get("status") or "")
-    bypass_schedule = bool(decorated.get("bypass_schedule"))
-    attempt_count = int(decorated.get("attempt_count") or 0)
-    waiting_reason = str(decorated.get("waiting_reason") or "").strip()
-    schedule_waiting = (
-            status == "queued"
-            and not _scheduler_allows_encode_run(policy, bypass_schedule=bypass_schedule,
-                                                 host_payload=dict(decorated.get("host") or {}))
-    )
-    decorated["schedule_waiting"] = schedule_waiting
-    decorated["scheduler_summary"] = str(policy["summary"])
-    decorated[
-        "attempt_summary"] = f"attempt {attempt_count} of {ENCODE_JOB_MAX_ATTEMPTS}" if attempt_count else "not started yet"
-    if status == "running":
-        decorated["scheduler_status_copy"] = "running now"
-    elif status == "needs_attention":
-        decorated["scheduler_status_copy"] = waiting_reason or "needs attention before retrying"
-    elif status == "retry_backoff":
-        decorated["scheduler_status_copy"] = waiting_reason or "waiting for retry backoff"
-    elif waiting_reason:
-        decorated["scheduler_status_copy"] = waiting_reason
-    elif bypass_schedule:
-        decorated["scheduler_status_copy"] = "bypassing scheduler"
-    elif schedule_waiting:
-        decorated["scheduler_status_copy"] = f"waiting for {policy['summary']}"
-    else:
-        decorated["scheduler_status_copy"] = "ready when a worker is free"
-    return _decorate_encode_job_telemetry(decorated)
+    return runtime_decorate_encode_job_for_scheduler(config, job, _encode_scheduler_deps())
 
 
 def _decorate_encode_queue_for_scheduler(config: MediaforceConfig, encode_queue: dict[str, Any]) -> dict[str, Any]:
-    policy = _encode_queue_scheduler_policy(config)
-    queue_state = dict(encode_queue.get("state") or {})
-    queue_state["scheduler"] = policy
-    queue_state["scheduler_summary"] = str(policy["summary"])
-    queue_state["schedule_profiles"] = list(_encode_queue_schedule_profiles(config).values())
-    decorated = dict(encode_queue)
-    decorated["state"] = queue_state
-    decorated["running"] = [
-        _decorate_encode_job_for_scheduler(config, job) or job
-        for job in encode_queue.get("running") or []
-    ]
-    decorated["queued"] = [
-        _decorate_encode_job_for_scheduler(config, job) or job
-        for job in encode_queue.get("queued") or []
-    ]
-    decorated["recent"] = [
-        _decorate_encode_job_for_scheduler(config, job) or job
-        for job in encode_queue.get("recent") or []
-    ]
-    decorated["queued_waiting_count"] = sum(
-        1
-        for job in decorated["queued"]
-        if bool(job.get("schedule_waiting")) or str(job.get("status") or "") == "retry_backoff"
-    )
-    decorated["telemetry"] = _encode_queue_telemetry(decorated)
-    return decorated
+    return runtime_decorate_encode_queue_for_scheduler(config, encode_queue, _encode_scheduler_deps())
 
 
 def _state_web_dir(config: MediaforceConfig) -> Path:
@@ -1809,6 +1204,22 @@ def _current_catalog_signature(config: MediaforceConfig) -> dict[str, Any]:
     return {"source_roots": _runtime_source_roots(config.raw)}
 
 
+def _settings_library_rows_for_config(config: MediaforceConfig, *, min_rows: int = 3) -> list[dict[str, str]]:
+    return _settings_library_rows_for_config_runtime(config, min_rows=min_rows)
+
+
+def _settings_remote_rows_for_config(config: MediaforceConfig, *, min_rows: int = 3) -> list[dict[str, Any]]:
+    return _settings_remote_rows_for_config_runtime(config, min_rows=min_rows)
+
+
+def _settings_transcode_root_value(config: MediaforceConfig) -> str:
+    return _settings_transcode_root_value_runtime(config)
+
+
+def _settings_archive_root(transcode_root: str) -> str:
+    return _settings_archive_root_runtime(transcode_root)
+
+
 def _load_catalog_signature(config: MediaforceConfig) -> dict[str, Any] | None:
     path = _catalog_signature_file(config)
     if not path.exists():
@@ -1829,58 +1240,8 @@ def _save_catalog_signature(config: MediaforceConfig) -> None:
     _catalog_signature_file(config).write_text(json.dumps(_current_catalog_signature(config), indent=2) + "\n")
 
 
-def _calibration_draft_hash(payload: dict[str, Any]) -> str:
-    canonical = {
-        key: value
-        for key, value in payload.items()
-        if key not in CALIBRATION_REVIEW_FIELDS
-    }
-    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()[:16]
-
-
-def _review_gate(calibration: dict[str, Any] | None) -> dict[str, Any]:
-    if calibration is None:
-        return {
-            "can_confirm_full": False,
-            "message": "Run a sampled calibration first.",
-            "status": "missing_sample",
-        }
-
-    if str(calibration.get("mode") or "sample") != "sample":
-        return {
-            "can_confirm_full": False,
-            "message": "Run and save a fresh sampled draft before queueing the folder encode.",
-            "status": "needs_fresh_sample",
-        }
-
-    current_hash = str(calibration.get("draft_hash") or _calibration_draft_hash(calibration))
-    accepted_hash = str(calibration.get("accepted_draft_hash") or "")
-    accepted_job_id = str(calibration.get("accepted_sample_job_id") or "")
-    current_job_id = str(calibration.get("job_id") or "")
-    accepted_at = calibration.get("accepted_at")
-    review_media_ready = bool(calibration.get("review_media_ready"))
-    can_confirm_full = bool(accepted_at and accepted_hash == current_hash and accepted_job_id == current_job_id)
-    if can_confirm_full:
-        return {
-            "can_confirm_full": True,
-            "message": f"Approved sample draft saved at {accepted_at}. Folder encode is unlocked.",
-            "status": "accepted",
-            "accepted_at": accepted_at,
-        }
-
-    if not review_media_ready:
-        return {
-            "can_confirm_full": False,
-            "message": "Review clips are unavailable for this draft. Run a fresh sample before approving it.",
-            "status": "missing_review_media",
-        }
-
-    return {
-        "can_confirm_full": False,
-        "message": "Review the sample clips, then approve this draft to save the folder policy and unlock folder encode.",
-        "status": "needs_approval",
-    }
+_calibration_draft_hash = runtime_calibration_draft_hash
+_review_gate = runtime_review_gate
 
 
 def _encode_queue_summary_copy(
@@ -1888,43 +1249,7 @@ def _encode_queue_summary_copy(
         encode_queue_state: dict[str, Any],
         encode_job: dict[str, Any] | None,
 ) -> str:
-    parts = [
-        f"{int(encode_queue.get('running_count') or 0)} running",
-        f"{int(encode_queue.get('queued_count') or 0)} queued",
-    ]
-
-    status = str(encode_job.get("status") or "") if encode_job else ""
-    if status == "queued" and encode_job and encode_job.get("queue_position"):
-        queue_position = int(encode_job["queue_position"])
-        queue_depth = int(encode_job.get("queue_depth") or queue_position)
-        parts.append(f"this folder is {queue_position} of {queue_depth}")
-    elif status == "running":
-        parts.append("this folder is active now")
-    elif status in {"completed", "failed", "stopped", "needs_attention"}:
-        parts.append(f"latest folder job {status}")
-    else:
-        parts.append("no folder job queued yet")
-
-    waiting_count = int(encode_queue.get("queued_waiting_count") or 0)
-    if waiting_count:
-        parts.append(f"{waiting_count} waiting")
-
-    queue_eta_copy = str(((encode_queue.get("telemetry") or {}).get("eta_copy") or "")).strip()
-    if queue_eta_copy:
-        parts.append(f"estimated queue finish in {queue_eta_copy}")
-
-    attention_count = int(encode_queue.get("needs_attention_count") or 0)
-    if attention_count:
-        parts.append(f"{attention_count} need attention")
-
-    if encode_job and encode_job.get("scheduler_status_copy") and status in {"queued", "retry_backoff", "running",
-                                                                             "needs_attention"}:
-        parts.append(str(encode_job["scheduler_status_copy"]))
-
-    if encode_queue_state.get("is_paused"):
-        parts.append("queue paused")
-
-    return " · ".join(parts)
+    return runtime_encode_queue_summary_copy(encode_queue, encode_queue_state, encode_job)
 
 
 def _folder_state_deps() -> FolderStateDeps:
@@ -2033,6 +1358,31 @@ def _calibration_queue_runtime_deps() -> CalibrationQueueRuntimeDeps:
         sample_calibration_concurrency=SAMPLE_CALIBRATION_CONCURRENCY,
         full_calibration_concurrency=FULL_CALIBRATION_CONCURRENCY,
         calibration_queue_poll_seconds=CALIBRATION_QUEUE_POLL_SECONDS,
+    )
+
+
+def _encode_queue_runtime_deps() -> EncodeQueueRuntimeDeps:
+    return EncodeQueueRuntimeDeps(
+        load_config=load_config,
+        now_iso=_now_iso,
+        parse_iso=_parse_iso,
+        host_runtime_rows=_host_runtime_rows,
+        schedule_profile_policy_for_host=_schedule_profile_policy_for_host,
+        scheduler_allows_encode_run=_scheduler_allows_encode_run,
+        host_lifecycle_start_command=_host_lifecycle_start_command,
+        ensure_encode_host_ready=_ensure_encode_host_ready,
+        stop_encode_host_if_configured=_stop_encode_host_if_configured,
+        encode_manifest_items=encode_manifest_items,
+        logger=LOGGER,
+        encode_queue_process=ENCODE_QUEUE_PROCESS,
+        encode_queue_poll_seconds=ENCODE_QUEUE_POLL_SECONDS,
+        encode_job_lease_seconds=ENCODE_JOB_LEASE_SECONDS,
+        encode_job_heartbeat_seconds=ENCODE_JOB_HEARTBEAT_SECONDS,
+        encode_job_progress_write_interval_seconds=ENCODE_JOB_PROGRESS_WRITE_INTERVAL_SECONDS,
+        encode_job_retry_base_delay_seconds=ENCODE_JOB_RETRY_BASE_DELAY_SECONDS,
+        encode_job_retry_max_delay_seconds=ENCODE_JOB_RETRY_MAX_DELAY_SECONDS,
+        encode_job_max_attempts=ENCODE_JOB_MAX_ATTEMPTS,
+        encode_host_cooldown_seconds=ENCODE_HOST_COOLDOWN_SECONDS,
     )
 
 
@@ -2156,8 +1506,8 @@ def _folder_group(rel_path: str) -> tuple[str, str, str, str] | None:
     if len(parts) < 2:
         return None
     if parts[0] == "tv" and len(parts) >= 3:
-        return ("/".join(parts[:3]), f"{parts[1]} · {parts[2]}", parts[1], "Season")
-    return ("/".join(parts[:2]), parts[1], parts[0].title(), "Folder")
+        return "/".join(parts[:3]), f"{parts[1]} · {parts[2]}", parts[1], "Season"
+    return "/".join(parts[:2]), parts[1], parts[0].title(), "Folder"
 
 
 def _estimate_savings_bytes(*, size_bytes: int, video_codec: str, audio_summary_json: str) -> int:
@@ -2401,192 +1751,17 @@ def _recover_calibration_jobs(connection: sqlite3.Connection, config: Mediaforce
 
 
 def _recover_encode_queue(connection: sqlite3.Connection, config: MediaforceConfig) -> None:
-    _reconcile_encode_jobs(connection, config, restart_recovery=True)
+    runtime_recover_encode_queue(connection, config, _encode_queue_runtime_deps())
 
 
 def _reconcile_encode_jobs(
         connection: sqlite3.Connection, config: MediaforceConfig, *, restart_recovery: bool = False
 ) -> None:
-    now = datetime.now(tz=UTC)
-    running_rows = connection.execute("SELECT job_id FROM encode_jobs WHERE status = 'running'").fetchall()
-    for row in running_rows:
-        payload = load_encode_job(connection, str(row["job_id"]))
-        if payload is None:
-            continue
-        lease_expires_at = _parse_iso(payload.get("lease_expires_at"))
-        if not restart_recovery and lease_expires_at is not None and lease_expires_at > now:
-            continue
-        failure_kind = "worker_restart" if restart_recovery else "stale_lease"
-        failure_message = (
-            "Encode queue job was interrupted by a web process restart."
-            if restart_recovery
-            else "Encode queue job stopped heartbeating and was reclaimed for retry."
-        )
-        _transition_encode_job_failure(
-            connection,
-            config,
-            payload,
-            failure_kind=failure_kind,
-            error_message=failure_message,
-        )
-
-    retry_backoff_rows = connection.execute(
-        "SELECT job_id FROM encode_jobs WHERE status = 'retry_backoff' ORDER BY created_at , rowid "
-    ).fetchall()
-    for row in retry_backoff_rows:
-        payload = load_encode_job(connection, str(row["job_id"]))
-        if payload is None:
-            continue
-        retry_not_before = _parse_iso(payload.get("retry_not_before"))
-        if retry_not_before is not None and retry_not_before > now:
-            continue
-        payload.update(
-            {
-                "status": "queued",
-                "retry_not_before": None,
-                "waiting_reason": None,
-                "updated_at": _now_iso(),
-            }
-        )
-        save_encode_job(connection, payload)
-
-    state = load_queue_state(connection)
-    running_count = int(
-        connection.execute("SELECT COUNT(*) FROM encode_jobs WHERE status = 'running'").fetchone()[0]
-    )
-    if running_count == 0 and (state.get("active_job_id") or state.get("stop_requested")):
-        state.update({"active_job_id": None, "stop_requested": False, "updated_at": _now_iso()})
-        save_queue_state(connection, state)
-
-
-def _encode_job_worker_id() -> str:
-    return f"{socket.gethostname()}:{os.getpid()}:{threading.current_thread().name}"
-
-
-def _encode_job_lease_expires_at() -> str:
-    return (datetime.now(tz=UTC) + timedelta(seconds=ENCODE_JOB_LEASE_SECONDS)).isoformat(timespec="seconds")
-
-
-def _encode_job_retry_delay_seconds(attempt_count: int) -> int:
-    exponent = max(attempt_count - 1, 0)
-    delay = ENCODE_JOB_RETRY_BASE_DELAY_SECONDS * (2 ** exponent)
-    return min(delay, ENCODE_JOB_RETRY_MAX_DELAY_SECONDS)
+    runtime_reconcile_encode_jobs(connection, config, _encode_queue_runtime_deps(), restart_recovery=restart_recovery)
 
 
 def _encode_job_manifest_totals(job: dict[str, Any]) -> dict[str, Any]:
-    manifest_path = Path(str(job.get("manifest_path") or "")).expanduser()
-    if not manifest_path.exists():
-        return {
-            "total_item_count": int(job.get("item_count") or 0),
-            "total_duration_seconds": 0.0,
-            "total_source_size_bytes": 0,
-        }
-    try:
-        payload = json.loads(manifest_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {
-            "total_item_count": int(job.get("item_count") or 0),
-            "total_duration_seconds": 0.0,
-            "total_source_size_bytes": 0,
-        }
-    items = list(payload.get("items") or [])
-    return {
-        "total_item_count": len(items) or int(job.get("item_count") or 0),
-        "total_duration_seconds": sum(float(item.get("duration_seconds") or 0.0) for item in items),
-        "total_source_size_bytes": sum(int(item.get("source_size_bytes") or 0) for item in items),
-    }
-
-
-def _initial_encode_job_progress(job: dict[str, Any]) -> dict[str, Any]:
-    manifest_totals = _encode_job_manifest_totals(job)
-    return {
-        **manifest_totals,
-        "completed_item_count": 0,
-        "completed_duration_seconds": 0.0,
-        "overall_completed_duration_seconds": 0.0,
-        "remaining_duration_seconds": float(manifest_totals["total_duration_seconds"]),
-        "percent_complete": 0.0,
-        "progress_state": "starting",
-        "fps": None,
-        "speed": None,
-        "eta_seconds": None,
-        "elapsed_seconds": 0.0,
-        "out_time_seconds": 0.0,
-        "updated_at": _now_iso(),
-    }
-
-
-def _persist_encode_job_progress(config_path: Path, job_id: str, progress: dict[str, Any]) -> None:
-    with open_db(load_config(config_path).paths.db_path) as connection:
-        job = load_encode_job(connection, job_id)
-        if job is None or str(job.get("status") or "") != "running":
-            return
-        job.update({"progress": {**progress, "updated_at": _now_iso()}, "updated_at": _now_iso()})
-        save_encode_job(connection, job)
-
-
-def _finalize_encode_job_progress(job: dict[str, Any], *, terminal_state: str) -> dict[str, Any] | None:
-    progress = dict(job.get("progress") or {})
-    if not progress:
-        return None
-    total_duration_seconds = float(progress.get("total_duration_seconds") or 0.0)
-    total_item_count = int(progress.get("total_item_count") or int(job.get("item_count") or 0))
-    if terminal_state == "completed":
-        progress.update(
-            {
-                "completed_item_count": total_item_count,
-                "completed_duration_seconds": total_duration_seconds,
-                "overall_completed_duration_seconds": total_duration_seconds,
-                "remaining_duration_seconds": 0.0,
-                "percent_complete": 100.0,
-                "eta_seconds": 0.0,
-                "progress_state": "completed",
-                "updated_at": _now_iso(),
-            }
-        )
-        return progress
-    progress.update({"progress_state": terminal_state, "updated_at": _now_iso()})
-    return progress
-
-
-def _encode_failure_is_host_related(failure_kind: str, error_message: str, host_payload: dict[str, Any]) -> bool:
-    if failure_kind in {"host_unavailable", "ssh_transport"}:
-        return True
-    lowered = error_message.lower()
-    markers = (
-        "host key verification failed",
-        "could not resolve hostname",
-        "temporary failure in name resolution",
-        "name or service not known",
-        "nodename nor servname provided",
-        "no route to host",
-        "connection refused",
-        "connection reset",
-        "operation timed out",
-        "broken pipe",
-        "ssh:",
-    )
-    if any(marker in lowered for marker in markers):
-        return True
-    return str(host_payload.get("mode") or "") == "ssh" and "permission denied" in lowered
-
-
-def _encode_failure_is_retryable(failure_kind: str, error_message: str, host_payload: dict[str, Any]) -> bool:
-    if failure_kind in {"worker_restart", "stale_lease", "host_unavailable", "ssh_transport"}:
-        return True
-    if failure_kind in {"stopped", "deterministic"}:
-        return False
-    return _encode_failure_is_host_related(failure_kind, error_message, host_payload)
-
-
-def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) -> str:
-    reason = {
-        "worker_restart": "worker restart",
-        "stale_lease": "stale worker lease",
-        "host_unavailable": "host availability issue",
-        "ssh_transport": "SSH transport failure",
-    }.get(failure_kind, "retryable failure")
-    return f"retrying after {reason} at {retry_not_before}"
+    return runtime_encode_job_manifest_totals(job)
 
 
 def _transition_encode_job_failure(
@@ -2597,218 +1772,29 @@ def _transition_encode_job_failure(
         failure_kind: str,
         error_message: str,
 ) -> None:
-    _ = config
-    now = datetime.now(tz=UTC)
-    now_iso = now.isoformat(timespec="seconds")
-    assigned_host = dict(job.get("host") or {})
-    attempt_count = int(job.get("attempt_count") or 0)
-    retryable = _encode_failure_is_retryable(failure_kind, error_message, assigned_host)
-    host_related = _encode_failure_is_host_related(failure_kind, error_message, assigned_host)
-    job.update(
-        {
-            "process_pid": None,
-            "leased_at": None,
-            "lease_expires_at": None,
-            "heartbeat_at": None,
-            "worker_id": None,
-            "last_failure_kind": failure_kind,
-            "last_failure_at": now_iso,
-            "error": error_message,
-            "last_host": assigned_host,
-            "progress": _finalize_encode_job_progress(job, terminal_state="needs_attention"),
-            "updated_at": now_iso,
-        }
+    runtime_transition_encode_job_failure(
+        connection,
+        config,
+        job,
+        _encode_queue_runtime_deps(),
+        failure_kind=failure_kind,
+        error_message=error_message,
     )
-
-    if retryable and attempt_count < ENCODE_JOB_MAX_ATTEMPTS:
-        _cleanup_encode_retry_artifacts(connection, manifest_path=Path(str(job["manifest_path"])))
-        retry_delay = _encode_job_retry_delay_seconds(attempt_count)
-        retry_not_before = (now + timedelta(seconds=retry_delay)).isoformat(timespec="seconds")
-        job.update(
-            {
-                "status": "retry_backoff",
-                "finished_at": None,
-                "retry_not_before": retry_not_before,
-                "waiting_reason": _encode_retry_waiting_reason(
-                    failure_kind=failure_kind,
-                    retry_not_before=retry_not_before,
-                ),
-                "terminal_reason": None,
-                "host_cooldown_until": (
-                    (now + timedelta(seconds=ENCODE_HOST_COOLDOWN_SECONDS)).isoformat(timespec="seconds")
-                    if host_related and assigned_host
-                    else None
-                ),
-            }
-        )
-        save_encode_job(connection, job)
-        return
-
-    terminal_reason = "max_attempts_exhausted" if retryable else failure_kind
-    job.update(
-        {
-            "status": "needs_attention",
-            "finished_at": now_iso,
-            "retry_not_before": None,
-            "waiting_reason": None,
-            "terminal_reason": terminal_reason,
-            "host_cooldown_until": None,
-        }
-    )
-    save_encode_job(connection, job)
-
-
-def _cleanup_encode_retry_artifacts(connection: sqlite3.Connection, *, manifest_path: Path) -> None:
-    try:
-        manifest = json.loads(manifest_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return
-    now_iso = _now_iso()
-    for item in manifest.get("items") or []:
-        staging_value = item.get("staging_path")
-        if staging_value:
-            staging_path = Path(str(staging_value))
-            _remove_path(staging_path)
-            _remove_path(staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}"))
-        library_item_id = item.get("library_item_id")
-        if library_item_id is None:
-            continue
-        stage_row = connection.execute(
-            "SELECT promoted_at FROM staged_artifacts WHERE library_item_id = ?",
-            (library_item_id,),
-        ).fetchone()
-        if stage_row is not None and not stage_row["promoted_at"]:
-            connection.execute(
-                "DELETE FROM staged_artifacts WHERE library_item_id = ?",
-                (library_item_id,),
-            )
-        connection.execute(
-            """
-            UPDATE library_items
-            SET status     = CASE WHEN status = 'promoted' THEN status ELSE 'planned' END,
-                updated_at = ?
-            WHERE id = ?
-              AND status != 'promoted'
-            """,
-            (now_iso, library_item_id),
-        )
 
 
 def _select_encode_host(connection: sqlite3.Connection, config: MediaforceConfig, job: dict[str, Any]) -> tuple[
     dict[str, Any] | None, str | None]:
-    host_rows = sorted(_host_runtime_rows(connection, config),
-                       key=lambda status: (-int(status["priority"]), str(status["label"])))
-    now = datetime.now(tz=UTC)
-    bypass_schedule = bool(job.get("bypass_schedule"))
-    active_hosts = [
-        host
-        for host in host_rows
-        if bool(host.get("available"))
-           and "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
-           and int(host.get("active_encode_count") or 0) < int(host.get("max_parallel_encodes") or 1)
-           and (
-                   bypass_schedule
-                   or _scheduler_allows_encode_run(
-               _schedule_profile_policy_for_host(config, host),
-               now=now,
-               host_payload=host,
-           )
-           )
-    ]
-    encode_capable_hosts = [
-        host
-        for host in host_rows
-        if "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
-    ]
-    startable_hosts = [
-        host
-        for host in host_rows
-        if not bool(host.get("available"))
-           and bool(_host_lifecycle_start_command(host))
-           and "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
-           and int(host.get("active_encode_count") or 0) < int(host.get("max_parallel_encodes") or 1)
-           and (
-                   bypass_schedule
-                   or _scheduler_allows_encode_run(
-               _schedule_profile_policy_for_host(config, host),
-               now=now,
-               host_payload=host,
-           )
-           )
-    ]
-    if not encode_capable_hosts and not startable_hosts:
-        return None, "waiting for an available encode host"
-
-    cooldown_until = _parse_iso(job.get("host_cooldown_until"))
-    last_host = dict(job.get("last_host") or {})
-    blocked_keys = {
-        str(last_host.get("key") or ""),
-        str(last_host.get("label") or ""),
-        str(last_host.get("host") or ""),
-    }
-    if cooldown_until is not None and cooldown_until > now and any(blocked_keys):
-        eligible_active_hosts = [
-            host
-            for host in active_hosts
-            if str(host.get("key") or "") not in blocked_keys and str(host.get("label") or "") not in blocked_keys
-        ]
-        if eligible_active_hosts:
-            return dict(eligible_active_hosts[0]), None
-        eligible_startable_hosts = [
-            host
-            for host in startable_hosts
-            if str(host.get("key") or "") not in blocked_keys and str(host.get("label") or "") not in blocked_keys
-        ]
-        if eligible_startable_hosts:
-            return dict(eligible_startable_hosts[0]), None
-        host_name = str(last_host.get("label") or last_host.get("key") or "the last host")
-        return None, f"waiting for host cooldown to expire on {host_name}"
-    if active_hosts:
-        return dict(active_hosts[0]), None
-    if startable_hosts:
-        return dict(startable_hosts[0]), None
-    if any(int(host.get("active_encode_count") or 0) >= int(host.get("max_parallel_encodes") or 1) for host in
-           encode_capable_hosts):
-        return None, "waiting for host capacity to free up"
-    if any(
-            not _scheduler_allows_encode_run(
-                _schedule_profile_policy_for_host(config, host),
-                now=now,
-                host_payload=host,
-            )
-            for host in encode_capable_hosts
-    ):
-        return None, "waiting for a host schedule window"
-    return None, "waiting for an available encode host"
-
-
-def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
-    message = str(exc).lower()
-    host_payload = dict(job.get("host") or {})
-    if _encode_failure_is_host_related("ssh_transport", message, host_payload):
-        return "ssh_transport"
-    if "staging file already exists" in message:
-        return "deterministic"
-    return "deterministic"
+    return runtime_select_encode_host(connection, config, job, _encode_queue_runtime_deps())
 
 
 def _encode_job_heartbeat_loop(*, config_path: Path, job_id: str, worker_id: str, stop_event: threading.Event) -> None:
-    while not stop_event.wait(ENCODE_JOB_HEARTBEAT_SECONDS):
-        with open_db(load_config(config_path).paths.db_path) as connection:
-            job = load_encode_job(connection, job_id)
-            if job is None or str(job.get("status") or "") != "running":
-                return
-            if str(job.get("worker_id") or "") != worker_id:
-                return
-            job.update(
-                {
-                    "heartbeat_at": _now_iso(),
-                    "lease_expires_at": _encode_job_lease_expires_at(),
-                    "process_pid": ENCODE_QUEUE_PROCESS.pid,
-                    "updated_at": _now_iso(),
-                }
-            )
-            save_encode_job(connection, job)
+    runtime_encode_job_heartbeat_loop(
+        config_path=config_path,
+        job_id=job_id,
+        worker_id=worker_id,
+        stop_event=stop_event,
+        deps=_encode_queue_runtime_deps(),
+    )
 
 
 def _dispatch_calibration_job(config: MediaforceConfig, job_payload: dict[str, Any]) -> None:
@@ -2881,60 +1867,17 @@ def _maybe_seed_baseline_policy(
         existing_calibration: dict[str, Any] | None,
         connection: sqlite3.Connection,
 ) -> dict[str, Any] | None:
-    if action != "baseline" or existing_calibration is not None:
-        return None
-    summary = inspect_prefix(connection, config, prefix)
-    metric_support = _metric_support()
-    payload = _build_seed_policy_payload(
+    return runtime_maybe_seed_baseline_policy(
+        config=config,
+        project_root=config.paths.project_root,
         prefix=prefix,
+        action=action,
         user_note=user_note,
         base_policy=base_policy,
         sample_item=sample_item,
-        summary=summary,
-        metric_support=metric_support,
+        existing_calibration=existing_calibration,
+        connection=connection,
     )
-    seed_response = request_seed_policy(project_root=config.paths.project_root, payload=payload)
-    if not seed_response.ok or not seed_response.proposed_policy:
-        return {
-            "policy": base_policy,
-            "job_fields": {
-                "seed_source": "default",
-                "seed_summary": seed_response.summary,
-                "seed_diagnosis": seed_response.diagnosis,
-                "seed_confidence": seed_response.confidence,
-                "seed_evidence_checked": seed_response.evidence_checked,
-                "seed_suggested_follow_up": seed_response.suggested_follow_up,
-                "seed_request_disposition": seed_response.request_disposition,
-                "seed_request_response": seed_response.request_response,
-                "seed_feasibility_note": seed_response.feasibility_note,
-                "seed_prompt_version": seed_response.prompt_version,
-                "seed_raw_response": seed_response.raw,
-                "seed_proposed_policy": None,
-                "seed_applied_policy": None,
-                "seed_context_payload": payload,
-            },
-        }
-    seeded_policy, applied_fragment = apply_seed_policy(base_policy, seed_response.proposed_policy)
-    seed_source = "ai" if applied_fragment else "default"
-    return {
-        "policy": seeded_policy,
-        "job_fields": {
-            "seed_source": seed_source,
-            "seed_summary": seed_response.summary,
-            "seed_diagnosis": seed_response.diagnosis,
-            "seed_confidence": seed_response.confidence,
-            "seed_evidence_checked": seed_response.evidence_checked,
-            "seed_suggested_follow_up": seed_response.suggested_follow_up,
-            "seed_request_disposition": seed_response.request_disposition,
-            "seed_request_response": seed_response.request_response,
-            "seed_feasibility_note": seed_response.feasibility_note,
-            "seed_prompt_version": seed_response.prompt_version,
-            "seed_raw_response": seed_response.raw,
-            "seed_proposed_policy": seed_response.proposed_policy,
-            "seed_applied_policy": applied_fragment or None,
-            "seed_context_payload": payload,
-        },
-    }
 
 
 def _tuning_advice_payload(
@@ -2943,92 +1886,19 @@ def _tuning_advice_payload(
         note: str,
         applied_fragment: dict[str, Any],
 ) -> dict[str, Any]:
-    return {
-        "ok": tuning.ok,
-        "summary": tuning.summary,
-        "raw": tuning.raw,
-        "kind": "ai_tune",
-        "operator_note": note,
-        "prompt_version": tuning.prompt_version,
-        "request_disposition": tuning.request_disposition,
-        "request_response": tuning.request_response,
-        "feasibility_note": tuning.feasibility_note,
-        "diagnosis": tuning.diagnosis,
-        "confidence": tuning.confidence,
-        "evidence_checked": tuning.evidence_checked,
-        "suggested_follow_up": tuning.suggested_follow_up,
-        "applied_policy": applied_fragment,
-        "toolbelt_used": tuning.toolbelt_used,
-        "self_check": tuning.self_check,
-    }
+    return runtime_tuning_advice_payload(tuning=tuning, note=note, applied_fragment=applied_fragment)
 
 
 def _seed_advice_payload(note: str, seed_metadata: dict[str, Any] | None) -> dict[str, Any] | None:
-    if seed_metadata is None and not note:
-        return None
-    job_fields = dict(seed_metadata.get("job_fields") or {}) if seed_metadata else {}
-    return {
-        "ok": True,
-        "summary": job_fields.get("seed_summary") or "Queued an AI-guided first sample baseline.",
-        "raw": job_fields.get("seed_raw_response") or "",
-        "kind": "seed_baseline",
-        "operator_note": note or None,
-        "prompt_version": job_fields.get("seed_prompt_version"),
-        "request_disposition": job_fields.get("seed_request_disposition"),
-        "request_response": job_fields.get("seed_request_response"),
-        "feasibility_note": job_fields.get("seed_feasibility_note"),
-        "diagnosis": job_fields.get("seed_diagnosis"),
-        "confidence": job_fields.get("seed_confidence"),
-        "evidence_checked": list(job_fields.get("seed_evidence_checked") or []),
-        "suggested_follow_up": job_fields.get("seed_suggested_follow_up"),
-        "applied_policy": job_fields.get("seed_applied_policy"),
-    }
+    return runtime_seed_advice_payload(note, seed_metadata)
 
 
 def _job_seed_metadata(job_payload: dict[str, Any]) -> dict[str, Any] | None:
-    if not any(job_payload.get(key) is not None for key in
-               ("seed_source", "seed_prompt_version", "seed_raw_response", "seed_proposed_policy",
-                "seed_applied_policy")):
-        return None
-    return {
-        "source": job_payload.get("seed_source"),
-        "summary": job_payload.get("seed_summary"),
-        "diagnosis": job_payload.get("seed_diagnosis"),
-        "confidence": job_payload.get("seed_confidence"),
-        "request_disposition": job_payload.get("seed_request_disposition"),
-        "request_response": job_payload.get("seed_request_response"),
-        "feasibility_note": job_payload.get("seed_feasibility_note"),
-        "prompt_version": job_payload.get("seed_prompt_version"),
-        "raw_response": job_payload.get("seed_raw_response"),
-        "proposed_policy": job_payload.get("seed_proposed_policy"),
-        "applied_policy": job_payload.get("seed_applied_policy"),
-    }
+    return runtime_job_seed_metadata(job_payload)
 
 
 def _summarize_calibration_result(calibration_payload: dict[str, Any]) -> dict[str, Any]:
-    summary = {
-        "mode": calibration_payload.get("mode"),
-        "action": calibration_payload.get("action"),
-        "policy_seed": calibration_payload.get("policy_seed"),
-    }
-    if calibration_payload.get("mode") == "sample":
-        sample_result = calibration_payload.get("sample_result") or {}
-        summary["sample_result"] = {
-            "chosen_crf": sample_result.get("chosen_crf"),
-            "quality_metric": sample_result.get("quality_metric"),
-            "quality_score": sample_result.get("quality_score"),
-            "predicted_total_size_bytes": sample_result.get("predicted_total_size_bytes"),
-            "predicted_encode_percent": sample_result.get("predicted_encode_percent"),
-        }
-    else:
-        encode_result = calibration_payload.get("encode_result") or {}
-        summary["encode_result"] = {
-            "chosen_crf": encode_result.get("chosen_crf"),
-            "quality_metric": encode_result.get("quality_metric"),
-            "quality_score": encode_result.get("quality_score"),
-            "staging_size_bytes": encode_result.get("staging_size_bytes"),
-        }
-    return summary
+    return runtime_summarize_calibration_result(calibration_payload)
 
 
 def _start_encode_queue_worker(config: MediaforceConfig) -> None:
@@ -3043,198 +1913,21 @@ def _start_encode_queue_worker(config: MediaforceConfig) -> None:
 
 
 def _encode_queue_worker_loop(*, config_path: Path) -> None:
-    while True:
-        try:
-            _process_encode_queue_once(config_path=config_path)
-        except Exception:
-            pass
-        threading.Event().wait(ENCODE_QUEUE_POLL_SECONDS)
+    runtime_encode_queue_worker_loop(config_path=config_path, deps=_encode_queue_runtime_deps())
 
 
 def _process_encode_queue_once(*, config_path: Path) -> None:
-    config = load_config(config_path)
-    with open_db(config.paths.db_path) as connection:
-        ensure_queue_state(connection, updated_at=_now_iso())
-        _reconcile_encode_jobs(connection, config)
-        state = load_queue_state(connection)
-        running_job = load_active_encode_job(connection)
-        if running_job is not None:
-            if state.get("stop_requested"):
-                ENCODE_QUEUE_PROCESS.cancel()
-            return
-        if state.get("stop_requested"):
-            state.update({"stop_requested": False, "active_job_id": None, "updated_at": _now_iso()})
-            save_queue_state(connection, state)
-        if state.get("is_paused"):
-            return
-        next_job = _load_next_runnable_encode_job(connection, config)
-        if next_job is None:
-            return
-        worker_id = _encode_job_worker_id()
-        now_iso = _now_iso()
-        state.update({"active_job_id": next_job["job_id"], "updated_at": _now_iso()})
-        save_queue_state(connection, state)
-        next_job.update(
-            {
-                "status": "running",
-                "started_at": now_iso,
-                "finished_at": None,
-                "process_pid": None,
-                "leased_at": now_iso,
-                "heartbeat_at": now_iso,
-                "lease_expires_at": _encode_job_lease_expires_at(),
-                "worker_id": worker_id,
-                "attempt_count": int(next_job.get("attempt_count") or 0) + 1,
-                "retry_not_before": None,
-                "waiting_reason": None,
-                "terminal_reason": None,
-                "last_failure_kind": None,
-                "progress": _initial_encode_job_progress(next_job),
-                "updated_at": now_iso,
-            }
-        )
-        save_encode_job(connection, next_job)
-
-    _run_encode_job(config_path=config_path, job_id=str(next_job["job_id"]))
+    runtime_process_encode_queue_once(config_path=config_path, deps=_encode_queue_runtime_deps())
 
 
 def _load_next_runnable_encode_job(
         connection: sqlite3.Connection, config: MediaforceConfig
 ) -> dict[str, Any] | None:
-    rows = connection.execute(
-        "SELECT job_id FROM encode_jobs WHERE status = 'queued' ORDER BY created_at , rowid "
-    ).fetchall()
-    for row in rows:
-        job = load_encode_job(connection, str(row["job_id"]))
-        if job is None:
-            continue
-        host_payload, waiting_reason = _select_encode_host(connection, config, job)
-        if host_payload is None:
-            if str(job.get("waiting_reason") or "") != str(waiting_reason or ""):
-                job.update({"waiting_reason": waiting_reason, "updated_at": _now_iso()})
-                save_encode_job(connection, job)
-            continue
-        if job.get("waiting_reason") or job.get("host") != host_payload:
-            job.update({"waiting_reason": None, "host": host_payload, "updated_at": _now_iso()})
-            save_encode_job(connection, job)
-        return job
-    return None
+    return runtime_load_next_runnable_encode_job(connection, config, _encode_queue_runtime_deps())
 
 
 def _run_encode_job(*, config_path: Path, job_id: str) -> None:
-    config = load_config(config_path)
-    ENCODE_QUEUE_PROCESS.reset()
-    with open_db(config.paths.db_path) as connection:
-        job = load_encode_job(connection, job_id)
-        if job is None:
-            return
-        manifest_path = Path(job["manifest_path"])
-        manifest = json.loads(manifest_path.read_text())
-        indexes = list(range(len(manifest.get("items") or [])))
-        job.update({"process_pid": ENCODE_QUEUE_PROCESS.pid, "updated_at": _now_iso()})
-        save_encode_job(connection, job)
-
-    progress_write_lock = threading.Lock()
-    last_progress_write = 0.0
-
-    def report_progress(progress: dict[str, Any]) -> None:
-        nonlocal last_progress_write
-        now_monotonic = time.monotonic()
-        progress_state = str(progress.get("progress_state") or "")
-        if progress_state != "end" and (
-                now_monotonic - last_progress_write) < ENCODE_JOB_PROGRESS_WRITE_INTERVAL_SECONDS:
-            return
-        with progress_write_lock:
-            if progress_state != "end" and (
-                    now_monotonic - last_progress_write) < ENCODE_JOB_PROGRESS_WRITE_INTERVAL_SECONDS:
-                return
-            last_progress_write = now_monotonic
-        _persist_encode_job_progress(config_path, job_id, progress)
-
-    heartbeat_stop = threading.Event()
-    worker_id = str(job.get("worker_id") or _encode_job_worker_id())
-    heartbeat_thread = threading.Thread(
-        target=_encode_job_heartbeat_loop,
-        kwargs={
-            "config_path": config_path,
-            "job_id": job_id,
-            "worker_id": worker_id,
-            "stop_event": heartbeat_stop,
-        },
-        daemon=True,
-        name=f"encode-heartbeat-{job_id}",
-    )
-    heartbeat_thread.start()
-    final_status: str | None = None
-    failure_kind: str | None = None
-    error: str | None = None
-    started_host_for_job = False
-    try:
-        ENCODE_QUEUE_PROCESS.throw_if_cancelled()
-        started_host_for_job = _ensure_encode_host_ready(config, job.get("host"))
-        with open_db(config.paths.db_path) as connection:
-            encode_manifest_items(
-                connection,
-                config,
-                manifest_path,
-                manifest,
-                indexes,
-                overwrite=False,
-                process_controller=ENCODE_QUEUE_PROCESS,
-                host=job.get("host"),
-                progress_callback=report_progress,
-            )
-        final_status = "completed"
-    except ProcessCancelledError:
-        final_status = "stopped"
-        error = "Encode queue job was stopped and cleaned up."
-    except Exception as exc:
-        failure_kind = _classify_encode_failure(exc, job)
-        error = str(exc)
-    finally:
-        if started_host_for_job:
-            try:
-                _stop_encode_host_if_configured(config, job.get("host"))
-            except Exception as exc:
-                LOGGER.warning("Encode host stop command failed for %s: %s", job_id, exc)
-        heartbeat_stop.set()
-        heartbeat_thread.join(timeout=1.0)
-        with open_db(config.paths.db_path) as connection:
-            job = load_encode_job(connection, job_id)
-            if job is not None:
-                if final_status is not None:
-                    job.update(
-                        {
-                            "status": final_status,
-                            "finished_at": _now_iso(),
-                            "error": error,
-                            "process_pid": None,
-                            "leased_at": None,
-                            "lease_expires_at": None,
-                            "heartbeat_at": None,
-                            "worker_id": None,
-                            "retry_not_before": None,
-                            "waiting_reason": None,
-                            "terminal_reason": None,
-                            "last_failure_kind": None,
-                            "host_cooldown_until": None,
-                            "progress": _finalize_encode_job_progress(job, terminal_state=final_status),
-                            "updated_at": _now_iso(),
-                        }
-                    )
-                    save_encode_job(connection, job)
-                elif error is not None:
-                    _transition_encode_job_failure(
-                        connection,
-                        config,
-                        job,
-                        failure_kind=failure_kind or "deterministic",
-                        error_message=error,
-                    )
-            state = load_queue_state(connection)
-            state.update({"active_job_id": None, "stop_requested": False, "updated_at": _now_iso()})
-            save_queue_state(connection, state)
-        ENCODE_QUEUE_PROCESS.reset()
+    runtime_run_encode_job(config_path=config_path, job_id=job_id, deps=_encode_queue_runtime_deps())
 
 
 def _run_periodic_cleanup(config: MediaforceConfig, cleanup_lock: threading.Lock) -> None:

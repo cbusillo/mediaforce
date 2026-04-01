@@ -3,9 +3,9 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from mediaforce.config import MediaforceConfig, load_config
-from mediaforce.db import open_db
-from mediaforce.run_manifests import create_folder_manifest
+from mediaforce.core.config import MediaforceConfig, load_config
+from mediaforce.core.db import open_db
+from mediaforce.library.run_manifests import create_folder_manifest
 
 
 def queue_folder_encode_action(

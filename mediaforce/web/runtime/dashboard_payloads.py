@@ -2,10 +2,10 @@ from dataclasses import asdict
 import sqlite3
 from typing import Any
 
-from mediaforce.calibration_jobs import list_queue_summary
-from mediaforce.config import MediaforceConfig
-from mediaforce.db import open_db
-from mediaforce.encode_queue import summarize_encode_queue
+from mediaforce.tuning.calibration_jobs import list_queue_summary
+from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.db import open_db
+from mediaforce.encoding.encode_queue import summarize_encode_queue
 
 from mediaforce.web.runtime.folder_cards import FolderCard
 

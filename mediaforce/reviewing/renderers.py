@@ -1,0 +1,260 @@
+from pathlib import Path
+from typing import Any, Callable
+
+
+def render_compare_clip(
+        source_path: Path,
+        staged_path: Path,
+        output_path: Path,
+        clip_time: float,
+        duration_seconds: float,
+        *,
+        source_codec: str | None = None,
+        process_controller: Any = None,
+        ffmpeg_binary: Callable[[], str],
+        ffmpeg_hwaccel_input_args: Callable[[str | None], list[str]],
+        run_command: Callable[..., Any],
+) -> None:
+    filter_complex = "[0:v]scale=-2:540:flags=lanczos,setsar=1[left];[1:v]scale=-2:540:flags=lanczos,setsar=1[right];[left][right]hstack=inputs=2[v]"
+    cmd = [
+        ffmpeg_binary(),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-ss",
+        f"{clip_time:.3f}",
+        "-t",
+        f"{duration_seconds:.3f}",
+        *ffmpeg_hwaccel_input_args(source_codec),
+        "-i",
+        str(source_path),
+        "-ss",
+        f"{clip_time:.3f}",
+        "-t",
+        f"{duration_seconds:.3f}",
+        "-i",
+        str(staged_path),
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "[v]",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-crf",
+        "16",
+        "-preset",
+        "veryfast",
+        str(output_path),
+    ]
+    result = run_command(cmd, process_controller=process_controller)
+    _raise_on_failure(result, "Compare clip render failed")
+
+
+def render_encoded_preview_clip(
+        *,
+        source_path: Path,
+        source_codec: str | None = None,
+        output_path: Path,
+        clip_time: float,
+        duration_seconds: float,
+        encoder: str,
+        pixel_format: str,
+        preset: int,
+        crf: float,
+        svt_params: list[str],
+        process_controller: Any = None,
+        ffmpeg_binary: Callable[[], str],
+        ffmpeg_hwaccel_input_args: Callable[[str | None], list[str]],
+        format_crf: Callable[[float], str],
+        run_command: Callable[..., Any],
+) -> None:
+    cmd = [
+        ffmpeg_binary(),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-ss",
+        f"{clip_time:.3f}",
+        "-t",
+        f"{duration_seconds:.3f}",
+        *ffmpeg_hwaccel_input_args(source_codec),
+        "-i",
+        str(source_path),
+        "-map",
+        "0:v:0",
+        "-an",
+        "-sn",
+        "-c:v",
+        encoder,
+        "-pix_fmt",
+        pixel_format,
+        "-movflags",
+        "+faststart",
+        "-preset",
+        str(preset),
+        "-crf",
+        format_crf(crf),
+    ]
+    if encoder == "libsvtav1":
+        cmd.extend(["-svtav1-params", ":".join(svt_params)])
+    cmd.append(str(output_path))
+    result = run_command(cmd, process_controller=process_controller)
+    _raise_on_failure(result, "Preview sample encode failed")
+
+
+def render_encoded_preview_clip_remote(
+        *,
+        host: dict[str, Any],
+        source_path: Path,
+        source_codec: str | None = None,
+        remote_output_path: Path,
+        clip_time: float,
+        duration_seconds: float,
+        encoder: str,
+        pixel_format: str,
+        preset: int,
+        crf: float,
+        svt_params: list[str],
+        remote_preview_timeout_seconds: int,
+        ffmpeg_binary: Callable[[], str],
+        ffmpeg_hwaccel_input_args: Callable[[str | None], list[str]],
+        format_crf: Callable[[float], str],
+        run_remote_command: Callable[..., Any],
+) -> None:
+    cmd = [
+        ffmpeg_binary(),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-ss",
+        f"{clip_time:.3f}",
+        "-t",
+        f"{duration_seconds:.3f}",
+        *ffmpeg_hwaccel_input_args(source_codec),
+        "-i",
+        str(source_path),
+        "-map",
+        "0:v:0",
+        "-an",
+        "-sn",
+        "-c:v",
+        encoder,
+        "-pix_fmt",
+        pixel_format,
+        "-movflags",
+        "+faststart",
+        "-preset",
+        str(preset),
+        "-crf",
+        format_crf(crf),
+    ]
+    if encoder == "libsvtav1":
+        cmd.extend(["-svtav1-params", ":".join(svt_params)])
+    cmd.append(str(remote_output_path))
+    result = run_remote_command(host, cmd, timeout=remote_preview_timeout_seconds)
+    _raise_on_failure(result, "Preview sample encode failed")
+
+
+def render_compare_clip_from_preview(
+        *,
+        source_path: Path,
+        source_codec: str | None = None,
+        preview_path: Path,
+        output_path: Path,
+        clip_time: float,
+        duration_seconds: float,
+        process_controller: Any = None,
+        ffmpeg_binary: Callable[[], str],
+        ffmpeg_hwaccel_input_args: Callable[[str | None], list[str]],
+        run_command: Callable[..., Any],
+) -> None:
+    filter_complex = "[0:v]scale=-2:540:flags=lanczos,setsar=1[left];[1:v]scale=-2:540:flags=lanczos,setsar=1[right];[left][right]hstack=inputs=2[v]"
+    cmd = [
+        ffmpeg_binary(),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-ss",
+        f"{clip_time:.3f}",
+        "-t",
+        f"{duration_seconds:.3f}",
+        *ffmpeg_hwaccel_input_args(source_codec),
+        "-i",
+        str(source_path),
+        "-i",
+        str(preview_path),
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "[v]",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-crf",
+        "16",
+        "-preset",
+        "veryfast",
+        str(output_path),
+    ]
+    result = run_command(cmd, process_controller=process_controller)
+    _raise_on_failure(result, "Preview compare render failed")
+
+
+def render_source_review_clip(
+        *,
+        source_path: Path,
+        source_codec: str | None = None,
+        output_path: Path,
+        clip_time: float,
+        duration_seconds: float,
+        process_controller: Any = None,
+        ffmpeg_binary: Callable[[], str],
+        ffmpeg_hwaccel_input_args: Callable[[str | None], list[str]],
+        run_command: Callable[..., Any],
+) -> None:
+    cmd = [
+        ffmpeg_binary(),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-ss",
+        f"{clip_time:.3f}",
+        "-t",
+        f"{duration_seconds:.3f}",
+        *ffmpeg_hwaccel_input_args(source_codec),
+        "-i",
+        str(source_path),
+        "-map",
+        "0:v:0",
+        "-an",
+        "-sn",
+        "-c:v",
+        "libx264",
+        "-crf",
+        "16",
+        "-preset",
+        "veryfast",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    result = run_command(cmd, process_controller=process_controller)
+    _raise_on_failure(result, "Source review clip render failed")
+
+
+def _raise_on_failure(result: Any, prefix: str) -> None:
+    if result.returncode == 0:
+        return
+    details = result.stderr.strip() or result.stdout.strip() or f"ffmpeg exited with status {result.returncode}"
+    raise RuntimeError(f"{prefix}: {details}")

@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from mediaforce.config import MediaforceConfig
+from mediaforce.core.config import MediaforceConfig
 
 
 def learned_memory_dir(config: MediaforceConfig) -> Path:

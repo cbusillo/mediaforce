@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from mediaforce.binaries import ffmpeg_binary
-from mediaforce.ffmpeg import ab_av1_hwaccel_input_args
-from mediaforce.process_control import ManagedProcessController, run_command
+from mediaforce.core.binaries import ffmpeg_binary
+from mediaforce.encoding.ffmpeg import ab_av1_hwaccel_input_args
+from mediaforce.core.process_control import ManagedProcessController, run_command
 from mediaforce.remote import execution_mode_for_host, run_remote_command
 
 RESULT_RE = re.compile(
@@ -49,12 +49,12 @@ REMOTE_QUALITY_TIMEOUT_SECONDS = 2 * 60 * 60
 def select_quality_metric(preferred: str) -> tuple[str, float]:
     preferred_value = preferred.lower()
     if preferred_value == "vmaf" and has_libvmaf():
-        return ("vmaf", 95.0)
+        return "vmaf", 95.0
     if preferred_value == "auto":
         if has_libvmaf():
-            return ("vmaf", 95.0)
-        return ("xpsnr", 41.0)
-    return (preferred_value, 41.0)
+            return "vmaf", 95.0
+        return "xpsnr", 41.0
+    return preferred_value, 41.0
 
 
 def run_crf_search(

@@ -1,9 +1,9 @@
+import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-import threading
 from pathlib import Path
 
-from mediaforce.config import MediaforceConfig
+from mediaforce.core.config import MediaforceConfig
 from mediaforce.remote import HostStatus, collect_host_statuses
 from mediaforce.web.settings_runtime import normalize_host_capabilities
 
@@ -57,7 +57,7 @@ def safe_collect_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
     with _HOST_STATUS_CACHE_LOCK:
         cached_matches = _HOST_STATUS_CACHE_KEY == cache_key and bool(_HOST_STATUS_CACHE_VALUE)
         cache_fresh = cached_matches and (
-            time.monotonic() - _HOST_STATUS_CACHE_FETCHED_AT
+                time.monotonic() - _HOST_STATUS_CACHE_FETCHED_AT
         ) < _HOST_STATUS_CACHE_TTL_SECONDS
         cached_statuses = list(_HOST_STATUS_CACHE_VALUE) if cached_matches else []
 
@@ -88,7 +88,7 @@ def _path_mtime_ns(path: Path) -> int:
 
 
 def _host_status_refresh_payload(config: MediaforceConfig) -> tuple[tuple[str, int, int], list[HostStatus]]:
-    return (_host_status_cache_key(config), collect_host_statuses_with_fallback(config))
+    return _host_status_cache_key(config), collect_host_statuses_with_fallback(config)
 
 
 def _fallback_host_statuses(config: MediaforceConfig) -> list[HostStatus]:

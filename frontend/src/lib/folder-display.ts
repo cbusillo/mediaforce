@@ -39,7 +39,7 @@ function hexToRgb(hex: string): [number, number, number] {
 	return [0, 2, 4].map((index) => Number.parseInt(normalized.slice(index, index + 2), 16)) as [
 		number,
 		number,
-		number,
+		number
 	];
 }
 
@@ -66,7 +66,7 @@ export function folderLibraryTheme(color?: string | null): FolderLibraryTheme {
 		border: rgba(base, 0.2),
 		text: mixHex(base, 0, 0.2),
 		glow: rgba(base, 0.16),
-		softText: mixHex(base, 255, 0.32),
+		softText: mixHex(base, 255, 0.32)
 	};
 }
 

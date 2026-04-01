@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from mediaforce.advisor import AdvisorResponse
-from mediaforce.config import MediaforceConfig
+from mediaforce.core.config import MediaforceConfig
 
 
 @dataclass(slots=True)

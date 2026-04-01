@@ -118,7 +118,9 @@
 
 	const metadataPills = $derived.by(() => [
 		`P${host.priority}`,
-		...host.capabilities.map((capability) => capabilityLabels[capability] ?? capability.replace(/_/g, ' '))
+		...host.capabilities.map(
+			(capability) => capabilityLabels[capability] ?? capability.replace(/_/g, ' ')
+		)
 	]);
 </script>
 
@@ -168,7 +170,9 @@
 								{job.progress?.current_item_rel_path ?? 'Starting encode'}
 							</p>
 						</div>
-						<p class="running-job-summary">{job.telemetry_summary || job.scheduler_status_copy || 'Running now'}</p>
+						<p class="running-job-summary">
+							{job.telemetry_summary || job.scheduler_status_copy || 'Running now'}
+						</p>
 					</div>
 				{/each}
 			</div>

@@ -2,7 +2,7 @@ import platform as platform_module
 import subprocess
 from functools import lru_cache
 
-from mediaforce.binaries import ffmpeg_binary
+from mediaforce.core.binaries import ffmpeg_binary
 
 VIDEOTOOLBOX_REQUIRED_ISSUE = "ffmpeg is missing VideoToolbox hardware decode required for H.264/H.265 sources."
 SVT_AV1_REQUIRED_ISSUE = "ffmpeg is missing libsvtav1 support required for queue encodes."

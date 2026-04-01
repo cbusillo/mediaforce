@@ -6,10 +6,10 @@ from typing import Any
 from fastapi import HTTPException
 
 from mediaforce.advisor import apply_seed_policy, request_note_tuning
-from mediaforce.config import MediaforceConfig
-from mediaforce.db import open_db
-from mediaforce.folder_profiles import inspect_prefix
-from mediaforce.tuning_memory import promote_learning_artifact, retrieve_learning_context
+from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.db import open_db
+from mediaforce.library.folder_profiles import inspect_prefix
+from mediaforce.tuning.tuning_memory import promote_learning_artifact, retrieve_learning_context
 
 
 @dataclass(slots=True)
