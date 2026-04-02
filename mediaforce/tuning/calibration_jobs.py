@@ -5,6 +5,7 @@ from typing import TypeVar
 from sqlalchemy import func
 from sqlalchemy import literal_column
 from sqlalchemy import select
+from sqlalchemy import update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.db import DBClient
@@ -60,37 +61,29 @@ def claim_next_queued_calibration_job(
         started_at: str,
         excluded_prefixes: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
-    query = [
-        "lane = ?",
-        "status = 'queued'",
-    ]
-    params: list[Any] = [lane]
+    candidate_query = (
+        select(calibration_jobs.c.job_id)
+        .where(calibration_jobs.c.lane == lane)
+        .where(calibration_jobs.c.status == "queued")
+        .order_by(calibration_jobs.c.created_at.asc(), _rowid_column().asc())
+        .limit(1)
+    )
     if excluded_prefixes:
-        placeholders = ", ".join("?" for _ in excluded_prefixes)
-        query.append(f"prefix NOT IN ({placeholders})")
-        params.extend(excluded_prefixes)
-    where_clause = " AND ".join(query)
-    row = connection.exec_driver_sql(
-        f"""
-        WITH candidate AS (
-            SELECT job_id
-            FROM calibration_jobs
-            WHERE {where_clause}
-            ORDER BY created_at ASC, rowid ASC
-            LIMIT 1
+        candidate_query = candidate_query.where(calibration_jobs.c.prefix.not_in(excluded_prefixes))
+    candidate_job_id = candidate_query.scalar_subquery()
+    row = connection.execute(
+        update(calibration_jobs)
+        .where(calibration_jobs.c.job_id == candidate_job_id)
+        .where(calibration_jobs.c.status == "queued")
+        .values(
+            status="running",
+            owner_pid=owner_pid,
+            started_at=func.coalesce(calibration_jobs.c.started_at, started_at),
+            finished_at=None,
+            error=None,
+            updated_at=started_at,
         )
-        UPDATE calibration_jobs
-        SET status = 'running',
-            owner_pid = ?,
-            started_at = COALESCE(started_at, ?),
-            finished_at = NULL,
-            error = NULL,
-            updated_at = ?
-        WHERE job_id = (SELECT job_id FROM candidate)
-          AND status = 'queued'
-        RETURNING *
-        """,
-        tuple(params + [owner_pid, started_at, started_at]),
+        .returning(*calibration_jobs.c, _rowid_column())
     ).mappings().fetchone()
     return _hydrate_job(row) if row is not None else None
 

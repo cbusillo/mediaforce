@@ -3,8 +3,15 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable
 
+from sqlalchemy import case
+from sqlalchemy import delete
+from sqlalchemy import select
+from sqlalchemy import update
+
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
+from mediaforce.core.db_tables import library_items
+from mediaforce.core.db_tables import staged_artifacts
 
 
 def finalize_output_path(temp_output: Path, staging_path: Path) -> None:
@@ -27,9 +34,8 @@ def validate_one_item(
         timestamp: Callable[[], str],
         record_event: Callable[[DBClient, int, str, dict[str, Any]], None],
 ) -> dict[str, Any]:
-    row = connection.exec_driver_sql(
-        "SELECT * FROM staged_artifacts WHERE library_item_id = ?",
-        (item["library_item_id"],),
+    row = connection.execute(
+        select(staged_artifacts).where(staged_artifacts.c.library_item_id == item["library_item_id"])
     ).mappings().fetchone()
     if row is None:
         raise FileNotFoundError(f"No staged artifact found for item {item['library_item_id']}")
@@ -70,14 +76,20 @@ def validate_one_item(
         check(validation, staged_size_bytes < source_size_bytes, "staged file is smaller than source")
 
     now = timestamp()
-    connection.exec_driver_sql(
-        "UPDATE staged_artifacts SET validation_json = ?, validated_at = ?, updated_at = ? WHERE library_item_id = ?",
-        (json.dumps(validation, separators=(",", ":")), now, now, item["library_item_id"]),
+    connection.execute(
+        update(staged_artifacts)
+        .where(staged_artifacts.c.library_item_id == item["library_item_id"])
+        .values(
+            validation_json=json.dumps(validation, separators=(",", ":")),
+            validated_at=now,
+            updated_at=now,
+        )
     )
     if validation["passed"]:
-        connection.exec_driver_sql(
-            "UPDATE library_items SET status = 'validated', updated_at = ? WHERE id = ?",
-            (now, item["library_item_id"]),
+        connection.execute(
+            update(library_items)
+            .where(library_items.c.id == item["library_item_id"])
+            .values(status="validated", updated_at=now)
         )
     record_event(connection, item["library_item_id"], "validation_completed", validation)
     connection.commit()
@@ -95,9 +107,8 @@ def promote_one_item(
         timestamp: Callable[[], str],
         record_event: Callable[[DBClient, int, str, dict[str, Any]], None],
 ) -> Path:
-    stage_row = connection.exec_driver_sql(
-        "SELECT * FROM staged_artifacts WHERE library_item_id = ?",
-        (item["library_item_id"],),
+    stage_row = connection.execute(
+        select(staged_artifacts).where(staged_artifacts.c.library_item_id == item["library_item_id"])
     ).mappings().fetchone()
     if stage_row is None:
         raise FileNotFoundError(f"No staged artifact found for item {item['library_item_id']}")
@@ -128,74 +139,46 @@ def promote_one_item(
     rel_path = str(destination_path.relative_to(config.source_root_map[item["media_root"]].parent))
     parent_dir = str(destination_path.parent.relative_to(config.source_root_map[item["media_root"]].parent))
 
-    connection.exec_driver_sql(
-        """
-        UPDATE library_items
-        SET source_path               = ?,
-            rel_path                  = ?,
-            parent_dir                = ?,
-            file_name                 = ?,
-            container                 = ?,
-            size_bytes                = ?,
-            mtime_ns                  = ?,
-            fingerprint               = ?,
-            duration_seconds          = ?,
-            video_codec               = ?,
-            video_bitrate             = ?,
-            width                     = ?,
-            height                    = ?,
-            pix_fmt                   = ?,
-            audio_track_count         = ?,
-            subtitle_track_count      = ?,
-            english_audio_count       = ?,
-            english_subtitle_count    = ?,
-            default_audio_language    = ?,
-            default_subtitle_language = ?,
-            audio_summary_json        = ?,
-            subtitle_summary_json     = ?,
-            status                    = 'promoted',
-            updated_at                = ?,
-            last_seen_at              = ?
-        WHERE id = ?
-        """,
-        (
-            str(destination_path),
-            rel_path,
-            parent_dir,
-            destination_path.name,
-            destination_path.suffix.lower(),
-            promoted_stat.st_size,
-            promoted_stat.st_mtime_ns,
-            promoted_fingerprint,
-            promoted_probe.duration_seconds,
-            promoted_probe.video_codec,
-            promoted_probe.video_bitrate,
-            promoted_probe.width,
-            promoted_probe.height,
-            promoted_probe.pix_fmt,
-            promoted_probe.audio_track_count,
-            promoted_probe.subtitle_track_count,
-            promoted_probe.english_audio_count,
-            promoted_probe.english_subtitle_count,
-            promoted_probe.default_audio_language,
-            promoted_probe.default_subtitle_language,
-            promoted_probe.audio_summary_json,
-            promoted_probe.subtitle_summary_json,
-            now,
-            now,
-            item["library_item_id"],
-        ),
+    connection.execute(
+        update(library_items)
+        .where(library_items.c.id == item["library_item_id"])
+        .values(
+            source_path=str(destination_path),
+            rel_path=rel_path,
+            parent_dir=parent_dir,
+            file_name=destination_path.name,
+            container=destination_path.suffix.lower(),
+            size_bytes=promoted_stat.st_size,
+            mtime_ns=promoted_stat.st_mtime_ns,
+            fingerprint=promoted_fingerprint,
+            duration_seconds=promoted_probe.duration_seconds,
+            video_codec=promoted_probe.video_codec,
+            video_bitrate=promoted_probe.video_bitrate,
+            width=promoted_probe.width,
+            height=promoted_probe.height,
+            pix_fmt=promoted_probe.pix_fmt,
+            audio_track_count=promoted_probe.audio_track_count,
+            subtitle_track_count=promoted_probe.subtitle_track_count,
+            english_audio_count=promoted_probe.english_audio_count,
+            english_subtitle_count=promoted_probe.english_subtitle_count,
+            default_audio_language=promoted_probe.default_audio_language,
+            default_subtitle_language=promoted_probe.default_subtitle_language,
+            audio_summary_json=promoted_probe.audio_summary_json,
+            subtitle_summary_json=promoted_probe.subtitle_summary_json,
+            status="promoted",
+            updated_at=now,
+            last_seen_at=now,
+        )
     )
-    connection.exec_driver_sql(
-        """
-        UPDATE staged_artifacts
-        SET promoted_at          = ?,
-            promoted_path        = ?,
-            archived_source_path = ?,
-            updated_at           = ?
-        WHERE library_item_id = ?
-        """,
-        (now, str(destination_path), str(archive_path), now, item["library_item_id"]),
+    connection.execute(
+        update(staged_artifacts)
+        .where(staged_artifacts.c.library_item_id == item["library_item_id"])
+        .values(
+            promoted_at=now,
+            promoted_path=str(destination_path),
+            archived_source_path=str(archive_path),
+            updated_at=now,
+        )
     )
     record_event(
         connection,

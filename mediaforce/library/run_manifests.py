@@ -4,8 +4,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import bindparam
+from sqlalchemy import or_
+from sqlalchemy import outerjoin
+from sqlalchemy import select
+from sqlalchemy import update
+
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
+from mediaforce.core.db_tables import library_items
+from mediaforce.core.db_tables import run_manifests
+from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.library.planner import build_manifest_item, recommend_item
 from mediaforce.library.scanner import scan_library
 
@@ -19,29 +28,29 @@ def select_candidates(
         limit: int | None,
         buckets: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    query = """
-        SELECT
-            library_items.*,
-            staged_artifacts.staging_size_bytes,
-            staged_artifacts.staging_path,
-            staged_artifacts.quality_metric,
-            staged_artifacts.quality_score,
-            staged_artifacts.validation_json
-        FROM library_items
-        LEFT JOIN staged_artifacts ON staged_artifacts.library_item_id = library_items.id
-        WHERE library_items.status IN ({statuses})
-    """.format(
-        statuses=",".join("?" for _ in statuses)
+    joined_tables = outerjoin(
+        library_items,
+        staged_artifacts,
+        staged_artifacts.c.library_item_id == library_items.c.id,
     )
-    params: list[Any] = list(statuses)
+    query = (
+        select(
+            library_items,
+            staged_artifacts.c.staging_size_bytes,
+            staged_artifacts.c.staging_path,
+            staged_artifacts.c.quality_metric,
+            staged_artifacts.c.quality_score,
+            staged_artifacts.c.validation_json,
+        )
+        .select_from(joined_tables)
+        .where(library_items.c.status.in_(statuses))
+    )
     if prefixes:
-        query += " AND (" + " OR ".join("rel_path LIKE ?" for _ in prefixes) + ")"
-        params.extend([f"{prefix}%" for prefix in prefixes])
-    query += " ORDER BY priority_score DESC, size_bytes DESC"
+        query = query.where(or_(*(library_items.c.rel_path.like(f"{prefix}%") for prefix in prefixes)))
+    query = query.order_by(library_items.c.priority_score.desc(), library_items.c.size_bytes.desc())
     if limit is not None:
-        query += " LIMIT ?"
-        params.append(limit)
-    rows = [dict(row) for row in connection.exec_driver_sql(query, tuple(params)).mappings().fetchall()]
+        query = query.limit(limit)
+    rows = [dict(row) for row in connection.execute(query).mappings().fetchall()]
     if buckets:
         rows = [row for row in rows if recommend_item(row, config).bucket in buckets]
     return rows
@@ -76,20 +85,27 @@ def write_manifest(
         "item_count": len(manifest["items"]),
         "sources": [item["source_path"] for item in manifest["items"]],
     }
-    connection.exec_driver_sql(
-        "INSERT INTO run_manifests(run_id, created_at, output_path, selection_json, item_count) VALUES (?, ?, ?, ?, ?)",
-        (
-            manifest["run_id"],
-            manifest["created_at"],
-            str(manifest_path),
-            json.dumps(selection, separators=(",", ":")),
-            len(manifest["items"]),
-        ),
+    connection.execute(
+        run_manifests.insert().values(
+            run_id=manifest["run_id"],
+            created_at=manifest["created_at"],
+            output_path=str(manifest_path),
+            selection_json=json.dumps(selection, separators=(",", ":")),
+            item_count=len(manifest["items"]),
+        )
     )
     if manifest["items"]:
-        connection.exec_driver_sql(
-            "UPDATE library_items SET status = 'planned', updated_at = ? WHERE source_path = ?",
-            [(manifest["created_at"], item["source_path"]) for item in manifest["items"]],
+        connection.execute(
+            update(library_items)
+            .where(library_items.c.source_path == bindparam("source_path_param"))
+            .values(status="planned", updated_at=bindparam("updated_at_param")),
+            [
+                {
+                    "updated_at_param": manifest["created_at"],
+                    "source_path_param": item["source_path"],
+                }
+                for item in manifest["items"]
+            ],
         )
     return manifest_path
 

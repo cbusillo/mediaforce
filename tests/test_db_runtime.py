@@ -4,9 +4,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from sqlalchemy import create_engine
+from sqlalchemy import inspect
+from sqlalchemy import select
+
 from mediaforce.core.db import _load_sql_asset
 from mediaforce.core.db import open_db
 from mediaforce.core.db import reset_engine_cache
+from mediaforce.core.db_tables import alembic_version
+from mediaforce.core.db_tables import encode_jobs
+from mediaforce.core.db_tables import encode_queue_state
 
 
 class DatabaseRuntimeTests(unittest.TestCase):
@@ -18,41 +25,48 @@ class DatabaseRuntimeTests(unittest.TestCase):
             db_path = Path(temp_dir) / "library.sqlite3"
 
             with open_db(db_path) as connection:
-                version = connection.exec_driver_sql("SELECT version_num FROM alembic_version").fetchone()
-                row = connection.exec_driver_sql("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'").fetchone()
-                indexes = {
-                    str(index_row["name"])
-                    for index_row in connection.exec_driver_sql("PRAGMA index_list('encode_jobs')").mappings().fetchall()
-                }
+                version = connection.execute(select(alembic_version.c.version_num)).fetchone()
+                inspector = inspect(connection)
+                table_names = inspector.get_table_names()
+                indexes = {str(index_row["name"]) for index_row in inspector.get_indexes("encode_jobs")}
 
             self.assertEqual(version[0], "20260401_0002")
-            self.assertGreaterEqual(int(row[0]), 10)
+            self.assertGreaterEqual(len(table_names), 10)
             self.assertIn("idx_encode_jobs_status_retry_ready", indexes)
 
     def test_open_db_stamps_existing_legacy_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "library.sqlite3"
-            legacy_connection = sqlite3.connect(db_path)
+            engine = create_engine(f"sqlite+pysqlite:///{db_path}")
             try:
-                legacy_connection.executescript(_load_sql_asset("schema.sql"))
-                legacy_connection.execute(
-                    "INSERT INTO encode_jobs(job_id, prefix, status, manifest_path, item_count, host_json, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    ("job-1", "tv/show", "queued", "/tmp/run.json", 1, "{}", "2026-04-01T00:00:00", "2026-04-01T00:00:00"),
-                )
-                legacy_connection.commit()
+                raw_connection = sqlite3.connect(db_path)
+                try:
+                    raw_connection.executescript(_load_sql_asset("schema.sql"))
+                    raw_connection.commit()
+                finally:
+                    raw_connection.close()
+                with engine.begin() as legacy_connection:
+                    legacy_connection.execute(
+                        encode_jobs.insert().values(
+                            job_id="job-1",
+                            prefix="tv/show",
+                            status="queued",
+                            manifest_path="/tmp/run.json",
+                            item_count=1,
+                            host_json="{}",
+                            created_at="2026-04-01T00:00:00",
+                            updated_at="2026-04-01T00:00:00",
+                        )
+                    )
             finally:
-                legacy_connection.close()
+                engine.dispose()
 
             with open_db(db_path) as connection:
-                version = connection.exec_driver_sql("SELECT version_num FROM alembic_version").fetchone()
-                stored = connection.exec_driver_sql(
-                    "SELECT prefix FROM encode_jobs WHERE job_id = ?", ("job-1",)
+                version = connection.execute(select(alembic_version.c.version_num)).fetchone()
+                stored = connection.execute(
+                    select(encode_jobs.c.prefix).where(encode_jobs.c.job_id == "job-1")
                 ).mappings().fetchone()
-                indexes = {
-                    str(index_row["name"])
-                    for index_row in connection.exec_driver_sql("PRAGMA index_list('encode_jobs')").mappings().fetchall()
-                }
+                indexes = {str(index_row["name"]) for index_row in inspect(connection).get_indexes("encode_jobs")}
 
             self.assertEqual(version[0], "20260401_0002")
             self.assertEqual(stored["prefix"], "tv/show")
@@ -63,12 +77,19 @@ class DatabaseRuntimeTests(unittest.TestCase):
             db_path = Path(temp_dir) / "library.sqlite3"
 
             with open_db(db_path) as connection:
-                connection.exec_driver_sql(
-                    "INSERT INTO encode_queue_state(queue_name, is_paused, stop_requested, active_job_id, updated_at) VALUES (?, ?, ?, ?, ?)",
-                    ("heavy", 0, 0, None, "2026-04-01T00:00:00"),
+                connection.execute(
+                    encode_queue_state.insert().values(
+                        queue_name="heavy",
+                        is_paused=0,
+                        stop_requested=0,
+                        active_job_id=None,
+                        updated_at="2026-04-01T00:00:00",
+                    )
                 )
-                row = connection.exec_driver_sql(
-                    "SELECT queue_name, is_paused FROM encode_queue_state ORDER BY queue_name LIMIT 1"
+                row = connection.execute(
+                    select(encode_queue_state.c.queue_name, encode_queue_state.c.is_paused)
+                    .order_by(encode_queue_state.c.queue_name)
+                    .limit(1)
                 ).mappings().fetchone()
 
             self.assertIsNotNone(row)
@@ -81,20 +102,23 @@ class DatabaseRuntimeTests(unittest.TestCase):
 
             with self.assertRaises(KeyboardInterrupt):
                 with open_db(db_path) as connection:
-                    connection.exec_driver_sql(
-                        "INSERT INTO encode_queue_state(queue_name, is_paused, stop_requested, active_job_id, updated_at) VALUES (?, ?, ?, ?, ?)",
-                        ("heavy", 0, 0, None, "2026-04-01T00:00:00"),
+                    connection.execute(
+                        encode_queue_state.insert().values(
+                            queue_name="heavy",
+                            is_paused=0,
+                            stop_requested=0,
+                            active_job_id=None,
+                            updated_at="2026-04-01T00:00:00",
+                        )
                     )
                     raise KeyboardInterrupt()
 
             with open_db(db_path) as connection:
-                row = connection.exec_driver_sql(
-                    "SELECT COUNT(*) FROM encode_queue_state WHERE queue_name = ?",
-                    ("heavy",),
-                ).fetchone()
+                row = connection.execute(
+                    select(encode_queue_state.c.queue_name).where(encode_queue_state.c.queue_name == "heavy")
+                ).fetchall()
 
-            self.assertIsNotNone(row)
-            self.assertEqual(int(row[0]), 0)
+            self.assertEqual(len(row), 0)
 
     def test_finalize_closes_connection_when_commit_raises(self) -> None:
         class _FakeConnection:

@@ -10,9 +10,17 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any
 
+from sqlalchemy import func
+from sqlalchemy import literal_column
+from sqlalchemy import select
+from sqlalchemy import update
+
 from mediaforce.tuning.calibration_jobs import claim_next_queued_calibration_job, load_latest_job, queue_position, save_job
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, DBRow, open_db
+from mediaforce.core.db_tables import calibration_jobs
+from mediaforce.core.db_tables import library_items
+from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.process_control import ManagedProcessController
 from mediaforce.library.scanner import scan_library
 from mediaforce.state_cleanup import purge_transient_artifacts
@@ -299,13 +307,15 @@ def process_calibration_queue_once(*, config_path: Any, deps: CalibrationQueueRu
         "full": deps.full_calibration_concurrency,
     }
     with open_db(config.paths.db_path) as connection:
-        active_rows = connection.exec_driver_sql(
-            """
-            SELECT job_id, lane, prefix, status
-            FROM calibration_jobs
-            WHERE status IN ('running', 'pending_review')
-            ORDER BY created_at, rowid
-            """
+        active_rows = connection.execute(
+            select(
+                calibration_jobs.c.job_id,
+                calibration_jobs.c.lane,
+                calibration_jobs.c.prefix,
+                calibration_jobs.c.status,
+            )
+            .where(calibration_jobs.c.status.in_(("running", "pending_review")))
+            .order_by(calibration_jobs.c.created_at, literal_column("rowid"))
         ).mappings().fetchall()
         running_by_lane = {lane: 0 for lane in capacities}
         active_prefixes: set[str] = set()
@@ -362,7 +372,7 @@ def scan_is_stale(
     if prefix is None:
         if deps.load_catalog_signature(config) != deps.current_catalog_signature(config):
             return True
-        item_count = int(connection.exec_driver_sql("SELECT COUNT(*) FROM library_items").fetchone()[0])
+        item_count = int(connection.execute(select(func.count()).select_from(library_items)).scalar_one())
         if item_count == 0:
             return True
         latest = latest_scan_completed_at(connection, prefix=None)
@@ -371,7 +381,11 @@ def scan_is_stale(
         return datetime.now(tz=UTC) - latest > deps.full_scan_stale_after
 
     item_count = int(
-        connection.exec_driver_sql("SELECT COUNT(*) FROM library_items WHERE rel_path LIKE ?", (f"{prefix}%",)).fetchone()[0]
+        connection.execute(
+            select(func.count())
+            .select_from(library_items)
+            .where(library_items.c.rel_path.like(f"{prefix}%"))
+        ).scalar_one()
     )
     if item_count == 0:
         return True
@@ -382,8 +396,15 @@ def scan_is_stale(
 
 
 def latest_scan_completed_at(connection: DBClient, prefix: str | None) -> datetime | None:
-    rows = connection.exec_driver_sql(
-        "SELECT completed_at, started_at, scope, prefixes_json FROM scan_runs ORDER BY started_at DESC LIMIT 250"
+    rows = connection.execute(
+        select(
+            scan_runs.c.completed_at,
+            scan_runs.c.started_at,
+            scan_runs.c.scope,
+            scan_runs.c.prefixes_json,
+        )
+        .order_by(scan_runs.c.started_at.desc())
+        .limit(250)
     ).mappings().fetchall()
     for row in rows:
         scope = str(row["scope"] or "unknown")
@@ -416,8 +437,21 @@ def active_scan_from_db(
         prefix: str | None,
         deps: JobRuntimeDeps,
 ) -> dict[str, Any] | None:
-    rows = connection.exec_driver_sql(
-        "SELECT scan_id, started_at, scope, prefixes_json, owner_pid, last_progress_at, file_count, reprobed_count, unchanged_count FROM scan_runs WHERE completed_at IS NULL ORDER BY started_at DESC LIMIT 25"
+    rows = connection.execute(
+        select(
+            scan_runs.c.scan_id,
+            scan_runs.c.started_at,
+            scan_runs.c.scope,
+            scan_runs.c.prefixes_json,
+            scan_runs.c.owner_pid,
+            scan_runs.c.last_progress_at,
+            scan_runs.c.file_count,
+            scan_runs.c.reprobed_count,
+            scan_runs.c.unchanged_count,
+        )
+        .where(scan_runs.c.completed_at.is_(None))
+        .order_by(scan_runs.c.started_at.desc())
+        .limit(25)
     ).mappings().fetchall()
     for row in rows:
         matched_prefix = _scan_run_matches_prefix(row, prefix)
@@ -534,9 +568,10 @@ def _scan_run_matches_prefix(row: DBRow, prefix: str | None) -> str | None | obj
 
 
 def _expire_scan_run(connection: DBClient, scan_id: str) -> None:
-    connection.exec_driver_sql(
-        "UPDATE scan_runs SET completed_at = COALESCE(completed_at, ?) WHERE scan_id = ?",
-        (_now_iso(), scan_id),
+    connection.execute(
+        update(scan_runs)
+        .where(scan_runs.c.scan_id == scan_id)
+        .values(completed_at=func.coalesce(scan_runs.c.completed_at, _now_iso()))
     )
     connection.commit()
 

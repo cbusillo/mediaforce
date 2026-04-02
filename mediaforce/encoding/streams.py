@@ -2,6 +2,7 @@ import json
 from typing import Any
 
 from mediaforce.core.db import DBClient
+from mediaforce.core.db_tables import item_events
 from mediaforce.core.utils import timestamp
 
 
@@ -153,9 +154,13 @@ def _parse_bitrate_text(value: str) -> int:
 
 def _record_event(connection: DBClient, library_item_id: int, event_type: str,
                   details: dict[str, Any]) -> None:
-    connection.exec_driver_sql(
-        "INSERT INTO item_events(library_item_id, created_at, event_type, details_json) VALUES (?, ?, ?, ?)",
-        (library_item_id, timestamp(), event_type, json.dumps(details, separators=(",", ":"))),
+    connection.execute(
+        item_events.insert().values(
+            library_item_id=library_item_id,
+            created_at=timestamp(),
+            event_type=event_type,
+            details_json=json.dumps(details, separators=(",", ":")),
+        )
     )
 
 

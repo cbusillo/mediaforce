@@ -3,16 +3,21 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
+
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
+from mediaforce.core.db_tables import library_items
+from mediaforce.core.type_defs import mapping_dict
 
 
 def inspect_prefix(connection: DBClient, config: MediaforceConfig, prefix: str) -> dict[str, Any]:
     rows = [
-        dict(row)
-        for row in connection.exec_driver_sql(
-            "SELECT * FROM library_items WHERE rel_path LIKE ? ORDER BY rel_path",
-            (f"{prefix}%",),
+        mapping_dict(row)
+        for row in connection.execute(
+            select(library_items)
+            .where(library_items.c.rel_path.like(f"{prefix}%"))
+            .order_by(library_items.c.rel_path)
         ).mappings().fetchall()
     ]
     if not rows:

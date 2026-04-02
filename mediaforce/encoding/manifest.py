@@ -2,8 +2,13 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
+from sqlalchemy import update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
+from mediaforce.core.db_tables import library_items
+from mediaforce.core.db_tables import staged_artifacts
 
 
 def encode_manifest_items(
@@ -177,9 +182,10 @@ def encode_one_item(
 
     started_at = timestamp()
     record_event(connection, item["library_item_id"], "encoding_started", {"manifest": str(manifest_path), "item_index": index})
-    connection.exec_driver_sql(
-        "UPDATE library_items SET status = 'encoding', updated_at = ? WHERE id = ?",
-        (started_at, item["library_item_id"]),
+    connection.execute(
+        update(library_items)
+        .where(library_items.c.id == item["library_item_id"])
+        .values(status="encoding", updated_at=started_at)
     )
     connection.commit()
 
@@ -215,55 +221,38 @@ def encode_one_item(
     staged_fingerprint = file_fingerprint(staging_path, staged_stat, staged_probe.duration_seconds)
     now = timestamp()
 
-    connection.exec_driver_sql(
-        """
-        INSERT INTO staged_artifacts (library_item_id, manifest_run_id, manifest_path, item_index, source_fingerprint,
-                                      staging_path, staging_size_bytes, staging_mtime_ns, staging_fingerprint,
-                                      chosen_crf, quality_metric, quality_target, quality_score, encode_command_json,
-                                      audio_summary_json, subtitle_summary_json, staged_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(library_item_id) DO UPDATE SET manifest_run_id       = excluded.manifest_run_id,
-                                                   manifest_path         = excluded.manifest_path,
-                                                   item_index            = excluded.item_index,
-                                                   source_fingerprint    = excluded.source_fingerprint,
-                                                   staging_path          = excluded.staging_path,
-                                                   staging_size_bytes    = excluded.staging_size_bytes,
-                                                   staging_mtime_ns      = excluded.staging_mtime_ns,
-                                                   staging_fingerprint   = excluded.staging_fingerprint,
-                                                   chosen_crf            = excluded.chosen_crf,
-                                                   quality_metric        = excluded.quality_metric,
-                                                   quality_target        = excluded.quality_target,
-                                                   quality_score         = excluded.quality_score,
-                                                   encode_command_json   = excluded.encode_command_json,
-                                                   audio_summary_json    = excluded.audio_summary_json,
-                                                   subtitle_summary_json = excluded.subtitle_summary_json,
-                                                   staged_at             = excluded.staged_at,
-                                                   updated_at            = excluded.updated_at
-        """,
-        (
-            item["library_item_id"],
-            manifest["run_id"],
-            str(manifest_path),
-            index,
-            item["source_fingerprint"],
-            str(staging_path),
-            staged_stat.st_size,
-            staged_stat.st_mtime_ns,
-            staged_fingerprint,
-            quality_result.crf,
-            quality_result.metric,
-            quality_result.target,
-            quality_result.score,
-            json.dumps(ffmpeg_cmd, separators=(",", ":")),
-            staged_probe.audio_summary_json,
-            staged_probe.subtitle_summary_json,
-            now,
-            now,
-        ),
+    staged_values = {
+        "library_item_id": item["library_item_id"],
+        "manifest_run_id": manifest["run_id"],
+        "manifest_path": str(manifest_path),
+        "item_index": index,
+        "source_fingerprint": item["source_fingerprint"],
+        "staging_path": str(staging_path),
+        "staging_size_bytes": staged_stat.st_size,
+        "staging_mtime_ns": staged_stat.st_mtime_ns,
+        "staging_fingerprint": staged_fingerprint,
+        "chosen_crf": quality_result.crf,
+        "quality_metric": quality_result.metric,
+        "quality_target": quality_result.target,
+        "quality_score": quality_result.score,
+        "encode_command_json": json.dumps(ffmpeg_cmd, separators=(",", ":")),
+        "audio_summary_json": staged_probe.audio_summary_json,
+        "subtitle_summary_json": staged_probe.subtitle_summary_json,
+        "staged_at": now,
+        "updated_at": now,
+    }
+    connection.execute(
+        sqlite_insert(staged_artifacts)
+        .values(**staged_values)
+        .on_conflict_do_update(
+            index_elements=[staged_artifacts.c.library_item_id],
+            set_={key: value for key, value in staged_values.items() if key != "library_item_id"},
+        )
     )
-    connection.exec_driver_sql(
-        "UPDATE library_items SET status = 'encoded', updated_at = ? WHERE id = ?",
-        (now, item["library_item_id"]),
+    connection.execute(
+        update(library_items)
+        .where(library_items.c.id == item["library_item_id"])
+        .values(status="encoded", updated_at=now)
     )
     record_event(
         connection,

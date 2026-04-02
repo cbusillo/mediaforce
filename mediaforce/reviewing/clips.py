@@ -1,6 +1,10 @@
 from pathlib import Path
 from typing import Any, Callable
 
+from sqlalchemy import select
+
+from mediaforce.core.db_tables import staged_artifacts
+
 
 def encode_preview_clips(
         *,
@@ -143,9 +147,8 @@ def generate_compare_clips(
     generated: list[Any] = []
     for index in indexes:
         item = manifest["items"][index]
-        stage_row = connection.exec_driver_sql(
-            "SELECT staging_path FROM staged_artifacts WHERE library_item_id = ?",
-            (item["library_item_id"],),
+        stage_row = connection.execute(
+            select(staged_artifacts.c.staging_path).where(staged_artifacts.c.library_item_id == item["library_item_id"])
         ).mappings().fetchone()
         if stage_row is None:
             raise FileNotFoundError(f"No staged artifact found for item {item['library_item_id']}")

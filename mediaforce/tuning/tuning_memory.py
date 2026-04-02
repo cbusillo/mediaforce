@@ -4,8 +4,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
+
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
+from mediaforce.core.db_tables import learning_artifacts
+from mediaforce.core.db_tables import tuning_sessions
 
 
 def learned_memory_dir(config: MediaforceConfig) -> Path:
@@ -25,31 +29,28 @@ def record_tuning_session(
         created_at: str,
 ) -> str:
     session_id = uuid.uuid4().hex[:12]
-    connection.exec_driver_sql(
-        """
-        INSERT INTO tuning_sessions(session_id, prefix, note, summary, diagnosis, confidence,
-                                    evidence_checked_json, suggested_follow_up, prompt_version,
-                                    proposed_policy_json, applied_policy_json, toolbelt_json,
-                                    self_check_json, raw_response, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            session_id,
-            prefix,
-            note,
-            str(response.get("summary") or ""),
-            str(response.get("diagnosis") or ""),
-            str(response.get("confidence") or ""),
-            json.dumps(response.get("evidence_checked") or [], sort_keys=True),
-            response.get("suggested_follow_up"),
-            response.get("prompt_version"),
-            json.dumps(response.get("proposed_policy") or {}, sort_keys=True),
-            json.dumps(applied_policy or {}, sort_keys=True),
-            json.dumps(toolbelt or {}, sort_keys=True),
-            json.dumps(response.get("self_check") or {}, sort_keys=True) if response.get("self_check") else None,
-            str(response.get("raw") or ""),
-            created_at,
-        ),
+    connection.execute(
+        tuning_sessions.insert().values(
+            session_id=session_id,
+            prefix=prefix,
+            note=note,
+            summary=str(response.get("summary") or ""),
+            diagnosis=str(response.get("diagnosis") or ""),
+            confidence=str(response.get("confidence") or ""),
+            evidence_checked_json=json.dumps(response.get("evidence_checked") or [], sort_keys=True),
+            suggested_follow_up=response.get("suggested_follow_up"),
+            prompt_version=response.get("prompt_version"),
+            proposed_policy_json=json.dumps(response.get("proposed_policy") or {}, sort_keys=True),
+            applied_policy_json=json.dumps(applied_policy or {}, sort_keys=True),
+            toolbelt_json=json.dumps(toolbelt or {}, sort_keys=True),
+            self_check_json=(
+                json.dumps(response.get("self_check") or {}, sort_keys=True)
+                if response.get("self_check")
+                else None
+            ),
+            raw_response=str(response.get("raw") or ""),
+            created_at=created_at,
+        )
     )
     return session_id
 
@@ -91,23 +92,18 @@ def promote_learning_artifact(
             created_at=created_at,
         )
     )
-    connection.exec_driver_sql(
-        """
-        INSERT INTO learning_artifacts(artifact_id, session_id, prefix, title, artifact_path, summary,
-                                       tags_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            artifact_id,
-            session_id,
-            prefix,
-            title,
-            str(artifact_path),
-            str(response.get("summary") or ""),
-            json.dumps(tags, sort_keys=True),
-            created_at,
-            created_at,
-        ),
+    connection.execute(
+        learning_artifacts.insert().values(
+            artifact_id=artifact_id,
+            session_id=session_id,
+            prefix=prefix,
+            title=title,
+            artifact_path=str(artifact_path),
+            summary=str(response.get("summary") or ""),
+            tags_json=json.dumps(tags, sort_keys=True),
+            created_at=created_at,
+            updated_at=created_at,
+        )
     )
     return {
         "artifact_id": artifact_id,
@@ -125,8 +121,14 @@ def retrieve_learning_context(
         note: str,
         limit: int = 3,
 ) -> list[dict[str, Any]]:
-    candidate_rows = connection.exec_driver_sql(
-        "SELECT title, artifact_path, summary, tags_json, updated_at FROM learning_artifacts ORDER BY updated_at DESC"
+    candidate_rows = connection.execute(
+        select(
+            learning_artifacts.c.title,
+            learning_artifacts.c.artifact_path,
+            learning_artifacts.c.summary,
+            learning_artifacts.c.tags_json,
+            learning_artifacts.c.updated_at,
+        ).order_by(learning_artifacts.c.updated_at.desc())
     ).mappings().fetchall()
     desired_tags = set(_artifact_tags(prefix=prefix, sample_item=sample_item, note=note, response={}))
     ranked: list[tuple[int, dict[str, Any]]] = []
@@ -176,32 +178,27 @@ def record_visual_approval_artifact(
     summary = str((run_verdict or {}).get("summary") or "Operator approved this sampled calibration after review.")
     diagnosis = "Visual approval recorded so future tuning can learn from this accepted draft."
     evidence_checked = ["operator_visual_review", "sample_result", "saved_policy"]
-    connection.exec_driver_sql(
-        """
-        INSERT INTO tuning_sessions(session_id, prefix, note, summary, diagnosis, confidence,
-                                    evidence_checked_json, suggested_follow_up, prompt_version,
-                                    proposed_policy_json, applied_policy_json, toolbelt_json,
-                                    self_check_json, raw_response, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            session_id,
-            prefix,
-            approval_note,
-            summary,
-            diagnosis,
-            "high",
-            json.dumps(evidence_checked, sort_keys=True),
-            None,
-            "visual-approval-v1",
-            json.dumps(policy, sort_keys=True),
-            json.dumps(policy, sort_keys=True),
-            json.dumps({"sample_result": sample_result, "run_verdict": run_verdict or {}}, sort_keys=True),
-            json.dumps({"status": "pass", "summary": "Approved by operator after review.", "issues": []},
-                       sort_keys=True),
-            "",
-            created_at,
-        ),
+    connection.execute(
+        tuning_sessions.insert().values(
+            session_id=session_id,
+            prefix=prefix,
+            note=approval_note,
+            summary=summary,
+            diagnosis=diagnosis,
+            confidence="high",
+            evidence_checked_json=json.dumps(evidence_checked, sort_keys=True),
+            suggested_follow_up=None,
+            prompt_version="visual-approval-v1",
+            proposed_policy_json=json.dumps(policy, sort_keys=True),
+            applied_policy_json=json.dumps(policy, sort_keys=True),
+            toolbelt_json=json.dumps({"sample_result": sample_result, "run_verdict": run_verdict or {}}, sort_keys=True),
+            self_check_json=json.dumps(
+                {"status": "pass", "summary": "Approved by operator after review.", "issues": []},
+                sort_keys=True,
+            ),
+            raw_response="",
+            created_at=created_at,
+        )
     )
 
     artifact_id = uuid.uuid4().hex[:12]
@@ -221,23 +218,18 @@ def record_visual_approval_artifact(
             created_at=created_at,
         )
     )
-    connection.exec_driver_sql(
-        """
-        INSERT INTO learning_artifacts(artifact_id, session_id, prefix, title, artifact_path, summary,
-                                       tags_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            artifact_id,
-            session_id,
-            prefix,
-            title,
-            str(artifact_path),
-            summary,
-            json.dumps(tags, sort_keys=True),
-            created_at,
-            created_at,
-        ),
+    connection.execute(
+        learning_artifacts.insert().values(
+            artifact_id=artifact_id,
+            session_id=session_id,
+            prefix=prefix,
+            title=title,
+            artifact_path=str(artifact_path),
+            summary=summary,
+            tags_json=json.dumps(tags, sort_keys=True),
+            created_at=created_at,
+            updated_at=created_at,
+        )
     )
     return {
         "artifact_id": artifact_id,

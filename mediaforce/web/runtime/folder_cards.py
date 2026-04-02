@@ -3,8 +3,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from sqlalchemy import select
+
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
+from mediaforce.core.db_tables import library_items
 
 FolderGroup = tuple[str, str, str, str]
 FolderBadge = dict[str, str | None]
@@ -80,9 +83,16 @@ def preview_folder_cards(
         estimate_savings_bytes: Callable[..., int],
         review_badge_for_prefix: Callable[[str], FolderBadge],
 ) -> list[FolderCard]:
-    rows = connection.exec_driver_sql(
-        "SELECT rel_path, size_bytes, status, video_codec, audio_summary_json "
-        "FROM library_items WHERE status != 'missing' ORDER BY rel_path"
+    rows = connection.execute(
+        select(
+            library_items.c.rel_path,
+            library_items.c.size_bytes,
+            library_items.c.status,
+            library_items.c.video_codec,
+            library_items.c.audio_summary_json,
+        )
+        .where(library_items.c.status != "missing")
+        .order_by(library_items.c.rel_path)
     ).mappings().fetchall()
     grouped: dict[str, FolderCard] = {}
     for row in rows:
@@ -141,9 +151,17 @@ def list_folder_cards(
         estimate_savings_bytes: Callable[..., int],
         review_badge_for_prefix: Callable[[str], FolderBadge],
 ) -> list[FolderCard]:
-    rows = connection.exec_driver_sql(
-        "SELECT rel_path, source_path, size_bytes, status, video_codec, audio_summary_json "
-        "FROM library_items WHERE status != 'missing' ORDER BY rel_path"
+    rows = connection.execute(
+        select(
+            library_items.c.rel_path,
+            library_items.c.source_path,
+            library_items.c.size_bytes,
+            library_items.c.status,
+            library_items.c.video_codec,
+            library_items.c.audio_summary_json,
+        )
+        .where(library_items.c.status != "missing")
+        .order_by(library_items.c.rel_path)
     ).mappings().fetchall()
     grouped: dict[str, FolderCard] = {}
     for row in rows:

@@ -10,6 +10,12 @@ from sqlalchemy import Text
 
 metadata = MetaData()
 
+alembic_version = Table(
+    "alembic_version",
+    metadata,
+    Column("version_num", String(32), primary_key=True),
+)
+
 scan_runs = Table(
     "scan_runs",
     metadata,

@@ -1,7 +1,11 @@
 from typing import Any
 
+from sqlalchemy import literal_column
+from sqlalchemy import select
+
 from mediaforce.tuning.calibration_jobs import load_job
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.db_tables import calibration_jobs
 from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
 
 
@@ -44,13 +48,10 @@ def stop_calibration_queue_action(
 ) -> dict[str, Any]:
     stopped_message = "Calibration queue job was stopped and cleaned up."
     with connection_factory() as connection:
-        active_rows = connection.exec_driver_sql(
-            """
-            SELECT prefix
-            FROM calibration_jobs
-            WHERE status IN ('queued', 'running')
-            ORDER BY created_at, rowid
-            """
+        active_rows = connection.execute(
+            select(calibration_jobs.c.prefix)
+            .where(calibration_jobs.c.status.in_(("queued", "running")))
+            .order_by(calibration_jobs.c.created_at, literal_column("rowid"))
         ).mappings().fetchall()
         active_prefixes = [str(row["prefix"]) for row in active_rows]
         for prefix in active_prefixes:

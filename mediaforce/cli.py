@@ -5,13 +5,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Sequence
 
+from sqlalchemy import select
+
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, open_db
+from mediaforce.core.db_tables import run_manifests as run_manifests_table
 from mediaforce.execution import describe_item_plan, encode_manifest_items, promote_manifest_items, \
     validate_manifest_items
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.planner import build_manifest_item, recommend_item
-from mediaforce.library.run_manifests import create_folder_manifest, select_candidates, write_manifest
+from mediaforce.library.run_manifests import create_folder_manifest, select_candidates as select_run_manifest_candidates, \
+    write_manifest as write_run_manifest
 from mediaforce.library.scanner import scan_library
 from mediaforce.review import generate_compare_clips
 from mediaforce.state_cleanup import purge_transient_artifacts
@@ -329,35 +333,14 @@ def _select_candidates(
         limit: int | None,
         buckets: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    query = """
-        SELECT
-            library_items.*,
-            staged_artifacts.staging_size_bytes,
-            staged_artifacts.staging_path,
-            staged_artifacts.quality_metric,
-            staged_artifacts.quality_score,
-            staged_artifacts.validation_json
-        FROM library_items
-        LEFT JOIN staged_artifacts ON staged_artifacts.library_item_id = library_items.id
-        WHERE library_items.status IN ({statuses})
-    """.format(
-        statuses=",".join("?" for _ in statuses)
+    return select_run_manifest_candidates(
+        connection,
+        config,
+        statuses=statuses,
+        prefixes=prefixes,
+        limit=limit,
+        buckets=buckets,
     )
-    params: list[Any] = list(statuses)
-
-    if prefixes:
-        query += " AND (" + " OR ".join("rel_path LIKE ?" for _ in prefixes) + ")"
-        params.extend([f"{prefix}%" for prefix in prefixes])
-
-    query += " ORDER BY priority_score DESC, size_bytes DESC"
-    if limit is not None:
-        query += " LIMIT ?"
-        params.append(limit)
-
-    rows = [dict(row) for row in connection.exec_driver_sql(query, tuple(params)).mappings().fetchall()]
-    if buckets:
-        rows = [row for row in rows if recommend_item(row, config).bucket in buckets]
-    return rows
 
 
 def _print_report(rows: list[dict[str, Any]], config: MediaforceConfig) -> None:
@@ -405,33 +388,7 @@ def _write_manifest(
         manifest: dict[str, Any],
         output_path: Path | None,
 ) -> Path:
-    config.paths.run_manifest_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = output_path or config.paths.run_manifest_dir / f"run-{manifest['run_id']}.json"
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-
-    selection = {
-        "item_count": len(manifest["items"]),
-        "sources": [item["source_path"] for item in manifest["items"]],
-    }
-    connection.exec_driver_sql(
-        "INSERT INTO run_manifests(run_id, created_at, output_path, selection_json, item_count) VALUES (?, ?, ?, ?, ?)",
-        (
-            manifest["run_id"],
-            manifest["created_at"],
-            str(manifest_path),
-            json.dumps(selection, separators=(",", ":")),
-            len(manifest["items"]),
-        ),
-    )
-
-    if manifest["items"]:
-        connection.exec_driver_sql(
-            "UPDATE library_items SET status = 'planned', updated_at = ? WHERE source_path = ?",
-            [(manifest["created_at"], item["source_path"]) for item in manifest["items"]],
-        )
-
-    return manifest_path
+    return write_run_manifest(connection, config, manifest, output_path)
 
 
 def _load_manifest(path: Path) -> dict[str, Any]:
@@ -470,8 +427,10 @@ def _create_campaign_manifest(
 def _resolve_manifest_path(connection: DBClient, manifest_path: Path | None) -> Path:
     if manifest_path is not None:
         return manifest_path
-    row = connection.exec_driver_sql(
-        "SELECT output_path FROM run_manifests ORDER BY created_at DESC LIMIT 1"
+    row = connection.execute(
+        select(run_manifests_table.c.output_path)
+        .order_by(run_manifests_table.c.created_at.desc())
+        .limit(1)
     ).mappings().fetchone()
     if row is None:
         raise FileNotFoundError("No run manifest found. Start with mediaforce campaign or plan.")
