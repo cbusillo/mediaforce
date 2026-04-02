@@ -10,6 +10,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import learning_artifacts
 from mediaforce.core.db_tables import tuning_sessions
+from mediaforce.core.type_defs import object_dict, object_list
 
 
 def learned_memory_dir(config: MediaforceConfig) -> Path:
@@ -72,7 +73,7 @@ def promote_learning_artifact(
     confidence = str(response.get("confidence") or "").lower()
     if confidence not in {"high", "medium"}:
         return None
-    self_check = dict(response.get("self_check") or {})
+    self_check = object_dict(response.get("self_check"))
     if str(self_check.get("status") or "pass") == "fail":
         return None
 
@@ -168,14 +169,15 @@ def record_visual_approval_artifact(
         run_verdict: dict[str, Any] | None,
         created_at: str,
 ) -> dict[str, Any] | None:
-    sample_result = dict(calibration.get("sample_result") or {})
-    policy = dict(calibration.get("policy") or {})
+    sample_result = object_dict(calibration.get("sample_result"))
+    policy = object_dict(calibration.get("policy"))
     if not sample_result or not policy:
         return None
 
     session_id = uuid.uuid4().hex[:12]
     approval_note = note.strip() or "Operator approved this sampled calibration after visual review."
-    summary = str((run_verdict or {}).get("summary") or "Operator approved this sampled calibration after review.")
+    verdict_payload = object_dict(run_verdict)
+    summary = str(verdict_payload.get("summary") or "Operator approved this sampled calibration after review.")
     diagnosis = "Visual approval recorded so future tuning can learn from this accepted draft."
     evidence_checked = ["operator_visual_review", "sample_result", "saved_policy"]
     connection.execute(
@@ -254,8 +256,9 @@ def _artifact_tags(*, prefix: str, sample_item: dict[str, Any], note: str, respo
         f"codec:{str(sample_item.get('video_codec') or 'unknown').lower()}",
         f"bucket:{str(sample_item.get('recommendation') or 'unknown').lower()}",
     }
-    if "quality_metric" in (sample_item.get("resolved_policy") or {}).get("video", {}):
-        tags.add(f"metric:{str(sample_item['resolved_policy']['video'].get('quality_metric') or 'auto').lower()}")
+    video_policy = object_dict(object_dict(sample_item.get("resolved_policy")).get("video"))
+    if "quality_metric" in video_policy:
+        tags.add(f"metric:{str(video_policy.get('quality_metric') or 'auto').lower()}")
     for token in re.findall(r"[a-z0-9]{5,}", note.lower()):
         tags.add(f"note:{token}")
     for token in re.findall(r"[a-z0-9]{5,}", str(response.get("diagnosis") or "").lower()):
@@ -295,9 +298,9 @@ def _render_artifact_markdown(
         json.dumps(applied_policy or {}, indent=2, sort_keys=True),
         "",
         "## Evidence Checked",
-        ", ".join(response.get("evidence_checked") or []) or "None recorded.",
+        ", ".join(str(item) for item in object_list(response.get("evidence_checked"))) or "None recorded.",
     ]
-    self_check = dict(response.get("self_check") or {})
+    self_check = object_dict(response.get("self_check"))
     if self_check:
         lines.extend(
             [
@@ -320,7 +323,7 @@ def _render_visual_approval_markdown(
         tags: list[str],
         created_at: str,
 ) -> str:
-    sample_result = dict(calibration.get("sample_result") or {})
+    sample_result = object_dict(calibration.get("sample_result"))
     lines = [
         f"# {title}",
         "",

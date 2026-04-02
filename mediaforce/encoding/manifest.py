@@ -9,6 +9,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
+from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 
 
 def encode_manifest_items(
@@ -26,18 +27,22 @@ def encode_manifest_items(
     if encode_one_item is None:
         raise RuntimeError("encode_one_item dependency is required")
     results: list[Any] = []
-    total_duration_seconds = sum(float(manifest["items"][index].get("duration_seconds") or 0.0) for index in indexes)
+    manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
+    total_duration_seconds = sum(float_value(manifest_items[index].get("duration_seconds")) for index in indexes)
     completed_duration_seconds = 0.0
     for index in indexes:
-        if process_controller is not None:
-            process_controller.throw_if_cancelled()
-        item = manifest["items"][index]
-        item_duration_seconds = float(item.get("duration_seconds") or 0.0)
+        controller = process_controller
+        if controller is None:
+            pass
+        else:
+            controller.throw_if_cancelled()
+        item = manifest_items[index]
+        item_duration_seconds = float_value(item.get("duration_seconds"))
 
         def item_progress(snapshot: dict[str, Any]) -> None:
             if progress_callback is None:
                 return
-            current_out_time_seconds = min(float(snapshot.get("out_time_seconds") or 0.0), item_duration_seconds)
+            current_out_time_seconds = min(float_value(snapshot.get("out_time_seconds")), item_duration_seconds)
             overall_completed_duration_seconds = completed_duration_seconds + current_out_time_seconds
             payload = {
                 **snapshot,
@@ -54,9 +59,10 @@ def encode_manifest_items(
             }
             if total_duration_seconds > 0:
                 payload["percent_complete"] = min(overall_completed_duration_seconds / total_duration_seconds, 1.0) * 100.0
-            speed_value = float(payload.get("speed") or 0.0)
+            speed_value = float_value(payload.get("speed"))
             if speed_value > 0.0:
-                payload["eta_seconds"] = payload["remaining_duration_seconds"] / speed_value
+                remaining_duration_seconds = float_value(payload.get("remaining_duration_seconds"))
+                payload["eta_seconds"] = remaining_duration_seconds / speed_value
             progress_callback(payload)
 
         result = encode_one_item(
@@ -67,7 +73,7 @@ def encode_manifest_items(
             index,
             item,
             overwrite=overwrite,
-            process_controller=process_controller,
+            process_controller=controller,
             host=host,
             progress_callback=item_progress,
         )
@@ -87,16 +93,16 @@ def describe_item_plan(
     policy = item["resolved_policy"]
     selection = select_streams(item)
     quality_metric, _ = select_quality_metric(str(policy["video"].get("quality_metric", "auto")))
-    selected_audio = selection["audio_tracks"][0]
+    selected_audio = object_dict(selection["audio_tracks"][0])
     chosen_audio_codec = audio_codec(selected_audio, policy["audio"])
     audio_plan = {
         "source_codec": str(selected_audio.get("codec_name") or "unknown"),
-        "channels": int(selected_audio.get("channels") or 0),
+        "channels": int_value(selected_audio.get("channels")),
         "language": selected_audio.get("language") or "und",
         "action": "convert" if chosen_audio_codec == "libopus" else "copy",
         "output_codec": "opus" if chosen_audio_codec == "libopus" else str(selected_audio.get("codec_name") or "unknown"),
         "output_bitrate": opus_bitrate(selected_audio, policy["audio"]) if chosen_audio_codec == "libopus" else None,
-        "source_track_count": len(item.get("audio_summary") or []),
+        "source_track_count": len(object_list(item.get("audio_summary"))),
         "kept_track_count": len(selection["audio_tracks"]),
     }
     subtitle_tracks = selection["subtitle_tracks"]
@@ -105,14 +111,14 @@ def describe_item_plan(
             "source_codec": item.get("video_codec") or "unknown",
             "output_codec": "av1",
             "quality_metric": quality_metric,
-            "target": float(policy["video"]["target_vmaf" if quality_metric == "vmaf" else "target_xpsnr"]),
-            "min_target": float(policy["video"]["min_target_vmaf" if quality_metric == "vmaf" else "min_target_xpsnr"]),
-            "max_encoded_percent": float(policy["video"].get("max_encoded_percent", 100)),
-            "default_grain": int(policy["video"].get("default_grain", 0)),
+            "target": float_value(policy["video"]["target_vmaf" if quality_metric == "vmaf" else "target_xpsnr"]),
+            "min_target": float_value(policy["video"]["min_target_vmaf" if quality_metric == "vmaf" else "min_target_xpsnr"]),
+            "max_encoded_percent": float_value(policy["video"].get("max_encoded_percent", 100)),
+            "default_grain": int_value(policy["video"].get("default_grain", 0)),
         },
         "audio": audio_plan,
         "subtitles": {
-            "source_track_count": len(item.get("subtitle_summary") or []),
+            "source_track_count": len(object_list(item.get("subtitle_summary"))),
             "kept_track_count": len(subtitle_tracks),
             "languages": [track.get("language") or "und" for track in subtitle_tracks],
             "codecs": [track.get("codec_name") or "unknown" for track in subtitle_tracks],
@@ -154,8 +160,8 @@ def encode_one_item(
         raise FileExistsError(f"Staging file already exists: {staging_path}")
 
     policy = item["resolved_policy"]
-    width = int(item.get("width") or 0) or None
-    height = int(item.get("height") or 0) or None
+    width = int_value(item.get("width")) or None
+    height = int_value(item.get("height")) or None
     preset = effective_video_preset(policy["video"], width=width, height=height)
     quality_result = search_quality(
         source_path,

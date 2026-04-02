@@ -24,7 +24,7 @@ from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.process_control import ManagedProcessController
 from mediaforce.library.scanner import scan_library
 from mediaforce.state_cleanup import purge_transient_artifacts
-from mediaforce.core.type_defs import JSONValue
+from mediaforce.core.type_defs import JSONValue, object_dict
 
 _MISSING = object()
 
@@ -270,9 +270,9 @@ def dispatch_calibration_job(
         config_path=config.paths.config_path,
         prefix=str(job_payload["prefix"]),
         action=str(job_payload["action"]),
-        host_data=dict(job_payload.get("host") or {}),
+        host_data=object_dict(job_payload.get("host")),
         notes=str(job_payload.get("notes") or ""),
-        policy=dict(job_payload.get("policy") or {}),
+        policy=object_dict(job_payload.get("policy")),
         job_id=job_id,
         seed_metadata=deps.job_seed_metadata(job_payload),
         process_controller=process_controller,
@@ -609,4 +609,4 @@ def _stats_payload(stats: Any) -> dict[str, Any]:
         return dict(stats)
     if is_dataclass(stats) and not isinstance(stats, type):
         return dict(asdict(stats))
-    return dict(getattr(stats, "__dict__", {}))
+    return object_dict(getattr(stats, "__dict__", None))
