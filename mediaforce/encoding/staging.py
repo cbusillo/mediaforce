@@ -12,6 +12,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
+from mediaforce.core.type_defs import object_list
 
 
 def finalize_output_path(temp_output: Path, staging_path: Path) -> None:
@@ -57,7 +58,7 @@ def validate_one_item(
     check(validation, staged_probe.audio_track_count == 1, "exactly one audio track remains")
     check(validation, staged_probe.english_audio_count == staged_probe.audio_track_count, "all audio tracks are tagged English")
 
-    source_has_english_subs = source_has_preservable_subtitles(item.get("subtitle_summary") or [])
+    source_has_english_subs = source_has_preservable_subtitles(object_list(item.get("subtitle_summary")))
     if source_has_english_subs:
         check(validation, staged_probe.english_subtitle_count >= 1, "English subtitles were preserved")
         if staged_probe.english_subtitle_count:

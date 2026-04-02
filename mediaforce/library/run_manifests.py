@@ -15,6 +15,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import run_manifests
 from mediaforce.core.db_tables import staged_artifacts
+from mediaforce.core.type_defs import object_dict
 from mediaforce.library.planner import build_manifest_item, recommend_item
 from mediaforce.library.scanner import scan_library
 
@@ -50,7 +51,7 @@ def select_candidates(
     query = query.order_by(library_items.c.priority_score.desc(), library_items.c.size_bytes.desc())
     if limit is not None:
         query = query.limit(limit)
-    rows = [dict(row) for row in connection.execute(query).mappings().fetchall()]
+    rows = [object_dict(row) for row in connection.execute(query).mappings().fetchall()]
     if buckets:
         rows = [row for row in rows if recommend_item(row, config).bucket in buckets]
     return rows
@@ -78,7 +79,10 @@ def write_manifest(
         output_path: Path | None = None,
 ) -> Path:
     config.paths.run_manifest_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = output_path or config.paths.run_manifest_dir / f"run-{manifest['run_id']}.json"
+    if output_path is None:
+        manifest_path = config.paths.run_manifest_dir / f"run-{manifest['run_id']}.json"
+    else:
+        manifest_path = output_path
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     selection = {

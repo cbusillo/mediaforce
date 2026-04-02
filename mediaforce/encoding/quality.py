@@ -8,6 +8,7 @@ from pathlib import Path
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.encoding.ffmpeg import ab_av1_hwaccel_input_args
 from mediaforce.core.process_control import ManagedProcessController, run_command
+from mediaforce.core.type_defs import object_dict
 from mediaforce.remote import execution_mode_for_host, run_remote_command
 
 RESULT_RE = re.compile(
@@ -236,7 +237,7 @@ def _run_quality_command(
     host_mode = execution_mode_for_host(host)
     if host_mode != "ssh":
         return run_command(cmd, process_controller=process_controller)
-    return run_remote_command(host or {}, cmd, REMOTE_QUALITY_TIMEOUT_SECONDS)
+    return run_remote_command(object_dict(host), cmd, REMOTE_QUALITY_TIMEOUT_SECONDS)
 
 
 @lru_cache(maxsize=1)

@@ -19,6 +19,7 @@ from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.library.planner import recommend_item
 from mediaforce.library.probe import probe_media
+from mediaforce.core.type_defs import int_value, object_list
 from mediaforce.core.utils import file_fingerprint, timestamp
 
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mp4", ".ts"}
@@ -40,7 +41,7 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
     scan_id = uuid.uuid4().hex
     started_at = timestamp()
     roots_json = json.dumps(sorted(config.source_root_map.keys()))
-    normalized_prefixes = sorted({prefix.strip("/") for prefix in prefixes or [] if prefix.strip("/")})
+    normalized_prefixes = sorted({prefix.strip("/") for prefix in object_list(prefixes) if str(prefix).strip("/")})
     scope = "prefix" if normalized_prefixes else "full"
     connection.execute(
         insert(scan_runs).values(
@@ -170,7 +171,7 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
             )
             .values(status="missing", updated_at=started_at)
         )
-        stats.missing = cursor.rowcount if cursor.rowcount != -1 else 0
+        stats.missing = int_value(cursor.rowcount) if cursor.rowcount != -1 else 0
         pending_writes = _flush_scan_progress(connection, scan_id, stats, pending_writes + 1)
 
     _flush_scan_progress(connection, scan_id, stats, pending_writes, force=True)

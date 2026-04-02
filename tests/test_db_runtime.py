@@ -14,6 +14,7 @@ from mediaforce.core.db import reset_engine_cache
 from mediaforce.core.db_tables import alembic_version
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import encode_queue_state
+from mediaforce.core.type_defs import object_dict
 
 
 class DatabaseRuntimeTests(unittest.TestCase):
@@ -94,7 +95,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
 
             self.assertIsNotNone(row)
             self.assertEqual(row["queue_name"], "heavy")
-            self.assertIn("queue_name", dict(row))
+            self.assertIn("queue_name", object_dict(row))
 
     def test_open_db_rolls_back_on_base_exception(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
