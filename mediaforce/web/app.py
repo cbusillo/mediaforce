@@ -1,4 +1,3 @@
-import hashlib
 import json
 import logging
 import os
@@ -26,7 +25,6 @@ from sqlalchemy import select
 from mediaforce.advisor import (
     AdvisorResponse,
     TuningPolicyResponse,
-    apply_seed_policy,
 )
 from mediaforce.tuning.calibration_jobs import load_active_job, load_job, \
     list_queue_summary
@@ -50,6 +48,7 @@ from mediaforce.execution import (
 )
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.planner import build_manifest_item
+from mediaforce.hosts.types import HostSetupResult
 from mediaforce.core.process_control import ManagedProcessController
 from mediaforce.encoding.quality import run_sample_encode, select_quality_metric
 from mediaforce.remote import (
@@ -71,7 +70,7 @@ from mediaforce.tuning.tuning_memory import (
     record_tuning_session,
     record_visual_approval_artifact,
 )
-from mediaforce.core.type_defs import JSONValue, mapping_dict, object_dict, object_list
+from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, object_dict, object_list
 from mediaforce.web.routes import register_dashboard_routes, register_folder_routes, register_frontend_routes, \
     register_host_routes, register_queue_routes, register_settings_routes
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_folders_payload, \
@@ -96,6 +95,8 @@ from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
     run_full_calibration as runtime_run_full_calibration, \
     run_sampled_calibration as runtime_run_sampled_calibration, \
     remove_path as runtime_remove_path, snapshot_staged_artifact as runtime_snapshot_staged_artifact
+from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail, \
+    unavailable_host_error_message as runtime_unavailable_host_error_message
 from mediaforce.web.runtime.encode_runtime import EncodeQueueRuntimeDeps, \
     encode_job_heartbeat_loop as runtime_encode_job_heartbeat_loop, \
     encode_job_manifest_totals as runtime_encode_job_manifest_totals, \
@@ -396,15 +397,15 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     def _prepare_host_action(host_key: str, remote_password: str | None = None) -> dict[str, Any]:
         nonlocal config
         result = prepare_remote_host_with_password(config, host_key, password=remote_password or None)
-        config = load_config(config.paths.config_path)
-        app.state.config = config
-        _refresh_host_status_cache(config)
-        notice = result.message if not result.detail else f"{result.message} Details: {result.detail}"
-        return {"ok": result.ok, "message": notice, "kind": "success" if result.ok else "error"}
+        return _host_action_result(result)
 
     def _reset_host_trust_action(host_key: str) -> dict[str, Any]:
         nonlocal config
         result = reset_remote_host_trust(config, host_key)
+        return _host_action_result(result)
+
+    def _host_action_result(result: HostSetupResult) -> dict[str, Any]:
+        nonlocal config
         config = load_config(config.paths.config_path)
         app.state.config = config
         _refresh_host_status_cache(config)
@@ -470,7 +471,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             advice_state = _load_advice_state(config, normalized_prefix)
             pending_proposal = _pending_proposal_public_view(_load_pending_proposal(config, normalized_prefix))
             calibration = _load_calibration_state(config, normalized_prefix)
-            recent_tuning_sessions = _recent_tuning_sessions(connection, normalized_prefix)
+            recent_sessions = _recent_tuning_sessions(connection, normalized_prefix)
             review_gate = _review_gate(calibration)
             hot_spots = _preview_hotspots(sample_item, calibration)
             calibration_queue = list_queue_summary(connection, limit_per_lane=3)
@@ -491,7 +492,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         resolved_metric, _ = select_quality_metric(str(video_policy.get("quality_metric", "auto")))
         sample_host_statuses = _sample_calibration_host_statuses(config)
         sample_host_key = _default_sample_host_key_from_statuses(sample_host_statuses)
-        sample_host_options = _sample_host_options_from_statuses(sample_host_statuses)
+        sample_host_choices = _sample_host_options_from_statuses(sample_host_statuses)
         return (
             {
                 **base_context,
@@ -504,7 +505,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 "calibration": calibration,
                 "advice": advice_state,
                 "pending_proposal": pending_proposal,
-                "recent_tuning_sessions": recent_tuning_sessions,
+                "recent_tuning_sessions": recent_sessions,
                 "review_gate": review_gate,
                 "calibration_queue": calibration_queue,
                 "encode_job": encode_job,
@@ -514,8 +515,8 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 "encode_queue_scheduler": scheduler_policy,
                 "resolved_metric": resolved_metric.upper(),
                 "sample_host_key": sample_host_key,
-                "sample_host_options": sample_host_options,
-                "sample_host_help_text": _sample_host_help_text(sample_host_options, sample_host_key),
+                "sample_host_options": sample_host_choices,
+                "sample_host_help_text": _sample_host_help_text(sample_host_choices, sample_host_key),
             },
             200,
         )
@@ -716,25 +717,29 @@ def main() -> None:
     _load_project_env_file()
     config = load_config(DEFAULT_CONFIG_PATH)
     host = _default_web_host()
-    port = int(_preferred_env("MEDIAFORCE_WEB_PORT") or "8777")
+    configured_port = _preferred_env("MEDIAFORCE_WEB_PORT")
+    port_value = configured_port.strip() if configured_port is not None else ""
+    port = int(port_value) if port_value else 8777
     reload_enabled = _default_web_reload_enabled()
     if reload_enabled:
         config_path = str(config.paths.config_path)
         os.environ.setdefault("MEDIAFORCE_CONFIG_PATH", config_path)
         uvicorn.run(
             "mediaforce.web.app:create_reloadable_app",
-            host=host,
+            host=str(host),
             port=port,
             reload=True,
             factory=True,
             log_level="info",
         )
         return
-    uvicorn.run(create_app(config.paths.config_path), host=host, port=port, log_level="info")
+    uvicorn.run(create_app(config.paths.config_path), host=str(host), port=port, log_level="info")
 
 
 def create_reloadable_app() -> FastAPI:
-    config_path = Path(_preferred_env("MEDIAFORCE_CONFIG_PATH") or str(DEFAULT_CONFIG_PATH)).expanduser()
+    configured_path = _preferred_env("MEDIAFORCE_CONFIG_PATH")
+    config_value = configured_path.strip() if configured_path is not None else ""
+    config_path = Path(config_value or str(DEFAULT_CONFIG_PATH)).expanduser()
     return create_app(config_path)
 
 
@@ -876,13 +881,10 @@ def _ensure_encode_host_ready(config: MediaforceConfig, host_payload: dict[str, 
         return False
     start_command = _host_lifecycle_start_command(host)
     if not start_command:
-        detail = status.detail if status is not None else None
-        message = status.message if status is not None else "host unavailable"
-        raise RuntimeError(detail or message or "Encode host is not available.")
+        raise RuntimeError(runtime_unavailable_host_error_message(status))
     result = run_host_lifecycle_command(host, start_command, timeout=HOST_LIFECYCLE_COMMAND_TIMEOUT_SECONDS)
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "host start command failed"
-        raise RuntimeError(detail)
+        raise RuntimeError(runtime_lifecycle_command_error_detail(result, "host start command failed"))
     deadline = time.monotonic() + _host_lifecycle_start_timeout_seconds(host)
     while time.monotonic() < deadline:
         refreshed = _fresh_host_status_for_key(config, host_key)
@@ -905,8 +907,7 @@ def _stop_encode_host_if_configured(config: MediaforceConfig, host_payload: dict
         return
     result = run_host_lifecycle_command(host, stop_command, timeout=HOST_LIFECYCLE_COMMAND_TIMEOUT_SECONDS)
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "host stop command failed"
-        raise RuntimeError(detail)
+        raise RuntimeError(runtime_lifecycle_command_error_detail(result, "host stop command failed"))
 
 
 def _default_sample_host_key(config: MediaforceConfig) -> str:
@@ -929,8 +930,8 @@ def _sample_host_options_from_statuses(statuses: list[HostStatus]) -> list[dict[
     return sample_host_options_from_statuses(statuses)
 
 
-def _sample_host_help_text(sample_host_options: list[dict[str, Any]], selected_key: str) -> str:
-    for option in sample_host_options:
+def _sample_host_help_text(sample_host_choices: list[dict[str, Any]], selected_key: str) -> str:
+    for option in sample_host_choices:
         if str(option.get("key") or "") != selected_key:
             continue
         detail = str(option.get("detail") or "").strip()
@@ -1503,8 +1504,11 @@ def _adjust_bitrate(value: str, delta_kbps: int, *, minimum: int) -> str:
 
 def _preview_hotspots(sample_item: dict[str, Any], calibration: dict[str, Any] | None) -> list[float]:
     if calibration and calibration.get("compare_clips"):
-        return [float(clip["timestamp_seconds"]) for clip in calibration["compare_clips"]]
-    total_duration = float(sample_item.get("duration_seconds") or 0.0)
+        return [
+            float_value(object_dict(clip).get("timestamp_seconds"))
+            for clip in object_list(calibration.get("compare_clips"))
+        ]
+    total_duration = float_value(sample_item.get("duration_seconds"))
     if total_duration <= 0:
         return [0.0]
     usable = max(total_duration - 8.0, 0.0)
@@ -1668,8 +1672,8 @@ def _clear_folder_tuning_state(
             calibration_payload = None
 
     review_targets = _review_cleanup_targets(config, calibration_payload)
-    review_pack_dir = _review_pack_dir(config, prefix)
-    review_pack_present = review_pack_dir.exists()
+    review_pack_path = _review_pack_dir(config, prefix)
+    review_pack_present = review_pack_path.exists()
     artifact_rows = connection.execute(
         select(learning_artifacts.c.artifact_path).where(learning_artifacts.c.prefix == prefix)
     ).mappings().fetchall()
@@ -1694,9 +1698,9 @@ def _clear_folder_tuning_state(
         _remove_path_if_exists(review_target)
         if review_target.parent != config.paths.review_dir:
             _prune_empty_parents(review_target.parent, stop_at=config.paths.review_dir)
-    _remove_path_if_exists(review_pack_dir)
-    if review_pack_dir.parent != config.paths.review_dir:
-        _prune_empty_parents(review_pack_dir.parent, stop_at=config.paths.review_dir)
+    _remove_path_if_exists(review_pack_path)
+    if review_pack_path.parent != config.paths.review_dir:
+        _prune_empty_parents(review_pack_path.parent, stop_at=config.paths.review_dir)
 
     return {
         "ok": True,
@@ -1715,7 +1719,7 @@ def _upsert_override(file_path: Path, prefix: str, policy: dict[str, Any]) -> No
     content = file_path.read_text() if file_path.exists() else ""
     block = _render_override_block(prefix, policy)
     pattern = re.compile(
-        rf'\[\[overrides\]\]\npath_prefix = "{re.escape(prefix)}"\n(?:.*?)(?=\n\[\[overrides\]\]|\Z)',
+        rf'\[\[overrides]]\npath_prefix = "{re.escape(prefix)}"\n.*?(?=\n\[\[overrides]]|\Z)',
         re.DOTALL,
     )
     if pattern.search(content):

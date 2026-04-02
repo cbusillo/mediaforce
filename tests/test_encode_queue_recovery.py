@@ -11,7 +11,6 @@ from typing import Any, Callable, cast
 from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
-from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy import update
 
@@ -429,7 +428,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         }
         job = {"job_id": "job-1", "bypass_schedule": False}
         with patch("mediaforce.web.app._host_runtime_rows", return_value=[host]):
-            selected_host, waiting_reason = web_app._select_encode_host(None, self.config, job)
+            selected_host, waiting_reason = web_app._select_encode_host(cast(Any, None), self.config, job)
         self.assertIsNotNone(selected_host)
         assert selected_host is not None
         self.assertEqual(selected_host["key"], "ct103")
@@ -483,7 +482,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             }
         ]
         with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
-            host_payload, waiting_reason = web_app._select_encode_host(None, self.config, job)
+            host_payload, waiting_reason = web_app._select_encode_host(cast(Any, None), self.config, job)
         self.assertIsNone(host_payload)
         self.assertEqual(waiting_reason, "waiting for host cooldown to expire on CT103")
 
@@ -502,7 +501,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             }
         ]
         with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
-            host_payload, waiting_reason = web_app._select_encode_host(None, self.config, {"bypass_schedule": False})
+            host_payload, waiting_reason = web_app._select_encode_host(cast(Any, None), self.config, {"bypass_schedule": False})
         self.assertIsNone(host_payload)
         self.assertEqual(waiting_reason, "waiting for host capacity to free up")
 
@@ -849,6 +848,25 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(web_app._default_web_host(), "0.0.0.0")
             self.assertTrue(web_app._default_web_reload_enabled())
 
+    def test_main_uses_default_port_when_mediaforce_web_port_is_blank(self) -> None:
+        config = self.config
+        with patch.dict(os.environ, {"MEDIAFORCE_WEB_PORT": "", "MEDIAFORCE_WEB_RELOAD": "false"}, clear=True), patch(
+            "mediaforce.web.app.load_config", return_value=config
+        ), patch("mediaforce.web.app.uvicorn.run") as uvicorn_run_mock:
+            web_app.main()
+
+        uvicorn_run_mock.assert_called_once()
+        self.assertEqual(uvicorn_run_mock.call_args.kwargs["port"], 8777)
+
+    @staticmethod
+    def test_create_reloadable_app_uses_default_config_when_env_path_is_blank() -> None:
+        with patch.dict(os.environ, {"MEDIAFORCE_CONFIG_PATH": ""}, clear=True), patch(
+            "mediaforce.web.app.create_app", return_value=object()
+        ) as create_app_mock:
+            web_app.create_reloadable_app()
+
+        create_app_mock.assert_called_once_with(web_app.DEFAULT_CONFIG_PATH.expanduser())
+
     def test_parse_project_env_value_strips_matching_quotes(self) -> None:
         self.assertEqual(web_app._parse_project_env_value('"0.0.0.0"'), "0.0.0.0")
         self.assertEqual(web_app._parse_project_env_value("'8777'"), "8777")
@@ -868,11 +886,19 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(missing_media_gate["status"], "missing_review_media")
         self.assertFalse(missing_media_gate["can_confirm_full"])
 
-        payload = {"mode": "sample", "job_id": "sample-2",
-                   "preview_clips": [{"path": "/review-media/run/item-00/encoded-01.mp4"}], "compare_clips": [],
-                   "review_media_ready": True, "accepted_at": "2026-03-28T19:10:00+00:00"}
-        payload["accepted_draft_hash"] = web_app._calibration_draft_hash(payload)
-        payload["accepted_sample_job_id"] = "sample-2"
+        payload = {
+            "mode": "sample",
+            "job_id": "sample-2",
+            "preview_clips": [{"path": "/review-media/run/item-00/encoded-01.mp4"}],
+            "compare_clips": [],
+            "review_media_ready": True,
+            "accepted_at": "2026-03-28T19:10:00+00:00",
+        }
+        payload = {
+            **payload,
+            "accepted_draft_hash": web_app._calibration_draft_hash(payload),
+            "accepted_sample_job_id": "sample-2",
+        }
 
         accepted_gate = web_app._review_gate(payload)
 
@@ -2026,7 +2052,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 self.stdout = io.StringIO("stdout line\n")
                 self.stderr = io.StringIO("out_time_ms=45000000\nprogress=continue\n")
 
-            def wait(self) -> int:
+            @staticmethod
+            def wait() -> int:
                 return 0
 
         snapshots: list[dict[str, object]] = []
@@ -2050,7 +2077,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 self.stdout = io.BytesIO(b"encoded-output")
                 self.stderr = io.BytesIO(b"out_time_ms=45000000\nprogress=continue\n")
 
-            def wait(self) -> int:
+            @staticmethod
+            def wait() -> int:
                 return 0
 
         source_path = self._create_source_file("episode-stream.mkv")
@@ -2103,7 +2131,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             return subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr="")
 
         with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source_path, status="planned")
+            item_id = self._insert_library_item(connection, source_path)
             item = {
                 "library_item_id": item_id,
                 "resolved_policy": {
@@ -2165,7 +2193,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             return subprocess.CompletedProcess(args=["ffmpeg"], returncode=1, stdout="bad stdout", stderr="bad stderr")
 
         with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source_path, status="planned")
+            item_id = self._insert_library_item(connection, source_path)
             item = {
                 "library_item_id": item_id,
                 "resolved_policy": {
@@ -2232,7 +2260,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         progress_snapshots: list[dict[str, object]] = []
 
         def encode_side_effect(*args: object, **kwargs: object) -> execution.EncodeResult:
-            index = int(args[4])
+            index = cast(int, args[4])
             progress_callback = cast(Callable[[dict[str, object]], None] | None, kwargs["progress_callback"])
             if callable(progress_callback):
                 snapshot = {0: {"out_time_seconds": 50.0, "speed": 2.0}, 1: {"out_time_seconds": 25.0, "speed": 2.5}}[index]
@@ -2254,11 +2282,11 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(progress_snapshots[0]["current_item_number"], 1)
         self.assertEqual(progress_snapshots[0]["completed_item_count"], 0)
         self.assertEqual(progress_snapshots[0]["overall_completed_duration_seconds"], 50.0)
-        self.assertAlmostEqual(float(progress_snapshots[0]["percent_complete"]), 33.3333, places=3)
+        self.assertAlmostEqual(float(cast(float, progress_snapshots[0]["percent_complete"])), 33.3333, places=3)
         self.assertEqual(progress_snapshots[1]["current_item_number"], 2)
         self.assertEqual(progress_snapshots[1]["completed_item_count"], 1)
         self.assertEqual(progress_snapshots[1]["overall_completed_duration_seconds"], 125.0)
-        self.assertAlmostEqual(float(progress_snapshots[1]["percent_complete"]), 83.3333, places=3)
+        self.assertAlmostEqual(float(cast(float, progress_snapshots[1]["percent_complete"])), 83.3333, places=3)
         self.assertEqual(progress_snapshots[1]["eta_seconds"], 10.0)
 
     def test_describe_item_plan_reports_audio_and_subtitle_decisions(self) -> None:
@@ -2620,8 +2648,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "needs_attention_count": 0,
         }
         decorated = web_app._decorate_encode_queue_for_scheduler(self.config, encode_queue)
-        telemetry = decorated.get("telemetry") or {}
-        self.assertAlmostEqual(float(telemetry.get("eta_seconds") or 0.0), 90.0)
+        telemetry = cast(dict[str, object], decorated.get("telemetry") or {})
+        self.assertAlmostEqual(float(cast(float, telemetry.get("eta_seconds") or 0.0)), 90.0)
         self.assertEqual(telemetry.get("eta_copy"), "1m 30s")
         self.assertEqual(decorated["running"][0]["telemetry_summary"], "40% · 2.00x · Est. ETA 1m 0s")
 
@@ -2822,6 +2850,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 audio_policy={"convert_to_opus_codecs": ["aac"], "surround_5_1_opus_bitrate": "256k"},
             )
 
+        self.assertIsNotNone(result)
+        assert result is not None
         self.assertEqual(result["action"], "libopus")
         self.assertEqual(result["bitrate"], "256k")
         self.assertEqual(result["channels"], 6)
@@ -2922,9 +2952,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             app = web_app.create_app(self.config.paths.config_path)
 
         folder_route_paths = [
-            route.path
+            str(getattr(route, "path", ""))
             for route in app.router.routes
-            if getattr(route, "path", "").startswith("/api/folders/")
+            if str(getattr(route, "path", "")).startswith("/api/folders/")
         ]
         self.assertLess(
             folder_route_paths.index("/api/folders/{prefix:path}/status"),

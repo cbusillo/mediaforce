@@ -3,7 +3,6 @@ from typing import Any
 from sqlalchemy import literal_column
 from sqlalchemy import select
 
-from mediaforce.tuning.calibration_jobs import load_job
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db_tables import calibration_jobs
 from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state

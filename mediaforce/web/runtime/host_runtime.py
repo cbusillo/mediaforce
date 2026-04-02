@@ -1,19 +1,36 @@
+import subprocess
 from dataclasses import asdict
 from datetime import UTC, datetime
 import json
 import time
 from typing import Any
 
-from sqlalchemy import func
 from sqlalchemy import select
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import encode_jobs
-from mediaforce.core.type_defs import object_dict
+from mediaforce.core.type_defs import float_value, object_dict
 from mediaforce.encoding.encode_queue import list_encode_jobs
 from mediaforce.remote import HostStatus, collect_host_statuses, host_status_targets_current_machine, \
     normalize_host_media_access, run_host_lifecycle_command
+
+
+def _progress_float(job: dict[str, Any], key: str) -> float:
+    return float_value(object_dict(job.get("progress")).get(key))
+
+
+def unavailable_host_error_message(status: HostStatus | None) -> str:
+    detail = status.detail if status is not None else None
+    if detail:
+        return detail
+    if status is not None and status.message:
+        return status.message
+    return "Encode host is not available."
+
+
+def lifecycle_command_error_detail(result: subprocess.CompletedProcess[str], default_message: str) -> str:
+    return result.stderr.strip() or result.stdout.strip() or default_message
 
 
 def host_runtime_rows(
@@ -76,9 +93,9 @@ def host_runtime_rows(
         if schedule_profile == always_schedule_profile and schedule_detail == "runs anytime":
             schedule_detail = ""
         host_running_jobs = [job for job in running_jobs if job_host_key(job) == status.key]
-        host_speed = sum(float(object_dict(job.get("progress")).get("speed") or 0.0) for job in host_running_jobs)
+        host_speed = sum(_progress_float(job, "speed") for job in host_running_jobs)
         host_remaining_duration_seconds = sum(
-            float(object_dict(job.get("progress")).get("remaining_duration_seconds") or 0.0) for job in host_running_jobs
+            _progress_float(job, "remaining_duration_seconds") for job in host_running_jobs
         )
         host_eta_seconds = (host_remaining_duration_seconds / host_speed) if host_speed > 0 else None
         rows.append(
@@ -133,16 +150,16 @@ def host_config_for_key(config: MediaforceConfig, host_key: str) -> dict[str, An
 
 
 def host_lifecycle_start_command(host: dict[str, Any] | None) -> str:
-    return str((host or {}).get("start_command") or "").strip()
+    return str(object_dict(host).get("start_command") or "").strip()
 
 
 def host_lifecycle_stop_command(host: dict[str, Any] | None) -> str:
-    return str((host or {}).get("stop_command") or "").strip()
+    return str(object_dict(host).get("stop_command") or "").strip()
 
 
 def host_lifecycle_start_timeout_seconds(host: dict[str, Any] | None) -> int:
     try:
-        return max(1, int(str((host or {}).get("start_timeout_seconds") or "180")))
+        return max(1, int(str(object_dict(host).get("start_timeout_seconds") or "180")))
     except (TypeError, ValueError):
         return 180
 
@@ -170,13 +187,10 @@ def ensure_encode_host_ready(
         return False
     start_command = host_lifecycle_start_command(host)
     if not start_command:
-        detail = status.detail if status is not None else None
-        message = status.message if status is not None else "host unavailable"
-        raise RuntimeError(detail or message or "Encode host is not available.")
+        raise RuntimeError(unavailable_host_error_message(status))
     result = run_host_lifecycle_command(host, start_command, timeout=lifecycle_command_timeout_seconds)
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "host start command failed"
-        raise RuntimeError(detail)
+        raise RuntimeError(lifecycle_command_error_detail(result, "host start command failed"))
     deadline = time.monotonic() + host_lifecycle_start_timeout_seconds(host)
     while time.monotonic() < deadline:
         refreshed = fresh_host_status_for_key(config, host_key)
@@ -198,8 +212,7 @@ def stop_encode_host_if_configured(host_payload: dict[str, Any] | None, *, lifec
         return
     result = run_host_lifecycle_command(host, stop_command, timeout=lifecycle_command_timeout_seconds)
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "host stop command failed"
-        raise RuntimeError(detail)
+        raise RuntimeError(lifecycle_command_error_detail(result, "host stop command failed"))
 
 
 def default_sample_host_key(config: MediaforceConfig, *, safe_collect_statuses: Any) -> str:

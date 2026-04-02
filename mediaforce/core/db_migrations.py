@@ -1,14 +1,13 @@
 from contextlib import contextmanager
 from collections.abc import Iterator
-from functools import lru_cache
 from importlib.resources import as_file
 from importlib.resources import files
 from pathlib import Path
+from typing import Any, cast
 
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine
-from sqlalchemy import text
 from sqlalchemy.engine import URL
 from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Engine
@@ -74,8 +73,11 @@ def _bootstrap_legacy_schema(connection: Connection) -> None:
     # Keep this bridge aligned with the initial Alembic revision so future
     # revisions still run normally after the one-time legacy stamp.
     raw_connection = connection.connection.driver_connection
+    if raw_connection is None:
+        raise RuntimeError("SQLite driver connection is unavailable for legacy schema bootstrap.")
+    sqlite_connection = cast(Any, raw_connection)
     schema_sql = files("mediaforce.core").joinpath("sql", "schema.sql").read_text(encoding="utf-8")
-    raw_connection.executescript(schema_sql)
+    sqlite_connection.executescript(schema_sql)
     _ensure_column(connection, "scan_runs", "scope", "TEXT NOT NULL DEFAULT 'unknown'")
     _ensure_column(connection, "scan_runs", "prefixes_json", "TEXT")
     _ensure_column(connection, "scan_runs", "owner_pid", "INTEGER")

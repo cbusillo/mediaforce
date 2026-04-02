@@ -1,7 +1,5 @@
 import argparse
 import json
-import uuid
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -13,8 +11,9 @@ from mediaforce.core.db_tables import run_manifests as run_manifests_table
 from mediaforce.execution import describe_item_plan, encode_manifest_items, promote_manifest_items, \
     validate_manifest_items
 from mediaforce.library.folder_profiles import inspect_prefix
-from mediaforce.library.planner import build_manifest_item, recommend_item
-from mediaforce.library.run_manifests import create_folder_manifest, select_candidates as select_run_manifest_candidates, \
+from mediaforce.library.planner import recommend_item
+from mediaforce.library.run_manifests import build_run_manifest as build_db_run_manifest, \
+    select_candidates as select_run_manifest_candidates, \
     write_manifest as write_run_manifest
 from mediaforce.library.scanner import scan_library
 from mediaforce.review import generate_compare_clips
@@ -74,16 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     review_parser.add_argument("manifest", nargs="?", type=Path,
                                help="Path to a run manifest JSON file (defaults to latest)")
     review_parser.add_argument("--index", type=int, default=0, help="Manifest item index to review")
-    review_parser.add_argument("--duration", type=float, default=8.0, help="Clip duration in seconds")
-    review_parser.add_argument("--timestamp", action="append", type=float, default=[],
-                               help="Clip start timestamps in seconds")
-    review_parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=None,
-        help="Directory for generated compare clips",
-    )
-    review_parser.add_argument("--play", action="store_true", help="Open the first generated clip in ffplay")
+    _add_compare_clip_args(review_parser)
 
     encode_parser = subparsers.add_parser("encode", help="Encode manifest items into the staging root")
     _add_manifest_selection_args(encode_parser, require_manifest=False)
@@ -106,16 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     compare_parser = subparsers.add_parser("compare", help="Generate side-by-side approval clips for staged items")
     _add_manifest_selection_args(compare_parser, require_manifest=False)
-    compare_parser.add_argument("--duration", type=float, default=8.0, help="Clip duration in seconds")
-    compare_parser.add_argument("--timestamp", action="append", type=float, default=[],
-                                help="Clip start timestamps in seconds")
-    compare_parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=None,
-        help="Directory for generated compare clips",
-    )
-    compare_parser.add_argument("--play", action="store_true", help="Open the first generated clip in ffplay")
+    _add_compare_clip_args(compare_parser)
 
     return parser
 
@@ -325,6 +306,19 @@ def _add_manifest_selection_args(parser: argparse.ArgumentParser, *, require_man
     parser.add_argument("--all", action="store_true", help="Process all manifest items")
 
 
+def _add_compare_clip_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--duration", type=float, default=8.0, help="Clip duration in seconds")
+    parser.add_argument("--timestamp", action="append", type=float, default=[],
+                        help="Clip start timestamps in seconds")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Directory for generated compare clips",
+    )
+    parser.add_argument("--play", action="store_true", help="Open the first generated clip in ffplay")
+
+
 def _select_candidates(
         connection: DBClient,
         config: MediaforceConfig,
@@ -368,18 +362,7 @@ def _print_report(rows: list[dict[str, Any]], config: MediaforceConfig) -> None:
 
 
 def _build_run_manifest(rows: list[dict[str, Any]], config: MediaforceConfig) -> dict[str, Any]:
-    now = datetime.now(tz=UTC).isoformat(timespec="seconds")
-    run_id = uuid.uuid4().hex[:12]
-    items = [build_manifest_item(row, config) for row in rows]
-    return {
-        "run_id": run_id,
-        "created_at": now,
-        "config_path": str(config.paths.config_path),
-        "db_path": str(config.paths.db_path),
-        "staging_root": str(config.staging_root),
-        "output_container": config.output_container,
-        "items": items,
-    }
+    return build_db_run_manifest(rows, config)
 
 
 def _write_manifest(

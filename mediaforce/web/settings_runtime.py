@@ -5,6 +5,7 @@ from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY
+from mediaforce.hosts.config import normalize_host_capabilities
 from mediaforce.remote import DEFAULT_HOST_CAPABILITIES, DEFAULT_HOST_MEDIA_ACCESS, normalize_host_media_access
 from mediaforce.core.type_defs import JSONValue
 
@@ -74,25 +75,7 @@ def index_settings_library_rows(rows: list[dict[str, str]], *, min_rows: int = 1
 
 
 def settings_remote_rows(remote_hosts: list[dict[str, Any]], *, min_rows: int = 3) -> list[dict[str, Any]]:
-    rows = [
-        {
-            "label": str(host.get("label") or ""),
-            "host": str(host.get("host") or ""),
-            "repo_path": str(host.get("repo_path") or ""),
-            "wake_mac": str(host.get("wake_mac") or host.get("wol_mac") or ""),
-            "start_command": str(host.get("start_command") or ""),
-            "stop_command": str(host.get("stop_command") or ""),
-            "start_timeout_seconds": str(host.get("start_timeout_seconds") or "180"),
-            "media_access": normalize_host_media_access(host.get("media_access")),
-            "priority": str(host.get("priority") or "0"),
-            "max_parallel_encodes": str(host_max_parallel_encodes(host)),
-            "schedule_profile": host_schedule_profile_key(host),
-            "capabilities": normalize_host_capabilities(host.get("capabilities")),
-            "source_roots_json": settings_host_source_roots_json(host.get("source_roots")),
-            "staging_root": str(host.get("staging_root") or ""),
-        }
-        for host in remote_hosts
-    ]
+    rows = [_settings_remote_row(host) for host in remote_hosts]
     return index_settings_remote_rows(rows, min_rows=min_rows)
 
 
@@ -103,25 +86,27 @@ def settings_remote_rows_for_config(config: MediaforceConfig, *, min_rows: int =
         for host in remote_hosts:
             if not isinstance(host, dict):
                 continue
-            rows.append(
-                {
-                    "label": str(host.get("label") or ""),
-                    "host": str(host.get("host") or ""),
-                    "repo_path": str(host.get("repo_path") or ""),
-                    "wake_mac": str(host.get("wake_mac") or host.get("wol_mac") or ""),
-                    "start_command": str(host.get("start_command") or ""),
-                    "stop_command": str(host.get("stop_command") or ""),
-                    "start_timeout_seconds": str(host.get("start_timeout_seconds") or "180"),
-                    "media_access": normalize_host_media_access(host.get("media_access")),
-                    "priority": str(host.get("priority") or "0"),
-                    "max_parallel_encodes": str(host_max_parallel_encodes(host)),
-                    "schedule_profile": host_schedule_profile_key(host),
-                    "capabilities": normalize_host_capabilities(host.get("capabilities")),
-                    "source_roots_json": settings_host_source_roots_json(host.get("source_roots")),
-                    "staging_root": str(host.get("staging_root") or ""),
-                }
-            )
+            rows.append(_settings_remote_row(host))
     return index_settings_remote_rows(rows, min_rows=min_rows)
+
+
+def _settings_remote_row(host: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "label": str(host.get("label") or ""),
+        "host": str(host.get("host") or ""),
+        "repo_path": str(host.get("repo_path") or ""),
+        "wake_mac": str(host.get("wake_mac") or host.get("wol_mac") or ""),
+        "start_command": str(host.get("start_command") or ""),
+        "stop_command": str(host.get("stop_command") or ""),
+        "start_timeout_seconds": str(host.get("start_timeout_seconds") or "180"),
+        "media_access": normalize_host_media_access(host.get("media_access")),
+        "priority": str(host.get("priority") or "0"),
+        "max_parallel_encodes": str(host_max_parallel_encodes(host)),
+        "schedule_profile": host_schedule_profile_key(host),
+        "capabilities": normalize_host_capabilities(host.get("capabilities")),
+        "source_roots_json": settings_host_source_roots_json(host.get("source_roots")),
+        "staging_root": str(host.get("staging_root") or ""),
+    }
 
 
 def index_settings_remote_rows(rows: list[dict[str, Any]], *, min_rows: int = 1) -> list[dict[str, Any]]:
@@ -215,17 +200,6 @@ def index_schedule_profile_rows(rows: list[dict[str, str]], *, min_rows: int = 1
             }
         )
     return indexed
-
-
-def normalize_host_capabilities(raw: JSONValue) -> list[str]:
-    if isinstance(raw, str):
-        values = [value.strip() for value in raw.split(",") if value.strip()]
-    elif isinstance(raw, list):
-        values = [str(value).strip() for value in raw if str(value).strip()]
-    else:
-        values = []
-    normalized = sorted({value.lower().replace(" ", "_") for value in values})
-    return normalized or list(DEFAULT_HOST_CAPABILITIES)
 
 
 def host_max_parallel_encodes(host: dict[str, Any]) -> int:
@@ -616,9 +590,12 @@ def library_color_map_from_source_roots(
         source_roots: dict[str, str], configured_colors: dict[str, str] | None = None
 ) -> dict[str, str]:
     resolved: dict[str, str] = {}
-    colors = configured_colors or {}
+    colors = configured_colors if configured_colors is not None else {}
     for index, key in enumerate(source_roots):
-        resolved[key] = colors.get(key) or DEFAULT_LIBRARY_COLOR_PALETTE[index % len(DEFAULT_LIBRARY_COLOR_PALETTE)]
+        configured_color = colors.get(key)
+        resolved[key] = configured_color if configured_color is not None else DEFAULT_LIBRARY_COLOR_PALETTE[
+            index % len(DEFAULT_LIBRARY_COLOR_PALETTE)
+        ]
     return resolved
 
 

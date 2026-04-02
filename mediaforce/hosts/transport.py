@@ -38,7 +38,7 @@ def _run_remote_ssh(
         cmd.extend(["-i", str(identity_file), "-o", "IdentitiesOnly=yes"])
     cmd.extend(ssh_client_options_func(batch_mode=batch_mode))
     cmd.extend([ssh_host, *remote_args])
-    return subprocess_run(cmd, capture_output=True, text=True, timeout=timeout, input=input_text)
+    return subprocess_run(cmd, capture_output=True, text=True, timeout=timeout, input_text=input_text)
 
 
 def run_remote_command(

@@ -3,7 +3,9 @@ from typing import Any
 
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import item_events
+from mediaforce.core.type_defs import float_value, int_value
 from mediaforce.core.utils import timestamp
+from mediaforce.reviewing.helpers import planned_audio_action, planned_opus_bitrate
 
 
 def _select_streams(item: dict[str, Any], *, text_subtitle_codecs: set[str]) -> dict[str, Any]:
@@ -25,7 +27,7 @@ def _select_streams(item: dict[str, Any], *, text_subtitle_codecs: set[str]) -> 
 
 def estimate_output_overhead_bytes(item: dict[str, Any], *, text_subtitle_codecs: set[str]) -> dict[str, int]:
     selection = _select_streams(item, text_subtitle_codecs=text_subtitle_codecs)
-    duration_seconds = float(item.get("duration_seconds") or 0.0)
+    duration_seconds = float_value(item.get("duration_seconds"))
     audio_bytes = 0
     for track in selection["audio_tracks"]:
         audio_bytes += _estimate_audio_track_bytes(track, item["resolved_policy"]["audio"], duration_seconds)
@@ -87,25 +89,15 @@ def _source_has_preservable_subtitles(subtitle_tracks: list[dict[str, Any]]) -> 
 
 
 def _audio_codec(track: dict[str, Any], audio_policy: dict[str, Any]) -> str:
-    codec = str(track.get("codec_name") or "").lower()
-    if codec in {str(name).lower() for name in audio_policy.get("copy_codecs", [])}:
-        return "copy"
-    if codec in {str(name).lower() for name in audio_policy.get("convert_to_opus_codecs", [])}:
-        return "libopus"
-    return "copy"
+    return planned_audio_action(track, audio_policy)
 
 
 def _opus_bitrate(track: dict[str, Any], audio_policy: dict[str, Any]) -> str:
-    channels = int(track.get("channels") or 2)
-    if channels >= 8:
-        return str(audio_policy["surround_7_1_opus_bitrate"])
-    if channels >= 6:
-        return str(audio_policy["surround_5_1_opus_bitrate"])
-    return str(audio_policy["stereo_opus_bitrate"])
+    return planned_opus_bitrate(track, audio_policy)
 
 
 def _opus_layout_filter(track: dict[str, Any]) -> str | None:
-    channels = int(track.get("channels") or 2)
+    channels = int_value(track.get("channels")) or 2
     if channels >= 8:
         return "channelmap=channel_layout=7.1"
     if channels >= 6:
@@ -124,17 +116,17 @@ def _estimate_audio_track_bytes(track: dict[str, Any], audio_policy: dict[str, A
         bitrate_text = _opus_bitrate(track, audio_policy)
         bitrate_bps = _parse_bitrate_text(bitrate_text)
     else:
-        bitrate_bps = int(track.get("bit_rate") or 0)
+        bitrate_bps = int_value(track.get("bit_rate"))
         if bitrate_bps <= 0:
-            channels = int(track.get("channels") or 2)
+            channels = int_value(track.get("channels")) or 2
             bitrate_bps = 640_000 if channels >= 6 else 192_000
     return int((bitrate_bps / 8) * duration_seconds)
 
 
 def _estimate_subtitle_track_bytes(track: dict[str, Any], *, text_subtitle_codecs: set[str]) -> int:
-    bit_rate = int(track.get("bit_rate") or 0)
+    bit_rate = int_value(track.get("bit_rate"))
     if bit_rate > 0:
-        duration_seconds = float(track.get("duration_seconds") or 0.0)
+        duration_seconds = float_value(track.get("duration_seconds"))
         if duration_seconds > 0:
             return int((bit_rate / 8) * duration_seconds)
     codec = str(track.get("codec_name") or "").lower()

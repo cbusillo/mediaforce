@@ -37,7 +37,7 @@ def local_videotoolbox_support() -> bool:
     ffmpeg_cmd = ffmpeg_binary()
     try:
         result = subprocess.run([ffmpeg_cmd, "-hide_banner", "-hwaccels"], capture_output=True, text=True, timeout=2)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return False
 
     if result.returncode != 0:
@@ -46,21 +46,34 @@ def local_videotoolbox_support() -> bool:
     return has_videotoolbox_hwaccel(f"{result.stdout}\n{result.stderr}")
 
 
+def _videotoolbox_decode_available(
+        source_codec: str | None,
+        *,
+        platform_name: str | None,
+        videotoolbox_available: bool | None,
+) -> bool:
+    if not should_use_videotoolbox_decode(source_codec):
+        return False
+    platform_value = normalize_execution_platform(
+        platform_name) if platform_name is not None else local_execution_platform()
+    if platform_value != "macos":
+        return False
+    if videotoolbox_available is None:
+        videotoolbox_available = local_videotoolbox_support()
+    return bool(videotoolbox_available)
+
+
 def ffmpeg_hwaccel_input_args(
         source_codec: str | None,
         *,
         platform_name: str | None = None,
         videotoolbox_available: bool | None = None,
 ) -> list[str]:
-    if not should_use_videotoolbox_decode(source_codec):
-        return []
-    platform_value = normalize_execution_platform(
-        platform_name) if platform_name is not None else local_execution_platform()
-    if platform_value != "macos":
-        return []
-    if videotoolbox_available is None:
-        videotoolbox_available = local_videotoolbox_support()
-    if not videotoolbox_available:
+    if not _videotoolbox_decode_available(
+            source_codec,
+            platform_name=platform_name,
+            videotoolbox_available=videotoolbox_available,
+    ):
         return []
     return ["-hwaccel", "videotoolbox"]
 
@@ -71,14 +84,10 @@ def ab_av1_hwaccel_input_args(
         platform_name: str | None = None,
         videotoolbox_available: bool | None = None,
 ) -> list[str]:
-    if not should_use_videotoolbox_decode(source_codec):
-        return []
-    platform_value = normalize_execution_platform(
-        platform_name) if platform_name is not None else local_execution_platform()
-    if platform_value != "macos":
-        return []
-    if videotoolbox_available is None:
-        videotoolbox_available = local_videotoolbox_support()
-    if not videotoolbox_available:
+    if not _videotoolbox_decode_available(
+            source_codec,
+            platform_name=platform_name,
+            videotoolbox_available=videotoolbox_available,
+    ):
         return []
     return ["--enc-input", "hwaccel=videotoolbox"]

@@ -1,21 +1,16 @@
-import os
-import shlex
-import socket
 import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
-from mediaforce.core.config import MediaforceConfig, load_runtime_settings, save_runtime_settings
+from mediaforce.core.config import MediaforceConfig
 from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQUIRED_ISSUE
-from mediaforce.hosts.config import _host_capabilities, _host_lookup_targets_current_machine, _host_priority, \
-    _host_supports_capability, _parse_utc_offset_minutes, _ssh_lookup_host, execution_mode_for_host, \
-    host_media_access_for_host, host_status_targets_current_machine, host_targets_current_machine, \
-    normalize_host_media_access, remote_shell_path_export_line, ssh_target_for_host
+from mediaforce.hosts.config import execution_mode_for_host, host_media_access_for_host, \
+    host_status_targets_current_machine, normalize_host_media_access, remote_shell_path_export_line, \
+    ssh_target_for_host
 from mediaforce.hosts.status_runtime import _current_machine_host_status as _current_machine_host_status_impl, \
     _remote_host_status as _remote_host_status_impl, _run_remote_status_probe as _run_remote_status_probe_impl
-from mediaforce.hosts.setup_runtime import _find_remote_host, \
-    _finish_remote_host_prepare as _finish_remote_host_prepare_impl, \
+from mediaforce.hosts.setup_runtime import _finish_remote_host_prepare as _finish_remote_host_prepare_impl, \
     _bootstrap_remote_macos as _bootstrap_remote_macos_impl, \
     _install_local_ssh_key as _install_local_ssh_key_impl, \
     _request_remote_xcode_install as _request_remote_xcode_install_impl, \
@@ -23,8 +18,8 @@ from mediaforce.hosts.setup_runtime import _find_remote_host, \
     prepare_remote_host_with_password as prepare_remote_host_with_password_impl, \
     _remote_ffmpeg_install_commands as _remote_ffmpeg_install_commands_impl, \
     reset_remote_host_trust as reset_remote_host_trust_impl
-from mediaforce.hosts.status_helpers import _classify_ssh_failure, _command_output, _command_succeeds, \
-    _default_public_key_path, _local_tool_status_snapshot, _needs_initial_ssh_key_install, \
+from mediaforce.hosts.status_helpers import _classify_ssh_failure, _default_public_key_path, \
+    _local_tool_status_snapshot, _needs_initial_ssh_key_install, \
     _private_key_path_for_public_key, _should_retry_remote_status_exception, \
     _should_retry_remote_status_failure, _ssh_access_must_be_fixed_first
 from mediaforce.hosts.transport import _run_remote_ssh as _run_remote_ssh_impl, \
@@ -33,14 +28,38 @@ from mediaforce.hosts.transport import _run_remote_ssh as _run_remote_ssh_impl, 
 from mediaforce.hosts.wake_runtime import _ensure_remote_awake_for_ssh as _ensure_remote_awake_for_ssh_impl, \
     _learn_remote_wake_mac as _learn_remote_wake_mac_impl, \
     _wake_remote_host_if_configured as _wake_remote_host_if_configured_impl
-from mediaforce.hosts.wake_helpers import _broadcast_addresses_for_interface, _interface_for_ip, \
-    _local_broadcast_addresses, _looks_like_ipv4_address, _mac_from_arp, _normalize_mac_address, \
-    _persist_remote_wake_mac, _resolve_host_to_ip, _resolved_ssh_network_host, _tcp_port_is_open, \
-    _wake_broadcast_destinations
 from mediaforce.hosts.types import AB_AV1_MISSING_ISSUE, DEFAULT_HOST_CAPABILITIES, DEFAULT_HOST_MEDIA_ACCESS, \
-    DEFAULT_WAKE_WAIT_SECONDS, FFMPEG_MISSING_ISSUE, HostSetupResult, HostStatus, \
-    LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE, REMOTE_SHELL_PATH, REMOTE_STATUS_RETRY_DELAY_SECONDS, \
-    SAMPLE_AV1_ENCODER_MISSING_ISSUE, SAMPLE_METRIC_MISSING_ISSUE
+    DEFAULT_WAKE_WAIT_SECONDS, HostSetupResult, HostStatus, \
+    FFMPEG_MISSING_ISSUE, LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE, \
+    REMOTE_STATUS_RETRY_DELAY_SECONDS, SAMPLE_AV1_ENCODER_MISSING_ISSUE, SAMPLE_METRIC_MISSING_ISSUE
+
+__all__ = [
+    "AB_AV1_MISSING_ISSUE",
+    "DEFAULT_HOST_CAPABILITIES",
+    "DEFAULT_HOST_MEDIA_ACCESS",
+    "DEFAULT_WAKE_WAIT_SECONDS",
+    "FFMPEG_MISSING_ISSUE",
+    "HostSetupResult",
+    "HostStatus",
+    "LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE",
+    "REMOTE_STATUS_RETRY_DELAY_SECONDS",
+    "SAMPLE_AV1_ENCODER_MISSING_ISSUE",
+    "SAMPLE_METRIC_MISSING_ISSUE",
+    "SVT_AV1_REQUIRED_ISSUE",
+    "VIDEOTOOLBOX_REQUIRED_ISSUE",
+    "_classify_ssh_failure",
+    "collect_host_statuses",
+    "copy_remote_file_to_local",
+    "execution_mode_for_host",
+    "host_media_access_for_host",
+    "host_status_targets_current_machine",
+    "normalize_host_media_access",
+    "prepare_remote_host_with_password",
+    "remote_shell_path_export_line",
+    "reset_remote_host_trust",
+    "run_host_lifecycle_command",
+    "run_remote_command",
+]
 
 
 def run_host_lifecycle_command(host: dict[str, object], command: str, *, timeout: int) -> subprocess.CompletedProcess[
@@ -49,7 +68,26 @@ def run_host_lifecycle_command(host: dict[str, object], command: str, *, timeout
     command_text = str(command or "").strip()
     if not command_text:
         raise RuntimeError("Lifecycle command cannot be empty.")
-    return subprocess.run(["sh", "-lc", command_text], capture_output=True, text=True, timeout=timeout)
+    return _run_subprocess_text(["sh", "-lc", command_text], timeout=timeout)
+
+
+def _run_subprocess_text(
+        command: list[str],
+        *,
+        timeout: int,
+        capture_output: bool = True,
+        text: bool = True,
+        input_text: str | None = None,
+        env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        capture_output=capture_output,
+        text=text,
+        timeout=timeout,
+        input=input_text,
+        env=env,
+    )
 
 
 def collect_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
@@ -87,7 +125,7 @@ def copy_remote_file_to_local(
         ssh_target_for_host=ssh_target_for_host,
         ensure_remote_awake_for_ssh=_ensure_remote_awake_for_ssh,
         ssh_client_options_func=ssh_client_options,
-        subprocess_run=subprocess.run,
+        subprocess_run=_run_subprocess_text,
     )
 
 
@@ -206,7 +244,7 @@ def _run_remote_ssh(
         wake_before_connect=wake_before_connect,
         ensure_remote_awake_for_ssh=_ensure_remote_awake_for_ssh,
         ssh_client_options_func=ssh_client_options,
-        subprocess_run=subprocess.run,
+        subprocess_run=_run_subprocess_text,
     )
 
 
@@ -236,7 +274,7 @@ def _install_local_ssh_key(host: dict[str, Any], password: str) -> HostSetupResu
         default_public_key_path=_default_public_key_path,
         private_key_path_for_public_key=_private_key_path_for_public_key,
         ssh_client_options=ssh_client_options,
-        subprocess_run=subprocess.run,
+        subprocess_run=_run_subprocess_text,
         run_remote_ssh=_run_remote_ssh,
     )
 

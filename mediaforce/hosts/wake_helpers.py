@@ -46,13 +46,9 @@ def _local_broadcast_addresses(host: dict[str, Any]) -> list[str]:
             continue
         if not current_interface:
             continue
-        if "broadcast" not in line or "inet " not in line:
-            continue
-        parts = line.split()
-        for index, part in enumerate(parts[:-1]):
-            if part == "broadcast":
-                addresses.append(parts[index + 1])
-                break
+        broadcast = _broadcast_address_from_line(line)
+        if broadcast is not None:
+            addresses.append(broadcast)
     return list(dict.fromkeys(addresses))
 
 
@@ -78,16 +74,7 @@ def _broadcast_addresses_for_interface(interface: str) -> list[str]:
         return []
     if result.returncode != 0:
         return []
-    addresses: list[str] = []
-    for line in result.stdout.splitlines():
-        if "broadcast" not in line or "inet " not in line:
-            continue
-        parts = line.split()
-        for index, part in enumerate(parts[:-1]):
-            if part == "broadcast":
-                addresses.append(parts[index + 1])
-                break
-    return addresses
+    return _broadcast_addresses_from_lines(result.stdout.splitlines())
 
 
 def _tcp_port_is_open(ip_address: str, port: int) -> bool:
@@ -140,17 +127,38 @@ def _mac_from_arp(ip_address: str) -> str | None:
         result = subprocess.run(["arp", "-n", ip_address], capture_output=True, text=True, timeout=5)
     except Exception:
         return None
-    output = f"{result.stdout}\n{result.stderr}"
-    for token in output.replace("(", " ").replace(")", " ").split():
-        normalized = _normalize_mac_address(token)
-        if normalized is not None:
-            return ":".join(normalized[index: index + 2] for index in range(0, 12, 2))
+    found = _mac_from_arp_output(result.stdout, result.stderr)
+    if found is not None:
+        return found
     try:
         subprocess.run(["ping", "-c", "1", ip_address], capture_output=True, text=True, timeout=5)
         result = subprocess.run(["arp", "-n", ip_address], capture_output=True, text=True, timeout=5)
     except Exception:
         return None
-    output = f"{result.stdout}\n{result.stderr}"
+    return _mac_from_arp_output(result.stdout, result.stderr)
+
+
+def _broadcast_addresses_from_lines(lines: list[str]) -> list[str]:
+    addresses: list[str] = []
+    for line in lines:
+        broadcast = _broadcast_address_from_line(line)
+        if broadcast is not None:
+            addresses.append(broadcast)
+    return addresses
+
+
+def _broadcast_address_from_line(line: str) -> str | None:
+    if "broadcast" not in line or "inet " not in line:
+        return None
+    parts = line.split()
+    for index, part in enumerate(parts[:-1]):
+        if part == "broadcast":
+            return parts[index + 1]
+    return None
+
+
+def _mac_from_arp_output(stdout: str, stderr: str) -> str | None:
+    output = f"{stdout}\n{stderr}"
     for token in output.replace("(", " ").replace(")", " ").split():
         normalized = _normalize_mac_address(token)
         if normalized is not None:

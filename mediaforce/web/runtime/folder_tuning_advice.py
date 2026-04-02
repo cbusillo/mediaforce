@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from mediaforce.advisor import apply_seed_policy, request_run_verdict, request_seed_policy
+from mediaforce.advising.policy import policy_key_paths
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
@@ -367,15 +368,7 @@ def tuning_policy_focus(policy: dict[str, Any]) -> dict[str, Any]:
 
 
 def tuning_policy_key_paths(policy: dict[str, Any]) -> list[str]:
-    focused = tuning_policy_focus(policy)
-    paths: list[str] = []
-    for section in ("video", "audio", "subtitle"):
-        raw_section = focused.get(section)
-        if not isinstance(raw_section, dict):
-            continue
-        for key in raw_section:
-            paths.append(f"{section}.{key}")
-    return paths
+    return policy_key_paths(tuning_policy_focus(policy))
 
 
 def seed_policy_fragment(raw: JSONValue) -> dict[str, Any]:

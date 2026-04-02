@@ -1,5 +1,6 @@
 import socket
 
+from mediaforce.core.type_defs import object_dict
 from mediaforce.hosts.types import DEFAULT_HOST_MEDIA_ACCESS, HostStatus, REMOTE_SHELL_PATH
 
 
@@ -11,7 +12,7 @@ def normalize_host_media_access(value: object) -> str:
 
 
 def host_media_access_for_host(host: dict[str, object] | None) -> str:
-    return normalize_host_media_access((host or {}).get("media_access"))
+    return normalize_host_media_access(object_dict(host).get("media_access"))
 
 
 def ssh_target_for_host(host: dict[str, object]) -> str:
@@ -25,8 +26,7 @@ def _host_priority(host: dict[str, object]) -> int:
         return 0
 
 
-def _host_capabilities(host: dict[str, object]) -> list[str]:
-    raw = host.get("capabilities")
+def normalize_host_capabilities(raw: object, default_capabilities: list[str] | tuple[str, ...] = ("encode_queue",)) -> list[str]:
     if isinstance(raw, str):
         values = [value.strip() for value in raw.split(",") if value.strip()]
     elif isinstance(raw, list):
@@ -34,7 +34,11 @@ def _host_capabilities(host: dict[str, object]) -> list[str]:
     else:
         values = []
     normalized = sorted({value.lower().replace(" ", "_") for value in values})
-    return normalized or ["encode_queue"]
+    return normalized or list(default_capabilities)
+
+
+def _host_capabilities(host: dict[str, object]) -> list[str]:
+    return normalize_host_capabilities(host.get("capabilities"))
 
 
 def _host_supports_capability(host: dict[str, object], capability: str) -> bool:
@@ -64,7 +68,7 @@ def host_targets_current_machine(host: dict[str, object]) -> bool:
 
 
 def execution_mode_for_host(host: dict[str, object] | None) -> str:
-    host_payload = host or {}
+    host_payload = object_dict(host)
     mode = str(host_payload.get("mode") or "local").strip().lower() or "local"
     if mode == "ssh" and host_targets_current_machine(host_payload):
         return "local"
@@ -107,6 +111,7 @@ __all__ = [
     "host_media_access_for_host",
     "host_status_targets_current_machine",
     "host_targets_current_machine",
+    "normalize_host_capabilities",
     "normalize_host_media_access",
     "remote_shell_path_export_line",
     "ssh_target_for_host",

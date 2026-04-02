@@ -46,6 +46,7 @@ from mediaforce.web.app import (
     _planned_audio_review_context,
     _proposal_file,
     _review_pack_dir,
+    _upsert_override,
 )
 
 
@@ -76,6 +77,20 @@ class TuningRuntimeTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
+
+    def _capture_subprocess_commands(self, response_body: str) -> tuple[list[list[str]], object]:
+        commands: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(kwargs, dict)
+            commands.append(cmd)
+            return type("Result", (), {"returncode": 0, "stdout": response_body, "stderr": ""})()
+
+        return commands, fake_run
+
+    def _assert_structured_subprocess_call(self, commands: list[list[str]]) -> None:
+        self.assertTrue(commands)
+        self.assertEqual(commands[0][1:7], _memory_disabled_code_args())
 
     def test_request_note_tuning_uses_structured_runtime_path_and_self_check(self) -> None:
         responses = [
@@ -275,12 +290,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 "evidence_checked": ["sample_result", "operator_request"],
             }
         )
-        commands: list[list[str]] = []
-
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
-            self.assertIsInstance(kwargs, dict)
-            commands.append(cmd)
-            return type("Result", (), {"returncode": 0, "stdout": response_body, "stderr": ""})()
+        commands, fake_run = self._capture_subprocess_commands(response_body)
 
         with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
             response = request_run_verdict(
@@ -296,8 +306,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(response.prompt_version, RUN_VERDICT_PROMPT_VERSION)
         self.assertEqual(response.outcome, "acceptable_experiment")
         self.assertEqual(response.next_step, "Approve it if the remaining review moments still look clean.")
-        self.assertTrue(commands)
-        self.assertEqual(commands[0][1:7], _memory_disabled_code_args())
+        self._assert_structured_subprocess_call(commands)
 
     def test_request_seed_policy_uses_structured_runner(self) -> None:
         response_body = json.dumps(
@@ -313,12 +322,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 "policy": {"video": {}}
             }
         )
-        commands: list[list[str]] = []
-
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
-            self.assertIsInstance(kwargs, dict)
-            commands.append(cmd)
-            return type("Result", (), {"returncode": 0, "stdout": response_body, "stderr": ""})()
+        commands, fake_run = self._capture_subprocess_commands(response_body)
 
         with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
             response = request_seed_policy(
@@ -332,8 +336,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(response.ok)
         self.assertEqual(response.request_disposition, "softened")
         self.assertIn("first pass", response.request_response)
-        self.assertTrue(commands)
-        self.assertEqual(commands[0][1:7], _memory_disabled_code_args())
+        self._assert_structured_subprocess_call(commands)
 
     def test_operator_requested_experiment_detects_literal_vmaf_target(self) -> None:
         request = _operator_requested_experiment("I want to try 85 VMAF on this show.")
@@ -1027,6 +1030,35 @@ class TuningRuntimeTests(unittest.TestCase):
             web_app.CALIBRATION_QUEUE_PROCESSES.clear()
             web_app.CALIBRATION_QUEUE_PROCESSES.update(original_map)
             web_app.ENCODE_QUEUE_PROCESS = original_encode
+
+    def test_upsert_override_replaces_existing_matching_block(self) -> None:
+        override_file = self.root / "overrides.toml"
+        override_file.write_text(
+            """[[overrides]]
+path_prefix = "tv/House/Season 2"
+note = "Old note"
+
+[overrides.video]
+target_xpsnr = 33.0
+
+[[overrides]]
+path_prefix = "tv/Other"
+note = "Keep me"
+"""
+        )
+
+        _upsert_override(
+            override_file,
+            "tv/House/Season 2",
+            {"video": {"target_xpsnr": 34.5}, "audio": {"bitrate_kbps": 224}},
+        )
+
+        updated = override_file.read_text()
+        self.assertEqual(updated.count('path_prefix = "tv/House/Season 2"'), 1)
+        self.assertIn('target_xpsnr = 34.5', updated)
+        self.assertIn('bitrate_kbps = 224', updated)
+        self.assertIn('path_prefix = "tv/Other"', updated)
+        self.assertNotIn('target_xpsnr = 33.0', updated)
 
 
 if __name__ == "__main__":

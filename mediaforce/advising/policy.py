@@ -7,37 +7,14 @@ _SKIP_POLICY_VALUE = object()
 
 
 def tune_response_schema(current_policy: dict[str, Any], *, request_dispositions: tuple[str, ...]) -> dict[str, Any]:
-    policy_schema = policy_response_schema(current_policy)
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "required": [
-            "request_response",
-            "request_disposition",
-            "summary",
-            "diagnosis",
-            "confidence",
-            "evidence_checked",
-            "suggested_follow_up",
-            "feasibility_note",
-            "policy",
-        ],
-        "properties": {
-            "request_response": {"type": "string"},
-            "request_disposition": {"type": "string", "enum": list(request_dispositions)},
-            "summary": {"type": "string"},
-            "diagnosis": {"type": "string"},
-            "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
-            "evidence_checked": {"type": "array", "items": {"type": "string"}},
-            "suggested_follow_up": {"type": ["string", "null"]},
-            "feasibility_note": {"type": ["string", "null"]},
-            "policy": policy_schema,
-        },
-    }
+    return _advice_response_schema(policy_response_schema(current_policy), request_dispositions=request_dispositions)
 
 
 def seed_response_schema(base_policy: dict[str, Any], *, request_dispositions: tuple[str, ...]) -> dict[str, Any]:
-    policy_schema = policy_response_schema(base_policy)
+    return _advice_response_schema(policy_response_schema(base_policy), request_dispositions=request_dispositions)
+
+
+def _advice_response_schema(policy_schema: dict[str, Any], *, request_dispositions: tuple[str, ...]) -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
@@ -136,6 +113,10 @@ def try_load_first_json_object(raw: str) -> JSONValue:
 
 
 def policy_key_paths(policy: dict[str, Any]) -> list[str]:
+    return _section_key_paths(policy)
+
+
+def _section_key_paths(policy: dict[str, Any]) -> list[str]:
     paths: list[str] = []
     for section in ("video", "audio", "subtitle"):
         raw_section = policy.get(section)
