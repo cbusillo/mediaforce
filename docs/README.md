@@ -7,7 +7,6 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 - `docs/policies/acceptance-gate.md`: commit/session-finish bar
 - `docs/policies/coding-standards.md`: repo-wide coding expectations
 - `docs/style/index.md`: entry point for language and testing style guides
-- `docs/TODO.md`: current priorities
 
 ## Architecture
 
@@ -16,5 +15,5 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 
 ## Developer workflows
 
-- `docs/development/database-tooling.md`: PyCharm and SQLite schema workflow for
-  `mediaforce/core/sql/`
+- `docs/development/database-tooling.md`: SQLAlchemy/Alembic schema workflow,
+  legacy-bridge notes, and migration validation commands

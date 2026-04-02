@@ -454,6 +454,18 @@
 	const sampleRunActive = $derived(
 		status.calibration_status === 'queued' || status.calibration_status === 'running'
 	);
+	const folderRefreshActive = $derived(
+		status.folder_scan_status === 'queued' || status.folder_scan_status === 'running'
+	);
+	const folderRefreshSignal = $derived.by(() =>
+		status.folder_scan_status === 'running' ? 'Refreshing now' : 'Refresh queued'
+	);
+	const calibrationSignal = $derived.by(() => {
+		if (status.calibration_status === 'running') {
+			return calibrationJob?.mode === 'full' ? 'Proof encode live' : 'Sample live';
+		}
+		return 'Calibration queued';
+	});
 	const sampleActionBlockedReason = $derived.by(() => {
 		if (sampleRunActive) {
 			return 'A calibration job is already active for this folder.';
@@ -1443,10 +1455,14 @@
 		</div>
 	</Panel>
 
-	{#if status.folder_scan_job && (status.folder_scan_status === 'queued' || status.folder_scan_status === 'running')}
-		<Panel class="status-strip-panel" padding="0.95rem 1rem">
+	{#if status.folder_scan_job && folderRefreshActive}
+		<Panel class="status-strip-panel in-progress" padding="0.95rem 1rem">
 			<div class="status-strip">
 				<div class="section-copy-block">
+					<div class="status-strip-signal" aria-live="polite">
+						<span class="status-strip-beacon" aria-hidden="true"></span>
+						<span>{folderRefreshSignal}</span>
+					</div>
 					<p class="eyebrow-copy">Folder refresh</p>
 					<p class="status-strip-title">Refreshing in the background before you start a run</p>
 					<p class="muted-copy">
@@ -1463,9 +1479,13 @@
 	{/if}
 
 	{#if calibrationJob && (status.calibration_status === 'queued' || status.calibration_status === 'running')}
-		<Panel class="status-strip-panel accent-strip" padding="0.95rem 1rem">
+		<Panel class="status-strip-panel accent-strip in-progress" padding="0.95rem 1rem">
 			<div class="status-strip">
 				<div class="section-copy-block">
+					<div class="status-strip-signal" aria-live="polite">
+						<span class="status-strip-beacon" aria-hidden="true"></span>
+						<span>{calibrationSignal}</span>
+					</div>
 					<p class="eyebrow-copy">
 						{calibrationJob.mode === 'full' ? 'Proof encode' : 'Calibration'}
 					</p>
@@ -2390,6 +2410,26 @@
 		background: rgba(255, 255, 255, 0.82);
 	}
 
+	.status-strip-panel.in-progress {
+		position: relative;
+		overflow: hidden;
+	}
+
+	.status-strip-panel.in-progress::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		pointer-events: none;
+		background: linear-gradient(
+			110deg,
+			rgba(255, 255, 255, 0) 0%,
+			rgba(255, 255, 255, 0.45) 18%,
+			rgba(255, 255, 255, 0) 36%
+		);
+		transform: translateX(-150%);
+		animation: status-strip-sheen 2.8s ease-in-out infinite;
+	}
+
 	.accent-strip {
 		background: rgba(241, 252, 248, 0.88);
 	}
@@ -2409,12 +2449,61 @@
 		line-height: 1.35;
 	}
 
+	.status-strip-signal {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.45rem;
+		margin-bottom: 0.35rem;
+		padding: 0.28rem 0.62rem;
+		border-radius: 999px;
+		background: rgba(17, 24, 39, 0.08);
+		color: var(--ink);
+		font-size: 0.72rem;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.status-strip-beacon {
+		position: relative;
+		width: 0.62rem;
+		height: 0.62rem;
+		border-radius: 999px;
+		background: #e4572e;
+		box-shadow: 0 0 0 0 rgba(228, 87, 46, 0.4);
+		animation: status-strip-pulse 1.35s ease-out infinite;
+	}
+
 	.status-strip-meta {
 		margin: 0;
 		font-size: 0.82rem;
 		line-height: 1.45;
 		color: var(--ink-soft);
 		white-space: nowrap;
+	}
+
+	@keyframes status-strip-pulse {
+		0% {
+			box-shadow: 0 0 0 0 rgba(228, 87, 46, 0.38);
+		}
+
+		70% {
+			box-shadow: 0 0 0 0.68rem rgba(228, 87, 46, 0);
+		}
+
+		100% {
+			box-shadow: 0 0 0 0 rgba(228, 87, 46, 0);
+		}
+	}
+
+	@keyframes status-strip-sheen {
+		0% {
+			transform: translateX(-150%);
+		}
+
+		100% {
+			transform: translateX(150%);
+		}
 	}
 
 	.studio-grid {
