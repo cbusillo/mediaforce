@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, cast
 
+from mediaforce.core.type_defs import object_dict
+
 
 def run_encode_command(
         *,
@@ -27,6 +29,7 @@ def run_encode_command(
         run_streamed_remote_encode_command: Callable[..., subprocess.CompletedProcess[str]],
 ) -> subprocess.CompletedProcess[str]:
     host_mode = execution_mode_for_host(host)
+    host_payload = object_dict(host)
     if host_mode != "ssh":
         return run_tracked_encode_command(
             ffmpeg_cmd[:-1] + [str(temp_output)],
@@ -44,7 +47,7 @@ def run_encode_command(
             progress_callback=progress_callback,
         )
 
-    ssh_host = str((host or {}).get("key") or (host or {}).get("host") or "").strip()
+    ssh_host = str(host_payload.get("key") or host_payload.get("host") or "").strip()
     if not ssh_host:
         raise RuntimeError("Remote encode host is missing an SSH target.")
 
@@ -92,7 +95,8 @@ def run_streamed_remote_encode_command(
         update_ffmpeg_progress_state: Callable[..., dict[str, Any] | None],
         process_cancelled_error: type[Exception],
 ) -> subprocess.CompletedProcess[str]:
-    ssh_host = str((host or {}).get("key") or (host or {}).get("host") or "").strip()
+    host_payload = object_dict(host)
+    ssh_host = str(host_payload.get("key") or host_payload.get("host") or "").strip()
     if not ssh_host:
         raise RuntimeError("Remote encode host is missing an SSH target.")
 
@@ -100,7 +104,7 @@ def run_streamed_remote_encode_command(
         ffmpeg_cmd,
         source_path=source_path,
         output_path=temp_output,
-        executable_path=str((host or {}).get("ffmpeg_path") or "") or None,
+        executable_path=str(host_payload.get("ffmpeg_path") or "") or None,
     )
     ssh_cmd = [
         "ssh",
@@ -112,7 +116,7 @@ def run_streamed_remote_encode_command(
     process_controller.throw_if_cancelled() if process_controller is not None else None
     process = subprocess.Popen(ssh_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                bufsize=0)
-    process_handle = cast(subprocess.Popen[str], process)
+    process_handle = cast(subprocess.Popen[str], cast(object, process))
     if process_controller is not None:
         process_controller.attach(process_handle)
 
@@ -138,7 +142,8 @@ def run_streamed_remote_encode_command(
         if process.stdout is None:
             return
         with temp_output.open("wb") as output_file:
-            shutil.copyfileobj(process.stdout, output_file, length=1024 * 1024)
+            output_stream = cast(Any, output_file)
+            shutil.copyfileobj(process.stdout, output_stream, length=1024 * 1024)
         process.stdout.close()
 
     def consume_stderr() -> None:

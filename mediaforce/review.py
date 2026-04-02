@@ -113,6 +113,9 @@ def generate_compare_clips(
         play: bool,
         process_controller: ManagedProcessController | None = None,
 ) -> list[CompareClip]:
+    def ffplay_runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(args, check=False, capture_output=True, text=True)
+
     return generate_compare_clips_impl(
         connection,
         manifest,
@@ -124,7 +127,7 @@ def generate_compare_clips(
         process_controller=process_controller,
         auto_timestamps=_auto_timestamps,
         generate_compare_clips_for_pair=generate_compare_clips_for_pair,
-        subprocess_run=subprocess.run,
+        subprocess_run=ffplay_runner,
     )
 
 
