@@ -10,6 +10,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db import DBRow
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import encode_queue_state
+from mediaforce.core.type_defs import int_value
 
 DEFAULT_QUEUE_NAME = "heavy"
 DEFAULT_SCHEDULER_POLICY = {
@@ -140,21 +141,17 @@ def queue_position(connection: DBClient, job_id: str) -> tuple[int, int] | None:
         return None
     created_at = str(row["created_at"])
     rowid = int(row["rowid"])
-    position = int(
-        connection.execute(
-            select(func.count())
-            .select_from(encode_jobs)
-            .where(encode_jobs.c.status.in_(QUEUED_ENCODE_JOB_STATUSES))
-            .where((encode_jobs.c.created_at < created_at) | ((encode_jobs.c.created_at == created_at) & (_rowid_column() <= rowid)))
-        ).fetchone()[0]
-    )
-    total = int(
-        connection.execute(
-            select(func.count())
-            .select_from(encode_jobs)
-            .where(encode_jobs.c.status.in_(QUEUED_ENCODE_JOB_STATUSES))
-        ).fetchone()[0]
-    )
+    position = int(connection.execute(
+        select(func.count())
+        .select_from(encode_jobs)
+        .where(encode_jobs.c.status.in_(QUEUED_ENCODE_JOB_STATUSES))
+        .where((encode_jobs.c.created_at < created_at) | ((encode_jobs.c.created_at == created_at) & (_rowid_column() <= rowid)))
+    ).scalar_one())
+    total = int(connection.execute(
+        select(func.count())
+        .select_from(encode_jobs)
+        .where(encode_jobs.c.status.in_(QUEUED_ENCODE_JOB_STATUSES))
+    ).scalar_one())
     return position, total
 
 
@@ -192,11 +189,9 @@ def summarize_encode_queue(connection: DBClient) -> dict[str, Any]:
 
 
 def _count_jobs(connection: DBClient, *, statuses: tuple[str, ...]) -> int:
-    return int(
-        connection.execute(
-            select(func.count()).select_from(encode_jobs).where(encode_jobs.c.status.in_(statuses))
-        ).fetchone()[0]
-    )
+    return int(connection.execute(
+        select(func.count()).select_from(encode_jobs).where(encode_jobs.c.status.in_(statuses))
+    ).scalar_one())
 
 
 def _encode_job_select() -> Any:
@@ -213,7 +208,7 @@ def _serialize_encode_job(payload: dict[str, Any]) -> dict[str, Any]:
         "prefix": payload["prefix"],
         "status": payload["status"],
         "manifest_path": payload["manifest_path"],
-        "item_count": int(payload.get("item_count") or 0),
+        "item_count": int_value(payload.get("item_count")),
         "saved_profile_path": payload.get("saved_profile_path"),
         "host_json": json.dumps(payload.get("host") or {}, sort_keys=True),
         "last_host_json": json.dumps(payload.get("last_host") or {}, sort_keys=True),
@@ -221,7 +216,7 @@ def _serialize_encode_job(payload: dict[str, Any]) -> dict[str, Any]:
         "process_pid": payload.get("process_pid"),
         "error": payload.get("error"),
         "bypass_schedule": int(bool(payload.get("bypass_schedule"))),
-        "attempt_count": int(payload.get("attempt_count") or 0),
+        "attempt_count": int_value(payload.get("attempt_count")),
         "leased_at": payload.get("leased_at"),
         "lease_expires_at": payload.get("lease_expires_at"),
         "heartbeat_at": payload.get("heartbeat_at"),

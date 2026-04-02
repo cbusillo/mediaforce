@@ -13,7 +13,7 @@ from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
-from mediaforce.core.type_defs import object_dict
+from mediaforce.core.type_defs import float_value, int_value, object_dict
 from mediaforce.state_cleanup import purge_transient_artifacts
 
 
@@ -125,10 +125,11 @@ def run_calibration_job(
                 raise RuntimeError(f"No sample item found for {prefix}")
             sample_item = object_dict(sample_item)
             sample_item["resolved_policy"] = policy
-            library_item_id = int(sample_item["library_item_id"])
+            current_library_item_id = int_value(sample_item.get("library_item_id"))
+            library_item_id = current_library_item_id
             staged_artifact_snapshot = snapshot_staged_artifact(
                 connection,
-                library_item_id,
+                current_library_item_id,
                 deps.staged_artifact_columns,
             )
 
@@ -239,8 +240,8 @@ def run_sampled_calibration(
     _ = prefix
     source_path = Path(sample_item["source_path"])
     video_policy = object_dict(policy.get("video"))
-    width = int(sample_item.get("width") or 0) or None
-    height = int(sample_item.get("height") or 0) or None
+    width = int_value(sample_item.get("width")) or None
+    height = int_value(sample_item.get("height")) or None
     preset = deps.effective_video_preset(video_policy, width=width, height=height)
     quality_result = deps.search_quality_for_source(
         source_path,
@@ -267,7 +268,7 @@ def run_sampled_calibration(
 
     timestamps = deps.recommend_review_timestamps(
         source_path,
-        float(sample_item.get("duration_seconds") or 0.0),
+        float_value(sample_item.get("duration_seconds")),
         8.0,
         process_controller=process_controller,
     )

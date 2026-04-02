@@ -23,7 +23,7 @@ from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.encoding.encode_queue import ensure_queue_state, load_active_encode_job, load_encode_job, load_queue_state, \
     save_encode_job, save_queue_state
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
-from mediaforce.core.type_defs import object_dict, object_list
+from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 
 
 @dataclass(slots=True)
@@ -126,9 +126,10 @@ def reconcile_encode_jobs(
 
 def encode_job_manifest_totals(job: dict[str, Any]) -> dict[str, Any]:
     manifest_path = Path(str(job.get("manifest_path") or "")).expanduser()
+    fallback_item_count = int_value(job.get("item_count"))
     if not manifest_path.exists():
         return {
-            "total_item_count": int(job.get("item_count") or 0),
+            "total_item_count": fallback_item_count,
             "total_duration_seconds": 0.0,
             "total_source_size_bytes": 0,
         }
@@ -136,15 +137,15 @@ def encode_job_manifest_totals(job: dict[str, Any]) -> dict[str, Any]:
         payload = json.loads(manifest_path.read_text())
     except (OSError, json.JSONDecodeError):
         return {
-            "total_item_count": int(job.get("item_count") or 0),
+            "total_item_count": fallback_item_count,
             "total_duration_seconds": 0.0,
             "total_source_size_bytes": 0,
         }
-    items = object_list(payload.get("items"))
+    items = [object_dict(item) for item in object_list(payload.get("items"))]
     return {
-        "total_item_count": len(items) or int(job.get("item_count") or 0),
-        "total_duration_seconds": sum(float(item.get("duration_seconds") or 0.0) for item in items),
-        "total_source_size_bytes": sum(int(item.get("source_size_bytes") or 0) for item in items),
+        "total_item_count": len(items) or fallback_item_count,
+        "total_duration_seconds": sum(float_value(item.get("duration_seconds")) for item in items),
+        "total_source_size_bytes": sum(int_value(item.get("source_size_bytes")) for item in items),
     }
 
 
@@ -161,7 +162,7 @@ def transition_encode_job_failure(
     now = datetime.now(tz=UTC)
     now_iso = now.isoformat(timespec="seconds")
     assigned_host = object_dict(job.get("host"))
-    attempt_count = int(job.get("attempt_count") or 0)
+    attempt_count = int_value(job.get("attempt_count"))
     retryable = _encode_failure_is_retryable(failure_kind, error_message, assigned_host)
     host_related = _encode_failure_is_host_related(failure_kind, error_message, assigned_host)
     job.update(
@@ -382,7 +383,7 @@ def process_encode_queue_once(*, config_path: Path, deps: EncodeQueueRuntimeDeps
                 "heartbeat_at": now_iso,
                 "lease_expires_at": _encode_job_lease_expires_at(deps),
                 "worker_id": worker_id,
-                "attempt_count": int(next_job.get("attempt_count") or 0) + 1,
+                "attempt_count": int_value(next_job.get("attempt_count")) + 1,
                 "retry_not_before": None,
                 "waiting_reason": None,
                 "terminal_reason": None,
@@ -527,12 +528,16 @@ def run_encode_job(*, config_path: Path, job_id: str, deps: EncodeQueueRuntimeDe
                     )
                     save_encode_job(connection, job)
                 elif error is not None:
+                    if failure_kind is None:
+                        effective_failure_kind = "deterministic"
+                    else:
+                        effective_failure_kind = failure_kind
                     transition_encode_job_failure(
                         connection,
                         config,
                         job,
                         deps,
-                        failure_kind=failure_kind or "deterministic",
+                        failure_kind=effective_failure_kind,
                         error_message=error,
                     )
             state = load_queue_state(connection)
@@ -562,7 +567,7 @@ def _initial_encode_job_progress(job: dict[str, Any], deps: EncodeQueueRuntimeDe
         "completed_item_count": 0,
         "completed_duration_seconds": 0.0,
         "overall_completed_duration_seconds": 0.0,
-        "remaining_duration_seconds": float(manifest_totals["total_duration_seconds"]),
+        "remaining_duration_seconds": float_value(manifest_totals.get("total_duration_seconds")),
         "percent_complete": 0.0,
         "progress_state": "starting",
         "fps": None,
@@ -597,8 +602,8 @@ def _finalize_encode_job_progress(
     progress = object_dict(job.get("progress"))
     if not progress:
         return None
-    total_duration_seconds = float(progress.get("total_duration_seconds") or 0.0)
-    total_item_count = int(progress.get("total_item_count") or int(job.get("item_count") or 0))
+    total_duration_seconds = float_value(progress.get("total_duration_seconds"))
+    total_item_count = int_value(progress.get("total_item_count") or job.get("item_count"))
     if terminal_state == "completed":
         progress.update(
             {
