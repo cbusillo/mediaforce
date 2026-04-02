@@ -4,7 +4,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.type_defs import JSONValue
+from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 
 
 @dataclass(slots=True)
@@ -19,11 +19,12 @@ class EncodeSchedulerDeps:
 
 
 def encode_queue_scheduler_policy(config: MediaforceConfig, deps: EncodeSchedulerDeps) -> dict[str, Any]:
-    encode_queue = config.raw.get("encode_queue")
-    raw = encode_queue.get("scheduler") if isinstance(encode_queue, dict) else None
+    config_raw = object_dict(config.raw)
+    encode_queue = object_dict(config_raw.get("encode_queue"))
+    raw = encode_queue.get("scheduler")
     if not isinstance(raw, dict):
-        legacy_queue = config.raw.get("heavy_queue")
-        raw = legacy_queue.get("scheduler") if isinstance(legacy_queue, dict) else None
+        legacy_queue = object_dict(config_raw.get("heavy_queue"))
+        raw = legacy_queue.get("scheduler")
     return deps.normalize_encode_queue_scheduler(raw if isinstance(raw, dict) else None)
 
 
@@ -32,12 +33,12 @@ def encode_queue_schedule_profiles(config: MediaforceConfig, deps: EncodeSchedul
     always["key"] = deps.always_schedule_profile
     always["label"] = "Always"
     profiles = {deps.always_schedule_profile: always}
-    encode_queue = config.raw.get("encode_queue")
-    raw_profiles = encode_queue.get("schedule_profiles") if isinstance(encode_queue, dict) else None
-    if not isinstance(raw_profiles, list):
+    raw_profiles = object_list(object_dict(object_dict(config.raw).get("encode_queue")).get("schedule_profiles"))
+    if not raw_profiles:
         return profiles
-    for profile in raw_profiles:
-        if not isinstance(profile, dict):
+    for raw_profile in raw_profiles:
+        profile = object_dict(raw_profile)
+        if not profile:
             continue
         key = deps.canonical_schedule_profile_key(str(profile.get("key") or profile.get("name") or ""))
         if not key or key == deps.always_schedule_profile:
@@ -55,10 +56,15 @@ def schedule_profile_policy_for_host(
         deps: EncodeSchedulerDeps,
 ) -> dict[str, Any]:
     profiles = encode_queue_schedule_profiles(config, deps)
+    host_data = object_dict(host_payload)
     profile_key = deps.canonical_schedule_profile_key(
-        (host_payload or {}).get("schedule_profile") or deps.default_host_schedule_profile
+        host_data.get("schedule_profile") or deps.default_host_schedule_profile
     )
-    return dict(profiles.get(profile_key) or profiles[deps.default_host_schedule_profile])
+    if profile_key in profiles:
+        selected_profile = profiles[profile_key]
+    else:
+        selected_profile = profiles[deps.default_host_schedule_profile]
+    return dict(selected_profile)
 
 
 def encode_queue_scheduler_summary(policy: dict[str, Any]) -> str:
@@ -68,15 +74,14 @@ def encode_queue_scheduler_summary(policy: dict[str, Any]) -> str:
 
 
 def host_schedule_now(current: datetime, host_payload: dict[str, Any] | None) -> datetime:
-    offset_minutes = (host_payload or {}).get("utc_offset_minutes")
+    host_data = object_dict(host_payload)
+    offset_minutes = host_data.get("utc_offset_minutes")
     try:
-        if offset_minutes is not None:
+        if isinstance(offset_minutes, str | int | float):
             return current.astimezone(timezone(timedelta(minutes=int(offset_minutes))))
     except (TypeError, ValueError):
         pass
-    timezone_name = str(
-        (host_payload or {}).get("schedule_timezone") or (host_payload or {}).get("timezone") or ""
-    ).strip()
+    timezone_name = str(host_data.get("schedule_timezone") or host_data.get("timezone") or "").strip()
     if timezone_name:
         try:
             return current.astimezone(ZoneInfo(timezone_name))
@@ -95,7 +100,7 @@ def scheduler_allows_encode_run(
 ) -> bool:
     if bypass_schedule or str(policy.get("mode") or "anytime") == "anytime":
         return True
-    current = now or datetime.now(UTC)
+    current = datetime.now(UTC) if now is None else now
     if current.tzinfo is None:
         current = current.replace(tzinfo=UTC)
     timezone_name = str(policy.get("timezone") or "local")
@@ -137,7 +142,7 @@ def format_eta_seconds(seconds: float | None) -> str | None:
     return f"{secs}s"
 
 
-def _float_or_none(value: JSONValue) -> float | None:
+def _float_or_none(value: object | None) -> float | None:
     if not isinstance(value, str | int | float):
         return None
     try:
@@ -152,16 +157,16 @@ def decorate_encode_job_telemetry(
         encode_job_manifest_totals: Any,
 ) -> dict[str, Any]:
     decorated = dict(job)
-    progress = dict(decorated.get("progress") or {})
-    manifest_totals = encode_job_manifest_totals(decorated)
-    total_duration_seconds = float(
-        progress.get("total_duration_seconds") or manifest_totals["total_duration_seconds"] or 0.0
+    progress = object_dict(decorated.get("progress"))
+    manifest_totals = object_dict(encode_job_manifest_totals(decorated))
+    total_duration_seconds = float_value(
+        progress.get("total_duration_seconds") or manifest_totals.get("total_duration_seconds")
     )
-    total_item_count = int(
-        progress.get("total_item_count") or manifest_totals["total_item_count"] or decorated.get("item_count") or 0
+    total_item_count = int_value(
+        progress.get("total_item_count") or manifest_totals.get("total_item_count") or decorated.get("item_count")
     )
-    overall_completed_duration_seconds = float(progress.get("overall_completed_duration_seconds") or 0.0)
-    remaining_duration_seconds = float(
+    overall_completed_duration_seconds = float_value(progress.get("overall_completed_duration_seconds"))
+    remaining_duration_seconds = float_value(
         progress.get("remaining_duration_seconds")
         or max(total_duration_seconds - overall_completed_duration_seconds, 0.0)
     )
@@ -193,7 +198,7 @@ def decorate_encode_job_telemetry(
         summary_parts.append(f"{speed:.2f}x")
     if fps not in {None, 0, 0.0}:
         summary_parts.append(f"{fps:.1f} fps")
-    eta_copy = decorated["progress"].get("eta_copy")
+    eta_copy = object_dict(decorated["progress"]).get("eta_copy")
     if eta_copy:
         summary_parts.append(f"Est. ETA {eta_copy}")
     decorated["telemetry_summary"] = " · ".join(summary_parts)
@@ -201,15 +206,15 @@ def decorate_encode_job_telemetry(
 
 
 def encode_queue_telemetry(encode_queue: dict[str, Any]) -> dict[str, Any]:
-    running_jobs = [dict(job) for job in encode_queue.get("running") or []]
-    queued_jobs = [dict(job) for job in encode_queue.get("queued") or []]
-    aggregate_speed = sum(float(((job.get("progress") or {}).get("speed") or 0.0)) for job in running_jobs)
+    running_jobs = [object_dict(job) for job in object_list(encode_queue.get("running"))]
+    queued_jobs = [object_dict(job) for job in object_list(encode_queue.get("queued"))]
+    aggregate_speed = sum(float_value(object_dict(job.get("progress")).get("speed")) for job in running_jobs)
     total_remaining_duration_seconds = sum(
-        float(((job.get("progress") or {}).get("remaining_duration_seconds") or 0.0))
+        float_value(object_dict(job.get("progress")).get("remaining_duration_seconds"))
         for job in running_jobs
     )
     total_remaining_duration_seconds += sum(
-        float(((job.get("progress") or {}).get("total_duration_seconds") or 0.0)) for job in queued_jobs
+        float_value(object_dict(job.get("progress")).get("total_duration_seconds")) for job in queued_jobs
     )
     eta_seconds = (total_remaining_duration_seconds / aggregate_speed) if aggregate_speed > 0 else None
     return {
@@ -229,10 +234,11 @@ def decorate_encode_job_for_scheduler(
     if job is None:
         return None
     decorated = dict(job)
-    policy = schedule_profile_policy_for_host(config, dict(decorated.get("host") or {}), deps)
+    host_payload = object_dict(decorated.get("host"))
+    policy = schedule_profile_policy_for_host(config, host_payload, deps)
     status = str(decorated.get("status") or "")
     bypass_schedule = bool(decorated.get("bypass_schedule"))
-    attempt_count = int(decorated.get("attempt_count") or 0)
+    attempt_count = int_value(decorated.get("attempt_count"))
     waiting_reason = str(decorated.get("waiting_reason") or "").strip()
     schedule_waiting = (
         status == "queued"
@@ -240,7 +246,7 @@ def decorate_encode_job_for_scheduler(
             policy,
             deps,
             bypass_schedule=bypass_schedule,
-            host_payload=dict(decorated.get("host") or {}),
+            host_payload=host_payload,
         )
     )
     decorated["schedule_waiting"] = schedule_waiting
@@ -271,7 +277,7 @@ def decorate_encode_queue_for_scheduler(
         deps: EncodeSchedulerDeps,
 ) -> dict[str, Any]:
     policy = encode_queue_scheduler_policy(config, deps)
-    queue_state = dict(encode_queue.get("state") or {})
+    queue_state = object_dict(encode_queue.get("state"))
     queue_state["scheduler"] = policy
     queue_state["scheduler_summary"] = str(policy["summary"])
     queue_state["schedule_profiles"] = list(encode_queue_schedule_profiles(config, deps).values())
@@ -279,15 +285,15 @@ def decorate_encode_queue_for_scheduler(
     decorated["state"] = queue_state
     decorated["running"] = [
         decorate_encode_job_for_scheduler(config, job, deps) or job
-        for job in encode_queue.get("running") or []
+        for job in object_list(encode_queue.get("running"))
     ]
     decorated["queued"] = [
         decorate_encode_job_for_scheduler(config, job, deps) or job
-        for job in encode_queue.get("queued") or []
+        for job in object_list(encode_queue.get("queued"))
     ]
     decorated["recent"] = [
         decorate_encode_job_for_scheduler(config, job, deps) or job
-        for job in encode_queue.get("recent") or []
+        for job in object_list(encode_queue.get("recent"))
     ]
     decorated["queued_waiting_count"] = sum(
         1
@@ -304,14 +310,14 @@ def encode_queue_summary_copy(
         encode_job: dict[str, Any] | None,
 ) -> str:
     parts = [
-        f"{int(encode_queue.get('running_count') or 0)} running",
-        f"{int(encode_queue.get('queued_count') or 0)} queued",
+        f"{int_value(encode_queue.get('running_count'))} running",
+        f"{int_value(encode_queue.get('queued_count'))} queued",
     ]
 
     status = str(encode_job.get("status") or "") if encode_job else ""
     if status == "queued" and encode_job and encode_job.get("queue_position"):
-        queue_position = int(encode_job["queue_position"])
-        queue_depth = int(encode_job.get("queue_depth") or queue_position)
+        queue_position = int_value(encode_job.get("queue_position"))
+        queue_depth = int_value(encode_job.get("queue_depth") or queue_position)
         parts.append(f"this folder is {queue_position} of {queue_depth}")
     elif status == "running":
         parts.append("this folder is active now")
@@ -320,15 +326,15 @@ def encode_queue_summary_copy(
     else:
         parts.append("no folder job queued yet")
 
-    waiting_count = int(encode_queue.get("queued_waiting_count") or 0)
+    waiting_count = int_value(encode_queue.get("queued_waiting_count"))
     if waiting_count:
         parts.append(f"{waiting_count} waiting")
 
-    queue_eta_copy = str(((encode_queue.get("telemetry") or {}).get("eta_copy") or "")).strip()
+    queue_eta_copy = str(object_dict(encode_queue.get("telemetry")).get("eta_copy") or "").strip()
     if queue_eta_copy:
         parts.append(f"estimated queue finish in {queue_eta_copy}")
 
-    attention_count = int(encode_queue.get("needs_attention_count") or 0)
+    attention_count = int_value(encode_queue.get("needs_attention_count"))
     if attention_count:
         parts.append(f"{attention_count} need attention")
 

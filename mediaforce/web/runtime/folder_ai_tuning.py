@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from mediaforce.advisor import apply_seed_policy, request_note_tuning
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
+from mediaforce.core.type_defs import object_dict
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.tuning.tuning_memory import promote_learning_artifact, retrieve_learning_context
 
@@ -93,9 +94,10 @@ def folder_ai_tune_confirm_action(
         normalized_prefix: str,
         proposal_id: str,
 ) -> dict[str, Any]:
-    pending_proposal = deps.load_pending_proposal(config, normalized_prefix)
-    if pending_proposal is None:
+    pending_proposal_raw = deps.load_pending_proposal(config, normalized_prefix)
+    if pending_proposal_raw is None:
         return {"ok": False, "message": "Ask the bench for a draft first."}
+    pending_proposal = object_dict(pending_proposal_raw)
     if str(pending_proposal.get("proposal_id") or "") != proposal_id:
         return {"ok": False, "message": "This bench draft is out of date. Refresh it before queueing a sample."}
     if not pending_proposal.get("can_queue"):
@@ -104,12 +106,12 @@ def folder_ai_tune_confirm_action(
             "message": str(pending_proposal.get("message") or "The current bench draft is not ready to queue."),
         }
 
-    host_key = str(((pending_proposal.get("host") or {}).get("key") or "")).strip()
+    host_key = str(object_dict(pending_proposal.get("host")).get("key") or "").strip()
     host = deps.resolve_sample_host(config, host_key)
     operator_note = str(pending_proposal.get("operator_note") or "").strip()
     action = str(pending_proposal.get("action") or "ai_tune")
-    applied_policy = dict(pending_proposal.get("applied_policy") or {})
-    advice_payload = dict(pending_proposal.get("advice_payload") or {})
+    applied_policy = object_dict(pending_proposal.get("applied_policy"))
+    advice_payload = object_dict(pending_proposal.get("advice_payload"))
 
     with open_db(config.paths.db_path) as connection:
         existing_job = deps.load_job_state(connection, config, normalized_prefix)
@@ -127,13 +129,13 @@ def folder_ai_tune_confirm_action(
         if action == "ai_tune" and calibration is None:
             return {"ok": False, "message": "The folder needs a first sample before the bench can tune a retry."}
 
-        policy_source = calibration.get("policy") if calibration else sample_item["resolved_policy"]
-        final_policy = deps.apply_policy_fragment(dict(policy_source or {}), applied_policy)
+        policy_source = object_dict(calibration.get("policy")) if calibration else object_dict(sample_item.get("resolved_policy"))
+        final_policy = deps.apply_policy_fragment(policy_source, applied_policy)
         if advice_payload:
             deps.save_advice_state(config, normalized_prefix, advice_payload)
 
         if action == "ai_tune":
-            tuning_record = dict(pending_proposal.get("tuning_record") or {})
+            tuning_record = object_dict(pending_proposal.get("tuning_record"))
             session_id = str(pending_proposal.get("session_id") or "").strip()
             if not session_id:
                 session_id = deps.record_tuning_session(
@@ -146,7 +148,7 @@ def folder_ai_tune_confirm_action(
                         "proposed_policy": tuning_record.get("proposed_policy"),
                     },
                     applied_policy=applied_policy,
-                    toolbelt=dict(tuning_record.get("runtime_toolbelt") or {}),
+                    toolbelt=object_dict(tuning_record.get("runtime_toolbelt")),
                     created_at=deps.now_iso(),
                 )
             advice_payload["session_id"] = session_id
@@ -156,7 +158,7 @@ def folder_ai_tune_confirm_action(
                 session_id=session_id,
                 prefix=normalized_prefix,
                 note=operator_note,
-                sample_item=dict(tuning_record.get("sample_item") or {}),
+                sample_item=object_dict(tuning_record.get("sample_item")),
                 response=advice_payload,
                 applied_policy=applied_policy,
                 created_at=deps.now_iso(),
@@ -188,7 +190,7 @@ def folder_ai_tune_confirm_action(
             "updated_at": deps.now_iso(),
         }
         if action == "baseline":
-            job_payload.update(dict(pending_proposal.get("job_fields") or {}))
+            job_payload.update(object_dict(pending_proposal.get("job_fields")))
         deps.save_job_state(connection, config, normalized_prefix, job_payload)
 
     deps.clear_pending_proposal(config, normalized_prefix)
@@ -210,7 +212,7 @@ def folder_ai_tune_action(
     preview = folder_ai_tune_preview_action(config, deps, normalized_prefix, note, host_key)
     if not preview.get("ok"):
         return preview
-    proposal = dict(preview.get("proposal") or {})
+    proposal = object_dict(preview.get("proposal"))
     proposal_id = str(proposal.get("proposal_id") or "")
     if not proposal_id:
         return {"ok": False, "message": "The bench draft could not be queued."}
@@ -229,9 +231,9 @@ def _seed_preview_action(
         summary: dict[str, Any],
         operator_request: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    base_policy = dict(sample_item["resolved_policy"] or {})
+    base_policy = object_dict(sample_item.get("resolved_policy"))
     metric_support = deps.metric_support()
-    seed_metadata = deps.maybe_seed_baseline_policy(
+    seed_metadata_raw = deps.maybe_seed_baseline_policy(
         config=config,
         prefix=normalized_prefix,
         action="baseline",
@@ -241,10 +243,13 @@ def _seed_preview_action(
         existing_calibration=None,
         connection=connection,
     )
-    seeded_policy = seed_metadata["policy"] if seed_metadata else base_policy
-    seed_fragment = dict(((seed_metadata or {}).get("job_fields") or {}).get("seed_applied_policy") or {})
+    seed_metadata = object_dict(seed_metadata_raw)
+    seed_job_fields = object_dict(seed_metadata.get("job_fields"))
+    seeded_policy = object_dict(seed_metadata.get("policy")) if seed_metadata_raw is not None else base_policy
+    seed_fragment = object_dict(seed_job_fields.get("seed_applied_policy"))
     combined_fragment = seed_fragment
-    advice_payload = deps.seed_advice_payload(trimmed_note, seed_metadata)
+    advice_payload_raw = deps.seed_advice_payload(trimmed_note, seed_metadata if seed_metadata_raw is not None else None)
+    advice_payload = object_dict(advice_payload_raw) if advice_payload_raw is not None else None
     if advice_payload is None and operator_request:
         advice_payload = {
             "ok": True,
@@ -257,9 +262,10 @@ def _seed_preview_action(
         advice_payload["operator_request"] = operator_request
     if advice_payload is not None and combined_fragment:
         advice_payload["applied_policy"] = combined_fragment
+    advice_details = object_dict(advice_payload)
     alignment_issue = deps.proposal_alignment_issue(
         operator_request=operator_request,
-        request_disposition=(advice_payload or {}).get("request_disposition"),
+        request_disposition=advice_details.get("request_disposition"),
         current_policy=base_policy,
         preview_policy=seeded_policy,
     )
@@ -271,8 +277,8 @@ def _seed_preview_action(
         prefix=normalized_prefix,
         note=trimmed_note,
         response={
-            **dict(advice_payload or {}),
-            "proposed_policy": dict((((seed_metadata or {}).get("job_fields") or {}).get("seed_proposed_policy") or {})),
+            **object_dict(advice_payload),
+            "proposed_policy": object_dict(seed_job_fields.get("seed_proposed_policy")),
         },
         applied_policy=combined_fragment,
         toolbelt={},
@@ -293,15 +299,15 @@ def _seed_preview_action(
             trimmed_note,
             operator_request,
             False,
-            (advice_payload or {}).get("request_disposition"),
+            advice_details.get("request_disposition"),
         ),
-        "request_disposition": advice_payload.get("request_disposition") if advice_payload else None,
-        "request_response": advice_payload.get("request_response") if advice_payload else None,
-        "feasibility_note": advice_payload.get("feasibility_note") if advice_payload else None,
-        "summary": advice_payload.get("summary") if advice_payload else "Drafted the initial sample.",
-        "diagnosis": advice_payload.get("diagnosis") if advice_payload else None,
-        "confidence": advice_payload.get("confidence") if advice_payload else None,
-        "suggested_follow_up": advice_payload.get("suggested_follow_up") if advice_payload else None,
+        "request_disposition": advice_details.get("request_disposition"),
+        "request_response": advice_details.get("request_response"),
+        "feasibility_note": advice_details.get("feasibility_note"),
+        "summary": advice_details.get("summary") or "Drafted the initial sample.",
+        "diagnosis": advice_details.get("diagnosis"),
+        "confidence": advice_details.get("confidence"),
+        "suggested_follow_up": advice_details.get("suggested_follow_up"),
         "applied_policy": combined_fragment,
         "preview_policy": seeded_policy,
         "current_policy": base_policy,
@@ -309,12 +315,12 @@ def _seed_preview_action(
         "self_check": None,
         "evidence_checked": [],
         "advice_payload": advice_payload,
-        "job_fields": dict((seed_metadata or {}).get("job_fields") or {}),
+        "job_fields": seed_job_fields,
         "metric_support": metric_support,
         "trace": {
-            "prompt_version": (advice_payload or {}).get("prompt_version"),
-            "raw_response": (advice_payload or {}).get("raw"),
-            "proposed_policy": dict(((seed_metadata or {}).get("job_fields") or {}).get("seed_proposed_policy") or {}),
+            "prompt_version": advice_details.get("prompt_version"),
+            "raw_response": advice_details.get("raw"),
+            "proposed_policy": object_dict(seed_job_fields.get("seed_proposed_policy")),
             "context": deps.proposal_context_snapshot(
                 goal="Draft the first measured sample before anything queues.",
                 current_policy=base_policy,
@@ -348,7 +354,7 @@ def _tuned_preview_action(
 ) -> dict[str, Any]:
     if not trimmed_note:
         raise HTTPException(status_code=400, detail="Add a note so the tuner knows what to change before running another sample.")
-    current_policy = dict((calibration.get("policy") if calibration else sample_item["resolved_policy"]) or {})
+    current_policy = object_dict(calibration.get("policy")) if calibration else object_dict(sample_item.get("resolved_policy"))
     metric_support = deps.metric_support()
     learning_context = retrieve_learning_context(
         connection,
@@ -397,9 +403,9 @@ def _tuned_preview_action(
     if multimodal_review_pack is not None:
         tuning_payload["multimodal_review_pack"] = multimodal_review_pack
     tuning = request_note_tuning(project_root=config.paths.project_root, payload=tuning_payload)
-    tuned_policy, applied_fragment = apply_seed_policy(current_policy, tuning.proposed_policy or {}, mode="tune")
+    tuned_policy, applied_fragment = apply_seed_policy(current_policy, object_dict(tuning.proposed_policy), mode="tune")
     combined_fragment = applied_fragment
-    advice_payload = deps.tuning_advice_payload(tuning=tuning, note=trimmed_note, applied_fragment=applied_fragment)
+    advice_payload = object_dict(deps.tuning_advice_payload(tuning=tuning, note=trimmed_note, applied_fragment=applied_fragment))
     if public_review_pack is not None:
         advice_payload["multimodal_review_pack"] = public_review_pack
     advice_payload["retrieved_memory"] = learning_context
@@ -463,7 +469,7 @@ def _tuned_preview_action(
         "trace": {
             "prompt_version": tuning.prompt_version,
             "raw_response": tuning.raw,
-            "proposed_policy": dict(tuning.proposed_policy or {}),
+            "proposed_policy": object_dict(tuning.proposed_policy),
             "context": deps.proposal_context_snapshot(
                 goal="Draft the next measured sample before anything queues.",
                 current_policy=current_policy,

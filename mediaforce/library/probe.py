@@ -4,28 +4,29 @@ from pathlib import Path
 
 from mediaforce.core.binaries import ffprobe_binary
 from mediaforce.core.models import ProbeSummary
+from mediaforce.core.type_defs import int_value, object_dict, object_list
 
 TRACK_FIELDS = ("index", "codec_name", "channels", "bit_rate", "language", "default", "forced")
 
 
-def _normalize_language(stream: dict) -> str | None:
-    tags = stream.get("tags") or {}
+def _normalize_language(stream: dict[str, object]) -> str | None:
+    tags = object_dict(stream.get("tags"))
     language = tags.get("language") or tags.get("LANGUAGE")
     if language is None:
         return None
     return str(language).lower()
 
 
-def _stream_entry(stream: dict) -> dict[str, object]:
-    disposition = stream.get("disposition") or {}
+def _stream_entry(stream: dict[str, object]) -> dict[str, object]:
+    disposition = object_dict(stream.get("disposition"))
     entry = {
         "index": stream.get("index"),
         "codec_name": stream.get("codec_name"),
         "channels": stream.get("channels"),
         "bit_rate": stream.get("bit_rate"),
         "language": _normalize_language(stream),
-        "default": int(disposition.get("default", 0)),
-        "forced": int(disposition.get("forced", 0)),
+        "default": int_value(disposition.get("default", 0)),
+        "forced": int_value(disposition.get("forced", 0)),
     }
     return {key: entry[key] for key in TRACK_FIELDS}
 
@@ -42,10 +43,10 @@ def probe_media(path: Path) -> ProbeSummary:
         str(path),
     ]
     result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-    payload = json.loads(result.stdout)
+    payload = object_dict(json.loads(result.stdout))
 
-    streams = payload.get("streams") or []
-    format_info = payload.get("format") or {}
+    streams = [object_dict(stream) for stream in object_list(payload.get("streams"))]
+    format_info = object_dict(payload.get("format"))
     video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
     audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
     subtitle_streams = [stream for stream in streams if stream.get("codec_type") == "subtitle"]
@@ -54,12 +55,12 @@ def probe_media(path: Path) -> ProbeSummary:
     subtitle_summary = [_stream_entry(stream) for stream in subtitle_streams]
 
     default_audio_language = next(
-        (_normalize_language(stream) for stream in audio_streams if (stream.get("disposition") or {}).get("default")),
+        (_normalize_language(stream) for stream in audio_streams if object_dict(stream.get("disposition")).get("default")),
         _normalize_language(audio_streams[0]) if audio_streams else None,
     )
     default_subtitle_language = next(
         (_normalize_language(stream) for stream in subtitle_streams if
-         (stream.get("disposition") or {}).get("default")),
+         object_dict(stream.get("disposition")).get("default")),
         _normalize_language(subtitle_streams[0]) if subtitle_streams else None,
     )
 
@@ -93,7 +94,7 @@ def _as_int(value: object) -> int | None:
     if value in (None, ""):
         return None
     if isinstance(value, bool):
-        return int(value)
+        return 1 if value else 0
     if isinstance(value, (int, float, str)):
         return int(value)
     raise TypeError(f"Unsupported int value: {value!r}")

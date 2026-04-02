@@ -10,8 +10,8 @@ from mediaforce.advising.policy import policy_key_paths
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
+from mediaforce.core.type_defs import JSONValue, float_value, int_value, object_dict, object_list
 from mediaforce.library.folder_profiles import inspect_prefix
-from mediaforce.core.type_defs import JSONValue
 
 MIN_RECOMMENDED_SAVINGS_BYTES = 100 * 1024 * 1024
 CALIBRATION_REVIEW_FIELDS = {
@@ -59,14 +59,11 @@ def parse_audio_bitrate_kbps(value: JSONValue, fallback: float) -> float:
 def sample_audio_target_kbps(sample_item: dict[str, Any] | None) -> float:
     if not isinstance(sample_item, dict):
         return 160.0
-    audio_policy = dict((sample_item.get("resolved_policy") or {}).get("audio") or {})
-    audio_tracks = list(sample_item.get("audio_summary") or [])
+    audio_policy = object_dict(object_dict(sample_item.get("resolved_policy")).get("audio"))
+    audio_tracks = object_list(sample_item.get("audio_summary"))
     channels = 0
     for track in audio_tracks:
-        try:
-            channels = max(channels, int(track.get("channels") or 0))
-        except (TypeError, ValueError):
-            continue
+        channels = max(channels, int_value(object_dict(track).get("channels")))
     if channels >= 8:
         return parse_audio_bitrate_kbps(audio_policy.get("surround_7_1_opus_bitrate"), 320.0)
     if channels >= 6:
@@ -101,14 +98,10 @@ def size_budget_request(trimmed: str, sample_item: dict[str, Any] | None) -> dic
         source_size_bytes = None
         duration_seconds = None
         if isinstance(sample_item, dict):
-            try:
-                source_size_bytes = float(sample_item.get("source_size_bytes") or 0)
-            except (TypeError, ValueError):
-                source_size_bytes = None
-            try:
-                duration_seconds = float(sample_item.get("duration_seconds") or 0)
-            except (TypeError, ValueError):
-                duration_seconds = None
+            source_size_candidate = float_value(sample_item.get("source_size_bytes"))
+            duration_candidate = float_value(sample_item.get("duration_seconds"))
+            source_size_bytes = source_size_candidate if source_size_candidate > 0 else None
+            duration_seconds = duration_candidate if duration_candidate > 0 else None
         audio_kbps = sample_audio_target_kbps(sample_item)
         estimated_audio_bytes = None
         estimated_video_bitrate_kbps = None
@@ -202,10 +195,11 @@ def operator_requested_experiment(note: str, sample_item: dict[str, Any] | None 
 
 def apply_policy_fragment(policy: dict[str, Any], fragment: dict[str, Any] | None) -> dict[str, Any]:
     updated_policy = json.loads(json.dumps(policy))
-    for section, values in dict(fragment or {}).items():
-        if not isinstance(values, dict):
+    for section, values in object_dict(fragment).items():
+        normalized_values = object_dict(values)
+        if not normalized_values:
             continue
-        updated_policy.setdefault(section, {}).update(values)
+        updated_policy.setdefault(section, {}).update(normalized_values)
     return updated_policy
 
 
@@ -215,15 +209,16 @@ def build_run_verdict_payload(
         calibration_payload: dict[str, Any],
         advice_state: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    sample_result = dict(calibration_payload.get("sample_result") or {})
-    sample_item = dict(calibration_payload.get("sample_item") or {})
-    policy = dict(calibration_payload.get("policy") or {})
+    sample_result = object_dict(calibration_payload.get("sample_result"))
+    sample_item = object_dict(calibration_payload.get("sample_item"))
+    policy = object_dict(calibration_payload.get("policy"))
+    advice_details = object_dict(advice_state)
     return {
         "folder": prefix,
         "action": calibration_payload.get("action"),
         "mode": calibration_payload.get("mode"),
-        "operator_note": (advice_state or {}).get("operator_note") or calibration_payload.get("notes") or None,
-        "operator_request": (advice_state or {}).get("operator_request"),
+        "operator_note": advice_details.get("operator_note") or calibration_payload.get("notes") or None,
+        "operator_request": advice_details.get("operator_request"),
         "sample_item": {
             "rel_path": sample_item.get("rel_path"),
             "source_size_bytes": sample_item.get("source_size_bytes"),
@@ -279,7 +274,7 @@ def record_run_verdict(
 def metric_support() -> dict[str, bool]:
     try:
         result = subprocess.run([ffmpeg_binary(), "-hide_banner", "-filters"], check=True, capture_output=True, text=True)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return {"vmaf": False, "xpsnr": False, "ssim": False, "psnr": False}
     output = result.stdout.lower()
     return {
@@ -319,11 +314,8 @@ def dominant_summary_key(values: JSONValue) -> str | None:
 def resolution_tier(width: JSONValue, height: JSONValue) -> str | None:
     if not isinstance(width, str | int | float | None.__class__) or not isinstance(height, str | int | float | None.__class__):
         return None
-    try:
-        width_value = int(width or 0)
-        height_value = int(height or 0)
-    except (TypeError, ValueError):
-        return None
+    width_value = int_value(width)
+    height_value = int_value(height)
     largest_dimension = max(width_value, height_value)
     if largest_dimension >= 3800:
         return "2160p"
@@ -372,26 +364,22 @@ def tuning_policy_key_paths(policy: dict[str, Any]) -> list[str]:
 
 
 def seed_policy_fragment(raw: JSONValue) -> dict[str, Any]:
-    source = raw if isinstance(raw, dict) else {}
-    video = source.get("video")
-    audio = source.get("audio")
-    subtitle = source.get("subtitle")
+    source = object_dict(raw)
     return tuning_policy_focus(
         {
-            "video": dict(video) if isinstance(video, dict) else {},
-            "audio": dict(audio) if isinstance(audio, dict) else {},
-            "subtitle": dict(subtitle) if isinstance(subtitle, dict) else {},
+            "video": object_dict(source.get("video")),
+            "audio": object_dict(source.get("audio")),
+            "subtitle": object_dict(source.get("subtitle")),
         }
     )
 
 
 def seed_class_signals(prefix: str, sample_item: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
-    suggested_override_raw = summary.get("suggested_override")
-    suggested_override: dict[str, Any] = dict(suggested_override_raw) if isinstance(suggested_override_raw, dict) else {}
+    suggested_override = object_dict(summary.get("suggested_override"))
     collection_shape = seed_collection_shape(prefix)
     sample_resolution_tier = resolution_tier(sample_item.get("width"), sample_item.get("height"))
     dominant_video_codec = dominant_summary_key(summary.get("video_codecs"))
-    video_codecs = summary.get("video_codecs")
+    video_codecs = object_dict(summary.get("video_codecs"))
     positive_signals: list[str] = []
     caution_flags: list[str] = []
 
@@ -410,16 +398,16 @@ def seed_class_signals(prefix: str, sample_item: dict[str, Any], summary: dict[s
     sample_codec = str(sample_item.get("video_codec") or "").strip().lower()
     if dominant_video_codec and sample_codec and dominant_video_codec == sample_codec:
         positive_signals.append(f"Sample codec matches the folder majority codec ({dominant_video_codec}).")
-    if isinstance(video_codecs, dict) and len(video_codecs) > 1:
+    if len(video_codecs) > 1:
         caution_flags.append(
             "Folder mixes multiple video codecs, so one sample item may not represent every episode equally."
         )
 
-    item_count = int(summary.get("item_count") or 0)
+    item_count = int_value(summary.get("item_count"))
     if item_count and item_count < 6:
         caution_flags.append("Small folder sample size means the seed should remain conservative.")
 
-    for reason in list(suggested_override.get("reason") or [])[:2]:
+    for reason in object_list(suggested_override.get("reason"))[:2]:
         if reason:
             positive_signals.append(str(reason))
 
@@ -444,8 +432,7 @@ def build_seed_policy_payload(
         summary: dict[str, Any],
         metric_support_payload: dict[str, bool],
 ) -> dict[str, Any]:
-    suggested_override_raw = summary.get("suggested_override")
-    suggested_override: dict[str, Any] = dict(suggested_override_raw) if isinstance(suggested_override_raw, dict) else {}
+    suggested_override = object_dict(summary.get("suggested_override"))
     requested_experiment = operator_requested_experiment(user_note, sample_item)
     return {
         "folder": prefix,
@@ -480,7 +467,7 @@ def build_seed_policy_payload(
             "dominant_video_codec": dominant_summary_key(summary.get("video_codecs")),
             "dominant_audio_codec": dominant_summary_key(summary.get("audio_codecs")),
             "suggested_override": {
-                "reason": list(suggested_override.get("reason") or []),
+                "reason": object_list(suggested_override.get("reason")),
                 "policy_focus": seed_policy_fragment(suggested_override),
             },
         },
@@ -646,7 +633,7 @@ def tuning_advice_payload(
 def seed_advice_payload(note: str, seed_metadata: dict[str, Any] | None) -> dict[str, Any] | None:
     if seed_metadata is None and not note:
         return None
-    job_fields = dict(seed_metadata.get("job_fields") or {}) if seed_metadata else {}
+    job_fields = object_dict(seed_metadata.get("job_fields")) if seed_metadata else {}
     return {
         "ok": True,
         "summary": job_fields.get("seed_summary") or "Queued an AI-guided first sample baseline.",
@@ -659,7 +646,7 @@ def seed_advice_payload(note: str, seed_metadata: dict[str, Any] | None) -> dict
         "feasibility_note": job_fields.get("seed_feasibility_note"),
         "diagnosis": job_fields.get("seed_diagnosis"),
         "confidence": job_fields.get("seed_confidence"),
-        "evidence_checked": list(job_fields.get("seed_evidence_checked") or []),
+        "evidence_checked": object_list(job_fields.get("seed_evidence_checked")),
         "suggested_follow_up": job_fields.get("seed_suggested_follow_up"),
         "applied_policy": job_fields.get("seed_applied_policy"),
     }
@@ -693,7 +680,7 @@ def summarize_calibration_result(calibration_payload: dict[str, Any]) -> dict[st
         "policy_seed": calibration_payload.get("policy_seed"),
     }
     if calibration_payload.get("mode") == "sample":
-        sample_result = calibration_payload.get("sample_result") or {}
+        sample_result = object_dict(calibration_payload.get("sample_result"))
         summary["sample_result"] = {
             "chosen_crf": sample_result.get("chosen_crf"),
             "quality_metric": sample_result.get("quality_metric"),
@@ -702,7 +689,7 @@ def summarize_calibration_result(calibration_payload: dict[str, Any]) -> dict[st
             "predicted_encode_percent": sample_result.get("predicted_encode_percent"),
         }
     else:
-        encode_result = calibration_payload.get("encode_result") or {}
+        encode_result = object_dict(calibration_payload.get("encode_result"))
         summary["encode_result"] = {
             "chosen_crf": encode_result.get("chosen_crf"),
             "quality_metric": encode_result.get("quality_metric"),
