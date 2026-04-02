@@ -5,6 +5,7 @@ from fastapi import HTTPException
 
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import open_db
+from mediaforce.core.type_defs import object_dict
 from mediaforce.library.run_manifests import create_folder_manifest
 
 
@@ -32,7 +33,8 @@ def queue_folder_encode_action(
         if calibration is None:
             raise HTTPException(status_code=400, detail="Run a sampled calibration first.")
         saved_profile_path = config.paths.config_path.parent / "folder-defaults.toml"
-        upsert_override(saved_profile_path, normalized_prefix, calibration["policy"])
+        calibration_payload = object_dict(calibration)
+        upsert_override(saved_profile_path, normalized_prefix, calibration_payload["policy"])
         refreshed_config = load_config(config.paths.config_path)
         manifest, manifest_path = create_folder_manifest(connection, refreshed_config, prefix=normalized_prefix)
         if not manifest["items"]:
@@ -74,39 +76,46 @@ def save_profile_action(
     calibration = load_calibration_state(config, normalized_prefix)
     if not calibration:
         raise HTTPException(status_code=400, detail="No draft calibration found for this folder")
-    if str(calibration.get("mode") or "sample") == "sample":
-        if not calibration.get("review_media_ready"):
+    calibration_payload = object_dict(calibration)
+    if str(calibration_payload.get("mode") or "sample") == "sample":
+        if not calibration_payload.get("review_media_ready"):
             raise HTTPException(
                 status_code=400,
                 detail="Run a fresh sample before approving because the review clips are unavailable.",
             )
-        calibration["accepted_at"] = now_iso()
-        calibration["accepted_draft_hash"] = str(calibration.get("draft_hash") or calibration_draft_hash(calibration))
-        calibration["accepted_sample_job_id"] = str(calibration.get("job_id") or "")
-        save_calibration_state(config, normalized_prefix, calibration)
-        advice_state = load_advice_state(config, normalized_prefix) or {}
-        existing_approval = dict(advice_state.get("approval_artifact") or {})
-        if str(existing_approval.get("sample_job_id") or "") != str(calibration.get("job_id") or ""):
+        calibration_payload["accepted_at"] = now_iso()
+        calibration_payload["accepted_draft_hash"] = str(
+            calibration_payload.get("draft_hash") or calibration_draft_hash(calibration_payload)
+        )
+        calibration_payload["accepted_sample_job_id"] = str(calibration_payload.get("job_id") or "")
+        save_calibration_state(config, normalized_prefix, calibration_payload)
+        advice_state = object_dict(load_advice_state(config, normalized_prefix))
+        existing_approval = object_dict(advice_state.get("approval_artifact"))
+        if str(existing_approval.get("sample_job_id") or "") != str(calibration_payload.get("job_id") or ""):
             with open_db(config.paths.db_path) as connection:
                 approval_artifact = record_visual_approval_artifact(
                     connection,
                     config,
                     prefix=normalized_prefix,
                     note=str(advice_state.get("operator_note") or ""),
-                    sample_item=dict(calibration.get("sample_item") or {}),
-                    calibration=calibration,
-                    run_verdict=dict(advice_state.get("run_verdict") or {}),
-                    created_at=str(calibration["accepted_at"]),
+                    sample_item=object_dict(calibration_payload.get("sample_item")),
+                    calibration=calibration_payload,
+                    run_verdict=object_dict(advice_state.get("run_verdict")),
+                    created_at=str(calibration_payload["accepted_at"]),
                 )
             if approval_artifact is not None:
-                approval_artifact["sample_job_id"] = str(calibration.get("job_id") or "")
+                approval_artifact["sample_job_id"] = str(calibration_payload.get("job_id") or "")
                 merge_advice_state(
                     config,
                     normalized_prefix,
                     {
                         "approval_artifact": approval_artifact,
-                        "operator_approved_at": calibration["accepted_at"],
+                        "operator_approved_at": calibration_payload["accepted_at"],
                     },
                 )
-    upsert_override(config.paths.config_path.parent / "folder-defaults.toml", normalized_prefix, calibration["policy"])
+    upsert_override(
+        config.paths.config_path.parent / "folder-defaults.toml",
+        normalized_prefix,
+        calibration_payload["policy"],
+    )
     return {"ok": True, "message": "Approved the current draft and saved it as the folder profile."}

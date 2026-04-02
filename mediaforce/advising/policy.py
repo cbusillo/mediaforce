@@ -1,7 +1,7 @@
 import json
 from typing import Any
 
-from mediaforce.core.type_defs import JSONObject, JSONValue
+from mediaforce.core.type_defs import JSONObject, JSONValue, float_value, int_value
 
 _SKIP_POLICY_VALUE = object()
 
@@ -301,7 +301,7 @@ def normalize_like_base(value: JSONValue, base_value: JSONValue) -> JSONValue | 
     if isinstance(base_value, bool):
         return coerce_bool(value, fallback=base_value)
     if isinstance(base_value, int) and not isinstance(base_value, bool):
-        return clamp_int(value, minimum=0, maximum=max(int(base_value), 1_000_000))
+        return clamp_int(value, minimum=0, maximum=max(int_value(base_value), 1_000_000))
     if isinstance(base_value, float):
         return round(clamp_float(value, minimum=float("-inf"), maximum=float("inf")), 2)
     if isinstance(base_value, list):
@@ -322,18 +322,18 @@ def normalize_like_base(value: JSONValue, base_value: JSONValue) -> JSONValue | 
 def finalize_video_policy_updates(updates: dict[str, Any], base_video: dict[str, Any]) -> dict[str, Any]:
     finalized = dict(updates)
     if "target_vmaf" in finalized or "min_target_vmaf" in finalized:
-        target = float(finalized.get("target_vmaf", base_video.get("target_vmaf", 95.0)))
-        floor = float(finalized.get("min_target_vmaf", base_video.get("min_target_vmaf", target)))
+        target = float_value(finalized.get("target_vmaf", base_video.get("target_vmaf", 95.0)))
+        floor = float_value(finalized.get("min_target_vmaf", base_video.get("min_target_vmaf", target)))
         finalized["target_vmaf"] = round(clamp_float(target, minimum=70.0, maximum=98.0), 2)
         finalized["min_target_vmaf"] = round(min(clamp_float(floor, minimum=65.0, maximum=97.0), finalized["target_vmaf"]), 2)
     if "target_xpsnr" in finalized or "min_target_xpsnr" in finalized:
-        target = float(finalized.get("target_xpsnr", base_video.get("target_xpsnr", 41.0)))
-        floor = float(finalized.get("min_target_xpsnr", base_video.get("min_target_xpsnr", target)))
+        target = float_value(finalized.get("target_xpsnr", base_video.get("target_xpsnr", 41.0)))
+        floor = float_value(finalized.get("min_target_xpsnr", base_video.get("min_target_xpsnr", target)))
         finalized["target_xpsnr"] = round(clamp_float(target, minimum=25.0, maximum=41.0), 2)
         finalized["min_target_xpsnr"] = round(min(clamp_float(floor, minimum=20.0, maximum=40.0), finalized["target_xpsnr"]), 2)
     if "min_crf" in finalized or "max_crf" in finalized:
-        min_crf = int(finalized.get("min_crf", base_video.get("min_crf", 18)))
-        max_crf = int(finalized.get("max_crf", base_video.get("max_crf", 38)))
+        min_crf = int_value(finalized.get("min_crf", base_video.get("min_crf", 18)))
+        max_crf = int_value(finalized.get("max_crf", base_video.get("max_crf", 38)))
         finalized["min_crf"] = min(min_crf, max_crf)
         finalized["max_crf"] = max(min_crf, max_crf)
     return finalized
@@ -390,18 +390,12 @@ def parse_bitrate_kbps(value: JSONValue, *, fallback: JSONValue) -> int:
 def clamp_float(value: JSONValue, *, minimum: float, maximum: float) -> float:
     if not isinstance(value, (str, int, float, bool)):
         return minimum
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return minimum
+    number = float_value(value)
     return max(min(number, maximum), minimum)
 
 
 def clamp_int(value: JSONValue, *, minimum: int, maximum: int) -> int:
     if not isinstance(value, (str, int, float, bool)):
         return minimum
-    try:
-        number = int(round(float(value)))
-    except (TypeError, ValueError):
-        return minimum
+    number = int(round(float_value(value)))
     return max(min(number, maximum), minimum)

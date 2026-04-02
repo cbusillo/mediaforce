@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from mediaforce.core.type_defs import JSONObject, JSONValue
+from mediaforce.core.type_defs import JSONObject, JSONValue, object_dict, object_list
 from mediaforce.advising.policy import compact_policy_payload as _compact_policy_payload_impl, \
     extract_seed_payload as _extract_seed_payload_impl, normalize_policy_section as _normalize_policy_section_impl, \
     policy_key_paths as _policy_key_paths_impl, policy_response_schema as _policy_response_schema_impl, \
@@ -106,7 +106,7 @@ def request_tuning_advice(*, project_root: Path, payload: dict[str, Any]) -> Adv
 
 def request_seed_policy(*, project_root: Path, payload: dict[str, Any]) -> SeedPolicyResponse:
     prompt = _build_seed_prompt(payload)
-    base_policy = dict(payload.get("base_policy") or {}) if isinstance(payload.get("base_policy"), dict) else {}
+    base_policy = object_dict(payload.get("base_policy"))
     parsed = _run_structured_llm_request(
         project_root=project_root,
         developer=(
@@ -132,7 +132,7 @@ def request_seed_policy(*, project_root: Path, payload: dict[str, Any]) -> SeedP
             feasibility_note=None,
             proposed_policy=None,
         )
-    proposed_policy = parsed.get("policy") if isinstance(parsed.get("policy"), dict) else None
+    proposed_policy = object_dict(parsed.get("policy")) or None
     proposed_policy = _compact_policy_payload(proposed_policy)
     if proposed_policy is not None and base_policy:
         _, proposed_policy = apply_seed_policy(base_policy, proposed_policy)
@@ -176,12 +176,11 @@ def request_seed_policy(*, project_root: Path, payload: dict[str, Any]) -> SeedP
 
 def request_note_tuning(*, project_root: Path, payload: dict[str, Any]) -> TuningPolicyResponse:
     prompt = _build_tune_prompt(payload)
-    current_policy = dict(payload.get("policy") or {}) if isinstance(payload.get("policy"), dict) else {}
-    review_pack = payload.get("multimodal_review_pack") if isinstance(payload.get("multimodal_review_pack"),
-                                                                      dict) else None
+    current_policy = object_dict(payload.get("policy"))
+    review_pack = object_dict(payload.get("multimodal_review_pack")) or None
     review_images = [
         str(path)
-        for path in list((review_pack or {}).get("images") or [])
+        for path in object_list(object_dict(review_pack).get("images"))
         if str(path).strip()
     ]
     if review_images:
@@ -221,10 +220,10 @@ def request_note_tuning(*, project_root: Path, payload: dict[str, Any]) -> Tunin
             request_response="I could not turn that note into a trustworthy next draft.",
             feasibility_note=None,
             proposed_policy=None,
-            toolbelt_used=sorted((payload.get("runtime_toolbelt") or {}).keys()),
+            toolbelt_used=sorted(object_dict(payload.get("runtime_toolbelt")).keys()),
             self_check=None,
         )
-    proposed_policy = parsed.get("policy") if isinstance(parsed.get("policy"), dict) else None
+    proposed_policy = object_dict(parsed.get("policy")) or None
     proposed_policy = _compact_policy_payload(proposed_policy)
     if proposed_policy is not None and current_policy:
         _, proposed_policy = apply_seed_policy(current_policy, proposed_policy, mode="tune")
@@ -235,11 +234,13 @@ def request_note_tuning(*, project_root: Path, payload: dict[str, Any]) -> Tunin
         tuning_context=payload,
         proposal={**parsed, "policy": proposed_policy},
     )
-    self_check_status = str((self_check or {}).get("status") or "pass")
+    self_check_status = str(object_dict(self_check).get("status") or "pass")
     if self_check_status == "fail":
         proposed_policy = None
         if not parsed.get("suggested_follow_up"):
-            parsed["suggested_follow_up"] = str((self_check or {}).get("summary") or "Try a more specific note.")
+            parsed["suggested_follow_up"] = str(
+                object_dict(self_check).get("summary") or "Try a more specific note."
+            )
     request_disposition = str(parsed.get("request_disposition") or "unclear")
     if request_disposition not in REQUEST_DISPOSITIONS:
         request_disposition = "unclear"
@@ -257,7 +258,7 @@ def request_note_tuning(*, project_root: Path, payload: dict[str, Any]) -> Tunin
         request_response=request_response,
         feasibility_note=(str(parsed.get("feasibility_note")) if parsed.get("feasibility_note") else None),
         proposed_policy=proposed_policy,
-        toolbelt_used=sorted((payload.get("runtime_toolbelt") or {}).keys()),
+        toolbelt_used=sorted(object_dict(payload.get("runtime_toolbelt")).keys()),
         self_check=self_check,
     )
 

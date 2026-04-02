@@ -1,11 +1,11 @@
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from mediaforce.advisor import AdvisorResponse
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.type_defs import float_value, object_dict, object_list
 
 
 @dataclass(slots=True)
@@ -21,26 +21,29 @@ def load_calibration_state(deps: FolderStateDeps, config: MediaforceConfig, pref
     path = calibration_file
     if not path.exists():
         return None
-    payload = json.loads(path.read_text())
-    compare_clips = []
-    preview_clips = []
-    source_clips = []
+    payload = object_dict(json.loads(path.read_text()))
+    compare_clips: list[dict[str, Any]] = []
+    preview_clips: list[dict[str, Any]] = []
+    source_clips: list[dict[str, Any]] = []
     compare_clips_purged = False
     preview_clips_purged = False
     source_clips_purged = False
-    for clip in payload.get("compare_clips") or []:
+    for raw_clip in object_list(payload.get("compare_clips")):
+        clip = object_dict(raw_clip)
         review_file = deps.review_file_from_url(config, str(clip.get("path") or ""))
         if review_file is None or review_file.exists():
             compare_clips.append(clip)
             continue
         compare_clips_purged = True
-    for clip in payload.get("preview_clips") or []:
+    for raw_clip in object_list(payload.get("preview_clips")):
+        clip = object_dict(raw_clip)
         review_file = deps.review_file_from_url(config, str(clip.get("path") or ""))
         if review_file is None or review_file.exists():
             preview_clips.append(clip)
             continue
         preview_clips_purged = True
-    for clip in payload.get("source_clips") or []:
+    for raw_clip in object_list(payload.get("source_clips")):
+        clip = object_dict(raw_clip)
         review_file = deps.review_file_from_url(config, str(clip.get("path") or ""))
         if review_file is None or review_file.exists():
             source_clips.append(clip)
@@ -75,14 +78,14 @@ def review_pairs(
         compare_clips: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     compare_by_timestamp = {
-        review_pair_key(float(clip.get("timestamp_seconds") or 0.0)): clip for clip in compare_clips
+        review_pair_key(float_value(clip.get("timestamp_seconds"))): clip for clip in compare_clips
     }
     preview_by_timestamp = {
-        review_pair_key(float(clip.get("timestamp_seconds") or 0.0)): clip for clip in preview_clips
+        review_pair_key(float_value(clip.get("timestamp_seconds"))): clip for clip in preview_clips
     }
     pairs: list[dict[str, Any]] = []
     for source_clip in source_clips:
-        timestamp = float(source_clip.get("timestamp_seconds") or 0.0)
+        timestamp = float_value(source_clip.get("timestamp_seconds"))
         key = review_pair_key(timestamp)
         preview_clip = preview_by_timestamp.get(key)
         if preview_clip is None:
@@ -90,7 +93,9 @@ def review_pairs(
         pairs.append(
             {
                 "timestamp_seconds": timestamp,
-                "duration_seconds": float(source_clip.get("duration_seconds") or preview_clip.get("duration_seconds") or 0.0),
+                "duration_seconds": float_value(
+                    source_clip.get("duration_seconds") or preview_clip.get("duration_seconds")
+                ),
                 "source_clip": source_clip,
                 "preview_clip": preview_clip,
                 "compare_clip": compare_by_timestamp.get(key),
@@ -100,21 +105,21 @@ def review_pairs(
 
 
 def review_media_context(calibration: dict[str, Any] | None) -> dict[str, Any]:
-    payload = dict(calibration or {})
+    payload = object_dict(calibration)
     raw_pairs = payload.get("review_pairs")
     if isinstance(raw_pairs, list):
-        pairs = [pair for pair in raw_pairs if isinstance(pair, dict)]
+        pairs = [object_dict(pair) for pair in raw_pairs if isinstance(pair, dict)]
     else:
         pairs = review_pairs(
-            list(payload.get("source_clips") or []),
-            list(payload.get("preview_clips") or []),
-            list(payload.get("compare_clips") or []),
+            [object_dict(clip) for clip in object_list(payload.get("source_clips"))],
+            [object_dict(clip) for clip in object_list(payload.get("preview_clips"))],
+            [object_dict(clip) for clip in object_list(payload.get("compare_clips"))],
         )
     moments: list[dict[str, Any]] = []
     for index, pair in enumerate(pairs[:3], start=1):
-        source_clip = dict(pair.get("source_clip") or {})
-        preview_clip = dict(pair.get("preview_clip") or {})
-        compare_clip = dict(pair.get("compare_clip") or {})
+        source_clip = object_dict(pair.get("source_clip"))
+        preview_clip = object_dict(pair.get("preview_clip"))
+        compare_clip = object_dict(pair.get("compare_clip"))
         moments.append(
             {
                 "moment": index,
@@ -154,7 +159,8 @@ def load_pending_proposal(proposal_file: Path) -> dict[str, Any] | None:
         payload = json.loads(proposal_file.read_text())
     except (OSError, json.JSONDecodeError):
         return None
-    return payload if isinstance(payload, dict) else None
+    normalized_payload = object_dict(payload)
+    return normalized_payload or None
 
 
 def save_pending_proposal(proposal_file: Path, payload: dict[str, Any]) -> None:
@@ -173,7 +179,7 @@ def clear_pending_proposal(proposal_file: Path) -> None:
 def pending_proposal_public_view(deps: FolderStateDeps, payload: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
-    self_check = dict(payload.get("self_check") or {})
+    self_check = object_dict(payload.get("self_check"))
     return {
         "proposal_id": payload.get("proposal_id"),
         "status": payload.get("status"),
@@ -191,19 +197,19 @@ def pending_proposal_public_view(deps: FolderStateDeps, payload: dict[str, Any] 
         "diagnosis": payload.get("diagnosis"),
         "confidence": payload.get("confidence"),
         "suggested_follow_up": payload.get("suggested_follow_up"),
-        "applied_policy": deps.tuning_policy_focus(dict(payload.get("applied_policy") or {})),
-        "preview_policy": deps.tuning_policy_focus(dict(payload.get("preview_policy") or {})),
-        "current_policy": deps.tuning_policy_focus(dict(payload.get("current_policy") or {})),
-        "host": dict(payload.get("host") or {}),
+        "applied_policy": deps.tuning_policy_focus(object_dict(payload.get("applied_policy"))),
+        "preview_policy": deps.tuning_policy_focus(object_dict(payload.get("preview_policy"))),
+        "current_policy": deps.tuning_policy_focus(object_dict(payload.get("current_policy"))),
+        "host": object_dict(payload.get("host")),
         "self_check": {
             "status": self_check.get("status"),
             "summary": self_check.get("summary"),
-            "issues": list(self_check.get("issues") or []),
+            "issues": object_list(self_check.get("issues")),
         },
         "operator_signal": payload.get("operator_signal"),
-        "evidence_checked": list(payload.get("evidence_checked") or []),
-        "multimodal_review_pack": dict(payload.get("multimodal_review_pack") or {}) or None,
-        "trace": deps.pending_proposal_trace_public_view(dict(payload.get("trace") or {})),
+        "evidence_checked": object_list(payload.get("evidence_checked")),
+        "multimodal_review_pack": object_dict(payload.get("multimodal_review_pack")) or None,
+        "trace": deps.pending_proposal_trace_public_view(object_dict(payload.get("trace"))),
     }
 
 

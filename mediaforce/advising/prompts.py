@@ -1,6 +1,8 @@
 import json
 from typing import Any, Callable
 
+from mediaforce.core.type_defs import object_dict, object_list
+
 
 def build_prompt(payload: dict[str, Any]) -> str:
     serialized = json.dumps(payload, indent=2, sort_keys=True)
@@ -21,7 +23,7 @@ def build_seed_prompt(
         policy_shape_example: Callable[[dict[str, Any]], dict[str, Any]],
 ) -> str:
     serialized = json.dumps(payload, indent=2, sort_keys=True)
-    base_policy = dict(payload.get("base_policy") or {}) if isinstance(payload.get("base_policy"), dict) else {}
+    base_policy = object_dict(payload.get("base_policy"))
     valid_keys = policy_key_paths(base_policy)
     policy_shape = policy_shape_example(base_policy)
     return (
@@ -55,14 +57,14 @@ def build_tune_prompt(
         policy_shape_example: Callable[[dict[str, Any]], dict[str, Any]],
 ) -> str:
     prompt_payload = dict(payload)
-    review_pack = prompt_payload.get("multimodal_review_pack")
-    if isinstance(review_pack, dict):
+    review_pack = object_dict(prompt_payload.get("multimodal_review_pack"))
+    if review_pack:
         summarized_pack = {key: value for key, value in review_pack.items() if key != "images"}
         if "images" in review_pack:
-            summarized_pack["image_count"] = len(list(review_pack.get("images") or []))
+            summarized_pack["image_count"] = len(object_list(review_pack.get("images")))
         prompt_payload["multimodal_review_pack"] = summarized_pack
     serialized = json.dumps(prompt_payload, indent=2, sort_keys=True)
-    current_policy = dict(payload.get("policy") or {}) if isinstance(payload.get("policy"), dict) else {}
+    current_policy = object_dict(payload.get("policy"))
     valid_keys = policy_key_paths(current_policy)
     policy_shape = policy_shape_example(current_policy)
     return (
