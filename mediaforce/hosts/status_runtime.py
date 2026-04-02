@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Callable
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.type_defs import object_dict
 from mediaforce.hosts.config import _host_capabilities, _host_priority, _parse_utc_offset_minutes, \
     host_media_access_for_host, host_targets_current_machine
 from mediaforce.hosts.status_helpers import _classify_ssh_failure, _find_local_tool, _host_capability_issues, \
@@ -92,7 +93,7 @@ def _remote_host_status(
     if media_access != "stream":
         paths = [str(path) for path in config.source_root_map_for_host(host).values()] + [
             str(config.staging_root_for_host(host))]
-    repo_check_path = repo_path or ""
+    repo_check_path = repo_path if repo_path is not None else ""
     script = _remote_status_script(paths=paths, repo_path=repo_check_path)
     try:
         result = run_remote_status_probe(host, script, timeout=8)
@@ -151,9 +152,9 @@ def _remote_host_status(
 
     mounted_paths = {
         str(path_text): bool(exists)
-        for path_text, exists in dict(payload.get("paths") or {}).items()
+        for path_text, exists in object_dict(payload.get("paths")).items()
     }
-    tools = dict(payload.get("tools") or {})
+    tools = object_dict(payload.get("tools"))
     platform_name = _status_platform(payload.get("platform"), tools=tools)
     learn_remote_wake_mac(config, host, ssh_host)
     capability_issues = _host_capability_issues(

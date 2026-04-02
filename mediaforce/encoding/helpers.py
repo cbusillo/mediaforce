@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.type_defs import int_value
 
 
 def build_svt_params(video_policy: dict[str, Any]) -> list[str]:
@@ -23,7 +24,7 @@ def effective_video_preset(
     preset = int(video_policy["preset"])
     if str(video_policy.get("encoder") or "").lower() != "libsvtav1":
         return preset
-    largest_dimension = max(int(width or 0), int(height or 0))
+    largest_dimension = max(int_value(width), int_value(height))
     if largest_dimension < svt_av1_8k_dimension_threshold:
         return preset
     return max(preset, svt_av1_min_8k_preset)

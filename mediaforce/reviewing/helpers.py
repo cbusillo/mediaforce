@@ -3,18 +3,20 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
+from mediaforce.core.type_defs import int_value, object_list
+
 
 def planned_audio_action(audio_track: dict[str, Any], audio_policy: dict[str, Any]) -> str:
     codec = str(audio_track.get("codec_name") or "").lower()
-    if codec in {str(name).lower() for name in audio_policy.get("copy_codecs", [])}:
+    if codec in {str(name).lower() for name in object_list(audio_policy.get("copy_codecs"))}:
         return "copy"
-    if codec in {str(name).lower() for name in audio_policy.get("convert_to_opus_codecs", [])}:
+    if codec in {str(name).lower() for name in object_list(audio_policy.get("convert_to_opus_codecs"))}:
         return "libopus"
     return "copy"
 
 
 def planned_opus_bitrate(audio_track: dict[str, Any], audio_policy: dict[str, Any]) -> str:
-    channels = int(audio_track.get("channels") or 2)
+    channels = int_value(audio_track.get("channels")) or 2
     if channels >= 8:
         return str(audio_policy.get("surround_7_1_opus_bitrate") or "320k")
     if channels >= 6:

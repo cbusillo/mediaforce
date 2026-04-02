@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.type_defs import object_list
 from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQUIRED_ISSUE, has_videotoolbox_hwaccel, \
     normalize_execution_platform
 from mediaforce.hosts.config import _host_capabilities, _host_priority, _host_supports_capability, \
@@ -147,7 +148,7 @@ def _status_from_paths(
         require_paths: bool = True,
 ) -> HostStatus:
     missing_paths = [path for path, mounted in mounted_paths.items() if not mounted]
-    issue_list = list(issues or [])
+    issue_list = [str(issue) for issue in object_list(issues)]
     available = (len(mounted_paths) > 0 or not require_paths) and not missing_paths and not issue_list
     return HostStatus(
         key=key,

@@ -2,6 +2,8 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable
 
+from mediaforce.core.type_defs import int_value
+
 
 def render_review_contact_sheet(
         *,
@@ -101,7 +103,7 @@ def render_audio_spectrogram_compare(
     return {
         "action": action,
         "bitrate": bitrate,
-        "channels": int(audio_track.get("channels") or 2),
+        "channels": int_value(audio_track.get("channels")) or 2,
         "codec_name": str(audio_track.get("codec_name") or "").lower() or None,
     }
 
