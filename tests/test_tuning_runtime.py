@@ -4,6 +4,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from sqlalchemy import func
+from sqlalchemy import select
+
 from mediaforce.advisor import (
     RUN_VERDICT_PROMPT_VERSION,
     SEED_PROMPT_VERSION,
@@ -23,6 +26,9 @@ from mediaforce.advisor import (
 )
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db
+from mediaforce.core.db_tables import calibration_jobs
+from mediaforce.core.db_tables import learning_artifacts
+from mediaforce.core.db_tables import tuning_sessions
 from mediaforce.tuning.tuning_memory import (
     promote_learning_artifact,
     record_tuning_session,
@@ -444,54 +450,48 @@ class TuningRuntimeTests(unittest.TestCase):
             artifact_path = self.root / "learned-memory" / "artifact.md"
             artifact_path.parent.mkdir(parents=True, exist_ok=True)
             artifact_path.write_text("artifact")
-            connection.exec_driver_sql(
-                """
-                INSERT INTO learning_artifacts(artifact_id, session_id, prefix, title, artifact_path, summary,
-                                               tags_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    "artifact-1",
-                    session_id,
-                    prefix,
-                    "artifact",
-                    str(artifact_path),
-                    "summary",
-                    "[]",
-                    "2026-03-30T00:00:00+00:00",
-                    "2026-03-30T00:00:00+00:00",
-                ),
+            connection.execute(
+                learning_artifacts.insert().values(
+                    artifact_id="artifact-1",
+                    session_id=session_id,
+                    prefix=prefix,
+                    title="artifact",
+                    artifact_path=str(artifact_path),
+                    summary="summary",
+                    tags_json="[]",
+                    created_at="2026-03-30T00:00:00+00:00",
+                    updated_at="2026-03-30T00:00:00+00:00",
+                )
             )
-            connection.exec_driver_sql(
-                """
-                INSERT INTO calibration_jobs(job_id, prefix, status, lane, action, host_json, notes, policy_json,
-                                             sample_item_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    "job-1",
-                    prefix,
-                    "failed",
-                    "sample",
-                    "ai_tune",
-                    "{}",
-                    "note",
-                    "{}",
-                    "{}",
-                    "2026-03-30T00:00:00+00:00",
-                    "2026-03-30T00:00:00+00:00",
-                ),
+            connection.execute(
+                calibration_jobs.insert().values(
+                    job_id="job-1",
+                    prefix=prefix,
+                    status="failed",
+                    lane="sample",
+                    action="ai_tune",
+                    host_json="{}",
+                    notes="note",
+                    policy_json="{}",
+                    sample_item_json="{}",
+                    created_at="2026-03-30T00:00:00+00:00",
+                    updated_at="2026-03-30T00:00:00+00:00",
+                )
             )
 
             result = _clear_folder_tuning_state(connection, config=self.config, prefix=prefix)
 
             self.assertTrue(result["ok"])
             self.assertEqual(
-                connection.exec_driver_sql("SELECT COUNT(*) FROM tuning_sessions WHERE prefix = ?", (prefix,)).fetchone()[0],
+                connection.execute(
+                    select(func.count()).select_from(tuning_sessions).where(tuning_sessions.c.prefix == prefix)
+                ).scalar_one(),
                 0,
             )
             self.assertEqual(
-                connection.exec_driver_sql("SELECT COUNT(*) FROM calibration_jobs WHERE prefix = ?", (prefix,)).fetchone()[0],
+                connection.execute(
+                    select(func.count()).select_from(calibration_jobs).where(calibration_jobs.c.prefix == prefix)
+                ).scalar_one(),
                 0,
             )
 
@@ -546,25 +546,20 @@ class TuningRuntimeTests(unittest.TestCase):
     def test_clear_folder_tuning_state_refuses_active_job(self) -> None:
         prefix = "tv/House/Season 2"
         with open_db(self.config.paths.db_path) as connection:
-            connection.exec_driver_sql(
-                """
-                INSERT INTO calibration_jobs(job_id, prefix, status, lane, action, host_json, notes, policy_json,
-                                             sample_item_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    "job-active",
-                    prefix,
-                    "queued",
-                    "sample",
-                    "ai_tune",
-                    "{}",
-                    "note",
-                    "{}",
-                    "{}",
-                    "2026-03-30T00:00:00+00:00",
-                    "2026-03-30T00:00:00+00:00",
-                ),
+            connection.execute(
+                calibration_jobs.insert().values(
+                    job_id="job-active",
+                    prefix=prefix,
+                    status="queued",
+                    lane="sample",
+                    action="ai_tune",
+                    host_json="{}",
+                    notes="note",
+                    policy_json="{}",
+                    sample_item_json="{}",
+                    created_at="2026-03-30T00:00:00+00:00",
+                    updated_at="2026-03-30T00:00:00+00:00",
+                )
             )
 
             result = _clear_folder_tuning_state(connection, config=self.config, prefix=prefix)
@@ -1014,16 +1009,17 @@ class TuningRuntimeTests(unittest.TestCase):
 
             with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
                     "mediaforce.web.app._start_calibration_queue_worker"
-            ), patch("mediaforce.web.app._start_encode_queue_worker"):
+            ), patch("mediaforce.web.app._start_encode_queue_worker"), patch(
+                "mediaforce.web.app._refresh_host_status_cache", return_value=[]
+            ):
                 app = web_app.create_app(self.root / "config.toml")
-            for handler in app.router.on_shutdown:
-                if getattr(handler, "__name__", "") == "stop_managed_processes":
-                    import asyncio
+            import asyncio
 
-                    asyncio.run(handler())
-                    break
-            else:
-                self.fail("shutdown cleanup handler was not registered")
+            async def _exercise_lifespan() -> None:
+                async with app.router.lifespan_context(app):
+                    return None
+
+            asyncio.run(_exercise_lifespan())
 
             self.assertTrue(calibration_controller.cancelled)
             self.assertTrue(encode_controller.cancelled)

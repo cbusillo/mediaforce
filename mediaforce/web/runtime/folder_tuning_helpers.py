@@ -1,7 +1,11 @@
 import json
 from typing import Any
 
+from sqlalchemy import select
+
 from mediaforce.core.db import DBClient
+from mediaforce.core.db_tables import tuning_sessions
+from mediaforce.core.type_defs import object_dict
 from mediaforce.core.type_defs import JSONValue
 
 
@@ -12,22 +16,20 @@ def recent_tuning_sessions(
         load_json_object: Any,
         limit: int = 8,
 ) -> list[dict[str, Any]]:
-    rows = connection.exec_driver_sql(
-        """
-        SELECT session_id,
-               note,
-               summary,
-               diagnosis,
-               confidence,
-               suggested_follow_up,
-               raw_response,
-               created_at
-        FROM tuning_sessions
-        WHERE prefix = ?
-        ORDER BY created_at DESC
-        LIMIT ?
-        """,
-        (prefix, limit),
+    rows = connection.execute(
+        select(
+            tuning_sessions.c.session_id,
+            tuning_sessions.c.note,
+            tuning_sessions.c.summary,
+            tuning_sessions.c.diagnosis,
+            tuning_sessions.c.confidence,
+            tuning_sessions.c.suggested_follow_up,
+            tuning_sessions.c.raw_response,
+            tuning_sessions.c.created_at,
+        )
+        .where(tuning_sessions.c.prefix == prefix)
+        .order_by(tuning_sessions.c.created_at.desc())
+        .limit(limit)
     ).mappings().fetchall()
     sessions: list[dict[str, Any]] = []
     for row in rows:
@@ -101,8 +103,8 @@ def proposal_alignment_issue(
     request_type = str(operator_request.get("request_type") or "").strip().lower()
     if request_type != "size_budget":
         return None
-    current_video = dict(current_policy.get("video") or {})
-    preview_video = dict(preview_policy.get("video") or {})
+    current_video = object_dict(current_policy.get("video"))
+    preview_video = object_dict(preview_policy.get("video"))
 
     def _float_or_none(value: JSONValue) -> float | None:
         if not isinstance(value, str | int | float):

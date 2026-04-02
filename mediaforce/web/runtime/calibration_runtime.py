@@ -5,9 +5,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import delete
+from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, open_db
+from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
+from mediaforce.core.type_defs import object_dict
 from mediaforce.state_cleanup import purge_transient_artifacts
 
 
@@ -42,10 +48,9 @@ def snapshot_staged_artifact(
         library_item_id: int,
         staged_artifact_columns: tuple[str, ...],
 ) -> dict[str, Any] | None:
-    columns = ", ".join(staged_artifact_columns)
-    row = connection.exec_driver_sql(
-        f"SELECT {columns} FROM staged_artifacts WHERE library_item_id = ?",
-        (library_item_id,),
+    selected_columns = [getattr(staged_artifacts.c, column) for column in staged_artifact_columns]
+    row = connection.execute(
+        select(*selected_columns).where(staged_artifacts.c.library_item_id == library_item_id)
     ).mappings().fetchone()
     if row is None:
         return None
@@ -59,24 +64,17 @@ def restore_staged_artifact(
         staged_artifact_columns: tuple[str, ...],
 ) -> None:
     if snapshot is None:
-        connection.exec_driver_sql("DELETE FROM staged_artifacts WHERE library_item_id = ?", (library_item_id,))
+        connection.execute(delete(staged_artifacts).where(staged_artifacts.c.library_item_id == library_item_id))
         return
 
-    columns = ", ".join(staged_artifact_columns)
-    placeholders = ", ".join("?" for _ in staged_artifact_columns)
-    updates = ", ".join(
-        f"{column} = excluded.{column}"
-        for column in staged_artifact_columns
-        if column != "library_item_id"
-    )
-    values = tuple(snapshot[column] for column in staged_artifact_columns)
-    connection.exec_driver_sql(
-        f"""
-        INSERT INTO staged_artifacts ({columns})
-        VALUES ({placeholders})
-        ON CONFLICT(library_item_id) DO UPDATE SET {updates}
-        """,
-        values,
+    values = {column: snapshot[column] for column in staged_artifact_columns}
+    connection.execute(
+        sqlite_insert(staged_artifacts)
+        .values(**values)
+        .on_conflict_do_update(
+            index_elements=[staged_artifacts.c.library_item_id],
+            set_={column: values[column] for column in staged_artifact_columns if column != "library_item_id"},
+        )
     )
 
 
@@ -125,7 +123,7 @@ def run_calibration_job(
             sample_item = deps.sample_item(connection, config, prefix)
             if sample_item is None:
                 raise RuntimeError(f"No sample item found for {prefix}")
-            sample_item = dict(sample_item)
+            sample_item = object_dict(sample_item)
             sample_item["resolved_policy"] = policy
             library_item_id = int(sample_item["library_item_id"])
             staged_artifact_snapshot = snapshot_staged_artifact(
@@ -240,7 +238,7 @@ def run_sampled_calibration(
 ) -> tuple[dict[str, Any], Path | None]:
     _ = prefix
     source_path = Path(sample_item["source_path"])
-    video_policy = dict(policy["video"])
+    video_policy = object_dict(policy.get("video"))
     width = int(sample_item.get("width") or 0) or None
     height = int(sample_item.get("height") or 0) or None
     preset = deps.effective_video_preset(video_policy, width=width, height=height)

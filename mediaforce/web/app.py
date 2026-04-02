@@ -6,8 +6,9 @@ import re
 import shutil
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -17,6 +18,10 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import delete
+from sqlalchemy import func
+from sqlalchemy import literal_column
+from sqlalchemy import select
 
 from mediaforce.advisor import (
     AdvisorResponse,
@@ -28,6 +33,10 @@ from mediaforce.tuning.calibration_jobs import load_active_job, load_job, \
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, load_runtime_settings, \
     save_runtime_settings
 from mediaforce.core.db import DBClient, open_db
+from mediaforce.core.db_tables import calibration_jobs as calibration_jobs_table
+from mediaforce.core.db_tables import learning_artifacts
+from mediaforce.core.db_tables import library_items
+from mediaforce.core.db_tables import tuning_sessions
 from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY, ensure_queue_state, load_latest_encode_job, \
     queue_position as encode_queue_position, save_encode_job, summarize_encode_queue
 from mediaforce.execution import (
@@ -59,9 +68,10 @@ from mediaforce.review import (
 )
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.tuning.tuning_memory import (
+    record_tuning_session,
     record_visual_approval_artifact,
 )
-from mediaforce.core.type_defs import JSONValue
+from mediaforce.core.type_defs import JSONValue, mapping_dict, object_dict, object_list
 from mediaforce.web.routes import register_dashboard_routes, register_folder_routes, register_frontend_routes, \
     register_host_routes, register_queue_routes, register_settings_routes
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_folders_payload, \
@@ -254,15 +264,26 @@ def _record_run_verdict(config: MediaforceConfig, prefix: str, calibration_paylo
 
 def create_app(config_path: Path | None = None) -> FastAPI:
     config = load_config(config_path or DEFAULT_CONFIG_PATH)
-    purge_transient_artifacts(config, force=True)
-    with open_db(config.paths.db_path) as connection:
-        ensure_queue_state(connection, updated_at=_now_iso())
-        _recover_calibration_jobs(connection, config)
-        _recover_encode_queue(connection, config)
-    _start_calibration_queue_worker(config)
-    _start_encode_queue_worker(config)
-    app = FastAPI(title="Mediaforce Calibration Bench")
     cleanup_lock = threading.Lock()
+
+    @asynccontextmanager
+    async def _app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        purge_transient_artifacts(config, force=True)
+        with open_db(config.paths.db_path) as connection:
+            ensure_queue_state(connection, updated_at=_now_iso())
+            _recover_calibration_jobs(connection, config)
+            _recover_encode_queue(connection, config)
+        _start_calibration_queue_worker(config)
+        _start_encode_queue_worker(config)
+        _refresh_host_status_cache(config)
+        try:
+            yield
+        finally:
+            for controller in _active_calibration_process_controllers():
+                controller.cancel()
+            ENCODE_QUEUE_PROCESS.cancel()
+
+    app = FastAPI(title="Mediaforce Calibration Bench", lifespan=_app_lifespan)
     review_dir = config.paths.review_dir
     packaged_frontend_build_dir = Path(__file__).resolve().parent / "frontend_build"
     frontend_build_dir = packaged_frontend_build_dir if packaged_frontend_build_dir.exists() else config.paths.project_root / "frontend" / "build"
@@ -272,7 +293,6 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     if frontend_app_dir.exists():
         app.mount("/_app", StaticFiles(directory=str(frontend_app_dir)), name="frontend_app")
     app.state.config = config
-    _refresh_host_status_cache(config)
 
     @app.middleware("http")
     async def periodic_cleanup(
@@ -280,12 +300,6 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     ) -> Response:
         _run_periodic_cleanup(config, cleanup_lock)
         return await call_next(request)
-
-    @app.on_event("shutdown")
-    async def stop_managed_processes() -> None:
-        for controller in _active_calibration_process_controllers():
-            controller.cancel()
-        ENCODE_QUEUE_PROCESS.cancel()
 
     def _settings_page_payload(
             *,
@@ -467,13 +481,13 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 if position is not None:
                     encode_job["queue_position"] = position[0]
                     encode_job["queue_depth"] = position[1]
-            scheduler_policy = dict(encode_queue["state"]["scheduler"])
+            encode_queue_state = object_dict(encode_queue.get("state"))
+            scheduler_policy = object_dict(encode_queue_state.get("scheduler"))
             encode_job = _decorate_encode_job_for_scheduler(config, encode_job)
-            encode_queue_state = encode_queue["state"]
             encode_queue_summary = _encode_queue_summary_copy(encode_queue, encode_queue_state, encode_job)
-        policy_source = calibration.get("policy") if calibration else sample_item["resolved_policy"]
-        policy = dict(policy_source or {})
-        video_policy = dict(policy.get("video") or {})
+        policy_source = calibration.get("policy") if calibration else sample_item.get("resolved_policy")
+        policy = object_dict(policy_source)
+        video_policy = object_dict(policy.get("video"))
         resolved_metric, _ = select_quality_metric(str(video_policy.get("quality_metric", "auto")))
         sample_host_statuses = _sample_calibration_host_statuses(config)
         sample_host_key = _default_sample_host_key_from_statuses(sample_host_statuses)
@@ -853,7 +867,7 @@ def _fresh_host_status_for_key(config: MediaforceConfig, host_key: str) -> HostS
 
 
 def _ensure_encode_host_ready(config: MediaforceConfig, host_payload: dict[str, Any] | None) -> bool:
-    host = dict(host_payload or {})
+    host = object_dict(host_payload)
     host_key = str(host.get("key") or host.get("host") or host.get("label") or "").strip()
     if not host_key:
         return False
@@ -885,7 +899,7 @@ def _ensure_encode_host_ready(config: MediaforceConfig, host_payload: dict[str, 
 
 def _stop_encode_host_if_configured(config: MediaforceConfig, host_payload: dict[str, Any] | None) -> None:
     _ = config
-    host = dict(host_payload or {})
+    host = object_dict(host_payload)
     stop_command = _host_lifecycle_stop_command(host)
     if not stop_command:
         return
@@ -971,20 +985,18 @@ def _folder_review_badge(config: MediaforceConfig, prefix: str) -> dict[str, str
 
 
 def _sample_item(connection: DBClient, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
-    row = connection.exec_driver_sql(
-        """
-        SELECT *
-        FROM library_items
-        WHERE rel_path LIKE ?
-          AND status IN ('discovered', 'planned', 'validated', 'encoded')
-        ORDER BY priority_score DESC, size_bytes DESC
-        LIMIT 1
-        """,
-        (f"{prefix}%",),
+    row = connection.execute(
+        select(library_items)
+        .where(
+            library_items.c.rel_path.like(f"{prefix}%"),
+            library_items.c.status.in_(("discovered", "planned", "validated", "encoded")),
+        )
+        .order_by(library_items.c.priority_score.desc(), library_items.c.size_bytes.desc())
+        .limit(1)
     ).mappings().fetchone()
     if row is None:
         return None
-    return build_manifest_item(dict(row), config)
+    return build_manifest_item(mapping_dict(row), config)
 
 
 _metric_support = runtime_metric_support
@@ -1150,7 +1162,7 @@ def _format_eta_seconds(seconds: float | None) -> str | None:
 
 
 def _job_host_key(job: dict[str, Any]) -> str:
-    host = dict(job.get("host") or {})
+    host = object_dict(job.get("host"))
     return str(host.get("key") or host.get("host") or host.get("label") or "").strip()
 
 
@@ -1307,14 +1319,15 @@ def _pending_proposal_trace_public_view(trace: dict[str, Any]) -> dict[str, Any]
     if not trace:
         return None
     proposed_policy = trace.get("proposed_policy")
-    context = dict(trace.get("context") or {})
-    if isinstance(context.get("current_policy"), dict):
-        context["current_policy"] = _tuning_policy_focus(dict(context["current_policy"]))
+    context = object_dict(trace.get("context"))
+    current_policy = object_dict(context.get("current_policy"))
+    if current_policy:
+        context["current_policy"] = _tuning_policy_focus(current_policy)
+    proposed_policy_payload = object_dict(proposed_policy)
     return {
         "prompt_version": trace.get("prompt_version"),
         "raw_response": trace.get("raw_response"),
-        "proposed_policy": _tuning_policy_focus(dict(proposed_policy or {})) if isinstance(proposed_policy,
-                                                                                           dict) else {},
+        "proposed_policy": _tuning_policy_focus(proposed_policy_payload) if proposed_policy_payload else {},
         "context": context,
     }
 
@@ -1581,8 +1594,8 @@ def _review_cleanup_targets(config: MediaforceConfig, calibration_payload: dict[
     targets: list[Path] = []
     seen: set[Path] = set()
     for key in ("compare_clips", "preview_clips", "source_clips"):
-        for clip in calibration_payload.get(key) or []:
-            review_file = _review_file_from_url(config, str((clip or {}).get("path") or ""))
+        for clip in object_list(calibration_payload.get(key)):
+            review_file = _review_file_from_url(config, str(object_dict(clip).get("path") or ""))
             if review_file is None:
                 continue
             if review_file not in seen:
@@ -1657,21 +1670,20 @@ def _clear_folder_tuning_state(
     review_targets = _review_cleanup_targets(config, calibration_payload)
     review_pack_dir = _review_pack_dir(config, prefix)
     review_pack_present = review_pack_dir.exists()
-    artifact_rows = connection.exec_driver_sql(
-        "SELECT artifact_path FROM learning_artifacts WHERE prefix = ?",
-        (prefix,),
+    artifact_rows = connection.execute(
+        select(learning_artifacts.c.artifact_path).where(learning_artifacts.c.prefix == prefix)
     ).mappings().fetchall()
     artifact_paths = [Path(str(row["artifact_path"])) for row in artifact_rows if
                       str(row["artifact_path"] or "").strip()]
-    session_count = int(
-        connection.exec_driver_sql("SELECT COUNT(*) FROM tuning_sessions WHERE prefix = ?", (prefix,)).fetchone()[0]
-    )
-    job_count = int(
-        connection.exec_driver_sql("SELECT COUNT(*) FROM calibration_jobs WHERE prefix = ?", (prefix,)).fetchone()[0]
-    )
+    session_count = int(connection.execute(
+        select(func.count()).select_from(tuning_sessions).where(tuning_sessions.c.prefix == prefix)
+    ).scalar_one())
+    job_count = int(connection.execute(
+        select(func.count()).select_from(calibration_jobs_table).where(calibration_jobs_table.c.prefix == prefix)
+    ).scalar_one())
 
-    connection.exec_driver_sql("DELETE FROM tuning_sessions WHERE prefix = ?", (prefix,))
-    connection.exec_driver_sql("DELETE FROM calibration_jobs WHERE prefix = ?", (prefix,))
+    connection.execute(delete(tuning_sessions).where(tuning_sessions.c.prefix == prefix))
+    connection.execute(delete(calibration_jobs_table).where(calibration_jobs_table.c.prefix == prefix))
 
     _remove_path_if_exists(calibration_path)
     _remove_path_if_exists(_advice_file(config, prefix))
@@ -1736,9 +1748,13 @@ def _now_iso() -> str:
 
 
 def _recover_calibration_jobs(connection: DBClient, config: MediaforceConfig) -> None:
-    running_rows = connection.exec_driver_sql(
-        "SELECT job_id FROM calibration_jobs WHERE status = 'running' AND (owner_pid IS NULL OR owner_pid != ?)",
-        (os.getpid(),),
+    running_rows = connection.execute(
+        select(calibration_jobs_table.c.job_id)
+        .where(
+            calibration_jobs_table.c.status == "running",
+            (calibration_jobs_table.c.owner_pid.is_(None)) | (calibration_jobs_table.c.owner_pid != os.getpid()),
+        )
+        .order_by(calibration_jobs_table.c.created_at, literal_column("rowid"))
     ).mappings().fetchall()
     for row in running_rows:
         payload = load_job(connection, str(row["job_id"]))

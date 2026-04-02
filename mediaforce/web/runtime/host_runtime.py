@@ -4,8 +4,13 @@ import json
 import time
 from typing import Any
 
+from sqlalchemy import func
+from sqlalchemy import select
+
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
+from mediaforce.core.db_tables import encode_jobs
+from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.encode_queue import list_encode_jobs
 from mediaforce.remote import HostStatus, collect_host_statuses, host_status_targets_current_machine, \
     normalize_host_media_access, run_host_lifecycle_command
@@ -52,7 +57,7 @@ def host_runtime_rows(
         }
         max_parallel_encodes = host_max_parallel_encodes(host_config)
         schedule_profile = host_schedule_profile_key(host_config)
-        policy = dict(profiles.get(schedule_profile) or profiles[default_host_schedule_profile])
+        policy = object_dict(profiles.get(schedule_profile) or profiles[default_host_schedule_profile])
         active_encode_count = running_counts.get(status.key, 0)
         schedule_open = scheduler_allows_encode_run(policy, now=current_time, host_payload=asdict(status))
         encode_capable = "encode_queue" in capabilities
@@ -71,9 +76,9 @@ def host_runtime_rows(
         if schedule_profile == always_schedule_profile and schedule_detail == "runs anytime":
             schedule_detail = ""
         host_running_jobs = [job for job in running_jobs if job_host_key(job) == status.key]
-        host_speed = sum(float(((job.get("progress") or {}).get("speed") or 0.0)) for job in host_running_jobs)
+        host_speed = sum(float(object_dict(job.get("progress")).get("speed") or 0.0) for job in host_running_jobs)
         host_remaining_duration_seconds = sum(
-            float(((job.get("progress") or {}).get("remaining_duration_seconds") or 0.0)) for job in host_running_jobs
+            float(object_dict(job.get("progress")).get("remaining_duration_seconds") or 0.0) for job in host_running_jobs
         )
         host_eta_seconds = (host_remaining_duration_seconds / host_speed) if host_speed > 0 else None
         rows.append(
@@ -103,7 +108,9 @@ def host_runtime_rows(
 
 def running_encode_counts_by_host(connection: DBClient) -> dict[str, int]:
     counts: dict[str, int] = {}
-    rows = connection.exec_driver_sql("SELECT host_json FROM encode_jobs WHERE status = 'running'").mappings().fetchall()
+    rows = connection.execute(
+        select(encode_jobs.c.host_json).where(encode_jobs.c.status == "running")
+    ).mappings().fetchall()
     for row in rows:
         try:
             payload = json.loads(str(row["host_json"] or "{}"))
@@ -154,7 +161,7 @@ def ensure_encode_host_ready(
         lifecycle_command_timeout_seconds: int,
         lifecycle_poll_seconds: float,
 ) -> bool:
-    host = dict(host_payload or {})
+    host = object_dict(host_payload)
     host_key = str(host.get("key") or host.get("host") or host.get("label") or "").strip()
     if not host_key:
         return False
@@ -185,7 +192,7 @@ def ensure_encode_host_ready(
 
 
 def stop_encode_host_if_configured(host_payload: dict[str, Any] | None, *, lifecycle_command_timeout_seconds: int) -> None:
-    host = dict(host_payload or {})
+    host = object_dict(host_payload)
     stop_command = host_lifecycle_stop_command(host)
     if not stop_command:
         return

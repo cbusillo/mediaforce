@@ -8,11 +8,22 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import case
+from sqlalchemy import delete
+from sqlalchemy import func
+from sqlalchemy import literal_column
+from sqlalchemy import select
+from sqlalchemy import update
+
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
+from mediaforce.core.db_tables import encode_jobs
+from mediaforce.core.db_tables import library_items
+from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.encoding.encode_queue import ensure_queue_state, load_active_encode_job, load_encode_job, load_queue_state, \
     save_encode_job, save_queue_state
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
+from mediaforce.core.type_defs import object_dict, object_list
 
 
 @dataclass(slots=True)
@@ -55,7 +66,9 @@ def reconcile_encode_jobs(
         restart_recovery: bool = False,
 ) -> None:
     now = datetime.now(tz=UTC)
-    running_rows = connection.exec_driver_sql("SELECT job_id FROM encode_jobs WHERE status = 'running'").mappings().fetchall()
+    running_rows = connection.execute(
+        select(encode_jobs.c.job_id).where(encode_jobs.c.status == "running")
+    ).mappings().fetchall()
     for row in running_rows:
         payload = load_encode_job(connection, str(row["job_id"]))
         if payload is None:
@@ -78,8 +91,10 @@ def reconcile_encode_jobs(
             error_message=failure_message,
         )
 
-    retry_backoff_rows = connection.exec_driver_sql(
-        "SELECT job_id FROM encode_jobs WHERE status = 'retry_backoff' ORDER BY created_at , rowid "
+    retry_backoff_rows = connection.execute(
+        select(encode_jobs.c.job_id)
+        .where(encode_jobs.c.status == "retry_backoff")
+        .order_by(encode_jobs.c.created_at, literal_column("rowid"))
     ).mappings().fetchall()
     for row in retry_backoff_rows:
         payload = load_encode_job(connection, str(row["job_id"]))
@@ -100,7 +115,9 @@ def reconcile_encode_jobs(
 
     state = load_queue_state(connection)
     running_count = int(
-        connection.exec_driver_sql("SELECT COUNT(*) FROM encode_jobs WHERE status = 'running'").fetchone()[0]
+        connection.execute(
+            select(func.count()).select_from(encode_jobs).where(encode_jobs.c.status == "running")
+        ).scalar_one()
     )
     if running_count == 0 and (state.get("active_job_id") or state.get("stop_requested")):
         state.update({"active_job_id": None, "stop_requested": False, "updated_at": deps.now_iso()})
@@ -123,7 +140,7 @@ def encode_job_manifest_totals(job: dict[str, Any]) -> dict[str, Any]:
             "total_duration_seconds": 0.0,
             "total_source_size_bytes": 0,
         }
-    items = list(payload.get("items") or [])
+    items = object_list(payload.get("items"))
     return {
         "total_item_count": len(items) or int(job.get("item_count") or 0),
         "total_duration_seconds": sum(float(item.get("duration_seconds") or 0.0) for item in items),
@@ -143,7 +160,7 @@ def transition_encode_job_failure(
     _ = config
     now = datetime.now(tz=UTC)
     now_iso = now.isoformat(timespec="seconds")
-    assigned_host = dict(job.get("host") or {})
+    assigned_host = object_dict(job.get("host"))
     attempt_count = int(job.get("attempt_count") or 0)
     retryable = _encode_failure_is_retryable(failure_kind, error_message, assigned_host)
     host_related = _encode_failure_is_host_related(failure_kind, error_message, assigned_host)
@@ -253,7 +270,7 @@ def select_encode_host(
         return None, "waiting for an available encode host"
 
     cooldown_until = deps.parse_iso(job.get("host_cooldown_until"))
-    last_host = dict(job.get("last_host") or {})
+    last_host = object_dict(job.get("last_host"))
     blocked_keys = {
         str(last_host.get("key") or ""),
         str(last_host.get("label") or ""),
@@ -266,20 +283,20 @@ def select_encode_host(
             if str(host.get("key") or "") not in blocked_keys and str(host.get("label") or "") not in blocked_keys
         ]
         if eligible_active_hosts:
-            return dict(eligible_active_hosts[0]), None
+            return object_dict(eligible_active_hosts[0]), None
         eligible_startable_hosts = [
             host
             for host in startable_hosts
             if str(host.get("key") or "") not in blocked_keys and str(host.get("label") or "") not in blocked_keys
         ]
         if eligible_startable_hosts:
-            return dict(eligible_startable_hosts[0]), None
+            return object_dict(eligible_startable_hosts[0]), None
         host_name = str(last_host.get("label") or last_host.get("key") or "the last host")
         return None, f"waiting for host cooldown to expire on {host_name}"
     if active_hosts:
-        return dict(active_hosts[0]), None
+        return object_dict(active_hosts[0]), None
     if startable_hosts:
-        return dict(startable_hosts[0]), None
+        return object_dict(startable_hosts[0]), None
     if any(
             int(host.get("active_encode_count") or 0) >= int(host.get("max_parallel_encodes") or 1)
             for host in encode_capable_hosts
@@ -384,8 +401,10 @@ def load_next_runnable_encode_job(
         config: MediaforceConfig,
         deps: EncodeQueueRuntimeDeps,
 ) -> dict[str, Any] | None:
-    rows = connection.exec_driver_sql(
-        "SELECT job_id FROM encode_jobs WHERE status = 'queued' ORDER BY created_at , rowid "
+    rows = connection.execute(
+        select(encode_jobs.c.job_id)
+        .where(encode_jobs.c.status == "queued")
+        .order_by(encode_jobs.c.created_at, literal_column("rowid"))
     ).mappings().fetchall()
     for row in rows:
         job = load_encode_job(connection, str(row["job_id"]))
@@ -575,7 +594,7 @@ def _finalize_encode_job_progress(
         deps: EncodeQueueRuntimeDeps,
         terminal_state: str,
 ) -> dict[str, Any] | None:
-    progress = dict(job.get("progress") or {})
+    progress = object_dict(job.get("progress"))
     if not progress:
         return None
     total_duration_seconds = float(progress.get("total_duration_seconds") or 0.0)
@@ -650,7 +669,7 @@ def _cleanup_encode_retry_artifacts(
     except (OSError, json.JSONDecodeError):
         return
     now_iso = deps.now_iso()
-    for item in manifest.get("items") or []:
+    for item in object_list(manifest.get("items")):
         staging_value = item.get("staging_path")
         if staging_value:
             staging_path = Path(str(staging_value))
@@ -659,30 +678,24 @@ def _cleanup_encode_retry_artifacts(
         library_item_id = item.get("library_item_id")
         if library_item_id is None:
             continue
-        stage_row = connection.exec_driver_sql(
-            "SELECT promoted_at FROM staged_artifacts WHERE library_item_id = ?",
-            (library_item_id,),
+        stage_row = connection.execute(
+            select(staged_artifacts.c.promoted_at).where(staged_artifacts.c.library_item_id == library_item_id)
         ).mappings().fetchone()
         if stage_row is not None and not stage_row["promoted_at"]:
-            connection.exec_driver_sql(
-                "DELETE FROM staged_artifacts WHERE library_item_id = ?",
-                (library_item_id,),
+            connection.execute(delete(staged_artifacts).where(staged_artifacts.c.library_item_id == library_item_id))
+        connection.execute(
+            update(library_items)
+            .where(library_items.c.id == library_item_id, library_items.c.status != "promoted")
+            .values(
+                status=case((library_items.c.status == "promoted", library_items.c.status), else_="planned"),
+                updated_at=now_iso,
             )
-        connection.exec_driver_sql(
-            """
-            UPDATE library_items
-            SET status     = CASE WHEN status = 'promoted' THEN status ELSE 'planned' END,
-                updated_at = ?
-            WHERE id = ?
-              AND status != 'promoted'
-            """,
-            (now_iso, library_item_id),
         )
 
 
 def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
     message = str(exc).lower()
-    host_payload = dict(job.get("host") or {})
+    host_payload = object_dict(job.get("host"))
     if _encode_failure_is_host_related("ssh_transport", message, host_payload):
         return "ssh_transport"
     if "staging file already exists" in message:
