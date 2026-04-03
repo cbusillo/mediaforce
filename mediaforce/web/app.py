@@ -522,7 +522,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         )
 
     def _recent_tuning_sessions(connection: DBClient, prefix: str, limit: int = 8) -> list[dict[str, Any]]:
-        return recent_tuning_sessions(connection, prefix, load_json_object=_load_json_object, limit=limit)
+        return recent_tuning_sessions(connection, prefix, load_json_object_fn=_load_json_object, limit=limit)
 
     def _proposal_signal_copy(
             note: str,

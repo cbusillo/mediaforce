@@ -78,7 +78,7 @@ def encode_manifest_items(
         process_controller=process_controller,
         host=host,
         progress_callback=progress_callback,
-        encode_one_item=encode_one_item,
+        encode_one_item_fn=encode_one_item,
     )
 
 
@@ -347,8 +347,8 @@ def _run_encode_command(
         ssh_client_options=ssh_client_options,
         ffmpeg_command_with_progress=_ffmpeg_command_with_progress,
         run_tracked_encode_command=_run_tracked_encode_command,
-        run_tracked_process=_run_tracked_process,
-        run_streamed_remote_encode_command=_run_streamed_remote_encode_command,
+        run_tracked_process_fn=_run_tracked_process,
+        run_streamed_remote_encode_command_fn=_run_streamed_remote_encode_command,
     )
 
 

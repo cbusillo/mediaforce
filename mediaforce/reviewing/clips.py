@@ -21,7 +21,7 @@ def encode_preview_clips(
         host: dict[str, Any] | None = None,
         process_controller: Any = None,
         execution_mode_for_host: Callable[[dict[str, Any] | None], str],
-        encode_preview_clips_remote: Callable[..., list[Any]],
+        encode_preview_clips_remote_fn: Callable[..., list[Any]],
         render_encoded_preview_clip: Callable[..., None],
         slug_seconds: Callable[[float], str],
         encoded_preview_clip_factory: Callable[..., Any],
@@ -29,7 +29,7 @@ def encode_preview_clips(
     output_dir.mkdir(parents=True, exist_ok=True)
     host_mode = execution_mode_for_host(host)
     if host_mode == "ssh":
-        return encode_preview_clips_remote(
+        return encode_preview_clips_remote_fn(
             host=host or {},
             source_path=source_path,
             source_codec=source_codec,
@@ -140,7 +140,7 @@ def generate_compare_clips(
         play: bool,
         process_controller: Any = None,
         auto_timestamps: Callable[..., list[float]],
-        generate_compare_clips_for_pair: Callable[..., list[Any]],
+        generate_compare_clips_for_pair_fn: Callable[..., list[Any]],
         subprocess_run: Callable[[list[str]], Any],
 ) -> list[Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -165,7 +165,7 @@ def generate_compare_clips(
         item_dir.mkdir(parents=True, exist_ok=True)
 
         generated.extend(
-            generate_compare_clips_for_pair(
+            generate_compare_clips_for_pair_fn(
                 source_path=source_path,
                 staged_path=staged_path,
                 source_codec=str(item.get("video_codec") or ""),

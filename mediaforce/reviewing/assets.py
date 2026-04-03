@@ -51,17 +51,17 @@ def render_audio_spectrogram_compare(
         audio_track: dict[str, Any],
         audio_policy: dict[str, Any],
         process_controller: Any = None,
-        planned_audio_action: Callable[[dict[str, Any], dict[str, Any]], str],
-        planned_opus_bitrate: Callable[[dict[str, Any], dict[str, Any]], str],
-        render_audio_spectrogram: Callable[..., None],
-        render_encoded_audio_clip: Callable[..., None],
-        stack_review_images: Callable[..., None],
+        planned_audio_action_fn: Callable[[dict[str, Any], dict[str, Any]], str],
+        planned_opus_bitrate_fn: Callable[[dict[str, Any], dict[str, Any]], str],
+        render_audio_spectrogram_fn: Callable[..., None],
+        render_encoded_audio_clip_fn: Callable[..., None],
+        stack_review_images_fn: Callable[..., None],
 ) -> dict[str, Any] | None:
-    action = planned_audio_action(audio_track, audio_policy)
+    action = planned_audio_action_fn(audio_track, audio_policy)
     if action != "libopus":
         return None
 
-    bitrate = planned_opus_bitrate(audio_track, audio_policy)
+    bitrate = planned_opus_bitrate_fn(audio_track, audio_policy)
     temp_root = output_path.parent / f".{output_path.stem}-artifacts"
     temp_root.mkdir(parents=True, exist_ok=True)
     try:
@@ -69,14 +69,14 @@ def render_audio_spectrogram_compare(
         encoded_audio = temp_root / "encoded-audio.opus"
         encoded_png = temp_root / "encoded-audio.png"
 
-        render_audio_spectrogram(
+        render_audio_spectrogram_fn(
             source_path=source_path,
             output_path=source_png,
             clip_time=clip_time,
             duration_seconds=duration_seconds,
             process_controller=process_controller,
         )
-        render_encoded_audio_clip(
+        render_encoded_audio_clip_fn(
             source_path=source_path,
             output_path=encoded_audio,
             clip_time=clip_time,
@@ -84,14 +84,14 @@ def render_audio_spectrogram_compare(
             bitrate=bitrate,
             process_controller=process_controller,
         )
-        render_audio_spectrogram(
+        render_audio_spectrogram_fn(
             source_path=encoded_audio,
             output_path=encoded_png,
             clip_time=0.0,
             duration_seconds=duration_seconds,
             process_controller=process_controller,
         )
-        stack_review_images(
+        stack_review_images_fn(
             top_path=source_png,
             bottom_path=encoded_png,
             output_path=output_path,

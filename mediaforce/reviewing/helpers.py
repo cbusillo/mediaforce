@@ -39,11 +39,11 @@ def auto_timestamps(
         clip_duration: float,
         *,
         process_controller: Any = None,
-        complexity_timestamps: Callable[..., list[float]],
-        scene_change_timestamps: Callable[..., list[float]],
-        default_timestamps: Callable[[float, float], list[float]],
+        complexity_timestamps_fn: Callable[..., list[float]],
+        scene_change_timestamps_fn: Callable[..., list[float]],
+        default_timestamps_fn: Callable[[float, float], list[float]],
 ) -> list[float]:
-    complexity_points = complexity_timestamps(
+    complexity_points = complexity_timestamps_fn(
         source_path,
         total_duration,
         clip_duration,
@@ -51,7 +51,7 @@ def auto_timestamps(
     )
     if complexity_points:
         return complexity_points
-    scene_points = scene_change_timestamps(
+    scene_points = scene_change_timestamps_fn(
         source_path,
         total_duration,
         clip_duration,
@@ -59,7 +59,7 @@ def auto_timestamps(
     )
     if scene_points:
         return scene_points
-    return default_timestamps(total_duration, clip_duration)
+    return default_timestamps_fn(total_duration, clip_duration)
 
 
 def complexity_timestamps(

@@ -22,9 +22,9 @@ def encode_manifest_items(
         process_controller: Any = None,
         host: dict[str, Any] | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
-        encode_one_item: Callable[..., Any] | None = None,
+        encode_one_item_fn: Callable[..., Any] | None = None,
 ) -> list[Any]:
-    if encode_one_item is None:
+    if encode_one_item_fn is None:
         raise RuntimeError("encode_one_item dependency is required")
     results: list[Any] = []
     manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
@@ -65,7 +65,7 @@ def encode_manifest_items(
                 payload["eta_seconds"] = remaining_duration_seconds / speed_value
             progress_callback(payload)
 
-        result = encode_one_item(
+        result = encode_one_item_fn(
             connection,
             config,
             manifest_path,

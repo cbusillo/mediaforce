@@ -7,25 +7,25 @@ from typing import Any
 
 from mediaforce.core.binaries import ffmpeg_binary, ffprobe_binary
 from mediaforce.core.db import DBClient
-from mediaforce.encoding.ffmpeg import ffmpeg_hwaccel_input_args
 from mediaforce.core.process_control import ManagedProcessController, run_command
+from mediaforce.encoding.ffmpeg import ffmpeg_hwaccel_input_args
 from mediaforce.remote import copy_remote_file_to_local, execution_mode_for_host, run_remote_command
-from mediaforce.reviewing.helpers import auto_timestamps as _auto_timestamps_impl, \
-    complexity_timestamps as _complexity_timestamps_impl, default_timestamps as _default_timestamps_impl, \
-    format_crf as _format_crf_impl, planned_audio_action as _planned_audio_action_impl, \
-    planned_opus_bitrate as _planned_opus_bitrate_impl, scene_change_timestamps as _scene_change_timestamps_impl, \
-    slug_seconds as _slug_seconds_impl
+from mediaforce.reviewing.assets import render_audio_spectrogram as _render_audio_spectrogram_impl, \
+    render_audio_spectrogram_compare as render_audio_spectrogram_compare_impl, \
+    render_encoded_audio_clip as _render_encoded_audio_clip_impl, \
+    render_review_contact_sheet as render_review_contact_sheet_impl, \
+    stack_review_images as _stack_review_images_impl
 from mediaforce.reviewing.clips import encode_preview_clips as encode_preview_clips_impl, \
     encode_preview_clips_remote as _encode_preview_clips_remote_impl, \
     generate_compare_clips as generate_compare_clips_impl, \
     generate_compare_clips_for_pair as generate_compare_clips_for_pair_impl, \
     generate_compare_clips_from_previews as generate_compare_clips_from_previews_impl, \
     render_source_review_clips as render_source_review_clips_impl
-from mediaforce.reviewing.assets import render_audio_spectrogram as _render_audio_spectrogram_impl, \
-    render_audio_spectrogram_compare as render_audio_spectrogram_compare_impl, \
-    render_encoded_audio_clip as _render_encoded_audio_clip_impl, \
-    render_review_contact_sheet as render_review_contact_sheet_impl, \
-    stack_review_images as _stack_review_images_impl
+from mediaforce.reviewing.helpers import auto_timestamps as _auto_timestamps_impl, \
+    complexity_timestamps as _complexity_timestamps_impl, default_timestamps as _default_timestamps_impl, \
+    format_crf as _format_crf_impl, planned_audio_action as _planned_audio_action_impl, \
+    planned_opus_bitrate as _planned_opus_bitrate_impl, scene_change_timestamps as _scene_change_timestamps_impl, \
+    slug_seconds as _slug_seconds_impl
 from mediaforce.reviewing.renderers import render_compare_clip as _render_compare_clip_impl, \
     render_compare_clip_from_preview as _render_compare_clip_from_preview_impl, \
     render_encoded_preview_clip as _render_encoded_preview_clip_impl, \
@@ -94,11 +94,11 @@ def render_audio_spectrogram_compare(
         audio_track=audio_track,
         audio_policy=audio_policy,
         process_controller=process_controller,
-        planned_audio_action=_planned_audio_action,
-        planned_opus_bitrate=_planned_opus_bitrate,
-        render_audio_spectrogram=_render_audio_spectrogram,
-        render_encoded_audio_clip=_render_encoded_audio_clip,
-        stack_review_images=_stack_review_images,
+        planned_audio_action_fn=_planned_audio_action,
+        planned_opus_bitrate_fn=_planned_opus_bitrate,
+        render_audio_spectrogram_fn=_render_audio_spectrogram,
+        render_encoded_audio_clip_fn=_render_encoded_audio_clip,
+        stack_review_images_fn=_stack_review_images,
     )
 
 
@@ -114,7 +114,7 @@ def generate_compare_clips(
         process_controller: ManagedProcessController | None = None,
 ) -> list[CompareClip]:
     def ffplay_runner(args: list[str]) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(args, check=False, capture_output=True, text=True)
+        return subprocess.run(args, capture_output=True, text=True)
 
     return generate_compare_clips_impl(
         connection,
@@ -126,7 +126,7 @@ def generate_compare_clips(
         play=play,
         process_controller=process_controller,
         auto_timestamps=_auto_timestamps,
-        generate_compare_clips_for_pair=generate_compare_clips_for_pair,
+        generate_compare_clips_for_pair_fn=generate_compare_clips_for_pair,
         subprocess_run=ffplay_runner,
     )
 
@@ -170,7 +170,7 @@ def encode_preview_clips(
         host=host,
         process_controller=process_controller,
         execution_mode_for_host=execution_mode_for_host,
-        encode_preview_clips_remote=_encode_preview_clips_remote,
+        encode_preview_clips_remote_fn=_encode_preview_clips_remote,
         render_encoded_preview_clip=_render_encoded_preview_clip,
         slug_seconds=_slug_seconds,
         encoded_preview_clip_factory=EncodedPreviewClip,
@@ -497,9 +497,9 @@ def _auto_timestamps(
         total_duration,
         clip_duration,
         process_controller=process_controller,
-        complexity_timestamps=_complexity_timestamps,
-        scene_change_timestamps=_scene_change_timestamps,
-        default_timestamps=_default_timestamps,
+        complexity_timestamps_fn=_complexity_timestamps,
+        scene_change_timestamps_fn=_scene_change_timestamps,
+        default_timestamps_fn=_default_timestamps,
     )
 
 

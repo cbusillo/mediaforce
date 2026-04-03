@@ -13,7 +13,7 @@ def recent_tuning_sessions(
         connection: DBClient,
         prefix: str,
         *,
-        load_json_object: Any,
+        load_json_object_fn: Any,
         limit: int = 8,
 ) -> list[dict[str, Any]]:
     rows = connection.execute(
@@ -37,7 +37,7 @@ def recent_tuning_sessions(
         summary = str(row["summary"] or "").strip()
         diagnosis = str(row["diagnosis"] or "").strip()
         suggested_follow_up = str(row["suggested_follow_up"] or "").strip()
-        parsed_raw = load_json_object(str(row["raw_response"] or ""))
+        parsed_raw = load_json_object_fn(str(row["raw_response"] or ""))
         sessions.append(
             {
                 "session_id": row["session_id"],

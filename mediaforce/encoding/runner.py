@@ -25,8 +25,8 @@ def run_encode_command(
         ssh_client_options: Callable[[], list[str]],
         ffmpeg_command_with_progress: Callable[[list[str]], list[str]],
         run_tracked_encode_command: Callable[..., subprocess.CompletedProcess[str]],
-        run_tracked_process: Callable[..., subprocess.CompletedProcess[str]],
-        run_streamed_remote_encode_command: Callable[..., subprocess.CompletedProcess[str]],
+        run_tracked_process_fn: Callable[..., subprocess.CompletedProcess[str]],
+        run_streamed_remote_encode_command_fn: Callable[..., subprocess.CompletedProcess[str]],
 ) -> subprocess.CompletedProcess[str]:
     host_mode = execution_mode_for_host(host)
     host_payload = object_dict(host)
@@ -38,7 +38,7 @@ def run_encode_command(
         )
 
     if host_media_access_for_host(host) == "stream":
-        return run_streamed_remote_encode_command(
+        return run_streamed_remote_encode_command_fn(
             ffmpeg_cmd=ffmpeg_cmd,
             temp_output=temp_output,
             source_path=Path(ffmpeg_cmd[ffmpeg_cmd.index("-i") + 1]),
@@ -75,7 +75,7 @@ def run_encode_command(
         "-lc",
         " && ".join(remote_script_parts),
     ]
-    return run_tracked_process(
+    return run_tracked_process_fn(
         ssh_cmd,
         process_controller=process_controller,
         progress_callback=progress_callback,
