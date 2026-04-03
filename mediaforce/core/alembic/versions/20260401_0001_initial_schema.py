@@ -5,10 +5,8 @@ Revises:
 Create Date: 2026-04-01 00:00:00
 """
 
-from collections.abc import Sequence
-
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "20260401_0001"
 down_revision = None
@@ -69,13 +67,8 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("source_path"),
     )
-    op.create_index("idx_library_items_rel_path", "library_items", ["rel_path"], unique=False)
-    op.create_index(
-        "idx_library_items_status_score",
-        "library_items",
-        ["status", sa.text("priority_score DESC")],
-        unique=False,
-    )
+    op.create_index("idx_library_items_rel_path", "library_items", ["rel_path"])
+    op.create_index("idx_library_items_status_score", "library_items", ["status", sa.text("priority_score DESC")])
     op.create_table(
         "run_manifests",
         sa.Column("run_id", sa.Text(), nullable=False),
@@ -111,18 +104,9 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.Text(), nullable=False),
         sa.PrimaryKeyConstraint("job_id"),
     )
-    op.create_index(
-        "idx_calibration_jobs_prefix_created",
-        "calibration_jobs",
-        ["prefix", sa.text("created_at DESC")],
-        unique=False,
-    )
-    op.create_index(
-        "idx_calibration_jobs_lane_status_created",
-        "calibration_jobs",
-        ["lane", "status", sa.text("created_at ASC")],
-        unique=False,
-    )
+    op.create_index("idx_calibration_jobs_prefix_created", "calibration_jobs", ["prefix", sa.text("created_at DESC")])
+    op.create_index("idx_calibration_jobs_lane_status_created", "calibration_jobs",
+                    ["lane", "status", sa.text("created_at ASC")])
     op.create_table(
         "encode_queue_state",
         sa.Column("queue_name", sa.Text(), nullable=False),
@@ -164,18 +148,8 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.Text(), nullable=False),
         sa.PrimaryKeyConstraint("job_id"),
     )
-    op.create_index(
-        "idx_encode_jobs_status_created",
-        "encode_jobs",
-        ["status", sa.text("created_at ASC")],
-        unique=False,
-    )
-    op.create_index(
-        "idx_encode_jobs_prefix_created",
-        "encode_jobs",
-        ["prefix", sa.text("created_at DESC")],
-        unique=False,
-    )
+    op.create_index("idx_encode_jobs_status_created", "encode_jobs", ["status", sa.text("created_at ASC")])
+    op.create_index("idx_encode_jobs_prefix_created", "encode_jobs", ["prefix", sa.text("created_at DESC")])
     op.create_table(
         "tuning_sessions",
         sa.Column("session_id", sa.Text(), nullable=False),
@@ -195,12 +169,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.Text(), nullable=False),
         sa.PrimaryKeyConstraint("session_id"),
     )
-    op.create_index(
-        "idx_tuning_sessions_prefix_created",
-        "tuning_sessions",
-        ["prefix", sa.text("created_at DESC")],
-        unique=False,
-    )
+    op.create_index("idx_tuning_sessions_prefix_created", "tuning_sessions", ["prefix", sa.text("created_at DESC")])
     op.create_table(
         "learning_artifacts",
         sa.Column("artifact_id", sa.Text(), nullable=False),
@@ -215,12 +184,8 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["session_id"], ["tuning_sessions.session_id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("artifact_id"),
     )
-    op.create_index(
-        "idx_learning_artifacts_prefix_updated",
-        "learning_artifacts",
-        ["prefix", sa.text("updated_at DESC")],
-        unique=False,
-    )
+    op.create_index("idx_learning_artifacts_prefix_updated", "learning_artifacts",
+                    ["prefix", sa.text("updated_at DESC")])
     op.create_table(
         "staged_artifacts",
         sa.Column("library_item_id", sa.Integer(), nullable=False),
@@ -259,12 +224,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["library_item_id"], ["library_items.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index(
-        "idx_item_events_item_time",
-        "item_events",
-        ["library_item_id", sa.text("created_at DESC")],
-        unique=False,
-    )
+    op.create_index("idx_item_events_item_time", "item_events", ["library_item_id", sa.text("created_at DESC")])
 
 
 def downgrade() -> None:
