@@ -3034,11 +3034,32 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with patch(
                 "mediaforce.web.runtime.encode_runtime.process_encode_queue_once",
                 side_effect=RuntimeError("boom"),
-        ), patch("mediaforce.web.runtime.encode_runtime.threading.Event", return_value=wait_gate):
+        ), patch("mediaforce.web.runtime.worker_supervision.threading.Event", return_value=wait_gate):
             with self.assertRaises(KeyboardInterrupt):
                 encode_runtime.encode_queue_worker_loop(config_path=self.config.paths.config_path, deps=deps)
 
         deps.logger.exception.assert_called_once_with("Encode queue worker pass failed")
+
+    def test_calibration_queue_worker_loop_logs_pass_failures_and_keeps_running(self) -> None:
+        deps = Mock()
+        deps.calibration_queue_poll_seconds = 1.0
+        logger = Mock()
+
+        wait_gate = Mock()
+        wait_gate.wait.side_effect = KeyboardInterrupt()
+
+        with patch(
+                "mediaforce.web.runtime.job_runtime.process_calibration_queue_once",
+                side_effect=RuntimeError("boom"),
+        ), patch("mediaforce.web.runtime.worker_supervision.threading.Event", return_value=wait_gate):
+            with self.assertRaises(KeyboardInterrupt):
+                job_runtime.calibration_queue_worker_loop(
+                    config_path=self.config.paths.config_path,
+                    deps=deps,
+                    logger=logger,
+                )
+
+        logger.exception.assert_called_once_with("Calibration queue worker pass failed")
 
     def test_load_next_runnable_encode_job_supports_plain_sqlalchemy_connection(self) -> None:
         source_path = self._create_source_file("episode-queued.mkv")

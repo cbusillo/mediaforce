@@ -24,6 +24,7 @@ from mediaforce.encoding.encode_queue import ensure_queue_state, load_active_enc
     save_encode_job, save_queue_state
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
+from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
 
 
 @dataclass(slots=True)
@@ -342,12 +343,12 @@ def encode_job_heartbeat_loop(
 
 
 def encode_queue_worker_loop(*, config_path: Path, deps: EncodeQueueRuntimeDeps) -> None:
-    while True:
-        try:
-            process_encode_queue_once(config_path=config_path, deps=deps)
-        except Exception:
-            deps.logger.exception("Encode queue worker pass failed")
-        threading.Event().wait(deps.encode_queue_poll_seconds)
+    run_supervised_worker_loop(
+        process_once_fn=lambda: process_encode_queue_once(config_path=config_path, deps=deps),
+        poll_seconds=deps.encode_queue_poll_seconds,
+        logger=deps.logger,
+        failure_message="Encode queue worker pass failed",
+    )
 
 
 def process_encode_queue_once(*, config_path: Path, deps: EncodeQueueRuntimeDeps) -> None:
@@ -668,7 +669,6 @@ def _cleanup_encode_retry_artifacts(
         manifest_path: Path,
         deps: EncodeQueueRuntimeDeps,
 ) -> None:
-    _ = deps
     try:
         manifest = json.loads(manifest_path.read_text())
     except (OSError, json.JSONDecodeError):

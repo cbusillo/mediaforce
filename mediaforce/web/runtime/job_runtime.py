@@ -25,6 +25,7 @@ from mediaforce.core.process_control import ManagedProcessController
 from mediaforce.library.scanner import scan_library
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.core.type_defs import JSONValue, object_dict
+from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
 
 _MISSING = object()
 
@@ -292,12 +293,12 @@ def calibration_queue_worker_loop(
         deps: CalibrationQueueRuntimeDeps,
         logger: Any,
 ) -> None:
-    while True:
-        try:
-            process_calibration_queue_once(config_path=config_path, deps=deps)
-        except Exception:
-            logger.exception("Calibration queue worker pass failed")
-        threading.Event().wait(deps.calibration_queue_poll_seconds)
+    run_supervised_worker_loop(
+        process_once_fn=lambda: process_calibration_queue_once(config_path=config_path, deps=deps),
+        poll_seconds=deps.calibration_queue_poll_seconds,
+        logger=logger,
+        failure_message="Calibration queue worker pass failed",
+    )
 
 
 def process_calibration_queue_once(*, config_path: Any, deps: CalibrationQueueRuntimeDeps) -> None:
