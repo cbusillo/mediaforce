@@ -296,7 +296,7 @@ def calibration_queue_worker_loop(
     while True:
         try:
             process_calibration_queue_once(config_path=config_path, deps=deps)
-        except (OSError, RuntimeError, ValueError, SQLAlchemyError):
+        except Exception:
             logger.exception("Calibration queue worker pass failed")
         threading.Event().wait(deps.calibration_queue_poll_seconds)
 

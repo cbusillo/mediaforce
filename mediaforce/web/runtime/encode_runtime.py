@@ -346,7 +346,7 @@ def encode_queue_worker_loop(*, config_path: Path, deps: EncodeQueueRuntimeDeps)
     while True:
         try:
             process_encode_queue_once(config_path=config_path, deps=deps)
-        except (OSError, RuntimeError, ValueError, ProcessCancelledError, SQLAlchemyError):
+        except Exception:
             pass
         threading.Event().wait(deps.encode_queue_poll_seconds)
 
