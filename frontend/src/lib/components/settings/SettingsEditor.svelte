@@ -76,6 +76,13 @@
 		prepareHost: (hostKey: string, runtimeHost: HostRuntime) => Promise<void>;
 		resetHostTrust: (hostKey: string) => Promise<void>;
 	} = $props();
+
+	function handleHostActionPasswordInput(
+		hostKey: string,
+		event: Event & { currentTarget: EventTarget & HTMLInputElement }
+	): void {
+		updateHostActionPassword(hostKey, event.currentTarget.value);
+	}
 </script>
 
 <div class="page-stack">
@@ -406,10 +413,7 @@
 															type="password"
 															value={runtimeActionState.password}
 															oninput={(event) =>
-																updateHostActionPassword(
-																	runtimeHostKey,
-																	(event.currentTarget as HTMLInputElement).value
-																)}
+																handleHostActionPasswordInput(runtimeHostKey, event)}
 															placeholder="Only used for this setup run"
 														/>
 													</label>
