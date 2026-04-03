@@ -6,6 +6,7 @@ Create Date: 2026-04-01 00:30:00
 """
 
 import sqlalchemy as sa
+# noinspection PyPackageRequirements
 from alembic import op
 
 revision = "20260401_0002"

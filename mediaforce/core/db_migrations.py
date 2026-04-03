@@ -5,7 +5,9 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any, cast
 
+# noinspection PyPackageRequirements
 from alembic import command
+# noinspection PyPackageRequirements
 from alembic.config import Config
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Connection
