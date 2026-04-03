@@ -124,7 +124,7 @@ def encode_preview_clips_remote(
     finally:
         try:
             run_remote_command(host, ["rm", "-rf", str(remote_root)], 30)
-        except Exception:
+        except (OSError, RuntimeError):
             pass
     return encoded
 

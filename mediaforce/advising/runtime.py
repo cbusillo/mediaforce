@@ -37,7 +37,7 @@ def run_code_prompt(
         result = subprocess_run(cmd, capture_output=True, text=True, timeout=75)
     except FileNotFoundError as exc:
         return advisor_response_factory(ok=False, summary="`code` is required but not installed.", raw=str(exc))
-    except Exception as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
         return advisor_response_factory(ok=False, summary="`code` failed to run.", raw=str(exc))
 
     try:
@@ -85,7 +85,7 @@ def run_structured_llm_request(
     ]
     try:
         result = subprocess_run(cmd, capture_output=True, text=True, timeout=max_seconds + 15, cwd=project_root)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return None
     raw = result.stdout.strip() or result.stderr.strip()
     if result.returncode != 0 or not raw:
@@ -134,7 +134,7 @@ def run_multimodal_tune_request(
     cmd.append(message)
     try:
         result = subprocess_run(cmd, capture_output=True, text=True, timeout=max_seconds + 30)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         output_path.unlink(missing_ok=True)
         return None
     try:

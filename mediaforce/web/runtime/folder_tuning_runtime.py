@@ -88,7 +88,7 @@ def build_tuning_runtime_toolbelt(
     try:
         item_plan = describe_item_plan(sample_plan_item)
         overhead = estimate_output_overhead_bytes(sample_plan_item)
-    except Exception:
+    except (KeyError, TypeError, ValueError):
         item_plan = {}
         overhead = {}
     sample_result = object_dict(object_dict(calibration).get("sample_result"))

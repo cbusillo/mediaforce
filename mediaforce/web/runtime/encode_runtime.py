@@ -14,6 +14,7 @@ from sqlalchemy import func
 from sqlalchemy import literal_column
 from sqlalchemy import select
 from sqlalchemy import update
+from sqlalchemy.exc import SQLAlchemyError
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
@@ -345,7 +346,7 @@ def encode_queue_worker_loop(*, config_path: Path, deps: EncodeQueueRuntimeDeps)
     while True:
         try:
             process_encode_queue_once(config_path=config_path, deps=deps)
-        except Exception:
+        except (OSError, RuntimeError, ValueError, ProcessCancelledError, SQLAlchemyError):
             pass
         threading.Event().wait(deps.encode_queue_poll_seconds)
 

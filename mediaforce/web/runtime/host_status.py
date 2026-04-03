@@ -1,6 +1,6 @@
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from pathlib import Path
 
 from mediaforce.core.config import MediaforceConfig
@@ -19,7 +19,7 @@ _HOST_STATUS_CACHE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_pref
 def collect_host_statuses_with_fallback(config: MediaforceConfig) -> list[HostStatus]:
     try:
         return collect_host_statuses(config)
-    except Exception as exc:
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
         return [
             HostStatus(
                 key="host-status-error",
@@ -137,7 +137,7 @@ def _complete_host_status_refresh_if_ready() -> None:
 
     try:
         cache_key, statuses = future.result()
-    except Exception:
+    except (CancelledError, OSError, RuntimeError, TypeError, ValueError):
         return
 
     with _HOST_STATUS_CACHE_LOCK:
