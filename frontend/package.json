@@ -29,7 +29,6 @@
 		"prettier": "^3.8.1",
 		"prettier-plugin-svelte": "^3.4.1",
 		"svelte": "^5.54.0",
-		"svelte-language-server": "^0.17.30",
 		"svelte-check": "^4.4.2",
 		"typescript": "^5.9.3",
 		"typescript-svelte-plugin": "^0.3.51",
