@@ -1942,7 +1942,7 @@
 												</section>
 											{/if}
 
-											<section class="proposal-workbench-card">
+											<section class="proposal-workbench-card proposal-trace-card-shell">
 												<p class="eyebrow-copy">Advanced trace</p>
 												{#if pendingProposalTrace?.prompt_version}
 													<p class="muted-copy">
@@ -3189,6 +3189,17 @@
 		align-content: start;
 	}
 
+	.proposal-workbench-card .muted-copy {
+		min-width: 0;
+		max-width: 100%;
+		overflow-wrap: anywhere;
+		word-break: break-word;
+	}
+
+	.proposal-trace-card-shell {
+		grid-column: 1 / -1;
+	}
+
 	.proposal-context-grid {
 		display: grid;
 		gap: 0.65rem;
@@ -3294,6 +3305,7 @@
 		display: grid;
 		gap: 0.7rem;
 		padding-top: 0.1rem;
+		min-width: 0;
 	}
 
 	.proposal-trace-shell summary {
@@ -3332,11 +3344,16 @@
 		display: grid;
 		gap: 0.65rem;
 		padding: 0.2rem 0.1rem 0;
+		min-width: 0;
 	}
 
 	.proposal-trace-raw {
+		display: block;
+		width: 100%;
 		margin: 0;
 		padding: 0.85rem;
+		min-width: 0;
+		max-width: 100%;
 		border-radius: calc(var(--radius-md) - 0.15rem);
 		background: rgba(23, 35, 31, 0.06);
 		border: 1px solid rgba(23, 35, 31, 0.08);
@@ -3345,6 +3362,8 @@
 		white-space: pre-wrap;
 		word-break: break-word;
 		overflow-wrap: anywhere;
+		overflow-x: auto;
+		box-sizing: border-box;
 	}
 
 	.proposal-issue-list {
@@ -3381,7 +3400,7 @@
 	}
 
 	.note-panel {
-		padding: 0;
+		padding: 1rem 1.05rem;
 	}
 
 	.note-lede {
