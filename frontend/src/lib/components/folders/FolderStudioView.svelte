@@ -2519,6 +2519,7 @@
 		display: grid;
 		gap: var(--space-3);
 		align-content: start;
+		min-width: 0;
 	}
 
 	.studio-sidebar {
@@ -2575,6 +2576,7 @@
 	.section-copy-block {
 		display: grid;
 		gap: 0.3rem;
+		min-width: 0;
 	}
 
 	.host-section-copy {
@@ -2682,6 +2684,7 @@
 		display: grid;
 		gap: 0.9rem;
 		padding: 0.35rem;
+		min-width: 0;
 		border-radius: calc(var(--radius-lg) + 0.2rem);
 		background:
 			linear-gradient(180deg, rgba(255, 252, 246, 0.96), rgba(252, 249, 242, 0.92)),
@@ -2968,6 +2971,7 @@
 		display: grid;
 		gap: 0.85rem;
 		padding: 0.95rem 1rem;
+		min-width: 0;
 		border-radius: var(--radius-md);
 		border: 1px solid rgba(15, 118, 110, 0.12);
 		background:
@@ -2994,6 +2998,7 @@
 		display: grid;
 		gap: 0.32rem;
 		max-width: min(100%, 43rem);
+		min-width: 0;
 		padding: 0.85rem 0.95rem;
 		border-radius: 1rem;
 		border: 1px solid rgba(23, 35, 31, 0.08);
@@ -3042,6 +3047,7 @@
 		margin: 0;
 		font-size: 0.98rem;
 		line-height: 1.45;
+		overflow-wrap: anywhere;
 	}
 
 	.thread-support {
@@ -3049,6 +3055,7 @@
 		font-size: 0.88rem;
 		line-height: 1.45;
 		color: var(--ink-soft);
+		overflow-wrap: anywhere;
 	}
 
 	.thread-readout {
@@ -3108,6 +3115,7 @@
 		justify-content: space-between;
 		align-items: start;
 		flex-wrap: wrap;
+		min-width: 0;
 	}
 
 	.proposal-title {
@@ -3140,6 +3148,7 @@
 		font-size: 0.98rem;
 		font-weight: 700;
 		line-height: 1.3;
+		overflow-wrap: anywhere;
 	}
 
 	.proposal-change-previous {
@@ -3147,6 +3156,7 @@
 		font-size: 0.83rem;
 		line-height: 1.4;
 		color: var(--ink-soft);
+		overflow-wrap: anywhere;
 	}
 
 	.proposal-warning-copy {
@@ -3165,11 +3175,13 @@
 		display: grid;
 		gap: 0.8rem;
 		grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+		min-width: 0;
 	}
 
 	.proposal-workbench-card {
 		display: grid;
 		gap: 0.65rem;
+		min-width: 0;
 		padding: 0.9rem;
 		border-radius: var(--radius-md);
 		background: rgba(255, 255, 255, 0.78);
@@ -3186,6 +3198,7 @@
 	.proposal-trace-card {
 		display: grid;
 		gap: 0.22rem;
+		min-width: 0;
 		padding: 0.75rem 0.8rem;
 		border-radius: calc(var(--radius-md) - 0.15rem);
 		background: rgba(247, 246, 241, 0.88);
@@ -3207,6 +3220,7 @@
 		font-size: 0.9rem;
 		font-weight: 700;
 		line-height: 1.35;
+		overflow-wrap: anywhere;
 	}
 
 	.proposal-memory-shell {
@@ -3330,6 +3344,7 @@
 		line-height: 1.45;
 		white-space: pre-wrap;
 		word-break: break-word;
+		overflow-wrap: anywhere;
 	}
 
 	.proposal-issue-list {
@@ -3371,6 +3386,7 @@
 
 	.note-lede {
 		max-width: 42ch;
+		overflow-wrap: anywhere;
 	}
 
 	.field-block {
@@ -3417,6 +3433,7 @@
 		font-size: 0.9rem;
 		line-height: 1.45;
 		color: var(--ink-soft);
+		overflow-wrap: anywhere;
 	}
 
 	.run-unlock-grid {
@@ -3840,6 +3857,7 @@
 		justify-content: space-between;
 		gap: 1rem;
 		align-items: start;
+		min-width: 0;
 	}
 
 	.reference-disclosure summary,
@@ -3881,10 +3899,12 @@
 	.thread-history-meta {
 		font-size: 0.8rem;
 		color: var(--ink-soft);
+		overflow-wrap: anywhere;
 	}
 
 	.thread-history-copy {
 		margin-top: -0.15rem;
+		overflow-wrap: anywhere;
 	}
 
 	.reference-disclosure-grid {
