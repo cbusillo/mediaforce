@@ -59,6 +59,7 @@ __all__ = [
     "reset_remote_host_trust",
     "run_host_lifecycle_command",
     "run_remote_command",
+    "ssh_client_options",
 ]
 
 
