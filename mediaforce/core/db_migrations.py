@@ -1,5 +1,5 @@
-from contextlib import contextmanager
 from collections.abc import Iterator
+from contextlib import contextmanager
 from importlib.resources import as_file
 from importlib.resources import files
 from pathlib import Path
@@ -8,9 +8,9 @@ from typing import Any, cast
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine
-from sqlalchemy.engine import URL
 from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine import URL
 from sqlalchemy.pool import NullPool
 
 SQLITE_BUSY_TIMEOUT_MS = 30_000
@@ -23,7 +23,7 @@ def database_url(db_path: Path) -> str:
 
 @contextmanager
 def _alembic_script_location() -> Iterator[str]:
-    resource = files("mediaforce.core").joinpath("alembic")
+    resource = files("mediaforce.core").joinpath("db_migration_scripts")
     with as_file(resource) as path:
         yield str(path)
 

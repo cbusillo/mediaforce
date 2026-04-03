@@ -8,7 +8,8 @@ Mediaforce's SQLite schema.
 - `mediaforce/core/db.py` now boots databases through Alembic revisions instead
   of applying ad hoc runtime schema patches.
 - `mediaforce/core/db_tables.py` defines the current SQLAlchemy metadata shape.
-- `mediaforce/core/alembic/versions/` records the ordered schema history used
+- `mediaforce/core/db_migration_scripts/versions/` records the ordered schema
+  history used
   for both fresh databases and legacy upgrades.
 - `mediaforce/core/sql/schema.sql` remains the compatibility bridge for very
   old pre-Alembic databases and should stay aligned with the initial revision,
@@ -21,14 +22,14 @@ Mediaforce's SQLite schema.
    data inspection.
 3. If you want a static schema reference, inspect the current metadata in
    `mediaforce/core/db_tables.py` and the ordered revisions under
-   `mediaforce/core/alembic/versions/`.
+   `mediaforce/core/db_migration_scripts/versions/`.
 4. Refresh introspection after migration changes.
 
 ## Workflow expectations
 
 - When the SQLite schema changes, update `mediaforce/core/db_tables.py` and add
-  a new Alembic revision under `mediaforce/core/alembic/versions/` in the same
-  change.
+  a new Alembic revision under `mediaforce/core/db_migration_scripts/versions/`
+  in the same change.
 - Keep Alembic revisions hand-authored and SQLite-aware. Prefer explicit DDL or
   well-understood Alembic operations over broad autogeneration assumptions.
 - Preserve `mediaforce/core/sql/schema.sql` as the initial bridge for legacy
@@ -44,7 +45,8 @@ Mediaforce's SQLite schema.
 ## Creating a new migration
 
 1. Update `mediaforce/core/db_tables.py` to reflect the desired head schema.
-2. Add a new Alembic revision file under `mediaforce/core/alembic/versions/`
+2. Add a new Alembic revision file under
+   `mediaforce/core/db_migration_scripts/versions/`
    with explicit `upgrade()` and `downgrade()` steps.
 3. If the change must also apply to pre-Alembic databases, make sure the legacy
    bridge in `mediaforce/core/db_migrations.py` still normalizes old databases
