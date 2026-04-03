@@ -155,6 +155,7 @@ def _remote_host_status(
         for path_text, exists in object_dict(payload.get("paths")).items()
     }
     tools = object_dict(payload.get("tools"))
+    tool_paths = object_dict(payload.get("tool_paths"))
     platform_name = _status_platform(payload.get("platform"), tools=tools)
     learn_remote_wake_mac(config, host, ssh_host)
     capability_issues = _host_capability_issues(
@@ -172,7 +173,7 @@ def _remote_host_status(
         capabilities=_host_capabilities(host),
         mounted_paths=mounted_paths,
         repo_path=repo_path,
-        ffmpeg_path=str((payload.get("tool_paths") or {}).get("ffmpeg") or "") or None,
+        ffmpeg_path=str(tool_paths.get("ffmpeg") or "") or None,
         platform=platform_name,
         videotoolbox_available=bool(tools.get("ffmpeg_videotoolbox")),
         utc_offset_minutes=_parse_utc_offset_minutes(payload.get("utc_offset")),

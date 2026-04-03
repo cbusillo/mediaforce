@@ -47,6 +47,17 @@ class SampleEncodeError(RuntimeError):
 REMOTE_QUALITY_TIMEOUT_SECONDS = 2 * 60 * 60
 
 
+def _host_hwaccel_context(host: dict[str, object] | None) -> tuple[str | None, bool | None]:
+    host_payload = object_dict(host)
+    platform_name = str(host_payload.get("platform") or "") or None
+    videotoolbox_available = (
+        bool(host_payload.get("videotoolbox_available"))
+        if "videotoolbox_available" in host_payload
+        else None
+    )
+    return platform_name, videotoolbox_available
+
+
 def select_quality_metric(preferred: str) -> tuple[str, float]:
     preferred_value = preferred.lower()
     if preferred_value == "vmaf" and has_libvmaf():
@@ -77,6 +88,7 @@ def run_crf_search(
         host: dict[str, object] | None = None,
 ) -> QualitySearchResult:
     metric, _ = select_quality_metric(preferred_metric)
+    platform_name, videotoolbox_available = _host_hwaccel_context(host)
     cmd = [
         "ab-av1",
         "crf-search",
@@ -102,10 +114,8 @@ def run_crf_search(
     cmd.extend(
         ab_av1_hwaccel_input_args(
             source_codec,
-            platform_name=str((host or {}).get("platform") or "") or None,
-            videotoolbox_available=bool((host or {}).get("videotoolbox_available"))
-            if "videotoolbox_available" in (host or {})
-            else None,
+            platform_name=platform_name,
+            videotoolbox_available=videotoolbox_available,
         )
     )
     if thorough:
@@ -160,6 +170,7 @@ def run_sample_encode(
         host: dict[str, object] | None = None,
 ) -> SampleEncodeResult:
     metric, _ = select_quality_metric(preferred_metric)
+    platform_name, videotoolbox_available = _host_hwaccel_context(host)
     cmd = [
         "ab-av1",
         "sample-encode",
@@ -183,10 +194,8 @@ def run_sample_encode(
     cmd.extend(
         ab_av1_hwaccel_input_args(
             source_codec,
-            platform_name=str((host or {}).get("platform") or "") or None,
-            videotoolbox_available=bool((host or {}).get("videotoolbox_available"))
-            if "videotoolbox_available" in (host or {})
-            else None,
+            platform_name=platform_name,
+            videotoolbox_available=videotoolbox_available,
         )
     )
     for param in svt_params:

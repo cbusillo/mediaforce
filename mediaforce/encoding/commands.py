@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Any, Callable
 
+from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.quality import QualitySearchResult
 
 
@@ -25,6 +26,13 @@ def build_ffmpeg_command(
         format_crf: Callable[[float], str],
 ) -> list[str]:
     _ = subtitle_policy
+    host_payload = object_dict(host)
+    platform_name = str(host_payload.get("platform") or "") or None
+    videotoolbox_available = (
+        bool(host_payload.get("videotoolbox_available"))
+        if "videotoolbox_available" in host_payload
+        else None
+    )
     mediaforce_tags = {
         "mediaforce_encoded_by": "mediaforce",
         "mediaforce_quality_metric": quality.metric,
@@ -37,10 +45,8 @@ def build_ffmpeg_command(
         "-y",
         *ffmpeg_hwaccel_input_args(
             source_codec,
-            platform_name=str((host or {}).get("platform") or "") or None,
-            videotoolbox_available=bool((host or {}).get("videotoolbox_available"))
-            if "videotoolbox_available" in (host or {})
-            else None,
+            platform_name=platform_name,
+            videotoolbox_available=videotoolbox_available,
         ),
         "-i",
         str(source_path),

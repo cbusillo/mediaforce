@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from sqlalchemy import update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -12,6 +12,11 @@ from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 
 
+class SupportsCancellation(Protocol):
+    def throw_if_cancelled(self) -> None:
+        ...
+
+
 def encode_manifest_items(
         connection: DBClient,
         config: MediaforceConfig,
@@ -19,7 +24,7 @@ def encode_manifest_items(
         manifest: dict[str, Any],
         indexes: list[int],
         overwrite: bool,
-        process_controller: Any = None,
+        process_controller: SupportsCancellation | None = None,
         host: dict[str, Any] | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         encode_one_item_fn: Callable[..., Any] | None = None,
@@ -32,9 +37,7 @@ def encode_manifest_items(
     completed_duration_seconds = 0.0
     for index in indexes:
         controller = process_controller
-        if controller is None:
-            pass
-        else:
+        if controller is not None:
             controller.throw_if_cancelled()
         item = manifest_items[index]
         item_duration_seconds = float_value(item.get("duration_seconds"))
@@ -135,7 +138,7 @@ def encode_one_item(
         item: dict[str, Any],
         *,
         overwrite: bool,
-        process_controller: Any = None,
+        process_controller: SupportsCancellation | None = None,
         host: dict[str, Any] | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         resolve_item_source_path: Callable[..., Path],

@@ -137,7 +137,7 @@ def queue_position(connection: DBClient, job_id: str) -> tuple[int, int] | None:
                 (calibration_jobs.c.created_at < created_at)
                 | ((calibration_jobs.c.created_at == created_at) & (_rowid_column() <= rowid))
             )
-        ).fetchone()[0]
+        ).scalar_one()
     )
     total = int(
         connection.execute(
@@ -145,7 +145,7 @@ def queue_position(connection: DBClient, job_id: str) -> tuple[int, int] | None:
             .select_from(calibration_jobs)
             .where(calibration_jobs.c.lane == lane)
             .where(calibration_jobs.c.status == "queued")
-        ).fetchone()[0]
+        ).scalar_one()
     )
     return position, total
 

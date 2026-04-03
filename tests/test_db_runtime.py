@@ -26,12 +26,12 @@ class DatabaseRuntimeTests(unittest.TestCase):
             db_path = Path(temp_dir) / "library.sqlite3"
 
             with open_db(db_path) as connection:
-                version = connection.execute(select(alembic_version.c.version_num)).fetchone()
+                version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
                 inspector = inspect(connection)
                 table_names = inspector.get_table_names()
                 indexes = {str(index_row["name"]) for index_row in inspector.get_indexes("encode_jobs")}
 
-            self.assertEqual(version[0], "20260401_0002")
+            self.assertEqual(version, "20260401_0002")
             self.assertGreaterEqual(len(table_names), 10)
             self.assertIn("idx_encode_jobs_status_retry_ready", indexes)
 
@@ -63,13 +63,15 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 engine.dispose()
 
             with open_db(db_path) as connection:
-                version = connection.execute(select(alembic_version.c.version_num)).fetchone()
+                version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
                 stored = connection.execute(
                     select(encode_jobs.c.prefix).where(encode_jobs.c.job_id == "job-1")
                 ).mappings().fetchone()
                 indexes = {str(index_row["name"]) for index_row in inspect(connection).get_indexes("encode_jobs")}
 
-            self.assertEqual(version[0], "20260401_0002")
+            self.assertIsNotNone(stored)
+            assert stored is not None
+            self.assertEqual(version, "20260401_0002")
             self.assertEqual(stored["prefix"], "tv/show")
             self.assertIn("idx_encode_jobs_status_retry_ready", indexes)
 
@@ -94,6 +96,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 ).mappings().fetchone()
 
             self.assertIsNotNone(row)
+            assert row is not None
             self.assertEqual(row["queue_name"], "heavy")
             self.assertIn("queue_name", object_dict(row))
 

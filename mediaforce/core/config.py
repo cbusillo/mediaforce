@@ -137,7 +137,8 @@ def _resolve_path(base: Path, value: str) -> Path:
 
 
 def load_config(config_path: Path | None = None) -> MediaforceConfig:
-    resolved_config_path = (config_path or DEFAULT_CONFIG_PATH).expanduser().resolve()
+    base_config_path = config_path if config_path is not None else DEFAULT_CONFIG_PATH
+    resolved_config_path = base_config_path.expanduser().resolve()
     raw = tomllib.loads(resolved_config_path.read_text())
     raw = _merge_optional_configs(raw, resolved_config_path.parent)
     project_root = resolved_config_path.parents[1]
