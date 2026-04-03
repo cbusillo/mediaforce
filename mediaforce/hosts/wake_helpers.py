@@ -36,7 +36,7 @@ def _local_broadcast_addresses(host: dict[str, Any]) -> list[str]:
                 addresses.extend(_broadcast_addresses_for_interface(routed_interface))
     try:
         result = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return list(dict.fromkeys(addresses))
     current_interface = ""
     for raw_line in result.stdout.splitlines():
@@ -55,7 +55,7 @@ def _local_broadcast_addresses(host: dict[str, Any]) -> list[str]:
 def _interface_for_ip(ip_address: str) -> str | None:
     try:
         result = subprocess.run(["route", "-n", "get", ip_address], capture_output=True, text=True, timeout=5)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
         return None
@@ -70,7 +70,7 @@ def _interface_for_ip(ip_address: str) -> str | None:
 def _broadcast_addresses_for_interface(interface: str) -> list[str]:
     try:
         result = subprocess.run(["ifconfig", interface], capture_output=True, text=True, timeout=5)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return []
     if result.returncode != 0:
         return []
@@ -96,14 +96,14 @@ def _resolved_ssh_network_host(ssh_host: str) -> str | None:
     fallback = _ssh_lookup_host(ssh_host)
     try:
         result = subprocess.run(["ssh", "-G", ssh_host], capture_output=True, text=True, timeout=5)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return fallback or None
     if result.returncode != 0:
         return fallback or None
     for line in result.stdout.splitlines():
         if not line.startswith("hostname "):
             continue
-        hostname = line.split(None, 1)[1].strip()
+        hostname = line.split(maxsplit=1)[1].strip()
         return hostname or fallback or None
     return fallback or None
 
@@ -125,7 +125,7 @@ def _looks_like_ipv4_address(value: str) -> bool:
 def _mac_from_arp(ip_address: str) -> str | None:
     try:
         result = subprocess.run(["arp", "-n", ip_address], capture_output=True, text=True, timeout=5)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return None
     found = _mac_from_arp_output(result.stdout, result.stderr)
     if found is not None:
@@ -133,7 +133,7 @@ def _mac_from_arp(ip_address: str) -> str | None:
     try:
         subprocess.run(["ping", "-c", "1", ip_address], capture_output=True, text=True, timeout=5)
         result = subprocess.run(["arp", "-n", ip_address], capture_output=True, text=True, timeout=5)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return None
     return _mac_from_arp_output(result.stdout, result.stderr)
 
@@ -185,5 +185,5 @@ def _persist_remote_wake_mac(config: MediaforceConfig, host: dict[str, object], 
             updated_hosts.append(updated_entry)
         runtime_settings["remote_hosts"] = updated_hosts
         save_runtime_settings(config.paths.runtime_settings_path, runtime_settings)
-    except Exception:
+    except (OSError, ValueError):
         return

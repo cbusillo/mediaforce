@@ -6,12 +6,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.type_defs import object_list
 from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQUIRED_ISSUE, has_videotoolbox_hwaccel, \
     normalize_execution_platform
-from mediaforce.hosts.config import _host_capabilities, _host_priority, _host_supports_capability, \
-    _parse_utc_offset_minutes, host_media_access_for_host, remote_shell_path_export_line
+from mediaforce.hosts.config import _host_supports_capability, \
+    _parse_utc_offset_minutes, remote_shell_path_export_line
 from mediaforce.hosts.types import AB_AV1_MISSING_ISSUE, FFMPEG_MISSING_ISSUE, HostStatus, \
     LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE, SAMPLE_AV1_ENCODER_MISSING_ISSUE, SAMPLE_METRIC_MISSING_ISSUE
 
@@ -42,7 +41,7 @@ def _status_platform(value: object, *, tools: dict[str, bool] | None = None) -> 
     normalized = normalize_execution_platform(str(value or ""))
     if normalized != "unknown":
         return normalized
-    tool_status = tools or {}
+    tool_status: dict[str, bool] = tools if tools is not None else {}
     if any(key in tool_status for key in ("xcode_clt", "brew", "ffmpeg_videotoolbox")):
         return "macos"
     return normalized
@@ -98,6 +97,7 @@ def _host_capability_issues(
 
 
 def _find_local_tool(name: str, *, fallback_paths: list[str]) -> str | None:
+    # noinspection PyDeprecation
     discovered = shutil.which(name)
     if discovered:
         return discovered
@@ -111,7 +111,7 @@ def _find_local_tool(name: str, *, fallback_paths: list[str]) -> str | None:
 def _command_output(command: list[str]) -> str:
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=5)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return ""
     return result.stdout if result.returncode == 0 else ""
 
@@ -119,7 +119,7 @@ def _command_output(command: list[str]) -> str:
 def _command_succeeds(command: list[str]) -> bool:
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=5)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return False
     return result.returncode == 0
 

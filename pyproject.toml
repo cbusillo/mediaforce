@@ -7,12 +7,12 @@ name = "mediaforce"
 version = "0.1.0"
 description = "Manifest-driven AV1 planning and execution workflow for Mediaforce v2"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = [
-  "alembic",
-  "fastapi",
-  "sqlalchemy>=2,<3",
-  "uvicorn",
+    "alembic",
+    "fastapi",
+    "sqlalchemy>=2,<3",
+    "uvicorn",
 ]
 
 [project.scripts]
@@ -26,7 +26,7 @@ packages = ["mediaforce"]
 "frontend/build" = "mediaforce/web/frontend_build"
 
 [tool.ruff]
-target-version = "py313"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = ["ANN001", "ANN002", "ANN003", "ANN202"]
