@@ -14,7 +14,6 @@ from sqlalchemy import func
 from sqlalchemy import literal_column
 from sqlalchemy import select
 from sqlalchemy import update
-from sqlalchemy.exc import SQLAlchemyError
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db

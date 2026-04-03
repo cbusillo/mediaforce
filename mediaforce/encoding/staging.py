@@ -3,8 +3,6 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable
 
-from sqlalchemy import case
-from sqlalchemy import delete
 from sqlalchemy import select
 from sqlalchemy import update
 

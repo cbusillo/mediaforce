@@ -14,7 +14,6 @@ from sqlalchemy import func
 from sqlalchemy import literal_column
 from sqlalchemy import select
 from sqlalchemy import update
-from sqlalchemy.exc import SQLAlchemyError
 
 from mediaforce.tuning.calibration_jobs import claim_next_queued_calibration_job, load_latest_job, queue_position, save_job
 from mediaforce.core.config import MediaforceConfig, load_config

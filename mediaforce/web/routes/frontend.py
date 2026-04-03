@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
 

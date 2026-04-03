@@ -6,8 +6,6 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import open_db
 from mediaforce.encoding.encode_queue import summarize_encode_queue
 
-from mediaforce.web.runtime.folder_cards import FolderCard
-
 
 def dashboard_summary_payload(
         config: MediaforceConfig,

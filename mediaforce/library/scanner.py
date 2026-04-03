@@ -5,9 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from sqlalchemy import and_
 from sqlalchemy import case
-from sqlalchemy import func
 from sqlalchemy import insert
 from sqlalchemy import not_
 from sqlalchemy import select
