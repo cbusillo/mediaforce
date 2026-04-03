@@ -19,6 +19,7 @@ def media_binary(name: str) -> str:
     if preferred and preferred.exists():
         return str(preferred)
 
+    # noinspection PyDeprecation
     discovered = shutil.which(name)
     if discovered:
         return discovered
