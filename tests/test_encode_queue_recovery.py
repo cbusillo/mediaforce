@@ -3023,6 +3023,23 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         deps.run_calibration_job.assert_not_called()
 
+    def test_encode_queue_worker_loop_logs_pass_failures_and_keeps_running(self) -> None:
+        deps = Mock()
+        deps.logger = Mock()
+        deps.encode_queue_poll_seconds = 1.0
+
+        wait_gate = Mock()
+        wait_gate.wait.side_effect = KeyboardInterrupt()
+
+        with patch(
+                "mediaforce.web.runtime.encode_runtime.process_encode_queue_once",
+                side_effect=RuntimeError("boom"),
+        ), patch("mediaforce.web.runtime.encode_runtime.threading.Event", return_value=wait_gate):
+            with self.assertRaises(KeyboardInterrupt):
+                encode_runtime.encode_queue_worker_loop(config_path=self.config.paths.config_path, deps=deps)
+
+        deps.logger.exception.assert_called_once_with("Encode queue worker pass failed")
+
     def test_load_next_runnable_encode_job_supports_plain_sqlalchemy_connection(self) -> None:
         source_path = self._create_source_file("episode-queued.mkv")
         staging_path = self._staging_path("episode-queued.mkv")

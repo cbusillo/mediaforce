@@ -346,7 +346,7 @@ def encode_queue_worker_loop(*, config_path: Path, deps: EncodeQueueRuntimeDeps)
         try:
             process_encode_queue_once(config_path=config_path, deps=deps)
         except Exception:
-            pass
+            deps.logger.exception("Encode queue worker pass failed")
         threading.Event().wait(deps.encode_queue_poll_seconds)
 
 
