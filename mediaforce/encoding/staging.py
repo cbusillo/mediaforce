@@ -1,5 +1,7 @@
+import errno
 import json
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,14 +14,39 @@ from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.type_defs import object_list
 
+TRANSIENT_FILE_BUSY_ERRNOS = {errno.EBUSY}
+TRANSIENT_FILE_BUSY_RETRY_ATTEMPTS = 8
+TRANSIENT_FILE_BUSY_RETRY_DELAY_SECONDS = 0.25
+
+
+def _retry_transient_file_busy(operation: Callable[[], Any]) -> Any:
+    for attempt in range(TRANSIENT_FILE_BUSY_RETRY_ATTEMPTS):
+        try:
+            return operation()
+        except OSError as exc:
+            if exc.errno not in TRANSIENT_FILE_BUSY_ERRNOS or attempt == TRANSIENT_FILE_BUSY_RETRY_ATTEMPTS - 1:
+                raise
+            time.sleep(TRANSIENT_FILE_BUSY_RETRY_DELAY_SECONDS)
+    return None
+
+
+def safe_unlink(path: Path) -> None:
+    def _unlink() -> None:
+        path.unlink(missing_ok=True)
+
+    _retry_transient_file_busy(_unlink)
+
 
 def finalize_output_path(temp_output: Path, staging_path: Path) -> None:
-    if temp_output.exists():
-        temp_output.replace(staging_path)
-        return
-    if staging_path.exists():
-        return
-    raise FileNotFoundError(f"Encoded output missing after ffmpeg completed: {temp_output}")
+    def _finalize() -> None:
+        if temp_output.exists():
+            temp_output.replace(staging_path)
+            return
+        if staging_path.exists():
+            return
+        raise FileNotFoundError(f"Encoded output missing after ffmpeg completed: {temp_output}")
+
+    _retry_transient_file_busy(_finalize)
 
 
 def validate_one_item(

@@ -1,3 +1,4 @@
+import os
 import json
 import re
 import subprocess
@@ -5,7 +6,6 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.encoding.ffmpeg import ab_av1_hwaccel_input_args
 from mediaforce.core.process_control import ManagedProcessController, run_command
 from mediaforce.core.type_defs import object_dict
@@ -45,6 +45,7 @@ class SampleEncodeError(RuntimeError):
 
 
 REMOTE_QUALITY_TIMEOUT_SECONDS = 2 * 60 * 60
+LOCAL_QUALITY_PATH_PREFIX = "/opt/homebrew/opt/ffmpeg-full/bin:/usr/local/opt/ffmpeg-full/bin"
 
 
 def _host_hwaccel_context(host: dict[str, object] | None) -> tuple[str | None, bool | None]:
@@ -86,6 +87,7 @@ def run_crf_search(
         thorough: bool,
         process_controller: ManagedProcessController | None = None,
         host: dict[str, object] | None = None,
+        quality_temp_dir: Path | None = None,
 ) -> QualitySearchResult:
     metric, _ = select_quality_metric(preferred_metric)
     platform_name, videotoolbox_available = _host_hwaccel_context(host)
@@ -127,6 +129,8 @@ def run_crf_search(
         cmd.extend(["--min-vmaf", str(metric_target)])
     else:
         cmd.extend(["--min-xpsnr", str(metric_target)])
+    if quality_temp_dir is not None:
+        cmd.extend(["--temp-dir", str(quality_temp_dir)])
 
     result = _run_quality_command(cmd, process_controller=process_controller, host=host)
     if result.returncode != 0:
@@ -168,6 +172,7 @@ def run_sample_encode(
         svt_params: list[str],
         process_controller: ManagedProcessController | None = None,
         host: dict[str, object] | None = None,
+        quality_temp_dir: Path | None = None,
 ) -> SampleEncodeResult:
     metric, _ = select_quality_metric(preferred_metric)
     platform_name, videotoolbox_available = _host_hwaccel_context(host)
@@ -202,6 +207,8 @@ def run_sample_encode(
         cmd.extend(["--svt", param])
     if metric == "xpsnr":
         cmd.append("--xpsnr")
+    if quality_temp_dir is not None:
+        cmd.extend(["--temp-dir", str(quality_temp_dir)])
 
     result = _run_quality_command(cmd, process_controller=process_controller, host=host)
     if result.returncode != 0:
@@ -245,16 +252,24 @@ def _run_quality_command(
 ) -> subprocess.CompletedProcess[str]:
     host_mode = execution_mode_for_host(host)
     if host_mode != "ssh":
-        return run_command(cmd, process_controller=process_controller)
+        return run_command(cmd, process_controller=process_controller, env=_local_quality_environment())
     return run_remote_command(object_dict(host), cmd, REMOTE_QUALITY_TIMEOUT_SECONDS)
+
+
+def _local_quality_environment() -> dict[str, str]:
+    env = dict(os.environ)
+    current_path = env.get("PATH", "")
+    env["PATH"] = f"{LOCAL_QUALITY_PATH_PREFIX}:{current_path}" if current_path else LOCAL_QUALITY_PATH_PREFIX
+    return env
 
 
 @lru_cache(maxsize=1)
 def has_libvmaf() -> bool:
     result = subprocess.run(
-        [ffmpeg_binary(), "-hide_banner", "-filters"],
+        ["sh", "-lc", "ffmpeg -hide_banner -filters"],
         check=True,
         capture_output=True,
         text=True,
+        env=_local_quality_environment(),
     )
     return "libvmaf" in result.stdout

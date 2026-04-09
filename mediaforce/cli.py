@@ -226,7 +226,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             manifest = _load_manifest(manifest_path)
             indexes = _resolve_indexes(manifest, args)
             encode_results = encode_manifest_items(connection, config, manifest_path, manifest, indexes,
-                                                   overwrite=args.overwrite)
+                                                   overwrite=args.overwrite, encode_context={"origin": "cli"})
             for result in encode_results:
                 percent = _percent_string(result.staging_size_bytes, result.source_size_bytes)
                 print(
@@ -522,7 +522,15 @@ def _run_review(
     print(f"Review manifest: {manifest_path}")
     _print_manifest_item(item, index)
 
-    encode_result = encode_manifest_items(connection, config, manifest_path, manifest, [index], overwrite=overwrite)[0]
+    encode_result = encode_manifest_items(
+        connection,
+        config,
+        manifest_path,
+        manifest,
+        [index],
+        overwrite=overwrite,
+        encode_context={"origin": "cli"},
+    )[0]
     percent = _percent_string(encode_result.staging_size_bytes, encode_result.source_size_bytes)
     print(
         f"encoded {encode_result.staging_path} crf={encode_result.chosen_crf} "

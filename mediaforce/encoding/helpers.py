@@ -5,6 +5,29 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.type_defs import int_value
 
 
+def _mapped_item_source_path(
+        config: MediaforceConfig,
+        item: dict[str, Any],
+        *,
+        host: dict[str, Any] | None = None,
+) -> Path | None:
+    media_root = str(item.get("media_root") or "").strip()
+    rel_path = str(item.get("rel_path") or "").strip()
+    if not media_root or not rel_path:
+        return None
+    root = config.source_root_map_for_host(host).get(media_root)
+    if root is None:
+        return None
+    return root.parent / Path(rel_path)
+
+
+def _controller_item_source_path(item: dict[str, Any]) -> Path:
+    source_path = str(item.get("source_path") or "").strip()
+    if source_path:
+        return Path(source_path)
+    raise KeyError("source_path")
+
+
 def build_svt_params(video_policy: dict[str, Any]) -> list[str]:
     return [
         "tune=0",
@@ -38,14 +61,31 @@ def resolve_item_source_path(
         host_media_access_for_host: Callable[[dict[str, Any] | None], str],
 ) -> Path:
     if host_media_access_for_host(host) == "stream":
-        return Path(str(item["source_path"]))
-    media_root = str(item.get("media_root") or "").strip()
-    rel_path = str(item.get("rel_path") or "").strip()
-    if media_root and rel_path:
-        root = config.source_root_map_for_host(host).get(media_root)
-        if root is not None:
-            return root.parent / Path(rel_path)
-    return Path(str(item["source_path"]))
+        return _controller_item_source_path(item)
+    mapped_path = _mapped_item_source_path(config, item, host=host)
+    if mapped_path is not None:
+        return mapped_path
+    return _controller_item_source_path(item)
+
+
+def resolve_item_quality_source_path(
+        config: MediaforceConfig,
+        item: dict[str, Any],
+        *,
+        host: dict[str, Any] | None = None,
+        host_media_access_for_host: Callable[[dict[str, Any] | None], str],
+) -> Path:
+    if host_media_access_for_host(host) != "stream":
+        return resolve_item_source_path(
+            config,
+            item,
+            host=host,
+            host_media_access_for_host=host_media_access_for_host,
+        )
+    mapped_path = _mapped_item_source_path(config, item, host=host)
+    if mapped_path is not None:
+        return mapped_path
+    return _controller_item_source_path(item)
 
 
 def resolve_item_staging_path(

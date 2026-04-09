@@ -13,6 +13,7 @@ def search_quality(
         height: int | None = None,
         process_controller: Any = None,
         host: dict[str, Any] | None = None,
+        quality_temp_dir: Path | None = None,
         host_media_access_for_host: Callable[[dict[str, Any] | None], str],
         select_quality_metric: Callable[[str], tuple[str, float]],
         build_svt_params: Callable[[dict[str, Any]], list[str]],
@@ -51,6 +52,7 @@ def search_quality(
                 thorough=bool(video_policy.get("thorough", False)),
                 process_controller=process_controller,
                 host=quality_host,
+                quality_temp_dir=quality_temp_dir,
             )
         except QualitySearchError as exc:
             last_error = exc

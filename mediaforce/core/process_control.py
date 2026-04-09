@@ -1,5 +1,6 @@
 import subprocess
 import threading
+from typing import Mapping
 
 
 class ProcessCancelledError(RuntimeError):
@@ -65,14 +66,15 @@ def run_command(
         process_controller: ManagedProcessController | None = None,
         capture_output: bool = True,
         text: bool = True,
+        env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if process_controller is None:
-        return subprocess.run(cmd, capture_output=capture_output, text=text)
+        return subprocess.run(cmd, capture_output=capture_output, text=text, env=env)
 
     process_controller.throw_if_cancelled()
     stdout_pipe = subprocess.PIPE if capture_output else None
     stderr_pipe = subprocess.PIPE if capture_output else None
-    process = subprocess.Popen(cmd, stdout=stdout_pipe, stderr=stderr_pipe, text=text)
+    process = subprocess.Popen(cmd, stdout=stdout_pipe, stderr=stderr_pipe, text=text, env=env)
     process_controller.attach(process)
     try:
         stdout, stderr = process.communicate()

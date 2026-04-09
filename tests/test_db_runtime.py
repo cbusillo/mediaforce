@@ -16,6 +16,8 @@ from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import encode_queue_state
 from mediaforce.core.type_defs import object_dict
 
+CURRENT_DB_REVISION = "20260403_0004"
+
 
 class DatabaseRuntimeTests(unittest.TestCase):
     def tearDown(self) -> None:
@@ -31,7 +33,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 table_names = inspector.get_table_names()
                 indexes = {str(index_row["name"]) for index_row in inspector.get_indexes("encode_jobs")}
 
-            self.assertEqual(version, "20260401_0002")
+            self.assertEqual(version, CURRENT_DB_REVISION)
             self.assertGreaterEqual(len(table_names), 10)
             self.assertIn("idx_encode_jobs_status_retry_ready", indexes)
 
@@ -71,7 +73,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
 
             self.assertIsNotNone(stored)
             assert stored is not None
-            self.assertEqual(version, "20260401_0002")
+            self.assertEqual(version, CURRENT_DB_REVISION)
             self.assertEqual(stored["prefix"], "tv/show")
             self.assertIn("idx_encode_jobs_status_retry_ready", indexes)
 

@@ -1,6 +1,7 @@
 import json
 from typing import Any
 
+from sqlalchemy import delete
 from sqlalchemy import func
 from sqlalchemy import literal_column
 from sqlalchemy import select
@@ -19,6 +20,9 @@ DEFAULT_SCHEDULER_POLICY = {
     "end_hour": 8,
     "timezone": "local",
 }
+DISPLAY_ENCODE_JOB_KINDS = ("single", "folder")
+RUNNABLE_ENCODE_JOB_KINDS = ("single", "shard")
+ACTIVE_ENCODE_JOB_STATUSES = ("queued", "retry_backoff", "running")
 QUEUED_ENCODE_JOB_STATUSES = ("queued", "retry_backoff")
 RECENT_ENCODE_JOB_STATUSES = ("completed", "failed", "stopped", "needs_attention")
 
@@ -105,16 +109,38 @@ def load_latest_encode_job(connection: DBClient, prefix: str) -> dict[str, Any] 
     row = connection.execute(
         _encode_job_select()
         .where(encode_jobs.c.prefix == prefix)
+        .where(encode_jobs.c.job_kind.in_(DISPLAY_ENCODE_JOB_KINDS))
         .order_by(encode_jobs.c.created_at.desc(), _rowid_column().desc())
         .limit(1)
     ).mappings().fetchone()
     return _hydrate_job(row) if row is not None else None
 
 
+def load_active_encode_job_for_prefix(connection: DBClient, prefix: str) -> dict[str, Any] | None:
+    row = connection.execute(
+        _encode_job_select()
+        .where(encode_jobs.c.prefix == prefix)
+        .where(encode_jobs.c.job_kind.in_(DISPLAY_ENCODE_JOB_KINDS))
+        .where(encode_jobs.c.status.in_(ACTIVE_ENCODE_JOB_STATUSES))
+        .order_by(encode_jobs.c.created_at.desc(), _rowid_column().desc())
+        .limit(1)
+    ).mappings().fetchone()
+    return _hydrate_job(row) if row is not None else None
+
+
+def clear_terminal_encode_jobs_for_prefix(connection: DBClient, prefix: str) -> None:
+    connection.execute(
+        delete(encode_jobs)
+        .where(encode_jobs.c.prefix == prefix)
+        .where(encode_jobs.c.status.in_(RECENT_ENCODE_JOB_STATUSES))
+    )
+
+
 def load_active_encode_job(connection: DBClient) -> dict[str, Any] | None:
     row = connection.execute(
         _encode_job_select()
         .where(encode_jobs.c.status == "running")
+        .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
         .order_by(encode_jobs.c.started_at.desc(), _rowid_column().desc())
         .limit(1)
     ).mappings().fetchone()
@@ -125,6 +151,7 @@ def load_next_queued_job(connection: DBClient) -> dict[str, Any] | None:
     row = connection.execute(
         _encode_job_select()
         .where(encode_jobs.c.status == "queued")
+        .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
         .order_by(encode_jobs.c.created_at.asc(), _rowid_column().asc())
         .limit(1)
     ).mappings().fetchone()
@@ -135,6 +162,7 @@ def queue_position(connection: DBClient, job_id: str) -> tuple[int, int] | None:
     row = connection.execute(
         select(encode_jobs.c.created_at, _rowid_column())
         .where(encode_jobs.c.job_id == job_id)
+        .where(encode_jobs.c.job_kind.in_(DISPLAY_ENCODE_JOB_KINDS))
         .where(encode_jobs.c.status.in_(QUEUED_ENCODE_JOB_STATUSES))
     ).mappings().fetchone()
     if row is None:
@@ -144,36 +172,53 @@ def queue_position(connection: DBClient, job_id: str) -> tuple[int, int] | None:
     position = int(connection.execute(
         select(func.count())
         .select_from(encode_jobs)
+        .where(encode_jobs.c.job_kind.in_(DISPLAY_ENCODE_JOB_KINDS))
         .where(encode_jobs.c.status.in_(QUEUED_ENCODE_JOB_STATUSES))
         .where((encode_jobs.c.created_at < created_at) | ((encode_jobs.c.created_at == created_at) & (_rowid_column() <= rowid)))
     ).scalar_one())
     total = int(connection.execute(
         select(func.count())
         .select_from(encode_jobs)
+        .where(encode_jobs.c.job_kind.in_(DISPLAY_ENCODE_JOB_KINDS))
         .where(encode_jobs.c.status.in_(QUEUED_ENCODE_JOB_STATUSES))
     ).scalar_one())
     return position, total
 
 
-def list_encode_jobs(connection: DBClient, *, statuses: tuple[str, ...], limit: int = 8) -> list[dict[str, Any]]:
+def list_encode_jobs(
+        connection: DBClient,
+        *,
+        statuses: tuple[str, ...],
+        limit: int = 8,
+        job_kinds: tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
+    statement = _encode_job_select().where(encode_jobs.c.status.in_(statuses))
+    if job_kinds is not None:
+        statement = statement.where(encode_jobs.c.job_kind.in_(job_kinds))
+    rows = connection.execute(
+        statement.order_by(encode_jobs.c.created_at.asc(), _rowid_column().asc()).limit(limit)
+    ).mappings().fetchall()
+    return [_hydrate_job(row) for row in rows]
+
+
+def list_child_encode_jobs(connection: DBClient, parent_job_id: str) -> list[dict[str, Any]]:
     rows = connection.execute(
         _encode_job_select()
-        .where(encode_jobs.c.status.in_(statuses))
+        .where(encode_jobs.c.parent_job_id == parent_job_id)
         .order_by(encode_jobs.c.created_at.asc(), _rowid_column().asc())
-        .limit(limit)
     ).mappings().fetchall()
     return [_hydrate_job(row) for row in rows]
 
 
 def summarize_encode_queue(connection: DBClient) -> dict[str, Any]:
-    queued = list_encode_jobs(connection, statuses=QUEUED_ENCODE_JOB_STATUSES)
-    running = list_encode_jobs(connection, statuses=("running",), limit=2)
-    recent = list_encode_jobs(connection, statuses=RECENT_ENCODE_JOB_STATUSES, limit=6)
+    queued = list_encode_jobs(connection, statuses=QUEUED_ENCODE_JOB_STATUSES, job_kinds=DISPLAY_ENCODE_JOB_KINDS)
+    running = list_encode_jobs(connection, statuses=("running",), limit=2, job_kinds=DISPLAY_ENCODE_JOB_KINDS)
+    recent = list_encode_jobs(connection, statuses=RECENT_ENCODE_JOB_STATUSES, limit=6, job_kinds=DISPLAY_ENCODE_JOB_KINDS)
     counts = {
-        "queued": _count_jobs(connection, statuses=QUEUED_ENCODE_JOB_STATUSES),
-        "running": _count_jobs(connection, statuses=("running",)),
-        "retry_backoff": _count_jobs(connection, statuses=("retry_backoff",)),
-        "needs_attention": _count_jobs(connection, statuses=("needs_attention",)),
+        "queued": _count_jobs(connection, statuses=QUEUED_ENCODE_JOB_STATUSES, job_kinds=DISPLAY_ENCODE_JOB_KINDS),
+        "running": _count_jobs(connection, statuses=("running",), job_kinds=DISPLAY_ENCODE_JOB_KINDS),
+        "retry_backoff": _count_jobs(connection, statuses=("retry_backoff",), job_kinds=DISPLAY_ENCODE_JOB_KINDS),
+        "needs_attention": _count_jobs(connection, statuses=("needs_attention",), job_kinds=DISPLAY_ENCODE_JOB_KINDS),
     }
     state = load_queue_state(connection)
     return {
@@ -188,10 +233,11 @@ def summarize_encode_queue(connection: DBClient) -> dict[str, Any]:
     }
 
 
-def _count_jobs(connection: DBClient, *, statuses: tuple[str, ...]) -> int:
-    return int(connection.execute(
-        select(func.count()).select_from(encode_jobs).where(encode_jobs.c.status.in_(statuses))
-    ).scalar_one())
+def _count_jobs(connection: DBClient, *, statuses: tuple[str, ...], job_kinds: tuple[str, ...] | None = None) -> int:
+    statement = select(func.count()).select_from(encode_jobs).where(encode_jobs.c.status.in_(statuses))
+    if job_kinds is not None:
+        statement = statement.where(encode_jobs.c.job_kind.in_(job_kinds))
+    return int(connection.execute(statement).scalar_one())
 
 
 def _encode_job_select() -> Any:
@@ -206,8 +252,15 @@ def _serialize_encode_job(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "job_id": payload["job_id"],
         "prefix": payload["prefix"],
+        "job_kind": str(payload.get("job_kind") or "single"),
+        "parent_job_id": payload.get("parent_job_id"),
         "status": payload["status"],
         "manifest_path": payload["manifest_path"],
+        "manifest_indexes_json": (
+            json.dumps(payload.get("manifest_indexes") or [], separators=(",", ":"))
+            if payload.get("manifest_indexes") is not None
+            else None
+        ),
         "item_count": int_value(payload.get("item_count")),
         "saved_profile_path": payload.get("saved_profile_path"),
         "host_json": json.dumps(payload.get("host") or {}, sort_keys=True),
@@ -239,8 +292,11 @@ def _hydrate_job(row: DBRow) -> dict[str, Any]:
     return {
         "job_id": str(row["job_id"]),
         "prefix": str(row["prefix"]),
+        "job_kind": str(row["job_kind"] or "single"),
+        "parent_job_id": row["parent_job_id"],
         "status": str(row["status"]),
         "manifest_path": str(row["manifest_path"]),
+        "manifest_indexes": json.loads(str(row["manifest_indexes_json"] or "[]")) if row["manifest_indexes_json"] else None,
         "item_count": int(row["item_count"] or 0),
         "saved_profile_path": row["saved_profile_path"],
         "host": json.loads(str(row["host_json"] or "{}")),

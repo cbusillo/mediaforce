@@ -71,9 +71,7 @@ def run_encode_command(
         "ssh",
         *ssh_client_options(),
         ssh_host,
-        "sh",
-        "-lc",
-        " && ".join(remote_script_parts),
+        f"sh -lc {shlex.quote(' && '.join(remote_script_parts))}",
     ]
     return run_tracked_process_fn(
         ssh_cmd,
@@ -110,7 +108,7 @@ def run_streamed_remote_encode_command(
         "ssh",
         *ssh_client_options(),
         ssh_host,
-        *remote_ffmpeg_cmd,
+        shlex.join(remote_ffmpeg_cmd),
     ]
 
     process_controller.throw_if_cancelled() if process_controller is not None else None

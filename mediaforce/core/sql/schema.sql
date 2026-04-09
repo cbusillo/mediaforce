@@ -109,8 +109,11 @@ CREATE TABLE IF NOT EXISTS encode_jobs
 (
     job_id              TEXT PRIMARY KEY,
     prefix              TEXT    NOT NULL,
+    job_kind            TEXT    NOT NULL DEFAULT 'single',
+    parent_job_id       TEXT,
     status              TEXT    NOT NULL,
     manifest_path       TEXT    NOT NULL,
+    manifest_indexes_json TEXT,
     item_count          INTEGER NOT NULL DEFAULT 0,
     saved_profile_path  TEXT,
     host_json           TEXT    NOT NULL,
@@ -142,6 +145,12 @@ CREATE INDEX IF NOT EXISTS idx_encode_jobs_status_created
 
 CREATE INDEX IF NOT EXISTS idx_encode_jobs_prefix_created
     ON encode_jobs (prefix, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_encode_jobs_kind_status_created
+    ON encode_jobs (job_kind, status, created_at ASC);
+
+CREATE INDEX IF NOT EXISTS idx_encode_jobs_parent_created
+    ON encode_jobs (parent_job_id, created_at ASC);
 
 CREATE TABLE IF NOT EXISTS tuning_sessions
 (
@@ -188,11 +197,28 @@ CREATE TABLE IF NOT EXISTS staged_artifacts
     manifest_run_id       TEXT,
     manifest_path         TEXT,
     item_index            INTEGER,
+    encode_origin         TEXT,
+    encode_job_id         TEXT,
+    encode_worker_id      TEXT,
+    encode_host_key       TEXT,
+    encode_host_label     TEXT,
+    encode_host_mode      TEXT,
+    encode_media_access   TEXT,
+    source_path           TEXT,
+    source_rel_path       TEXT,
+    source_size_bytes     INTEGER,
+    source_duration_seconds REAL,
+    source_video_codec    TEXT,
     source_fingerprint    TEXT,
+    encode_started_at     TEXT,
+    encode_completed_at   TEXT,
+    encode_duration_seconds REAL,
     staging_path          TEXT NOT NULL,
     staging_size_bytes    INTEGER,
     staging_mtime_ns      INTEGER,
     staging_fingerprint   TEXT,
+    bytes_saved           INTEGER,
+    size_ratio            REAL,
     chosen_crf            REAL,
     quality_metric        TEXT,
     quality_target        REAL,

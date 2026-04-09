@@ -28,18 +28,18 @@ default_grain = 6
 encoder = "libsvtav1"
 grain_denoise = 0
 max_crf = 38
-max_encoded_percent = 75
+max_encoded_percent = 10
 min_crf = 18
-min_target_vmaf = 93.0
+min_target_vmaf = 83.0
 min_target_xpsnr = 35.0
 pixel_format = "yuv420p10le"
 preset = 4
-quality_metric = "auto"
+quality_metric = "vmaf"
 sample_duration = "20s"
 sample_every = "8m"
 target_relax_step_vmaf = 0.5
 target_relax_step_xpsnr = 1.0
-target_vmaf = 94.5
+target_vmaf = 85.0
 target_xpsnr = 40.0
 thorough = true
 
@@ -50,6 +50,12 @@ keep_languages = ["eng"]
 stereo_opus_bitrate = "128k"
 surround_5_1_opus_bitrate = "224k"
 surround_7_1_opus_bitrate = "320k"
+
+[overrides.subtitle]
+default_mode = "first_english"
+keep_forced = true
+keep_languages = ["eng"]
+prefer_text = true
 
 [overrides.planning]
 bucket_thresholds = { priority_encode = 70, review_encode = 35 }
@@ -63,7 +69,6 @@ multi_audio_bonus = 6
 size_weight = 10
 small_file_gib = 1.5
 small_file_penalty = -8
-
 [[overrides]]
 path_prefix = "tv/House/Season 2"
 note = "Saved from the calibration bench."

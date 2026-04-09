@@ -19,7 +19,9 @@ def purge_transient_artifacts(config: MediaforceConfig, *, force: bool = False) 
 
     cutoff = time.time() - (retention_days * SECONDS_PER_DAY)
     _prune_children(config.paths.review_dir, cutoff)
-    _prune_children(config.staging_root / "_calibration", cutoff)
+    for staging_root in _staging_roots_for_cleanup(config):
+        _prune_children(staging_root / "_calibration", cutoff)
+        _prune_matching_directories(staging_root, ".ab-av1-*", cutoff)
     _prune_matching_files(config.paths.web_state_dir, "calibration-*.json", cutoff)
     _prune_matching_files(config.paths.web_state_dir, "*.job.json", cutoff)
     _write_cleanup_stamp(config)
@@ -95,6 +97,35 @@ def _prune_matching_files(root: Path, pattern: str, cutoff: float) -> None:
             path.unlink(missing_ok=True)
         except OSError:
             continue
+
+
+def _prune_matching_directories(root: Path, pattern: str, cutoff: float) -> None:
+    if not root.exists():
+        return
+    try:
+        paths = list(root.glob(pattern))
+    except OSError:
+        return
+    for path in paths:
+        if _mtime(path) >= cutoff:
+            continue
+        if not path.is_dir():
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _staging_roots_for_cleanup(config: MediaforceConfig) -> list[Path]:
+    roots: list[Path] = []
+
+    def add_root(path: Path) -> None:
+        if any(existing == path for existing in roots):
+            return
+        roots.append(path)
+
+    add_root(config.staging_root)
+    for host in config.remote_hosts:
+        add_root(config.staging_root_for_host(host))
+    return roots
 
 
 def _mtime(path: Path) -> float:

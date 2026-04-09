@@ -10,6 +10,7 @@ from mediaforce.encoding.commands import build_ffmpeg_command as _build_ffmpeg_c
 from mediaforce.encoding.helpers import _build_streaming_remote_ffmpeg_command as _build_streaming_remote_ffmpeg_command_impl, \
     _streaming_output_args_for_path as _streaming_output_args_for_path_impl, \
     build_svt_params as build_svt_params_impl, effective_video_preset as effective_video_preset_impl, \
+    resolve_item_quality_source_path as resolve_item_quality_source_path_impl, \
     resolve_item_source_path as resolve_item_source_path_impl, resolve_item_staging_path as resolve_item_staging_path_impl
 from mediaforce.encoding.manifest import describe_item_plan as describe_item_plan_impl, \
     encode_manifest_items as encode_manifest_items_impl, encode_one_item as encode_one_item_impl
@@ -67,6 +68,7 @@ def encode_manifest_items(
         process_controller: ManagedProcessController | None = None,
         host: dict[str, Any] | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        encode_context: dict[str, Any] | None = None,
 ) -> list[EncodeResult]:
     return encode_manifest_items_impl(
         connection,
@@ -78,6 +80,7 @@ def encode_manifest_items(
         process_controller=process_controller,
         host=host,
         progress_callback=progress_callback,
+        encode_context=encode_context,
         encode_one_item_fn=encode_one_item,
     )
 
@@ -143,6 +146,27 @@ def resolve_item_staging_path(
     )
 
 
+def resolve_item_quality_source_path(
+        config: MediaforceConfig,
+        item: dict[str, Any],
+        *,
+        host: dict[str, Any] | None = None,
+) -> Path:
+    if host_media_access_for_host(host) != "stream":
+        return resolve_item_source_path(config, item, host=host)
+    try:
+        return resolve_item_quality_source_path_impl(
+            config,
+            item,
+            host=host,
+            host_media_access_for_host=host_media_access_for_host,
+        )
+    except KeyError as exc:
+        if exc.args != ("source_path",):
+            raise
+        return resolve_item_source_path(config, item, host=host)
+
+
 def encode_one_item(
         connection: DBClient,
         config: MediaforceConfig,
@@ -155,6 +179,7 @@ def encode_one_item(
         process_controller: ManagedProcessController | None = None,
         host: dict[str, Any] | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        encode_context: dict[str, Any] | None = None,
 ) -> EncodeResult:
     return encode_one_item_impl(
         connection,
@@ -167,7 +192,9 @@ def encode_one_item(
         process_controller=process_controller,
         host=host,
         progress_callback=progress_callback,
+        encode_context=encode_context,
         resolve_item_source_path=resolve_item_source_path,
+        resolve_item_quality_source_path=resolve_item_quality_source_path,
         resolve_item_staging_path=resolve_item_staging_path,
         effective_video_preset=effective_video_preset,
         search_quality=_search_quality,
@@ -192,6 +219,7 @@ def search_quality_for_source(
         height: int | None = None,
         process_controller: ManagedProcessController | None = None,
         host: dict[str, Any] | None = None,
+        quality_temp_dir: Path | None = None,
 ) -> QualitySearchResult:
     return _search_quality(
         source_path,
@@ -201,6 +229,7 @@ def search_quality_for_source(
         height=height,
         process_controller=process_controller,
         host=host,
+        quality_temp_dir=quality_temp_dir,
     )
 
 
@@ -268,6 +297,7 @@ def _search_quality(
         height: int | None = None,
         process_controller: ManagedProcessController | None = None,
         host: dict[str, Any] | None = None,
+        quality_temp_dir: Path | None = None,
 ) -> QualitySearchResult:
     return _search_quality_impl(
         source_path,
@@ -277,6 +307,7 @@ def _search_quality(
         height=height,
         process_controller=process_controller,
         host=host,
+        quality_temp_dir=quality_temp_dir,
         host_media_access_for_host=host_media_access_for_host,
         select_quality_metric=select_quality_metric,
         build_svt_params=build_svt_params,
