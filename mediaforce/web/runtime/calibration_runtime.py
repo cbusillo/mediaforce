@@ -239,6 +239,8 @@ def run_sampled_calibration(
 ) -> tuple[dict[str, Any], Path | None]:
     _ = prefix
     source_path = Path(sample_item["source_path"])
+    quality_host = _quality_host_data(config, host_data)
+    quality_temp_dir = _quality_temp_dir_for_host(config, quality_host)
     video_policy = object_dict(policy.get("video"))
     width = int_value(sample_item.get("width")) or None
     height = int_value(sample_item.get("height")) or None
@@ -250,7 +252,8 @@ def run_sampled_calibration(
         width=width,
         height=height,
         process_controller=process_controller,
-        host=host_data,
+        host=quality_host,
+        quality_temp_dir=quality_temp_dir,
     )
     sample_result = deps.run_sample_encode(
         source_path,
@@ -263,7 +266,8 @@ def run_sampled_calibration(
         sample_duration=str(video_policy["sample_duration"]),
         svt_params=deps.build_svt_params(video_policy),
         process_controller=process_controller,
-        host=host_data,
+        host=quality_host,
+        quality_temp_dir=quality_temp_dir,
     )
 
     timestamps = deps.recommend_review_timestamps(
@@ -361,6 +365,51 @@ def run_sampled_calibration(
     return payload, None
 
 
+def _configured_host_record(config: MediaforceConfig, host_data: dict[str, Any]) -> dict[str, Any] | None:
+    host_key = str(host_data.get("key") or host_data.get("host") or host_data.get("label") or "").strip()
+    if not host_key:
+        return None
+    for host in config.remote_hosts:
+        ssh_host = str(host.get("host") or "").strip()
+        label = str(host.get("label") or ssh_host or "remote").strip()
+        if host_key in {ssh_host, label}:
+            return host
+    return None
+
+
+def _quality_host_data(config: MediaforceConfig, host_data: dict[str, Any]) -> dict[str, Any]:
+    configured_host = _configured_host_record(config, host_data)
+    if configured_host is None:
+        return host_data
+
+    media_access = str(host_data.get("media_access") or configured_host.get("media_access") or "").strip()
+    merged = {
+        **configured_host,
+        **host_data,
+        "media_access": media_access or configured_host.get("media_access") or "",
+    }
+    if str(merged.get("media_access") or "").strip().lower() == "stream":
+        merged["mode"] = "local"
+    return merged
+
+
+def _quality_temp_dir_for_host(config: MediaforceConfig, host_data: dict[str, Any]) -> Path:
+    if str(host_data.get("media_access") or "").strip().lower() == "stream":
+        return config.staging_root
+
+    staging_root = str(host_data.get("staging_root") or "").strip()
+    if staging_root:
+        return Path(staging_root).expanduser()
+
+    configured_host = _configured_host_record(config, host_data)
+    if configured_host is not None:
+        if str(configured_host.get("media_access") or "").strip().lower() == "stream":
+            return config.staging_root
+        return config.staging_root_for_host(configured_host)
+
+    return config.staging_root_for_host(host_data)
+
+
 def run_full_calibration(
         *,
         connection: DBClient,
@@ -402,6 +451,7 @@ def run_full_calibration(
         [0],
         overwrite=True,
         process_controller=process_controller,
+        encode_context={"origin": "calibration"},
     )[0]
     validation_result = deps.validate_manifest_items(connection, config, manifest, [0])[0]
     output_dir = config.paths.review_dir / calibration_run_id

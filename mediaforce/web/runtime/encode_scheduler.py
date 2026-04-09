@@ -32,7 +32,10 @@ def encode_queue_schedule_profiles(config: MediaforceConfig, deps: EncodeSchedul
     always = deps.normalize_encode_queue_scheduler({"mode": "anytime", "timezone": "host_local"})
     always["key"] = deps.always_schedule_profile
     always["label"] = "Always"
-    profiles = {deps.always_schedule_profile: always}
+    never = deps.normalize_encode_queue_scheduler({"mode": "never", "timezone": "host_local"})
+    never["key"] = "never"
+    never["label"] = "Never"
+    profiles = {deps.always_schedule_profile: always, "never": never}
     raw_profiles = object_list(object_dict(object_dict(config.raw).get("encode_queue")).get("schedule_profiles"))
     if not raw_profiles:
         return profiles
@@ -41,7 +44,7 @@ def encode_queue_schedule_profiles(config: MediaforceConfig, deps: EncodeSchedul
         if not profile:
             continue
         key = deps.canonical_schedule_profile_key(str(profile.get("key") or profile.get("name") or ""))
-        if not key or key == deps.always_schedule_profile:
+        if not key or key in {deps.always_schedule_profile, "never"}:
             continue
         normalized = deps.normalize_encode_queue_scheduler(profile)
         normalized["key"] = key
@@ -68,8 +71,11 @@ def schedule_profile_policy_for_host(
 
 
 def encode_queue_scheduler_summary(policy: dict[str, Any]) -> str:
-    if str(policy.get("mode") or "anytime") == "night":
+    mode = str(policy.get("mode") or "anytime")
+    if mode == "night":
         return f"window {int(policy['start_hour']):02d}:00-{int(policy['end_hour']):02d}:00 in host local time"
+    if mode == "never":
+        return "disabled"
     return "runs anytime"
 
 
@@ -98,7 +104,10 @@ def scheduler_allows_encode_run(
         now: datetime | None = None,
         host_payload: dict[str, Any] | None = None,
 ) -> bool:
-    if bypass_schedule or str(policy.get("mode") or "anytime") == "anytime":
+    mode = str(policy.get("mode") or "anytime")
+    if mode == "never":
+        return False
+    if bypass_schedule or mode == "anytime":
         return True
     current = datetime.now(UTC) if now is None else now
     if current.tzinfo is None:
@@ -151,6 +160,15 @@ def _float_or_none(value: object | None) -> float | None:
         return None
 
 
+def _telemetry_speed_for_eta(job: dict[str, Any]) -> float:
+    progress = object_dict(job.get("progress"))
+    eta_speed = _float_or_none(progress.get("eta_speed"))
+    if eta_speed is not None and eta_speed > 0:
+        return eta_speed
+    speed = _float_or_none(progress.get("speed"))
+    return speed if speed is not None and speed > 0 else 0.0
+
+
 def decorate_encode_job_telemetry(
         job: dict[str, Any],
         *,
@@ -176,6 +194,8 @@ def decorate_encode_job_telemetry(
     fps = _float_or_none(progress.get("fps"))
     speed = _float_or_none(progress.get("speed"))
     eta_seconds = _float_or_none(progress.get("eta_seconds"))
+    progress_state = str(progress.get("progress_state") or "").strip().lower()
+    phase_label = str(progress.get("phase_label") or "").strip()
     speed_value = speed if speed not in {None, 0, 0.0} else None
     if eta_seconds is None and speed_value is not None:
         eta_seconds = remaining_duration_seconds / speed_value
@@ -192,23 +212,31 @@ def decorate_encode_job_telemetry(
         "eta_copy": format_eta_seconds(eta_seconds),
     }
     summary_parts: list[str] = []
-    if percent_complete is not None:
+    include_numeric_summary = progress_state not in {"quality_search", "starting"}
+    if percent_complete is not None and include_numeric_summary:
         summary_parts.append(f"{percent_complete:.0f}%")
-    if speed_value is not None:
+    if speed_value is not None and include_numeric_summary:
         summary_parts.append(f"{speed:.2f}x")
-    if fps not in {None, 0, 0.0}:
+    if fps not in {None, 0, 0.0} and include_numeric_summary:
         summary_parts.append(f"{fps:.1f} fps")
     eta_copy = object_dict(decorated["progress"]).get("eta_copy")
-    if eta_copy:
+    if eta_copy and include_numeric_summary:
         summary_parts.append(f"Est. ETA {eta_copy}")
-    decorated["telemetry_summary"] = " · ".join(summary_parts)
+    if summary_parts:
+        decorated["telemetry_summary"] = " · ".join(summary_parts)
+    elif progress_state == "quality_search":
+        decorated["telemetry_summary"] = phase_label or "Searching quality"
+    elif progress_state == "starting":
+        decorated["telemetry_summary"] = phase_label or "Starting encode"
+    else:
+        decorated["telemetry_summary"] = phase_label
     return decorated
 
 
 def encode_queue_telemetry(encode_queue: dict[str, Any]) -> dict[str, Any]:
     running_jobs = [object_dict(job) for job in object_list(encode_queue.get("running"))]
     queued_jobs = [object_dict(job) for job in object_list(encode_queue.get("queued"))]
-    aggregate_speed = sum(float_value(object_dict(job.get("progress")).get("speed")) for job in running_jobs)
+    aggregate_speed = sum(_telemetry_speed_for_eta(job) for job in running_jobs)
     total_remaining_duration_seconds = sum(
         float_value(object_dict(job.get("progress")).get("remaining_duration_seconds"))
         for job in running_jobs
@@ -240,6 +268,13 @@ def decorate_encode_job_for_scheduler(
     bypass_schedule = bool(decorated.get("bypass_schedule"))
     attempt_count = int_value(decorated.get("attempt_count"))
     waiting_reason = str(decorated.get("waiting_reason") or "").strip()
+    progress = object_dict(decorated.get("progress"))
+    has_started = bool(str(decorated.get("started_at") or "").strip())
+    if not has_started:
+        has_started = bool(str(progress.get("progress_state") or "").strip()) or (
+            float_value(progress.get("overall_completed_duration_seconds")) > 0.0
+        )
+    effective_attempt_count = attempt_count if attempt_count > 0 else (1 if has_started else 0)
     schedule_waiting = (
         status == "queued"
         and not scheduler_allows_encode_run(
@@ -252,7 +287,9 @@ def decorate_encode_job_for_scheduler(
     decorated["schedule_waiting"] = schedule_waiting
     decorated["scheduler_summary"] = str(policy["summary"])
     decorated["attempt_summary"] = (
-        f"attempt {attempt_count} of {deps.encode_job_max_attempts}" if attempt_count else "not started yet"
+        f"attempt {effective_attempt_count} of {deps.encode_job_max_attempts}"
+        if effective_attempt_count
+        else "not started yet"
     )
     if status == "running":
         decorated["scheduler_status_copy"] = "running now"

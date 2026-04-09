@@ -15,14 +15,19 @@
 	</div>
 
 	<nav class="nav-row" aria-label="Primary">
-		<a
-			class:active={page.url.pathname === '/'}
-			href={resolve('/')}
-			aria-current={page.url.pathname === '/' ? 'page' : undefined}>Folders</a
-		>
-		<a
-			class:active={page.url.pathname === '/settings'}
-			href={resolve('/settings')}
+			<a
+				class:active={page.url.pathname === '/'}
+				href={resolve('/')}
+				aria-current={page.url.pathname === '/' ? 'page' : undefined}>Folders</a
+			>
+			<a
+				class:active={page.url.pathname === '/ops'}
+				href={resolve('/ops')}
+				aria-current={page.url.pathname === '/ops' ? 'page' : undefined}>Ops</a
+			>
+			<a
+				class:active={page.url.pathname === '/settings'}
+				href={resolve('/settings')}
 			aria-current={page.url.pathname === '/settings' ? 'page' : undefined}>Settings</a
 		>
 	</nav>
@@ -34,8 +39,14 @@
 		grid-template-columns: minmax(0, 1fr) auto;
 		gap: var(--space-4);
 		align-items: center;
+		position: sticky;
+		top: 0.75rem;
+		z-index: 10;
 		box-shadow: var(--shadow-md);
 		backdrop-filter: blur(18px);
+		background:
+			linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(255, 251, 243, 0.8)),
+			radial-gradient(circle at top left, rgba(15, 118, 110, 0.08), transparent 28%);
 	}
 
 	.brand-block,
@@ -74,6 +85,10 @@
 		color: var(--ink);
 	}
 
+	.brand-link:hover .brand-name {
+		color: var(--accent-deep);
+	}
+
 	.nav-row {
 		gap: 0.65rem;
 		justify-content: flex-end;
@@ -92,6 +107,7 @@
 		color: var(--ink-muted);
 		font-size: 0.94rem;
 		font-weight: 700;
+		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
 		transition:
 			transform 150ms ease,
 			border-color 150ms ease,
@@ -105,11 +121,15 @@
 		border-color: rgba(15, 118, 110, 0.2);
 		background: rgba(15, 118, 110, 0.11);
 		color: var(--accent-deep);
+		box-shadow:
+			inset 0 1px 0 rgba(255, 255, 255, 0.66),
+			0 10px 22px rgba(15, 118, 110, 0.08);
 	}
 
 	@media (max-width: 860px) {
 		:global(.masthead) {
 			grid-template-columns: 1fr;
+			top: 0.5rem;
 		}
 
 		.nav-row {

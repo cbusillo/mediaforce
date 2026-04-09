@@ -10,7 +10,7 @@
 	.page-shell {
 		width: var(--shell-width);
 		margin: 0 auto;
-		padding: 1.1rem 0 4rem;
+		padding: 1.25rem 0 4.5rem;
 		display: grid;
 		gap: var(--space-4);
 	}

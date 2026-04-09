@@ -18,6 +18,7 @@
 		draftFromSettings,
 		hasPrimaryHostAction,
 		hostActionKey,
+		primaryHostAction,
 		primaryHostActionHelp,
 		primaryHostActionLabel,
 		removeAtIndex,
@@ -46,12 +47,17 @@
 	let transcodeRoot = $state('');
 	let isSaving = $state(false);
 	let isRefreshingHosts = $state(false);
+	let isClearingArchive = $state(false);
 	let hostActionState = $state<Record<string, HostActionState>>({});
 
 	const initialSettingsDraft = $derived.by(() => draftFromSettings(settings));
 	const currentSettingsDraft = $derived.by(() => ({
 		libraries: libraries.map((library) => ({ ...library })),
-		remote_hosts: remoteHosts.map((host) => ({ ...host, capabilities: [...host.capabilities] })),
+		remote_hosts: remoteHosts.map((host) => ({
+			...host,
+			capabilities: [...host.capabilities],
+			allowed_libraries: [...host.allowed_libraries]
+		})),
 		transcode_root: transcodeRoot,
 		schedule_profiles: scheduleProfiles.map((profile) => ({ ...profile }))
 	}));
@@ -150,6 +156,38 @@
 		}
 	}
 
+	async function clearArchiveCleanup() {
+		const targetArchiveRoot = `${transcodeRoot.trim().replace(/\/$/, '')}/_replaced`;
+		const usingDraftArchiveRoot = transcodeRoot.trim() !== settings.transcode_root.trim();
+		const cleanupCount = usingDraftArchiveRoot ? null : settings.archive_cleanup.file_count;
+		if (
+			!transcodeRoot.trim() ||
+			!window.confirm(
+				cleanupCount != null
+					? `Remove ${cleanupCount} archived original file${cleanupCount === 1 ? '' : 's'} from ${targetArchiveRoot}? This deletes rollback copies and cannot be undone.`
+					: `Remove archived original files from ${targetArchiveRoot}? This uses the current draft transcode root and cannot be undone.`
+			)
+		) {
+			return;
+		}
+
+		isClearingArchive = true;
+		try {
+			const response = await postJson<{ message: string }>('/api/archive-cleanup/clear', {
+				transcode_root: transcodeRoot
+			});
+			toasts.success('Archive cleanup finished', response.message);
+			await invalidateAll();
+		} catch (error) {
+			toasts.error(
+				'Archive cleanup failed',
+				error instanceof Error ? error.message : 'Unexpected archive cleanup error'
+			);
+		} finally {
+			isClearingArchive = false;
+		}
+	}
+
 	function getHostActionState(hostKey: string) {
 		return hostActionState[hostKey] ?? defaultHostActionState();
 	}
@@ -209,6 +247,29 @@
 		}
 	}
 
+	async function startHost(hostKey: string) {
+		patchHostActionState(hostKey, { preparing: true });
+		try {
+			const response = await postJson<{ ok: boolean; message: string; kind?: string }>(
+				'/api/hosts/start',
+				{ host_key: hostKey }
+			);
+			if (response.ok) {
+				toasts.success('Host start finished', response.message);
+			} else {
+				toasts.error('Host start failed', response.message);
+			}
+			await invalidateAll();
+		} catch (error) {
+			toasts.error(
+				'Host start failed',
+				error instanceof Error ? error.message : 'Unexpected host start error'
+			);
+		} finally {
+			patchHostActionState(hostKey, { preparing: false });
+		}
+	}
+
 	async function resetHostTrust(hostKey: string) {
 		patchHostActionState(hostKey, { resettingTrust: true });
 		try {
@@ -251,6 +312,7 @@
 	{getHostActionState}
 	{updateHostActionPassword}
 	{revealHostActionPassword}
+	{primaryHostAction}
 	{primaryHostActionLabel}
 	{primaryHostActionHelp}
 	{hasPrimaryHostAction}
@@ -265,5 +327,8 @@
 	{saveSettings}
 	{refreshHostStatuses}
 	{prepareHost}
+	{startHost}
 	{resetHostTrust}
+	{isClearingArchive}
+	{clearArchiveCleanup}
 />

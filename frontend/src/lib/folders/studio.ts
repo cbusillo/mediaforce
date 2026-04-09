@@ -251,6 +251,7 @@ export type ReviewGate = {
 	message?: string;
 	status?: string;
 	accepted_at?: string;
+	next_action_label?: string;
 };
 export type BreadcrumbHref = '/' | `/folders/${string}`;
 export type BreadcrumbItem = { label: string; href: BreadcrumbHref | null };
@@ -308,6 +309,10 @@ export type SampleHostCard = {
 	detail: string;
 	available: boolean;
 	runtime: HostRuntime | null;
+	searchSummary?: {
+		label: string;
+		detail: string;
+	} | null;
 	preferred: boolean;
 };
 
@@ -691,22 +696,32 @@ export function compactScheduleCopy(runtime: HostRuntime | null): string | null 
 	if (!runtime.schedule_profile_label || runtime.schedule_profile_label === 'Always') {
 		return 'Always';
 	}
-	return runtime.schedule_detail
-		.replace(/^window\s+/i, '')
-		.replace(/\s+in host local time$/i, ' local time');
+	const detail = runtime.schedule_detail.trim();
+	const rangeMatch = detail.match(/(\d{2}:\d{2}).*?(\d{2}:\d{2})(.*)$/i);
+	if (rangeMatch) {
+		const suffix = String(rangeMatch[3] ?? '').trim();
+		if (!suffix) {
+			return `Window ${rangeMatch[1]}-${rangeMatch[2]}`;
+		}
+		if (/^in\s+host local time$/i.test(suffix)) {
+			return `Window ${rangeMatch[1]}-${rangeMatch[2]} local`;
+		}
+		return `Window ${rangeMatch[1]}-${rangeMatch[2]} ${suffix}`;
+	}
+	return detail.replace(/^window\s+/i, '');
 }
 
 export function hostCapacityCopy(runtime: HostRuntime | null): string | null {
 	if (!runtime) return null;
 	const laneLabel = `lane${runtime.max_parallel_encodes === 1 ? '' : 's'}`;
 	if (runtime.active_encode_count > 0) {
-		return `${runtime.active_encode_count} of ${runtime.max_parallel_encodes} ${laneLabel} running`;
+		return `${runtime.active_encode_count}/${runtime.max_parallel_encodes} ${laneLabel} running`;
 	}
 	if (runtime.queue_active) {
-		return `${runtime.max_parallel_encodes} ${laneLabel} available`;
+		return `${runtime.max_parallel_encodes} ${laneLabel} free`;
 	}
 	if (runtime.schedule_open === false) {
-		return `${runtime.max_parallel_encodes} ${laneLabel} waiting on schedule`;
+		return `${runtime.max_parallel_encodes} ${laneLabel} scheduled`;
 	}
 	if (runtime.active_reason === 'parallel encode slots are full') {
 		return `${runtime.max_parallel_encodes} ${laneLabel} busy`;
@@ -725,6 +740,9 @@ export function encodeQueueSummaryCopy(summary: string | undefined): string {
 	const trimmed = String(summary ?? '').trim();
 	if (!trimmed || trimmed.startsWith('0 running · 0 queued')) {
 		return 'Encode queue: idle';
+	}
+	if (/waiting for a host schedule window/i.test(trimmed)) {
+		return `Encode queue: ${trimmed.replace(/\s*·\s*waiting for a host schedule window/i, ' · next worker window')}`;
 	}
 	return `Encode queue: ${trimmed}`;
 }

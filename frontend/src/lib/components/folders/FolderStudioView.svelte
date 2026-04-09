@@ -79,6 +79,7 @@
 	} from '$lib/folders/studio';
 	import { folderLibraryLabel } from '$lib/folder-display';
 	import { formatGiB, formatTimestamp, titleCase } from '$lib/format';
+	import { folderAwareQualitySearchSummary } from '$lib/hosts/runtime';
 	import { toasts } from '$lib/stores/toasts';
 
 	let autoRefreshTimer: number | null = null;
@@ -189,9 +190,17 @@
 	const hasCalibration = $derived(Boolean(folder.calibration));
 	const reviewGate = $derived((folder.review_gate as ReviewGate | undefined) ?? {});
 	const reviewGateStatus = $derived(String(reviewGate.status ?? 'missing_sample'));
-	const approvalButtonLabel = $derived.by(() =>
-		reviewGateStatus === 'accepted' ? 'Approved Policy Saved' : 'Approve Draft + Save Policy'
+	const folderStatusCounts = $derived(
+		(folder.summary?.statuses as Record<string, number> | undefined) ?? {}
 	);
+	const encodedOutputCount = $derived(Number(folderStatusCounts.encoded ?? 0));
+	const validatedOutputCount = $derived(Number(folderStatusCounts.validated ?? 0));
+	const promotedOutputCount = $derived(Number(folderStatusCounts.promoted ?? 0));
+	const stagedOutputCount = $derived(encodedOutputCount + validatedOutputCount);
+	const approvalButtonLabel = $derived.by(() =>
+		reviewGateStatus === 'accepted' ? 'Draft already approved' : 'Approve Draft + Save Policy'
+	);
+	const reviewGateNextActionLabel = $derived(String(reviewGate.next_action_label ?? '').trim());
 	const queueGateLabel = $derived.by(() => {
 		if (reviewGateStatus === 'needs_approval') return 'Needs approval';
 		if (reviewGateStatus === 'missing_review_media') return 'Review clips missing';
@@ -369,7 +378,7 @@
 	const currentThreadSession = $derived.by(() => calibrationThreadSessions.at(-1) ?? null);
 	const calibrationThreadCountLabel = $derived.by(() => {
 		const count = calibrationThreadSessions.length;
-		return `${count} ${count === 1 ? 'exchange' : 'exchanges'}`;
+		return `${count} ${count === 1 ? 'turn' : 'turns'}`;
 	});
 	const hasClearableTuningState = $derived(
 		Boolean(
@@ -381,19 +390,25 @@
 		)
 	);
 	const sampleSetupHeading = $derived.by(() =>
-		hasCalibration ? 'Continue the calibration' : 'Start the sample'
+		reviewGateStatus === 'accepted'
+			? 'Revise the approved draft'
+			: hasCalibration
+				? 'Continue the calibration'
+				: 'Start the sample'
 	);
-	const noteFieldLabel = $derived.by(() =>
-		hasCalibration
-			? 'What should change next or what did you notice?'
-			: 'Optional note for this sample'
-	);
+	const sampleSetupLede = $derived.by(() => {
+		if (reviewGateStatus === 'accepted') {
+			return 'The current draft is already saved for queueing. Keep tuning here only if you want to replace it with a newer draft.';
+		}
+		return 'Choose the host, steer the bench, and keep the latest diagnosis beside the controls instead of buried below them.';
+	});
+	const noteFieldLabel = $derived.by(() => (hasCalibration ? 'Note for bench' : 'Optional note'));
 	const noteFieldLede = $derived.by(() =>
 		hasCalibration
 			? calibration.review_media_ready
-				? 'Talk about what you saw or heard in the review clips, or describe the scene, artifact, or size tradeoff you want adjusted next.'
-				: 'Describe the artifact, scene type, or size tradeoff you want adjusted on the next pass.'
-			: 'Ask for a literal experiment or call out the artifact you want protected.'
+				? 'Describe what you noticed in the clips and what should change next.'
+				: 'Describe the artifact, scene type, or size tradeoff you want adjusted next.'
+			: 'Ask for a literal experiment or name the artifact you want protected.'
 	);
 	const notePlaceholder = $derived.by(() =>
 		hasCalibration
@@ -406,7 +421,7 @@
 		if (!hasCalibration || !calibration.review_media_ready) {
 			return null;
 		}
-		return 'The bench can now use the current review deck as context for this thread, so tell it what you noticed in the source-versus-draft clips, including video artifacts or audio tradeoffs.';
+		return 'The bench can use the current review deck as context, so reference anything you saw or heard in the source-versus-draft clips.';
 	});
 	const runVerdictOutcomeCopy = $derived.by(() => {
 		switch (String(runVerdict.outcome ?? '')) {
@@ -450,6 +465,9 @@
 	const selectedHostDetail = $derived(String(selectedHostOption?.detail ?? '').trim());
 	const selectedHostScheduleCopy = $derived(compactScheduleCopy(selectedHostRuntime));
 	const selectedHostCapacityCopy = $derived(hostCapacityCopy(selectedHostRuntime));
+	const selectedHostSearchSummary = $derived(
+		folderAwareQualitySearchSummary(selectedHostRuntime, folder.prefix)
+	);
 	const canRunSample = $derived(selectedHostOption?.available === true);
 	const sampleRunActive = $derived(
 		status.calibration_status === 'queued' || status.calibration_status === 'running'
@@ -519,6 +537,9 @@
 		}
 		return reviewMediaStatusCopy;
 	});
+	const reviewGateEyebrow = $derived.by(() =>
+		reviewGateStatus === 'accepted' ? '2. Approval complete' : '2. Approval gate'
+	);
 	const calibrationFailureNoticeId = $derived(`calibration-failure:${folder.prefix}`);
 	const pendingProposalHostKey = $derived(String(pendingProposal?.host?.key ?? '').trim());
 	const pendingProposalTrace = $derived(
@@ -571,28 +592,62 @@
 		if (pendingProposal) return 'Ask bench again';
 		return 'Ask bench first';
 	});
-	const confirmButtonLabel = $derived.by(() =>
-		selectedHostLabel ? `Run this sample on ${selectedHostLabel}` : 'Run this sample'
+	const confirmButtonLabel = $derived.by(() => {
+		if (!pendingProposal) return 'Run sample after bench draft';
+		if (pendingProposalNeedsRefresh) return 'Run sample after draft refresh';
+		if (!pendingProposalCanQueue) return 'Run sample after draft fix';
+		return selectedHostLabel ? `Run this sample on ${selectedHostLabel}` : 'Run this sample';
+	});
+	const canRequestBenchDraft = $derived(
+		canRunSample && !sampleRunActive && actionState !== 'preview'
 	);
 	const sampleActionSupportCopy = $derived.by(() => {
 		if (actionState === 'preview') {
-			return 'The bench is drafting the next sample now. This can take a minute because it is reading the latest calibration context before anything queues.';
+			return 'The bench is reading the latest note and calibration context before it drafts the next sample.';
 		}
 		if (sampleRunActive) {
 			return sampleActionBlockedReason || 'A calibration job is already active for this folder.';
 		}
 		if (!canRunSample) {
-			return sampleActionBlockedReason || 'Choose a ready host before asking for a bench draft.';
+			return (
+				sampleActionBlockedReason || 'Choose a ready host before asking the bench for a draft.'
+			);
 		}
 		if (pendingProposalNeedsRefresh) {
-			return 'You changed the note or host. Refresh the bench draft so the warning and plan match what will run.';
+			return 'You changed the note or host. Refresh the bench draft so the plan matches what will run.';
 		}
 		if (pendingProposal) {
 			return pendingProposalCanQueue
-				? 'Nothing queues until you confirm this draft. Review the warning and the setting changes first.'
+				? 'The draft is ready. Review the warning and the policy changes, then run the sample when it looks right.'
 				: String(pendingProposal.message ?? 'Adjust the note and ask the bench again.');
 		}
-		return 'Ask the bench for a proposed sample first. It will explain the tradeoff before anything queues.';
+		return 'Ask the bench for a proposed sample first. Nothing queues until you approve that draft.';
+	});
+	const nextActionStatus = $derived.by(() => {
+		if (sampleRunActive) return { label: 'In progress', variant: 'neutral' as const };
+		if (!canRunSample) return { label: 'Blocked', variant: 'warn' as const };
+		if (pendingProposalNeedsRefresh) return { label: 'Needs refresh', variant: 'warn' as const };
+		if (pendingProposal && pendingProposalCanQueue) {
+			return { label: 'Ready to run', variant: 'ok' as const };
+		}
+		if (pendingProposal) return { label: 'Needs revision', variant: 'neutral' as const };
+		return { label: 'Draft first', variant: 'default' as const };
+	});
+	const nextActionHeading = $derived.by(() => {
+		if (sampleRunActive) return 'Wait for the current sample to finish';
+		if (!canRunSample) return 'Choose a ready host';
+		if (pendingProposalNeedsRefresh) return 'Refresh the bench draft';
+		if (pendingProposal && pendingProposalCanQueue) {
+			return selectedHostLabel ? `Run the draft on ${selectedHostLabel}` : 'Run the draft';
+		}
+		if (pendingProposal) return 'Revise the draft before running';
+		return 'Ask the bench for a draft';
+	});
+	const noteSubmitHint = $derived.by(() => {
+		if (canRequestBenchDraft) {
+			return 'Press Enter to ask the bench. Shift+Enter adds a new line.';
+		}
+		return sampleActionBlockedReason || 'Choose a ready host before asking the bench for a draft.';
 	});
 	const proposalWorkbenchRows = $derived.by(() => {
 		if (!pendingProposal) return [] as PolicyWorkbenchRow[];
@@ -813,12 +868,14 @@
 		sampleHostOptions
 			.map((option) => {
 				const key = String(option.key ?? '');
+				const runtime = hostRuntimeByKey.get(key) ?? null;
 				const card: SampleHostCard = {
 					key,
 					label: String(option.label ?? 'Unknown host'),
 					detail: String(option.detail ?? ''),
 					available: option.available === true,
-					runtime: hostRuntimeByKey.get(key) ?? null,
+					runtime,
+					searchSummary: folderAwareQualitySearchSummary(runtime, folder.prefix),
 					preferred: key === String(folder.sample_host_key ?? '')
 				};
 				return card;
@@ -833,6 +890,7 @@
 	const reviewPairs = $derived((calibration.review_pairs as FolderReviewPair[] | undefined) ?? []);
 	let selectedReviewPairIndex = $state(0);
 	const selectedReviewPair = $derived(reviewPairs[selectedReviewPairIndex] ?? null);
+	let seenReviewMomentKeys = $state<string[]>([]);
 	let sourceReviewVideo = $state<HTMLVideoElement | null>(null);
 	let draftReviewVideo = $state<HTMLVideoElement | null>(null);
 	let reviewSyncLocked = false;
@@ -852,10 +910,111 @@
 			const duration = Number(clip.duration_seconds ?? 0);
 			return {
 				key: `${index}-${timestamp}`,
-				label: `${labels[index] ?? `Review clip ${index + 1}`}: ${formatTimestamp(timestamp)}`,
+				title: labels[index] ?? `Review clip ${index + 1}`,
+				timestamp: formatTimestamp(timestamp),
 				detail: duration > 0 ? `${Math.round(duration)}s clip` : 'Review clip'
 			};
 		});
+	});
+	const selectedReviewMoment = $derived(reviewMomentPills[selectedReviewPairIndex] ?? null);
+	const reviewMomentCount = $derived(reviewMomentPills.length);
+	const hasPreviousReviewMoment = $derived(selectedReviewPairIndex > 0);
+	const hasNextReviewMoment = $derived(selectedReviewPairIndex < reviewMomentCount - 1);
+	const seenReviewMomentSet = $derived.by(
+		() =>
+			new Set(
+				seenReviewMomentKeys.filter((key) => reviewMomentPills.some((pill) => pill.key === key))
+			)
+	);
+	const seenReviewMomentCount = $derived(seenReviewMomentSet.size);
+	const remainingReviewMomentCount = $derived(
+		Math.max(reviewMomentCount - seenReviewMomentCount, 0)
+	);
+	const reviewMomentProgressCopy = $derived.by(() => {
+		const total = reviewMomentCount;
+		if (total === 0) return 'No review moments yet';
+		const seen = seenReviewMomentCount;
+		if (seen === 0) return `${total} ${total === 1 ? 'moment' : 'moments'} to review`;
+		if (seen >= total) return `Reviewed all ${total} ${total === 1 ? 'moment' : 'moments'}`;
+		return `Reviewed ${seen} of ${total} ${total === 1 ? 'moment' : 'moments'}`;
+	});
+	const selectedReviewMomentCopy = $derived.by(() => {
+		if (!selectedReviewMoment) return '';
+		return `${selectedReviewMoment.title} at ${selectedReviewMoment.timestamp}`;
+	});
+	const reviewDecisionProgressCopy = $derived.by(() => {
+		if (reviewMomentCount === 0) return '';
+		if (remainingReviewMomentCount === 0) {
+			return 'You have reviewed every proof moment in this browser session. Save or queue the draft when it looks right.';
+		}
+		return `You have checked ${seenReviewMomentCount} of ${reviewMomentCount} proof moments in this browser session. Review ${remainingReviewMomentCount} more before you commit the folder run.`;
+	});
+	const threadBenchSummary = $derived.by(() => ({
+		headline:
+			String(currentThreadSession?.requestResponse ?? '').trim() ||
+			String(currentThreadSession?.summary ?? '').trim(),
+		detail:
+			String(currentThreadSession?.runNextStep ?? '').trim() ||
+			String(currentThreadSession?.suggestedFollowUp ?? '').trim() ||
+			String(currentThreadSession?.diagnosis ?? '').trim(),
+		requestLabel: pendingOperatorRequestLabel || operatorRequestLabel
+	}));
+	const reviewBenchSummary = $derived.by(() => {
+		const pendingProposalSummary = {
+			headline:
+				String(pendingProposal?.request_response ?? '').trim() ||
+				String(pendingProposal?.summary ?? '').trim() ||
+				String(pendingProposal?.message ?? '').trim(),
+			detail:
+				String(pendingProposal?.suggested_follow_up ?? '').trim() ||
+				String(pendingProposal?.diagnosis ?? '').trim() ||
+				String(pendingProposal?.feasibility_note ?? '').trim() ||
+				String(pendingProposal?.message ?? '').trim(),
+			requestLabel: pendingOperatorRequestLabel
+		};
+		if (
+			pendingProposalSummary.headline ||
+			pendingProposalSummary.detail ||
+			pendingProposalSummary.requestLabel
+		) {
+			return {
+				headline: pendingProposalSummary.headline || threadBenchSummary.headline,
+				detail: pendingProposalSummary.detail || threadBenchSummary.detail,
+				requestLabel: pendingProposalSummary.requestLabel || threadBenchSummary.requestLabel,
+				available: true
+			};
+		}
+
+		return {
+			...threadBenchSummary,
+			available: Boolean(
+				threadBenchSummary.headline || threadBenchSummary.detail || threadBenchSummary.requestLabel
+			)
+		};
+	});
+	const threadHistorySummaryCopy = $derived.by(() => {
+		if (!hasCalibrationThread) return '';
+		const nextStep = String(currentThreadSession?.runNextStep ?? '').trim();
+		if (nextStep) return nextStep;
+		const followUp = String(currentThreadSession?.suggestedFollowUp ?? '').trim();
+		if (followUp) return followUp;
+		return 'The latest bench read is pinned beside the review decision so you can scan it without leaving the proof clips.';
+	});
+	const archivedThreadHeadline = $derived.by(
+		() =>
+			String(currentThreadSession?.requestResponse ?? '').trim() ||
+			String(currentThreadSession?.summary ?? '').trim()
+	);
+	const archivedThreadDetail = $derived.by(() => {
+		const summary = String(currentThreadSession?.summary ?? '').trim();
+		if (summary && summary !== archivedThreadHeadline) {
+			return summary;
+		}
+		return (
+			String(currentThreadSession?.diagnosis ?? '').trim() ||
+			String(currentThreadSession?.runSummary ?? '').trim() ||
+			null
+		);
 	});
 
 	const factItems = $derived.by(() =>
@@ -881,12 +1040,19 @@
 	);
 	const encodeJob = $derived((folder.encode_job as EncodeQueueJob | null) ?? null);
 	const encodeQueue = $derived((folder.encode_queue as EncodeQueueSummary | undefined) ?? null);
+	const encodeQueuePaused = $derived(Boolean(encodeQueue?.state?.is_paused));
+	const encodeQueueStopping = $derived(Boolean(encodeQueue?.state?.stop_requested));
 	const encodeJobStatus = $derived(String(encodeJob?.status ?? '').trim());
 	const encodeJobProgress = $derived(
 		(encodeJob?.progress as EncodeJobProgressTelemetry | null | undefined) ?? null
 	);
+	const encodeJobActiveHosts = $derived.by(() =>
+		((encodeJob?.active_hosts as Array<Record<string, unknown>> | undefined) ?? []).filter(Boolean)
+	);
 	const encodeJobHostLabel = $derived.by(() =>
-		String(encodeJob?.host?.label ?? encodeJob?.host?.key ?? '').trim()
+		encodeJobActiveHosts.length > 1
+			? `${encodeJobActiveHosts.length} hosts`
+			: String(encodeJob?.host?.label ?? encodeJob?.host?.key ?? '').trim()
 	);
 	const encodeJobHostRuntime = $derived.by(() => {
 		const hostKey = String(encodeJob?.host?.key ?? '').trim();
@@ -894,30 +1060,142 @@
 		return hostRuntimeByKey.get(hostKey) ?? null;
 	});
 	const encodeJobTone = $derived.by(() => encodeStatusTone(encodeJobStatus));
+	const encodeJobChipLabel = $derived.by(() => {
+		if (encodeJobStatus === 'queued' && encodeQueueStopping) {
+			return 'Stopping';
+		}
+		if (encodeJobStatus === 'queued' && encodeQueuePaused) {
+			return 'Paused';
+		}
+		if (
+			encodeJobStatus === 'queued' &&
+			/waiting for a host schedule window/i.test(String(encodeJob?.scheduler_status_copy ?? ''))
+		) {
+			return 'Scheduled';
+		}
+		return titleCase(encodeJobStatus.replace(/_/g, ' '));
+	});
+	const recoverableItemCount = $derived(Number(encodeJob?.recoverable_item_count ?? 0));
+	const encodeJobCanRecoverNow = $derived.by(
+		() =>
+			['running', 'queued', 'retry_backoff'].includes(encodeJobStatus) && recoverableItemCount > 0
+	);
 	const encodeJobHeadline = $derived.by(() => {
-		if (encodeJobStatus === 'running') return 'Folder encode is active now';
-		if (encodeJobStatus === 'queued') return 'Folder encode is queued';
-		if (encodeJobStatus === 'retry_backoff') return 'Folder encode is waiting to retry';
-		if (encodeJobStatus === 'needs_attention') return 'Folder encode needs attention';
-		if (encodeJobStatus === 'completed') return 'Latest folder encode completed';
-		if (encodeJobStatus === 'failed') return 'Latest folder encode failed';
-		if (encodeJobStatus === 'stopped') return 'Latest folder encode was stopped';
-		return 'Folder encode is idle';
+		if (encodeJobCanRecoverNow) {
+			return 'Recovery available';
+		}
+		if (encodeJobStatus === 'running' && Number(encodeJob?.running_shard_count ?? 0) > 1) {
+			return 'Running across multiple lanes';
+		}
+		if (encodeJobStatus === 'running') return 'Running now';
+		if (encodeJobStatus === 'queued') {
+			if (encodeQueueStopping) {
+				return 'Stopping before this folder starts';
+			}
+			if (encodeQueuePaused) {
+				return 'Queued, but the fleet is paused';
+			}
+			return /waiting for a host schedule window/i.test(
+				String(encodeJob?.scheduler_status_copy ?? '')
+			)
+				? 'Queued for the next worker window'
+				: 'Waiting for a lane';
+		}
+		if (encodeJobStatus === 'retry_backoff') return 'Retry scheduled';
+		if (encodeJobStatus === 'needs_attention') return 'Needs attention';
+		if (encodeJobStatus === 'completed') return 'Completed';
+		if (encodeJobStatus === 'failed') return 'Failed';
+		if (encodeJobStatus === 'stopped') return 'Stopped';
+		return 'Idle';
 	});
 	const encodeJobDetail = $derived.by(() => {
 		const schedulerCopy = String(encodeJob?.scheduler_status_copy ?? '').trim();
 		const currentItem = String(encodeJobProgress?.current_item_rel_path ?? '').trim();
+		const activeHostLabels = encodeJobActiveHosts
+			.map((host) => String(host.label ?? host.key ?? '').trim())
+			.filter(Boolean);
+		if (encodeJobCanRecoverNow) {
+			return `${recoverableItemCount} file${recoverableItemCount === 1 ? '' : 's'} can be requeued without stopping the active lanes.`;
+		}
 		if (encodeJobStatus === 'running' && currentItem) return currentItem;
+		if (encodeJobStatus === 'queued') {
+			if (encodeQueueStopping) {
+				return 'The queue is stopping, so this folder will not auto-start in the next worker window.';
+			}
+			if (encodeQueuePaused) {
+				return 'This folder stays queued until you resume the fleet from Ops.';
+			}
+			if (/waiting for a host schedule window/i.test(schedulerCopy)) {
+				return 'Queued now. Mediaforce will start this folder when a scheduled worker window opens.';
+			}
+			if (schedulerCopy) return schedulerCopy;
+			return 'Waiting for an open worker lane.';
+		}
 		if (schedulerCopy) return schedulerCopy;
+		if (encodeJobStatus === 'running' && activeHostLabels.length > 1) {
+			return `${activeHostLabels.join(', ')} are encoding now.`;
+		}
 		if (encodeJobStatus === 'running') return 'Streaming work to the selected worker now.';
-		if (encodeJobStatus === 'queued') return 'Waiting for an open worker lane.';
 		if (encodeJobStatus === 'retry_backoff') return 'Waiting for the next retry window.';
+		if (encodeJobStatus === 'needs_attention')
+			return 'This run stopped before it could finish cleanly.';
+		if (encodeJobStatus === 'failed')
+			return 'The last folder encode failed before it could finish.';
+		if (encodeJobStatus === 'stopped')
+			return 'The last folder encode was stopped before it completed.';
+		return '';
+	});
+	const encodeJobNextActionCopy = $derived.by(() => {
+		if (encodeJobCanRecoverNow) {
+			return 'Use Recover Failed Files to requeue only the interrupted items without resetting the whole folder.';
+		}
+		if (
+			encodeJobStatus === 'needs_attention' ||
+			encodeJobStatus === 'failed' ||
+			encodeJobStatus === 'stopped'
+		) {
+			return 'Review the failure detail, then retry the folder encode when you want Mediaforce to continue this folder.';
+		}
+		if (encodeJobStatus === 'retry_backoff') {
+			return 'Mediaforce will retry automatically when the cooldown window expires.';
+		}
+		if (encodeJobStatus === 'queued') {
+			if (encodeQueueStopping) {
+				return 'If you still want this folder later, requeue it after the stop request finishes.';
+			}
+			if (encodeQueuePaused) {
+				return 'Resume the fleet from Ops when you want this folder to start again.';
+			}
+			if (
+				/waiting for a host schedule window/i.test(String(encodeJob?.scheduler_status_copy ?? ''))
+			) {
+				return 'Leave this queued. Mediaforce will start it automatically in the next worker window.';
+			}
+			return 'Leave this queued unless you need to pause or stop the fleet.';
+		}
+		if (encodeJobStatus === 'running') {
+			return 'Let the active run finish before validating or promoting staged files.';
+		}
 		return '';
 	});
 	const encodeJobFacts = $derived.by(() => {
 		const facts: Array<{ label: string; value: string }> = [];
+		const runningShardCount = Number(encodeJob?.running_shard_count ?? 0);
+		const totalShardCount = Number(encodeJob?.shard_count ?? 0);
 		if (encodeJobHostLabel) {
 			facts.push({ label: 'Worker', value: encodeJobHostLabel });
+		}
+		if (runningShardCount > 1) {
+			facts.push({
+				label: 'Active lanes',
+				value: `${runningShardCount} of ${totalShardCount || runningShardCount}`
+			});
+		}
+		if (recoverableItemCount > 0) {
+			facts.push({
+				label: 'Needs recovery',
+				value: `${recoverableItemCount} file${recoverableItemCount === 1 ? '' : 's'}`
+			});
 		}
 		const percentCopy =
 			encodeJobProgress?.percent_complete != null
@@ -943,9 +1221,6 @@
 	});
 	const encodeJobMetaCopy = $derived.by(() => {
 		const parts: string[] = [];
-		if (encodeJobStatus) {
-			parts.push(titleCase(encodeJobStatus.replace(/_/g, ' ')));
-		}
 		const runtimeReason = String(
 			encodeJobHostRuntime?.active_reason ?? encodeJobHostRuntime?.message ?? ''
 		).trim();
@@ -955,6 +1230,109 @@
 		return parts.join(' · ');
 	});
 	const encodeQueueLabel = $derived.by(() => encodeQueueSummaryCopy(folder.encode_queue_summary));
+	const deliveryBlockedByEncode = $derived.by(() =>
+		['queued', 'running', 'retry_backoff'].includes(encodeJobStatus)
+	);
+	const deliveryPanelVisible = $derived(stagedOutputCount > 0);
+	const validateButtonLabel = $derived.by(() =>
+		validatedOutputCount > 0 ? 'Re-validate Staged Files' : 'Validate Encoded Files'
+	);
+	const promoteButtonLabel = $derived.by(() =>
+		validatedOutputCount === 0
+			? 'Promote Validated Files'
+			: validatedOutputCount === 1
+				? 'Promote 1 Validated File'
+				: `Promote ${validatedOutputCount} Validated Files`
+	);
+	const validateButtonVariant = $derived.by(() =>
+		validatedOutputCount > 0 || deliveryBlockedByEncode ? 'secondary' : 'primary'
+	);
+	const promoteButtonVariant = $derived.by(() =>
+		validatedOutputCount > 0 && !deliveryBlockedByEncode ? 'primary' : 'ghost'
+	);
+	const deliverHeading = $derived.by(() => {
+		if (promotedOutputCount > 0) return 'Validation and promotion complete';
+		if (validatedOutputCount > 0) return 'Validated output is ready to promote';
+		return 'Validate and promote staged output';
+	});
+	const deliverEyebrow = $derived.by(() =>
+		promotedOutputCount > 0 ? '3. Validation complete' : '3. Validate'
+	);
+	const queueEncodeButtonLabel = $derived.by(() =>
+		encodeJobCanRecoverNow
+			? 'Recover Failed Files'
+			: ['needs_attention', 'failed', 'stopped'].includes(encodeJobStatus)
+				? 'Retry Folder Encode'
+				: 'Queue Folder Encode'
+	);
+	const workflowStageCards = $derived.by(() => {
+		const draftStage = (() => {
+			if (reviewGateStatus === 'accepted') {
+				return { key: 'draft', label: 'Draft', status: 'done', detail: 'Draft saved' };
+			}
+			if (sampleRunActive) {
+				return { key: 'draft', label: 'Draft', status: 'current', detail: 'Sample running' };
+			}
+			if (pendingProposal && pendingProposalCanQueue && !pendingProposalNeedsRefresh) {
+				return { key: 'draft', label: 'Draft', status: 'done', detail: 'Bench draft ready' };
+			}
+			if (pendingProposalNeedsRefresh) {
+				return { key: 'draft', label: 'Draft', status: 'current', detail: 'Refresh needed' };
+			}
+			if (hasCalibrationThread || hasCalibration) {
+				return { key: 'draft', label: 'Draft', status: 'current', detail: 'Keep tuning' };
+			}
+			return { key: 'draft', label: 'Draft', status: 'pending', detail: 'Ask bench first' };
+		})();
+
+		const reviewStage = (() => {
+			if (reviewGateStatus === 'accepted') {
+				return { key: 'review', label: 'Review', status: 'done', detail: 'Policy approved' };
+			}
+			if (reviewGateStatus === 'needs_approval') {
+				return { key: 'review', label: 'Review', status: 'current', detail: 'Review clips' };
+			}
+			if (
+				reviewGateStatus === 'missing_review_media' ||
+				reviewGateStatus === 'needs_fresh_sample'
+			) {
+				return { key: 'review', label: 'Review', status: 'current', detail: 'Need fresh sample' };
+			}
+			return { key: 'review', label: 'Review', status: 'pending', detail: 'Await sample' };
+		})();
+
+		const queueStage = (() => {
+			if (
+				['running', 'queued', 'retry_backoff', 'needs_attention', 'failed', 'stopped'].includes(
+					encodeJobStatus
+				)
+			) {
+				return { key: 'queue', label: 'Queue', status: 'current', detail: queueEncodeButtonLabel };
+			}
+			if (reviewGateStatus === 'accepted') {
+				return { key: 'queue', label: 'Queue', status: 'current', detail: 'Ready to queue' };
+			}
+			if (promotedOutputCount > 0 || encodeJobStatus === 'completed') {
+				return { key: 'queue', label: 'Queue', status: 'done', detail: 'Encode finished' };
+			}
+			return { key: 'queue', label: 'Queue', status: 'pending', detail: 'Approval unlocks this' };
+		})();
+
+		const deliverStage = (() => {
+			if (promotedOutputCount > 0) {
+				return { key: 'deliver', label: 'Validate', status: 'done', detail: 'Promoted' };
+			}
+			if (validatedOutputCount > 0) {
+				return { key: 'deliver', label: 'Validate', status: 'current', detail: 'Ready to promote' };
+			}
+			if (stagedOutputCount > 0) {
+				return { key: 'deliver', label: 'Validate', status: 'current', detail: 'Validate outputs' };
+			}
+			return { key: 'deliver', label: 'Validate', status: 'pending', detail: 'Wait for encode' };
+		})();
+
+		return [draftStage, reviewStage, queueStage, deliverStage];
+	});
 	const folderSnapshotItems = $derived.by<SnapshotItem[]>(() => {
 		const discoveredCount = Number(folder.summary?.statuses?.discovered ?? 0);
 		return factItems
@@ -1187,15 +1565,23 @@
 	$effect(() => {
 		if (reviewPairs.length === 0) {
 			selectedReviewPairIndex = 0;
+			seenReviewMomentKeys = [];
 			return;
 		}
 		if (selectedReviewPairIndex >= 0 && selectedReviewPairIndex < reviewPairs.length) return;
 		selectedReviewPairIndex = 0;
 	});
 
+	function markReviewMomentSeen(index: number) {
+		const key = reviewMomentPills[index]?.key;
+		if (!key || seenReviewMomentSet.has(key)) return;
+		seenReviewMomentKeys = [...seenReviewMomentKeys, key];
+	}
+
 	async function selectReviewMoment(index: number) {
 		if (index === selectedReviewPairIndex) return;
 		if (!reviewPairs[index]) return;
+		markReviewMomentSeen(index);
 		const shouldResumePlayback = Boolean(
 			(sourceReviewVideo && !sourceReviewVideo.paused) ||
 			(draftReviewVideo && !draftReviewVideo.paused)
@@ -1216,6 +1602,12 @@
 		window.setTimeout(() => {
 			reviewMomentChangeLocked = false;
 		}, 160);
+	}
+
+	async function stepReviewMoment(direction: -1 | 1) {
+		const nextIndex = selectedReviewPairIndex + direction;
+		if (nextIndex < 0 || nextIndex >= reviewPairs.length) return;
+		await selectReviewMoment(nextIndex);
 	}
 
 	function maybeResumeReviewPlayback() {
@@ -1398,19 +1790,73 @@
 	async function queueEncode() {
 		actionState = 'encode';
 		try {
-			const response = await postJson<{ message: string }>(
+			const response = await postJson<{ message: string; action?: string }>(
 				`/api/folders/${apiPrefix}/queue-encode`,
 				{
 					notes: note,
 					bypass_schedule: false
 				}
 			);
-			toasts.success('Folder encode queued', response.message);
+			toasts.success(
+				response.action === 'recovered' ? 'Failed files recovered' : 'Folder encode queued',
+				response.message
+			);
 			await invalidateAll();
 		} catch (error) {
 			toasts.error(
 				'Could not queue folder encode',
 				error instanceof Error ? error.message : 'Unexpected queue error'
+			);
+		} finally {
+			actionState = null;
+		}
+	}
+
+	async function validateOutputs() {
+		actionState = 'validate';
+		try {
+			const response = await postJson<{
+				message: string;
+				validated_count?: number;
+				failed_count?: number;
+				item_count?: number;
+			}>(`/api/folders/${apiPrefix}/validate-outputs`, {});
+			const failedCount = Number(response.failed_count ?? 0);
+			if (failedCount > 0) {
+				toasts.info('Validation finished with warnings', response.message);
+			} else {
+				toasts.success('Validation finished', response.message);
+			}
+			await invalidateAll();
+		} catch (error) {
+			toasts.error(
+				'Could not validate outputs',
+				error instanceof Error ? error.message : 'Unexpected validation error'
+			);
+		} finally {
+			actionState = null;
+		}
+	}
+
+	async function promoteOutputs() {
+		if (browser) {
+			const confirmed = window.confirm(
+				`Promote ${validatedOutputCount} validated file${validatedOutputCount === 1 ? '' : 's'} to the library? The originals will be moved to the archive and this cannot be undone.`
+			);
+			if (!confirmed) return;
+		}
+		actionState = 'promote';
+		try {
+			const response = await postJson<{ message: string; promoted_count?: number }>(
+				`/api/folders/${apiPrefix}/promote-outputs`,
+				{}
+			);
+			toasts.success('Promotion complete', response.message);
+			await invalidateAll();
+		} catch (error) {
+			toasts.error(
+				'Could not promote outputs',
+				error instanceof Error ? error.message : 'Unexpected promotion error'
 			);
 		} finally {
 			actionState = null;
@@ -1452,6 +1898,14 @@
 					{/each}
 				</div>
 			</div>
+		</div>
+		<div class="workflow-stage-strip" aria-label="Folder workflow stages">
+			{#each workflowStageCards as stage (stage.key)}
+				<div class={`workflow-stage-card ${stage.status}`.trim()}>
+					<p class="workflow-stage-label">{stage.label}</p>
+					<p class="workflow-stage-detail">{stage.detail}</p>
+				</div>
+			{/each}
 		</div>
 	</Panel>
 
@@ -1515,7 +1969,7 @@
 				<SectionHead
 					eyebrow="1. Shape the next draft"
 					heading={sampleSetupHeading}
-					lede="Choose the host, steer the bench, and keep the latest diagnosis beside the controls instead of buried below them."
+					lede={sampleSetupLede}
 					size="section"
 				/>
 				<div class="studio-grid">
@@ -1537,11 +1991,17 @@
 												<p class="folder-encode-title">{encodeJobHeadline}</p>
 											</div>
 											<span class={`folder-encode-chip ${encodeJobTone}`.trim()}>
-												{titleCase(encodeJobStatus.replace(/_/g, ' '))}
+												{encodeJobChipLabel}
 											</span>
 										</div>
 										{#if encodeJobDetail}
 											<p class="muted-copy folder-encode-detail">{encodeJobDetail}</p>
+										{/if}
+										{#if encodeJobNextActionCopy}
+											<p class="inline-gate-copy folder-encode-next-step">
+												<span class="eyebrow-copy">Next step</span>
+												{encodeJobNextActionCopy}
+											</p>
 										{/if}
 										{#if encodeJobFacts.length > 0}
 											<div class="folder-encode-facts" aria-label="Folder encode telemetry">
@@ -1567,6 +2027,10 @@
 										Pick the machine for this representative pass. The chosen host stays visible in
 										the action bar below.
 									</p>
+									<p class="muted-copy host-section-copy host-schedule-note">
+										Representative samples can run now. Full-folder encodes still wait for the
+										worker windows you see in Ops.
+									</p>
 								</div>
 								<div class="sample-host-grid compact-host-grid">
 									{#each sampleHostCards as hostCard (hostCard.key)}
@@ -1589,13 +2053,21 @@
 												{/if}
 											</span>
 											<span class="sample-host-label">{hostCard.label}</span>
-											<span class="muted-copy compact-host-meta">
-												{[compactScheduleCopy(hostCard.runtime), hostCapacityCopy(hostCard.runtime)]
-													.filter(Boolean)
-													.join(' · ') ||
+											{#if compactScheduleCopy(hostCard.runtime)}
+												<span class="muted-copy compact-host-meta"
+													>{compactScheduleCopy(hostCard.runtime)}</span
+												>
+											{/if}
+											<span class="muted-copy compact-host-meta secondary">
+												{hostCapacityCopy(hostCard.runtime) ||
 													hostCard.detail ||
 													'No runtime detail'}
 											</span>
+											{#if hostCard.searchSummary}
+												<span class="muted-copy compact-host-meta tertiary">
+													{hostCard.searchSummary.label}
+												</span>
+											{/if}
 										</button>
 									{/each}
 								</div>
@@ -1606,6 +2078,11 @@
 
 							<div class="run-setup-card action-card">
 								<p class="eyebrow-copy">Next action</p>
+								<div class="action-card-head">
+									<h3 class="run-card-title">{nextActionHeading}</h3>
+									<Pill label={nextActionStatus.label} variant={nextActionStatus.variant} />
+								</div>
+								<p class="muted-copy">{sampleActionSupportCopy}</p>
 								<p class="selected-host-inline">
 									<span class="selected-host-inline-value"
 										>{selectedHostLabel || 'Choose a host above'}</span
@@ -1620,13 +2097,15 @@
 										<span class="muted-copy selected-host-inline-meta">{selectedHostDetail}</span>
 									{/if}
 								</p>
-								<div class="action-row primary-action-row compact-action-row">
-									<Button
-										variant="secondary"
-										loading={actionState === 'preview'}
-										disabled={!canRunSample || sampleRunActive}
-										onclick={previewSampleDraft}>{previewButtonLabel}</Button
-									>
+								{#if selectedHostSearchSummary}
+									<p class="muted-copy host-search-callout">
+										<span class="host-search-callout-label">{selectedHostSearchSummary.label}</span>
+										{selectedHostSearchSummary.detail}
+									</p>
+								{/if}
+								<div
+									class="action-row primary-action-row compact-action-row single-primary-action-row"
+								>
 									<Button
 										loading={actionState === 'sample'}
 										disabled={!canRunSample ||
@@ -1638,24 +2117,33 @@
 									>
 								</div>
 								<p class="inline-gate-copy sample-action-copy action-inline-note">
-									<span class="eyebrow-copy"
-										>{sampleRunActive
-											? 'Active run'
-											: pendingProposalCanQueue && !pendingProposalNeedsRefresh
-												? 'Ready to run'
-												: 'Next step'}</span
-									>
-									{sampleActionSupportCopy}
+									<span class="eyebrow-copy">Run gate</span>
+									{pendingProposalCanQueue && !pendingProposalNeedsRefresh
+										? 'The current draft is aligned with the selected host and can queue when you confirm it.'
+										: 'The sample button stays locked until the host is ready and the current bench draft matches what will run.'}
 								</p>
 								{#if hasClearableTuningState}
-									<div class="action-row utility-action-row">
-										<Button
-											variant="ghost"
-											loading={actionState === 'clear'}
-											disabled={sampleRunActive}
-											onclick={clearTuningState}>Clear thread + sample artifacts</Button
-										>
-									</div>
+									<details class="danger-disclosure">
+										<summary>
+											<span>Advanced reset</span>
+											<span class="summary-hint">Danger</span>
+										</summary>
+										<div class="danger-disclosure-body">
+											<p class="inline-gate-copy destructive-action-copy">
+												<span class="eyebrow-copy">Destructive</span>
+												Removes the tuning thread, retained sample context, and sample artifacts for this
+												folder only.
+											</p>
+											<div class="action-row utility-action-row">
+												<Button
+													variant="danger"
+													loading={actionState === 'clear'}
+													disabled={sampleRunActive}
+													onclick={clearTuningState}>Clear thread + sample artifacts</Button
+												>
+											</div>
+										</div>
+									</details>
 								{/if}
 							</div>
 						</div>
@@ -1674,10 +2162,19 @@
 								></textarea>
 								{#if reviewConversationCopy}
 									<p class="inline-gate-copy note-review-copy">
-										<span class="eyebrow-copy">Bench loop</span>
+										<span class="eyebrow-copy">Bench context</span>
 										{reviewConversationCopy}
 									</p>
 								{/if}
+								<div class="note-composer-footer">
+									<p class="muted-copy note-submit-hint">{noteSubmitHint}</p>
+									<Button
+										variant="secondary"
+										loading={actionState === 'preview'}
+										disabled={!canRequestBenchDraft}
+										onclick={previewSampleDraft}>{previewButtonLabel}</Button
+									>
+								</div>
 							</div>
 
 							{#if calibrationThreadSessions.length}
@@ -1970,14 +2467,18 @@
 								</div>
 							{:else if currentThreadSession}
 								<div class="proposal-shell diagnosis-shell archived-diagnosis-shell">
-									<p class="eyebrow-copy">Latest saved read</p>
-									<h4 class="proposal-title">Most recent calibration exchange</h4>
-									{#if currentThreadSession.requestResponse}
-										<p class="thread-copy">{currentThreadSession.requestResponse}</p>
+									<p class="eyebrow-copy">Bench history</p>
+									<h4 class="proposal-title">{calibrationThreadCountLabel} saved in the thread</h4>
+									{#if archivedThreadHeadline}
+										<p class="thread-copy">{archivedThreadHeadline}</p>
 									{/if}
-									{#if currentThreadSession.summary}
-										<p class="thread-support">{currentThreadSession.summary}</p>
+									{#if archivedThreadDetail}
+										<p class="thread-support">{archivedThreadDetail}</p>
 									{/if}
+									<p class="thread-support">
+										{threadHistorySummaryCopy} Scroll the thread above when you want to reopen earlier
+										notes, compare bench replies, or rewrite the next draft request.
+									</p>
 								</div>
 							{/if}
 						</div>
@@ -1989,9 +2490,9 @@
 		<Panel class="review-panel">
 			<div class="panel-stack">
 				<SectionHead
-					eyebrow="2. Review and approve"
-					heading="Keep the proof, diff, and approval call in one place"
-					lede="Review the synced clips, check what actually changes, and save or queue without jumping through duplicated summaries."
+					eyebrow="2. Review the sample"
+					heading="Watch the proof clips, then decide whether this draft is ready"
+					lede="Review the synced clips, check the meaningful changes, and decide whether this draft is ready to save, queue, validate, or promote without leaving the page."
 					size="section"
 				/>
 				<div class="review-grid review-grid-balanced">
@@ -2002,11 +2503,48 @@
 								<div class="review-player-shell-block">
 									<div class="review-player-head">
 										<div>
-											<h3 class="review-block-title">Synced review deck</h3>
+											<h3 class="review-block-title">Synced compare clips</h3>
 											<p class="muted-copy">
-												Play either clip and the other follows. The lower player is the retained AV1
-												draft preview from this run.
+												Play either clip and the other follows. Use these moments to decide whether
+												the current draft is good enough to keep.
 											</p>
+										</div>
+										<div class="review-head-actions">
+											<div class="pill-row review-progress-pills">
+												<Pill
+													label={reviewMomentProgressCopy}
+													variant={seenReviewMomentCount >= reviewMomentCount &&
+													reviewMomentCount > 0
+														? 'ok'
+														: 'neutral'}
+												/>
+												{#if selectedReviewMomentCopy}
+													<Pill label={selectedReviewMomentCopy} variant="ghost" />
+												{/if}
+											</div>
+											<div class="action-row review-sequence-actions">
+												<Button
+													variant="ghost"
+													disabled={!hasPreviousReviewMoment}
+													onclick={() => void stepReviewMoment(-1)}>Previous moment</Button
+												>
+												<Button
+													variant="ghost"
+													disabled={!hasNextReviewMoment}
+													onclick={() => void stepReviewMoment(1)}>Next moment</Button
+												>
+											</div>
+											{#if selectedReviewPair.compare_clip?.path}
+												<Button
+													variant="secondary"
+													onclick={() => {
+														markReviewMomentSeen(selectedReviewPairIndex);
+														openReviewAsset(String(selectedReviewPair.compare_clip?.path ?? ''));
+													}}
+												>
+													Open full side-by-side compare
+												</Button>
+											{/if}
 										</div>
 									</div>
 									<div class="review-selector-row" role="tablist" aria-label="Review moments">
@@ -2014,21 +2552,32 @@
 											<button
 												type="button"
 												class:selected={selectedReviewPairIndex === index}
+												class:seen={seenReviewMomentSet.has(reviewMomentPills[index]?.key ?? '')}
 												class="review-selector-chip"
 												onclick={() => void selectReviewMoment(index)}
 											>
-												<span class="eyebrow-copy">Moment {index + 1}</span>
-												<strong>{formatTimestamp(Number(pair.timestamp_seconds ?? 0))}</strong>
-												<span>{Math.round(Number(pair.duration_seconds ?? 0))}s</span>
+												<span class="eyebrow-copy"
+													>{reviewMomentPills[index]?.title ?? `Review clip ${index + 1}`}</span
+												>
+												<strong
+													>{reviewMomentPills[index]?.timestamp ??
+														formatTimestamp(Number(pair.timestamp_seconds ?? 0))}</strong
+												>
+												<span
+													>{seenReviewMomentSet.has(reviewMomentPills[index]?.key ?? '')
+														? 'Reviewed'
+														: (reviewMomentPills[index]?.detail ??
+															`${Math.round(Number(pair.duration_seconds ?? 0))}s`)}</span
+												>
 											</button>
 										{/each}
 									</div>
 									<div class="review-player-stack review-player-columns">
 										<div class="review-player-panel">
 											<div class="review-player-meta">
-												<p class="eyebrow-copy">Source clip</p>
+												<p class="eyebrow-copy">Source reference</p>
 												<p class="muted-copy">
-													Browser review render from the representative source file.
+													Reference clip from the original representative file.
 												</p>
 											</div>
 											<video
@@ -2039,7 +2588,10 @@
 												playsinline
 												preload="auto"
 												oncanplay={maybeResumeReviewPlayback}
-												onplay={() => syncReviewPlayers('source', 'play')}
+												onplay={() => {
+													markReviewMomentSeen(selectedReviewPairIndex);
+													syncReviewPlayers('source', 'play');
+												}}
 												onpause={() => syncReviewPlayers('source', 'pause')}
 												onseeked={() => syncReviewPlayers('source', 'seek')}
 												onratechange={() => syncReviewPlayers('source', 'rate')}
@@ -2047,9 +2599,9 @@
 										</div>
 										<div class="review-player-panel draft-review-player-panel">
 											<div class="review-player-meta">
-												<p class="eyebrow-copy">Draft AV1 clip</p>
+												<p class="eyebrow-copy">Draft preview</p>
 												<p class="muted-copy">
-													The retained preview from the sampled draft you are deciding on now.
+													Preview clip from the AV1 draft you are deciding on now.
 												</p>
 											</div>
 											<video
@@ -2060,23 +2612,16 @@
 												playsinline
 												preload="auto"
 												oncanplay={maybeResumeReviewPlayback}
-												onplay={() => syncReviewPlayers('draft', 'play')}
+												onplay={() => {
+													markReviewMomentSeen(selectedReviewPairIndex);
+													syncReviewPlayers('draft', 'play');
+												}}
 												onpause={() => syncReviewPlayers('draft', 'pause')}
 												onseeked={() => syncReviewPlayers('draft', 'seek')}
 												onratechange={() => syncReviewPlayers('draft', 'rate')}
 											></video>
 										</div>
 									</div>
-									{#if selectedReviewPair.compare_clip?.path}
-										<button
-											type="button"
-											class="review-compare-link"
-											onclick={() =>
-												openReviewAsset(String(selectedReviewPair.compare_clip?.path ?? ''))}
-										>
-											Open baked side-by-side compare clip
-										</button>
-									{/if}
 								</div>
 							{:else if calibration.review_media_ready}
 								<div class="legacy-review-note">
@@ -2221,13 +2766,38 @@
 
 					<aside class="review-side-column review-approval-column">
 						<div class="review-block approval-block">
-							<p class="eyebrow-copy">Approval gate</p>
+							<p class="eyebrow-copy">{reviewGateEyebrow}</p>
 							<h3 class="review-block-title">{reviewGateHeading}</h3>
 							<p class="muted-copy">{reviewGateDetail}</p>
 							<p class="inline-gate-copy review-action-copy">
 								<span class="eyebrow-copy">Review media</span>
 								{reviewMediaStatusCopy}
 							</p>
+							{#if reviewDecisionProgressCopy}
+								<p class="inline-gate-copy review-action-copy">
+									<span class="eyebrow-copy">Review progress</span>
+									{reviewDecisionProgressCopy}
+								</p>
+							{/if}
+							{#if reviewBenchSummary.available}
+								<div class="review-bench-summary-card">
+									<p class="eyebrow-copy">Latest bench read</p>
+									{#if reviewBenchSummary.requestLabel}
+										<div class="pill-row review-bench-pill-row">
+											<Pill
+												label={`Experiment ${reviewBenchSummary.requestLabel}`}
+												variant="ghost"
+											/>
+										</div>
+									{/if}
+									{#if reviewBenchSummary.headline}
+										<p class="thread-copy review-bench-headline">{reviewBenchSummary.headline}</p>
+									{/if}
+									{#if reviewBenchSummary.detail}
+										<p class="thread-support">{reviewBenchSummary.detail}</p>
+									{/if}
+								</div>
+							{/if}
 							{#if highImpactPolicyRows.length}
 								<p class="inline-gate-copy proposal-warning-copy impact-warning-copy">
 									<span class="eyebrow-copy">High-impact changes</span>
@@ -2236,29 +2806,100 @@
 										.join(', ')}. Read the diff before you queue the full folder.
 								</p>
 							{/if}
+							{#if reviewGateStatus === 'accepted'}
+								<p class="inline-gate-copy review-action-copy accepted-next-step-copy">
+									<span class="eyebrow-copy">Next move</span>
+									The saved draft is locked in. Queue or retry the folder encode when you want Mediaforce
+									to continue this folder.
+								</p>
+							{/if}
 							<div class="action-row review-action-row stacked-review-actions">
-								<Button
-									variant="secondary"
-									loading={actionState === 'save'}
-									disabled={!hasCalibration || reviewGateStatus === 'accepted'}
-									onclick={saveProfile}>{approvalButtonLabel}</Button
-								>
+								{#if reviewGateStatus === 'accepted'}
+									<Pill label="Policy saved" variant="ok" />
+								{:else}
+									<Button
+										variant="secondary"
+										loading={actionState === 'save'}
+										disabled={!hasCalibration}
+										onclick={saveProfile}>{approvalButtonLabel}</Button
+									>
+								{/if}
 								<div class="queue-action-block">
 									<Button
-										variant="ghost"
+										variant={reviewGate.can_confirm_full ? 'primary' : 'ghost'}
 										loading={actionState === 'encode'}
 										disabled={!reviewGate.can_confirm_full}
-										onclick={queueEncode}>Queue Folder Encode</Button
+										onclick={queueEncode}>{queueEncodeButtonLabel}</Button
 									>
 									{#if !reviewGate.can_confirm_full}
 										<p class="inline-gate-copy">
-											<span class="eyebrow-copy">{queueGateLabel}</span>
+											<span class="eyebrow-copy">{reviewGateNextActionLabel || queueGateLabel}</span
+											>
 											{String(reviewGate.message ?? 'Run or review a calibration to continue.')}
 										</p>
 									{/if}
 								</div>
 							</div>
 						</div>
+
+						{#if deliveryPanelVisible}
+							<div class="review-block approval-block deliver-block">
+								<p class="eyebrow-copy">{deliverEyebrow}</p>
+								<h3 class="review-block-title">{deliverHeading}</h3>
+								<p class="muted-copy">
+									Check the encoded files before anything moves, then promote the validated set into
+									the library.
+								</p>
+								<div class="pill-row deliver-pill-row">
+									{#if encodedOutputCount > 0}
+										<Pill label={`${encodedOutputCount} encoded`} variant="default" />
+									{/if}
+									{#if validatedOutputCount > 0}
+										<Pill label={`${validatedOutputCount} validated`} variant="ok" />
+									{/if}
+									{#if promotedOutputCount > 0}
+										<Pill label={`${promotedOutputCount} promoted`} variant="neutral" />
+									{/if}
+								</div>
+								<div class="action-row review-action-row stacked-review-actions">
+									<Button
+										variant={validateButtonVariant}
+										loading={actionState === 'validate'}
+										disabled={stagedOutputCount === 0 || deliveryBlockedByEncode}
+										onclick={validateOutputs}>{validateButtonLabel}</Button
+									>
+									<Button
+										variant={promoteButtonVariant}
+										loading={actionState === 'promote'}
+										disabled={validatedOutputCount === 0 || deliveryBlockedByEncode}
+										onclick={promoteOutputs}>{promoteButtonLabel}</Button
+									>
+								</div>
+								{#if deliveryBlockedByEncode}
+									<p class="inline-gate-copy">
+										<span class="eyebrow-copy">Waiting for encode</span>
+										Finish the active folder encode before validating or promoting staged files.
+									</p>
+								{:else if validatedOutputCount === 0}
+									<p class="inline-gate-copy">
+										<span class="eyebrow-copy">Validation required</span>
+										Validate the staged files before anything moves into the library.
+									</p>
+								{:else}
+									<p class="inline-gate-copy">
+										<span class="eyebrow-copy">Promotion archive</span>
+										Moves validated files into the library and archives the original sources.
+									</p>
+								{/if}
+								{#if encodedOutputCount > 0 && validatedOutputCount > 0}
+									<p class="inline-gate-copy">
+										<span class="eyebrow-copy">Partial results</span>
+										{encodedOutputCount} file{encodedOutputCount === 1 ? '' : 's'} still need validation.
+										You can promote the validated set now or validate everything first.
+									</p>
+								{/if}
+							</div>
+						{/if}
 
 						{#if predictedOutputSizeBytes > 0}
 							<div class="review-block estimate-block compact-estimate-block">
@@ -2267,7 +2908,9 @@
 									{formatGiB(predictedOutputSizeBytes, 2)} predicted output
 								</h3>
 								<p class="muted-copy">
-									Representative-file estimate for the current draft before you approve this folder.
+									{reviewGateStatus === 'accepted'
+										? 'Representative-file estimate for the saved draft that will drive the next folder encode.'
+										: 'Representative-file estimate for the current draft before you approve this folder.'}
 								</p>
 								<div class="pill-row">
 									<Pill
@@ -2295,7 +2938,11 @@
 						{/if}
 
 						<details class="reference-disclosure" open={false}>
-							<summary>Representative file and folder context</summary>
+							<summary
+								><span>Representative file and folder context</span><span class="summary-hint"
+									>Inspect</span
+								></summary
+							>
 							<div class="reference-disclosure-grid">
 								<div class="review-block representative-block compact-reference-block">
 									<p class="eyebrow-copy">Representative file</p>
@@ -2345,7 +2992,7 @@
 									{#if reviewMomentPills.length}
 										<div class="pill-row hotspot-pill-row">
 											{#each reviewMomentPills as pill (pill.key)}
-												<Pill label={`${pill.label} · ${pill.detail}`} variant="neutral" />
+												<Pill label={`${pill.title} · ${pill.detail}`} variant="neutral" />
 											{/each}
 										</div>
 									{/if}
@@ -2354,10 +3001,11 @@
 						</details>
 
 						<details class="reference-disclosure host-detail-disclosure" open={false}>
-							<summary>All host lanes</summary>
+							<summary><span>All host lanes</span><span class="summary-hint">Inspect</span></summary
+							>
 							<div class="host-grid">
 								{#each rankedHosts as host (host.key)}
-									<HostCard {host} />
+									<HostCard {host} folderPrefix={folder.prefix} />
 								{/each}
 							</div>
 						</details>
@@ -2380,6 +3028,61 @@
 		grid-template-columns: minmax(0, 1.05fr) minmax(280px, 0.95fr);
 		gap: var(--space-4);
 		align-items: start;
+	}
+
+	.workflow-stage-strip {
+		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		gap: 0.75rem;
+		margin-top: 1rem;
+	}
+
+	.workflow-stage-card {
+		display: grid;
+		gap: 0.2rem;
+		padding: 0.85rem 0.95rem;
+		border-radius: var(--radius-md);
+		background: rgba(255, 255, 255, 0.68);
+		border: 1px solid rgba(23, 35, 31, 0.08);
+		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+	}
+
+	.workflow-stage-card.current {
+		background: linear-gradient(180deg, rgba(15, 118, 110, 0.14), rgba(255, 255, 255, 0.78));
+		border-color: rgba(15, 118, 110, 0.22);
+		box-shadow:
+			inset 0 1px 0 rgba(255, 255, 255, 0.56),
+			0 14px 24px rgba(15, 118, 110, 0.06);
+	}
+
+	.workflow-stage-card.done {
+		background: linear-gradient(180deg, rgba(47, 107, 62, 0.14), rgba(255, 255, 255, 0.78));
+		border-color: rgba(47, 107, 62, 0.22);
+	}
+
+	.workflow-stage-card.pending {
+		border-style: dashed;
+		background: rgba(255, 255, 255, 0.54);
+	}
+
+	.workflow-stage-label,
+	.workflow-stage-detail {
+		margin: 0;
+	}
+
+	.workflow-stage-label {
+		font-size: 0.74rem;
+		font-weight: 800;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--accent-deep);
+	}
+
+	.workflow-stage-detail {
+		font-size: 0.94rem;
+		font-weight: 700;
+		line-height: 1.3;
+		color: var(--ink);
 	}
 
 	.folder-header-side {
@@ -2581,6 +3284,10 @@
 
 	.host-section-copy {
 		max-width: 62ch;
+	}
+
+	.host-schedule-note {
+		margin-top: -0.12rem;
 	}
 
 	.run-readiness-card,
@@ -2789,6 +3496,7 @@
 	}
 
 	.folder-encode-detail,
+	.folder-encode-next-step,
 	.folder-encode-meta {
 		margin: 0;
 	}
@@ -2918,6 +3626,17 @@
 	.compact-host-meta {
 		font-size: 0.84rem;
 		line-height: 1.45;
+	}
+
+	.compact-host-meta.secondary {
+		font-size: 0.79rem;
+		color: var(--library-soft-text);
+	}
+
+	.compact-host-meta.tertiary {
+		font-size: 0.77rem;
+		font-weight: 700;
+		color: var(--accent-deep);
 	}
 
 	.sample-host-badge {
@@ -3386,6 +4105,19 @@
 		max-width: 44ch;
 	}
 
+	.host-search-callout {
+		margin: -0.18rem 0 0;
+		display: grid;
+		gap: 0.12rem;
+		font-size: 0.82rem;
+		line-height: 1.42;
+	}
+
+	.host-search-callout-label {
+		font-weight: 700;
+		color: var(--ink);
+	}
+
 	.action-inline-note {
 		padding: 0.15rem 0 0;
 		border-radius: 0;
@@ -3399,6 +4131,10 @@
 		padding-top: 0.15rem;
 	}
 
+	.destructive-action-copy {
+		padding-top: 0;
+	}
+
 	.note-panel {
 		padding: 1rem 1.05rem;
 	}
@@ -3406,6 +4142,20 @@
 	.note-lede {
 		max-width: 42ch;
 		overflow-wrap: anywhere;
+	}
+
+	.note-composer-footer {
+		display: flex;
+		justify-content: space-between;
+		gap: var(--space-2);
+		align-items: end;
+		flex-wrap: wrap;
+	}
+
+	.note-submit-hint {
+		max-width: 40ch;
+		font-size: 0.88rem;
+		line-height: 1.45;
 	}
 
 	.field-block {
@@ -3438,6 +4188,18 @@
 	.compact-action-row :global(button) {
 		flex: 1 1 12rem;
 		min-width: 0;
+	}
+
+	.single-primary-action-row :global(button) {
+		flex-basis: 100%;
+	}
+
+	.action-card-head {
+		display: flex;
+		justify-content: space-between;
+		gap: 0.8rem;
+		align-items: start;
+		flex-wrap: wrap;
 	}
 
 	.queue-action-block {
@@ -3581,6 +4343,17 @@
 		flex-wrap: wrap;
 	}
 
+	.review-head-actions {
+		display: grid;
+		justify-items: end;
+		gap: 0.7rem;
+		min-width: min(100%, 22rem);
+	}
+
+	.review-progress-pills {
+		justify-content: flex-end;
+	}
+
 	.review-selector-row {
 		display: flex;
 		gap: 0.65rem;
@@ -3602,6 +4375,16 @@
 		border-color: rgba(15, 118, 110, 0.32);
 		background: rgba(15, 118, 110, 0.12);
 		box-shadow: 0 10px 24px rgba(15, 118, 110, 0.1);
+	}
+
+	.review-selector-chip.seen {
+		border-color: rgba(47, 107, 62, 0.22);
+		background: linear-gradient(180deg, rgba(47, 107, 62, 0.08), rgba(255, 255, 255, 0.84));
+	}
+
+	.review-selector-chip.seen span:last-child {
+		color: #2f6b3e;
+		font-weight: 700;
 	}
 
 	.review-selector-chip strong {
@@ -3648,6 +4431,23 @@
 		background: #020617;
 		border: 1px solid rgba(23, 35, 31, 0.1);
 		aspect-ratio: 16 / 9;
+	}
+
+	.review-bench-summary-card {
+		display: grid;
+		gap: 0.55rem;
+		padding: 0.85rem 0.9rem;
+		border-radius: calc(var(--radius-md) - 0.14rem);
+		background: rgba(255, 255, 255, 0.7);
+		border: 1px solid rgba(23, 35, 31, 0.08);
+	}
+
+	.review-bench-pill-row {
+		margin-top: -0.1rem;
+	}
+
+	.review-bench-headline {
+		font-weight: 700;
 	}
 
 	.review-compare-link {
@@ -3882,9 +4682,9 @@
 	.reference-disclosure summary,
 	.steady-details-shell summary {
 		cursor: pointer;
-		display: flex;
-		justify-content: space-between;
-		gap: 1rem;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto auto;
+		gap: 0.8rem;
 		align-items: center;
 		padding: 0.8rem 0.95rem;
 		margin: -0.05rem -0.05rem 0;
@@ -3894,6 +4694,12 @@
 		font-size: 0.9rem;
 		font-weight: 700;
 		color: var(--ink);
+	}
+
+	.summary-hint {
+		font-size: 0.82rem;
+		font-weight: 700;
+		color: var(--ink-soft);
 	}
 
 	.reference-disclosure summary::after,
@@ -3932,6 +4738,44 @@
 		padding-top: 0.35rem;
 	}
 
+	.danger-disclosure {
+		display: grid;
+		gap: 0.75rem;
+		padding: 0.9rem 0.95rem;
+		border-radius: var(--radius-md);
+		background: rgba(255, 255, 255, 0.54);
+		border: 1px solid rgba(138, 68, 19, 0.14);
+	}
+
+	.danger-disclosure summary {
+		cursor: pointer;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto auto;
+		gap: 0.8rem;
+		align-items: center;
+		font-size: 0.9rem;
+		font-weight: 700;
+		color: var(--ink);
+	}
+
+	.danger-disclosure summary::after {
+		content: '+';
+		font-size: 1rem;
+		font-weight: 700;
+		line-height: 1;
+		color: var(--ink-soft);
+	}
+
+	.danger-disclosure[open] summary::after {
+		content: '-';
+	}
+
+	.danger-disclosure-body {
+		display: grid;
+		gap: 0.7rem;
+		padding-top: 0.1rem;
+	}
+
 	.compact-reference-block {
 		background: rgba(255, 255, 255, 0.74);
 	}
@@ -3946,6 +4790,7 @@
 
 	@media (max-width: 900px) {
 		.folder-header-grid,
+		.workflow-stage-strip,
 		.studio-grid,
 		.run-layout,
 		.review-grid,
@@ -3985,6 +4830,15 @@
 			display: none;
 		}
 
+		.review-head-actions {
+			justify-items: stretch;
+			min-width: 0;
+		}
+
+		.review-progress-pills {
+			justify-content: flex-start;
+		}
+
 		.steady-summary-row {
 			grid-template-columns: 1fr;
 			display: grid;
@@ -4001,6 +4855,16 @@
 			grid-template-columns: 1fr;
 		}
 
+		.note-composer-footer,
+		.thread-inline-head {
+			flex-direction: column;
+			align-items: start;
+		}
+
+		.note-composer-footer :global(button) {
+			width: 100%;
+		}
+
 		.status-strip {
 			align-items: start;
 		}
@@ -4010,7 +4874,8 @@
 		}
 
 		.reference-disclosure summary,
-		.steady-details-shell summary {
+		.steady-details-shell summary,
+		.danger-disclosure summary {
 			flex-direction: column;
 			align-items: start;
 		}

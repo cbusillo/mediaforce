@@ -63,6 +63,10 @@ or fresh clones.
 Database schema changes are now managed through SQLAlchemy 2.x plus Alembic.
 Opening the app against a database will auto-apply Alembic migrations, and
 legacy pre-Alembic databases are normalized to the initial revision before
+later revisions run. Encode artifacts also persist richer telemetry now: source
+size and path at encode time, host and worker metadata, wall-clock encode
+duration, and append-only item events for encode start, completion, and
+failure.
 subsequent Alembic upgrades run.
 
 For migration authoring and review workflow, see
@@ -343,8 +347,10 @@ any other host.
 Each host can now declare its own `max_parallel_encodes` limit and pick a
 structured schedule instead of typing profile keys by hand. `Always` is the
 built-in default, and you can add named windows when a machine should only run
-during certain hours. Those windows are evaluated in the local time of the host
-that is actually running the work.
+during certain hours. `Never` is also built in for temporarily disabling queued
+encodes on a host without removing its capabilities or setup state. Those
+windows are evaluated in the local time of the host that is actually running
+the work.
 
 For a blank remote Mac, first turn on Remote Login so SSH answers. Once that is
 reachable, the runtime settings UI can finish setup from the web surface: if

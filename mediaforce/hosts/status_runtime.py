@@ -89,10 +89,20 @@ def _remote_host_status(
         )
 
     media_access = host_media_access_for_host(host)
+    merged_source_roots = config.source_root_map_for_host(host)
+    supports_remote_stream_quality = media_access == "stream" and bool(merged_source_roots)
     paths = []
-    if media_access != "stream":
-        paths = [str(path) for path in config.source_root_map_for_host(host).values()] + [
+    require_paths = media_access != "stream"
+    if require_paths:
+        paths = [str(path) for path in merged_source_roots.values()] + [
             str(config.staging_root_for_host(host))]
+    elif media_access == "stream":
+        paths = [
+            str(path)
+            for path in merged_source_roots.values()
+            if str(path).strip()
+        ]
+        require_paths = bool(paths)
     repo_check_path = repo_path if repo_path is not None else ""
     script = _remote_status_script(paths=paths, repo_path=repo_check_path)
     try:
@@ -164,6 +174,7 @@ def _remote_host_status(
         platform_name=platform_name,
         repo_path=repo_path,
         repo_path_exists=bool(payload.get("repo_path_exists", False)),
+        supports_remote_stream_quality=supports_remote_stream_quality,
     )
     return _status_from_paths(
         key=ssh_host,
@@ -180,7 +191,7 @@ def _remote_host_status(
         issues=capability_issues,
         setup_supported=_host_setup_supported(platform_name),
         setup_requires_password=_remote_setup_needs_password(capability_issues),
-        require_paths=media_access != "stream",
+        require_paths=require_paths,
     )
 
 
@@ -194,12 +205,21 @@ def _current_machine_host_status(
         local_tool_status_snapshot: Callable[[], dict[str, bool]],
 ) -> HostStatus:
     media_access = host_media_access_for_host(host)
+    merged_source_roots = config.source_root_map_for_host(host)
+    supports_remote_stream_quality = media_access == "stream" and bool(merged_source_roots)
+    require_paths = media_access != "stream"
+    status_paths: list[Path]
+    if require_paths:
+        status_paths = [
+            *merged_source_roots.values(),
+            config.staging_root_for_host(host),
+        ]
+    else:
+        status_paths = [path for path in merged_source_roots.values() if str(path).strip()]
+        require_paths = bool(status_paths)
     mounted_paths = {
         str(path): path.exists()
-        for path in ([] if media_access == "stream" else [
-            *config.source_root_map_for_host(host).values(),
-            config.staging_root_for_host(host),
-        ])
+        for path in status_paths
     }
     tools = local_tool_status_snapshot()
     ffmpeg_bin = _find_local_tool("ffmpeg", fallback_paths=["/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"])
@@ -210,6 +230,7 @@ def _current_machine_host_status(
         platform_name=platform_name,
         repo_path=repo_path,
         repo_path_exists=not repo_path or Path(repo_path).expanduser().exists(),
+        supports_remote_stream_quality=supports_remote_stream_quality,
     )
     return _status_from_paths(
         key=ssh_host,
@@ -225,5 +246,5 @@ def _current_machine_host_status(
         utc_offset_minutes=_local_utc_offset_minutes(),
         issues=capability_issues,
         setup_supported=_host_setup_supported(platform_name),
-        require_paths=media_access != "stream",
+        require_paths=require_paths,
     )

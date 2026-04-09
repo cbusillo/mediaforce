@@ -12,6 +12,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.type_defs import JSONValue, float_value, int_value, object_dict, object_list
 from mediaforce.library.folder_profiles import inspect_prefix
+from mediaforce.web.runtime.folder_tuning_helpers import load_json_object, recent_tuning_sessions
 
 MIN_RECOMMENDED_SAVINGS_BYTES = 100 * 1024 * 1024
 CALIBRATION_REVIEW_FIELDS = {
@@ -23,21 +24,31 @@ CALIBRATION_REVIEW_FIELDS = {
 
 _NOTE_VMAF_PATTERNS = (
     re.compile(r"\b(?P<target>\d{2}(?:\.\d+)?)\s*vmaf\b", re.IGNORECASE),
-    re.compile(r"\bvmaf\s*(?:target|around|at|to|of|=)?\s*(?P<target>\d{2}(?:\.\d+)?)\b", re.IGNORECASE),
+    re.compile(
+        r"\bvmaf\b(?:\s+(?:target|around|about|roughly|approximately|approx|at|to|of)|\s*=){0,3}\s*(?P<target>\d{2}(?:\.\d+)?)\b",
+        re.IGNORECASE,
+    ),
 )
 _NOTE_XPSNR_PATTERNS = (
     re.compile(r"\b(?P<target>\d{2}(?:\.\d+)?)\s*xpsnr\b", re.IGNORECASE),
-    re.compile(r"\bxpsnr\s*(?:target|around|at|to|of|=)?\s*(?P<target>\d{2}(?:\.\d+)?)\b", re.IGNORECASE),
+    re.compile(
+        r"\bxpsnr\b(?:\s+(?:target|around|about|roughly|approximately|approx|at|to|of)|\s*=){0,3}\s*(?P<target>\d{2}(?:\.\d+)?)\b",
+        re.IGNORECASE,
+    ),
 )
 _NOTE_SIZE_BUDGET_PATTERNS = (
     re.compile(
         r"\b(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>kb|mb|gb|tb)\s*(?:per|/)\s*(?:episode|ep|file)\b",
         re.IGNORECASE,
     ),
-    re.compile(
-        r"\b(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>kb|mb|gb|tb)\s*(?:each|an?)\s*(?:episode|ep|file)\b",
-        re.IGNORECASE,
-    ),
+        re.compile(
+            r"\b(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>kb|mb|gb|tb)\s*(?:each|an?)\s*(?:episode|ep|file)\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:want|aim|target|hit|keep|hold|try|budget|cap|under|around|about)\b[^\n.]{0,48}?\b(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>kb|mb|gb|tb)\b",
+            re.IGNORECASE,
+        ),
 )
 _SIZE_BUDGET_UNIT_BYTES = {
     "kb": 1024,
@@ -45,6 +56,17 @@ _SIZE_BUDGET_UNIT_BYTES = {
     "gb": 1024 * 1024 * 1024,
     "tb": 1024 * 1024 * 1024 * 1024,
 }
+
+
+def merge_policy_fragments(*fragments: dict[str, Any] | None) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for fragment in fragments:
+        for section, values in object_dict(fragment).items():
+            normalized_values = object_dict(values)
+            if not normalized_values:
+                continue
+            merged.setdefault(section, {}).update(normalized_values)
+    return merged
 
 
 def parse_audio_bitrate_kbps(value: JSONValue, fallback: float) -> float:
@@ -116,6 +138,13 @@ def size_budget_request(trimmed: str, sample_item: dict[str, Any] | None) -> dic
             source_percent=estimated_source_percent,
             video_bitrate_kbps=estimated_video_bitrate_kbps,
         )
+        applied_policy: dict[str, Any] | None = None
+        requested_max_encoded_percent = None
+        applied_max_encoded_percent = None
+        if estimated_source_percent is not None:
+            requested_max_encoded_percent = round(estimated_source_percent, 2)
+            applied_max_encoded_percent = max(10, min(100, int(round(estimated_source_percent))))
+            applied_policy = {"video": {"max_encoded_percent": applied_max_encoded_percent}}
         return {
             "source": "operator_note",
             "honor_mode": "size_budget_experiment",
@@ -128,19 +157,14 @@ def size_budget_request(trimmed: str, sample_item: dict[str, Any] | None) -> dic
             "estimated_video_bitrate_kbps": estimated_video_bitrate_kbps,
             "feasibility": feasibility,
             "requires_confirmation": requires_confirmation,
+            "requested_max_encoded_percent": requested_max_encoded_percent,
+            "applied_max_encoded_percent": applied_max_encoded_percent,
+            "applied_policy": applied_policy,
         }
     return None
 
 
-def operator_requested_experiment(note: str, sample_item: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    trimmed = note.strip()
-    if not trimmed:
-        return None
-
-    requested_size_budget = size_budget_request(trimmed, sample_item)
-    if requested_size_budget:
-        return requested_size_budget
-
+def metric_target_request(trimmed: str) -> dict[str, Any] | None:
     for pattern in _NOTE_VMAF_PATTERNS:
         match = pattern.search(trimmed)
         if not match:
@@ -193,14 +217,141 @@ def operator_requested_experiment(note: str, sample_item: dict[str, Any] | None 
     return None
 
 
+def operator_requested_experiment(note: str, sample_item: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    trimmed = note.strip()
+    if not trimmed:
+        return None
+
+    requested_size_budget = size_budget_request(trimmed, sample_item)
+    requested_metric_target = metric_target_request(trimmed)
+    if requested_size_budget and requested_metric_target:
+        return {
+            "source": "operator_note",
+            "honor_mode": "combined_experiment",
+            "request_type": "combined_experiment",
+            "request_text": trimmed,
+            "metric": requested_metric_target.get("metric"),
+            "target": requested_metric_target.get("target"),
+            "budget_bytes": requested_size_budget.get("budget_bytes"),
+            "budget_label": requested_size_budget.get("budget_label"),
+            "estimated_source_percent": requested_size_budget.get("estimated_source_percent"),
+            "estimated_audio_bytes": requested_size_budget.get("estimated_audio_bytes"),
+            "estimated_video_bitrate_kbps": requested_size_budget.get("estimated_video_bitrate_kbps"),
+            "feasibility": requested_size_budget.get("feasibility"),
+            "requires_confirmation": requested_size_budget.get("requires_confirmation"),
+            "requested_max_encoded_percent": requested_size_budget.get("requested_max_encoded_percent"),
+            "applied_max_encoded_percent": requested_size_budget.get("applied_max_encoded_percent"),
+            "metric_request": requested_metric_target,
+            "size_budget_request": requested_size_budget,
+            "applied_policy": merge_policy_fragments(
+                object_dict(requested_metric_target.get("applied_policy")),
+                object_dict(requested_size_budget.get("applied_policy")),
+            ),
+        }
+    if requested_metric_target:
+        return requested_metric_target
+    if requested_size_budget:
+        return requested_size_budget
+    return None
+
+
 def apply_policy_fragment(policy: dict[str, Any], fragment: dict[str, Any] | None) -> dict[str, Any]:
     updated_policy = json.loads(json.dumps(policy))
-    for section, values in object_dict(fragment).items():
-        normalized_values = object_dict(values)
-        if not normalized_values:
-            continue
-        updated_policy.setdefault(section, {}).update(normalized_values)
+    for section, values in merge_policy_fragments(fragment).items():
+        updated_policy.setdefault(section, {}).update(values)
     return updated_policy
+
+
+def operator_request_signature(operator_request: dict[str, Any] | None) -> tuple[Any, ...] | None:
+    request = object_dict(operator_request)
+    if not request:
+        return None
+    request_type = str(request.get("request_type") or "").strip().lower()
+    metric = str(request.get("metric") or "").strip().lower() or None
+    target = float_value(request.get("target")) if request.get("target") is not None else None
+    budget_bytes = int_value(request.get("budget_bytes")) if request.get("budget_bytes") is not None else None
+    rounded_target = round(0.0 if target is None else target, 2)
+    if request_type == "combined_experiment":
+        return request_type, metric, rounded_target, budget_bytes
+    if request_type == "metric_target":
+        return request_type, metric, rounded_target
+    if request_type == "size_budget":
+        return request_type, budget_bytes
+    return None
+
+
+def matching_request_history(
+        *,
+        note: str,
+        sample_item: dict[str, Any] | None,
+        recent_sessions_payload: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    current_request = operator_requested_experiment(note, sample_item)
+    current_signature = operator_request_signature(current_request)
+    if current_signature is None:
+        return None
+    matches: list[dict[str, Any]] = []
+    softened_count = 0
+    for session in recent_sessions_payload:
+        prior_request = operator_requested_experiment(str(session.get("note") or ""), sample_item)
+        if operator_request_signature(prior_request) != current_signature:
+            continue
+        disposition = str(session.get("request_disposition") or "").strip().lower() or None
+        if disposition == "softened":
+            softened_count += 1
+        matches.append(
+            {
+                "note": session.get("note"),
+                "request_disposition": disposition,
+                "summary": session.get("summary"),
+                "created_at": session.get("created_at"),
+            }
+        )
+    if not matches:
+        return None
+    return {
+        "repeat_count": len(matches) + 1,
+        "previous_softened_count": softened_count,
+        "matching_sessions": matches,
+        "operator_confirmed": True,
+    }
+
+
+def maybe_force_repeated_seed_experiment(
+        *,
+        base_policy: dict[str, Any],
+        seed_response: Any,
+        requested_experiment: dict[str, Any] | None,
+        repeat_signal: dict[str, Any] | None,
+) -> None:
+    repeat_payload = object_dict(repeat_signal)
+    if int_value(repeat_payload.get("repeat_count")) < 2:
+        return
+    if str(seed_response.request_disposition or "").strip().lower() not in {"softened", "rejected"}:
+        return
+    requested_policy = object_dict(object_dict(requested_experiment).get("applied_policy"))
+    if not requested_policy:
+        return
+    _, applied_fragment = apply_seed_policy(base_policy, requested_policy)
+    if not applied_fragment:
+        return
+    previous_softened = int_value(repeat_payload.get("previous_softened_count"))
+    seed_response.ok = True
+    seed_response.proposed_policy = applied_fragment
+    seed_response.request_disposition = "honored_with_risk"
+    seed_response.summary = "Kept the repeated requested experiment as a high-risk first sample draft."
+    seed_response.diagnosis = (
+        "The operator repeated the same explicit experiment after an earlier softening, "
+        "so the seed keeps the risky target for measurement instead of overriding it again."
+    )
+    seed_response.request_response = (
+        "You asked for the same aggressive experiment again, so I kept it as an honored high-risk draft "
+        "instead of softening it again."
+    )
+    if previous_softened:
+        seed_response.suggested_follow_up = "Measure this risky first sample and decide from the clips whether to pull it back."
+    if not seed_response.feasibility_note:
+        seed_response.feasibility_note = "This draft is operator-confirmed and intentionally riskier than the usual cold-start seed."
 
 
 def build_run_verdict_payload(
@@ -431,9 +582,16 @@ def build_seed_policy_payload(
         sample_item: dict[str, Any],
         summary: dict[str, Any],
         metric_support_payload: dict[str, bool],
+        recent_sessions_payload: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     suggested_override = object_dict(summary.get("suggested_override"))
     requested_experiment = operator_requested_experiment(user_note, sample_item)
+    recent_sessions = list(recent_sessions_payload) if recent_sessions_payload is not None else []
+    repeat_signal = matching_request_history(
+        note=user_note,
+        sample_item=sample_item,
+        recent_sessions_payload=recent_sessions,
+    )
     return {
         "folder": prefix,
         "goal": "Prefer slightly smaller files when the visual difference is hard to spot, but keep first-pass drafts conservative when the class is uncertain.",
@@ -475,6 +633,7 @@ def build_seed_policy_payload(
         "base_policy": tuning_policy_focus(base_policy),
         "operator_note": user_note or None,
         "requested_experiment": requested_experiment,
+        "operator_repeat_signal": repeat_signal,
         "metric_support": metric_support_payload,
         "preferred_metric": "vmaf" if metric_support_payload.get("vmaf") else (
             "xpsnr" if metric_support_payload.get("xpsnr") else None
@@ -498,6 +657,7 @@ def review_gate(calibration: dict[str, Any] | None) -> dict[str, Any]:
             "can_confirm_full": False,
             "message": "Run a sampled calibration first.",
             "status": "missing_sample",
+            "next_action_label": "Run a sample",
         }
 
     if str(calibration.get("mode") or "sample") != "sample":
@@ -505,6 +665,7 @@ def review_gate(calibration: dict[str, Any] | None) -> dict[str, Any]:
             "can_confirm_full": False,
             "message": "Run and save a fresh sampled draft before queueing the folder encode.",
             "status": "needs_fresh_sample",
+            "next_action_label": "Run a fresh sample",
         }
 
     current_hash = str(calibration.get("draft_hash") or calibration_draft_hash(calibration))
@@ -520,6 +681,7 @@ def review_gate(calibration: dict[str, Any] | None) -> dict[str, Any]:
             "message": f"Approved sample draft saved at {accepted_at}. Folder encode is unlocked.",
             "status": "accepted",
             "accepted_at": accepted_at,
+            "next_action_label": "Queue folder encode",
         }
 
     if not review_media_ready:
@@ -527,12 +689,14 @@ def review_gate(calibration: dict[str, Any] | None) -> dict[str, Any]:
             "can_confirm_full": False,
             "message": "Review clips are unavailable for this draft. Run a fresh sample before approving it.",
             "status": "missing_review_media",
+            "next_action_label": "Run a fresh sample",
         }
 
     return {
         "can_confirm_full": False,
         "message": "Review the sample clips, then approve this draft to save the folder policy and unlock folder encode.",
         "status": "needs_approval",
+        "next_action_label": "Review clips and approve",
     }
 
 
@@ -552,6 +716,12 @@ def maybe_seed_baseline_policy(
         return None
     summary = inspect_prefix(connection, config, prefix)
     metric_support_payload = metric_support()
+    recent_sessions_payload = recent_tuning_sessions(
+        connection,
+        prefix,
+        load_json_object_fn=load_json_object,
+        limit=4,
+    )
     payload = build_seed_policy_payload(
         prefix=prefix,
         user_note=user_note,
@@ -559,8 +729,15 @@ def maybe_seed_baseline_policy(
         sample_item=sample_item,
         summary=summary,
         metric_support_payload=metric_support_payload,
+        recent_sessions_payload=recent_sessions_payload,
     )
     seed_response = request_seed_policy(project_root=project_root, payload=payload)
+    maybe_force_repeated_seed_experiment(
+        base_policy=base_policy,
+        seed_response=seed_response,
+        requested_experiment=object_dict(payload.get("requested_experiment")),
+        repeat_signal=object_dict(payload.get("operator_repeat_signal")),
+    )
     if not seed_response.ok or not seed_response.proposed_policy:
         return {
             "policy": base_policy,

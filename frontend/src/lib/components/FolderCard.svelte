@@ -27,18 +27,44 @@
 	);
 	const cardThemeStyle = $derived(folderLibraryThemeStyle(libraryColor));
 	const reviewBadgeTone = $derived(folder.review_badge_tone ?? 'neutral');
+	const progressVisible = $derived(completedCount > 0 && completedCount < folder.item_count);
+	const folderStateCopy = $derived.by(() => {
+		if (completedCount === 0) {
+			return `${folder.item_count} ${folder.item_count === 1 ? 'item' : 'items'} waiting`;
+		}
+		if (folder.pending_count === 0) {
+			return `${folder.item_count} ${folder.item_count === 1 ? 'item' : 'items'} need no more discovery work`;
+		}
+		return `${folder.pending_count} pending of ${folder.item_count} items`;
+	});
+	const statusSummaryCopy = $derived.by(() => formatCounts(folder.statuses));
+	const statusLineCopy = $derived.by(() => {
+		const discoveredCount = Number(folder.statuses?.discovered ?? 0);
+		if (discoveredCount === folder.item_count && Object.keys(folder.statuses ?? {}).length === 1) {
+			return 'Ready to assess';
+		}
+		return statusSummaryCopy;
+	});
+	const cardActionLabel = $derived.by(() => {
+		if (folder.review_badge_label) return 'Continue in studio';
+		return 'Open studio';
+	});
 	const folderFacts = $derived.by(() => [
 		{ label: 'Estimated reclaim', value: formatGiB(folder.estimated_savings_bytes) },
-		{ label: 'Current size', value: formatGiB(folder.total_size_bytes, 2) },
-		{
-			label: 'Avg age',
-			value: folder.details_loading ? 'Calculating' : `${folder.average_age_days.toFixed(0)} days`
-		},
-		{ label: 'Video mix', value: formatCounts(folder.video_codecs) }
+		{ label: 'Current size', value: formatGiB(folder.total_size_bytes, 2) }
 	]);
+	const secondaryMetaCopy = $derived.by(() => {
+		const parts: string[] = [];
+		const videoMix = formatCounts(folder.video_codecs);
+		if (videoMix && videoMix !== 'None') parts.push(videoMix);
+		if (!folder.details_loading && folder.average_age_days > 0) {
+			parts.push(`${folder.average_age_days.toFixed(0)} days old`);
+		}
+		return parts.join(' · ');
+	});
 </script>
 
-<a class="folder-link" href={resolve(`/folders/${folder.prefix}`)} style={cardThemeStyle}>
+<a class="folder-link" href={resolve(`/folders/${folder.prefix}`)} style={cardThemeStyle} title={folder.prefix}>
 	<Panel class="folder-card" variant="default" padding="1.2rem 1.2rem 1.25rem">
 		<div class="card-shell">
 			<div class="card-header">
@@ -51,31 +77,36 @@
 						>
 					{/if}
 				</div>
-				<p class="path-line">{folder.prefix}</p>
 			</div>
 
 			<div class="card-body">
-				<h3 class="serif">{folder.title}</h3>
-				<p class="summary-line">{folder.pending_count} pending of {folder.item_count} items</p>
-				{#if folder.details_loading}
-					<p class="loading-line">Ranking details are still loading.</p>
-				{/if}
-				<div class="progress-cluster" aria-label={`${completionPercent}% complete`}>
+					<h3 class="serif">{folder.title}</h3>
+					<p class="summary-line">{folderStateCopy}</p>
+					{#if progressVisible}
+					<div class="progress-cluster" aria-label={`${completionPercent}% complete`}>
 					<div class="progress-rail" aria-hidden="true">
 						<span class="progress-fill" style={`width: ${completionPercent}%;`}></span>
 					</div>
 					<p class="progress-copy">{completedCount} complete · {completionPercent}%</p>
 				</div>
-				<p class="status-line">Statuses: {formatCounts(folder.statuses)}</p>
+					{/if}
+					<p class="status-line">{statusLineCopy}</p>
+					{#if secondaryMetaCopy}
+						<p class="secondary-meta-line">{secondaryMetaCopy}</p>
+					{/if}
 			</div>
 
 			<div class="fact-grid" aria-label={`${folder.title} details`}>
-				{#each folderFacts as fact (fact.label)}
-					<div class={`fact-card ${fact.label === 'Estimated reclaim' ? 'highlight' : ''}`.trim()}>
-						<p class="fact-label">{fact.label}</p>
-						<p class="fact-value">{fact.value}</p>
-					</div>
-				{/each}
+					{#each folderFacts as fact (fact.label)}
+						<div class={`fact-card ${fact.label === 'Estimated reclaim' ? 'highlight' : ''}`.trim()}>
+							<p class="fact-label">{fact.label}</p>
+							<p class="fact-value">{fact.value}</p>
+						</div>
+					{/each}
+				</div>
+
+			<div class="card-footer" aria-hidden="true">
+				<span class="card-footer-copy">{cardActionLabel}</span>
 			</div>
 		</div>
 	</Panel>
@@ -114,7 +145,7 @@
 
 	.card-shell {
 		display: grid;
-		grid-template-rows: auto 1fr auto;
+		grid-template-rows: auto 1fr auto auto;
 		gap: 1rem;
 		height: 100%;
 		padding-left: 0.55rem;
@@ -124,15 +155,6 @@
 		display: grid;
 		grid-template-rows: auto auto;
 		gap: 0.55rem;
-	}
-
-	.path-line {
-		margin: 0;
-		font-size: 0.8rem;
-		line-height: 1.35;
-		color: var(--library-soft-text);
-		max-width: min(20rem, 100%);
-		word-break: break-word;
 	}
 
 	.badge-row {
@@ -212,14 +234,7 @@
 		color: var(--ink-soft);
 	}
 
-	.loading-line {
-		margin: 0;
-		font-size: 0.78rem;
-		font-weight: 700;
-		color: var(--library-soft-text);
-	}
-
-	.progress-cluster {
+		.progress-cluster {
 		display: grid;
 		gap: 0.32rem;
 	}
@@ -256,11 +271,34 @@
 		color: var(--ink-soft);
 	}
 
+	.secondary-meta-line {
+		margin: -0.1rem 0 0;
+		font-size: 0.8rem;
+		line-height: 1.4;
+		color: var(--library-soft-text);
+	}
+
 	.fact-grid {
 		display: grid;
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 		gap: 0.72rem;
 		align-self: end;
+	}
+
+	.card-footer {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 0.75rem;
+		padding-top: 0.15rem;
+		border-top: 1px solid rgba(23, 35, 31, 0.08);
+		color: var(--library-text);
+	}
+
+	.card-footer-copy {
+		font-size: 0.84rem;
+		font-weight: 700;
+		letter-spacing: 0.01em;
 	}
 
 	.fact-card {
@@ -277,6 +315,10 @@
 		border-color: var(--library-border);
 	}
 
+	.fact-card.pending {
+		background: rgba(255, 255, 255, 0.48);
+	}
+
 	.fact-label,
 	.fact-value {
 		margin: 0;
@@ -285,17 +327,59 @@
 	.fact-label {
 		font-size: 0.72rem;
 		font-weight: 800;
-		letter-spacing: 0.06em;
-		text-transform: uppercase;
+		letter-spacing: 0.01em;
 		color: var(--library-text);
 	}
 
 	.fact-value {
-		font-size: 0.95rem;
+		font-size: 0.9rem;
 		line-height: 1.4;
-		font-weight: 650;
+		font-weight: 600;
 		color: var(--ink);
 		text-wrap: pretty;
+	}
+
+	.fact-card.highlight .fact-value {
+		font-size: 1.14rem;
+		font-weight: 800;
+		color: var(--library-text);
+	}
+
+	.fact-card.pending .fact-value {
+		color: var(--ink-soft);
+		font-weight: 600;
+	}
+
+	.fact-skeleton {
+		display: block;
+		width: 72%;
+		height: 1rem;
+		border-radius: 999px;
+		background: linear-gradient(90deg, rgba(23, 35, 31, 0.08), rgba(23, 35, 31, 0.16), rgba(23, 35, 31, 0.08));
+		background-size: 200% 100%;
+		animation: fact-skeleton-shift 1.6s ease-in-out infinite;
+	}
+
+	.visually-hidden {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
+		border: 0;
+	}
+
+	@keyframes fact-skeleton-shift {
+		0% {
+			background-position: 100% 0;
+		}
+
+		100% {
+			background-position: -100% 0;
+		}
 	}
 
 	@media (max-width: 720px) {

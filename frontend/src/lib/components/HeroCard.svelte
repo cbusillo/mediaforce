@@ -38,7 +38,10 @@
 		grid-template-areas: 'copy meta aside';
 		gap: var(--space-4);
 		align-items: start;
-		background: var(--surface-spotlight);
+		background:
+			radial-gradient(circle at top left, rgba(15, 118, 110, 0.18), transparent 42%),
+			radial-gradient(circle at 85% 18%, rgba(201, 166, 112, 0.16), transparent 24%),
+			linear-gradient(140deg, rgba(255, 253, 247, 0.94), rgba(244, 233, 210, 0.9));
 	}
 
 	.copy-block,
@@ -64,8 +67,11 @@
 		line-height: 1.55;
 		padding: 1rem 1.05rem;
 		border-radius: var(--radius-md);
-		background: rgba(255, 255, 255, 0.52);
-		border: 1px solid rgba(23, 35, 31, 0.08);
+		background: rgba(255, 255, 255, 0.66);
+		border: 1px solid rgba(15, 118, 110, 0.12);
+		box-shadow:
+			inset 0 1px 0 rgba(255, 255, 255, 0.56),
+			0 18px 32px rgba(58, 42, 23, 0.06);
 	}
 
 	@media (max-width: 1180px) {

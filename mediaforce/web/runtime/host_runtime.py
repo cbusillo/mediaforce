@@ -11,6 +11,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.type_defs import float_value, object_dict
+from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS
 from mediaforce.encoding.encode_queue import list_encode_jobs
 from mediaforce.remote import HostStatus, collect_host_statuses, host_status_targets_current_machine, \
     normalize_host_media_access, run_host_lifecycle_command
@@ -55,7 +56,7 @@ def host_runtime_rows(
         job
         for job in (
             decorate_encode_job_for_scheduler(config, job)
-            for job in list_encode_jobs(connection, statuses=("running",), limit=32)
+            for job in list_encode_jobs(connection, statuses=("running",), limit=32, job_kinds=RUNNABLE_ENCODE_JOB_KINDS)
         )
         if job is not None
     ]
@@ -65,12 +66,25 @@ def host_runtime_rows(
     for status in statuses:
         host_config = host_config_for_key(config, status.key)
         capabilities = {capability.lower() for capability in status.capabilities}
+        raw_allowed_libraries = host_config.get("allowed_libraries")
+        allowed_libraries = [
+            str(value)
+            for value in raw_allowed_libraries
+            if isinstance(value, str)
+        ] if isinstance(raw_allowed_libraries, list) else []
+        merged_source_roots = {
+            key: str(path)
+            for key, path in config.source_root_map_for_host(host_config).items()
+        }
         runtime_host_payload = {
             "host": str(host_config.get("host") or status.key),
             "start_command": str(host_config.get("start_command") or ""),
             "stop_command": str(host_config.get("stop_command") or ""),
             "start_timeout_seconds": host_lifecycle_start_timeout_seconds(host_config),
             "media_access": normalize_host_media_access(host_config.get("media_access")),
+            "allowed_libraries": allowed_libraries,
+            "source_roots": merged_source_roots,
+            "staging_root": str(host_config.get("staging_root") or "").strip() or None,
         }
         max_parallel_encodes = host_max_parallel_encodes(host_config)
         schedule_profile = host_schedule_profile_key(host_config)
@@ -83,6 +97,8 @@ def host_runtime_rows(
             active_reason = status.message
         elif not encode_capable:
             active_reason = "encode queue capability disabled"
+        elif str(policy.get("mode") or "anytime") == "never":
+            active_reason = "encode queue disabled by schedule"
         elif not schedule_open:
             active_reason = ""
         elif active_encode_count >= max_parallel_encodes:
@@ -126,7 +142,9 @@ def host_runtime_rows(
 def running_encode_counts_by_host(connection: DBClient) -> dict[str, int]:
     counts: dict[str, int] = {}
     rows = connection.execute(
-        select(encode_jobs.c.host_json).where(encode_jobs.c.status == "running")
+        select(encode_jobs.c.host_json)
+        .where(encode_jobs.c.status == "running")
+        .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
     ).mappings().fetchall()
     for row in rows:
         try:

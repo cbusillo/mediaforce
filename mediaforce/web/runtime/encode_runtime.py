@@ -20,10 +20,11 @@ from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
-from mediaforce.encoding.encode_queue import ensure_queue_state, load_active_encode_job, load_encode_job, load_queue_state, \
-    save_encode_job, save_queue_state
+from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS, ensure_queue_state, list_child_encode_jobs, \
+    load_encode_job, load_queue_state, save_encode_job, save_queue_state
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
+from mediaforce.encoding.staging import safe_unlink
 from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
 
 
@@ -39,8 +40,9 @@ class EncodeQueueRuntimeDeps:
     ensure_encode_host_ready: Any
     stop_encode_host_if_configured: Any
     encode_manifest_items: Any
+    dispatch_encode_job: Any
+    active_encode_process_controllers: Any
     logger: Any
-    encode_queue_process: ManagedProcessController
     encode_queue_poll_seconds: float
     encode_job_lease_seconds: int
     encode_job_heartbeat_seconds: float
@@ -68,7 +70,9 @@ def reconcile_encode_jobs(
 ) -> None:
     now = datetime.now(tz=UTC)
     running_rows = connection.execute(
-        select(encode_jobs.c.job_id).where(encode_jobs.c.status == "running")
+        select(encode_jobs.c.job_id)
+        .where(encode_jobs.c.status == "running")
+        .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
     ).mappings().fetchall()
     for row in running_rows:
         payload = load_encode_job(connection, str(row["job_id"]))
@@ -95,6 +99,7 @@ def reconcile_encode_jobs(
     retry_backoff_rows = connection.execute(
         select(encode_jobs.c.job_id)
         .where(encode_jobs.c.status == "retry_backoff")
+        .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
         .order_by(encode_jobs.c.created_at, literal_column("rowid"))
     ).mappings().fetchall()
     for row in retry_backoff_rows:
@@ -113,16 +118,231 @@ def reconcile_encode_jobs(
             }
         )
         save_encode_job(connection, payload)
+        sync_encode_job_parent(connection, payload, deps)
 
     state = load_queue_state(connection)
-    running_count = int(
-        connection.execute(
-            select(func.count()).select_from(encode_jobs).where(encode_jobs.c.status == "running")
-        ).scalar_one()
-    )
+    running_count = running_encode_job_count(connection)
     if running_count == 0 and (state.get("active_job_id") or state.get("stop_requested")):
         state.update({"active_job_id": None, "stop_requested": False, "updated_at": deps.now_iso()})
         save_queue_state(connection, state)
+
+
+def running_encode_job_count(connection: DBClient) -> int:
+    return int(connection.execute(
+        select(func.count())
+        .select_from(encode_jobs)
+        .where(encode_jobs.c.status == "running")
+        .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
+    ).scalar_one())
+
+
+def resolve_encode_job_for_display(
+        connection: DBClient,
+        job: dict[str, Any] | None,
+        deps: EncodeQueueRuntimeDeps,
+) -> dict[str, Any] | None:
+    if job is None:
+        return None
+    if str(job.get("job_kind") or "single") != "folder":
+        return job
+    return aggregate_encode_parent_job(connection, job, deps)
+
+
+def sync_encode_job_parent(connection: DBClient, job: dict[str, Any], deps: EncodeQueueRuntimeDeps) -> dict[str, Any] | None:
+    if str(job.get("job_kind") or "single") != "shard":
+        return None
+    parent_job_id = str(job.get("parent_job_id") or "").strip()
+    if not parent_job_id:
+        return None
+    parent = load_encode_job(connection, parent_job_id)
+    if parent is None:
+        return None
+    aggregated = aggregate_encode_parent_job(connection, parent, deps)
+    save_encode_job(connection, aggregated)
+    return aggregated
+
+
+def aggregate_encode_parent_job(
+        connection: DBClient,
+        job: dict[str, Any],
+        deps: EncodeQueueRuntimeDeps,
+) -> dict[str, Any]:
+    children = list_child_encode_jobs(connection, str(job["job_id"]))
+    if not children:
+        return dict(job)
+
+    running_children = [child for child in children if str(child.get("status") or "") == "running"]
+    queued_children = [
+        child for child in children if str(child.get("status") or "") in {"queued", "retry_backoff"}
+    ]
+    completed_children = [child for child in children if str(child.get("status") or "") == "completed"]
+    attention_children = [child for child in children if str(child.get("status") or "") == "needs_attention"]
+    stopped_children = [child for child in children if str(child.get("status") or "") == "stopped"]
+    failed_children = [child for child in children if str(child.get("status") or "") == "failed"]
+
+    if running_children:
+        status = "running"
+    elif attention_children:
+        status = "needs_attention"
+    elif any(str(child.get("status") or "") == "retry_backoff" for child in children):
+        status = "retry_backoff"
+    elif queued_children:
+        status = "queued"
+    elif len(completed_children) == len(children):
+        status = "completed"
+    elif stopped_children:
+        status = "stopped"
+    elif failed_children:
+        status = "failed"
+    else:
+        status = str(job.get("status") or "queued")
+
+    total_duration_seconds = 0.0
+    total_item_count = 0
+    completed_duration_seconds = 0.0
+    completed_item_count = 0
+    remaining_duration_seconds = 0.0
+    aggregate_speed = 0.0
+    aggregate_fps = 0.0
+    recoverable_item_count = 0
+    speed_reporting_children = 0
+    running_progress_states: list[str] = []
+    active_hosts: list[dict[str, Any]] = []
+    seen_host_keys: set[str] = set()
+    current_items: list[str] = []
+    for child in children:
+        progress = object_dict(child.get("progress"))
+        child_totals = encode_job_manifest_totals(child)
+        child_total_duration_seconds = float_value(
+            progress.get("total_duration_seconds") or child_totals.get("total_duration_seconds")
+        )
+        child_total_item_count = int_value(progress.get("total_item_count") or child_totals.get("total_item_count") or child.get("item_count"))
+        child_completed_duration_seconds = float_value(progress.get("overall_completed_duration_seconds"))
+        if str(child.get("status") or "") == "completed":
+            child_completed_duration_seconds = child_total_duration_seconds
+            child_completed_item_count = child_total_item_count
+        else:
+            child_completed_item_count = int_value(progress.get("completed_item_count"))
+        total_duration_seconds += child_total_duration_seconds
+        total_item_count += child_total_item_count
+        completed_duration_seconds += min(child_completed_duration_seconds, child_total_duration_seconds)
+        completed_item_count += min(child_completed_item_count, child_total_item_count)
+        remaining_duration_seconds += max(child_total_duration_seconds - child_completed_duration_seconds, 0.0)
+        if str(child.get("status") or "") in {"needs_attention", "failed", "stopped"}:
+            recoverable_item_count += child_total_item_count
+        speed = float_value(progress.get("speed"))
+        child_progress_state = str(progress.get("progress_state") or "").strip().lower()
+        if str(child.get("status") or "") == "running" and child_progress_state:
+            running_progress_states.append(child_progress_state)
+        if str(child.get("status") or "") == "running" and speed > 0:
+            aggregate_speed += speed
+            speed_reporting_children += 1
+        fps = float_value(progress.get("fps"))
+        if str(child.get("status") or "") == "running" and fps > 0:
+            aggregate_fps += fps
+        host_payload = object_dict(child.get("host"))
+        host_key = str(host_payload.get("key") or host_payload.get("host") or host_payload.get("label") or "").strip()
+        if str(child.get("status") or "") == "running" and host_key and host_key not in seen_host_keys:
+            seen_host_keys.add(host_key)
+            active_hosts.append(host_payload)
+        current_item = str(progress.get("current_item_rel_path") or "").strip()
+        if str(child.get("status") or "") == "running" and current_item:
+            current_items.append(current_item)
+
+    percent_complete = (
+        min(completed_duration_seconds / total_duration_seconds, 1.0) * 100.0
+        if total_duration_seconds > 0
+        else 0.0
+    )
+    eta_speed = aggregate_speed
+    if 0 < speed_reporting_children < len(running_children):
+        eta_speed *= len(running_children) / speed_reporting_children
+    eta_seconds = (remaining_duration_seconds / eta_speed) if eta_speed > 0 else None
+    progress_state = {
+        "running": "running",
+        "completed": "completed",
+        "queued": "queued",
+        "retry_backoff": "queued",
+        "needs_attention": "needs_attention",
+        "stopped": "stopped",
+        "failed": "failed",
+    }.get(status, "queued")
+    phase_label = None
+    if (
+        status == "running"
+        and running_progress_states
+        and len(running_progress_states) == len(running_children)
+        and all(state in {"quality_search", "starting"} for state in running_progress_states)
+    ):
+        if "quality_search" in running_progress_states:
+            progress_state = "quality_search"
+            phase_label = "Searching quality"
+        else:
+            progress_state = "starting"
+    progress = {
+        "total_item_count": total_item_count,
+        "completed_item_count": min(completed_item_count, total_item_count),
+        "total_duration_seconds": total_duration_seconds,
+        "completed_duration_seconds": completed_duration_seconds,
+        "overall_completed_duration_seconds": completed_duration_seconds,
+        "remaining_duration_seconds": max(remaining_duration_seconds, 0.0),
+        "percent_complete": percent_complete,
+        "speed": aggregate_speed or None,
+        "eta_speed": eta_speed or None,
+        "fps": aggregate_fps or None,
+        "eta_seconds": eta_seconds,
+        "progress_state": progress_state,
+        "phase_label": phase_label,
+        "current_item_rel_path": current_items[0] if len(current_items) == 1 else None,
+        "active_host_labels": [
+            str(host.get("label") or host.get("key") or host.get("host") or "").strip()
+            for host in active_hosts
+            if str(host.get("label") or host.get("key") or host.get("host") or "").strip()
+        ],
+        "updated_at": deps.now_iso(),
+    }
+    waiting_reason = None
+    if not running_children:
+        for child in children:
+            waiting_reason = str(child.get("waiting_reason") or "").strip() or None
+            if waiting_reason:
+                break
+    terminal_reason = None
+    for child in attention_children + failed_children + stopped_children:
+        terminal_reason = str(child.get("terminal_reason") or child.get("last_failure_kind") or "").strip() or None
+        if terminal_reason:
+            break
+    error = None
+    for child in attention_children + failed_children + stopped_children:
+        error = str(child.get("error") or "").strip() or None
+        if error:
+            break
+    started_candidates = [
+        str(child.get("started_at") or "").strip() for child in children if str(child.get("started_at") or "").strip()
+    ]
+    finished_candidates = [
+        str(child.get("finished_at") or "").strip() for child in children if str(child.get("finished_at") or "").strip()
+    ]
+    aggregated = {
+        **job,
+        "status": status,
+        # Folder aggregate rows are display-only and must not count as runnable host work.
+        "host": {},
+        "progress": progress,
+        "waiting_reason": waiting_reason,
+        "terminal_reason": terminal_reason,
+        "error": error,
+        "started_at": min(started_candidates) if started_candidates else job.get("started_at"),
+        "finished_at": max(finished_candidates) if len(finished_candidates) == len(children) else None,
+        "updated_at": deps.now_iso(),
+        "active_hosts": active_hosts,
+        "running_shard_count": len(running_children),
+        "queued_shard_count": len(queued_children),
+        "completed_shard_count": len(completed_children),
+        "shard_count": len(children),
+        "recoverable_item_count": recoverable_item_count,
+    }
+    return aggregated
 
 
 def encode_job_manifest_totals(job: dict[str, Any]) -> dict[str, Any]:
@@ -142,12 +362,27 @@ def encode_job_manifest_totals(job: dict[str, Any]) -> dict[str, Any]:
             "total_duration_seconds": 0.0,
             "total_source_size_bytes": 0,
         }
-    items = [object_dict(item) for item in object_list(payload.get("items"))]
+    manifest_items = [object_dict(item) for item in object_list(payload.get("items"))]
+    indexes = _manifest_indexes_for_job(job, manifest_items)
+    items = [manifest_items[index] for index in indexes if 0 <= index < len(manifest_items)]
     return {
         "total_item_count": len(items) or fallback_item_count,
         "total_duration_seconds": sum(float_value(item.get("duration_seconds")) for item in items),
         "total_source_size_bytes": sum(int_value(item.get("source_size_bytes")) for item in items),
     }
+
+
+def _manifest_indexes_for_job(job: dict[str, Any], manifest_items: list[dict[str, Any]]) -> list[int]:
+    manifest_indexes = job.get("manifest_indexes")
+    if not isinstance(manifest_indexes, list):
+        return list(range(len(manifest_items)))
+    indexes: list[int] = []
+    for value in manifest_indexes:
+        if not isinstance(value, int):
+            continue
+        if 0 <= value < len(manifest_items):
+            indexes.append(value)
+    return indexes or list(range(len(manifest_items)))
 
 
 def transition_encode_job_failure(
@@ -183,7 +418,12 @@ def transition_encode_job_failure(
     )
 
     if retryable and attempt_count < deps.encode_job_max_attempts:
-        _cleanup_encode_retry_artifacts(connection, manifest_path=Path(str(job["manifest_path"])), deps=deps)
+        _cleanup_encode_retry_artifacts(
+            connection,
+            manifest_path=Path(str(job["manifest_path"])),
+            indexes=job.get("manifest_indexes"),
+            deps=deps,
+        )
         retry_delay = _encode_job_retry_delay_seconds(attempt_count, deps)
         retry_not_before = (now + timedelta(seconds=retry_delay)).isoformat(timespec="seconds")
         job.update(
@@ -204,6 +444,7 @@ def transition_encode_job_failure(
             }
         )
         save_encode_job(connection, job)
+        sync_encode_job_parent(connection, job, deps)
         return
 
     terminal_reason = "max_attempts_exhausted" if retryable else failure_kind
@@ -218,6 +459,7 @@ def transition_encode_job_failure(
         }
     )
     save_encode_job(connection, job)
+    sync_encode_job_parent(connection, job, deps)
 
 
 def select_encode_host(
@@ -226,26 +468,31 @@ def select_encode_host(
         job: dict[str, Any],
         deps: EncodeQueueRuntimeDeps,
 ) -> tuple[dict[str, Any] | None, str | None]:
+    library_key = _encode_job_library_key(job)
     host_rows = sorted(
         deps.host_runtime_rows(connection, config),
         key=lambda status: (-int(status["priority"]), str(status["label"])),
     )
+    if library_key:
+        host_rows = [host for host in host_rows if _host_allows_library(host, library_key)]
     now = datetime.now(tz=UTC)
     bypass_schedule = bool(job.get("bypass_schedule"))
+
+    def _schedule_open(host: dict[str, Any]) -> bool:
+        return deps.scheduler_allows_encode_run(
+            deps.schedule_profile_policy_for_host(config, host),
+            bypass_schedule=bypass_schedule,
+            now=now,
+            host_payload=host,
+        )
+
     active_hosts = [
         host
         for host in host_rows
         if bool(host.get("available"))
         and "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
         and int(host.get("active_encode_count") or 0) < int(host.get("max_parallel_encodes") or 1)
-        and (
-            bypass_schedule
-            or deps.scheduler_allows_encode_run(
-                deps.schedule_profile_policy_for_host(config, host),
-                now=now,
-                host_payload=host,
-            )
-        )
+        and _schedule_open(host)
     ]
     encode_capable_hosts = [
         host
@@ -256,17 +503,11 @@ def select_encode_host(
         host
         for host in host_rows
         if not bool(host.get("available"))
+        and not object_list(host.get("issues"))
         and bool(deps.host_lifecycle_start_command(host))
         and "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
         and int(host.get("active_encode_count") or 0) < int(host.get("max_parallel_encodes") or 1)
-        and (
-            bypass_schedule
-            or deps.scheduler_allows_encode_run(
-                deps.schedule_profile_policy_for_host(config, host),
-                now=now,
-                host_payload=host,
-            )
-        )
+        and _schedule_open(host)
     ]
     if not encode_capable_hosts and not startable_hosts:
         return None, "waiting for an available encode host"
@@ -313,7 +554,24 @@ def select_encode_host(
             for host in encode_capable_hosts
     ):
         return None, "waiting for a host schedule window"
+    if library_key and encode_capable_hosts:
+        return None, f"waiting for a host allowed to encode {library_key}"
     return None, "waiting for an available encode host"
+
+
+def _encode_job_library_key(job: dict[str, Any]) -> str:
+    prefix = str(job.get("prefix") or "").strip()
+    if not prefix:
+        return ""
+    return prefix.split("/", 1)[0].strip().lower()
+
+
+def _host_allows_library(host: dict[str, Any], library_key: str) -> bool:
+    allowed_libraries = host.get("allowed_libraries")
+    if not isinstance(allowed_libraries, list) or not allowed_libraries:
+        return True
+    normalized_allowed = {str(value or "").strip().lower() for value in allowed_libraries if str(value or "").strip()}
+    return library_key in normalized_allowed
 
 
 def encode_job_heartbeat_loop(
@@ -322,6 +580,7 @@ def encode_job_heartbeat_loop(
         job_id: str,
         worker_id: str,
         stop_event: threading.Event,
+        process_controller: ManagedProcessController,
         deps: EncodeQueueRuntimeDeps,
 ) -> None:
     while not stop_event.wait(deps.encode_job_heartbeat_seconds):
@@ -335,7 +594,7 @@ def encode_job_heartbeat_loop(
                 {
                     "heartbeat_at": deps.now_iso(),
                     "lease_expires_at": _encode_job_lease_expires_at(deps),
-                    "process_pid": deps.encode_queue_process.pid,
+                    "process_pid": process_controller.pid,
                     "updated_at": deps.now_iso(),
                 }
             )
@@ -353,49 +612,79 @@ def encode_queue_worker_loop(*, config_path: Path, deps: EncodeQueueRuntimeDeps)
 
 def process_encode_queue_once(*, config_path: Path, deps: EncodeQueueRuntimeDeps) -> None:
     config = deps.load_config(config_path)
+    claimed_jobs: list[dict[str, Any]] = []
     with open_db(config.paths.db_path) as connection:
         ensure_queue_state(connection, updated_at=deps.now_iso())
         reconcile_encode_jobs(connection, config, deps)
         state = load_queue_state(connection)
-        running_job = load_active_encode_job(connection)
-        if running_job is not None:
-            if state.get("stop_requested"):
-                deps.encode_queue_process.cancel()
-            return
         if state.get("stop_requested"):
+            for controller in deps.active_encode_process_controllers():
+                controller.cancel()
+            if running_encode_job_count(connection) > 0:
+                return
             state.update({"stop_requested": False, "active_job_id": None, "updated_at": deps.now_iso()})
             save_queue_state(connection, state)
         if state.get("is_paused"):
             return
-        next_job = load_next_runnable_encode_job(connection, config, deps)
-        if next_job is None:
-            return
-        worker_id = _encode_job_worker_id()
-        now_iso = deps.now_iso()
-        state.update({"active_job_id": next_job["job_id"], "updated_at": deps.now_iso()})
-        save_queue_state(connection, state)
-        next_job.update(
-            {
-                "status": "running",
-                "started_at": now_iso,
-                "finished_at": None,
-                "process_pid": None,
-                "leased_at": now_iso,
-                "heartbeat_at": now_iso,
-                "lease_expires_at": _encode_job_lease_expires_at(deps),
-                "worker_id": worker_id,
-                "attempt_count": int_value(next_job.get("attempt_count")) + 1,
-                "retry_not_before": None,
-                "waiting_reason": None,
-                "terminal_reason": None,
-                "last_failure_kind": None,
-                "progress": _initial_encode_job_progress(next_job, deps),
-                "updated_at": now_iso,
-            }
-        )
-        save_encode_job(connection, next_job)
+        while True:
+            next_job = claim_next_runnable_encode_job(connection, config, deps)
+            if next_job is None:
+                break
+            claimed_jobs.append(next_job)
+        if state.get("active_job_id"):
+            state.update({"active_job_id": None, "updated_at": deps.now_iso()})
+            save_queue_state(connection, state)
 
-    run_encode_job(config_path=config_path, job_id=str(next_job["job_id"]), deps=deps)
+    for job in claimed_jobs:
+        deps.dispatch_encode_job(config_path=config_path, job_id=str(job["job_id"]))
+
+
+def claim_next_runnable_encode_job(
+        connection: DBClient,
+        config: MediaforceConfig,
+        deps: EncodeQueueRuntimeDeps,
+) -> dict[str, Any] | None:
+    next_job = load_next_runnable_encode_job(connection, config, deps)
+    if next_job is None:
+        return None
+    worker_id = _encode_job_worker_id()
+    now_iso = deps.now_iso()
+    update_result = connection.execute(
+        update(encode_jobs)
+        .where(encode_jobs.c.job_id == next_job["job_id"])
+        .where(encode_jobs.c.status == "queued")
+        .values(
+            status="running",
+            started_at=now_iso,
+            finished_at=None,
+            process_pid=None,
+            leased_at=now_iso,
+            heartbeat_at=now_iso,
+            lease_expires_at=_encode_job_lease_expires_at(deps),
+            worker_id=worker_id,
+            attempt_count=int_value(next_job.get("attempt_count")) + 1,
+            retry_not_before=None,
+            waiting_reason=None,
+            terminal_reason=None,
+            last_failure_kind=None,
+            progress_json=json.dumps(_initial_encode_job_progress(next_job, deps), sort_keys=True),
+            updated_at=now_iso,
+        )
+    )
+    rowcount = update_result.rowcount
+    if callable(rowcount):
+        claimed_rowcount = rowcount()
+    elif isinstance(rowcount, int):
+        claimed_rowcount = rowcount
+    else:
+        claimed_rowcount = 0
+    if claimed_rowcount != 1:
+        return None
+    claimed_job = load_encode_job(connection, str(next_job["job_id"]))
+    if claimed_job is None:
+        return None
+    sync_encode_job_parent(connection, claimed_job, deps)
+    return claimed_job
 
 
 def load_next_runnable_encode_job(
@@ -406,6 +695,7 @@ def load_next_runnable_encode_job(
     rows = connection.execute(
         select(encode_jobs.c.job_id)
         .where(encode_jobs.c.status == "queued")
+        .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
         .order_by(encode_jobs.c.created_at, literal_column("rowid"))
     ).mappings().fetchall()
     for row in rows:
@@ -417,25 +707,34 @@ def load_next_runnable_encode_job(
             if str(job.get("waiting_reason") or "") != str(waiting_reason or ""):
                 job.update({"waiting_reason": waiting_reason, "updated_at": deps.now_iso()})
                 save_encode_job(connection, job)
+                sync_encode_job_parent(connection, job, deps)
             continue
         if job.get("waiting_reason") or job.get("host") != host_payload:
             job.update({"waiting_reason": None, "host": host_payload, "updated_at": deps.now_iso()})
             save_encode_job(connection, job)
+            sync_encode_job_parent(connection, job, deps)
         return job
     return None
 
 
-def run_encode_job(*, config_path: Path, job_id: str, deps: EncodeQueueRuntimeDeps) -> None:
+def run_encode_job(
+        *,
+        config_path: Path,
+        job_id: str,
+        process_controller: ManagedProcessController,
+        deps: EncodeQueueRuntimeDeps,
+) -> None:
     config = deps.load_config(config_path)
-    deps.encode_queue_process.reset()
+    process_controller.reset()
     with open_db(config.paths.db_path) as connection:
         job = load_encode_job(connection, job_id)
         if job is None:
             return
         manifest_path = Path(job["manifest_path"])
         manifest = json.loads(manifest_path.read_text())
-        indexes = list(range(len(manifest.get("items") or [])))
-        job.update({"process_pid": deps.encode_queue_process.pid, "updated_at": deps.now_iso()})
+        manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
+        indexes = _manifest_indexes_for_job(job, manifest_items)
+        job.update({"process_pid": process_controller.pid, "updated_at": deps.now_iso()})
         save_encode_job(connection, job)
 
     progress_write_lock = threading.Lock()
@@ -464,6 +763,7 @@ def run_encode_job(*, config_path: Path, job_id: str, deps: EncodeQueueRuntimeDe
             "job_id": job_id,
             "worker_id": worker_id,
             "stop_event": heartbeat_stop,
+            "process_controller": process_controller,
             "deps": deps,
         },
         daemon=True,
@@ -475,7 +775,7 @@ def run_encode_job(*, config_path: Path, job_id: str, deps: EncodeQueueRuntimeDe
     error: str | None = None
     started_host_for_job = False
     try:
-        deps.encode_queue_process.throw_if_cancelled()
+        process_controller.throw_if_cancelled()
         started_host_for_job = deps.ensure_encode_host_ready(config, job.get("host"))
         with open_db(config.paths.db_path) as connection:
             deps.encode_manifest_items(
@@ -485,9 +785,14 @@ def run_encode_job(*, config_path: Path, job_id: str, deps: EncodeQueueRuntimeDe
                 manifest,
                 indexes,
                 overwrite=False,
-                process_controller=deps.encode_queue_process,
+                process_controller=process_controller,
                 host=job.get("host"),
                 progress_callback=report_progress,
+                encode_context={
+                    "origin": "queue",
+                    "encode_job_id": job_id,
+                    "encode_worker_id": worker_id,
+                },
             )
         final_status = "completed"
     except ProcessCancelledError:
@@ -497,7 +802,7 @@ def run_encode_job(*, config_path: Path, job_id: str, deps: EncodeQueueRuntimeDe
         failure_kind = _classify_encode_failure(exc, job)
         error = str(exc)
     finally:
-        if started_host_for_job:
+        if started_host_for_job and not _host_has_other_running_jobs(config, job_id, job.get("host")):
             try:
                 deps.stop_encode_host_if_configured(config, job.get("host"))
             except Exception as exc:
@@ -528,6 +833,7 @@ def run_encode_job(*, config_path: Path, job_id: str, deps: EncodeQueueRuntimeDe
                         }
                     )
                     save_encode_job(connection, job)
+                    sync_encode_job_parent(connection, job, deps)
                 elif error is not None:
                     if failure_kind is None:
                         effective_failure_kind = "deterministic"
@@ -542,9 +848,10 @@ def run_encode_job(*, config_path: Path, job_id: str, deps: EncodeQueueRuntimeDe
                         error_message=error,
                     )
             state = load_queue_state(connection)
-            state.update({"active_job_id": None, "stop_requested": False, "updated_at": deps.now_iso()})
-            save_queue_state(connection, state)
-        deps.encode_queue_process.reset()
+            if running_encode_job_count(connection) == 0:
+                state.update({"active_job_id": None, "stop_requested": False, "updated_at": deps.now_iso()})
+                save_queue_state(connection, state)
+        process_controller.reset()
 
 
 def _encode_job_worker_id() -> str:
@@ -559,6 +866,26 @@ def _encode_job_retry_delay_seconds(attempt_count: int, deps: EncodeQueueRuntime
     exponent = max(attempt_count - 1, 0)
     delay = deps.encode_job_retry_base_delay_seconds * (2 ** exponent)
     return min(delay, deps.encode_job_retry_max_delay_seconds)
+
+
+def _host_has_other_running_jobs(config: MediaforceConfig, job_id: str, host_payload: dict[str, Any] | None) -> bool:
+    target_host = object_dict(host_payload)
+    target_key = str(target_host.get("key") or target_host.get("host") or target_host.get("label") or "").strip()
+    if not target_key:
+        return False
+    with open_db(config.paths.db_path) as connection:
+        rows = connection.execute(
+            select(encode_jobs.c.job_id, encode_jobs.c.host_json)
+            .where(encode_jobs.c.status == "running")
+            .where(encode_jobs.c.job_id != job_id)
+            .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
+        ).mappings().fetchall()
+    for row in rows:
+        host = object_dict(json.loads(str(row["host_json"] or "{}")))
+        host_key = str(host.get("key") or host.get("host") or host.get("label") or "").strip()
+        if host_key == target_key:
+            return True
+    return False
 
 
 def _initial_encode_job_progress(job: dict[str, Any], deps: EncodeQueueRuntimeDeps) -> dict[str, Any]:
@@ -592,6 +919,7 @@ def _persist_encode_job_progress(
             return
         job.update({"progress": {**progress, "updated_at": deps.now_iso()}, "updated_at": deps.now_iso()})
         save_encode_job(connection, job)
+        sync_encode_job_parent(connection, job, deps)
 
 
 def _finalize_encode_job_progress(
@@ -663,10 +991,45 @@ def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) ->
     return f"retrying after {reason} at {retry_not_before}"
 
 
+def prepare_terminal_encode_job_for_requeue(
+        connection: DBClient,
+        job: dict[str, Any],
+        *,
+        deps: EncodeQueueRuntimeDeps,
+) -> None:
+    if str(job.get("status") or "") not in {"needs_attention", "failed", "stopped"}:
+        return
+    manifest_path = Path(str(job.get("manifest_path") or "").strip())
+    if not str(manifest_path):
+        return
+    selected_indexes = job.get("manifest_indexes")
+    if str(job.get("job_kind") or "") == "folder":
+        child_indexes: list[int] = []
+        for child in list_child_encode_jobs(connection, str(job.get("job_id") or "")):
+            if str(child.get("status") or "") == "completed":
+                continue
+            for index in object_list(child.get("manifest_indexes")):
+                if isinstance(index, int):
+                    child_indexes.append(index)
+        if child_indexes:
+            selected_indexes = sorted(set(child_indexes))
+
+    # Legacy and malformed folder jobs may have no child rows or no non-completed child
+    # manifest indexes; in those cases, fallback to the job-level indexes to avoid
+    # skipping retry cleanup and item resets.
+    _cleanup_encode_retry_artifacts(
+        connection,
+        manifest_path=manifest_path,
+        indexes=selected_indexes,
+        deps=deps,
+    )
+
+
 def _cleanup_encode_retry_artifacts(
         connection: DBClient,
         *,
         manifest_path: Path,
+        indexes: list[int] | None = None,
         deps: EncodeQueueRuntimeDeps,
 ) -> None:
     try:
@@ -674,7 +1037,12 @@ def _cleanup_encode_retry_artifacts(
     except (OSError, json.JSONDecodeError):
         return
     now_iso = deps.now_iso()
-    for item in object_list(manifest.get("items")):
+    manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
+    selected_indexes = indexes if isinstance(indexes, list) else list(range(len(manifest_items)))
+    for index in selected_indexes:
+        if not isinstance(index, int) or index < 0 or index >= len(manifest_items):
+            continue
+        item = manifest_items[index]
         staging_value = item.get("staging_path")
         if staging_value:
             staging_path = Path(str(staging_value))
@@ -714,6 +1082,6 @@ def _remove_path(path: Path | None) -> None:
     if path.is_dir():
         return
     try:
-        path.unlink(missing_ok=True)
+        safe_unlink(path)
     except OSError:
         return

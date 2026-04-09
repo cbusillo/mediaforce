@@ -7,6 +7,11 @@ STATE_DIR="${HOME}/Library/Application Support/mediaforce"
 PID_FILE="${STATE_DIR}/mediaforce-web.pid"
 LOG_FILE="${STATE_DIR}/mediaforce-web.log"
 
+trim() {
+	local value="${1:-}"
+	printf '%s\n' "${value}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+
 load_env() {
 	if [[ -f "${ROOT_DIR}/.env" ]]; then
 		set -a
@@ -42,7 +47,7 @@ is_running() {
 	fi
 	local pid
 	pid="$(<"${pid_file}")"
-	[[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null
+	[[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null && pid_matches_mediaforce_session "${pid}"
 }
 
 running_pid() {
@@ -51,13 +56,119 @@ running_pid() {
 	cat "${pid_file}"
 }
 
+pid_command() {
+	local pid="${1:-}"
+	ps -p "${pid}" -o command= 2>/dev/null || true
+}
+
+pid_parent() {
+	local pid="${1:-}"
+	ps -p "${pid}" -o ppid= 2>/dev/null | awk '{print $1}'
+}
+
+port_listener_pids() {
+	load_env
+	lsof -nP -tiTCP:"${PORT}" -sTCP:LISTEN 2>/dev/null | sort -u || true
+}
+
+pid_matches_mediaforce_session() {
+	local pid="${1:-}"
+	local managed_binary
+	local depth=0
+	managed_binary="$(web_binary)"
+	while [[ -n "${pid}" && "${pid}" != "0" && ${depth} -lt 8 ]]; do
+		local command
+		command="$(pid_command "${pid}")"
+		if [[ -n "${command}" ]]; then
+			if [[ "${command}" == *"${managed_binary}"* ]]; then
+				return 0
+			fi
+			if [[ "${command}" == *"uv run mediaforce-web"* && "${command}" == *"${ROOT_DIR}"* ]]; then
+				return 0
+			fi
+		fi
+		pid="$(trim "$(pid_parent "${pid}")")"
+		depth=$((depth + 1))
+	done
+	return 1
+}
+
+managed_listener_pids() {
+	local pid
+	for pid in $(port_listener_pids); do
+		if pid_matches_mediaforce_session "${pid}"; then
+			printf '%s\n' "${pid}"
+		fi
+	done
+}
+
+foreign_listener_pids() {
+	local pid
+	for pid in $(port_listener_pids); do
+		if ! pid_matches_mediaforce_session "${pid}"; then
+			printf '%s\n' "${pid}"
+		fi
+	done
+}
+
+collect_descendant_pids() {
+	local root_pid="${1:-}"
+	local child
+	for child in $(ps -axo pid=,ppid= | awk -v ppid="${root_pid}" '$2 == ppid {print $1}'); do
+		printf '%s\n' "${child}"
+		collect_descendant_pids "${child}"
+	done
+}
+
+kill_pid_tree() {
+	local root_pid="${1:-}"
+	local descendants
+	descendants="$(collect_descendant_pids "${root_pid}")"
+	if [[ -n "${descendants}" ]]; then
+		while IFS= read -r child_pid; do
+			[[ -n "${child_pid}" ]] || continue
+			kill "${child_pid}" 2>/dev/null || true
+		done <<<"${descendants}"
+	fi
+	kill "${root_pid}" 2>/dev/null || true
+}
+
+cleanup_stale_sessions() {
+	local reason="${1:-stale session}"
+	local managed_pids
+	managed_pids="$(managed_listener_pids)"
+	if [[ -z "${managed_pids}" ]]; then
+		return 0
+	fi
+	echo "cleaning ${reason} on ${HOST}:${PORT}"
+	while IFS= read -r pid; do
+		[[ -n "${pid}" ]] || continue
+		kill_pid_tree "${pid}"
+	done <<<"${managed_pids}"
+	sleep 1
+	return 0
+}
+
 start_server() {
 	load_env
 	mkdir -p "${STATE_DIR}"
+	local managed_pids
+	local foreign_pids
 	if is_running; then
 		echo "mediaforce-web already running on ${HOST}:${PORT} (pid $(running_pid))"
 		return 0
 	fi
+	managed_pids="$(managed_listener_pids)"
+	if [[ -n "${managed_pids}" ]]; then
+		echo "mediaforce-web already running on ${HOST}:${PORT} (listener $(printf '%s' "${managed_pids}" | paste -sd ',' -))"
+		return 0
+	fi
+	foreign_pids="$(foreign_listener_pids)"
+	if [[ -n "${foreign_pids}" ]]; then
+		echo "port ${PORT} is already in use by a non-mediaforce process; refusing to kill it" >&2
+		return 1
+	fi
+	cleanup_stale_sessions "old mediaforce-web session"
 	rm -f "${PID_FILE}"
 	(
 		cd "${ROOT_DIR}"
@@ -69,22 +180,35 @@ start_server() {
 }
 
 stop_server() {
-	if ! is_running; then
-		rm -f "${PID_FILE}"
-		echo "mediaforce-web is not running"
+	load_env
+	local pid=""
+	if is_running; then
+		pid="$(running_pid)"
+		kill_pid_tree "${pid}"
+	fi
+	cleanup_stale_sessions "old mediaforce-web session"
+	rm -f "${PID_FILE}"
+	if [[ -n "${pid}" ]]; then
+		echo "stopped mediaforce-web (pid ${pid})"
 		return 0
 	fi
-	local pid
-	pid="$(running_pid)"
-	kill "${pid}"
-	rm -f "${PID_FILE}"
-	echo "stopped mediaforce-web (pid ${pid})"
+	if [[ -n "$(managed_listener_pids)" ]]; then
+		echo "mediaforce-web listener cleanup may still be in progress" >&2
+		return 1
+	fi
+	echo "mediaforce-web is not running"
 }
 
 status_server() {
 	load_env
 	if is_running; then
 		echo "mediaforce-web running on ${HOST}:${PORT} (pid $(running_pid))"
+		return 0
+	fi
+	local listener_pids
+	listener_pids="$(managed_listener_pids)"
+	if [[ -n "${listener_pids}" ]]; then
+		echo "mediaforce-web running on ${HOST}:${PORT} (listener $(printf '%s' "${listener_pids}" | paste -sd ',' -))"
 		return 0
 	fi
 	echo "mediaforce-web is stopped"

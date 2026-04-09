@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import delete
 from sqlalchemy import func
 from sqlalchemy import literal_column
+from sqlalchemy import or_
 from sqlalchemy import select
 
 from mediaforce.advisor import (
@@ -34,8 +35,10 @@ from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import calibration_jobs as calibration_jobs_table
 from mediaforce.core.db_tables import learning_artifacts
 from mediaforce.core.db_tables import library_items
+from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.db_tables import tuning_sessions
-from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY, ensure_queue_state, load_latest_encode_job, \
+from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY, clear_terminal_encode_jobs_for_prefix, \
+    ensure_queue_state, load_active_encode_job_for_prefix, load_latest_encode_job, \
     queue_position as encode_queue_position, save_encode_job, summarize_encode_queue
 from mediaforce.execution import (
     build_svt_params,
@@ -43,6 +46,7 @@ from mediaforce.execution import (
     encode_manifest_items,
     effective_video_preset,
     estimate_output_overhead_bytes,
+    promote_manifest_items,
     search_quality_for_source,
     validate_manifest_items,
 )
@@ -76,18 +80,22 @@ from mediaforce.web.routes import register_dashboard_routes, register_folder_rou
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_folders_payload, \
     dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
+    archive_cleanup_summary, clear_archive_cleanup_action, \
+    ensure_encode_host_ready, \
     folder_ai_tune_action, folder_ai_tune_confirm_action, folder_ai_tune_preview_action, \
     folder_card_cache_key, folder_status_payload, host_config_for_key, host_lifecycle_start_command, \
     host_lifecycle_start_timeout_seconds, host_lifecycle_stop_command, host_runtime_rows, \
     load_calibration_state, load_json_object, load_pending_proposal, \
     multimodal_review_pack_public_view, pause_encode_queue_action, pending_proposal_public_view, \
     planned_audio_review_context, preview_folder_cards, proposal_alignment_issue, \
-    proposal_context_snapshot, proposal_signal_copy, queue_folder_encode_action, recent_tuning_sessions, \
+    proposal_context_snapshot, proposal_signal_copy, promote_folder_outputs_action, \
+    queue_folder_encode_action, recent_tuning_sessions, \
     refresh_host_status_cache, reset_folder_card_cache, resume_encode_queue_action, review_media_context, \
     review_pack_dir, review_pair_key, review_pairs, safe_collect_host_statuses, save_advice_state, \
     save_calibration_state, save_pending_proposal, save_profile_action, \
     sample_calibration_host_statuses, sample_host_options, sample_host_options_from_statuses, \
     settings_page_payload, stop_calibration_queue_action, stop_encode_queue_action, \
+    validate_folder_outputs_action, \
     build_multimodal_review_pack, build_tuning_runtime_toolbelt
 from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
     restore_staged_artifact as runtime_restore_staged_artifact, \
@@ -102,8 +110,10 @@ from mediaforce.web.runtime.encode_runtime import EncodeQueueRuntimeDeps, \
     encode_job_manifest_totals as runtime_encode_job_manifest_totals, \
     encode_queue_worker_loop as runtime_encode_queue_worker_loop, \
     load_next_runnable_encode_job as runtime_load_next_runnable_encode_job, \
+    prepare_terminal_encode_job_for_requeue as runtime_prepare_terminal_encode_job_for_requeue, \
     process_encode_queue_once as runtime_process_encode_queue_once, \
     reconcile_encode_jobs as runtime_reconcile_encode_jobs, \
+    resolve_encode_job_for_display as runtime_resolve_encode_job_for_display, \
     recover_encode_queue as runtime_recover_encode_queue, \
     run_encode_job as runtime_run_encode_job, \
     select_encode_host as runtime_select_encode_host, \
@@ -221,6 +231,8 @@ CALIBRATION_QUEUE_PROCESSES_LOCK = threading.Lock()
 CALIBRATION_QUEUE_WORKER_LOCK = threading.Lock()
 CALIBRATION_QUEUE_WORKER_STARTED = False
 ENCODE_QUEUE_PROCESS = ManagedProcessController()
+ENCODE_QUEUE_PROCESSES: dict[str, ManagedProcessController] = {}
+ENCODE_QUEUE_PROCESSES_LOCK = threading.Lock()
 ENCODE_QUEUE_WORKER_LOCK = threading.Lock()
 ENCODE_QUEUE_WORKER_STARTED = False
 
@@ -282,7 +294,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         finally:
             for controller in _active_calibration_process_controllers():
                 controller.cancel()
-            ENCODE_QUEUE_PROCESS.cancel()
+            _cancel_active_encode_processes()
 
     app = FastAPI(title="Mediaforce Calibration Bench", lifespan=_app_lifespan)
     review_dir = config.paths.review_dir
@@ -318,6 +330,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             config,
             encode_queue_scheduler_policy=_encode_queue_scheduler_policy,
             normalize_encode_queue_scheduler=_normalize_encode_queue_scheduler,
+            archive_cleanup_summary_fn=archive_cleanup_summary,
             error=error,
             saved=saved,
             host_notice=host_notice,
@@ -337,6 +350,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             maybe_schedule_scan=_maybe_schedule_scan,
             decorate_encode_queue_for_scheduler=_decorate_encode_queue_for_scheduler,
             library_color_map_for_config=_library_color_map_for_config,
+            archive_cleanup_summary_fn=archive_cleanup_summary,
         )
 
     def _dashboard_folders_payload() -> dict[str, Any]:
@@ -360,6 +374,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             normalized_prefix,
             load_job_state=_load_job_state,
             load_scan_job_state=_load_scan_job_state,
+            load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
         )
 
     def _save_settings_action(
@@ -399,6 +414,27 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         result = prepare_remote_host_with_password(config, host_key, password=remote_password or None)
         return _host_action_result(result)
 
+    def _start_host_action(host_key: str) -> dict[str, Any]:
+        nonlocal config
+        host = host_config_for_key(config, host_key)
+        if not host:
+            return _host_action_result(HostSetupResult(ok=False, message="Remote host is no longer configured"))
+        try:
+            started = ensure_encode_host_ready(
+                config,
+                host,
+                lifecycle_command_timeout_seconds=HOST_LIFECYCLE_COMMAND_TIMEOUT_SECONDS,
+                lifecycle_poll_seconds=HOST_LIFECYCLE_POLL_SECONDS,
+            )
+        except RuntimeError as exc:
+            return _host_action_result(HostSetupResult(ok=False, message=str(exc)))
+        label = str(host.get("label") or host.get("host") or host_key).strip() or host_key
+        if started:
+            message = f"{label} accepted the start command and is reachable now."
+        else:
+            message = f"{label} was already reachable."
+        return _host_action_result(HostSetupResult(ok=True, message=message))
+
     def _reset_host_trust_action(host_key: str) -> dict[str, Any]:
         nonlocal config
         result = reset_remote_host_trust(config, host_key)
@@ -426,10 +462,15 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         app,
         settings_payload=_settings_page_payload,
         save_settings_action=_save_settings_action,
+        clear_archive_cleanup_action=lambda transcode_root=None: clear_archive_cleanup_action(
+            config,
+            transcode_root=transcode_root,
+        ),
     )
     register_host_routes(
         app,
         hosts_payload=_hosts_payload,
+        start_host_action=_start_host_action,
         prepare_host_action=_prepare_host_action,
         reset_host_trust_action=_reset_host_trust_action,
     )
@@ -476,6 +517,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             hot_spots = _preview_hotspots(sample_item, calibration)
             calibration_queue = list_queue_summary(connection, limit_per_lane=3)
             encode_job = load_latest_encode_job(connection, normalized_prefix)
+            encode_job = runtime_resolve_encode_job_for_display(connection, encode_job, _encode_queue_runtime_deps())
             encode_queue = _decorate_encode_queue_for_scheduler(config, summarize_encode_queue(connection))
             if encode_job and encode_job.get("status") == "queued":
                 position = encode_queue_position(connection, str(encode_job["job_id"]))
@@ -616,7 +658,33 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             load_calibration_state=_load_calibration_state,
             review_gate=_review_gate,
             upsert_override=_upsert_override,
+            load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
+            load_latest_encode_job_for_prefix_fn=load_latest_encode_job,
+            clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
+            prepare_terminal_encode_job_for_requeue_fn=lambda connection, job: runtime_prepare_terminal_encode_job_for_requeue(
+                connection,
+                job,
+                deps=_encode_queue_runtime_deps(),
+            ),
             save_encode_job=save_encode_job,
+        )
+
+    def _validate_folder_outputs_action(normalized_prefix: str) -> dict[str, Any]:
+        return validate_folder_outputs_action(
+            config,
+            normalized_prefix,
+            load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
+            load_folder_staged_items_fn=_load_folder_staged_items,
+            validate_manifest_items_fn=validate_manifest_items,
+        )
+
+    def _promote_folder_outputs_action(normalized_prefix: str) -> dict[str, Any]:
+        return promote_folder_outputs_action(
+            config,
+            normalized_prefix,
+            load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
+            load_folder_staged_items_fn=_load_folder_staged_items,
+            promote_manifest_items_fn=promote_manifest_items,
         )
 
     def _save_profile_action(normalized_prefix: str) -> dict[str, Any]:
@@ -652,7 +720,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             connection_factory=lambda: open_db(config.paths.db_path),
             config=config,
             now_iso=_now_iso,
-            cancel_queue_process=ENCODE_QUEUE_PROCESS.cancel,
+            cancel_queue_process=_cancel_active_encode_processes,
         )
 
     def _stop_calibration_queue_action() -> dict[str, Any]:
@@ -682,6 +750,8 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         folder_ai_tune_confirm_action=_folder_ai_tune_confirm_action,
         clear_folder_tuning_action=_clear_folder_tuning_action,
         queue_folder_encode_action=_queue_folder_encode_action,
+        validate_folder_outputs_action=_validate_folder_outputs_action,
+        promote_folder_outputs_action=_promote_folder_outputs_action,
         save_profile_action=_save_profile_action,
     )
     register_queue_routes(
@@ -1000,6 +1070,46 @@ def _sample_item(connection: DBClient, config: MediaforceConfig, prefix: str) ->
     return build_manifest_item(mapping_dict(row), config)
 
 
+def _prefix_descendant_like_pattern(prefix: str) -> str:
+    escaped_prefix = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"{escaped_prefix}/%"
+
+
+def _load_folder_staged_items(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+        *,
+        statuses: set[str],
+) -> list[dict[str, Any]]:
+    normalized_prefix = prefix.strip().strip("/")
+    if not normalized_prefix or not statuses:
+        return []
+    descendant_pattern = _prefix_descendant_like_pattern(normalized_prefix)
+    rows = connection.execute(
+        select(library_items)
+        .join(staged_artifacts, staged_artifacts.c.library_item_id == library_items.c.id)
+        .where(
+            or_(
+                library_items.c.parent_dir == normalized_prefix,
+                library_items.c.parent_dir.like(descendant_pattern, escape="\\"),
+            )
+        )
+        .where(library_items.c.status.in_(tuple(sorted(statuses))))
+        .where(staged_artifacts.c.staging_path.is_not(None))
+        .where(staged_artifacts.c.promoted_at.is_(None))
+        .order_by(library_items.c.rel_path.asc())
+    ).mappings().fetchall()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        item = build_manifest_item(mapping_dict(row), config)
+        item["staging_host_label"] = str(row.get("encode_host_label") or "").strip() or None
+        item["staging_host_key"] = str(row.get("encode_host_key") or "").strip() or None
+        item["staging_media_access"] = str(row.get("encode_media_access") or "").strip() or None
+        items.append(item)
+    return items
+
+
 _metric_support = runtime_metric_support
 _metric_status_copy = runtime_metric_status_copy
 _tuning_policy_focus = runtime_tuning_policy_focus
@@ -1014,6 +1124,7 @@ def _build_seed_policy_payload(
         sample_item: dict[str, Any],
         summary: dict[str, Any],
         metric_support: dict[str, bool],
+        recent_sessions_payload: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return runtime_build_seed_policy_payload(
         prefix=prefix,
@@ -1022,6 +1133,7 @@ def _build_seed_policy_payload(
         sample_item=sample_item,
         summary=summary,
         metric_support_payload=metric_support,
+        recent_sessions_payload=recent_sessions_payload,
     )
 
 
@@ -1384,8 +1496,9 @@ def _encode_queue_runtime_deps() -> EncodeQueueRuntimeDeps:
         ensure_encode_host_ready=_ensure_encode_host_ready,
         stop_encode_host_if_configured=_stop_encode_host_if_configured,
         encode_manifest_items=encode_manifest_items,
+        dispatch_encode_job=_dispatch_encode_job,
+        active_encode_process_controllers=_active_encode_process_controllers,
         logger=LOGGER,
-        encode_queue_process=ENCODE_QUEUE_PROCESS,
         encode_queue_poll_seconds=ENCODE_QUEUE_POLL_SECONDS,
         encode_job_lease_seconds=ENCODE_JOB_LEASE_SECONDS,
         encode_job_heartbeat_seconds=ENCODE_JOB_HEARTBEAT_SECONDS,
@@ -1729,6 +1842,22 @@ def _upsert_override(file_path: Path, prefix: str, policy: dict[str, Any]) -> No
     file_path.write_text(updated)
 
 
+def _render_override_value(value: Any) -> str:
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, list):
+        rendered_items = ", ".join(_render_override_value(item) for item in value)
+        return f"[{rendered_items}]"
+    if isinstance(value, dict):
+        rendered_items = ", ".join(
+            f"{key} = {_render_override_value(item)}" for key, item in value.items()
+        )
+        return f"{{ {rendered_items} }}"
+    return json.dumps(value)
+
+
 def _render_override_block(prefix: str, policy: dict[str, Any]) -> str:
     lines = ["[[overrides]]", f'path_prefix = "{prefix}"', 'note = "Saved from the calibration bench."', ""]
     for section in ("video", "audio", "subtitle", "planning"):
@@ -1737,12 +1866,7 @@ def _render_override_block(prefix: str, policy: dict[str, Any]) -> str:
             continue
         lines.append(f"[overrides.{section}]")
         for key, value in values.items():
-            if isinstance(value, str):
-                lines.append(f'{key} = "{value}"')
-            elif isinstance(value, list):
-                lines.append(f"{key} = {json.dumps(value)}")
-            else:
-                lines.append(f"{key} = {json.dumps(value)}")
+            lines.append(f"{key} = {_render_override_value(value)}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -1804,12 +1928,21 @@ def _select_encode_host(connection: DBClient, config: MediaforceConfig, job: dic
     return runtime_select_encode_host(connection, config, job, _encode_queue_runtime_deps())
 
 
-def _encode_job_heartbeat_loop(*, config_path: Path, job_id: str, worker_id: str, stop_event: threading.Event) -> None:
+def _encode_job_heartbeat_loop(
+        *,
+        config_path: Path,
+        job_id: str,
+        worker_id: str,
+        stop_event: threading.Event,
+        process_controller: ManagedProcessController | None = None,
+) -> None:
+    controller = process_controller if process_controller is not None else ManagedProcessController()
     runtime_encode_job_heartbeat_loop(
         config_path=config_path,
         job_id=job_id,
         worker_id=worker_id,
         stop_event=stop_event,
+        process_controller=controller,
         deps=_encode_queue_runtime_deps(),
     )
 
@@ -1943,8 +2076,63 @@ def _load_next_runnable_encode_job(
     return runtime_load_next_runnable_encode_job(connection, config, _encode_queue_runtime_deps())
 
 
-def _run_encode_job(*, config_path: Path, job_id: str) -> None:
-    runtime_run_encode_job(config_path=config_path, job_id=job_id, deps=_encode_queue_runtime_deps())
+def _register_encode_process_controller(job_id: str, controller: ManagedProcessController) -> None:
+    with ENCODE_QUEUE_PROCESSES_LOCK:
+        ENCODE_QUEUE_PROCESSES[job_id] = controller
+
+
+def _unregister_encode_process_controller(job_id: str) -> None:
+    with ENCODE_QUEUE_PROCESSES_LOCK:
+        ENCODE_QUEUE_PROCESSES.pop(job_id, None)
+
+
+def _active_encode_process_controllers() -> list[ManagedProcessController]:
+    with ENCODE_QUEUE_PROCESSES_LOCK:
+        return list(ENCODE_QUEUE_PROCESSES.values())
+
+
+def _cancel_active_encode_processes() -> None:
+    for controller in _active_encode_process_controllers():
+        controller.cancel()
+    ENCODE_QUEUE_PROCESS.cancel()
+
+
+def _dispatch_encode_job(*, config_path: Path, job_id: str) -> None:
+    controller = ManagedProcessController()
+    _register_encode_process_controller(job_id, controller)
+    thread = threading.Thread(
+        target=_run_encode_job,
+        kwargs={"config_path": config_path, "job_id": job_id, "process_controller": controller},
+        daemon=True,
+        name=f"encode-job-{job_id}",
+    )
+    try:
+        thread.start()
+    except Exception:
+        _unregister_encode_process_controller(job_id)
+        raise
+
+
+def _run_encode_job(
+        *,
+        config_path: Path,
+        job_id: str,
+        process_controller: ManagedProcessController | None = None,
+) -> None:
+    if process_controller is None:
+        controller = ManagedProcessController()
+    else:
+        controller = process_controller
+    try:
+        runtime_run_encode_job(
+            config_path=config_path,
+            job_id=job_id,
+            process_controller=controller,
+            deps=_encode_queue_runtime_deps(),
+        )
+    finally:
+        if process_controller is not None:
+            _unregister_encode_process_controller(job_id)
 
 
 def _run_periodic_cleanup(config: MediaforceConfig, cleanup_lock: threading.Lock) -> None:

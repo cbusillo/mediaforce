@@ -1,15 +1,19 @@
+import asyncio
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
+from fastapi.routing import APIRoute
 from sqlalchemy import func
 from sqlalchemy import select
 
 from mediaforce.advisor import (
     RUN_VERDICT_PROMPT_VERSION,
     SEED_PROMPT_VERSION,
+    SeedPolicyResponse,
     _build_prompt,
     _build_tune_prompt,
     _extract_seed_payload,
@@ -35,9 +39,11 @@ from mediaforce.tuning.tuning_memory import (
     record_visual_approval_artifact,
     retrieve_learning_context,
 )
+from mediaforce.web.runtime.archive_cleanup import archive_cleanup_summary, clear_archive_cleanup_action
 from mediaforce.web.app import (
     _advice_file,
     _build_seed_policy_payload,
+    _maybe_seed_baseline_policy,
     _build_tuning_runtime_toolbelt,
     _calibration_file,
     _clear_folder_tuning_state,
@@ -144,6 +150,80 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("smaller", response.request_response)
         self.assertTrue(commands)
         self.assertEqual(commands[0][1:7], _memory_disabled_code_args())
+
+    def test_archive_cleanup_summary_counts_files_and_size(self) -> None:
+        archive_root = self.config.archive_root
+        first = archive_root / "tv/show/episode-1.mkv"
+        second = archive_root / "movies/demo.mp4"
+        first.parent.mkdir(parents=True, exist_ok=True)
+        second.parent.mkdir(parents=True, exist_ok=True)
+        first.write_bytes(b"abc")
+        second.write_bytes(b"12345")
+
+        summary = archive_cleanup_summary(self.config)
+
+        self.assertTrue(summary["has_cleanup"])
+        self.assertEqual(summary["file_count"], 2)
+        self.assertEqual(summary["total_size_bytes"], 8)
+
+    def test_clear_archive_cleanup_action_removes_files_and_prunes_directories(self) -> None:
+        archive_root = self.config.archive_root
+        archived = archive_root / "tv/show/episode-1.mkv"
+        archived.parent.mkdir(parents=True, exist_ok=True)
+        archived.write_text("backup")
+
+        result = clear_archive_cleanup_action(self.config)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["removed_count"], 1)
+        self.assertFalse(archived.exists())
+        self.assertFalse((archive_root / "tv/show").exists())
+        self.assertTrue(archive_root.exists())
+        self.assertEqual(result["archive_cleanup"]["file_count"], 0)
+
+    def test_archive_cleanup_route_passes_transcode_root_to_action(self) -> None:
+        from mediaforce.web import app as web_app
+
+        captured: list[str | None] = []
+
+        def fake_clear_archive_cleanup_action(
+                _config: MediaforceConfig,
+                *,
+                transcode_root: str | None = None,
+        ) -> dict[str, object]:
+            captured.append(transcode_root)
+            return {"ok": True, "transcode_root": transcode_root}
+
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.purge_transient_artifacts"
+        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
+            "mediaforce.web.app._start_encode_queue_worker"
+        ), patch("mediaforce.web.app._refresh_host_status_cache", return_value=[]), patch(
+            "mediaforce.web.app.clear_archive_cleanup_action",
+            side_effect=fake_clear_archive_cleanup_action,
+        ):
+            app = web_app.create_app(self.root / "config.toml")
+            route = next(
+                route
+                for route in app.routes
+                if isinstance(route, APIRoute) and route.path == "/api/archive-cleanup/clear"
+            )
+
+            class _FakeRequest:
+                def __init__(self, payload: dict[str, str]) -> None:
+                    self._payload = payload
+
+                async def json(self) -> dict[str, str]:
+                    return self._payload
+
+            response = asyncio.run(cast(APIRoute, route).endpoint(_FakeRequest({"transcode_root": "/Volumes/media/transcode-alt"})))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            json.loads(response.body),
+            {"ok": True, "transcode_root": "/Volumes/media/transcode-alt"},
+        )
+        self.assertEqual(captured, ["/Volumes/media/transcode-alt"])
 
     def test_request_tuning_advice_reads_last_message_output(self) -> None:
         commands: list[list[str]] = []
@@ -372,6 +452,25 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(request["requires_confirmation"])
         self.assertAlmostEqual(request["estimated_source_percent"], 4.36, places=2)
 
+    def test_operator_requested_experiment_detects_combined_budget_and_vmaf_request(self) -> None:
+        request = _operator_requested_experiment(
+            "I really want 200MB and VMAF of around 85.",
+            {
+                "source_size_bytes": 4_480_523_243,
+                "duration_seconds": 2645.248,
+                "audio_summary": [{"channels": 6}],
+                "resolved_policy": {"audio": {"surround_5_1_opus_bitrate": "224k"}},
+            },
+        )
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "combined_experiment")
+        self.assertEqual(request["metric"], "vmaf")
+        self.assertEqual(request["target"], 85.0)
+        self.assertEqual(request["budget_label"], "200 MB per episode")
+        self.assertEqual(request["applied_policy"]["video"]["target_vmaf"], 85.0)
+        self.assertEqual(request["applied_policy"]["video"]["max_encoded_percent"], 10)
+
     def test_build_seed_policy_payload_carries_requested_experiment(self) -> None:
         payload = _build_seed_policy_payload(
             prefix="tv/House/Season 2",
@@ -406,6 +505,123 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(request["metric"], "vmaf")
         self.assertEqual(request["target"], 85.0)
         self.assertEqual(request["applied_policy"]["video"]["target_vmaf"], 85.0)
+
+    def test_build_seed_policy_payload_marks_repeated_operator_confirmation(self) -> None:
+        payload = _build_seed_policy_payload(
+            prefix="tv/House/Season 5",
+            user_note="I really want 200MB and VMAF of around 85.",
+            base_policy={"video": {"target_vmaf": 94.5, "min_target_vmaf": 93.0, "max_encoded_percent": 75}},
+            sample_item={
+                "rel_path": "tv/House/Season 5/House.S05E22.mkv",
+                "source_size_bytes": 4_480_523_243,
+                "video_codec": "h264",
+                "video_bitrate": None,
+                "width": 1920,
+                "height": 1080,
+                "duration_seconds": 2645.248,
+                "audio_summary": [{"channels": 6}],
+                "subtitle_summary": [],
+                "recommendation": None,
+                "recommendation_reason": None,
+                "resolved_policy": {"audio": {"surround_5_1_opus_bitrate": "224k"}},
+            },
+            summary={
+                "item_count": 24,
+                "total_size_bytes": 76_892_875_827,
+                "statuses": {"discovered": 24},
+                "video_codecs": {"h264": 24},
+                "audio_codecs": {"eac3:6": 24},
+                "seasons": ["Season 5"],
+            },
+            metric_support={"vmaf": True, "xpsnr": True, "ssim": True, "psnr": True},
+            recent_sessions_payload=[
+                {
+                    "note": "Try to hit around 200MB an episode. VMAF of around 85.",
+                    "request_disposition": "softened",
+                    "summary": "Too aggressive for a safe cold start.",
+                    "created_at": "2026-04-04T01:29:02+00:00",
+                }
+            ],
+        )
+
+        repeat_signal = payload["operator_repeat_signal"]
+        assert repeat_signal is not None
+        self.assertEqual(repeat_signal["repeat_count"], 2)
+        self.assertEqual(repeat_signal["previous_softened_count"], 1)
+
+    def test_maybe_seed_baseline_policy_honors_repeated_explicit_request(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            record_tuning_session(
+                connection,
+                prefix="tv/House/Season 5",
+                note="Try to hit around 200MB an episode. VMAF of around 85.",
+                response={
+                    "summary": "Too aggressive for a safe cold start.",
+                    "diagnosis": "Prior request was softened.",
+                    "confidence": "medium",
+                    "raw": json.dumps({"request_disposition": "softened"}),
+                },
+                applied_policy={},
+                toolbelt={},
+                created_at="2026-04-04T01:29:02+00:00",
+            )
+
+            mocked_response = SeedPolicyResponse(
+                ok=True,
+                summary="Mildly smaller first-pass draft.",
+                raw=json.dumps({"request_disposition": "softened"}),
+                prompt_version=SEED_PROMPT_VERSION,
+                diagnosis="The request is too aggressive for a cold start.",
+                confidence="medium",
+                evidence_checked=["base_policy"],
+                suggested_follow_up="Measure one sample first.",
+                request_disposition="softened",
+                request_response="I softened that request.",
+                feasibility_note="Cold-start budgets are rough.",
+                proposed_policy={"video": {"target_vmaf": 94.0}},
+            )
+
+            with patch(
+                "mediaforce.web.runtime.folder_tuning_advice.inspect_prefix",
+                return_value={
+                    "item_count": 24,
+                    "total_size_bytes": 76_892_875_827,
+                    "statuses": {"discovered": 24},
+                    "video_codecs": {"h264": 24},
+                    "audio_codecs": {"eac3:6": 24},
+                    "seasons": ["Season 5"],
+                },
+            ), patch(
+                "mediaforce.web.runtime.folder_tuning_advice.request_seed_policy",
+                return_value=mocked_response,
+            ):
+                metadata = _maybe_seed_baseline_policy(
+                    config=self.config,
+                    prefix="tv/House/Season 5",
+                    action="baseline",
+                    user_note="I really want 200MB and VMAF of around 85.",
+                    base_policy={"video": {"target_vmaf": 94.5, "min_target_vmaf": 93.0, "max_encoded_percent": 75}},
+                    sample_item={
+                        "rel_path": "tv/House/Season 5/House.S05E22.mkv",
+                        "source_size_bytes": 4_480_523_243,
+                        "video_codec": "h264",
+                        "video_bitrate": None,
+                        "width": 1920,
+                        "height": 1080,
+                        "duration_seconds": 2645.248,
+                        "audio_summary": [{"channels": 6}],
+                        "subtitle_summary": [],
+                        "resolved_policy": {"audio": {"surround_5_1_opus_bitrate": "224k"}},
+                    },
+                    existing_calibration=None,
+                    connection=connection,
+                )
+
+        assert metadata is not None
+        job_fields = metadata["job_fields"]
+        self.assertEqual(job_fields["seed_request_disposition"], "honored_with_risk")
+        self.assertEqual(job_fields["seed_applied_policy"]["video"]["target_vmaf"], 85.0)
+        self.assertEqual(job_fields["seed_applied_policy"]["video"]["max_encoded_percent"], 10)
 
     def test_clear_folder_tuning_state_removes_thread_and_artifacts(self) -> None:
         prefix = "tv/House/Season 2"
@@ -773,6 +989,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("cold-start guess", prompt)
         self.assertIn("Teach media-class taste", prompt)
         self.assertIn("Do not chase dramatic savings", prompt)
+        self.assertIn("operator_repeat_signal", prompt)
         self.assertIn("clean 1080p catalog TV", prompt)
         self.assertIn("request_response", prompt)
         self.assertIn("honored_with_risk", prompt)
@@ -1059,6 +1276,24 @@ note = "Keep me"
         self.assertIn('bitrate_kbps = 224', updated)
         self.assertIn('path_prefix = "tv/Other"', updated)
         self.assertNotIn('target_xpsnr = 33.0', updated)
+
+    def test_upsert_override_renders_nested_planning_tables_as_valid_toml(self) -> None:
+        override_file = self.root / "overrides.toml"
+
+        _upsert_override(
+            override_file,
+            "tv/House/Season 2",
+            {
+                "planning": {
+                    "bucket_thresholds": {"priority_encode": 70, "review_encode": 35},
+                    "codec_bonus": {"av1": -45, "default": 18, "h264": 40},
+                }
+            },
+        )
+
+        updated = override_file.read_text()
+        self.assertIn("bucket_thresholds = { priority_encode = 70, review_encode = 35 }", updated)
+        self.assertIn("codec_bonus = { av1 = -45, default = 18, h264 = 40 }", updated)
 
 
 if __name__ == "__main__":

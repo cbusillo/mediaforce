@@ -15,6 +15,22 @@ def host_media_access_for_host(host: dict[str, object] | None) -> str:
     return normalize_host_media_access(object_dict(host).get("media_access"))
 
 
+def stream_host_has_remote_source_roots(
+        host: dict[str, object] | None,
+        *,
+        media_root: str | None = None,
+) -> bool:
+    host_payload = object_dict(host)
+    if host_media_access_for_host(host_payload) != "stream":
+        return False
+    raw_source_roots = object_dict(host_payload.get("source_roots"))
+    if not raw_source_roots:
+        return False
+    if media_root is None:
+        return any(str(value or "").strip() for value in raw_source_roots.values())
+    return bool(str(raw_source_roots.get(media_root) or "").strip())
+
+
 def ssh_target_for_host(host: dict[str, object]) -> str:
     return str(host.get("host") or host.get("key") or "").strip()
 
@@ -115,4 +131,5 @@ __all__ = [
     "normalize_host_media_access",
     "remote_shell_path_export_line",
     "ssh_target_for_host",
+    "stream_host_has_remote_source_roots",
 ]

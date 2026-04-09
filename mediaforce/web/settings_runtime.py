@@ -18,6 +18,7 @@ DEFAULT_LIBRARY_COLOR_PALETTE = (
     "#6b7280",
 )
 ALWAYS_SCHEDULE_PROFILE = "always"
+NEVER_SCHEDULE_PROFILE = "never"
 LEGACY_QUEUE_WINDOW_SCHEDULE_PROFILE = "queue_window"
 LEGACY_DEFAULT_SCHEDULE_PROFILE = "default"
 DEFAULT_HOST_SCHEDULE_PROFILE = ALWAYS_SCHEDULE_PROFILE
@@ -104,6 +105,7 @@ def _settings_remote_row(host: dict[str, Any]) -> dict[str, Any]:
         "max_parallel_encodes": str(host_max_parallel_encodes(host)),
         "schedule_profile": host_schedule_profile_key(host),
         "capabilities": normalize_host_capabilities(host.get("capabilities")),
+        "allowed_libraries": normalize_allowed_libraries(host.get("allowed_libraries")),
         "source_roots_json": settings_host_source_roots_json(host.get("source_roots")),
         "staging_root": str(host.get("staging_root") or ""),
     }
@@ -127,6 +129,7 @@ def index_settings_remote_rows(rows: list[dict[str, Any]], *, min_rows: int = 1)
                 row.get("schedule_profile", DEFAULT_HOST_SCHEDULE_PROFILE)
             ),
             "capabilities": normalize_host_capabilities(row.get("capabilities", list(DEFAULT_HOST_CAPABILITIES))),
+            "allowed_libraries": normalize_allowed_libraries(row.get("allowed_libraries")),
             "source_roots_json": row.get("source_roots_json", ""),
             "staging_root": row.get("staging_root", ""),
         }
@@ -148,6 +151,7 @@ def index_settings_remote_rows(rows: list[dict[str, Any]], *, min_rows: int = 1)
                 "max_parallel_encodes": str(DEFAULT_HOST_MAX_PARALLEL_ENCODES),
                 "schedule_profile": DEFAULT_HOST_SCHEDULE_PROFILE,
                 "capabilities": list(DEFAULT_HOST_CAPABILITIES),
+                "allowed_libraries": [],
                 "source_roots_json": "",
                 "staging_root": "",
             }
@@ -164,7 +168,7 @@ def settings_schedule_profile_rows_for_config(config: MediaforceConfig, *, min_r
             if not isinstance(profile, dict):
                 continue
             key = canonical_schedule_profile_key(str(profile.get("key") or profile.get("name") or ""))
-            if not key or key == ALWAYS_SCHEDULE_PROFILE:
+            if not key or key in {ALWAYS_SCHEDULE_PROFILE, NEVER_SCHEDULE_PROFILE}:
                 continue
             normalized = normalize_encode_queue_scheduler(profile)
             rows.append(
@@ -215,8 +219,10 @@ def normalize_schedule_profile_key(value: str) -> str:
 
 def canonical_schedule_profile_key(value: JSONValue) -> str:
     key = normalize_schedule_profile_key(str(value or ""))
-    if key in {"", "always", "no_schedule", "none"}:
+    if key in {"", "always"}:
         return ALWAYS_SCHEDULE_PROFILE
+    if key in {NEVER_SCHEDULE_PROFILE, "disabled"}:
+        return NEVER_SCHEDULE_PROFILE
     if key in {LEGACY_DEFAULT_SCHEDULE_PROFILE, "queue_default", LEGACY_QUEUE_WINDOW_SCHEDULE_PROFILE}:
         return ALWAYS_SCHEDULE_PROFILE
     return key
@@ -233,10 +239,15 @@ def schedule_profile_options(*, schedule_profiles: list[dict[str, Any]]) -> list
             "label": "Always",
             "summary": "Runs anytime.",
         },
+        {
+            "key": NEVER_SCHEDULE_PROFILE,
+            "label": "Never",
+            "summary": "Never accepts queued encodes.",
+        },
     ]
     for row in schedule_profiles:
         key = canonical_schedule_profile_key(row.get("key"))
-        if key == ALWAYS_SCHEDULE_PROFILE:
+        if key in {ALWAYS_SCHEDULE_PROFILE, NEVER_SCHEDULE_PROFILE}:
             continue
         policy = normalize_encode_queue_scheduler(
             {
@@ -300,7 +311,7 @@ def normalize_encode_queue_scheduler(raw: dict[str, Any] | None) -> dict[str, An
         payload.update(raw)
     mode = str(payload.get("mode") or DEFAULT_SCHEDULER_POLICY["mode"]).strip().lower()
     timezone = str(payload.get("timezone") or DEFAULT_SCHEDULER_POLICY["timezone"]).strip().lower()
-    if mode not in {"anytime", "night"}:
+    if mode not in {"anytime", "night", "never"}:
         mode = str(DEFAULT_SCHEDULER_POLICY["mode"])
     if timezone not in {"host_local", "controller_local", "utc"}:
         timezone = str(DEFAULT_SCHEDULER_POLICY["timezone"])
@@ -320,6 +331,8 @@ def normalize_encode_queue_scheduler(raw: dict[str, Any] | None) -> dict[str, An
     }
     if mode == "anytime":
         normalized["summary"] = "runs anytime"
+    elif mode == "never":
+        normalized["summary"] = "never runs"
     else:
         normalized["summary"] = f"runs between {start_hour:02d}:00 and {end_hour:02d}:00 ({timezone.replace('_', ' ')})"
     return normalized
@@ -408,6 +421,9 @@ def build_runtime_settings_payload(
         payload["max_parallel_encodes"] = max_parallel_encodes
         payload["schedule_profile"] = schedule_profile
         payload["capabilities"] = normalize_host_capabilities(row.get("capabilities"))
+        allowed_libraries = normalize_allowed_libraries(row.get("allowed_libraries"))
+        if allowed_libraries:
+            payload["allowed_libraries"] = allowed_libraries
         source_root_overrides = normalize_host_source_root_overrides(
             row.get("source_roots") if "source_roots" in row else row.get("source_roots_json"),
             known_library_keys=known_library_keys,
@@ -421,7 +437,7 @@ def build_runtime_settings_payload(
         normalized_remotes.append(payload)
 
     normalized_profiles: list[dict[str, Any]] = []
-    seen_profile_keys: set[str] = {ALWAYS_SCHEDULE_PROFILE}
+    seen_profile_keys: set[str] = {ALWAYS_SCHEDULE_PROFILE, NEVER_SCHEDULE_PROFILE}
     for row in schedule_profiles:
         key_text = canonical_schedule_profile_key(row.get("key", ""))
         label_text = _text(row.get("label", ""))
@@ -437,6 +453,8 @@ def build_runtime_settings_payload(
             continue
         if not key_text:
             raise ValueError("Each schedule profile needs a key.")
+        if key_text in {ALWAYS_SCHEDULE_PROFILE, NEVER_SCHEDULE_PROFILE}:
+            raise ValueError(f"Schedule profile key '{key_text}' is reserved.")
         if key_text in seen_profile_keys:
             raise ValueError(f"Duplicate schedule profile key: {key_text}")
         normalized = normalize_encode_queue_scheduler(
@@ -527,6 +545,20 @@ def settings_host_source_roots_json(value: JSONValue) -> str:
     if not normalized:
         return ""
     return json.dumps(normalized, indent=2, sort_keys=True)
+
+
+def normalize_allowed_libraries(value: JSONValue) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        key_text = normalize_library_key(str(item or ""))
+        if not key_text or key_text in seen:
+            continue
+        seen.add(key_text)
+        normalized.append(key_text)
+    return normalized
 
 
 def normalize_host_source_root_overrides(

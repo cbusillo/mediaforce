@@ -15,6 +15,7 @@ def dashboard_summary_payload(
         maybe_schedule_scan: Any,
         decorate_encode_queue_for_scheduler: Any,
         library_color_map_for_config: Any,
+        archive_cleanup_summary_fn: Any,
 ) -> dict[str, Any]:
     cache_key = folder_card_cache_key(config)
     with open_db(config.paths.db_path) as connection:
@@ -27,6 +28,7 @@ def dashboard_summary_payload(
         "scan_job": scan_job,
         "calibration_queue": calibration_queue,
         "encode_queue": encode_queue,
+        "archive_cleanup": archive_cleanup_summary_fn(config),
         "folders_preview": [asdict(folder) for folder in preview_folders],
         "catalog_empty": not preview_folders,
         "folder_cache_key": _serialize_cache_key(cache_key),
@@ -55,12 +57,15 @@ def folder_status_payload(
         *,
         load_job_state: Any,
         load_scan_job_state: Any,
+        load_active_encode_job_for_prefix: Any,
 ) -> dict[str, Any]:
     with open_db(config.paths.db_path) as connection:
         calibration_job = load_job_state(connection, config, normalized_prefix)
+        active_encode_job = load_active_encode_job_for_prefix(connection, normalized_prefix)
         folder_scan_job = load_scan_job_state(config, normalized_prefix)
     polling_active = bool(
         (calibration_job and calibration_job.get("status") in {"queued", "running"})
+        or (active_encode_job and active_encode_job.get("status") in {"queued", "retry_backoff", "running"})
         or (folder_scan_job and folder_scan_job.get("status") in {"queued", "running"})
     )
     return {

@@ -7,17 +7,16 @@
 		FolderCard as FolderCardData,
 		HostsPayload
 	} from '$lib/api/types';
-	import { goto, invalidateAll } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { onDestroy, onMount } from 'svelte';
-	import { fetchJson, postJson } from '$lib/api/client';
+	import { fetchJson } from '$lib/api/client';
 	import { folderLibraryKey, folderLibraryLabel } from '$lib/folder-display';
-	import { formatGiB, hostSettingsAnchor } from '$lib/format';
+	import { formatGiB } from '$lib/format';
+	import { allQueueWorkersScheduledOffWindow, nextQueueWindowCopy } from '$lib/hosts/schedule';
 	import DashboardFolderGrid from '$lib/components/dashboard/DashboardFolderGrid.svelte';
 	import DashboardHero from '$lib/components/dashboard/DashboardHero.svelte';
-	import DashboardHostGrid from '$lib/components/dashboard/DashboardHostGrid.svelte';
-	import DashboardQueues from '$lib/components/dashboard/DashboardQueues.svelte';
-	import { toasts } from '$lib/stores/toasts';
+	import Panel from '$lib/components/Panel.svelte';
+	import Pill from '$lib/components/Pill.svelte';
 
 	let {
 		data
@@ -50,51 +49,56 @@
 	const foldersPending = $derived.by(() =>
 		folders.reduce((total, folder) => total + folder.pending_count, 0)
 	);
-	const encodeCapableHosts = $derived.by(
-		() => hosts.hosts.filter((host) => host.capabilities.includes('encode_queue')).length
-	);
 	const readyHosts = $derived.by(() => hosts.hosts.filter((host) => host.queue_active).length);
-	const rankedHosts = $derived.by(() =>
-		[...hosts.hosts].sort(
-			(left, right) =>
-				Number(right.priority) - Number(left.priority) || left.label.localeCompare(right.label)
-		)
-	);
-	const reachableHosts = $derived.by(() => hosts.hosts.filter((host) => host.available).length);
 	const pendingReviewCount = $derived.by(
 		() =>
 			dashboard.calibration_queue.sample.pending_review_count +
 			dashboard.calibration_queue.full.pending_review_count
 	);
-	const calibrationQueueHasWork = $derived.by(
-		() =>
-			dashboard.calibration_queue.sample.running_count +
-				dashboard.calibration_queue.sample.queued_count +
-				dashboard.calibration_queue.full.running_count +
-				dashboard.calibration_queue.full.queued_count >
-			0
+	const queueWorkersScheduledOffWindow = $derived.by(() =>
+		allQueueWorkersScheduledOffWindow(hosts.hosts)
 	);
-	const encodeRunningJobs = $derived(dashboard.encode_queue.running ?? []);
-	const encodeQueueEtaCopy = $derived(dashboard.encode_queue.telemetry?.eta_copy ?? null);
-	const encodeQueueStatus = $derived.by(() => {
-		if (dashboard.encode_queue.state.stop_requested) {
-			return { label: 'Stopping', tone: 'attention' as const };
-		}
-
-		if (dashboard.encode_queue.state.is_paused) {
-			return { label: 'Paused', tone: 'neutral' as const };
-		}
-
+	const nextWorkerWindow = $derived.by(() => nextQueueWindowCopy(hosts.hosts, new Date(clockNow)));
+	const fleetSnapshotLabel = $derived.by(() => {
 		if (dashboard.encode_queue.running_count > 0) {
-			return { label: 'Running', tone: 'ok' as const };
+			return `${dashboard.encode_queue.running_count} encodes running`;
 		}
-
 		if (dashboard.encode_queue.queued_count > 0) {
-			return { label: 'Queued', tone: 'attention' as const };
+			return `${dashboard.encode_queue.queued_count} folder${dashboard.encode_queue.queued_count === 1 ? '' : 's'} queued`;
 		}
-
-		return { label: 'Idle', tone: 'neutral' as const };
+		return 'Fleet idle';
 	});
+	const opsSnapshotPills = $derived.by(() => [
+		{ label: fleetSnapshotLabel, variant: dashboard.encode_queue.queued_count > 0 ? 'warn' as const : 'ghost' as const },
+		...(readyHosts > 0
+			? [{ label: `${readyHosts} hosts ready`, variant: 'ok' as const }]
+			: queueWorkersScheduledOffWindow
+				? [
+					{
+						label: nextWorkerWindow
+							? `Next worker window ${nextWorkerWindow}`
+							: 'All queue workers are scheduled off-window',
+						variant: 'neutral' as const
+					}
+				]
+				: [{ label: '0 hosts ready', variant: 'ghost' as const }]),
+		...(Number(dashboard.archive_cleanup?.file_count ?? 0) > 0
+			? [
+				{
+					label: `${Number(dashboard.archive_cleanup?.file_count ?? 0)} archived backups`,
+					variant: 'warn' as const
+				}
+			]
+			: []),
+		...(pendingReviewCount > 0
+			? [
+				{
+					label: `${pendingReviewCount} pending review`,
+					variant: 'warn' as const
+				}
+			]
+			: [])
+	]);
 	const heroFacts = $derived.by(() => [
 		{ label: 'Top folders', value: String(folders.length) },
 		{ label: 'Pending items', value: String(foldersPending) },
@@ -188,87 +192,6 @@
 			? 'Click an inactive pill to restore it, or All to reset.'
 			: 'Click a pill to hide that library.'
 	);
-	const folderFilterSummary = $derived.by(() => {
-		if (!libraryFiltersActive) {
-			return `Showing all ${folders.length} candidate folders.`;
-		}
-
-		if (!visibleFolders.length) {
-			return 'No folders match the selected libraries.';
-		}
-
-		return `Showing ${visibleFolders.length} of ${folders.length} candidate folders.`;
-	});
-
-	const queueCards = $derived.by(() => [
-		{
-			eyebrow: 'Calibration',
-			heading: `${dashboard.calibration_queue.sample.running_count + dashboard.calibration_queue.full.running_count} running · ${dashboard.calibration_queue.sample.queued_count + dashboard.calibration_queue.full.queued_count} queued`,
-			lede: 'Sample calibrations and proof encodes stay separate so you can tune before committing to a full folder run.'
-		},
-		{
-			eyebrow: 'Encode Queue',
-			heading: `${dashboard.encode_queue.running_count} running · ${dashboard.encode_queue.queued_count} queued`,
-			lede: 'Queue health, worker availability, and controls for whole-folder runs.'
-		}
-	]);
-
-	let queueAction = $state<string | null>(null);
-	let calibrationQueueAction = $state<string | null>(null);
-
-	async function runQueueAction(action: 'pause' | 'resume' | 'stop') {
-		if (
-			action === 'stop' &&
-			browser &&
-			!window.confirm('Stop active encodes and clear the queue? This cannot be undone.')
-		) {
-			return;
-		}
-
-		queueAction = action;
-		try {
-			const response = await postJson<{ message: string }>(`/api/encode-queue/${action}`, {});
-			toasts.success('Queue updated', response.message);
-			await invalidateAll();
-		} catch (error) {
-			toasts.error(
-				'Queue update failed',
-				error instanceof Error ? error.message : 'Unexpected queue error'
-			);
-		} finally {
-			queueAction = null;
-		}
-	}
-
-	async function stopCalibrationQueue() {
-		if (
-			browser &&
-			!window.confirm(
-				'Stop active calibrations and clear queued calibration jobs? This cannot be undone.'
-			)
-		) {
-			return;
-		}
-
-		calibrationQueueAction = 'stop';
-		try {
-			const response = await postJson<{ message: string }>(`/api/calibration-queue/stop`, {});
-			toasts.success('Calibration queue updated', response.message);
-			await invalidateAll();
-		} catch (error) {
-			toasts.error(
-				'Calibration queue update failed',
-				error instanceof Error ? error.message : 'Unexpected calibration queue error'
-			);
-		} finally {
-			calibrationQueueAction = null;
-		}
-	}
-
-	async function openHostSettings(hostKey: string) {
-		await goto(resolve('/settings'));
-		window.location.hash = hostSettingsAnchor(hostKey);
-	}
 
 	function toggleLibraryFilter(libraryKey: string) {
 		disabledLibraries = disabledLibraries.includes(libraryKey)
@@ -486,7 +409,7 @@
 </script>
 
 <svelte:head>
-	<title>Dashboard · Mediaforce</title>
+	<title>Folders · Mediaforce</title>
 </svelte:head>
 
 <div class="page-stack">
@@ -499,24 +422,21 @@
 		metricStatusCopy={dashboard.metric_status_copy}
 	/>
 
-	<DashboardQueues
-		{queueCards}
-		{pendingReviewCount}
-		{calibrationQueueAction}
-		{calibrationQueueHasWork}
-		{stopCalibrationQueue}
-		{encodeQueueStatus}
-		{queueAction}
-		{dashboard}
-		{readyHosts}
-		{encodeCapableHosts}
-		{reachableHosts}
-		{runQueueAction}
-		{encodeQueueEtaCopy}
-		{encodeRunningJobs}
-	/>
-
-	<DashboardHostGrid {rankedHosts} {readyHosts} onOpenHostSettings={openHostSettings} />
+	<Panel class="ops-summary-panel" padding="1rem 1.1rem">
+		<div class="ops-summary-shell">
+			<p class="ops-summary-label">Ops snapshot</p>
+			<div class="ops-summary-side">
+				<div class="ops-summary-pills">
+					{#each opsSnapshotPills as pill (pill.label)}
+						<Pill label={pill.label} variant={pill.variant} />
+					{/each}
+				</div>
+				<a class="ops-summary-link" href={resolve('/ops')}>
+					Open ops
+				</a>
+			</div>
+		</div>
+	</Panel>
 
 	<DashboardFolderGrid
 		{catalogScanActive}
@@ -530,13 +450,12 @@
 		{folderLoadError}
 		{folderLibraries}
 		{disabledLibraries}
-		onEnableAllLibraries={enableAllLibraries}
-		onToggleLibraryFilter={toggleLibraryFilter}
-		{libraryColors}
-		{folderFilterSummary}
-		{filterHintCopy}
-		{visibleFolders}
-		{catalogEmpty}
+			onEnableAllLibraries={enableAllLibraries}
+			onToggleLibraryFilter={toggleLibraryFilter}
+			{libraryColors}
+			{filterHintCopy}
+			{visibleFolders}
+			{catalogEmpty}
 	/>
 </div>
 
@@ -544,5 +463,59 @@
 	.page-stack {
 		display: grid;
 		gap: var(--space-3);
+	}
+
+	.ops-summary-shell {
+		display: flex;
+		justify-content: space-between;
+		gap: 1rem;
+		align-items: center;
+		flex-wrap: wrap;
+	}
+
+	.ops-summary-side {
+		display: grid;
+		gap: 0.7rem;
+	}
+
+	.ops-summary-label {
+		margin: 0;
+		font-size: 0.78rem;
+		font-weight: 800;
+		letter-spacing: 0.14em;
+		text-transform: uppercase;
+		color: var(--accent-deep);
+	}
+
+	.ops-summary-side {
+		justify-items: start;
+	}
+
+	.ops-summary-pills {
+		display: flex;
+		gap: 0.65rem;
+		flex-wrap: wrap;
+	}
+
+	.ops-summary-link {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0.74rem 1rem;
+		border-radius: var(--radius-pill);
+		border: 1px solid rgba(15, 118, 110, 0.18);
+		background: rgba(15, 118, 110, 0.1);
+		color: var(--accent-deep);
+		font-weight: 700;
+		text-decoration: none;
+		box-shadow:
+			inset 0 1px 0 rgba(255, 255, 255, 0.55),
+			0 12px 22px rgba(15, 118, 110, 0.08);
+	}
+
+	:global(.ops-summary-panel) {
+		background:
+			radial-gradient(circle at top left, rgba(15, 118, 110, 0.12), transparent 34%),
+			linear-gradient(140deg, rgba(255, 253, 247, 0.88), rgba(244, 237, 224, 0.84));
 	}
 </style>

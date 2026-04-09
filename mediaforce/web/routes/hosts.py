@@ -9,9 +9,15 @@ def register_host_routes(
         app: FastAPI,
         *,
         hosts_payload: Callable[[int], dict[str, Any]],
+        start_host_action: Callable[[str], dict[str, Any]],
         prepare_host_action: Callable[[str, str | None], dict[str, Any]],
         reset_host_trust_action: Callable[[str], dict[str, Any]],
 ) -> None:
+    @app.post("/api/hosts/start")
+    async def api_host_start(request: Request) -> JSONResponse:
+        body = await request.json()
+        return JSONResponse(start_host_action(str(body.get("host_key", "")).strip()))
+
     @app.post("/api/hosts/prepare")
     async def api_host_prepare(request: Request) -> JSONResponse:
         body = await request.json()

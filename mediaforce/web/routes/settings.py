@@ -10,6 +10,7 @@ def register_settings_routes(
         *,
         settings_payload: Callable[[], dict[str, Any]],
         save_settings_action: Callable[..., dict[str, Any]],
+        clear_archive_cleanup_action: Callable[[str | None], dict[str, Any]],
 ) -> None:
     @app.get("/api/settings")
     def api_settings() -> JSONResponse:
@@ -29,3 +30,8 @@ def register_settings_routes(
         except ValueError as exc:
             return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
         return JSONResponse(result)
+
+    @app.post("/api/archive-cleanup/clear")
+    async def api_archive_cleanup_clear(request: Request) -> JSONResponse:
+        body = await request.json()
+        return JSONResponse(clear_archive_cleanup_action(str(body.get("transcode_root", "")).strip() or None))

@@ -49,7 +49,18 @@ export interface EncodeQueueJob {
 	job_id: string;
 	prefix: string;
 	status: string;
+	recoverable_item_count?: number;
 	host?: Record<string, unknown>;
+	error?: string | null;
+	last_failure_kind?: string | null;
+	last_failure_at?: string | null;
+	finished_at?: string | null;
+	attempt_summary?: string | null;
+	active_hosts?: Array<Record<string, unknown>>;
+	running_shard_count?: number;
+	queued_shard_count?: number;
+	completed_shard_count?: number;
+	shard_count?: number;
 	queue_position?: number;
 	queue_depth?: number;
 	schedule_waiting?: boolean;
@@ -110,6 +121,12 @@ export interface DashboardSummaryPayload {
 		active_count: number;
 	};
 	encode_queue: EncodeQueueSummary;
+	archive_cleanup?: {
+		archive_root: string;
+		file_count: number;
+		total_size_bytes: number;
+		has_cleanup: boolean;
+	};
 	catalog_empty: boolean;
 	folder_cache_key: string;
 	metric_support: MetricSupport;
@@ -127,12 +144,15 @@ export interface HostRuntime {
 	label: string;
 	available: boolean;
 	message: string;
+	media_access?: string;
+	source_roots?: Record<string, string>;
 	missing_paths: string[];
 	issues: string[];
 	detail: string | null;
 	capabilities: string[];
 	priority: number;
 	max_parallel_encodes: number;
+	allowed_libraries?: string[];
 	active_encode_count: number;
 	schedule_profile_label: string;
 	schedule_detail: string;
@@ -174,6 +194,7 @@ export interface SettingsHost {
 	max_parallel_encodes: string;
 	schedule_profile: string;
 	capabilities: string[];
+	allowed_libraries: string[];
 	source_roots_json: string;
 	staging_root: string;
 }
@@ -203,6 +224,12 @@ export interface SettingsPayload {
 	schedule_profile_options: Array<{ key: string; label: string }>;
 	host_capability_options: Array<{ key: string; label: string; help: string }>;
 	archive_root: string;
+	archive_cleanup: {
+		archive_root: string;
+		file_count: number;
+		total_size_bytes: number;
+		has_cleanup: boolean;
+	};
 	runtime_settings_path: string;
 	repo_config_path: string;
 	host_notice: string | null;

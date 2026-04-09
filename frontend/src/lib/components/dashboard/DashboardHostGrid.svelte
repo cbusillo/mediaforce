@@ -19,18 +19,18 @@
 <Panel variant="inset" class="folder-section" padding="1.2rem 1.3rem 1.4rem">
 	<div class="section-stack">
 		<div class="section-header-row">
-			<SectionHead
-				eyebrow="Remote Hosts"
-				heading="Where encodes can run"
-				lede="Worker availability stays close to the queue controls so scheduling decisions are easy to read."
-				size="compact"
-			/>
+				<SectionHead
+					eyebrow="Remote Hosts"
+					heading="Where encodes can run"
+					lede="See which workers are ready now, scheduled for later, or need attention."
+					size="compact"
+				/>
 			<div class="section-header-tools">
 				<span class={`section-summary-chip ${readyHosts > 0 ? 'active' : ''}`.trim()}
 					>{readyHosts} ready</span
 				>
-				<a class="section-action-link" href={resolve('/settings')}> Manage in Settings </a>
-			</div>
+					<a class="section-action-link" href={resolve('/settings')}> Edit in Settings </a>
+				</div>
 		</div>
 		<div id="remote-hosts" class="host-grid">
 			{#each rankedHosts as host (host.key)}

@@ -1,15 +1,16 @@
 :root {
 	--page-bg: #f0ead9;
-	--page-grad-top: #fbf8f1;
-	--page-grad-bottom: #efe6d4;
-	--surface-1: rgba(255, 252, 246, 0.94);
-	--surface-2: rgba(255, 255, 255, 0.74);
-	--surface-3: rgba(255, 255, 255, 0.54);
-	--surface-strong: rgba(255, 250, 242, 0.97);
-	--surface-accent: linear-gradient(135deg, rgba(15, 118, 110, 0.1), rgba(214, 195, 165, 0.22));
+	--page-grad-top: #fdfaf4;
+	--page-grad-bottom: #eadfc9;
+	--surface-1: rgba(255, 252, 246, 0.95);
+	--surface-2: rgba(255, 255, 255, 0.78);
+	--surface-3: rgba(255, 255, 255, 0.58);
+	--surface-strong: rgba(255, 250, 242, 0.98);
+	--surface-accent: linear-gradient(135deg, rgba(15, 118, 110, 0.11), rgba(214, 195, 165, 0.2));
 	--surface-spotlight:
-		radial-gradient(circle at top left, rgba(15, 118, 110, 0.14), transparent 48%),
-		linear-gradient(135deg, rgba(255, 255, 255, 0.84), rgba(246, 237, 220, 0.9));
+		radial-gradient(circle at top left, rgba(15, 118, 110, 0.14), transparent 46%),
+		radial-gradient(circle at 82% 18%, rgba(226, 199, 154, 0.16), transparent 28%),
+		linear-gradient(135deg, rgba(255, 255, 255, 0.88), rgba(246, 237, 220, 0.92));
 	--ink: #17231f;
 	--ink-muted: #52655e;
 	--ink-soft: #6f7f79;
@@ -19,8 +20,8 @@
 	--border-strong: rgba(15, 118, 110, 0.2);
 	--ok: #2f6b3e;
 	--warn: #c2410c;
-	--shadow-lg: 0 26px 70px rgba(23, 35, 31, 0.12);
-	--shadow-md: 0 14px 42px rgba(23, 35, 31, 0.08);
+	--shadow-lg: 0 30px 80px rgba(58, 42, 23, 0.14);
+	--shadow-md: 0 18px 48px rgba(58, 42, 23, 0.09);
 	--radius-xl: 2rem;
 	--radius-lg: 1.5rem;
 	--radius-md: 1rem;
@@ -66,9 +67,10 @@ body::after {
 	inset: 0;
 	pointer-events: none;
 	background:
-		radial-gradient(circle at top right, rgba(15, 118, 110, 0.08), transparent 28%),
-		radial-gradient(circle at 18% 22%, rgba(214, 195, 165, 0.12), transparent 22%);
-	opacity: 0.8;
+		radial-gradient(circle at top right, rgba(15, 118, 110, 0.08), transparent 30%),
+		radial-gradient(circle at 18% 22%, rgba(214, 195, 165, 0.14), transparent 24%),
+		radial-gradient(circle at 50% 100%, rgba(201, 166, 112, 0.08), transparent 24%);
+	opacity: 0.9;
 }
 
 body::before {
@@ -78,7 +80,7 @@ body::before {
 	pointer-events: none;
 	background-image: radial-gradient(circle at 1px 1px, rgba(23, 35, 31, 0.045) 1px, transparent 0);
 	background-size: 18px 18px;
-	opacity: 0.14;
+	opacity: 0.1;
 	mix-blend-mode: multiply;
 	mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.55), transparent 92%);
 }

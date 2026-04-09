@@ -9,8 +9,8 @@ from typing import Any
 from mediaforce.core.type_defs import object_list
 from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQUIRED_ISSUE, has_videotoolbox_hwaccel, \
     normalize_execution_platform
-from mediaforce.hosts.config import _host_supports_capability, \
-    _parse_utc_offset_minutes, remote_shell_path_export_line
+from mediaforce.hosts.config import _host_supports_capability, host_media_access_for_host, \
+    _parse_utc_offset_minutes, remote_shell_path_export_line, stream_host_has_remote_source_roots
 from mediaforce.hosts.types import AB_AV1_MISSING_ISSUE, FFMPEG_MISSING_ISSUE, HostStatus, \
     LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE, SAMPLE_AV1_ENCODER_MISSING_ISSUE, SAMPLE_METRIC_MISSING_ISSUE
 
@@ -58,10 +58,19 @@ def _host_capability_issues(
         platform_name: str,
         repo_path: str | None,
         repo_path_exists: bool,
+        supports_remote_stream_quality: bool | None = None,
 ) -> list[str]:
     capability_issues: list[str] = []
     supports_sample = _host_supports_capability(host, "sample_calibration")
     supports_encode = _host_supports_capability(host, "encode_queue")
+    if supports_remote_stream_quality is None:
+        supports_remote_stream_quality = stream_host_has_remote_source_roots(host)
+    needs_remote_ab_av1 = supports_sample or (
+        supports_encode and (host_media_access_for_host(host) != "stream" or supports_remote_stream_quality)
+    )
+    needs_remote_quality_metric = supports_sample or (
+        supports_encode and (host_media_access_for_host(host) != "stream" or supports_remote_stream_quality)
+    )
 
     if platform_name == "macos":
         if not bool(tools.get("xcode_clt")):
@@ -72,20 +81,26 @@ def _host_capability_issues(
             capability_issues.append(FFMPEG_MISSING_ISSUE)
         elif not bool(tools.get("ffmpeg_videotoolbox")):
             capability_issues.append(VIDEOTOOLBOX_REQUIRED_ISSUE)
+        if needs_remote_ab_av1 and not bool(tools.get("ab_av1")):
+            capability_issues.append(AB_AV1_MISSING_ISSUE)
+        if needs_remote_quality_metric and bool(tools.get("ffmpeg")) and not (
+                bool(tools.get("ffmpeg_libvmaf")) or bool(tools.get("ffmpeg_xpsnr"))
+        ):
+            capability_issues.append(SAMPLE_METRIC_MISSING_ISSUE)
         if supports_sample:
-            if not bool(tools.get("ab_av1")):
-                capability_issues.append(AB_AV1_MISSING_ISSUE)
             if bool(tools.get("ffmpeg")) and not bool(tools.get("ffmpeg_libsvtav1")):
                 capability_issues.append(SAMPLE_AV1_ENCODER_MISSING_ISSUE)
-            if bool(tools.get("ffmpeg")) and not (
-                    bool(tools.get("ffmpeg_libvmaf")) or bool(tools.get("ffmpeg_xpsnr"))
-            ):
-                capability_issues.append(SAMPLE_METRIC_MISSING_ISSUE)
     elif platform_name == "linux":
         if not bool(tools.get("ffmpeg")):
             capability_issues.append(FFMPEG_MISSING_ISSUE)
-        elif supports_encode and not bool(tools.get("ffmpeg_libsvtav1")):
+        if needs_remote_ab_av1 and not bool(tools.get("ab_av1")):
+            capability_issues.append(AB_AV1_MISSING_ISSUE)
+        if supports_encode and not bool(tools.get("ffmpeg_libsvtav1")):
             capability_issues.append(SVT_AV1_REQUIRED_ISSUE)
+        if needs_remote_quality_metric and bool(tools.get("ffmpeg")) and not (
+                bool(tools.get("ffmpeg_libvmaf")) or bool(tools.get("ffmpeg_xpsnr"))
+        ):
+            capability_issues.append(SAMPLE_METRIC_MISSING_ISSUE)
         if supports_sample:
             capability_issues.append(LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE)
     else:
@@ -182,6 +197,8 @@ def _host_message(*, available: bool, missing_paths: list[str], issues: list[str
         return "Install Homebrew first"
     if any(issue == FFMPEG_MISSING_ISSUE for issue in issues):
         return "Install ffmpeg first"
+    if any(issue == AB_AV1_MISSING_ISSUE for issue in issues):
+        return "Install ab-av1 first"
     if any(issue == SVT_AV1_REQUIRED_ISSUE for issue in issues):
         return "Install AV1 encoder support"
     if issues:
@@ -358,11 +375,13 @@ def _remote_status_script(*, paths: list[str], repo_path: str) -> str:
     if paths:
         lines[16:16] = [
             f"for path in {quoted_paths}; do",
-            '  if [ -e "$path" ]; then',
+            '  if [ -d "$path" ]; then',
+            '    if ls "$path" >/dev/null 2>&1; then printf "path|%s|1\\n" "$path"; else printf "path|%s|0\\n" "$path"; fi',
+            '  elif [ -e "$path" ] && [ -r "$path" ]; then',
             '    printf "path|%s|1\\n" "$path"',
-            "  else",
+            '  else',
             '    printf "path|%s|0\\n" "$path"',
-            "  fi",
+            '  fi',
             "done",
         ]
     if repo_path:

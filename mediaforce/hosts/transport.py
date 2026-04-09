@@ -1,3 +1,4 @@
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Callable
@@ -37,7 +38,9 @@ def _run_remote_ssh(
     if identity_file is not None:
         cmd.extend(["-i", str(identity_file), "-o", "IdentitiesOnly=yes"])
     cmd.extend(ssh_client_options_func(batch_mode=batch_mode))
-    cmd.extend([ssh_host, *remote_args])
+    cmd.append(ssh_host)
+    if remote_args:
+        cmd.append(shlex.join([str(arg) for arg in remote_args]))
     return subprocess_run(cmd, capture_output=True, text=True, timeout=timeout, input_text=input_text)
 
 

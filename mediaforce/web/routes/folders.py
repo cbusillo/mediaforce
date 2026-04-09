@@ -15,6 +15,8 @@ def register_folder_routes(
         folder_ai_tune_confirm_action: Callable[[str, str], dict[str, Any]],
         clear_folder_tuning_action: Callable[[str], dict[str, Any]],
         queue_folder_encode_action: Callable[[str, str, bool], dict[str, Any]],
+        validate_folder_outputs_action: Callable[[str], dict[str, Any]],
+        promote_folder_outputs_action: Callable[[str], dict[str, Any]],
         save_profile_action: Callable[[str], dict[str, Any]],
 ) -> None:
     @app.get("/api/folders/{prefix:path}/status")
@@ -64,6 +66,16 @@ def register_folder_routes(
             str(body.get("notes", "")),
             bool(body.get("bypass_schedule", False)),
         )
+        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+    @app.post("/api/folders/{prefix:path}/validate-outputs")
+    def api_folder_validate_outputs(prefix: str) -> JSONResponse:
+        result = validate_folder_outputs_action(prefix.strip("/"))
+        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+    @app.post("/api/folders/{prefix:path}/promote-outputs")
+    def api_folder_promote_outputs(prefix: str) -> JSONResponse:
+        result = promote_folder_outputs_action(prefix.strip("/"))
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     @app.post("/api/folders/{prefix:path}/save-profile")

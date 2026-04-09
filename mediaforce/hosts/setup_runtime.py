@@ -7,7 +7,8 @@ from pathlib import Path
 import time
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.hosts.config import _host_supports_capability, _ssh_lookup_host, remote_shell_path_export_line
+from mediaforce.hosts.config import _host_supports_capability, _ssh_lookup_host, host_media_access_for_host, \
+    remote_shell_path_export_line
 from mediaforce.hosts.types import HostSetupResult, HostStatus
 
 
@@ -76,11 +77,16 @@ def _finish_remote_host_prepare(
         run_remote_ssh: Callable[..., subprocess.CompletedProcess[str]],
         remote_host_status: Callable[[MediaforceConfig, dict[str, object]], HostStatus],
 ) -> HostSetupResult:
-    import shlex
-
     repo_path = str(host.get("repo_path") or "").strip()
     staging_root = str(config.staging_root_for_host(host))
     archive_root = str(config.archive_root_for_host(host))
+    supports_remote_stream_quality = (
+        host_media_access_for_host(host) == "stream" and bool(config.source_root_map_for_host(host))
+    )
+    installs_ab_av1 = _host_supports_capability(host, "sample_calibration") or (
+        _host_supports_capability(host, "encode_queue")
+        and (host_media_access_for_host(host) != "stream" or supports_remote_stream_quality)
+    )
     prep_steps.extend(
         [
             "Ensured the transcode and archive directories exist.",
@@ -109,7 +115,7 @@ def _finish_remote_host_prepare(
         if _host_supports_capability(host, "sample_calibration")
         else "Installed ffmpeg with Homebrew if it was missing or lacked required VideoToolbox decode support."
     )
-    if _host_supports_capability(host, "sample_calibration"):
+    if installs_ab_av1:
         remote_commands.extend(
             [
                 'if [ -z "$AB_AV1_BIN" ]; then',
@@ -122,7 +128,7 @@ def _finish_remote_host_prepare(
                 'fi',
             ]
         )
-        prep_steps.append("Installed ab-av1 with Homebrew for sampled calibration if it was missing.")
+        prep_steps.append("Installed ab-av1 with Homebrew for encode and sample hosts if it was missing.")
 
     try:
         result = run_remote_ssh(
@@ -376,19 +382,22 @@ def _install_local_ssh_key(
         "-o",
         "PubkeyAuthentication=no",
         ssh_host,
-        "sh",
-        "-lc",
-        " && ".join(
-            [
-                "mkdir -p ~/.ssh",
-                "chmod 700 ~/.ssh",
-                "touch ~/.ssh/authorized_keys",
-                "chmod 600 ~/.ssh/authorized_keys",
-                (
-                    f"grep -qxF {shlex.quote(public_key_text)} ~/.ssh/authorized_keys "
-                    f"|| printf '%s\\n' {shlex.quote(public_key_text)} >> ~/.ssh/authorized_keys"
-                ),
-            ]
+        (
+            "sh -lc "
+            + shlex.quote(
+                " && ".join(
+                    [
+                        "mkdir -p ~/.ssh",
+                        "chmod 700 ~/.ssh",
+                        "touch ~/.ssh/authorized_keys",
+                        "chmod 600 ~/.ssh/authorized_keys",
+                        (
+                            f"grep -qxF {shlex.quote(public_key_text)} ~/.ssh/authorized_keys "
+                            f"|| printf '%s\\n' {shlex.quote(public_key_text)} >> ~/.ssh/authorized_keys"
+                        ),
+                    ]
+                )
+            )
         ),
     ]
     expect_script = "\n".join(

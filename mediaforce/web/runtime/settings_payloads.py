@@ -12,6 +12,7 @@ def settings_page_payload(
         *,
         encode_queue_scheduler_policy: Any,
         normalize_encode_queue_scheduler: Any,
+        archive_cleanup_summary_fn: Any,
         error: str | None = None,
         saved: bool = False,
         host_notice: str | None = None,
@@ -46,6 +47,7 @@ def settings_page_payload(
         "schedule_profile_options": schedule_profile_options(schedule_profiles=resolved_schedule_profiles),
         "host_capability_options": list(HOST_CAPABILITY_OPTIONS),
         "archive_root": settings_archive_root(resolved_transcode_root),
+        "archive_cleanup": archive_cleanup_summary_fn(config),
         "runtime_settings_path": str(config.paths.runtime_settings_path),
         "repo_config_path": str(config.paths.config_path),
     }

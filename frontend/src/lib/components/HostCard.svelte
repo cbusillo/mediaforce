@@ -1,13 +1,16 @@
 <script lang="ts">
 	import type { HostRuntime } from '$lib/api/types';
+	import { folderAwareQualitySearchSummary, qualitySearchSummary } from '$lib/hosts/runtime';
 	import Panel from '$lib/components/Panel.svelte';
 
 	let {
 		host,
-		onSettingsClick = null
+		onSettingsClick = null,
+		folderPrefix = null
 	}: {
 		host: HostRuntime;
 		onSettingsClick?: (() => void) | null;
+		folderPrefix?: string | null;
 	} = $props();
 
 	type StateTone = 'ok' | 'warn' | 'hold' | 'neutral';
@@ -41,7 +44,7 @@
 	});
 
 	const hostDetail = $derived.by(() => {
-		if (!host.schedule_detail || host.schedule_profile_label === 'Always') {
+		if (!host.schedule_detail || ['Always', 'Never'].includes(host.schedule_profile_label)) {
 			return null;
 		}
 
@@ -81,8 +84,12 @@
 			return { label: 'Ready', tone: 'ok' as const };
 		}
 
+		if (host.schedule_profile_label === 'Never') {
+			return { label: 'Disabled', tone: 'hold' as const };
+		}
+
 		if (host.schedule_open === false) {
-			return { label: 'Window', tone: 'hold' as const };
+			return { label: 'Scheduled', tone: 'hold' as const };
 		}
 
 		if (host.active_reason === 'parallel encode slots are full') {
@@ -105,8 +112,12 @@
 			return `${host.max_parallel_encodes} ${laneLabel} available`;
 		}
 
+		if (host.schedule_profile_label === 'Never') {
+			return `${host.max_parallel_encodes} ${laneLabel} disabled`;
+		}
+
 		if (host.schedule_open === false) {
-			return `${host.max_parallel_encodes} ${laneLabel} waiting on schedule`;
+			return `${host.max_parallel_encodes} ${laneLabel} scheduled for the next window`;
 		}
 
 		if (host.active_reason === 'parallel encode slots are full') {
@@ -122,6 +133,15 @@
 			(capability) => capabilityLabels[capability] ?? capability.replace(/_/g, ' ')
 		)
 	]);
+	const runningJobsSummary = $derived.by(() => {
+		const count = host.running_jobs?.length ?? 0;
+		if (count <= 0) return '';
+		if (count === 1) return '1 live encode';
+		return `${count} live encodes`;
+	});
+	const searchSummary = $derived(
+		folderPrefix ? folderAwareQualitySearchSummary(host, folderPrefix) : qualitySearchSummary(host)
+	);
 </script>
 
 <Panel class={`host-card ${hostTone}`.trim()} padding="0.8rem 0.9rem 0.92rem">
@@ -160,22 +180,34 @@
 				{/each}
 			</div>
 		</div>
+		{#if searchSummary}
+			<p class="search-mode-copy muted-copy">
+				<span>{searchSummary.label}</span>
+				<span>{searchSummary.detail}</span>
+			</p>
+		{/if}
 		{#if host.running_jobs && host.running_jobs.length > 0}
-			<div class="running-job-list" aria-label="Active encode jobs on this host">
-				{#each host.running_jobs as job (job.job_id)}
-					<div class="running-job-row">
-						<div>
-							<p class="running-job-title">{job.prefix}</p>
-							<p class="muted-copy running-job-detail">
-								{job.progress?.current_item_rel_path ?? 'Starting encode'}
+			<details class="running-job-shell" aria-label="Active encode jobs on this host">
+				<summary>
+					<span>{runningJobsSummary}</span>
+					<span class="muted-copy">Open details</span>
+				</summary>
+				<div class="running-job-list">
+					{#each host.running_jobs as job (job.job_id)}
+						<div class="running-job-row">
+							<div class="running-job-copy">
+								<p class="running-job-title">{job.prefix}</p>
+								<p class="muted-copy running-job-detail">
+									{job.progress?.current_item_rel_path ?? 'Preparing encode job'}
+								</p>
+							</div>
+							<p class="running-job-summary">
+								{job.telemetry_summary || job.scheduler_status_copy || 'Running now'}
 							</p>
 						</div>
-						<p class="running-job-summary">
-							{job.telemetry_summary || job.scheduler_status_copy || 'Running now'}
-						</p>
-					</div>
-				{/each}
-			</div>
+					{/each}
+				</div>
+			</details>
 		{/if}
 	{/if}
 
@@ -208,7 +240,6 @@
 <style>
 	:global(.host-card) {
 		display: grid;
-		grid-template-rows: auto 1fr;
 		gap: 0.7rem;
 		align-content: start;
 	}
@@ -343,7 +374,6 @@
 		padding: 0.82rem 0.88rem;
 		border-radius: var(--radius-md);
 		border: 1px solid rgba(23, 35, 31, 0.08);
-		height: 100%;
 		box-sizing: border-box;
 	}
 
@@ -402,11 +432,23 @@
 		line-height: 1.35;
 	}
 
+	.search-mode-copy {
+		margin: -0.12rem 0 0;
+		display: grid;
+		gap: 0.08rem;
+		font-size: 0.76rem;
+		line-height: 1.35;
+	}
+
+	.search-mode-copy span:first-child {
+		font-weight: 700;
+		color: var(--ink-soft);
+	}
+
 	.meta-pill-row {
 		display: flex;
 		flex-wrap: wrap;
 		gap: 0.36rem;
-		margin-top: auto;
 		padding-top: 0.2rem;
 	}
 
@@ -476,15 +518,43 @@
 		padding-top: 0.1rem;
 	}
 
+	.running-job-shell {
+		display: grid;
+		gap: 0.55rem;
+		padding: 0.72rem 0.8rem;
+		border-radius: var(--radius-md);
+		background: rgba(255, 255, 255, 0.52);
+		border: 1px solid rgba(23, 35, 31, 0.08);
+	}
+
+	.running-job-shell summary {
+		cursor: pointer;
+		display: flex;
+		justify-content: space-between;
+		gap: 0.75rem;
+		align-items: center;
+		font-size: 0.84rem;
+		font-weight: 700;
+		color: var(--ink);
+	}
+
+	.running-job-shell summary::-webkit-details-marker {
+		display: none;
+	}
+
 	.running-job-row {
 		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto;
-		gap: 0.7rem;
+		grid-template-columns: minmax(0, 1fr);
+		gap: 0.38rem;
 		align-items: start;
 		padding: 0.68rem 0.78rem;
 		border-radius: var(--radius-md);
 		background: rgba(255, 255, 255, 0.72);
 		border: 1px solid rgba(23, 35, 31, 0.08);
+	}
+
+	.running-job-copy {
+		min-width: 0;
 	}
 
 	.running-job-title,
@@ -496,19 +566,24 @@
 	.running-job-title {
 		font-size: 0.9rem;
 		font-weight: 700;
+		line-height: 1.18;
 		color: var(--ink);
+		overflow-wrap: anywhere;
 	}
 
 	.running-job-detail {
 		margin-top: 0.18rem;
 		font-size: 0.84rem;
+		line-height: 1.4;
+		overflow-wrap: anywhere;
 	}
 
 	.running-job-summary {
-		text-align: right;
 		font-size: 0.84rem;
 		font-weight: 700;
+		line-height: 1.3;
 		color: var(--ink-soft);
+		overflow-wrap: anywhere;
 	}
 
 	.attention-link {

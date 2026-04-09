@@ -30,6 +30,7 @@
 		backdrop-filter: blur(20px);
 		position: relative;
 		overflow: clip;
+		isolation: isolate;
 	}
 
 	.panel.accent {
@@ -47,5 +48,16 @@
 		height: 1px;
 		background: linear-gradient(90deg, transparent, rgba(15, 118, 110, 0.12), transparent);
 		pointer-events: none;
+	}
+
+	.panel::before {
+		content: '';
+		position: absolute;
+		inset: 0;
+		pointer-events: none;
+		background:
+			radial-gradient(circle at top left, rgba(255, 255, 255, 0.55), transparent 30%),
+			linear-gradient(180deg, rgba(255, 255, 255, 0.26), transparent 28%);
+		opacity: 0.8;
 	}
 </style>

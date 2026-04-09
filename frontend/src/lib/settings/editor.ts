@@ -18,6 +18,8 @@ export type HostActionState = {
 	showPassword: boolean;
 };
 
+export type HostPrimaryAction = 'prepare' | 'start' | null;
+
 export function draftFromSettings(payload: SettingsPayload) {
 	return {
 		libraries: payload.libraries
@@ -25,7 +27,11 @@ export function draftFromSettings(payload: SettingsPayload) {
 			.map((library) => ({ ...library })),
 		remote_hosts: payload.remote_hosts
 			.filter((host) => host.label || host.host)
-			.map((host) => ({ ...host, capabilities: [...host.capabilities] })),
+			.map((host) => ({
+				...host,
+				capabilities: [...host.capabilities],
+				allowed_libraries: [...host.allowed_libraries]
+			})),
 		transcode_root: payload.transcode_root,
 		schedule_profiles: payload.schedule_profiles
 			.filter((profile) => profile.key || profile.label)
@@ -57,6 +63,7 @@ export function addHostDraft(
 			max_parallel_encodes: '1',
 			schedule_profile: scheduleProfiles[0]?.key ?? 'always',
 			capabilities: ['encode_queue', 'sample_calibration'],
+			allowed_libraries: [],
 			source_roots_json: '',
 			staging_root: ''
 		}
@@ -111,7 +118,23 @@ export function defaultHostActionState(): HostActionState {
 	};
 }
 
-export function primaryHostActionLabel(runtimeHost: HostRuntime): string {
+export function primaryHostAction(runtimeHost: HostRuntime, host: SettingsHost): HostPrimaryAction {
+	if (
+		!runtimeHost.available &&
+		Boolean(host.start_command.trim()) &&
+		runtimeHost.message === 'SSH unavailable'
+	) {
+		return 'start';
+	}
+	if (!runtimeHost.setup_supported) return null;
+	if (runtimeHost.missing_paths.length > 0 && runtimeHost.issues.length === 0) return null;
+	return 'prepare';
+}
+
+export function primaryHostActionLabel(runtimeHost: HostRuntime, host: SettingsHost): string {
+	if (primaryHostAction(runtimeHost, host) === 'start') {
+		return 'Start host';
+	}
 	if (runtimeHost.issues.includes(AB_AV1_MISSING_ISSUE)) {
 		return 'Install ab-av1';
 	}
@@ -127,7 +150,10 @@ export function primaryHostActionLabel(runtimeHost: HostRuntime): string {
 	return 'Prepare host';
 }
 
-export function primaryHostActionHelp(runtimeHost: HostRuntime): string {
+export function primaryHostActionHelp(runtimeHost: HostRuntime, host: SettingsHost): string {
+	if (primaryHostAction(runtimeHost, host) === 'start') {
+		return 'Runs the configured host start command, then waits for SSH status to come back before refreshing this card.';
+	}
 	if (runtimeHost.issues.includes(AB_AV1_MISSING_ISSUE)) {
 		return 'Runs remote setup so sampled calibration can find ab-av1 on the host PATH.';
 	}
@@ -143,16 +169,13 @@ export function primaryHostActionHelp(runtimeHost: HostRuntime): string {
 	return 'Runs the built-in remote setup flow for this worker.';
 }
 
-export function hasPrimaryHostAction(runtimeHost: HostRuntime): boolean {
-	if (!runtimeHost.setup_supported) return false;
-	return !(runtimeHost.missing_paths.length > 0 && runtimeHost.issues.length === 0);
+export function hasPrimaryHostAction(runtimeHost: HostRuntime, host: SettingsHost): boolean {
+	return primaryHostAction(runtimeHost, host) !== null;
 }
 
-export function shouldShowHostActions(runtimeHost: HostRuntime): boolean {
+export function shouldShowHostActions(runtimeHost: HostRuntime, host: SettingsHost): boolean {
 	return (
 		Boolean(runtimeHost.trust_reset_supported) ||
-		(!runtimeHost.available &&
-			Boolean(runtimeHost.setup_supported) &&
-			hasPrimaryHostAction(runtimeHost))
+		(!runtimeHost.available && hasPrimaryHostAction(runtimeHost, host))
 	);
 }

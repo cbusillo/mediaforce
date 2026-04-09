@@ -89,10 +89,23 @@
 		justify-content: space-between;
 		align-items: baseline;
 		gap: 0.8rem;
-		padding: 0.6rem 0.7rem;
+		padding: 0.72rem 0.8rem;
 		border-radius: var(--radius-md);
-		background: rgba(255, 255, 255, 0.52);
-		border: 1px solid rgba(23, 35, 31, 0.08);
+		background: rgba(255, 255, 255, 0.64);
+		border: 1px solid rgba(15, 118, 110, 0.1);
+		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+	}
+
+	.hero-stat-row:nth-child(1) {
+		border-left: 4px solid rgba(15, 118, 110, 0.55);
+	}
+
+	.hero-stat-row:nth-child(2) {
+		border-left: 4px solid rgba(79, 111, 166, 0.55);
+	}
+
+	.hero-stat-row:nth-child(3) {
+		border-left: 4px solid rgba(161, 98, 7, 0.55);
 	}
 
 	.hero-stat-value {
