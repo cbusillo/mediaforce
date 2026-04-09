@@ -4233,6 +4233,70 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(payload["sample_item"]["rel_path"], "tv/show/episode-folder.mkv")
         self.assertIn("summary", payload)
 
+    def test_folder_endpoint_returns_payload_for_fully_promoted_prefix(self) -> None:
+        from mediaforce.web import app as web_app
+
+        source_path = self._create_source_file("episode-promoted-folder.mkv")
+        self.config.raw["media"]["output_container"] = "mp4"
+        self.config.raw.update(
+            {
+                "video": {
+                    "quality_metric": "auto",
+                    "target_vmaf": 94,
+                    "min_target_vmaf": 92,
+                    "target_xpsnr": 36,
+                    "min_target_xpsnr": 34,
+                    "max_encoded_percent": 100,
+                    "default_grain": 0,
+                },
+                "audio": {},
+                "subtitle": {},
+                "planning": {},
+            }
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="promoted")
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_id)
+                .values(
+                    rel_path="tv/House/Season 5/episode-promoted-folder.mp4",
+                    parent_dir="tv/House/Season 5",
+                    source_path=str(
+                        self.root / "source" / "tv" / "House" / "Season 5" / "episode-promoted-folder.mp4"
+                    ),
+                    container="mp4",
+                    audio_summary_json=json.dumps([{"index": 0, "codec": "opus", "channels": 6, "language": "eng"}]),
+                    subtitle_summary_json=json.dumps([]),
+                )
+            )
+            connection.commit()
+
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.purge_transient_artifacts"
+        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
+            "mediaforce.web.app._start_encode_queue_worker"
+        ):
+            app = web_app.create_app(self.config.paths.config_path)
+
+        folder_endpoint = next(
+            route.endpoint
+            for route in app.router.routes
+            if getattr(route, "path", "") == "/api/folders/{prefix:path}"
+        )
+        with patch("mediaforce.web.app._maybe_schedule_scan", return_value=None), patch(
+                "mediaforce.web.app._sample_calibration_host_statuses", return_value=[]
+        ):
+            response = folder_endpoint("tv/House/Season 5")
+        payload = json.loads(response.body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(payload["pending"])
+        self.assertEqual(payload["prefix"], "tv/House/Season 5")
+        self.assertEqual(payload["sample_item"]["rel_path"], "tv/House/Season 5/episode-promoted-folder.mp4")
+        self.assertEqual(payload["summary"]["statuses"]["promoted"], 1)
+
     def test_process_calibration_queue_once_handles_plain_connection_queries(self) -> None:
         deps = web_app._calibration_queue_runtime_deps()
         deps.run_calibration_job = Mock()

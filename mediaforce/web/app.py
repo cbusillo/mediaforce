@@ -1056,15 +1056,17 @@ def _folder_review_badge(config: MediaforceConfig, prefix: str) -> dict[str, str
 
 
 def _sample_item(connection: DBClient, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
-    row = connection.execute(
+    base_query = (
         select(library_items)
-        .where(
-            library_items.c.rel_path.like(f"{prefix}%"),
-            library_items.c.status.in_(("discovered", "planned", "validated", "encoded")),
-        )
+        .where(library_items.c.rel_path.like(f"{prefix}%"))
         .order_by(library_items.c.priority_score.desc(), library_items.c.size_bytes.desc())
         .limit(1)
+    )
+    row = connection.execute(
+        base_query.where(library_items.c.status.in_(("discovered", "planned", "validated", "encoded")))
     ).mappings().fetchone()
+    if row is None:
+        row = connection.execute(base_query).mappings().fetchone()
     if row is None:
         return None
     return build_manifest_item(mapping_dict(row), config)
