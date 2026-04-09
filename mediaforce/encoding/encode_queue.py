@@ -4,6 +4,7 @@ from typing import Any
 from sqlalchemy import delete
 from sqlalchemy import func
 from sqlalchemy import literal_column
+from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -132,8 +133,21 @@ def clear_terminal_encode_jobs_for_prefix(connection: DBClient, prefix: str) -> 
     connection.execute(
         delete(encode_jobs)
         .where(encode_jobs.c.prefix == prefix)
+        .where(or_(encode_jobs.c.job_kind != "shard", encode_jobs.c.status != "completed"))
         .where(encode_jobs.c.status.in_(RECENT_ENCODE_JOB_STATUSES))
     )
+
+
+def load_latest_terminal_encode_job_for_prefix(connection: DBClient, prefix: str) -> dict[str, Any] | None:
+    row = connection.execute(
+        _encode_job_select()
+        .where(encode_jobs.c.prefix == prefix)
+        .where(encode_jobs.c.status.in_(RECENT_ENCODE_JOB_STATUSES))
+        .where(or_(encode_jobs.c.job_kind != "shard", encode_jobs.c.status != "completed"))
+        .order_by(encode_jobs.c.created_at.desc(), _rowid_column().desc())
+        .limit(1)
+    ).mappings().fetchone()
+    return _hydrate_job(row) if row is not None else None
 
 
 def load_active_encode_job(connection: DBClient) -> dict[str, Any] | None:

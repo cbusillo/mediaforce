@@ -9,7 +9,8 @@ from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import encode_jobs, library_items, staged_artifacts
 from mediaforce.core.type_defs import object_dict, object_list
-from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, list_child_encode_jobs
+from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, list_child_encode_jobs, \
+    load_latest_terminal_encode_job_for_prefix
 from mediaforce.encoding.staging import safe_unlink
 from mediaforce.library.run_manifests import create_folder_manifest
 
@@ -61,7 +62,7 @@ def queue_folder_encode_action(
                 "ok": False,
                 "message": f"A folder encode is already {active_status} for this folder.",
             }
-        latest_encode_job = load_latest_encode_job_for_prefix_fn(connection, normalized_prefix)
+        latest_encode_job = load_latest_terminal_encode_job_for_prefix(connection, normalized_prefix)
         if latest_encode_job is not None and str(latest_encode_job.get("status") or "") in {
             "needs_attention",
             "failed",

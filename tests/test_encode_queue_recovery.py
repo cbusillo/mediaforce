@@ -27,8 +27,8 @@ from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.models import ProbeSummary
 from mediaforce.encoding import staging as staging_runtime
 from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_prefix, list_child_encode_jobs, \
-    load_active_encode_job_for_prefix, load_encode_job, load_latest_encode_job, load_queue_state, save_encode_job, \
-    save_queue_state
+    load_active_encode_job_for_prefix, load_encode_job, load_latest_encode_job, \
+    load_latest_terminal_encode_job_for_prefix, load_queue_state, save_encode_job, save_queue_state
 from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
 from mediaforce.remote import HostStatus
 from mediaforce.review import BrowserReviewClip, CompareClip, EncodedPreviewClip
@@ -5682,6 +5682,175 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIsNotNone(new_job)
         self.assertEqual({str(row["job_kind"]) for row in prefix_rows}, {"folder", "shard"})
         self.assertEqual({str(row["status"]) for row in prefix_rows}, {"queued"})
+
+    def test_load_latest_terminal_encode_job_for_prefix_prefers_latest_row_when_timestamps_tie(self) -> None:
+        shared_created_at = "2026-04-09T12:00:00+00:00"
+        manifest_path = self._write_manifest("manifest-terminal-tie.json", [{"library_item_id": 1}])
+
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "older-terminal",
+                    "prefix": "tv/show",
+                    "job_kind": "folder",
+                    "parent_job_id": None,
+                    "status": "failed",
+                    "manifest_path": str(manifest_path),
+                    "manifest_indexes": None,
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "host": {},
+                    "last_host": {},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": None,
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": None,
+                    "last_failure_at": None,
+                    "host_cooldown_until": None,
+                    "created_at": shared_created_at,
+                    "started_at": None,
+                    "finished_at": shared_created_at,
+                    "updated_at": shared_created_at,
+                },
+            )
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "newer-terminal",
+                    "prefix": "tv/show",
+                    "job_kind": "folder",
+                    "parent_job_id": None,
+                    "status": "needs_attention",
+                    "manifest_path": str(manifest_path),
+                    "manifest_indexes": None,
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "host": {},
+                    "last_host": {},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": None,
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": None,
+                    "last_failure_at": None,
+                    "host_cooldown_until": None,
+                    "created_at": shared_created_at,
+                    "started_at": None,
+                    "finished_at": shared_created_at,
+                    "updated_at": shared_created_at,
+                },
+            )
+
+            latest_job = load_latest_terminal_encode_job_for_prefix(connection, "tv/show")
+
+        self.assertIsNotNone(latest_job)
+        assert latest_job is not None
+        self.assertEqual(latest_job["job_id"], "newer-terminal")
+
+    def test_clear_terminal_encode_jobs_for_prefix_preserves_completed_shards(self) -> None:
+        shared_created_at = "2026-04-09T12:00:00+00:00"
+        manifest_path = self._write_manifest("manifest-terminal-shards.json", [{"library_item_id": 1}])
+
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "terminal-folder",
+                    "prefix": "tv/show",
+                    "job_kind": "folder",
+                    "parent_job_id": None,
+                    "status": "failed",
+                    "manifest_path": str(manifest_path),
+                    "manifest_indexes": None,
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "host": {},
+                    "last_host": {},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": None,
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": None,
+                    "last_failure_at": None,
+                    "host_cooldown_until": None,
+                    "created_at": shared_created_at,
+                    "started_at": None,
+                    "finished_at": shared_created_at,
+                    "updated_at": shared_created_at,
+                },
+            )
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "completed-shard",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": "terminal-folder",
+                    "status": "completed",
+                    "manifest_path": str(manifest_path),
+                    "manifest_indexes": [0],
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "host": {},
+                    "last_host": {},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": None,
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": None,
+                    "last_failure_at": None,
+                    "host_cooldown_until": None,
+                    "created_at": shared_created_at,
+                    "started_at": None,
+                    "finished_at": shared_created_at,
+                    "updated_at": shared_created_at,
+                },
+            )
+
+            clear_terminal_encode_jobs_for_prefix(connection, "tv/show")
+
+            remaining_job_ids = {
+                str(row["job_id"])
+                for row in connection.execute(
+                    select(encode_jobs.c.job_id).where(encode_jobs.c.prefix == "tv/show")
+                ).mappings().fetchall()
+            }
+
+        self.assertEqual(remaining_job_ids, {"completed-shard"})
 
     def test_queue_folder_encode_retry_resets_stale_encoding_items_before_manifest(self) -> None:
         source_a = self._create_source_file("retry-a.mkv")
