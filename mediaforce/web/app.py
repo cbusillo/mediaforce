@@ -33,8 +33,8 @@ from mediaforce.advisor import (
 )
 from mediaforce.tuning.calibration_jobs import load_active_job, load_job, \
     list_queue_summary
-from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, load_runtime_settings, \
-    save_runtime_settings, upsert_runtime_folder_policy_override
+from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, update_runtime_settings, \
+    upsert_runtime_folder_policy_override
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import calibration_jobs as calibration_jobs_table
@@ -401,11 +401,16 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             encode_queue_scheduler=encode_queue_scheduler,
             schedule_profiles=schedule_profiles,
         )
-        existing_runtime_settings = load_runtime_settings(config.paths.runtime_settings_path)
-        merged_runtime_settings = _merge_runtime_settings_payload(existing_runtime_settings, payload)
-        libraries_changed = _runtime_source_roots(existing_runtime_settings) != _runtime_source_roots(
-            merged_runtime_settings)
-        save_runtime_settings(config.paths.runtime_settings_path, merged_runtime_settings)
+        libraries_changed = False
+
+        def _apply_runtime_settings(existing_runtime_settings: dict[str, Any]) -> dict[str, Any]:
+            nonlocal libraries_changed
+            merged_runtime_settings = _merge_runtime_settings_payload(existing_runtime_settings, payload)
+            libraries_changed = _runtime_source_roots(existing_runtime_settings) != _runtime_source_roots(
+                merged_runtime_settings)
+            return merged_runtime_settings
+
+        update_runtime_settings(config.paths.runtime_settings_path, _apply_runtime_settings)
         config = load_config(config.paths.config_path)
         app.state.config = config
         if libraries_changed:

@@ -1,6 +1,8 @@
 import asyncio
+import multiprocessing
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -27,7 +29,7 @@ from mediaforce.advisor import (
     request_note_tuning,
     request_run_verdict,
 )
-from mediaforce.core.config import ConfigPaths, MediaforceConfig, load_config
+from mediaforce.core.config import ConfigPaths, MediaforceConfig, load_config, save_runtime_settings
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import calibration_jobs
 from mediaforce.core.db_tables import learning_artifacts
@@ -57,6 +59,26 @@ from mediaforce.web.app import (
     _upsert_override,
 )
 from mediaforce.web.runtime.archive_cleanup import archive_cleanup_summary, clear_archive_cleanup_action
+
+
+def _runtime_settings_writer(path_text: str, ready_path_text: str, mode: str) -> None:
+    from pathlib import Path
+
+    from mediaforce.core.config import update_runtime_settings
+
+    path = Path(path_text)
+    ready_path = Path(ready_path_text)
+
+    def _apply(runtime_settings: dict[str, object]) -> dict[str, object]:
+        if mode == "folder":
+            runtime_settings["folder_policy_overrides"] = [{"path_prefix": "tv/House/Season 2"}]
+            ready_path.write_text("ready\n")
+            time.sleep(0.5)
+        else:
+            runtime_settings["remote_hosts"] = [{"label": "m4-studio"}]
+        return runtime_settings
+
+    update_runtime_settings(path, _apply)
 
 
 class TuningRuntimeTests(unittest.TestCase):
@@ -1430,6 +1452,68 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(planning["bucket_thresholds"], {"priority_encode": 70, "review_encode": 35})
         self.assertEqual(planning["codec_bonus"], {"av1": -45, "default": 18, "h264": 40})
 
+    def test_runtime_settings_updates_are_serialized_across_processes(self) -> None:
+        runtime_file = self.root / "runtime-settings.json"
+        runtime_file.write_text(
+            json.dumps(
+                {
+                    "remote_hosts": [{"label": "original"}],
+                    "wake_mac": "aa:bb:cc:dd:ee:ff",
+                }
+            )
+        )
+        ready_file = self.root / "runtime-writer-ready.txt"
+
+        ctx = multiprocessing.get_context("spawn")
+        first_writer = ctx.Process(
+            target=_runtime_settings_writer,
+            args=(str(runtime_file), str(ready_file), "folder"),
+        )
+        first_writer.start()
+
+        deadline = time.time() + 10
+        while not ready_file.exists():
+            if time.time() > deadline:
+                first_writer.terminate()
+                self.fail("Timed out waiting for the first runtime-settings writer to acquire the lock")
+            time.sleep(0.05)
+
+        second_writer = ctx.Process(
+            target=_runtime_settings_writer,
+            args=(str(runtime_file), str(self.root / "runtime-writer-second.txt"), "remote"),
+        )
+        second_writer.start()
+
+        first_writer.join(10)
+        second_writer.join(10)
+        self.assertEqual(first_writer.exitcode, 0)
+        self.assertEqual(second_writer.exitcode, 0)
+
+        updated = json.loads(runtime_file.read_text())
+        self.assertEqual(updated["remote_hosts"], [{"label": "m4-studio"}])
+        self.assertEqual(updated["wake_mac"], "aa:bb:cc:dd:ee:ff")
+        self.assertEqual(updated["folder_policy_overrides"], [{"path_prefix": "tv/House/Season 2"}])
+
+    def test_save_runtime_settings_overwrites_malformed_runtime_file(self) -> None:
+        runtime_file = self.root / "runtime-settings.json"
+        runtime_file.write_text("{broken json")
+
+        save_runtime_settings(runtime_file, {"remote_hosts": [{"label": "recovered"}]})
+
+        updated = json.loads(runtime_file.read_text())
+        self.assertEqual(updated, {"remote_hosts": [{"label": "recovered"}]})
+
+    def test_update_runtime_settings_recovers_malformed_runtime_file(self) -> None:
+        runtime_file = self.root / "runtime-settings.json"
+        runtime_file.write_text("{broken json")
+
+        from mediaforce.core.config import update_runtime_settings
+
+        updated = update_runtime_settings(runtime_file, lambda current: {**current, "remote_hosts": [{"label": "recovered"}]})
+
+        self.assertEqual(updated, {"remote_hosts": [{"label": "recovered"}]})
+        self.assertEqual(json.loads(runtime_file.read_text()), updated)
+
     def test_load_config_appends_local_folder_policy_overrides_after_tracked_defaults(self) -> None:
         config_dir = self.root / "config"
         config_dir.mkdir()
@@ -1499,6 +1583,83 @@ target_xpsnr = 33.0
         resolved = loaded.resolve_policy("tv/House/Season 2/Episode 1.mkv")
         self.assertEqual(resolved["video"]["target_xpsnr"], 35.5)
         self.assertEqual(resolved["planning"]["default_limit"], 12)
+
+    def test_resolve_policy_prefers_more_specific_shipped_defaults_over_broad_local_override(self) -> None:
+        config_dir = self.root / "config"
+        config_dir.mkdir()
+        defaults_path = config_dir / "defaults.toml"
+        defaults_path.write_text(
+            """[config]
+include_files = ["folder-defaults.toml"]
+
+[state]
+db_path = "library.sqlite3"
+run_manifest_dir = "runs"
+web_state_dir = "web"
+review_dir = "review"
+runtime_settings_path = "runtime-settings.json"
+
+[media]
+staging_root = "staging"
+archive_root = "archive"
+output_container = "mkv"
+
+[media.source_roots]
+tv = "source/tv"
+
+[video]
+encoder = "libsvtav1"
+
+[audio]
+keep_languages = ["eng"]
+
+[subtitle]
+keep_languages = ["eng"]
+
+[planning]
+default_limit = 20
+
+[validation]
+require_size_reduction = true
+"""
+        )
+        (config_dir / "folder-defaults.toml").write_text(
+            """[[overrides]]
+path_prefix = "tv/House"
+note = "Tracked broad default"
+
+[overrides.video]
+target_xpsnr = 33.0
+
+[[overrides]]
+path_prefix = "tv/House/Season 2"
+note = "Tracked specific default"
+
+[overrides.video]
+target_xpsnr = 36.0
+"""
+        )
+        (self.root / "runtime-settings.json").write_text(
+            json.dumps(
+                {
+                    "folder_policy_overrides": [
+                        {
+                            "path_prefix": "tv/House",
+                            "note": "Saved broad local override",
+                            "video": {"target_xpsnr": 40.0},
+                        }
+                    ]
+                }
+            )
+        )
+
+        loaded = load_config(defaults_path)
+
+        season_two = loaded.resolve_policy("tv/House/Season 2/Episode 1.mkv")
+        self.assertEqual(season_two["video"]["target_xpsnr"], 36.0)
+
+        season_six = loaded.resolve_policy("tv/House/Season 6/Episode 1.mkv")
+        self.assertEqual(season_six["video"]["target_xpsnr"], 40.0)
 
 
 if __name__ == "__main__":

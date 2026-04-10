@@ -1,6 +1,10 @@
 import copy
+from collections.abc import Callable
+from contextlib import contextmanager
 import json
+import os
 import shutil
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -120,10 +124,15 @@ class MediaforceConfig:
             "planning": copy.deepcopy(self.planning),
         }
 
-        for override in self.overrides:
+        normalized_rel_path = rel_path.strip("/")
+        matching_overrides: list[tuple[int, int, dict[str, Any]]] = []
+        for index, override in enumerate(self.overrides):
             prefix = str(override.get("path_prefix", "")).strip("/")
-            if prefix and not rel_path.startswith(prefix):
+            if prefix and not _path_prefix_matches(normalized_rel_path, prefix):
                 continue
+            matching_overrides.append((len(prefix), index, override))
+
+        for _, _, override in sorted(matching_overrides):
             for section in ("video", "audio", "subtitle", "planning"):
                 values = override.get(section)
                 if isinstance(values, dict):
@@ -173,28 +182,43 @@ def load_runtime_settings(path: Path) -> dict[str, Any]:
 
 
 def save_runtime_settings(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    with _locked_runtime_settings(path):
+        _write_runtime_settings(path, payload)
+
+
+def update_runtime_settings(path: Path, updater: Callable[[dict[str, Any]], dict[str, Any]]) -> dict[str, Any]:
+    with _locked_runtime_settings(path):
+        try:
+            current = load_runtime_settings(path)
+        except (json.JSONDecodeError, OSError, ValueError):
+            current = {}
+        updated = updater(copy.deepcopy(current))
+        if not isinstance(updated, dict):
+            raise ValueError("Runtime settings updater must return a JSON object")
+        _write_runtime_settings(path, updated)
+        return updated
 
 
 def upsert_runtime_folder_policy_override(path: Path, prefix: str, policy: dict[str, Any]) -> None:
-    runtime_settings = load_runtime_settings(path)
-    overrides = _normalize_folder_policy_overrides(runtime_settings.get(FOLDER_POLICY_OVERRIDES_KEY))
     override_payload = _build_folder_policy_override(prefix, policy)
+    normalized_prefix = prefix.strip("/")
 
-    updated_overrides: list[dict[str, Any]] = []
-    replaced = False
-    for existing in overrides:
-        if str(existing.get("path_prefix", "")).strip("/") == prefix.strip("/"):
+    def _apply(runtime_settings: dict[str, Any]) -> dict[str, Any]:
+        overrides = _normalize_folder_policy_overrides(runtime_settings.get(FOLDER_POLICY_OVERRIDES_KEY))
+        updated_overrides: list[dict[str, Any]] = []
+        replaced = False
+        for existing in overrides:
+            if str(existing.get("path_prefix", "")).strip("/") == normalized_prefix:
+                updated_overrides.append(override_payload)
+                replaced = True
+                continue
+            updated_overrides.append(existing)
+        if not replaced:
             updated_overrides.append(override_payload)
-            replaced = True
-            continue
-        updated_overrides.append(existing)
-    if not replaced:
-        updated_overrides.append(override_payload)
+        runtime_settings[FOLDER_POLICY_OVERRIDES_KEY] = updated_overrides
+        return runtime_settings
 
-    runtime_settings[FOLDER_POLICY_OVERRIDES_KEY] = updated_overrides
-    save_runtime_settings(path, runtime_settings)
+    update_runtime_settings(path, _apply)
 
 
 def _migrate_project_state(project_root: Path, paths: ConfigPaths) -> None:
@@ -324,12 +348,53 @@ def _build_folder_policy_override(prefix: str, policy: dict[str, Any]) -> dict[s
     return override
 
 
+def _path_prefix_matches(rel_path: str, prefix: str) -> bool:
+    return rel_path == prefix or rel_path.startswith(f"{prefix}/")
+
+
 def _resolve_runtime_settings_path(project_root: Path, state: dict[str, Any]) -> Path:
     configured_path = state.get("runtime_settings_path")
     if configured_path:
         return _resolve_path(project_root, str(configured_path))
     db_path = _resolve_path(project_root, state["db_path"])
     return db_path.parent / "runtime-settings.json"
+
+
+@contextmanager
+def _locked_runtime_settings(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.parent / f"{path.name}.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        import fcntl
+
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _write_runtime_settings(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+        ) as tmp_file:
+            tmp_path = Path(tmp_file.name)
+            tmp_file.write(json.dumps(payload, indent=2, sort_keys=True))
+            tmp_file.write("\n")
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            tmp_path.unlink()
 
 
 def _deep_merge(target: dict[str, Any], source: dict[str, Any], *, extend_lists: bool = True) -> None:

@@ -2,7 +2,7 @@ import socket
 import subprocess
 from typing import Any
 
-from mediaforce.core.config import MediaforceConfig, load_runtime_settings, save_runtime_settings
+from mediaforce.core.config import MediaforceConfig, update_runtime_settings
 from mediaforce.hosts.config import _ssh_lookup_host
 
 
@@ -169,21 +169,24 @@ def _mac_from_arp_output(stdout: str, stderr: str) -> str | None:
 def _persist_remote_wake_mac(config: MediaforceConfig, host: dict[str, object], mac_address: str) -> None:
     host["wake_mac"] = mac_address
     try:
-        runtime_settings = load_runtime_settings(config.paths.runtime_settings_path)
-        existing_runtime_hosts = runtime_settings.get("remote_hosts")
-        source_hosts = existing_runtime_hosts if isinstance(existing_runtime_hosts, list) else config.remote_hosts
-        updated_hosts: list[dict[str, Any]] = []
         target_host = str(host.get("host") or "")
         target_label = str(host.get("label") or "")
-        for entry in source_hosts:
-            if not isinstance(entry, dict):
-                continue
-            updated_entry = dict(entry)
-            if str(updated_entry.get("host") or "") == target_host and str(
-                    updated_entry.get("label") or "") == target_label:
-                updated_entry["wake_mac"] = mac_address
-            updated_hosts.append(updated_entry)
-        runtime_settings["remote_hosts"] = updated_hosts
-        save_runtime_settings(config.paths.runtime_settings_path, runtime_settings)
+
+        def _apply(runtime_settings: dict[str, Any]) -> dict[str, Any]:
+            existing_runtime_hosts = runtime_settings.get("remote_hosts")
+            source_hosts = existing_runtime_hosts if isinstance(existing_runtime_hosts, list) else config.remote_hosts
+            updated_hosts: list[dict[str, Any]] = []
+            for entry in source_hosts:
+                if not isinstance(entry, dict):
+                    continue
+                updated_entry = dict(entry)
+                if str(updated_entry.get("host") or "") == target_host and str(
+                        updated_entry.get("label") or "") == target_label:
+                    updated_entry["wake_mac"] = mac_address
+                updated_hosts.append(updated_entry)
+            runtime_settings["remote_hosts"] = updated_hosts
+            return runtime_settings
+
+        update_runtime_settings(config.paths.runtime_settings_path, _apply)
     except (OSError, ValueError):
         return
