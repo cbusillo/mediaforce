@@ -1,0 +1,38 @@
+---
+version: 2
+
+multi-ecosystem-groups:
+  dependencies:
+    schedule:
+      interval: weekly
+
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    patterns:
+      - "*"
+    multi-ecosystem-group: dependencies
+    open-pull-requests-limit: 2
+    labels:
+      - dependencies
+      - python
+    groups:
+      all-security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: "/frontend"
+    patterns:
+      - "*"
+    multi-ecosystem-group: dependencies
+    open-pull-requests-limit: 2
+    labels:
+      - dependencies
+      - npm
+    groups:
+      all-security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
