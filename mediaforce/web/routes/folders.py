@@ -2,6 +2,7 @@ from collections.abc import Callable
 from typing import Any
 
 from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse
 from fastapi.responses import JSONResponse
 
 
@@ -10,6 +11,7 @@ def register_folder_routes(
         *,
         folder_status_payload: Callable[[str], dict[str, Any]],
         folder_content_payload: Callable[[str], tuple[dict[str, Any], int]],
+        download_review_compare_action: Callable[[str], FileResponse],
         folder_ai_tune_action: Callable[[str, str, str], dict[str, Any]],
         folder_ai_tune_preview_action: Callable[[str, str, str], dict[str, Any]],
         folder_ai_tune_confirm_action: Callable[[str, str], dict[str, Any]],
@@ -22,6 +24,10 @@ def register_folder_routes(
     @app.get("/api/folders/{prefix:path}/status")
     def api_folder_status(prefix: str) -> JSONResponse:
         return JSONResponse(folder_status_payload(prefix.strip("/")))
+
+    @app.get("/api/folders/{prefix:path}/review-compare/download")
+    def api_folder_review_compare_download(prefix: str) -> FileResponse:
+        return download_review_compare_action(prefix.strip("/"))
 
     @app.get("/api/folders/{prefix:path}")
     def api_folder(prefix: str) -> JSONResponse:

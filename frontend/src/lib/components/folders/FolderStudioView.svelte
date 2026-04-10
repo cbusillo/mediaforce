@@ -811,6 +811,26 @@
 		window.open(target, '_blank', 'noopener,noreferrer');
 	}
 
+	function reviewCompareDownloadHref(): string {
+		const encodedPrefix = folder.prefix
+			.split('/')
+			.filter(Boolean)
+			.map((segment) => encodeURIComponent(segment))
+			.join('/');
+		return `/api/folders/${encodedPrefix}/review-compare/download`;
+	}
+
+	function downloadReviewCompareVideo(): void {
+		if (!browser) return;
+		const link = document.createElement('a');
+		link.href = reviewCompareDownloadHref();
+		link.rel = 'noopener noreferrer';
+		link.style.display = 'none';
+		document.body.appendChild(link);
+		link.click();
+		link.remove();
+	}
+
 	$effect(() => {
 		if (!browser) return;
 		const intervalMs = status.polling_active ? 5_000 : 60_000;
@@ -888,6 +908,12 @@
 			)
 	);
 	const reviewPairs = $derived((calibration.review_pairs as FolderReviewPair[] | undefined) ?? []);
+	const fullCompareClipCount = $derived(
+		((calibration.compare_clips as { path?: string }[] | undefined) ?? []).filter((clip) =>
+			Boolean(String(clip?.path ?? '').trim())
+		).length
+	);
+	const hasFullCompareDownload = $derived(fullCompareClipCount > 0);
 	let selectedReviewPairIndex = $state(0);
 	const selectedReviewPair = $derived(reviewPairs[selectedReviewPairIndex] ?? null);
 	let seenReviewMomentKeys = $state<string[]>([]);
@@ -2534,15 +2560,15 @@
 													onclick={() => void stepReviewMoment(1)}>Next moment</Button
 												>
 											</div>
-											{#if selectedReviewPair.compare_clip?.path}
+											{#if hasFullCompareDownload}
 												<Button
 													variant="secondary"
 													onclick={() => {
 														markReviewMomentSeen(selectedReviewPairIndex);
-														openReviewAsset(String(selectedReviewPair.compare_clip?.path ?? ''));
+														downloadReviewCompareVideo();
 													}}
 												>
-													Open full side-by-side compare
+													Download full side-by-side compare
 												</Button>
 											{/if}
 										</div>

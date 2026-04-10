@@ -210,6 +210,7 @@ dependencies = [
     { name = "alembic" },
     { name = "fastapi" },
     { name = "sqlalchemy" },
+    { name = "starlette" },
     { name = "uvicorn" },
 ]
 
@@ -218,6 +219,7 @@ requires-dist = [
     { name = "alembic" },
     { name = "fastapi" },
     { name = "sqlalchemy", specifier = ">=2,<3" },
+    { name = "starlette" },
     { name = "uvicorn" },
 ]
 

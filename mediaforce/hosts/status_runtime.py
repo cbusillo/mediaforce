@@ -5,7 +5,7 @@ from typing import Callable
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.type_defs import object_dict
 from mediaforce.hosts.config import _host_capabilities, _host_priority, _parse_utc_offset_minutes, \
-    host_media_access_for_host, host_targets_current_machine
+    host_media_access_for_host, host_targets_current_machine, stream_host_has_remote_source_roots
 from mediaforce.hosts.status_helpers import _classify_ssh_failure, _find_local_tool, _host_capability_issues, \
     _host_setup_supported, _local_platform_name, _local_utc_offset_minutes, _parse_remote_status_output, \
     _remote_setup_needs_password, _remote_status_script, _status_from_paths, _status_platform
@@ -90,7 +90,8 @@ def _remote_host_status(
 
     media_access = host_media_access_for_host(host)
     merged_source_roots = config.source_root_map_for_host(host)
-    supports_remote_stream_quality = media_access == "stream" and bool(merged_source_roots)
+    explicit_source_roots = object_dict(host.get("source_roots"))
+    supports_remote_stream_quality = stream_host_has_remote_source_roots(host)
     paths = []
     require_paths = media_access != "stream"
     if require_paths:
@@ -98,8 +99,8 @@ def _remote_host_status(
             str(config.staging_root_for_host(host))]
     elif media_access == "stream":
         paths = [
-            str(path)
-            for path in merged_source_roots.values()
+            str(Path(str(path).strip()).expanduser())
+            for path in explicit_source_roots.values()
             if str(path).strip()
         ]
         require_paths = bool(paths)
@@ -206,7 +207,8 @@ def _current_machine_host_status(
 ) -> HostStatus:
     media_access = host_media_access_for_host(host)
     merged_source_roots = config.source_root_map_for_host(host)
-    supports_remote_stream_quality = media_access == "stream" and bool(merged_source_roots)
+    explicit_source_roots = object_dict(host.get("source_roots"))
+    supports_remote_stream_quality = stream_host_has_remote_source_roots(host)
     require_paths = media_access != "stream"
     status_paths: list[Path]
     if require_paths:
@@ -215,7 +217,7 @@ def _current_machine_host_status(
             config.staging_root_for_host(host),
         ]
     else:
-        status_paths = [path for path in merged_source_roots.values() if str(path).strip()]
+        status_paths = [Path(str(path).strip()).expanduser() for path in explicit_source_roots.values() if str(path).strip()]
         require_paths = bool(status_paths)
     mounted_paths = {
         str(path): path.exists()

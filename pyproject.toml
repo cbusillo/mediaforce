@@ -12,6 +12,7 @@ dependencies = [
     "alembic",
     "fastapi",
     "sqlalchemy>=2,<3",
+    "starlette",
     "uvicorn",
 ]
 

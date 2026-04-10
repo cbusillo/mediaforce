@@ -3,7 +3,6 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from typing import cast
 from unittest.mock import patch
 
 from fastapi.routing import APIRoute
@@ -39,14 +38,17 @@ from mediaforce.tuning.tuning_memory import (
     record_visual_approval_artifact,
     retrieve_learning_context,
 )
-from mediaforce.web.runtime.archive_cleanup import archive_cleanup_summary, clear_archive_cleanup_action
 from mediaforce.web.app import (
     _advice_file,
     _build_seed_policy_payload,
+    _build_review_compare_video,
+    _ffmpeg_concat_file_line,
     _maybe_seed_baseline_policy,
     _build_tuning_runtime_toolbelt,
     _calibration_file,
     _clear_folder_tuning_state,
+    _folder_display_policy,
+    _review_compare_bundle_entries,
     _multimodal_review_pack_public_view,
     _operator_requested_experiment,
     _planned_audio_review_context,
@@ -54,6 +56,7 @@ from mediaforce.web.app import (
     _review_pack_dir,
     _upsert_override,
 )
+from mediaforce.web.runtime.archive_cleanup import archive_cleanup_summary, clear_archive_cleanup_action
 
 
 class TuningRuntimeTests(unittest.TestCase):
@@ -97,6 +100,126 @@ class TuningRuntimeTests(unittest.TestCase):
     def _assert_structured_subprocess_call(self, commands: list[list[str]]) -> None:
         self.assertTrue(commands)
         self.assertEqual(commands[0][1:7], _memory_disabled_code_args())
+
+    def test_folder_display_policy_prefers_pending_preview_before_first_sample(self) -> None:
+        sample_item = {
+            "resolved_policy": {
+                "video": {
+                    "quality_metric": "auto",
+                    "target_vmaf": 95.0,
+                    "min_target_vmaf": 93.0,
+                    "target_xpsnr": 35.5,
+                    "min_target_xpsnr": 34.5,
+                    "max_encoded_percent": 55,
+                }
+            }
+        }
+
+        pending_proposal = {
+            "preview_policy": {
+                "video": {
+                    "quality_metric": "vmaf",
+                    "target_vmaf": 94.5,
+                    "min_target_vmaf": 93.0,
+                    "max_encoded_percent": 50,
+                }
+            },
+            "current_policy": sample_item["resolved_policy"],
+        }
+
+        policy = _folder_display_policy(
+            sample_item=sample_item,
+            calibration=None,
+            pending_proposal=pending_proposal,
+        )
+
+        self.assertEqual(policy["video"]["quality_metric"], "vmaf")
+        self.assertEqual(policy["video"]["target_vmaf"], 94.5)
+        self.assertEqual(policy["video"]["max_encoded_percent"], 50)
+
+    def test_folder_display_policy_prefers_saved_calibration_over_pending_preview(self) -> None:
+        sample_item = {"resolved_policy": {"video": {"quality_metric": "auto", "target_vmaf": 95.0}}}
+        calibration = {"policy": {"video": {"quality_metric": "xpsnr", "target_xpsnr": 35.5}}}
+        pending_proposal = {
+            "preview_policy": {"video": {"quality_metric": "vmaf", "target_vmaf": 94.5}},
+        }
+
+        policy = _folder_display_policy(
+            sample_item=sample_item,
+            calibration=calibration,
+            pending_proposal=pending_proposal,
+        )
+
+        self.assertEqual(policy["video"]["quality_metric"], "xpsnr")
+        self.assertEqual(policy["video"]["target_xpsnr"], 35.5)
+
+    def test_build_review_compare_video_concatenates_all_compare_clips(self) -> None:
+        review_run_dir = self.config.paths.review_dir / "sample-run"
+        review_run_dir.mkdir(parents=True, exist_ok=True)
+        compare_clip_1 = review_run_dir / "compare-01.mkv"
+        compare_clip_2 = review_run_dir / "compare-02.mkv"
+        compare_clip_3 = review_run_dir / "compare-03.mkv"
+        compare_clip_1.write_bytes(b"compare1")
+        compare_clip_2.write_bytes(b"compare2")
+        compare_clip_3.write_bytes(b"compare3")
+
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: object) -> object:
+            commands.append(command)
+            output_path = Path(command[-1])
+            output_path.write_bytes(b"mkv")
+            return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+        with patch("mediaforce.web.app.subprocess.run", side_effect=fake_run), patch(
+                "mediaforce.web.app.ffmpeg_binary", return_value="ffmpeg"
+        ):
+            bundle_path, download_name = _build_review_compare_video(
+                config=self.config,
+                prefix="tv/Suits/Season 5",
+                compare_clips=[compare_clip_1, compare_clip_2, compare_clip_3],
+            )
+        self.addCleanup(bundle_path.unlink, missing_ok=True)
+
+        self.assertEqual(download_name, "tv-suits-season-5-full-review-compare.mkv")
+        self.assertTrue(commands)
+        self.assertEqual(
+            commands[0][:9],
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(bundle_path.with_suffix('.txt')), "-c"],
+        )
+        concat_list = bundle_path.with_suffix('.txt')
+        self.assertFalse(concat_list.exists())
+        self.assertEqual(bundle_path.read_bytes(), b"mkv")
+
+    def test_review_compare_bundle_entries_prefers_compare_clips_over_review_pairs(self) -> None:
+        review_run_dir = self.config.paths.review_dir / "sample-run"
+        review_run_dir.mkdir(parents=True, exist_ok=True)
+        compare_clip_1 = review_run_dir / "compare-01.mkv"
+        compare_clip_2 = review_run_dir / "compare-02.mkv"
+        compare_clip_1.write_bytes(b"compare1")
+        compare_clip_2.write_bytes(b"compare2")
+
+        calibration = {
+            "compare_clips": [
+                {"path": "/review-media/sample-run/compare-01.mkv"},
+                {"path": "/review-media/sample-run/compare-02.mkv"},
+            ],
+            "review_pairs": [
+                {
+                    "compare_clip": {"path": "/review-media/sample-run/compare-01.mkv"},
+                }
+            ],
+        }
+
+        entries = _review_compare_bundle_entries(self.config, calibration)
+
+        self.assertEqual(entries, [compare_clip_1.resolve(), compare_clip_2.resolve()])
+
+    def test_ffmpeg_concat_file_line_escapes_single_quotes(self) -> None:
+        path = Path("/tmp/it's fine/compare clip.mkv")
+        line = _ffmpeg_concat_file_line(path)
+
+        self.assertEqual(line, "file '/tmp/it'\\''s fine/compare clip.mkv'\n")
 
     def test_request_note_tuning_uses_structured_runtime_path_and_self_check(self) -> None:
         responses = [
@@ -208,6 +331,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 for route in app.routes
                 if isinstance(route, APIRoute) and route.path == "/api/archive-cleanup/clear"
             )
+            assert isinstance(route, APIRoute)
 
             class _FakeRequest:
                 def __init__(self, payload: dict[str, str]) -> None:
@@ -216,7 +340,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 async def json(self) -> dict[str, str]:
                     return self._payload
 
-            response = asyncio.run(cast(APIRoute, route).endpoint(_FakeRequest({"transcode_root": "/Volumes/media/transcode-alt"})))
+            response = asyncio.run(route.endpoint(_FakeRequest({"transcode_root": "/Volumes/media/transcode-alt"})))
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
@@ -582,15 +706,15 @@ class TuningRuntimeTests(unittest.TestCase):
             )
 
             with patch(
-                "mediaforce.web.runtime.folder_tuning_advice.inspect_prefix",
-                return_value={
-                    "item_count": 24,
-                    "total_size_bytes": 76_892_875_827,
-                    "statuses": {"discovered": 24},
-                    "video_codecs": {"h264": 24},
-                    "audio_codecs": {"eac3:6": 24},
-                    "seasons": ["Season 5"],
-                },
+                    "mediaforce.web.runtime.folder_tuning_advice.inspect_prefix",
+                    return_value={
+                        "item_count": 24,
+                        "total_size_bytes": 76_892_875_827,
+                        "statuses": {"discovered": 24},
+                        "video_codecs": {"h264": 24},
+                        "audio_codecs": {"eac3:6": 24},
+                        "seasons": ["Season 5"],
+                    },
             ), patch(
                 "mediaforce.web.runtime.folder_tuning_advice.request_seed_policy",
                 return_value=mocked_response,
@@ -1026,7 +1150,8 @@ class TuningRuntimeTests(unittest.TestCase):
 
     def test_generic_and_verdict_prompts_embed_context_and_shape(self) -> None:
         generic_prompt = _build_prompt({"folder": "tv/House/Season 2", "sample": {"score": 91.4}})
-        verdict_prompt = _build_run_verdict_prompt({"folder": "tv/House/Season 2", "sample_result": {"quality_score": 91.4}})
+        verdict_prompt = _build_run_verdict_prompt(
+            {"folder": "tv/House/Season 2", "sample_result": {"quality_score": 91.4}})
 
         self.assertIn("Recommendation, Why, Setting changes, Audio/Subtitles notes", generic_prompt)
         self.assertIn("tv/House/Season 2", generic_prompt)

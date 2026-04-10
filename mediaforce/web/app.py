@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -11,10 +12,13 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
+from starlette.background import BackgroundTask
+from fastapi.responses import FileResponse
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import delete
@@ -31,6 +35,7 @@ from mediaforce.tuning.calibration_jobs import load_active_job, load_job, \
     list_queue_summary
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, load_runtime_settings, \
     save_runtime_settings
+from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import calibration_jobs as calibration_jobs_table
 from mediaforce.core.db_tables import learning_artifacts
@@ -97,6 +102,7 @@ from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_fo
     settings_page_payload, stop_calibration_queue_action, stop_encode_queue_action, \
     validate_folder_outputs_action, \
     build_multimodal_review_pack, build_tuning_runtime_toolbelt
+from mediaforce.web.runtime.folder_actions import ActionPayload, FolderItem
 from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
     restore_staged_artifact as runtime_restore_staged_artifact, \
     run_calibration_job as runtime_run_calibration_job, \
@@ -243,7 +249,7 @@ _operator_requested_experiment = runtime_operator_requested_experiment
 _apply_policy_fragment = runtime_apply_policy_fragment
 
 
-def _load_advice_state(config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+def _load_advice_state(config: MediaforceConfig, prefix: str) -> ActionPayload | None:
     path = _advice_file(config, prefix)
     if not path.exists():
         return None
@@ -254,7 +260,7 @@ def _load_advice_state(config: MediaforceConfig, prefix: str) -> dict[str, Any] 
     return payload if isinstance(payload, dict) else None
 
 
-def _merge_advice_state(config: MediaforceConfig, prefix: str, patch: dict[str, Any]) -> dict[str, Any]:
+def _merge_advice_state(config: MediaforceConfig, prefix: str, patch: ActionPayload) -> ActionPayload:
     existing = _load_advice_state(config, prefix) or {}
     merged = {**existing, **patch}
     _save_advice_state(config, prefix, merged)
@@ -510,7 +516,8 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                     404,
                 )
             advice_state = _load_advice_state(config, normalized_prefix)
-            pending_proposal = _pending_proposal_public_view(_load_pending_proposal(config, normalized_prefix))
+            pending_proposal_raw = _load_pending_proposal(config, normalized_prefix)
+            pending_proposal = _pending_proposal_public_view(pending_proposal_raw)
             calibration = _load_calibration_state(config, normalized_prefix)
             recent_sessions = _recent_tuning_sessions(connection, normalized_prefix)
             review_gate = _review_gate(calibration)
@@ -528,8 +535,11 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             scheduler_policy = object_dict(encode_queue_state.get("scheduler"))
             encode_job = _decorate_encode_job_for_scheduler(config, encode_job)
             encode_queue_summary = _encode_queue_summary_copy(encode_queue, encode_queue_state, encode_job)
-        policy_source = calibration.get("policy") if calibration else sample_item.get("resolved_policy")
-        policy = object_dict(policy_source)
+        policy = _folder_display_policy(
+            sample_item=sample_item,
+            calibration=calibration,
+            pending_proposal=pending_proposal_raw,
+        )
         video_policy = object_dict(policy.get("video"))
         resolved_metric, _ = select_quality_metric(str(video_policy.get("quality_metric", "auto")))
         sample_host_statuses = _sample_calibration_host_statuses(config)
@@ -647,7 +657,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             host_key,
         )
 
-    def _queue_folder_encode_action(normalized_prefix: str, notes: str, bypass_schedule: bool) -> dict[str, Any]:
+    def _queue_folder_encode_action(normalized_prefix: str, notes: str, bypass_schedule: bool) -> ActionPayload:
         return queue_folder_encode_action(
             config,
             normalized_prefix,
@@ -659,7 +669,6 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             review_gate=_review_gate,
             upsert_override=_upsert_override,
             load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-            load_latest_encode_job_for_prefix_fn=load_latest_encode_job,
             clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
             prepare_terminal_encode_job_for_requeue_fn=lambda connection, job: runtime_prepare_terminal_encode_job_for_requeue(
                 connection,
@@ -669,7 +678,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             save_encode_job=save_encode_job,
         )
 
-    def _validate_folder_outputs_action(normalized_prefix: str) -> dict[str, Any]:
+    def _validate_folder_outputs_action(normalized_prefix: str) -> ActionPayload:
         return validate_folder_outputs_action(
             config,
             normalized_prefix,
@@ -678,7 +687,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             validate_manifest_items_fn=validate_manifest_items,
         )
 
-    def _promote_folder_outputs_action(normalized_prefix: str) -> dict[str, Any]:
+    def _promote_folder_outputs_action(normalized_prefix: str) -> ActionPayload:
         return promote_folder_outputs_action(
             config,
             normalized_prefix,
@@ -687,7 +696,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             promote_manifest_items_fn=promote_manifest_items,
         )
 
-    def _save_profile_action(normalized_prefix: str) -> dict[str, Any]:
+    def _save_profile_action(normalized_prefix: str) -> ActionPayload:
         return save_profile_action(
             config,
             normalized_prefix,
@@ -745,6 +754,10 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         app,
         folder_status_payload=_folder_status_payload,
         folder_content_payload=_folder_content_payload,
+        download_review_compare_action=lambda prefix: _download_review_compare_action(
+            config,
+            prefix,
+        ),
         folder_ai_tune_action=_folder_ai_tune_action,
         folder_ai_tune_preview_action=_folder_ai_tune_preview_action,
         folder_ai_tune_confirm_action=_folder_ai_tune_confirm_action,
@@ -781,6 +794,118 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     )
 
     return app
+
+
+def _folder_display_policy(
+        *,
+        sample_item: dict[str, Any],
+        calibration: dict[str, Any] | None,
+        pending_proposal: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if calibration:
+        calibration_policy = object_dict(calibration.get("policy"))
+        if calibration_policy:
+            return calibration_policy
+    proposal = object_dict(pending_proposal)
+    preview_policy = object_dict(proposal.get("preview_policy"))
+    if preview_policy:
+        return preview_policy
+    current_policy = object_dict(proposal.get("current_policy"))
+    if current_policy:
+        return current_policy
+    return object_dict(sample_item.get("resolved_policy"))
+
+
+def _download_review_compare_action(config: MediaforceConfig, prefix: str) -> FileResponse:
+    calibration = _load_calibration_state(config, prefix)
+    if calibration is None:
+        raise HTTPException(status_code=404, detail="No sampled review clips are available for this folder yet.")
+    compare_clips = [
+        clip_path for clip_path in _review_compare_bundle_entries(config, calibration)
+        if clip_path.exists()
+    ]
+    if not compare_clips:
+        raise HTTPException(status_code=404, detail="No side-by-side compare clips are available for this folder yet.")
+    bundle_path, download_name = _build_review_compare_video(
+        config=config,
+        prefix=prefix,
+        compare_clips=compare_clips,
+    )
+    return FileResponse(
+        bundle_path,
+        filename=download_name,
+        media_type="video/x-matroska",
+        background=BackgroundTask(_remove_path_if_exists, bundle_path),
+    )
+
+
+def _build_review_compare_video(
+        *,
+        config: MediaforceConfig,
+        prefix: str,
+        compare_clips: list[Path],
+) -> tuple[Path, str]:
+    bundle_dir = config.paths.web_state_dir / "downloads"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(prefix="review-bundle-", suffix=".mkv", dir=bundle_dir, delete=False) as temp_file:
+        bundle_path = Path(temp_file.name)
+    _concat_review_compare_clips(bundle_path=bundle_path, compare_clips=compare_clips)
+    download_name = f"{_download_name_slug(prefix)}-full-review-compare.mkv"
+    return bundle_path, download_name
+
+
+def _review_compare_bundle_entries(config: MediaforceConfig, calibration: dict[str, Any]) -> list[Path]:
+    entries: list[Path] = []
+    for raw_clip in object_list(calibration.get("compare_clips")):
+        clip_path = _review_file_from_url(config, str(object_dict(raw_clip).get("path") or ""))
+        if clip_path is None:
+            continue
+        entries.append(clip_path)
+    if entries:
+        return entries
+    for raw_pair in object_list(calibration.get("review_pairs")):
+        pair = object_dict(raw_pair)
+        compare_clip = object_dict(pair.get("compare_clip"))
+        clip_path = _review_file_from_url(config, str(compare_clip.get("path") or ""))
+        if clip_path is None:
+            continue
+        entries.append(clip_path)
+    return entries
+
+
+def _concat_review_compare_clips(*, bundle_path: Path, compare_clips: list[Path]) -> None:
+    list_file = bundle_path.with_suffix(".txt")
+    list_file.write_text("".join(_ffmpeg_concat_file_line(path) for path in compare_clips))
+    command = [
+        ffmpeg_binary(),
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_file),
+        "-c",
+        "copy",
+        str(bundle_path),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    _remove_path_if_exists(list_file)
+    if result.returncode != 0 or not bundle_path.exists() or bundle_path.stat().st_size <= 0:
+        _remove_path_if_exists(bundle_path)
+        stderr = (result.stderr or "").strip()
+        detail = stderr or "ffmpeg could not build the combined review video."
+        raise HTTPException(status_code=500, detail=detail)
+
+
+def _ffmpeg_concat_file_line(path: Path) -> str:
+    escaped = str(path).replace("'", "'\\''")
+    return f"file '{escaped}'\n"
+
+
+def _download_name_slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "review-bundle"
 
 
 def main() -> None:
@@ -1080,11 +1205,11 @@ def _prefix_descendant_like_pattern(prefix: str) -> str:
 def _load_folder_staged_items(
         connection: DBClient,
         config: MediaforceConfig,
-        prefix: str,
+        normalized_prefix: str,
         *,
         statuses: set[str],
-) -> list[dict[str, Any]]:
-    normalized_prefix = prefix.strip().strip("/")
+) -> list[FolderItem]:
+    normalized_prefix = normalized_prefix.strip().strip("/")
     if not normalized_prefix or not statuses:
         return []
     descendant_pattern = _prefix_descendant_like_pattern(normalized_prefix)
@@ -1102,7 +1227,7 @@ def _load_folder_staged_items(
         .where(staged_artifacts.c.promoted_at.is_(None))
         .order_by(library_items.c.rel_path.asc())
     ).mappings().fetchall()
-    items: list[dict[str, Any]] = []
+    items: list[FolderItem] = []
     for row in rows:
         item = build_manifest_item(mapping_dict(row), config)
         item["staging_host_label"] = str(row.get("encode_host_label") or "").strip() or None
@@ -1386,11 +1511,11 @@ def _folder_state_deps() -> FolderStateDeps:
     )
 
 
-def _load_calibration_state(config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+def _load_calibration_state(config: MediaforceConfig, prefix: str) -> ActionPayload | None:
     return load_calibration_state(_folder_state_deps(), config, prefix, _calibration_file(config, prefix))
 
 
-def _save_calibration_state(config: MediaforceConfig, prefix: str, payload: dict[str, Any]) -> None:
+def _save_calibration_state(config: MediaforceConfig, prefix: str, payload: ActionPayload) -> None:
     save_calibration_state(_calibration_file(config, prefix), payload, calibration_draft_hash=_calibration_draft_hash)
 
 
@@ -1410,7 +1535,7 @@ def _review_pair_key(timestamp_seconds: float) -> int:
     return review_pair_key(timestamp_seconds)
 
 
-def _save_advice_state(config: MediaforceConfig, prefix: str, advice: AdvisorResponse | dict[str, Any]) -> None:
+def _save_advice_state(config: MediaforceConfig, prefix: str, advice: AdvisorResponse | ActionPayload) -> None:
     save_advice_state(_advice_file(config, prefix), advice)
 
 
@@ -1830,7 +1955,7 @@ def _clear_folder_tuning_state(
     }
 
 
-def _upsert_override(file_path: Path, prefix: str, policy: dict[str, Any]) -> None:
+def _upsert_override(file_path: Path, prefix: str, policy: ActionPayload) -> None:
     content = file_path.read_text() if file_path.exists() else ""
     block = _render_override_block(prefix, policy)
     pattern = re.compile(
