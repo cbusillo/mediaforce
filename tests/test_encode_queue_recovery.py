@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, cast
@@ -18,7 +19,7 @@ from sqlalchemy import update
 
 from mediaforce import execution, quality, remote, review
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
-from mediaforce.core.db import open_db
+from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import item_events
 from mediaforce.core.db_tables import library_items
@@ -27,7 +28,7 @@ from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.models import ProbeSummary
 from mediaforce.encoding import staging as staging_runtime
 from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_prefix, list_child_encode_jobs, \
-    load_active_encode_job_for_prefix, load_encode_job, load_latest_encode_job, \
+    load_active_encode_job_for_prefix, load_encode_job, \
     load_latest_terminal_encode_job_for_prefix, load_queue_state, save_encode_job, save_queue_state
 from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
 from mediaforce.remote import HostStatus
@@ -46,6 +47,51 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
+
+    @staticmethod
+    def _noop_load_job_state(
+            _connection: DBClient,
+            _config: MediaforceConfig,
+            _prefix: str,
+    ) -> folder_actions_runtime.JobPayload | None:
+        return None
+
+    @staticmethod
+    def _accepted_calibration_state(
+            _config: MediaforceConfig,
+            _prefix: str,
+    ) -> folder_actions_runtime.ActionPayload | None:
+        return {"policy": {}, "accepted_at": web_app._now_iso()}
+
+    @staticmethod
+    def _accepted_review_gate(
+            _calibration: folder_actions_runtime.ActionPayload | None,
+    ) -> folder_actions_runtime.ActionPayload:
+        return {
+            "can_confirm_full": True,
+            "message": None,
+            "status": "accepted",
+            "next_action_label": "Queue folder encode",
+        }
+
+    @staticmethod
+    def _noop_upsert_override(
+            _file_path: Path,
+            _prefix: str,
+            _policy: folder_actions_runtime.ActionPayload,
+    ) -> None:
+        return None
+
+    @staticmethod
+    def _prepare_terminal_encode_job_for_requeue(
+            connection: DBClient,
+            job: folder_actions_runtime.JobPayload,
+    ) -> None:
+        encode_runtime.prepare_terminal_encode_job_for_requeue(
+            connection,
+            job,
+            deps=web_app._encode_queue_runtime_deps(),
+        )
 
     def test_restart_recovery_requeues_running_job_and_cleans_transients(self) -> None:
         source_path = self._create_source_file("episode-a.mkv")
@@ -2002,7 +2048,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(status.message, "Missing required paths")
         self.assertEqual(status.missing_paths, ["/srv/media/tv"])
 
-    def test_remote_host_status_checks_inherited_stream_source_roots(self) -> None:
+    def test_remote_host_status_ignores_inherited_stream_source_roots_without_host_overrides(self) -> None:
         self.config.raw["media"]["source_roots"] = {"tv": "/srv/media/tv"}
         host: dict[str, object] = {
             "host": "cbusillo@stream-host",
@@ -2012,7 +2058,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         }
         stdout = "\n".join(
             [
-                "path|/srv/media/tv|0",
                 "tool|xcode_clt|0",
                 "tool|brew|0",
                 "tool|ffmpeg|1",
@@ -2031,10 +2076,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
         ), patch("mediaforce.remote._learn_remote_wake_mac"):
             status = remote._remote_host_status(self.config, host)
-        self.assertFalse(status.available)
-        self.assertEqual(status.missing_paths, ["/srv/media/tv"])
+        self.assertTrue(status.available)
+        self.assertEqual(status.missing_paths, [])
 
-    def test_current_machine_status_checks_inherited_stream_source_roots(self) -> None:
+    def test_current_machine_status_ignores_inherited_stream_source_roots_without_host_overrides(self) -> None:
         missing_root = self.root / "missing-tv-root"
         self.config.raw["media"]["source_roots"] = {"tv": str(missing_root)}
         host: dict[str, object] = {
@@ -2063,8 +2108,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 label="Local Stream",
                 repo_path=None,
             )
-        self.assertFalse(status.available)
-        self.assertEqual(status.missing_paths, [str(missing_root)])
+        self.assertTrue(status.available)
+        self.assertEqual(status.missing_paths, [])
 
     def test_remote_host_status_requires_metric_and_av1_support_for_sample_hosts(self) -> None:
         host: dict[str, object] = {
@@ -2622,7 +2667,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             assert stored_status_row is not None
             assert stored_validation_row is not None
             stored_status = stored_status_row["status"]
-            stored_validation = stored_validation_row["validation_json"]
+            stored_validation = cast(str, stored_validation_row["validation_json"])
             self.assertEqual(stored_status, "validated")
             self.assertTrue(json.loads(stored_validation)["passed"])
 
@@ -2915,17 +2960,17 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(artifact_row["source_video_codec"], "h264")
             self.assertIsNotNone(artifact_row["encode_started_at"])
             self.assertIsNotNone(artifact_row["encode_completed_at"])
-            self.assertGreaterEqual(float(artifact_row["encode_duration_seconds"]), 0.0)
+            self.assertGreaterEqual(float(cast(float | int | str, artifact_row["encode_duration_seconds"])), 0.0)
             self.assertEqual(artifact_row["bytes_saved"], 1017)
-            self.assertAlmostEqual(float(artifact_row["size_ratio"]), 7 / 1024, places=6)
+            self.assertAlmostEqual(float(cast(float | int | str, artifact_row["size_ratio"])), 7 / 1024, places=6)
             self.assertEqual(artifact_row["quality_metric"], "XPSNR")
             self.assertEqual(artifact_row["quality_score"], 41.5)
             self.assertEqual(artifact_row["staging_fingerprint"], "staged-fingerprint")
             self.assertEqual(item_row["status"], "encoded")
             event_rows = self._item_event_rows(connection, item_id)
             self.assertEqual([row["event_type"] for row in event_rows[-2:]], ["encoding_started", "encoding_completed"])
-            started_details = json.loads(event_rows[-2]["details_json"])
-            completed_details = json.loads(event_rows[-1]["details_json"])
+            started_details = json.loads(cast(str, event_rows[-2]["details_json"]))
+            completed_details = json.loads(cast(str, event_rows[-1]["details_json"]))
             self.assertEqual(started_details["encode_origin"], "queue")
             self.assertEqual(started_details["encode_job_id"], "job-123")
             self.assertEqual(started_details["encode_host_label"], "Remote A")
@@ -2985,7 +3030,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertFalse(staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}").exists())
             event_rows = self._item_event_rows(connection, item_id)
             self.assertEqual([row["event_type"] for row in event_rows[-2:]], ["encoding_started", "encoding_failed"])
-            failed_details = json.loads(event_rows[-1]["details_json"])
+            failed_details = json.loads(cast(str, event_rows[-1]["details_json"]))
             self.assertEqual(failed_details["encode_job_id"], "job-fail")
             self.assertEqual(failed_details["encode_host_key"], "remote-b")
             self.assertIn("bad stdout", failed_details["error"])
@@ -3609,9 +3654,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "needs_attention_count": 0,
         }
         decorated = web_app._decorate_encode_queue_for_scheduler(self.config, encode_queue)
-        telemetry = cast(dict[str, object], decorated.get("telemetry") or {})
-        self.assertAlmostEqual(float(cast(float, telemetry.get("eta_seconds") or 0.0)), 90.0)
-        self.assertEqual(telemetry.get("eta_copy"), "1m 30s")
+        telemetry = decorated.get("telemetry")
+        assert isinstance(telemetry, Mapping)
+        eta_seconds = telemetry.get("eta_seconds")
+        assert eta_seconds is None or isinstance(eta_seconds, (int, float))
+        eta_copy = telemetry.get("eta_copy")
+        assert eta_copy is None or isinstance(eta_copy, str)
+        self.assertAlmostEqual(0.0 if eta_seconds is None else float(eta_seconds), 90.0)
+        self.assertEqual(eta_copy, "1m 30s")
         self.assertEqual(decorated["running"][0]["telemetry_summary"], "40% · 2.00x · Est. ETA 1m 0s")
 
     def test_decorate_encode_queue_for_scheduler_labels_quality_search_phase(self) -> None:
@@ -3706,9 +3756,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         decorated = web_app._decorate_encode_queue_for_scheduler(self.config, encode_queue)
 
-        telemetry = cast(dict[str, object], decorated.get("telemetry") or {})
-        self.assertAlmostEqual(float(cast(float, telemetry.get("eta_seconds") or 0.0)), 45.0)
-        self.assertEqual(telemetry.get("eta_copy"), "45s")
+        telemetry = decorated.get("telemetry")
+        assert isinstance(telemetry, Mapping)
+        eta_seconds = telemetry.get("eta_seconds")
+        assert eta_seconds is None or isinstance(eta_seconds, (int, float))
+        eta_copy = telemetry.get("eta_copy")
+        assert eta_copy is None or isinstance(eta_copy, str)
+        self.assertAlmostEqual(0.0 if eta_seconds is None else float(eta_seconds), 45.0)
+        self.assertEqual(eta_copy, "45s")
 
     def test_decorate_encode_queue_for_scheduler_attempt_summary_respects_started_at(self) -> None:
         manifest_path = self.root / "started-at-manifest.json"
@@ -4234,7 +4289,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIn("summary", payload)
 
     def test_folder_endpoint_returns_payload_for_fully_promoted_prefix(self) -> None:
-        from mediaforce.web import app as web_app
+        from mediaforce.web import app as folder_web_app
 
         source_path = self._create_source_file("episode-promoted-folder.mkv")
         self.config.raw["media"]["output_container"] = "mp4"
@@ -4278,7 +4333,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
             "mediaforce.web.app._start_encode_queue_worker"
         ):
-            app = web_app.create_app(self.config.paths.config_path)
+            app = folder_web_app.create_app(self.config.paths.config_path)
 
         folder_endpoint = next(
             route.endpoint
@@ -5179,19 +5234,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "",
                 False,
                 now_iso=web_app._now_iso,
-                load_job_state=lambda *_args, **_kwargs: None,
-                load_calibration_state=lambda *_args, **_kwargs: {"policy": {}, "accepted_at": web_app._now_iso()},
-                review_gate=lambda *_args, **_kwargs: {"can_confirm_full": True, "message": None},
-                upsert_override=lambda *_args, **_kwargs: None,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=self._accepted_calibration_state,
+                review_gate=self._accepted_review_gate,
+                upsert_override=self._noop_upsert_override,
                 load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                load_latest_encode_job_for_prefix_fn=load_latest_encode_job,
                 clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                prepare_terminal_encode_job_for_requeue_fn=lambda db_connection,
-                                                                  job: encode_runtime.prepare_terminal_encode_job_for_requeue(
-                    db_connection,
-                    job,
-                    deps=web_app._encode_queue_runtime_deps(),
-                ),
+                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
                 save_encode_job=save_encode_job,
             )
 
@@ -5206,7 +5255,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(row_count, 1)
 
     def test_build_manifest_shards_creates_one_file_per_shard(self) -> None:
-        manifest = {
+        manifest: folder_actions_runtime.ManifestPayload = {
             "items": [
                 {"library_item_id": 1, "duration_seconds": 600.0, "source_size_bytes": 1000},
                 {"library_item_id": 2, "duration_seconds": 400.0, "source_size_bytes": 900},
@@ -5219,18 +5268,37 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(shards, [[0], [1], [2]])
 
     def test_validate_folder_outputs_action_summarizes_pass_and_fail_counts(self) -> None:
-        def _validate_manifest_items(_connection: Any, _config: Any, _manifest: dict[str, Any], indexes: list[int]) -> \
-        list[dict[str, Any]]:
-            return [{"passed": indexes[0] == 0}]
+        class _LoadStagedItems(folder_actions_runtime.LoadFolderStagedItemsFn):
+            def __call__(
+                    self,
+                    _connection: DBClient,
+                    _config: MediaforceConfig,
+                    _normalized_prefix: str,
+                    *,
+                    statuses: set[str],
+            ) -> list[folder_actions_runtime.FolderItem]:
+                self_test.assertEqual(statuses, {"encoded", "validated"})
+                return [{"library_item_id": 1}, {"library_item_id": 2}]
+
+        class _ValidateManifestItems(folder_actions_runtime.ValidateManifestItemsFn):
+            def __call__(
+                    self,
+                    _connection: DBClient,
+                    _config: MediaforceConfig,
+                    _manifest: folder_actions_runtime.ManifestPayload,
+                    indexes: list[int],
+            ) -> list[folder_actions_runtime.ActionPayload]:
+                return [{"passed": indexes[0] == 0}]
+
+        self_test = self
+        load_staged_items_fn = _LoadStagedItems()
+        validate_manifest_items_fn = _ValidateManifestItems()
 
         result = folder_actions_runtime.validate_folder_outputs_action(
             self.config,
             "tv/show",
-            load_folder_staged_items_fn=lambda *_args, **_kwargs: [
-                {"library_item_id": 1},
-                {"library_item_id": 2},
-            ],
-            validate_manifest_items_fn=_validate_manifest_items,
+            load_folder_staged_items_fn=load_staged_items_fn,
+            validate_manifest_items_fn=validate_manifest_items_fn,
         )
 
         self.assertTrue(result["ok"])
@@ -5239,6 +5307,33 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIn("1 passed, 1 failed", result["message"])
 
     def test_validate_folder_outputs_action_rejects_while_folder_encode_active(self) -> None:
+        class _SingleStagedItem(folder_actions_runtime.LoadFolderStagedItemsFn):
+            def __call__(
+                    self,
+                    _connection: DBClient,
+                    _config: MediaforceConfig,
+                    _normalized_prefix: str,
+                    *,
+                    statuses: set[str],
+            ) -> list[folder_actions_runtime.FolderItem]:
+                self_test.assertEqual(statuses, {"encoded", "validated"})
+                return [{"library_item_id": 1}]
+
+        class _PassedValidation(folder_actions_runtime.ValidateManifestItemsFn):
+            def __call__(
+                    self,
+                    _connection: DBClient,
+                    _config: MediaforceConfig,
+                    _manifest: folder_actions_runtime.ManifestPayload,
+                    indexes: list[int],
+            ) -> list[folder_actions_runtime.ActionPayload]:
+                self_test.assertEqual(indexes, [0])
+                return [{"passed": True}]
+
+        self_test = self
+        load_folder_staged_items_fn = _SingleStagedItem()
+        validate_manifest_items_fn = _PassedValidation()
+
         for status in ("queued", "running", "retry_backoff"):
             prefix = f"tv/show-{status}"
             with open_db(self.config.paths.db_path) as connection:
@@ -5282,25 +5377,85 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 self.config,
                 prefix,
                 load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                load_folder_staged_items_fn=lambda *_args, **_kwargs: [{"library_item_id": 1}],
-                validate_manifest_items_fn=lambda *_args, **_kwargs: [{"passed": True}],
+                load_folder_staged_items_fn=load_folder_staged_items_fn,
+                validate_manifest_items_fn=validate_manifest_items_fn,
             )
 
             self.assertFalse(result["ok"])
             self.assertIn(f"folder encode is {status.replace('_', ' ')}", result["message"])
 
     def test_promote_folder_outputs_action_requires_validated_items(self) -> None:
+        class _NoStagedItems(folder_actions_runtime.LoadFolderStagedItemsFn):
+            def __call__(
+                    self,
+                    _connection: DBClient,
+                    _config: MediaforceConfig,
+                    _normalized_prefix: str,
+                    *,
+                    statuses: set[str],
+            ) -> list[folder_actions_runtime.FolderItem]:
+                self_test.assertEqual(statuses, {"validated"})
+                return []
+
+        class _PromoteManifestItems(folder_actions_runtime.PromoteManifestItemsFn):
+            def __call__(
+                    self,
+                    _connection: DBClient,
+                    _config: MediaforceConfig,
+                    _manifest: folder_actions_runtime.ManifestPayload,
+                    indexes: list[int],
+                    *,
+                    force: bool,
+            ) -> list[Path]:
+                self_test.assertEqual(indexes, [])
+                self_test.assertFalse(force)
+                return []
+
+        self_test = self
+        load_folder_staged_items_fn = _NoStagedItems()
+        promote_manifest_items_fn = _PromoteManifestItems()
+
         result = folder_actions_runtime.promote_folder_outputs_action(
             self.config,
             "tv/show",
-            load_folder_staged_items_fn=lambda *_args, **_kwargs: [],
-            promote_manifest_items_fn=lambda *_args, **_kwargs: [],
+            load_folder_staged_items_fn=load_folder_staged_items_fn,
+            promote_manifest_items_fn=promote_manifest_items_fn,
         )
 
         self.assertFalse(result["ok"])
         self.assertIn("No validated staged files", result["message"])
 
     def test_promote_folder_outputs_action_rejects_while_folder_encode_active(self) -> None:
+        class _SingleValidatedItem(folder_actions_runtime.LoadFolderStagedItemsFn):
+            def __call__(
+                    self,
+                    _connection: DBClient,
+                    _config: MediaforceConfig,
+                    _normalized_prefix: str,
+                    *,
+                    statuses: set[str],
+            ) -> list[folder_actions_runtime.FolderItem]:
+                self_test.assertEqual(statuses, {"validated"})
+                return [{"library_item_id": 1}]
+
+        class _PromoteManifestItems(folder_actions_runtime.PromoteManifestItemsFn):
+            def __call__(
+                    self,
+                    _connection: DBClient,
+                    _config: MediaforceConfig,
+                    _manifest: folder_actions_runtime.ManifestPayload,
+                    indexes: list[int],
+                    *,
+                    force: bool,
+            ) -> list[Path]:
+                self_test.assertEqual(indexes, [0])
+                self_test.assertFalse(force)
+                return []
+
+        self_test = self
+        load_folder_staged_items_fn = _SingleValidatedItem()
+        promote_manifest_items_fn = _PromoteManifestItems()
+
         for status in ("queued", "running", "retry_backoff"):
             prefix = f"tv/show-{status}-promote"
             with open_db(self.config.paths.db_path) as connection:
@@ -5344,8 +5499,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 self.config,
                 prefix,
                 load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                load_folder_staged_items_fn=lambda *_args, **_kwargs: [{"library_item_id": 1}],
-                promote_manifest_items_fn=lambda *_args, **_kwargs: [],
+                load_folder_staged_items_fn=load_folder_staged_items_fn,
+                promote_manifest_items_fn=promote_manifest_items_fn,
             )
 
             self.assertFalse(result["ok"])
@@ -5589,19 +5744,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "recover the active folder",
             False,
             now_iso=web_app._now_iso,
-            load_job_state=lambda *_args, **_kwargs: None,
-            load_calibration_state=lambda *_args, **_kwargs: {"policy": {}, "accepted_at": web_app._now_iso()},
-            review_gate=lambda *_args, **_kwargs: {"can_confirm_full": True, "message": None},
-            upsert_override=lambda *_args, **_kwargs: None,
+            load_job_state=self._noop_load_job_state,
+            load_calibration_state=self._accepted_calibration_state,
+            review_gate=self._accepted_review_gate,
+            upsert_override=self._noop_upsert_override,
             load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-            load_latest_encode_job_for_prefix_fn=load_latest_encode_job,
             clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-            prepare_terminal_encode_job_for_requeue_fn=lambda inner_connection,
-                                                              job: encode_runtime.prepare_terminal_encode_job_for_requeue(
-                inner_connection,
-                job,
-                deps=web_app._encode_queue_runtime_deps(),
-            ),
+            prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
             save_encode_job=save_encode_job,
         )
 
@@ -5652,19 +5801,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "retry after blocker",
                 False,
                 now_iso=web_app._now_iso,
-                load_job_state=lambda *_args, **_kwargs: None,
-                load_calibration_state=lambda *_args, **_kwargs: {"policy": {}, "accepted_at": web_app._now_iso()},
-                review_gate=lambda *_args, **_kwargs: {"can_confirm_full": True, "message": None},
-                upsert_override=lambda *_args, **_kwargs: None,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=self._accepted_calibration_state,
+                review_gate=self._accepted_review_gate,
+                upsert_override=self._noop_upsert_override,
                 load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                load_latest_encode_job_for_prefix_fn=load_latest_encode_job,
                 clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                prepare_terminal_encode_job_for_requeue_fn=lambda db_connection,
-                                                                  job: encode_runtime.prepare_terminal_encode_job_for_requeue(
-                    db_connection,
-                    job,
-                    deps=web_app._encode_queue_runtime_deps(),
-                ),
+                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
                 save_encode_job=save_encode_job,
             )
 
@@ -5894,7 +6037,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             [{"library_item_id": item_a}, {"library_item_id": item_b}],
         )
 
-        def create_manifest_stub(db_connection: Any, _config: Any, *, prefix: str) -> tuple[dict[str, Any], Path]:
+        def create_manifest_stub(
+                db_connection: DBClient,
+                _config: MediaforceConfig,
+                *,
+                prefix: str,
+        ) -> tuple[folder_actions_runtime.ManifestPayload, Path]:
             self.assertEqual(prefix, "tv/show")
             pending_ids = {
                 int(row["id"])
@@ -5905,7 +6053,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 ).mappings().fetchall()
             }
             self.assertEqual(pending_ids, {item_a, item_b})
-            return {"items": [{"library_item_id": item_a}, {"library_item_id": item_b}]}, next_manifest
+            manifest_payload: folder_actions_runtime.ManifestPayload = {
+                "items": [{"library_item_id": item_a}, {"library_item_id": item_b}],
+            }
+            return manifest_payload, next_manifest
 
         with patch("mediaforce.web.runtime.folder_actions.load_config", return_value=self.config), patch(
                 "mediaforce.web.runtime.folder_actions.create_folder_manifest",
@@ -5917,19 +6068,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "retry interrupted folder",
                 False,
                 now_iso=web_app._now_iso,
-                load_job_state=lambda *_args, **_kwargs: None,
-                load_calibration_state=lambda *_args, **_kwargs: {"policy": {}, "accepted_at": web_app._now_iso()},
-                review_gate=lambda *_args, **_kwargs: {"can_confirm_full": True, "message": None},
-                upsert_override=lambda *_args, **_kwargs: None,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=self._accepted_calibration_state,
+                review_gate=self._accepted_review_gate,
+                upsert_override=self._noop_upsert_override,
                 load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                load_latest_encode_job_for_prefix_fn=load_latest_encode_job,
                 clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                prepare_terminal_encode_job_for_requeue_fn=lambda db_connection,
-                                                                  job: encode_runtime.prepare_terminal_encode_job_for_requeue(
-                    db_connection,
-                    job,
-                    deps=web_app._encode_queue_runtime_deps(),
-                ),
+                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
                 save_encode_job=save_encode_job,
             )
 
@@ -6000,7 +6145,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             [{"library_item_id": item_a}, {"library_item_id": item_b}],
         )
 
-        def create_manifest_stub(db_connection: Any, _config: Any, *, prefix: str) -> tuple[dict[str, Any], Path]:
+        def create_manifest_stub(
+                db_connection: DBClient,
+                _config: MediaforceConfig,
+                *,
+                prefix: str,
+        ) -> tuple[folder_actions_runtime.ManifestPayload, Path]:
             self.assertEqual(prefix, "tv/show")
             pending_ids = {
                 int(row["id"])
@@ -6011,7 +6161,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 ).mappings().fetchall()
             }
             self.assertEqual(pending_ids, {item_a, item_b})
-            return {"items": [{"library_item_id": item_a}, {"library_item_id": item_b}]}, next_manifest
+            manifest_payload: folder_actions_runtime.ManifestPayload = {
+                "items": [{"library_item_id": item_a}, {"library_item_id": item_b}],
+            }
+            return manifest_payload, next_manifest
 
         with patch("mediaforce.web.runtime.folder_actions.load_config", return_value=self.config), patch(
                 "mediaforce.web.runtime.folder_actions.create_folder_manifest",
@@ -6023,19 +6176,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "retry interrupted folder",
                 False,
                 now_iso=web_app._now_iso,
-                load_job_state=lambda *_args, **_kwargs: None,
-                load_calibration_state=lambda *_args, **_kwargs: {"policy": {}, "accepted_at": web_app._now_iso()},
-                review_gate=lambda *_args, **_kwargs: {"can_confirm_full": True, "message": None},
-                upsert_override=lambda *_args, **_kwargs: None,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=self._accepted_calibration_state,
+                review_gate=self._accepted_review_gate,
+                upsert_override=self._noop_upsert_override,
                 load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                load_latest_encode_job_for_prefix_fn=load_latest_encode_job,
                 clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                prepare_terminal_encode_job_for_requeue_fn=lambda db_connection,
-                                                                  job: encode_runtime.prepare_terminal_encode_job_for_requeue(
-                    db_connection,
-                    job,
-                    deps=web_app._encode_queue_runtime_deps(),
-                ),
+                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
                 save_encode_job=save_encode_job,
             )
 
@@ -6126,19 +6273,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "retry nested folder",
                 False,
                 now_iso=web_app._now_iso,
-                load_job_state=lambda *_args, **_kwargs: None,
-                load_calibration_state=lambda *_args, **_kwargs: {"policy": {}, "accepted_at": web_app._now_iso()},
-                review_gate=lambda *_args, **_kwargs: {"can_confirm_full": True, "message": None},
-                upsert_override=lambda *_args, **_kwargs: None,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=self._accepted_calibration_state,
+                review_gate=self._accepted_review_gate,
+                upsert_override=self._noop_upsert_override,
                 load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                load_latest_encode_job_for_prefix_fn=load_latest_encode_job,
                 clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                prepare_terminal_encode_job_for_requeue_fn=lambda db_connection,
-                                                                  job: encode_runtime.prepare_terminal_encode_job_for_requeue(
-                    db_connection,
-                    job,
-                    deps=web_app._encode_queue_runtime_deps(),
-                ),
+                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
                 save_encode_job=save_encode_job,
             )
 
@@ -6257,19 +6398,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "retry parent folder",
                 False,
                 now_iso=web_app._now_iso,
-                load_job_state=lambda *_args, **_kwargs: None,
-                load_calibration_state=lambda *_args, **_kwargs: {"policy": {}, "accepted_at": web_app._now_iso()},
-                review_gate=lambda *_args, **_kwargs: {"can_confirm_full": True, "message": None},
-                upsert_override=lambda *_args, **_kwargs: None,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=self._accepted_calibration_state,
+                review_gate=self._accepted_review_gate,
+                upsert_override=self._noop_upsert_override,
                 load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                load_latest_encode_job_for_prefix_fn=load_latest_encode_job,
                 clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                prepare_terminal_encode_job_for_requeue_fn=lambda db_connection,
-                                                                  job: encode_runtime.prepare_terminal_encode_job_for_requeue(
-                    db_connection,
-                    job,
-                    deps=web_app._encode_queue_runtime_deps(),
-                ),
+                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
                 save_encode_job=save_encode_job,
             )
 
@@ -6355,19 +6490,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "retry root folder",
                 False,
                 now_iso=web_app._now_iso,
-                load_job_state=lambda *_args, **_kwargs: None,
-                load_calibration_state=lambda *_args, **_kwargs: {"policy": {}, "accepted_at": web_app._now_iso()},
-                review_gate=lambda *_args, **_kwargs: {"can_confirm_full": True, "message": None},
-                upsert_override=lambda *_args, **_kwargs: None,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=self._accepted_calibration_state,
+                review_gate=self._accepted_review_gate,
+                upsert_override=self._noop_upsert_override,
                 load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                load_latest_encode_job_for_prefix_fn=load_latest_encode_job,
                 clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                prepare_terminal_encode_job_for_requeue_fn=lambda db_connection,
-                                                                  job: encode_runtime.prepare_terminal_encode_job_for_requeue(
-                    db_connection,
-                    job,
-                    deps=web_app._encode_queue_runtime_deps(),
-                ),
+                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
                 save_encode_job=save_encode_job,
             )
 
@@ -6953,7 +7082,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         return self.root / "staging" / "tv" / "show" / name
 
     @staticmethod
-    def _insert_library_item(connection: Any, source_path: Path, *,
+    def _insert_library_item(connection: DBClient, source_path: Path, *,
                              status: str = "planned") -> int:
         now = web_app._now_iso()
         result = connection.execute(
@@ -6981,7 +7110,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         return int(result.inserted_primary_key[0])
 
     @staticmethod
-    def _insert_staged_artifact(connection: Any, library_item_id: int, staging_path: Path) -> None:
+    def _insert_staged_artifact(connection: DBClient, library_item_id: int, staging_path: Path) -> None:
         connection.execute(
             staged_artifacts.insert().values(
                 library_item_id=library_item_id,
@@ -6991,27 +7120,27 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         )
 
     @staticmethod
-    def _insert_scan_run(connection: Any, **values: Any) -> None:
+    def _insert_scan_run(connection: DBClient, **values: object) -> None:
         connection.execute(scan_runs.insert().values(**values))
 
     @staticmethod
-    def _library_item_value(connection: Any, item_id: int, *columns: Any) -> Any:
+    def _library_item_value(connection: DBClient, item_id: int, *columns: Any) -> Mapping[str, object] | None:
         row = connection.execute(
             select(*columns).where(library_items.c.id == item_id)
         ).mappings().fetchone()
         return row
 
     @staticmethod
-    def _staged_artifact_value(connection: Any, item_id: int, *columns: Any) -> Any:
+    def _staged_artifact_value(connection: DBClient, item_id: int, *columns: Any) -> Mapping[str, object] | None:
         row = connection.execute(
             select(*columns).where(staged_artifacts.c.library_item_id == item_id)
         ).mappings().fetchone()
         return row
 
     @staticmethod
-    def _item_event_rows(connection: Any, item_id: int) -> list[dict[str, Any]]:
+    def _item_event_rows(connection: DBClient, item_id: int) -> list[dict[str, object]]:
         return [
-            cast(dict[str, Any], dict(row))
+            {str(key): value for key, value in dict(row).items()}
             for row in connection.execute(
                 select(item_events.c.event_type, item_events.c.details_json)
                 .where(item_events.c.library_item_id == item_id)
@@ -7027,7 +7156,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
     def _save_job(
             self,
-            connection: Any,
+            connection: DBClient,
             *,
             job_id: str,
             manifest_name: str,

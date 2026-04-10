@@ -1,18 +1,95 @@
+from collections.abc import Callable
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, TypeAlias
 
 from fastapi import HTTPException
 from sqlalchemy import delete, or_, select, update
 
 from mediaforce.core.config import MediaforceConfig, load_config
-from mediaforce.core.db import open_db
+from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import encode_jobs, library_items, staged_artifacts
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, list_child_encode_jobs, \
     load_latest_terminal_encode_job_for_prefix
 from mediaforce.encoding.staging import safe_unlink
 from mediaforce.library.run_manifests import create_folder_manifest
+
+ActionPayload: TypeAlias = dict[str, Any]
+FolderItem: TypeAlias = dict[str, Any]
+JobPayload: TypeAlias = dict[str, Any]
+ManifestPayload: TypeAlias = dict[str, Any]
+
+
+NowIsoFn: TypeAlias = Callable[[], str]
+LoadJobStateFn: TypeAlias = Callable[[DBClient, MediaforceConfig, str], JobPayload | None]
+LoadCalibrationStateFn: TypeAlias = Callable[[MediaforceConfig, str], ActionPayload | None]
+ReviewGateFn: TypeAlias = Callable[[ActionPayload | None], ActionPayload]
+UpsertOverrideFn: TypeAlias = Callable[[Path, str, ActionPayload], None]
+LoadActiveEncodeJobFn: TypeAlias = Callable[[DBClient, str], JobPayload | None]
+ClearTerminalEncodeJobsFn: TypeAlias = Callable[[DBClient, str], None]
+PrepareTerminalEncodeJobForRequeueFn: TypeAlias = Callable[[DBClient, JobPayload], None]
+SaveEncodeJobFn: TypeAlias = Callable[[DBClient, JobPayload], None]
+CalibrationDraftHashFn: TypeAlias = Callable[[ActionPayload], str]
+SaveCalibrationStateFn: TypeAlias = Callable[[MediaforceConfig, str, ActionPayload], None]
+LoadAdviceStateFn: TypeAlias = Callable[[MediaforceConfig, str], ActionPayload | None]
+MergeAdviceStateFn: TypeAlias = Callable[[MediaforceConfig, str, ActionPayload], ActionPayload]
+
+
+class LoadFolderStagedItemsFn(Protocol):
+    def __call__(
+            self,
+            connection: DBClient,
+            config: MediaforceConfig,
+            normalized_prefix: str,
+            *,
+            statuses: set[str],
+    ) -> list[FolderItem]:
+        ...
+
+
+class ValidateManifestItemsFn(Protocol):
+    def __call__(
+            self,
+            connection: DBClient,
+            config: MediaforceConfig,
+            manifest: ManifestPayload,
+            indexes: list[int],
+    ) -> list[ActionPayload]:
+        ...
+
+
+class PromoteManifestItemsFn(Protocol):
+    def __call__(
+            self,
+            connection: DBClient,
+            config: MediaforceConfig,
+            manifest: ManifestPayload,
+            indexes: list[int],
+            *,
+            force: bool,
+    ) -> list[Path]:
+        ...
+
+
+class RecordVisualApprovalArtifactFn(Protocol):
+    def __call__(
+            self,
+            connection: DBClient,
+            config: MediaforceConfig,
+            *,
+            prefix: str,
+            note: str,
+            sample_item: ActionPayload,
+            calibration: ActionPayload,
+            run_verdict: ActionPayload | None,
+            created_at: str,
+    ) -> ActionPayload | None:
+        ...
+
+
+def _no_active_encode_job(_connection: DBClient, _normalized_prefix: str) -> JobPayload | None:
+    return None
 
 
 def queue_folder_encode_action(
@@ -21,17 +98,16 @@ def queue_folder_encode_action(
         notes: str,
         bypass_schedule: bool,
         *,
-        now_iso: Any,
-        load_job_state: Any,
-        load_calibration_state: Any,
-        review_gate: Any,
-        upsert_override: Any,
-        load_active_encode_job_for_prefix_fn: Any,
-        load_latest_encode_job_for_prefix_fn: Any,
-        clear_terminal_encode_jobs_for_prefix_fn: Any,
-        prepare_terminal_encode_job_for_requeue_fn: Any,
-        save_encode_job: Any,
-) -> dict[str, Any]:
+        now_iso: NowIsoFn,
+        load_job_state: LoadJobStateFn,
+        load_calibration_state: LoadCalibrationStateFn,
+        review_gate: ReviewGateFn,
+        upsert_override: UpsertOverrideFn,
+        load_active_encode_job_for_prefix_fn: LoadActiveEncodeJobFn,
+        clear_terminal_encode_jobs_for_prefix_fn: ClearTerminalEncodeJobsFn,
+        prepare_terminal_encode_job_for_requeue_fn: PrepareTerminalEncodeJobForRequeueFn,
+        save_encode_job: SaveEncodeJobFn,
+) -> ActionPayload:
     with open_db(config.paths.db_path) as connection:
         existing_job = load_job_state(connection, config, normalized_prefix)
         if existing_job and existing_job.get("status") in {"queued", "running", "pending_review"}:
@@ -77,7 +153,7 @@ def queue_folder_encode_action(
         clear_terminal_encode_jobs_for_prefix_fn(connection, normalized_prefix)
         created_at = now_iso()
         parent_job_id = uuid.uuid4().hex[:12]
-        queue_job = {
+        queue_job: JobPayload = {
             "job_id": parent_job_id,
             "prefix": normalized_prefix,
             "job_kind": "folder",
@@ -129,12 +205,12 @@ def validate_folder_outputs_action(
         config: MediaforceConfig,
         normalized_prefix: str,
         *,
-        load_active_encode_job_for_prefix_fn: Any | None = None,
-        load_folder_staged_items_fn: Any,
-        validate_manifest_items_fn: Any,
-) -> dict[str, Any]:
+        load_active_encode_job_for_prefix_fn: LoadActiveEncodeJobFn | None = None,
+        load_folder_staged_items_fn: LoadFolderStagedItemsFn,
+        validate_manifest_items_fn: ValidateManifestItemsFn,
+) -> ActionPayload:
     if load_active_encode_job_for_prefix_fn is None:
-        load_active_encode_job_for_prefix_fn = lambda *_args, **_kwargs: None
+        load_active_encode_job_for_prefix_fn = _no_active_encode_job
     with open_db(config.paths.db_path) as connection:
         active_encode_job = load_active_encode_job_for_prefix_fn(connection, normalized_prefix)
         encode_blocked = _validate_delivery_blocked_by_active_encode(active_encode_job)
@@ -158,8 +234,8 @@ def validate_folder_outputs_action(
         )
         if inaccessible_response is not None:
             return inaccessible_response
-        manifest = {"items": items}
-        results: list[dict[str, Any]] = []
+        manifest: ManifestPayload = {"items": items}
+        results: list[ActionPayload] = []
         for index in range(len(items)):
             try:
                 result = validate_manifest_items_fn(connection, config, manifest, [index])[0]
@@ -188,12 +264,12 @@ def promote_folder_outputs_action(
         config: MediaforceConfig,
         normalized_prefix: str,
         *,
-        load_active_encode_job_for_prefix_fn: Any | None = None,
-        load_folder_staged_items_fn: Any,
-        promote_manifest_items_fn: Any,
-) -> dict[str, Any]:
+        load_active_encode_job_for_prefix_fn: LoadActiveEncodeJobFn | None = None,
+        load_folder_staged_items_fn: LoadFolderStagedItemsFn,
+        promote_manifest_items_fn: PromoteManifestItemsFn,
+) -> ActionPayload:
     if load_active_encode_job_for_prefix_fn is None:
-        load_active_encode_job_for_prefix_fn = lambda *_args, **_kwargs: None
+        load_active_encode_job_for_prefix_fn = _no_active_encode_job
     with open_db(config.paths.db_path) as connection:
         active_encode_job = load_active_encode_job_for_prefix_fn(connection, normalized_prefix)
         encode_blocked = _validate_delivery_blocked_by_active_encode(active_encode_job)
@@ -217,7 +293,7 @@ def promote_folder_outputs_action(
         )
         if inaccessible_response is not None:
             return inaccessible_response
-        manifest = {"items": items}
+        manifest: ManifestPayload = {"items": items}
         promoted_paths = promote_manifest_items_fn(connection, config, manifest, list(range(len(items))), force=False)
     promoted_count = len(promoted_paths)
     file_label = "file" if promoted_count == 1 else "files"
@@ -230,10 +306,10 @@ def promote_folder_outputs_action(
 
 def _inaccessible_staged_item_response(
         *,
-        items: list[dict[str, Any]],
+        items: list[FolderItem],
         action: str,
         zero_count_key: str,
-) -> dict[str, Any] | None:
+) -> ActionPayload | None:
     inaccessible_items = [item for item in items if not Path(str(item.get("staging_path") or "")).exists()]
     if not inaccessible_items:
         return None
@@ -261,7 +337,7 @@ def _inaccessible_staged_item_response(
     return response
 
 
-def _build_manifest_shards(_config: MediaforceConfig, manifest: dict[str, Any]) -> list[list[int]]:
+def _build_manifest_shards(_config: MediaforceConfig, manifest: ManifestPayload) -> list[list[int]]:
     items = [object_dict(item) for item in object_list(manifest.get("items"))]
     if not items:
         return []
@@ -269,17 +345,17 @@ def _build_manifest_shards(_config: MediaforceConfig, manifest: dict[str, Any]) 
 
 
 def _recover_active_folder_encode_job(
-        connection: Any,
-        active_encode_job: dict[str, Any],
+        connection: DBClient,
+        active_encode_job: JobPayload,
         *,
         notes: str,
-        now_iso: Any,
-        prepare_terminal_encode_job_for_requeue_fn: Any,
-        save_encode_job: Any,
-) -> dict[str, Any] | None:
+        now_iso: NowIsoFn,
+        prepare_terminal_encode_job_for_requeue_fn: PrepareTerminalEncodeJobForRequeueFn,
+        save_encode_job: SaveEncodeJobFn,
+) -> ActionPayload | None:
     if str(active_encode_job.get("job_kind") or "single") != "folder":
         return None
-    recoverable_children: list[dict[str, Any]] = []
+    recoverable_children: list[JobPayload] = []
     recoverable_indexes: list[int] = []
     for child in _folder_recoverable_children(connection, str(active_encode_job.get("job_id") or "")):
         child_indexes = [index for index in object_list(child.get("manifest_indexes")) if isinstance(index, int)]
@@ -344,7 +420,7 @@ def _recover_active_folder_encode_job(
     }
 
 
-def _folder_recoverable_children(connection: Any, parent_job_id: str) -> list[dict[str, Any]]:
+def _folder_recoverable_children(connection: DBClient, parent_job_id: str) -> list[JobPayload]:
     if not parent_job_id:
         return []
     return [
@@ -354,7 +430,7 @@ def _folder_recoverable_children(connection: Any, parent_job_id: str) -> list[di
     ]
 
 
-def _validate_delivery_blocked_by_active_encode(active_encode_job: dict[str, Any] | None) -> dict[str, Any] | None:
+def _validate_delivery_blocked_by_active_encode(active_encode_job: JobPayload | None) -> ActionPayload | None:
     if not active_encode_job:
         return None
     status = str(active_encode_job.get("status") or "queued")
@@ -367,11 +443,11 @@ def _validate_delivery_blocked_by_active_encode(active_encode_job: dict[str, Any
 
 
 def _reset_stale_prefix_encoding_items_for_requeue(
-        connection: Any,
+        connection: DBClient,
         config: MediaforceConfig,
         prefix: str,
         *,
-        now_iso: Any,
+        now_iso: NowIsoFn,
 ) -> None:
     normalized_prefix = str(prefix).strip().strip("/")
     if not normalized_prefix:
@@ -424,7 +500,7 @@ def _prefix_descendant_path_pattern(prefix: str) -> str:
     return f"{escaped_prefix}/%"
 
 
-def _active_descendant_encode_prefixes(connection: Any, prefix: str) -> set[str]:
+def _active_descendant_encode_prefixes(connection: DBClient, prefix: str) -> set[str]:
     if not prefix:
         return set()
     descendant_pattern = _prefix_descendant_path_pattern(prefix)
@@ -457,15 +533,15 @@ def save_profile_action(
         config: MediaforceConfig,
         normalized_prefix: str,
         *,
-        now_iso: Any,
-        load_calibration_state: Any,
-        calibration_draft_hash: Any,
-        save_calibration_state: Any,
-        load_advice_state: Any,
-        record_visual_approval_artifact: Any,
-        merge_advice_state: Any,
-        upsert_override: Any,
-) -> dict[str, Any]:
+        now_iso: NowIsoFn,
+        load_calibration_state: LoadCalibrationStateFn,
+        calibration_draft_hash: CalibrationDraftHashFn,
+        save_calibration_state: SaveCalibrationStateFn,
+        load_advice_state: LoadAdviceStateFn,
+        record_visual_approval_artifact: RecordVisualApprovalArtifactFn,
+        merge_advice_state: MergeAdviceStateFn,
+        upsert_override: UpsertOverrideFn,
+) -> ActionPayload:
     calibration = load_calibration_state(config, normalized_prefix)
     if not calibration:
         raise HTTPException(status_code=400, detail="No draft calibration found for this folder")
