@@ -282,7 +282,9 @@ in this order:
 1. Global defaults
 2. Matching per-folder overrides from `config/folder-defaults.toml` in
    declaration order
-3. Runtime environment overrides from
+3. Matching operator-local folder overrides saved into
+   `~/Library/Application Support/mediaforce/runtime-settings.json`
+4. Runtime environment overrides from
    `~/Library/Application Support/mediaforce/runtime-settings.json`
 
 This first version intentionally does **not** silently skip codecs or folders.
@@ -296,6 +298,11 @@ you can see the storage win before promotion.
 
 Keep campaign tuning in [config/folder-defaults.toml](config/folder-defaults.toml).
 That file is where per-show or per-season starting policies should live.
+
+Bench-approved drafts are saved locally in runtime settings so future runs on
+that machine can reuse them without mutating the tracked repo defaults. If a
+bench-learned policy should become a shared starting point for everyone, copy it
+into `config/folder-defaults.toml` intentionally.
 
 Use the web Settings page for local libraries, the transcode folder, and remote
 host definitions so those environment details stay off the checked-in repo.

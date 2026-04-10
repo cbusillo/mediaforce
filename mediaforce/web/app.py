@@ -34,7 +34,7 @@ from mediaforce.advisor import (
 from mediaforce.tuning.calibration_jobs import load_active_job, load_job, \
     list_queue_summary
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, load_runtime_settings, \
-    save_runtime_settings
+    save_runtime_settings, upsert_runtime_folder_policy_override
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import calibration_jobs as calibration_jobs_table
@@ -1956,46 +1956,9 @@ def _clear_folder_tuning_state(
 
 
 def _upsert_override(file_path: Path, prefix: str, policy: ActionPayload) -> None:
-    content = file_path.read_text() if file_path.exists() else ""
-    block = _render_override_block(prefix, policy)
-    pattern = re.compile(
-        rf'\[\[overrides]]\npath_prefix = "{re.escape(prefix)}"\n.*?(?=\n\[\[overrides]]|\Z)',
-        re.DOTALL,
-    )
-    if pattern.search(content):
-        updated = pattern.sub(block.rstrip("\n"), content).rstrip() + "\n"
-    else:
-        updated = content.rstrip() + "\n\n" + block if content.strip() else block
-    file_path.write_text(updated)
-
-
-def _render_override_value(value: Any) -> str:
-    if isinstance(value, str):
-        return json.dumps(value)
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, list):
-        rendered_items = ", ".join(_render_override_value(item) for item in value)
-        return f"[{rendered_items}]"
-    if isinstance(value, dict):
-        rendered_items = ", ".join(
-            f"{key} = {_render_override_value(item)}" for key, item in value.items()
-        )
-        return f"{{ {rendered_items} }}"
-    return json.dumps(value)
-
-
-def _render_override_block(prefix: str, policy: dict[str, Any]) -> str:
-    lines = ["[[overrides]]", f'path_prefix = "{prefix}"', 'note = "Saved from the calibration bench."', ""]
-    for section in ("video", "audio", "subtitle", "planning"):
-        values = policy.get(section) or {}
-        if not values:
-            continue
-        lines.append(f"[overrides.{section}]")
-        for key, value in values.items():
-            lines.append(f"{key} = {_render_override_value(value)}")
-        lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
+    # Bench-saved profiles are local operator state, so persist them beside the
+    # runtime settings rather than mutating repo-tracked TOML defaults.
+    upsert_runtime_folder_policy_override(file_path, prefix, policy)
 
 
 def _now_iso() -> str:

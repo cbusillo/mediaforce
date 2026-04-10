@@ -27,7 +27,7 @@ from mediaforce.advisor import (
     request_note_tuning,
     request_run_verdict,
 )
-from mediaforce.core.config import ConfigPaths, MediaforceConfig
+from mediaforce.core.config import ConfigPaths, MediaforceConfig, load_config
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import calibration_jobs
 from mediaforce.core.db_tables import learning_artifacts
@@ -1373,20 +1373,26 @@ class TuningRuntimeTests(unittest.TestCase):
             web_app.CALIBRATION_QUEUE_PROCESSES.update(original_map)
             web_app.ENCODE_QUEUE_PROCESS = original_encode
 
-    def test_upsert_override_replaces_existing_matching_block(self) -> None:
-        override_file = self.root / "overrides.toml"
+    def test_upsert_override_replaces_existing_runtime_override(self) -> None:
+        override_file = self.root / "runtime-settings.json"
         override_file.write_text(
-            """[[overrides]]
-path_prefix = "tv/House/Season 2"
-note = "Old note"
-
-[overrides.video]
-target_xpsnr = 33.0
-
-[[overrides]]
-path_prefix = "tv/Other"
-note = "Keep me"
-"""
+            json.dumps(
+                {
+                    "remote_hosts": [{"key": "m4-studio"}],
+                    "folder_policy_overrides": [
+                        {
+                            "path_prefix": "tv/House/Season 2",
+                            "note": "Old note",
+                            "video": {"target_xpsnr": 33.0},
+                        },
+                        {
+                            "path_prefix": "tv/Other",
+                            "note": "Keep me",
+                            "planning": {"default_limit": 8},
+                        },
+                    ],
+                }
+            )
         )
 
         _upsert_override(
@@ -1395,15 +1401,18 @@ note = "Keep me"
             {"video": {"target_xpsnr": 34.5}, "audio": {"bitrate_kbps": 224}},
         )
 
-        updated = override_file.read_text()
-        self.assertEqual(updated.count('path_prefix = "tv/House/Season 2"'), 1)
-        self.assertIn('target_xpsnr = 34.5', updated)
-        self.assertIn('bitrate_kbps = 224', updated)
-        self.assertIn('path_prefix = "tv/Other"', updated)
-        self.assertNotIn('target_xpsnr = 33.0', updated)
+        updated = json.loads(override_file.read_text())
+        self.assertEqual(updated["remote_hosts"], [{"key": "m4-studio"}])
+        overrides = updated["folder_policy_overrides"]
+        self.assertEqual(len(overrides), 2)
+        self.assertEqual([item["path_prefix"] for item in overrides], ["tv/House/Season 2", "tv/Other"])
+        self.assertEqual(overrides[0]["video"]["target_xpsnr"], 34.5)
+        self.assertEqual(overrides[0]["audio"]["bitrate_kbps"], 224)
+        self.assertEqual(overrides[0]["note"], "Saved from the calibration bench.")
+        self.assertEqual(overrides[1]["planning"]["default_limit"], 8)
 
-    def test_upsert_override_renders_nested_planning_tables_as_valid_toml(self) -> None:
-        override_file = self.root / "overrides.toml"
+    def test_upsert_override_preserves_nested_planning_tables_in_runtime_settings(self) -> None:
+        override_file = self.root / "runtime-settings.json"
 
         _upsert_override(
             override_file,
@@ -1416,9 +1425,80 @@ note = "Keep me"
             },
         )
 
-        updated = override_file.read_text()
-        self.assertIn("bucket_thresholds = { priority_encode = 70, review_encode = 35 }", updated)
-        self.assertIn("codec_bonus = { av1 = -45, default = 18, h264 = 40 }", updated)
+        updated = json.loads(override_file.read_text())
+        planning = updated["folder_policy_overrides"][0]["planning"]
+        self.assertEqual(planning["bucket_thresholds"], {"priority_encode": 70, "review_encode": 35})
+        self.assertEqual(planning["codec_bonus"], {"av1": -45, "default": 18, "h264": 40})
+
+    def test_load_config_appends_local_folder_policy_overrides_after_tracked_defaults(self) -> None:
+        config_dir = self.root / "config"
+        config_dir.mkdir()
+        defaults_path = config_dir / "defaults.toml"
+        defaults_path.write_text(
+            """[config]
+include_files = ["folder-defaults.toml"]
+
+[state]
+db_path = "library.sqlite3"
+run_manifest_dir = "runs"
+web_state_dir = "web"
+review_dir = "review"
+runtime_settings_path = "runtime-settings.json"
+
+[media]
+staging_root = "staging"
+archive_root = "archive"
+output_container = "mkv"
+
+[media.source_roots]
+tv = "source/tv"
+
+[video]
+encoder = "libsvtav1"
+
+[audio]
+keep_languages = ["eng"]
+
+[subtitle]
+keep_languages = ["eng"]
+
+[planning]
+default_limit = 20
+
+[validation]
+require_size_reduction = true
+"""
+        )
+        (config_dir / "folder-defaults.toml").write_text(
+            """[[overrides]]
+path_prefix = "tv/House"
+note = "Tracked default"
+
+[overrides.video]
+target_xpsnr = 33.0
+"""
+        )
+        (self.root / "runtime-settings.json").write_text(
+            json.dumps(
+                {
+                    "folder_policy_overrides": [
+                        {
+                            "path_prefix": "tv/House/Season 2",
+                            "note": "Saved from the calibration bench.",
+                            "video": {"target_xpsnr": 35.5},
+                            "planning": {"default_limit": 12},
+                        }
+                    ]
+                }
+            )
+        )
+
+        loaded = load_config(defaults_path)
+
+        self.assertEqual([override["path_prefix"] for override in loaded.overrides], ["tv/House", "tv/House/Season 2"])
+        resolved = loaded.resolve_policy("tv/House/Season 2/Episode 1.mkv")
+        self.assertEqual(resolved["video"]["target_xpsnr"], 35.5)
+        self.assertEqual(resolved["planning"]["default_limit"], 12)
 
 
 if __name__ == "__main__":

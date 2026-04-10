@@ -118,7 +118,7 @@ def queue_folder_encode_action(
             raise HTTPException(status_code=400, detail=str(gate["message"]))
         if calibration is None:
             raise HTTPException(status_code=400, detail="Run a sampled calibration first.")
-        saved_profile_path = config.paths.config_path.parent / "folder-defaults.toml"
+        saved_profile_path = config.paths.runtime_settings_path
         calibration_payload = object_dict(calibration)
         upsert_override(saved_profile_path, normalized_prefix, calibration_payload["policy"])
         active_encode_job = load_active_encode_job_for_prefix_fn(connection, normalized_prefix)
@@ -583,7 +583,7 @@ def save_profile_action(
                     },
                 )
     upsert_override(
-        config.paths.config_path.parent / "folder-defaults.toml",
+        config.paths.runtime_settings_path,
         normalized_prefix,
         calibration_payload["policy"],
     )

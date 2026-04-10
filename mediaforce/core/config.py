@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "defaults.toml"
+FOLDER_POLICY_OVERRIDES_KEY = "folder_policy_overrides"
+BENCH_SAVED_OVERRIDE_NOTE = "Saved from the calibration bench."
 
 
 @dataclass(frozen=True)
@@ -143,7 +145,9 @@ def load_config(config_path: Path | None = None) -> MediaforceConfig:
     raw = _merge_optional_configs(raw, resolved_config_path.parent)
     project_root = resolved_config_path.parents[1]
     runtime_settings_path = _resolve_runtime_settings_path(project_root, raw["state"])
-    raw = _merge_runtime_settings(raw, runtime_settings_path)
+    runtime_settings = load_runtime_settings(runtime_settings_path)
+    raw = _merge_runtime_settings(raw, runtime_settings)
+    _merge_local_folder_policy_overrides(raw, runtime_settings)
 
     state = raw["state"]
     paths = ConfigPaths(
@@ -171,6 +175,26 @@ def load_runtime_settings(path: Path) -> dict[str, Any]:
 def save_runtime_settings(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def upsert_runtime_folder_policy_override(path: Path, prefix: str, policy: dict[str, Any]) -> None:
+    runtime_settings = load_runtime_settings(path)
+    overrides = _normalize_folder_policy_overrides(runtime_settings.get(FOLDER_POLICY_OVERRIDES_KEY))
+    override_payload = _build_folder_policy_override(prefix, policy)
+
+    updated_overrides: list[dict[str, Any]] = []
+    replaced = False
+    for existing in overrides:
+        if str(existing.get("path_prefix", "")).strip("/") == prefix.strip("/"):
+            updated_overrides.append(override_payload)
+            replaced = True
+            continue
+        updated_overrides.append(existing)
+    if not replaced:
+        updated_overrides.append(override_payload)
+
+    runtime_settings[FOLDER_POLICY_OVERRIDES_KEY] = updated_overrides
+    save_runtime_settings(path, runtime_settings)
 
 
 def _migrate_project_state(project_root: Path, paths: ConfigPaths) -> None:
@@ -255,13 +279,49 @@ def _merge_optional_configs(base: dict[str, Any], config_dir: Path) -> dict[str,
     return merged
 
 
-def _merge_runtime_settings(base: dict[str, Any], runtime_settings_path: Path) -> dict[str, Any]:
-    payload = load_runtime_settings(runtime_settings_path)
+def _merge_runtime_settings(base: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     if not payload:
         return base
     merged = copy.deepcopy(base)
     _deep_merge(merged, payload, extend_lists=False)
     return merged
+
+
+def _merge_local_folder_policy_overrides(base: dict[str, Any], runtime_settings: dict[str, Any]) -> None:
+    overrides = _normalize_folder_policy_overrides(runtime_settings.get(FOLDER_POLICY_OVERRIDES_KEY))
+    if not overrides:
+        return
+    existing_overrides = base.get("overrides")
+    if not isinstance(existing_overrides, list):
+        base["overrides"] = copy.deepcopy(overrides)
+        return
+    existing_overrides.extend(copy.deepcopy(overrides))
+
+
+def _normalize_folder_policy_overrides(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        prefix = str(item.get("path_prefix") or "").strip("/")
+        if not prefix:
+            continue
+        normalized.append(_build_folder_policy_override(prefix, item))
+    return normalized
+
+
+def _build_folder_policy_override(prefix: str, policy: dict[str, Any]) -> dict[str, Any]:
+    override: dict[str, Any] = {
+        "path_prefix": prefix.strip("/"),
+        "note": BENCH_SAVED_OVERRIDE_NOTE,
+    }
+    for section in ("video", "audio", "subtitle", "planning"):
+        values = policy.get(section)
+        if isinstance(values, dict) and values:
+            override[section] = copy.deepcopy(values)
+    return override
 
 
 def _resolve_runtime_settings_path(project_root: Path, state: dict[str, Any]) -> Path:
