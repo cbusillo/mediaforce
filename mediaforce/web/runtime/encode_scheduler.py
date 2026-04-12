@@ -6,6 +6,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 
+SCHEDULE_DAY_ORDER = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
 
 @dataclass(slots=True)
 class EncodeSchedulerDeps:
@@ -122,6 +124,19 @@ def scheduler_allows_encode_run(
             local_now = current.astimezone(ZoneInfo(timezone_name))
         except ZoneInfoNotFoundError:
             local_now = current.astimezone()
+    current_day = SCHEDULE_DAY_ORDER[local_now.weekday()]
+    full_day_days = [
+        day
+        for day in object_list(policy.get("all_day_days_of_week"))
+        if str(day).strip().lower() in SCHEDULE_DAY_ORDER
+    ]
+    if current_day in full_day_days:
+        return True
+    allowed_days = [
+        day for day in object_list(policy.get("days_of_week")) if str(day).strip().lower() in SCHEDULE_DAY_ORDER
+    ]
+    if not allowed_days and full_day_days:
+        return False
     start_hour_value = policy.get("start_hour")
     if start_hour_value is None:
         start_hour_value = deps.default_scheduler_policy["start_hour"]
@@ -131,8 +146,22 @@ def scheduler_allows_encode_run(
     start_hour = int(str(start_hour_value))
     end_hour = int(str(end_hour_value))
     if start_hour == end_hour:
+        if allowed_days and current_day not in allowed_days:
+            return False
         return True
     current_hour = local_now.hour
+    if allowed_days:
+        if start_hour < end_hour and current_day not in allowed_days:
+            return False
+        if start_hour > end_hour:
+            if current_hour >= start_hour and current_day not in allowed_days:
+                return False
+            if current_hour < end_hour:
+                previous_day = SCHEDULE_DAY_ORDER[(local_now.weekday() - 1) % len(SCHEDULE_DAY_ORDER)]
+                if previous_day not in allowed_days:
+                    return False
+            if end_hour <= current_hour < start_hour:
+                return False
     if start_hour < end_hour:
         return start_hour <= current_hour < end_hour
     return current_hour >= start_hour or current_hour < end_hour
