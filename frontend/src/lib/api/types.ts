@@ -13,6 +13,8 @@ export interface FolderCard {
 	pending_count: number;
 	total_size_bytes: number;
 	estimated_savings_bytes: number;
+	known_saved_bytes: number;
+	projected_reclaim_bytes: number;
 	average_age_days: number;
 	sort_score: number;
 	statuses: Record<string, number>;

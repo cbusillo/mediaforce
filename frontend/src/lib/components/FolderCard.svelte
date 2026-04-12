@@ -28,6 +28,7 @@
 	const cardThemeStyle = $derived(folderLibraryThemeStyle(libraryColor));
 	const reviewBadgeTone = $derived(folder.review_badge_tone ?? 'neutral');
 	const progressVisible = $derived(completedCount > 0 && completedCount < folder.item_count);
+	const displayedProjectedReclaimBytes = $derived(folder.projected_reclaim_bytes);
 	const folderStateCopy = $derived.by(() => {
 		if (completedCount === 0) {
 			return `${folder.item_count} ${folder.item_count === 1 ? 'item' : 'items'} waiting`;
@@ -50,7 +51,7 @@
 		return 'Open studio';
 	});
 	const folderFacts = $derived.by(() => [
-		{ label: 'Estimated reclaim', value: formatGiB(folder.estimated_savings_bytes) },
+		{ label: 'Projected reclaim', value: formatGiB(displayedProjectedReclaimBytes) },
 		{ label: 'Current size', value: formatGiB(folder.total_size_bytes, 2) }
 	]);
 	const secondaryMetaCopy = $derived.by(() => {
@@ -103,7 +104,7 @@
 
 			<div class="fact-grid" aria-label={`${folder.title} details`}>
 				{#each folderFacts as fact (fact.label)}
-					<div class={`fact-card ${fact.label === 'Estimated reclaim' ? 'highlight' : ''}`.trim()}>
+					<div class={`fact-card ${fact.label === 'Projected reclaim' ? 'highlight' : ''}`.trim()}>
 						<p class="fact-label">{fact.label}</p>
 						<p class="fact-value">{fact.value}</p>
 					</div>

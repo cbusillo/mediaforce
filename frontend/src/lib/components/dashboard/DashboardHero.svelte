@@ -9,14 +9,14 @@
 
 	let {
 		foldersCount,
-		totalEstimatedSavings,
+		totalProjectedReclaim,
 		heroFacts,
 		metricsReady,
 		metricSupport,
 		metricStatusCopy
 	}: {
 		foldersCount: number;
-		totalEstimatedSavings: number;
+		totalProjectedReclaim: number;
 		heroFacts: HeroFact[];
 		metricsReady: boolean;
 		metricSupport: DashboardSummaryPayload['metric_support'];
@@ -28,7 +28,7 @@
 	{#snippet copy()}
 		<SectionHead
 			eyebrow="Current Strategy"
-			heading={`${foldersCount} folders ready for tuning with ${formatGiB(totalEstimatedSavings, 0)} on the table.`}
+			heading={`${foldersCount} folders ready for tuning with ${formatGiB(totalProjectedReclaim, 0)} projected.`}
 			lede="Start with the biggest reclaim, validate with a sample, then send the full folder only when the draft looks right."
 			size="display"
 		/>

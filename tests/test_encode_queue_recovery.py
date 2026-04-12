@@ -43,6 +43,7 @@ from mediaforce.web import settings_runtime
 from mediaforce.web.runtime import dashboard_payloads, encode_runtime, folder_actions as folder_actions_runtime, \
     host_runtime as host_runtime_module, job_runtime, queue_actions as queue_actions_runtime, \
     calibration_runtime
+from mediaforce.web.runtime import folder_cards as folder_cards_runtime
 
 
 class EncodeQueueRecoveryTests(unittest.TestCase):
@@ -1346,6 +1347,95 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(card.statuses["validated"], 1)
         self.assertEqual(card.statuses["promoted"], 1)
 
+    def test_folder_cards_projected_reclaim_uses_known_validated_savings(self) -> None:
+        validated = self._create_source_file("episode-validated.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            validated_id = self._insert_library_item(connection, validated, status="validated")
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == validated_id)
+                .values(
+                    size_bytes=2 * 1024 * 1024 * 1024,
+                    rel_path=f"tv/show/Season 5/{validated.name}",
+                    parent_dir="tv/show/Season 5",
+                    video_codec="h264",
+                )
+            )
+            self._insert_staged_artifact(connection, validated_id, self._staging_path(validated.name))
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == validated_id)
+                .values(
+                    source_rel_path=f"tv/show/Season 5/{validated.name}",
+                    source_video_codec="h264",
+                    source_size_bytes=2 * 1024 * 1024 * 1024,
+                    bytes_saved=int(1.5 * 1024 * 1024 * 1024),
+                )
+            )
+
+            cards = web_app._list_folder_cards(self.config, connection)
+
+        matching_cards = [card for card in cards if card.prefix == "tv/show/Season 5"]
+        self.assertEqual(len(matching_cards), 1)
+        self.assertEqual(matching_cards[0].estimated_savings_bytes, 0)
+        self.assertEqual(matching_cards[0].known_saved_bytes, int(1.5 * 1024 * 1024 * 1024))
+        self.assertEqual(matching_cards[0].projected_reclaim_bytes, int(1.5 * 1024 * 1024 * 1024))
+
+    def test_folder_cards_use_validated_samples_in_history_for_pending_items(self) -> None:
+        pending = self._create_source_file("episode-pending.mkv")
+        validated_one = self._create_source_file("episode-validated-one.mkv")
+        validated_two = self._create_source_file("episode-validated-two.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            pending_id = self._insert_library_item(connection, pending)
+            validated_one_id = self._insert_library_item(connection, validated_one, status="validated")
+            validated_two_id = self._insert_library_item(connection, validated_two, status="encoded")
+            for item_id, name, status in (
+                (pending_id, pending.name, "planned"),
+                (validated_one_id, validated_one.name, "validated"),
+                (validated_two_id, validated_two.name, "encoded"),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(
+                        size_bytes=2 * 1024 * 1024 * 1024,
+                        rel_path=f"tv/show/Season 6/{name}",
+                        parent_dir="tv/show/Season 6",
+                        video_codec="h264",
+                        status=status,
+                    )
+                )
+
+            for item_id, name, bytes_saved in (
+                (validated_one_id, validated_one.name, int(1.5 * 1024 * 1024 * 1024)),
+                (validated_two_id, validated_two.name, int(1.0 * 1024 * 1024 * 1024)),
+            ):
+                self._insert_staged_artifact(connection, item_id, self._staging_path(name))
+                connection.execute(
+                    update(staged_artifacts)
+                    .where(staged_artifacts.c.library_item_id == item_id)
+                    .values(
+                        source_rel_path=f"tv/show/Season 6/{name}",
+                        source_video_codec="h264",
+                        source_size_bytes=2 * 1024 * 1024 * 1024,
+                        bytes_saved=bytes_saved,
+                    )
+                )
+
+            with patch.object(web_app, "_estimate_savings_bytes", autospec=True, return_value=0):
+                cards = web_app._list_folder_cards(self.config, connection)
+
+        matching_cards = [card for card in cards if card.prefix == "tv/show/Season 6"]
+        self.assertEqual(len(matching_cards), 1)
+        self.assertEqual(matching_cards[0].known_saved_bytes, int(2.5 * 1024 * 1024 * 1024))
+        self.assertGreater(matching_cards[0].estimated_savings_bytes, int(1.0 * 1024 * 1024 * 1024))
+        self.assertEqual(
+            matching_cards[0].projected_reclaim_bytes,
+            matching_cards[0].known_saved_bytes + matching_cards[0].estimated_savings_bytes,
+        )
+
     def test_folder_cards_use_folder_history_to_adjust_estimated_reclaim(self) -> None:
         pending = self._create_source_file("episode-pending.mkv")
         promoted_one = self._create_source_file("episode-promoted-one.mkv")
@@ -1390,6 +1480,118 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 1"]
         self.assertEqual(len(matching_cards), 1)
         self.assertEqual(matching_cards[0].estimated_savings_bytes, int(1.5 * 1024 * 1024 * 1024))
+        self.assertEqual(matching_cards[0].known_saved_bytes, 0)
+        self.assertEqual(matching_cards[0].projected_reclaim_bytes, int(1.5 * 1024 * 1024 * 1024))
+
+    def test_folder_cards_do_not_count_promoted_savings_toward_projected_reclaim_threshold(self) -> None:
+        pending = self._create_source_file("episode-pending.mkv")
+        promoted = self._create_source_file("episode-promoted.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            pending_id = self._insert_library_item(connection, pending)
+            promoted_id = self._insert_library_item(connection, promoted, status="promoted")
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == pending_id)
+                .values(
+                    size_bytes=2 * 1024 * 1024 * 1024,
+                    rel_path=f"tv/show/Season 7/{pending.name}",
+                    parent_dir="tv/show/Season 7",
+                    video_codec=None,
+                )
+            )
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == promoted_id)
+                .values(
+                    size_bytes=2 * 1024 * 1024 * 1024,
+                    rel_path=f"tv/show/Season 7/{promoted.name}",
+                    parent_dir="tv/show/Season 7",
+                    video_codec=None,
+                )
+            )
+
+            self._insert_staged_artifact(connection, promoted_id, self._staging_path(promoted.name))
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == promoted_id)
+                .values(
+                    promoted_at=web_app._now_iso(),
+                    source_rel_path=f"tv/show/Season 7/{promoted.name}",
+                    source_size_bytes=2 * 1024 * 1024 * 1024,
+                    bytes_saved=int(1.5 * 1024 * 1024 * 1024),
+                )
+            )
+
+            with patch.object(
+                    web_app,
+                    "_estimate_savings_bytes",
+                    autospec=True,
+                    return_value=50 * 1024 * 1024,
+            ):
+                cards = web_app._list_folder_cards(self.config, connection)
+
+        self.assertEqual([card for card in cards if card.prefix == "tv/show/Season 7"], [])
+
+    def test_cached_folder_cards_recomputes_after_reset_during_cache_miss(self) -> None:
+        folder_cards_runtime.reset_folder_card_cache()
+
+        stale_card = folder_cards_runtime.FolderCard(
+            prefix="tv/show/Season 8",
+            title="Season 8",
+            subtitle="TV",
+            scope_label="Season",
+            item_count=1,
+            pending_count=1,
+            total_size_bytes=2 * 1024 * 1024 * 1024,
+            estimated_savings_bytes=200 * 1024 * 1024,
+            known_saved_bytes=0,
+            projected_reclaim_bytes=200 * 1024 * 1024,
+            average_age_days=10.0,
+            sort_score=0.2,
+            statuses={"planned": 1},
+            video_codecs={"h264": 1},
+        )
+        fresh_card = folder_cards_runtime.FolderCard(
+            prefix="tv/show/Season 9",
+            title="Season 9",
+            subtitle="TV",
+            scope_label="Season",
+            item_count=1,
+            pending_count=1,
+            total_size_bytes=3 * 1024 * 1024 * 1024,
+            estimated_savings_bytes=300 * 1024 * 1024,
+            known_saved_bytes=0,
+            projected_reclaim_bytes=300 * 1024 * 1024,
+            average_age_days=20.0,
+            sort_score=0.3,
+            statuses={"planned": 1},
+            video_codecs={"h264": 1},
+        )
+        calls = {"count": 0}
+
+        def fake_list_folder_cards(*args: Any, **kwargs: Any) -> list[folder_cards_runtime.FolderCard]:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                folder_cards_runtime.reset_folder_card_cache()
+                return [stale_card]
+            return [fresh_card]
+
+        with patch.object(folder_cards_runtime, "folder_card_cache_key", return_value=("cache", 1, 1)):
+            with patch.object(folder_cards_runtime, "list_folder_cards", side_effect=fake_list_folder_cards):
+                cards = folder_cards_runtime.cached_folder_cards(
+                    self.config,
+                    Mock(),
+                    minimum_recommended_savings_bytes=100 * 1024 * 1024,
+                    folder_group=Mock(),
+                    age_days=Mock(),
+                    estimate_savings_bytes=Mock(),
+                    review_badge_for_prefix=Mock(return_value={"label": None, "tone": None}),
+                )
+
+        self.assertEqual(calls["count"], 2)
+        self.assertEqual([card.prefix for card in cards], [fresh_card.prefix])
+        folder_cards_runtime.reset_folder_card_cache()
 
     def test_folder_cards_require_multiple_labeled_samples_before_using_folder_history(self) -> None:
         pending = self._create_source_file("episode-pending.mkv")

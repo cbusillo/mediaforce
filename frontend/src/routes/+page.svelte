@@ -96,12 +96,6 @@
 	});
 	const libraryColors = $derived(dashboard.library_colors ?? {});
 	const LIBRARY_FILTER_STORAGE_KEY = 'mediaforce.dashboard.disabledLibraries';
-	const totalEstimatedSavings = $derived.by(() =>
-		folders.reduce((total, folder) => total + folder.estimated_savings_bytes, 0)
-	);
-	const foldersPending = $derived.by(() =>
-		folders.reduce((total, folder) => total + folder.pending_count, 0)
-	);
 	const readyHosts = $derived.by(() => hosts.hosts.filter((host) => host.queue_active).length);
 	const pendingReviewCount = $derived.by(
 		() =>
@@ -154,11 +148,6 @@
 					}
 				]
 			: [])
-	]);
-	const heroFacts = $derived.by(() => [
-		{ label: 'Top folders', value: String(folders.length) },
-		{ label: 'Pending items', value: String(foldersPending) },
-		{ label: 'Potential reclaim', value: formatGiB(totalEstimatedSavings, 1) }
 	]);
 	const metricsReady = $derived(
 		dashboard.metric_support.vmaf && dashboard.metric_support.xpsnr && dashboard.metric_support.ssim
@@ -241,6 +230,17 @@
 	const visibleFolders = $derived.by(() =>
 		folders.filter((folder) => !disabledLibraries.includes(folderLibraryKey(folder.prefix)))
 	);
+	const totalProjectedReclaim = $derived.by(() =>
+		visibleFolders.reduce((total, folder) => total + folder.projected_reclaim_bytes, 0)
+	);
+	const foldersPending = $derived.by(() =>
+		visibleFolders.reduce((total, folder) => total + folder.pending_count, 0)
+	);
+	const heroFacts = $derived.by(() => [
+		{ label: 'Top folders', value: String(visibleFolders.length) },
+		{ label: 'Pending items', value: String(foldersPending) },
+		{ label: 'Projected reclaim', value: formatGiB(totalProjectedReclaim, 1) }
+	]);
 	const libraryFiltersActive = $derived(disabledLibraries.length > 0);
 	const availableLibraryKeys = $derived.by(() => folderLibraries.map((library) => library.key));
 	const filterHintCopy = $derived(
@@ -542,8 +542,8 @@
 	{/if}
 
 	<DashboardHero
-		foldersCount={folders.length}
-		{totalEstimatedSavings}
+		foldersCount={visibleFolders.length}
+		{totalProjectedReclaim}
 		{heroFacts}
 		{metricsReady}
 		metricSupport={dashboard.metric_support}

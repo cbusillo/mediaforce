@@ -23,6 +23,8 @@ class FolderCard:
     pending_count: int
     total_size_bytes: int
     estimated_savings_bytes: int
+    known_saved_bytes: int
+    projected_reclaim_bytes: int
     average_age_days: float
     sort_score: float
     statuses: dict[str, int]
@@ -76,6 +78,7 @@ class SavingsHistory:
 _FOLDER_CARD_CACHE_LOCK = threading.Lock()
 _FOLDER_CARD_CACHE_KEY: tuple[str, int, int] | None = None
 _FOLDER_CARD_CACHE_VALUE: list[FolderCard] = []
+_FOLDER_CARD_CACHE_GENERATION = 0
 
 
 def cached_folder_cards(
@@ -88,30 +91,38 @@ def cached_folder_cards(
         estimate_savings_bytes: Callable[..., int],
         review_badge_for_prefix: Callable[[str], FolderBadge],
 ) -> list[FolderCard]:
-    global _FOLDER_CARD_CACHE_KEY, _FOLDER_CARD_CACHE_VALUE
+    global _FOLDER_CARD_CACHE_KEY, _FOLDER_CARD_CACHE_VALUE, _FOLDER_CARD_CACHE_GENERATION
 
-    cache_key = folder_card_cache_key(config)
-    with _FOLDER_CARD_CACHE_LOCK:
-        if _FOLDER_CARD_CACHE_KEY == cache_key:
-            return list(_FOLDER_CARD_CACHE_VALUE)
-    cards = list_folder_cards(
-        connection,
-        minimum_recommended_savings_bytes=minimum_recommended_savings_bytes,
-        folder_group=folder_group,
-        age_days=age_days,
-        estimate_savings_bytes=estimate_savings_bytes,
-        review_badge_for_prefix=review_badge_for_prefix,
-    )
-    with _FOLDER_CARD_CACHE_LOCK:
-        _FOLDER_CARD_CACHE_KEY = cache_key
-        _FOLDER_CARD_CACHE_VALUE = list(cards)
-    return cards
+    while True:
+        cache_key = folder_card_cache_key(config)
+        with _FOLDER_CARD_CACHE_LOCK:
+            cache_generation = _FOLDER_CARD_CACHE_GENERATION
+            if _FOLDER_CARD_CACHE_KEY == cache_key:
+                return list(_FOLDER_CARD_CACHE_VALUE)
+        cards = list_folder_cards(
+            connection,
+            minimum_recommended_savings_bytes=minimum_recommended_savings_bytes,
+            folder_group=folder_group,
+            age_days=age_days,
+            estimate_savings_bytes=estimate_savings_bytes,
+            review_badge_for_prefix=review_badge_for_prefix,
+        )
+        with _FOLDER_CARD_CACHE_LOCK:
+            current_cache_key = folder_card_cache_key(config)
+            if cache_generation != _FOLDER_CARD_CACHE_GENERATION or cache_key != current_cache_key:
+                continue
+            if _FOLDER_CARD_CACHE_KEY == cache_key:
+                return list(_FOLDER_CARD_CACHE_VALUE)
+            _FOLDER_CARD_CACHE_KEY = cache_key
+            _FOLDER_CARD_CACHE_VALUE = list(cards)
+            return cards
 
 
 def reset_folder_card_cache() -> None:
-    global _FOLDER_CARD_CACHE_KEY, _FOLDER_CARD_CACHE_VALUE
+    global _FOLDER_CARD_CACHE_KEY, _FOLDER_CARD_CACHE_VALUE, _FOLDER_CARD_CACHE_GENERATION
 
     with _FOLDER_CARD_CACHE_LOCK:
+        _FOLDER_CARD_CACHE_GENERATION += 1
         _FOLDER_CARD_CACHE_KEY = None
         _FOLDER_CARD_CACHE_VALUE = []
 
@@ -132,6 +143,13 @@ def preview_folder_cards(
             library_items.c.status,
             library_items.c.video_codec,
             library_items.c.audio_summary_json,
+            staged_artifacts.c.bytes_saved,
+        )
+        .select_from(
+            library_items.outerjoin(
+                staged_artifacts,
+                staged_artifacts.c.library_item_id == library_items.c.id,
+            )
         )
         .where(library_items.c.status != "missing")
         .order_by(library_items.c.rel_path)
@@ -154,6 +172,8 @@ def preview_folder_cards(
                 pending_count=0,
                 total_size_bytes=0,
                 estimated_savings_bytes=0,
+                known_saved_bytes=0,
+                projected_reclaim_bytes=0,
                 average_age_days=0.0,
                 sort_score=0.0,
                 statuses={},
@@ -166,25 +186,31 @@ def preview_folder_cards(
         card.total_size_bytes += size_bytes
         status = str(row["status"] or "unknown")
         codec = str(row["video_codec"] or "unknown")
+        known_saved_bytes = _pending_folder_item_savings_bytes(status=status, bytes_saved=row["bytes_saved"])
+        if known_saved_bytes is not None:
+            card.known_saved_bytes += known_saved_bytes
         if status != "promoted":
             card.pending_count += 1
-            card.estimated_savings_bytes += _estimated_pending_savings_bytes(
-                size_bytes=size_bytes,
-                video_codec=codec,
-                audio_summary_json=str(row["audio_summary_json"] or "[]"),
-                estimate_savings_bytes=estimate_savings_bytes,
-                folder_history=folder_history.get(prefix),
-                codec_history=codec_history.get(_canonical_video_codec(codec)),
-            )
+            if known_saved_bytes is None:
+                card.estimated_savings_bytes += _estimated_pending_savings_bytes(
+                    size_bytes=size_bytes,
+                    video_codec=codec,
+                    audio_summary_json=str(row["audio_summary_json"] or "[]"),
+                    estimate_savings_bytes=estimate_savings_bytes,
+                    folder_history=folder_history.get(prefix),
+                    codec_history=codec_history.get(_canonical_video_codec(codec)),
+                )
         card.statuses[status] = card.statuses.get(status, 0) + 1
         card.video_codecs[codec] = card.video_codecs.get(codec, 0) + 1
+    for card in grouped.values():
+        card.projected_reclaim_bytes = card.known_saved_bytes + card.estimated_savings_bytes
     cards = [
         card
         for card in grouped.values()
-        if card.pending_count > 0 and card.estimated_savings_bytes >= minimum_recommended_savings_bytes
+        if card.pending_count > 0 and card.projected_reclaim_bytes >= minimum_recommended_savings_bytes
     ]
     _apply_folder_review_badges(cards, review_badge_for_prefix)
-    return sorted(cards, key=lambda item: (item.estimated_savings_bytes, item.total_size_bytes), reverse=True)
+    return sorted(cards, key=lambda item: (item.projected_reclaim_bytes, item.total_size_bytes), reverse=True)
 
 
 def list_folder_cards(
@@ -205,6 +231,13 @@ def list_folder_cards(
             library_items.c.status,
             library_items.c.video_codec,
             library_items.c.audio_summary_json,
+            staged_artifacts.c.bytes_saved,
+        )
+        .select_from(
+            library_items.outerjoin(
+                staged_artifacts,
+                staged_artifacts.c.library_item_id == library_items.c.id,
+            )
         )
         .where(library_items.c.status != "missing")
         .order_by(library_items.c.rel_path)
@@ -227,6 +260,8 @@ def list_folder_cards(
                 pending_count=0,
                 total_size_bytes=0,
                 estimated_savings_bytes=0,
+                known_saved_bytes=0,
+                projected_reclaim_bytes=0,
                 average_age_days=0.0,
                 sort_score=0.0,
                 statuses={},
@@ -240,33 +275,39 @@ def list_folder_cards(
         card.average_age_days += path_age_days
         status = str(row["status"] or "unknown")
         codec = str(row["video_codec"] or "unknown")
+        known_saved_bytes = _pending_folder_item_savings_bytes(status=status, bytes_saved=row["bytes_saved"])
+        age_multiplier = _age_multiplier(path_age_days)
+        if known_saved_bytes is not None:
+            card.known_saved_bytes += known_saved_bytes
+            card.sort_score += (known_saved_bytes / (1024 ** 3)) * age_multiplier
         if status != "promoted":
-            estimated_savings = _estimated_pending_savings_bytes(
-                size_bytes=size_bytes,
-                video_codec=codec,
-                audio_summary_json=str(row["audio_summary_json"] or "[]"),
-                estimate_savings_bytes=estimate_savings_bytes,
-                folder_history=folder_history.get(prefix),
-                codec_history=codec_history.get(_canonical_video_codec(codec)),
-            )
-            age_multiplier = _age_multiplier(path_age_days)
             card.pending_count += 1
-            card.estimated_savings_bytes += estimated_savings
-            card.sort_score += (estimated_savings / (1024 ** 3)) * age_multiplier
+            if known_saved_bytes is None:
+                estimated_savings = _estimated_pending_savings_bytes(
+                    size_bytes=size_bytes,
+                    video_codec=codec,
+                    audio_summary_json=str(row["audio_summary_json"] or "[]"),
+                    estimate_savings_bytes=estimate_savings_bytes,
+                    folder_history=folder_history.get(prefix),
+                    codec_history=codec_history.get(_canonical_video_codec(codec)),
+                )
+                card.estimated_savings_bytes += estimated_savings
+                card.sort_score += (estimated_savings / (1024 ** 3)) * age_multiplier
         card.statuses[status] = card.statuses.get(status, 0) + 1
         card.video_codecs[codec] = card.video_codecs.get(codec, 0) + 1
     cards = list(grouped.values())
     for card in cards:
         card.average_age_days = round(card.average_age_days / max(card.item_count, 1), 1)
+        card.projected_reclaim_bytes = card.known_saved_bytes + card.estimated_savings_bytes
     cards = [
         card
         for card in cards
-        if card.pending_count > 0 and card.estimated_savings_bytes >= minimum_recommended_savings_bytes
+        if card.pending_count > 0 and card.projected_reclaim_bytes >= minimum_recommended_savings_bytes
     ]
     _apply_folder_review_badges(cards, review_badge_for_prefix)
     return sorted(
         cards,
-        key=lambda item: (item.sort_score, item.estimated_savings_bytes, item.total_size_bytes),
+        key=lambda item: (item.sort_score, item.projected_reclaim_bytes, item.total_size_bytes),
         reverse=True,
     )
 
@@ -311,6 +352,7 @@ def _load_savings_history(
     rows = connection.execute(
         select(
             library_items.c.rel_path,
+            library_items.c.status,
             staged_artifacts.c.source_rel_path,
             staged_artifacts.c.source_video_codec,
             staged_artifacts.c.source_size_bytes,
@@ -322,7 +364,7 @@ def _load_savings_history(
                 staged_artifacts.c.library_item_id == library_items.c.id,
             )
         )
-        .where(staged_artifacts.c.promoted_at.is_not(None))
+        .where(library_items.c.status.in_(("encoded", "validated", "promoted")))
         .where(staged_artifacts.c.source_size_bytes.is_not(None))
         .where(staged_artifacts.c.bytes_saved.is_not(None))
     ).mappings().fetchall()
@@ -367,6 +409,14 @@ def _estimated_pending_savings_bytes(
         video_codec=video_codec,
         audio_summary_json=audio_summary_json,
     )
+
+
+def _pending_folder_item_savings_bytes(*, status: str, bytes_saved: object) -> int | None:
+    if status not in {"encoded", "validated"}:
+        return None
+    if bytes_saved is None:
+        return None
+    return int(bytes_saved)
 
 
 def _folder_history_matches_pending_codec(history: SavingsHistory | None, pending_codec: str) -> bool:
