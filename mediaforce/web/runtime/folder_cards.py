@@ -210,7 +210,15 @@ def preview_folder_cards(
         if card.pending_count > 0 and card.projected_reclaim_bytes >= minimum_recommended_savings_bytes
     ]
     _apply_folder_review_badges(cards, review_badge_for_prefix)
-    return sorted(cards, key=lambda item: (item.projected_reclaim_bytes, item.total_size_bytes), reverse=True)
+    return sorted(
+        cards,
+        key=lambda item: (
+            item.estimated_savings_bytes,
+            item.projected_reclaim_bytes,
+            item.total_size_bytes,
+        ),
+        reverse=True,
+    )
 
 
 def list_folder_cards(
@@ -276,13 +284,12 @@ def list_folder_cards(
         status = str(row["status"] or "unknown")
         codec = str(row["video_codec"] or "unknown")
         known_saved_bytes = _pending_folder_item_savings_bytes(status=status, bytes_saved=row["bytes_saved"])
-        age_multiplier = _age_multiplier(path_age_days)
         if known_saved_bytes is not None:
             card.known_saved_bytes += known_saved_bytes
-            card.sort_score += (known_saved_bytes / (1024 ** 3)) * age_multiplier
         if status != "promoted":
             card.pending_count += 1
             if known_saved_bytes is None:
+                age_multiplier = _age_multiplier(path_age_days)
                 estimated_savings = _estimated_pending_savings_bytes(
                     size_bytes=size_bytes,
                     video_codec=codec,
@@ -307,7 +314,11 @@ def list_folder_cards(
     _apply_folder_review_badges(cards, review_badge_for_prefix)
     return sorted(
         cards,
-        key=lambda item: (item.sort_score, item.projected_reclaim_bytes, item.total_size_bytes),
+        key=lambda item: (
+            item.sort_score,
+            item.projected_reclaim_bytes,
+            item.total_size_bytes,
+        ),
         reverse=True,
     )
 

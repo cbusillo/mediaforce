@@ -1382,6 +1382,206 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(matching_cards[0].known_saved_bytes, int(1.5 * 1024 * 1024 * 1024))
         self.assertEqual(matching_cards[0].projected_reclaim_bytes, int(1.5 * 1024 * 1024 * 1024))
 
+    def test_preview_folder_cards_rank_by_pending_opportunity(self) -> None:
+        season_a_pending = self._create_source_file("season-a-pending.mkv")
+        season_a_promoted = self._create_source_file("season-a-promoted.mkv")
+        season_b_pending = self._create_source_file("season-b-pending.mkv")
+        season_b_validated = self._create_source_file("season-b-validated.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            season_a_pending_id = self._insert_library_item(connection, season_a_pending)
+            season_a_promoted_id = self._insert_library_item(connection, season_a_promoted, status="promoted")
+            season_b_pending_id = self._insert_library_item(connection, season_b_pending)
+            season_b_validated_id = self._insert_library_item(connection, season_b_validated, status="validated")
+
+            for item_id, rel_path, status in (
+                (season_a_pending_id, "tv/show/Season A/season-a-pending.mkv", "planned"),
+                (season_a_promoted_id, "tv/show/Season A/season-a-promoted.mkv", "promoted"),
+                (season_b_pending_id, "tv/show/Season B/season-b-pending.mkv", "planned"),
+                (season_b_validated_id, "tv/show/Season B/season-b-validated.mkv", "validated"),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(
+                        size_bytes=1 * 1024 * 1024 * 1024,
+                        rel_path=rel_path,
+                        parent_dir=rel_path.rsplit("/", 1)[0],
+                        status=status,
+                    )
+                )
+
+            self._insert_staged_artifact(connection, season_b_validated_id, self._staging_path(season_b_validated.name))
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == season_b_validated_id)
+                .values(
+                    source_rel_path="tv/show/Season B/season-b-validated.mkv",
+                    source_video_codec="h264",
+                    source_size_bytes=2 * 1024 * 1024 * 1024,
+                    bytes_saved=int(5 * 1024 * 1024 * 1024),
+                )
+            )
+
+            def fake_estimate_savings(*args: Any, **kwargs: Any) -> int:
+                return 300 * 1024 * 1024
+
+            with patch.object(web_app, "_estimate_savings_bytes", autospec=True, side_effect=fake_estimate_savings):
+                cards = web_app._preview_folder_cards(self.config, connection)
+
+        self.assertEqual([card.prefix for card in cards], ["tv/show/Season B", "tv/show/Season A"])
+
+    def test_preview_folder_cards_use_projected_reclaim_when_pending_estimate_is_zero(self) -> None:
+        small_total = self._create_source_file("season-c-validated-small.mkv")
+        large_total = self._create_source_file("season-d-validated-large.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            small_total_id = self._insert_library_item(connection, small_total, status="validated")
+            large_total_id = self._insert_library_item(connection, large_total, status="validated")
+
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == small_total_id)
+                .values(
+                    size_bytes=1 * 1024 * 1024 * 1024,
+                    rel_path="tv/show/Season C/season-c-validated-small.mkv",
+                    parent_dir="tv/show/Season C",
+                )
+            )
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == large_total_id)
+                .values(
+                    size_bytes=4 * 1024 * 1024 * 1024,
+                    rel_path="tv/show/Season D/season-d-validated-large.mkv",
+                    parent_dir="tv/show/Season D",
+                )
+            )
+
+            for item_id, name, bytes_saved in (
+                (small_total_id, small_total.name, int(5 * 1024 * 1024 * 1024)),
+                (large_total_id, large_total.name, int(3 * 1024 * 1024 * 1024)),
+            ):
+                self._insert_staged_artifact(connection, item_id, self._staging_path(name))
+                connection.execute(
+                    update(staged_artifacts)
+                    .where(staged_artifacts.c.library_item_id == item_id)
+                    .values(
+                        source_rel_path=f"tv/show/{'Season C' if item_id == small_total_id else 'Season D'}/{name}",
+                        source_video_codec="h264",
+                        source_size_bytes=2 * 1024 * 1024 * 1024,
+                        bytes_saved=bytes_saved,
+                    )
+                )
+
+            with patch.object(web_app, "_estimate_savings_bytes", autospec=True, return_value=0):
+                cards = web_app._preview_folder_cards(self.config, connection)
+
+        self.assertEqual([card.prefix for card in cards], ["tv/show/Season C", "tv/show/Season D"])
+
+    def test_list_folder_cards_rank_by_pending_opportunity(self) -> None:
+        season_a_pending = self._create_source_file("season-a-pending.mkv")
+        season_a_promoted = self._create_source_file("season-a-promoted.mkv")
+        season_b_pending = self._create_source_file("season-b-pending.mkv")
+        season_b_validated = self._create_source_file("season-b-validated.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            season_a_pending_id = self._insert_library_item(connection, season_a_pending)
+            season_a_promoted_id = self._insert_library_item(connection, season_a_promoted, status="promoted")
+            season_b_pending_id = self._insert_library_item(connection, season_b_pending)
+            season_b_validated_id = self._insert_library_item(connection, season_b_validated, status="validated")
+
+            for item_id, rel_path, status in (
+                (season_a_pending_id, "tv/show/Season A/season-a-pending.mkv", "planned"),
+                (season_a_promoted_id, "tv/show/Season A/season-a-promoted.mkv", "promoted"),
+                (season_b_pending_id, "tv/show/Season B/season-b-pending.mkv", "planned"),
+                (season_b_validated_id, "tv/show/Season B/season-b-validated.mkv", "validated"),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(
+                        size_bytes=1 * 1024 * 1024 * 1024,
+                        rel_path=rel_path,
+                        parent_dir=rel_path.rsplit("/", 1)[0],
+                        status=status,
+                    )
+                )
+
+            self._insert_staged_artifact(connection, season_b_validated_id, self._staging_path(season_b_validated.name))
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == season_b_validated_id)
+                .values(
+                    source_rel_path="tv/show/Season B/season-b-validated.mkv",
+                    source_video_codec="h264",
+                    source_size_bytes=2 * 1024 * 1024 * 1024,
+                    bytes_saved=int(5 * 1024 * 1024 * 1024),
+                )
+            )
+
+            def fake_estimate_savings(*args: Any, **kwargs: Any) -> int:
+                return 300 * 1024 * 1024
+
+            with (
+                    patch.object(web_app, "_age_days", autospec=True, return_value=42.0),
+                    patch.object(web_app, "_estimate_savings_bytes", autospec=True, side_effect=fake_estimate_savings),
+            ):
+                cards = web_app._list_folder_cards(self.config, connection)
+
+        self.assertEqual([card.prefix for card in cards], ["tv/show/Season B", "tv/show/Season A"])
+
+    def test_list_folder_cards_use_projected_reclaim_when_sort_score_is_zero(self) -> None:
+        small_total = self._create_source_file("season-c-validated-small.mkv")
+        large_total = self._create_source_file("season-d-validated-large.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            small_total_id = self._insert_library_item(connection, small_total, status="validated")
+            large_total_id = self._insert_library_item(connection, large_total, status="validated")
+
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == small_total_id)
+                .values(
+                    size_bytes=1 * 1024 * 1024 * 1024,
+                    rel_path="tv/show/Season C/season-c-validated-small.mkv",
+                    parent_dir="tv/show/Season C",
+                )
+            )
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == large_total_id)
+                .values(
+                    size_bytes=4 * 1024 * 1024 * 1024,
+                    rel_path="tv/show/Season D/season-d-validated-large.mkv",
+                    parent_dir="tv/show/Season D",
+                )
+            )
+
+            for item_id, name, bytes_saved in (
+                (small_total_id, small_total.name, int(5 * 1024 * 1024 * 1024)),
+                (large_total_id, large_total.name, int(3 * 1024 * 1024 * 1024)),
+            ):
+                self._insert_staged_artifact(connection, item_id, self._staging_path(name))
+                connection.execute(
+                    update(staged_artifacts)
+                    .where(staged_artifacts.c.library_item_id == item_id)
+                    .values(
+                        source_rel_path=f"tv/show/{'Season C' if item_id == small_total_id else 'Season D'}/{name}",
+                        source_video_codec="h264",
+                        source_size_bytes=2 * 1024 * 1024 * 1024,
+                        bytes_saved=bytes_saved,
+                    )
+                )
+
+            with (
+                    patch.object(web_app, "_age_days", autospec=True, return_value=42.0),
+                    patch.object(web_app, "_estimate_savings_bytes", autospec=True, return_value=0),
+            ):
+                cards = web_app._list_folder_cards(self.config, connection)
+
+        self.assertEqual([card.prefix for card in cards], ["tv/show/Season C", "tv/show/Season D"])
+
     def test_folder_cards_use_validated_samples_in_history_for_pending_items(self) -> None:
         pending = self._create_source_file("episode-pending.mkv")
         validated_one = self._create_source_file("episode-validated-one.mkv")
