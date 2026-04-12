@@ -1,7 +1,9 @@
 import asyncio
 import multiprocessing
 import json
+import re
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -13,17 +15,25 @@ from sqlalchemy import select
 
 from mediaforce.advisor import (
     RUN_VERDICT_PROMPT_VERSION,
+    REVIEW_ARTIFACT_CRITIQUE_PROMPT_VERSION,
     SEED_PROMPT_VERSION,
     SeedPolicyResponse,
     _build_prompt,
+    _build_review_artifact_critique_prompt,
     _build_tune_prompt,
+    _build_operator_note_parse_prompt,
     _extract_seed_payload,
+    _filter_audio_specific_guardrail_issues,
     _memory_disabled_code_args,
     _policy_response_schema,
+    _run_tune_self_check,
+    _tune_self_check_schema,
     _build_run_verdict_prompt,
     _try_load_first_json_object,
     _build_seed_prompt,
     apply_seed_policy,
+    request_review_artifact_critique,
+    request_operator_note_parse,
     request_seed_policy,
     request_tuning_advice,
     request_note_tuning,
@@ -33,15 +43,22 @@ from mediaforce.core.config import ConfigPaths, MediaforceConfig, load_config, s
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import calibration_jobs
 from mediaforce.core.db_tables import learning_artifacts
+from mediaforce.core.db_tables import library_items
+from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.db_tables import tuning_sessions
+from mediaforce.core.process_control import ProcessCancelledError
+from mediaforce.hosts.types import HostStatus
 from mediaforce.tuning.tuning_memory import (
     promote_learning_artifact,
     record_tuning_session,
     record_visual_approval_artifact,
     retrieve_learning_context,
+    sibling_approved_season_memory,
 )
 from mediaforce.web.app import (
     _advice_file,
+    _backfill_multimodal_review_pack,
+    _build_multimodal_review_pack,
     _build_seed_policy_payload,
     _build_review_compare_video,
     _ffmpeg_concat_file_line,
@@ -50,6 +67,7 @@ from mediaforce.web.app import (
     _calibration_file,
     _clear_folder_tuning_state,
     _folder_display_policy,
+    _run_periodic_cleanup,
     _review_compare_bundle_entries,
     _multimodal_review_pack_public_view,
     _operator_requested_experiment,
@@ -59,6 +77,16 @@ from mediaforce.web.app import (
     _upsert_override,
 )
 from mediaforce.web.runtime.archive_cleanup import archive_cleanup_summary, clear_archive_cleanup_action
+from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, run_calibration_job
+from mediaforce.web.runtime.completed_runtime import clear_completed_backups_action, completed_page_payload
+from mediaforce.web.runtime.folder_ai_tuning import (
+    FolderAiTuneDeps,
+    _proposal_can_queue,
+    _proposal_ready_message,
+    folder_ai_tune_confirm_action,
+    folder_ai_tune_preview_action,
+)
+from mediaforce.web.runtime.folder_tuning_advice import audio_tradeoff_hint, size_budget_feasibility
 
 
 def _runtime_settings_writer(path_text: str, ready_path_text: str, mode: str) -> None:
@@ -79,6 +107,58 @@ def _runtime_settings_writer(path_text: str, ready_path_text: str, mode: str) ->
         return runtime_settings
 
     update_runtime_settings(path, _apply)
+
+
+def _fake_operator_note_parse(*, project_root: Path, payload: dict[str, object]) -> dict[str, object] | None:
+    del project_root
+    note = str(payload.get("operator_note") or "").strip()
+    if not note:
+        return None
+    lower = note.lower()
+    budget_match = re.search(r"(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>kb|mb|gb|tb)", lower)
+    metric_match = re.search(
+        r"\b(?P<metric>vmaf|xpsnr)\b(?:\s+(?:target|around|about|roughly|approximately|approx|at|to|of)|\s*=){0,3}\s*(?P<target>\d{2}(?:\.\d+)?)\b",
+        lower,
+    )
+    if metric_match is None:
+        metric_match = re.search(r"\b(?P<target>\d{2}(?:\.\d+)?)\s*(?P<metric>vmaf|xpsnr)\b", lower)
+    metric = None
+    metric_target = None
+    if metric_match:
+        metric = str(metric_match.group("metric") or "").strip() or None
+        metric_target = float(metric_match.group("target") or 0)
+    size_budget_value = float(budget_match.group("amount")) if budget_match else None
+    size_budget_unit = str(budget_match.group("unit")) if budget_match else None
+    if size_budget_value is not None and metric_target is not None:
+        request_type = "combined_experiment"
+    elif size_budget_value is not None:
+        request_type = "size_budget"
+    elif metric_target is not None:
+        request_type = "metric_target"
+    else:
+        request_type = "none"
+    exploratory = any(
+        phrase in lower
+        for phrase in (
+            "can we try",
+            "will that help",
+            "want to understand",
+            "is realistic",
+        )
+    )
+    operator_confirmed = request_type != "none" and not exploratory
+    intent_type = "exploratory_question" if exploratory else ("direct_request" if request_type != "none" else "other")
+    return {
+        "summary": "parsed note",
+        "intent_type": intent_type,
+        "request_type": request_type,
+        "operator_confirmed": operator_confirmed,
+        "metric": metric,
+        "metric_target": metric_target,
+        "size_budget_value": size_budget_value,
+        "size_budget_unit": size_budget_unit,
+        "reasoning_note": "test parser",
+    }
 
 
 class TuningRuntimeTests(unittest.TestCase):
@@ -105,8 +185,14 @@ class TuningRuntimeTests(unittest.TestCase):
                 runtime_settings_path=self.root / "runtime.json",
             ),
         )
+        self.note_parse_patcher = patch(
+            "mediaforce.web.runtime.folder_tuning_advice.request_operator_note_parse",
+            side_effect=_fake_operator_note_parse,
+        )
+        self.note_parse_patcher.start()
 
     def tearDown(self) -> None:
+        self.note_parse_patcher.stop()
         self.tempdir.cleanup()
 
     def _capture_subprocess_commands(self, response_body: str) -> tuple[list[list[str]], object]:
@@ -122,6 +208,87 @@ class TuningRuntimeTests(unittest.TestCase):
     def _assert_structured_subprocess_call(self, commands: list[list[str]]) -> None:
         self.assertTrue(commands)
         self.assertEqual(commands[0][1:7], _memory_disabled_code_args())
+
+    def _insert_promoted_artifact(
+            self,
+            *,
+            rel_path: str,
+            promoted_at: str,
+            archived_size_bytes: int,
+            bytes_saved: int,
+            archive_exists: bool = True,
+    ) -> None:
+        source_path = self.root / "source" / rel_path
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_text("source")
+        archived_path = self.config.archive_root / Path(rel_path)
+        if archive_exists:
+            archived_path.parent.mkdir(parents=True, exist_ok=True)
+            archived_path.write_bytes(b"a" * archived_size_bytes)
+        with open_db(self.config.paths.db_path) as connection:
+            result = connection.execute(
+                library_items.insert().values(
+                    source_path=str(source_path),
+                    rel_path=rel_path,
+                    media_root="tv",
+                    parent_dir=str(Path(rel_path).parent),
+                    file_name=Path(rel_path).name,
+                    container=Path(rel_path).suffix or ".mkv",
+                    size_bytes=archived_size_bytes,
+                    mtime_ns=1,
+                    fingerprint=f"fp-{rel_path}",
+                    duration_seconds=1800.0,
+                    video_codec="av1",
+                    audio_summary_json="[]",
+                    subtitle_summary_json="[]",
+                    status="promoted",
+                    last_scan_id="scan-1",
+                    discovered_at=promoted_at,
+                    last_seen_at=promoted_at,
+                    updated_at=promoted_at,
+                )
+            )
+            library_item_id = int(result.inserted_primary_key[0])
+            connection.execute(
+                staged_artifacts.insert().values(
+                    library_item_id=library_item_id,
+                    staging_path=str(self.root / "staging" / Path(rel_path).name),
+                    bytes_saved=bytes_saved,
+                    promoted_at=promoted_at,
+                    archived_source_path=str(archived_path),
+                    updated_at=promoted_at,
+                )
+            )
+            connection.commit()
+
+    def test_request_operator_note_parse_uses_structured_runtime_path(self) -> None:
+        commands, fake_run = self._capture_subprocess_commands(
+            json.dumps(
+                {
+                    "summary": "Direct size-budget request.",
+                    "intent_type": "direct_request",
+                    "request_type": "size_budget",
+                    "operator_confirmed": True,
+                    "metric": None,
+                    "metric_target": None,
+                    "size_budget_value": 300,
+                    "size_budget_unit": "mb",
+                    "reasoning_note": "Directive question asking for action.",
+                }
+            )
+        )
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+            parsed = request_operator_note_parse(
+                project_root=self.root,
+                payload={"operator_note": "Can you target 300MB per episode?"},
+            )
+
+        assert parsed is not None
+        self.assertTrue(parsed["operator_confirmed"])
+        self._assert_structured_subprocess_call(commands)
+        self.assertIn("llm", commands[0])
+        self.assertIn(_build_operator_note_parse_prompt({"operator_note": "Can you target 300MB per episode?"}), commands[0])
 
     def test_folder_display_policy_prefers_pending_preview_before_first_sample(self) -> None:
         sample_item = {
@@ -175,6 +342,251 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(policy["video"]["quality_metric"], "xpsnr")
         self.assertEqual(policy["video"]["target_xpsnr"], 35.5)
 
+    def test_folder_ai_tune_confirm_retries_latest_stopped_sample_without_pending_proposal(self) -> None:
+        saved_jobs: list[dict[str, object]] = []
+        host = HostStatus(
+            key="cbusillo@localhost",
+            label="M4 Studio",
+            mode="ssh",
+            priority=10,
+            capabilities=["encode_queue", "sample_calibration"],
+            available=True,
+            message="Mounted and ready",
+            missing_paths=[],
+        )
+        retryable_job = {
+            "job_id": "job-old",
+            "status": "stopped",
+            "lane": "sample",
+            "mode": "sample",
+            "action": "ai_tune",
+            "prefix": "tv/show",
+            "host": {"key": host.key},
+            "notes": "Aim for 8%",
+            "policy": {"video": {"target_vmaf": 93.5, "default_grain": 0}},
+            "sample_item": {
+                "library_item_id": 7,
+                "rel_path": "tv/show/episode.mkv",
+                "source_path": str(self.root / "source" / "tv" / "show" / "episode.mkv"),
+                "source_size_bytes": 1234,
+                "video_codec": "h264",
+                "duration_seconds": 120.0,
+                "width": 1920,
+                "height": 1080,
+                "audio_summary": [],
+                "subtitle_summary": [],
+            },
+            "result": {"quality_score": 91.2},
+            "created_at": "2026-04-11T15:18:09+00:00",
+            "started_at": "2026-04-11T15:18:10+00:00",
+            "finished_at": "2026-04-11T15:18:21+00:00",
+            "updated_at": "2026-04-11T15:18:21+00:00",
+            "error": "Calibration queue job was stopped and cleaned up.",
+        }
+
+        deps = FolderAiTuneDeps(
+            resolve_sample_host=lambda _config, host_key: host if host_key == host.key else None,
+            load_job_state=lambda _connection, _config, prefix: dict(retryable_job) if prefix == "tv/show" else None,
+            load_retryable_sample_job_state=lambda _connection, _config, prefix: dict(retryable_job)
+            if prefix == "tv/show"
+            else None,
+            sample_item=lambda *_args, **_kwargs: None,
+            operator_requested_experiment=lambda *_args, **_kwargs: None,
+            load_calibration_state=lambda *_args, **_kwargs: None,
+            recent_tuning_sessions=lambda *_args, **_kwargs: [],
+            matching_request_history=lambda *_args, **_kwargs: None,
+            metric_support=lambda: {},
+            maybe_seed_baseline_policy=lambda *_args, **_kwargs: None,
+            seed_advice_payload=lambda *_args, **_kwargs: None,
+            proposal_alignment_issue=lambda *_args, **_kwargs: None,
+            now_iso=lambda: "2026-04-11T15:30:00+00:00",
+            proposal_signal_copy=lambda *_args, **_kwargs: "",
+            proposal_context_snapshot=lambda *_args, **_kwargs: {},
+            save_pending_proposal=lambda *_args, **_kwargs: None,
+            pending_proposal_public_view=lambda payload: payload,
+            build_tuning_runtime_toolbelt=lambda *_args, **_kwargs: {},
+            review_pack_dir=lambda *_args, **_kwargs: self.root / "review-pack",
+            remove_path_if_exists=lambda *_args, **_kwargs: None,
+            build_multimodal_review_pack=lambda *_args, **_kwargs: None,
+            multimodal_review_pack_public_view=lambda *_args, **_kwargs: None,
+            tuning_advice_payload=lambda *_args, **_kwargs: {},
+            load_pending_proposal=lambda *_args, **_kwargs: None,
+            apply_policy_fragment=lambda current, fragment: {**current, **fragment},
+            save_advice_state=lambda *_args, **_kwargs: None,
+            save_job_state=lambda _connection, _config, _prefix, payload: saved_jobs.append(dict(payload)),
+            clear_pending_proposal=lambda *_args, **_kwargs: None,
+            record_tuning_session=lambda *_args, **_kwargs: "session-1",
+        )
+
+        result = folder_ai_tune_confirm_action(self.config, deps, "tv/show", "")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["message"], "Queued the saved sample draft again.")
+        self.assertEqual(len(saved_jobs), 1)
+        self.assertEqual(saved_jobs[0]["status"], "queued")
+        self.assertEqual(saved_jobs[0]["action"], "ai_tune")
+        self.assertIsNone(saved_jobs[0]["started_at"])
+        self.assertIsNone(saved_jobs[0]["finished_at"])
+        self.assertIsNone(saved_jobs[0]["error"])
+        self.assertIsNone(saved_jobs[0]["result"])
+        self.assertNotEqual(saved_jobs[0]["job_id"], retryable_job["job_id"])
+
+    def test_folder_ai_tune_confirm_fails_closed_when_stale_proposal_id_has_no_pending_proposal(self) -> None:
+        host = HostStatus(
+            key="cbusillo@localhost",
+            label="M4 Studio",
+            mode="ssh",
+            priority=10,
+            capabilities=["encode_queue", "sample_calibration"],
+            available=True,
+            message="Mounted and ready",
+            missing_paths=[],
+        )
+        retryable_job = {
+            "job_id": "job-old",
+            "status": "stopped",
+            "lane": "sample",
+            "mode": "sample",
+            "action": "ai_tune",
+            "prefix": "tv/show",
+            "host": {"key": host.key},
+            "notes": "Aim for 8%",
+            "policy": {"video": {"target_vmaf": 93.5, "default_grain": 0}},
+            "sample_item": {
+                "rel_path": "tv/show/episode.mkv",
+                "source_path": str(self.root / "source" / "tv" / "show" / "episode.mkv"),
+                "source_size_bytes": 1234,
+            },
+            "created_at": "2026-04-11T15:18:09+00:00",
+            "started_at": "2026-04-11T15:18:10+00:00",
+            "finished_at": "2026-04-11T15:18:21+00:00",
+            "updated_at": "2026-04-11T15:18:21+00:00",
+            "error": "Calibration queue job was stopped and cleaned up.",
+        }
+
+        deps = FolderAiTuneDeps(
+            resolve_sample_host=lambda _config, host_key: host if host_key == host.key else None,
+            load_job_state=lambda _connection, _config, prefix: dict(retryable_job) if prefix == "tv/show" else None,
+            load_retryable_sample_job_state=lambda _connection, _config, prefix: dict(retryable_job)
+            if prefix == "tv/show"
+            else None,
+            sample_item=lambda *_args, **_kwargs: None,
+            operator_requested_experiment=lambda *_args, **_kwargs: None,
+            load_calibration_state=lambda *_args, **_kwargs: None,
+            recent_tuning_sessions=lambda *_args, **_kwargs: [],
+            matching_request_history=lambda *_args, **_kwargs: None,
+            metric_support=lambda: {},
+            maybe_seed_baseline_policy=lambda *_args, **_kwargs: None,
+            seed_advice_payload=lambda *_args, **_kwargs: None,
+            proposal_alignment_issue=lambda *_args, **_kwargs: None,
+            now_iso=lambda: "2026-04-11T15:30:00+00:00",
+            proposal_signal_copy=lambda *_args, **_kwargs: "",
+            proposal_context_snapshot=lambda *_args, **_kwargs: {},
+            save_pending_proposal=lambda *_args, **_kwargs: None,
+            pending_proposal_public_view=lambda payload: payload,
+            build_tuning_runtime_toolbelt=lambda *_args, **_kwargs: {},
+            review_pack_dir=lambda *_args, **_kwargs: self.root / "review-pack",
+            remove_path_if_exists=lambda *_args, **_kwargs: None,
+            build_multimodal_review_pack=lambda *_args, **_kwargs: None,
+            multimodal_review_pack_public_view=lambda *_args, **_kwargs: None,
+            tuning_advice_payload=lambda *_args, **_kwargs: {},
+            load_pending_proposal=lambda *_args, **_kwargs: None,
+            apply_policy_fragment=lambda current, fragment: {**current, **fragment},
+            save_advice_state=lambda *_args, **_kwargs: None,
+            save_job_state=lambda *_args, **_kwargs: None,
+            clear_pending_proposal=lambda *_args, **_kwargs: None,
+            record_tuning_session=lambda *_args, **_kwargs: "session-1",
+        )
+
+        result = folder_ai_tune_confirm_action(self.config, deps, "tv/show", "stale-proposal-id")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["message"], "This bench draft is out of date. Refresh it before queueing a sample.")
+
+    def test_folder_ai_tune_confirm_retries_saved_sample_even_if_latest_job_is_full(self) -> None:
+        host = HostStatus(
+            key="cbusillo@localhost",
+            label="M4 Studio",
+            mode="ssh",
+            priority=10,
+            capabilities=["encode_queue", "sample_calibration"],
+            available=True,
+            message="Mounted and ready",
+            missing_paths=[],
+        )
+        retryable_job = {
+            "job_id": "sample-job-old",
+            "status": "stopped",
+            "lane": "sample",
+            "mode": "sample",
+            "action": "ai_tune",
+            "prefix": "tv/show",
+            "host": {"key": host.key},
+            "notes": "Aim for 8%",
+            "policy": {"video": {"target_vmaf": 93.5, "default_grain": 0}},
+            "sample_item": {
+                "rel_path": "tv/show/episode.mkv",
+                "source_path": str(self.root / "source" / "tv" / "show" / "episode.mkv"),
+                "source_size_bytes": 1234,
+            },
+            "created_at": "2026-04-11T15:18:09+00:00",
+            "started_at": "2026-04-11T15:18:10+00:00",
+            "finished_at": "2026-04-11T15:18:21+00:00",
+            "updated_at": "2026-04-11T15:18:21+00:00",
+            "error": "Calibration queue job was stopped and cleaned up.",
+        }
+        latest_full_job = {
+            "job_id": "full-job-newer",
+            "status": "stopped",
+            "lane": "full",
+            "mode": "full",
+            "action": "full",
+            "prefix": "tv/show",
+            "host": {"key": host.key},
+        }
+        saved_jobs: list[dict[str, object]] = []
+
+        deps = FolderAiTuneDeps(
+            resolve_sample_host=lambda _config, host_key: host if host_key == host.key else None,
+            load_job_state=lambda _connection, _config, prefix: dict(latest_full_job) if prefix == "tv/show" else None,
+            load_retryable_sample_job_state=lambda _connection, _config, prefix: dict(retryable_job)
+            if prefix == "tv/show"
+            else None,
+            sample_item=lambda *_args, **_kwargs: None,
+            operator_requested_experiment=lambda *_args, **_kwargs: None,
+            load_calibration_state=lambda *_args, **_kwargs: None,
+            recent_tuning_sessions=lambda *_args, **_kwargs: [],
+            matching_request_history=lambda *_args, **_kwargs: None,
+            metric_support=lambda: {},
+            maybe_seed_baseline_policy=lambda *_args, **_kwargs: None,
+            seed_advice_payload=lambda *_args, **_kwargs: None,
+            proposal_alignment_issue=lambda *_args, **_kwargs: None,
+            now_iso=lambda: "2026-04-11T15:30:00+00:00",
+            proposal_signal_copy=lambda *_args, **_kwargs: "",
+            proposal_context_snapshot=lambda *_args, **_kwargs: {},
+            save_pending_proposal=lambda *_args, **_kwargs: None,
+            pending_proposal_public_view=lambda payload: payload,
+            build_tuning_runtime_toolbelt=lambda *_args, **_kwargs: {},
+            review_pack_dir=lambda *_args, **_kwargs: self.root / "review-pack",
+            remove_path_if_exists=lambda *_args, **_kwargs: None,
+            build_multimodal_review_pack=lambda *_args, **_kwargs: None,
+            multimodal_review_pack_public_view=lambda *_args, **_kwargs: None,
+            tuning_advice_payload=lambda *_args, **_kwargs: {},
+            load_pending_proposal=lambda *_args, **_kwargs: None,
+            apply_policy_fragment=lambda current, fragment: {**current, **fragment},
+            save_advice_state=lambda *_args, **_kwargs: None,
+            save_job_state=lambda _connection, _config, _prefix, payload: saved_jobs.append(dict(payload)),
+            clear_pending_proposal=lambda *_args, **_kwargs: None,
+            record_tuning_session=lambda *_args, **_kwargs: "session-1",
+        )
+
+        result = folder_ai_tune_confirm_action(self.config, deps, "tv/show", "")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["message"], "Queued the saved sample draft again.")
+        self.assertEqual(len(saved_jobs), 1)
+        self.assertEqual(saved_jobs[0]["action"], "ai_tune")
+
     def test_build_review_compare_video_concatenates_all_compare_clips(self) -> None:
         review_run_dir = self.config.paths.review_dir / "sample-run"
         review_run_dir.mkdir(parents=True, exist_ok=True)
@@ -190,7 +602,7 @@ class TuningRuntimeTests(unittest.TestCase):
         def fake_run(command: list[str], **_kwargs: object) -> object:
             commands.append(command)
             output_path = Path(command[-1])
-            output_path.write_bytes(b"mkv")
+            output_path.write_bytes(b"mov")
             return type("Result", (), {"returncode": 0, "stderr": ""})()
 
         with patch("mediaforce.web.app.subprocess.run", side_effect=fake_run), patch(
@@ -203,15 +615,35 @@ class TuningRuntimeTests(unittest.TestCase):
             )
         self.addCleanup(bundle_path.unlink, missing_ok=True)
 
-        self.assertEqual(download_name, "tv-suits-season-5-full-review-compare.mkv")
+        self.assertEqual(download_name, "tv-suits-season-5-full-review-compare.mov")
         self.assertTrue(commands)
         self.assertEqual(
-            commands[0][:9],
-            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(bundle_path.with_suffix('.txt')), "-c"],
+            commands[0][:18],
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(bundle_path.with_suffix('.txt')),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0?",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+            ],
         )
         concat_list = bundle_path.with_suffix('.txt')
         self.assertFalse(concat_list.exists())
-        self.assertEqual(bundle_path.read_bytes(), b"mkv")
+        self.assertEqual(bundle_path.suffix, ".mov")
+        self.assertEqual(bundle_path.read_bytes(), b"mov")
 
     def test_review_compare_bundle_entries_prefers_compare_clips_over_review_pairs(self) -> None:
         review_run_dir = self.config.paths.review_dir / "sample-run"
@@ -326,6 +758,304 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(archive_root.exists())
         self.assertEqual(result["archive_cleanup"]["file_count"], 0)
 
+    def test_completed_page_payload_groups_promoted_folders_and_active_backups(self) -> None:
+        from mediaforce.web import app as web_app
+
+        self._insert_promoted_artifact(
+            rel_path="tv/Example Show/Season 1/Episode 01.mkv",
+            promoted_at="2026-04-10T10:00:00+00:00",
+            archived_size_bytes=3,
+            bytes_saved=12,
+        )
+        self._insert_promoted_artifact(
+            rel_path="tv/Example Show/Season 1/Episode 02.mkv",
+            promoted_at="2026-04-11T10:00:00+00:00",
+            archived_size_bytes=5,
+            bytes_saved=18,
+        )
+        self._insert_promoted_artifact(
+            rel_path="tv/Example Show/Season 2/Episode 01.mkv",
+            promoted_at="2026-04-12T10:00:00+00:00",
+            archived_size_bytes=7,
+            bytes_saved=20,
+            archive_exists=False,
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            payload = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
+
+        self.assertEqual(payload["completed_count"], 2)
+        self.assertEqual(payload["folders_with_backups_count"], 1)
+        self.assertEqual(payload["archive_cleanup"]["file_count"], 2)
+        first_folder = payload["folders"][0]
+        self.assertEqual(first_folder["prefix"], "tv/Example Show/Season 1")
+        self.assertEqual(first_folder["promoted_item_count"], 2)
+        self.assertEqual(first_folder["archived_backup_count"], 2)
+        self.assertEqual(first_folder["archived_backup_size_bytes"], 8)
+        self.assertEqual(first_folder["total_bytes_saved"], 30)
+        second_folder = payload["folders"][1]
+        self.assertEqual(second_folder["prefix"], "tv/Example Show/Season 2")
+        self.assertEqual(second_folder["archived_backup_count"], 0)
+
+    def test_completed_page_payload_ignores_archived_paths_outside_active_archive_root(self) -> None:
+        from mediaforce.web import app as web_app
+
+        self._insert_promoted_artifact(
+            rel_path="tv/Example Show/Season 1/Episode 01.mkv",
+            promoted_at="2026-04-10T10:00:00+00:00",
+            archived_size_bytes=3,
+            bytes_saved=12,
+        )
+        outside_archive = self.root / "outside-archive" / "tv" / "Example Show" / "Season 1" / "Episode 02.mkv"
+        outside_archive.parent.mkdir(parents=True, exist_ok=True)
+        outside_archive.write_text("outside")
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                staged_artifacts.update()
+                .values(archived_source_path=str(outside_archive))
+                .where(staged_artifacts.c.library_item_id == 1)
+            )
+            connection.commit()
+            payload = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
+
+        self.assertEqual(payload["archive_cleanup"]["file_count"], 1)
+        self.assertEqual(payload["folders"][0]["archived_backup_count"], 0)
+
+    def test_completed_page_payload_keeps_total_bytes_saved_after_backup_is_deleted(self) -> None:
+        from mediaforce.web import app as web_app
+
+        self._insert_promoted_artifact(
+            rel_path="tv/Example Show/Season 1/Episode 01.mkv",
+            promoted_at="2026-04-10T10:00:00+00:00",
+            archived_size_bytes=3,
+            bytes_saved=12,
+        )
+        archived_path = self.config.archive_root / "tv/Example Show/Season 1/Episode 01.mkv"
+        archived_path.unlink()
+
+        with open_db(self.config.paths.db_path) as connection:
+            payload = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
+
+        self.assertEqual(payload["folders"][0]["archived_backup_count"], 0)
+        self.assertEqual(payload["folders"][0]["archived_backup_size_bytes"], 0)
+        self.assertEqual(payload["folders"][0]["total_bytes_saved"], 12)
+
+    def test_clear_completed_backups_action_removes_selected_prefixes(self) -> None:
+        from mediaforce.web import app as web_app
+
+        season_one_backup = self.config.archive_root / "tv/Example Show/Season 1/Episode 01.mkv"
+        season_two_backup = self.config.archive_root / "tv/Example Show/Season 2/Episode 01.mkv"
+        self._insert_promoted_artifact(
+            rel_path="tv/Example Show/Season 1/Episode 01.mkv",
+            promoted_at="2026-04-10T10:00:00+00:00",
+            archived_size_bytes=3,
+            bytes_saved=12,
+        )
+        self._insert_promoted_artifact(
+            rel_path="tv/Example Show/Season 2/Episode 01.mkv",
+            promoted_at="2026-04-11T10:00:00+00:00",
+            archived_size_bytes=5,
+            bytes_saved=18,
+        )
+
+        result = clear_completed_backups_action(
+            self.config,
+            folder_group=web_app._folder_group,
+            prefixes=["tv/Example Show/Season 1"],
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["removed_count"], 1)
+        self.assertEqual(result["removed_prefix_count"], 1)
+        self.assertFalse(season_one_backup.exists())
+        self.assertTrue(season_two_backup.exists())
+
+    def test_clear_completed_backups_action_rejects_unknown_prefixes(self) -> None:
+        from mediaforce.web import app as web_app
+
+        self._insert_promoted_artifact(
+            rel_path="tv/Example Show/Season 1/Episode 01.mkv",
+            promoted_at="2026-04-10T10:00:00+00:00",
+            archived_size_bytes=3,
+            bytes_saved=12,
+        )
+
+        with self.assertRaisesRegex(ValueError, "Unknown completed-folder prefix"):
+            clear_completed_backups_action(
+                self.config,
+                folder_group=web_app._folder_group,
+                prefixes=["tv"],
+                valid_prefixes={"tv/Example Show/Season 1"},
+            )
+
+    def test_completed_route_returns_payload(self) -> None:
+        from mediaforce.web import app as web_app
+
+        expected_payload = {"folders": [], "completed_count": 0, "folders_with_backups_count": 0, "archive_cleanup": {}}
+
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.purge_transient_artifacts"
+        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
+            "mediaforce.web.app._start_encode_queue_worker"
+        ), patch("mediaforce.web.app._refresh_host_status_cache", return_value=[]), patch(
+            "mediaforce.web.app.completed_page_payload",
+            return_value=expected_payload,
+        ):
+            app = web_app.create_app(self.root / "config.toml")
+            route = next(
+                route
+                for route in app.routes
+                if isinstance(route, APIRoute) and route.path == "/api/completed"
+            )
+            assert isinstance(route, APIRoute)
+            response = route.endpoint()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.body), expected_payload)
+
+    def test_completed_cleanup_route_passes_selected_prefixes(self) -> None:
+        from mediaforce.web import app as web_app
+
+        captured: list[list[str] | None] = []
+
+        def fake_clear_completed_backups_action(
+                _config: MediaforceConfig,
+                *,
+                folder_group: object,
+                prefixes: list[str] | None = None,
+                valid_prefixes: set[str] | None = None,
+        ) -> dict[str, object]:
+            _ = folder_group, valid_prefixes
+            captured.append(prefixes)
+            return {
+                "ok": True,
+                "message": "done",
+                "removed_count": 1,
+                "removed_size_bytes": 3,
+                "removed_prefix_count": 1,
+            }
+
+        expected_payload = {"folders": [], "completed_count": 0, "folders_with_backups_count": 0, "archive_cleanup": {}}
+
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.purge_transient_artifacts"
+        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
+            "mediaforce.web.app._start_encode_queue_worker"
+        ), patch("mediaforce.web.app._refresh_host_status_cache", return_value=[]), patch(
+            "mediaforce.web.app.clear_completed_backups_action",
+            side_effect=fake_clear_completed_backups_action,
+        ), patch("mediaforce.web.app.completed_page_payload", return_value=expected_payload):
+            app = web_app.create_app(self.root / "config.toml")
+            route = next(
+                route
+                for route in app.routes
+                if isinstance(route, APIRoute) and route.path == "/api/completed/backups/clear"
+            )
+            assert isinstance(route, APIRoute)
+
+            class _FakeRequest:
+                def __init__(self, payload: dict[str, object]) -> None:
+                    self._payload = payload
+
+                async def json(self) -> dict[str, object]:
+                    return self._payload
+
+            response = asyncio.run(route.endpoint(_FakeRequest({"prefixes": ["tv/Example Show/Season 1"]})))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured, [["tv/Example Show/Season 1"]])
+        self.assertEqual(json.loads(response.body)["completed"], expected_payload)
+
+    def test_completed_cleanup_route_rejects_malformed_prefix_payload(self) -> None:
+        from mediaforce.web import app as web_app
+
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.purge_transient_artifacts"
+        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
+            "mediaforce.web.app._start_encode_queue_worker"
+        ), patch("mediaforce.web.app._refresh_host_status_cache", return_value=[]):
+            app = web_app.create_app(self.root / "config.toml")
+            route = next(
+                route
+                for route in app.routes
+                if isinstance(route, APIRoute) and route.path == "/api/completed/backups/clear"
+            )
+            assert isinstance(route, APIRoute)
+
+            class _FakeRequest:
+                def __init__(self, payload: object) -> None:
+                    self._payload = payload
+
+                async def json(self) -> object:
+                    return self._payload
+
+            response = asyncio.run(route.endpoint(_FakeRequest({"prefixes": "tv/Example Show/Season 1"})))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            json.loads(response.body),
+            {"ok": False, "message": "Completed-folder prefixes must be provided as a list."},
+        )
+
+    def test_completed_cleanup_route_rejects_unknown_selected_prefix(self) -> None:
+        from mediaforce.web import app as web_app
+
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.purge_transient_artifacts"
+        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
+            "mediaforce.web.app._start_encode_queue_worker"
+        ), patch("mediaforce.web.app._refresh_host_status_cache", return_value=[]), patch(
+            "mediaforce.web.app.list_completed_folders",
+            return_value=[],
+        ):
+            app = web_app.create_app(self.root / "config.toml")
+            route = next(
+                route
+                for route in app.routes
+                if isinstance(route, APIRoute) and route.path == "/api/completed/backups/clear"
+            )
+            assert isinstance(route, APIRoute)
+
+            class _FakeRequest:
+                def __init__(self, payload: dict[str, object]) -> None:
+                    self._payload = payload
+
+                async def json(self) -> dict[str, object]:
+                    return self._payload
+
+            response = asyncio.run(route.endpoint(_FakeRequest({"prefixes": ["tv"]})))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Unknown completed-folder prefix", json.loads(response.body)["message"])
+
+    def test_completed_cleanup_route_rejects_malformed_json(self) -> None:
+        from mediaforce.web import app as web_app
+
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.purge_transient_artifacts"
+        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
+            "mediaforce.web.app._start_encode_queue_worker"
+        ), patch("mediaforce.web.app._refresh_host_status_cache", return_value=[]):
+            app = web_app.create_app(self.root / "config.toml")
+            route = next(
+                route
+                for route in app.routes
+                if isinstance(route, APIRoute) and route.path == "/api/completed/backups/clear"
+            )
+            assert isinstance(route, APIRoute)
+
+            class _FakeRequest:
+                async def json(self) -> object:
+                    raise json.JSONDecodeError("bad", "{", 0)
+
+            response = asyncio.run(route.endpoint(_FakeRequest()))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            json.loads(response.body),
+            {"ok": False, "message": "Completed cleanup requests must be valid JSON."},
+        )
+
     def test_archive_cleanup_route_passes_transcode_root_to_action(self) -> None:
         from mediaforce.web import app as web_app
 
@@ -370,6 +1100,119 @@ class TuningRuntimeTests(unittest.TestCase):
             {"ok": True, "transcode_root": "/Volumes/media/transcode-alt"},
         )
         self.assertEqual(captured, ["/Volumes/media/transcode-alt"])
+
+    def test_archive_cleanup_summary_route_passes_transcode_root(self) -> None:
+        from mediaforce.web import app as web_app
+
+        captured: list[str | None] = []
+
+        def fake_archive_cleanup_summary(
+                _config: MediaforceConfig,
+                *,
+                transcode_root: str | None = None,
+        ) -> dict[str, object]:
+            captured.append(transcode_root)
+            return {
+                "archive_root": "/Volumes/media/transcode-alt/_replaced",
+                "file_count": 3,
+                "total_size_bytes": 42,
+                "has_cleanup": True,
+            }
+
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.purge_transient_artifacts"
+        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
+            "mediaforce.web.app._start_encode_queue_worker"
+        ), patch("mediaforce.web.app._refresh_host_status_cache", return_value=[]), patch(
+            "mediaforce.web.app.archive_cleanup_summary",
+            side_effect=fake_archive_cleanup_summary,
+        ):
+            app = web_app.create_app(self.root / "config.toml")
+            route = next(
+                route
+                for route in app.routes
+                if isinstance(route, APIRoute) and route.path == "/api/archive-cleanup"
+            )
+            assert isinstance(route, APIRoute)
+
+            response = route.endpoint("/Volumes/media/transcode-alt")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            json.loads(response.body),
+            {
+                "archive_root": "/Volumes/media/transcode-alt/_replaced",
+                "file_count": 3,
+                "total_size_bytes": 42,
+                "has_cleanup": True,
+            },
+        )
+        self.assertEqual(captured, ["/Volumes/media/transcode-alt"])
+
+    def test_settings_route_can_skip_archive_cleanup_summary(self) -> None:
+        from mediaforce.web import app as web_app
+
+        archive_cleanup_calls = 0
+
+        def fake_archive_cleanup_summary(
+                _config: MediaforceConfig,
+                *,
+                transcode_root: str | None = None,
+        ) -> dict[str, object]:
+            nonlocal archive_cleanup_calls
+            archive_cleanup_calls += 1
+            return {
+                "archive_root": str((Path(transcode_root) / "_replaced") if transcode_root else self.config.archive_root),
+                "file_count": 0,
+                "total_size_bytes": 0,
+                "has_cleanup": False,
+            }
+
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.purge_transient_artifacts"
+        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
+            "mediaforce.web.app._start_encode_queue_worker"
+        ), patch("mediaforce.web.app._refresh_host_status_cache", return_value=[]), patch(
+            "mediaforce.web.app.archive_cleanup_summary",
+            side_effect=fake_archive_cleanup_summary,
+        ):
+            app = web_app.create_app(self.root / "config.toml")
+            route = next(
+                route for route in app.routes if isinstance(route, APIRoute) and route.path == "/api/settings"
+            )
+            assert isinstance(route, APIRoute)
+
+            response = route.endpoint(include_archive_cleanup=0)
+
+        self.assertEqual(response.status_code, 200)
+        body = json.loads(response.body)
+        self.assertIsNone(body["archive_cleanup"])
+        self.assertEqual(archive_cleanup_calls, 0)
+
+    def test_run_periodic_cleanup_starts_background_thread_without_blocking(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        cleanup_lock = threading.Lock()
+
+        def fake_purge(_config: MediaforceConfig) -> None:
+            started.set()
+            self.assertTrue(release.wait(timeout=1.0))
+
+        with patch("mediaforce.web.app.purge_transient_artifacts", side_effect=fake_purge):
+            started_at = time.monotonic()
+            _run_periodic_cleanup(self.config, cleanup_lock)
+            elapsed = time.monotonic() - started_at
+
+            self.assertLess(elapsed, 0.2)
+            self.assertTrue(started.wait(timeout=1.0))
+            self.assertTrue(cleanup_lock.locked())
+
+            release.set()
+            deadline = time.monotonic() + 1.0
+            while cleanup_lock.locked() and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        self.assertFalse(cleanup_lock.locked())
 
     def test_request_tuning_advice_reads_last_message_output(self) -> None:
         commands: list[list[str]] = []
@@ -460,6 +1303,50 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("--image", commands[0])
         self.assertEqual(commands[0][1:7], _memory_disabled_code_args())
 
+    def test_request_review_artifact_critique_uses_multimodal_exec(self) -> None:
+        image_path = self.root / "review-pack.png"
+        image_path.write_bytes(b"png")
+        commands: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(kwargs, dict)
+            commands.append(cmd)
+            output_index = cmd.index("--output-last-message") + 1
+            Path(cmd[output_index]).write_text(
+                json.dumps(
+                    {
+                        "summary": "The hallway moment looks like the most fragile visual tradeoff.",
+                        "confidence": "medium",
+                        "weakest_moments": ["Moment 2 looks softer in dark material."],
+                        "preserved_strengths": ["Dialogue close-ups still look stable."],
+                        "artifacts_to_recheck": ["Compare timeline for review moment 2"],
+                        "recommendation": "Treat dark material as the veto moment for the next draft.",
+                        "evidence_checked": ["multimodal_review_pack.artifacts[0]"],
+                    }
+                )
+            )
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+            response = request_review_artifact_critique(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/suits/season-3",
+                    "operator_note": "Does the hallway still hold up?",
+                    "multimodal_review_pack": {
+                        "artifacts": [{"label": "Moment 2", "detail": "Source on left, draft on right"}],
+                        "images": [str(image_path)],
+                    },
+                },
+            )
+
+        self.assertTrue(response.ok)
+        self.assertEqual(response.prompt_version, REVIEW_ARTIFACT_CRITIQUE_PROMPT_VERSION)
+        self.assertEqual(response.weakest_moments, ["Moment 2 looks softer in dark material."])
+        self.assertTrue(commands)
+        self.assertIn("exec", commands[0])
+        self.assertIn("--image", commands[0])
+
     def test_request_note_tuning_blocks_failed_self_check(self) -> None:
         responses = [
             json.dumps(
@@ -505,6 +1392,1451 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIsNone(response.proposed_policy)
         assert response.self_check is not None
         self.assertEqual(response.self_check["status"], "fail")
+
+    def test_request_note_tuning_preserves_low_leverage_surround_audio_when_self_check_flags_it(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I can shave a little more size by leaning on both video and surround audio.",
+                    "request_disposition": "honored_with_risk",
+                    "summary": "Trim the next sample slightly further.",
+                    "diagnosis": "The current draft still has room for a modest size-first push.",
+                    "confidence": "medium",
+                    "evidence_checked": ["runtime_toolbelt.audio_tradeoff_hint", "runtime_toolbelt.recent_sample_result"],
+                    "suggested_follow_up": "Try the lower surround tier again if you still need size savings.",
+                    "feasibility_note": None,
+                    "policy": {
+                        "video": {"target_vmaf": 89.5, "max_encoded_percent": 18},
+                        "audio": {"surround_5_1_opus_bitrate": "192k"},
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "warn",
+                    "summary": "The draft is mostly usable, but the surround audio cut is not the best lever here.",
+                    "issues": [],
+                    "surround_audio_guardrail": {
+                        "status": "prefer_preserve_current",
+                        "reason": "Dropping 5.1 Opus from 224k to 192k is low-leverage here, so preserve the current surround bitrate and spend the size budget on video instead.",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "pass",
+                    "summary": "The adjusted video-only draft is safe to try.",
+                    "issues": [],
+                    "surround_audio_guardrail": {"status": "ok", "reason": ""},
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/suits/season-3",
+                    "operator_note": "Keep pushing toward 300MB.",
+                    "policy": {
+                        "video": {"target_vmaf": 91.0, "max_encoded_percent": 22},
+                        "audio": {"surround_5_1_opus_bitrate": "224k"},
+                    },
+                    "runtime_toolbelt": {
+                        "recent_sample_result": {"predicted_encode_percent": 20.4},
+                        "audio_tradeoff_hint": {
+                            "leverage": "low",
+                            "target_bitrate_kbps": 224.0,
+                            "next_lower_bitrate_kbps": 192.0,
+                            "estimated_step_down_savings_mib": 10.4,
+                        },
+                    },
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertTrue(response.ok)
+        assert response.proposed_policy is not None
+        self.assertEqual(response.proposed_policy["video"]["target_vmaf"], 89.5)
+        self.assertEqual(response.proposed_policy["video"]["max_encoded_percent"], 18)
+        self.assertNotIn("audio", response.proposed_policy)
+        assert response.self_check is not None
+        self.assertEqual(response.self_check["status"], "pass")
+        self.assertIsNone(response.suggested_follow_up)
+        self.assertIn("held the current surround bitrate", response.request_response)
+        self.assertNotIn("leaning on both video and surround audio", response.request_response)
+        self.assertEqual(response.self_check["issues"], [])
+
+    def test_request_note_tuning_reruns_self_check_after_surround_guardrail_rollback(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I can shave a little more size by leaning on both video and surround audio.",
+                    "request_disposition": "honored",
+                    "summary": "Trim the next sample slightly further.",
+                    "diagnosis": "The current draft still has room for a modest size-first push.",
+                    "confidence": "medium",
+                    "evidence_checked": ["runtime_toolbelt.audio_tradeoff_hint", "runtime_toolbelt.recent_sample_result"],
+                    "suggested_follow_up": "Try the lower surround tier again if you still need size savings.",
+                    "feasibility_note": None,
+                    "policy": {
+                        "video": {"target_vmaf": 89.5, "max_encoded_percent": 18},
+                        "audio": {"surround_5_1_opus_bitrate": "192k"},
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "fail",
+                    "summary": "The surround audio cut is not a safe trade for this draft.",
+                    "issues": ["The surround bitrate cut is the main problem in this proposal."],
+                    "surround_audio_guardrail": {
+                        "status": "prefer_preserve_current",
+                        "reason": "Dropping 5.1 Opus from 224k to 192k is low-leverage here, so preserve the current surround bitrate and spend the size budget on video instead.",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "warn",
+                    "summary": "The remaining video-only draft is usable, but verify it against the review clips.",
+                    "issues": ["The cap may still land a bit under the requested budget."],
+                    "surround_audio_guardrail": {
+                        "status": "ok",
+                        "reason": "",
+                    },
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/suits/season-3",
+                    "operator_note": "Keep pushing toward 300MB.",
+                    "policy": {
+                        "video": {"target_vmaf": 91.0, "max_encoded_percent": 22},
+                        "audio": {"surround_5_1_opus_bitrate": "224k"},
+                    },
+                    "runtime_toolbelt": {
+                        "recent_sample_result": {"predicted_encode_percent": 20.4},
+                        "audio_tradeoff_hint": {
+                            "leverage": "low",
+                            "target_bitrate_kbps": 224.0,
+                            "next_lower_bitrate_kbps": 192.0,
+                            "estimated_step_down_savings_mib": 10.4,
+                        },
+                    },
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertTrue(response.ok)
+        assert response.proposed_policy is not None
+        self.assertEqual(response.proposed_policy["video"]["target_vmaf"], 89.5)
+        self.assertEqual(response.proposed_policy["video"]["max_encoded_percent"], 18)
+        self.assertNotIn("audio", response.proposed_policy)
+        assert response.self_check is not None
+        self.assertEqual(response.self_check["status"], "warn")
+        self.assertEqual(
+            response.self_check["summary"],
+            "The remaining video-only draft is usable, but verify it against the review clips.",
+        )
+        self.assertIsNone(response.suggested_follow_up)
+        self.assertIn("held the current surround bitrate", response.request_response)
+
+    def test_request_note_tuning_preserves_failed_self_check_when_guardrail_rerun_returns_none(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I can shave a little more size by leaning on both video and surround audio.",
+                    "request_disposition": "honored",
+                    "summary": "Trim the next sample slightly further.",
+                    "diagnosis": "The current draft still has room for a modest size-first push.",
+                    "confidence": "medium",
+                    "evidence_checked": ["runtime_toolbelt.audio_tradeoff_hint", "runtime_toolbelt.recent_sample_result"],
+                    "suggested_follow_up": "Try the lower surround tier again if you still need size savings.",
+                    "feasibility_note": None,
+                    "policy": {
+                        "video": {"target_vmaf": 89.5, "max_encoded_percent": 18},
+                        "audio": {"surround_5_1_opus_bitrate": "192k"},
+                    },
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        initial_fail_self_check = {
+            "status": "fail",
+            "summary": "The surround audio cut is not a safe trade for this draft.",
+            "issues": ["The surround bitrate cut is the main problem in this proposal."],
+            "surround_audio_guardrail": {
+                "status": "prefer_preserve_current",
+                "reason": "Dropping 5.1 Opus from 224k to 192k is low-leverage here, so preserve the current surround bitrate and spend the size budget on video instead.",
+            },
+        }
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run), patch(
+            "mediaforce.advisor._run_tune_self_check",
+            side_effect=[initial_fail_self_check, None],
+        ):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/suits/season-3",
+                    "operator_note": "Keep pushing toward 300MB.",
+                    "policy": {
+                        "video": {"target_vmaf": 91.0, "max_encoded_percent": 22},
+                        "audio": {"surround_5_1_opus_bitrate": "224k"},
+                    },
+                    "runtime_toolbelt": {
+                        "recent_sample_result": {"predicted_encode_percent": 20.4},
+                        "audio_tradeoff_hint": {
+                            "policy_key": "surround_5_1_opus_bitrate",
+                            "leverage": "low",
+                            "target_bitrate_kbps": 224.0,
+                            "next_lower_bitrate_kbps": 192.0,
+                            "estimated_step_down_savings_mib": 10.4,
+                        },
+                    },
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertFalse(response.ok)
+        self.assertIsNone(response.proposed_policy)
+        assert response.self_check is not None
+        self.assertEqual(response.self_check["status"], "fail")
+        self.assertEqual(
+            response.self_check["summary"],
+            "Dropping 5.1 Opus from 224k to 192k is low-leverage here, so preserve the current surround bitrate and spend the size budget on video instead.",
+        )
+
+    def test_request_note_tuning_preserves_non_audio_failures_when_guardrail_rerun_passes(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I can shave a little more size by leaning on both video and surround audio.",
+                    "request_disposition": "honored",
+                    "summary": "Trim the next sample slightly further.",
+                    "diagnosis": "The current draft still has room for a modest size-first push.",
+                    "confidence": "medium",
+                    "evidence_checked": ["runtime_toolbelt.audio_tradeoff_hint", "runtime_toolbelt.recent_sample_result"],
+                    "suggested_follow_up": "Try the lower surround tier again if you still need size savings.",
+                    "feasibility_note": None,
+                    "policy": {
+                        "video": {"target_vmaf": 89.5, "max_encoded_percent": 18},
+                        "audio": {"surround_5_1_opus_bitrate": "192k"},
+                    },
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run), patch(
+            "mediaforce.advisor._run_tune_self_check",
+            side_effect=[
+                {
+                    "status": "fail",
+                    "summary": "The surround audio cut is not a safe trade for this draft.",
+                    "issues": [
+                        "The surround bitrate cut is the main problem in this proposal.",
+                        "The cap may still land a bit under the requested budget.",
+                    ],
+                    "surround_audio_guardrail": {
+                        "status": "prefer_preserve_current",
+                        "reason": "Dropping 5.1 Opus from 224k to 192k is low-leverage here, so preserve the current surround bitrate and spend the size budget on video instead.",
+                    },
+                },
+                {
+                    "status": "pass",
+                    "summary": "The adjusted draft is safe to try.",
+                    "issues": [],
+                    "surround_audio_guardrail": {"status": "ok", "reason": ""},
+                },
+            ],
+        ):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/suits/season-3",
+                    "operator_note": "Keep pushing toward 300MB.",
+                    "policy": {
+                        "video": {"target_vmaf": 91.0, "max_encoded_percent": 22},
+                        "audio": {"surround_5_1_opus_bitrate": "224k"},
+                    },
+                    "runtime_toolbelt": {
+                        "recent_sample_result": {"predicted_encode_percent": 20.4},
+                        "audio_tradeoff_hint": {
+                            "policy_key": "surround_5_1_opus_bitrate",
+                            "leverage": "low",
+                            "target_bitrate_kbps": 224.0,
+                            "next_lower_bitrate_kbps": 192.0,
+                        },
+                    },
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertFalse(response.ok)
+        assert response.self_check is not None
+        self.assertEqual(response.self_check["status"], "fail")
+        self.assertEqual(response.self_check["issues"], ["The cap may still land a bit under the requested budget."])
+
+    def test_filter_audio_specific_guardrail_issues_keeps_mixed_issue_text(self) -> None:
+        issues = [
+            "The surround audio cut is not the best lever here.",
+            "The surround cut may still leave the size budget slightly under target.",
+        ]
+
+        filtered = _filter_audio_specific_guardrail_issues(issues)
+
+        self.assertEqual(filtered, ["The surround cut may still leave the size budget slightly under target."])
+
+    def test_request_note_tuning_clears_mixed_audio_sample_follow_up_when_surround_guardrail_fires(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I can shave a little more size by leaning on both video and surround audio.",
+                    "request_disposition": "honored_with_risk",
+                    "summary": "Trim the next sample slightly further.",
+                    "diagnosis": "The current draft still has room for a modest size-first push.",
+                    "confidence": "medium",
+                    "evidence_checked": ["runtime_toolbelt.audio_tradeoff_hint", "runtime_toolbelt.recent_sample_result"],
+                    "suggested_follow_up": "Measure the surround audio in the next sample clip before deciding whether to keep that cut.",
+                    "feasibility_note": None,
+                    "policy": {
+                        "video": {"target_vmaf": 89.5, "max_encoded_percent": 18},
+                        "audio": {"surround_5_1_opus_bitrate": "192k"},
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "warn",
+                    "summary": "The draft is mostly usable, but the surround audio cut is not the best lever here.",
+                    "issues": [],
+                    "surround_audio_guardrail": {
+                        "status": "prefer_preserve_current",
+                        "reason": "Dropping 5.1 Opus from 224k to 192k is low-leverage here, so preserve the current surround bitrate and spend the size budget on video instead.",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "pass",
+                    "summary": "The adjusted video-only draft is safe to try.",
+                    "issues": [],
+                    "surround_audio_guardrail": {"status": "ok", "reason": ""},
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/suits/season-3",
+                    "operator_note": "Keep pushing toward 300MB.",
+                    "policy": {
+                        "video": {"target_vmaf": 91.0, "max_encoded_percent": 22},
+                        "audio": {"surround_5_1_opus_bitrate": "224k"},
+                    },
+                    "runtime_toolbelt": {
+                        "recent_sample_result": {"predicted_encode_percent": 20.4},
+                        "audio_tradeoff_hint": {
+                            "leverage": "low",
+                            "target_bitrate_kbps": 224.0,
+                            "next_lower_bitrate_kbps": 192.0,
+                            "estimated_step_down_savings_mib": 10.4,
+                        },
+                    },
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertTrue(response.ok)
+        self.assertIsNone(response.suggested_follow_up)
+        self.assertIn("held the current surround bitrate", response.request_response)
+
+    def test_request_note_tuning_clears_punctuated_audio_follow_up_when_surround_guardrail_fires(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I can shave a little more size by leaning on both video and surround audio.",
+                    "request_disposition": "honored_with_risk",
+                    "summary": "Trim the next sample slightly further.",
+                    "diagnosis": "The current draft still has room for a modest size-first push.",
+                    "confidence": "medium",
+                    "evidence_checked": ["runtime_toolbelt.audio_tradeoff_hint", "runtime_toolbelt.recent_sample_result"],
+                    "suggested_follow_up": "Measure the surround audio, in the next sample clip, before deciding whether to keep that cut.",
+                    "feasibility_note": None,
+                    "policy": {
+                        "video": {"target_vmaf": 89.5, "max_encoded_percent": 18},
+                        "audio": {"surround_5_1_opus_bitrate": "192k"},
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "warn",
+                    "summary": "The draft is mostly usable, but the surround audio cut is not the best lever here.",
+                    "issues": [],
+                    "surround_audio_guardrail": {
+                        "status": "prefer_preserve_current",
+                        "reason": "Dropping 5.1 Opus from 224k to 192k is low-leverage here, so preserve the current surround bitrate and spend the size budget on video instead.",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "pass",
+                    "summary": "The adjusted video-only draft is safe to try.",
+                    "issues": [],
+                    "surround_audio_guardrail": {"status": "ok", "reason": ""},
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/suits/season-3",
+                    "operator_note": "Keep pushing toward 300MB.",
+                    "policy": {
+                        "video": {"target_vmaf": 91.0, "max_encoded_percent": 22},
+                        "audio": {"surround_5_1_opus_bitrate": "224k"},
+                    },
+                    "runtime_toolbelt": {
+                        "recent_sample_result": {"predicted_encode_percent": 20.4},
+                        "audio_tradeoff_hint": {
+                            "leverage": "low",
+                            "target_bitrate_kbps": 224.0,
+                            "next_lower_bitrate_kbps": 192.0,
+                            "estimated_step_down_savings_mib": 10.4,
+                        },
+                    },
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertTrue(response.ok)
+        self.assertIsNone(response.suggested_follow_up)
+        self.assertIn("held the current surround bitrate", response.request_response)
+
+    def test_request_note_tuning_preserves_non_audio_follow_up_when_surround_guardrail_fires(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I can keep the surround bitrates steady and tighten the video target instead.",
+                    "request_disposition": "honored_with_risk",
+                    "summary": "Trim the next sample slightly further.",
+                    "diagnosis": "The current draft still has room for a modest size-first push.",
+                    "confidence": "medium",
+                    "evidence_checked": ["runtime_toolbelt.audio_tradeoff_hint", "runtime_toolbelt.recent_sample_result"],
+                    "suggested_follow_up": "Try lowering target_vmaf on the next pass if you still need savings.",
+                    "feasibility_note": None,
+                    "policy": {
+                        "video": {"target_vmaf": 89.5, "max_encoded_percent": 18},
+                        "audio": {"surround_5_1_opus_bitrate": "192k"},
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "warn",
+                    "summary": "The draft is mostly usable, but the surround audio cut is not the best lever here.",
+                    "issues": [],
+                    "surround_audio_guardrail": {
+                        "status": "prefer_preserve_current",
+                        "reason": "Dropping 5.1 Opus from 224k to 192k is low-leverage here, so preserve the current surround bitrate and spend the size budget on video instead.",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "pass",
+                    "summary": "The adjusted video-only draft is safe to try.",
+                    "issues": [],
+                    "surround_audio_guardrail": {"status": "ok", "reason": ""},
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/suits/season-3",
+                    "operator_note": "Keep pushing toward 300MB.",
+                    "policy": {
+                        "video": {"target_vmaf": 91.0, "max_encoded_percent": 22},
+                        "audio": {"surround_5_1_opus_bitrate": "224k"},
+                    },
+                    "runtime_toolbelt": {
+                        "recent_sample_result": {"predicted_encode_percent": 20.4},
+                        "audio_tradeoff_hint": {
+                            "leverage": "low",
+                            "target_bitrate_kbps": 224.0,
+                            "next_lower_bitrate_kbps": 192.0,
+                            "estimated_step_down_savings_mib": 10.4,
+                        },
+                    },
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertTrue(response.ok)
+        assert response.proposed_policy is not None
+        self.assertEqual(response.proposed_policy["video"]["target_vmaf"], 89.5)
+        self.assertEqual(response.proposed_policy["video"]["max_encoded_percent"], 18)
+        self.assertNotIn("audio", response.proposed_policy)
+        self.assertEqual(response.suggested_follow_up, "Try lowering target_vmaf on the next pass if you still need savings.")
+        assert response.self_check is not None
+        self.assertEqual(response.self_check["status"], "pass")
+
+    def test_request_note_tuning_rolls_back_stereo_audio_cut_when_guardrail_fires(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I can shave a little more size by leaning on both video and stereo audio.",
+                    "request_disposition": "honored_with_risk",
+                    "summary": "Trim the next sample slightly further.",
+                    "diagnosis": "The current draft still has room for a modest size-first push.",
+                    "confidence": "medium",
+                    "evidence_checked": ["runtime_toolbelt.audio_tradeoff_hint", "runtime_toolbelt.recent_sample_result"],
+                    "suggested_follow_up": "Try the lower stereo bitrate again if you still need size savings.",
+                    "feasibility_note": None,
+                    "policy": {
+                        "video": {"target_vmaf": 89.5, "max_encoded_percent": 18},
+                        "audio": {"stereo_opus_bitrate": "112k"},
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "warn",
+                    "summary": "The draft is mostly usable, but the stereo audio cut is not the best lever here.",
+                    "issues": [],
+                    "surround_audio_guardrail": {
+                        "status": "prefer_preserve_current",
+                        "reason": "Dropping stereo Opus from 128k to 112k is low-leverage here, so preserve the current stereo bitrate and spend the size budget on video instead.",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "pass",
+                    "summary": "The adjusted video-only draft is safe to try.",
+                    "issues": [],
+                    "surround_audio_guardrail": {"status": "ok", "reason": ""},
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/demo/season-1",
+                    "operator_note": "Keep pushing toward 300MB.",
+                    "policy": {
+                        "video": {"target_vmaf": 91.0, "max_encoded_percent": 22},
+                        "audio": {"stereo_opus_bitrate": "128k"},
+                    },
+                    "runtime_toolbelt": {
+                        "recent_sample_result": {"predicted_encode_percent": 20.4},
+                        "audio_tradeoff_hint": {
+                            "policy_key": "stereo_opus_bitrate",
+                            "leverage": "low",
+                            "target_bitrate_kbps": 128.0,
+                            "next_lower_bitrate_kbps": 112.0,
+                            "estimated_step_down_savings_mib": 6.2,
+                        },
+                    },
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertTrue(response.ok)
+        assert response.proposed_policy is not None
+        self.assertEqual(response.proposed_policy["video"]["target_vmaf"], 89.5)
+        self.assertEqual(response.proposed_policy["video"]["max_encoded_percent"], 18)
+        self.assertNotIn("audio", response.proposed_policy)
+        self.assertIsNone(response.suggested_follow_up)
+        self.assertIn("held the current stereo bitrate", response.request_response)
+
+    def test_request_note_tuning_rejects_audio_only_draft_after_guardrail_removes_last_edit(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I can shave a little more size by lowering stereo audio.",
+                    "request_disposition": "honored_with_risk",
+                    "summary": "Lower stereo only.",
+                    "diagnosis": "The remaining opportunity is in audio.",
+                    "confidence": "medium",
+                    "evidence_checked": ["runtime_toolbelt.audio_tradeoff_hint"],
+                    "suggested_follow_up": "Try the lower stereo bitrate again if you still need size savings.",
+                    "feasibility_note": None,
+                    "policy": {
+                        "audio": {"stereo_opus_bitrate": "112k"},
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "warn",
+                    "summary": "The stereo audio cut is not the best lever here.",
+                    "issues": [],
+                    "surround_audio_guardrail": {
+                        "status": "prefer_preserve_current",
+                        "reason": "Dropping stereo Opus from 128k to 112k is low-leverage here.",
+                    },
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/demo/season-1",
+                    "operator_note": "Go a little smaller.",
+                    "policy": {
+                        "audio": {"stereo_opus_bitrate": "128k"},
+                    },
+                    "runtime_toolbelt": {
+                        "audio_tradeoff_hint": {
+                            "policy_key": "stereo_opus_bitrate",
+                            "leverage": "low",
+                            "target_bitrate_kbps": 128.0,
+                            "next_lower_bitrate_kbps": 112.0,
+                        }
+                    },
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertFalse(response.ok)
+        self.assertIsNone(response.proposed_policy)
+        assert response.self_check is not None
+        self.assertEqual(response.self_check["status"], "warn")
+        self.assertEqual(response.self_check["summary"], "Dropping stereo Opus from 128k to 112k is low-leverage here.")
+        self.assertEqual(response.suggested_follow_up, "Dropping stereo Opus from 128k to 112k is low-leverage here.")
+
+    def test_request_note_tuning_applies_audio_guardrail_when_self_check_is_missing(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I can shave a little more size by leaning on both video and stereo audio.",
+                    "request_disposition": "honored_with_risk",
+                    "summary": "Trim the next sample slightly further.",
+                    "diagnosis": "The current draft still has room for a modest size-first push.",
+                    "confidence": "medium",
+                    "evidence_checked": ["runtime_toolbelt.audio_tradeoff_hint", "runtime_toolbelt.recent_sample_result"],
+                    "suggested_follow_up": "Try the lower stereo bitrate again if you still need size savings.",
+                    "feasibility_note": None,
+                    "policy": {
+                        "video": {"target_vmaf": 89.5, "max_encoded_percent": 18},
+                        "audio": {"stereo_opus_bitrate": "112k"},
+                    },
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run), patch(
+            "mediaforce.advisor._run_tune_self_check",
+            return_value=None,
+        ):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/demo/season-1",
+                    "operator_note": "Keep pushing toward 300MB.",
+                    "policy": {
+                        "video": {"target_vmaf": 91.0, "max_encoded_percent": 22},
+                        "audio": {"stereo_opus_bitrate": "128k"},
+                    },
+                    "runtime_toolbelt": {
+                        "recent_sample_result": {"predicted_encode_percent": 20.4},
+                        "audio_tradeoff_hint": {
+                            "policy_key": "stereo_opus_bitrate",
+                            "leverage": "low",
+                            "target_bitrate_kbps": 128.0,
+                            "next_lower_bitrate_kbps": 112.0,
+                        },
+                    },
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertTrue(response.ok)
+        assert response.proposed_policy is not None
+        self.assertEqual(response.proposed_policy["video"]["target_vmaf"], 89.5)
+        self.assertEqual(response.proposed_policy["video"]["max_encoded_percent"], 18)
+        self.assertNotIn("audio", response.proposed_policy)
+        self.assertIsNone(response.suggested_follow_up)
+        assert response.self_check is not None
+        self.assertEqual(response.self_check["status"], "warn")
+        self.assertEqual(
+            response.self_check["summary"],
+            "Dropping current stereo bitrate from 128k to 112k is low-leverage here, so preserve the current stereo bitrate and spend the size budget on video instead.",
+        )
+
+    def test_request_note_tuning_backstops_audio_guardrail_when_self_check_misses_it(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I can shave a little more size by leaning on both video and stereo audio.",
+                    "request_disposition": "honored_with_risk",
+                    "summary": "Trim the next sample slightly further.",
+                    "diagnosis": "The current draft still has room for a modest size-first push.",
+                    "confidence": "medium",
+                    "evidence_checked": ["runtime_toolbelt.audio_tradeoff_hint", "runtime_toolbelt.recent_sample_result"],
+                    "suggested_follow_up": "Try the lower stereo bitrate again if you still need size savings.",
+                    "feasibility_note": None,
+                    "policy": {
+                        "video": {"target_vmaf": 89.5, "max_encoded_percent": 18},
+                        "audio": {"stereo_opus_bitrate": "112k"},
+                    },
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run), patch(
+            "mediaforce.advisor._run_tune_self_check",
+            side_effect=[
+                {
+                    "status": "pass",
+                    "summary": "The draft is safe to try.",
+                    "issues": [],
+                    "surround_audio_guardrail": {"status": "ok", "reason": ""},
+                },
+                {
+                    "status": "pass",
+                    "summary": "The adjusted draft is safe to try.",
+                    "issues": [],
+                    "surround_audio_guardrail": {"status": "ok", "reason": ""},
+                },
+            ],
+        ):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/demo/season-1",
+                    "operator_note": "Keep pushing toward 300MB.",
+                    "policy": {
+                        "video": {"target_vmaf": 91.0, "max_encoded_percent": 22},
+                        "audio": {"stereo_opus_bitrate": "128k"},
+                    },
+                    "runtime_toolbelt": {
+                        "recent_sample_result": {"predicted_encode_percent": 20.4},
+                        "audio_tradeoff_hint": {
+                            "policy_key": "stereo_opus_bitrate",
+                            "leverage": "low",
+                            "target_bitrate_kbps": 128.0,
+                            "next_lower_bitrate_kbps": 112.0,
+                        },
+                    },
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertTrue(response.ok)
+        assert response.proposed_policy is not None
+        self.assertEqual(response.proposed_policy["video"]["target_vmaf"], 89.5)
+        self.assertEqual(response.proposed_policy["video"]["max_encoded_percent"], 18)
+        self.assertNotIn("audio", response.proposed_policy)
+        self.assertIsNone(response.suggested_follow_up)
+        assert response.self_check is not None
+        self.assertEqual(response.self_check["status"], "pass")
+        self.assertEqual(response.self_check["summary"], "The adjusted draft is safe to try.")
+
+    def test_request_note_tuning_does_not_treat_generic_bitrate_note_as_audio_specific(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I can shave a little more size by leaning on both video and stereo audio.",
+                    "request_disposition": "honored_with_risk",
+                    "summary": "Trim the next sample slightly further.",
+                    "diagnosis": "The current draft still has room for a modest size-first push.",
+                    "confidence": "medium",
+                    "evidence_checked": ["runtime_toolbelt.audio_tradeoff_hint", "runtime_toolbelt.recent_sample_result"],
+                    "suggested_follow_up": "Try the lower stereo bitrate again if you still need size savings.",
+                    "feasibility_note": None,
+                    "policy": {
+                        "video": {"target_vmaf": 89.5, "max_encoded_percent": 18},
+                        "audio": {"stereo_opus_bitrate": "112k"},
+                    },
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run), patch(
+            "mediaforce.advisor._run_tune_self_check",
+            return_value={
+                "status": "pass",
+                "summary": "The draft is safe to try.",
+                "issues": [],
+                "surround_audio_guardrail": {"status": "ok", "reason": ""},
+            },
+        ):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/demo/season-1",
+                    "operator_note": "Trim the bitrate a little more, but keep the motion clean.",
+                    "policy": {
+                        "video": {"target_vmaf": 91.0, "max_encoded_percent": 22},
+                        "audio": {"stereo_opus_bitrate": "128k"},
+                    },
+                    "runtime_toolbelt": {
+                        "recent_sample_result": {"predicted_encode_percent": 20.4},
+                        "audio_tradeoff_hint": {
+                            "policy_key": "stereo_opus_bitrate",
+                            "leverage": "low",
+                            "target_bitrate_kbps": 128.0,
+                            "next_lower_bitrate_kbps": 112.0,
+                        },
+                    },
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertTrue(response.ok)
+        assert response.proposed_policy is not None
+        self.assertEqual(response.proposed_policy["video"]["target_vmaf"], 89.5)
+        self.assertEqual(response.proposed_policy["video"]["max_encoded_percent"], 18)
+        self.assertNotIn("audio", response.proposed_policy)
+        assert response.self_check is not None
+        self.assertEqual(response.self_check["status"], "pass")
+
+    def test_request_note_tuning_recognizes_codec_names_as_audio_specific(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I can shave a little more size by leaning on both video and stereo audio.",
+                    "request_disposition": "honored_with_risk",
+                    "summary": "Trim the next sample slightly further.",
+                    "diagnosis": "The current draft still has room for a modest size-first push.",
+                    "confidence": "medium",
+                    "evidence_checked": ["runtime_toolbelt.audio_tradeoff_hint", "runtime_toolbelt.recent_sample_result"],
+                    "suggested_follow_up": "Try the lower stereo bitrate again if you still need size savings.",
+                    "feasibility_note": None,
+                    "policy": {
+                        "video": {"target_vmaf": 89.5, "max_encoded_percent": 18},
+                        "audio": {"stereo_opus_bitrate": "112k"},
+                    },
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run), patch(
+            "mediaforce.advisor._run_tune_self_check",
+            return_value={
+                "status": "pass",
+                "summary": "The draft is safe to try.",
+                "issues": [],
+                "surround_audio_guardrail": {"status": "ok", "reason": ""},
+            },
+        ):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/demo/season-1",
+                    "operator_note": "Drop the AAC track harder if that buys us the space.",
+                    "policy": {
+                        "video": {"target_vmaf": 91.0, "max_encoded_percent": 22},
+                        "audio": {"stereo_opus_bitrate": "128k"},
+                    },
+                    "runtime_toolbelt": {
+                        "recent_sample_result": {"predicted_encode_percent": 20.4},
+                        "audio_tradeoff_hint": {
+                            "policy_key": "stereo_opus_bitrate",
+                            "leverage": "low",
+                            "target_bitrate_kbps": 128.0,
+                            "next_lower_bitrate_kbps": 112.0,
+                        },
+                    },
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertTrue(response.ok)
+        assert response.proposed_policy is not None
+        self.assertEqual(response.proposed_policy["audio"]["stereo_opus_bitrate"], "112k")
+        assert response.self_check is not None
+        self.assertEqual(response.self_check["status"], "pass")
+
+    def test_request_note_tuning_recognizes_audio_request_even_when_video_terms_appear(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I can shave a little more size by leaning on both video and stereo audio.",
+                    "request_disposition": "honored_with_risk",
+                    "summary": "Trim the next sample slightly further.",
+                    "diagnosis": "The current draft still has room for a modest size-first push.",
+                    "confidence": "medium",
+                    "evidence_checked": ["runtime_toolbelt.audio_tradeoff_hint", "runtime_toolbelt.recent_sample_result"],
+                    "suggested_follow_up": "Try the lower stereo bitrate again if you still need size savings.",
+                    "feasibility_note": None,
+                    "policy": {
+                        "video": {"target_vmaf": 89.5, "max_encoded_percent": 18},
+                        "audio": {"stereo_opus_bitrate": "112k"},
+                    },
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run), patch(
+            "mediaforce.advisor._run_tune_self_check",
+            return_value={
+                "status": "pass",
+                "summary": "The draft is safe to try.",
+                "issues": [],
+                "surround_audio_guardrail": {"status": "ok", "reason": ""},
+            },
+        ):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/demo/season-1",
+                    "operator_note": "Keep the video clean, but drop the AAC track harder if that buys us the space.",
+                    "policy": {
+                        "video": {"target_vmaf": 91.0, "max_encoded_percent": 22},
+                        "audio": {"stereo_opus_bitrate": "128k"},
+                    },
+                    "runtime_toolbelt": {
+                        "recent_sample_result": {"predicted_encode_percent": 20.4},
+                        "audio_tradeoff_hint": {
+                            "policy_key": "stereo_opus_bitrate",
+                            "leverage": "low",
+                            "target_bitrate_kbps": 128.0,
+                            "next_lower_bitrate_kbps": 112.0,
+                        },
+                    },
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertTrue(response.ok)
+        assert response.proposed_policy is not None
+        self.assertEqual(response.proposed_policy["audio"]["stereo_opus_bitrate"], "112k")
+        assert response.self_check is not None
+        self.assertEqual(response.self_check["status"], "pass")
+
+    def test_request_note_tuning_recognizes_audio_mix_language(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I can shave a little more size by leaning on both video and stereo audio.",
+                    "request_disposition": "honored_with_risk",
+                    "summary": "Trim the next sample slightly further.",
+                    "diagnosis": "The current draft still has room for a modest size-first push.",
+                    "confidence": "medium",
+                    "evidence_checked": ["runtime_toolbelt.audio_tradeoff_hint", "runtime_toolbelt.recent_sample_result"],
+                    "suggested_follow_up": "Try the lower stereo bitrate again if you still need size savings.",
+                    "feasibility_note": None,
+                    "policy": {
+                        "video": {"target_vmaf": 89.5, "max_encoded_percent": 18},
+                        "audio": {"stereo_opus_bitrate": "112k"},
+                    },
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run), patch(
+            "mediaforce.advisor._run_tune_self_check",
+            return_value={
+                "status": "pass",
+                "summary": "The draft is safe to try.",
+                "issues": [],
+                "surround_audio_guardrail": {"status": "ok", "reason": ""},
+            },
+        ):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/demo/season-1",
+                    "operator_note": "Keep the video close, but spend the English mix if that helps size.",
+                    "policy": {
+                        "video": {"target_vmaf": 91.0, "max_encoded_percent": 22},
+                        "audio": {"stereo_opus_bitrate": "128k"},
+                    },
+                    "runtime_toolbelt": {
+                        "recent_sample_result": {"predicted_encode_percent": 20.4},
+                        "audio_tradeoff_hint": {
+                            "policy_key": "stereo_opus_bitrate",
+                            "leverage": "low",
+                            "target_bitrate_kbps": 128.0,
+                            "next_lower_bitrate_kbps": 112.0,
+                        },
+                    },
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertTrue(response.ok)
+        assert response.proposed_policy is not None
+        self.assertEqual(response.proposed_policy["audio"]["stereo_opus_bitrate"], "112k")
+        assert response.self_check is not None
+        self.assertEqual(response.self_check["status"], "pass")
+
+    def test_request_note_tuning_reruns_self_check_after_guardrail_warn_rewrite(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I can shave a little more size by leaning on both video and stereo audio.",
+                    "request_disposition": "honored_with_risk",
+                    "summary": "Trim the next sample slightly further.",
+                    "diagnosis": "The current draft still has room for a modest size-first push.",
+                    "confidence": "medium",
+                    "evidence_checked": ["runtime_toolbelt.audio_tradeoff_hint", "runtime_toolbelt.recent_sample_result"],
+                    "suggested_follow_up": "Try the lower stereo bitrate again if you still need size savings.",
+                    "feasibility_note": None,
+                    "policy": {
+                        "video": {"target_vmaf": 89.5, "max_encoded_percent": 18},
+                        "audio": {"stereo_opus_bitrate": "112k"},
+                    },
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run), patch(
+            "mediaforce.advisor._run_tune_self_check",
+            side_effect=[
+                {
+                    "status": "pass",
+                    "summary": "The original draft is safe to try.",
+                    "issues": [],
+                    "surround_audio_guardrail": {
+                        "status": "prefer_preserve_current",
+                        "reason": "Dropping current stereo bitrate from 128k to 112k is low-leverage here, so preserve the current stereo bitrate and spend the size budget on video instead.",
+                    },
+                },
+                {
+                    "status": "pass",
+                    "summary": "The adjusted draft is safe to try.",
+                    "issues": [],
+                    "surround_audio_guardrail": {"status": "ok", "reason": ""},
+                },
+            ],
+        ):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/demo/season-1",
+                    "operator_note": "Keep pushing toward 300MB.",
+                    "policy": {
+                        "video": {"target_vmaf": 91.0, "max_encoded_percent": 22},
+                        "audio": {"stereo_opus_bitrate": "128k"},
+                    },
+                    "runtime_toolbelt": {
+                        "recent_sample_result": {"predicted_encode_percent": 20.4},
+                        "audio_tradeoff_hint": {
+                            "policy_key": "stereo_opus_bitrate",
+                            "leverage": "low",
+                            "target_bitrate_kbps": 128.0,
+                            "next_lower_bitrate_kbps": 112.0,
+                        },
+                    },
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertTrue(response.ok)
+        assert response.proposed_policy is not None
+        self.assertNotIn("audio", response.proposed_policy)
+        assert response.self_check is not None
+        self.assertEqual(response.self_check["status"], "pass")
+        self.assertEqual(response.self_check["summary"], "The adjusted draft is safe to try.")
+
+    def test_request_note_tuning_updates_summary_and_diagnosis_after_guardrail(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I can shave a little more size by leaning on both video and surround audio.",
+                    "request_disposition": "honored_with_risk",
+                    "summary": "Trim the next sample slightly further.",
+                    "diagnosis": "The current draft still has room for a modest size-first push.",
+                    "confidence": "medium",
+                    "evidence_checked": ["runtime_toolbelt.audio_tradeoff_hint", "runtime_toolbelt.recent_sample_result"],
+                    "suggested_follow_up": "Try the lower surround tier again if you still need size savings.",
+                    "feasibility_note": None,
+                    "policy": {
+                        "video": {"target_vmaf": 89.5, "max_encoded_percent": 18},
+                        "audio": {"surround_5_1_opus_bitrate": "192k"},
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "warn",
+                    "summary": "The draft is mostly usable, but the surround audio cut is not the best lever here.",
+                    "issues": [],
+                    "surround_audio_guardrail": {
+                        "status": "prefer_preserve_current",
+                        "reason": "Dropping 5.1 Opus from 224k to 192k is low-leverage here, so preserve the current surround bitrate and spend the size budget on video instead.",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "warn",
+                    "summary": "The remaining video-only draft is usable, but the cap may still land a bit under the requested budget.",
+                    "issues": ["The cap may still land a bit under the requested budget."],
+                    "surround_audio_guardrail": {"status": "ok", "reason": ""},
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/suits/season-3",
+                    "operator_note": "Keep pushing toward 300MB.",
+                    "policy": {
+                        "video": {"target_vmaf": 91.0, "max_encoded_percent": 22},
+                        "audio": {"surround_5_1_opus_bitrate": "224k"},
+                    },
+                    "runtime_toolbelt": {
+                        "recent_sample_result": {"predicted_encode_percent": 20.4},
+                        "audio_tradeoff_hint": {
+                            "policy_key": "surround_5_1_opus_bitrate",
+                            "leverage": "low",
+                            "target_bitrate_kbps": 224.0,
+                            "next_lower_bitrate_kbps": 192.0,
+                        },
+                    },
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertTrue(response.ok)
+        self.assertEqual(response.summary, "Kept the non-audio tightening, but preserved the current surround bitrate.")
+        self.assertIn("lowering the current surround bitrate was not the right trade here", response.diagnosis)
+        self.assertIn("Dropping 5.1 Opus from 224k to 192k is low-leverage here", response.diagnosis)
+
+    def test_request_note_tuning_filters_audio_only_issues_after_guardrail_warn(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I can shave a little more size by leaning on both video and surround audio.",
+                    "request_disposition": "honored_with_risk",
+                    "summary": "Trim the next sample slightly further.",
+                    "diagnosis": "The current draft still has room for a modest size-first push.",
+                    "confidence": "medium",
+                    "evidence_checked": ["runtime_toolbelt.audio_tradeoff_hint", "runtime_toolbelt.recent_sample_result"],
+                    "suggested_follow_up": "Try the lower surround tier again if you still need size savings.",
+                    "feasibility_note": None,
+                    "policy": {
+                        "video": {"target_vmaf": 89.5, "max_encoded_percent": 18},
+                        "audio": {"surround_5_1_opus_bitrate": "192k"},
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "warn",
+                    "summary": "The draft is mostly usable, but the surround audio cut is not the best lever here.",
+                    "issues": [
+                        "The surround audio cut is not the best lever here.",
+                        "The cap may still land a bit under the requested budget.",
+                    ],
+                    "surround_audio_guardrail": {
+                        "status": "prefer_preserve_current",
+                        "reason": "Dropping 5.1 Opus from 224k to 192k is low-leverage here, so preserve the current surround bitrate and spend the size budget on video instead.",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "warn",
+                    "summary": "The remaining video-only draft is usable, but the cap may still land a bit under the requested budget.",
+                    "issues": ["The cap may still land a bit under the requested budget."],
+                    "surround_audio_guardrail": {"status": "ok", "reason": ""},
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/suits/season-3",
+                    "operator_note": "Keep pushing toward 300MB.",
+                    "policy": {
+                        "video": {"target_vmaf": 91.0, "max_encoded_percent": 22},
+                        "audio": {"surround_5_1_opus_bitrate": "224k"},
+                    },
+                    "runtime_toolbelt": {
+                        "recent_sample_result": {"predicted_encode_percent": 20.4},
+                        "audio_tradeoff_hint": {
+                            "policy_key": "surround_5_1_opus_bitrate",
+                            "leverage": "low",
+                            "target_bitrate_kbps": 224.0,
+                            "next_lower_bitrate_kbps": 192.0,
+                            "estimated_step_down_savings_mib": 10.4,
+                        },
+                    },
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertTrue(response.ok)
+        assert response.self_check is not None
+        self.assertEqual(
+            response.self_check["issues"],
+            ["The cap may still land a bit under the requested budget."],
+        )
+
+    def test_request_note_tuning_preserves_follow_up_that_only_uses_track_as_verb(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I can keep the surround bitrates steady and tighten the video target instead.",
+                    "request_disposition": "honored_with_risk",
+                    "summary": "Trim the next sample slightly further.",
+                    "diagnosis": "The current draft still has room for a modest size-first push.",
+                    "confidence": "medium",
+                    "evidence_checked": ["runtime_toolbelt.audio_tradeoff_hint", "runtime_toolbelt.recent_sample_result"],
+                    "suggested_follow_up": "Track whether the dark scenes still look stable on the next pass.",
+                    "feasibility_note": None,
+                    "policy": {
+                        "video": {"target_vmaf": 89.5, "max_encoded_percent": 18},
+                        "audio": {"surround_5_1_opus_bitrate": "192k"},
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "warn",
+                    "summary": "The draft is mostly usable, but the surround audio cut is not the best lever here.",
+                    "issues": [],
+                    "surround_audio_guardrail": {
+                        "status": "prefer_preserve_current",
+                        "reason": "Dropping 5.1 Opus from 224k to 192k is low-leverage here, so preserve the current surround bitrate and spend the size budget on video instead.",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "pass",
+                    "summary": "The adjusted video-only draft is safe to try.",
+                    "issues": [],
+                    "surround_audio_guardrail": {"status": "ok", "reason": ""},
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/suits/season-3",
+                    "operator_note": "Keep pushing toward 300MB.",
+                    "policy": {
+                        "video": {"target_vmaf": 91.0, "max_encoded_percent": 22},
+                        "audio": {"surround_5_1_opus_bitrate": "224k"},
+                    },
+                    "runtime_toolbelt": {
+                        "recent_sample_result": {"predicted_encode_percent": 20.4},
+                        "audio_tradeoff_hint": {
+                            "policy_key": "surround_5_1_opus_bitrate",
+                            "leverage": "low",
+                            "target_bitrate_kbps": 224.0,
+                            "next_lower_bitrate_kbps": 192.0,
+                            "estimated_step_down_savings_mib": 10.4,
+                        },
+                    },
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertTrue(response.ok)
+        self.assertEqual(
+            response.suggested_follow_up,
+            "Track whether the dark scenes still look stable on the next pass.",
+        )
+
+    def test_request_note_tuning_keeps_repeat_confirmed_experiment(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "I softened that request to stay safer.",
+                    "request_disposition": "softened",
+                    "summary": "Safer follow-up draft.",
+                    "diagnosis": "The request still looks too aggressive.",
+                    "confidence": "medium",
+                    "evidence_checked": ["requested_experiment"],
+                    "suggested_follow_up": None,
+                    "feasibility_note": None,
+                    "policy": {"video": {"target_vmaf": 91.0}},
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "pass",
+                    "summary": "The repeated experiment is coherent enough to measure.",
+                    "issues": [],
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/suits/season-3",
+                    "operator_note": "Keep pushing. I still want under 300MB.",
+                    "requested_experiment": {
+                        "request_type": "combined_experiment",
+                        "applied_policy": {"video": {"target_vmaf": 88.5, "min_target_vmaf": 87.0, "max_encoded_percent": 8}},
+                    },
+                    "operator_repeat_signal": {
+                        "repeat_count": 2,
+                        "previous_softened_count": 1,
+                        "operator_confirmed": True,
+                    },
+                    "policy": {
+                        "video": {
+                            "target_vmaf": 94.5,
+                            "min_target_vmaf": 93.0,
+                            "max_encoded_percent": 55,
+                        }
+                    },
+                    "runtime_toolbelt": {"recent_sample_result": {"predicted_encode_percent": 20.28}},
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertTrue(response.ok)
+        self.assertEqual(response.request_disposition, "honored_with_risk")
+        assert response.proposed_policy is not None
+        self.assertEqual(response.proposed_policy["video"]["target_vmaf"], 88.5)
+        self.assertEqual(response.proposed_policy["video"]["min_target_vmaf"], 87.0)
+        self.assertEqual(response.proposed_policy["video"]["max_encoded_percent"], 8)
 
     def test_request_run_verdict_uses_structured_runtime_path(self) -> None:
         response_body = json.dumps(
@@ -564,12 +2896,56 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("first pass", response.request_response)
         self._assert_structured_subprocess_call(commands)
 
+    def test_request_seed_policy_keeps_operator_confirmed_budget_experiment(self) -> None:
+        response_body = json.dumps(
+            {
+                "request_response": "300 MB is too aggressive for a safe cold start.",
+                "request_disposition": "softened",
+                "summary": "Safer first-pass draft.",
+                "diagnosis": "The request is too aggressive for a cold start.",
+                "confidence": "medium",
+                "evidence_checked": ["requested_experiment"],
+                "suggested_follow_up": None,
+                "feasibility_note": None,
+                "policy": {"video": {"target_vmaf": 94.5}},
+            }
+        )
+        commands, fake_run = self._capture_subprocess_commands(response_body)
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+            response = request_seed_policy(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/suits/season-3",
+                    "base_policy": {
+                        "video": {
+                            "target_vmaf": 95.0,
+                            "min_target_vmaf": 93.0,
+                            "max_encoded_percent": 55,
+                        }
+                    },
+                    "requested_experiment": {
+                        "request_type": "size_budget",
+                        "operator_confirmed": True,
+                        "applied_policy": {"video": {"max_encoded_percent": 8}},
+                    },
+                },
+            )
+
+        self.assertTrue(response.ok)
+        self.assertEqual(response.request_disposition, "honored_with_risk")
+        assert response.proposed_policy is not None
+        self.assertEqual(response.proposed_policy["video"]["max_encoded_percent"], 8)
+        self.assertIn("aggressive experiment directly", response.request_response)
+        self._assert_structured_subprocess_call(commands)
+
     def test_operator_requested_experiment_detects_literal_vmaf_target(self) -> None:
         request = _operator_requested_experiment("I want to try 85 VMAF on this show.")
 
         assert request is not None
         self.assertEqual(request["metric"], "vmaf")
         self.assertEqual(request["target"], 85.0)
+        self.assertEqual(request["operator_note_parse"]["request_type"], "metric_target")
         self.assertEqual(request["applied_policy"]["video"]["target_vmaf"], 85.0)
         self.assertEqual(request["applied_policy"]["video"]["min_target_vmaf"], 83.0)
 
@@ -586,6 +2962,155 @@ class TuningRuntimeTests(unittest.TestCase):
             {
                 "source_size_bytes": 4_815_446_620,
                 "duration_seconds": 2660.352,
+                "audio_summary": [{"codec_name": "eac3", "channels": 6}],
+                "resolved_policy": {
+                    "video": {"encoder": "libsvtav1"},
+                    "audio": {
+                        "convert_to_opus_codecs": ["eac3"],
+                        "surround_5_1_opus_bitrate": "224k",
+                    }
+                },
+            },
+        )
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "size_budget")
+        self.assertTrue(request["operator_confirmed"])
+        self.assertEqual(request["budget_label"], "200 MB per episode")
+        self.assertEqual(request["feasibility"], "aggressive")
+        self.assertFalse(request["requires_confirmation"])
+        self.assertAlmostEqual(request["estimated_source_percent"], 4.36, places=2)
+
+    def test_size_budget_feasibility_treats_old_codec_style_low_bitrates_as_aggressive_first(self) -> None:
+        feasibility, requires_confirmation = size_budget_feasibility(
+            source_percent=4.36,
+            video_bitrate_kbps=379.7,
+            video_encoder="libsvtav1",
+        )
+
+        self.assertEqual(feasibility, "aggressive")
+        self.assertFalse(requires_confirmation)
+
+    def test_size_budget_feasibility_keeps_hard_stop_for_tiny_av1_budgets(self) -> None:
+        feasibility, requires_confirmation = size_budget_feasibility(
+            source_percent=2.8,
+            video_bitrate_kbps=240.0,
+            video_encoder="libsvtav1",
+        )
+
+        self.assertEqual(feasibility, "unreasonable")
+        self.assertTrue(requires_confirmation)
+
+    def test_size_budget_feasibility_keeps_legacy_encoders_on_stricter_thresholds(self) -> None:
+        feasibility, requires_confirmation = size_budget_feasibility(
+            source_percent=4.36,
+            video_bitrate_kbps=379.7,
+            video_encoder="libx264",
+        )
+
+        self.assertEqual(feasibility, "unreasonable")
+        self.assertTrue(requires_confirmation)
+
+    def test_operator_requested_experiment_uses_current_policy_for_av1_budget_feasibility(self) -> None:
+        request = _operator_requested_experiment(
+            "I want to aim for 200MB per episode while losing as little fidelity as possible.",
+            {
+                "source_size_bytes": 4_815_446_620,
+                "duration_seconds": 2660.352,
+                "audio_summary": [{"codec_name": "eac3", "channels": 6}],
+                "resolved_policy": {
+                    "video": {"encoder": "libx264"},
+                    "audio": {
+                        "convert_to_opus_codecs": ["eac3"],
+                        "surround_5_1_opus_bitrate": "224k",
+                    },
+                },
+            },
+            current_policy={
+                "video": {"encoder": "libsvtav1"},
+                "audio": {
+                    "convert_to_opus_codecs": ["eac3"],
+                    "surround_5_1_opus_bitrate": "224k",
+                },
+            },
+        )
+
+        assert request is not None
+        self.assertEqual(request["feasibility"], "aggressive")
+        self.assertFalse(request["requires_confirmation"])
+
+    def test_folder_ai_tune_preview_uses_calibration_policy_for_operator_budget_request(self) -> None:
+        captured_current_policy: list[dict[str, object]] = []
+
+        class _StopPreview(Exception):
+            pass
+
+        def _capture_operator_request(note: str, sample_item: dict[str, object], **kwargs: object) -> None:
+            del note, sample_item
+            current_policy = kwargs.get("current_policy")
+            captured_current_policy.append(dict(current_policy) if isinstance(current_policy, dict) else {})
+            raise _StopPreview
+
+        deps = FolderAiTuneDeps(
+            resolve_sample_host=lambda _config, _host_key: {"key": "host-1"},
+            load_job_state=lambda *_args, **_kwargs: None,
+            load_retryable_sample_job_state=lambda *_args, **_kwargs: None,
+            sample_item=lambda *_args, **_kwargs: {
+                "rel_path": "tv/show/episode.mkv",
+                "resolved_policy": {"video": {"encoder": "libx264"}},
+            },
+            operator_requested_experiment=_capture_operator_request,
+            load_calibration_state=lambda *_args, **_kwargs: {
+                "policy": {"video": {"encoder": "libsvtav1"}},
+            },
+            recent_tuning_sessions=lambda *_args, **_kwargs: [],
+            matching_request_history=lambda *_args, **_kwargs: None,
+            metric_support=lambda: {},
+            maybe_seed_baseline_policy=lambda *_args, **_kwargs: None,
+            seed_advice_payload=lambda *_args, **_kwargs: None,
+            proposal_alignment_issue=lambda *_args, **_kwargs: None,
+            now_iso=lambda: "2026-04-11T15:30:00+00:00",
+            proposal_signal_copy=lambda *_args, **_kwargs: "",
+            proposal_context_snapshot=lambda *_args, **_kwargs: {},
+            save_pending_proposal=lambda *_args, **_kwargs: None,
+            pending_proposal_public_view=lambda payload: payload,
+            build_tuning_runtime_toolbelt=lambda *_args, **_kwargs: {},
+            review_pack_dir=lambda *_args, **_kwargs: self.root / "review-pack",
+            remove_path_if_exists=lambda *_args, **_kwargs: None,
+            build_multimodal_review_pack=lambda *_args, **_kwargs: None,
+            multimodal_review_pack_public_view=lambda *_args, **_kwargs: None,
+            tuning_advice_payload=lambda *_args, **_kwargs: {},
+            load_pending_proposal=lambda *_args, **_kwargs: None,
+            apply_policy_fragment=lambda current, fragment: {**current, **fragment},
+            save_advice_state=lambda *_args, **_kwargs: None,
+            save_job_state=lambda *_args, **_kwargs: None,
+            clear_pending_proposal=lambda *_args, **_kwargs: None,
+            record_tuning_session=lambda *_args, **_kwargs: "session-1",
+        )
+
+        with self.assertRaises(_StopPreview):
+            folder_ai_tune_preview_action(
+                self.config,
+                deps,
+                "tv/show",
+                "target 200MB per episode",
+                "host-1",
+            )
+
+        self.assertEqual(captured_current_policy, [{"video": {"encoder": "libsvtav1"}}])
+
+    def test_operator_requested_experiment_leaves_exploratory_note_unconfirmed(self) -> None:
+        request = _operator_requested_experiment("Can we try to target 85 VMAF instead? Will that help?")
+
+        assert request is not None
+        self.assertFalse(request["operator_confirmed"])
+
+    def test_operator_requested_experiment_marks_directive_question_budget_confirmed(self) -> None:
+        request = _operator_requested_experiment(
+            "Target 300MB per episode?",
+            {
+                "source_size_bytes": 3_519_516_042,
+                "duration_seconds": 2561.35,
                 "audio_summary": [{"channels": 6}],
                 "resolved_policy": {"audio": {"surround_5_1_opus_bitrate": "224k"}},
             },
@@ -593,10 +3118,37 @@ class TuningRuntimeTests(unittest.TestCase):
 
         assert request is not None
         self.assertEqual(request["request_type"], "size_budget")
-        self.assertEqual(request["budget_label"], "200 MB per episode")
-        self.assertEqual(request["feasibility"], "unreasonable")
-        self.assertTrue(request["requires_confirmation"])
-        self.assertAlmostEqual(request["estimated_source_percent"], 4.36, places=2)
+        self.assertTrue(request["operator_confirmed"])
+
+    def test_operator_requested_experiment_marks_can_you_directive_confirmed(self) -> None:
+        request = _operator_requested_experiment(
+            "Can you target 300MB per episode?",
+            {
+                "source_size_bytes": 3_519_516_042,
+                "duration_seconds": 2561.35,
+                "audio_summary": [{"channels": 6}],
+                "resolved_policy": {"audio": {"surround_5_1_opus_bitrate": "224k"}},
+            },
+        )
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "size_budget")
+        self.assertTrue(request["operator_confirmed"])
+
+    def test_operator_requested_experiment_leaves_want_to_understand_unconfirmed(self) -> None:
+        request = _operator_requested_experiment(
+            "I want to understand if 300MB per episode is realistic.",
+            {
+                "source_size_bytes": 3_519_516_042,
+                "duration_seconds": 2561.35,
+                "audio_summary": [{"channels": 6}],
+                "resolved_policy": {"audio": {"surround_5_1_opus_bitrate": "224k"}},
+            },
+        )
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "size_budget")
+        self.assertFalse(request["operator_confirmed"])
 
     def test_operator_requested_experiment_detects_combined_budget_and_vmaf_request(self) -> None:
         request = _operator_requested_experiment(
@@ -615,7 +3167,21 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(request["target"], 85.0)
         self.assertEqual(request["budget_label"], "200 MB per episode")
         self.assertEqual(request["applied_policy"]["video"]["target_vmaf"], 85.0)
-        self.assertEqual(request["applied_policy"]["video"]["max_encoded_percent"], 10)
+        self.assertEqual(request["applied_policy"]["video"]["max_encoded_percent"], 4)
+
+    def test_operator_requested_experiment_returns_none_when_structured_parse_fails(self) -> None:
+        with patch("mediaforce.web.runtime.folder_tuning_advice.request_operator_note_parse", return_value=None):
+            request = _operator_requested_experiment(
+                "Can you target 300MB per episode?",
+                {
+                    "source_size_bytes": 3_519_516_042,
+                    "duration_seconds": 2561.35,
+                    "audio_summary": [{"channels": 6}],
+                    "resolved_policy": {"audio": {"surround_5_1_opus_bitrate": "224k"}},
+                },
+            )
+
+        self.assertIsNone(request)
 
     def test_build_seed_policy_payload_carries_requested_experiment(self) -> None:
         payload = _build_seed_policy_payload(
@@ -695,6 +3261,59 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(repeat_signal["repeat_count"], 2)
         self.assertEqual(repeat_signal["previous_softened_count"], 1)
 
+    def test_build_seed_policy_payload_reuses_stored_operator_note_parse(self) -> None:
+        sample_item = {
+            "rel_path": "tv/House/Season 5/House.S05E22.mkv",
+            "source_size_bytes": 4_480_523_243,
+            "video_codec": "h264",
+            "video_bitrate": None,
+            "width": 1920,
+            "height": 1080,
+            "duration_seconds": 2645.248,
+            "audio_summary": [{"channels": 6}],
+            "subtitle_summary": [],
+            "recommendation": None,
+            "recommendation_reason": None,
+            "resolved_policy": {"audio": {"surround_5_1_opus_bitrate": "224k"}},
+        }
+        current_request = _operator_requested_experiment(
+            "I really want 200MB and VMAF of around 85.",
+            sample_item,
+        )
+        assert current_request is not None
+
+        with patch("mediaforce.web.runtime.folder_tuning_advice.request_operator_note_parse", return_value=None):
+            payload = _build_seed_policy_payload(
+                prefix="tv/House/Season 5",
+                user_note="I really want 200MB and VMAF of around 85.",
+                base_policy={"video": {"target_vmaf": 94.5, "min_target_vmaf": 93.0, "max_encoded_percent": 75}},
+                sample_item=sample_item,
+                summary={
+                    "item_count": 24,
+                    "total_size_bytes": 76_892_875_827,
+                    "statuses": {"discovered": 24},
+                    "video_codecs": {"h264": 24},
+                    "audio_codecs": {"eac3:6": 24},
+                    "seasons": ["Season 5"],
+                },
+                metric_support={"vmaf": True, "xpsnr": True, "ssim": True, "psnr": True},
+                recent_sessions_payload=[
+                    {
+                        "note": "Try to hit around 200MB an episode. VMAF of around 85.",
+                        "operator_note_parse": current_request["operator_note_parse"],
+                        "request_disposition": "softened",
+                        "summary": "Too aggressive for a safe cold start.",
+                        "created_at": "2026-04-04T01:29:02+00:00",
+                    }
+                ],
+                requested_experiment=current_request,
+            )
+
+        repeat_signal = payload["operator_repeat_signal"]
+        assert repeat_signal is not None
+        self.assertEqual(repeat_signal["repeat_count"], 2)
+        self.assertEqual(repeat_signal["previous_softened_count"], 1)
+
     def test_maybe_seed_baseline_policy_honors_repeated_explicit_request(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             record_tuning_session(
@@ -767,7 +3386,67 @@ class TuningRuntimeTests(unittest.TestCase):
         job_fields = metadata["job_fields"]
         self.assertEqual(job_fields["seed_request_disposition"], "honored_with_risk")
         self.assertEqual(job_fields["seed_applied_policy"]["video"]["target_vmaf"], 85.0)
-        self.assertEqual(job_fields["seed_applied_policy"]["video"]["max_encoded_percent"], 10)
+        self.assertEqual(job_fields["seed_applied_policy"]["video"]["max_encoded_percent"], 4)
+
+    def test_request_note_tuning_carries_explicit_budget_into_honored_risky_draft(self) -> None:
+        responses = [
+            json.dumps(
+                {
+                    "request_response": "You asked for the aggressive budget explicitly, so I kept that experiment and lowered the quality target to match.",
+                    "request_disposition": "honored_with_risk",
+                    "summary": "Risky size-budget draft.",
+                    "diagnosis": "This needs a hard size cap plus much softer video targets.",
+                    "confidence": "medium",
+                    "evidence_checked": ["requested_experiment", "runtime_toolbelt.recent_sample_result"],
+                    "suggested_follow_up": "If this still misses the budget, stop and reassess.",
+                    "feasibility_note": "This is operator-confirmed and high risk.",
+                    "policy": {"video": {"target_vmaf": 89.0, "min_target_vmaf": 87.5}},
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "fail",
+                    "summary": "The bench explanation has caveats, but the explicit experiment is still coherent enough to review.",
+                    "issues": ["The fallback wording is weaker than the draft policy itself."],
+                }
+            ),
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/suits/season-3",
+                    "operator_note": "Keep pushing. I want to see under 300MB.",
+                    "requested_experiment": {
+                        "request_type": "size_budget",
+                        "applied_policy": {"video": {"max_encoded_percent": 8}},
+                    },
+                    "policy": {
+                        "video": {
+                            "target_vmaf": 94.5,
+                            "min_target_vmaf": 93.0,
+                            "max_encoded_percent": 55,
+                        }
+                    },
+                    "runtime_toolbelt": {"recent_sample_result": {"predicted_encode_percent": 20.28}},
+                    "retrieved_memory": [],
+                },
+            )
+
+        self.assertTrue(response.ok)
+        assert response.proposed_policy is not None
+        assert response.self_check is not None
+        self.assertEqual(response.self_check["status"], "warn")
+        self.assertEqual(response.proposed_policy["video"]["target_vmaf"], 89.0)
+        self.assertEqual(response.proposed_policy["video"]["min_target_vmaf"], 87.5)
+        self.assertEqual(response.proposed_policy["video"]["max_encoded_percent"], 8)
 
     def test_clear_folder_tuning_state_removes_thread_and_artifacts(self) -> None:
         prefix = "tv/House/Season 2"
@@ -900,6 +3579,147 @@ class TuningRuntimeTests(unittest.TestCase):
             "Primary track eac3 is planned for Opus at 224k.",
         )
 
+    def test_backfill_multimodal_review_pack_restores_legacy_advice_with_retained_clips(self) -> None:
+        prefix = "movies/The Super Mario Galaxy Movie (2026)"
+        advice_path = _advice_file(self.config, prefix)
+        advice_path.parent.mkdir(parents=True, exist_ok=True)
+        advice_path.write_text(json.dumps({"summary": "Legacy draft without review pack."}) + "\n")
+
+        sample_item = {
+            "rel_path": f"{prefix}/The.Super.Mario.Galaxy.Movie.2026.mkv",
+            "source_path": str(self.root / "galaxy-source.mkv"),
+            "source_size_bytes": 2_519_516_042,
+            "video_codec": "h264",
+            "duration_seconds": 2561.35,
+            "audio_summary": [{"codec_name": "eac3", "channels": 6, "language": "eng", "default": 1, "index": 1}],
+            "subtitle_summary": [],
+            "resolved_policy": {
+                "video": {"quality_metric": "vmaf", "target_vmaf": 85.0},
+                "audio": {"convert_to_opus_codecs": ["eac3"], "surround_5_1_opus_bitrate": "224k"},
+            },
+        }
+
+        calibration = {
+            "draft_hash": "728b984563319b8f",
+            "review_media_ready": True,
+            "policy": sample_item["resolved_policy"],
+            "source_clips": [{"path": "/review-media/legacy-run/item-00/source-01.mp4", "timestamp_seconds": 345.0}],
+            "preview_clips": [{"path": "/review-media/legacy-run/item-00/encoded-01.mp4", "timestamp_seconds": 345.0}],
+            "compare_clips": [{"path": "/review-media/legacy-run/item-00/compare-01.mkv", "timestamp_seconds": 345.0}],
+        }
+
+        with patch(
+            "mediaforce.web.app._build_multimodal_review_pack",
+            return_value={"artifacts": [{"kind": "audio_spectrogram_compare"}]},
+        ), patch(
+            "mediaforce.web.app._multimodal_review_pack_public_view",
+            return_value={
+                "artifact_count": 3,
+                "artifacts": [
+                    {"kind": "video_compare_timeline", "image_url": "/review-media/review-compare.png"},
+                    {"kind": "video_contact_sheet", "image_url": "/review-media/review-video.png"},
+                    {"kind": "audio_spectrogram_compare", "image_url": "/review-media/review-audio.png"},
+                ],
+            },
+        ):
+            merged = _backfill_multimodal_review_pack(
+                self.config,
+                prefix,
+                sample_item=sample_item,
+                calibration=calibration,
+                advice_state={"summary": "Legacy draft without review pack."},
+            )
+
+        assert merged is not None
+        self.assertEqual(merged["summary"], "Legacy draft without review pack.")
+        pack = merged.get("multimodal_review_pack")
+        assert isinstance(pack, dict)
+        artifact_kinds = [artifact["kind"] for artifact in pack["artifacts"]]
+        self.assertIn("video_contact_sheet", artifact_kinds)
+        self.assertIn("video_compare_timeline", artifact_kinds)
+        self.assertIn("audio_spectrogram_compare", artifact_kinds)
+        calibration_advice = calibration.get("advice")
+        assert isinstance(calibration_advice, dict)
+        self.assertEqual(calibration_advice.get("multimodal_review_pack"), pack)
+        persisted_advice = json.loads(advice_path.read_text())
+        self.assertEqual(persisted_advice["summary"], "Legacy draft without review pack.")
+        self.assertEqual(persisted_advice["multimodal_review_pack"], pack)
+
+    def test_build_multimodal_review_pack_includes_compare_timelines_and_moment_signals(self) -> None:
+        sample_item = {
+            "rel_path": "tv/House/Season 2/House.S02E06.mkv",
+            "source_path": str(self.root / "source.mkv"),
+            "source_size_bytes": 4_815_446_620,
+            "duration_seconds": 2660.352,
+            "audio_summary": [
+                {"codec_name": "commentary", "channels": 2, "language": "spa", "default": 1, "index": 1},
+                {"codec_name": "eac3", "channels": 6, "language": "eng", "default": 1, "index": 2},
+            ],
+        }
+        Path(sample_item["source_path"]).write_text("source")
+        source_clip = self.config.paths.review_dir / "run-123" / "item-00" / "source-01.mp4"
+        preview_clip = self.config.paths.review_dir / "run-123" / "item-00" / "encoded-01.mp4"
+        compare_clip = self.config.paths.review_dir / "run-123" / "item-00" / "compare-01.mkv"
+        for path in (source_clip, preview_clip, compare_clip):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("clip")
+
+        def create_artifact(*_args: object, **kwargs: object) -> None:
+            Path(str(kwargs["output_path"])).write_text("artifact")
+
+        with patch("mediaforce.web.runtime.folder_tuning_runtime.render_review_timeline_strip", side_effect=create_artifact), patch(
+            "mediaforce.web.runtime.folder_tuning_runtime.render_review_contact_sheet", side_effect=create_artifact
+        ), patch(
+            "mediaforce.web.runtime.folder_tuning_runtime.render_audio_spectrogram_compare",
+            return_value={"action": "libopus", "bitrate": "224k", "channels": 6, "codec_name": "eac3"},
+        ) as audio_compare_mock:
+            pack = _build_multimodal_review_pack(
+                config=self.config,
+                sample_item=sample_item,
+                current_policy={
+                    "audio": {
+                        "copy_codecs": ["aac", "opus"],
+                        "convert_to_opus_codecs": ["eac3"],
+                        "surround_5_1_opus_bitrate": "224k",
+                    }
+                },
+                calibration={
+                    "review_media_ready": True,
+                    "source_clips": [
+                        {
+                            "path": "/review-media/run-123/item-00/source-01.mp4",
+                            "timestamp_seconds": 89.0,
+                            "duration_seconds": 8.0,
+                            "size_bytes": 27_525_266,
+                        }
+                    ],
+                    "preview_clips": [
+                        {
+                            "path": "/review-media/run-123/item-00/encoded-01.mp4",
+                            "timestamp_seconds": 89.0,
+                            "duration_seconds": 8.0,
+                            "size_bytes": 2_461_753,
+                        }
+                    ],
+                    "compare_clips": [
+                        {
+                            "path": "/review-media/run-123/item-00/compare-01.mkv",
+                            "timestamp_seconds": 89.0,
+                            "duration_seconds": 8.0,
+                        }
+                    ],
+                },
+                output_dir=self.root / "review-pack",
+            )
+
+        assert pack is not None
+        artifact_kinds = [artifact["kind"] for artifact in pack["artifacts"]]
+        self.assertIn("video_compare_timeline", artifact_kinds)
+        self.assertIn("video_contact_sheet", artifact_kinds)
+        self.assertEqual(pack["moment_signals"][0]["moment"], 1)
+        self.assertTrue(pack["moment_signals"][0]["has_compare_clip"])
+        self.assertEqual(audio_compare_mock.call_args.kwargs["audio_track"]["index"], 2)
+
     def test_review_pack_dir_is_unique_per_request(self) -> None:
         first = _review_pack_dir(self.config, "tv/House/Season 2", "request-1")
         second = _review_pack_dir(self.config, "tv/House/Season 2", "request-2")
@@ -1022,6 +3842,407 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(context)
         self.assertIn("Aggressive but acceptable", context[0]["summary"])
 
+    def test_sibling_approved_season_memory_lists_other_approved_seasons(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            session_s1 = record_tuning_session(
+                connection,
+                prefix="tv/Suits/Season 1",
+                note="Season 1 note",
+                response={"summary": "Season 1", "confidence": "high", "raw": "{}"},
+                applied_policy={"video": {"target_xpsnr": 35.0}},
+                toolbelt={},
+                created_at="2026-03-20T00:00:00+00:00",
+            )
+            session_s3 = record_tuning_session(
+                connection,
+                prefix="tv/Suits/Season 3",
+                note="Season 3 note",
+                response={"summary": "Season 3", "confidence": "high", "raw": "{}"},
+                applied_policy={"video": {"target_xpsnr": 35.0}},
+                toolbelt={},
+                created_at="2026-03-22T00:00:00+00:00",
+            )
+            session_s2 = record_tuning_session(
+                connection,
+                prefix="tv/Suits/Season 2",
+                note="Season 2 note",
+                response={"summary": "Season 2", "confidence": "high", "raw": "{}"},
+                applied_policy={"video": {"target_xpsnr": 35.0}},
+                toolbelt={},
+                created_at="2026-03-24T00:00:00+00:00",
+            )
+            session_s4 = record_tuning_session(
+                connection,
+                prefix="tv/Suits/Season 4",
+                note="Season 4 note",
+                response={"summary": "Season 4", "confidence": "high", "raw": "{}"},
+                applied_policy={"video": {"target_xpsnr": 35.0}},
+                toolbelt={},
+                created_at="2026-03-26T00:00:00+00:00",
+            )
+            session_house = record_tuning_session(
+                connection,
+                prefix="tv/House/Season 1",
+                note="House note",
+                response={"summary": "House", "confidence": "high", "raw": "{}"},
+                applied_policy={"video": {"target_xpsnr": 35.0}},
+                toolbelt={},
+                created_at="2026-03-28T00:00:00+00:00",
+            )
+            connection.execute(
+                learning_artifacts.insert().values(
+                    artifact_id="artifact-s1",
+                    session_id=session_s1,
+                    prefix="tv/Suits/Season 1",
+                    title="Season 1 approval",
+                    artifact_path=str(self.root / "learned-memory" / "season-1.md"),
+                    summary="Season 1 accepted",
+                    tags_json=json.dumps(["approval:visual", "decision:accepted"], sort_keys=True),
+                    created_at="2026-03-20T00:00:00+00:00",
+                    updated_at="2026-03-20T00:00:00+00:00",
+                )
+            )
+            connection.execute(
+                learning_artifacts.insert().values(
+                    artifact_id="artifact-s3",
+                    session_id=session_s3,
+                    prefix="tv/Suits/Season 3",
+                    title="Season 3 approval",
+                    artifact_path=str(self.root / "learned-memory" / "season-3.md"),
+                    summary="Season 3 accepted",
+                    tags_json=json.dumps(["approval:visual", "decision:accepted"], sort_keys=True),
+                    created_at="2026-03-22T00:00:00+00:00",
+                    updated_at="2026-03-22T00:00:00+00:00",
+                )
+            )
+            connection.execute(
+                learning_artifacts.insert().values(
+                    artifact_id="artifact-s2",
+                    session_id=session_s2,
+                    prefix="tv/Suits/Season 2",
+                    title="Season 2 approval",
+                    artifact_path=str(self.root / "learned-memory" / "season-2.md"),
+                    summary="Current season accepted",
+                    tags_json=json.dumps(["approval:visual", "decision:accepted"], sort_keys=True),
+                    created_at="2026-03-24T00:00:00+00:00",
+                    updated_at="2026-03-24T00:00:00+00:00",
+                )
+            )
+            connection.execute(
+                learning_artifacts.insert().values(
+                    artifact_id="artifact-s4-unapproved",
+                    session_id=session_s4,
+                    prefix="tv/Suits/Season 4",
+                    title="Season 4 draft",
+                    artifact_path=str(self.root / "learned-memory" / "season-4.md"),
+                    summary="Not approved",
+                    tags_json=json.dumps(["approval:visual"], sort_keys=True),
+                    created_at="2026-03-26T00:00:00+00:00",
+                    updated_at="2026-03-26T00:00:00+00:00",
+                )
+            )
+            connection.execute(
+                learning_artifacts.insert().values(
+                    artifact_id="artifact-house",
+                    session_id=session_house,
+                    prefix="tv/House/Season 1",
+                    title="House approval",
+                    artifact_path=str(self.root / "learned-memory" / "house-season-1.md"),
+                    summary="Different show",
+                    tags_json=json.dumps(["approval:visual", "decision:accepted"], sort_keys=True),
+                    created_at="2026-03-28T00:00:00+00:00",
+                    updated_at="2026-03-28T00:00:00+00:00",
+                )
+            )
+
+            shortcut = sibling_approved_season_memory(connection, prefix="tv/Suits/Season 2")
+
+        assert shortcut is not None
+        self.assertEqual(shortcut["root_prefix"], "tv/Suits")
+        self.assertEqual(shortcut["count"], 2)
+        self.assertEqual(shortcut["season_labels"], ["Season 1", "Season 3"])
+        self.assertEqual(shortcut["season_prefixes"], ["tv/Suits/Season 1", "tv/Suits/Season 3"])
+        self.assertIn("approved Suits seasons", shortcut["suggested_note"])
+
+    def test_sibling_approved_season_memory_escapes_sql_wildcards(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            matching_session = record_tuning_session(
+                connection,
+                prefix="tv/100%_Real/Season 1",
+                note="matching note",
+                response={"summary": "matching", "confidence": "high", "raw": "{}"},
+                applied_policy={"video": {"target_xpsnr": 35.0}},
+                toolbelt={},
+                created_at="2026-03-20T00:00:00+00:00",
+            )
+            unrelated_session = record_tuning_session(
+                connection,
+                prefix="tv/100abcXReal/Season 9",
+                note="unrelated note",
+                response={"summary": "unrelated", "confidence": "high", "raw": "{}"},
+                applied_policy={"video": {"target_xpsnr": 35.0}},
+                toolbelt={},
+                created_at="2026-03-21T00:00:00+00:00",
+            )
+            connection.execute(
+                learning_artifacts.insert().values(
+                    artifact_id="artifact-match",
+                    session_id=matching_session,
+                    prefix="tv/100%_Real/Season 1",
+                    title="Matching season",
+                    artifact_path=str(self.root / "learned-memory" / "matching.md"),
+                    summary="matching season",
+                    tags_json=json.dumps(["approval:visual", "decision:accepted"], sort_keys=True),
+                    created_at="2026-03-20T00:00:00+00:00",
+                    updated_at="2026-03-20T00:00:00+00:00",
+                )
+            )
+            connection.execute(
+                learning_artifacts.insert().values(
+                    artifact_id="artifact-unrelated",
+                    session_id=unrelated_session,
+                    prefix="tv/100abcXReal/Season 9",
+                    title="Unrelated season",
+                    artifact_path=str(self.root / "learned-memory" / "unrelated.md"),
+                    summary="unrelated season",
+                    tags_json=json.dumps(["approval:visual", "decision:accepted"], sort_keys=True),
+                    created_at="2026-03-21T00:00:00+00:00",
+                    updated_at="2026-03-21T00:00:00+00:00",
+                )
+            )
+
+            shortcut = sibling_approved_season_memory(connection, prefix="tv/100%_Real/Season 2")
+
+        assert shortcut is not None
+        self.assertEqual(shortcut["season_prefixes"], ["tv/100%_Real/Season 1"])
+
+    def test_sibling_approved_season_memory_ignores_episode_level_prefixes(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            season_session = record_tuning_session(
+                connection,
+                prefix="tv/Suits/Season 1",
+                note="season note",
+                response={"summary": "season", "confidence": "high", "raw": "{}"},
+                applied_policy={"video": {"target_xpsnr": 35.0}},
+                toolbelt={},
+                created_at="2026-03-20T00:00:00+00:00",
+            )
+            episode_session = record_tuning_session(
+                connection,
+                prefix="tv/Suits/Season 4/Episode 01",
+                note="episode note",
+                response={"summary": "episode", "confidence": "high", "raw": "{}"},
+                applied_policy={"video": {"target_xpsnr": 35.0}},
+                toolbelt={},
+                created_at="2026-03-21T00:00:00+00:00",
+            )
+            connection.execute(
+                learning_artifacts.insert().values(
+                    artifact_id="artifact-season-root",
+                    session_id=season_session,
+                    prefix="tv/Suits/Season 1",
+                    title="Season 1 approval",
+                    artifact_path=str(self.root / "learned-memory" / "season-root.md"),
+                    summary="season root",
+                    tags_json=json.dumps(["approval:visual", "decision:accepted"], sort_keys=True),
+                    created_at="2026-03-20T00:00:00+00:00",
+                    updated_at="2026-03-20T00:00:00+00:00",
+                )
+            )
+            connection.execute(
+                learning_artifacts.insert().values(
+                    artifact_id="artifact-episode-level",
+                    session_id=episode_session,
+                    prefix="tv/Suits/Season 4/Episode 01",
+                    title="Episode approval",
+                    artifact_path=str(self.root / "learned-memory" / "episode-level.md"),
+                    summary="episode level",
+                    tags_json=json.dumps(["approval:visual", "decision:accepted"], sort_keys=True),
+                    created_at="2026-03-21T00:00:00+00:00",
+                    updated_at="2026-03-21T00:00:00+00:00",
+                )
+            )
+
+            shortcut = sibling_approved_season_memory(connection, prefix="tv/Suits/Season 2")
+
+        assert shortcut is not None
+        self.assertEqual(shortcut["season_prefixes"], ["tv/Suits/Season 1"])
+
+    def test_proposal_can_queue_when_bench_keeps_current_policy(self) -> None:
+        self.assertTrue(
+            _proposal_can_queue(
+                applied_fragment={},
+                preview_policy={"video": {"target_vmaf": 88.0}},
+                request_disposition="honored",
+                alignment_issue=None,
+            )
+        )
+        self.assertIn(
+            "kept the current policy",
+            _proposal_ready_message(
+                can_queue=True,
+                alignment_issue=None,
+                has_policy_change=False,
+                run_label="next sample",
+            ),
+        )
+
+    def test_proposal_cannot_queue_without_change_when_request_was_rejected(self) -> None:
+        self.assertFalse(
+            _proposal_can_queue(
+                applied_fragment={},
+                preview_policy={"video": {"target_vmaf": 88.0}},
+                request_disposition="rejected",
+                alignment_issue=None,
+            )
+        )
+
+    def test_proposal_alignment_issue_still_blocks_queue(self) -> None:
+        self.assertFalse(
+            _proposal_can_queue(
+                applied_fragment={"video": {"target_vmaf": 87.0}},
+                preview_policy={"video": {"target_vmaf": 87.0}},
+                request_disposition="honored",
+                alignment_issue="The draft raises the VMAF target even though your note asked for a smaller encode.",
+            )
+        )
+
+    def test_run_calibration_job_marks_cancelled_run_stopped(self) -> None:
+        saved_statuses: list[str] = []
+
+        def _save_job_state(_connection: object, _config: object, _prefix: str, payload: dict[str, object]) -> None:
+            saved_statuses.append(str(payload.get("status") or ""))
+
+        deps = CalibrationRunDeps(
+            now_iso=lambda: "2026-04-11T00:00:00+00:00",
+            load_job_state=lambda *_args, **_kwargs: {"job_id": "job-1", "status": "queued"},
+            sample_item=lambda *_args, **_kwargs: {
+                "rel_path": "tv/show/season-1/episode.mkv",
+                "source_path": str(self.root / "episode.mkv"),
+                "source_size_bytes": 1024,
+                "video_codec": "h264",
+                "duration_seconds": 120.0,
+            },
+            save_job_state=_save_job_state,
+            save_calibration_state=lambda *_args, **_kwargs: None,
+            record_run_verdict=lambda *_args, **_kwargs: None,
+            summarize_calibration_result=lambda payload: payload,
+            calibration_mode_for_action=lambda _action: "sample",
+            effective_video_preset=lambda *_args, **_kwargs: 4,
+            search_quality_for_source=lambda *_args, **_kwargs: (_ for _ in ()).throw(ProcessCancelledError()),
+            run_sample_encode=lambda *_args, **_kwargs: None,
+            recommend_review_timestamps=lambda *_args, **_kwargs: [],
+            encode_preview_clips=lambda *_args, **_kwargs: [],
+            render_source_review_clips=lambda *_args, **_kwargs: [],
+            generate_compare_clips_from_previews=lambda *_args, **_kwargs: [],
+            estimate_output_overhead_bytes=lambda *_args, **_kwargs: {
+                "total_bytes": 0,
+                "audio_bytes": 0,
+                "subtitle_bytes": 0,
+                "container_bytes": 0,
+            },
+            build_svt_params=lambda *_args, **_kwargs: {},
+            review_url=lambda *_args, **_kwargs: "",
+            encode_manifest_items=lambda *_args, **_kwargs: None,
+            validate_manifest_items=lambda *_args, **_kwargs: None,
+            generate_compare_clips=lambda *_args, **_kwargs: [],
+            staged_artifact_columns=("library_item_id",),
+        )
+
+        episode_path = self.root / "episode.mkv"
+        episode_path.write_text("episode")
+
+        with patch("mediaforce.web.runtime.calibration_runtime.load_config", return_value=self.config), patch(
+                "mediaforce.web.runtime.calibration_runtime.purge_transient_artifacts"
+        ):
+            run_calibration_job(
+                config_path=self.config.paths.config_path,
+                prefix="tv/show/season-1",
+                action="ai_tune",
+                host_data={"key": "cbusillo@localhost", "label": "M4 Studio"},
+                notes="retry later",
+                policy={"video": {"pixel_format": "yuv420p10le", "sample_every": "8m", "sample_duration": "20s", "encoder": "libsvtav1"}},
+                job_id="job-1",
+                seed_metadata=None,
+                process_controller=type("Controller", (), {"throw_if_cancelled": lambda self: None})(),
+                deps=deps,
+            )
+
+        self.assertIn("running", saved_statuses)
+        self.assertIn("stopped", saved_statuses)
+        self.assertNotIn("failed", saved_statuses)
+
+    def test_run_calibration_job_uses_saved_job_sample_item_before_reselecting(self) -> None:
+        saved_statuses: list[str] = []
+
+        def _save_job_state(_connection: object, _config: object, _prefix: str, payload: dict[str, object]) -> None:
+            saved_statuses.append(str(payload.get("status") or ""))
+
+        saved_sample_item = {
+            "library_item_id": 9,
+            "rel_path": "tv/show/season-1/saved-episode.mkv",
+            "source_path": str(self.root / "saved-episode.mkv"),
+            "source_size_bytes": 1024,
+            "video_codec": "h264",
+            "duration_seconds": 120.0,
+            "width": 1920,
+            "height": 1080,
+            "audio_summary": [],
+            "subtitle_summary": [],
+        }
+
+        deps = CalibrationRunDeps(
+            now_iso=lambda: "2026-04-11T00:00:00+00:00",
+            load_job_state=lambda *_args, **_kwargs: {"job_id": "job-1", "status": "queued", "sample_item": dict(saved_sample_item)},
+            sample_item=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not reselect sample item")),
+            save_job_state=_save_job_state,
+            save_calibration_state=lambda *_args, **_kwargs: None,
+            record_run_verdict=lambda *_args, **_kwargs: None,
+            summarize_calibration_result=lambda payload: payload,
+            calibration_mode_for_action=lambda _action: "sample",
+            effective_video_preset=lambda *_args, **_kwargs: 4,
+            search_quality_for_source=lambda *_args, **_kwargs: (_ for _ in ()).throw(ProcessCancelledError()),
+            run_sample_encode=lambda *_args, **_kwargs: None,
+            recommend_review_timestamps=lambda *_args, **_kwargs: [],
+            encode_preview_clips=lambda *_args, **_kwargs: [],
+            render_source_review_clips=lambda *_args, **_kwargs: [],
+            generate_compare_clips_from_previews=lambda *_args, **_kwargs: [],
+            estimate_output_overhead_bytes=lambda *_args, **_kwargs: {
+                "total_bytes": 0,
+                "audio_bytes": 0,
+                "subtitle_bytes": 0,
+                "container_bytes": 0,
+            },
+            build_svt_params=lambda *_args, **_kwargs: {},
+            review_url=lambda *_args, **_kwargs: "",
+            encode_manifest_items=lambda *_args, **_kwargs: None,
+            validate_manifest_items=lambda *_args, **_kwargs: None,
+            generate_compare_clips=lambda *_args, **_kwargs: [],
+            staged_artifact_columns=("library_item_id",),
+        )
+
+        saved_episode_path = self.root / "saved-episode.mkv"
+        saved_episode_path.write_text("episode")
+
+        with patch("mediaforce.web.runtime.calibration_runtime.load_config", return_value=self.config), patch(
+                "mediaforce.web.runtime.calibration_runtime.purge_transient_artifacts"
+        ):
+            run_calibration_job(
+                config_path=self.config.paths.config_path,
+                prefix="tv/show/season-1",
+                action="ai_tune",
+                host_data={"key": "cbusillo@localhost", "label": "M4 Studio"},
+                notes="retry later",
+                policy={"video": {"pixel_format": "yuv420p10le", "sample_every": "8m", "sample_duration": "20s", "encoder": "libsvtav1"}},
+                job_id="job-1",
+                seed_metadata=None,
+                process_controller=type("Controller", (), {"throw_if_cancelled": lambda self: None})(),
+                deps=deps,
+            )
+
+        self.assertIn("running", saved_statuses)
+        self.assertIn("stopped", saved_statuses)
+
     def test_apply_seed_policy_ignores_null_tunable_fields(self) -> None:
         base_policy = {
             "video": {
@@ -1131,12 +4352,20 @@ class TuningRuntimeTests(unittest.TestCase):
     def test_seed_prompt_adds_class_guardrails(self) -> None:
         prompt = _build_seed_prompt({"folder": "tv/House/Season 5"})
 
-        self.assertEqual(SEED_PROMPT_VERSION, "seed-v4")
+        self.assertEqual(SEED_PROMPT_VERSION, "seed-v7")
         self.assertIn("cold-start guess", prompt)
-        self.assertIn("Teach media-class taste", prompt)
-        self.assertIn("Do not chase dramatic savings", prompt)
+        self.assertIn("best first-pass attempt", prompt)
+        self.assertIn("instruction to satisfy", prompt)
+        self.assertIn("audio_tradeoff_hint", prompt)
+        self.assertIn("recommended_seed_action", prompt)
+        self.assertIn("review_confidence", prompt)
+        self.assertIn("hold", prompt)
+        self.assertIn("Use softened only when the operator note is exploratory", prompt)
+        self.assertIn("closest faithful experiment", prompt)
         self.assertIn("operator_repeat_signal", prompt)
         self.assertIn("clean 1080p catalog TV", prompt)
+        self.assertIn("legacy H.264 or HEVC bitrate intuition", prompt)
+        self.assertIn("high-80s VMAF", prompt)
         self.assertIn("request_response", prompt)
         self.assertIn("honored_with_risk", prompt)
 
@@ -1170,6 +4399,14 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(schema["properties"]["video"]["properties"]["thorough"]["type"], ["boolean", "null"])
         self.assertEqual(schema["properties"]["audio"]["properties"]["keep_languages"]["type"], ["array", "null"])
 
+    def test_tune_self_check_schema_requires_surround_audio_guardrail(self) -> None:
+        schema = _tune_self_check_schema()
+
+        self.assertIn("surround_audio_guardrail", schema["required"])
+        guardrail = schema["properties"]["surround_audio_guardrail"]
+        self.assertEqual(guardrail["required"], ["status", "reason"])
+        self.assertEqual(guardrail["properties"]["status"]["enum"], ["ok", "prefer_preserve_current"])
+
     def test_generic_and_verdict_prompts_embed_context_and_shape(self) -> None:
         generic_prompt = _build_prompt({"folder": "tv/House/Season 2", "sample": {"score": 91.4}})
         verdict_prompt = _build_run_verdict_prompt(
@@ -1198,6 +4435,9 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("review_media_context", prompt)
         self.assertIn("current audio tradeoff", prompt)
         self.assertIn("never pretend", prompt)
+        self.assertIn("instruction to satisfy", prompt)
+        self.assertIn("runtime_toolbelt.audio_tradeoff_hint", prompt)
+        self.assertIn("closest faithful experiment", prompt)
 
     def test_tune_prompt_summarizes_multimodal_review_pack_without_paths(self) -> None:
         prompt = _build_tune_prompt(
@@ -1215,14 +4455,55 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("image_count", prompt)
         self.assertNotIn("/tmp/private-artifact.png", prompt)
 
+    def test_tune_prompt_mentions_review_artifact_critique(self) -> None:
+        prompt = _build_tune_prompt(
+            {
+                "folder": "tv/House/Season 2",
+                "operator_note": "Push a little more if the hallway still looks clean.",
+                "review_artifact_critique": {
+                    "summary": "Moment 2 is the fragile scene.",
+                    "weakest_moments": ["Moment 2"],
+                },
+            }
+        )
+
+        self.assertIn("review_artifact_critique", prompt)
+        self.assertIn("first-pass reading over artifacts extracted from the actual review clips", prompt)
+
+    def test_review_artifact_critique_prompt_summarizes_multimodal_pack_without_paths(self) -> None:
+        prompt = _build_review_artifact_critique_prompt(
+            {
+                "folder": "tv/House/Season 2",
+                "multimodal_review_pack": {
+                    "artifacts": [{"label": "Moment 1", "detail": "Compare timeline"}],
+                    "images": ["/tmp/private-artifact.png"],
+                },
+            }
+        )
+
+        self.assertIn("multimodal_review_pack", prompt)
+        self.assertIn("image_count", prompt)
+        self.assertNotIn("/tmp/private-artifact.png", prompt)
+
     def test_build_tuning_runtime_toolbelt_summarizes_review_media(self) -> None:
         toolbelt = _build_tuning_runtime_toolbelt(
             sample_item={
                 "rel_path": "tv/House/Season 2/House.S02E06.mkv",
                 "source_size_bytes": 4_815_446_620,
+                "duration_seconds": 2660.352,
+                "audio_summary": [
+                    {"codec_name": "commentary", "channels": 2, "language": "spa", "default": 1, "index": 1},
+                    {"codec_name": "eac3", "channels": 6, "language": "eng", "default": 1, "index": 2},
+                ],
                 "resolved_policy": {},
             },
-            current_policy={"video": {"target_vmaf": 89.0}},
+            current_policy={
+                "video": {"target_vmaf": 89.0},
+                "audio": {
+                    "convert_to_opus_codecs": ["eac3"],
+                    "surround_5_1_opus_bitrate": "224k",
+                },
+            },
             calibration={
                 "sample_result": {"quality_score": 90.7, "quality_target": 89.0},
                 "review_media_ready": True,
@@ -1260,6 +4541,36 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(review_media_context["moments"][0]["preview_clip_size_bytes"], 2_461_753)
         self.assertEqual(review_media_context["moments"][0]["compare_clip_path"],
                          "/review-media/run-123/item-00/compare-01.mkv")
+        audio_tradeoff_hint = toolbelt.get("audio_tradeoff_hint")
+        assert isinstance(audio_tradeoff_hint, dict)
+        self.assertEqual(audio_tradeoff_hint["leverage"], "low")
+        self.assertEqual(audio_tradeoff_hint["recommended_seed_action"], "hold")
+        self.assertEqual(audio_tradeoff_hint["review_confidence"], "low")
+        self.assertEqual(audio_tradeoff_hint["target_bitrate_kbps"], 224.0)
+        self.assertEqual(audio_tradeoff_hint["next_lower_bitrate_kbps"], 192.0)
+
+    def test_planned_audio_review_context_uses_planner_primary_audio_track(self) -> None:
+        context = _planned_audio_review_context(
+            sample_item={
+                "audio_summary": [
+                    {"codec_name": "commentary", "channels": 2, "language": "spa", "default": 1, "index": 1},
+                    {"codec_name": "eac3", "channels": 6, "language": "eng", "default": 1, "index": 2},
+                ]
+            },
+            current_policy={
+                "audio": {
+                    "copy_codecs": ["aac", "opus"],
+                    "convert_to_opus_codecs": ["eac3"],
+                    "surround_5_1_opus_bitrate": "224k",
+                }
+            },
+        )
+
+        self.assertEqual(context["action"], "libopus")
+        self.assertEqual(context["primary_track"]["index"], 2)
+        self.assertEqual(context["primary_track"]["codec_name"], "eac3")
+        self.assertEqual(context["primary_track"]["channels"], 6)
+        self.assertEqual(context["target_bitrate"], "224k")
 
     def test_planned_audio_review_context_marks_copy_vs_transcode(self) -> None:
         transcode_context = _planned_audio_review_context(
@@ -1288,6 +4599,31 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(copy_context["action"], "copy")
         self.assertIsNone(copy_context["target_bitrate"])
 
+    def test_operator_requested_experiment_uses_selected_audio_track_for_copy_budget_estimate(self) -> None:
+        request = _operator_requested_experiment(
+            "I want to aim for 200MB per episode while keeping the current audio.",
+            {
+                "source_size_bytes": 1_000_000_000,
+                "duration_seconds": 100.0,
+                "audio_summary": [
+                    {"codec_name": "commentary", "channels": 2, "language": "spa", "default": 1, "index": 1},
+                    {"codec_name": "aac", "channels": 2, "language": "eng", "default": 0, "index": 2, "bit_rate": 320_000},
+                ],
+                "resolved_policy": {
+                    "audio": {
+                        "copy_codecs": ["aac"],
+                        "convert_to_opus_codecs": ["eac3"],
+                        "stereo_opus_bitrate": "128k",
+                    }
+                },
+            },
+        )
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "size_budget")
+        self.assertEqual(request["estimated_audio_bytes"], 4_000_000)
+        self.assertIsNone(request.get("audio_tradeoff_hint"))
+
     def test_build_seed_policy_payload_surfaces_class_signals(self) -> None:
         payload = _build_seed_policy_payload(
             prefix="tv/House/Season 5",
@@ -1305,6 +4641,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 "audio": {
                     "surround_5_1_opus_bitrate": "256k",
                     "copy_codecs": ["aac", "opus"],
+                    "convert_to_opus_codecs": ["eac3"],
                 },
             },
             sample_item={
@@ -1350,6 +4687,13 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["preferred_metric"], "vmaf")
         self.assertEqual(payload["base_policy"]["audio"]["surround_5_1_opus_bitrate"], "256k")
         self.assertEqual(payload["base_policy"]["video"]["encoder"], "libsvtav1")
+        audio_tradeoff_hint = payload.get("audio_tradeoff_hint")
+        assert isinstance(audio_tradeoff_hint, dict)
+        self.assertEqual(audio_tradeoff_hint["leverage"], "low")
+        self.assertEqual(audio_tradeoff_hint["recommended_seed_action"], "hold")
+        self.assertEqual(audio_tradeoff_hint["review_confidence"], "low")
+        self.assertEqual(audio_tradeoff_hint["target_bitrate_kbps"], 256.0)
+        self.assertEqual(audio_tradeoff_hint["next_lower_bitrate_kbps"], 224.0)
         self.assertEqual(payload["summary"]["suggested_override"]["policy_focus"]["audio"]["surround_5_1_opus_bitrate"],
                          "224k")
         self.assertIn(
@@ -1360,6 +4704,125 @@ class TuningRuntimeTests(unittest.TestCase):
             "This first-pass seed is only a bounded starting point; measured calibration should confirm any lean move.",
             payload["class_signals"]["caution_flags"],
         )
+
+    def test_audio_tradeoff_hint_holds_when_low_leverage(self) -> None:
+        # 44-min episode: 224k→192k saves ~10 MiB — below the 12 MiB low threshold
+        hint = audio_tradeoff_hint(
+            {
+                "source_size_bytes": 2_000_000_000,
+                "duration_seconds": 2640.0,
+                "audio_summary": [{"codec_name": "eac3", "channels": 6, "language": "eng"}],
+            },
+            {
+                "convert_to_opus_codecs": ["eac3"],
+                "surround_5_1_opus_bitrate": "224k",
+            },
+        )
+
+        assert hint is not None
+        self.assertEqual(hint["leverage"], "low")
+        self.assertEqual(hint["recommended_seed_action"], "hold")
+        self.assertEqual(hint["review_confidence"], "low")
+
+    def test_audio_tradeoff_hint_holds_when_medium_leverage(self) -> None:
+        # 224k→192k (32 kbps delta) over 5000s = ~19 MiB, 3 GB source → 0.67% → medium leverage
+        hint = audio_tradeoff_hint(
+            {
+                "source_size_bytes": 3_000_000_000,
+                "duration_seconds": 5000.0,
+                "audio_summary": [{"codec_name": "eac3", "channels": 6, "language": "eng"}],
+            },
+            {
+                "convert_to_opus_codecs": ["eac3"],
+                "surround_5_1_opus_bitrate": "224k",
+            },
+        )
+
+        assert hint is not None
+        self.assertEqual(hint["leverage"], "medium")
+        self.assertEqual(hint["recommended_seed_action"], "hold")
+        self.assertEqual(hint["review_confidence"], "low")
+
+    def test_audio_tradeoff_hint_allows_when_high_leverage(self) -> None:
+        # 3-hour item, 320k→256k saves ~82 MiB, source is only 5 GB so that's >1% → high leverage
+        hint = audio_tradeoff_hint(
+            {
+                "source_size_bytes": 5_000_000_000,
+                "duration_seconds": 10_800.0,
+                "audio_summary": [{"codec_name": "eac3", "channels": 6, "language": "eng"}],
+            },
+            {
+                "convert_to_opus_codecs": ["eac3"],
+                "surround_5_1_opus_bitrate": "320k",
+            },
+        )
+
+        assert hint is not None
+        self.assertEqual(hint["leverage"], "high")
+        self.assertEqual(hint["recommended_seed_action"], "allow")
+        self.assertEqual(hint["review_confidence"], "low")
+
+    def test_seed_prompt_references_recommended_seed_action(self) -> None:
+        prompt = _build_seed_prompt({"folder": "tv/Suits/Season 3"})
+
+        self.assertIn("recommended_seed_action", prompt)
+        self.assertIn("review_confidence", prompt)
+        self.assertIn("hold", prompt)
+        self.assertNotIn("requested budget clearly needs that savings", prompt)
+        self.assertIn("materially necessary and worth the review risk", prompt)
+
+    def test_seed_prompt_references_hinted_audio_key_for_stereo(self) -> None:
+        prompt = _build_seed_prompt(
+            {
+                "folder": "movies/Demo",
+                "audio_tradeoff_hint": {"policy_key": "stereo_opus_bitrate", "review_confidence": "medium"},
+            }
+        )
+
+        self.assertIn("stereo_opus_bitrate", prompt)
+        self.assertNotIn("surround Opus bitrate", prompt)
+
+    def test_tune_prompt_does_not_allow_budget_to_override_low_leverage_audio(self) -> None:
+        prompt = _build_tune_prompt({"folder": "tv/Suits/Season 3"})
+
+        self.assertIn("runtime_toolbelt.audio_tradeoff_hint", prompt)
+        self.assertIn("review_confidence", prompt)
+        self.assertNotIn("requested budget clearly needs that savings", prompt)
+        self.assertIn("materially necessary and worth that review risk", prompt)
+        self.assertIn("legacy H.264 or HEVC bitrate intuition", prompt)
+        self.assertIn("high-80s VMAF", prompt)
+
+    def test_tune_self_check_prompt_references_hinted_audio_key(self) -> None:
+        captured_messages: list[str] = []
+
+        def fake_request(**kwargs: object) -> dict[str, object]:
+            captured_messages.append(str(kwargs["message"]))
+            return {
+                "status": "warn",
+                "summary": "ok",
+                "issues": [],
+                "surround_audio_guardrail": {"status": "ok", "reason": ""},
+            }
+
+        with patch("mediaforce.advisor._run_structured_llm_request", side_effect=fake_request):
+            result = _run_tune_self_check(
+                project_root=self.root,
+                tuning_context={
+                    "runtime_toolbelt": {
+                        "audio_tradeoff_hint": {
+                            "policy_key": "stereo_opus_bitrate",
+                            "review_risk_summary": "Stereo changes are easier to validate directly.",
+                            "review_confidence": "medium",
+                        }
+                    }
+                },
+                proposal={"policy": {"audio": {"stereo_opus_bitrate": "112k"}}},
+            )
+
+        assert result is not None
+        self.assertTrue(captured_messages)
+        self.assertIn("stereo_opus_bitrate", captured_messages[0])
+        self.assertNotIn("surround_5_1_opus_bitrate", captured_messages[0])
 
     def test_shutdown_cleanup_cancels_managed_processes(self) -> None:
         from mediaforce.web import app as web_app
