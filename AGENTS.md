@@ -15,12 +15,15 @@ Only session-start facts that are easy to miss belong here.
   invariants
 - Do not reintroduce checked-in runtime state, SQLite databases, or review
   media artifacts into the repo
+- `uv build` now auto-builds `frontend/` during wheel packaging; do not rely on
+  stale checked-in or local `frontend/build/` artifacts
 
 ## Defaults
 
 - Backend targeted tests:
   `uv run --with pytest pytest tests/test_encode_queue_recovery.py tests/test_tuning_runtime.py`
 - Frontend checks: `cd frontend && npm run check`
+- Full local acceptance gate: `bash scripts/pre-commit-check.sh`
 - CLI smoke: `uv run mediaforce --help`
 - UI changes: validate in a real browser
 - For browser exploration by subagents, explicitly use the `browser-ui-review`
@@ -29,6 +32,8 @@ Only session-start facts that are easy to miss belong here.
   `docs/policies/coding-standards.md`
 - Before commits or ending a session, satisfy
   `docs/policies/acceptance-gate.md`
+- The checked-in Git hook lives at `.githooks/pre-commit`; fresh clones should
+  enable it with `git config core.hooksPath .githooks`
 
 ## Browser Review Launch Contract
 
