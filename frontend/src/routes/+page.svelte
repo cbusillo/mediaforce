@@ -15,6 +15,9 @@
 	import { hostsStatusPending } from '$lib/hosts/runtime';
 	import { allQueueWorkersScheduledOffWindow, nextQueueWindowCopy } from '$lib/hosts/schedule';
 
+	type FolderSortKey = 'priority' | 'title' | 'library' | 'pending' | 'reclaim' | 'age' | 'review';
+	type FolderSortDirection = 'asc' | 'desc';
+
 	const EMPTY_DASHBOARD: DashboardSummaryPayload = {
 		folders_preview: [],
 		library_colors: {},
@@ -188,6 +191,8 @@
 
 	let disabledLibraries = $state<string[]>([]);
 	let libraryFiltersHydrated = $state(false);
+	let folderSortKey = $state<FolderSortKey>('priority');
+	let folderSortDirection = $state<FolderSortDirection>('asc');
 
 	const visibleFolders = $derived.by(() =>
 		folders.filter((folder) => !disabledLibraries.includes(folderLibraryKey(folder.prefix)))
@@ -209,7 +214,53 @@
 		() => hosts.hosts.filter((host) => host.capabilities.includes('encode_queue')).length
 	);
 	const reachableHosts = $derived.by(() => hosts.hosts.filter((host) => host.available).length);
-	const activeWorkspaceFolder = $derived(visibleFolders[0] ?? null);
+	const sortedVisibleFolders = $derived.by(() => {
+		const collator = new Intl.Collator('en-US', { sensitivity: 'base', numeric: true });
+		const rankedFolders = visibleFolders.map((folder, index) => ({
+			folder,
+			index,
+			libraryLabel: folderLibraryLabel(folderLibraryKey(folder.prefix)),
+			reviewLabel: String(folder.review_badge_label ?? '')
+		}));
+
+		rankedFolders.sort((left, right) => {
+			const direction = folderSortDirection === 'asc' ? 1 : -1;
+			let comparison = 0;
+
+			switch (folderSortKey) {
+				case 'priority':
+					comparison = left.index - right.index;
+					break;
+				case 'title':
+					comparison = collator.compare(left.folder.title, right.folder.title);
+					break;
+				case 'library':
+					comparison = collator.compare(left.libraryLabel, right.libraryLabel);
+					break;
+				case 'pending':
+					comparison = left.folder.pending_count - right.folder.pending_count;
+					break;
+				case 'reclaim':
+					comparison = left.folder.projected_reclaim_bytes - right.folder.projected_reclaim_bytes;
+					break;
+				case 'age':
+					comparison = left.folder.average_age_days - right.folder.average_age_days;
+					break;
+				case 'review':
+					comparison = collator.compare(left.reviewLabel, right.reviewLabel);
+					break;
+			}
+
+			if (comparison === 0) {
+				comparison = left.index - right.index;
+			}
+
+			return comparison * direction;
+		});
+
+		return rankedFolders.map(({ folder }) => folder);
+	});
+	const activeWorkspaceFolder = $derived(sortedVisibleFolders[0] ?? null);
 	const queueWatchJobs = $derived.by(() =>
 		[...dashboard.encode_queue.running, ...dashboard.encode_queue.queued].slice(0, 5)
 	);
@@ -227,6 +278,37 @@
 
 	function enableAllLibraries() {
 		disabledLibraries = [];
+	}
+
+	function defaultFolderSortDirection(key: FolderSortKey): FolderSortDirection {
+		switch (key) {
+			case 'priority':
+			case 'title':
+			case 'library':
+			case 'review':
+				return 'asc';
+			case 'pending':
+			case 'reclaim':
+			case 'age':
+				return 'desc';
+		}
+	}
+
+	function toggleFolderSort(key: FolderSortKey) {
+		if (folderSortKey === key) {
+			folderSortDirection = folderSortDirection === 'asc' ? 'desc' : 'asc';
+			return;
+		}
+
+		folderSortKey = key;
+		folderSortDirection = defaultFolderSortDirection(key);
+	}
+
+	function folderSortAria(key: FolderSortKey): 'ascending' | 'descending' | 'none' {
+		if (folderSortKey !== key) {
+			return 'none';
+		}
+		return folderSortDirection === 'asc' ? 'ascending' : 'descending';
 	}
 
 	function parseIsoDate(value: string | null | undefined): Date | null {
@@ -537,7 +619,9 @@
 
 <div class="workstation-screen">
 	<section class="system-strip" aria-label="Fleet system state">
-		<div class="system-cell">
+		<div
+			class={`system-cell queue-cell ${dashboard.encode_queue.state.stop_requested || dashboard.encode_queue.state.is_paused ? 'warning-state' : 'normal-state'}`.trim()}
+		>
 			<p class="system-label">Queue state</p>
 			<p class="system-value">{fleetSnapshotLabel}</p>
 			<p class="system-detail">
@@ -832,7 +916,13 @@
 				<p class="section-label">Work queue</p>
 				<h2 class="section-title small">Ranked folders</h2>
 			</div>
-			<p class="queue-count">{visibleFolders.length} visible folders</p>
+			<p class="queue-count">
+				{sortedVisibleFolders.length} visible folders
+				<span class="sort-summary">
+					Sorted by {folderSortKey}
+					{folderSortDirection === 'asc' ? 'ascending' : 'descending'}
+				</span>
+			</p>
 		</div>
 
 		{#if folderLoadState === 'loading' && folders.length === 0 && !catalogEmpty}
@@ -847,7 +937,7 @@
 				<p>No folders are available yet.</p>
 				<p>Run a scan or confirm your library configuration in Settings.</p>
 			</div>
-		{:else if visibleFolders.length === 0}
+		{:else if sortedVisibleFolders.length === 0}
 			<div class="table-message">
 				<p>All visible libraries are currently filtered out.</p>
 				<p>Restore one library filter or press All libraries to resume the queue view.</p>
@@ -857,17 +947,123 @@
 				<table>
 					<thead>
 						<tr>
-							<th scope="col">Priority</th>
-							<th scope="col">Folder</th>
-							<th scope="col">Library</th>
-							<th scope="col">Pending</th>
-							<th scope="col">Reclaim</th>
-							<th scope="col">Review</th>
+							<th scope="col" aria-sort={folderSortAria('priority')}>
+								<button
+									type="button"
+									class={`sort-header ${folderSortKey === 'priority' ? 'active' : ''}`.trim()}
+									onclick={() => toggleFolderSort('priority')}
+								>
+									Priority
+									<span class="sort-indicator"
+										>{folderSortKey === 'priority'
+											? folderSortDirection === 'asc'
+												? '^'
+												: 'v'
+											: '-'}</span
+									>
+								</button>
+							</th>
+							<th scope="col" aria-sort={folderSortAria('title')}>
+								<button
+									type="button"
+									class={`sort-header ${folderSortKey === 'title' ? 'active' : ''}`.trim()}
+									onclick={() => toggleFolderSort('title')}
+								>
+									Folder
+									<span class="sort-indicator"
+										>{folderSortKey === 'title'
+											? folderSortDirection === 'asc'
+												? '^'
+												: 'v'
+											: '-'}</span
+									>
+								</button>
+							</th>
+							<th scope="col" aria-sort={folderSortAria('library')}>
+								<button
+									type="button"
+									class={`sort-header ${folderSortKey === 'library' ? 'active' : ''}`.trim()}
+									onclick={() => toggleFolderSort('library')}
+								>
+									Library
+									<span class="sort-indicator"
+										>{folderSortKey === 'library'
+											? folderSortDirection === 'asc'
+												? '^'
+												: 'v'
+											: '-'}</span
+									>
+								</button>
+							</th>
+							<th scope="col" aria-sort={folderSortAria('pending')}>
+								<button
+									type="button"
+									class={`sort-header ${folderSortKey === 'pending' ? 'active' : ''}`.trim()}
+									onclick={() => toggleFolderSort('pending')}
+								>
+									Pending
+									<span class="sort-indicator"
+										>{folderSortKey === 'pending'
+											? folderSortDirection === 'asc'
+												? '^'
+												: 'v'
+											: '-'}</span
+									>
+								</button>
+							</th>
+							<th scope="col" aria-sort={folderSortAria('reclaim')}>
+								<button
+									type="button"
+									class={`sort-header ${folderSortKey === 'reclaim' ? 'active' : ''}`.trim()}
+									onclick={() => toggleFolderSort('reclaim')}
+								>
+									Reclaim
+									<span class="sort-indicator"
+										>{folderSortKey === 'reclaim'
+											? folderSortDirection === 'asc'
+												? '^'
+												: 'v'
+											: '-'}</span
+									>
+								</button>
+							</th>
+							<th scope="col" aria-sort={folderSortAria('age')}>
+								<button
+									type="button"
+									class={`sort-header ${folderSortKey === 'age' ? 'active' : ''}`.trim()}
+									onclick={() => toggleFolderSort('age')}
+								>
+									Age
+									<span class="sort-indicator"
+										>{folderSortKey === 'age'
+											? folderSortDirection === 'asc'
+												? '^'
+												: 'v'
+											: '-'}</span
+									>
+								</button>
+							</th>
+							<th scope="col" aria-sort={folderSortAria('review')}>
+								<button
+									type="button"
+									class={`sort-header ${folderSortKey === 'review' ? 'active' : ''}`.trim()}
+									onclick={() => toggleFolderSort('review')}
+								>
+									Review
+									<span class="sort-indicator"
+										>{folderSortKey === 'review'
+											? folderSortDirection === 'asc'
+												? '^'
+												: 'v'
+											: '-'}</span
+									>
+								</button>
+							</th>
 							<th scope="col">Signal</th>
 						</tr>
 					</thead>
 					<tbody>
-						{#each visibleFolders as folder, index (folder.prefix)}
+						{#each sortedVisibleFolders as folder, index (folder.prefix)}
 							<tr class:active-row={index === 0}>
 								<td data-label="Priority">#{index + 1}</td>
 								<td data-label="Folder">
@@ -896,15 +1092,19 @@
 									<span class="table-value">{formatGiB(folder.projected_reclaim_bytes, 1)}</span>
 									<span class="table-subcopy">{formatGiB(folder.total_size_bytes, 1)} on disk</span>
 								</td>
+								<td data-label="Age">
+									<span class="table-value"
+										>{Math.max(0, Math.round(folder.average_age_days))}d</span
+									>
+									<span class="table-subcopy">
+										{folder.average_age_days > 0 ? 'Average item age' : 'Freshly ranked'}
+									</span>
+								</td>
 								<td data-label="Review">
 									<span class={`review-tag ${folder.review_badge_tone ?? 'neutral'}`.trim()}>
 										{folder.review_badge_label || 'Ready to inspect'}
 									</span>
-									<span class="table-subcopy">
-										{folder.average_age_days > 0
-											? `${Math.round(folder.average_age_days)} days old`
-											: 'Freshly ranked'}
-									</span>
+									<span class="table-subcopy">{folder.scope_label}</span>
 								</td>
 								<td data-label="Signal">
 									<span class="table-value">{formatTopCounts(folder.statuses, 3)}</span>
@@ -922,6 +1122,78 @@
 </div>
 
 <style>
+	:global(html),
+	:global(body) {
+		background: #0b1014;
+	}
+
+	:global(body) {
+		color: #e5edf6;
+		background-image: none;
+	}
+
+	:global(body::after) {
+		display: none;
+	}
+
+	:global(body::before) {
+		inset: 0;
+		background-image:
+			linear-gradient(rgba(148, 163, 184, 0.05) 1px, transparent 1px),
+			linear-gradient(90deg, rgba(148, 163, 184, 0.04) 1px, transparent 1px);
+		background-size: 28px 28px;
+		opacity: 0.32;
+		mix-blend-mode: normal;
+		mask-image: none;
+	}
+
+	:global(.page-shell) {
+		width: min(1480px, calc(100vw - 1.75rem));
+		gap: 0.95rem;
+		padding-top: 0.7rem;
+	}
+
+	:global(.masthead),
+	:global(.masthead.panel) {
+		border: 1px solid rgba(148, 163, 184, 0.18) !important;
+		box-shadow: 0 18px 34px rgba(2, 6, 23, 0.26) !important;
+		backdrop-filter: blur(14px);
+		background: rgba(10, 15, 21, 0.9) !important;
+	}
+
+	:global(.masthead)::before,
+	:global(.masthead)::after {
+		display: none !important;
+	}
+
+	:global(.masthead .brand-mark) {
+		color: #7dd3fc;
+	}
+
+	:global(.masthead .brand-name) {
+		font-family: 'Avenir Next', 'Segoe UI', sans-serif;
+		font-size: clamp(1.1rem, 1.65vw, 1.45rem);
+		letter-spacing: -0.02em;
+		color: #f8fafc;
+	}
+
+	:global(.masthead .nav-row a) {
+		border-radius: 0.55rem;
+		border-color: rgba(148, 163, 184, 0.16);
+		background: rgba(15, 23, 42, 0.72);
+		color: rgba(226, 232, 240, 0.74);
+		box-shadow: none;
+	}
+
+	:global(.masthead .nav-row a:hover),
+	:global(.masthead .nav-row a.active) {
+		transform: none;
+		border-color: rgba(56, 189, 248, 0.42);
+		background: rgba(8, 47, 73, 0.86);
+		color: #f8fafc;
+		box-shadow: none;
+	}
+
 	.workstation-screen {
 		display: grid;
 		gap: 1rem;
@@ -955,9 +1227,9 @@
 	.station-card,
 	.alert-strip {
 		position: relative;
-		border: 1px solid rgba(148, 163, 184, 0.24);
-		background: linear-gradient(180deg, rgba(11, 15, 20, 0.96), rgba(17, 24, 39, 0.94));
-		box-shadow: 0 22px 50px rgba(15, 23, 42, 0.26);
+		border: 1px solid rgba(148, 163, 184, 0.18);
+		background: rgba(15, 20, 27, 0.94);
+		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2);
 		overflow: hidden;
 	}
 
@@ -967,17 +1239,31 @@
 	}
 
 	.accent-cell {
-		background: linear-gradient(180deg, rgba(13, 18, 24, 0.96), rgba(17, 43, 51, 0.96));
+		background: rgba(13, 33, 42, 0.94);
 	}
 
-	.system-cell::before,
-	.station-card::before,
-	.alert-strip::before {
+	.alert-strip::before,
+	.queue-cell::before,
+	.active-workspace::before {
 		content: '';
 		position: absolute;
 		inset: 0 0 auto;
 		height: 2px;
 		background: linear-gradient(90deg, rgba(56, 189, 248, 0.75), rgba(34, 197, 94, 0.2));
+	}
+
+	.queue-cell.warning-state {
+		border-color: rgba(249, 115, 22, 0.3);
+		background: rgba(58, 26, 13, 0.94);
+	}
+
+	.queue-cell.warning-state::before {
+		background: linear-gradient(90deg, rgba(251, 146, 60, 0.95), rgba(248, 113, 113, 0.3));
+	}
+
+	.queue-cell.normal-state::before,
+	.active-workspace::before {
+		background: linear-gradient(90deg, rgba(56, 189, 248, 0.85), rgba(34, 197, 94, 0.22));
 	}
 
 	.system-label,
@@ -1083,7 +1369,7 @@
 
 	.console-grid {
 		display: grid;
-		grid-template-columns: minmax(0, 1.7fr) minmax(21rem, 0.95fr);
+		grid-template-columns: minmax(0, 1.5fr) minmax(25rem, 0.92fr);
 		align-items: start;
 	}
 
@@ -1133,8 +1419,9 @@
 
 	.workspace-title {
 		margin-top: 0.7rem;
-		font-size: clamp(1.8rem, 3vw, 2.4rem);
-		line-height: 1.04;
+		font-size: clamp(1.18rem, 1.55vw, 1.55rem);
+		font-weight: 700;
+		line-height: 1.16;
 	}
 
 	.workspace-subtitle {
@@ -1144,7 +1431,7 @@
 
 	.workspace-summary {
 		margin-top: 0.8rem;
-		max-width: 44rem;
+		max-width: 38rem;
 	}
 
 	.workspace-actions {
@@ -1230,11 +1517,11 @@
 	.signal-panel {
 		padding: 0.85rem 0.9rem;
 		border: 1px solid rgba(148, 163, 184, 0.18);
-		background: rgba(15, 23, 42, 0.72);
+		background: rgba(15, 23, 42, 0.54);
 	}
 
 	.fact-cell.highlight {
-		background: linear-gradient(180deg, rgba(8, 47, 73, 0.9), rgba(15, 23, 42, 0.86));
+		background: rgba(8, 47, 73, 0.82);
 		border-color: rgba(56, 189, 248, 0.36);
 	}
 
@@ -1252,6 +1539,13 @@
 
 	.side-rail {
 		gap: 1rem;
+	}
+
+	@media (min-width: 961px) {
+		.side-rail {
+			position: sticky;
+			top: 5.9rem;
+		}
 	}
 
 	.rail-summary {
@@ -1327,7 +1621,7 @@
 	.muted-block {
 		padding: 0.95rem 1rem;
 		border: 1px solid rgba(148, 163, 184, 0.16);
-		background: rgba(15, 23, 42, 0.58);
+		background: rgba(15, 23, 42, 0.46);
 	}
 
 	.filter-deck,
@@ -1350,7 +1644,7 @@
 	}
 
 	.filter-chip.active {
-		background: rgba(30, 41, 59, 0.96);
+		background: rgba(30, 41, 59, 0.88);
 		color: #f8fafc;
 		border-color: color-mix(in srgb, var(--library-chip, #38bdf8) 58%, rgba(148, 163, 184, 0.35));
 	}
@@ -1374,7 +1668,9 @@
 	}
 
 	.table-shell {
+		max-height: min(68vh, 58rem);
 		overflow-x: auto;
+		overflow-y: auto;
 		border: 1px solid rgba(148, 163, 184, 0.16);
 		background: rgba(9, 14, 22, 0.88);
 	}
@@ -1386,6 +1682,13 @@
 
 	thead {
 		background: rgba(15, 23, 42, 0.96);
+	}
+
+	thead th {
+		position: sticky;
+		top: 0;
+		z-index: 2;
+		background: rgba(15, 23, 42, 0.98);
 	}
 
 	th,
@@ -1406,6 +1709,39 @@
 
 	td {
 		color: rgba(226, 232, 240, 0.86);
+	}
+
+	.sort-header {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.45rem;
+		padding: 0;
+		border: 0;
+		background: transparent;
+		color: inherit;
+		font: inherit;
+		font-weight: inherit;
+		letter-spacing: inherit;
+		text-transform: inherit;
+	}
+
+	.sort-header.active {
+		color: #f8fafc;
+	}
+
+	.sort-indicator {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 0.8rem;
+		color: rgba(125, 211, 252, 0.9);
+	}
+
+	.sort-summary {
+		display: block;
+		margin-top: 0.15rem;
+		font-size: 0.82rem;
+		color: rgba(148, 163, 184, 0.84);
 	}
 
 	tbody tr {
@@ -1440,6 +1776,12 @@
 
 	.review-tag {
 		justify-content: flex-start;
+	}
+
+	.table-value,
+	.fact-value {
+		font-family: 'SFMono-Regular', 'Menlo', monospace;
+		letter-spacing: -0.01em;
 	}
 
 	.error-message {
