@@ -15,24 +15,24 @@
 	</div>
 
 	<nav class="nav-row" aria-label="Primary">
-			<a
-				class:active={page.url.pathname === '/'}
-				href={resolve('/')}
-				aria-current={page.url.pathname === '/' ? 'page' : undefined}>Folders</a
-			>
-			<a
-				class:active={page.url.pathname === '/ops'}
-				href={resolve('/ops')}
-				aria-current={page.url.pathname === '/ops' ? 'page' : undefined}>Ops</a
-			>
-			<a
-				class:active={page.url.pathname === '/completed'}
-				href={resolve('/completed')}
-				aria-current={page.url.pathname === '/completed' ? 'page' : undefined}>Completed</a
-			>
-			<a
-				class:active={page.url.pathname === '/settings'}
-				href={resolve('/settings')}
+		<a
+			class:active={page.url.pathname === '/'}
+			href={resolve('/')}
+			aria-current={page.url.pathname === '/' ? 'page' : undefined}>Folders</a
+		>
+		<a
+			class:active={page.url.pathname === '/ops'}
+			href={resolve('/ops')}
+			aria-current={page.url.pathname === '/ops' ? 'page' : undefined}>Ops</a
+		>
+		<a
+			class:active={page.url.pathname === '/completed'}
+			href={resolve('/completed')}
+			aria-current={page.url.pathname === '/completed' ? 'page' : undefined}>Completed</a
+		>
+		<a
+			class:active={page.url.pathname === '/settings'}
+			href={resolve('/settings')}
 			aria-current={page.url.pathname === '/settings' ? 'page' : undefined}>Settings</a
 		>
 	</nav>

@@ -20,9 +20,7 @@ export function allQueueWorkersScheduledOffWindow(hosts: HostRuntime[]): boolean
 	if (!queueHosts.length) return false;
 	return queueHosts.every(
 		(host) =>
-			host.available &&
-			host.schedule_profile_label !== 'Never' &&
-			host.schedule_open === false
+			host.available && host.schedule_profile_label !== 'Never' && host.schedule_open === false
 	);
 }
 

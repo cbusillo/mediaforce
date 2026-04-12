@@ -347,8 +347,8 @@ git config core.hooksPath .githooks
 ```
 
 That pre-commit hook runs `scripts/pre-commit-check.sh`, which executes the
-full backend pytest suite, CLI smoke, frontend type checks, staged-file
-frontend lint, frontend unit tests, and frontend build.
+full backend pytest suite, CLI smoke, frontend type checks, frontend lint,
+frontend unit tests, and frontend build.
 
 For frontend development, run the Svelte app from
 `frontend/` with `npm run dev`. The Vite dev server

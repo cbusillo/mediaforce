@@ -27,12 +27,12 @@
 		scheduleProfiles,
 		transcodeRoot = $bindable(),
 		isDirty,
-			isSaving,
-			isRefreshingHosts,
-			archiveCleanupPending,
-			archiveCleanupError,
-			hostsLoadError,
-			isClearingArchive,
+		isSaving,
+		isRefreshingHosts,
+		archiveCleanupPending,
+		archiveCleanupError,
+		hostsLoadError,
+		isClearingArchive,
 		hostActionKey,
 		getHostActionState,
 		updateHostActionPassword,
@@ -50,10 +50,10 @@
 		removeSchedule,
 		toggleScheduleDay,
 		toggleCapability,
-			saveSettings,
-			refreshHostStatuses,
-			refreshArchiveCleanup,
-			clearArchiveCleanup,
+		saveSettings,
+		refreshHostStatuses,
+		refreshArchiveCleanup,
+		clearArchiveCleanup,
 		prepareHost,
 		startHost,
 		resetHostTrust
@@ -65,11 +65,11 @@
 		scheduleProfiles: ScheduleProfile[];
 		transcodeRoot: string;
 		isDirty: boolean;
-			isSaving: boolean;
-			isRefreshingHosts: boolean;
-			archiveCleanupPending: boolean;
-			archiveCleanupError: string | null;
-			hostsLoadError: string | null;
+		isSaving: boolean;
+		isRefreshingHosts: boolean;
+		archiveCleanupPending: boolean;
+		archiveCleanupError: string | null;
+		hostsLoadError: string | null;
 		isClearingArchive: boolean;
 		hostActionKey: (host: SettingsHost, runtimeHost: HostRuntime | null, index: number) => string;
 		getHostActionState: (hostKey: string) => {
@@ -97,10 +97,13 @@
 			target?: 'days_of_week' | 'all_day_days_of_week'
 		) => void;
 		toggleCapability: (index: number, capability: string) => void;
-			saveSettings: () => Promise<void>;
-			refreshHostStatuses: () => Promise<void>;
-			refreshArchiveCleanup: (options?: { transcodeRoot?: string | null; silent?: boolean }) => Promise<void>;
-			clearArchiveCleanup: () => Promise<void>;
+		saveSettings: () => Promise<void>;
+		refreshHostStatuses: () => Promise<void>;
+		refreshArchiveCleanup: (options?: {
+			transcodeRoot?: string | null;
+			silent?: boolean;
+		}) => Promise<void>;
+		clearArchiveCleanup: () => Promise<void>;
 		prepareHost: (hostKey: string, runtimeHost: HostRuntime) => Promise<void>;
 		startHost: (hostKey: string, runtimeHost: HostRuntime) => Promise<void>;
 		resetHostTrust: (hostKey: string) => Promise<void>;
@@ -221,15 +224,15 @@
 					<span class="section-summary-badge">{sectionSummary.libraries()}</span>
 					<span class="section-summary-badge">{sectionSummary.schedules()}</span>
 					<span class="section-summary-badge">{sectionSummary.hosts()}</span>
-						{#if archiveCleanupError && !archiveCleanupUsesDraftPath}
-							<span class="section-summary-badge warn">Backup status unavailable</span>
-						{:else if archiveCleanup.file_count > 0}
-							<span class="section-summary-badge warn">
-								{archiveCleanup.file_count} archived backups
-							</span>
-						{:else if archiveCleanupPending}
-							<span class="section-summary-badge">Checking backups</span>
-						{/if}
+					{#if archiveCleanupError && !archiveCleanupUsesDraftPath}
+						<span class="section-summary-badge warn">Backup status unavailable</span>
+					{:else if archiveCleanup.file_count > 0}
+						<span class="section-summary-badge warn">
+							{archiveCleanup.file_count} archived backups
+						</span>
+					{:else if archiveCleanupPending}
+						<span class="section-summary-badge">Checking backups</span>
+					{/if}
 				</div>
 			</div>
 			<div class="path-card compact-paths">
@@ -382,34 +385,37 @@
 						<div class="archive-cleanup-copy">
 							<p class="eyebrow-copy">Archived originals</p>
 							<p class="transcode-summary-title">{archiveCleanupCopy}</p>
+							<p class="muted-copy">
+								Rollback copies live under `{draftArchiveRoot}` until you clear them.
+							</p>
+							{#if archiveCleanupError && !archiveCleanupUsesDraftPath}
+								<p class="warning-copy">{archiveCleanupError}</p>
+							{/if}
+							{#if archiveCleanupUsesDraftPath}
 								<p class="muted-copy">
-									Rollback copies live under `{draftArchiveRoot}` until you clear them.
-								</p>
-								{#if archiveCleanupError && !archiveCleanupUsesDraftPath}
-									<p class="warning-copy">{archiveCleanupError}</p>
-								{/if}
-								{#if archiveCleanupUsesDraftPath}
-									<p class="muted-copy">
-										Save settings first if you want the on-screen backup counts to refresh for this
+									Save settings first if you want the on-screen backup counts to refresh for this
 									new path.
 								</p>
 							{/if}
 						</div>
-							<div class="archive-cleanup-side">
-								<span class="transcode-summary-chip">{archiveCleanupSizeCopy}</span>
-								{#if archiveCleanupError && !archiveCleanupUsesDraftPath}
-									<Button variant="secondary" onclick={() => refreshArchiveCleanup({ silent: false })}>
-										Retry status
-									</Button>
-								{/if}
+						<div class="archive-cleanup-side">
+							<span class="transcode-summary-chip">{archiveCleanupSizeCopy}</span>
+							{#if archiveCleanupError && !archiveCleanupUsesDraftPath}
 								<Button
-									variant="danger"
-									loading={isClearingArchive}
-									disabled={!transcodeRoot.trim() ||
-										(archiveCleanupPending && !archiveCleanupUsesDraftPath) ||
-										(Boolean(archiveCleanupError) && !archiveCleanupUsesDraftPath) ||
-										(!archiveCleanupUsesDraftPath && archiveCleanup.file_count <= 0)}
-									onclick={clearArchiveCleanup}
+									variant="secondary"
+									onclick={() => refreshArchiveCleanup({ silent: false })}
+								>
+									Retry status
+								</Button>
+							{/if}
+							<Button
+								variant="danger"
+								loading={isClearingArchive}
+								disabled={!transcodeRoot.trim() ||
+									(archiveCleanupPending && !archiveCleanupUsesDraftPath) ||
+									(Boolean(archiveCleanupError) && !archiveCleanupUsesDraftPath) ||
+									(!archiveCleanupUsesDraftPath && archiveCleanup.file_count <= 0)}
+								onclick={clearArchiveCleanup}
 							>
 								Clear archived originals
 							</Button>

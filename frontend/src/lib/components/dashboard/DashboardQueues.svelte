@@ -142,11 +142,13 @@
 	}
 
 	function attentionReason(job: EncodeQueueJob): string {
-		const failureKind = String(job.last_failure_kind ?? '').trim().replaceAll('_', ' ');
+		const failureKind = String(job.last_failure_kind ?? '')
+			.trim()
+			.replaceAll('_', ' ');
 		const rawError = String(job.error ?? '').trim();
 		const errorTail = rawError.includes('Error:')
 			? rawError.slice(rawError.lastIndexOf('Error:'))
-			: rawError.split(/\r?\n/).filter(Boolean).at(-1) ?? rawError;
+			: (rawError.split(/\r?\n/).filter(Boolean).at(-1) ?? rawError);
 		const error = errorTail.replace(/\s+/g, ' ').trim();
 		const compactError = error.length > 180 ? `${error.slice(0, 177)}...` : error;
 		if (failureKind && error) {
@@ -164,7 +166,10 @@
 
 <div class="queue-grid">
 	{#each queueCards as card, index (card.eyebrow)}
-		<Panel class={`ops-queue-panel ${index === 1 ? 'primary-ops-panel' : 'secondary-ops-panel'}`.trim()} variant={index === 1 ? 'accent' : 'default'}>
+		<Panel
+			class={`ops-queue-panel ${index === 1 ? 'primary-ops-panel' : 'secondary-ops-panel'}`.trim()}
+			variant={index === 1 ? 'accent' : 'default'}
+		>
 			<div class="panel-stack">
 				<SectionHead
 					eyebrow={card.eyebrow}
@@ -188,7 +193,8 @@
 						</div>
 					{:else if pendingReviewCount === 0}
 						<p class="queue-empty-copy muted-copy">
-							Calibration lanes are idle. <a href={resolve('/')}>Go to folders</a> when you want a new sample or proof encode.
+							Calibration lanes are idle. <a href={resolve('/')}>Go to folders</a> when you want a new
+							sample or proof encode.
 						</p>
 					{/if}
 				{:else}
@@ -258,61 +264,65 @@
 							Estimated queue finish in {encodeQueueEtaCopy} at the current fleet pace.
 						</p>
 					{/if}
-						{#if recentAttentionJobs.length > 0}
-							<details class="queue-detail-shell attention-detail-shell" aria-label="Recent queue blockers" open={!encodeQueueHasWork}>
-								<summary>
-									<span>{blockersSummary}</span>
-									<span class="muted-copy">{blockersLeadCopy}</span>
-								</summary>
-								<div class="attention-list">
-									{#each recentAttentionJobs as job (job.job_id)}
-										<div class="attention-row">
-											<div>
-												<p class="attention-title">{job.prefix}</p>
-												<p class="attention-detail muted-copy">{attentionReason(job)}</p>
-											</div>
-											<div class="attention-meta muted-copy">
-												{#if job.attempt_summary}
-													<span>{job.attempt_summary}</span>
-												{/if}
-												{#if formatAttentionTimestamp(job)}
-													<span>{formatAttentionTimestamp(job)}</span>
-												{/if}
-											</div>
+					{#if recentAttentionJobs.length > 0}
+						<details
+							class="queue-detail-shell attention-detail-shell"
+							aria-label="Recent queue blockers"
+							open={!encodeQueueHasWork}
+						>
+							<summary>
+								<span>{blockersSummary}</span>
+								<span class="muted-copy">{blockersLeadCopy}</span>
+							</summary>
+							<div class="attention-list">
+								{#each recentAttentionJobs as job (job.job_id)}
+									<div class="attention-row">
+										<div>
+											<p class="attention-title">{job.prefix}</p>
+											<p class="attention-detail muted-copy">{attentionReason(job)}</p>
 										</div>
-									{/each}
-								</div>
-							</details>
-						{/if}
-						{#if encodeRunningJobs.length > 0}
-							<details class="queue-detail-shell" aria-label="Running encode telemetry">
-								<summary>
-									<span>{runningTelemetrySummary}</span>
-									<span class="muted-copy">Open details</span>
-								</summary>
-								<div class="encode-telemetry-list">
-									{#each encodeRunningJobs as job (job.job_id)}
-										<div class="encode-telemetry-row">
-											<div>
-												<p class="encode-telemetry-title">{job.prefix}</p>
-												<p class="muted-copy encode-telemetry-detail">
-													{String(job.host?.label ?? job.host?.key ?? 'Worker')}
-													{#if job.progress?.current_item_rel_path}
-														· {job.progress.current_item_rel_path}
-													{/if}
-												</p>
-											</div>
-											<p class="encode-telemetry-summary">
-												{job.telemetry_summary || job.scheduler_status_copy || 'Running now'}
+										<div class="attention-meta muted-copy">
+											{#if job.attempt_summary}
+												<span>{job.attempt_summary}</span>
+											{/if}
+											{#if formatAttentionTimestamp(job)}
+												<span>{formatAttentionTimestamp(job)}</span>
+											{/if}
+										</div>
+									</div>
+								{/each}
+							</div>
+						</details>
+					{/if}
+					{#if encodeRunningJobs.length > 0}
+						<details class="queue-detail-shell" aria-label="Running encode telemetry">
+							<summary>
+								<span>{runningTelemetrySummary}</span>
+								<span class="muted-copy">Open details</span>
+							</summary>
+							<div class="encode-telemetry-list">
+								{#each encodeRunningJobs as job (job.job_id)}
+									<div class="encode-telemetry-row">
+										<div>
+											<p class="encode-telemetry-title">{job.prefix}</p>
+											<p class="muted-copy encode-telemetry-detail">
+												{String(job.host?.label ?? job.host?.key ?? 'Worker')}
+												{#if job.progress?.current_item_rel_path}
+													· {job.progress.current_item_rel_path}
+												{/if}
 											</p>
 										</div>
-									{/each}
-								</div>
-							</details>
-						{/if}
+										<p class="encode-telemetry-summary">
+											{job.telemetry_summary || job.scheduler_status_copy || 'Running now'}
+										</p>
+									</div>
+								{/each}
+							</div>
+						</details>
 					{/if}
-				</div>
-			</Panel>
+				{/if}
+			</div>
+		</Panel>
 	{/each}
 </div>
 

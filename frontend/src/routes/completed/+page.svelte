@@ -1,11 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { resolve } from '$app/paths';
-	import type {
-		CompletedBackupsClearResponse,
-		CompletedFolder,
-		CompletedPagePayload
-	} from '$lib/api/types';
+	import type { CompletedBackupsClearResponse, CompletedPagePayload } from '$lib/api/types';
 	import { fetchJson, postJson } from '$lib/api/client';
 	import Button from '$lib/components/Button.svelte';
 	import Panel from '$lib/components/Panel.svelte';
@@ -27,7 +23,7 @@
 	};
 
 	let completedPayload = $state<CompletedPagePayload>(EMPTY_COMPLETED_PAGE);
-	let selectedPrefixes = $state<Set<string>>(new Set());
+	let selectedPrefixes = $state<string[]>([]);
 	let actionState = $state<'selected' | 'all' | null>(null);
 	let loadState = $state<'loading' | 'ready' | 'error'>('loading');
 	let loadError = $state<string | null>(null);
@@ -38,11 +34,9 @@
 
 	const completed = $derived(completedPayload);
 	const folders = $derived(completed.folders);
-	const foldersWithBackups = $derived(
-		folders.filter((folder) => folder.archived_backup_count > 0)
-	);
+	const foldersWithBackups = $derived(folders.filter((folder) => folder.archived_backup_count > 0));
 	const selectedFolders = $derived(
-		foldersWithBackups.filter((folder) => selectedPrefixes.has(folder.prefix))
+		foldersWithBackups.filter((folder) => selectedPrefixes.includes(folder.prefix))
 	);
 	const selectedBackupCount = $derived(
 		selectedFolders.reduce((total, folder) => total + folder.archived_backup_count, 0)
@@ -51,15 +45,15 @@
 		selectedFolders.reduce((total, folder) => total + folder.archived_backup_size_bytes, 0)
 	);
 	const allFoldersSelected = $derived(
-		foldersWithBackups.length > 0 && selectedPrefixes.size === foldersWithBackups.length
+		foldersWithBackups.length > 0 && selectedPrefixes.length === foldersWithBackups.length
 	);
 
-	function folderHref(prefix: string): string {
+	function folderPath(prefix: string): `/folders/${string}` {
 		const encodedPrefix = prefix
 			.split('/')
 			.map((segment) => encodeURIComponent(segment))
 			.join('/');
-		return resolve(`/folders/${encodedPrefix}`);
+		return `/folders/${encodedPrefix}`;
 	}
 
 	function toggleFolder(prefix: string): void {
@@ -68,10 +62,10 @@
 
 	function toggleAllFolders(): void {
 		if (allFoldersSelected) {
-			selectedPrefixes = new Set();
+			selectedPrefixes = [];
 			return;
 		}
-		selectedPrefixes = new Set(foldersWithBackups.map((folder) => folder.prefix));
+		selectedPrefixes = foldersWithBackups.map((folder) => folder.prefix);
 	}
 
 	async function clearSelectedBackups(): Promise<void> {
@@ -84,7 +78,10 @@
 		if (!confirmed) {
 			return;
 		}
-		await clearBackups({ prefixes: selectedFolders.map((folder) => folder.prefix), mode: 'selected' });
+		await clearBackups({
+			prefixes: selectedFolders.map((folder) => folder.prefix),
+			mode: 'selected'
+		});
 	}
 
 	async function clearAllBackups(): Promise<void> {
@@ -114,7 +111,7 @@
 				prefixes ? { prefixes } : {}
 			);
 			completedPayload = response.completed;
-			selectedPrefixes = new Set();
+			selectedPrefixes = [];
 			toasts.success('Archived backups removed', response.message);
 		} catch (error) {
 			toasts.error(
@@ -133,7 +130,8 @@
 			loadError = null;
 			loadState = 'ready';
 		} catch (error) {
-			loadError = error instanceof Error ? error.message : 'Unexpected completed page loading error';
+			loadError =
+				error instanceof Error ? error.message : 'Unexpected completed page loading error';
 			loadState = 'error';
 		}
 	}
@@ -150,14 +148,10 @@
 		}).format(parsed);
 	}
 
-	function nextSelection(prefix: string, current: Set<string>): Set<string> {
-		const next = new Set(current);
-		if (next.has(prefix)) {
-			next.delete(prefix);
-		} else {
-			next.add(prefix);
-		}
-		return next;
+	function nextSelection(prefix: string, current: string[]): string[] {
+		return current.includes(prefix)
+			? current.filter((value) => value !== prefix)
+			: [...current, prefix];
 	}
 </script>
 
@@ -175,9 +169,15 @@
 				size="display"
 			/>
 			<div class="hero-pills">
-				<Pill label={`${completed.folders_with_backups_count} folders with backups`} variant="warn" />
+				<Pill
+					label={`${completed.folders_with_backups_count} folders with backups`}
+					variant="warn"
+				/>
 				<Pill label={`${completed.archive_cleanup.file_count} archived originals`} variant="warn" />
-				<Pill label={`${formatGiB(completed.archive_cleanup.total_size_bytes, 1)} reclaimable`} variant="ghost" />
+				<Pill
+					label={`${formatGiB(completed.archive_cleanup.total_size_bytes, 1)} reclaimable`}
+					variant="ghost"
+				/>
 			</div>
 		</div>
 		<div class="hero-meta">
@@ -200,41 +200,50 @@
 	</Panel>
 {:else}
 	<Panel class="cleanup-panel" padding="1.05rem 1.15rem 1.2rem">
-	<div class="cleanup-header">
-		<div>
-			<p class="eyebrow-copy">Archived Originals</p>
-			<h2>Folder-level cleanup for rollback copies</h2>
-			<p class="cleanup-copy">
-				Select completed folders with archived originals, or clear the whole archive when you are ready.
+		<div class="cleanup-header">
+			<div>
+				<p class="eyebrow-copy">Archived Originals</p>
+				<h2>Folder-level cleanup for rollback copies</h2>
+				<p class="cleanup-copy">
+					Select completed folders with archived originals, or clear the whole archive when you are
+					ready.
+				</p>
+			</div>
+			<div class="cleanup-actions">
+				<Button
+					variant="ghost"
+					onclick={toggleAllFolders}
+					disabled={foldersWithBackups.length <= 0}
+				>
+					{allFoldersSelected ? 'Clear selection' : 'Select all folders with backups'}
+				</Button>
+				<Button
+					variant="danger"
+					onclick={clearSelectedBackups}
+					disabled={selectedFolders.length <= 0}
+					loading={actionState === 'selected'}
+				>
+					Delete selected backups
+				</Button>
+				<Button
+					variant="danger"
+					onclick={clearAllBackups}
+					disabled={!completed.archive_cleanup.has_cleanup}
+					loading={actionState === 'all'}
+				>
+					Delete all backups
+				</Button>
+			</div>
+		</div>
+		{#if selectedFolders.length > 0}
+			<p class="selection-summary">
+				{selectedFolders.length} folder{selectedFolders.length === 1 ? '' : 's'} selected · {selectedBackupCount}
+				archived original{selectedBackupCount === 1 ? '' : 's'} · {formatGiB(
+					selectedBackupSizeBytes,
+					1
+				)}
 			</p>
-		</div>
-		<div class="cleanup-actions">
-			<Button variant="ghost" onclick={toggleAllFolders} disabled={foldersWithBackups.length <= 0}>
-				{allFoldersSelected ? 'Clear selection' : 'Select all folders with backups'}
-			</Button>
-			<Button
-				variant="danger"
-				onclick={clearSelectedBackups}
-				disabled={selectedFolders.length <= 0}
-				loading={actionState === 'selected'}
-			>
-				Delete selected backups
-			</Button>
-			<Button
-				variant="danger"
-				onclick={clearAllBackups}
-				disabled={!completed.archive_cleanup.has_cleanup}
-				loading={actionState === 'all'}
-			>
-				Delete all backups
-			</Button>
-		</div>
-	</div>
-	{#if selectedFolders.length > 0}
-		<p class="selection-summary">
-			{selectedFolders.length} folder{selectedFolders.length === 1 ? '' : 's'} selected · {selectedBackupCount} archived original{selectedBackupCount === 1 ? '' : 's'} · {formatGiB(selectedBackupSizeBytes, 1)}
-		</p>
-	{/if}
+		{/if}
 	</Panel>
 
 	{#if loadState === 'loading'}
@@ -244,64 +253,68 @@
 			<p>Pulling promoted-folder history and archived backup totals now.</p>
 		</Panel>
 	{:else if folders.length > 0}
-	<div class="completed-grid">
-		{#each folders as folder (folder.prefix)}
-			{@const hasBackups = folder.archived_backup_count > 0}
-			{@const isSelected = selectedPrefixes.has(folder.prefix)}
-			<Panel class={`completed-card ${isSelected ? 'selected' : ''}`.trim()} padding="1rem 1rem 1.05rem">
-				<div class="card-header">
-					<div>
-						<p class="eyebrow-copy">{folder.scope_label}</p>
-						<h2>{folder.title}</h2>
-						<p class="card-subtitle">{folder.subtitle}</p>
+		<div class="completed-grid">
+			{#each folders as folder (folder.prefix)}
+				{@const hasBackups = folder.archived_backup_count > 0}
+				{@const isSelected = selectedPrefixes.includes(folder.prefix)}
+				<Panel
+					class={`completed-card ${isSelected ? 'selected' : ''}`.trim()}
+					padding="1rem 1rem 1.05rem"
+				>
+					<div class="card-header">
+						<div>
+							<p class="eyebrow-copy">{folder.scope_label}</p>
+							<h2>{folder.title}</h2>
+							<p class="card-subtitle">{folder.subtitle}</p>
+						</div>
+						{#if hasBackups}
+							<label class="select-toggle">
+								<input
+									type="checkbox"
+									checked={isSelected}
+									onchange={() => toggleFolder(folder.prefix)}
+								/>
+								<span>Select</span>
+							</label>
+						{/if}
 					</div>
-					{#if hasBackups}
-						<label class="select-toggle">
-							<input
-								type="checkbox"
-								checked={isSelected}
-								onchange={() => toggleFolder(folder.prefix)}
-							/>
-							<span>Select</span>
-						</label>
-					{/if}
-				</div>
-				<div class="card-pills">
-					<Pill label={`${folder.promoted_item_count} promoted`} variant="ok" />
-					{#if hasBackups}
-						<Pill label={`${folder.archived_backup_count} archived backups`} variant="warn" />
-					{:else}
-						<Pill label="Backups cleared" variant="ghost" />
-					{/if}
-				</div>
-				<div class="card-stats">
-					<div>
-						<p class="card-stat-label">Archived size</p>
-						<p class="card-stat-value">{formatGiB(folder.archived_backup_size_bytes, 1)}</p>
+					<div class="card-pills">
+						<Pill label={`${folder.promoted_item_count} promoted`} variant="ok" />
+						{#if hasBackups}
+							<Pill label={`${folder.archived_backup_count} archived backups`} variant="warn" />
+						{:else}
+							<Pill label="Backups cleared" variant="ghost" />
+						{/if}
 					</div>
-					<div>
-						<p class="card-stat-label">Space recovered</p>
-						<p class="card-stat-value">{formatGiB(folder.total_bytes_saved, 1)}</p>
+					<div class="card-stats">
+						<div>
+							<p class="card-stat-label">Archived size</p>
+							<p class="card-stat-value">{formatGiB(folder.archived_backup_size_bytes, 1)}</p>
+						</div>
+						<div>
+							<p class="card-stat-label">Space recovered</p>
+							<p class="card-stat-value">{formatGiB(folder.total_bytes_saved, 1)}</p>
+						</div>
+						<div>
+							<p class="card-stat-label">Latest promotion</p>
+							<p class="card-stat-value time">{formatPromotionTime(folder.latest_promoted_at)}</p>
+						</div>
 					</div>
-					<div>
-						<p class="card-stat-label">Latest promotion</p>
-						<p class="card-stat-value time">{formatPromotionTime(folder.latest_promoted_at)}</p>
+					<div class="card-actions">
+						<a href={resolve(folderPath(folder.prefix))}>Open folder</a>
 					</div>
-				</div>
-				<div class="card-actions">
-					<a href={folderHref(folder.prefix)}>Open folder</a>
-				</div>
-			</Panel>
-		{/each}
-	</div>
+				</Panel>
+			{/each}
+		</div>
 	{:else}
-	<Panel class="empty-panel" padding="1.1rem 1.15rem 1.2rem">
-		<p class="eyebrow-copy">Completed</p>
-		<h2>No completed folders are available yet.</h2>
-		<p>
-			Folders appear here once staged outputs are promoted into the library. Archived originals will stay visible until you clear them.
-		</p>
-	</Panel>
+		<Panel class="empty-panel" padding="1.1rem 1.15rem 1.2rem">
+			<p class="eyebrow-copy">Completed</p>
+			<h2>No completed folders are available yet.</h2>
+			<p>
+				Folders appear here once staged outputs are promoted into the library. Archived originals
+				will stay visible until you clear them.
+			</p>
+		</Panel>
 	{/if}
 {/if}
 

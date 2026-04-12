@@ -64,7 +64,12 @@
 	});
 </script>
 
-<a class="folder-link" href={resolve(`/folders/${folder.prefix}`)} style={cardThemeStyle} title={folder.prefix}>
+<a
+	class="folder-link"
+	href={resolve(`/folders/${folder.prefix}`)}
+	style={cardThemeStyle}
+	title={folder.prefix}
+>
 	<Panel class="folder-card" variant="default" padding="1.2rem 1.2rem 1.25rem">
 		<div class="card-shell">
 			<div class="card-header">
@@ -80,30 +85,30 @@
 			</div>
 
 			<div class="card-body">
-					<h3 class="serif">{folder.title}</h3>
-					<p class="summary-line">{folderStateCopy}</p>
-					{#if progressVisible}
+				<h3 class="serif">{folder.title}</h3>
+				<p class="summary-line">{folderStateCopy}</p>
+				{#if progressVisible}
 					<div class="progress-cluster" aria-label={`${completionPercent}% complete`}>
-					<div class="progress-rail" aria-hidden="true">
-						<span class="progress-fill" style={`width: ${completionPercent}%;`}></span>
+						<div class="progress-rail" aria-hidden="true">
+							<span class="progress-fill" style={`width: ${completionPercent}%;`}></span>
+						</div>
+						<p class="progress-copy">{completedCount} complete · {completionPercent}%</p>
 					</div>
-					<p class="progress-copy">{completedCount} complete · {completionPercent}%</p>
-				</div>
-					{/if}
-					<p class="status-line">{statusLineCopy}</p>
-					{#if secondaryMetaCopy}
-						<p class="secondary-meta-line">{secondaryMetaCopy}</p>
-					{/if}
+				{/if}
+				<p class="status-line">{statusLineCopy}</p>
+				{#if secondaryMetaCopy}
+					<p class="secondary-meta-line">{secondaryMetaCopy}</p>
+				{/if}
 			</div>
 
 			<div class="fact-grid" aria-label={`${folder.title} details`}>
-					{#each folderFacts as fact (fact.label)}
-						<div class={`fact-card ${fact.label === 'Estimated reclaim' ? 'highlight' : ''}`.trim()}>
-							<p class="fact-label">{fact.label}</p>
-							<p class="fact-value">{fact.value}</p>
-						</div>
-					{/each}
-				</div>
+				{#each folderFacts as fact (fact.label)}
+					<div class={`fact-card ${fact.label === 'Estimated reclaim' ? 'highlight' : ''}`.trim()}>
+						<p class="fact-label">{fact.label}</p>
+						<p class="fact-value">{fact.value}</p>
+					</div>
+				{/each}
+			</div>
 
 			<div class="card-footer" aria-hidden="true">
 				<span class="card-footer-copy">{cardActionLabel}</span>
@@ -234,7 +239,7 @@
 		color: var(--ink-soft);
 	}
 
-		.progress-cluster {
+	.progress-cluster {
 		display: grid;
 		gap: 0.32rem;
 	}
@@ -355,7 +360,12 @@
 		width: 72%;
 		height: 1rem;
 		border-radius: 999px;
-		background: linear-gradient(90deg, rgba(23, 35, 31, 0.08), rgba(23, 35, 31, 0.16), rgba(23, 35, 31, 0.08));
+		background: linear-gradient(
+			90deg,
+			rgba(23, 35, 31, 0.08),
+			rgba(23, 35, 31, 0.16),
+			rgba(23, 35, 31, 0.08)
+		);
 		background-size: 200% 100%;
 		animation: fact-skeleton-shift 1.6s ease-in-out infinite;
 	}

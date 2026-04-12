@@ -65,11 +65,11 @@
 	let opsLoadError = $state<string | null>(null);
 	let hostStatusRetryTimer: number | null = null;
 	let opsRefreshTimer: number | null = null;
-		let dashboardRefreshController: AbortController | null = null;
-		let hostsRefreshController: AbortController | null = null;
-		let activeDashboardRefreshRequest = 0;
-		let activeHostsRefreshRequest = 0;
-		let opsRefreshPromise: Promise<void> | null = null;
+	let dashboardRefreshController: AbortController | null = null;
+	let hostsRefreshController: AbortController | null = null;
+	let activeDashboardRefreshRequest = 0;
+	let activeHostsRefreshRequest = 0;
+	let opsRefreshPromise: Promise<void> | null = null;
 
 	const dashboard = $derived(dashboardPayload ?? EMPTY_DASHBOARD);
 	const hosts = $derived(hostsPayload ?? EMPTY_HOSTS);
@@ -175,83 +175,81 @@
 	let queueAction = $state<string | null>(null);
 	let calibrationQueueAction = $state<string | null>(null);
 
-		async function refreshOpsData(
-			{ silent = false, force = false }: { silent?: boolean; force?: boolean } = {}
-		) {
-			if (opsRefreshPromise !== null && !force) {
-				return opsRefreshPromise;
-			}
-			if (force) {
-				dashboardRefreshController?.abort();
-				hostsRefreshController?.abort();
-			}
-			const refreshPromise = (async () => {
-				isLoadingOps = true;
-				const dashboardRequestId = ++activeDashboardRefreshRequest;
-				const hostsRequestId = ++activeHostsRefreshRequest;
-				try {
-					const nextDashboardRefreshController = new AbortController();
-					const nextHostsRefreshController = new AbortController();
-					dashboardRefreshController = nextDashboardRefreshController;
-					hostsRefreshController = nextHostsRefreshController;
-					const [nextDashboard, nextHosts] = await Promise.all([
-						fetchJson<DashboardSummaryPayload>('/api/dashboard', fetch, {
-							signal: nextDashboardRefreshController.signal
-						}),
-						fetchJson<HostsPayload>('/api/hosts?compact=1', fetch, {
-							signal: nextHostsRefreshController.signal
-						})
-					]);
-					if (
-						dashboardRequestId !== activeDashboardRefreshRequest ||
-						hostsRequestId !== activeHostsRefreshRequest
-					) {
-						return;
-					}
-					dashboardPayload = nextDashboard;
-					hostsPayload = nextHosts;
-					opsLoadError = null;
-					if (browser && hostsStatusPending(nextHosts)) {
-						hostStatusRetryTimer ??= window.setTimeout(() => {
-							hostStatusRetryTimer = null;
-							void refreshOpsData({ silent: true });
-						}, 1000);
-					} else if (hostStatusRetryTimer !== null) {
-						clearTimeout(hostStatusRetryTimer);
-						hostStatusRetryTimer = null;
-					}
-				} catch (error) {
-					if (
-						error instanceof DOMException &&
-						error.name === 'AbortError'
-					) {
-						return;
-					}
-					opsLoadError = error instanceof Error ? error.message : 'Unexpected ops loading error';
-						if (!silent) {
-							toasts.error('Ops load failed', opsLoadError);
-						}
-					} finally {
-						if (dashboardRequestId === activeDashboardRefreshRequest) {
-							dashboardRefreshController = null;
-						}
-						if (hostsRequestId === activeHostsRefreshRequest) {
-							hostsRefreshController = null;
-						}
-						if (
-							dashboardRequestId === activeDashboardRefreshRequest &&
-							hostsRequestId === activeHostsRefreshRequest
-						) {
-							isLoadingOps = false;
-						}
-					}
-				})();
-			opsRefreshPromise = refreshPromise;
-			await refreshPromise;
-			if (opsRefreshPromise === refreshPromise) {
-				opsRefreshPromise = null;
-			}
+	async function refreshOpsData({
+		silent = false,
+		force = false
+	}: { silent?: boolean; force?: boolean } = {}) {
+		if (opsRefreshPromise !== null && !force) {
+			return opsRefreshPromise;
 		}
+		if (force) {
+			dashboardRefreshController?.abort();
+			hostsRefreshController?.abort();
+		}
+		const refreshPromise = (async () => {
+			isLoadingOps = true;
+			const dashboardRequestId = ++activeDashboardRefreshRequest;
+			const hostsRequestId = ++activeHostsRefreshRequest;
+			try {
+				const nextDashboardRefreshController = new AbortController();
+				const nextHostsRefreshController = new AbortController();
+				dashboardRefreshController = nextDashboardRefreshController;
+				hostsRefreshController = nextHostsRefreshController;
+				const [nextDashboard, nextHosts] = await Promise.all([
+					fetchJson<DashboardSummaryPayload>('/api/dashboard', fetch, {
+						signal: nextDashboardRefreshController.signal
+					}),
+					fetchJson<HostsPayload>('/api/hosts?compact=1', fetch, {
+						signal: nextHostsRefreshController.signal
+					})
+				]);
+				if (
+					dashboardRequestId !== activeDashboardRefreshRequest ||
+					hostsRequestId !== activeHostsRefreshRequest
+				) {
+					return;
+				}
+				dashboardPayload = nextDashboard;
+				hostsPayload = nextHosts;
+				opsLoadError = null;
+				if (browser && hostsStatusPending(nextHosts)) {
+					hostStatusRetryTimer ??= window.setTimeout(() => {
+						hostStatusRetryTimer = null;
+						void refreshOpsData({ silent: true });
+					}, 1000);
+				} else if (hostStatusRetryTimer !== null) {
+					clearTimeout(hostStatusRetryTimer);
+					hostStatusRetryTimer = null;
+				}
+			} catch (error) {
+				if (error instanceof DOMException && error.name === 'AbortError') {
+					return;
+				}
+				opsLoadError = error instanceof Error ? error.message : 'Unexpected ops loading error';
+				if (!silent) {
+					toasts.error('Ops load failed', opsLoadError);
+				}
+			} finally {
+				if (dashboardRequestId === activeDashboardRefreshRequest) {
+					dashboardRefreshController = null;
+				}
+				if (hostsRequestId === activeHostsRefreshRequest) {
+					hostsRefreshController = null;
+				}
+				if (
+					dashboardRequestId === activeDashboardRefreshRequest &&
+					hostsRequestId === activeHostsRefreshRequest
+				) {
+					isLoadingOps = false;
+				}
+			}
+		})();
+		opsRefreshPromise = refreshPromise;
+		await refreshPromise;
+		if (opsRefreshPromise === refreshPromise) {
+			opsRefreshPromise = null;
+		}
+	}
 
 	async function runQueueAction(action: 'pause' | 'resume' | 'retry' | 'stop') {
 		if (
@@ -264,7 +262,9 @@
 		if (
 			action === 'retry' &&
 			browser &&
-			!window.confirm('Retry all approved failed folder encodes? Folders that still need review will be skipped.')
+			!window.confirm(
+				'Retry all approved failed folder encodes? Folders that still need review will be skipped.'
+			)
 		) {
 			return;
 		}
@@ -279,7 +279,7 @@
 				return;
 			}
 			toasts.success('Queue updated', payload.message ?? 'Queue updated.');
-				await refreshOpsData({ silent: true, force: true });
+			await refreshOpsData({ silent: true, force: true });
 		} catch (error) {
 			toasts.error(
 				'Queue update failed',
@@ -312,7 +312,7 @@
 				return;
 			}
 			toasts.success('Calibration queue updated', payload.message ?? 'Calibration queue updated.');
-				await refreshOpsData({ silent: true, force: true });
+			await refreshOpsData({ silent: true, force: true });
 		} catch (error) {
 			toasts.error(
 				'Calibration queue update failed',
@@ -370,7 +370,11 @@
 				{#if opsLoadError}
 					<div class="section-actions-row">
 						<a class="ops-return-link" href={resolve('/')}>Back to folders</a>
-					<button type="button" class="refresh-button" onclick={() => refreshOpsData({ force: true })}>
+						<button
+							type="button"
+							class="refresh-button"
+							onclick={() => refreshOpsData({ force: true })}
+						>
 							Retry ops load
 						</button>
 					</div>

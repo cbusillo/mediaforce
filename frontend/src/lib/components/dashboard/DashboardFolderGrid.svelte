@@ -43,62 +43,66 @@
 		filterHintCopy: string;
 		visibleFolders: FolderCardData[];
 		catalogEmpty: boolean;
-		} = $props();
+	} = $props();
 
-		const libraryFiltersActive = $derived(disabledLibraries.length > 0);
-		const folderRankingPending = $derived(folderLoadState === 'loading' && folders.length > 0);
-		const totalFolderCount = $derived(folders.length);
-		const visibleFolderCount = $derived(visibleFolders.length);
-		const libraryControlSummary = $derived.by(() => {
-			if (visibleFolderCount === 0 && totalFolderCount > 0 && libraryFiltersActive) {
-				return 'No folders match current filters';
-			}
-			return `Showing ${visibleFolderCount} of ${totalFolderCount}`;
-		});
+	const libraryFiltersActive = $derived(disabledLibraries.length > 0);
+	const folderRankingPending = $derived(folderLoadState === 'loading' && folders.length > 0);
+	const totalFolderCount = $derived(folders.length);
+	const visibleFolderCount = $derived(visibleFolders.length);
+	const libraryControlSummary = $derived.by(() => {
+		if (visibleFolderCount === 0 && totalFolderCount > 0 && libraryFiltersActive) {
+			return 'No folders match current filters';
+		}
+		return `Showing ${visibleFolderCount} of ${totalFolderCount}`;
+	});
 </script>
 
 <Panel variant="inset" class="folder-section" padding="1.2rem 1.3rem 1.4rem">
 	<div class="section-stack">
 		<div class="section-header-row">
-				<SectionHead
-					eyebrow="Folders"
-					heading="Choose a folder to tune"
-					lede="Start here. Folders stay sorted by estimated reclaim so the strongest space-saving bets rise first."
-					size="compact"
-				/>
-					<div class="folder-header-side">
-						<p class="section-kicker muted-copy">Open a folder to start representative-file tuning before you dive into fleet telemetry.</p>
-						{#if folderRankingPending}
-							<span class="section-status-chip" role="status" aria-live="polite" aria-atomic="true">Ranking details are still finishing</span>
-						{/if}
-					</div>
+			<SectionHead
+				eyebrow="Folders"
+				heading="Choose a folder to tune"
+				lede="Start here. Folders stay sorted by estimated reclaim so the strongest space-saving bets rise first."
+				size="compact"
+			/>
+			<div class="folder-header-side">
+				<p class="section-kicker muted-copy">
+					Open a folder to start representative-file tuning before you dive into fleet telemetry.
+				</p>
+				{#if folderRankingPending}
+					<span class="section-status-chip" role="status" aria-live="polite" aria-atomic="true"
+						>Ranking details are still finishing</span
+					>
+				{/if}
+			</div>
+		</div>
+		{#if catalogScanActive && !catalogScanLikelyStalled}
+			<div class="catalog-refresh-inline" role="status" aria-live="polite" aria-atomic="true">
+				<div class="catalog-refresh-inline-main">
+					<span class="catalog-refresh-chip live">Library refresh live</span>
+					<p class="muted-copy catalog-refresh-inline-copy">{catalogScanProgressHeadline}</p>
 				</div>
-			{#if catalogScanActive && !catalogScanLikelyStalled}
-				<div class="catalog-refresh-inline" role="status" aria-live="polite" aria-atomic="true">
-					<div class="catalog-refresh-inline-main">
-						<span class="catalog-refresh-chip live">Library refresh live</span>
-						<p class="muted-copy catalog-refresh-inline-copy">{catalogScanProgressHeadline}</p>
+				{#if catalogScanProgressFacts.length > 0}
+					<div class="catalog-refresh-facts" aria-label="Library scan progress details">
+						{#each catalogScanProgressFacts as fact (fact)}
+							<span>{fact}</span>
+						{/each}
 					</div>
-					{#if catalogScanProgressFacts.length > 0}
-						<div class="catalog-refresh-facts" aria-label="Library scan progress details">
-							{#each catalogScanProgressFacts as fact (fact)}
-								<span>{fact}</span>
-							{/each}
-						</div>
-					{/if}
-				</div>
-			{:else if catalogScanLikelyStalled}
-				<div
-					class={`catalog-refresh-banner ${catalogScanLikelyStalled ? 'stalled' : 'live'}`.trim()}
-					role="status"
+				{/if}
+			</div>
+		{:else if catalogScanLikelyStalled}
+			<div
+				class={`catalog-refresh-banner ${catalogScanLikelyStalled ? 'stalled' : 'live'}`.trim()}
+				role="status"
 				aria-live="polite"
 			>
-					<div class="catalog-refresh-header">
-						<p class="eyebrow-copy">Library Refresh</p>
-						<span class="catalog-refresh-chip stalled">No recent progress</span>
-					</div>
-					<p>{catalogScanHeading}</p>
-					<p class="muted-copy">{catalogScanProgressHeadline}</p>
+				<div class="catalog-refresh-header">
+					<p class="eyebrow-copy">Library Refresh</p>
+					<span class="catalog-refresh-chip stalled">No recent progress</span>
+				</div>
+				<p>{catalogScanHeading}</p>
+				<p class="muted-copy">{catalogScanProgressHeadline}</p>
 				<p class="muted-copy">{catalogScanStatusCopy}</p>
 				{#if catalogScanProgressFacts.length > 0}
 					<div class="catalog-refresh-facts" aria-label="Library scan progress details">
@@ -109,10 +113,10 @@
 				{/if}
 			</div>
 		{/if}
-			{#if folderLoadState === 'error'}
-				<div class="catalog-refresh-banner" role="alert">
-					<p class="eyebrow-copy">Folders</p>
-					<p>Folder list failed to load.</p>
+		{#if folderLoadState === 'error'}
+			<div class="catalog-refresh-banner" role="alert">
+				<p class="eyebrow-copy">Folders</p>
+				<p>Folder list failed to load.</p>
 				<p class="muted-copy">{folderLoadError ?? 'Unknown folder loading error.'}</p>
 			</div>
 		{/if}
@@ -178,57 +182,57 @@
 		gap: var(--space-3);
 	}
 
-		.section-header-row {
-			display: flex;
-			justify-content: space-between;
+	.section-header-row {
+		display: flex;
+		justify-content: space-between;
 		gap: 1rem;
 		align-items: start;
-			flex-wrap: wrap;
-		}
+		flex-wrap: wrap;
+	}
 
-		.folder-header-side {
-			display: grid;
-			gap: 0.55rem;
-			justify-items: start;
-		}
+	.folder-header-side {
+		display: grid;
+		gap: 0.55rem;
+		justify-items: start;
+	}
 
-		.section-status-chip {
-			display: inline-flex;
-			align-items: center;
-			padding: 0.38rem 0.68rem;
-			border-radius: var(--radius-pill);
-			font-size: 0.78rem;
-			font-weight: 700;
-			background: rgba(23, 35, 31, 0.07);
-			color: var(--ink-soft);
-			border: 1px solid rgba(23, 35, 31, 0.08);
-		}
+	.section-status-chip {
+		display: inline-flex;
+		align-items: center;
+		padding: 0.38rem 0.68rem;
+		border-radius: var(--radius-pill);
+		font-size: 0.78rem;
+		font-weight: 700;
+		background: rgba(23, 35, 31, 0.07);
+		color: var(--ink-soft);
+		border: 1px solid rgba(23, 35, 31, 0.08);
+	}
 
-		.folder-grid {
-			display: grid;
-			grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-			gap: var(--space-4);
-		}
+	.folder-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+		gap: var(--space-4);
+	}
 
-		.catalog-refresh-inline {
-			display: flex;
-			justify-content: space-between;
-			gap: 0.9rem;
-			align-items: center;
-			flex-wrap: wrap;
-			padding: 0.1rem 0;
-		}
+	.catalog-refresh-inline {
+		display: flex;
+		justify-content: space-between;
+		gap: 0.9rem;
+		align-items: center;
+		flex-wrap: wrap;
+		padding: 0.1rem 0;
+	}
 
-		.catalog-refresh-inline-main {
-			display: flex;
-			align-items: center;
-			gap: 0.65rem;
-			flex-wrap: wrap;
-		}
+	.catalog-refresh-inline-main {
+		display: flex;
+		align-items: center;
+		gap: 0.65rem;
+		flex-wrap: wrap;
+	}
 
-		.catalog-refresh-inline-copy {
-			margin: 0;
-		}
+	.catalog-refresh-inline-copy {
+		margin: 0;
+	}
 
 	.catalog-refresh-banner {
 		display: grid;

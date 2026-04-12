@@ -200,9 +200,13 @@
 			const query = requestedTranscodeRoot?.trim()
 				? `?transcode_root=${encodeURIComponent(requestedTranscodeRoot.trim())}`
 				: '';
-			const nextArchiveCleanup = await fetchJson<ArchiveCleanupPayload>(`/api/archive-cleanup${query}`, fetch, {
-				signal: archiveCleanupController.signal
-			});
+			const nextArchiveCleanup = await fetchJson<ArchiveCleanupPayload>(
+				`/api/archive-cleanup${query}`,
+				fetch,
+				{
+					signal: archiveCleanupController.signal
+				}
+			);
 			if (requestId !== activeArchiveCleanupRequest) {
 				return;
 			}
@@ -218,10 +222,7 @@
 			archiveCleanupError =
 				error instanceof Error ? error.message : 'Unexpected archive cleanup error';
 			if (!silent) {
-				toasts.error(
-					'Archive cleanup refresh failed',
-					archiveCleanupError
-				);
+				toasts.error('Archive cleanup refresh failed', archiveCleanupError);
 			}
 		} finally {
 			if (requestId === activeArchiveCleanupRequest) {
@@ -258,13 +259,13 @@
 		}
 	}
 
-		async function refreshHostStatuses({ silent = false }: { silent?: boolean } = {}) {
-			if (hostRefreshRetryTimer !== null) {
-				clearTimeout(hostRefreshRetryTimer);
-				hostRefreshRetryTimer = null;
-			}
-			hostRefreshController?.abort();
-			hostRefreshController = new AbortController();
+	async function refreshHostStatuses({ silent = false }: { silent?: boolean } = {}) {
+		if (hostRefreshRetryTimer !== null) {
+			clearTimeout(hostRefreshRetryTimer);
+			hostRefreshRetryTimer = null;
+		}
+		hostRefreshController?.abort();
+		hostRefreshController = new AbortController();
 		const requestId = ++activeHostRefreshRequest;
 		isRefreshingHosts = true;
 		try {
@@ -307,7 +308,7 @@
 	async function clearArchiveCleanup() {
 		const targetArchiveRoot = `${transcodeRoot.trim().replace(/\/$/, '')}/_replaced`;
 		const usingDraftArchiveRoot = transcodeRoot.trim() !== settings.transcode_root.trim();
-		const cleanupCount = usingDraftArchiveRoot ? null : archiveCleanup?.file_count ?? 0;
+		const cleanupCount = usingDraftArchiveRoot ? null : (archiveCleanup?.file_count ?? 0);
 		if (
 			!transcodeRoot.trim() ||
 			!window.confirm(
@@ -453,11 +454,11 @@
 		void refreshHostStatuses({ silent: true });
 		return () => {
 			archiveCleanupController?.abort();
-		hostRefreshController?.abort();
-		if (hostRefreshRetryTimer !== null) {
-			clearTimeout(hostRefreshRetryTimer);
-			hostRefreshRetryTimer = null;
-		}
+			hostRefreshController?.abort();
+			if (hostRefreshRetryTimer !== null) {
+				clearTimeout(hostRefreshRetryTimer);
+				hostRefreshRetryTimer = null;
+			}
 		};
 	});
 </script>
@@ -477,9 +478,9 @@
 		{isDirty}
 		{isSaving}
 		{isRefreshingHosts}
-			{archiveCleanupPending}
-			{archiveCleanupError}
-			{hostsLoadError}
+		{archiveCleanupPending}
+		{archiveCleanupError}
+		{hostsLoadError}
 		{hostActionKey}
 		{getHostActionState}
 		{updateHostActionPassword}
@@ -503,9 +504,9 @@
 		{startHost}
 		{resetHostTrust}
 		{isClearingArchive}
-			{clearArchiveCleanup}
-			{refreshArchiveCleanup}
-		/>
+		{clearArchiveCleanup}
+		{refreshArchiveCleanup}
+	/>
 {:else}
 	<div class="page-stack">
 		<Panel padding="1.05rem 1.2rem">

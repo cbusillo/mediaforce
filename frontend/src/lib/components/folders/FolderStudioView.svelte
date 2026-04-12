@@ -3124,7 +3124,9 @@
 															/>
 														</button>
 														<div class="review-pack-copy">
-															<p class="proposal-memory-title">{artifact.label || 'Review artifact'}</p>
+															<p class="proposal-memory-title">
+																{artifact.label || 'Review artifact'}
+															</p>
 															{#if artifact.detail}
 																<p class="thread-support">{artifact.detail}</p>
 															{/if}
@@ -3158,7 +3160,9 @@
 															/>
 														</button>
 														<div class="review-pack-copy">
-															<p class="proposal-memory-title">{artifact.label || 'Review artifact'}</p>
+															<p class="proposal-memory-title">
+																{artifact.label || 'Review artifact'}
+															</p>
 															{#if artifact.detail}
 																<p class="thread-support">{artifact.detail}</p>
 															{/if}
