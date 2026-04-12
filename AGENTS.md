@@ -32,6 +32,9 @@ Only session-start facts that are easy to miss belong here.
   `docs/policies/coding-standards.md`
 - Before commits or ending a session, satisfy
   `docs/policies/acceptance-gate.md`
+- Prefer making commits in smaller logical chunks as work is completed.
+- Before finalizing a change when practical, run PyCharm inspections in addition
+  to the required checks.
 - The checked-in Git hook lives at `.githooks/pre-commit`; fresh clones should
   enable it with `git config core.hooksPath .githooks`
 
