@@ -17,6 +17,16 @@ DEFAULT_LIBRARY_COLOR_PALETTE = (
     "#7c6142",
     "#6b7280",
 )
+SCHEDULE_DAY_ORDER = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+SCHEDULE_DAY_LABELS = {
+    "mon": "Mon",
+    "tue": "Tue",
+    "wed": "Wed",
+    "thu": "Thu",
+    "fri": "Fri",
+    "sat": "Sat",
+    "sun": "Sun",
+}
 ALWAYS_SCHEDULE_PROFILE = "always"
 NEVER_SCHEDULE_PROFILE = "never"
 LEGACY_QUEUE_WINDOW_SCHEDULE_PROFILE = "queue_window"
@@ -159,10 +169,10 @@ def index_settings_remote_rows(rows: list[dict[str, Any]], *, min_rows: int = 1)
     return indexed
 
 
-def settings_schedule_profile_rows_for_config(config: MediaforceConfig, *, min_rows: int = 1) -> list[dict[str, str]]:
+def settings_schedule_profile_rows_for_config(config: MediaforceConfig, *, min_rows: int = 1) -> list[dict[str, Any]]:
     encode_queue = config.raw.get("encode_queue")
     raw_profiles = encode_queue.get("schedule_profiles") if isinstance(encode_queue, dict) else None
-    rows: list[dict[str, str]] = []
+    rows: list[dict[str, Any]] = []
     if isinstance(raw_profiles, list):
         for profile in raw_profiles:
             if not isinstance(profile, dict):
@@ -175,6 +185,8 @@ def settings_schedule_profile_rows_for_config(config: MediaforceConfig, *, min_r
                 {
                     "key": key,
                     "label": str(profile.get("label") or key.replace("_", " ").title()),
+                    "days_of_week": list(normalized["days_of_week"]),
+                    "all_day_days_of_week": list(normalized["all_day_days_of_week"]),
                     "start_hour": str(normalized["start_hour"]),
                     "end_hour": str(normalized["end_hour"]),
                 }
@@ -182,12 +194,16 @@ def settings_schedule_profile_rows_for_config(config: MediaforceConfig, *, min_r
     return index_schedule_profile_rows(rows, min_rows=min_rows)
 
 
-def index_schedule_profile_rows(rows: list[dict[str, str]], *, min_rows: int = 1) -> list[dict[str, str]]:
+def index_schedule_profile_rows(rows: list[dict[str, Any]], *, min_rows: int = 1) -> list[dict[str, Any]]:
     indexed = [
         {
             "index": str(index),
             "key": row.get("key", ""),
             "label": row.get("label", ""),
+            "days_of_week": normalize_schedule_days(row.get("days_of_week"), default_to_all=True),
+            "all_day_days_of_week": normalize_schedule_days(
+                row.get("all_day_days_of_week"), default_to_all=False
+            ),
             "start_hour": row.get("start_hour", str(DEFAULT_SCHEDULER_POLICY["start_hour"])),
             "end_hour": row.get("end_hour", str(DEFAULT_SCHEDULER_POLICY["end_hour"])),
         }
@@ -199,6 +215,8 @@ def index_schedule_profile_rows(rows: list[dict[str, str]], *, min_rows: int = 1
                 "index": str(len(indexed)),
                 "key": "",
                 "label": "",
+                "days_of_week": list(SCHEDULE_DAY_ORDER),
+                "all_day_days_of_week": [],
                 "start_hour": str(DEFAULT_SCHEDULER_POLICY["start_hour"]),
                 "end_hour": str(DEFAULT_SCHEDULER_POLICY["end_hour"]),
             }
@@ -253,6 +271,8 @@ def schedule_profile_options(*, schedule_profiles: list[dict[str, Any]]) -> list
             {
                 "mode": "night",
                 "timezone": "host_local",
+                "days_of_week": row.get("days_of_week"),
+                "all_day_days_of_week": row.get("all_day_days_of_week"),
                 "start_hour": row.get("start_hour"),
                 "end_hour": row.get("end_hour"),
             }
@@ -305,6 +325,52 @@ def clamp_hour(value: JSONValue, default: int) -> int:
         return default
 
 
+def normalize_schedule_days(value: JSONValue, *, default_to_all: bool) -> list[str]:
+    if value is None:
+        return list(SCHEDULE_DAY_ORDER) if default_to_all else []
+    if isinstance(value, str):
+        raw_days = [part.strip().lower() for part in value.split(",")]
+    elif isinstance(value, list):
+        raw_days = [str(item or "").strip().lower() for item in value]
+    else:
+        raw_days = []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for day in SCHEDULE_DAY_ORDER:
+        if day not in raw_days or day in seen:
+            continue
+        seen.add(day)
+        normalized.append(day)
+    if normalized:
+        return normalized
+    return list(SCHEDULE_DAY_ORDER) if default_to_all else []
+
+
+def schedule_days_summary(days_of_week: list[str]) -> str:
+    if days_of_week == list(SCHEDULE_DAY_ORDER):
+        return "every day"
+    if days_of_week == list(SCHEDULE_DAY_ORDER[:5]):
+        return "weekdays"
+    if days_of_week == list(SCHEDULE_DAY_ORDER[5:]):
+        return "weekends"
+    return ", ".join(SCHEDULE_DAY_LABELS.get(day, day.title()) for day in days_of_week)
+
+
+def schedule_day_rule_summary(*, window_days: list[str], all_day_days: list[str], start_hour: int, end_hour: int) -> str:
+    segments: list[str] = []
+    if all_day_days:
+        all_day_summary = schedule_days_summary(all_day_days)
+        segments.append("all day" if all_day_summary == "every day" else f"{all_day_summary} all day")
+    if window_days:
+        window_summary = schedule_days_summary(window_days)
+        if start_hour == end_hour:
+            segments.append("all day" if window_summary == "every day" else f"{window_summary} all day")
+        else:
+            window_phrase = f"between {start_hour:02d}:00 and {end_hour:02d}:00"
+            segments.append(window_phrase if window_summary == "every day" else f"{window_summary} {window_phrase}")
+    return " and ".join(segment for segment in segments if segment)
+
+
 def normalize_encode_queue_scheduler(raw: dict[str, Any] | None) -> dict[str, Any]:
     payload = dict(DEFAULT_SCHEDULER_POLICY)
     if isinstance(raw, dict):
@@ -323,18 +389,38 @@ def normalize_encode_queue_scheduler(raw: dict[str, Any] | None) -> dict[str, An
         end_hour_value = None
     start_hour = clamp_hour(start_hour_value, int(str(DEFAULT_SCHEDULER_POLICY["start_hour"])))
     end_hour = clamp_hour(end_hour_value, int(str(DEFAULT_SCHEDULER_POLICY["end_hour"])))
+    all_day_days_of_week = normalize_schedule_days(payload.get("all_day_days_of_week"), default_to_all=False)
+    default_window_days_to_all = payload.get("days_of_week") is None
+    days_of_week = [
+        day
+        for day in normalize_schedule_days(
+            payload.get("days_of_week"),
+            default_to_all=default_window_days_to_all,
+        )
+        if day not in all_day_days_of_week
+    ]
     normalized = {
         "mode": mode,
         "timezone": timezone,
         "start_hour": start_hour,
         "end_hour": end_hour,
+        "days_of_week": days_of_week,
+        "all_day_days_of_week": all_day_days_of_week,
     }
     if mode == "anytime":
         normalized["summary"] = "runs anytime"
     elif mode == "never":
         normalized["summary"] = "never runs"
     else:
-        normalized["summary"] = f"runs between {start_hour:02d}:00 and {end_hour:02d}:00 ({timezone.replace('_', ' ')})"
+        rule_summary = schedule_day_rule_summary(
+            window_days=days_of_week,
+            all_day_days=all_day_days_of_week,
+            start_hour=start_hour,
+            end_hour=end_hour,
+        )
+        normalized["summary"] = (
+            f"runs {rule_summary} ({timezone.replace('_', ' ')})" if rule_summary else "never runs"
+        )
     return normalized
 
 
@@ -344,7 +430,7 @@ def build_runtime_settings_payload(
         remote_hosts: list[dict[str, Any]],
         transcode_root: str,
         encode_queue_scheduler: dict[str, Any],
-        schedule_profiles: list[dict[str, str]],
+        schedule_profiles: list[dict[str, Any]],
 ) -> dict[str, Any]:
     def _text(value: JSONValue, default: str = "") -> str:
         if value is None:
@@ -449,6 +535,17 @@ def build_runtime_settings_payload(
             row.get("end_hour", str(DEFAULT_SCHEDULER_POLICY["end_hour"])),
             str(DEFAULT_SCHEDULER_POLICY["end_hour"]),
         )
+        all_day_days_of_week = normalize_schedule_days(
+            row.get("all_day_days_of_week"), default_to_all=False
+        )
+        default_window_days_to_all = row.get("days_of_week") is None
+        days_of_week = [
+            day
+            for day in normalize_schedule_days(
+                row.get("days_of_week"), default_to_all=default_window_days_to_all
+            )
+            if day not in all_day_days_of_week
+        ]
         if not any((key_text, label_text, start_hour_text, end_hour_text)):
             continue
         if not key_text:
@@ -457,10 +554,14 @@ def build_runtime_settings_payload(
             raise ValueError(f"Schedule profile key '{key_text}' is reserved.")
         if key_text in seen_profile_keys:
             raise ValueError(f"Duplicate schedule profile key: {key_text}")
+        if not days_of_week and not all_day_days_of_week:
+            raise ValueError(f"Select at least one day for schedule profile '{key_text}'.")
         normalized = normalize_encode_queue_scheduler(
             {
                 "mode": "night",
                 "timezone": "host_local",
+                "days_of_week": days_of_week,
+                "all_day_days_of_week": all_day_days_of_week,
                 "start_hour": start_hour_text,
                 "end_hour": end_hour_text,
             }
@@ -471,6 +572,8 @@ def build_runtime_settings_payload(
                 "label": label_text or key_text.replace("_", " ").title(),
                 "mode": normalized["mode"],
                 "timezone": normalized["timezone"],
+                "days_of_week": list(normalized["days_of_week"]),
+                "all_day_days_of_week": list(normalized["all_day_days_of_week"]),
                 "start_hour": normalized["start_hour"],
                 "end_hour": normalized["end_hour"],
             }

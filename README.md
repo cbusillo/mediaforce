@@ -354,10 +354,11 @@ any other host.
 Each host can now declare its own `max_parallel_encodes` limit and pick a
 structured schedule instead of typing profile keys by hand. `Always` is the
 built-in default, and you can add named windows when a machine should only run
-during certain hours. `Never` is also built in for temporarily disabling queued
-encodes on a host without removing its capabilities or setup state. Those
-windows are evaluated in the local time of the host that is actually running
-the work.
+during certain hours, on specific days of the week, or all day on explicit
+exception days such as Sunday. `Never` is also built in for temporarily
+disabling queued encodes on a host without removing its capabilities or setup
+state. Those windows are evaluated in the local time of the host that is
+actually running the work.
 
 For a blank remote Mac, first turn on Remote Login so SSH answers. Once that is
 reachable, the runtime settings UI can finish setup from the web surface: if

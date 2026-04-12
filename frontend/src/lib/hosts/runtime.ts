@@ -1,4 +1,6 @@
-import type { HostRuntime } from '$lib/api/types';
+import type { HostRuntime, HostsPayload } from '$lib/api/types';
+
+export const HOST_STATUS_PENDING_MESSAGE = 'Checking host status...';
 
 type QualitySearchMode = 'worker-local' | 'fully-remote' | 'local-assist';
 
@@ -80,4 +82,13 @@ export function folderAwareQualitySearchSummary(
 		label: 'Search starts here',
 		detail: 'This host streams the encode, but quality search still starts on this machine first.'
 	};
+}
+
+export function hostsStatusPending(payload: HostsPayload | null | undefined): boolean {
+	return (payload?.hosts ?? []).some(
+		(host) =>
+			String(host.message ?? '').trim() === HOST_STATUS_PENDING_MESSAGE &&
+			Array.isArray(host.issues) &&
+			host.issues.length === 0
+	);
 }

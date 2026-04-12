@@ -8,13 +8,18 @@ from fastapi.responses import JSONResponse
 def register_settings_routes(
         app: FastAPI,
         *,
-        settings_payload: Callable[[], dict[str, Any]],
+        settings_payload: Callable[[bool], dict[str, Any]],
         save_settings_action: Callable[..., dict[str, Any]],
+        archive_cleanup_payload: Callable[[str | None], dict[str, Any]],
         clear_archive_cleanup_action: Callable[[str | None], dict[str, Any]],
 ) -> None:
     @app.get("/api/settings")
-    def api_settings() -> JSONResponse:
-        return JSONResponse(settings_payload())
+    def api_settings(include_archive_cleanup: int = 1) -> JSONResponse:
+        return JSONResponse(settings_payload(bool(include_archive_cleanup)))
+
+    @app.get("/api/archive-cleanup")
+    def api_archive_cleanup(transcode_root: str | None = None) -> JSONResponse:
+        return JSONResponse(archive_cleanup_payload((transcode_root or "").strip() or None))
 
     @app.post("/api/settings")
     async def api_settings_save(request: Request) -> JSONResponse:

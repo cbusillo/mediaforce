@@ -1,7 +1,9 @@
 <script lang="ts">
-	import { invalidateAll } from '$app/navigation';
-	import { postJson } from '$lib/api/client';
+	import { browser } from '$app/environment';
+	import { onMount } from 'svelte';
+	import { fetchJson, postJson } from '$lib/api/client';
 	import type {
+		ArchiveCleanupPayload,
 		HostRuntime,
 		HostsPayload,
 		ScheduleProfile,
@@ -9,11 +11,16 @@
 		SettingsLibrary,
 		SettingsPayload
 	} from '$lib/api/types';
+	import Button from '$lib/components/Button.svelte';
+	import Panel from '$lib/components/Panel.svelte';
+	import SectionHead from '$lib/components/SectionHead.svelte';
 	import SettingsEditor from '$lib/components/settings/SettingsEditor.svelte';
+	import { hostsStatusPending } from '$lib/hosts/runtime';
 	import {
 		addHostDraft,
 		addLibraryDraft,
 		addScheduleDraft,
+		cloneScheduleProfile,
 		defaultHostActionState,
 		draftFromSettings,
 		hasPrimaryHostAction,
@@ -23,23 +30,59 @@
 		primaryHostActionLabel,
 		removeAtIndex,
 		shouldShowHostActions,
+		type ScheduleDayKey,
+		toggleScheduleProfileDay,
 		toggleHostCapability,
 		type HostActionState
 	} from '$lib/settings/editor';
 	import { toasts } from '$lib/stores/toasts';
 
-	let {
-		data
-	}: {
-		data: {
-			settings: SettingsPayload;
-			hosts: HostsPayload;
-		};
-	} = $props();
+	const EMPTY_ARCHIVE_CLEANUP: ArchiveCleanupPayload = {
+		archive_root: '',
+		file_count: 0,
+		total_size_bytes: 0,
+		has_cleanup: false
+	};
+	const EMPTY_SETTINGS: SettingsPayload = {
+		error: null,
+		saved: false,
+		libraries: [],
+		remote_hosts: [],
+		transcode_root: '',
+		encode_queue_scheduler: {
+			mode: 'night',
+			start_hour: 22,
+			end_hour: 8,
+			timezone: 'host_local',
+			summary: ''
+		},
+		schedule_profiles: [],
+		schedule_profile_options: [],
+		host_capability_options: [],
+		archive_root: '',
+		archive_cleanup: EMPTY_ARCHIVE_CLEANUP,
+		runtime_settings_path: '',
+		repo_config_path: '',
+		host_notice: null,
+		host_notice_kind: null
+	};
 
-	const settings = $derived(data.settings);
-	const hosts = $derived(data.hosts);
-	const runtimeHostsByKey = $derived.by(() => new Map(hosts.hosts.map((host) => [host.key, host])));
+	let settingsPayload = $state<SettingsPayload | null>(null);
+	let archiveCleanup = $state<ArchiveCleanupPayload | null>(null);
+	let hostsPayload = $state<HostsPayload | null>(null);
+	let archiveCleanupPending = $state(true);
+	let archiveCleanupError = $state<string | null>(null);
+	let isLoadingSettings = $state(true);
+	let settingsLoadError = $state<string | null>(null);
+	let hostsLoadError = $state<string | null>(null);
+	const settings = $derived.by(() => ({
+		...(settingsPayload ?? EMPTY_SETTINGS),
+		archive_cleanup:
+			archiveCleanup ?? settingsPayload?.archive_cleanup ?? EMPTY_SETTINGS.archive_cleanup
+	}));
+	const runtimeHostsByKey = $derived.by(
+		() => new Map((hostsPayload?.hosts ?? []).map((host) => [host.key, host]))
+	);
 
 	let libraries = $state<SettingsLibrary[]>([]);
 	let remoteHosts = $state<SettingsHost[]>([]);
@@ -49,6 +92,11 @@
 	let isRefreshingHosts = $state(false);
 	let isClearingArchive = $state(false);
 	let hostActionState = $state<Record<string, HostActionState>>({});
+	let archiveCleanupController: AbortController | null = null;
+	let activeArchiveCleanupRequest = 0;
+	let hostRefreshController: AbortController | null = null;
+	let activeHostRefreshRequest = 0;
+	let hostRefreshRetryTimer: number | null = null;
 
 	const initialSettingsDraft = $derived.by(() => draftFromSettings(settings));
 	const currentSettingsDraft = $derived.by(() => ({
@@ -59,34 +107,25 @@
 			allowed_libraries: [...host.allowed_libraries]
 		})),
 		transcode_root: transcodeRoot,
-		schedule_profiles: scheduleProfiles.map((profile) => ({ ...profile }))
+		schedule_profiles: scheduleProfiles.map((profile) => cloneScheduleProfile(profile))
 	}));
 	const isDirty = $derived(
 		JSON.stringify(currentSettingsDraft) !== JSON.stringify(initialSettingsDraft)
 	);
 
 	function applySettingsDraft(payload: SettingsPayload) {
+		settingsPayload = payload;
+		if (payload.archive_cleanup) {
+			archiveCleanup = payload.archive_cleanup;
+			archiveCleanupPending = false;
+			archiveCleanupError = null;
+		}
 		const draft = draftFromSettings(payload);
 		libraries = draft.libraries;
 		remoteHosts = draft.remote_hosts;
 		scheduleProfiles = draft.schedule_profiles;
 		transcodeRoot = draft.transcode_root;
 	}
-
-	$effect(() => {
-		if (!libraries.length) {
-			libraries = draftFromSettings(settings).libraries;
-		}
-		if (!remoteHosts.length) {
-			remoteHosts = draftFromSettings(settings).remote_hosts;
-		}
-		if (!scheduleProfiles.length) {
-			scheduleProfiles = draftFromSettings(settings).schedule_profiles;
-		}
-		if (!transcodeRoot) {
-			transcodeRoot = settings.transcode_root;
-		}
-	});
 
 	function addLibrary() {
 		libraries = addLibraryDraft(libraries);
@@ -112,8 +151,84 @@
 		scheduleProfiles = removeAtIndex(scheduleProfiles, index);
 	}
 
+	function toggleScheduleDay(
+		index: number,
+		dayKey: ScheduleDayKey,
+		target: 'days_of_week' | 'all_day_days_of_week' = 'days_of_week'
+	) {
+		scheduleProfiles = scheduleProfiles.map((profile, candidate) =>
+			candidate === index ? toggleScheduleProfileDay(profile, dayKey, target) : profile
+		);
+	}
+
 	function toggleCapability(index: number, capability: string) {
 		remoteHosts = toggleHostCapability(remoteHosts, index, capability);
+	}
+
+	async function loadSettings({ silent = false }: { silent?: boolean } = {}) {
+		isLoadingSettings = true;
+		try {
+			const response = await fetchJson<SettingsPayload>('/api/settings?include_archive_cleanup=0');
+			applySettingsDraft(response);
+			settingsLoadError = null;
+			if (!response.archive_cleanup) {
+				void refreshArchiveCleanup({ silent: true });
+			}
+		} catch (error) {
+			settingsLoadError =
+				error instanceof Error ? error.message : 'Unexpected settings loading error';
+			if (!silent) {
+				toasts.error('Settings load failed', settingsLoadError);
+			}
+		} finally {
+			isLoadingSettings = false;
+		}
+	}
+
+	async function refreshArchiveCleanup({
+		transcodeRoot: requestedTranscodeRoot,
+		silent = false
+	}: {
+		transcodeRoot?: string | null;
+		silent?: boolean;
+	} = {}) {
+		archiveCleanupController?.abort();
+		archiveCleanupController = new AbortController();
+		const requestId = ++activeArchiveCleanupRequest;
+		archiveCleanupPending = true;
+		try {
+			const query = requestedTranscodeRoot?.trim()
+				? `?transcode_root=${encodeURIComponent(requestedTranscodeRoot.trim())}`
+				: '';
+			const nextArchiveCleanup = await fetchJson<ArchiveCleanupPayload>(`/api/archive-cleanup${query}`, fetch, {
+				signal: archiveCleanupController.signal
+			});
+			if (requestId !== activeArchiveCleanupRequest) {
+				return;
+			}
+			archiveCleanup = nextArchiveCleanup;
+			archiveCleanupError = null;
+		} catch (error) {
+			if (requestId !== activeArchiveCleanupRequest) {
+				return;
+			}
+			if (error instanceof DOMException && error.name === 'AbortError') {
+				return;
+			}
+			archiveCleanupError =
+				error instanceof Error ? error.message : 'Unexpected archive cleanup error';
+			if (!silent) {
+				toasts.error(
+					'Archive cleanup refresh failed',
+					archiveCleanupError
+				);
+			}
+		} finally {
+			if (requestId === activeArchiveCleanupRequest) {
+				archiveCleanupPending = false;
+				archiveCleanupController = null;
+			}
+		}
 	}
 
 	async function saveSettings() {
@@ -131,7 +246,8 @@
 			);
 			applySettingsDraft(response.settings);
 			toasts.success('Settings saved', response.message);
-			await invalidateAll();
+			void refreshArchiveCleanup({ transcodeRoot: response.settings.transcode_root, silent: true });
+			void refreshHostStatuses({ silent: true });
 		} catch (error) {
 			toasts.error(
 				'Settings save failed',
@@ -142,24 +258,56 @@
 		}
 	}
 
-	async function refreshHostStatuses() {
+		async function refreshHostStatuses({ silent = false }: { silent?: boolean } = {}) {
+			if (hostRefreshRetryTimer !== null) {
+				clearTimeout(hostRefreshRetryTimer);
+				hostRefreshRetryTimer = null;
+			}
+			hostRefreshController?.abort();
+			hostRefreshController = new AbortController();
+		const requestId = ++activeHostRefreshRequest;
 		isRefreshingHosts = true;
 		try {
-			await invalidateAll();
+			const nextHostsPayload = await fetchJson<HostsPayload>('/api/hosts', fetch, {
+				signal: hostRefreshController.signal
+			});
+			if (requestId !== activeHostRefreshRequest) {
+				return;
+			}
+			hostsPayload = nextHostsPayload;
+			hostsLoadError = null;
+			if (browser && hostsStatusPending(nextHostsPayload)) {
+				hostRefreshRetryTimer ??= window.setTimeout(() => {
+					hostRefreshRetryTimer = null;
+					void refreshHostStatuses({ silent: true });
+				}, 1000);
+			} else if (hostRefreshRetryTimer !== null) {
+				clearTimeout(hostRefreshRetryTimer);
+				hostRefreshRetryTimer = null;
+			}
 		} catch (error) {
-			toasts.error(
-				'Host refresh failed',
-				error instanceof Error ? error.message : 'Unexpected host refresh error'
-			);
+			if (requestId !== activeHostRefreshRequest) {
+				return;
+			}
+			if (error instanceof DOMException && error.name === 'AbortError') {
+				return;
+			}
+			hostsLoadError = error instanceof Error ? error.message : 'Unexpected host refresh error';
+			if (!silent) {
+				toasts.error('Host refresh failed', hostsLoadError);
+			}
 		} finally {
-			isRefreshingHosts = false;
+			if (requestId === activeHostRefreshRequest) {
+				isRefreshingHosts = false;
+				hostRefreshController = null;
+			}
 		}
 	}
 
 	async function clearArchiveCleanup() {
 		const targetArchiveRoot = `${transcodeRoot.trim().replace(/\/$/, '')}/_replaced`;
 		const usingDraftArchiveRoot = transcodeRoot.trim() !== settings.transcode_root.trim();
-		const cleanupCount = usingDraftArchiveRoot ? null : settings.archive_cleanup.file_count;
+		const cleanupCount = usingDraftArchiveRoot ? null : archiveCleanup?.file_count ?? 0;
 		if (
 			!transcodeRoot.trim() ||
 			!window.confirm(
@@ -173,11 +321,18 @@
 
 		isClearingArchive = true;
 		try {
-			const response = await postJson<{ message: string }>('/api/archive-cleanup/clear', {
-				transcode_root: transcodeRoot
-			});
+			const response = await postJson<{ message: string; archive_cleanup: ArchiveCleanupPayload }>(
+				'/api/archive-cleanup/clear',
+				{
+					transcode_root: transcodeRoot
+				}
+			);
+			if (!usingDraftArchiveRoot) {
+				archiveCleanup = response.archive_cleanup;
+				archiveCleanupPending = false;
+				archiveCleanupError = null;
+			}
 			toasts.success('Archive cleanup finished', response.message);
-			await invalidateAll();
 		} catch (error) {
 			toasts.error(
 				'Archive cleanup failed',
@@ -236,7 +391,7 @@
 			} else {
 				toasts.error('Remote setup failed', response.message);
 			}
-			await invalidateAll();
+			await refreshHostStatuses({ silent: true });
 		} catch (error) {
 			toasts.error(
 				'Remote setup failed',
@@ -259,7 +414,7 @@
 			} else {
 				toasts.error('Host start failed', response.message);
 			}
-			await invalidateAll();
+			await refreshHostStatuses({ silent: true });
 		} catch (error) {
 			toasts.error(
 				'Host start failed',
@@ -282,7 +437,7 @@
 			} else {
 				toasts.error('SSH trust reset failed', response.message);
 			}
-			await invalidateAll();
+			await refreshHostStatuses({ silent: true });
 		} catch (error) {
 			toasts.error(
 				'SSH trust reset failed',
@@ -292,43 +447,82 @@
 			patchHostActionState(hostKey, { resettingTrust: false });
 		}
 	}
+
+	onMount(() => {
+		void loadSettings({ silent: true });
+		void refreshHostStatuses({ silent: true });
+		return () => {
+			archiveCleanupController?.abort();
+		hostRefreshController?.abort();
+		if (hostRefreshRetryTimer !== null) {
+			clearTimeout(hostRefreshRetryTimer);
+			hostRefreshRetryTimer = null;
+		}
+		};
+	});
 </script>
 
 <svelte:head>
 	<title>Settings · Mediaforce</title>
 </svelte:head>
 
-<SettingsEditor
-	{settings}
-	{runtimeHostsByKey}
-	{libraries}
-	{remoteHosts}
-	{scheduleProfiles}
-	bind:transcodeRoot
-	{isDirty}
-	{isSaving}
-	{isRefreshingHosts}
-	{hostActionKey}
-	{getHostActionState}
-	{updateHostActionPassword}
-	{revealHostActionPassword}
-	{primaryHostAction}
-	{primaryHostActionLabel}
-	{primaryHostActionHelp}
-	{hasPrimaryHostAction}
-	{shouldShowHostActions}
-	{addLibrary}
-	{addHost}
-	{addSchedule}
-	{removeLibrary}
-	{removeHost}
-	{removeSchedule}
-	{toggleCapability}
-	{saveSettings}
-	{refreshHostStatuses}
-	{prepareHost}
-	{startHost}
-	{resetHostTrust}
-	{isClearingArchive}
-	{clearArchiveCleanup}
-/>
+{#if settingsPayload}
+	<SettingsEditor
+		{settings}
+		{runtimeHostsByKey}
+		{libraries}
+		{remoteHosts}
+		{scheduleProfiles}
+		bind:transcodeRoot
+		{isDirty}
+		{isSaving}
+		{isRefreshingHosts}
+			{archiveCleanupPending}
+			{archiveCleanupError}
+			{hostsLoadError}
+		{hostActionKey}
+		{getHostActionState}
+		{updateHostActionPassword}
+		{revealHostActionPassword}
+		{primaryHostAction}
+		{primaryHostActionLabel}
+		{primaryHostActionHelp}
+		{hasPrimaryHostAction}
+		{shouldShowHostActions}
+		{addLibrary}
+		{addHost}
+		{addSchedule}
+		{removeLibrary}
+		{removeHost}
+		{removeSchedule}
+		{toggleScheduleDay}
+		{toggleCapability}
+		{saveSettings}
+		{refreshHostStatuses}
+		{prepareHost}
+		{startHost}
+		{resetHostTrust}
+		{isClearingArchive}
+			{clearArchiveCleanup}
+			{refreshArchiveCleanup}
+		/>
+{:else}
+	<div class="page-stack">
+		<Panel padding="1.05rem 1.2rem">
+			<div class="panel-stack">
+				<SectionHead
+					eyebrow="Runtime Settings"
+					heading={isLoadingSettings ? 'Loading runtime settings' : 'Runtime settings unavailable'}
+					lede={settingsLoadError ??
+						'Loading the current machine settings now. The page shell stays interactive while the runtime data catches up.'}
+					size="compact"
+				/>
+				{#if settingsLoadError}
+					<div class="section-actions-row">
+						<Button variant="secondary" onclick={() => loadSettings()}>Retry settings load</Button>
+					</div>
+				{/if}
+			</div>
+		</Panel>
+	</div>
+{/if}

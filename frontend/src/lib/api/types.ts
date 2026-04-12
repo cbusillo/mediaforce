@@ -203,6 +203,8 @@ export interface ScheduleProfile {
 	index: string;
 	key: string;
 	label: string;
+	days_of_week: string[];
+	all_day_days_of_week: string[];
 	start_hour: string;
 	end_hour: string;
 }
@@ -229,11 +231,46 @@ export interface SettingsPayload {
 		file_count: number;
 		total_size_bytes: number;
 		has_cleanup: boolean;
-	};
+	} | null;
 	runtime_settings_path: string;
 	repo_config_path: string;
 	host_notice: string | null;
 	host_notice_kind: string | null;
+}
+
+export interface ArchiveCleanupPayload {
+	archive_root: string;
+	file_count: number;
+	total_size_bytes: number;
+	has_cleanup: boolean;
+}
+
+export interface CompletedFolder {
+	prefix: string;
+	title: string;
+	subtitle: string;
+	scope_label: string;
+	promoted_item_count: number;
+	archived_backup_count: number;
+	archived_backup_size_bytes: number;
+	total_bytes_saved: number;
+	latest_promoted_at: string | null;
+}
+
+export interface CompletedPagePayload {
+	folders: CompletedFolder[];
+	completed_count: number;
+	folders_with_backups_count: number;
+	archive_cleanup: ArchiveCleanupPayload;
+}
+
+export interface CompletedBackupsClearResponse {
+	ok: boolean;
+	message: string;
+	removed_count: number;
+	removed_size_bytes: number;
+	removed_prefix_count: number;
+	completed: CompletedPagePayload;
 }
 
 export interface FolderSummary {
@@ -258,6 +295,7 @@ export interface FolderPayload {
 	hot_spots?: number[];
 	calibration?: Record<string, unknown> | null;
 	advice?: Record<string, unknown> | null;
+	approved_season_shortcut?: Record<string, unknown> | null;
 	pending_proposal?: Record<string, unknown> | null;
 	review_gate?: Record<string, unknown>;
 	calibration_queue?: Record<string, unknown>;
@@ -283,5 +321,6 @@ export interface FolderStatusPayload {
 	calibration_status: string;
 	folder_scan_status: string;
 	calibration_job: Record<string, unknown> | null;
+	retryable_sample_job?: Record<string, unknown> | null;
 	folder_scan_job: Record<string, unknown> | null;
 }

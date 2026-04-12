@@ -10,6 +10,21 @@ export const AB_AV1_MISSING_ISSUE = 'ab-av1 is not installed on the remote PATH.
 export const FFMPEG_MISSING_ISSUE = 'ffmpeg is not installed on the remote PATH.';
 export const FFMPEG_VIDEOTOOLBOX_MISSING_ISSUE =
 	'ffmpeg is missing VideoToolbox hardware decode required for H.264/H.265 sources.';
+export const SCHEDULE_DAY_OPTIONS = [
+	{ key: 'mon', shortLabel: 'Mon', label: 'Monday' },
+	{ key: 'tue', shortLabel: 'Tue', label: 'Tuesday' },
+	{ key: 'wed', shortLabel: 'Wed', label: 'Wednesday' },
+	{ key: 'thu', shortLabel: 'Thu', label: 'Thursday' },
+	{ key: 'fri', shortLabel: 'Fri', label: 'Friday' },
+	{ key: 'sat', shortLabel: 'Sat', label: 'Saturday' },
+	{ key: 'sun', shortLabel: 'Sun', label: 'Sunday' }
+] as const;
+export type ScheduleDayKey = (typeof SCHEDULE_DAY_OPTIONS)[number]['key'];
+export const DEFAULT_SCHEDULE_DAYS = SCHEDULE_DAY_OPTIONS.map((option) => option.key);
+
+const scheduleDayIndex = new Map<ScheduleDayKey, number>(
+	SCHEDULE_DAY_OPTIONS.map((option, index) => [option.key, index])
+);
 
 export type HostActionState = {
 	preparing: boolean;
@@ -19,6 +34,92 @@ export type HostActionState = {
 };
 
 export type HostPrimaryAction = 'prepare' | 'start' | null;
+
+export function cloneScheduleProfile(profile: ScheduleProfile): ScheduleProfile {
+	return normalizeScheduleProfile(profile);
+}
+
+export function scheduleDaysSummaryCopy(daysOfWeek: string[]): string {
+	const normalizedDays = normalizeScheduleDays(daysOfWeek, { fallbackToDefault: false });
+	if (!normalizedDays.length) return 'Choose days';
+	if (normalizedDays.length === DEFAULT_SCHEDULE_DAYS.length) return 'Every day';
+	if (normalizedDays.join(',') === DEFAULT_SCHEDULE_DAYS.slice(0, 5).join(',')) return 'Weekdays';
+	if (normalizedDays.join(',') === DEFAULT_SCHEDULE_DAYS.slice(5).join(',')) return 'Weekends';
+	return normalizedDays
+		.map((day) => SCHEDULE_DAY_OPTIONS[scheduleDayIndex.get(day) ?? 0]?.shortLabel ?? day)
+		.join(', ');
+}
+
+export function scheduleWindowSummaryCopy(profile: ScheduleProfile): string {
+	const normalizedProfile = normalizeScheduleProfile(profile);
+	const numericStartHour = Number(normalizedProfile.start_hour);
+	const numericEndHour = Number(normalizedProfile.end_hour);
+	const start = formatScheduleHour(numericStartHour);
+	const end = formatScheduleHour(numericEndHour);
+	const parts: string[] = [];
+	const windowDayCopy = scheduleDaysSummaryCopy(normalizedProfile.days_of_week);
+	const allDayCopy = scheduleDaysSummaryCopy(normalizedProfile.all_day_days_of_week);
+	if (normalizedProfile.all_day_days_of_week.length > 0) {
+		parts.push(allDayCopy === 'Every day' ? 'All day' : `${allDayCopy} all day`);
+	}
+	if (normalizedProfile.days_of_week.length > 0) {
+		const timeCopy = start === end ? `${start} all day` : `${start} - ${end}`;
+		parts.push(windowDayCopy === 'Every day' ? timeCopy : `${windowDayCopy} · ${timeCopy}`);
+	}
+	if (!parts.length) return 'Choose days';
+	return parts.join(' + ');
+}
+
+export function toggleScheduleProfileDay(
+	profile: ScheduleProfile,
+	dayKey: ScheduleDayKey,
+	target: 'days_of_week' | 'all_day_days_of_week' = 'days_of_week'
+): ScheduleProfile {
+	const normalizedProfile = normalizeScheduleProfile(profile);
+	const activeDays = normalizedProfile[target];
+	const nextDays = activeDays.includes(dayKey)
+		? activeDays.filter((day) => day !== dayKey)
+		: [...activeDays, dayKey];
+	return normalizeScheduleProfile({
+		...normalizedProfile,
+		[target]: normalizeScheduleDays(nextDays, { fallbackToDefault: false })
+	});
+}
+
+function normalizeScheduleDays(
+	daysOfWeek: string[] | undefined,
+	{ fallbackToDefault }: { fallbackToDefault: boolean }
+): ScheduleDayKey[] {
+	const seen = new Set<string>();
+	return [...(daysOfWeek ?? (fallbackToDefault ? DEFAULT_SCHEDULE_DAYS : []))]
+		.filter((day): day is ScheduleDayKey => scheduleDayIndex.has(day as ScheduleDayKey))
+		.filter((day) => {
+			if (seen.has(day)) return false;
+			seen.add(day);
+			return true;
+		})
+		.sort((left, right) => (scheduleDayIndex.get(left) ?? 0) - (scheduleDayIndex.get(right) ?? 0));
+}
+
+function normalizeScheduleProfile(profile: ScheduleProfile): ScheduleProfile {
+	const allDayDays = normalizeScheduleDays(profile.all_day_days_of_week, {
+		fallbackToDefault: false
+	});
+	const defaultWindowDaysToAll = profile.days_of_week === undefined && allDayDays.length === 0;
+	const windowDays = normalizeScheduleDays(profile.days_of_week, {
+		fallbackToDefault: defaultWindowDaysToAll
+	}).filter((day) => !allDayDays.includes(day));
+	return {
+		...profile,
+		days_of_week: [...windowDays],
+		all_day_days_of_week: [...allDayDays]
+	};
+}
+
+function formatScheduleHour(hour: number): string {
+	const normalized = Math.max(0, Math.min(23, Number.isFinite(hour) ? hour : 0));
+	return `${normalized.toString().padStart(2, '0')}:00`;
+}
 
 export function draftFromSettings(payload: SettingsPayload) {
 	return {
@@ -35,7 +136,7 @@ export function draftFromSettings(payload: SettingsPayload) {
 		transcode_root: payload.transcode_root,
 		schedule_profiles: payload.schedule_profiles
 			.filter((profile) => profile.key || profile.label)
-			.map((profile) => ({ ...profile }))
+			.map((profile) => cloneScheduleProfile(profile))
 	};
 }
 
@@ -77,6 +178,8 @@ export function addScheduleDraft(scheduleProfiles: ScheduleProfile[]): ScheduleP
 			index: String(scheduleProfiles.length),
 			key: '',
 			label: '',
+			days_of_week: [...DEFAULT_SCHEDULE_DAYS],
+			all_day_days_of_week: [],
 			start_hour: '22',
 			end_hour: '8'
 		}

@@ -11,6 +11,11 @@
 	import Button from '$lib/components/Button.svelte';
 	import HostCard from '$lib/components/HostCard.svelte';
 	import { formatGiB, hostSettingsAnchor } from '$lib/format';
+	import {
+		SCHEDULE_DAY_OPTIONS,
+		scheduleWindowSummaryCopy,
+		type ScheduleDayKey
+	} from '$lib/settings/editor';
 	import Panel from '$lib/components/Panel.svelte';
 	import SectionHead from '$lib/components/SectionHead.svelte';
 
@@ -22,9 +27,12 @@
 		scheduleProfiles,
 		transcodeRoot = $bindable(),
 		isDirty,
-		isSaving,
-		isRefreshingHosts,
-		isClearingArchive,
+			isSaving,
+			isRefreshingHosts,
+			archiveCleanupPending,
+			archiveCleanupError,
+			hostsLoadError,
+			isClearingArchive,
 		hostActionKey,
 		getHostActionState,
 		updateHostActionPassword,
@@ -40,10 +48,12 @@
 		removeLibrary,
 		removeHost,
 		removeSchedule,
+		toggleScheduleDay,
 		toggleCapability,
-		saveSettings,
-		refreshHostStatuses,
-		clearArchiveCleanup,
+			saveSettings,
+			refreshHostStatuses,
+			refreshArchiveCleanup,
+			clearArchiveCleanup,
 		prepareHost,
 		startHost,
 		resetHostTrust
@@ -55,8 +65,11 @@
 		scheduleProfiles: ScheduleProfile[];
 		transcodeRoot: string;
 		isDirty: boolean;
-		isSaving: boolean;
-		isRefreshingHosts: boolean;
+			isSaving: boolean;
+			isRefreshingHosts: boolean;
+			archiveCleanupPending: boolean;
+			archiveCleanupError: string | null;
+			hostsLoadError: string | null;
 		isClearingArchive: boolean;
 		hostActionKey: (host: SettingsHost, runtimeHost: HostRuntime | null, index: number) => string;
 		getHostActionState: (hostKey: string) => {
@@ -78,10 +91,16 @@
 		removeLibrary: (index: number) => void;
 		removeHost: (index: number) => void;
 		removeSchedule: (index: number) => void;
+		toggleScheduleDay: (
+			index: number,
+			dayKey: ScheduleDayKey,
+			target?: 'days_of_week' | 'all_day_days_of_week'
+		) => void;
 		toggleCapability: (index: number, capability: string) => void;
-		saveSettings: () => Promise<void>;
-		refreshHostStatuses: () => Promise<void>;
-		clearArchiveCleanup: () => Promise<void>;
+			saveSettings: () => Promise<void>;
+			refreshHostStatuses: () => Promise<void>;
+			refreshArchiveCleanup: (options?: { transcodeRoot?: string | null; silent?: boolean }) => Promise<void>;
+			clearArchiveCleanup: () => Promise<void>;
 		prepareHost: (hostKey: string, runtimeHost: HostRuntime) => Promise<void>;
 		startHost: (hostKey: string, runtimeHost: HostRuntime) => Promise<void>;
 		resetHostTrust: (hostKey: string) => Promise<void>;
@@ -106,16 +125,8 @@
 		document.getElementById(anchor)?.scrollIntoView({ block: 'start' });
 	}
 
-	function formatScheduleHour(hour: number | string): string {
-		const numericHour = Number(hour);
-		const normalized = Math.max(0, Math.min(23, Number.isFinite(numericHour) ? numericHour : 0));
-		return `${normalized.toString().padStart(2, '0')}:00`;
-	}
-
 	function scheduleSummaryCopy(profile: ScheduleProfile): string {
-		const start = formatScheduleHour(profile.start_hour);
-		const end = formatScheduleHour(profile.end_hour);
-		return start === end ? `${start} all day` : `${start} - ${end}`;
+		return scheduleWindowSummaryCopy(profile);
 	}
 
 	const settingsSections = [
@@ -126,7 +137,8 @@
 	] as const;
 	const sectionSummary = {
 		libraries: () => `${libraries.length} ${libraries.length === 1 ? 'library' : 'libraries'}`,
-		schedules: () => `${scheduleProfiles.length} ${scheduleProfiles.length === 1 ? 'schedule' : 'schedules'}`,
+		schedules: () =>
+			`${scheduleProfiles.length} ${scheduleProfiles.length === 1 ? 'schedule' : 'schedules'}`,
 		hosts: () => `${remoteHosts.length} ${remoteHosts.length === 1 ? 'worker' : 'workers'}`
 	};
 	const pathHighlights = [
@@ -137,21 +149,39 @@
 		const cleanedRoot = transcodeRoot.trim().replace(/\/$/, '');
 		return cleanedRoot ? `${cleanedRoot}/_replaced` : settings.archive_root;
 	});
+	const archiveCleanup = $derived(
+		settings.archive_cleanup ?? {
+			archive_root: '',
+			file_count: 0,
+			total_size_bytes: 0,
+			has_cleanup: false
+		}
+	);
 	const archiveCleanupUsesDraftPath = $derived.by(
 		() => transcodeRoot.trim() !== settings.transcode_root.trim()
 	);
 	const archiveCleanupCopy = $derived.by(() => {
+		if (archiveCleanupPending && !archiveCleanupUsesDraftPath) {
+			return 'Checking archived originals';
+		}
+		if (archiveCleanupError && !archiveCleanupUsesDraftPath) {
+			return 'Archive cleanup status unavailable';
+		}
 		if (archiveCleanupUsesDraftPath) {
 			return 'Archive cleanup will target the current draft transcode path';
 		}
-		const count = Number(settings.archive_cleanup.file_count ?? 0);
+		const count = Number(archiveCleanup.file_count ?? 0);
 		if (count <= 0) return 'No archived originals waiting for cleanup';
 		return `${count} archived original${count === 1 ? '' : 's'} waiting for cleanup`;
 	});
 	const archiveCleanupSizeCopy = $derived.by(() =>
-		archiveCleanupUsesDraftPath
-			? 'Draft path'
-			: formatGiB(Number(settings.archive_cleanup.total_size_bytes ?? 0), 2)
+		archiveCleanupPending && !archiveCleanupUsesDraftPath
+			? 'Checking...'
+			: archiveCleanupError && !archiveCleanupUsesDraftPath
+				? 'Needs retry'
+				: archiveCleanupUsesDraftPath
+					? 'Draft path'
+					: formatGiB(Number(archiveCleanup.total_size_bytes ?? 0), 2)
 	);
 	let expandedHostAnchor = $state<string | null>(null);
 
@@ -179,103 +209,112 @@
 
 <div class="page-stack">
 	<Panel padding="1.05rem 1.2rem">
-			<div class="settings-hero">
-					<div class="settings-hero-copy">
-						<SectionHead
-							eyebrow="Runtime Settings"
-							heading="Configure libraries, hosts, and queue windows"
-							lede="The runtime file below is the live machine-specific contract."
-							size="compact"
-						/>
-						<div class="settings-hero-pills">
-							<span class="section-summary-badge">{sectionSummary.libraries()}</span>
-							<span class="section-summary-badge">{sectionSummary.schedules()}</span>
-							<span class="section-summary-badge">{sectionSummary.hosts()}</span>
-							{#if settings.archive_cleanup.file_count > 0}
-								<span class="section-summary-badge warn">
-									{settings.archive_cleanup.file_count} archived backups
+		<div class="settings-hero">
+			<div class="settings-hero-copy">
+				<SectionHead
+					eyebrow="Runtime Settings"
+					heading="Configure libraries, hosts, and queue windows"
+					lede="The runtime file below is the live machine-specific contract."
+					size="compact"
+				/>
+				<div class="settings-hero-pills">
+					<span class="section-summary-badge">{sectionSummary.libraries()}</span>
+					<span class="section-summary-badge">{sectionSummary.schedules()}</span>
+					<span class="section-summary-badge">{sectionSummary.hosts()}</span>
+						{#if archiveCleanupError && !archiveCleanupUsesDraftPath}
+							<span class="section-summary-badge warn">Backup status unavailable</span>
+						{:else if archiveCleanup.file_count > 0}
+							<span class="section-summary-badge warn">
+								{archiveCleanup.file_count} archived backups
+							</span>
+						{:else if archiveCleanupPending}
+							<span class="section-summary-badge">Checking backups</span>
+						{/if}
+				</div>
+			</div>
+			<div class="path-card compact-paths">
+				<p class="eyebrow-copy">Paths</p>
+				<div class="path-highlight-row">
+					{#each pathHighlights as item (item.label)}
+						<div class="path-highlight-chip">
+							<span class="eyebrow-copy">{item.label}</span>
+							<strong>{item.value}</strong>
+						</div>
+					{/each}
+				</div>
+				<details class="path-disclosure">
+					<summary>Show full file paths</summary>
+					<p class="mono-copy">Runtime file: {settings.runtime_settings_path}</p>
+					<p class="mono-copy">Repo defaults: {settings.repo_config_path}</p>
+				</details>
+			</div>
+		</div>
+	</Panel>
+
+	<nav class="settings-jump-nav" aria-label="Settings sections">
+		{#each settingsSections as section (section.anchor)}
+			<button
+				type="button"
+				class="settings-jump-link"
+				onclick={() => jumpToSettingsAnchor(section.anchor)}
+			>
+				{section.label}
+			</button>
+		{/each}
+		{#if isDirty}
+			<button
+				type="button"
+				class="settings-jump-link"
+				onclick={() => jumpToSettingsAnchor('save-settings')}
+			>
+				Save
+			</button>
+		{/if}
+		{#if isDirty}
+			<span class="settings-jump-status dirty">Unsaved changes</span>
+		{:else}
+			<span class="settings-jump-status">All changes saved</span>
+		{/if}
+	</nav>
+
+	<div class="settings-grid">
+		<Panel>
+			<div id="libraries" class="panel-stack">
+				<div class="section-row">
+					<SectionHead
+						eyebrow="Libraries"
+						heading="Mounted media roots"
+						lede="These become the top-level prefixes throughout Mediaforce."
+						size="compact"
+					/>
+					<div class="section-actions-row">
+						<span class="section-summary-badge">{sectionSummary.libraries()}</span>
+						<Button variant="secondary" onclick={addLibrary}>Add Library</Button>
+					</div>
+				</div>
+				<div class="row-stack">
+					{#each libraries as library, index (`library-${index}`)}
+						<details class="editor-card library-shell">
+							<summary class="library-summary">
+								<span class="summary-copy-block">
+									<span class="eyebrow-copy">Library</span>
+									<span class="library-summary-title">{library.key || 'Untitled library'}</span>
+									<span class="muted-copy library-summary-path"
+										>{library.path || 'Set a mounted path'}</span
+									>
 								</span>
-							{/if}
-						</div>
-					</div>
-					<div class="path-card compact-paths">
-					<p class="eyebrow-copy">Paths</p>
-					<div class="path-highlight-row">
-						{#each pathHighlights as item (item.label)}
-							<div class="path-highlight-chip">
-								<span class="eyebrow-copy">{item.label}</span>
-								<strong>{item.value}</strong>
-							</div>
-						{/each}
-					</div>
-					<details class="path-disclosure">
-						<summary>Show full file paths</summary>
-						<p class="mono-copy">Runtime file: {settings.runtime_settings_path}</p>
-						<p class="mono-copy">Repo defaults: {settings.repo_config_path}</p>
-					</details>
-				</div>
-				</div>
-			</Panel>
-
-		<nav class="settings-jump-nav" aria-label="Settings sections">
-				{#each settingsSections as section (section.anchor)}
-					<button
-						type="button"
-						class="settings-jump-link"
-						onclick={() => jumpToSettingsAnchor(section.anchor)}
-					>
-						{section.label}
-					</button>
-				{/each}
-				{#if isDirty}
-					<button
-						type="button"
-						class="settings-jump-link"
-						onclick={() => jumpToSettingsAnchor('save-settings')}
-					>
-						Save
-					</button>
-				{/if}
-				{#if isDirty}
-					<span class="settings-jump-status dirty">Unsaved changes</span>
-				{:else}
-				<span class="settings-jump-status">All changes saved</span>
-			{/if}
-		</nav>
-
-		<div class="settings-grid">
-			<Panel>
-				<div id="libraries" class="panel-stack">
-						<div class="section-row">
-							<SectionHead
-							eyebrow="Libraries"
-							heading="Mounted media roots"
-							lede="These become the top-level prefixes throughout Mediaforce."
-							size="compact"
-							/>
-							<div class="section-actions-row">
-								<span class="section-summary-badge">{sectionSummary.libraries()}</span>
-								<Button variant="secondary" onclick={addLibrary}>Add Library</Button>
-							</div>
-						</div>
-						<div class="row-stack">
-								{#each libraries as library, index (`library-${index}`)}
-									<details class="editor-card library-shell">
-									<summary class="library-summary">
-										<span class="summary-copy-block">
-											<span class="eyebrow-copy">Library</span>
-											<span class="library-summary-title">{library.key || 'Untitled library'}</span>
-											<span class="muted-copy library-summary-path">{library.path || 'Set a mounted path'}</span>
-										</span>
-										<span class="summary-action-block">
-											<span class="summary-action-copy">Edit</span>
-											<span class="library-color-chip" style={`--library-swatch: ${library.color || '#d1d5db'}`}></span>
-										</span>
-									</summary>
-									<div class="library-editor">
-									<label class="field-block">
-										<span class="eyebrow-copy field-label-hidden">Library name</span>
-										<input bind:value={library.key} placeholder="movies" />
+								<span class="summary-action-block">
+									<span class="summary-action-copy">Edit</span>
+									<span
+										class="library-color-chip"
+										style={`--library-swatch: ${library.color || '#d1d5db'}`}
+									></span>
+								</span>
+							</summary>
+							<div class="library-editor">
+								<label class="field-block">
+									<span class="eyebrow-copy field-label-hidden">Library name</span>
+									<input bind:value={library.key} placeholder="movies" />
 								</label>
 								<label class="field-block">
 									<span class="eyebrow-copy field-label-hidden">Mounted path</span>
@@ -284,192 +323,245 @@
 								<label class="field-block color-field">
 									<span class="eyebrow-copy field-label-hidden">Colors</span>
 									<span class="color-control">
-									<input
-										type="color"
-										bind:value={library.color}
-										aria-label="Library accent color"
-									/>
-								</span>
-							</label>
-							<div class="editor-actions compact-actions">
-								<button
-									type="button"
-									class="icon-button danger"
-									aria-label="Remove library"
-									title="Remove library"
-									onclick={() => removeLibrary(index)}
-								>
-									<svg viewBox="0 0 24 24" aria-hidden="true">
-										<path
-											d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 7h2v7h-2v-7Zm4 0h2v7h-2v-7ZM7 10h2v7H7v-7Zm-1 10h12a2 2 0 0 0 2-2V8H4v10a2 2 0 0 0 2 2Z"
+										<input
+											type="color"
+											bind:value={library.color}
+											aria-label="Library accent color"
 										/>
+									</span>
+								</label>
+								<div class="editor-actions compact-actions">
+									<button
+										type="button"
+										class="icon-button danger"
+										aria-label="Remove library"
+										title="Remove library"
+										onclick={() => removeLibrary(index)}
+									>
+										<svg viewBox="0 0 24 24" aria-hidden="true">
+											<path
+												d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 7h2v7h-2v-7Zm4 0h2v7h-2v-7ZM7 10h2v7H7v-7Zm-1 10h12a2 2 0 0 0 2-2V8H4v10a2 2 0 0 0 2 2Z"
+											/>
 										</svg>
-									</button>
-								</div>
-								</div>
-								</details>
-						{/each}
-					</div>
-			</div>
-		</Panel>
-
-				<Panel>
-					<div id="transcode" class="panel-stack">
-					<details class="transcode-shell">
-						<summary class="transcode-summary">
-							<span class="summary-copy-block">
-								<span class="eyebrow-copy">Transcode</span>
-								<span class="transcode-summary-title">Scratch and replacement root</span>
-								<span class="muted-copy">Archive path is derived automatically from the transcode root.</span>
-							</span>
-							<span class="summary-action-block transcode-action-block">
-								<span class="summary-action-copy">Edit</span>
-								<span class="transcode-summary-chip">{transcodeRoot || '/Volumes/media/transcode'}</span>
-							</span>
-						</summary>
-						<label class="field-block">
-							<span class="eyebrow-copy">Transcode root</span>
-							<input bind:value={transcodeRoot} placeholder="/Volumes/media/transcode" />
-						</label>
-						<div class="path-card">
-							<p class="eyebrow-copy">Derived archive path</p>
-							<p class="mono-copy">{settings.archive_root}</p>
-						</div>
-						<div class="archive-cleanup-card">
-							<div class="archive-cleanup-copy">
-								<p class="eyebrow-copy">Archived originals</p>
-								<p class="transcode-summary-title">{archiveCleanupCopy}</p>
-								<p class="muted-copy">
-									Rollback copies live under `{draftArchiveRoot}` until you clear them.
-								</p>
-								{#if archiveCleanupUsesDraftPath}
-									<p class="muted-copy">
-										Save settings first if you want the on-screen backup counts to refresh for this new path.
-									</p>
-								{/if}
-							</div>
-							<div class="archive-cleanup-side">
-								<span class="transcode-summary-chip">{archiveCleanupSizeCopy}</span>
-								<Button
-									variant="danger"
-									loading={isClearingArchive}
-									disabled={!transcodeRoot.trim() || (!archiveCleanupUsesDraftPath && settings.archive_cleanup.file_count <= 0)}
-									onclick={clearArchiveCleanup}
-								>
-									Clear archived originals
-								</Button>
-							</div>
-						</div>
-					</details>
-				</div>
-			</Panel>
-	</div>
-
-	<Panel>
-		<div id="schedule-profiles" class="panel-stack">
-						<div class="section-row">
-							<SectionHead
-						eyebrow="Schedules"
-						heading="Reusable worker windows"
-						lede="Define the queue windows workers can follow, then assign one of these schedules to each host."
-						size="compact"
-							/>
-							<div class="section-actions-row">
-								<span class="section-summary-badge">{sectionSummary.schedules()}</span>
-								<Button variant="secondary" onclick={addSchedule}>Add Schedule</Button>
-							</div>
-						</div>
-						<p class="muted-copy schedule-section-note">
-							The machine key is how hosts remember a schedule. Rename it carefully after workers are assigned.
-						</p>
-					<div class="field-grid-header schedule-grid-header" aria-hidden="true">
-						<span>Machine key</span>
-						<span>Label</span>
-						<span>Start</span>
-						<span>End</span>
-						<span>Actions</span>
-					</div>
-				<div class="row-stack">
-						{#each scheduleProfiles as profile, index (`profile-${profile.index || index}`)}
-							<details class="editor-card schedule-shell">
-								<summary class="schedule-summary">
-									<span class="summary-copy-block">
-										<span class="eyebrow-copy">Schedule</span>
-										<span class="schedule-summary-title">{profile.label || profile.key || 'Untitled schedule'}</span>
-									</span>
-									<span class="summary-action-block">
-										<span class="summary-action-copy">Edit</span>
-										<span class="schedule-summary-chip">{scheduleSummaryCopy(profile)}</span>
-									</span>
-								</summary>
-							<div class="schedule-editor">
-								<label class="field-block">
-									<span class="eyebrow-copy field-label-hidden">Machine key</span>
-									<input bind:value={profile.key} placeholder="quiet_hours" />
-								</label>
-								<label class="field-block">
-									<span class="eyebrow-copy field-label-hidden">Label</span>
-									<input bind:value={profile.label} placeholder="Quiet Hours" />
-								</label>
-								<label class="field-block">
-									<span class="eyebrow-copy field-label-hidden">Start</span>
-									<input
-								type="number"
-								min="0"
-								max="23"
-								step="1"
-								bind:value={profile.start_hour}
-								placeholder="0-23"
-							/>
-								</label>
-								<label class="field-block">
-									<span class="eyebrow-copy field-label-hidden">End</span>
-									<input
-								type="number"
-								min="0"
-								max="23"
-								step="1"
-								bind:value={profile.end_hour}
-								placeholder="0-23"
-							/>
-						</label>
-						<div class="editor-actions compact-actions">
-							<button
-								type="button"
-									class="icon-button danger"
-									aria-label="Remove schedule"
-									title="Remove schedule"
-								onclick={() => removeSchedule(index)}
-							>
-								<svg viewBox="0 0 24 24" aria-hidden="true">
-									<path
-										d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 7h2v7h-2v-7Zm4 0h2v7h-2v-7ZM7 10h2v7H7v-7Zm-1 10h12a2 2 0 0 0 2-2V8H4v10a2 2 0 0 0 2 2Z"
-									/>
-								</svg>
 									</button>
 								</div>
 							</div>
 						</details>
 					{/each}
 				</div>
+			</div>
+		</Panel>
+
+		<Panel>
+			<div id="transcode" class="panel-stack">
+				<details class="transcode-shell">
+					<summary class="transcode-summary">
+						<span class="summary-copy-block">
+							<span class="eyebrow-copy">Transcode</span>
+							<span class="transcode-summary-title">Scratch and replacement root</span>
+							<span class="muted-copy"
+								>Archive path is derived automatically from the transcode root.</span
+							>
+						</span>
+						<span class="summary-action-block transcode-action-block">
+							<span class="summary-action-copy">Edit</span>
+							<span class="transcode-summary-chip"
+								>{transcodeRoot || '/Volumes/media/transcode'}</span
+							>
+						</span>
+					</summary>
+					<label class="field-block">
+						<span class="eyebrow-copy">Transcode root</span>
+						<input bind:value={transcodeRoot} placeholder="/Volumes/media/transcode" />
+					</label>
+					<div class="path-card">
+						<p class="eyebrow-copy">Derived archive path</p>
+						<p class="mono-copy">{settings.archive_root}</p>
+					</div>
+					<div class="archive-cleanup-card">
+						<div class="archive-cleanup-copy">
+							<p class="eyebrow-copy">Archived originals</p>
+							<p class="transcode-summary-title">{archiveCleanupCopy}</p>
+								<p class="muted-copy">
+									Rollback copies live under `{draftArchiveRoot}` until you clear them.
+								</p>
+								{#if archiveCleanupError && !archiveCleanupUsesDraftPath}
+									<p class="warning-copy">{archiveCleanupError}</p>
+								{/if}
+								{#if archiveCleanupUsesDraftPath}
+									<p class="muted-copy">
+										Save settings first if you want the on-screen backup counts to refresh for this
+									new path.
+								</p>
+							{/if}
+						</div>
+							<div class="archive-cleanup-side">
+								<span class="transcode-summary-chip">{archiveCleanupSizeCopy}</span>
+								{#if archiveCleanupError && !archiveCleanupUsesDraftPath}
+									<Button variant="secondary" onclick={() => refreshArchiveCleanup({ silent: false })}>
+										Retry status
+									</Button>
+								{/if}
+								<Button
+									variant="danger"
+									loading={isClearingArchive}
+									disabled={!transcodeRoot.trim() ||
+										(archiveCleanupPending && !archiveCleanupUsesDraftPath) ||
+										(Boolean(archiveCleanupError) && !archiveCleanupUsesDraftPath) ||
+										(!archiveCleanupUsesDraftPath && archiveCleanup.file_count <= 0)}
+									onclick={clearArchiveCleanup}
+							>
+								Clear archived originals
+							</Button>
+						</div>
+					</div>
+				</details>
+			</div>
+		</Panel>
+	</div>
+
+	<Panel>
+		<div id="schedule-profiles" class="panel-stack">
+			<div class="section-row">
+				<SectionHead
+					eyebrow="Schedules"
+					heading="Reusable worker windows"
+					lede="Define hour windows plus any full-day exceptions like Sunday, then assign one of these schedules to each host."
+					size="compact"
+				/>
+				<div class="section-actions-row">
+					<span class="section-summary-badge">{sectionSummary.schedules()}</span>
+					<Button variant="secondary" onclick={addSchedule}>Add Schedule</Button>
+				</div>
+			</div>
+			<p class="muted-copy schedule-section-note">
+				The machine key is how hosts remember a schedule. Rename it carefully after workers are
+				assigned.
+			</p>
+			<div class="field-grid-header schedule-grid-header" aria-hidden="true">
+				<span>Machine key</span>
+				<span>Label</span>
+				<span>Start</span>
+				<span>End</span>
+				<span>Actions</span>
+			</div>
+			<div class="row-stack">
+				{#each scheduleProfiles as profile, index (`profile-${profile.index || index}`)}
+					<details class="editor-card schedule-shell">
+						<summary class="schedule-summary">
+							<span class="summary-copy-block">
+								<span class="eyebrow-copy">Schedule</span>
+								<span class="schedule-summary-title"
+									>{profile.label || profile.key || 'Untitled schedule'}</span
+								>
+							</span>
+							<span class="summary-action-block">
+								<span class="summary-action-copy">Edit</span>
+								<span class="schedule-summary-chip">{scheduleSummaryCopy(profile)}</span>
+							</span>
+						</summary>
+						<div class="schedule-editor">
+							<label class="field-block">
+								<span class="eyebrow-copy field-label-hidden">Machine key</span>
+								<input bind:value={profile.key} placeholder="quiet_hours" />
+							</label>
+							<label class="field-block">
+								<span class="eyebrow-copy field-label-hidden">Label</span>
+								<input bind:value={profile.label} placeholder="Quiet Hours" />
+							</label>
+							<label class="field-block">
+								<span class="eyebrow-copy field-label-hidden">Start</span>
+								<input
+									type="number"
+									min="0"
+									max="23"
+									step="1"
+									bind:value={profile.start_hour}
+									placeholder="0-23"
+								/>
+							</label>
+							<label class="field-block">
+								<span class="eyebrow-copy field-label-hidden">End</span>
+								<input
+									type="number"
+									min="0"
+									max="23"
+									step="1"
+									bind:value={profile.end_hour}
+									placeholder="0-23"
+								/>
+							</label>
+							<div class="editor-actions compact-actions">
+								<button
+									type="button"
+									class="icon-button danger"
+									aria-label="Remove schedule"
+									title="Remove schedule"
+									onclick={() => removeSchedule(index)}
+								>
+									<svg viewBox="0 0 24 24" aria-hidden="true">
+										<path
+											d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 7h2v7h-2v-7Zm4 0h2v7h-2v-7ZM7 10h2v7H7v-7Zm-1 10h12a2 2 0 0 0 2-2V8H4v10a2 2 0 0 0 2 2Z"
+										/>
+									</svg>
+								</button>
+							</div>
+							<fieldset class="field-block schedule-days-field">
+								<legend class="eyebrow-copy">Window days</legend>
+								<div class="weekday-pill-row">
+									{#each SCHEDULE_DAY_OPTIONS as option (option.key)}
+										<button
+											type="button"
+											class:active={profile.days_of_week.includes(option.key)}
+											class="weekday-pill"
+											aria-pressed={profile.days_of_week.includes(option.key)}
+											title={option.label}
+											onclick={() => toggleScheduleDay(index, option.key, 'days_of_week')}
+										>
+											{option.shortLabel}
+										</button>
+									{/each}
+								</div>
+							</fieldset>
+							<fieldset class="field-block schedule-days-field">
+								<legend class="eyebrow-copy">All day</legend>
+								<div class="weekday-pill-row">
+									{#each SCHEDULE_DAY_OPTIONS as option (option.key)}
+										<button
+											type="button"
+											class:active={profile.all_day_days_of_week.includes(option.key)}
+											class="weekday-pill"
+											aria-pressed={profile.all_day_days_of_week.includes(option.key)}
+											title={`${option.label} all day`}
+											onclick={() => toggleScheduleDay(index, option.key, 'all_day_days_of_week')}
+										>
+											{option.shortLabel}
+										</button>
+									{/each}
+								</div>
+							</fieldset>
+						</div>
+					</details>
+				{/each}
+			</div>
 		</div>
 	</Panel>
 
 	<Panel>
 		<div class="legacy-anchor" id="remote-workers" aria-hidden="true"></div>
 		<div id="remote-hosts" class="panel-stack">
-						<div class="section-row">
-							<SectionHead
-						eyebrow="Hosts"
-						heading="Remote workers"
-						lede="Click a worker row to edit scheduling, queue policy, and live-host setup details in one place."
-						size="compact"
-							/>
-					<div class="section-actions-row">
-						<span class="section-summary-badge">{sectionSummary.hosts()}</span>
-						<button
-							type="button"
-							class="refresh-status-button"
+			<div class="section-row">
+				<SectionHead
+					eyebrow="Hosts"
+					heading="Remote workers"
+					lede="Click a worker row to edit scheduling, queue policy, and live-host setup details in one place."
+					size="compact"
+				/>
+				<div class="section-actions-row">
+					<span class="section-summary-badge">{sectionSummary.hosts()}</span>
+					<button
+						type="button"
+						class="refresh-status-button"
 						disabled={isRefreshingHosts}
 						onclick={refreshHostStatuses}
 					>
@@ -479,106 +571,105 @@
 				</div>
 			</div>
 			<div class="row-stack">
+				{#if isRefreshingHosts && runtimeHostsByKey.size === 0}
+					<p class="muted-copy">Loading live host status…</p>
+				{:else if hostsLoadError}
+					<p class="muted-copy">Live host status unavailable: {hostsLoadError}</p>
+				{/if}
 				{#each remoteHosts as host, index (`host-${host.index || index}`)}
 					{@const runtimeHost = runtimeHostsByKey.get(host.host) ?? null}
 					{@const runtimeHostKey = hostActionKey(host, runtimeHost, index)}
-						{@const runtimeActionState = getHostActionState(runtimeHostKey)}
-						{@const primaryActionKind = runtimeHost ? primaryHostAction(runtimeHost, host) : null}
-						{@const showPrimaryHostAction = runtimeHost
-							? hasPrimaryHostAction(runtimeHost, host)
-							: false}
-						{@const hostAnchor = hostSettingsAnchor(host.host || `host-${index}`)}
-						{@const hostSummaryLabel = host.label || 'Untitled host'}
-						{@const hostSummaryAddress = host.host || 'Set an SSH target to bring this host online.'}
-						{@const hostSummaryStatus = runtimeHost?.available
-							? `${runtimeHost.label} ready`
-							: runtimeHost?.message || 'No live status yet'}
-						<div
-							id={hostAnchor}
-							class="editor-card host-card-editor"
-						>
-								<details
-									class="host-editor-shell"
-									open={expandedHostAnchor === hostAnchor}
-								>
-									<summary class="host-head">
-									<span class="host-summary-main">
-										<span class="eyebrow-copy">Remote worker</span>
-										<span class="host-summary-title">{hostSummaryLabel}</span>
-										<span class="muted-copy">{hostSummaryAddress}</span>
-									</span>
-									<span class="host-summary-side">
-										<span class="summary-action-copy">Edit</span>
-										<span class="host-summary-chip">{hostSummaryStatus}</span>
-									</span>
-									</summary>
-								<div class="host-editor-layout">
-									<div class="two-col">
-										<p class="form-subhead">Connection</p>
-										<label class="field-block"
-											><span class="eyebrow-copy">Label</span><input
+					{@const runtimeActionState = getHostActionState(runtimeHostKey)}
+					{@const primaryActionKind = runtimeHost ? primaryHostAction(runtimeHost, host) : null}
+					{@const showPrimaryHostAction = runtimeHost
+						? hasPrimaryHostAction(runtimeHost, host)
+						: false}
+					{@const hostAnchor = hostSettingsAnchor(host.host || `host-${index}`)}
+					{@const hostSummaryLabel = host.label || 'Untitled host'}
+					{@const hostSummaryAddress = host.host || 'Set an SSH target to bring this host online.'}
+					{@const hostSummaryStatus = runtimeHost?.available
+						? `${runtimeHost.label} ready`
+						: runtimeHost?.message || 'No live status yet'}
+					<div id={hostAnchor} class="editor-card host-card-editor">
+						<details class="host-editor-shell" open={expandedHostAnchor === hostAnchor}>
+							<summary class="host-head">
+								<span class="host-summary-main">
+									<span class="eyebrow-copy">Remote worker</span>
+									<span class="host-summary-title">{hostSummaryLabel}</span>
+									<span class="muted-copy">{hostSummaryAddress}</span>
+								</span>
+								<span class="host-summary-side">
+									<span class="summary-action-copy">Edit</span>
+									<span class="host-summary-chip">{hostSummaryStatus}</span>
+								</span>
+							</summary>
+							<div class="host-editor-layout">
+								<div class="two-col">
+									<p class="form-subhead">Connection</p>
+									<label class="field-block"
+										><span class="eyebrow-copy">Label</span><input
 											bind:value={host.label}
-										placeholder="M4 Studio"
-									/></label
-								>
-								<label class="field-block"
-									><span class="eyebrow-copy">SSH host</span><input
-										bind:value={host.host}
+											placeholder="M4 Studio"
+										/></label
+									>
+									<label class="field-block"
+										><span class="eyebrow-copy">SSH host</span><input
+											bind:value={host.host}
 											placeholder="cbusillo@localhost"
 										/></label
 									>
-										<p class="form-subhead">Queue behavior</p>
-										<label class="field-block host-schedule-field"
-											><span class="eyebrow-copy">Schedule profile</span><span class="select-shell"
-												><select bind:value={host.schedule_profile}
-													>{#each settings.schedule_profile_options as option (option.key)}<option
+									<p class="form-subhead">Queue behavior</p>
+									<label class="field-block host-schedule-field"
+										><span class="eyebrow-copy">Schedule profile</span><span class="select-shell"
+											><select bind:value={host.schedule_profile}
+												>{#each settings.schedule_profile_options as option (option.key)}<option
 														value={option.key}>{option.label}</option
 													>{/each}</select
-												></span
-											></label
-										>
-										<label class="field-block"
-											><span class="eyebrow-copy">Priority</span><input
+											></span
+										></label
+									>
+									<label class="field-block"
+										><span class="eyebrow-copy">Priority</span><input
 											type="number"
 											min="0"
-										step="1"
-										bind:value={host.priority}
-									/></label
-								>
-								<label class="field-block"
-									><span class="eyebrow-copy">Parallel encodes</span><input
-										type="number"
-										min="1"
-										step="1"
-										bind:value={host.max_parallel_encodes}
-									/></label
-								>
-								<label class="field-block"
-									><span class="eyebrow-copy">Host staging root</span><input
-										bind:value={host.staging_root}
+											step="1"
+											bind:value={host.priority}
+										/></label
+									>
+									<label class="field-block"
+										><span class="eyebrow-copy">Parallel encodes</span><input
+											type="number"
+											min="1"
+											step="1"
+											bind:value={host.max_parallel_encodes}
+										/></label
+									>
+									<label class="field-block"
+										><span class="eyebrow-copy">Host staging root</span><input
+											bind:value={host.staging_root}
 											placeholder="Defaults to global transcode root"
 										/></label
 									>
-										<p class="form-subhead">Library access</p>
-										<label class="field-block host-json-field"
-											><span class="eyebrow-copy">Allowed libraries</span>
-									<span class="library-allowlist" aria-label="Allowed libraries for this host">
-										<button
-											type="button"
-											class={`library-allow-pill ${host.allowed_libraries.length === 0 ? 'active' : ''}`.trim()}
-											onclick={() => (host.allowed_libraries = [])}
-										>
-											All libraries
-										</button>
-										{#each libraries.filter((library) => library.key.trim()) as library (`${host.index}-${library.key}`)}
+									<p class="form-subhead">Library access</p>
+									<label class="field-block host-json-field"
+										><span class="eyebrow-copy">Allowed libraries</span>
+										<span class="library-allowlist" aria-label="Allowed libraries for this host">
 											<button
 												type="button"
-												class={`library-allow-pill ${host.allowed_libraries.includes(library.key) ? 'active' : ''}`.trim()}
-												onclick={() => toggleAllowedLibrary(host, library.key)}
+												class={`library-allow-pill ${host.allowed_libraries.length === 0 ? 'active' : ''}`.trim()}
+												onclick={() => (host.allowed_libraries = [])}
 											>
-												{library.key}
+												All libraries
 											</button>
-										{/each}
+											{#each libraries.filter( (library) => library.key.trim() ) as library (`${host.index}-${library.key}`)}
+												<button
+													type="button"
+													class={`library-allow-pill ${host.allowed_libraries.includes(library.key) ? 'active' : ''}`.trim()}
+													onclick={() => toggleAllowedLibrary(host, library.key)}
+												>
+													{library.key}
+												</button>
+											{/each}
 										</span></label
 									>
 									<details class="host-advanced-shell host-json-field">
@@ -638,88 +729,89 @@
 										</div>
 									</details>
 								</div>
-							{#if runtimeHost}
-								<div class="host-runtime-column">
-									<p class="eyebrow-copy">Live Status</p>
-									<HostCard host={runtimeHost} />
-									{#if shouldShowHostActions(runtimeHost, host)}
-										<div class="host-actions-panel">
-											<div class="host-actions-head">
-												<p class="eyebrow-copy">Remote Actions</p>
-												{#if isDirty}
-													<p class="muted-copy">Save host edits before running remote actions.</p>
-												{:else if showPrimaryHostAction}
-													<p class="muted-copy">{primaryHostActionHelp(runtimeHost, host)}</p>
-												{/if}
-											</div>
-											{#if showPrimaryHostAction}
-												{#if runtimeHost.setup_requires_password || runtimeActionState.showPassword}
-													<label class="field-block inline-password-field">
-														<span class="eyebrow-copy">Remote account password</span>
-														<input
-															type="password"
-															value={runtimeActionState.password}
-															oninput={(event) =>
-																handleHostActionPasswordInput(runtimeHostKey, event)}
-															placeholder="Only used for this setup run"
-														/>
-													</label>
-												{/if}
-												<div class="host-actions-row">
-													<Button
-														variant="secondary"
-														loading={runtimeActionState.preparing}
-														disabled={isDirty}
-														onclick={() =>
-															primaryActionKind === 'start'
-																? startHost(runtimeHostKey, runtimeHost)
-																: prepareHost(runtimeHostKey, runtimeHost)}
-														>{primaryHostActionLabel(runtimeHost, host)}</Button
-													>
-													{#if runtimeHost.setup_requires_password && !runtimeActionState.showPassword}
-														<Button
-															variant="ghost"
-															disabled={isDirty}
-															onclick={() => revealHostActionPassword(runtimeHostKey)}
-															>Add Password</Button
-														>
+								{#if runtimeHost}
+									<div class="host-runtime-column">
+										<p class="eyebrow-copy">Live Status</p>
+										<HostCard host={runtimeHost} />
+										{#if shouldShowHostActions(runtimeHost, host)}
+											<div class="host-actions-panel">
+												<div class="host-actions-head">
+													<p class="eyebrow-copy">Remote Actions</p>
+													{#if isDirty}
+														<p class="muted-copy">Save host edits before running remote actions.</p>
+													{:else if showPrimaryHostAction}
+														<p class="muted-copy">{primaryHostActionHelp(runtimeHost, host)}</p>
 													{/if}
-													{#if runtimeHost.trust_reset_supported}
+												</div>
+												{#if showPrimaryHostAction}
+													{#if runtimeHost.setup_requires_password || runtimeActionState.showPassword}
+														<label class="field-block inline-password-field">
+															<span class="eyebrow-copy">Remote account password</span>
+															<input
+																type="password"
+																value={runtimeActionState.password}
+																oninput={(event) =>
+																	handleHostActionPasswordInput(runtimeHostKey, event)}
+																placeholder="Only used for this setup run"
+															/>
+														</label>
+													{/if}
+													<div class="host-actions-row">
+														<Button
+															variant="secondary"
+															loading={runtimeActionState.preparing}
+															disabled={isDirty}
+															onclick={() =>
+																primaryActionKind === 'start'
+																	? startHost(runtimeHostKey, runtimeHost)
+																	: prepareHost(runtimeHostKey, runtimeHost)}
+															>{primaryHostActionLabel(runtimeHost, host)}</Button
+														>
+														{#if runtimeHost.setup_requires_password && !runtimeActionState.showPassword}
+															<Button
+																variant="ghost"
+																disabled={isDirty}
+																onclick={() => revealHostActionPassword(runtimeHostKey)}
+																>Add Password</Button
+															>
+														{/if}
+														{#if runtimeHost.trust_reset_supported}
+															<Button
+																variant="ghost"
+																loading={runtimeActionState.resettingTrust}
+																disabled={isDirty || runtimeActionState.preparing}
+																onclick={() => resetHostTrust(runtimeHostKey)}
+																>Reset SSH Trust</Button
+															>
+														{/if}
+													</div>
+												{:else if runtimeHost.trust_reset_supported}
+													<div class="host-actions-row">
 														<Button
 															variant="ghost"
 															loading={runtimeActionState.resettingTrust}
-															disabled={isDirty || runtimeActionState.preparing}
+															disabled={isDirty}
 															onclick={() => resetHostTrust(runtimeHostKey)}>Reset SSH Trust</Button
 														>
-													{/if}
-												</div>
-											{:else if runtimeHost.trust_reset_supported}
-												<div class="host-actions-row">
-													<Button
-														variant="ghost"
-														loading={runtimeActionState.resettingTrust}
-														disabled={isDirty}
-														onclick={() => resetHostTrust(runtimeHostKey)}>Reset SSH Trust</Button
-													>
-												</div>
-											{/if}
-										</div>
-									{/if}
-								</div>
+													</div>
+												{/if}
+											</div>
+										{/if}
+									</div>
 								{/if}
 							</div>
 							<div class="capability-row">
-							{#each settings.host_capability_options as capability (capability.key)}
-								<label
-									class={`capability-pill ${host.capabilities.includes(capability.key) ? 'checked' : ''}`.trim()}
-								>
-									<input
-										type="checkbox"
-										class="visually-hidden"
-										checked={host.capabilities.includes(capability.key)}
-										onchange={() => toggleCapability(index, capability.key)}
-									/>
-									<span class="capability-mark" aria-hidden="true">✓</span>
+								{#each settings.host_capability_options as capability (capability.key)}
+									<label
+										class={`capability-pill ${host.capabilities.includes(capability.key) ? 'checked' : ''}`.trim()}
+									>
+										<input
+											type="checkbox"
+											class="visually-hidden"
+											checked={host.capabilities.includes(capability.key)}
+											onchange={() => toggleCapability(index, capability.key)}
+										/>
+										<span class="capability-mark" aria-hidden="true">✓</span>
 										<span class="capability-label">{capability.label}</span>
 									</label>
 								{/each}
@@ -739,10 +831,10 @@
 									</svg>
 								</button>
 							</div>
-							</details>
-						</div>
-					{/each}
-				</div>
+						</details>
+					</div>
+				{/each}
+			</div>
 		</div>
 	</Panel>
 </div>
@@ -908,6 +1000,12 @@
 		justify-items: start;
 	}
 
+	.warning-copy {
+		margin: 0;
+		color: #9a3412;
+		font-weight: 600;
+	}
+
 	.path-highlight-row {
 		display: grid;
 		gap: 0.65rem;
@@ -1054,7 +1152,9 @@
 	}
 
 	.schedule-grid-header {
-		grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+		grid-template-columns:
+			minmax(0, 1.2fr) minmax(0, 1.2fr) minmax(84px, 0.7fr) minmax(84px, 0.7fr)
+			auto;
 	}
 
 	.schedule-section-note {
@@ -1076,9 +1176,43 @@
 	.library-editor,
 	.schedule-editor {
 		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+		grid-template-columns:
+			minmax(0, 1.2fr) minmax(0, 1.2fr) minmax(84px, 0.7fr) minmax(84px, 0.7fr)
+			auto;
 		gap: 0.85rem;
 		align-items: end;
+	}
+
+	.schedule-days-field {
+		border: 0;
+		padding: 0;
+		margin: 0;
+		min-width: 0;
+		grid-column: 1 / span 4;
+	}
+
+	.weekday-pill-row {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem;
+	}
+
+	.weekday-pill {
+		border: 1px solid rgba(23, 35, 31, 0.12);
+		background: rgba(255, 255, 255, 0.76);
+		color: var(--ink-soft);
+		border-radius: var(--radius-pill);
+		padding: 0.48rem 0.72rem;
+		font: inherit;
+		font-size: 0.84rem;
+		font-weight: 700;
+		cursor: pointer;
+	}
+
+	.weekday-pill.active {
+		background: rgba(15, 118, 110, 0.12);
+		border-color: rgba(15, 118, 110, 0.2);
+		color: var(--accent-deep);
 	}
 
 	.field-block {
