@@ -13,7 +13,8 @@ from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
-from mediaforce.core.type_defs import float_value, int_value, object_dict
+from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
+from mediaforce.encoding.quality import quality_error_message, resolve_local_quality_temp_root
 from mediaforce.state_cleanup import purge_transient_artifacts
 
 
@@ -41,6 +42,31 @@ class CalibrationRunDeps:
     validate_manifest_items: Any
     generate_compare_clips: Any
     staged_artifact_columns: tuple[str, ...]
+
+
+def _stored_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "library_item_id": sample_item.get("library_item_id"),
+        "rel_path": sample_item.get("rel_path"),
+        "source_path": sample_item.get("source_path"),
+        "source_size_bytes": sample_item.get("source_size_bytes"),
+        "video_codec": sample_item.get("video_codec"),
+        "video_bitrate": sample_item.get("video_bitrate"),
+        "width": sample_item.get("width"),
+        "height": sample_item.get("height"),
+        "duration_seconds": sample_item.get("duration_seconds"),
+        "audio_summary": object_list(sample_item.get("audio_summary")),
+        "subtitle_summary": object_list(sample_item.get("subtitle_summary")),
+        "resolved_policy": object_dict(sample_item.get("resolved_policy")),
+    }
+
+
+def _job_sample_item(job: dict[str, Any]) -> dict[str, Any] | None:
+    sample_item = object_dict(job.get("sample_item"))
+    required_keys = ("rel_path", "source_path", "source_size_bytes", "video_codec", "duration_seconds")
+    if not sample_item or any(sample_item.get(key) in {None, ""} for key in required_keys):
+        return None
+    return sample_item
 
 
 def snapshot_staged_artifact(
@@ -120,10 +146,12 @@ def run_calibration_job(
 
     try:
         with open_db(config.paths.db_path) as connection:
-            sample_item = deps.sample_item(connection, config, prefix)
+            sample_item = _job_sample_item(job)
             if sample_item is None:
-                raise RuntimeError(f"No sample item found for {prefix}")
-            sample_item = object_dict(sample_item)
+                loaded_sample_item = deps.sample_item(connection, config, prefix)
+                if loaded_sample_item is None:
+                    raise RuntimeError(f"No sample item found for {prefix}")
+                sample_item = object_dict(loaded_sample_item)
             sample_item["resolved_policy"] = policy
             current_library_item_id = int_value(sample_item.get("library_item_id"))
             library_item_id = current_library_item_id
@@ -190,7 +218,7 @@ def run_calibration_job(
                 {
                     **job,
                     "job_id": job_id,
-                    "status": "failed",
+                    "status": "stopped",
                     "finished_at": deps.now_iso(),
                     "error": "Calibration queue job was stopped and cleaned up.",
                 },
@@ -206,7 +234,7 @@ def run_calibration_job(
                     "job_id": job_id,
                     "status": "failed",
                     "finished_at": deps.now_iso(),
-                    "error": str(exc),
+                    "error": quality_error_message(exc),
                 },
             )
     finally:
@@ -316,11 +344,7 @@ def run_sampled_calibration(
         "notes": notes,
         "policy": policy,
         "policy_seed": seed_metadata,
-        "sample_item": {
-            "rel_path": sample_item["rel_path"],
-            "source_path": sample_item["source_path"],
-            "source_size_bytes": sample_item["source_size_bytes"],
-        },
+        "sample_item": _stored_sample_item_payload(sample_item),
         "sample_result": {
             "chosen_crf": quality_result.crf,
             "quality_metric": sample_result.metric,
@@ -395,7 +419,10 @@ def _quality_host_data(config: MediaforceConfig, host_data: dict[str, Any]) -> d
 
 def _quality_temp_dir_for_host(config: MediaforceConfig, host_data: dict[str, Any]) -> Path:
     if str(host_data.get("media_access") or "").strip().lower() == "stream":
-        return config.staging_root
+        return resolve_local_quality_temp_root(
+            config.staging_root,
+            config.paths.web_state_dir / "quality-temp",
+        )
 
     staging_root = str(host_data.get("staging_root") or "").strip()
     if staging_root:
@@ -404,7 +431,10 @@ def _quality_temp_dir_for_host(config: MediaforceConfig, host_data: dict[str, An
     configured_host = _configured_host_record(config, host_data)
     if configured_host is not None:
         if str(configured_host.get("media_access") or "").strip().lower() == "stream":
-            return config.staging_root
+            return resolve_local_quality_temp_root(
+                config.staging_root,
+                config.paths.web_state_dir / "quality-temp",
+            )
         return config.staging_root_for_host(configured_host)
 
     return config.staging_root_for_host(host_data)
@@ -473,11 +503,7 @@ def run_full_calibration(
         "policy": policy,
         "policy_seed": seed_metadata,
         "manifest_path": str(manifest_path),
-        "sample_item": {
-            "rel_path": sample_item["rel_path"],
-            "source_path": sample_item["source_path"],
-            "source_size_bytes": sample_item["source_size_bytes"],
-        },
+        "sample_item": _stored_sample_item_payload(sample_item),
         "encode_result": {
             "staging_path": str(encode_result.staging_path),
             "source_size_bytes": encode_result.source_size_bytes,

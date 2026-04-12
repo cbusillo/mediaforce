@@ -14,6 +14,7 @@ from mediaforce.reviewing.assets import render_audio_spectrogram as _render_audi
     render_audio_spectrogram_compare as render_audio_spectrogram_compare_impl, \
     render_encoded_audio_clip as _render_encoded_audio_clip_impl, \
     render_review_contact_sheet as render_review_contact_sheet_impl, \
+    render_review_timeline_strip as render_review_timeline_strip_impl, \
     stack_review_images as _stack_review_images_impl
 from mediaforce.reviewing.clips import encode_preview_clips as encode_preview_clips_impl, \
     encode_preview_clips_remote as _encode_preview_clips_remote_impl, \
@@ -70,6 +71,25 @@ def render_review_contact_sheet(
         source_clip_path=source_clip_path,
         preview_clip_path=preview_clip_path,
         output_path=output_path,
+        process_controller=process_controller,
+        ffmpeg_binary=ffmpeg_binary,
+        run_command=run_command,
+    )
+
+
+def render_review_timeline_strip(
+        *,
+        clip_path: Path,
+        output_path: Path,
+        duration_seconds: float,
+        frame_count: int = 6,
+        process_controller: ManagedProcessController | None = None,
+) -> None:
+    return render_review_timeline_strip_impl(
+        clip_path=clip_path,
+        output_path=output_path,
+        duration_seconds=duration_seconds,
+        frame_count=frame_count,
         process_controller=process_controller,
         ffmpeg_binary=ffmpeg_binary,
         run_command=run_command,
@@ -422,6 +442,7 @@ def _render_audio_spectrogram(
         output_path: Path,
         clip_time: float,
         duration_seconds: float,
+        audio_track: dict[str, Any] | None = None,
         process_controller: ManagedProcessController | None = None,
 ) -> None:
     return _render_audio_spectrogram_impl(
@@ -429,6 +450,7 @@ def _render_audio_spectrogram(
         output_path=output_path,
         clip_time=clip_time,
         duration_seconds=duration_seconds,
+        audio_track=audio_track,
         process_controller=process_controller,
         ffmpeg_binary=ffmpeg_binary,
         run_command=run_command,
@@ -441,6 +463,7 @@ def _render_encoded_audio_clip(
         output_path: Path,
         clip_time: float,
         duration_seconds: float,
+        audio_track: dict[str, Any] | None = None,
         bitrate: str,
         process_controller: ManagedProcessController | None = None,
 ) -> None:
@@ -449,6 +472,7 @@ def _render_encoded_audio_clip(
         output_path=output_path,
         clip_time=clip_time,
         duration_seconds=duration_seconds,
+        audio_track=audio_track,
         bitrate=bitrate,
         process_controller=process_controller,
         ffmpeg_binary=ffmpeg_binary,

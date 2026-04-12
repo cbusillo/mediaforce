@@ -28,8 +28,12 @@ def record_tuning_session(
         applied_policy: dict[str, Any],
         toolbelt: dict[str, Any],
         created_at: str,
+        requested_experiment: dict[str, Any] | None = None,
 ) -> str:
     session_id = uuid.uuid4().hex[:12]
+    stored_toolbelt = dict(toolbelt or {})
+    if requested_experiment:
+        stored_toolbelt["requested_experiment"] = requested_experiment
     connection.execute(
         tuning_sessions.insert().values(
             session_id=session_id,
@@ -43,7 +47,7 @@ def record_tuning_session(
             prompt_version=response.get("prompt_version"),
             proposed_policy_json=json.dumps(response.get("proposed_policy") or {}, sort_keys=True),
             applied_policy_json=json.dumps(applied_policy or {}, sort_keys=True),
-            toolbelt_json=json.dumps(toolbelt or {}, sort_keys=True),
+            toolbelt_json=json.dumps(stored_toolbelt, sort_keys=True),
             self_check_json=(
                 json.dumps(response.get("self_check") or {}, sort_keys=True)
                 if response.get("self_check")
@@ -158,6 +162,62 @@ def retrieve_learning_context(
     return [payload for _, payload in ranked[:limit]]
 
 
+def sibling_approved_season_memory(
+        connection: DBClient,
+        *,
+        prefix: str,
+) -> dict[str, Any] | None:
+    root_prefix = _season_root_prefix(prefix)
+    if root_prefix is None:
+        return None
+
+    rows = connection.execute(
+        select(
+            learning_artifacts.c.prefix,
+            learning_artifacts.c.tags_json,
+            learning_artifacts.c.updated_at,
+        )
+        .where(learning_artifacts.c.prefix.like(f"{_sql_like_escape(root_prefix)}/%", escape="\\"))
+        .order_by(learning_artifacts.c.updated_at.desc())
+    ).mappings().fetchall()
+
+    sibling_rows: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        artifact_prefix = str(row["prefix"] or "").strip().strip("/")
+        if not artifact_prefix or artifact_prefix == prefix:
+            continue
+        if not _is_season_prefix(artifact_prefix):
+            continue
+        if _season_root_prefix(artifact_prefix) != root_prefix:
+            continue
+        tags = {str(value).strip() for value in json.loads(str(row["tags_json"] or "[]"))}
+        if "decision:accepted" not in tags:
+            continue
+        sibling_rows.setdefault(
+            artifact_prefix,
+            {
+                "prefix": artifact_prefix,
+                "label": _season_label(artifact_prefix),
+                "updated_at": str(row["updated_at"] or ""),
+            },
+        )
+
+    if not sibling_rows:
+        return None
+
+    siblings = sorted(sibling_rows.values(), key=lambda entry: _season_sort_key(str(entry.get("label") or "")))
+    season_labels = [str(entry["label"]) for entry in siblings if str(entry.get("label") or "").strip()]
+    show_label = Path(root_prefix).name
+    return {
+        "root_prefix": root_prefix,
+        "root_label": show_label,
+        "count": len(siblings),
+        "season_labels": season_labels,
+        "season_prefixes": [str(entry["prefix"]) for entry in siblings],
+        "suggested_note": _approved_season_shortcut_note(show_label=show_label, season_labels=season_labels),
+    }
+
+
 def record_visual_approval_artifact(
         connection: DBClient,
         config: MediaforceConfig,
@@ -264,6 +324,63 @@ def _artifact_tags(*, prefix: str, sample_item: dict[str, Any], note: str, respo
     for token in re.findall(r"[a-z0-9]{5,}", str(response.get("diagnosis") or "").lower()):
         tags.add(f"diagnosis:{token}")
     return sorted(tags)
+
+
+def _season_root_prefix(prefix: str) -> str | None:
+    parts = Path(str(prefix).strip().strip("/")).parts
+    if len(parts) < 3:
+        return None
+    if parts[0].lower() != "tv":
+        return None
+    if not parts[2].lower().startswith("season"):
+        return None
+    return str(Path(parts[0]) / parts[1])
+
+
+def _is_season_prefix(prefix: str) -> bool:
+    parts = Path(str(prefix).strip().strip("/")).parts
+    return len(parts) == 3 and parts[0].lower() == "tv" and parts[2].lower().startswith("season")
+
+
+def _season_label(prefix: str) -> str:
+    parts = Path(str(prefix).strip().strip("/")).parts
+    if len(parts) >= 3:
+        return str(parts[2])
+    return str(prefix).strip().strip("/")
+
+
+def _season_sort_key(label: str) -> tuple[int, str]:
+    match = re.search(r"(\d+)", label)
+    if match:
+        return int(match.group(1)), label.lower()
+    return 10 ** 9, label.lower()
+
+
+def _approved_season_shortcut_note(*, show_label: str, season_labels: list[str]) -> str:
+    reference_labels = _human_join(season_labels[:3])
+    if len(season_labels) > 3:
+        reference_labels = f"{reference_labels}, and the other approved seasons"
+    if reference_labels:
+        return (
+            f"Match the approved {show_label} seasons unless this season clearly needs a different tradeoff. "
+            f"Keep this draft aligned with {reference_labels}."
+        )
+    return f"Match the approved {show_label} seasons unless this season clearly needs a different tradeoff."
+
+
+def _human_join(values: list[str]) -> str:
+    items = [str(value).strip() for value in values if str(value).strip()]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return f"{', '.join(items[:-1])}, and {items[-1]}"
+
+
+def _sql_like_escape(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _render_artifact_markdown(

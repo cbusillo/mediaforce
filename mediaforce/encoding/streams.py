@@ -5,7 +5,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import item_events
 from mediaforce.core.type_defs import float_value, int_value
 from mediaforce.core.utils import timestamp
-from mediaforce.reviewing.helpers import planned_audio_action, planned_opus_bitrate
+from mediaforce.reviewing.helpers import planned_audio_action, planned_opus_bitrate, select_primary_audio_track
 
 
 def _select_streams(item: dict[str, Any], *, text_subtitle_codecs: set[str]) -> dict[str, Any]:
@@ -46,12 +46,7 @@ def estimate_output_overhead_bytes(item: dict[str, Any], *, text_subtitle_codecs
 
 
 def _pick_audio(audio_tracks: list[dict[str, Any]]) -> dict[str, Any]:
-    english = [track for track in audio_tracks if track.get("language") == "eng"]
-    candidates = english or [track for track in audio_tracks if track.get("language") in {None, "und"}] or audio_tracks
-    if not candidates:
-        raise ValueError("No audio tracks available")
-    return sorted(candidates, key=lambda track: (-int(track.get("default") or 0), -(int(track.get("channels") or 0)),
-                                                 int(track["index"])))[0]
+    return select_primary_audio_track(audio_tracks)
 
 
 def _pick_subtitles(

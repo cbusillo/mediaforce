@@ -1,72 +1,88 @@
 import json
-import re
 import subprocess
 import hashlib
+import math
 from pathlib import Path
 from typing import Any
 
-from mediaforce.advisor import apply_seed_policy, request_run_verdict, request_seed_policy
-from mediaforce.advising.policy import policy_key_paths
+from mediaforce.advisor import apply_seed_policy, request_operator_note_parse, request_run_verdict, request_seed_policy
+from mediaforce.advising.policy import merge_policy_fragments, policy_key_paths
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.type_defs import JSONValue, float_value, int_value, object_dict, object_list
 from mediaforce.library.folder_profiles import inspect_prefix
+from mediaforce.reviewing.helpers import planned_audio_action, select_primary_audio_track
 from mediaforce.web.runtime.folder_tuning_helpers import load_json_object, recent_tuning_sessions
 
 MIN_RECOMMENDED_SAVINGS_BYTES = 100 * 1024 * 1024
 CALIBRATION_REVIEW_FIELDS = {
     "accepted_at",
     "accepted_draft_hash",
+    "accepted_policy_hash",
     "accepted_sample_job_id",
     "draft_hash",
 }
-
-_NOTE_VMAF_PATTERNS = (
-    re.compile(r"\b(?P<target>\d{2}(?:\.\d+)?)\s*vmaf\b", re.IGNORECASE),
-    re.compile(
-        r"\bvmaf\b(?:\s+(?:target|around|about|roughly|approximately|approx|at|to|of)|\s*=){0,3}\s*(?P<target>\d{2}(?:\.\d+)?)\b",
-        re.IGNORECASE,
-    ),
-)
-_NOTE_XPSNR_PATTERNS = (
-    re.compile(r"\b(?P<target>\d{2}(?:\.\d+)?)\s*xpsnr\b", re.IGNORECASE),
-    re.compile(
-        r"\bxpsnr\b(?:\s+(?:target|around|about|roughly|approximately|approx|at|to|of)|\s*=){0,3}\s*(?P<target>\d{2}(?:\.\d+)?)\b",
-        re.IGNORECASE,
-    ),
-)
-_NOTE_SIZE_BUDGET_PATTERNS = (
-    re.compile(
-        r"\b(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>kb|mb|gb|tb)\s*(?:per|/)\s*(?:episode|ep|file)\b",
-        re.IGNORECASE,
-    ),
-        re.compile(
-            r"\b(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>kb|mb|gb|tb)\s*(?:each|an?)\s*(?:episode|ep|file)\b",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            r"\b(?:want|aim|target|hit|keep|hold|try|budget|cap|under|around|about)\b[^\n.]{0,48}?\b(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>kb|mb|gb|tb)\b",
-            re.IGNORECASE,
-        ),
-)
 _SIZE_BUDGET_UNIT_BYTES = {
     "kb": 1024,
     "mb": 1024 * 1024,
     "gb": 1024 * 1024 * 1024,
     "tb": 1024 * 1024 * 1024 * 1024,
 }
+_AUDIO_STEP_DOWN_CANDIDATES_KBPS = {
+    "surround_7_1_opus_bitrate": (384.0, 320.0, 256.0, 224.0, 192.0),
+    "surround_5_1_opus_bitrate": (320.0, 256.0, 224.0, 192.0, 160.0, 128.0),
+    "stereo_opus_bitrate": (192.0, 160.0, 128.0, 112.0, 96.0, 80.0),
+}
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_NOTE_PARSE_INTENT_TYPES = {"direct_request", "exploratory_question", "approval_feedback", "other", "unclear"}
+_NOTE_PARSE_REQUEST_TYPES = {"none", "metric_target", "size_budget", "combined_experiment"}
+_NOTE_PARSE_METRICS = {"vmaf", "xpsnr"}
 
 
-def merge_policy_fragments(*fragments: dict[str, Any] | None) -> dict[str, Any]:
-    merged: dict[str, Any] = {}
-    for fragment in fragments:
-        for section, values in object_dict(fragment).items():
-            normalized_values = object_dict(values)
-            if not normalized_values:
-                continue
-            merged.setdefault(section, {}).update(normalized_values)
-    return merged
+def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, Any] | None:
+    parsed_object = object_dict(parsed)
+    if not parsed_object:
+        return None
+    request_type = str(parsed_object.get("request_type") or "").strip().lower()
+    if request_type not in _NOTE_PARSE_REQUEST_TYPES:
+        return None
+    intent_type = str(parsed_object.get("intent_type") or "").strip().lower()
+    if intent_type not in _NOTE_PARSE_INTENT_TYPES:
+        intent_type = "unclear"
+    metric = str(parsed_object.get("metric") or "").strip().lower() or None
+    metric_target = None
+    size_budget_value = None
+    size_budget_unit = None
+    if request_type in {"metric_target", "combined_experiment"}:
+        if metric not in _NOTE_PARSE_METRICS:
+            return None
+        metric_target = round(float_value(parsed_object.get("metric_target")), 2)
+        if metric_target <= 0:
+            return None
+    if request_type in {"size_budget", "combined_experiment"}:
+        size_budget_unit = str(parsed_object.get("size_budget_unit") or "").strip().lower() or None
+        if size_budget_unit not in _SIZE_BUDGET_UNIT_BYTES:
+            return None
+        size_budget_value = round(float_value(parsed_object.get("size_budget_value")), 3)
+        if size_budget_value <= 0:
+            return None
+    operator_confirmed = bool(parsed_object.get("operator_confirmed"))
+    if request_type == "none":
+        operator_confirmed = False
+    summary = str(parsed_object.get("summary") or "").strip() or "Parsed operator note."
+    reasoning_note = str(parsed_object.get("reasoning_note") or "").strip() or "Structured operator note parse."
+    return {
+        "summary": summary,
+        "intent_type": intent_type,
+        "request_type": request_type,
+        "operator_confirmed": operator_confirmed,
+        "metric": metric if metric_target is not None else None,
+        "metric_target": metric_target,
+        "size_budget_value": size_budget_value,
+        "size_budget_unit": size_budget_unit,
+        "reasoning_note": reasoning_note,
+    }
 
 
 def parse_audio_bitrate_kbps(value: JSONValue, fallback: float) -> float:
@@ -82,10 +98,17 @@ def sample_audio_target_kbps(sample_item: dict[str, Any] | None) -> float:
     if not isinstance(sample_item, dict):
         return 160.0
     audio_policy = object_dict(object_dict(sample_item.get("resolved_policy")).get("audio"))
-    audio_tracks = object_list(sample_item.get("audio_summary"))
-    channels = 0
-    for track in audio_tracks:
-        channels = max(channels, int_value(object_dict(track).get("channels")))
+    track = _primary_audio_track(sample_item)
+    if track is None:
+        return 160.0
+    codec_action = planned_audio_action(track, audio_policy)
+    if codec_action != "libopus":
+        source_bitrate_bps = int_value(track.get("bit_rate"))
+        if source_bitrate_bps > 0:
+            return round(source_bitrate_bps / 1000.0, 1)
+        channels = max(2, int_value(track.get("channels")))
+        return 640.0 if channels >= 6 else 192.0
+    channels = max(2, int_value(track.get("channels")))
     if channels >= 8:
         return parse_audio_bitrate_kbps(audio_policy.get("surround_7_1_opus_bitrate"), 320.0)
     if channels >= 6:
@@ -93,9 +116,134 @@ def sample_audio_target_kbps(sample_item: dict[str, Any] | None) -> float:
     return parse_audio_bitrate_kbps(audio_policy.get("stereo_opus_bitrate"), 128.0)
 
 
-def size_budget_feasibility(*, source_percent: float | None, video_bitrate_kbps: float | None) -> tuple[str, bool]:
+def _primary_audio_track(sample_item: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(sample_item, dict):
+        return None
+    audio_tracks = [object_dict(track) for track in object_list(sample_item.get("audio_summary")) if isinstance(track, dict)]
+    if not audio_tracks:
+        return None
+    try:
+        return select_primary_audio_track(audio_tracks)
+    except ValueError:
+        return None
+
+
+def _audio_bitrate_key_for_channels(channels: int) -> tuple[str, float]:
+    if channels >= 8:
+        return "surround_7_1_opus_bitrate", 320.0
+    if channels >= 6:
+        return "surround_5_1_opus_bitrate", 224.0
+    return "stereo_opus_bitrate", 128.0
+
+
+def _next_lower_audio_bitrate_kbps(policy_key: str, current_kbps: float) -> float | None:
+    for candidate in _AUDIO_STEP_DOWN_CANDIDATES_KBPS.get(policy_key, ()):
+        if candidate < current_kbps:
+            return candidate
+    return None
+
+
+def audio_tradeoff_hint(
+        sample_item: dict[str, Any] | None,
+        audio_policy: dict[str, Any] | None,
+        *,
+        budget_bytes: int | None = None,
+) -> dict[str, Any] | None:
+    track = _primary_audio_track(sample_item)
+    if track is None:
+        return None
+    policy = object_dict(audio_policy)
+    codec_name = str(track.get("codec_name") or "").strip().lower() or None
+    if planned_audio_action(track, policy) != "libopus":
+        return None
+    channels = max(2, int_value(track.get("channels")) or 2)
+    policy_key, fallback_kbps = _audio_bitrate_key_for_channels(channels)
+    target_kbps = parse_audio_bitrate_kbps(policy.get(policy_key), fallback_kbps)
+    next_lower_kbps = _next_lower_audio_bitrate_kbps(policy_key, target_kbps)
+    duration_seconds = float_value(object_dict(sample_item).get("duration_seconds"))
+    source_size_bytes = int_value(object_dict(sample_item).get("source_size_bytes"))
+    step_down_savings_bytes = None
+    step_down_source_percent = None
+    step_down_budget_percent = None
+    leverage = "unknown"
+    if next_lower_kbps is not None and duration_seconds > 0:
+        delta_kbps = max(target_kbps - next_lower_kbps, 0.0)
+        step_down_savings_bytes = int(round((delta_kbps * 1000.0 / 8.0) * duration_seconds))
+        if source_size_bytes > 0:
+            step_down_source_percent = round((step_down_savings_bytes / source_size_bytes) * 100.0, 2)
+        if budget_bytes is not None and budget_bytes > 0:
+            step_down_budget_percent = round((step_down_savings_bytes / budget_bytes) * 100.0, 2)
+        savings_mib = step_down_savings_bytes / (1024.0 * 1024.0)
+        if savings_mib < 12.0 or (step_down_source_percent is not None and step_down_source_percent < 0.5):
+            leverage = "low"
+        elif savings_mib < 28.0 or (step_down_source_percent is not None and step_down_source_percent < 1.0):
+            leverage = "medium"
+        else:
+            leverage = "high"
+    summary = (
+        f"A one-step drop from {target_kbps:g}k to {next_lower_kbps:g}k saves about "
+        f"{(step_down_savings_bytes or 0) / (1024.0 * 1024.0):.1f} MiB per item."
+        if next_lower_kbps is not None and step_down_savings_bytes is not None
+        else "No lower reference bitrate step is available for the current planned audio target."
+    )
+    guidance = (
+        "Surround audio is a low-leverage place to chase size; prefer video or methodology moves first unless the operator explicitly wants to spend audio quality."
+        if leverage == "low"
+        else "Surround audio offers some savings, but it should usually be a later trade after video or methodology moves."
+        if leverage == "medium"
+        else "Audio changes could materially help this request, so they are a plausible lever if the operator is explicitly size-first."
+        if leverage == "high"
+        else "Use audio changes only if they clearly support the operator's request."
+    )
+    review_confidence = "low" if channels > 2 else "medium"
+    review_risk_summary = (
+        "Multichannel audio changes are harder to validate casually than visible video tradeoffs, especially when the operator is monitoring indirectly."
+        if channels > 2
+        else "Stereo audio changes are still worth checking, but they are usually easier to validate directly than surround downshifts."
+    )
+    return {
+        "primary_track": {
+            "codec_name": codec_name,
+            "channels": channels,
+            "language": track.get("language"),
+        },
+        "policy_key": policy_key,
+        "target_bitrate_kbps": round(target_kbps, 1),
+        "next_lower_bitrate_kbps": round(next_lower_kbps, 1) if next_lower_kbps is not None else None,
+        "estimated_step_down_savings_bytes": step_down_savings_bytes,
+        "estimated_step_down_savings_mib": round(step_down_savings_bytes / (1024.0 * 1024.0), 1)
+        if step_down_savings_bytes is not None else None,
+        "estimated_step_down_source_percent": step_down_source_percent,
+        "estimated_step_down_budget_percent": step_down_budget_percent,
+        "leverage": leverage,
+        "recommended_seed_action": "allow" if leverage == "high" else "hold",
+        "review_confidence": review_confidence,
+        "review_risk_summary": review_risk_summary,
+        "summary": summary,
+        "guidance": guidance,
+    }
+
+
+def _is_av1_encoder(video_encoder: str | None) -> bool:
+    return "av1" in str(video_encoder or "").strip().lower()
+
+
+def size_budget_feasibility(
+        *,
+        source_percent: float | None,
+        video_bitrate_kbps: float | None,
+        video_encoder: str | None = None,
+) -> tuple[str, bool]:
     if source_percent is None or video_bitrate_kbps is None:
         return "unknown", False
+    if _is_av1_encoder(video_encoder):
+        # AV1 can stay visually strong at bitrates that look "too low" through an older-codec lens,
+        # so keep the hard stop for only the smallest AV1 budgets and treat the next band as aggressive.
+        if source_percent <= 4.0 or video_bitrate_kbps <= 325.0:
+            return "unreasonable", True
+        if source_percent <= 15.0 or video_bitrate_kbps <= 650.0:
+            return "aggressive", False
+        return "reasonable", False
     if source_percent <= 10.0 or video_bitrate_kbps <= 500.0:
         return "unreasonable", True
     if source_percent <= 20.0 or video_bitrate_kbps <= 900.0:
@@ -103,80 +251,108 @@ def size_budget_feasibility(*, source_percent: float | None, video_bitrate_kbps:
     return "reasonable", False
 
 
-def size_budget_request(trimmed: str, sample_item: dict[str, Any] | None) -> dict[str, Any] | None:
-    for pattern in _NOTE_SIZE_BUDGET_PATTERNS:
-        match = pattern.search(trimmed)
-        if not match:
-            continue
-        unit = str(match.group("unit") or "").strip().lower()
-        multiplier = _SIZE_BUDGET_UNIT_BYTES.get(unit)
-        if multiplier is None:
-            continue
-        try:
-            amount = float(match.group("amount"))
-        except (TypeError, ValueError):
-            continue
-        budget_bytes = int(round(amount * multiplier))
-        source_size_bytes = None
-        duration_seconds = None
-        if isinstance(sample_item, dict):
-            source_size_candidate = float_value(sample_item.get("source_size_bytes"))
-            duration_candidate = float_value(sample_item.get("duration_seconds"))
-            source_size_bytes = source_size_candidate if source_size_candidate > 0 else None
-            duration_seconds = duration_candidate if duration_candidate > 0 else None
-        audio_kbps = sample_audio_target_kbps(sample_item)
-        estimated_audio_bytes = None
-        estimated_video_bitrate_kbps = None
-        estimated_source_percent = None
-        if duration_seconds and duration_seconds > 0:
-            estimated_audio_bytes = int(round((audio_kbps * 1000.0 / 8.0) * duration_seconds))
-            remaining_video_bytes = max(budget_bytes - estimated_audio_bytes, 0)
-            estimated_video_bitrate_kbps = round((remaining_video_bytes * 8.0 / duration_seconds) / 1000.0, 1)
-        if source_size_bytes and source_size_bytes > 0:
-            estimated_source_percent = round((budget_bytes / source_size_bytes) * 100.0, 2)
-        feasibility, requires_confirmation = size_budget_feasibility(
-            source_percent=estimated_source_percent,
-            video_bitrate_kbps=estimated_video_bitrate_kbps,
+def _parsed_operator_note(note: str) -> dict[str, Any] | None:
+    trimmed = note.strip()
+    if not trimmed:
+        return None
+    return _normalize_operator_note_parse(
+        request_operator_note_parse(
+            project_root=_PROJECT_ROOT,
+            payload={
+                "operator_note": trimmed,
+                "goal": "Classify the operator note into a concrete tuning request, if one exists.",
+            },
         )
-        applied_policy: dict[str, Any] | None = None
-        requested_max_encoded_percent = None
-        applied_max_encoded_percent = None
-        if estimated_source_percent is not None:
-            requested_max_encoded_percent = round(estimated_source_percent, 2)
-            applied_max_encoded_percent = max(10, min(100, int(round(estimated_source_percent))))
-            applied_policy = {"video": {"max_encoded_percent": applied_max_encoded_percent}}
-        return {
-            "source": "operator_note",
-            "honor_mode": "size_budget_experiment",
-            "request_type": "size_budget",
-            "budget_bytes": budget_bytes,
-            "budget_label": f"{amount:g} {unit.upper()} per episode",
-            "request_text": trimmed,
-            "estimated_source_percent": estimated_source_percent,
-            "estimated_audio_bytes": estimated_audio_bytes,
-            "estimated_video_bitrate_kbps": estimated_video_bitrate_kbps,
-            "feasibility": feasibility,
-            "requires_confirmation": requires_confirmation,
-            "requested_max_encoded_percent": requested_max_encoded_percent,
-            "applied_max_encoded_percent": applied_max_encoded_percent,
-            "applied_policy": applied_policy,
-        }
-    return None
+    )
 
 
-def metric_target_request(trimmed: str) -> dict[str, Any] | None:
-    for pattern in _NOTE_VMAF_PATTERNS:
-        match = pattern.search(trimmed)
-        if not match:
-            continue
-        try:
-            target = float(match.group("target"))
-        except (TypeError, ValueError):
-            continue
+def size_budget_request(
+        trimmed: str,
+        sample_item: dict[str, Any] | None,
+        parsed_note: dict[str, Any],
+        *,
+        current_policy: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    effective_sample_item = dict(sample_item) if isinstance(sample_item, dict) else None
+    effective_policy = object_dict(current_policy)
+    if effective_sample_item is not None and effective_policy:
+        effective_sample_item["resolved_policy"] = effective_policy
+    unit = str(parsed_note.get("size_budget_unit") or "").strip().lower()
+    multiplier = _SIZE_BUDGET_UNIT_BYTES.get(unit)
+    amount = float_value(parsed_note.get("size_budget_value"))
+    if multiplier is None or amount <= 0:
+        return None
+    budget_bytes = int(round(amount * multiplier))
+    source_size_bytes = None
+    duration_seconds = None
+    if isinstance(effective_sample_item, dict):
+        source_size_candidate = float_value(effective_sample_item.get("source_size_bytes"))
+        duration_candidate = float_value(effective_sample_item.get("duration_seconds"))
+        source_size_bytes = source_size_candidate if source_size_candidate > 0 else None
+        duration_seconds = duration_candidate if duration_candidate > 0 else None
+    video_encoder = None
+    if isinstance(effective_sample_item, dict):
+        resolved_policy = object_dict(effective_sample_item.get("resolved_policy"))
+        video_encoder = str(object_dict(resolved_policy.get("video")).get("encoder") or "").strip() or None
+    audio_kbps = sample_audio_target_kbps(effective_sample_item)
+    estimated_audio_bytes = None
+    estimated_video_bitrate_kbps = None
+    estimated_source_percent = None
+    if duration_seconds and duration_seconds > 0:
+        estimated_audio_bytes = int(round((audio_kbps * 1000.0 / 8.0) * duration_seconds))
+        remaining_video_bytes = max(budget_bytes - estimated_audio_bytes, 0)
+        estimated_video_bitrate_kbps = round((remaining_video_bytes * 8.0 / duration_seconds) / 1000.0, 1)
+    if source_size_bytes and source_size_bytes > 0:
+        estimated_source_percent = round((budget_bytes / source_size_bytes) * 100.0, 2)
+    feasibility, requires_confirmation = size_budget_feasibility(
+        source_percent=estimated_source_percent,
+        video_bitrate_kbps=estimated_video_bitrate_kbps,
+        video_encoder=video_encoder,
+    )
+    applied_policy: dict[str, Any] | None = None
+    requested_max_encoded_percent = None
+    applied_max_encoded_percent = None
+    if estimated_source_percent is not None:
+        requested_max_encoded_percent = round(estimated_source_percent, 2)
+        # Floor the cap so an explicit size budget stays at or below the requested target.
+        applied_max_encoded_percent = max(1, min(100, int(math.floor(estimated_source_percent))))
+        applied_policy = {"video": {"max_encoded_percent": applied_max_encoded_percent}}
+    tradeoff_hint = None
+    if isinstance(effective_sample_item, dict):
+        tradeoff_hint = audio_tradeoff_hint(
+            effective_sample_item,
+            object_dict(object_dict(effective_sample_item.get("resolved_policy")).get("audio")),
+            budget_bytes=budget_bytes,
+        )
+    return {
+        "source": "operator_note",
+        "operator_note_parse": parsed_note,
+        "honor_mode": "size_budget_experiment",
+        "request_type": "size_budget",
+        "budget_bytes": budget_bytes,
+        "budget_label": f"{amount:g} {unit.upper()} per episode",
+        "request_text": trimmed,
+        "estimated_source_percent": estimated_source_percent,
+        "estimated_audio_bytes": estimated_audio_bytes,
+        "estimated_video_bitrate_kbps": estimated_video_bitrate_kbps,
+        "feasibility": feasibility,
+        "requires_confirmation": requires_confirmation,
+        "requested_max_encoded_percent": requested_max_encoded_percent,
+        "applied_max_encoded_percent": applied_max_encoded_percent,
+        "applied_policy": applied_policy,
+        "audio_tradeoff_hint": tradeoff_hint,
+    }
+
+
+def metric_target_request(trimmed: str, parsed_note: dict[str, Any]) -> dict[str, Any] | None:
+    metric = str(parsed_note.get("metric") or "").strip().lower()
+    target = float_value(parsed_note.get("metric_target"))
+    if metric == "vmaf" and target > 0:
         target = round(max(80.0, min(target, 98.0)), 2)
         min_target = round(min(target, max(75.0, target - 2.0)), 2)
         return {
             "source": "operator_note",
+            "operator_note_parse": parsed_note,
             "honor_mode": "literal_experiment",
             "request_type": "metric_target",
             "metric": "vmaf",
@@ -189,19 +365,12 @@ def metric_target_request(trimmed: str) -> dict[str, Any] | None:
             },
             "request_text": trimmed,
         }
-
-    for pattern in _NOTE_XPSNR_PATTERNS:
-        match = pattern.search(trimmed)
-        if not match:
-            continue
-        try:
-            target = float(match.group("target"))
-        except (TypeError, ValueError):
-            continue
+    if metric == "xpsnr" and target > 0:
         target = round(max(30.0, min(target, 41.0)), 2)
         min_target = round(min(target, max(29.0, target - 1.0)), 2)
         return {
             "source": "operator_note",
+            "operator_note_parse": parsed_note,
             "honor_mode": "literal_experiment",
             "request_type": "metric_target",
             "metric": "xpsnr",
@@ -217,16 +386,33 @@ def metric_target_request(trimmed: str) -> dict[str, Any] | None:
     return None
 
 
-def operator_requested_experiment(note: str, sample_item: dict[str, Any] | None = None) -> dict[str, Any] | None:
+def operator_requested_experiment(
+        note: str,
+        sample_item: dict[str, Any] | None = None,
+        *,
+        parsed_note: dict[str, Any] | None = None,
+        current_policy: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     trimmed = note.strip()
     if not trimmed:
         return None
+    note_parse = object_dict(parsed_note) or object_dict(_parsed_operator_note(trimmed))
+    request_type = str(note_parse.get("request_type") or "").strip().lower()
+    if request_type == "none":
+        return None
+    operator_confirmed = bool(note_parse.get("operator_confirmed"))
 
-    requested_size_budget = size_budget_request(trimmed, sample_item)
-    requested_metric_target = metric_target_request(trimmed)
+    requested_size_budget = size_budget_request(
+        trimmed,
+        sample_item,
+        note_parse,
+        current_policy=current_policy,
+    )
+    requested_metric_target = metric_target_request(trimmed, note_parse)
     if requested_size_budget and requested_metric_target:
         return {
             "source": "operator_note",
+            "operator_note_parse": note_parse,
             "honor_mode": "combined_experiment",
             "request_type": "combined_experiment",
             "request_text": trimmed,
@@ -241,6 +427,7 @@ def operator_requested_experiment(note: str, sample_item: dict[str, Any] | None 
             "requires_confirmation": requested_size_budget.get("requires_confirmation"),
             "requested_max_encoded_percent": requested_size_budget.get("requested_max_encoded_percent"),
             "applied_max_encoded_percent": requested_size_budget.get("applied_max_encoded_percent"),
+            "operator_confirmed": operator_confirmed,
             "metric_request": requested_metric_target,
             "size_budget_request": requested_size_budget,
             "applied_policy": merge_policy_fragments(
@@ -249,8 +436,10 @@ def operator_requested_experiment(note: str, sample_item: dict[str, Any] | None 
             ),
         }
     if requested_metric_target:
+        requested_metric_target["operator_confirmed"] = operator_confirmed
         return requested_metric_target
     if requested_size_budget:
+        requested_size_budget["operator_confirmed"] = operator_confirmed
         return requested_size_budget
     return None
 
@@ -285,15 +474,27 @@ def matching_request_history(
         note: str,
         sample_item: dict[str, Any] | None,
         recent_sessions_payload: list[dict[str, Any]],
+        current_request: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    current_request = operator_requested_experiment(note, sample_item)
-    current_signature = operator_request_signature(current_request)
+    resolved_current_request = object_dict(current_request) or operator_requested_experiment(note, sample_item)
+    if not bool(object_dict(resolved_current_request).get("operator_confirmed")):
+        return None
+    current_signature = operator_request_signature(resolved_current_request)
     if current_signature is None:
         return None
     matches: list[dict[str, Any]] = []
     softened_count = 0
     for session in recent_sessions_payload:
-        prior_request = operator_requested_experiment(str(session.get("note") or ""), sample_item)
+        prior_request = object_dict(session.get("requested_experiment"))
+        if not prior_request:
+            prior_note_parse = object_dict(session.get("operator_note_parse"))
+            prior_request = object_dict(
+                operator_requested_experiment(
+                    str(session.get("note") or ""),
+                    sample_item,
+                    parsed_note=prior_note_parse,
+                )
+            )
         if operator_request_signature(prior_request) != current_signature:
             continue
         disposition = str(session.get("request_disposition") or "").strip().lower() or None
@@ -583,14 +784,17 @@ def build_seed_policy_payload(
         summary: dict[str, Any],
         metric_support_payload: dict[str, bool],
         recent_sessions_payload: list[dict[str, Any]] | None = None,
+        requested_experiment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     suggested_override = object_dict(summary.get("suggested_override"))
-    requested_experiment = operator_requested_experiment(user_note, sample_item)
+    resolved_requested_experiment = object_dict(requested_experiment) or operator_requested_experiment(user_note, sample_item)
     recent_sessions = list(recent_sessions_payload) if recent_sessions_payload is not None else []
+    requested_budget_bytes = int_value(object_dict(resolved_requested_experiment).get("budget_bytes")) or None
     repeat_signal = matching_request_history(
         note=user_note,
         sample_item=sample_item,
         recent_sessions_payload=recent_sessions,
+        current_request=resolved_requested_experiment,
     )
     return {
         "folder": prefix,
@@ -631,8 +835,13 @@ def build_seed_policy_payload(
         },
         "class_signals": seed_class_signals(prefix, sample_item, summary),
         "base_policy": tuning_policy_focus(base_policy),
+        "audio_tradeoff_hint": audio_tradeoff_hint(
+            sample_item,
+            object_dict(base_policy.get("audio")),
+            budget_bytes=requested_budget_bytes,
+        ),
         "operator_note": user_note or None,
-        "requested_experiment": requested_experiment,
+        "requested_experiment": resolved_requested_experiment,
         "operator_repeat_signal": repeat_signal,
         "metric_support": metric_support_payload,
         "preferred_metric": "vmaf" if metric_support_payload.get("vmaf") else (
@@ -648,6 +857,12 @@ def calibration_draft_hash(payload: dict[str, Any]) -> str:
         if key not in CALIBRATION_REVIEW_FIELDS
     }
     encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def calibration_policy_hash(payload: dict[str, Any]) -> str:
+    policy_payload = object_dict(payload.get("policy"))
+    encoded = json.dumps(policy_payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
@@ -669,19 +884,29 @@ def review_gate(calibration: dict[str, Any] | None) -> dict[str, Any]:
         }
 
     current_hash = str(calibration.get("draft_hash") or calibration_draft_hash(calibration))
+    current_policy_hash = calibration_policy_hash(calibration)
     accepted_hash = str(calibration.get("accepted_draft_hash") or "")
+    accepted_policy_hash = str(calibration.get("accepted_policy_hash") or "")
     accepted_job_id = str(calibration.get("accepted_sample_job_id") or "")
     current_job_id = str(calibration.get("job_id") or "")
     accepted_at = calibration.get("accepted_at")
     review_media_ready = bool(calibration.get("review_media_ready"))
-    can_confirm_full = bool(accepted_at and accepted_hash == current_hash and accepted_job_id == current_job_id)
+    same_sample_job = bool(accepted_job_id and accepted_job_id == current_job_id)
+    policy_still_matches = bool(accepted_policy_hash and accepted_policy_hash == current_policy_hash)
+    # Legacy approvals only stored the full draft hash. Keep those approvals valid
+    # for the same sampled draft even if later non-policy metadata changes drift
+    # the hash after an encode failure.
+    legacy_same_sample_approval = bool(same_sample_job and not accepted_policy_hash)
+    can_confirm_full = bool(
+        accepted_at and same_sample_job and (policy_still_matches or accepted_hash == current_hash or legacy_same_sample_approval)
+    )
     if can_confirm_full:
         return {
             "can_confirm_full": True,
-            "message": f"Approved sample draft saved at {accepted_at}. Folder encode is unlocked.",
+            "message": f"Approved sample draft saved at {accepted_at}. Mediaforce queues the folder encode automatically after approval.",
             "status": "accepted",
             "accepted_at": accepted_at,
-            "next_action_label": "Queue folder encode",
+            "next_action_label": "Auto-queued after approval",
         }
 
     if not review_media_ready:
@@ -694,7 +919,7 @@ def review_gate(calibration: dict[str, Any] | None) -> dict[str, Any]:
 
     return {
         "can_confirm_full": False,
-        "message": "Review the sample clips, then approve this draft to save the folder policy and unlock folder encode.",
+        "message": "Review the sample clips, then approve this draft to save the folder policy and queue the folder encode.",
         "status": "needs_approval",
         "next_action_label": "Review clips and approve",
     }
@@ -711,6 +936,7 @@ def maybe_seed_baseline_policy(
         sample_item: dict[str, Any],
         existing_calibration: dict[str, Any] | None,
         connection: DBClient,
+        requested_experiment: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if action != "baseline" or existing_calibration is not None:
         return None
@@ -730,6 +956,7 @@ def maybe_seed_baseline_policy(
         summary=summary,
         metric_support_payload=metric_support_payload,
         recent_sessions_payload=recent_sessions_payload,
+        requested_experiment=requested_experiment,
     )
     seed_response = request_seed_policy(project_root=project_root, payload=payload)
     maybe_force_repeated_seed_experiment(

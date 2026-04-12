@@ -19,7 +19,7 @@ def register_folder_routes(
         queue_folder_encode_action: Callable[[str, str, bool], dict[str, Any]],
         validate_folder_outputs_action: Callable[[str], dict[str, Any]],
         promote_folder_outputs_action: Callable[[str], dict[str, Any]],
-        save_profile_action: Callable[[str], dict[str, Any]],
+        save_profile_action: Callable[[str, bool, str], dict[str, Any]],
 ) -> None:
     @app.get("/api/folders/{prefix:path}/status")
     def api_folder_status(prefix: str) -> JSONResponse:
@@ -85,5 +85,15 @@ def register_folder_routes(
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     @app.post("/api/folders/{prefix:path}/save-profile")
-    def api_folder_save_profile(prefix: str) -> JSONResponse:
-        return JSONResponse(save_profile_action(prefix.strip("/")))
+    async def api_folder_save_profile(prefix: str, request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        return JSONResponse(
+            save_profile_action(
+                prefix.strip("/"),
+                bool(body.get("confirm_high_impact", False)),
+                str(body.get("reviewed_draft_hash", "")),
+            )
+        )

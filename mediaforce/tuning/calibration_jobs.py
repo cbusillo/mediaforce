@@ -28,6 +28,30 @@ def load_latest_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
     return _hydrate_job(row) if row is not None else None
 
 
+def load_latest_retryable_sample_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
+    row = connection.execute(
+        _calibration_job_select()
+        .where(calibration_jobs.c.prefix == prefix)
+        .where(calibration_jobs.c.lane == "sample")
+        .where(calibration_jobs.c.status.in_(("failed", "stopped")))
+        .where(calibration_jobs.c.action.in_(("baseline", "ai_tune")))
+        .order_by(calibration_jobs.c.created_at.desc(), _rowid_column().desc())
+        .limit(1)
+    ).mappings().fetchone()
+    return _hydrate_job(row) if row is not None else None
+
+
+def load_latest_sample_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
+    row = connection.execute(
+        _calibration_job_select()
+        .where(calibration_jobs.c.prefix == prefix)
+        .where(calibration_jobs.c.lane == "sample")
+        .order_by(calibration_jobs.c.created_at.desc(), _rowid_column().desc())
+        .limit(1)
+    ).mappings().fetchone()
+    return _hydrate_job(row) if row is not None else None
+
+
 def load_job(connection: DBClient, job_id: str) -> dict[str, Any] | None:
     row = connection.execute(_calibration_job_select().where(calibration_jobs.c.job_id == job_id)).mappings().fetchone()
     return _hydrate_job(row) if row is not None else None

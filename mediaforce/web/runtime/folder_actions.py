@@ -1,3 +1,5 @@
+import hashlib
+import json
 from collections.abc import Callable
 import uuid
 from pathlib import Path
@@ -34,6 +36,55 @@ CalibrationDraftHashFn: TypeAlias = Callable[[ActionPayload], str]
 SaveCalibrationStateFn: TypeAlias = Callable[[MediaforceConfig, str, ActionPayload], None]
 LoadAdviceStateFn: TypeAlias = Callable[[MediaforceConfig, str], ActionPayload | None]
 MergeAdviceStateFn: TypeAlias = Callable[[MediaforceConfig, str, ActionPayload], ActionPayload]
+AutoQueueApprovedFolderEncodeFn: TypeAlias = Callable[[str, str, bool], ActionPayload]
+LoadSampleItemFn: TypeAlias = Callable[[DBClient, MediaforceConfig, str], FolderItem | None]
+
+
+def _calibration_policy_hash(payload: ActionPayload) -> str:
+    policy_payload = object_dict(payload.get("policy"))
+    encoded = json.dumps(policy_payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _normalized_number(value: Any) -> float | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalized_text(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _high_impact_policy_change(current_policy: ActionPayload, draft_policy: ActionPayload) -> bool:
+    current_video = object_dict(current_policy.get("video"))
+    draft_video = object_dict(draft_policy.get("video"))
+    current_guardrail = (
+        _normalized_text(current_video.get("quality_metric")),
+        _normalized_number(current_video.get("target_vmaf")),
+        _normalized_number(current_video.get("min_target_vmaf")),
+        _normalized_number(current_video.get("target_xpsnr")),
+        _normalized_number(current_video.get("min_target_xpsnr")),
+    )
+    draft_guardrail = (
+        _normalized_text(draft_video.get("quality_metric")),
+        _normalized_number(draft_video.get("target_vmaf")),
+        _normalized_number(draft_video.get("min_target_vmaf")),
+        _normalized_number(draft_video.get("target_xpsnr")),
+        _normalized_number(draft_video.get("min_target_xpsnr")),
+    )
+    if current_guardrail != draft_guardrail:
+        return True
+    if _normalized_number(current_video.get("max_encoded_percent")) != _normalized_number(
+            draft_video.get("max_encoded_percent")
+    ):
+        return True
+    if _normalized_number(current_video.get("default_grain")) != _normalized_number(draft_video.get("default_grain")):
+        return True
+    return False
 
 
 class LoadFolderStagedItemsFn(Protocol):
@@ -534,6 +585,7 @@ def save_profile_action(
         normalized_prefix: str,
         *,
         now_iso: NowIsoFn,
+        load_sample_item: LoadSampleItemFn,
         load_calibration_state: LoadCalibrationStateFn,
         calibration_draft_hash: CalibrationDraftHashFn,
         save_calibration_state: SaveCalibrationStateFn,
@@ -541,11 +593,34 @@ def save_profile_action(
         record_visual_approval_artifact: RecordVisualApprovalArtifactFn,
         merge_advice_state: MergeAdviceStateFn,
         upsert_override: UpsertOverrideFn,
+        auto_queue_folder_encode: AutoQueueApprovedFolderEncodeFn | None = None,
+        confirm_high_impact: bool = False,
+        reviewed_draft_hash: str = "",
 ) -> ActionPayload:
     calibration = load_calibration_state(config, normalized_prefix)
     if not calibration:
         raise HTTPException(status_code=400, detail="No draft calibration found for this folder")
     calibration_payload = object_dict(calibration)
+    current_draft_hash = str(calibration_payload.get("draft_hash") or calibration_draft_hash(calibration_payload)).strip()
+    baseline_policy = object_dict(object_dict(calibration_payload.get("sample_item")).get("resolved_policy"))
+    if not baseline_policy:
+        with open_db(config.paths.db_path) as connection:
+            sample_item = load_sample_item(connection, config, normalized_prefix)
+        baseline_policy = object_dict(object_dict(sample_item).get("resolved_policy"))
+    if baseline_policy and _high_impact_policy_change(
+            baseline_policy,
+            object_dict(calibration_payload.get("policy")),
+    ):
+        if not confirm_high_impact:
+            raise HTTPException(
+                status_code=409,
+                detail="This draft includes high-impact policy changes. Review the diff, then confirm approval again.",
+            )
+        if reviewed_draft_hash.strip() != current_draft_hash:
+            raise HTTPException(
+                status_code=409,
+                detail="This draft changed after the high-impact review. Review the diff and confirm approval again.",
+            )
     if str(calibration_payload.get("mode") or "sample") == "sample":
         if not calibration_payload.get("review_media_ready"):
             raise HTTPException(
@@ -553,9 +628,8 @@ def save_profile_action(
                 detail="Run a fresh sample before approving because the review clips are unavailable.",
             )
         calibration_payload["accepted_at"] = now_iso()
-        calibration_payload["accepted_draft_hash"] = str(
-            calibration_payload.get("draft_hash") or calibration_draft_hash(calibration_payload)
-        )
+        calibration_payload["accepted_draft_hash"] = current_draft_hash
+        calibration_payload["accepted_policy_hash"] = _calibration_policy_hash(calibration_payload)
         calibration_payload["accepted_sample_job_id"] = str(calibration_payload.get("job_id") or "")
         save_calibration_state(config, normalized_prefix, calibration_payload)
         advice_state = object_dict(load_advice_state(config, normalized_prefix))
@@ -587,4 +661,73 @@ def save_profile_action(
         normalized_prefix,
         calibration_payload["policy"],
     )
-    return {"ok": True, "message": "Approved the current draft and saved it as the folder profile."}
+    response: ActionPayload = {
+        "ok": True,
+        "queued": False,
+        "auto_queue_status": "not_requested",
+        "message": "Approved the current draft and saved it as the folder profile.",
+    }
+    if auto_queue_folder_encode is None:
+        return response
+
+    try:
+        queue_result = auto_queue_folder_encode(normalized_prefix, "", False)
+    except HTTPException as exc:
+        detail = str(exc.detail)
+        if detail == "No pending items were found to enqueue for this folder.":
+            response["auto_queue_status"] = "no_pending"
+            response["message"] = (
+                "Approved the current draft and saved it as the folder profile. "
+                "There were no pending items left to queue for this folder."
+            )
+            return response
+        response["auto_queue_status"] = "blocked"
+        response["queue_message"] = detail
+        response["message"] = (
+            "Approved the current draft and saved it as the folder profile. "
+            f"Mediaforce could not auto-queue the folder encode: {detail}"
+        )
+        return response
+
+    queue_message = str(queue_result.get("message") or "").strip()
+    if queue_result.get("ok"):
+        response.update(
+            {
+                "queued": True,
+                "auto_queue_status": "queued",
+                "message": "Approved the current draft, saved it as the folder profile, and queued the full folder encode.",
+            }
+        )
+        if queue_message:
+            response["queue_message"] = queue_message
+        if queue_result.get("job") is not None:
+            response["job"] = queue_result["job"]
+        if queue_result.get("action") is not None:
+            response["action"] = queue_result["action"]
+        return response
+
+    if queue_message.startswith("A folder encode is already "):
+        response.update(
+            {
+                "queued": True,
+                "auto_queue_status": "already_active",
+                "queue_message": queue_message,
+                "message": (
+                    "Approved the current draft and saved it as the folder profile. "
+                    f"{queue_message}"
+                ),
+            }
+        )
+        return response
+
+    response.update(
+        {
+            "auto_queue_status": "blocked",
+            "queue_message": queue_message,
+            "message": (
+                "Approved the current draft and saved it as the folder profile. "
+                f"Mediaforce could not auto-queue the folder encode: {queue_message or 'unknown queue error'}"
+            ),
+        }
+    )
+    return response

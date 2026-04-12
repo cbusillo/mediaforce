@@ -4,6 +4,18 @@ from typing import Any, Callable
 from mediaforce.core.type_defs import object_dict, object_list
 
 
+def _summarize_multimodal_review_pack(review_pack: dict[str, Any]) -> dict[str, Any]:
+    summarized_pack = {key: value for key, value in review_pack.items() if key != "images"}
+    if "images" in review_pack:
+        summarized_pack["image_count"] = len(object_list(review_pack.get("images")))
+    return summarized_pack
+
+
+def _audio_tradeoff_key_copy(hint: dict[str, Any] | None) -> str:
+    policy_key = str(object_dict(hint).get("policy_key") or "").strip()
+    return policy_key or "the hinted audio bitrate"
+
+
 def build_prompt(payload: dict[str, Any]) -> str:
     serialized = json.dumps(payload, indent=2, sort_keys=True)
     return (
@@ -24,21 +36,27 @@ def build_seed_prompt(
 ) -> str:
     serialized = json.dumps(payload, indent=2, sort_keys=True)
     base_policy = object_dict(payload.get("base_policy"))
+    hinted_audio_key = _audio_tradeoff_key_copy(object_dict(payload.get("audio_tradeoff_hint")))
     valid_keys = policy_key_paths(base_policy)
     policy_shape = policy_shape_example(base_policy)
     return (
         "You are helping seed a first-pass media encode calibration draft. "
         "This is a cold-start guess for one folder, not a measured calibration result. "
-        "Treat the operator note as the start of a conversation, not a decorative hint. "
-        "Bias slightly toward smaller files, but avoid obvious quality damage. "
-        "Teach media-class taste, not a single-title compression floor. "
-        "Use the base policy as the safe default and make only the smallest helpful overrides. "
-        "Clean, forgiving material can lean one notch smaller than default, but dark, grainy, noisy, fast-motion, or otherwise uncertain material should stay close to the base policy until measured calibration proves it can move further. "
-        "Do not chase dramatic savings, do not generalize aggressively from one easy sample item, and prefer leaving a key out when the evidence is weak. "
-        "If the operator asks for a smaller encode, do not silently move to a higher quality target. "
+        "Your job is to draft the best first-pass attempt at the operator's request using the available policy keys, not to negotiate the operator back to the base policy. "
+        "Treat the operator note as an instruction to satisfy when it is clear and specific. "
+        "Use the base policy as a starting surface, not as something that overrules a direct operator request. "
+        "If the operator asks for materially smaller files, you are allowed to make material policy changes that pursue that goal, including changing quality targets, encoded-percent caps, CRF bounds, grain, preset, or sample methodology when those knobs exist in the allowed policy keys. "
+        "Bias toward accomplishing the operator's ask while still describing the risk honestly. "
+        f"When audio_tradeoff_hint.recommended_seed_action is 'hold', strongly prefer leaving {hinted_audio_key} at the base policy value in this first-pass seed. A tight size budget alone is not sufficient to override a hold, especially when audio_tradeoff_hint.review_confidence is low because these audio changes may be harder for the operator to judge casually. If you still lower that hinted audio bitrate despite a hold, explain why the savings are materially necessary and worth the review risk. "
+        "When the note is a direct request or explicit experiment, default to honoring it. Use honored_with_risk when the request is aggressive or fragile, not softened. "
+        "Use softened only when the operator note is exploratory, ambiguous, self-contradictory, or cannot be expressed with the available policy keys. "
         "When operator_repeat_signal shows the same explicit experiment was asked for again after earlier softening, treat that as deliberate confirmation and keep the risky draft unless the request cannot be expressed with the available policy keys. "
-        "If the request looks unrealistic, you may still draft the operator-confirmed experiment, but say that plainly and mark it as honored_with_risk instead of fighting the request. "
-        "If you soften or reject a request, say so explicitly. "
+        "If the request looks unrealistic, still try to draft the closest faithful experiment you can and mark it honored_with_risk instead of fighting the request. "
+        "If the operator asks for a smaller encode, do not silently move to a higher quality target or otherwise preserve the old behavior behind reassuring wording. "
+        "Do not anchor on legacy H.264 or HEVC bitrate intuition when the policy is using AV1. For AV1, a projected bitrate that looks surprisingly low by older codec standards can still be a plausible high-quality outcome for clean or forgiving material, so do not soften a size-first request just because the bitrate number looks small on its own. "
+        "Teach media-class taste, not a single-title compression floor, but do that in service of the operator's ask rather than as a reason to refuse it. "
+        "If you soften or reject a request, say so explicitly and only do it for the narrow reasons above. "
+        "When the operator explicitly wants heavy compression with very little perceptible loss, high-80s VMAF can still be a legitimate AV1 experiment on clean or forgiving material, but treat that as class-dependent and risk-aware rather than a universal default. "
         "If the class signals clearly look like clean 1080p catalog TV, a mild lean can look like VMAF around 94-95, XPSNR around 39-40, max encoded percent in the low-to-mid 70s, grain around 4-6, and 5.1 Opus around 224k, but treat those as gentle reference points rather than mandatory targets. "
         "Use metric_support and the current base policy to decide whether VMAF or XPSNR guidance is more relevant. "
         "Return valid JSON only with this exact shape: "
@@ -60,12 +78,12 @@ def build_tune_prompt(
     prompt_payload = dict(payload)
     review_pack = object_dict(prompt_payload.get("multimodal_review_pack"))
     if review_pack:
-        summarized_pack = {key: value for key, value in review_pack.items() if key != "images"}
-        if "images" in review_pack:
-            summarized_pack["image_count"] = len(object_list(review_pack.get("images")))
-        prompt_payload["multimodal_review_pack"] = summarized_pack
+        prompt_payload["multimodal_review_pack"] = _summarize_multimodal_review_pack(review_pack)
     serialized = json.dumps(prompt_payload, indent=2, sort_keys=True)
     current_policy = object_dict(payload.get("policy"))
+    hinted_audio_key = _audio_tradeoff_key_copy(
+        object_dict(object_dict(payload.get("runtime_toolbelt")).get("audio_tradeoff_hint"))
+    )
     valid_keys = policy_key_paths(current_policy)
     policy_shape = policy_shape_example(current_policy)
     return (
@@ -76,13 +94,20 @@ def build_tune_prompt(
         "When review_media_context is present, treat it as part of the active review conversation: the operator may be asking about the sampled source-versus-draft clips, the compare clip, or the current audio tradeoff before approving a folder encode. "
         "When multimodal_review_pack is present, the attached images appear in the same order as multimodal_review_pack.artifacts. Use them as real review evidence, but describe them carefully and never pretend they show more than they actually show. "
         "You cannot literally watch or hear the clips from this prompt, so never pretend that you did. Instead, use the supplied review context, measured calibration result, policy, audio summary, and the operator's own observations to reason collaboratively about likely video and audio quality tradeoffs. "
+        "When review_artifact_critique is present, treat it as a first-pass reading over artifacts extracted from the actual review clips, and use it to focus the next draft on the moments most likely to fail visual review. "
         "If the operator is clearly discussing what they saw or heard, engage that review directly in request_response and suggested_follow_up instead of replying like a generic size-only tuner. "
         "Do not do slow exhaustive analysis or long encodes. If you are not confident, say so clearly instead of making up certainty. "
-        "Treat the operator note as the start of a conversation, not a decorative hint. "
-        "Use the operator note directly. If you intentionally soften or redirect an explicit request, say that plainly in request_response, diagnosis, and suggested_follow_up instead of hiding the tradeoff. "
-        "If the operator asks for a smaller encode, do not silently move to a higher quality target. "
+        "Treat the operator note as an instruction to satisfy when it is clear and specific, not as a decorative hint. "
+        "Your job is to draft the best next run that actually pursues the operator's request using the available policy keys. "
+        "You are allowed to make material policy changes when the note calls for them, including quality targets, encoded-percent caps, CRF bounds, grain, preset, or sample methodology, so long as you stay within the allowed keys and explain the tradeoff honestly. "
+        f"When runtime_toolbelt.audio_tradeoff_hint says {hinted_audio_key} is low leverage, prefer video or methodology changes before lowering that hinted audio bitrate. A size budget target alone is not sufficient reason to step down low-leverage hinted audio, especially when runtime_toolbelt.audio_tradeoff_hint.review_confidence is low because those audio changes may be harder for the operator to judge casually. If you still lower it, explain why the savings are materially necessary and worth that review risk, unless the operator's note explicitly references audio quality or audio bitrate. "
+        "Use softened only when the note is exploratory, ambiguous, self-contradictory, or cannot be expressed with the available policy keys. "
+        "If you intentionally soften or redirect an explicit request, say that plainly in request_response, diagnosis, and suggested_follow_up instead of hiding the tradeoff. "
+        "If the operator asks for a smaller encode, do not silently move to a higher quality target or preserve the old behavior behind reassuring language. "
+        "Do not anchor on legacy H.264 or HEVC bitrate intuition when the policy is using AV1. For AV1, a projected bitrate that looks surprisingly low by older codec standards can still be a plausible high-quality outcome for clean or forgiving material, so do not redirect a size-first request just because the bitrate number looks small on its own. "
+        "When the operator explicitly wants heavy compression with very little perceptible loss, high-80s VMAF can still be a legitimate AV1 experiment on clean or forgiving material, but treat that as class-dependent and risk-aware rather than a universal default. "
         "When requested_experiment or retrieved_memory shows the operator repeated the same explicit risky request, treat that as deliberate confirmation and keep the risky draft unless the request cannot be expressed with the available policy keys. "
-        "If the request looks unrealistic, you may still draft the operator-confirmed experiment, but mark it honored_with_risk and explain the risk plainly instead of fighting the request. "
+        "If the request looks unrealistic, still draft the closest faithful experiment you can, mark it honored_with_risk, and explain the risk plainly instead of fighting the request. "
         "Return JSON only with no markdown fences or extra commentary. "
         "Return valid JSON only with this exact shape: "
         f'{{"request_response":"short conversational reply","request_disposition":"honored|honored_with_risk|softened|rejected|unclear","summary":"short sentence","diagnosis":"short diagnosis","confidence":"high|medium|low","evidence_checked":["..."],"suggested_follow_up":"optional short suggestion","feasibility_note":"optional short feasibility note","policy":{json.dumps(policy_shape, sort_keys=True)}}}. '
@@ -90,6 +115,24 @@ def build_tune_prompt(
         "It is acceptable to change methodology knobs like preset, sample cadence, or CRF bounds when the note clearly justifies it, but be explicit in the diagnosis when you do that. "
         f"Only use these policy keys: {', '.join(valid_keys) if valid_keys else 'none'}. "
         "Do not invent other keys. Keep request_response conversational and direct. Here is the tuning context:\n\n"
+        f"{serialized}"
+    )
+
+
+def build_review_artifact_critique_prompt(payload: dict[str, Any]) -> str:
+    prompt_payload = dict(payload)
+    review_pack = object_dict(prompt_payload.get("multimodal_review_pack"))
+    if review_pack:
+        prompt_payload["multimodal_review_pack"] = _summarize_multimodal_review_pack(review_pack)
+    serialized = json.dumps(prompt_payload, indent=2, sort_keys=True)
+    return (
+        "You are reviewing source-versus-draft media artifacts extracted from actual sampled review clips. "
+        "Use the attached images as visual evidence from the real clips, but never claim to watch motion or hear audio beyond what those artifacts can support. "
+        "Focus on what looks preserved, what looks fragile, and which moments deserve extra caution before another draft is approved. "
+        "Return JSON only with no markdown fences or extra commentary. "
+        "Return valid JSON only with this exact shape: "
+        '{"summary":"short practical read","confidence":"high|medium|low","weakest_moments":["..."],"preserved_strengths":["..."],"artifacts_to_recheck":["..."],"recommendation":"short recommendation","evidence_checked":["..."]}. '
+        "Keep the answer concise and grounded in the supplied artifacts and metadata. Here is the review context:\n\n"
         f"{serialized}"
     )
 
@@ -104,5 +147,23 @@ def build_run_verdict_prompt(payload: dict[str, Any]) -> str:
         "Return valid JSON only with this exact shape: "
         '{"summary":"short verdict","outcome":"strong_match|acceptable_experiment|needs_review|poor_fit","confidence":"high|medium|low","next_step":"optional short suggestion","evidence_checked":["..."]}. '
         "Here is the completed calibration context:\n\n"
+        f"{serialized}"
+    )
+
+
+def build_operator_note_parse_prompt(payload: dict[str, Any]) -> str:
+    serialized = json.dumps(payload, indent=2, sort_keys=True)
+    return (
+        "You are classifying a media encode operator note before policy compilation. "
+        "Decide whether the note is a direct request to execute now, an exploratory question, approval feedback, or something else. "
+        "Extract only explicit tuning requests that are actually present in the note. "
+        "Mark operator_confirmed true only when the note is a clear instruction the system should act on now. "
+        "Directive questions still count as direct requests when they clearly ask for action, such as 'Target 300MB per episode?' or 'Can you target 300MB per episode?'. "
+        "Exploratory wording stays unconfirmed when the operator is asking whether a change would help or is realistic, such as 'Can we try to target 85 VMAF instead? Will that help?' or 'I want to understand if 300MB per episode is realistic.' "
+        "If both a size budget and a metric target are explicitly requested, use combined_experiment. "
+        "Return JSON only with no markdown fences or extra commentary. "
+        "Return valid JSON only with this exact shape: "
+        '{"summary":"short summary","intent_type":"direct_request|exploratory_question|approval_feedback|other|unclear","request_type":"none|metric_target|size_budget|combined_experiment","operator_confirmed":true,"metric":"vmaf|xpsnr|null","metric_target":85,"size_budget_value":300,"size_budget_unit":"mb|gb|kb|tb|null","reasoning_note":"short explanation"}. '
+        "Do not invent requests that are not explicitly in the note. Here is the note context:\n\n"
         f"{serialized}"
     )

@@ -2,7 +2,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable
 
-from mediaforce.core.type_defs import int_value
+from mediaforce.core.type_defs import int_value, object_dict
 
 
 def render_review_contact_sheet(
@@ -42,6 +42,44 @@ def render_review_contact_sheet(
     _raise_on_failure(result, "Review contact sheet render failed")
 
 
+def render_review_timeline_strip(
+        *,
+        clip_path: Path,
+        output_path: Path,
+        duration_seconds: float,
+        frame_count: int = 6,
+        process_controller: Any = None,
+        ffmpeg_binary: Callable[[], str],
+        run_command: Callable[..., Any],
+) -> None:
+    safe_duration = max(duration_seconds, 1.0)
+    safe_frame_count = max(frame_count, 3)
+    fps_value = safe_frame_count / safe_duration
+    filter_complex = (
+        f"[0:v]fps={fps_value:.4f},scale=240:-1:flags=lanczos,"
+        f"tile={safe_frame_count}x1,setsar=1[v]"
+    )
+    cmd = [
+        ffmpeg_binary(),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-i",
+        str(clip_path),
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "[v]",
+        "-frames:v",
+        "1",
+        str(output_path),
+    ]
+    result = run_command(cmd, process_controller=process_controller)
+    _raise_on_failure(result, "Review timeline strip render failed")
+
+
 def render_audio_spectrogram_compare(
         *,
         source_path: Path,
@@ -74,6 +112,7 @@ def render_audio_spectrogram_compare(
             output_path=source_png,
             clip_time=clip_time,
             duration_seconds=duration_seconds,
+            audio_track=audio_track,
             process_controller=process_controller,
         )
         render_encoded_audio_clip_fn(
@@ -81,6 +120,7 @@ def render_audio_spectrogram_compare(
             output_path=encoded_audio,
             clip_time=clip_time,
             duration_seconds=duration_seconds,
+            audio_track=audio_track,
             bitrate=bitrate,
             process_controller=process_controller,
         )
@@ -114,12 +154,15 @@ def render_audio_spectrogram(
         output_path: Path,
         clip_time: float,
         duration_seconds: float,
+        audio_track: dict[str, Any] | None = None,
         process_controller: Any = None,
         ffmpeg_binary: Callable[[], str],
         run_command: Callable[..., Any],
 ) -> None:
+    stream_index = int_value(object_dict(audio_track).get("index")) if isinstance(audio_track, dict) else None
+    stream_selector = f"0:{stream_index}" if stream_index is not None else "0:a:0"
     filter_complex = (
-        "[0:a]aformat=channel_layouts=stereo,"
+        f"[{stream_selector}]aformat=channel_layouts=stereo,"
         "showspectrumpic=s=960x240:legend=disabled:mode=combined:color=rainbow[v]"
     )
     cmd = [
@@ -153,11 +196,14 @@ def render_encoded_audio_clip(
         output_path: Path,
         clip_time: float,
         duration_seconds: float,
+        audio_track: dict[str, Any] | None = None,
         bitrate: str,
         process_controller: Any = None,
         ffmpeg_binary: Callable[[], str],
         run_command: Callable[..., Any],
 ) -> None:
+    stream_index = int_value(object_dict(audio_track).get("index")) if isinstance(audio_track, dict) else None
+    stream_selector = f"0:{stream_index}" if stream_index is not None else "0:a:0"
     cmd = [
         ffmpeg_binary(),
         "-hide_banner",
@@ -172,7 +218,7 @@ def render_encoded_audio_clip(
         "-i",
         str(source_path),
         "-map",
-        "0:a:0",
+        stream_selector,
         "-c:a",
         "libopus",
         "-b:a",

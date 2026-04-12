@@ -1,5 +1,6 @@
 import subprocess
 import tempfile
+import json
 from pathlib import Path
 from typing import Any, Callable
 
@@ -83,17 +84,20 @@ def run_structured_llm_request(
         __import__("json").dumps(schema, sort_keys=True),
         "--format-strict",
     ]
-    try:
-        result = subprocess_run(cmd, capture_output=True, text=True, timeout=max_seconds + 15, cwd=project_root)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    raw = result.stdout.strip() or result.stderr.strip()
-    if result.returncode != 0 or not raw:
-        return None
-    parsed = try_load_json(raw)
-    if parsed is None:
-        parsed = try_load_first_json_object(raw)
-    return parsed if isinstance(parsed, dict) else None
+    for _attempt in range(2):
+        try:
+            result = subprocess_run(cmd, capture_output=True, text=True, timeout=max_seconds + 15, cwd=project_root)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        raw = result.stdout.strip() or result.stderr.strip()
+        if result.returncode != 0 or not raw:
+            continue
+        parsed = try_load_json(raw)
+        if parsed is None:
+            parsed = try_load_first_json_object(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    return None
 
 
 def run_multimodal_tune_request(
@@ -102,6 +106,7 @@ def run_multimodal_tune_request(
         developer: str,
         message: str,
         images: list[str],
+        schema: dict[str, Any],
         max_seconds: int,
         advisor_model: str,
         memory_disabled_code_args: Callable[[], list[str]],
@@ -111,6 +116,9 @@ def run_multimodal_tune_request(
 ) -> dict[str, Any] | None:
     with tempfile.NamedTemporaryFile(prefix="mediaforce-tune-", suffix=".txt", delete=False) as handle:
         output_path = Path(handle.name)
+    with tempfile.NamedTemporaryFile(prefix="mediaforce-schema-", suffix=".json", delete=False, mode="w") as handle:
+        json.dump(schema, handle, sort_keys=True)
+        schema_path = Path(handle.name)
     cmd = [
         "code",
         *memory_disabled_code_args(),
@@ -124,6 +132,8 @@ def run_multimodal_tune_request(
         str(max_seconds),
         "--output-last-message",
         str(output_path),
+        "--output-schema",
+        str(schema_path),
         "--demo",
         developer,
         "-C",
@@ -132,22 +142,26 @@ def run_multimodal_tune_request(
     for image_path in images:
         cmd.extend(["--image", image_path])
     cmd.append(message)
-    try:
-        result = subprocess_run(cmd, capture_output=True, text=True, timeout=max_seconds + 30)
-    except (OSError, subprocess.SubprocessError):
-        output_path.unlink(missing_ok=True)
-        return None
-    try:
-        raw = output_path.read_text().strip()
-    except OSError:
-        raw = ""
-    finally:
-        output_path.unlink(missing_ok=True)
-    if result.returncode != 0 and not raw:
-        raw = result.stderr.strip() or result.stdout.strip()
-    if not raw:
-        return None
-    parsed = try_load_json(raw)
-    if parsed is None:
-        parsed = try_load_first_json_object(raw)
-    return parsed if isinstance(parsed, dict) else None
+    for _attempt in range(2):
+        try:
+            result = subprocess_run(cmd, capture_output=True, text=True, timeout=max_seconds + 30)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        try:
+            raw = output_path.read_text().strip()
+        except OSError:
+            raw = ""
+        finally:
+            output_path.unlink(missing_ok=True)
+        if result.returncode != 0 and not raw:
+            raw = result.stderr.strip() or result.stdout.strip()
+        if not raw:
+            continue
+        parsed = try_load_json(raw)
+        if parsed is None:
+            parsed = try_load_first_json_object(raw)
+        if isinstance(parsed, dict):
+            schema_path.unlink(missing_ok=True)
+            return parsed
+    schema_path.unlink(missing_ok=True)
+    return None

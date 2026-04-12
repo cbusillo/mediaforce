@@ -4,21 +4,27 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from mediaforce.advisor import apply_seed_policy, request_note_tuning
+from mediaforce.advisor import apply_seed_policy, request_note_tuning, request_review_artifact_critique
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
-from mediaforce.core.type_defs import object_dict
+from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.tuning.tuning_memory import promote_learning_artifact, retrieve_learning_context
+
+
+QUEUEABLE_NO_CHANGE_DISPOSITIONS = {"honored", "honored_with_risk", "softened"}
 
 
 @dataclass(slots=True)
 class FolderAiTuneDeps:
     resolve_sample_host: Any
     load_job_state: Any
+    load_retryable_sample_job_state: Any
     sample_item: Any
     operator_requested_experiment: Any
     load_calibration_state: Any
+    recent_tuning_sessions: Any
+    matching_request_history: Any
     metric_support: Any
     maybe_seed_baseline_policy: Any
     seed_advice_payload: Any
@@ -42,6 +48,54 @@ class FolderAiTuneDeps:
     record_tuning_session: Any
 
 
+def _job_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "library_item_id": sample_item.get("library_item_id"),
+        "rel_path": sample_item.get("rel_path"),
+        "source_path": sample_item.get("source_path"),
+        "source_size_bytes": sample_item.get("source_size_bytes"),
+        "video_codec": sample_item.get("video_codec"),
+        "video_bitrate": sample_item.get("video_bitrate"),
+        "width": sample_item.get("width"),
+        "height": sample_item.get("height"),
+        "duration_seconds": sample_item.get("duration_seconds"),
+        "audio_summary": object_list(sample_item.get("audio_summary")),
+        "subtitle_summary": object_list(sample_item.get("subtitle_summary")),
+        "resolved_policy": object_dict(sample_item.get("resolved_policy")),
+    }
+
+
+def _proposal_can_queue(
+        *,
+        applied_fragment: dict[str, Any],
+        preview_policy: dict[str, Any],
+        request_disposition: str | None,
+        alignment_issue: str | None,
+) -> bool:
+    if alignment_issue is not None:
+        return False
+    if applied_fragment:
+        return True
+    disposition = str(request_disposition or "").strip().lower()
+    return bool(preview_policy) and disposition in QUEUEABLE_NO_CHANGE_DISPOSITIONS
+
+
+def _proposal_ready_message(
+        *,
+        can_queue: bool,
+        alignment_issue: str | None,
+        has_policy_change: bool,
+        run_label: str,
+) -> str:
+    if alignment_issue:
+        return alignment_issue
+    if can_queue and has_policy_change:
+        return f"Review the bench draft, then confirm when you are ready to run the {run_label}."
+    if can_queue:
+        return f"The bench kept the current policy. Confirm when you are ready to rerun the {run_label} unchanged."
+    return "The bench did not produce a queueable draft yet. Adjust the note and ask again."
+
+
 def folder_ai_tune_preview_action(
         config: MediaforceConfig,
         deps: FolderAiTuneDeps,
@@ -60,8 +114,13 @@ def folder_ai_tune_preview_action(
         sample_item = deps.sample_item(connection, config, normalized_prefix)
         if sample_item is None:
             raise HTTPException(status_code=404, detail=f"No sample item found for {normalized_prefix}")
-        operator_request = deps.operator_requested_experiment(trimmed_note, sample_item)
         calibration = deps.load_calibration_state(config, normalized_prefix)
+        current_policy = object_dict(calibration.get("policy")) if calibration else object_dict(sample_item.get("resolved_policy"))
+        operator_request = deps.operator_requested_experiment(
+            trimmed_note,
+            sample_item,
+            current_policy=current_policy,
+        )
         if calibration is None:
             return _seed_preview_action(
                 config,
@@ -96,7 +155,9 @@ def folder_ai_tune_confirm_action(
 ) -> dict[str, Any]:
     pending_proposal_raw = deps.load_pending_proposal(config, normalized_prefix)
     if pending_proposal_raw is None:
-        return {"ok": False, "message": "Ask the bench for a draft first."}
+        if proposal_id.strip():
+            return {"ok": False, "message": "This bench draft is out of date. Refresh it before queueing a sample."}
+        return _retry_latest_sample_job(config, deps, normalized_prefix)
     pending_proposal = object_dict(pending_proposal_raw)
     if str(pending_proposal.get("proposal_id") or "") != proposal_id:
         return {"ok": False, "message": "This bench draft is out of date. Refresh it before queueing a sample."}
@@ -138,6 +199,10 @@ def folder_ai_tune_confirm_action(
             tuning_record = object_dict(pending_proposal.get("tuning_record"))
             session_id = str(pending_proposal.get("session_id") or "").strip()
             if not session_id:
+                session_toolbelt = object_dict(tuning_record.get("runtime_toolbelt"))
+                operator_note_parse = object_dict(object_dict(pending_proposal.get("operator_request")).get("operator_note_parse"))
+                if operator_note_parse:
+                    session_toolbelt["operator_note_parse"] = operator_note_parse
                 session_id = deps.record_tuning_session(
                     connection,
                     prefix=normalized_prefix,
@@ -148,8 +213,9 @@ def folder_ai_tune_confirm_action(
                         "proposed_policy": tuning_record.get("proposed_policy"),
                     },
                     applied_policy=applied_policy,
-                    toolbelt=object_dict(tuning_record.get("runtime_toolbelt")),
+                    toolbelt=session_toolbelt,
                     created_at=deps.now_iso(),
+                    requested_experiment=object_dict(pending_proposal.get("operator_request")),
                 )
             advice_payload["session_id"] = session_id
             learning_artifact = promote_learning_artifact(
@@ -178,11 +244,7 @@ def folder_ai_tune_confirm_action(
             "action": action,
             "notes": operator_note,
             "policy": final_policy,
-            "sample_item": {
-                "rel_path": sample_item["rel_path"],
-                "source_path": sample_item["source_path"],
-                "source_size_bytes": sample_item["source_size_bytes"],
-            },
+            "sample_item": _job_sample_item_payload(sample_item),
             "created_at": deps.now_iso(),
             "started_at": None,
             "finished_at": None,
@@ -199,6 +261,64 @@ def folder_ai_tune_confirm_action(
         "message": "Queued the sample run from the bench draft.",
         "job": job_payload,
         "advice": advice_payload,
+    }
+
+
+def _retry_latest_sample_job(
+        config: MediaforceConfig,
+        deps: FolderAiTuneDeps,
+        normalized_prefix: str,
+) -> dict[str, Any]:
+    with open_db(config.paths.db_path) as connection:
+        existing_job = deps.load_retryable_sample_job_state(connection, config, normalized_prefix)
+        if existing_job is None:
+            return {"ok": False, "message": "Ask the bench for a draft first."}
+        status = str(existing_job.get("status") or "").strip()
+        if status in {"queued", "running", "pending_review"}:
+            return {"ok": False, "message": "A calibration job is already active for this folder."}
+        if status not in {"failed", "stopped"}:
+            return {"ok": False, "message": "Ask the bench for a draft first."}
+        if str(existing_job.get("mode") or "sample").strip() != "sample":
+            return {"ok": False, "message": "Ask the bench for a draft first."}
+        action = str(existing_job.get("action") or "").strip()
+        if action not in {"baseline", "ai_tune"}:
+            return {"ok": False, "message": "Ask the bench for a draft first."}
+
+        stored_host = object_dict(existing_job.get("host"))
+        host_key = str(stored_host.get("key") or "").strip()
+        if not host_key:
+            return {"ok": False, "message": "Refresh the bench draft before queueing another sample."}
+        host = deps.resolve_sample_host(config, host_key)
+
+        stored_sample_item = object_dict(existing_job.get("sample_item"))
+        if not stored_sample_item:
+            sample_item = deps.sample_item(connection, config, normalized_prefix)
+            if sample_item is None:
+                raise HTTPException(status_code=404, detail=f"No sample item found for {normalized_prefix}")
+            stored_sample_item = _job_sample_item_payload(object_dict(sample_item))
+
+        job_payload = {
+            **existing_job,
+            "job_id": uuid.uuid4().hex[:12],
+            "status": "queued",
+            "owner_pid": None,
+            "host": asdict(host),
+            "sample_item": stored_sample_item,
+            "created_at": deps.now_iso(),
+            "started_at": None,
+            "finished_at": None,
+            "error": None,
+            "result": None,
+            "updated_at": deps.now_iso(),
+        }
+        job_payload.pop("queue_position", None)
+        job_payload.pop("queue_depth", None)
+        deps.save_job_state(connection, config, normalized_prefix, job_payload)
+
+    return {
+        "ok": True,
+        "message": "Queued the saved sample draft again.",
+        "job": job_payload,
     }
 
 
@@ -242,6 +362,7 @@ def _seed_preview_action(
         sample_item=sample_item,
         existing_calibration=None,
         connection=connection,
+        requested_experiment=operator_request,
     )
     seed_metadata = object_dict(seed_metadata_raw)
     seed_job_fields = object_dict(seed_metadata.get("job_fields"))
@@ -269,9 +390,23 @@ def _seed_preview_action(
         current_policy=base_policy,
         preview_policy=seeded_policy,
     )
-    can_queue = bool(combined_fragment) and alignment_issue is None
-    proposal_message = alignment_issue or "Review the bench draft, then confirm when you are ready to run the first sample."
+    can_queue = _proposal_can_queue(
+        applied_fragment=combined_fragment,
+        preview_policy=seeded_policy,
+        request_disposition=advice_details.get("request_disposition"),
+        alignment_issue=alignment_issue,
+    )
+    proposal_message = _proposal_ready_message(
+        can_queue=can_queue,
+        alignment_issue=alignment_issue,
+        has_policy_change=bool(combined_fragment),
+        run_label="first sample",
+    )
     proposal_created_at = deps.now_iso()
+    session_toolbelt: dict[str, Any] = {}
+    operator_note_parse = object_dict(object_dict(operator_request).get("operator_note_parse"))
+    if operator_note_parse:
+        session_toolbelt["operator_note_parse"] = operator_note_parse
     session_id = deps.record_tuning_session(
         connection,
         prefix=normalized_prefix,
@@ -281,8 +416,9 @@ def _seed_preview_action(
             "proposed_policy": object_dict(seed_job_fields.get("seed_proposed_policy")),
         },
         applied_policy=combined_fragment,
-        toolbelt={},
+        toolbelt=session_toolbelt,
         created_at=proposal_created_at,
+        requested_experiment=operator_request,
     )
     proposal_payload: dict[str, Any] = {
         "proposal_id": uuid.uuid4().hex[:12],
@@ -362,12 +498,20 @@ def _tuned_preview_action(
         sample_item=sample_item,
         note=trimmed_note,
     )
+    repeat_signal = deps.matching_request_history(
+        note=trimmed_note,
+        sample_item=sample_item,
+        recent_sessions_payload=deps.recent_tuning_sessions(connection, normalized_prefix, limit=4),
+    )
     runtime_toolbelt = deps.build_tuning_runtime_toolbelt(
         sample_item=sample_item,
         current_policy=current_policy,
         calibration=calibration,
         metric_support=metric_support,
     )
+    operator_note_parse = object_dict(object_dict(operator_request).get("operator_note_parse"))
+    if operator_note_parse:
+        runtime_toolbelt["operator_note_parse"] = operator_note_parse
     review_pack_dir = deps.review_pack_dir(config, normalized_prefix, uuid.uuid4().hex[:12])
     deps.remove_path_if_exists(review_pack_dir)
     multimodal_review_pack = deps.build_multimodal_review_pack(
@@ -380,6 +524,38 @@ def _tuned_preview_action(
     if multimodal_review_pack is None:
         deps.remove_path_if_exists(review_pack_dir)
     public_review_pack = deps.multimodal_review_pack_public_view(config, multimodal_review_pack)
+    review_artifact_critique: dict[str, Any] | None = None
+    if multimodal_review_pack is not None:
+        critique = request_review_artifact_critique(
+            project_root=config.paths.project_root,
+            payload={
+                "folder": normalized_prefix,
+                "operator_note": trimmed_note,
+                "requested_experiment": operator_request,
+                "sample_item": {
+                    "rel_path": sample_item["rel_path"],
+                    "source_size_bytes": sample_item["source_size_bytes"],
+                    "duration_seconds": sample_item["duration_seconds"],
+                    "audio_summary": sample_item["audio_summary"],
+                },
+                "recent_calibration": calibration,
+                "current_policy": current_policy,
+                "runtime_toolbelt": runtime_toolbelt,
+                "multimodal_review_pack": multimodal_review_pack,
+            },
+        )
+        if critique.ok:
+            review_artifact_critique = {
+                "summary": critique.summary,
+                "confidence": critique.confidence,
+                "weakest_moments": critique.weakest_moments,
+                "preserved_strengths": critique.preserved_strengths,
+                "artifacts_to_recheck": critique.artifacts_to_recheck,
+                "recommendation": critique.recommendation,
+                "evidence_checked": critique.evidence_checked,
+                "prompt_version": critique.prompt_version,
+                "raw": critique.raw,
+            }
     tuning_payload = {
         "folder": normalized_prefix,
         "operator_note": trimmed_note,
@@ -399,15 +575,20 @@ def _tuned_preview_action(
         "metric_support": metric_support,
         "runtime_toolbelt": runtime_toolbelt,
         "retrieved_memory": learning_context,
+        "operator_repeat_signal": repeat_signal,
     }
     if multimodal_review_pack is not None:
         tuning_payload["multimodal_review_pack"] = multimodal_review_pack
+    if review_artifact_critique is not None:
+        tuning_payload["review_artifact_critique"] = review_artifact_critique
     tuning = request_note_tuning(project_root=config.paths.project_root, payload=tuning_payload)
     tuned_policy, applied_fragment = apply_seed_policy(current_policy, object_dict(tuning.proposed_policy), mode="tune")
     combined_fragment = applied_fragment
     advice_payload = object_dict(deps.tuning_advice_payload(tuning=tuning, note=trimmed_note, applied_fragment=applied_fragment))
     if public_review_pack is not None:
         advice_payload["multimodal_review_pack"] = public_review_pack
+    if review_artifact_critique is not None:
+        advice_payload["review_artifact_critique"] = review_artifact_critique
     advice_payload["retrieved_memory"] = learning_context
     if operator_request:
         advice_payload["operator_request"] = operator_request
@@ -419,11 +600,17 @@ def _tuned_preview_action(
         current_policy=current_policy,
         preview_policy=tuned_policy,
     )
-    can_queue = bool(combined_fragment) and alignment_issue is None
-    proposal_message = alignment_issue or (
-        "Review the bench draft, then confirm when you are ready to run the next sample."
-        if can_queue
-        else "The bench did not produce a queueable draft yet. Adjust the note and ask again."
+    can_queue = _proposal_can_queue(
+        applied_fragment=combined_fragment,
+        preview_policy=tuned_policy,
+        request_disposition=tuning.request_disposition,
+        alignment_issue=alignment_issue,
+    )
+    proposal_message = _proposal_ready_message(
+        can_queue=can_queue,
+        alignment_issue=alignment_issue,
+        has_policy_change=bool(combined_fragment),
+        run_label="next sample",
     )
     proposal_created_at = deps.now_iso()
     with open_db(config.paths.db_path) as post_connection:
@@ -439,6 +626,7 @@ def _tuned_preview_action(
             applied_policy=combined_fragment,
             toolbelt=runtime_toolbelt,
             created_at=proposal_created_at,
+            requested_experiment=operator_request,
         )
     tune_proposal_payload: dict[str, Any] = {
         "proposal_id": uuid.uuid4().hex[:12],
@@ -481,6 +669,7 @@ def _tuned_preview_action(
                 metric_support=metric_support,
                 requested_experiment=operator_request,
                 multimodal_review_pack=public_review_pack,
+                review_artifact_critique=review_artifact_critique,
             ),
         },
         "tuning_record": {

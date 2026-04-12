@@ -15,6 +15,22 @@ def planned_audio_action(audio_track: dict[str, Any], audio_policy: dict[str, An
     return "copy"
 
 
+def select_primary_audio_track(audio_tracks: list[dict[str, Any]]) -> dict[str, Any]:
+    english = [track for track in audio_tracks if track.get("language") == "eng"]
+    candidates = english or [track for track in audio_tracks if track.get("language") in {None, "und"}] or audio_tracks
+    if not candidates:
+        raise ValueError("No audio tracks available")
+
+    def sort_key(track: dict[str, Any]) -> tuple[int, int, int]:
+        return (
+            0 if track.get("default") else 1,
+            -int_value(track.get("channels")),
+            int_value(track.get("index")),
+        )
+
+    return sorted(candidates, key=sort_key)[0]
+
+
 def planned_opus_bitrate(audio_track: dict[str, Any], audio_policy: dict[str, Any]) -> str:
     channels = int_value(audio_track.get("channels")) or 2
     if channels >= 8:

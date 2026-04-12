@@ -25,6 +25,7 @@ def recent_tuning_sessions(
             tuning_sessions.c.confidence,
             tuning_sessions.c.suggested_follow_up,
             tuning_sessions.c.raw_response,
+            tuning_sessions.c.toolbelt_json,
             tuning_sessions.c.created_at,
         )
         .where(tuning_sessions.c.prefix == prefix)
@@ -38,6 +39,7 @@ def recent_tuning_sessions(
         diagnosis = str(row["diagnosis"] or "").strip()
         suggested_follow_up = str(row["suggested_follow_up"] or "").strip()
         parsed_raw = load_json_object_fn(str(row["raw_response"] or ""))
+        toolbelt = load_json_object_fn(str(row["toolbelt_json"] or ""))
         sessions.append(
             {
                 "session_id": row["session_id"],
@@ -49,6 +51,12 @@ def recent_tuning_sessions(
                 "request_disposition": str(parsed_raw.get("request_disposition") or "").strip() or None,
                 "request_response": str(parsed_raw.get("request_response") or "").strip() or None,
                 "feasibility_note": str(parsed_raw.get("feasibility_note") or "").strip() or None,
+                "requested_experiment": object_dict(toolbelt.get("requested_experiment")) or None,
+                "operator_note_parse": (
+                    object_dict(toolbelt.get("operator_note_parse"))
+                    or object_dict(object_dict(toolbelt.get("requested_experiment")).get("operator_note_parse"))
+                    or None
+                ),
                 "created_at": row["created_at"],
             }
         )

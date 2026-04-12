@@ -7,7 +7,9 @@ from typing import Any
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.execution import describe_item_plan, estimate_output_overhead_bytes
-from mediaforce.review import render_audio_spectrogram_compare, render_review_contact_sheet
+from mediaforce.review import render_audio_spectrogram_compare, render_review_contact_sheet, render_review_timeline_strip
+from mediaforce.reviewing.helpers import planned_audio_action, planned_opus_bitrate, select_primary_audio_track
+from mediaforce.web.runtime.folder_tuning_advice import audio_tradeoff_hint
 
 LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +38,7 @@ def proposal_context_snapshot(
         metric_support: dict[str, Any] | None = None,
         requested_experiment: dict[str, Any] | None = None,
         multimodal_review_pack: dict[str, Any] | None = None,
+        review_artifact_critique: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     snapshot: dict[str, Any] = {
         "goal": goal,
@@ -72,6 +75,8 @@ def proposal_context_snapshot(
         snapshot["requested_experiment"] = requested_experiment
     if multimodal_review_pack:
         snapshot["multimodal_review_pack"] = multimodal_review_pack
+    if review_artifact_critique:
+        snapshot["review_artifact_critique"] = review_artifact_critique
     return snapshot
 
 
@@ -111,6 +116,9 @@ def build_tuning_runtime_toolbelt(
             if key in sample_result
         },
     }
+    tradeoff_hint = audio_tradeoff_hint(sample_item, object_dict(current_policy.get("audio")))
+    if tradeoff_hint is not None:
+        toolbelt["audio_tradeoff_hint"] = tradeoff_hint
     review_media_context = deps.review_media_context(calibration)
     if review_media_context.get("review_media_ready") or review_media_context.get("moment_count"):
         toolbelt["review_media_context"] = review_media_context
@@ -134,10 +142,47 @@ def build_multimodal_review_pack(
     artifacts: list[dict[str, Any]] = []
     images: list[str] = []
     output_dir.mkdir(parents=True, exist_ok=True)
+    moment_signals: list[dict[str, Any]] = []
 
-    for moment in moments[:2]:
+    for moment in moments[:3]:
         source_clip_path = deps.review_file_from_url(config, str(moment.get("source_clip_path") or ""))
         preview_clip_path = deps.review_file_from_url(config, str(moment.get("preview_clip_path") or ""))
+        compare_clip_path = deps.review_file_from_url(config, str(moment.get("compare_clip_path") or ""))
+        duration_seconds = float_value(moment.get("duration_seconds")) or 8.0
+        source_size = int_value(moment.get("source_clip_size_bytes"))
+        preview_size = int_value(moment.get("preview_clip_size_bytes"))
+        size_ratio = round(preview_size / source_size, 3) if source_size > 0 and preview_size > 0 else None
+        moment_signals.append(
+            {
+                "moment": int_value(moment.get("moment")),
+                "timestamp_seconds": float_value(moment.get("timestamp_seconds")),
+                "duration_seconds": duration_seconds,
+                "preview_to_source_size_ratio": size_ratio,
+                "has_compare_clip": bool(compare_clip_path and compare_clip_path.exists()),
+            }
+        )
+        if compare_clip_path is not None and compare_clip_path.exists():
+            compare_artifact_path = output_dir / f"review-compare-moment-{int_value(moment.get('moment')):02d}.png"
+            try:
+                render_review_timeline_strip(
+                    clip_path=compare_clip_path,
+                    output_path=compare_artifact_path,
+                    duration_seconds=duration_seconds,
+                )
+            except Exception as exc:
+                LOGGER.warning("Failed to build compare timeline strip", exc_info=exc)
+            else:
+                images.append(str(compare_artifact_path))
+                artifacts.append(
+                    {
+                        "kind": "video_compare_timeline",
+                        "label": (
+                            f"Compare timeline for review moment {int_value(moment.get('moment'))} at "
+                            f"{float_value(moment.get('timestamp_seconds')):.1f}s"
+                        ),
+                        "detail": "Evenly spaced frames sampled from the actual source-versus-draft compare clip for this moment.",
+                    }
+                )
         if source_clip_path is None or preview_clip_path is None:
             continue
         if not source_clip_path.exists() or not preview_clip_path.exists():
@@ -197,11 +242,14 @@ def build_multimodal_review_pack(
 
     if not artifacts:
         return None
-    return {
+    pack = {
         "artifacts": artifacts,
         "images": images,
         "audio_plan": audio_context,
     }
+    if moment_signals:
+        pack["moment_signals"] = moment_signals
+    return pack
 
 
 def review_pack_dir(deps: FolderTuningRuntimeDeps, config: MediaforceConfig, prefix: str, request_id: str | None = None) -> Path:
@@ -257,31 +305,25 @@ def multimodal_review_pack_public_view(
     audio_plan = object_dict(review_pack.get("audio_plan"))
     if audio_plan:
         public_view["audio_plan"] = audio_plan
+    moment_signals = [object_dict(signal) for signal in object_list(review_pack.get("moment_signals")) if isinstance(signal, dict)]
+    if moment_signals:
+        public_view["moment_signals"] = moment_signals
     return public_view
 
 
 def planned_audio_review_context(*, sample_item: dict[str, Any], current_policy: dict[str, Any]) -> dict[str, Any]:
-    audio_tracks = [object_dict(track) for track in object_list(sample_item.get("audio_summary"))]
+    audio_tracks = [object_dict(track) for track in object_list(sample_item.get("audio_summary")) if isinstance(track, dict)]
     if not audio_tracks:
         return {"action": "none", "summary": "No audio tracks were available on the representative item."}
-    primary_track = object_dict(audio_tracks[0])
+    try:
+        primary_track = select_primary_audio_track(audio_tracks)
+    except ValueError:
+        return {"action": "none", "summary": "No audio tracks were available on the representative item."}
     audio_policy = object_dict(current_policy.get("audio"))
     codec = str(primary_track.get("codec_name") or "").lower()
-    copy_codecs = {str(name).lower() for name in object_list(audio_policy.get("copy_codecs"))}
-    opus_codecs = {str(name).lower() for name in object_list(audio_policy.get("convert_to_opus_codecs"))}
-    if codec in opus_codecs:
-        action = "libopus"
-    elif codec in copy_codecs:
-        action = "copy"
-    else:
-        action = "copy"
+    action = planned_audio_action(primary_track, audio_policy)
     channels = int_value(primary_track.get("channels")) or 2
-    if channels >= 8:
-        bitrate = str(audio_policy.get("surround_7_1_opus_bitrate") or "320k")
-    elif channels >= 6:
-        bitrate = str(audio_policy.get("surround_5_1_opus_bitrate") or "224k")
-    else:
-        bitrate = str(audio_policy.get("stereo_opus_bitrate") or "128k")
+    bitrate = planned_opus_bitrate(primary_track, audio_policy)
     summary = (
         f"Primary track {codec or 'unknown'} is planned for Opus at {bitrate}."
         if action == "libopus"
@@ -292,6 +334,7 @@ def planned_audio_review_context(*, sample_item: dict[str, Any], current_policy:
         "summary": summary,
         "target_bitrate": bitrate if action == "libopus" else None,
         "primary_track": {
+            "index": primary_track.get("index"),
             "codec_name": codec or None,
             "channels": channels,
             "language": primary_track.get("language"),

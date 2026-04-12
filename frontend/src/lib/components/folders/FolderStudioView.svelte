@@ -10,7 +10,7 @@
 		FolderStatusPayload,
 		HostsPayload
 	} from '$lib/api/types';
-	import { invalidateAll } from '$app/navigation';
+	import { invalidate, invalidateAll } from '$app/navigation';
 	import { postJson } from '$lib/api/client';
 	import Button from '$lib/components/Button.svelte';
 	import HostCard from '$lib/components/HostCard.svelte';
@@ -23,6 +23,9 @@
 		compactScheduleCopy,
 		compareValues,
 		comparisonValue,
+		approvalReviewSignature,
+		buildCalibrationThreadScrollSignature,
+		describeHighImpactApprovalGate,
 		encodeQueueSummaryCopy,
 		encodeStatusTone,
 		flattenPolicy,
@@ -35,10 +38,12 @@
 		formatStatusCountCopy,
 		hostCapacityCopy,
 		inferResolutionFromPath,
+		normalizeReviewArtifacts,
 		pathExtension,
 		pathStem,
 		policyRowLabel,
 		queueSummaryCopy,
+		resolveBenchDraftNote,
 		softWrapTokens,
 		summarizeAudioPlan,
 		summarizeAudioTrack,
@@ -47,6 +52,7 @@
 		summarizeSubtitlePlan,
 		summarizeSubtitleSource,
 		workbenchSection,
+		type ApprovedSeasonShortcut,
 		type BreadcrumbItem,
 		type CalibrationThreadSession,
 		type ComparisonRow,
@@ -61,7 +67,6 @@
 		type FolderReviewPair,
 		type FolderRunVerdict,
 		type FolderSampleItem,
-		type FolderMultimodalReviewArtifact,
 		type PendingSampleProposal,
 		type PolicyWorkbenchRow,
 		type PolicyWorkbenchSection,
@@ -84,12 +89,41 @@
 
 	let autoRefreshTimer: number | null = null;
 	let autoRefreshInFlight = false;
+	let autoRefreshPauseUntil = 0;
+
+	function pauseAutoRefreshFor(durationMs: number) {
+		autoRefreshPauseUntil = Math.max(autoRefreshPauseUntil, Date.now() + durationMs);
+	}
+
+	function focusedElementNeedsRefreshGrace() {
+		if (!browser) return false;
+		const activeElement = document.activeElement;
+		if (!(activeElement instanceof HTMLElement)) return false;
+		return Boolean(
+			activeElement.closest(
+				'input, textarea, select, [contenteditable="true"], [contenteditable=""], [role="textbox"]'
+			)
+		);
+	}
+
+	function shouldPauseAutoRefresh() {
+		return (
+			actionState !== null ||
+			note.trim().length > 0 ||
+			focusedElementNeedsRefreshGrace() ||
+			Date.now() < autoRefreshPauseUntil
+		);
+	}
 
 	async function refreshFolderView() {
 		if (autoRefreshInFlight) return;
 		autoRefreshInFlight = true;
 		try {
-			await invalidateAll();
+			await Promise.all([
+				invalidate(`/api/folders/${apiPrefix}`),
+				invalidate(`/api/folders/${apiPrefix}/status`),
+				invalidate('/api/hosts?compact=1')
+			]);
 		} finally {
 			autoRefreshInFlight = false;
 		}
@@ -118,8 +152,16 @@
 		() => new Map(rankedHosts.map((host) => [host.key, host] as const))
 	);
 	const calibrationJob = $derived((status.calibration_job as FolderCalibrationJob | null) ?? null);
+	const retryableSampleJob = $derived(
+		(status.retryable_sample_job as FolderCalibrationJob | null) ?? null
+	);
 	const failedCalibrationPopupKey = $derived.by(() => {
-		if (!calibrationJob || status.calibration_status !== 'failed') return null;
+		if (
+			!calibrationJob ||
+			!['failed', 'stopped'].includes(String(status.calibration_status ?? '').trim())
+		) {
+			return null;
+		}
 		const identity =
 			String(calibrationJob.job_id ?? '').trim() ||
 			String(calibrationJob.finished_at ?? calibrationJob.created_at ?? '').trim() ||
@@ -153,12 +195,16 @@
 		(folder.sample_host_options as SampleHostOption[] | undefined) ?? []
 	);
 	const calibration = $derived((folder.calibration as FolderCalibrationState | undefined) ?? {});
+	const currentCalibrationDraftHash = $derived(String(calibration.draft_hash ?? '').trim());
 	const folderAdvice = $derived((folder.advice as FolderAdviceState | undefined) ?? {});
 	const storedPendingProposal = $derived(
 		(folder.pending_proposal as PendingSampleProposal | undefined | null) ?? null
 	);
 	const calibrationAdvice = $derived(
 		(calibration.advice as FolderAdviceState | undefined) ?? folderAdvice
+	);
+	const approvedSeasonShortcut = $derived(
+		(folder.approved_season_shortcut as ApprovedSeasonShortcut | undefined | null) ?? null
 	);
 	const recentTuningSessions = $derived(
 		(folder.recent_tuning_sessions as TuningSessionSummary[] | undefined) ?? []
@@ -172,7 +218,13 @@
 	let note = $state('');
 	let selectedHost = $state('');
 	let actionState = $state<string | null>(null);
+	let highImpactApprovalArmToken = $state('');
+	let highImpactReviewedDraftHash = $state('');
+	let highImpactApprovalLocked = $state(false);
+	let highImpactApprovalLockTimer = $state<ReturnType<typeof setTimeout> | null>(null);
 	let previewDraftEcho = $state<PendingSampleProposal | null>(null);
+	let threadScrollViewport = $state<HTMLDivElement | null>(null);
+	let lastAutoScrolledThreadSignature = $state('');
 	let previewSubmission = $state<{
 		note: string;
 		hostKey: string;
@@ -197,9 +249,27 @@
 	const validatedOutputCount = $derived(Number(folderStatusCounts.validated ?? 0));
 	const promotedOutputCount = $derived(Number(folderStatusCounts.promoted ?? 0));
 	const stagedOutputCount = $derived(encodedOutputCount + validatedOutputCount);
-	const approvalButtonLabel = $derived.by(() =>
-		reviewGateStatus === 'accepted' ? 'Draft already approved' : 'Approve Draft + Save Policy'
+	const highImpactPolicySignature = $derived.by(() =>
+		approvalReviewSignature(policyComparisonRows)
 	);
+	const highImpactApprovalGate = $derived.by(() =>
+		describeHighImpactApprovalGate({
+			reviewGateStatus,
+			highImpactPolicyCount: highImpactPolicyRows.length,
+			armed:
+				highImpactPolicySignature.length > 0 &&
+				highImpactApprovalArmToken === highImpactPolicySignature
+		})
+	);
+	const approvalButtonDisabled = $derived.by(() => {
+		if (!hasCalibration) return true;
+		if (highImpactApprovalLocked) return true;
+		if (highImpactApprovalGate.requiresConfirmation && highImpactApprovalGate.armed) {
+			return !highImpactReviewedDraftHash;
+		}
+		return false;
+	});
+	const approvalButtonLabel = $derived(highImpactApprovalGate.buttonLabel);
 	const reviewGateNextActionLabel = $derived(String(reviewGate.next_action_label ?? '').trim());
 	const queueGateLabel = $derived.by(() => {
 		if (reviewGateStatus === 'needs_approval') return 'Needs approval';
@@ -374,11 +444,36 @@
 
 		return sessions;
 	});
+	const latestThreadNote = $derived.by(() => {
+		const latestSessionWithNote = calibrationThreadSessions
+			.slice()
+			.reverse()
+			.find((session) => String(session.note ?? '').trim());
+		return String(latestSessionWithNote?.note ?? '').trim();
+	});
 	const hasCalibrationThread = $derived(calibrationThreadSessions.length > 0);
 	const currentThreadSession = $derived.by(() => calibrationThreadSessions.at(-1) ?? null);
 	const calibrationThreadCountLabel = $derived.by(() => {
 		const count = calibrationThreadSessions.length;
 		return `${count} ${count === 1 ? 'turn' : 'turns'}`;
+	});
+	$effect(() => {
+		const latestSession = calibrationThreadSessions.at(-1);
+		if (!latestSession) {
+			lastAutoScrolledThreadSignature = '';
+			return;
+		}
+		if (!threadScrollViewport) return;
+		const latestSessionSignature = buildCalibrationThreadScrollSignature(
+			latestSession,
+			calibrationThreadSessions.length
+		);
+		if (latestSessionSignature === lastAutoScrolledThreadSignature) return;
+		lastAutoScrolledThreadSignature = latestSessionSignature;
+		queueMicrotask(() => {
+			if (!threadScrollViewport) return;
+			threadScrollViewport.scrollTop = threadScrollViewport.scrollHeight;
+		});
 	});
 	const hasClearableTuningState = $derived(
 		Boolean(
@@ -516,7 +611,7 @@
 		return sampleActionBlockedReason || 'Select a host before starting a sample.';
 	});
 	const reviewGateHeading = $derived.by(() => {
-		if (reviewGateStatus === 'accepted') return 'Draft approved and ready to queue';
+		if (reviewGateStatus === 'accepted') return 'Draft approved and saved';
 		if (reviewGateStatus === 'needs_approval') return 'Draft ready for approval';
 		if (reviewGateStatus === 'missing_review_media')
 			return 'Run a fresh sample to restore review clips';
@@ -527,8 +622,8 @@
 		if (reviewGateStatus === 'accepted') {
 			const acceptedAtCopy = formatDateTimeCopy(reviewGate.accepted_at);
 			return acceptedAtCopy
-				? `Approved ${acceptedAtCopy}. You can queue the full folder encode when ready.`
-				: 'This draft is approved and ready for the full folder encode queue.';
+				? `Approved ${acceptedAtCopy}. Mediaforce queues the full folder encode automatically after approval.`
+				: 'This draft is approved. Mediaforce queues the full folder encode automatically after approval.';
 		}
 		const gateMessage = String(reviewGate.message ?? '').trim();
 		if (gateMessage) return gateMessage;
@@ -574,11 +669,16 @@
 		if (hasCalibration) return 'Bench draft for the next sample';
 		return 'Bench draft for the first sample';
 	});
+	const pendingProposalNote = $derived.by(() => {
+		const explicitProposalNote = String(pendingProposal?.operator_note ?? '').trim();
+		if (explicitProposalNote) return explicitProposalNote;
+		return latestThreadNote;
+	});
 	const proposalNoteMismatch = $derived.by(() => {
 		if (!pendingProposal) return false;
 		const currentNote = note.trim();
 		if (!currentNote) return false;
-		return currentNote !== String(pendingProposal.operator_note ?? '').trim();
+		return currentNote !== pendingProposalNote;
 	});
 	const proposalHostMismatch = $derived.by(() => {
 		if (!pendingProposal) return false;
@@ -587,19 +687,73 @@
 	const pendingProposalNeedsRefresh = $derived(
 		Boolean(pendingProposal && (proposalNoteMismatch || proposalHostMismatch))
 	);
+	const retryableCalibrationJob = $derived.by(() => {
+		if (pendingProposal) return null;
+		if (!retryableSampleJob) return null;
+		const jobStatus = String(retryableSampleJob.status ?? '').trim();
+		if (!['failed', 'stopped'].includes(jobStatus)) return null;
+		if (String(retryableSampleJob.mode ?? 'sample').trim() !== 'sample') return null;
+		const action = String(retryableSampleJob.action ?? '').trim();
+		if (!['baseline', 'ai_tune'].includes(action)) return null;
+		return retryableSampleJob;
+	});
+	const retryableCalibrationHostKey = $derived(
+		String(retryableCalibrationJob?.host?.key ?? '').trim()
+	);
+	const retryableCalibrationNote = $derived(String(retryableCalibrationJob?.notes ?? '').trim());
+	const retryableCalibrationNeedsRefresh = $derived.by(() => {
+		if (!retryableCalibrationJob) return false;
+		const currentNote = note.trim();
+		if (currentNote && currentNote !== retryableCalibrationNote) return true;
+		return selectedHost.trim() !== retryableCalibrationHostKey;
+	});
+	const retryableCalibrationRefreshBlockedByEmptyNote = $derived.by(() => {
+		if (!retryableCalibrationNeedsRefresh) return false;
+		return note.trim().length === 0;
+	});
+	const benchDraftBlockedByEmptyNote = $derived.by(
+		() => hasCalibration && note.trim().length === 0
+	);
+	const canRetrySavedSampleDraft = $derived(
+		Boolean(retryableCalibrationJob && !retryableCalibrationNeedsRefresh)
+	);
 	const previewButtonLabel = $derived.by(() => {
-		if (pendingProposalNeedsRefresh) return 'Refresh bench draft';
-		if (pendingProposal) return 'Ask bench again';
-		return 'Ask bench first';
+		if (benchDraftBlockedByEmptyNote) return 'Add note first';
+		if (retryableCalibrationNeedsRefresh || pendingProposalNeedsRefresh) return 'Refresh draft';
+		return 'Ask bench';
 	});
 	const confirmButtonLabel = $derived.by(() => {
+		if (canRetrySavedSampleDraft)
+			return selectedHostLabel ? `Run this sample on ${selectedHostLabel}` : 'Run this sample';
+		if (retryableCalibrationRefreshBlockedByEmptyNote) return 'Add note first';
+		if (retryableCalibrationNeedsRefresh) return 'Refresh draft first';
 		if (!pendingProposal) return 'Run sample after bench draft';
-		if (pendingProposalNeedsRefresh) return 'Run sample after draft refresh';
+		if (retryableCalibrationNeedsRefresh || pendingProposalNeedsRefresh)
+			return 'Run sample after draft refresh';
 		if (!pendingProposalCanQueue) return 'Run sample after draft fix';
 		return selectedHostLabel ? `Run this sample on ${selectedHostLabel}` : 'Run this sample';
 	});
+	const canRunPrimarySampleAction = $derived.by(() => {
+		if (!canRunSample || sampleRunActive || actionState === 'preview') return false;
+		if (canRetrySavedSampleDraft) return true;
+		if (retryableCalibrationRefreshBlockedByEmptyNote) return false;
+		if (retryableCalibrationNeedsRefresh) return false;
+		if (!pendingProposal) return false;
+		if (pendingProposalNeedsRefresh) return false;
+		return pendingProposalCanQueue;
+	});
 	const canRequestBenchDraft = $derived(
-		canRunSample && !sampleRunActive && actionState !== 'preview'
+		canRunSample &&
+			!sampleRunActive &&
+			actionState !== 'preview' &&
+			!retryableCalibrationRefreshBlockedByEmptyNote &&
+			!benchDraftBlockedByEmptyNote
+	);
+	const canUseApprovedSeasonShortcut = $derived(
+		canRunSample &&
+			!sampleRunActive &&
+			actionState !== 'preview' &&
+			Boolean(String(approvedSeasonShortcut?.suggested_note ?? '').trim())
 	);
 	const sampleActionSupportCopy = $derived.by(() => {
 		if (actionState === 'preview') {
@@ -613,41 +767,79 @@
 				sampleActionBlockedReason || 'Choose a ready host before asking the bench for a draft.'
 			);
 		}
+		if (canRetrySavedSampleDraft) {
+			return 'The last sample draft is still available. Run it again to retry the test encode without asking the bench again.';
+		}
+		if (retryableCalibrationRefreshBlockedByEmptyNote) {
+			return 'Add a note in the bench chat before refreshing the stopped sample draft. The tuner needs updated guidance when the next run changes host or request.';
+		}
+		if (retryableCalibrationNeedsRefresh) {
+			return 'You changed the note or host since the stopped sample. Refresh the bench draft in the chat below so the next run matches the latest request.';
+		}
 		if (pendingProposalNeedsRefresh) {
-			return 'You changed the note or host. Refresh the bench draft so the plan matches what will run.';
+			return 'You changed the note or host. Refresh the bench draft in the chat below so the plan matches what will run.';
 		}
 		if (pendingProposal) {
 			return pendingProposalCanQueue
 				? 'The draft is ready. Review the warning and the policy changes, then run the sample when it looks right.'
 				: String(pendingProposal.message ?? 'Adjust the note and ask the bench again.');
 		}
-		return 'Ask the bench for a proposed sample first. Nothing queues until you approve that draft.';
+		return 'Use the bench chat below to draft the next sample. Nothing queues until you approve that draft.';
 	});
 	const nextActionStatus = $derived.by(() => {
 		if (sampleRunActive) return { label: 'In progress', variant: 'neutral' as const };
 		if (!canRunSample) return { label: 'Blocked', variant: 'warn' as const };
-		if (pendingProposalNeedsRefresh) return { label: 'Needs refresh', variant: 'warn' as const };
+		if (canRetrySavedSampleDraft) return { label: 'Ready to run', variant: 'ok' as const };
+		if (retryableCalibrationRefreshBlockedByEmptyNote)
+			return { label: 'Add note', variant: 'warn' as const };
+		if (retryableCalibrationNeedsRefresh)
+			return { label: 'Refresh in chat', variant: 'warn' as const };
+		if (pendingProposalNeedsRefresh) return { label: 'Refresh in chat', variant: 'warn' as const };
 		if (pendingProposal && pendingProposalCanQueue) {
 			return { label: 'Ready to run', variant: 'ok' as const };
 		}
 		if (pendingProposal) return { label: 'Needs revision', variant: 'neutral' as const };
-		return { label: 'Draft first', variant: 'default' as const };
+		return { label: 'Draft in chat', variant: 'default' as const };
 	});
 	const nextActionHeading = $derived.by(() => {
 		if (sampleRunActive) return 'Wait for the current sample to finish';
 		if (!canRunSample) return 'Choose a ready host';
-		if (pendingProposalNeedsRefresh) return 'Refresh the bench draft';
+		if (canRetrySavedSampleDraft) {
+			return selectedHostLabel
+				? `Run the saved draft on ${selectedHostLabel}`
+				: 'Run the saved draft';
+		}
+		if (retryableCalibrationRefreshBlockedByEmptyNote) return 'Add a note before refreshing';
+		if (retryableCalibrationNeedsRefresh) return 'Refresh the draft in bench chat';
+		if (pendingProposalNeedsRefresh) return 'Refresh the draft in bench chat';
 		if (pendingProposal && pendingProposalCanQueue) {
 			return selectedHostLabel ? `Run the draft on ${selectedHostLabel}` : 'Run the draft';
 		}
-		if (pendingProposal) return 'Revise the draft before running';
-		return 'Ask the bench for a draft';
+		if (pendingProposal) return 'Revise the draft in bench chat';
+		return 'Draft the next sample in bench chat';
 	});
 	const noteSubmitHint = $derived.by(() => {
+		if (actionState === 'preview') {
+			return selectedHostLabel
+				? `The bench is drafting the next sample for ${selectedHostLabel}.`
+				: 'The bench is drafting the next sample now.';
+		}
+		if (benchDraftBlockedByEmptyNote) {
+			return 'Add a note for the bench before asking for another draft.';
+		}
 		if (canRequestBenchDraft) {
 			return 'Press Enter to ask the bench. Shift+Enter adds a new line.';
 		}
 		return sampleActionBlockedReason || 'Choose a ready host before asking the bench for a draft.';
+	});
+	const approvedSeasonShortcutSummary = $derived.by(() => {
+		const labels = (approvedSeasonShortcut?.season_labels ?? []).filter((value) =>
+			String(value).trim()
+		);
+		if (!labels.length) return '';
+		if (labels.length === 1) return labels[0];
+		if (labels.length === 2) return `${labels[0]} and ${labels[1]}`;
+		return `${labels.slice(0, 2).join(', ')}, and ${labels.length - 2} more`;
 	});
 	const proposalWorkbenchRows = $derived.by(() => {
 		if (!pendingProposal) return [] as PolicyWorkbenchRow[];
@@ -774,15 +966,12 @@
 			(calibrationAdvice.multimodal_review_pack as FolderMultimodalReviewPack | undefined | null) ??
 			null
 	);
-	const visibleReviewArtifacts = $derived.by(() =>
-		((visibleReviewPack?.artifacts as FolderMultimodalReviewArtifact[] | undefined) ?? [])
-			.map((artifact) => ({
-				kind: String(artifact.kind ?? '').trim(),
-				label: String(artifact.label ?? '').trim(),
-				detail: String(artifact.detail ?? '').trim(),
-				imageUrl: String(artifact.image_url ?? '').trim()
-			}))
-			.filter((artifact) => artifact.label || artifact.detail || artifact.imageUrl)
+	const visibleReviewArtifacts = $derived(normalizeReviewArtifacts(visibleReviewPack));
+	const visibleAudioReviewArtifacts = $derived(
+		visibleReviewArtifacts.filter((artifact) => artifact.category === 'audio')
+	);
+	const visibleVisualReviewArtifacts = $derived(
+		visibleReviewArtifacts.filter((artifact) => artifact.category === 'visual')
 	);
 	const visibleReviewPackHeading = $derived.by(() => {
 		if (!visibleReviewArtifacts.length) return '';
@@ -797,9 +986,9 @@
 				: visibleReviewArtifacts.length;
 		const noun = artifactCount === 1 ? 'artifact' : 'artifacts';
 		if (pendingProposal) {
-			return `These are the exact review images attached to the current bench draft (${artifactCount} ${noun}).`;
+			return `These are the exact review artifacts attached to the current bench draft (${artifactCount} ${noun}).`;
 		}
-		return `These are the exact review images attached to the latest saved bench reply (${artifactCount} ${noun}).`;
+		return `These are the exact review artifacts attached to the latest saved bench reply (${artifactCount} ${noun}).`;
 	});
 	const visibleReviewAudioSummary = $derived(
 		String(visibleReviewPack?.audio_plan?.summary ?? '').trim()
@@ -839,7 +1028,7 @@
 		const scheduleRefresh = () => {
 			if (cancelled) return;
 			autoRefreshTimer = window.setTimeout(async () => {
-				if (!cancelled && document.visibilityState === 'visible') {
+				if (!cancelled && document.visibilityState === 'visible' && !shouldPauseAutoRefresh()) {
 					await refreshFolderView();
 				}
 				scheduleRefresh();
@@ -847,17 +1036,38 @@
 		};
 
 		const handleVisibilityChange = () => {
-			if (document.visibilityState === 'visible') {
+			if (document.visibilityState === 'visible' && !shouldPauseAutoRefresh()) {
 				void refreshFolderView();
 			}
 		};
 
+		const handlePointerDown = (event: PointerEvent) => {
+			const target = event.target;
+			if (!(target instanceof HTMLElement)) return;
+			if (target.closest('a[href], button, summary, [role="button"], [role="link"]')) {
+				pauseAutoRefreshFor(1500);
+			}
+		};
+
+		const handleKeyDown = (event: KeyboardEvent) => {
+			if (event.key !== 'Enter' && event.key !== ' ') return;
+			const target = event.target;
+			if (!(target instanceof HTMLElement)) return;
+			if (target.closest('a[href], button, summary, [role="button"], [role="link"]')) {
+				pauseAutoRefreshFor(1500);
+			}
+		};
+
 		document.addEventListener('visibilitychange', handleVisibilityChange);
+		document.addEventListener('pointerdown', handlePointerDown, true);
+		document.addEventListener('keydown', handleKeyDown, true);
 		scheduleRefresh();
 
 		return () => {
 			cancelled = true;
 			document.removeEventListener('visibilitychange', handleVisibilityChange);
+			document.removeEventListener('pointerdown', handlePointerDown, true);
+			document.removeEventListener('keydown', handleKeyDown, true);
 			if (autoRefreshTimer !== null) {
 				window.clearTimeout(autoRefreshTimer);
 				autoRefreshTimer = null;
@@ -1289,8 +1499,13 @@
 			? 'Recover Failed Files'
 			: ['needs_attention', 'failed', 'stopped'].includes(encodeJobStatus)
 				? 'Retry Folder Encode'
-				: 'Queue Folder Encode'
+				: 'Start Saved Folder Encode'
 	);
+	const queueActionVisible = $derived.by(() => {
+		if (encodeJobCanRecoverNow) return true;
+		if (['needs_attention', 'failed', 'stopped'].includes(encodeJobStatus)) return true;
+		return reviewGate.can_confirm_full && !encodeJobStatus;
+	});
 	const workflowStageCards = $derived.by(() => {
 		const draftStage = (() => {
 			if (reviewGateStatus === 'accepted') {
@@ -1333,10 +1548,15 @@
 					encodeJobStatus
 				)
 			) {
-				return { key: 'queue', label: 'Queue', status: 'current', detail: queueEncodeButtonLabel };
+				return { key: 'queue', label: 'Queue', status: 'current', detail: encodeJobHeadline };
 			}
 			if (reviewGateStatus === 'accepted') {
-				return { key: 'queue', label: 'Queue', status: 'current', detail: 'Ready to queue' };
+				return {
+					key: 'queue',
+					label: 'Queue',
+					status: 'current',
+					detail: 'Auto-queued after approval'
+				};
 			}
 			if (promotedOutputCount > 0 || encodeJobStatus === 'completed') {
 				return { key: 'queue', label: 'Queue', status: 'done', detail: 'Encode finished' };
@@ -1534,6 +1754,9 @@
 			['Quality guardrail', 'Size ceiling', 'Film grain'].includes(row.label)
 		)
 	);
+	const highImpactPolicyLabels = $derived.by(() =>
+		highImpactPolicyRows.map((row) => row.label.toLowerCase()).join(', ')
+	);
 	const steadyPolicyRows = $derived.by<SteadyComparisonRow[]>(() =>
 		policyComparisonRows
 			.filter((row) => !row.changed)
@@ -1544,10 +1767,54 @@
 	);
 
 	$effect(() => {
+		return () => {
+			if (highImpactApprovalLockTimer) {
+				clearTimeout(highImpactApprovalLockTimer);
+			}
+		};
+	});
+
+	$effect(() => {
+		if (!highImpactApprovalGate.requiresConfirmation) {
+			highImpactApprovalArmToken = '';
+			highImpactReviewedDraftHash = '';
+			highImpactApprovalLocked = false;
+			return;
+		}
+		if (
+			highImpactApprovalArmToken &&
+			highImpactPolicySignature &&
+			highImpactApprovalArmToken !== highImpactPolicySignature
+		) {
+			highImpactApprovalArmToken = '';
+			highImpactReviewedDraftHash = '';
+			highImpactApprovalLocked = false;
+		}
+		if (
+			highImpactApprovalGate.armed &&
+			highImpactReviewedDraftHash &&
+			currentCalibrationDraftHash &&
+			highImpactReviewedDraftHash !== currentCalibrationDraftHash
+		) {
+			highImpactApprovalArmToken = '';
+			highImpactReviewedDraftHash = '';
+			highImpactApprovalLocked = false;
+		}
+	});
+
+	$effect(() => {
 		if (!browser) {
 			return;
 		}
-		if (!calibrationJob || status.calibration_status !== 'failed' || !failedCalibrationPopupKey) {
+		if (pendingProposalCanQueue) {
+			toasts.remove(calibrationFailureNoticeId);
+			return;
+		}
+		if (
+			!calibrationJob ||
+			!['failed', 'stopped'].includes(String(status.calibration_status ?? '').trim()) ||
+			!failedCalibrationPopupKey
+		) {
 			toasts.remove(calibrationFailureNoticeId);
 			return;
 		}
@@ -1559,12 +1826,20 @@
 		toasts.upsert({
 			id: calibrationFailureNoticeId,
 			kind: 'error',
-			eyebrow: calibrationJob.mode === 'full' ? 'Proof Encode Failed' : 'Calibration Failed',
+			eyebrow:
+				calibrationJob.mode === 'full'
+					? 'Proof Encode Stopped'
+					: status.calibration_status === 'stopped'
+						? 'Calibration Stopped'
+						: 'Calibration Failed',
 			heading:
 				calibrationJob.mode === 'full'
 					? 'Representative-file proof encode stopped before review clips were ready'
 					: 'Sample calibration stopped before a reviewable draft was ready',
-			lede: 'The last background run failed. Review the failure detail before retrying so the next click does not feel like a no-op.',
+			lede:
+				status.calibration_status === 'stopped'
+					? 'The last background run was stopped. Review the stop detail before retrying so the next click does not feel like a no-op.'
+					: 'The last background run failed. Review the failure detail before retrying so the next click does not feel like a no-op.',
 			detail: calibrationFailureDetail,
 			dismissLabel: 'Dismiss',
 			autoCloseMs: null,
@@ -1692,14 +1967,18 @@
 			return;
 		}
 		event.preventDefault();
-		if (!canRunSample || sampleRunActive || actionState === 'preview') {
+		if (!canRequestBenchDraft) {
 			return;
 		}
 		void previewSampleDraft();
 	}
 
-	async function previewSampleDraft() {
-		const submittedNote = note.trim();
+	function handlePreviewSampleDraftClick() {
+		void previewSampleDraft();
+	}
+
+	async function previewSampleDraft(noteOverride?: unknown) {
+		const submittedNote = resolveBenchDraftNote(note, noteOverride);
 		const submittedHostKey = selectedHost.trim();
 		const submittedHostLabel = String(selectedHostLabel).trim();
 		previewSubmission = {
@@ -1738,9 +2017,52 @@
 		}
 	}
 
-	async function runSample() {
-		if (!pendingProposal?.proposal_id) {
+	async function previewApprovedSeasonDraft() {
+		const suggestedNote = String(approvedSeasonShortcut?.suggested_note ?? '').trim();
+		if (!suggestedNote) {
 			await previewSampleDraft();
+			return;
+		}
+		const currentNote = note.trim();
+		const submittedNote = currentNote
+			? currentNote.includes(suggestedNote)
+				? currentNote
+				: `${currentNote}\n\n${suggestedNote}`
+			: suggestedNote;
+		await previewSampleDraft(submittedNote);
+	}
+
+	async function runSample() {
+		if (canRetrySavedSampleDraft) {
+			actionState = 'sample';
+			try {
+				const response = await postJson<{ ok: boolean; message: string }>(
+					`/api/folders/${apiPrefix}/ai-tune/confirm`,
+					{ proposal_id: '' }
+				);
+				toasts.success('Sample queued', response.message);
+				previewDraftEcho = null;
+				previewSubmission = null;
+				await invalidateAll();
+			} catch (error) {
+				toasts.error(
+					'Could not queue sample',
+					error instanceof Error ? error.message : 'Unexpected sample error'
+				);
+			} finally {
+				actionState = null;
+			}
+			return;
+		}
+		if (
+			!pendingProposal?.proposal_id ||
+			pendingProposalNeedsRefresh ||
+			retryableCalibrationNeedsRefresh
+		) {
+			const guidance = retryableCalibrationNeedsRefresh
+				? 'Refresh the saved sample draft from the bench chat below before queueing the next run.'
+				: 'Use the bench chat below to draft or refresh the next sample before queueing it.';
+			toasts.info('Bench draft required', guidance);
 			return;
 		}
 		actionState = 'sample';
@@ -1767,13 +2089,41 @@
 	}
 
 	async function saveProfile() {
+		if (highImpactApprovalGate.requiresConfirmation && !highImpactApprovalGate.armed) {
+			highImpactApprovalArmToken = highImpactPolicySignature;
+			highImpactReviewedDraftHash = currentCalibrationDraftHash;
+			highImpactApprovalLocked = true;
+			if (highImpactApprovalLockTimer) {
+				clearTimeout(highImpactApprovalLockTimer);
+			}
+			highImpactApprovalLockTimer = setTimeout(() => {
+				highImpactApprovalLocked = false;
+				highImpactApprovalLockTimer = null;
+			}, 750);
+			toasts.info(
+				'Review high-impact changes',
+				`Read the diff for ${highImpactPolicyLabels || 'the highlighted policy rows'}, then press "Confirm High-Impact Approval" to save the draft and queue the folder.`
+			);
+			return;
+		}
 		actionState = 'save';
 		try {
-			const response = await postJson<{ message: string }>(
+			const response = await postJson<{ message: string; auto_queue_status?: string }>(
 				`/api/folders/${apiPrefix}/save-profile`,
-				{}
+				{
+					confirm_high_impact: highImpactApprovalGate.requiresConfirmation,
+					reviewed_draft_hash: highImpactReviewedDraftHash || currentCalibrationDraftHash
+				}
 			);
-			toasts.success('Draft approved', response.message);
+			const autoQueueStatus = String(response.auto_queue_status ?? '').trim();
+			if (autoQueueStatus === 'blocked') {
+				toasts.info('Draft approved', response.message);
+			} else {
+				toasts.success(
+					autoQueueStatus === 'queued' ? 'Draft approved and queued' : 'Draft approved',
+					response.message
+				);
+			}
 			await invalidateAll();
 		} catch (error) {
 			toasts.error(
@@ -1925,6 +2275,28 @@
 				</div>
 			</div>
 		</div>
+		{#if actionState === 'preview' && previewSubmission}
+			<div class="status-strip internal-status-strip">
+				<div class="section-copy-block">
+					<div class="status-strip-signal" aria-live="polite">
+						<span class="status-strip-beacon" aria-hidden="true"></span>
+						<span>Drafting bench reply</span>
+					</div>
+					<p class="eyebrow-copy">Bench request</p>
+					<p class="status-strip-title">The bench is preparing the next sample draft now</p>
+					<p class="muted-copy">
+						{previewSubmission.hostLabel
+							? `Mediaforce is reading the latest note and review context for ${previewSubmission.hostLabel}. The updated draft card will appear below when the reply lands.`
+							: 'Mediaforce is reading the latest note and review context. The updated draft card will appear below when the reply lands.'}
+					</p>
+				</div>
+				<p class="status-strip-meta">
+					{previewSubmission.note
+						? `Latest note: ${previewSubmission.note}`
+						: 'Using the current host and saved review context'}
+				</p>
+			</div>
+		{/if}
 		<div class="workflow-stage-strip" aria-label="Folder workflow stages">
 			{#each workflowStageCards as stage (stage.key)}
 				<div class={`workflow-stage-card ${stage.status}`.trim()}>
@@ -2133,20 +2505,38 @@
 									class="action-row primary-action-row compact-action-row single-primary-action-row"
 								>
 									<Button
-										loading={actionState === 'sample'}
-										disabled={!canRunSample ||
-											sampleRunActive ||
-											!pendingProposal ||
-											!pendingProposalCanQueue ||
-											pendingProposalNeedsRefresh}
+										loading={actionState === 'sample' || actionState === 'preview'}
+										disabled={!canRunPrimarySampleAction}
 										onclick={runSample}>{confirmButtonLabel}</Button
 									>
 								</div>
 								<p class="inline-gate-copy sample-action-copy action-inline-note">
 									<span class="eyebrow-copy">Run gate</span>
-									{pendingProposalCanQueue && !pendingProposalNeedsRefresh
-										? 'The current draft is aligned with the selected host and can queue when you confirm it.'
-										: 'The sample button stays locked until the host is ready and the current bench draft matches what will run.'}
+									{#if !canRunSample}
+										The sample button stays locked until the host is ready.
+									{:else if sampleRunActive}
+										Wait for the current sample to finish before starting another one.
+									{:else if canRetrySavedSampleDraft}
+										The last bench draft is already saved for this host, so this button reruns that
+										test encode directly.
+									{:else if retryableCalibrationRefreshBlockedByEmptyNote}
+										Add a note before refreshing this stopped sample draft. The tuner cannot build a
+										new draft from an empty request.
+									{:else if retryableCalibrationNeedsRefresh}
+										The saved sample draft no longer matches the current note or host. Refresh it
+										from the bench chat below before queueing the next run.
+									{:else if !pendingProposal}
+										Use the bench chat below to draft the next sample. This button only queues a
+										ready draft.
+									{:else if pendingProposalNeedsRefresh}
+										The note or host changed. Refresh the draft from the bench chat below so the
+										queued sample matches the latest request.
+									{:else if pendingProposalCanQueue}
+										The current draft is aligned with the selected host and can queue when you
+										confirm it.
+									{:else}
+										Adjust the draft or ask the bench again before queueing the sample.
+									{/if}
 								</p>
 								{#if hasClearableTuningState}
 									<details class="danger-disclosure">
@@ -2177,46 +2567,23 @@
 
 					<div class="studio-main">
 						<div class="bench-workspace-shell">
-							<div class="field-block note-panel note-composer-card">
-								<span class="eyebrow-copy">{noteFieldLabel}</span>
-								<span class="muted-copy note-lede">{noteFieldLede}</span>
-								<textarea
-									bind:value={note}
-									rows="3"
-									onkeydown={handleNoteKeydown}
-									placeholder={notePlaceholder}
-								></textarea>
-								{#if reviewConversationCopy}
-									<p class="inline-gate-copy note-review-copy">
-										<span class="eyebrow-copy">Bench context</span>
-										{reviewConversationCopy}
-									</p>
-								{/if}
-								<div class="note-composer-footer">
-									<p class="muted-copy note-submit-hint">{noteSubmitHint}</p>
-									<Button
-										variant="secondary"
-										loading={actionState === 'preview'}
-										disabled={!canRequestBenchDraft}
-										onclick={previewSampleDraft}>{previewButtonLabel}</Button
-									>
-								</div>
-							</div>
-
-							{#if calibrationThreadSessions.length}
-								<section class="thread-history-shell inline-thread-shell">
-									<div class="thread-inline-head">
-										<div class="section-copy-block">
-											<p class="eyebrow-copy">Calibration thread</p>
-											<p class="muted-copy thread-history-copy">
-												Every operator note and bench reply stays in this one scrolling
-												conversation.
-											</p>
-										</div>
-										<span class="thread-history-meta">{calibrationThreadCountLabel}</span>
+							<section class="bench-chat-shell">
+								<div class="thread-inline-head bench-chat-head">
+									<div class="section-copy-block">
+										<p class="eyebrow-copy">Bench chat</p>
+										<p class="muted-copy thread-history-copy">
+											Talk to the bench in one running conversation. Draft requests, in-progress
+											replies, and saved guidance all stay here.
+										</p>
 									</div>
-									<div class="calibration-thread-shell history-thread-shell">
-										<div class="calibration-thread-list thread-scroll-list">
+									<span class="thread-history-meta">{calibrationThreadCountLabel}</span>
+								</div>
+								<div
+									bind:this={threadScrollViewport}
+									class="calibration-thread-shell history-thread-shell thread-scroll-list bench-chat-log"
+								>
+									{#if calibrationThreadSessions.length}
+										<div class="calibration-thread-list">
 											{#each calibrationThreadSessions as session (session.key)}
 												{#if session.note}
 													<article class="thread-turn operator-turn">
@@ -2290,9 +2657,70 @@
 												{/if}
 											{/each}
 										</div>
+									{:else}
+										<div class="bench-chat-empty">
+											<p class="thread-role">Bench</p>
+											<p class="thread-copy">
+												Ask for the first draft to start the bench conversation.
+											</p>
+											<p class="thread-support">
+												Your latest request, the bench reply, and any pending draft state will all
+												stay in this one thread.
+											</p>
+										</div>
+									{/if}
+								</div>
+								<div class="field-block note-panel bench-chat-composer">
+									<div class="section-copy-block">
+										<span class="eyebrow-copy">{noteFieldLabel}</span>
+										<span class="muted-copy note-lede">{noteFieldLede}</span>
 									</div>
-								</section>
-							{/if}
+									<textarea
+										bind:value={note}
+										rows="3"
+										onkeydown={handleNoteKeydown}
+										placeholder={notePlaceholder}
+									></textarea>
+									{#if reviewConversationCopy || approvedSeasonShortcut}
+										<div class="bench-chat-context">
+											{#if reviewConversationCopy}
+												<p class="inline-gate-copy note-review-copy">
+													<span class="eyebrow-copy">Bench context</span>
+													{reviewConversationCopy}
+												</p>
+											{/if}
+											{#if approvedSeasonShortcut}
+												<p class="inline-gate-copy note-review-copy approved-season-shortcut-copy">
+													<span class="eyebrow-copy">Approved season memory</span>
+													{approvedSeasonShortcut.count} approved {approvedSeasonShortcut.count ===
+													1
+														? 'season is'
+														: 'seasons are'} already saved for {approvedSeasonShortcut.root_label}.
+													Use the shortcut to ask the bench to match {approvedSeasonShortcutSummary}.
+												</p>
+											{/if}
+										</div>
+									{/if}
+									<div class="note-composer-footer bench-chat-footer">
+										<p class="muted-copy note-submit-hint">{noteSubmitHint}</p>
+										<div class="action-row note-composer-actions">
+											{#if approvedSeasonShortcut}
+												<Button
+													variant="ghost"
+													loading={actionState === 'preview'}
+													disabled={!canUseApprovedSeasonShortcut}
+													onclick={previewApprovedSeasonDraft}>Match approved seasons</Button
+												>
+											{/if}
+											<Button
+												loading={actionState === 'preview'}
+												disabled={!canRequestBenchDraft}
+												onclick={handlePreviewSampleDraftClick}>{previewButtonLabel}</Button
+											>
+										</div>
+									</div>
+								</div>
+							</section>
 
 							{#if pendingProposal}
 								<div
@@ -2672,29 +3100,74 @@
 											{visibleReviewAudioSummary}
 										</p>
 									{/if}
-									<div class="review-pack-grid">
-										{#each visibleReviewArtifacts as artifact (artifact.imageUrl || artifact.label)}
-											<article class="review-pack-card">
-												<button
-													type="button"
-													class="review-pack-link"
-													onclick={() => openReviewAsset(artifact.imageUrl)}
-												>
-													<img
-														src={artifact.imageUrl}
-														alt={artifact.label || 'Bench review artifact'}
-														loading="lazy"
-													/>
-												</button>
-												<div class="review-pack-copy">
-													<p class="proposal-memory-title">{artifact.label || 'Review artifact'}</p>
-													{#if artifact.detail}
-														<p class="thread-support">{artifact.detail}</p>
-													{/if}
-												</div>
-											</article>
-										{/each}
-									</div>
+									{#if visibleAudioReviewArtifacts.length}
+										<div class="review-pack-section">
+											<div class="section-copy-block review-pack-section-copy">
+												<p class="eyebrow-copy">Audio graph</p>
+												<p class="muted-copy">
+													The spectrogram compare from this bench draft is surfaced separately so it
+													doesn't get buried after the video frames.
+												</p>
+											</div>
+											<div class="review-pack-grid review-pack-audio-grid">
+												{#each visibleAudioReviewArtifacts as artifact (artifact.imageUrl || artifact.label)}
+													<article class="review-pack-card">
+														<button
+															type="button"
+															class="review-pack-link"
+															onclick={() => openReviewAsset(artifact.imageUrl)}
+														>
+															<img
+																src={artifact.imageUrl}
+																alt={artifact.label || 'Bench review artifact'}
+																loading="lazy"
+															/>
+														</button>
+														<div class="review-pack-copy">
+															<p class="proposal-memory-title">{artifact.label || 'Review artifact'}</p>
+															{#if artifact.detail}
+																<p class="thread-support">{artifact.detail}</p>
+															{/if}
+														</div>
+													</article>
+												{/each}
+											</div>
+										</div>
+									{/if}
+									{#if visibleVisualReviewArtifacts.length}
+										<div class="review-pack-section">
+											<div class="section-copy-block review-pack-section-copy">
+												<p class="eyebrow-copy">Image review</p>
+												<p class="muted-copy">
+													Compare timelines and frame sheets captured from the same retained review
+													moments.
+												</p>
+											</div>
+											<div class="review-pack-grid">
+												{#each visibleVisualReviewArtifacts as artifact (artifact.imageUrl || artifact.label)}
+													<article class="review-pack-card">
+														<button
+															type="button"
+															class="review-pack-link"
+															onclick={() => openReviewAsset(artifact.imageUrl)}
+														>
+															<img
+																src={artifact.imageUrl}
+																alt={artifact.label || 'Bench review artifact'}
+																loading="lazy"
+															/>
+														</button>
+														<div class="review-pack-copy">
+															<p class="proposal-memory-title">{artifact.label || 'Review artifact'}</p>
+															{#if artifact.detail}
+																<p class="thread-support">{artifact.detail}</p>
+															{/if}
+														</div>
+													</article>
+												{/each}
+											</div>
+										</div>
+									{/if}
 								</div>
 							{/if}
 						</div>
@@ -2827,16 +3300,17 @@
 							{#if highImpactPolicyRows.length}
 								<p class="inline-gate-copy proposal-warning-copy impact-warning-copy">
 									<span class="eyebrow-copy">High-impact changes</span>
-									This draft makes larger-than-usual moves to {highImpactPolicyRows
-										.map((row) => row.label.toLowerCase())
-										.join(', ')}. Read the diff before you queue the full folder.
+									This draft makes larger-than-usual moves to {highImpactPolicyLabels}. {#if highImpactApprovalGate.armed}Read
+										the diff one last time, then press Confirm High-Impact Approval to save and
+										queue the folder.{:else}Read the diff before you approve and queue the full
+										folder.{/if}
 								</p>
 							{/if}
 							{#if reviewGateStatus === 'accepted'}
 								<p class="inline-gate-copy review-action-copy accepted-next-step-copy">
 									<span class="eyebrow-copy">Next move</span>
-									The saved draft is locked in. Queue or retry the folder encode when you want Mediaforce
-									to continue this folder.
+									The saved draft is locked in. Mediaforce queues approved folders automatically, so only
+									retry the folder encode here if a prior run stopped early.
 								</p>
 							{/if}
 							<div class="action-row review-action-row stacked-review-actions">
@@ -2846,25 +3320,30 @@
 									<Button
 										variant="secondary"
 										loading={actionState === 'save'}
-										disabled={!hasCalibration}
+										disabled={approvalButtonDisabled}
 										onclick={saveProfile}>{approvalButtonLabel}</Button
 									>
 								{/if}
-								<div class="queue-action-block">
-									<Button
-										variant={reviewGate.can_confirm_full ? 'primary' : 'ghost'}
-										loading={actionState === 'encode'}
-										disabled={!reviewGate.can_confirm_full}
-										onclick={queueEncode}>{queueEncodeButtonLabel}</Button
-									>
-									{#if !reviewGate.can_confirm_full}
-										<p class="inline-gate-copy">
-											<span class="eyebrow-copy">{reviewGateNextActionLabel || queueGateLabel}</span
+								{#if queueActionVisible || !reviewGate.can_confirm_full}
+									<div class="queue-action-block">
+										{#if queueActionVisible}
+											<Button
+												variant={reviewGate.can_confirm_full ? 'primary' : 'ghost'}
+												loading={actionState === 'encode'}
+												disabled={!reviewGate.can_confirm_full}
+												onclick={queueEncode}>{queueEncodeButtonLabel}</Button
 											>
-											{String(reviewGate.message ?? 'Run or review a calibration to continue.')}
-										</p>
-									{/if}
-								</div>
+										{/if}
+										{#if !reviewGate.can_confirm_full}
+											<p class="inline-gate-copy">
+												<span class="eyebrow-copy"
+													>{reviewGateNextActionLabel || queueGateLabel}</span
+												>
+												{String(reviewGate.message ?? 'Run or review a calibration to continue.')}
+											</p>
+										{/if}
+									</div>
+								{/if}
 							</div>
 						</div>
 
@@ -3397,6 +3876,7 @@
 	}
 
 	.host-picker-shell,
+	.bench-chat-shell,
 	.note-composer-card,
 	.archived-diagnosis-shell {
 		display: grid;
@@ -3426,11 +3906,67 @@
 	}
 
 	.bench-workspace-shell .note-composer-card,
+	.bench-workspace-shell .bench-chat-shell,
 	.bench-workspace-shell .diagnosis-shell,
 	.bench-workspace-shell .archived-diagnosis-shell {
 		background: rgba(255, 255, 255, 0.72);
 		border-color: rgba(104, 87, 61, 0.08);
 		box-shadow: none;
+	}
+
+	.bench-chat-shell {
+		gap: 0.9rem;
+		padding: 1rem 1.05rem;
+		background:
+			linear-gradient(180deg, rgba(255, 255, 255, 0.8), rgba(255, 251, 245, 0.72)),
+			radial-gradient(circle at top left, rgba(221, 199, 160, 0.16), transparent 36%);
+	}
+
+	.bench-workspace-shell .bench-chat-shell {
+		border-color: rgba(164, 115, 46, 0.12);
+		background:
+			linear-gradient(180deg, rgba(255, 255, 255, 0.8), rgba(255, 251, 245, 0.72)),
+			radial-gradient(circle at top left, rgba(221, 199, 160, 0.16), transparent 36%);
+	}
+
+	.bench-chat-head {
+		align-items: center;
+	}
+
+	.bench-chat-log {
+		max-height: 34rem;
+		padding: 0.95rem;
+		background:
+			linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(251, 247, 240, 0.9)),
+			rgba(221, 199, 160, 0.08);
+		border-color: rgba(164, 115, 46, 0.12);
+	}
+
+	.bench-chat-empty {
+		display: grid;
+		gap: 0.35rem;
+		align-content: center;
+		min-height: 12rem;
+		padding: 0.35rem 0.2rem;
+	}
+
+	.bench-chat-composer {
+		gap: 0.75rem;
+		padding: 0.95rem 1rem;
+		border-radius: var(--radius-md);
+		border: 1px solid rgba(15, 118, 110, 0.12);
+		background:
+			linear-gradient(180deg, rgba(244, 252, 249, 0.92), rgba(255, 255, 255, 0.84)),
+			radial-gradient(circle at bottom right, rgba(15, 118, 110, 0.08), transparent 34%);
+	}
+
+	.bench-chat-context {
+		display: grid;
+		gap: 0.55rem;
+	}
+
+	.bench-chat-footer {
+		align-items: center;
 	}
 
 	.bench-workspace-shell .diagnosis-shell {
@@ -3734,7 +4270,6 @@
 	}
 
 	.thread-scroll-list {
-		max-height: 34rem;
 		overflow: auto;
 		padding-right: 0.35rem;
 	}
@@ -4008,10 +4543,23 @@
 		margin-top: 0.25rem;
 	}
 
+	.review-pack-section {
+		display: grid;
+		gap: 0.7rem;
+	}
+
+	.review-pack-section-copy {
+		gap: 0.18rem;
+	}
+
 	.review-pack-grid {
 		display: grid;
 		gap: 0.8rem;
 		grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+	}
+
+	.review-pack-audio-grid {
+		grid-template-columns: minmax(0, 1fr);
 	}
 
 	.review-pack-card {
@@ -4039,6 +4587,12 @@
 		height: auto;
 		aspect-ratio: 16 / 10;
 		object-fit: cover;
+	}
+
+	.review-pack-audio-grid .review-pack-link img {
+		aspect-ratio: 16 / 6;
+		object-fit: contain;
+		background: rgba(247, 246, 241, 0.94);
 	}
 
 	.review-pack-copy {

@@ -1,7 +1,7 @@
 import json
 from typing import Any
 
-from mediaforce.core.type_defs import JSONObject, JSONValue, float_value, int_value
+from mediaforce.core.type_defs import JSONObject, JSONValue, float_value, int_value, object_dict
 
 _SKIP_POLICY_VALUE = object()
 
@@ -47,11 +47,20 @@ def tune_self_check_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["status", "summary", "issues"],
+        "required": ["status", "summary", "issues", "surround_audio_guardrail"],
         "properties": {
             "status": {"type": "string", "enum": ["pass", "warn", "fail"]},
             "summary": {"type": "string"},
             "issues": {"type": "array", "items": {"type": "string"}},
+            "surround_audio_guardrail": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["status", "reason"],
+                "properties": {
+                    "status": {"type": "string", "enum": ["ok", "prefer_preserve_current"]},
+                    "reason": {"type": "string"},
+                },
+            },
         },
     }
 
@@ -70,6 +79,66 @@ def run_verdict_schema() -> dict[str, Any]:
             "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
             "next_step": {"type": ["string", "null"]},
             "evidence_checked": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+
+
+def review_artifact_critique_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "summary",
+            "confidence",
+            "weakest_moments",
+            "preserved_strengths",
+            "artifacts_to_recheck",
+            "recommendation",
+            "evidence_checked",
+        ],
+        "properties": {
+            "summary": {"type": "string"},
+            "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+            "weakest_moments": {"type": "array", "items": {"type": "string"}},
+            "preserved_strengths": {"type": "array", "items": {"type": "string"}},
+            "artifacts_to_recheck": {"type": "array", "items": {"type": "string"}},
+            "recommendation": {"type": "string"},
+            "evidence_checked": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+
+
+def operator_note_parse_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "summary",
+            "intent_type",
+            "request_type",
+            "operator_confirmed",
+            "metric",
+            "metric_target",
+            "size_budget_value",
+            "size_budget_unit",
+            "reasoning_note",
+        ],
+        "properties": {
+            "summary": {"type": "string"},
+            "intent_type": {
+                "type": "string",
+                "enum": ["direct_request", "exploratory_question", "approval_feedback", "other", "unclear"],
+            },
+            "request_type": {
+                "type": "string",
+                "enum": ["none", "metric_target", "size_budget", "combined_experiment"],
+            },
+            "operator_confirmed": {"type": "boolean"},
+            "metric": {"type": ["string", "null"], "enum": ["vmaf", "xpsnr", None]},
+            "metric_target": {"type": ["number", "null"]},
+            "size_budget_value": {"type": ["number", "null"]},
+            "size_budget_unit": {"type": ["string", "null"], "enum": ["kb", "mb", "gb", "tb", None]},
+            "reasoning_note": {"type": "string"},
         },
     }
 
@@ -151,6 +220,17 @@ def compact_policy_payload(policy: dict[str, Any] | None) -> dict[str, Any] | No
         if cleaned:
             compacted[section] = cleaned
     return compacted
+
+
+def merge_policy_fragments(*fragments: dict[str, Any] | None) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for fragment in fragments:
+        for section, values in object_dict(fragment).items():
+            normalized_values = object_dict(values)
+            if not normalized_values:
+                continue
+            merged.setdefault(section, {}).update(normalized_values)
+    return merged
 
 
 def policy_response_schema(policy: dict[str, Any]) -> dict[str, Any]:
@@ -261,7 +341,7 @@ def normalize_video_policy_value(key: str, value: JSONValue, base_value: JSONVal
     if key in {"min_crf", "max_crf"}:
         return clamp_int(value, minimum=0, maximum=63)
     if key == "max_encoded_percent":
-        return clamp_int(value, minimum=10, maximum=100)
+        return clamp_int(value, minimum=1, maximum=100)
     if key == "default_grain":
         return clamp_int(value, minimum=0, maximum=50)
     if key == "grain_denoise":

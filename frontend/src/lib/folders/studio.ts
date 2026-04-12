@@ -1,13 +1,14 @@
 import type { FolderPayload, HostRuntime } from '$lib/api/types';
 import { titleCase } from '$lib/format';
 
-export type FolderActionHost = { label?: string };
+export type FolderActionHost = { key?: string; label?: string };
 export type FolderCalibrationJob = {
 	job_id?: string;
 	status?: string;
 	mode?: string;
 	action?: string;
 	host?: FolderActionHost;
+	notes?: string;
 	error?: string | null;
 	created_at?: string | null;
 	finished_at?: string | null;
@@ -79,6 +80,39 @@ export type FolderItemPlan = {
 export type FolderQueueSample = { running_count?: number; queued_count?: number };
 export type FolderCalibrationQueue = { sample?: FolderQueueSample };
 export type EncodeStatusTone = 'live' | 'queued' | 'warning' | 'neutral';
+export type HighImpactApprovalGate = {
+	requiresConfirmation: boolean;
+	armed: boolean;
+	buttonLabel: string;
+};
+
+export function resolveBenchDraftNote(note: string, noteOverride?: unknown): string {
+	return typeof noteOverride === 'string' ? noteOverride.trim() : note.trim();
+}
+
+export function buildCalibrationThreadScrollSignature(
+	session: CalibrationThreadSession,
+	threadCount: number
+): string {
+	return [
+		session.key,
+		session.note,
+		session.requestResponse ?? '',
+		session.requestDisposition ?? '',
+		session.summary,
+		session.diagnosis ?? '',
+		session.feasibilityNote ?? '',
+		session.confidence ?? '',
+		session.suggestedFollowUp ?? '',
+		session.runSummary ?? '',
+		session.runNextStep ?? '',
+		session.runOutcome ?? '',
+		session.runConfidence ?? '',
+		String(session.isCurrent),
+		String(threadCount)
+	].join('\u001f');
+}
+
 export type FolderReviewClip = {
 	path?: string;
 	timestamp_seconds?: number;
@@ -93,6 +127,9 @@ export type FolderReviewPair = {
 	compare_clip?: FolderReviewClip | null;
 };
 export type FolderCalibrationState = {
+	job_id?: string;
+	draft_hash?: string;
+	accepted_draft_hash?: string;
 	compare_clips?: FolderReviewClip[];
 	preview_clips?: FolderReviewClip[];
 	source_clips?: FolderReviewClip[];
@@ -135,6 +172,13 @@ export type FolderMultimodalReviewArtifact = {
 	detail?: string | null;
 	image_url?: string | null;
 };
+export type VisibleReviewArtifact = {
+	kind: string;
+	label: string;
+	detail: string;
+	imageUrl: string;
+	category: 'audio' | 'visual';
+};
 export type FolderMultimodalReviewPack = {
 	artifact_count?: number;
 	artifacts?: FolderMultimodalReviewArtifact[];
@@ -149,6 +193,27 @@ export type FolderMultimodalReviewPack = {
 		} | null;
 	} | null;
 };
+
+export function normalizeReviewArtifacts(
+	reviewPack: FolderMultimodalReviewPack | null | undefined
+): VisibleReviewArtifact[] {
+	return ((reviewPack?.artifacts as FolderMultimodalReviewArtifact[] | undefined) ?? [])
+		.map((artifact) => {
+			const kind = String(artifact.kind ?? '').trim();
+			const category: VisibleReviewArtifact['category'] = /audio|spectrogram/i.test(kind)
+				? 'audio'
+				: 'visual';
+			return {
+				kind,
+				label: String(artifact.label ?? '').trim(),
+				detail: String(artifact.detail ?? '').trim(),
+				imageUrl: String(artifact.image_url ?? '').trim(),
+				category
+			};
+		})
+		.filter((artifact) => artifact.label || artifact.detail || artifact.imageUrl);
+}
+
 export type FolderAdviceState = {
 	summary?: string;
 	diagnosis?: string | null;
@@ -252,6 +317,14 @@ export type ReviewGate = {
 	status?: string;
 	accepted_at?: string;
 	next_action_label?: string;
+};
+export type ApprovedSeasonShortcut = {
+	root_prefix?: string;
+	root_label?: string;
+	count?: number;
+	season_labels?: string[];
+	season_prefixes?: string[];
+	suggested_note?: string;
 };
 export type BreadcrumbHref = '/' | `/folders/${string}`;
 export type BreadcrumbItem = { label: string; href: BreadcrumbHref | null };
@@ -765,4 +838,38 @@ export function formatDateTimeCopy(value: string | null | undefined): string {
 		hour: 'numeric',
 		minute: '2-digit'
 	});
+}
+
+export function describeHighImpactApprovalGate({
+	reviewGateStatus,
+	highImpactPolicyCount,
+	armed
+}: {
+	reviewGateStatus: string | null | undefined;
+	highImpactPolicyCount: number;
+	armed: boolean;
+}): HighImpactApprovalGate {
+	if (reviewGateStatus === 'accepted') {
+		return {
+			requiresConfirmation: false,
+			armed: false,
+			buttonLabel: 'Draft already approved'
+		};
+	}
+	const requiresConfirmation = highImpactPolicyCount > 0;
+	const confirmationArmed = requiresConfirmation && armed;
+	return {
+		requiresConfirmation,
+		armed: confirmationArmed,
+		buttonLabel: confirmationArmed ? 'Confirm High-Impact Approval' : 'Approve Draft + Queue Folder'
+	};
+}
+
+export function approvalReviewSignature(rows: ComparisonRow[]): string {
+	return rows
+		.map(
+			(row) =>
+				`${row.label}:${row.current.headline}:${row.current.detail ?? ''}:${row.draft.headline}:${row.draft.detail ?? ''}:${row.changed ? 'changed' : 'steady'}`
+		)
+		.join('|');
 }
