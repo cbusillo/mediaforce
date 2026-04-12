@@ -23,6 +23,8 @@ mediaforce-web = "mediaforce.web.app:main"
 [tool.hatch.build.targets.wheel]
 packages = ["mediaforce"]
 
+[tool.hatch.build.targets.wheel.hooks.custom]
+
 [tool.hatch.build.targets.wheel.force-include]
 "frontend/build" = "mediaforce/web/frontend_build"
 

@@ -339,11 +339,26 @@ For local backend work, use
 file and log under `~/Library/Application Support/mediaforce/`, and the
 `smoke` action checks `/`, `/api/dashboard`, `/api/settings`, and `/api/hosts`.
 
+To enforce the local acceptance gate before each commit, point Git at the
+checked-in hooks once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+That pre-commit hook runs `scripts/pre-commit-check.sh`, which executes the
+full backend pytest suite, CLI smoke, frontend type checks, staged-file
+frontend lint, frontend unit tests, and frontend build.
+
 For frontend development, run the Svelte app from
 `frontend/` with `npm run dev`. The Vite dev server
 proxies `/api/*` and `/review-media/*` back to the FastAPI backend. For the
 single-server local UI, build the frontend with `npm run build`; FastAPI will
 then serve the built SPA from `frontend/build/`.
+
+When packaging Mediaforce with `uv build`, the wheel build now runs
+`npm ci` plus `npm run build` automatically so the packaged app always embeds a
+fresh frontend bundle from source.
 
 Host configuration is now unified too: Mediaforce no longer injects a special
 synthetic local host. If you want the current machine to participate in sample

@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<project version="4">
-  <component name="DataSourcePerFileMappings">
-    <file url="file://$PROJECT_DIR$/mediaforce/core/db_migrations.py" value="9d45ecea-29d8-4b4a-a7bb-44ea00bcb8cc" />
-    <file url="file://$PROJECT_DIR$/tests/test_encode_queue_recovery.py" value="9d45ecea-29d8-4b4a-a7bb-44ea00bcb8cc" />
-  </component>
-</project>
