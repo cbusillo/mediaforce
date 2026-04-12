@@ -1,13 +1,13 @@
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from sqlalchemy import select
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import library_items
+from mediaforce.core.db_tables import library_items, staged_artifacts
 
 FolderGroup = tuple[str, str, str, str]
 FolderBadge = dict[str, str | None]
@@ -30,6 +30,47 @@ class FolderCard:
     review_badge_label: str | None = None
     review_badge_tone: str | None = None
     details_loading: bool = False
+
+
+@dataclass(slots=True)
+class SavingsHistory:
+    total_source_bytes: int = 0
+    total_bytes_saved: int = 0
+    sample_count: int = 0
+    known_codec_sample_count: int = 0
+    codec_counts: dict[str, int] = field(default_factory=dict)
+
+    def record(self, *, source_size_bytes: int, bytes_saved: int, codec_key: str | None = None) -> None:
+        if source_size_bytes <= 0:
+            return
+        self.total_source_bytes += source_size_bytes
+        self.total_bytes_saved += bytes_saved
+        self.sample_count += 1
+        if codec_key:
+            self.known_codec_sample_count += 1
+            self.codec_counts[codec_key] = self.codec_counts.get(codec_key, 0) + 1
+
+    @property
+    def savings_ratio(self) -> float:
+        if self.total_source_bytes <= 0:
+            return 0.0
+        return max(0.0, min(self.total_bytes_saved / self.total_source_bytes, 0.95))
+
+    @property
+    def dominant_codec_key(self) -> str | None:
+        if not self.codec_counts:
+            return None
+        dominant_codec, dominant_count = max(self.codec_counts.items(), key=lambda item: item[1])
+        if sum(1 for count in self.codec_counts.values() if count == dominant_count) > 1:
+            return None
+        return dominant_codec
+
+    @property
+    def dominant_codec_share(self) -> float:
+        dominant_codec = self.dominant_codec_key
+        if dominant_codec is None or self.sample_count <= 0:
+            return 0.0
+        return self.codec_counts[dominant_codec] / self.sample_count
 
 
 _FOLDER_CARD_CACHE_LOCK = threading.Lock()
@@ -83,6 +124,7 @@ def preview_folder_cards(
         estimate_savings_bytes: Callable[..., int],
         review_badge_for_prefix: Callable[[str], FolderBadge],
 ) -> list[FolderCard]:
+    folder_history, codec_history = _load_savings_history(connection, folder_group=folder_group)
     rows = connection.execute(
         select(
             library_items.c.rel_path,
@@ -126,10 +168,13 @@ def preview_folder_cards(
         codec = str(row["video_codec"] or "unknown")
         if status != "promoted":
             card.pending_count += 1
-            card.estimated_savings_bytes += estimate_savings_bytes(
+            card.estimated_savings_bytes += _estimated_pending_savings_bytes(
                 size_bytes=size_bytes,
                 video_codec=codec,
                 audio_summary_json=str(row["audio_summary_json"] or "[]"),
+                estimate_savings_bytes=estimate_savings_bytes,
+                folder_history=folder_history.get(prefix),
+                codec_history=codec_history.get(_canonical_video_codec(codec)),
             )
         card.statuses[status] = card.statuses.get(status, 0) + 1
         card.video_codecs[codec] = card.video_codecs.get(codec, 0) + 1
@@ -151,6 +196,7 @@ def list_folder_cards(
         estimate_savings_bytes: Callable[..., int],
         review_badge_for_prefix: Callable[[str], FolderBadge],
 ) -> list[FolderCard]:
+    folder_history, codec_history = _load_savings_history(connection, folder_group=folder_group)
     rows = connection.execute(
         select(
             library_items.c.rel_path,
@@ -195,10 +241,13 @@ def list_folder_cards(
         status = str(row["status"] or "unknown")
         codec = str(row["video_codec"] or "unknown")
         if status != "promoted":
-            estimated_savings = estimate_savings_bytes(
+            estimated_savings = _estimated_pending_savings_bytes(
                 size_bytes=size_bytes,
                 video_codec=codec,
                 audio_summary_json=str(row["audio_summary_json"] or "[]"),
+                estimate_savings_bytes=estimate_savings_bytes,
+                folder_history=folder_history.get(prefix),
+                codec_history=codec_history.get(_canonical_video_codec(codec)),
             )
             age_multiplier = _age_multiplier(path_age_days)
             card.pending_count += 1
@@ -252,6 +301,103 @@ def _apply_folder_review_badges(cards: list[FolderCard], review_badge_for_prefix
         badge = review_badge_for_prefix(card.prefix)
         card.review_badge_label = badge["label"]
         card.review_badge_tone = badge["tone"]
+
+
+def _load_savings_history(
+        connection: DBClient,
+        *,
+        folder_group: Callable[[str], FolderGroup | None],
+) -> tuple[dict[str, SavingsHistory], dict[str, SavingsHistory]]:
+    rows = connection.execute(
+        select(
+            library_items.c.rel_path,
+            staged_artifacts.c.source_rel_path,
+            staged_artifacts.c.source_video_codec,
+            staged_artifacts.c.source_size_bytes,
+            staged_artifacts.c.bytes_saved,
+        )
+        .select_from(
+            staged_artifacts.join(
+                library_items,
+                staged_artifacts.c.library_item_id == library_items.c.id,
+            )
+        )
+        .where(staged_artifacts.c.promoted_at.is_not(None))
+        .where(staged_artifacts.c.source_size_bytes.is_not(None))
+        .where(staged_artifacts.c.bytes_saved.is_not(None))
+    ).mappings().fetchall()
+
+    folder_history: dict[str, SavingsHistory] = {}
+    codec_history: dict[str, SavingsHistory] = {}
+    for row in rows:
+        source_size_bytes = int(row["source_size_bytes"] or 0)
+        if source_size_bytes <= 0:
+            continue
+        bytes_saved = int(row["bytes_saved"] or 0)
+        codec = _history_video_codec_key(row["source_video_codec"])
+        rel_path = str(row["source_rel_path"] or row["rel_path"] or "")
+        group = folder_group(rel_path)
+        if group is not None and codec is not None:
+            history = folder_history.setdefault(group[0], SavingsHistory())
+            history.record(source_size_bytes=source_size_bytes, bytes_saved=bytes_saved, codec_key=codec)
+        if codec is not None:
+            history = codec_history.setdefault(codec, SavingsHistory())
+            history.record(source_size_bytes=source_size_bytes, bytes_saved=bytes_saved, codec_key=codec)
+    return folder_history, codec_history
+
+
+def _estimated_pending_savings_bytes(
+        *,
+        size_bytes: int,
+        video_codec: str,
+        audio_summary_json: str,
+        estimate_savings_bytes: Callable[..., int],
+        folder_history: SavingsHistory | None,
+        codec_history: SavingsHistory | None,
+) -> int:
+    if size_bytes <= 0:
+        return 0
+    pending_codec = _canonical_video_codec(video_codec)
+    if _folder_history_matches_pending_codec(folder_history, pending_codec):
+        return int(size_bytes * folder_history.savings_ratio)
+    if codec_history is not None and codec_history.sample_count > 0:
+        return int(size_bytes * codec_history.savings_ratio)
+    return estimate_savings_bytes(
+        size_bytes=size_bytes,
+        video_codec=video_codec,
+        audio_summary_json=audio_summary_json,
+    )
+
+
+def _folder_history_matches_pending_codec(history: SavingsHistory | None, pending_codec: str) -> bool:
+    if history is None or history.sample_count < 2 or history.known_codec_sample_count < 2:
+        return False
+    dominant_codec = history.dominant_codec_key
+    if dominant_codec is None:
+        return False
+    if pending_codec != "unknown" and dominant_codec != pending_codec:
+        return False
+    return history.dominant_codec_share > 0.5
+
+
+def _canonical_video_codec(codec: str) -> str:
+    normalized = codec.strip().lower()
+    if not normalized:
+        return "unknown"
+    return {
+        "h265": "hevc",
+        "hvc1": "hevc",
+        "hev1": "hevc",
+        "avc1": "h264",
+        "avc3": "h264",
+    }.get(normalized, normalized)
+
+
+def _history_video_codec_key(codec: object) -> str | None:
+    canonical = _canonical_video_codec(str(codec or ""))
+    if canonical == "unknown":
+        return None
+    return canonical
 
 
 def _age_multiplier(age_days: float) -> float:
