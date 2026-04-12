@@ -15,7 +15,8 @@ from sqlalchemy import literal_column
 from sqlalchemy import select
 from sqlalchemy import update
 
-from mediaforce.tuning.calibration_jobs import claim_next_queued_calibration_job, load_latest_job, queue_position, save_job
+from mediaforce.tuning.calibration_jobs import claim_next_queued_calibration_job, load_latest_job, \
+    load_latest_retryable_sample_job, load_latest_sample_job, queue_position, save_job
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, DBRow, open_db
 from mediaforce.core.db_tables import calibration_jobs
@@ -85,9 +86,45 @@ def load_job_state(
         if position is not None:
             payload["queue_position"] = position[0]
             payload["queue_depth"] = position[1]
-    if status in {"failed", "completed"}:
+    if status in {"failed", "completed", "stopped"}:
         finished_at = deps.parse_iso(payload.get("finished_at") or payload.get("started_at") or payload.get("created_at"))
-        if finished_at and datetime.now(tz=UTC) - finished_at > deps.calibration_job_notice_after:
+        if (
+                finished_at and
+                datetime.now(tz=UTC) - finished_at > deps.calibration_job_notice_after and
+                not retryable_saved_sample_job(payload)
+        ):
+            return None
+    return payload
+
+
+def load_retryable_sample_job_state(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+        deps: JobRuntimeDeps,
+) -> dict[str, Any] | None:
+    payload = load_latest_retryable_sample_job(connection, prefix)
+    if payload is None:
+        return None
+    latest_sample_payload = load_latest_sample_job(connection, prefix)
+    if latest_sample_payload is not None and str(latest_sample_payload.get("job_id") or "") != str(payload.get("job_id") or ""):
+        return None
+    status = str(payload.get("status") or "")
+    if status == "running" and not calibration_job_belongs_to_current_process(payload):
+        payload = expire_calibration_job(connection, config, prefix, payload, deps)
+        status = str(payload.get("status") or "")
+    if status == "queued":
+        position = queue_position(connection, str(payload["job_id"]))
+        if position is not None:
+            payload["queue_position"] = position[0]
+            payload["queue_depth"] = position[1]
+    if status in {"failed", "completed", "stopped"}:
+        finished_at = deps.parse_iso(payload.get("finished_at") or payload.get("started_at") or payload.get("created_at"))
+        if (
+                finished_at and
+                datetime.now(tz=UTC) - finished_at > deps.calibration_job_notice_after and
+                not retryable_saved_sample_job(payload)
+        ):
             return None
     return payload
 
@@ -106,6 +143,17 @@ def save_job_state(
 def calibration_job_belongs_to_current_process(job: dict[str, Any]) -> bool:
     numeric_pid = _coerce_pid(job.get("owner_pid"))
     return numeric_pid is not None and numeric_pid == os.getpid()
+
+
+def retryable_saved_sample_job(job: dict[str, Any]) -> bool:
+    status = str(job.get("status") or "").strip()
+    if status not in {"failed", "stopped"}:
+        return False
+    mode = str(job.get("mode") or job.get("lane") or "sample").strip()
+    if mode != "sample":
+        return False
+    action = str(job.get("action") or "").strip()
+    return action in {"baseline", "ai_tune"}
 
 
 def expire_calibration_job(

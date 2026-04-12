@@ -44,6 +44,7 @@ from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.db_tables import tuning_sessions
 from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY, clear_terminal_encode_jobs_for_prefix, \
     ensure_queue_state, load_active_encode_job_for_prefix, load_latest_encode_job, \
+    repair_persisted_encode_job_hosts, \
     queue_position as encode_queue_position, save_encode_job, summarize_encode_queue
 from mediaforce.execution import (
     build_svt_params,
@@ -78,14 +79,16 @@ from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.tuning.tuning_memory import (
     record_tuning_session,
     record_visual_approval_artifact,
+    sibling_approved_season_memory,
 )
 from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, object_dict, object_list
-from mediaforce.web.routes import register_dashboard_routes, register_folder_routes, register_frontend_routes, \
-    register_host_routes, register_queue_routes, register_settings_routes
+from mediaforce.web.routes import register_completed_routes, register_dashboard_routes, register_folder_routes, \
+    register_frontend_routes, register_host_routes, register_queue_routes, register_settings_routes
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_folders_payload, \
     dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
     archive_cleanup_summary, clear_archive_cleanup_action, \
+    clear_completed_backups_action, completed_page_payload, list_completed_folders, \
     ensure_encode_host_ready, \
     folder_ai_tune_action, folder_ai_tune_confirm_action, folder_ai_tune_preview_action, \
     folder_card_cache_key, folder_status_payload, host_config_for_key, host_lifecycle_start_command, \
@@ -95,13 +98,14 @@ from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_fo
     planned_audio_review_context, preview_folder_cards, proposal_alignment_issue, \
     proposal_context_snapshot, proposal_signal_copy, promote_folder_outputs_action, \
     queue_folder_encode_action, recent_tuning_sessions, \
-    refresh_host_status_cache, reset_folder_card_cache, resume_encode_queue_action, review_media_context, \
+    refresh_host_status_cache, reset_folder_card_cache, resume_encode_queue_action, \
+    retry_failed_encode_queue_action, review_media_context, \
     review_pack_dir, review_pair_key, review_pairs, safe_collect_host_statuses, save_advice_state, \
     save_calibration_state, save_pending_proposal, save_profile_action, \
     sample_calibration_host_statuses, sample_host_options, sample_host_options_from_statuses, \
     settings_page_payload, stop_calibration_queue_action, stop_encode_queue_action, \
     validate_folder_outputs_action, \
-    build_multimodal_review_pack, build_tuning_runtime_toolbelt
+    build_multimodal_review_pack, build_tuning_runtime_toolbelt, load_retryable_sample_job_state
 from mediaforce.web.runtime.folder_actions import ActionPayload, FolderItem
 from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
     restore_staged_artifact as runtime_restore_staged_artifact, \
@@ -138,6 +142,7 @@ from mediaforce.web.runtime.folder_tuning_advice import build_run_verdict_payloa
     build_seed_policy_payload as runtime_build_seed_policy_payload, \
     calibration_draft_hash as runtime_calibration_draft_hash, \
     job_seed_metadata as runtime_job_seed_metadata, metric_status_copy as runtime_metric_status_copy, \
+    matching_request_history as runtime_matching_request_history, \
     metric_support as runtime_metric_support, \
     maybe_seed_baseline_policy as runtime_maybe_seed_baseline_policy, \
     operator_requested_experiment as runtime_operator_requested_experiment, \
@@ -289,6 +294,9 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     async def _app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
         purge_transient_artifacts(config, force=True)
         with open_db(config.paths.db_path) as connection:
+            repaired_host_rows = repair_persisted_encode_job_hosts(connection)
+            if repaired_host_rows:
+                LOGGER.warning("Repaired %s persisted encode job host payloads.", repaired_host_rows)
             ensure_queue_state(connection, updated_at=_now_iso())
             _recover_calibration_jobs(connection, config)
             _recover_encode_queue(connection, config)
@@ -321,6 +329,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         return await call_next(request)
 
     def _settings_page_payload(
+            include_archive_cleanup: bool = True,
             *,
             error: str | None = None,
             saved: bool = False,
@@ -330,13 +339,14 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             remote_hosts: list[dict[str, str]] | None = None,
             transcode_root: str | None = None,
             encode_queue_scheduler: dict[str, Any] | None = None,
-            schedule_profiles: list[dict[str, str]] | None = None,
+            schedule_profiles: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         return settings_page_payload(
             config,
             encode_queue_scheduler_policy=_encode_queue_scheduler_policy,
             normalize_encode_queue_scheduler=_normalize_encode_queue_scheduler,
             archive_cleanup_summary_fn=archive_cleanup_summary,
+            include_archive_cleanup=include_archive_cleanup,
             error=error,
             saved=saved,
             host_notice=host_notice,
@@ -379,6 +389,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             config,
             normalized_prefix,
             load_job_state=_load_job_state,
+            load_retryable_sample_job_state=_load_retryable_sample_job_state,
             load_scan_job_state=_load_scan_job_state,
             load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
         )
@@ -389,7 +400,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             remote_hosts: list[dict[str, Any]],
             transcode_root: str,
             encode_queue_scheduler: dict[str, Any],
-            schedule_profiles: list[dict[str, str]],
+            schedule_profiles: list[dict[str, Any]],
     ) -> dict[str, Any]:
         nonlocal config
         if not transcode_root:
@@ -473,10 +484,19 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         app,
         settings_payload=_settings_page_payload,
         save_settings_action=_save_settings_action,
+        archive_cleanup_payload=lambda transcode_root=None: archive_cleanup_summary(
+            config,
+            transcode_root=transcode_root,
+        ),
         clear_archive_cleanup_action=lambda transcode_root=None: clear_archive_cleanup_action(
             config,
             transcode_root=transcode_root,
         ),
+    )
+    register_completed_routes(
+        app,
+        completed_payload=lambda: _completed_page_payload(),
+        clear_completed_backups_action=lambda prefixes=None: _clear_completed_backups_action(prefixes),
     )
     register_host_routes(
         app,
@@ -525,6 +545,10 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             pending_proposal = _pending_proposal_public_view(pending_proposal_raw)
             calibration = _load_calibration_state(config, normalized_prefix)
             recent_sessions = _recent_tuning_sessions(connection, normalized_prefix)
+            approved_season_shortcut = sibling_approved_season_memory(
+                connection,
+                prefix=normalized_prefix,
+            )
             review_gate = _review_gate(calibration)
             hot_spots = _preview_hotspots(sample_item, calibration)
             calibration_queue = list_queue_summary(connection, limit_per_lane=3)
@@ -545,6 +569,13 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             calibration=calibration,
             pending_proposal=pending_proposal_raw,
         )
+        advice_state = _backfill_multimodal_review_pack(
+            config,
+            normalized_prefix,
+            sample_item=sample_item,
+            calibration=calibration,
+            advice_state=advice_state,
+        )
         video_policy = object_dict(policy.get("video"))
         resolved_metric, _ = select_quality_metric(str(video_policy.get("quality_metric", "auto")))
         sample_host_statuses = _sample_calibration_host_statuses(config)
@@ -563,6 +594,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 "advice": advice_state,
                 "pending_proposal": pending_proposal,
                 "recent_tuning_sessions": recent_sessions,
+                "approved_season_shortcut": approved_season_shortcut,
                 "review_gate": review_gate,
                 "calibration_queue": calibration_queue,
                 "encode_job": encode_job,
@@ -577,6 +609,31 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             },
             200,
         )
+
+    def _completed_page_payload() -> dict[str, Any]:
+        with open_db(config.paths.db_path) as connection:
+            return completed_page_payload(
+                config,
+                connection,
+                folder_group=_folder_group,
+            )
+
+    def _clear_completed_backups_action(prefixes: list[str] | None) -> dict[str, Any]:
+        with open_db(config.paths.db_path) as connection:
+            folders = list_completed_folders(
+                connection,
+                folder_group=_folder_group,
+                archive_root=config.archive_root,
+            )
+        valid_prefixes = {folder.prefix for folder in folders}
+        result = clear_completed_backups_action(
+            config,
+            folder_group=_folder_group,
+            prefixes=prefixes,
+            valid_prefixes=valid_prefixes,
+        )
+        result["completed"] = _completed_page_payload()
+        return result
 
     def _recent_tuning_sessions(connection: DBClient, prefix: str, limit: int = 8) -> list[dict[str, Any]]:
         return recent_tuning_sessions(connection, prefix, load_json_object_fn=_load_json_object, limit=limit)
@@ -610,9 +667,12 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         return FolderAiTuneDeps(
             resolve_sample_host=_resolve_sample_host,
             load_job_state=_load_job_state,
+            load_retryable_sample_job_state=_load_retryable_sample_job_state,
             sample_item=_sample_item,
             operator_requested_experiment=_operator_requested_experiment,
             load_calibration_state=_load_calibration_state,
+            recent_tuning_sessions=_recent_tuning_sessions,
+            matching_request_history=runtime_matching_request_history,
             metric_support=_metric_support,
             maybe_seed_baseline_policy=_maybe_seed_baseline_policy,
             seed_advice_payload=_seed_advice_payload,
@@ -701,11 +761,16 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             promote_manifest_items_fn=promote_manifest_items,
         )
 
-    def _save_profile_action(normalized_prefix: str) -> ActionPayload:
+    def _save_profile_action(
+            normalized_prefix: str,
+            confirm_high_impact: bool,
+            reviewed_draft_hash: str,
+    ) -> ActionPayload:
         return save_profile_action(
             config,
             normalized_prefix,
             now_iso=_now_iso,
+            load_sample_item=_sample_item,
             load_calibration_state=_load_calibration_state,
             calibration_draft_hash=_calibration_draft_hash,
             save_calibration_state=_save_calibration_state,
@@ -713,6 +778,9 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             record_visual_approval_artifact=record_visual_approval_artifact,
             merge_advice_state=_merge_advice_state,
             upsert_override=_upsert_override,
+            auto_queue_folder_encode=_queue_folder_encode_action,
+            confirm_high_impact=confirm_high_impact,
+            reviewed_draft_hash=reviewed_draft_hash,
         )
 
     def _pause_encode_queue_action() -> dict[str, Any]:
@@ -735,6 +803,15 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             config=config,
             now_iso=_now_iso,
             cancel_queue_process=_cancel_active_encode_processes,
+        )
+
+    def _retry_failed_encode_queue_action() -> dict[str, Any]:
+        return retry_failed_encode_queue_action(
+            connection_factory=lambda: open_db(config.paths.db_path),
+            config=config,
+            load_calibration_state=_load_calibration_state,
+            review_gate=_review_gate,
+            queue_folder_encode_action=_queue_folder_encode_action,
         )
 
     def _stop_calibration_queue_action() -> dict[str, Any]:
@@ -776,6 +853,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         app,
         pause_encode_queue_action=_pause_encode_queue_action,
         resume_encode_queue_action=_resume_encode_queue_action,
+        retry_failed_encode_queue_action=_retry_failed_encode_queue_action,
         stop_encode_queue_action=_stop_encode_queue_action,
         stop_calibration_queue_action=_stop_calibration_queue_action,
     )
@@ -839,7 +917,7 @@ def _download_review_compare_action(config: MediaforceConfig, prefix: str) -> Fi
     return FileResponse(
         bundle_path,
         filename=download_name,
-        media_type="video/x-matroska",
+        media_type="video/quicktime",
         background=BackgroundTask(_remove_path_if_exists, bundle_path),
     )
 
@@ -852,10 +930,10 @@ def _build_review_compare_video(
 ) -> tuple[Path, str]:
     bundle_dir = config.paths.web_state_dir / "downloads"
     bundle_dir.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile(prefix="review-bundle-", suffix=".mkv", dir=bundle_dir, delete=False) as temp_file:
+    with NamedTemporaryFile(prefix="review-bundle-", suffix=".mov", dir=bundle_dir, delete=False) as temp_file:
         bundle_path = Path(temp_file.name)
     _concat_review_compare_clips(bundle_path=bundle_path, compare_clips=compare_clips)
-    download_name = f"{_download_name_slug(prefix)}-full-review-compare.mkv"
+    download_name = f"{_download_name_slug(prefix)}-full-review-compare.mov"
     return bundle_path, download_name
 
 
@@ -890,8 +968,18 @@ def _concat_review_compare_clips(*, bundle_path: Path, compare_clips: list[Path]
         "0",
         "-i",
         str(list_file),
-        "-c",
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-c:v",
         "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
         str(bundle_path),
     ]
     result = subprocess.run(command, capture_output=True, text=True)
@@ -1035,13 +1123,11 @@ def _host_runtime_rows(
         connection,
         config,
         safe_collect_statuses=_safe_collect_host_statuses,
-        decorate_encode_job_for_scheduler=_decorate_encode_job_for_scheduler,
         encode_queue_schedule_profiles=_encode_queue_schedule_profiles,
         host_max_parallel_encodes=_host_max_parallel_encodes,
         host_schedule_profile_key=_host_schedule_profile_key,
         scheduler_allows_encode_run=_scheduler_allows_encode_run,
         format_eta_seconds=_format_eta_seconds,
-        job_host_key=_job_host_key,
         always_schedule_profile=ALWAYS_SCHEDULE_PROFILE,
         default_host_schedule_profile=DEFAULT_HOST_SCHEDULE_PROFILE,
         now=now,
@@ -1257,6 +1343,7 @@ def _build_seed_policy_payload(
         summary: dict[str, Any],
         metric_support: dict[str, bool],
         recent_sessions_payload: list[dict[str, Any]] | None = None,
+        requested_experiment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return runtime_build_seed_policy_payload(
         prefix=prefix,
@@ -1266,6 +1353,7 @@ def _build_seed_policy_payload(
         summary=summary,
         metric_support_payload=metric_support,
         recent_sessions_payload=recent_sessions_payload,
+        requested_experiment=requested_experiment,
     )
 
 
@@ -1293,6 +1381,7 @@ def _proposal_context_snapshot(
         metric_support: dict[str, Any] | None = None,
         requested_experiment: dict[str, Any] | None = None,
         multimodal_review_pack: dict[str, Any] | None = None,
+        review_artifact_critique: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return proposal_context_snapshot(
         _folder_tuning_runtime_deps(),
@@ -1306,6 +1395,7 @@ def _proposal_context_snapshot(
         metric_support=metric_support,
         requested_experiment=requested_experiment,
         multimodal_review_pack=multimodal_review_pack,
+        review_artifact_critique=review_artifact_critique,
     )
 
 
@@ -1352,6 +1442,48 @@ def _multimodal_review_pack_public_view(
         review_pack: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     return multimodal_review_pack_public_view(_folder_tuning_runtime_deps(), config, review_pack)
+
+
+def _backfill_multimodal_review_pack(
+        config: MediaforceConfig,
+        prefix: str,
+        *,
+        sample_item: dict[str, Any],
+        calibration: dict[str, Any] | None,
+        advice_state: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    calibration_payload = object_dict(calibration)
+    if not calibration_payload:
+        return advice_state
+    existing_pack = object_dict(object_dict(advice_state).get("multimodal_review_pack"))
+    if existing_pack:
+        if isinstance(calibration, dict):
+            calibration["advice"] = {**object_dict(calibration.get("advice")), "multimodal_review_pack": existing_pack}
+        return object_dict(advice_state) or advice_state
+    if not bool(calibration_payload.get("review_media_ready")):
+        return advice_state
+    stored_sample_item = object_dict(calibration_payload.get("sample_item")) or object_dict(sample_item)
+    if not stored_sample_item:
+        return advice_state
+    current_policy = object_dict(calibration_payload.get("policy")) or object_dict(stored_sample_item.get("resolved_policy"))
+    if not current_policy:
+        return advice_state
+    draft_hash = str(calibration_payload.get("draft_hash") or _calibration_draft_hash(calibration_payload)).strip()
+    request_id = f"legacy-{draft_hash[:12]}" if draft_hash else "legacy-review-pack"
+    review_pack = _build_multimodal_review_pack(
+        config=config,
+        sample_item=stored_sample_item,
+        current_policy=current_policy,
+        calibration=calibration_payload,
+        output_dir=_review_pack_dir(config, prefix, request_id),
+    )
+    public_review_pack = _multimodal_review_pack_public_view(config, review_pack)
+    if public_review_pack is None:
+        return advice_state
+    merged_advice_state = _merge_advice_state(config, prefix, {"multimodal_review_pack": public_review_pack})
+    if isinstance(calibration, dict):
+        calibration["advice"] = {**object_dict(calibration.get("advice")), "multimodal_review_pack": public_review_pack}
+    return merged_advice_state
 
 
 def _planned_audio_review_context(*, sample_item: dict[str, Any], current_policy: dict[str, Any]) -> dict[str, Any]:
@@ -1671,6 +1803,10 @@ def _calibration_run_deps() -> CalibrationRunDeps:
 
 def _load_job_state(connection: DBClient, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
     return runtime_load_job_state(connection, config, prefix, _job_runtime_deps())
+
+
+def _load_retryable_sample_job_state(connection: DBClient, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+    return load_retryable_sample_job_state(connection, config, prefix, _job_runtime_deps())
 
 
 def _save_job_state(
@@ -2111,6 +2247,7 @@ def _maybe_seed_baseline_policy(
         sample_item: dict[str, Any],
         existing_calibration: dict[str, Any] | None,
         connection: DBClient,
+        requested_experiment: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     return runtime_maybe_seed_baseline_policy(
         config=config,
@@ -2122,6 +2259,7 @@ def _maybe_seed_baseline_policy(
         sample_item=sample_item,
         existing_calibration=existing_calibration,
         connection=connection,
+        requested_experiment=requested_experiment,
     )
 
 
@@ -2233,6 +2371,16 @@ def _run_encode_job(
 def _run_periodic_cleanup(config: MediaforceConfig, cleanup_lock: threading.Lock) -> None:
     if not cleanup_lock.acquire(blocking=False):
         return
+    thread = threading.Thread(
+        target=_run_periodic_cleanup_task,
+        args=(config, cleanup_lock),
+        name="mediaforce-periodic-cleanup",
+        daemon=True,
+    )
+    thread.start()
+
+
+def _run_periodic_cleanup_task(config: MediaforceConfig, cleanup_lock: threading.Lock) -> None:
     try:
         purge_transient_artifacts(config)
     finally:

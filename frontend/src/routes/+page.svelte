@@ -12,24 +12,63 @@
 	import { fetchJson } from '$lib/api/client';
 	import { folderLibraryKey, folderLibraryLabel } from '$lib/folder-display';
 	import { formatGiB } from '$lib/format';
+	import { hostsStatusPending } from '$lib/hosts/runtime';
 	import { allQueueWorkersScheduledOffWindow, nextQueueWindowCopy } from '$lib/hosts/schedule';
 	import DashboardFolderGrid from '$lib/components/dashboard/DashboardFolderGrid.svelte';
 	import DashboardHero from '$lib/components/dashboard/DashboardHero.svelte';
 	import Panel from '$lib/components/Panel.svelte';
 	import Pill from '$lib/components/Pill.svelte';
 
-	let {
-		data
-	}: {
-		data: {
-			dashboard: DashboardSummaryPayload;
-			hosts: HostsPayload;
-		};
-	} = $props();
+	const EMPTY_DASHBOARD: DashboardSummaryPayload = {
+		folders_preview: [],
+		library_colors: {},
+		scan_job: null,
+		calibration_queue: {
+			sample: {
+				running: [],
+				queued: [],
+				pending_review: [],
+				running_count: 0,
+				queued_count: 0,
+				pending_review_count: 0
+			},
+			full: {
+				running: [],
+				queued: [],
+				pending_review: [],
+				running_count: 0,
+				queued_count: 0,
+				pending_review_count: 0
+			},
+			active_count: 0
+		},
+		encode_queue: {
+			running_count: 0,
+			queued_count: 0,
+			running: [],
+			queued: [],
+			telemetry: undefined,
+			state: { is_paused: false, stop_requested: false }
+		},
+		archive_cleanup: {
+			archive_root: '',
+			file_count: 0,
+			total_size_bytes: 0,
+			has_cleanup: false
+		},
+		catalog_empty: true,
+		folder_cache_key: '',
+		metric_support: { vmaf: false, xpsnr: false, ssim: false },
+		metric_status_copy: ''
+	};
+	const EMPTY_HOSTS: HostsPayload = { compact: true, hosts: [] };
 
 	let dashboardOverride = $state<DashboardSummaryPayload | null>(null);
-	const dashboard = $derived(dashboardOverride ?? data.dashboard);
-	const hosts = $derived(data.hosts);
+	let hostsPayload = $state<HostsPayload | null>(null);
+	let dashboardLoadError = $state<string | null>(null);
+	let hostsLoadError = $state<string | null>(null);
+	const dashboard = $derived(dashboardOverride ?? EMPTY_DASHBOARD);
+	const hosts = $derived(hostsPayload ?? EMPTY_HOSTS);
 	let folders = $state<FolderCardData[]>([]);
 	let catalogEmpty = $state(false);
 	let folderLoadState = $state<'loading' | 'ready' | 'error'>('loading');
@@ -39,8 +78,22 @@
 	let pendingStoredDisabledLibraries = $state<string[] | null>(null);
 	let folderLoadController: AbortController | null = null;
 	let dashboardRefreshController: AbortController | null = null;
+	let hostsSummaryController: AbortController | null = null;
+	let hostsSummaryRetryTimer: number | null = null;
 	let dashboardRefreshError = $state<string | null>(null);
+	let activeDashboardRefreshRequest = 0;
+	let activeHostsSummaryRequest = 0;
 	let clockNow = $state(Date.now());
+	const landingLoadIssues = $derived.by(() => {
+		const issues: string[] = [];
+		if (dashboardLoadError) {
+			issues.push(`Dashboard summary failed to load: ${dashboardLoadError}`);
+		}
+		if (hostsLoadError) {
+			issues.push(`Host snapshot failed to load: ${hostsLoadError}`);
+		}
+		return issues;
+	});
 	const libraryColors = $derived(dashboard.library_colors ?? {});
 	const LIBRARY_FILTER_STORAGE_KEY = 'mediaforce.dashboard.disabledLibraries';
 	const totalEstimatedSavings = $derived.by(() =>
@@ -69,34 +122,37 @@
 		return 'Fleet idle';
 	});
 	const opsSnapshotPills = $derived.by(() => [
-		{ label: fleetSnapshotLabel, variant: dashboard.encode_queue.queued_count > 0 ? 'warn' as const : 'ghost' as const },
+		{
+			label: fleetSnapshotLabel,
+			variant: dashboard.encode_queue.queued_count > 0 ? ('warn' as const) : ('ghost' as const)
+		},
 		...(readyHosts > 0
 			? [{ label: `${readyHosts} hosts ready`, variant: 'ok' as const }]
 			: queueWorkersScheduledOffWindow
 				? [
-					{
-						label: nextWorkerWindow
-							? `Next worker window ${nextWorkerWindow}`
-							: 'All queue workers are scheduled off-window',
-						variant: 'neutral' as const
-					}
-				]
+						{
+							label: nextWorkerWindow
+								? `Next worker window ${nextWorkerWindow}`
+								: 'All queue workers are scheduled off-window',
+							variant: 'neutral' as const
+						}
+					]
 				: [{ label: '0 hosts ready', variant: 'ghost' as const }]),
 		...(Number(dashboard.archive_cleanup?.file_count ?? 0) > 0
 			? [
-				{
-					label: `${Number(dashboard.archive_cleanup?.file_count ?? 0)} archived backups`,
-					variant: 'warn' as const
-				}
-			]
+					{
+						label: `${Number(dashboard.archive_cleanup?.file_count ?? 0)} archived backups`,
+						variant: 'warn' as const
+					}
+				]
 			: []),
 		...(pendingReviewCount > 0
 			? [
-				{
-					label: `${pendingReviewCount} pending review`,
-					variant: 'warn' as const
-				}
-			]
+					{
+						label: `${pendingReviewCount} pending review`,
+						variant: 'warn' as const
+					}
+				]
 			: [])
 	]);
 	const heroFacts = $derived.by(() => [
@@ -238,23 +294,71 @@
 	async function loadDashboardSummary() {
 		dashboardRefreshController?.abort();
 		dashboardRefreshController = new AbortController();
+		const requestId = ++activeDashboardRefreshRequest;
 		try {
-			dashboardOverride = await fetchJson<DashboardSummaryPayload>(`/api/dashboard`, fetch, {
+			const nextDashboard = await fetchJson<DashboardSummaryPayload>(`/api/dashboard`, fetch, {
 				signal: dashboardRefreshController.signal
 			});
-			dashboardRefreshError = null;
-			clockNow = Date.now();
-			if (dashboardRefreshController.signal.aborted) {
+			if (requestId !== activeDashboardRefreshRequest) {
 				return;
 			}
+			dashboardOverride = nextDashboard;
+			dashboardRefreshError = null;
+			dashboardLoadError = null;
+			clockNow = Date.now();
 			dashboardRefreshController = null;
 		} catch (error) {
+			if (requestId !== activeDashboardRefreshRequest) {
+				return;
+			}
 			if (error instanceof DOMException && error.name === 'AbortError') {
 				return;
 			}
 			dashboardRefreshError =
 				error instanceof Error ? error.message : 'Unexpected dashboard refresh error';
+			dashboardLoadError = dashboardRefreshError;
 			dashboardRefreshController = null;
+		} finally {
+			if (requestId === activeDashboardRefreshRequest) {
+				dashboardRefreshController = null;
+			}
+		}
+	}
+
+	async function loadHostsSummary() {
+		hostsSummaryController?.abort();
+		hostsSummaryController = new AbortController();
+		const requestId = ++activeHostsSummaryRequest;
+		try {
+			const nextHostsPayload = await fetchJson<HostsPayload>('/api/hosts?compact=1', fetch, {
+				signal: hostsSummaryController.signal
+			});
+			if (requestId !== activeHostsSummaryRequest) {
+				return;
+			}
+			hostsPayload = nextHostsPayload;
+			hostsLoadError = null;
+			if (browser && hostsStatusPending(nextHostsPayload)) {
+				hostsSummaryRetryTimer ??= window.setTimeout(() => {
+					hostsSummaryRetryTimer = null;
+					void loadHostsSummary();
+				}, 1000);
+			} else if (hostsSummaryRetryTimer !== null) {
+				clearTimeout(hostsSummaryRetryTimer);
+				hostsSummaryRetryTimer = null;
+			}
+		} catch (error) {
+			if (requestId !== activeHostsSummaryRequest) {
+				return;
+			}
+			if (error instanceof DOMException && error.name === 'AbortError') {
+				return;
+			}
+			hostsLoadError = error instanceof Error ? error.message : 'Unexpected host loading error';
+		} finally {
+			if (requestId === activeHostsSummaryRequest) {
+				hostsSummaryController = null;
+			}
 		}
 	}
 
@@ -291,10 +395,22 @@
 		}
 	}
 
+	function retryLandingLoads() {
+		void loadDashboardSummary();
+		void loadHostsSummary();
+		if (dashboard.folder_cache_key) {
+			requestedFolderCacheKey = null;
+			void loadFolders(dashboard.folder_cache_key);
+		}
+	}
+
 	onMount(() => {
 		if (!browser) {
 			return;
 		}
+
+		void loadDashboardSummary();
+		void loadHostsSummary();
 
 		try {
 			const storedValue = window.localStorage.getItem(LIBRARY_FILTER_STORAGE_KEY);
@@ -320,6 +436,11 @@
 	onDestroy(() => {
 		folderLoadController?.abort();
 		dashboardRefreshController?.abort();
+		hostsSummaryController?.abort();
+		if (hostsSummaryRetryTimer !== null) {
+			clearTimeout(hostsSummaryRetryTimer);
+			hostsSummaryRetryTimer = null;
+		}
 	});
 
 	$effect(() => {
@@ -340,16 +461,6 @@
 			window.clearInterval(refreshHandle);
 			window.clearInterval(clockHandle);
 		};
-	});
-
-	$effect(() => {
-		if (dashboardOverride !== null) {
-			return;
-		}
-
-		folders = data.dashboard.folders_preview;
-		catalogEmpty = data.dashboard.catalog_empty;
-		folderLoadState = data.dashboard.catalog_empty ? 'ready' : 'loading';
 	});
 
 	$effect(() => {
@@ -413,6 +524,23 @@
 </svelte:head>
 
 <div class="page-stack">
+	{#if landingLoadIssues.length > 0}
+		<Panel class="load-warning-panel" padding="1rem 1.1rem">
+			<div class="load-warning-shell">
+				<div class="load-warning-copy">
+					<p class="load-warning-label">Runtime issue</p>
+					<h2 class="load-warning-heading">Some dashboard data did not load</h2>
+					{#each landingLoadIssues as issue (issue)}
+						<p class="load-warning-detail">{issue}</p>
+					{/each}
+				</div>
+				<button type="button" class="load-warning-action" onclick={retryLandingLoads}>
+					Retry load
+				</button>
+			</div>
+		</Panel>
+	{/if}
+
 	<DashboardHero
 		foldersCount={folders.length}
 		{totalEstimatedSavings}
@@ -431,9 +559,12 @@
 						<Pill label={pill.label} variant={pill.variant} />
 					{/each}
 				</div>
-				<a class="ops-summary-link" href={resolve('/ops')}>
-					Open ops
-				</a>
+				<div class="ops-summary-links">
+					{#if Number(dashboard.archive_cleanup?.file_count ?? 0) > 0}
+						<a class="ops-summary-link" href={resolve('/completed')}> Open completed </a>
+					{/if}
+					<a class="ops-summary-link" href={resolve('/ops')}> Open ops </a>
+				</div>
 			</div>
 		</div>
 	</Panel>
@@ -450,12 +581,12 @@
 		{folderLoadError}
 		{folderLibraries}
 		{disabledLibraries}
-			onEnableAllLibraries={enableAllLibraries}
-			onToggleLibraryFilter={toggleLibraryFilter}
-			{libraryColors}
-			{filterHintCopy}
-			{visibleFolders}
-			{catalogEmpty}
+		onEnableAllLibraries={enableAllLibraries}
+		onToggleLibraryFilter={toggleLibraryFilter}
+		{libraryColors}
+		{filterHintCopy}
+		{visibleFolders}
+		{catalogEmpty}
 	/>
 </div>
 
@@ -463,6 +594,58 @@
 	.page-stack {
 		display: grid;
 		gap: var(--space-3);
+	}
+
+	.load-warning-shell {
+		display: flex;
+		justify-content: space-between;
+		gap: 1rem;
+		align-items: center;
+		flex-wrap: wrap;
+	}
+
+	.load-warning-copy {
+		display: grid;
+		gap: 0.4rem;
+	}
+
+	.load-warning-label {
+		margin: 0;
+		font-size: 0.78rem;
+		font-weight: 800;
+		letter-spacing: 0.14em;
+		text-transform: uppercase;
+		color: #9a3412;
+	}
+
+	.load-warning-heading {
+		margin: 0;
+		font-size: clamp(1.05rem, 2vw, 1.35rem);
+		color: #7c2d12;
+	}
+
+	.load-warning-detail {
+		margin: 0;
+		max-width: 54rem;
+		color: #7c2d12;
+		line-height: 1.5;
+	}
+
+	.load-warning-action {
+		border: 1px solid rgba(154, 52, 18, 0.18);
+		background: rgba(154, 52, 18, 0.1);
+		color: #7c2d12;
+		font: inherit;
+		font-weight: 700;
+		padding: 0.76rem 1rem;
+		border-radius: var(--radius-pill);
+		cursor: pointer;
+	}
+
+	:global(.load-warning-panel) {
+		background:
+			radial-gradient(circle at top left, rgba(251, 146, 60, 0.18), transparent 36%),
+			linear-gradient(140deg, rgba(255, 247, 237, 0.95), rgba(255, 237, 213, 0.88));
 	}
 
 	.ops-summary-shell {
@@ -492,6 +675,12 @@
 	}
 
 	.ops-summary-pills {
+		display: flex;
+		gap: 0.65rem;
+		flex-wrap: wrap;
+	}
+
+	.ops-summary-links {
 		display: flex;
 		gap: 0.65rem;
 		flex-wrap: wrap;

@@ -26,6 +26,11 @@
 				aria-current={page.url.pathname === '/ops' ? 'page' : undefined}>Ops</a
 			>
 			<a
+				class:active={page.url.pathname === '/completed'}
+				href={resolve('/completed')}
+				aria-current={page.url.pathname === '/completed' ? 'page' : undefined}>Completed</a
+			>
+			<a
 				class:active={page.url.pathname === '/settings'}
 				href={resolve('/settings')}
 			aria-current={page.url.pathname === '/settings' ? 'page' : undefined}>Settings</a

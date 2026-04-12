@@ -1,11 +1,15 @@
 from typing import Any
 
+from fastapi import HTTPException
 from sqlalchemy import literal_column
 from sqlalchemy import select
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db_tables import calibration_jobs
-from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
+from mediaforce.core.db_tables import calibration_jobs, encode_jobs
+from mediaforce.encoding.encode_queue import DISPLAY_ENCODE_JOB_KINDS, load_queue_state, save_queue_state
+
+
+RETRYABLE_TERMINAL_ENCODE_JOB_STATUSES = ("needs_attention", "failed", "stopped")
 
 
 def pause_encode_queue_action(*, connection_factory: Any, config: MediaforceConfig, now_iso: Any) -> dict[str, Any]:
@@ -36,6 +40,80 @@ def stop_encode_queue_action(*, connection_factory: Any, config: MediaforceConfi
     return {"ok": True, "message": "Stopped and cleaned the encode queue."}
 
 
+def retry_failed_encode_queue_action(
+        *,
+        connection_factory: Any,
+        config: MediaforceConfig,
+        load_calibration_state: Any,
+        review_gate: Any,
+        queue_folder_encode_action: Any,
+) -> dict[str, Any]:
+    with connection_factory() as connection:
+        rows = connection.execute(
+            select(encode_jobs.c.prefix, encode_jobs.c.status)
+            .where(encode_jobs.c.job_kind.in_(DISPLAY_ENCODE_JOB_KINDS))
+            .order_by(encode_jobs.c.updated_at.desc(), literal_column("rowid").desc())
+        ).mappings().fetchall()
+
+    latest_status_by_prefix: dict[str, str] = {}
+    for row in rows:
+        prefix = str(row["prefix"] or "").strip()
+        if not prefix or prefix in latest_status_by_prefix:
+            continue
+        latest_status_by_prefix[prefix] = str(row["status"] or "").strip()
+
+    terminal_prefixes = [
+        prefix
+        for prefix, status in latest_status_by_prefix.items()
+        if status in RETRYABLE_TERMINAL_ENCODE_JOB_STATUSES
+    ]
+    if not terminal_prefixes:
+        return {"ok": True, "message": "No failed folder encodes were ready to retry.", "queued_count": 0}
+
+    queued_prefixes: list[str] = []
+    review_blocked_prefixes: list[str] = []
+    blocked: list[dict[str, str]] = []
+    for prefix in terminal_prefixes:
+        calibration = load_calibration_state(config, prefix)
+        gate = review_gate(calibration)
+        if not bool(gate.get("can_confirm_full")):
+            review_blocked_prefixes.append(prefix)
+            continue
+        try:
+            result = queue_folder_encode_action(prefix, "", False)
+        except HTTPException as exc:
+            blocked.append({"prefix": prefix, "message": str(exc.detail)})
+            continue
+        if bool(result.get("ok")):
+            queued_prefixes.append(prefix)
+            continue
+        blocked.append({"prefix": prefix, "message": str(result.get("message") or "Retry blocked.")})
+
+    message_parts: list[str] = []
+    if queued_prefixes:
+        folder_label = "folder" if len(queued_prefixes) == 1 else "folders"
+        message_parts.append(f"Retried {len(queued_prefixes)} failed {folder_label}.")
+    else:
+        message_parts.append("No failed folder encodes were retried.")
+    if review_blocked_prefixes:
+        message_parts.append(
+            f"{len(review_blocked_prefixes)} still need approval before Mediaforce can queue them again."
+        )
+    if blocked:
+        message_parts.append(f"{len(blocked)} could not be retried due to queue conflicts or other blockers.")
+
+    return {
+        "ok": True,
+        "message": " ".join(message_parts),
+        "queued_count": len(queued_prefixes),
+        "queued_prefixes": queued_prefixes,
+        "review_blocked_count": len(review_blocked_prefixes),
+        "review_blocked_prefixes": review_blocked_prefixes,
+        "blocked_count": len(blocked),
+        "blocked": blocked,
+    }
+
+
 def stop_calibration_queue_action(
         *,
         connection_factory: Any,
@@ -63,7 +141,7 @@ def stop_calibration_queue_action(
                 prefix,
                 {
                     **payload,
-                    "status": "failed",
+                    "status": "stopped",
                     "finished_at": now_iso(),
                     "error": stopped_message,
                 },

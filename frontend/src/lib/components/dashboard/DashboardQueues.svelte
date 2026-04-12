@@ -5,7 +5,7 @@
 	import Panel from '$lib/components/Panel.svelte';
 	import SectionHead from '$lib/components/SectionHead.svelte';
 
-	type QueueAction = 'pause' | 'resume' | 'stop';
+	type QueueAction = 'pause' | 'resume' | 'retry' | 'stop';
 	type QueueCard = { eyebrow: string; heading: string; lede: string };
 	type EncodeQueueStatus = { label: string; tone: 'attention' | 'neutral' | 'ok' };
 
@@ -87,6 +87,7 @@
 	const encodeQueueActionable = $derived.by(
 		() =>
 			encodeQueueHasWork ||
+			Number(dashboard.encode_queue.needs_attention_count ?? 0) > 0 ||
 			dashboard.encode_queue.state.is_paused ||
 			dashboard.encode_queue.state.stop_requested
 	);
@@ -115,6 +116,9 @@
 	});
 	const encodeQueueActionHelp = $derived.by(() => {
 		if (!encodeQueueActionable) return '';
+		if (Number(dashboard.encode_queue.needs_attention_count ?? 0) > 0) {
+			return 'Retry All Failed requeues approved failed folders. Anything that still needs review stays blocked.';
+		}
 		if (dashboard.encode_queue.state.is_paused) {
 			return 'Resume keeps the queued folders in place. Stop + Clean clears the queue.';
 		}
@@ -207,6 +211,13 @@
 					</div>
 					{#if encodeQueueActionable}
 						<div class="action-row">
+							{#if dashboard.encode_queue.needs_attention_count}
+								<Button
+									variant="ghost"
+									loading={queueAction === 'retry'}
+									onclick={() => runQueueAction('retry')}>Retry All Failed</Button
+								>
+							{/if}
 							{#if dashboard.encode_queue.state.is_paused}
 								<Button
 									variant="primary"

@@ -1,10 +1,11 @@
+import json
 import subprocess
+import time
 from dataclasses import asdict
 from datetime import UTC, datetime
-import json
-import time
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy import select
 
 from mediaforce.core.config import MediaforceConfig
@@ -12,7 +13,6 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.type_defs import float_value, object_dict
 from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS
-from mediaforce.encoding.encode_queue import list_encode_jobs
 from mediaforce.remote import HostStatus, collect_host_statuses, host_status_targets_current_machine, \
     normalize_host_media_access, run_host_lifecycle_command
 
@@ -39,27 +39,18 @@ def host_runtime_rows(
         config: MediaforceConfig,
         *,
         safe_collect_statuses: Any,
-        decorate_encode_job_for_scheduler: Any,
         encode_queue_schedule_profiles: Any,
         host_max_parallel_encodes: Any,
         host_schedule_profile_key: Any,
         scheduler_allows_encode_run: Any,
         format_eta_seconds: Any,
-        job_host_key: Any,
         always_schedule_profile: str,
         default_host_schedule_profile: str,
         now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     statuses = safe_collect_statuses(config)
+    running_jobs = _running_encode_jobs_for_hosts(connection, format_eta_seconds=format_eta_seconds)
     running_counts = running_encode_counts_by_host(connection)
-    running_jobs = [
-        job
-        for job in (
-            decorate_encode_job_for_scheduler(config, job)
-            for job in list_encode_jobs(connection, statuses=("running",), limit=32, job_kinds=RUNNABLE_ENCODE_JOB_KINDS)
-        )
-        if job is not None
-    ]
     profiles = encode_queue_schedule_profiles(config)
     rows: list[dict[str, Any]] = []
     current_time = now or datetime.now(UTC)
@@ -108,7 +99,7 @@ def host_runtime_rows(
         schedule_detail = str(policy["summary"])
         if schedule_profile == always_schedule_profile and schedule_detail == "runs anytime":
             schedule_detail = ""
-        host_running_jobs = [job for job in running_jobs if job_host_key(job) == status.key]
+        host_running_jobs = [job for job in running_jobs if str(job.get("host_key") or "") == status.key]
         host_speed = sum(_progress_float(job, "speed") for job in host_running_jobs)
         host_remaining_duration_seconds = sum(
             _progress_float(job, "remaining_duration_seconds") for job in host_running_jobs
@@ -140,22 +131,156 @@ def host_runtime_rows(
 
 
 def running_encode_counts_by_host(connection: DBClient) -> dict[str, int]:
+    return _running_encode_counts_by_host(connection, running_jobs=None)
+
+
+def _running_encode_counts_by_host(
+        connection: DBClient,
+        *,
+        running_jobs: list[dict[str, Any]] | None,
+) -> dict[str, int]:
+    if running_jobs is not None:
+        counts: dict[str, int] = {}
+        for job in running_jobs:
+            host_key = str(job.get("host_key") or "").strip()
+            if not host_key:
+                continue
+            counts[host_key] = counts.get(host_key, 0) + 1
+        return counts
+
     counts: dict[str, int] = {}
     rows = connection.execute(
-        select(encode_jobs.c.host_json)
+        select(_running_job_host_key_sql().label("host_key"), func.count().label("job_count"))
         .where(encode_jobs.c.status == "running")
         .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
+        .group_by(_running_job_host_key_sql())
     ).mappings().fetchall()
     for row in rows:
-        try:
-            payload = json.loads(str(row["host_json"] or "{}"))
-        except json.JSONDecodeError:
-            continue
-        host_key = str(payload.get("key") or payload.get("host") or "").strip()
+        host_key = str(row["host_key"] or "").strip()
         if not host_key:
             continue
-        counts[host_key] = counts.get(host_key, 0) + 1
+        counts[host_key] = int(row["job_count"] or 0)
     return counts
+
+
+def _running_encode_jobs_for_hosts(connection: DBClient, *, format_eta_seconds: Any) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        select(
+            encode_jobs.c.job_id,
+            encode_jobs.c.prefix,
+            encode_jobs.c.item_count,
+            encode_jobs.c.progress_json,
+            _running_job_host_key_sql().label("host_key"),
+        )
+        .where(encode_jobs.c.status == "running")
+        .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
+        .order_by(encode_jobs.c.created_at.asc())
+        .limit(32)
+    ).mappings().fetchall()
+    jobs: list[dict[str, Any]] = []
+    for row in rows:
+        progress = _loads_progress_payload(row["progress_json"])
+        decorated_progress = _decorate_running_job_progress(progress, format_eta_seconds=format_eta_seconds)
+        jobs.append(
+            {
+                "job_id": str(row["job_id"]),
+                "prefix": str(row["prefix"]),
+                "item_count": int(row["item_count"] or 0),
+                "host_key": str(row["host_key"] or "").strip(),
+                "progress": decorated_progress,
+                "scheduler_status_copy": "running now",
+                "telemetry_summary": _running_job_telemetry_summary(decorated_progress),
+            }
+        )
+    return jobs
+
+
+def _running_job_host_key_sql() -> Any:
+    current_key = func.nullif(func.trim(func.json_extract(encode_jobs.c.host_json, "$.key")), "")
+    current_host = func.nullif(func.trim(func.json_extract(encode_jobs.c.host_json, "$.host")), "")
+    current_label = func.nullif(func.trim(func.json_extract(encode_jobs.c.host_json, "$.label")), "")
+    last_key = func.nullif(func.trim(func.json_extract(encode_jobs.c.last_host_json, "$.key")), "")
+    last_host = func.nullif(func.trim(func.json_extract(encode_jobs.c.last_host_json, "$.host")), "")
+    last_label = func.nullif(func.trim(func.json_extract(encode_jobs.c.last_host_json, "$.label")), "")
+    return func.coalesce(
+        current_key,
+        current_host,
+        current_label,
+        last_key,
+        last_host,
+        last_label,
+    )
+
+
+def _loads_progress_payload(raw_progress: Any) -> dict[str, Any]:
+    if not raw_progress:
+        return {}
+    try:
+        loaded = json.loads(str(raw_progress))
+    except json.JSONDecodeError:
+        return {}
+    return object_dict(loaded)
+
+
+def _decorate_running_job_progress(progress: dict[str, Any], *, format_eta_seconds: Any) -> dict[str, Any]:
+    total_duration_seconds = float_value(progress.get("total_duration_seconds"))
+    overall_completed_duration_seconds = float_value(progress.get("overall_completed_duration_seconds"))
+    remaining_duration_seconds = _float_or_none(progress.get("remaining_duration_seconds"), allow_zero=True)
+    if remaining_duration_seconds is None:
+        remaining_duration_seconds = max(total_duration_seconds - overall_completed_duration_seconds, 0.0)
+    percent_complete = _float_or_none(progress.get("percent_complete"), allow_zero=True)
+    if percent_complete is None and total_duration_seconds > 0:
+        percent_complete = min(overall_completed_duration_seconds / total_duration_seconds, 1.0) * 100.0
+    eta_seconds = _float_or_none(progress.get("eta_seconds"), allow_zero=True)
+    speed = _float_or_none(progress.get("speed"))
+    if eta_seconds is None and speed not in {None, 0.0}:
+        eta_seconds = remaining_duration_seconds / speed
+    return {
+        **progress,
+        "total_duration_seconds": total_duration_seconds,
+        "overall_completed_duration_seconds": overall_completed_duration_seconds,
+        "remaining_duration_seconds": remaining_duration_seconds,
+        "percent_complete": percent_complete,
+        "eta_seconds": eta_seconds,
+        "eta_copy": format_eta_seconds(eta_seconds),
+    }
+
+
+def _running_job_telemetry_summary(progress: dict[str, Any]) -> str:
+    progress_state = str(progress.get("progress_state") or "").strip().lower()
+    phase_label = str(progress.get("phase_label") or "").strip()
+    include_numeric_summary = progress_state not in {"quality_search", "starting"}
+    summary_parts: list[str] = []
+    percent_complete = _float_or_none(progress.get("percent_complete"), allow_zero=True)
+    speed = _float_or_none(progress.get("speed"))
+    fps = _float_or_none(progress.get("fps"))
+    eta_copy = str(progress.get("eta_copy") or "").strip()
+    if percent_complete is not None and include_numeric_summary:
+        summary_parts.append(f"{percent_complete:.0f}%")
+    if speed not in {None, 0.0} and include_numeric_summary:
+        summary_parts.append(f"{speed:.2f}x")
+    if fps not in {None, 0.0} and include_numeric_summary:
+        summary_parts.append(f"{fps:.1f} fps")
+    if eta_copy and include_numeric_summary:
+        summary_parts.append(f"Est. ETA {eta_copy}")
+    if summary_parts:
+        return " · ".join(summary_parts)
+    if progress_state == "quality_search":
+        return phase_label or "Searching quality"
+    if progress_state == "starting":
+        return phase_label or "Starting encode"
+    return phase_label
+
+
+def _float_or_none(value: Any, *, allow_zero: bool = False) -> float | None:
+    number = float_value(value)
+    if allow_zero:
+        if number < 0:
+            return None
+        return number
+    if number <= 0:
+        return None
+    return number
 
 
 def host_config_for_key(config: MediaforceConfig, host_key: str) -> dict[str, Any]:
@@ -223,7 +348,8 @@ def ensure_encode_host_ready(
     raise RuntimeError(detail or message or f"Timed out waiting for {host_key}")
 
 
-def stop_encode_host_if_configured(host_payload: dict[str, Any] | None, *, lifecycle_command_timeout_seconds: int) -> None:
+def stop_encode_host_if_configured(host_payload: dict[str, Any] | None, *,
+                                   lifecycle_command_timeout_seconds: int) -> None:
     host = object_dict(host_payload)
     stop_command = host_lifecycle_stop_command(host)
     if not stop_command:
@@ -234,7 +360,8 @@ def stop_encode_host_if_configured(host_payload: dict[str, Any] | None, *, lifec
 
 
 def default_sample_host_key(config: MediaforceConfig, *, safe_collect_statuses: Any) -> str:
-    return default_sample_host_key_from_statuses(sample_calibration_host_statuses(config, safe_collect_statuses=safe_collect_statuses))
+    return default_sample_host_key_from_statuses(
+        sample_calibration_host_statuses(config, safe_collect_statuses=safe_collect_statuses))
 
 
 def default_sample_host_key_from_statuses(statuses: list[HostStatus]) -> str:
@@ -257,7 +384,8 @@ def sample_calibration_host_statuses(config: MediaforceConfig, *, safe_collect_s
 
 
 def sample_host_options(config: MediaforceConfig, *, safe_collect_statuses: Any) -> list[dict[str, Any]]:
-    return sample_host_options_from_statuses(sample_calibration_host_statuses(config, safe_collect_statuses=safe_collect_statuses))
+    return sample_host_options_from_statuses(
+        sample_calibration_host_statuses(config, safe_collect_statuses=safe_collect_statuses))
 
 
 def sample_host_options_from_statuses(statuses: list[HostStatus]) -> list[dict[str, Any]]:

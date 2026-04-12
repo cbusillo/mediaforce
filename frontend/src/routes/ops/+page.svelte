@@ -1,28 +1,78 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { resolve } from '$app/paths';
+	import { onMount } from 'svelte';
+	import { fetchJson } from '$lib/api/client';
 	import type { DashboardSummaryPayload, HostsPayload } from '$lib/api/types';
-	import { goto, invalidateAll } from '$app/navigation';
+	import { goto } from '$app/navigation';
 	import DashboardHostGrid from '$lib/components/dashboard/DashboardHostGrid.svelte';
 	import DashboardQueues from '$lib/components/dashboard/DashboardQueues.svelte';
 	import Panel from '$lib/components/Panel.svelte';
 	import Pill from '$lib/components/Pill.svelte';
 	import SectionHead from '$lib/components/SectionHead.svelte';
 	import { hostSettingsAnchor } from '$lib/format';
+	import { hostsStatusPending } from '$lib/hosts/runtime';
 	import { allQueueWorkersScheduledOffWindow, nextQueueWindowCopy } from '$lib/hosts/schedule';
 	import { toasts } from '$lib/stores/toasts';
 
-	let {
-		data
-	}: {
-		data: {
-			dashboard: DashboardSummaryPayload;
-			hosts: HostsPayload;
-		};
-	} = $props();
+	const EMPTY_DASHBOARD: DashboardSummaryPayload = {
+		folders_preview: [],
+		library_colors: {},
+		scan_job: null,
+		calibration_queue: {
+			sample: {
+				running: [],
+				queued: [],
+				pending_review: [],
+				running_count: 0,
+				queued_count: 0,
+				pending_review_count: 0
+			},
+			full: {
+				running: [],
+				queued: [],
+				pending_review: [],
+				running_count: 0,
+				queued_count: 0,
+				pending_review_count: 0
+			},
+			active_count: 0
+		},
+		encode_queue: {
+			queued_count: 0,
+			running_count: 0,
+			state: { is_paused: false, stop_requested: false },
+			running: [],
+			telemetry: undefined,
+			queued: []
+		},
+		archive_cleanup: {
+			archive_root: '',
+			file_count: 0,
+			total_size_bytes: 0,
+			has_cleanup: false
+		},
+		catalog_empty: true,
+		folder_cache_key: '',
+		metric_support: { vmaf: false, xpsnr: false, ssim: false },
+		metric_status_copy: ''
+	};
+	const EMPTY_HOSTS: HostsPayload = { compact: true, hosts: [] };
 
-	const dashboard = $derived(data.dashboard);
-	const hosts = $derived(data.hosts);
+	let dashboardPayload = $state<DashboardSummaryPayload | null>(null);
+	let hostsPayload = $state<HostsPayload | null>(null);
+	let isLoadingOps = $state(true);
+	let opsLoadError = $state<string | null>(null);
+	let hostStatusRetryTimer: number | null = null;
+	let opsRefreshTimer: number | null = null;
+		let dashboardRefreshController: AbortController | null = null;
+		let hostsRefreshController: AbortController | null = null;
+		let activeDashboardRefreshRequest = 0;
+		let activeHostsRefreshRequest = 0;
+		let opsRefreshPromise: Promise<void> | null = null;
+
+	const dashboard = $derived(dashboardPayload ?? EMPTY_DASHBOARD);
+	const hosts = $derived(hostsPayload ?? EMPTY_HOSTS);
 	const encodeCapableHosts = $derived.by(
 		() => hosts.hosts.filter((host) => host.capabilities.includes('encode_queue')).length
 	);
@@ -82,26 +132,29 @@
 		return 'Fleet idle';
 	});
 	const opsHeroPills = $derived.by(() => [
-		{ label: fleetSnapshotLabel, variant: dashboard.encode_queue.queued_count > 0 ? 'warn' as const : 'ghost' as const },
+		{
+			label: fleetSnapshotLabel,
+			variant: dashboard.encode_queue.queued_count > 0 ? ('warn' as const) : ('ghost' as const)
+		},
 		...(readyHosts > 0
 			? [{ label: `${readyHosts} hosts ready`, variant: 'ok' as const }]
 			: queueWorkersScheduledOffWindow
 				? [
-					{
-						label: nextWorkerWindow
-							? `Next worker window ${nextWorkerWindow}`
-							: 'All queue workers are scheduled off-window',
-						variant: 'neutral' as const
-					}
-				]
+						{
+							label: nextWorkerWindow
+								? `Next worker window ${nextWorkerWindow}`
+								: 'All queue workers are scheduled off-window',
+							variant: 'neutral' as const
+						}
+					]
 				: [{ label: '0 hosts ready', variant: 'ghost' as const }]),
 		...(Number(dashboard.archive_cleanup?.file_count ?? 0) > 0
 			? [
-				{
-					label: `${Number(dashboard.archive_cleanup?.file_count ?? 0)} archived backups`,
-					variant: 'warn' as const
-				}
-			]
+					{
+						label: `${Number(dashboard.archive_cleanup?.file_count ?? 0)} archived backups`,
+						variant: 'warn' as const
+					}
+				]
 			: []),
 		...(pendingReviewCount > 0
 			? [{ label: `${pendingReviewCount} pending review`, variant: 'warn' as const }]
@@ -122,7 +175,85 @@
 	let queueAction = $state<string | null>(null);
 	let calibrationQueueAction = $state<string | null>(null);
 
-	async function runQueueAction(action: 'pause' | 'resume' | 'stop') {
+		async function refreshOpsData(
+			{ silent = false, force = false }: { silent?: boolean; force?: boolean } = {}
+		) {
+			if (opsRefreshPromise !== null && !force) {
+				return opsRefreshPromise;
+			}
+			if (force) {
+				dashboardRefreshController?.abort();
+				hostsRefreshController?.abort();
+			}
+			const refreshPromise = (async () => {
+				isLoadingOps = true;
+				const dashboardRequestId = ++activeDashboardRefreshRequest;
+				const hostsRequestId = ++activeHostsRefreshRequest;
+				try {
+					const nextDashboardRefreshController = new AbortController();
+					const nextHostsRefreshController = new AbortController();
+					dashboardRefreshController = nextDashboardRefreshController;
+					hostsRefreshController = nextHostsRefreshController;
+					const [nextDashboard, nextHosts] = await Promise.all([
+						fetchJson<DashboardSummaryPayload>('/api/dashboard', fetch, {
+							signal: nextDashboardRefreshController.signal
+						}),
+						fetchJson<HostsPayload>('/api/hosts?compact=1', fetch, {
+							signal: nextHostsRefreshController.signal
+						})
+					]);
+					if (
+						dashboardRequestId !== activeDashboardRefreshRequest ||
+						hostsRequestId !== activeHostsRefreshRequest
+					) {
+						return;
+					}
+					dashboardPayload = nextDashboard;
+					hostsPayload = nextHosts;
+					opsLoadError = null;
+					if (browser && hostsStatusPending(nextHosts)) {
+						hostStatusRetryTimer ??= window.setTimeout(() => {
+							hostStatusRetryTimer = null;
+							void refreshOpsData({ silent: true });
+						}, 1000);
+					} else if (hostStatusRetryTimer !== null) {
+						clearTimeout(hostStatusRetryTimer);
+						hostStatusRetryTimer = null;
+					}
+				} catch (error) {
+					if (
+						error instanceof DOMException &&
+						error.name === 'AbortError'
+					) {
+						return;
+					}
+					opsLoadError = error instanceof Error ? error.message : 'Unexpected ops loading error';
+						if (!silent) {
+							toasts.error('Ops load failed', opsLoadError);
+						}
+					} finally {
+						if (dashboardRequestId === activeDashboardRefreshRequest) {
+							dashboardRefreshController = null;
+						}
+						if (hostsRequestId === activeHostsRefreshRequest) {
+							hostsRefreshController = null;
+						}
+						if (
+							dashboardRequestId === activeDashboardRefreshRequest &&
+							hostsRequestId === activeHostsRefreshRequest
+						) {
+							isLoadingOps = false;
+						}
+					}
+				})();
+			opsRefreshPromise = refreshPromise;
+			await refreshPromise;
+			if (opsRefreshPromise === refreshPromise) {
+				opsRefreshPromise = null;
+			}
+		}
+
+	async function runQueueAction(action: 'pause' | 'resume' | 'retry' | 'stop') {
 		if (
 			action === 'stop' &&
 			browser &&
@@ -130,17 +261,25 @@
 		) {
 			return;
 		}
+		if (
+			action === 'retry' &&
+			browser &&
+			!window.confirm('Retry all approved failed folder encodes? Folders that still need review will be skipped.')
+		) {
+			return;
+		}
 
 		queueAction = action;
 		try {
-			const response = await fetch(`/api/encode-queue/${action}`, { method: 'POST' });
+			const actionPath = action === 'retry' ? 'retry-failed' : action;
+			const response = await fetch(`/api/encode-queue/${actionPath}`, { method: 'POST' });
 			const payload = (await response.json()) as { message?: string };
 			if (!response.ok) {
 				toasts.error('Queue update failed', payload.message ?? `Could not ${action} queue.`);
 				return;
 			}
 			toasts.success('Queue updated', payload.message ?? 'Queue updated.');
-			await invalidateAll();
+				await refreshOpsData({ silent: true, force: true });
 		} catch (error) {
 			toasts.error(
 				'Queue update failed',
@@ -154,7 +293,9 @@
 	async function stopCalibrationQueue() {
 		if (
 			browser &&
-			!window.confirm('Stop active calibrations and clear queued calibration jobs? This cannot be undone.')
+			!window.confirm(
+				'Stop active calibrations and clear queued calibration jobs? This cannot be undone.'
+			)
 		) {
 			return;
 		}
@@ -171,7 +312,7 @@
 				return;
 			}
 			toasts.success('Calibration queue updated', payload.message ?? 'Calibration queue updated.');
-			await invalidateAll();
+				await refreshOpsData({ silent: true, force: true });
 		} catch (error) {
 			toasts.error(
 				'Calibration queue update failed',
@@ -188,6 +329,27 @@
 			window.location.hash = hostSettingsAnchor(hostKey);
 		}
 	}
+
+	onMount(() => {
+		void refreshOpsData({ silent: true });
+		if (browser) {
+			opsRefreshTimer = window.setInterval(() => {
+				void refreshOpsData({ silent: true });
+			}, 4000);
+		}
+		return () => {
+			dashboardRefreshController?.abort();
+			hostsRefreshController?.abort();
+			if (opsRefreshTimer !== null) {
+				clearInterval(opsRefreshTimer);
+				opsRefreshTimer = null;
+			}
+			if (hostStatusRetryTimer !== null) {
+				clearTimeout(hostStatusRetryTimer);
+				hostStatusRetryTimer = null;
+			}
+		};
+	});
 </script>
 
 <svelte:head>
@@ -195,6 +357,28 @@
 </svelte:head>
 
 <div class="page-stack">
+	{#if !dashboardPayload}
+		<Panel padding="1.1rem 1.2rem">
+			<div class="panel-stack">
+				<SectionHead
+					eyebrow="Operations"
+					heading={isLoadingOps ? 'Loading fleet status' : 'Ops unavailable'}
+					lede={opsLoadError ??
+						'The page shell is ready now. Queue state and host readiness will populate as soon as the runtime calls finish.'}
+					size="compact"
+				/>
+				{#if opsLoadError}
+					<div class="section-actions-row">
+						<a class="ops-return-link" href={resolve('/')}>Back to folders</a>
+					<button type="button" class="refresh-button" onclick={() => refreshOpsData({ force: true })}>
+							Retry ops load
+						</button>
+					</div>
+				{/if}
+			</div>
+		</Panel>
+	{/if}
+
 	<Panel class="ops-hero-panel" padding="1.1rem 1.2rem">
 		<div class="ops-hero">
 			<SectionHead
@@ -209,9 +393,10 @@
 						<Pill label={pill.label} variant={pill.variant} />
 					{/each}
 				</div>
-				<a class="ops-return-link" href={resolve('/')}>
-					Back to folders
-				</a>
+				{#if Number(dashboard.archive_cleanup?.file_count ?? 0) > 0}
+					<a class="ops-return-link" href={resolve('/completed')}> Open completed </a>
+				{/if}
+				<a class="ops-return-link" href={resolve('/')}> Back to folders </a>
 			</div>
 		</div>
 	</Panel>

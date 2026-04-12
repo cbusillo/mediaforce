@@ -6,6 +6,7 @@ from sqlalchemy import func
 from sqlalchemy import literal_column
 from sqlalchemy import or_
 from sqlalchemy import select
+from sqlalchemy import update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.db import DBClient
@@ -26,6 +27,29 @@ RUNNABLE_ENCODE_JOB_KINDS = ("single", "shard")
 ACTIVE_ENCODE_JOB_STATUSES = ("queued", "retry_backoff", "running")
 QUEUED_ENCODE_JOB_STATUSES = ("queued", "retry_backoff")
 RECENT_ENCODE_JOB_STATUSES = ("completed", "failed", "stopped", "needs_attention")
+
+_PERSISTED_ENCODE_HOST_KEYS = (
+    "allowed_libraries",
+    "capabilities",
+    "ffmpeg_path",
+    "host",
+    "key",
+    "label",
+    "media_access",
+    "mode",
+    "platform",
+    "priority",
+    "repo_path",
+    "schedule_profile",
+    "source_roots",
+    "staging_root",
+    "start_command",
+    "start_timeout_seconds",
+    "stop_command",
+    "utc_offset_minutes",
+    "videotoolbox_available",
+)
+_ENCODE_JOB_HOST_REPAIR_LENGTH_THRESHOLD = 65_536
 
 
 def ensure_queue_state(connection: DBClient, *, queue_name: str = DEFAULT_QUEUE_NAME, updated_at: str) -> None:
@@ -99,6 +123,79 @@ def save_encode_job(connection: DBClient, payload: dict[str, Any]) -> None:
             set_={column: getattr(statement.excluded, column) for column in values if column != "job_id"},
         )
     )
+
+
+def persisted_encode_host_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+    host_payload = payload if isinstance(payload, dict) else {}
+    persisted: dict[str, Any] = {}
+    for key in _PERSISTED_ENCODE_HOST_KEYS:
+        value = host_payload.get(key)
+        if key in {"allowed_libraries", "capabilities"}:
+            if isinstance(value, list):
+                persisted[key] = [str(item) for item in value if isinstance(item, str)]
+            continue
+        if key == "source_roots":
+            if isinstance(value, dict):
+                persisted[key] = {
+                    str(root_key): str(root_value)
+                    for root_key, root_value in value.items()
+                    if isinstance(root_key, str) and root_value is not None
+                }
+            continue
+        if key in {"priority", "start_timeout_seconds", "utc_offset_minutes"}:
+            if value in {None, ""}:
+                continue
+            try:
+                persisted[key] = int(value)
+            except (TypeError, ValueError):
+                continue
+            continue
+        if key == "videotoolbox_available":
+            if value is None:
+                continue
+            persisted[key] = bool(value)
+            continue
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            persisted[key] = text
+    return persisted
+
+
+def repair_persisted_encode_job_hosts(connection: DBClient) -> int:
+    rows = connection.execute(
+        select(encode_jobs.c.job_id, encode_jobs.c.host_json, encode_jobs.c.last_host_json)
+    ).mappings().fetchall()
+    repaired = 0
+    for row in rows:
+        job_id = str(row["job_id"])
+        host_payload, host_payload_malformed = _loads_host_payload_for_repair(row["host_json"])
+        last_host_payload, last_host_payload_malformed = _loads_host_payload_for_repair(row["last_host_json"])
+        sanitized_host = persisted_encode_host_payload(host_payload)
+        sanitized_last_host = persisted_encode_host_payload(last_host_payload)
+        if not str(sanitized_host.get("key") or sanitized_host.get("host") or "").strip():
+            sanitized_host = {
+                **sanitized_last_host,
+                **sanitized_host,
+            }
+        if (
+            not host_payload_malformed
+            and not last_host_payload_malformed
+            and host_payload == sanitized_host
+            and last_host_payload == sanitized_last_host
+        ):
+            continue
+        connection.execute(
+            update(encode_jobs)
+            .where(encode_jobs.c.job_id == job_id)
+            .values(
+                host_json=json.dumps(sanitized_host, sort_keys=True),
+                last_host_json=json.dumps(sanitized_last_host, sort_keys=True),
+            )
+        )
+        repaired += 1
+    return repaired
 
 
 def load_encode_job(connection: DBClient, job_id: str) -> dict[str, Any] | None:
@@ -277,8 +374,8 @@ def _serialize_encode_job(payload: dict[str, Any]) -> dict[str, Any]:
         ),
         "item_count": int_value(payload.get("item_count")),
         "saved_profile_path": payload.get("saved_profile_path"),
-        "host_json": json.dumps(payload.get("host") or {}, sort_keys=True),
-        "last_host_json": json.dumps(payload.get("last_host") or {}, sort_keys=True),
+        "host_json": json.dumps(persisted_encode_host_payload(payload.get("host")), sort_keys=True),
+        "last_host_json": json.dumps(persisted_encode_host_payload(payload.get("last_host")), sort_keys=True),
         "notes": str(payload.get("notes") or ""),
         "process_pid": payload.get("process_pid"),
         "error": payload.get("error"),
@@ -313,8 +410,8 @@ def _hydrate_job(row: DBRow) -> dict[str, Any]:
         "manifest_indexes": json.loads(str(row["manifest_indexes_json"] or "[]")) if row["manifest_indexes_json"] else None,
         "item_count": int(row["item_count"] or 0),
         "saved_profile_path": row["saved_profile_path"],
-        "host": json.loads(str(row["host_json"] or "{}")),
-        "last_host": json.loads(str(row["last_host_json"] or "{}")),
+        "host": _loads_host_payload(row["host_json"]),
+        "last_host": _loads_host_payload(row["last_host_json"]),
         "notes": str(row["notes"] or ""),
         "process_pid": row["process_pid"],
         "error": row["error"],
@@ -336,3 +433,20 @@ def _hydrate_job(row: DBRow) -> dict[str, Any]:
         "finished_at": row["finished_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def _loads_host_payload(raw_payload: Any) -> dict[str, Any]:
+    payload, _ = _loads_host_payload_for_repair(raw_payload)
+    return payload
+
+
+def _loads_host_payload_for_repair(raw_payload: Any) -> tuple[dict[str, Any], bool]:
+    if isinstance(raw_payload, str) and not raw_payload.strip():
+        return {}, True
+    try:
+        payload = json.loads(str(raw_payload or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}, True
+    if not isinstance(payload, dict):
+        return {}, True
+    return payload, False

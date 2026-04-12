@@ -56,11 +56,13 @@ def folder_status_payload(
         normalized_prefix: str,
         *,
         load_job_state: Any,
+        load_retryable_sample_job_state: Any,
         load_scan_job_state: Any,
         load_active_encode_job_for_prefix: Any,
 ) -> dict[str, Any]:
     with open_db(config.paths.db_path) as connection:
         calibration_job = load_job_state(connection, config, normalized_prefix)
+        retryable_sample_job = load_retryable_sample_job_state(connection, config, normalized_prefix)
         active_encode_job = load_active_encode_job_for_prefix(connection, normalized_prefix)
         folder_scan_job = load_scan_job_state(config, normalized_prefix)
     polling_active = bool(
@@ -74,6 +76,7 @@ def folder_status_payload(
         "calibration_status": calibration_job.get("status") if calibration_job else "idle",
         "folder_scan_status": folder_scan_job.get("status") if folder_scan_job else "idle",
         "calibration_job": calibration_job,
+        "retryable_sample_job": retryable_sample_job,
         "folder_scan_job": folder_scan_job,
     }
 

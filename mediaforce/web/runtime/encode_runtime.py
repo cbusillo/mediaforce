@@ -21,9 +21,10 @@ from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS, ensure_queue_state, list_child_encode_jobs, \
-    load_encode_job, load_queue_state, save_encode_job, save_queue_state
+    load_encode_job, load_queue_state, persisted_encode_host_payload, save_encode_job, save_queue_state
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
+from mediaforce.encoding.quality import QualityTempCleanupError, QualityTempSetupError, quality_error_message
 from mediaforce.encoding.staging import safe_unlink
 from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
 
@@ -709,8 +710,9 @@ def load_next_runnable_encode_job(
                 save_encode_job(connection, job)
                 sync_encode_job_parent(connection, job, deps)
             continue
-        if job.get("waiting_reason") or job.get("host") != host_payload:
-            job.update({"waiting_reason": None, "host": host_payload, "updated_at": deps.now_iso()})
+        persisted_host_payload = persisted_encode_host_payload(host_payload)
+        if job.get("waiting_reason") or job.get("host") != persisted_host_payload:
+            job.update({"waiting_reason": None, "host": persisted_host_payload, "updated_at": deps.now_iso()})
             save_encode_job(connection, job)
             sync_encode_job_parent(connection, job, deps)
         return job
@@ -800,7 +802,7 @@ def run_encode_job(
         error = "Encode queue job was stopped and cleaned up."
     except Exception as exc:
         failure_kind = _classify_encode_failure(exc, job)
-        error = str(exc)
+        error = quality_error_message(exc)
     finally:
         if started_host_for_job and not _host_has_other_running_jobs(config, job_id, job.get("host")):
             try:
@@ -1067,6 +1069,8 @@ def _cleanup_encode_retry_artifacts(
 
 
 def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
+    if isinstance(exc, (QualityTempCleanupError, QualityTempSetupError)):
+        return "deterministic"
     message = str(exc).lower()
     host_payload = object_dict(job.get("host"))
     if _encode_failure_is_host_related("ssh_transport", message, host_payload):
