@@ -11,6 +11,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
+from mediaforce.encoding.quality import quality_error_message, resolve_local_quality_temp_root
 from mediaforce.encoding.staging import safe_unlink
 
 
@@ -185,6 +186,11 @@ def encode_one_item(
                 "out_time_seconds": 0.0,
             }
         )
+    quality_search_host = (
+        {**host, "media_access": "mounted"}
+        if quality_source_path != source_path and isinstance(host, dict)
+        else host
+    )
     quality_result = search_quality(
         quality_source_path,
         policy["video"],
@@ -192,8 +198,8 @@ def encode_one_item(
         width=width,
         height=height,
         process_controller=process_controller,
-        host=({**host, "media_access": "mounted"} if quality_source_path != source_path and isinstance(host, dict) else host),
-        quality_temp_dir=config.staging_root_for_host(host),
+        host=quality_search_host,
+        quality_temp_dir=_quality_temp_dir_for_encode_host(config, quality_search_host),
     )
     selection = select_streams(item)
     ffmpeg_cmd = build_ffmpeg_command(
@@ -260,7 +266,7 @@ def encode_one_item(
                 "encode_started_at": started_at,
                 "encode_completed_at": failed_at,
                 "encode_duration_seconds": round(max(time.monotonic() - start_monotonic, 0.0), 3),
-                "error": str(exc),
+                "error": quality_error_message(exc),
             },
         )
         connection.commit()
@@ -386,6 +392,15 @@ def _encode_event_details(
         "encode_host_mode": _host_text(host, "mode"),
         "encode_media_access": _host_text(host, "media_access"),
     }
+
+
+def _quality_temp_dir_for_encode_host(config: MediaforceConfig, host: dict[str, Any] | None) -> Path:
+    if isinstance(host, dict) and str(host.get("media_access") or "").strip().lower() == "stream":
+        return resolve_local_quality_temp_root(
+            config.staging_root,
+            config.paths.web_state_dir / "quality-temp",
+        )
+    return config.staging_root_for_host(host)
 
 
 def _encode_context_text(encode_context: dict[str, Any] | None, key: str) -> str | None:

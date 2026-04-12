@@ -113,10 +113,10 @@ def run_streamed_remote_encode_command(
 
     process_controller.throw_if_cancelled() if process_controller is not None else None
     process = subprocess.Popen(ssh_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               bufsize=0)
+                               bufsize=0, start_new_session=True)
     process_handle = cast(subprocess.Popen[str], cast(object, process))
     if process_controller is not None:
-        process_controller.attach(process_handle)
+        process_controller.attach(process_handle, terminate_process_group=True)
 
     stderr_lines: list[str] = []
     progress_state: dict[str, str] = {}
@@ -195,9 +195,10 @@ def run_tracked_process(
         return run_command(cmd)
 
     process_controller.throw_if_cancelled() if process_controller is not None else None
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
+                               start_new_session=True)
     if process_controller is not None:
-        process_controller.attach(process)
+        process_controller.attach(process, terminate_process_group=True)
 
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []

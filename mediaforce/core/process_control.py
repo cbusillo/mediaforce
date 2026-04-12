@@ -1,5 +1,8 @@
+import os
+import signal
 import subprocess
 import threading
+import time
 from typing import Mapping
 
 
@@ -12,10 +15,12 @@ class ManagedProcessController:
         self._lock = threading.Lock()
         self._process: subprocess.Popen[str] | None = None
         self._cancel_requested = False
+        self._terminate_process_group = False
 
-    def attach(self, process: subprocess.Popen[str]) -> None:
+    def attach(self, process: subprocess.Popen[str], *, terminate_process_group: bool = False) -> None:
         with self._lock:
             self._process = process
+            self._terminate_process_group = terminate_process_group
             if self._cancel_requested:
                 self._terminate_locked()
 
@@ -23,6 +28,7 @@ class ManagedProcessController:
         with self._lock:
             if self._process is process:
                 self._process = None
+                self._terminate_process_group = False
 
     def cancel(self) -> None:
         with self._lock:
@@ -33,6 +39,7 @@ class ManagedProcessController:
         with self._lock:
             self._cancel_requested = False
             self._process = None
+            self._terminate_process_group = False
 
     def throw_if_cancelled(self) -> None:
         with self._lock:
@@ -54,8 +61,31 @@ class ManagedProcessController:
             return
         if self._process.poll() is not None:
             return
+        process_group_id: int | None = None
+        if self._terminate_process_group:
+            try:
+                process_group_id = os.getpgid(self._process.pid)
+            except OSError:
+                process_group_id = None
         try:
-            self._process.terminate()
+            if process_group_id is not None:
+                os.killpg(process_group_id, signal.SIGTERM)
+            else:
+                self._process.terminate()
+        except OSError:
+            return
+        if self._process.poll() is not None:
+            return
+        end_time = time.monotonic() + 1.5
+        while time.monotonic() < end_time:
+            if self._process.poll() is not None:
+                return
+            time.sleep(0.05)
+        try:
+            if process_group_id is not None:
+                os.killpg(process_group_id, signal.SIGKILL)
+            else:
+                self._process.kill()
         except OSError:
             return
 
@@ -74,8 +104,15 @@ def run_command(
     process_controller.throw_if_cancelled()
     stdout_pipe = subprocess.PIPE if capture_output else None
     stderr_pipe = subprocess.PIPE if capture_output else None
-    process = subprocess.Popen(cmd, stdout=stdout_pipe, stderr=stderr_pipe, text=text, env=env)
-    process_controller.attach(process)
+    process = subprocess.Popen(
+        cmd,
+        stdout=stdout_pipe,
+        stderr=stderr_pipe,
+        text=text,
+        env=env,
+        start_new_session=True,
+    )
+    process_controller.attach(process, terminate_process_group=True)
     try:
         stdout, stderr = process.communicate()
     finally:

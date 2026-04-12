@@ -3,6 +3,8 @@ import time
 from pathlib import Path
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.encoding.quality import default_local_quality_temp_root, legacy_local_quality_temp_root, \
+    previous_local_quality_temp_root
 
 SECONDS_PER_DAY = 86400
 SECONDS_PER_MINUTE = 60
@@ -22,6 +24,7 @@ def purge_transient_artifacts(config: MediaforceConfig, *, force: bool = False) 
     for staging_root in _staging_roots_for_cleanup(config):
         _prune_children(staging_root / "_calibration", cutoff)
         _prune_matching_directories(staging_root, ".ab-av1-*", cutoff)
+        _prune_matching_directories(staging_root, ".mediaforce-ab-av1-*", cutoff)
     _prune_matching_files(config.paths.web_state_dir, "calibration-*.json", cutoff)
     _prune_matching_files(config.paths.web_state_dir, "*.job.json", cutoff)
     _write_cleanup_stamp(config)
@@ -123,6 +126,10 @@ def _staging_roots_for_cleanup(config: MediaforceConfig) -> list[Path]:
         roots.append(path)
 
     add_root(config.staging_root)
+    add_root(config.paths.web_state_dir / "quality-temp")
+    add_root(previous_local_quality_temp_root())
+    add_root(legacy_local_quality_temp_root())
+    add_root(default_local_quality_temp_root())
     for host in config.remote_hosts:
         add_root(config.staging_root_for_host(host))
     return roots

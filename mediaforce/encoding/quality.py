@@ -1,7 +1,10 @@
 import os
 import json
 import re
+import shutil
 import subprocess
+import tempfile
+import uuid
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -44,8 +47,21 @@ class SampleEncodeError(RuntimeError):
     pass
 
 
+class QualityTempCleanupError(RuntimeError):
+    pass
+
+
+class QualityTempSetupError(RuntimeError):
+    pass
+
+
 REMOTE_QUALITY_TIMEOUT_SECONDS = 2 * 60 * 60
+REMOTE_QUALITY_CLEANUP_TIMEOUT_SECONDS = 15
 LOCAL_QUALITY_PATH_PREFIX = "/opt/homebrew/opt/ffmpeg-full/bin:/usr/local/opt/ffmpeg-full/bin"
+DEFAULT_LOCAL_QUALITY_TEMP_ROOT_NAME = "mediaforce-quality-temp"
+LEGACY_LOCAL_QUALITY_TEMP_ROOT_NAME = "quality-temp"
+PREVIOUS_LOCAL_QUALITY_TEMP_ROOT_NAME = "mediaforce-quality"
+QUALITY_CLEANUP_NOTE_PREFIX = "Cleanup warning: "
 
 
 def _host_hwaccel_context(host: dict[str, object] | None) -> tuple[str | None, bool | None]:
@@ -129,15 +145,31 @@ def run_crf_search(
         cmd.extend(["--min-vmaf", str(metric_target)])
     else:
         cmd.extend(["--min-xpsnr", str(metric_target)])
-    if quality_temp_dir is not None:
-        cmd.extend(["--temp-dir", str(quality_temp_dir)])
+    try:
+        scoped_temp_dir = _scoped_quality_temp_dir(quality_temp_dir, host=host)
+    except OSError as exc:
+        raise QualityTempSetupError(_quality_temp_setup_error(quality_temp_dir, exc, host=host)) from exc
+    if scoped_temp_dir is not None:
+        cmd.extend(["--temp-dir", str(scoped_temp_dir)])
 
-    result = _run_quality_command(cmd, process_controller=process_controller, host=host)
+    try:
+        result = _run_quality_command(cmd, process_controller=process_controller, host=host)
+    except Exception as exc:
+        cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
+        if cleanup_error is not None:
+            _attach_quality_cleanup_detail(exc, cleanup_error)
+        raise
+    cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
     if result.returncode != 0:
         details = result.stdout.strip()
         if result.stderr.strip():
             details = f"{details}\n{result.stderr.strip()}".strip()
-        raise QualitySearchError(details)
+        error = QualitySearchError(details)
+        if cleanup_error is not None:
+            _attach_quality_cleanup_detail(error, cleanup_error)
+        raise error
+    if cleanup_error is not None:
+        raise QualityTempCleanupError(cleanup_error)
     parsed = parse_quality_result(result.stdout)
     if parsed.metric.lower() != metric:
         parsed.metric = metric.upper()
@@ -207,15 +239,31 @@ def run_sample_encode(
         cmd.extend(["--svt", param])
     if metric == "xpsnr":
         cmd.append("--xpsnr")
-    if quality_temp_dir is not None:
-        cmd.extend(["--temp-dir", str(quality_temp_dir)])
+    try:
+        scoped_temp_dir = _scoped_quality_temp_dir(quality_temp_dir, host=host)
+    except OSError as exc:
+        raise QualityTempSetupError(_quality_temp_setup_error(quality_temp_dir, exc, host=host)) from exc
+    if scoped_temp_dir is not None:
+        cmd.extend(["--temp-dir", str(scoped_temp_dir)])
 
-    result = _run_quality_command(cmd, process_controller=process_controller, host=host)
+    try:
+        result = _run_quality_command(cmd, process_controller=process_controller, host=host)
+    except Exception as exc:
+        cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
+        if cleanup_error is not None:
+            _attach_quality_cleanup_detail(exc, cleanup_error)
+        raise
+    cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
     if result.returncode != 0:
         details = result.stdout.strip()
         if result.stderr.strip():
             details = f"{details}\n{result.stderr.strip()}".strip()
-        raise SampleEncodeError(details)
+        error = SampleEncodeError(details)
+        if cleanup_error is not None:
+            _attach_quality_cleanup_detail(error, cleanup_error)
+        raise error
+    if cleanup_error is not None:
+        raise QualityTempCleanupError(cleanup_error)
     return parse_sample_encode_result(result.stdout, metric)
 
 
@@ -253,7 +301,158 @@ def _run_quality_command(
     host_mode = execution_mode_for_host(host)
     if host_mode != "ssh":
         return run_command(cmd, process_controller=process_controller, env=_local_quality_environment())
+    temp_dir = _quality_temp_dir_arg(cmd)
+    if temp_dir is not None:
+        mkdir_result = run_remote_command(object_dict(host), ["mkdir", "-p", temp_dir], REMOTE_QUALITY_TIMEOUT_SECONDS)
+        if mkdir_result.returncode != 0:
+            details = mkdir_result.stdout.strip()
+            if mkdir_result.stderr.strip():
+                details = f"{details}\n{mkdir_result.stderr.strip()}".strip()
+            raise QualityTempSetupError(details or f"Failed to prepare remote temp dir: {temp_dir}")
     return run_remote_command(object_dict(host), cmd, REMOTE_QUALITY_TIMEOUT_SECONDS)
+
+
+def _scoped_quality_temp_dir(quality_temp_dir: Path | None, *, host: dict[str, object] | None) -> Path | None:
+    if quality_temp_dir is None:
+        return None
+    host_mode = execution_mode_for_host(host)
+    if host_mode != "ssh":
+        quality_temp_dir.mkdir(parents=True, exist_ok=True)
+        return Path(tempfile.mkdtemp(prefix=".mediaforce-ab-av1-", dir=quality_temp_dir))
+    return quality_temp_dir / f".mediaforce-ab-av1-{uuid.uuid4().hex}"
+
+
+def _cleanup_scoped_quality_temp_dir(scoped_temp_dir: Path | None, *, host: dict[str, object] | None) -> str | None:
+    if scoped_temp_dir is None:
+        return None
+    host_mode = execution_mode_for_host(host)
+    if host_mode != "ssh":
+        try:
+            shutil.rmtree(scoped_temp_dir)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            return f"Failed to remove local quality temp dir {scoped_temp_dir}: {exc}"
+        return None
+    try:
+        result = run_remote_command(
+            object_dict(host),
+            ["rm", "-rf", str(scoped_temp_dir)],
+            REMOTE_QUALITY_CLEANUP_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        # Successful quality runs should not fail just because best-effort SSH
+        # cleanup took too long; periodic sweeps will catch leftovers later.
+        return None
+    except Exception as exc:
+        return f"Failed to remove remote quality temp dir {scoped_temp_dir}: {exc}"
+    if result.returncode == 0:
+        return None
+    details = result.stdout.strip()
+    if result.stderr.strip():
+        details = f"{details}\n{result.stderr.strip()}".strip()
+    return details or f"Failed to remove remote quality temp dir {scoped_temp_dir}"
+
+
+def _attach_quality_cleanup_detail(exc: Exception, cleanup_error: str) -> None:
+    cleaned = cleanup_error.strip()
+    if not cleaned:
+        return
+    setattr(exc, "quality_cleanup_error", cleaned)
+    if hasattr(exc, "add_note"):
+        exc.add_note(f"{QUALITY_CLEANUP_NOTE_PREFIX}{cleaned}")
+
+
+def quality_cleanup_error(exc: BaseException) -> str | None:
+    value = getattr(exc, "quality_cleanup_error", None)
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def quality_error_message(exc: BaseException) -> str:
+    message = str(exc).strip()
+    cleanup_error = quality_cleanup_error(exc)
+    if cleanup_error is None:
+        return message
+    cleanup_line = f"{QUALITY_CLEANUP_NOTE_PREFIX}{cleanup_error}"
+    if not message:
+        return cleanup_line
+    return f"{message}\n{cleanup_line}"
+
+
+def default_local_quality_temp_root() -> Path:
+    return Path(tempfile.gettempdir()) / DEFAULT_LOCAL_QUALITY_TEMP_ROOT_NAME
+
+
+def legacy_local_quality_temp_root() -> Path:
+    return Path(tempfile.gettempdir()) / LEGACY_LOCAL_QUALITY_TEMP_ROOT_NAME
+
+
+def previous_local_quality_temp_root() -> Path:
+    return Path(tempfile.gettempdir()) / PREVIOUS_LOCAL_QUALITY_TEMP_ROOT_NAME
+
+
+def resolve_local_quality_temp_root(preferred_root: Path, *fallback_roots: Path) -> Path:
+    for candidate in _quality_temp_root_candidates(preferred_root, *fallback_roots):
+        if _quality_temp_root_is_writable(candidate):
+            return candidate
+    raise OSError(f"No writable quality temp root available for {preferred_root}")
+
+
+def _quality_temp_root_candidates(preferred_root: Path, *fallback_roots: Path) -> list[Path]:
+    candidates: list[Path] = []
+
+    def add_candidate(path: Path | None) -> None:
+        if path is None:
+            return
+        if any(existing == path for existing in candidates):
+            return
+        candidates.append(path)
+
+    add_candidate(preferred_root)
+    for fallback_root in fallback_roots:
+        add_candidate(fallback_root)
+    try:
+        add_candidate(default_local_quality_temp_root())
+    except OSError:
+        pass
+    return candidates
+
+
+def _quality_temp_root_is_writable(root: Path) -> bool:
+    probe_dir = root / f".mediaforce-quality-probe-{uuid.uuid4().hex}"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        probe_dir.mkdir()
+        probe_dir.rmdir()
+    except OSError:
+        return False
+    return True
+
+
+def _quality_temp_setup_error(
+        quality_temp_dir: Path | None,
+        exc: OSError,
+        *,
+        host: dict[str, object] | None,
+) -> str:
+    base_dir = str(quality_temp_dir) if quality_temp_dir is not None else "default temp dir"
+    host_mode = execution_mode_for_host(host)
+    location = "remote" if host_mode == "ssh" else "local"
+    return f"Failed to prepare {location} quality temp dir under {base_dir}: {exc}"
+
+
+def _quality_temp_dir_arg(cmd: list[str]) -> str | None:
+    try:
+        index = cmd.index("--temp-dir")
+    except ValueError:
+        return None
+    if index + 1 >= len(cmd):
+        return None
+    value = str(cmd[index + 1]).strip()
+    return value or None
 
 
 def _local_quality_environment() -> dict[str, str]:
