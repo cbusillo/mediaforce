@@ -71,7 +71,7 @@ def list_completed_folders(
     ).mappings().fetchall()
 
     grouped: dict[str, CompletedFolder] = {}
-    resolved_archive_root = archive_root.resolve(strict=False) if archive_root is not None else None
+    resolved_archive_root = archive_root.resolve() if archive_root is not None else None
     for row in rows:
         rel_path = str(row["rel_path"] or "")
         group = folder_group(rel_path)
@@ -234,6 +234,6 @@ def _clean_text(value: object) -> str:
 
 def _path_is_within_root(path: Path, root: Path) -> bool:
     try:
-        return path.resolve(strict=False).is_relative_to(root)
+        return path.resolve().is_relative_to(root)
     except OSError:
         return False
