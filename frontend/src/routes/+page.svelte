@@ -14,10 +14,6 @@
 	import { formatGiB } from '$lib/format';
 	import { hostsStatusPending } from '$lib/hosts/runtime';
 	import { allQueueWorkersScheduledOffWindow, nextQueueWindowCopy } from '$lib/hosts/schedule';
-	import DashboardFolderGrid from '$lib/components/dashboard/DashboardFolderGrid.svelte';
-	import DashboardHero from '$lib/components/dashboard/DashboardHero.svelte';
-	import Panel from '$lib/components/Panel.svelte';
-	import Pill from '$lib/components/Pill.svelte';
 
 	const EMPTY_DASHBOARD: DashboardSummaryPayload = {
 		folders_preview: [],
@@ -115,40 +111,6 @@
 		}
 		return 'Fleet idle';
 	});
-	const opsSnapshotPills = $derived.by(() => [
-		{
-			label: fleetSnapshotLabel,
-			variant: dashboard.encode_queue.queued_count > 0 ? ('warn' as const) : ('ghost' as const)
-		},
-		...(readyHosts > 0
-			? [{ label: `${readyHosts} hosts ready`, variant: 'ok' as const }]
-			: queueWorkersScheduledOffWindow
-				? [
-						{
-							label: nextWorkerWindow
-								? `Next worker window ${nextWorkerWindow}`
-								: 'All queue workers are scheduled off-window',
-							variant: 'neutral' as const
-						}
-					]
-				: [{ label: '0 hosts ready', variant: 'ghost' as const }]),
-		...(Number(dashboard.archive_cleanup?.file_count ?? 0) > 0
-			? [
-					{
-						label: `${Number(dashboard.archive_cleanup?.file_count ?? 0)} archived backups`,
-						variant: 'warn' as const
-					}
-				]
-			: []),
-		...(pendingReviewCount > 0
-			? [
-					{
-						label: `${pendingReviewCount} pending review`,
-						variant: 'warn' as const
-					}
-				]
-			: [])
-	]);
 	const metricsReady = $derived(
 		dashboard.metric_support.vmaf && dashboard.metric_support.xpsnr && dashboard.metric_support.ssim
 	);
@@ -236,17 +198,25 @@
 	const foldersPending = $derived.by(() =>
 		visibleFolders.reduce((total, folder) => total + folder.pending_count, 0)
 	);
-	const heroFacts = $derived.by(() => [
-		{ label: 'Top folders', value: String(visibleFolders.length) },
-		{ label: 'Pending items', value: String(foldersPending) },
-		{ label: 'Projected reclaim', value: formatGiB(totalProjectedReclaim, 1) }
-	]);
 	const libraryFiltersActive = $derived(disabledLibraries.length > 0);
 	const availableLibraryKeys = $derived.by(() => folderLibraries.map((library) => library.key));
 	const filterHintCopy = $derived(
 		libraryFiltersActive
 			? 'Click an inactive pill to restore it, or All to reset.'
 			: 'Click a pill to hide that library.'
+	);
+	const queueCapableHosts = $derived.by(
+		() => hosts.hosts.filter((host) => host.capabilities.includes('encode_queue')).length
+	);
+	const reachableHosts = $derived.by(() => hosts.hosts.filter((host) => host.available).length);
+	const activeWorkspaceFolder = $derived(visibleFolders[0] ?? null);
+	const queueWatchJobs = $derived.by(() =>
+		[...dashboard.encode_queue.running, ...dashboard.encode_queue.queued].slice(0, 5)
+	);
+	const recentQueueIssues = $derived.by(() =>
+		[...(dashboard.encode_queue.recent ?? [])]
+			.filter((job) => job.status !== 'completed')
+			.slice(0, 3)
 	);
 
 	function toggleLibraryFilter(libraryKey: string) {
@@ -289,6 +259,48 @@
 		}
 		const hours = Math.round(minutes / 60);
 		return `${hours}h ago`;
+	}
+
+	function formatTopCounts(
+		mapping: Record<string, number> | null | undefined,
+		limit = 3,
+		emptyCopy = 'No signal yet'
+	): string {
+		if (!mapping) {
+			return emptyCopy;
+		}
+		const entries = Object.entries(mapping)
+			.filter(([, value]) => Number(value) > 0)
+			.sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+			.slice(0, limit);
+
+		if (!entries.length) {
+			return emptyCopy;
+		}
+
+		return entries.map(([key, value]) => `${value} ${key}`).join(' · ');
+	}
+
+	function queueJobDetailCopy(
+		job: DashboardSummaryPayload['encode_queue']['running'][number]
+	): string {
+		const progressState = String(job.progress?.progress_state ?? '').trim();
+		if (progressState) {
+			return progressState;
+		}
+		const telemetrySummary = String(job.telemetry_summary ?? '').trim();
+		if (telemetrySummary) {
+			return telemetrySummary;
+		}
+		const schedulerCopy = String(job.scheduler_status_copy ?? '').trim();
+		if (schedulerCopy) {
+			return schedulerCopy;
+		}
+		const attemptSummary = String(job.attempt_summary ?? '').trim();
+		if (attemptSummary) {
+			return attemptSummary;
+		}
+		return 'Waiting for the next queue event.';
 	}
 
 	async function loadDashboardSummary() {
@@ -523,188 +535,985 @@
 	<title>Folders · Mediaforce</title>
 </svelte:head>
 
-<div class="page-stack">
+<div class="workstation-screen">
+	<section class="system-strip" aria-label="Fleet system state">
+		<div class="system-cell">
+			<p class="system-label">Queue state</p>
+			<p class="system-value">{fleetSnapshotLabel}</p>
+			<p class="system-detail">
+				{#if dashboard.encode_queue.state.stop_requested}
+					Stop requested across the fleet.
+				{:else if dashboard.encode_queue.state.is_paused}
+					Queue is paused until you resume from Ops.
+				{:else if queueWorkersScheduledOffWindow}
+					{nextWorkerWindow
+						? `Waiting for the next worker window at ${nextWorkerWindow}.`
+						: 'All queue workers are currently scheduled off-window.'}
+				{:else}
+					{dashboard.encode_queue.telemetry?.eta_copy
+						? `Estimated queue finish in ${dashboard.encode_queue.telemetry.eta_copy}.`
+						: 'Queue is ready for the next operator decision.'}
+				{/if}
+			</p>
+		</div>
+
+		<div class="system-cell">
+			<p class="system-label">Workers</p>
+			<p class="system-value">{readyHosts} ready / {queueCapableHosts} queue-capable</p>
+			<p class="system-detail">
+				{reachableHosts} mounted now
+				{#if queueCapableHosts === 0}
+					. No queue-capable workers configured.
+				{:else}
+					.
+				{/if}
+			</p>
+		</div>
+
+		<div class="system-cell">
+			<p class="system-label">Catalog</p>
+			<p class="system-value">{catalogScanActive ? catalogScanHeading : 'Catalog standing by'}</p>
+			<p class="system-detail">
+				{catalogScanActive
+					? catalogScanProgressHeadline
+					: 'Folder ranking is ready for the next pick.'}
+			</p>
+		</div>
+
+		<div class="system-cell accent-cell">
+			<p class="system-label">Recovery</p>
+			<p class="system-value">{formatGiB(totalProjectedReclaim, 1)} visible reclaim</p>
+			<p class="system-detail">
+				{foldersPending} pending items across {visibleFolders.length} visible folders
+				{#if Number(dashboard.archive_cleanup?.file_count ?? 0) > 0}
+					. {dashboard.archive_cleanup?.file_count} archived backups waiting in completed.
+				{:else}
+					.
+				{/if}
+			</p>
+		</div>
+	</section>
+
 	{#if landingLoadIssues.length > 0}
-		<Panel class="load-warning-panel" padding="1rem 1.1rem">
-			<div class="load-warning-shell">
-				<div class="load-warning-copy">
-					<p class="load-warning-label">Runtime issue</p>
-					<h2 class="load-warning-heading">Some dashboard data did not load</h2>
-					{#each landingLoadIssues as issue (issue)}
-						<p class="load-warning-detail">{issue}</p>
-					{/each}
-				</div>
-				<button type="button" class="load-warning-action" onclick={retryLandingLoads}>
-					Retry load
-				</button>
+		<section class="alert-strip" aria-label="Runtime issues">
+			<div>
+				<p class="alert-label">Runtime issue</p>
+				{#each landingLoadIssues as issue (issue)}
+					<p class="alert-copy">{issue}</p>
+				{/each}
 			</div>
-		</Panel>
+			<button type="button" class="alert-action" onclick={retryLandingLoads}>Retry load</button>
+		</section>
 	{/if}
 
-	<DashboardHero
-		foldersCount={visibleFolders.length}
-		{totalProjectedReclaim}
-		{heroFacts}
-		{metricsReady}
-		metricSupport={dashboard.metric_support}
-		metricStatusCopy={dashboard.metric_status_copy}
-	/>
-
-	<Panel class="ops-summary-panel" padding="1rem 1.1rem">
-		<div class="ops-summary-shell">
-			<p class="ops-summary-label">Ops snapshot</p>
-			<div class="ops-summary-side">
-				<div class="ops-summary-pills">
-					{#each opsSnapshotPills as pill (pill.label)}
-						<Pill label={pill.label} variant={pill.variant} />
-					{/each}
+	<div class="console-grid">
+		<section class="station-card active-workspace" aria-label="Active workspace">
+			<div class="section-head">
+				<div>
+					<p class="section-label">Active workspace</p>
+					<h2 class="section-title">Home queue console</h2>
 				</div>
-				<div class="ops-summary-links">
-					{#if Number(dashboard.archive_cleanup?.file_count ?? 0) > 0}
-						<a class="ops-summary-link" href={resolve('/completed')}> Open completed </a>
-					{/if}
-					<a class="ops-summary-link" href={resolve('/ops')}> Open ops </a>
+				<div class="action-row">
+					<a class="console-link" href={resolve('/ops')}>Open ops</a>
+					<a class="console-link" href={resolve('/settings')}>Worker settings</a>
 				</div>
 			</div>
-		</div>
-	</Panel>
 
-	<DashboardFolderGrid
-		{catalogScanActive}
-		{catalogScanLikelyStalled}
-		{catalogScanHeading}
-		{catalogScanProgressHeadline}
-		{catalogScanStatusCopy}
-		{catalogScanProgressFacts}
-		{folderLoadState}
-		{folders}
-		{folderLoadError}
-		{folderLibraries}
-		{disabledLibraries}
-		onEnableAllLibraries={enableAllLibraries}
-		onToggleLibraryFilter={toggleLibraryFilter}
-		{libraryColors}
-		{filterHintCopy}
-		{visibleFolders}
-		{catalogEmpty}
-	/>
+			{#if activeWorkspaceFolder}
+				<div class="workspace-header">
+					<div>
+						<div class="workspace-badges">
+							<span
+								class="workspace-badge library"
+								style={`--library-chip: ${libraryColors[folderLibraryKey(activeWorkspaceFolder.prefix)] ?? '#4b5563'};`}
+							>
+								{folderLibraryLabel(folderLibraryKey(activeWorkspaceFolder.prefix))}
+							</span>
+							<span class="workspace-badge neutral">{activeWorkspaceFolder.scope_label}</span>
+							{#if activeWorkspaceFolder.review_badge_label}
+								<span
+									class={`workspace-badge review ${activeWorkspaceFolder.review_badge_tone ?? 'neutral'}`.trim()}
+								>
+									{activeWorkspaceFolder.review_badge_label}
+								</span>
+							{/if}
+						</div>
+						<h3 class="workspace-title">{activeWorkspaceFolder.title}</h3>
+						<p class="workspace-subtitle">
+							{activeWorkspaceFolder.subtitle || activeWorkspaceFolder.prefix}
+						</p>
+						<p class="workspace-summary">
+							{activeWorkspaceFolder.pending_count} pending of {activeWorkspaceFolder.item_count} items.
+							Projected reclaim {formatGiB(activeWorkspaceFolder.projected_reclaim_bytes, 1)}.
+						</p>
+					</div>
+
+					<div class="workspace-actions">
+						<a class="workspace-primary" href={resolve(`/folders/${activeWorkspaceFolder.prefix}`)}>
+							Open folder studio
+						</a>
+						<a class="workspace-secondary" href={resolve('/completed')}>Open completed</a>
+					</div>
+				</div>
+
+				<div class="fact-grid" aria-label="Active workspace facts">
+					<div class="fact-cell highlight">
+						<p class="fact-label">Projected reclaim</p>
+						<p class="fact-value">{formatGiB(activeWorkspaceFolder.projected_reclaim_bytes, 1)}</p>
+					</div>
+					<div class="fact-cell">
+						<p class="fact-label">Pending</p>
+						<p class="fact-value">{activeWorkspaceFolder.pending_count}</p>
+					</div>
+					<div class="fact-cell">
+						<p class="fact-label">Current size</p>
+						<p class="fact-value">{formatGiB(activeWorkspaceFolder.total_size_bytes, 1)}</p>
+					</div>
+					<div class="fact-cell">
+						<p class="fact-label">Average age</p>
+						<p class="fact-value">{Math.round(activeWorkspaceFolder.average_age_days)} days</p>
+					</div>
+				</div>
+
+				<div class="signal-grid">
+					<div class="signal-panel">
+						<p class="signal-label">Status mix</p>
+						<p class="signal-value">{formatTopCounts(activeWorkspaceFolder.statuses, 4)}</p>
+					</div>
+					<div class="signal-panel">
+						<p class="signal-label">Codec mix</p>
+						<p class="signal-value">{formatTopCounts(activeWorkspaceFolder.video_codecs, 3)}</p>
+					</div>
+					<div class="signal-panel">
+						<p class="signal-label">Metric readiness</p>
+						<p class="signal-value">
+							{metricsReady ? 'Full metric stack online' : dashboard.metric_status_copy}
+						</p>
+					</div>
+				</div>
+			{:else if catalogEmpty}
+				<div class="empty-shell">
+					<h3 class="workspace-title">No folders ranked yet</h3>
+					<p class="workspace-summary">
+						The catalog is still empty. Start a library refresh or check Settings before queueing
+						work.
+					</p>
+				</div>
+			{:else}
+				<div class="empty-shell">
+					<h3 class="workspace-title">Loading the workspace queue</h3>
+					<p class="workspace-summary">
+						Mediaforce is pulling the full folder payload for the active console view.
+					</p>
+				</div>
+			{/if}
+		</section>
+
+		<div class="side-rail">
+			<section class="station-card rail-card" aria-label="Queue watch">
+				<div class="section-head compact">
+					<div>
+						<p class="section-label">Queue watch</p>
+						<h2 class="section-title small">Live encode lanes</h2>
+					</div>
+					<a class="console-link" href={resolve('/ops')}>Queue controls</a>
+				</div>
+
+				<div class="rail-summary">
+					<p>{fleetSnapshotLabel}</p>
+					<p>{pendingReviewCount} pending review</p>
+				</div>
+
+				{#if queueWatchJobs.length > 0}
+					<ul class="watch-list">
+						{#each queueWatchJobs as job (job.job_id)}
+							<li>
+								<div class="watch-row">
+									<div>
+										<p class="watch-title mono-copy">{job.prefix}</p>
+										<p class="watch-copy">{queueJobDetailCopy(job)}</p>
+									</div>
+									<span class="watch-state">{job.status}</span>
+								</div>
+							</li>
+						{/each}
+					</ul>
+				{:else}
+					<p class="muted-block">
+						No encode jobs are active. The next folder pick will define the queue.
+					</p>
+				{/if}
+			</section>
+
+			<section class="station-card rail-card" aria-label="Catalog watch">
+				<div class="section-head compact">
+					<div>
+						<p class="section-label">Catalog watch</p>
+						<h2 class="section-title small">Scan and backlog</h2>
+					</div>
+					<a class="console-link" href={resolve('/completed')}>Backups</a>
+				</div>
+
+				<p class="catalog-headline">{catalogScanStatusCopy}</p>
+				{#if catalogScanProgressFacts.length > 0}
+					<ul class="fact-list">
+						{#each catalogScanProgressFacts as fact (fact)}
+							<li>{fact}</li>
+						{/each}
+					</ul>
+				{/if}
+
+				<div class="rail-summary stack">
+					<p>
+						Metrics: {metricsReady ? 'VMAF, XPSNR, and SSIM online' : dashboard.metric_status_copy}
+					</p>
+					<p>
+						Archive root: <span class="mono-copy"
+							>{dashboard.archive_cleanup?.archive_root || 'not set'}</span
+						>
+					</p>
+				</div>
+
+				{#if recentQueueIssues.length > 0}
+					<div class="issue-block">
+						<p class="signal-label">Recent blockers</p>
+						<ul class="watch-list compact-list">
+							{#each recentQueueIssues as job (job.job_id)}
+								<li>
+									<p class="watch-title mono-copy">{job.prefix}</p>
+									<p class="watch-copy">{job.error || queueJobDetailCopy(job)}</p>
+								</li>
+							{/each}
+						</ul>
+					</div>
+				{/if}
+			</section>
+		</div>
+	</div>
+
+	<section class="station-card filter-deck" aria-label="Library filters">
+		<div class="section-head compact">
+			<div>
+				<p class="section-label">Queue filters</p>
+				<h2 class="section-title small">Visible libraries</h2>
+			</div>
+			<p class="filter-hint">{filterHintCopy}</p>
+		</div>
+
+		<div class="filter-row">
+			<button
+				type="button"
+				class:active={!libraryFiltersActive}
+				class="filter-chip all-chip"
+				onclick={enableAllLibraries}
+			>
+				All libraries
+			</button>
+
+			{#each folderLibraries as library (library.key)}
+				<button
+					type="button"
+					class:active={!disabledLibraries.includes(library.key)}
+					class="filter-chip"
+					style={`--library-chip: ${libraryColors[library.key] ?? '#4b5563'};`}
+					onclick={() => toggleLibraryFilter(library.key)}
+				>
+					<span class="filter-dot"></span>
+					{library.label}
+					<span class="filter-count">{library.count}</span>
+				</button>
+			{/each}
+		</div>
+	</section>
+
+	<section class="station-card table-deck" aria-label="Folder work queue">
+		<div class="section-head compact">
+			<div>
+				<p class="section-label">Work queue</p>
+				<h2 class="section-title small">Ranked folders</h2>
+			</div>
+			<p class="queue-count">{visibleFolders.length} visible folders</p>
+		</div>
+
+		{#if folderLoadState === 'loading' && folders.length === 0 && !catalogEmpty}
+			<p class="muted-block">Loading the full folder queue from the active catalog snapshot.</p>
+		{:else if folderLoadState === 'error'}
+			<div class="table-message error-message">
+				<p>Could not load the ranked folder queue.</p>
+				<p>{folderLoadError}</p>
+			</div>
+		{:else if catalogEmpty}
+			<div class="table-message">
+				<p>No folders are available yet.</p>
+				<p>Run a scan or confirm your library configuration in Settings.</p>
+			</div>
+		{:else if visibleFolders.length === 0}
+			<div class="table-message">
+				<p>All visible libraries are currently filtered out.</p>
+				<p>Restore one library filter or press All libraries to resume the queue view.</p>
+			</div>
+		{:else}
+			<div class="table-shell">
+				<table>
+					<thead>
+						<tr>
+							<th scope="col">Priority</th>
+							<th scope="col">Folder</th>
+							<th scope="col">Library</th>
+							<th scope="col">Pending</th>
+							<th scope="col">Reclaim</th>
+							<th scope="col">Review</th>
+							<th scope="col">Signal</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each visibleFolders as folder, index (folder.prefix)}
+							<tr class:active-row={index === 0}>
+								<td data-label="Priority">#{index + 1}</td>
+								<td data-label="Folder">
+									<a class="folder-link" href={resolve(`/folders/${folder.prefix}`)}>
+										<span class="folder-title">{folder.title}</span>
+										<span class="folder-meta">{folder.subtitle || folder.prefix}</span>
+									</a>
+								</td>
+								<td data-label="Library">
+									<span
+										class="library-tag"
+										style={`--library-chip: ${libraryColors[folderLibraryKey(folder.prefix)] ?? '#4b5563'};`}
+									>
+										<span class="filter-dot"></span>
+										{folderLibraryLabel(folderLibraryKey(folder.prefix))}
+									</span>
+									<span class="table-subcopy">{folder.scope_label}</span>
+								</td>
+								<td data-label="Pending">
+									<span class="table-value">{folder.pending_count} / {folder.item_count}</span>
+									<span class="table-subcopy"
+										>{Math.max(folder.item_count - folder.pending_count, 0)} complete</span
+									>
+								</td>
+								<td data-label="Reclaim">
+									<span class="table-value">{formatGiB(folder.projected_reclaim_bytes, 1)}</span>
+									<span class="table-subcopy">{formatGiB(folder.total_size_bytes, 1)} on disk</span>
+								</td>
+								<td data-label="Review">
+									<span class={`review-tag ${folder.review_badge_tone ?? 'neutral'}`.trim()}>
+										{folder.review_badge_label || 'Ready to inspect'}
+									</span>
+									<span class="table-subcopy">
+										{folder.average_age_days > 0
+											? `${Math.round(folder.average_age_days)} days old`
+											: 'Freshly ranked'}
+									</span>
+								</td>
+								<td data-label="Signal">
+									<span class="table-value">{formatTopCounts(folder.statuses, 3)}</span>
+									<span class="table-subcopy"
+										>{formatTopCounts(folder.video_codecs, 2, 'Codec mix pending')}</span
+									>
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		{/if}
+	</section>
 </div>
 
 <style>
-	.page-stack {
+	.workstation-screen {
 		display: grid;
-		gap: var(--space-3);
-	}
-
-	.load-warning-shell {
-		display: flex;
-		justify-content: space-between;
 		gap: 1rem;
-		align-items: center;
-		flex-wrap: wrap;
+		padding: 0.25rem 0 1rem;
 	}
 
-	.load-warning-copy {
+	.system-strip,
+	.console-grid,
+	.filter-row,
+	.section-head,
+	.action-row,
+	.workspace-actions,
+	.watch-row,
+	.filter-chip,
+	.library-tag,
+	.workspace-badges {
+		display: flex;
+	}
+
+	.system-strip,
+	.console-grid {
+		gap: 1rem;
+	}
+
+	.system-strip {
 		display: grid;
-		gap: 0.4rem;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
 	}
 
-	.load-warning-label {
+	.system-cell,
+	.station-card,
+	.alert-strip {
+		position: relative;
+		border: 1px solid rgba(148, 163, 184, 0.24);
+		background: linear-gradient(180deg, rgba(11, 15, 20, 0.96), rgba(17, 24, 39, 0.94));
+		box-shadow: 0 22px 50px rgba(15, 23, 42, 0.26);
+		overflow: hidden;
+	}
+
+	.system-cell {
+		padding: 1rem 1.1rem;
+		min-height: 8.5rem;
+	}
+
+	.accent-cell {
+		background: linear-gradient(180deg, rgba(13, 18, 24, 0.96), rgba(17, 43, 51, 0.96));
+	}
+
+	.system-cell::before,
+	.station-card::before,
+	.alert-strip::before {
+		content: '';
+		position: absolute;
+		inset: 0 0 auto;
+		height: 2px;
+		background: linear-gradient(90deg, rgba(56, 189, 248, 0.75), rgba(34, 197, 94, 0.2));
+	}
+
+	.system-label,
+	.section-label,
+	.alert-label,
+	.fact-label,
+	.signal-label {
 		margin: 0;
-		font-size: 0.78rem;
+		font-size: 0.72rem;
 		font-weight: 800;
-		letter-spacing: 0.14em;
+		letter-spacing: 0.16em;
 		text-transform: uppercase;
-		color: #9a3412;
+		color: rgba(148, 163, 184, 0.88);
 	}
 
-	.load-warning-heading {
+	.system-value,
+	.section-title,
+	.workspace-title,
+	.fact-value,
+	.table-value {
 		margin: 0;
-		font-size: clamp(1.05rem, 2vw, 1.35rem);
-		color: #7c2d12;
+		color: #f8fafc;
 	}
 
-	.load-warning-detail {
+	.system-value {
+		margin-top: 0.4rem;
+		font-size: 1.2rem;
+		font-weight: 700;
+		line-height: 1.25;
+	}
+
+	.system-detail,
+	.alert-copy,
+	.workspace-summary,
+	.workspace-subtitle,
+	.watch-copy,
+	.catalog-headline,
+	.filter-hint,
+	.queue-count,
+	.table-subcopy,
+	.muted-block,
+	.table-message,
+	.rail-summary,
+	.rail-summary p {
 		margin: 0;
-		max-width: 54rem;
-		color: #7c2d12;
+		color: rgba(226, 232, 240, 0.74);
 		line-height: 1.5;
 	}
 
-	.load-warning-action {
-		border: 1px solid rgba(154, 52, 18, 0.18);
-		background: rgba(154, 52, 18, 0.1);
-		color: #7c2d12;
-		font: inherit;
-		font-weight: 700;
-		padding: 0.76rem 1rem;
-		border-radius: var(--radius-pill);
-		cursor: pointer;
+	.alert-strip,
+	.section-head,
+	.workspace-header,
+	.fact-grid,
+	.signal-grid,
+	.side-rail,
+	.filter-row {
+		display: grid;
 	}
 
-	:global(.load-warning-panel) {
-		background:
-			radial-gradient(circle at top left, rgba(251, 146, 60, 0.18), transparent 36%),
-			linear-gradient(140deg, rgba(255, 247, 237, 0.95), rgba(255, 237, 213, 0.88));
-	}
-
-	.ops-summary-shell {
-		display: flex;
-		justify-content: space-between;
+	.alert-strip {
+		grid-template-columns: minmax(0, 1fr) auto;
 		gap: 1rem;
 		align-items: center;
+		padding: 1rem 1.1rem;
+		background: linear-gradient(180deg, rgba(42, 22, 14, 0.96), rgba(69, 26, 3, 0.92));
+	}
+
+	.alert-action,
+	.console-link,
+	.workspace-primary,
+	.workspace-secondary,
+	.filter-chip {
+		align-items: center;
+		justify-content: center;
+		font-weight: 700;
+		transition:
+			border-color 150ms ease,
+			background-color 150ms ease,
+			color 150ms ease,
+			transform 150ms ease;
+	}
+
+	.alert-action,
+	.console-link,
+	.workspace-primary,
+	.workspace-secondary {
+		display: inline-flex;
+		padding: 0.72rem 0.95rem;
+		border: 1px solid rgba(56, 189, 248, 0.22);
+		background: rgba(15, 23, 42, 0.7);
+		color: #e2e8f0;
+	}
+
+	.console-link:hover,
+	.workspace-primary:hover,
+	.workspace-secondary:hover,
+	.alert-action:hover,
+	.filter-chip:hover {
+		transform: translateY(-1px);
+		border-color: rgba(56, 189, 248, 0.5);
+		background: rgba(30, 41, 59, 0.94);
+	}
+
+	.console-grid {
+		display: grid;
+		grid-template-columns: minmax(0, 1.7fr) minmax(21rem, 0.95fr);
+		align-items: start;
+	}
+
+	.station-card {
+		padding: 1.1rem;
+	}
+
+	.section-head {
+		grid-template-columns: minmax(0, 1fr) auto;
+		gap: 1rem;
+		align-items: start;
+		margin-bottom: 1rem;
+	}
+
+	.section-head.compact {
+		margin-bottom: 0.85rem;
+	}
+
+	.section-head.compact .console-link {
+		justify-self: start;
+		width: fit-content;
+	}
+
+	.section-title {
+		margin-top: 0.3rem;
+		font-size: 1.25rem;
+		font-weight: 700;
+	}
+
+	.section-title.small {
+		font-size: 1rem;
+	}
+
+	.action-row,
+	.workspace-actions,
+	.workspace-badges,
+	.filter-row {
+		gap: 0.65rem;
 		flex-wrap: wrap;
 	}
 
-	.ops-summary-side {
+	.workspace-header {
+		grid-template-columns: minmax(0, 1fr) auto;
+		gap: 1rem;
+		align-items: start;
+	}
+
+	.workspace-title {
+		margin-top: 0.7rem;
+		font-size: clamp(1.8rem, 3vw, 2.4rem);
+		line-height: 1.04;
+	}
+
+	.workspace-subtitle {
+		margin-top: 0.55rem;
+		font-size: 0.95rem;
+	}
+
+	.workspace-summary {
+		margin-top: 0.8rem;
+		max-width: 44rem;
+	}
+
+	.workspace-actions {
+		justify-content: flex-end;
+	}
+
+	.workspace-primary {
+		background: rgba(8, 47, 73, 0.92);
+		border-color: rgba(56, 189, 248, 0.45);
+	}
+
+	.workspace-secondary {
+		background: rgba(15, 23, 42, 0.72);
+	}
+
+	.workspace-badge,
+	.review-tag,
+	.watch-state,
+	.library-tag {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.45rem;
+		padding: 0.34rem 0.56rem;
+		font-size: 0.72rem;
+		font-weight: 800;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+	}
+
+	.workspace-badge,
+	.library-tag {
+		border: 1px solid rgba(148, 163, 184, 0.28);
+		color: #e2e8f0;
+		background: rgba(30, 41, 59, 0.84);
+	}
+
+	.workspace-badge.library {
+		border-color: color-mix(in srgb, var(--library-chip) 58%, rgba(148, 163, 184, 0.35));
+	}
+
+	.workspace-badge.library::before {
+		content: '';
+		width: 0.55rem;
+		height: 0.55rem;
+		border-radius: 999px;
+		background: var(--library-chip);
+	}
+
+	.workspace-badge.review.ok,
+	.review-tag.ok {
+		background: rgba(20, 83, 45, 0.84);
+		color: #dcfce7;
+	}
+
+	.workspace-badge.review.warning,
+	.workspace-badge.review.warn,
+	.review-tag.warning,
+	.review-tag.warn {
+		background: rgba(120, 53, 15, 0.84);
+		color: #ffedd5;
+	}
+
+	.workspace-badge.review.attention,
+	.review-tag.attention,
+	.review-tag.neutral {
+		background: rgba(8, 47, 73, 0.86);
+		color: #dbeafe;
+	}
+
+	.fact-grid,
+	.signal-grid {
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		gap: 0.75rem;
+		margin-top: 1rem;
+	}
+
+	.signal-grid {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		margin-top: 0.75rem;
+	}
+
+	.fact-cell,
+	.signal-panel {
+		padding: 0.85rem 0.9rem;
+		border: 1px solid rgba(148, 163, 184, 0.18);
+		background: rgba(15, 23, 42, 0.72);
+	}
+
+	.fact-cell.highlight {
+		background: linear-gradient(180deg, rgba(8, 47, 73, 0.9), rgba(15, 23, 42, 0.86));
+		border-color: rgba(56, 189, 248, 0.36);
+	}
+
+	.fact-value {
+		margin-top: 0.45rem;
+		font-size: 1.1rem;
+		font-weight: 700;
+	}
+
+	.signal-value {
+		margin: 0.45rem 0 0;
+		color: rgba(241, 245, 249, 0.92);
+		line-height: 1.5;
+	}
+
+	.side-rail {
+		gap: 1rem;
+	}
+
+	.rail-summary {
+		display: flex;
+		gap: 0.75rem;
+		justify-content: space-between;
+		padding: 0.75rem 0.85rem;
+		border: 1px solid rgba(148, 163, 184, 0.16);
+		background: rgba(15, 23, 42, 0.64);
+	}
+
+	.rail-summary.stack {
+		display: grid;
+		gap: 0.45rem;
+		justify-content: stretch;
+	}
+
+	.watch-list,
+	.fact-list {
+		margin: 0.9rem 0 0;
+		padding: 0;
+		list-style: none;
+	}
+
+	.watch-list {
 		display: grid;
 		gap: 0.7rem;
 	}
 
-	.ops-summary-label {
+	.watch-row {
+		justify-content: space-between;
+		gap: 0.75rem;
+		padding: 0.75rem 0.85rem;
+		border: 1px solid rgba(148, 163, 184, 0.16);
+		background: rgba(15, 23, 42, 0.6);
+	}
+
+	.watch-title {
 		margin: 0;
-		font-size: 0.78rem;
-		font-weight: 800;
-		letter-spacing: 0.14em;
-		text-transform: uppercase;
-		color: var(--accent-deep);
+		color: #f8fafc;
+		font-size: 0.8rem;
 	}
 
-	.ops-summary-side {
-		justify-items: start;
+	.watch-copy {
+		margin-top: 0.25rem;
+		font-size: 0.88rem;
 	}
 
-	.ops-summary-pills {
-		display: flex;
-		gap: 0.65rem;
-		flex-wrap: wrap;
+	.watch-state {
+		align-self: start;
+		border: 1px solid rgba(56, 189, 248, 0.22);
+		background: rgba(30, 41, 59, 0.88);
+		color: #cbd5e1;
 	}
 
-	.ops-summary-links {
-		display: flex;
-		gap: 0.65rem;
-		flex-wrap: wrap;
+	.fact-list {
+		display: grid;
+		gap: 0.45rem;
+		padding-left: 1rem;
+		color: rgba(226, 232, 240, 0.74);
 	}
 
-	.ops-summary-link {
+	.issue-block {
+		margin-top: 1rem;
+	}
+
+	.compact-list {
+		margin-top: 0.55rem;
+	}
+
+	.empty-shell,
+	.table-message,
+	.muted-block {
+		padding: 0.95rem 1rem;
+		border: 1px solid rgba(148, 163, 184, 0.16);
+		background: rgba(15, 23, 42, 0.58);
+	}
+
+	.filter-deck,
+	.table-deck {
+		padding-top: 1rem;
+	}
+
+	.filter-row {
+		grid-template-columns: repeat(auto-fit, minmax(10rem, max-content));
+		align-items: stretch;
+	}
+
+	.filter-chip {
 		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		padding: 0.74rem 1rem;
-		border-radius: var(--radius-pill);
-		border: 1px solid rgba(15, 118, 110, 0.18);
-		background: rgba(15, 118, 110, 0.1);
-		color: var(--accent-deep);
-		font-weight: 700;
-		text-decoration: none;
-		box-shadow:
-			inset 0 1px 0 rgba(255, 255, 255, 0.55),
-			0 12px 22px rgba(15, 118, 110, 0.08);
+		gap: 0.5rem;
+		padding: 0.7rem 0.85rem;
+		border: 1px solid rgba(148, 163, 184, 0.2);
+		background: rgba(15, 23, 42, 0.62);
+		color: rgba(226, 232, 240, 0.76);
 	}
 
-	:global(.ops-summary-panel) {
-		background:
-			radial-gradient(circle at top left, rgba(15, 118, 110, 0.12), transparent 34%),
-			linear-gradient(140deg, rgba(255, 253, 247, 0.88), rgba(244, 237, 224, 0.84));
+	.filter-chip.active {
+		background: rgba(30, 41, 59, 0.96);
+		color: #f8fafc;
+		border-color: color-mix(in srgb, var(--library-chip, #38bdf8) 58%, rgba(148, 163, 184, 0.35));
+	}
+
+	.all-chip.active {
+		border-color: rgba(56, 189, 248, 0.45);
+	}
+
+	.filter-dot {
+		width: 0.55rem;
+		height: 0.55rem;
+		border-radius: 999px;
+		background: var(--library-chip, #38bdf8);
+		flex: 0 0 auto;
+		align-self: center;
+	}
+
+	.filter-count {
+		margin-left: auto;
+		color: rgba(148, 163, 184, 0.8);
+	}
+
+	.table-shell {
+		overflow-x: auto;
+		border: 1px solid rgba(148, 163, 184, 0.16);
+		background: rgba(9, 14, 22, 0.88);
+	}
+
+	table {
+		width: 100%;
+		border-collapse: collapse;
+	}
+
+	thead {
+		background: rgba(15, 23, 42, 0.96);
+	}
+
+	th,
+	td {
+		padding: 0.85rem 0.9rem;
+		text-align: left;
+		vertical-align: top;
+		border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+	}
+
+	th {
+		font-size: 0.72rem;
+		font-weight: 800;
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+		color: rgba(148, 163, 184, 0.88);
+	}
+
+	td {
+		color: rgba(226, 232, 240, 0.86);
+	}
+
+	tbody tr {
+		background: rgba(11, 15, 20, 0.76);
+	}
+
+	tbody tr:nth-child(even) {
+		background: rgba(15, 23, 42, 0.82);
+	}
+
+	tbody tr.active-row {
+		background: rgba(8, 47, 73, 0.34);
+	}
+
+	.folder-link {
+		display: grid;
+		gap: 0.18rem;
+		color: inherit;
+	}
+
+	.folder-title {
+		font-weight: 700;
+		color: #f8fafc;
+	}
+
+	.folder-meta,
+	.table-subcopy {
+		display: block;
+		margin-top: 0.18rem;
+		font-size: 0.84rem;
+	}
+
+	.review-tag {
+		justify-content: flex-start;
+	}
+
+	.error-message {
+		border-color: rgba(249, 115, 22, 0.3);
+		background: rgba(67, 20, 7, 0.72);
+	}
+
+	@media (max-width: 1100px) {
+		.system-strip,
+		.fact-grid,
+		.signal-grid {
+			grid-template-columns: 1fr 1fr;
+		}
+
+		.workspace-header,
+		.section-head {
+			grid-template-columns: 1fr;
+		}
+
+		.workspace-actions {
+			justify-content: flex-start;
+		}
+	}
+
+	@media (max-width: 960px) {
+		.console-grid {
+			grid-template-columns: 1fr;
+		}
+	}
+
+	@media (max-width: 720px) {
+		.system-strip,
+		.fact-grid,
+		.signal-grid {
+			grid-template-columns: 1fr;
+		}
+
+		.alert-strip {
+			grid-template-columns: 1fr;
+		}
+
+		.filter-row {
+			grid-template-columns: 1fr;
+		}
+
+		thead {
+			display: none;
+		}
+
+		table,
+		tbody,
+		tr,
+		td {
+			display: block;
+			width: 100%;
+		}
+
+		tr {
+			padding: 0.4rem 0;
+		}
+
+		td {
+			padding: 0.6rem 0.9rem;
+		}
+
+		td::before {
+			content: attr(data-label);
+			display: block;
+			margin-bottom: 0.22rem;
+			font-size: 0.68rem;
+			font-weight: 800;
+			letter-spacing: 0.12em;
+			text-transform: uppercase;
+			color: rgba(148, 163, 184, 0.8);
+		}
 	}
 </style>

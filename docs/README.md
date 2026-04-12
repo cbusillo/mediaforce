@@ -15,6 +15,11 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 - `docs/architecture/module-boundaries.md`: durable backend/frontend module
   boundary map after the structural refactor pass
 
+## Design briefs
+
+- `docs/design/workstation-home-screen-brief.md`: first-pass brief for the
+  workstation-style home screen reset
+
 ## Developer workflows
 
 - `docs/development/database-tooling.md`: SQLAlchemy/Alembic schema workflow,
