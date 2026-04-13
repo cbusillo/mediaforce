@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
+	import '$lib/design/workstation-shell.css';
 	import type {
 		DashboardScanJob,
 		DashboardFoldersPayload,
@@ -9,11 +10,14 @@
 	} from '$lib/api/types';
 	import { resolve } from '$app/paths';
 	import { onDestroy, onMount } from 'svelte';
-	import { fetchJson } from '$lib/api/client';
-	import { folderLibraryKey, folderLibraryLabel } from '$lib/folder-display';
+	import { fetchJson, postJson } from '$lib/api/client';
+	import HomeQueueContext from '$lib/components/home/HomeQueueContext.svelte';
+	import HomeQueueTable from '$lib/components/home/HomeQueueTable.svelte';
+	import { folderLibraryKey, folderLibraryLabel, folderRoutePrefix } from '$lib/folder-display';
 	import { formatGiB } from '$lib/format';
 	import { hostsStatusPending } from '$lib/hosts/runtime';
 	import { allQueueWorkersScheduledOffWindow, nextQueueWindowCopy } from '$lib/hosts/schedule';
+	import { toasts } from '$lib/stores/toasts';
 
 	type FolderSortKey = 'priority' | 'title' | 'library' | 'pending' | 'reclaim' | 'age' | 'review';
 	type FolderSortDirection = 'asc' | 'desc';
@@ -75,6 +79,7 @@
 	let activeFolderRequest = 0;
 	let requestedFolderCacheKey = $state<string | null>(null);
 	let pendingStoredDisabledLibraries = $state<string[] | null>(null);
+	let libraryFilterStorageLoaded = $state(false);
 	let folderLoadController: AbortController | null = null;
 	let dashboardRefreshController: AbortController | null = null;
 	let hostsSummaryController: AbortController | null = null;
@@ -157,7 +162,10 @@
 		if (catalogScanLikelyStalled) {
 			return 'Still marked running, but no new progress has been recorded recently. This can happen on a slow mount or if the scan is hung.';
 		}
-		return 'New or changed library roots are being rescanned before this recommendation list updates.';
+		if (catalogScanActive) {
+			return 'New or changed library roots are being rescanned before this recommendation list updates.';
+		}
+		return 'No library scan is active. Ranked folders reflect the latest completed catalog pass.';
 	});
 	const catalogScanProgressFacts = $derived.by(() => {
 		const facts: string[] = [];
@@ -193,6 +201,7 @@
 	let libraryFiltersHydrated = $state(false);
 	let folderSortKey = $state<FolderSortKey>('priority');
 	let folderSortDirection = $state<FolderSortDirection>('asc');
+	const fullFolderLibrariesReady = $derived(catalogEmpty || folderLoadState === 'ready');
 
 	const visibleFolders = $derived.by(() =>
 		folders.filter((folder) => !disabledLibraries.includes(folderLibraryKey(folder.prefix)))
@@ -207,18 +216,19 @@
 	const availableLibraryKeys = $derived.by(() => folderLibraries.map((library) => library.key));
 	const filterHintCopy = $derived(
 		libraryFiltersActive
-			? 'Click an inactive pill to restore it, or All to reset.'
-			: 'Click a pill to hide that library.'
+			? 'Show a hidden library again, or use Show all to reset the queue view.'
+			: 'Click a library to hide it from the queue.'
 	);
 	const queueCapableHosts = $derived.by(
 		() => hosts.hosts.filter((host) => host.capabilities.includes('encode_queue')).length
 	);
 	const reachableHosts = $derived.by(() => hosts.hosts.filter((host) => host.available).length);
-	const sortedVisibleFolders = $derived.by(() => {
+	const sortedVisibleFolderRows = $derived.by(() => {
 		const collator = new Intl.Collator('en-US', { sensitivity: 'base', numeric: true });
 		const rankedFolders = visibleFolders.map((folder, index) => ({
 			folder,
 			index,
+			priority: index + 1,
 			libraryLabel: folderLibraryLabel(folderLibraryKey(folder.prefix)),
 			reviewLabel: String(folder.review_badge_label ?? '')
 		}));
@@ -258,17 +268,41 @@
 			return comparison * direction;
 		});
 
-		return rankedFolders.map(({ folder }) => folder);
+		return rankedFolders;
 	});
-	const activeWorkspaceFolder = $derived(sortedVisibleFolders[0] ?? null);
+	const sortedVisibleFolders = $derived.by(() =>
+		sortedVisibleFolderRows.map(({ folder }) => folder)
+	);
+	const activeWorkspaceFolder = $derived(sortedVisibleFolderRows[0]?.folder ?? null);
 	const queueWatchJobs = $derived.by(() =>
 		[...dashboard.encode_queue.running, ...dashboard.encode_queue.queued].slice(0, 5)
+	);
+	const queuedFolderPrefixes = $derived.by(
+		() =>
+			new Set(
+				[...dashboard.encode_queue.running, ...dashboard.encode_queue.queued].map(
+					(job) => job.prefix
+				)
+			)
 	);
 	const recentQueueIssues = $derived.by(() =>
 		[...(dashboard.encode_queue.recent ?? [])]
 			.filter((job) => job.status !== 'completed')
 			.slice(0, 3)
 	);
+	const folderLookup = $derived.by(() => {
+		const lookup: Record<string, FolderCardData> = {};
+		for (const folder of [...dashboard.folders_preview, ...folders]) {
+			if (!lookup[folder.prefix]) {
+				lookup[folder.prefix] = folder;
+			}
+		}
+		return lookup;
+	});
+	const activeWorkspaceQueued = $derived.by(() =>
+		activeWorkspaceFolder ? queuedFolderPrefixes.has(activeWorkspaceFolder.prefix) : false
+	);
+	let actionState = $state<null | 'resume-queue' | 'queue-folder'>(null);
 
 	function toggleLibraryFilter(libraryKey: string) {
 		disabledLibraries = disabledLibraries.includes(libraryKey)
@@ -302,13 +336,6 @@
 
 		folderSortKey = key;
 		folderSortDirection = defaultFolderSortDirection(key);
-	}
-
-	function folderSortAria(key: FolderSortKey): 'ascending' | 'descending' | 'none' {
-		if (folderSortKey !== key) {
-			return 'none';
-		}
-		return folderSortDirection === 'asc' ? 'ascending' : 'descending';
 	}
 
 	function parseIsoDate(value: string | null | undefined): Date | null {
@@ -363,6 +390,14 @@
 		return entries.map(([key, value]) => `${value} ${key}`).join(' · ');
 	}
 
+	function folderTitleForPrefix(prefix: string): string {
+		return folderLookup[prefix]?.title || prefix.split('/').filter(Boolean).at(-1) || prefix;
+	}
+
+	function folderSubtitleForPrefix(prefix: string): string {
+		return folderLookup[prefix]?.subtitle || prefix;
+	}
+
 	function queueJobDetailCopy(
 		job: DashboardSummaryPayload['encode_queue']['running'][number]
 	): string {
@@ -383,6 +418,57 @@
 			return attemptSummary;
 		}
 		return 'Waiting for the next queue event.';
+	}
+
+	async function refreshHomeData() {
+		await Promise.all([loadDashboardSummary(), loadHostsSummary()]);
+	}
+
+	async function resumeQueueFromHome() {
+		actionState = 'resume-queue';
+		try {
+			const response = await postJson<{ message?: string }>('/api/encode-queue/resume', {});
+			toasts.success('Queue resumed', response.message ?? 'Resumed the encode queue.');
+			await refreshHomeData();
+		} catch (error) {
+			toasts.error(
+				'Could not resume queue',
+				error instanceof Error ? error.message : 'Unexpected queue resume error'
+			);
+		} finally {
+			actionState = null;
+		}
+	}
+
+	async function queueActiveWorkspaceFolder() {
+		if (
+			!activeWorkspaceFolder ||
+			activeWorkspaceQueued ||
+			activeWorkspaceFolder.pending_count <= 0
+		) {
+			return;
+		}
+
+		actionState = 'queue-folder';
+		try {
+			const encodedPrefix = folderRoutePrefix(activeWorkspaceFolder.prefix);
+			const response = await postJson<{ message?: string; action?: string }>(
+				`/api/folders/${encodedPrefix}/queue-encode`,
+				{ notes: '', bypass_schedule: false }
+			);
+			toasts.success(
+				response.action === 'recovered' ? 'Failed files recovered' : 'Folder queued',
+				response.message ?? 'Queued the current folder.'
+			);
+			await refreshHomeData();
+		} catch (error) {
+			toasts.error(
+				'Could not queue folder',
+				error instanceof Error ? error.message : 'Unexpected queue error'
+			);
+		} finally {
+			actionState = null;
+		}
 	}
 
 	async function loadDashboardSummary() {
@@ -510,12 +596,14 @@
 			const storedValue = window.localStorage.getItem(LIBRARY_FILTER_STORAGE_KEY);
 			if (!storedValue) {
 				pendingStoredDisabledLibraries = [];
+				libraryFilterStorageLoaded = true;
 				return;
 			}
 
 			const parsed = JSON.parse(storedValue);
 			if (!Array.isArray(parsed)) {
 				pendingStoredDisabledLibraries = [];
+				libraryFilterStorageLoaded = true;
 				return;
 			}
 
@@ -524,6 +612,8 @@
 				.filter((value, index, values) => values.indexOf(value) === index);
 		} catch {
 			pendingStoredDisabledLibraries = [];
+		} finally {
+			libraryFilterStorageLoaded = true;
 		}
 	});
 
@@ -558,41 +648,39 @@
 	});
 
 	$effect(() => {
-		if (!browser || libraryFiltersHydrated || (!folders.length && !catalogEmpty)) {
+		if (
+			!browser ||
+			!libraryFilterStorageLoaded ||
+			libraryFiltersHydrated ||
+			(!folders.length && !catalogEmpty)
+		) {
 			return;
 		}
 
-		const knownLibraries = new Set(availableLibraryKeys);
-		disabledLibraries = (pendingStoredDisabledLibraries ?? []).filter((value) =>
-			knownLibraries.has(value)
-		);
+		disabledLibraries = [...(pendingStoredDisabledLibraries ?? [])];
 		libraryFiltersHydrated = true;
 	});
 
 	$effect(() => {
-		if (!browser || !libraryFiltersHydrated || (!folders.length && !catalogEmpty)) {
+		if (!browser || !libraryFiltersHydrated) {
 			return;
 		}
 
-		const knownLibraries = new Set(availableLibraryKeys);
-		const normalizedDisabledLibraries = disabledLibraries.filter((value) =>
-			knownLibraries.has(value)
-		);
+		const nextDisabledLibraries = fullFolderLibrariesReady
+			? disabledLibraries.filter((value) => new Set(availableLibraryKeys).has(value))
+			: disabledLibraries;
 
-		if (normalizedDisabledLibraries.length !== disabledLibraries.length) {
-			disabledLibraries = normalizedDisabledLibraries;
+		if (nextDisabledLibraries.length !== disabledLibraries.length) {
+			disabledLibraries = nextDisabledLibraries;
 			return;
 		}
 
-		if (!normalizedDisabledLibraries.length) {
+		if (!nextDisabledLibraries.length) {
 			window.localStorage.removeItem(LIBRARY_FILTER_STORAGE_KEY);
 			return;
 		}
 
-		window.localStorage.setItem(
-			LIBRARY_FILTER_STORAGE_KEY,
-			JSON.stringify(normalizedDisabledLibraries)
-		);
+		window.localStorage.setItem(LIBRARY_FILTER_STORAGE_KEY, JSON.stringify(nextDisabledLibraries));
 	});
 
 	$effect(() => {
@@ -626,9 +714,9 @@
 			<p class="system-value">{fleetSnapshotLabel}</p>
 			<p class="system-detail">
 				{#if dashboard.encode_queue.state.stop_requested}
-					Stop requested across the fleet.
+					Stop was requested across the fleet. Resume here when you are ready to restart queue work.
 				{:else if dashboard.encode_queue.state.is_paused}
-					Queue is paused until you resume from Ops.
+					Queue is paused. Resume it here or open Ops for full queue controls.
 				{:else if queueWorkersScheduledOffWindow}
 					{nextWorkerWindow
 						? `Waiting for the next worker window at ${nextWorkerWindow}.`
@@ -639,18 +727,28 @@
 						: 'Queue is ready for the next operator decision.'}
 				{/if}
 			</p>
+			{#if dashboard.encode_queue.state.stop_requested || dashboard.encode_queue.state.is_paused}
+				<div class="queue-cell-actions">
+					<button
+						type="button"
+						class="system-action"
+						onclick={resumeQueueFromHome}
+						disabled={actionState !== null}
+					>
+						{actionState === 'resume-queue' ? 'Resuming queue...' : 'Resume queue'}
+					</button>
+					<a class="console-link" href={resolve('/ops')}>Open ops</a>
+				</div>
+			{/if}
 		</div>
 
 		<div class="system-cell">
 			<p class="system-label">Workers</p>
 			<p class="system-value">{readyHosts} ready / {queueCapableHosts} queue-capable</p>
 			<p class="system-detail">
-				{reachableHosts} mounted now
-				{#if queueCapableHosts === 0}
-					. No queue-capable workers configured.
-				{:else}
-					.
-				{/if}
+				{queueCapableHosts === 0
+					? `${reachableHosts} mounted now. No queue-capable workers configured.`
+					: `${reachableHosts} mounted now.`}
 			</p>
 		</div>
 
@@ -670,7 +768,7 @@
 			<p class="system-detail">
 				{foldersPending} pending items across {visibleFolders.length} visible folders
 				{#if Number(dashboard.archive_cleanup?.file_count ?? 0) > 0}
-					. {dashboard.archive_cleanup?.file_count} archived backups waiting in completed.
+					. {dashboard.archive_cleanup?.file_count} completed backups are ready for cleanup.
 				{:else}
 					.
 				{/if}
@@ -691,116 +789,66 @@
 	{/if}
 
 	<div class="console-grid">
-		<section class="station-card active-workspace" aria-label="Active workspace">
-			<div class="section-head">
-				<div>
-					<p class="section-label">Active workspace</p>
-					<h2 class="section-title">Home queue console</h2>
-				</div>
-				<div class="action-row">
-					<a class="console-link" href={resolve('/ops')}>Open ops</a>
-					<a class="console-link" href={resolve('/settings')}>Worker settings</a>
-				</div>
-			</div>
-
-			{#if activeWorkspaceFolder}
-				<div class="workspace-header">
-					<div>
-						<div class="workspace-badges">
-							<span
-								class="workspace-badge library"
-								style={`--library-chip: ${libraryColors[folderLibraryKey(activeWorkspaceFolder.prefix)] ?? '#4b5563'};`}
-							>
-								{folderLibraryLabel(folderLibraryKey(activeWorkspaceFolder.prefix))}
-							</span>
-							<span class="workspace-badge neutral">{activeWorkspaceFolder.scope_label}</span>
-							{#if activeWorkspaceFolder.review_badge_label}
-								<span
-									class={`workspace-badge review ${activeWorkspaceFolder.review_badge_tone ?? 'neutral'}`.trim()}
-								>
-									{activeWorkspaceFolder.review_badge_label}
-								</span>
-							{/if}
-						</div>
-						<h3 class="workspace-title">{activeWorkspaceFolder.title}</h3>
-						<p class="workspace-subtitle">
-							{activeWorkspaceFolder.subtitle || activeWorkspaceFolder.prefix}
-						</p>
-						<p class="workspace-summary">
-							{activeWorkspaceFolder.pending_count} pending of {activeWorkspaceFolder.item_count} items.
-							Projected reclaim {formatGiB(activeWorkspaceFolder.projected_reclaim_bytes, 1)}.
-						</p>
-					</div>
-
-					<div class="workspace-actions">
-						<a class="workspace-primary" href={resolve(`/folders/${activeWorkspaceFolder.prefix}`)}>
-							Open folder studio
-						</a>
-						<a class="workspace-secondary" href={resolve('/completed')}>Open completed</a>
-					</div>
-				</div>
-
-				<div class="fact-grid" aria-label="Active workspace facts">
-					<div class="fact-cell highlight">
-						<p class="fact-label">Projected reclaim</p>
-						<p class="fact-value">{formatGiB(activeWorkspaceFolder.projected_reclaim_bytes, 1)}</p>
-					</div>
-					<div class="fact-cell">
-						<p class="fact-label">Pending</p>
-						<p class="fact-value">{activeWorkspaceFolder.pending_count}</p>
-					</div>
-					<div class="fact-cell">
-						<p class="fact-label">Current size</p>
-						<p class="fact-value">{formatGiB(activeWorkspaceFolder.total_size_bytes, 1)}</p>
-					</div>
-					<div class="fact-cell">
-						<p class="fact-label">Average age</p>
-						<p class="fact-value">{Math.round(activeWorkspaceFolder.average_age_days)} days</p>
-					</div>
-				</div>
-
-				<div class="signal-grid">
-					<div class="signal-panel">
-						<p class="signal-label">Status mix</p>
-						<p class="signal-value">{formatTopCounts(activeWorkspaceFolder.statuses, 4)}</p>
-					</div>
-					<div class="signal-panel">
-						<p class="signal-label">Codec mix</p>
-						<p class="signal-value">{formatTopCounts(activeWorkspaceFolder.video_codecs, 3)}</p>
-					</div>
-					<div class="signal-panel">
-						<p class="signal-label">Metric readiness</p>
-						<p class="signal-value">
-							{metricsReady ? 'Full metric stack online' : dashboard.metric_status_copy}
-						</p>
-					</div>
-				</div>
-			{:else if catalogEmpty}
-				<div class="empty-shell">
-					<h3 class="workspace-title">No folders ranked yet</h3>
-					<p class="workspace-summary">
-						The catalog is still empty. Start a library refresh or check Settings before queueing
-						work.
-					</p>
-				</div>
-			{:else}
-				<div class="empty-shell">
-					<h3 class="workspace-title">Loading the workspace queue</h3>
-					<p class="workspace-summary">
-						Mediaforce is pulling the full folder payload for the active console view.
-					</p>
-				</div>
-			{/if}
-		</section>
+		<div class="main-column">
+			<HomeQueueTable
+				{folderLibraries}
+				{libraryColors}
+				{disabledLibraries}
+				{libraryFiltersActive}
+				{filterHintCopy}
+				{folderLoadState}
+				{folderLoadError}
+				showInitialLoadingMessage={folderLoadState === 'loading' &&
+					folders.length === 0 &&
+					!catalogEmpty}
+				{catalogEmpty}
+				{sortedVisibleFolders}
+				{sortedVisibleFolderRows}
+				activeWorkspacePrefix={activeWorkspaceFolder?.prefix ?? null}
+				{folderSortKey}
+				{folderSortDirection}
+				{enableAllLibraries}
+				{toggleLibraryFilter}
+				{toggleFolderSort}
+				{formatTopCounts}
+			/>
+		</div>
 
 		<div class="side-rail">
-			<section class="station-card rail-card" aria-label="Queue watch">
+			<HomeQueueContext
+				{activeWorkspaceFolder}
+				{libraryColors}
+				{metricsReady}
+				metricStatusCopy={dashboard.metric_status_copy}
+				{catalogEmpty}
+				{activeWorkspaceQueued}
+				queueActionDisabled={actionState !== null}
+				queueActionPending={actionState === 'queue-folder'}
+				{queueActiveWorkspaceFolder}
+				{formatTopCounts}
+			/>
+
+			<section class="station-card rail-card control-card" aria-label="Console controls">
 				<div class="section-head compact">
 					<div>
-						<p class="section-label">Queue watch</p>
-						<h2 class="section-title small">Live encode lanes</h2>
+						<p class="section-label">Console controls</p>
+						<h2 class="section-title small">Global actions</h2>
 					</div>
-					<a class="console-link" href={resolve('/ops')}>Queue controls</a>
+				</div>
+
+				<div class="rail-actions">
+					<a class="console-link" href={resolve('/ops')}>Open ops</a>
+					<a class="console-link" href={resolve('/settings')}>Settings</a>
+					<a class="console-link" href={resolve('/completed')}>Completed</a>
+				</div>
+			</section>
+
+			<section class="station-card rail-card" aria-label="Queue monitor">
+				<div class="section-head compact">
+					<div>
+						<p class="section-label">Queue monitor</p>
+						<h2 class="section-title small">Active encodes</h2>
+					</div>
 				</div>
 
 				<div class="rail-summary">
@@ -814,7 +862,8 @@
 							<li>
 								<div class="watch-row">
 									<div>
-										<p class="watch-title mono-copy">{job.prefix}</p>
+										<p class="watch-title">{folderTitleForPrefix(job.prefix)}</p>
+										<p class="watch-path mono-copy">{folderSubtitleForPrefix(job.prefix)}</p>
 										<p class="watch-copy">{queueJobDetailCopy(job)}</p>
 									</div>
 									<span class="watch-state">{job.status}</span>
@@ -829,13 +878,12 @@
 				{/if}
 			</section>
 
-			<section class="station-card rail-card" aria-label="Catalog watch">
+			<section class="station-card rail-card" aria-label="Catalog status">
 				<div class="section-head compact">
 					<div>
-						<p class="section-label">Catalog watch</p>
-						<h2 class="section-title small">Scan and backlog</h2>
+						<p class="section-label">Catalog status</p>
+						<h2 class="section-title small">Scan and cleanup</h2>
 					</div>
-					<a class="console-link" href={resolve('/completed')}>Backups</a>
 				</div>
 
 				<p class="catalog-headline">{catalogScanStatusCopy}</p>
@@ -864,7 +912,8 @@
 						<ul class="watch-list compact-list">
 							{#each recentQueueIssues as job (job.job_id)}
 								<li>
-									<p class="watch-title mono-copy">{job.prefix}</p>
+									<p class="watch-title">{folderTitleForPrefix(job.prefix)}</p>
+									<p class="watch-path mono-copy">{folderSubtitleForPrefix(job.prefix)}</p>
 									<p class="watch-copy">{job.error || queueJobDetailCopy(job)}</p>
 								</li>
 							{/each}
@@ -874,348 +923,57 @@
 			</section>
 		</div>
 	</div>
-
-	<section class="station-card filter-deck" aria-label="Library filters">
-		<div class="section-head compact">
-			<div>
-				<p class="section-label">Queue filters</p>
-				<h2 class="section-title small">Visible libraries</h2>
-			</div>
-			<p class="filter-hint">{filterHintCopy}</p>
-		</div>
-
-		<div class="filter-row">
-			<button
-				type="button"
-				class:active={!libraryFiltersActive}
-				class="filter-chip all-chip"
-				onclick={enableAllLibraries}
-			>
-				All libraries
-			</button>
-
-			{#each folderLibraries as library (library.key)}
-				<button
-					type="button"
-					class:active={!disabledLibraries.includes(library.key)}
-					class="filter-chip"
-					style={`--library-chip: ${libraryColors[library.key] ?? '#4b5563'};`}
-					onclick={() => toggleLibraryFilter(library.key)}
-				>
-					<span class="filter-dot"></span>
-					{library.label}
-					<span class="filter-count">{library.count}</span>
-				</button>
-			{/each}
-		</div>
-	</section>
-
-	<section class="station-card table-deck" aria-label="Folder work queue">
-		<div class="section-head compact">
-			<div>
-				<p class="section-label">Work queue</p>
-				<h2 class="section-title small">Ranked folders</h2>
-			</div>
-			<p class="queue-count">
-				{sortedVisibleFolders.length} visible folders
-				<span class="sort-summary">
-					Sorted by {folderSortKey}
-					{folderSortDirection === 'asc' ? 'ascending' : 'descending'}
-				</span>
-			</p>
-		</div>
-
-		{#if folderLoadState === 'loading' && folders.length === 0 && !catalogEmpty}
-			<p class="muted-block">Loading the full folder queue from the active catalog snapshot.</p>
-		{:else if folderLoadState === 'error'}
-			<div class="table-message error-message">
-				<p>Could not load the ranked folder queue.</p>
-				<p>{folderLoadError}</p>
-			</div>
-		{:else if catalogEmpty}
-			<div class="table-message">
-				<p>No folders are available yet.</p>
-				<p>Run a scan or confirm your library configuration in Settings.</p>
-			</div>
-		{:else if sortedVisibleFolders.length === 0}
-			<div class="table-message">
-				<p>All visible libraries are currently filtered out.</p>
-				<p>Restore one library filter or press All libraries to resume the queue view.</p>
-			</div>
-		{:else}
-			<div class="table-shell">
-				<table>
-					<thead>
-						<tr>
-							<th scope="col" aria-sort={folderSortAria('priority')}>
-								<button
-									type="button"
-									class={`sort-header ${folderSortKey === 'priority' ? 'active' : ''}`.trim()}
-									onclick={() => toggleFolderSort('priority')}
-								>
-									Priority
-									<span class="sort-indicator"
-										>{folderSortKey === 'priority'
-											? folderSortDirection === 'asc'
-												? '^'
-												: 'v'
-											: '-'}</span
-									>
-								</button>
-							</th>
-							<th scope="col" aria-sort={folderSortAria('title')}>
-								<button
-									type="button"
-									class={`sort-header ${folderSortKey === 'title' ? 'active' : ''}`.trim()}
-									onclick={() => toggleFolderSort('title')}
-								>
-									Folder
-									<span class="sort-indicator"
-										>{folderSortKey === 'title'
-											? folderSortDirection === 'asc'
-												? '^'
-												: 'v'
-											: '-'}</span
-									>
-								</button>
-							</th>
-							<th scope="col" aria-sort={folderSortAria('library')}>
-								<button
-									type="button"
-									class={`sort-header ${folderSortKey === 'library' ? 'active' : ''}`.trim()}
-									onclick={() => toggleFolderSort('library')}
-								>
-									Library
-									<span class="sort-indicator"
-										>{folderSortKey === 'library'
-											? folderSortDirection === 'asc'
-												? '^'
-												: 'v'
-											: '-'}</span
-									>
-								</button>
-							</th>
-							<th scope="col" aria-sort={folderSortAria('pending')}>
-								<button
-									type="button"
-									class={`sort-header ${folderSortKey === 'pending' ? 'active' : ''}`.trim()}
-									onclick={() => toggleFolderSort('pending')}
-								>
-									Pending
-									<span class="sort-indicator"
-										>{folderSortKey === 'pending'
-											? folderSortDirection === 'asc'
-												? '^'
-												: 'v'
-											: '-'}</span
-									>
-								</button>
-							</th>
-							<th scope="col" aria-sort={folderSortAria('reclaim')}>
-								<button
-									type="button"
-									class={`sort-header ${folderSortKey === 'reclaim' ? 'active' : ''}`.trim()}
-									onclick={() => toggleFolderSort('reclaim')}
-								>
-									Reclaim
-									<span class="sort-indicator"
-										>{folderSortKey === 'reclaim'
-											? folderSortDirection === 'asc'
-												? '^'
-												: 'v'
-											: '-'}</span
-									>
-								</button>
-							</th>
-							<th scope="col" aria-sort={folderSortAria('age')}>
-								<button
-									type="button"
-									class={`sort-header ${folderSortKey === 'age' ? 'active' : ''}`.trim()}
-									onclick={() => toggleFolderSort('age')}
-								>
-									Age
-									<span class="sort-indicator"
-										>{folderSortKey === 'age'
-											? folderSortDirection === 'asc'
-												? '^'
-												: 'v'
-											: '-'}</span
-									>
-								</button>
-							</th>
-							<th scope="col" aria-sort={folderSortAria('review')}>
-								<button
-									type="button"
-									class={`sort-header ${folderSortKey === 'review' ? 'active' : ''}`.trim()}
-									onclick={() => toggleFolderSort('review')}
-								>
-									Review
-									<span class="sort-indicator"
-										>{folderSortKey === 'review'
-											? folderSortDirection === 'asc'
-												? '^'
-												: 'v'
-											: '-'}</span
-									>
-								</button>
-							</th>
-							<th scope="col">Signal</th>
-						</tr>
-					</thead>
-					<tbody>
-						{#each sortedVisibleFolders as folder, index (folder.prefix)}
-							<tr class:active-row={index === 0}>
-								<td data-label="Priority">#{index + 1}</td>
-								<td data-label="Folder">
-									<a class="folder-link" href={resolve(`/folders/${folder.prefix}`)}>
-										<span class="folder-title">{folder.title}</span>
-										<span class="folder-meta">{folder.subtitle || folder.prefix}</span>
-									</a>
-								</td>
-								<td data-label="Library">
-									<span
-										class="library-tag"
-										style={`--library-chip: ${libraryColors[folderLibraryKey(folder.prefix)] ?? '#4b5563'};`}
-									>
-										<span class="filter-dot"></span>
-										{folderLibraryLabel(folderLibraryKey(folder.prefix))}
-									</span>
-									<span class="table-subcopy">{folder.scope_label}</span>
-								</td>
-								<td data-label="Pending">
-									<span class="table-value">{folder.pending_count} / {folder.item_count}</span>
-									<span class="table-subcopy"
-										>{Math.max(folder.item_count - folder.pending_count, 0)} complete</span
-									>
-								</td>
-								<td data-label="Reclaim">
-									<span class="table-value">{formatGiB(folder.projected_reclaim_bytes, 1)}</span>
-									<span class="table-subcopy">{formatGiB(folder.total_size_bytes, 1)} on disk</span>
-								</td>
-								<td data-label="Age">
-									<span class="table-value"
-										>{Math.max(0, Math.round(folder.average_age_days))}d</span
-									>
-									<span class="table-subcopy">
-										{folder.average_age_days > 0 ? 'Average item age' : 'Freshly ranked'}
-									</span>
-								</td>
-								<td data-label="Review">
-									<span class={`review-tag ${folder.review_badge_tone ?? 'neutral'}`.trim()}>
-										{folder.review_badge_label || 'Ready to inspect'}
-									</span>
-									<span class="table-subcopy">{folder.scope_label}</span>
-								</td>
-								<td data-label="Signal">
-									<span class="table-value">{formatTopCounts(folder.statuses, 3)}</span>
-									<span class="table-subcopy"
-										>{formatTopCounts(folder.video_codecs, 2, 'Codec mix pending')}</span
-									>
-								</td>
-							</tr>
-						{/each}
-					</tbody>
-				</table>
-			</div>
-		{/if}
-	</section>
 </div>
 
 <style>
-	:global(html),
-	:global(body) {
+	.workstation-screen {
+		display: grid;
+		gap: 1rem;
+		padding: 0.25rem 0 1rem;
+		position: relative;
+		isolation: isolate;
+		z-index: 0;
+	}
+
+	.workstation-screen::before {
+		content: '';
+		position: fixed;
+		inset: 0;
+		z-index: -2;
+		pointer-events: none;
 		background: #0b1014;
 	}
 
-	:global(body) {
-		color: #e5edf6;
-		background-image: none;
-	}
-
-	:global(body::after) {
-		display: none;
-	}
-
-	:global(body::before) {
+	.workstation-screen::after {
+		content: '';
+		position: fixed;
 		inset: 0;
+		z-index: -1;
+		pointer-events: none;
 		background-image:
 			linear-gradient(rgba(148, 163, 184, 0.05) 1px, transparent 1px),
 			linear-gradient(90deg, rgba(148, 163, 184, 0.04) 1px, transparent 1px);
 		background-size: 28px 28px;
 		opacity: 0.32;
-		mix-blend-mode: normal;
-		mask-image: none;
-	}
-
-	:global(.page-shell) {
-		width: min(1480px, calc(100vw - 1.75rem));
-		gap: 0.95rem;
-		padding-top: 0.7rem;
-	}
-
-	:global(.masthead),
-	:global(.masthead.panel) {
-		border: 1px solid rgba(148, 163, 184, 0.18) !important;
-		box-shadow: 0 18px 34px rgba(2, 6, 23, 0.26) !important;
-		backdrop-filter: blur(14px);
-		background: rgba(10, 15, 21, 0.9) !important;
-	}
-
-	:global(.masthead)::before,
-	:global(.masthead)::after {
-		display: none !important;
-	}
-
-	:global(.masthead .brand-mark) {
-		color: #7dd3fc;
-	}
-
-	:global(.masthead .brand-name) {
-		font-family: 'Avenir Next', 'Segoe UI', sans-serif;
-		font-size: clamp(1.1rem, 1.65vw, 1.45rem);
-		letter-spacing: -0.02em;
-		color: #f8fafc;
-	}
-
-	:global(.masthead .nav-row a) {
-		border-radius: 0.55rem;
-		border-color: rgba(148, 163, 184, 0.16);
-		background: rgba(15, 23, 42, 0.72);
-		color: rgba(226, 232, 240, 0.74);
-		box-shadow: none;
-	}
-
-	:global(.masthead .nav-row a:hover),
-	:global(.masthead .nav-row a.active) {
-		transform: none;
-		border-color: rgba(56, 189, 248, 0.42);
-		background: rgba(8, 47, 73, 0.86);
-		color: #f8fafc;
-		box-shadow: none;
-	}
-
-	.workstation-screen {
-		display: grid;
-		gap: 1rem;
-		padding: 0.25rem 0 1rem;
 	}
 
 	.system-strip,
 	.console-grid,
-	.filter-row,
 	.section-head,
-	.action-row,
-	.workspace-actions,
-	.watch-row,
-	.filter-chip,
-	.library-tag,
-	.workspace-badges {
+	.watch-row {
 		display: flex;
 	}
 
 	.system-strip,
 	.console-grid {
 		gap: 1rem;
+	}
+
+	.main-column {
+		display: grid;
+		gap: 1rem;
+		align-content: start;
+		min-width: 0;
 	}
 
 	.system-strip {
@@ -1243,8 +1001,7 @@
 	}
 
 	.alert-strip::before,
-	.queue-cell::before,
-	.active-workspace::before {
+	.queue-cell::before {
 		content: '';
 		position: absolute;
 		inset: 0 0 auto;
@@ -1261,15 +1018,13 @@
 		background: linear-gradient(90deg, rgba(251, 146, 60, 0.95), rgba(248, 113, 113, 0.3));
 	}
 
-	.queue-cell.normal-state::before,
-	.active-workspace::before {
+	.queue-cell.normal-state::before {
 		background: linear-gradient(90deg, rgba(56, 189, 248, 0.85), rgba(34, 197, 94, 0.22));
 	}
 
 	.system-label,
 	.section-label,
 	.alert-label,
-	.fact-label,
 	.signal-label {
 		margin: 0;
 		font-size: 0.72rem;
@@ -1280,10 +1035,7 @@
 	}
 
 	.system-value,
-	.section-title,
-	.workspace-title,
-	.fact-value,
-	.table-value {
+	.section-title {
 		margin: 0;
 		color: #f8fafc;
 	}
@@ -1297,15 +1049,8 @@
 
 	.system-detail,
 	.alert-copy,
-	.workspace-summary,
-	.workspace-subtitle,
 	.watch-copy,
 	.catalog-headline,
-	.filter-hint,
-	.queue-count,
-	.table-subcopy,
-	.muted-block,
-	.table-message,
 	.rail-summary,
 	.rail-summary p {
 		margin: 0;
@@ -1315,11 +1060,7 @@
 
 	.alert-strip,
 	.section-head,
-	.workspace-header,
-	.fact-grid,
-	.signal-grid,
-	.side-rail,
-	.filter-row {
+	.side-rail {
 		display: grid;
 	}
 
@@ -1332,10 +1073,8 @@
 	}
 
 	.alert-action,
-	.console-link,
-	.workspace-primary,
-	.workspace-secondary,
-	.filter-chip {
+	.system-action,
+	.console-link {
 		align-items: center;
 		justify-content: center;
 		font-weight: 700;
@@ -1347,9 +1086,8 @@
 	}
 
 	.alert-action,
-	.console-link,
-	.workspace-primary,
-	.workspace-secondary {
+	.system-action,
+	.console-link {
 		display: inline-flex;
 		padding: 0.72rem 0.95rem;
 		border: 1px solid rgba(56, 189, 248, 0.22);
@@ -1358,18 +1096,33 @@
 	}
 
 	.console-link:hover,
-	.workspace-primary:hover,
-	.workspace-secondary:hover,
-	.alert-action:hover,
-	.filter-chip:hover {
+	.system-action:hover,
+	.alert-action:hover {
 		transform: translateY(-1px);
 		border-color: rgba(56, 189, 248, 0.5);
 		background: rgba(30, 41, 59, 0.94);
 	}
 
+	.system-action {
+		background: rgba(154, 52, 18, 0.84);
+		border-color: rgba(251, 146, 60, 0.5);
+		color: #fff7ed;
+	}
+
+	.system-action:hover {
+		background: rgba(194, 65, 12, 0.9);
+		border-color: rgba(253, 186, 116, 0.65);
+	}
+
+	.system-action:disabled {
+		opacity: 0.62;
+		cursor: default;
+		transform: none;
+	}
+
 	.console-grid {
 		display: grid;
-		grid-template-columns: minmax(0, 1.5fr) minmax(25rem, 0.92fr);
+		grid-template-columns: minmax(0, 1.8fr) minmax(22rem, 0.88fr);
 		align-items: start;
 	}
 
@@ -1388,11 +1141,6 @@
 		margin-bottom: 0.85rem;
 	}
 
-	.section-head.compact .console-link {
-		justify-self: start;
-		width: fit-content;
-	}
-
 	.section-title {
 		margin-top: 0.3rem;
 		font-size: 1.25rem;
@@ -1403,54 +1151,18 @@
 		font-size: 1rem;
 	}
 
-	.action-row,
-	.workspace-actions,
-	.workspace-badges,
-	.filter-row {
+	.queue-cell-actions,
+	.rail-actions {
+		display: flex;
 		gap: 0.65rem;
 		flex-wrap: wrap;
 	}
 
-	.workspace-header {
-		grid-template-columns: minmax(0, 1fr) auto;
-		gap: 1rem;
-		align-items: start;
+	.queue-cell-actions {
+		margin-top: 0.85rem;
 	}
 
-	.workspace-title {
-		margin-top: 0.7rem;
-		font-size: clamp(1.18rem, 1.55vw, 1.55rem);
-		font-weight: 700;
-		line-height: 1.16;
-	}
-
-	.workspace-subtitle {
-		margin-top: 0.55rem;
-		font-size: 0.95rem;
-	}
-
-	.workspace-summary {
-		margin-top: 0.8rem;
-		max-width: 38rem;
-	}
-
-	.workspace-actions {
-		justify-content: flex-end;
-	}
-
-	.workspace-primary {
-		background: rgba(8, 47, 73, 0.92);
-		border-color: rgba(56, 189, 248, 0.45);
-	}
-
-	.workspace-secondary {
-		background: rgba(15, 23, 42, 0.72);
-	}
-
-	.workspace-badge,
-	.review-tag,
-	.watch-state,
-	.library-tag {
+	.watch-state {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.45rem;
@@ -1461,84 +1173,12 @@
 		text-transform: uppercase;
 	}
 
-	.workspace-badge,
-	.library-tag {
-		border: 1px solid rgba(148, 163, 184, 0.28);
-		color: #e2e8f0;
-		background: rgba(30, 41, 59, 0.84);
-	}
-
-	.workspace-badge.library {
-		border-color: color-mix(in srgb, var(--library-chip) 58%, rgba(148, 163, 184, 0.35));
-	}
-
-	.workspace-badge.library::before {
-		content: '';
-		width: 0.55rem;
-		height: 0.55rem;
-		border-radius: 999px;
-		background: var(--library-chip);
-	}
-
-	.workspace-badge.review.ok,
-	.review-tag.ok {
-		background: rgba(20, 83, 45, 0.84);
-		color: #dcfce7;
-	}
-
-	.workspace-badge.review.warning,
-	.workspace-badge.review.warn,
-	.review-tag.warning,
-	.review-tag.warn {
-		background: rgba(120, 53, 15, 0.84);
-		color: #ffedd5;
-	}
-
-	.workspace-badge.review.attention,
-	.review-tag.attention,
-	.review-tag.neutral {
-		background: rgba(8, 47, 73, 0.86);
-		color: #dbeafe;
-	}
-
-	.fact-grid,
-	.signal-grid {
-		grid-template-columns: repeat(4, minmax(0, 1fr));
-		gap: 0.75rem;
-		margin-top: 1rem;
-	}
-
-	.signal-grid {
-		grid-template-columns: repeat(3, minmax(0, 1fr));
-		margin-top: 0.75rem;
-	}
-
-	.fact-cell,
-	.signal-panel {
-		padding: 0.85rem 0.9rem;
-		border: 1px solid rgba(148, 163, 184, 0.18);
-		background: rgba(15, 23, 42, 0.54);
-	}
-
-	.fact-cell.highlight {
-		background: rgba(8, 47, 73, 0.82);
-		border-color: rgba(56, 189, 248, 0.36);
-	}
-
-	.fact-value {
-		margin-top: 0.45rem;
-		font-size: 1.1rem;
-		font-weight: 700;
-	}
-
-	.signal-value {
-		margin: 0.45rem 0 0;
-		color: rgba(241, 245, 249, 0.92);
-		line-height: 1.5;
-	}
-
 	.side-rail {
 		gap: 1rem;
+	}
+
+	.control-card {
+		padding-bottom: 1rem;
 	}
 
 	@media (min-width: 961px) {
@@ -1594,6 +1234,12 @@
 		font-size: 0.88rem;
 	}
 
+	.watch-path {
+		margin-top: 0.18rem;
+		font-size: 0.76rem;
+		color: rgba(148, 163, 184, 0.82);
+	}
+
 	.watch-state {
 		align-self: start;
 		border: 1px solid rgba(56, 189, 248, 0.22);
@@ -1616,193 +1262,19 @@
 		margin-top: 0.55rem;
 	}
 
-	.empty-shell,
-	.table-message,
-	.muted-block {
+	.empty-shell {
 		padding: 0.95rem 1rem;
 		border: 1px solid rgba(148, 163, 184, 0.16);
 		background: rgba(15, 23, 42, 0.46);
 	}
 
-	.filter-deck,
-	.table-deck {
-		padding-top: 1rem;
-	}
-
-	.filter-row {
-		grid-template-columns: repeat(auto-fit, minmax(10rem, max-content));
-		align-items: stretch;
-	}
-
-	.filter-chip {
-		display: inline-flex;
-		gap: 0.5rem;
-		padding: 0.7rem 0.85rem;
-		border: 1px solid rgba(148, 163, 184, 0.2);
-		background: rgba(15, 23, 42, 0.62);
-		color: rgba(226, 232, 240, 0.76);
-	}
-
-	.filter-chip.active {
-		background: rgba(30, 41, 59, 0.88);
-		color: #f8fafc;
-		border-color: color-mix(in srgb, var(--library-chip, #38bdf8) 58%, rgba(148, 163, 184, 0.35));
-	}
-
-	.all-chip.active {
-		border-color: rgba(56, 189, 248, 0.45);
-	}
-
-	.filter-dot {
-		width: 0.55rem;
-		height: 0.55rem;
-		border-radius: 999px;
-		background: var(--library-chip, #38bdf8);
-		flex: 0 0 auto;
-		align-self: center;
-	}
-
-	.filter-count {
-		margin-left: auto;
-		color: rgba(148, 163, 184, 0.8);
-	}
-
-	.table-shell {
-		max-height: min(68vh, 58rem);
-		overflow-x: auto;
-		overflow-y: auto;
-		border: 1px solid rgba(148, 163, 184, 0.16);
-		background: rgba(9, 14, 22, 0.88);
-	}
-
-	table {
-		width: 100%;
-		border-collapse: collapse;
-	}
-
-	thead {
-		background: rgba(15, 23, 42, 0.96);
-	}
-
-	thead th {
-		position: sticky;
-		top: 0;
-		z-index: 2;
-		background: rgba(15, 23, 42, 0.98);
-	}
-
-	th,
-	td {
-		padding: 0.85rem 0.9rem;
-		text-align: left;
-		vertical-align: top;
-		border-bottom: 1px solid rgba(148, 163, 184, 0.14);
-	}
-
-	th {
-		font-size: 0.72rem;
-		font-weight: 800;
-		letter-spacing: 0.12em;
-		text-transform: uppercase;
-		color: rgba(148, 163, 184, 0.88);
-	}
-
-	td {
-		color: rgba(226, 232, 240, 0.86);
-	}
-
-	.sort-header {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.45rem;
-		padding: 0;
-		border: 0;
-		background: transparent;
-		color: inherit;
-		font: inherit;
-		font-weight: inherit;
-		letter-spacing: inherit;
-		text-transform: inherit;
-	}
-
-	.sort-header.active {
-		color: #f8fafc;
-	}
-
-	.sort-indicator {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		min-width: 0.8rem;
-		color: rgba(125, 211, 252, 0.9);
-	}
-
-	.sort-summary {
-		display: block;
-		margin-top: 0.15rem;
-		font-size: 0.82rem;
-		color: rgba(148, 163, 184, 0.84);
-	}
-
-	tbody tr {
-		background: rgba(11, 15, 20, 0.76);
-	}
-
-	tbody tr:nth-child(even) {
-		background: rgba(15, 23, 42, 0.82);
-	}
-
-	tbody tr.active-row {
-		background: rgba(8, 47, 73, 0.34);
-	}
-
-	.folder-link {
-		display: grid;
-		gap: 0.18rem;
-		color: inherit;
-	}
-
-	.folder-title {
-		font-weight: 700;
-		color: #f8fafc;
-	}
-
-	.folder-meta,
-	.table-subcopy {
-		display: block;
-		margin-top: 0.18rem;
-		font-size: 0.84rem;
-	}
-
-	.review-tag {
-		justify-content: flex-start;
-	}
-
-	.table-value,
-	.fact-value {
-		font-family: 'SFMono-Regular', 'Menlo', monospace;
-		letter-spacing: -0.01em;
-	}
-
-	.error-message {
-		border-color: rgba(249, 115, 22, 0.3);
-		background: rgba(67, 20, 7, 0.72);
-	}
-
 	@media (max-width: 1100px) {
-		.system-strip,
-		.fact-grid,
-		.signal-grid {
+		.system-strip {
 			grid-template-columns: 1fr 1fr;
 		}
 
-		.workspace-header,
 		.section-head {
 			grid-template-columns: 1fr;
-		}
-
-		.workspace-actions {
-			justify-content: flex-start;
 		}
 	}
 
@@ -1813,49 +1285,12 @@
 	}
 
 	@media (max-width: 720px) {
-		.system-strip,
-		.fact-grid,
-		.signal-grid {
+		.system-strip {
 			grid-template-columns: 1fr;
 		}
 
 		.alert-strip {
 			grid-template-columns: 1fr;
-		}
-
-		.filter-row {
-			grid-template-columns: 1fr;
-		}
-
-		thead {
-			display: none;
-		}
-
-		table,
-		tbody,
-		tr,
-		td {
-			display: block;
-			width: 100%;
-		}
-
-		tr {
-			padding: 0.4rem 0;
-		}
-
-		td {
-			padding: 0.6rem 0.9rem;
-		}
-
-		td::before {
-			content: attr(data-label);
-			display: block;
-			margin-bottom: 0.22rem;
-			font-size: 0.68rem;
-			font-weight: 800;
-			letter-spacing: 0.12em;
-			text-transform: uppercase;
-			color: rgba(148, 163, 184, 0.8);
 		}
 	}
 </style>

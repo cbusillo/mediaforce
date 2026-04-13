@@ -19,6 +19,8 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 
 - `docs/design/workstation-home-screen-brief.md`: first-pass brief for the
   workstation-style home screen reset
+- `docs/design/workstation-home-screen-inventory.md`: carry-forward, rewrite,
+  and retire inventory for the home-screen reset
 
 ## Developer workflows
 
