@@ -266,11 +266,13 @@ def _prune_empty_quality_temp_dir(path: Path) -> None:
 
 def _remove_remote_stale_staging_path(path: Path, host: dict[str, Any]) -> None:
     quoted_path = shlex.quote(str(path))
-    quoted_parent = shlex.quote(str(path.parent))
-    script = (
-        f"rm -f {quoted_path}; "
-        f"if [ -d {quoted_parent} ]; then rmdir {quoted_parent} >/dev/null 2>&1 || true; fi"
-    )
+    script = f"rm -f {quoted_path}"
+    if path.parent.name.startswith(".mediaforce-ab-av1-") or path.parent.name.startswith(".ab-av1-"):
+        quoted_parent = shlex.quote(str(path.parent))
+        script = (
+            f"{script}; "
+            f"if [ -d {quoted_parent} ]; then rmdir {quoted_parent} >/dev/null 2>&1 || true; fi"
+        )
     try:
         run_remote_command(host, ["sh", "-lc", script], timeout=10)
     except Exception:

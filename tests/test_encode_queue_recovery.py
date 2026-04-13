@@ -376,6 +376,23 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertFalse(partial_path.exists())
         self.assertFalse(staging_path.parent.exists())
 
+    def test_remove_remote_stale_staging_path_only_prunes_temp_parents(self) -> None:
+        host = {"mode": "ssh", "host": "encode-remote"}
+        ordinary_path = Path("/srv/media/transcode/top-level-file.mkv")
+        temp_path = Path("/srv/media/transcode/.mediaforce-ab-av1-stale/clip.mkv")
+
+        with patch("mediaforce.web.runtime.encode_runtime.run_remote_command") as run_remote_command_mock:
+            encode_runtime._remove_remote_stale_staging_path(ordinary_path, host)
+            encode_runtime._remove_remote_stale_staging_path(temp_path, host)
+
+        self.assertEqual(run_remote_command_mock.call_count, 2)
+        ordinary_script = str(run_remote_command_mock.call_args_list[0].args[1][2])
+        temp_script = str(run_remote_command_mock.call_args_list[1].args[1][2])
+        self.assertIn("rm -f /srv/media/transcode/top-level-file.mkv", ordinary_script)
+        self.assertNotIn("rmdir", ordinary_script)
+        self.assertIn("rm -f /srv/media/transcode/.mediaforce-ab-av1-stale/clip.mkv", temp_script)
+        self.assertIn("rmdir /srv/media/transcode/.mediaforce-ab-av1-stale", temp_script)
+
     def test_host_selection_prefers_other_encode_capable_host_during_cooldown(self) -> None:
         job = {
             "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
