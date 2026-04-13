@@ -1479,6 +1479,40 @@
 	const deliverEyebrow = $derived.by(() =>
 		promotedOutputCount > 0 ? '3. Validation complete' : '3. Validate'
 	);
+	const reviewGateStatusPill = $derived.by(() => {
+		if (reviewGateStatus === 'accepted') return { label: 'Approved', variant: 'ok' as const };
+		if (reviewGateStatus === 'needs_approval')
+			return { label: 'Ready to save', variant: 'neutral' as const };
+		if (reviewGateStatus === 'missing_review_media')
+			return { label: 'Missing clips', variant: 'warn' as const };
+		if (reviewGateStatus === 'needs_fresh_sample')
+			return { label: 'Run fresh sample', variant: 'warn' as const };
+		return { label: 'Needs review', variant: 'ghost' as const };
+	});
+	const reviewMediaHeadline = $derived.by(() => {
+		if (calibration.browser_review_ready) return 'Browser compare ready';
+		if (calibration.review_media_ready) return 'Clips retained';
+		if (calibration.preview_clips_purged || calibration.compare_clips_purged) return 'Clips purged';
+		return 'Run a fresh sample';
+	});
+	const reviewProgressHeadline = $derived.by(() => {
+		if (reviewMomentCount === 0) return 'No proof moments';
+		if (remainingReviewMomentCount === 0) return 'All proof moments reviewed';
+		if (seenReviewMomentCount === 0) return 'Review has not started';
+		return `${remainingReviewMomentCount} ${remainingReviewMomentCount === 1 ? 'moment' : 'moments'} left`;
+	});
+	const reviewEstimateCopy = $derived.by(() => {
+		if (reviewGateStatus === 'accepted') {
+			return 'Representative-file estimate for the saved draft that will drive the next folder encode.';
+		}
+		return 'Representative-file estimate for the current draft before you approve this folder.';
+	});
+	const deliveryStatusPill = $derived.by(() => {
+		if (promotedOutputCount > 0) return { label: 'Promoted', variant: 'ok' as const };
+		if (validatedOutputCount > 0) return { label: 'Validated', variant: 'neutral' as const };
+		if (encodedOutputCount > 0) return { label: 'Staged', variant: 'default' as const };
+		return { label: 'Waiting', variant: 'ghost' as const };
+	});
 	const queueEncodeButtonLabel = $derived.by(() =>
 		encodeJobCanRecoverNow
 			? 'Recover Failed Files'
@@ -2359,14 +2393,14 @@
 			<div class="panel-stack">
 				<SectionHead
 					eyebrow="2. Review the sample"
-					heading="Watch the proof clips, then decide whether this draft is ready"
-					lede="Review the synced clips, check the meaningful changes, and decide whether this draft is ready to save, queue, validate, or promote without leaving the page."
+					heading="Run the proof deck, lock the draft, then move the staged files"
+					lede="Review the synced proof moments first, confirm the draft only when the evidence holds up, then validate or promote the staged outputs from the same console."
 					size="section"
 				/>
 				<div class="review-grid review-grid-balanced">
 					<div class="review-main-column">
 						<div class="review-block review-evidence-block">
-							<p class="eyebrow-copy">Evidence deck</p>
+							<p class="eyebrow-copy">Proof deck</p>
 							{#if reviewPairs.length && selectedReviewPair}
 								<div class="review-player-shell-block">
 									<div class="review-player-head">
@@ -2682,20 +2716,36 @@
 					</div>
 
 					<aside class="review-side-column review-approval-column">
-						<div class="review-block approval-block">
-							<p class="eyebrow-copy">{reviewGateEyebrow}</p>
-							<h3 class="review-block-title">{reviewGateHeading}</h3>
-							<p class="muted-copy">{reviewGateDetail}</p>
-							<p class="inline-gate-copy review-action-copy">
-								<span class="eyebrow-copy">Review media</span>
-								{reviewMediaStatusCopy}
-							</p>
-							{#if reviewDecisionProgressCopy}
-								<p class="inline-gate-copy review-action-copy">
-									<span class="eyebrow-copy">Review progress</span>
-									{reviewDecisionProgressCopy}
-								</p>
-							{/if}
+						<div class="review-block approval-block review-console-block">
+							<div class="review-console-head">
+								<div class="section-copy-block review-console-copy">
+									<p class="eyebrow-copy">{reviewGateEyebrow}</p>
+									<h3 class="review-block-title">{reviewGateHeading}</h3>
+									<p class="muted-copy">{reviewGateDetail}</p>
+								</div>
+								<Pill label={reviewGateStatusPill.label} variant={reviewGateStatusPill.variant} />
+							</div>
+							<div class="review-console-facts">
+								<div class="review-console-fact">
+									<p class="eyebrow-copy">Review media</p>
+									<strong>{reviewMediaHeadline}</strong>
+									<span class="muted-copy">{reviewMediaStatusCopy}</span>
+								</div>
+								{#if reviewDecisionProgressCopy}
+									<div class="review-console-fact">
+										<p class="eyebrow-copy">Proof progress</p>
+										<strong>{reviewProgressHeadline}</strong>
+										<span class="muted-copy">{reviewDecisionProgressCopy}</span>
+									</div>
+								{/if}
+								{#if predictedOutputSizeBytes > 0}
+									<div class="review-console-fact review-console-estimate-fact">
+										<p class="eyebrow-copy">Draft estimate</p>
+										<strong>{formatGiB(predictedOutputSizeBytes, 2)} output</strong>
+										<span class="muted-copy">{reviewEstimateCopy}</span>
+									</div>
+								{/if}
+							</div>
 							{#if reviewBenchSummary.available}
 								<div class="review-bench-summary-card">
 									<p class="eyebrow-copy">Latest bench read</p>
@@ -2731,7 +2781,7 @@
 									retry the folder encode here if a prior run stopped early.
 								</p>
 							{/if}
-							<div class="action-row review-action-row stacked-review-actions">
+							<div class="action-row review-action-row stacked-review-actions decision-action-row">
 								{#if reviewGateStatus === 'accepted'}
 									<Pill label="Policy saved" variant="ok" />
 								{:else}
@@ -2766,13 +2816,18 @@
 						</div>
 
 						{#if deliveryPanelVisible}
-							<div class="review-block approval-block deliver-block">
-								<p class="eyebrow-copy">{deliverEyebrow}</p>
-								<h3 class="review-block-title">{deliverHeading}</h3>
-								<p class="muted-copy">
-									Check the encoded files before anything moves, then promote the validated set into
-									the library.
-								</p>
+							<div class="review-block approval-block deliver-block delivery-console-block">
+								<div class="review-console-head delivery-console-head">
+									<div class="section-copy-block review-console-copy">
+										<p class="eyebrow-copy">{deliverEyebrow}</p>
+										<h3 class="review-block-title">{deliverHeading}</h3>
+										<p class="muted-copy">
+											Check the encoded files before anything moves, then promote the validated set
+											into the library.
+										</p>
+									</div>
+									<Pill label={deliveryStatusPill.label} variant={deliveryStatusPill.variant} />
+								</div>
 								<div class="pill-row deliver-pill-row">
 									{#if encodedOutputCount > 0}
 										<Pill label={`${encodedOutputCount} encoded`} variant="default" />
@@ -2784,7 +2839,9 @@
 										<Pill label={`${promotedOutputCount} promoted`} variant="neutral" />
 									{/if}
 								</div>
-								<div class="action-row review-action-row stacked-review-actions">
+								<div
+									class="action-row review-action-row stacked-review-actions decision-action-row"
+								>
 									<Button
 										variant={validateButtonVariant}
 										loading={actionState === 'validate'}
@@ -2825,38 +2882,27 @@
 						{/if}
 
 						{#if predictedOutputSizeBytes > 0}
-							<div class="review-block estimate-block compact-estimate-block">
-								<p class="eyebrow-copy">Current draft estimate</p>
-								<h3 class="review-block-title">
-									{formatGiB(predictedOutputSizeBytes, 2)} predicted output
-								</h3>
-								<p class="muted-copy">
-									{reviewGateStatus === 'accepted'
-										? 'Representative-file estimate for the saved draft that will drive the next folder encode.'
-										: 'Representative-file estimate for the current draft before you approve this folder.'}
-								</p>
-								<div class="pill-row">
+							<div class="pill-row review-estimate-pill-row">
+								<Pill
+									label={`Source ${formatGiB(Number(sampleItem.source_size_bytes ?? 0), 2)}`}
+									variant="neutral"
+								/>
+								<Pill label={`Output ${formatGiB(predictedOutputSizeBytes, 2)}`} variant="ok" />
+								{#if predictedOutputPercentCopy !== 'n/a'}
+									<Pill label={`Relative size ${predictedOutputPercentCopy}`} variant="default" />
+								{/if}
+								{#if predictedEncodeTimeCopy}
+									<Pill label={`Est encode ${predictedEncodeTimeCopy}`} variant="neutral" />
+								{/if}
+								{#if predictedQualityCopy}
+									<Pill label={`Predicted ${predictedQualityCopy}`} variant="neutral" />
+								{/if}
+								{#if calibrationSampleResult?.chosen_crf != null}
 									<Pill
-										label={`Source ${formatGiB(Number(sampleItem.source_size_bytes ?? 0), 2)}`}
-										variant="neutral"
+										label={`CRF ${Number(calibrationSampleResult.chosen_crf).toFixed(1)}`}
+										variant="ghost"
 									/>
-									<Pill label={`Output ${formatGiB(predictedOutputSizeBytes, 2)}`} variant="ok" />
-									{#if predictedOutputPercentCopy !== 'n/a'}
-										<Pill label={`Relative size ${predictedOutputPercentCopy}`} variant="default" />
-									{/if}
-									{#if predictedEncodeTimeCopy}
-										<Pill label={`Est encode ${predictedEncodeTimeCopy}`} variant="neutral" />
-									{/if}
-									{#if predictedQualityCopy}
-										<Pill label={`Predicted ${predictedQualityCopy}`} variant="neutral" />
-									{/if}
-									{#if calibrationSampleResult?.chosen_crf != null}
-										<Pill
-											label={`CRF ${Number(calibrationSampleResult.chosen_crf).toFixed(1)}`}
-											variant="ghost"
-										/>
-									{/if}
-								</div>
+								{/if}
 							</div>
 						{/if}
 
@@ -3326,7 +3372,7 @@
 	}
 
 	.review-grid-balanced {
-		grid-template-columns: minmax(0, 1.25fr) minmax(280px, 360px);
+		grid-template-columns: minmax(0, 1.35fr) minmax(300px, 390px);
 	}
 
 	.review-side-column {
@@ -3351,9 +3397,55 @@
 	}
 
 	.folder-workstation :global(.review-panel) {
-		background:
-			linear-gradient(180deg, rgba(255, 253, 247, 0.96), rgba(255, 251, 244, 0.9)),
-			radial-gradient(circle at top left, rgba(225, 241, 236, 0.22), transparent 34%);
+		background: rgba(10, 15, 21, 0.92);
+	}
+
+	.review-console-block,
+	.delivery-console-block {
+		gap: 0.85rem;
+	}
+
+	.review-console-head {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		gap: 0.75rem;
+		align-items: start;
+	}
+
+	.review-console-copy {
+		gap: 0.3rem;
+	}
+
+	.review-console-facts {
+		display: grid;
+		gap: 0.55rem;
+	}
+
+	.review-console-fact {
+		display: grid;
+		gap: 0.18rem;
+		padding: 0.78rem 0.84rem;
+		background: rgba(15, 20, 27, 0.92);
+		border: 1px solid rgba(148, 163, 184, 0.14);
+	}
+
+	.review-console-fact strong {
+		font-size: 1rem;
+		line-height: 1.25;
+		color: #f8fafc;
+	}
+
+	.review-console-estimate-fact {
+		border-color: rgba(56, 189, 248, 0.18);
+		background: rgba(8, 47, 73, 0.28);
+	}
+
+	.decision-action-row {
+		padding-top: 0.15rem;
+	}
+
+	.review-estimate-pill-row {
+		padding-top: 0.15rem;
 	}
 
 	.review-block-title {
@@ -3430,7 +3522,7 @@
 		display: grid;
 		gap: 0.15rem;
 		padding: 0.75rem 0.85rem;
-		border-radius: 1rem;
+		border-radius: 0;
 		border: 1px solid rgba(23, 35, 31, 0.12);
 		background: rgba(255, 255, 255, 0.84);
 		min-width: 7rem;
@@ -3476,7 +3568,7 @@
 		display: grid;
 		gap: 0.75rem;
 		padding: 0.85rem;
-		border-radius: calc(var(--radius-md) - 0.18rem);
+		border-radius: 0;
 		background: rgba(247, 245, 238, 0.88);
 		border: 1px solid rgba(23, 35, 31, 0.08);
 	}
