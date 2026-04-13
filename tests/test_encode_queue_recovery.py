@@ -288,6 +288,53 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertFalse(partial_path.exists())
         self.assertFalse(temp_dir.exists())
 
+    def test_reconcile_encode_jobs_prunes_empty_quality_temp_dirs_when_files_are_already_missing(self) -> None:
+        source_path = self._create_source_file("episode-temp-dir-missing.mkv")
+        temp_dir = self.root / "staging" / ".mediaforce-ab-av1-missing"
+        staging_path = temp_dir / "episode-temp-dir-missing.mkv"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+
+            web_app._reconcile_encode_jobs(connection, self.config)
+
+            item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+            assert item_status_row is not None
+            self.assertEqual(item_status_row["status"], "planned")
+            self.assertIsNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
+
+        self.assertFalse(temp_dir.exists())
+
+    def test_reconcile_encode_jobs_cleans_host_staging_output_without_staged_artifact_row(self) -> None:
+        source_path = self._create_source_file("episode-host-orphan.mkv")
+        self.config.raw["remote_hosts"] = [
+            {
+                "host": "encode-remote",
+                "label": "Encode Remote",
+                "staging_root": str(self.root / "remote-staging"),
+                "capabilities": ["encode_queue"],
+            }
+        ]
+        host_staging_path = self.root / "remote-staging" / "tv" / "show" / "episode-host-orphan.mkv"
+        host_partial_path = self.root / "remote-staging" / "tv" / "show" / "episode-host-orphan.partial.mkv"
+        host_staging_path.parent.mkdir(parents=True, exist_ok=True)
+        host_staging_path.write_text("staged")
+        host_partial_path.write_text("partial")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+
+            web_app._reconcile_encode_jobs(connection, self.config)
+
+            item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+            assert item_status_row is not None
+            self.assertEqual(item_status_row["status"], "planned")
+
+        self.assertFalse(host_staging_path.exists())
+        self.assertFalse(host_partial_path.exists())
+
     def test_host_selection_prefers_other_encode_capable_host_during_cooldown(self) -> None:
         job = {
             "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},

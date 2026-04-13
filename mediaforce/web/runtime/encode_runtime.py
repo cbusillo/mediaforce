@@ -161,11 +161,9 @@ def clear_stale_encoding_items_when_idle(
     for row in stale_rows:
         if row["promoted_at"] is not None:
             continue
-        staging_path = _resolve_stale_staging_path(config, row)
-        if staging_path is None:
-            continue
-        _remove_stale_staging_path(staging_path)
-        _remove_stale_staging_path(staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}"))
+        for staging_path in _candidate_stale_staging_paths(config, row):
+            _remove_stale_staging_path(staging_path)
+            _remove_stale_staging_path(staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}"))
 
     stale_ids = [int(row["id"]) for row in stale_rows]
     updated_at = deps.now_iso()
@@ -183,32 +181,49 @@ def clear_stale_encoding_items_when_idle(
     return len(stale_ids)
 
 
-def _resolve_stale_staging_path(config: MediaforceConfig, row: dict[str, Any]) -> Path | None:
+def _candidate_stale_staging_paths(config: MediaforceConfig, row: dict[str, Any]) -> list[Path]:
+    paths: list[Path] = []
+
+    def _add_path(path: Path | None) -> None:
+        if path is None:
+            return
+        if any(existing == path for existing in paths):
+            return
+        paths.append(path)
+
     staging_value = str(row.get("staging_path") or "").strip()
     if staging_value:
-        return Path(staging_value)
+        _add_path(Path(staging_value))
 
     rel_path = str(row.get("rel_path") or "").strip()
     if not rel_path:
-        return None
+        return paths
 
-    host_key = str(row.get("encode_host_key") or row.get("encode_host_label") or "").strip()
-    host_config = host_config_for_key(config, host_key) if host_key else {}
     output_suffix = str(object_dict(config.media).get("output_container") or "").strip()
     if output_suffix:
         output_suffix = f".{output_suffix.lstrip('.')}"
     else:
         output_suffix = Path(rel_path).suffix or ".mkv"
-    return config.staging_root_for_host(host_config) / Path(rel_path).with_suffix(output_suffix)
+
+    rel_output_path = Path(rel_path).with_suffix(output_suffix)
+    host_key = str(row.get("encode_host_key") or row.get("encode_host_label") or "").strip()
+    if host_key:
+        _add_path(config.staging_root_for_host(host_config_for_key(config, host_key)) / rel_output_path)
+
+    _add_path(config.staging_root / rel_output_path)
+    for host in config.remote_hosts:
+        _add_path(config.staging_root_for_host(host) / rel_output_path)
+    return paths
 
 
 def _remove_stale_staging_path(path: Path) -> None:
-    if not path.exists() or path.is_dir():
+    if path.is_dir():
         return
-    try:
-        safe_unlink(path)
-    except OSError:
-        return
+    if path.exists():
+        try:
+            safe_unlink(path)
+        except OSError:
+            pass
     _prune_empty_quality_temp_dir(path.parent)
 
 
