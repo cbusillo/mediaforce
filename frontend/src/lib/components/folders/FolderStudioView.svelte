@@ -17,6 +17,7 @@
 	import Panel from '$lib/components/Panel.svelte';
 	import Pill from '$lib/components/Pill.svelte';
 	import SectionHead from '$lib/components/SectionHead.svelte';
+	import FolderStudioBenchWorkspace from '$lib/components/folders/FolderStudioBenchWorkspace.svelte';
 	import FolderStudioControlDeck from '$lib/components/folders/FolderStudioControlDeck.svelte';
 	import FolderStudioHeader from '$lib/components/folders/FolderStudioHeader.svelte';
 	import {
@@ -26,7 +27,6 @@
 		compareValues,
 		comparisonValue,
 		approvalReviewSignature,
-		buildCalibrationThreadScrollSignature,
 		describeHighImpactApprovalGate,
 		encodeQueueSummaryCopy,
 		encodeStatusTone,
@@ -225,8 +225,6 @@
 	let highImpactApprovalLocked = $state(false);
 	let highImpactApprovalLockTimer = $state<ReturnType<typeof setTimeout> | null>(null);
 	let previewDraftEcho = $state<PendingSampleProposal | null>(null);
-	let threadScrollViewport = $state<HTMLDivElement | null>(null);
-	let lastAutoScrolledThreadSignature = $state('');
 	let previewSubmission = $state<{
 		note: string;
 		hostKey: string;
@@ -459,24 +457,6 @@
 		const count = calibrationThreadSessions.length;
 		return `${count} ${count === 1 ? 'turn' : 'turns'}`;
 	});
-	$effect(() => {
-		const latestSession = calibrationThreadSessions.at(-1);
-		if (!latestSession) {
-			lastAutoScrolledThreadSignature = '';
-			return;
-		}
-		if (!threadScrollViewport) return;
-		const latestSessionSignature = buildCalibrationThreadScrollSignature(
-			latestSession,
-			calibrationThreadSessions.length
-		);
-		if (latestSessionSignature === lastAutoScrolledThreadSignature) return;
-		lastAutoScrolledThreadSignature = latestSessionSignature;
-		queueMicrotask(() => {
-			if (!threadScrollViewport) return;
-			threadScrollViewport.scrollTop = threadScrollViewport.scrollHeight;
-		});
-	});
 	const hasClearableTuningState = $derived(
 		Boolean(
 			pendingProposal ||
@@ -499,7 +479,9 @@
 		}
 		return 'Choose the host, steer the bench, and keep the latest diagnosis beside the controls instead of buried below them.';
 	});
-	const noteFieldLabel = $derived.by(() => (hasCalibration ? 'Note for bench' : 'Optional note'));
+	const noteFieldLabel = $derived.by(() =>
+		hasCalibration ? 'Brief the next draft' : 'Describe the first sample'
+	);
 	const noteFieldLede = $derived.by(() =>
 		hasCalibration
 			? calibration.review_media_ready
@@ -720,9 +702,10 @@
 		Boolean(retryableCalibrationJob && !retryableCalibrationNeedsRefresh)
 	);
 	const previewButtonLabel = $derived.by(() => {
-		if (benchDraftBlockedByEmptyNote) return 'Add note first';
-		if (retryableCalibrationNeedsRefresh || pendingProposalNeedsRefresh) return 'Refresh draft';
-		return 'Ask bench';
+		if (benchDraftBlockedByEmptyNote) return 'Add bench direction';
+		if (retryableCalibrationNeedsRefresh || pendingProposalNeedsRefresh)
+			return 'Refresh bench draft';
+		return 'Draft next sample';
 	});
 	const confirmButtonLabel = $derived.by(() => {
 		if (canRetrySavedSampleDraft)
@@ -830,7 +813,7 @@
 			return 'Add a note for the bench before asking for another draft.';
 		}
 		if (canRequestBenchDraft) {
-			return 'Press Enter to ask the bench. Shift+Enter adds a new line.';
+			return 'Press Enter to draft the next sample. Shift+Enter adds a new line.';
 		}
 		return sampleActionBlockedReason || 'Choose a ready host before asking the bench for a draft.';
 	});
@@ -2321,376 +2304,52 @@
 					</aside>
 
 					<div class="studio-main">
-						<div class="bench-workspace-shell">
-							<section class="bench-chat-shell">
-								<div class="thread-inline-head bench-chat-head">
-									<div class="section-copy-block">
-										<p class="eyebrow-copy">Bench chat</p>
-										<p class="muted-copy thread-history-copy">
-											Talk to the bench in one running conversation. Draft requests, in-progress
-											replies, and saved guidance all stay here.
-										</p>
-									</div>
-									<span class="thread-history-meta">{calibrationThreadCountLabel}</span>
-								</div>
-								<div
-									bind:this={threadScrollViewport}
-									class="calibration-thread-shell history-thread-shell thread-scroll-list bench-chat-log"
-								>
-									{#if calibrationThreadSessions.length}
-										<div class="calibration-thread-list">
-											{#each calibrationThreadSessions as session (session.key)}
-												{#if session.note}
-													<article class="thread-turn operator-turn">
-														<p class="thread-role">You</p>
-														<p class="thread-copy">{session.note}</p>
-													</article>
-												{/if}
-												{#if session.summary || session.runSummary}
-													<article class="thread-turn system-turn">
-														<p class="thread-role">Bench</p>
-														{#if session.requestResponse}
-															<p class="thread-copy">{session.requestResponse}</p>
-														{/if}
-														{#if session.summary}
-															<p class="thread-support">{session.summary}</p>
-														{/if}
-														{#if session.feasibilityNote}
-															<p class="thread-support">{session.feasibilityNote}</p>
-														{/if}
-														{#if session.diagnosis}
-															<p class="thread-support">{session.diagnosis}</p>
-														{/if}
-														{#if session.suggestedFollowUp}
-															<p class="thread-support">
-																<span class="eyebrow-copy">Suggested follow-up</span>
-																{session.suggestedFollowUp}
-															</p>
-														{/if}
-														{#if session.runSummary}
-															<div class="thread-readout">
-																<p class="eyebrow-copy">Last run readout</p>
-																<p class="thread-copy">{session.runSummary}</p>
-																{#if session.runNextStep}
-																	<p class="thread-support">{session.runNextStep}</p>
-																{/if}
-															</div>
-														{/if}
-														<div class="pill-row thread-chip-row">
-															{#if session.requestDisposition}
-																<Pill
-																	label={`Request ${titleCase(String(session.requestDisposition).replace(/_/g, ' '))}`}
-																	variant="ghost"
-																/>
-															{/if}
-															{#if session.confidence}
-																<Pill
-																	label={`Tuner confidence ${titleCase(String(session.confidence))}`}
-																	variant="ghost"
-																/>
-															{/if}
-															{#if session.isCurrent && operatorRequestLabel}
-																<Pill
-																	label={`Experiment ${operatorRequestLabel}`}
-																	variant="default"
-																/>
-															{/if}
-															{#if session.isCurrent && runVerdictOutcomeCopy}
-																<Pill
-																	label={runVerdictOutcomeCopy}
-																	variant={runVerdictOutcomeVariant}
-																/>
-															{/if}
-															{#if session.isCurrent && session.runConfidence}
-																<Pill
-																	label={`Run confidence ${titleCase(String(session.runConfidence))}`}
-																	variant="ghost"
-																/>
-															{/if}
-														</div>
-													</article>
-												{/if}
-											{/each}
-										</div>
-									{:else}
-										<div class="bench-chat-empty">
-											<p class="thread-role">Bench</p>
-											<p class="thread-copy">
-												Ask for the first draft to start the bench conversation.
-											</p>
-											<p class="thread-support">
-												Your latest request, the bench reply, and any pending draft state will all
-												stay in this one thread.
-											</p>
-										</div>
-									{/if}
-								</div>
-								<div class="field-block note-panel bench-chat-composer">
-									<div class="section-copy-block">
-										<span class="eyebrow-copy">{noteFieldLabel}</span>
-										<span class="muted-copy note-lede">{noteFieldLede}</span>
-									</div>
-									<textarea
-										bind:value={note}
-										rows="3"
-										onkeydown={handleNoteKeydown}
-										placeholder={notePlaceholder}
-									></textarea>
-									{#if reviewConversationCopy || approvedSeasonShortcut}
-										<div class="bench-chat-context">
-											{#if reviewConversationCopy}
-												<p class="inline-gate-copy note-review-copy">
-													<span class="eyebrow-copy">Bench context</span>
-													{reviewConversationCopy}
-												</p>
-											{/if}
-											{#if approvedSeasonShortcut}
-												<p class="inline-gate-copy note-review-copy approved-season-shortcut-copy">
-													<span class="eyebrow-copy">Approved season memory</span>
-													{approvedSeasonShortcut.count} approved {approvedSeasonShortcut.count ===
-													1
-														? 'season is'
-														: 'seasons are'} already saved for {approvedSeasonShortcut.root_label}.
-													Use the shortcut to ask the bench to match {approvedSeasonShortcutSummary}.
-												</p>
-											{/if}
-										</div>
-									{/if}
-									<div class="note-composer-footer bench-chat-footer">
-										<p class="muted-copy note-submit-hint">{noteSubmitHint}</p>
-										<div class="action-row note-composer-actions">
-											{#if approvedSeasonShortcut}
-												<Button
-													variant="ghost"
-													loading={actionState === 'preview'}
-													disabled={!canUseApprovedSeasonShortcut}
-													onclick={previewApprovedSeasonDraft}>Match approved seasons</Button
-												>
-											{/if}
-											<Button
-												loading={actionState === 'preview'}
-												disabled={!canRequestBenchDraft}
-												onclick={handlePreviewSampleDraftClick}>{previewButtonLabel}</Button
-											>
-										</div>
-									</div>
-								</div>
-							</section>
-
-							{#if pendingProposal}
-								<div
-									class:stale={pendingProposalNeedsRefresh}
-									class="proposal-shell diagnosis-shell"
-								>
-									<div class="proposal-head">
-										<div class="section-copy-block">
-											<p class="eyebrow-copy">Current bench draft</p>
-											<h4 class="proposal-title">{proposalDraftHeading}</h4>
-											{#if pendingProposalSignal}
-												<p class="muted-copy">{pendingProposalSignal}</p>
-											{/if}
-										</div>
-										<div class="pill-row proposal-pill-row">
-											{#if pendingOperatorRequestLabel}
-												<Pill label={`Heard ${pendingOperatorRequestLabel}`} variant="default" />
-											{/if}
-											{#if pendingProposal?.request_disposition}
-												<Pill
-													label={`Request ${titleCase(String(pendingProposal.request_disposition).replace(/_/g, ' '))}`}
-													variant="ghost"
-												/>
-											{/if}
-											{#if pendingProposalSelfCheckLabel}
-												<Pill
-													label={pendingProposalSelfCheckLabel}
-													variant={pendingProposalSelfCheckVariant}
-												/>
-											{/if}
-											{#if pendingProposal?.confidence}
-												<Pill
-													label={`Bench confidence ${titleCase(String(pendingProposal.confidence))}`}
-													variant="ghost"
-												/>
-											{/if}
-										</div>
-									</div>
-
-									<div class="diagnosis-grid">
-										<section class="proposal-workbench-card diagnosis-copy-card">
-											<p class="eyebrow-copy">Latest read</p>
-											{#if pendingProposal?.request_response || pendingProposal?.summary}
-												<p class="thread-copy">
-													{pendingProposal.request_response || pendingProposal.summary}
-												</p>
-											{/if}
-											{#if pendingProposal?.request_response && pendingProposal.request_response !== pendingProposal.summary && pendingProposal?.summary}
-												<p class="thread-support">{pendingProposal.summary}</p>
-											{/if}
-											{#if pendingProposal?.feasibility_note}
-												<p class="thread-support">{pendingProposal.feasibility_note}</p>
-											{/if}
-											{#if pendingProposal?.diagnosis}
-												<p class="thread-support">{pendingProposal.diagnosis}</p>
-											{/if}
-											{#if pendingProposal?.suggested_follow_up}
-												<p class="inline-gate-copy proposal-warning-copy">
-													<span class="eyebrow-copy">Suggested follow-up</span>
-													{pendingProposal.suggested_follow_up}
-												</p>
-											{/if}
-											{#if previewSubmission}
-												<p class="inline-gate-copy proposal-warning-copy">
-													<span class="eyebrow-copy">Drafting now</span>
-													Bench received {previewSubmission.note || 'your latest request'} and is preparing
-													a fresh reply.
-												</p>
-											{/if}
-										</section>
-
-										{#if proposalWorkbenchSections.length}
-											<section class="proposal-workbench-card">
-												<p class="eyebrow-copy">Changed in this draft</p>
-												{#each proposalWorkbenchSections as section (section.title)}
-													<div class="proposal-change-section">
-														<p class="proposal-section-title">{section.title}</p>
-														<div class="proposal-change-grid workbench-change-grid">
-															{#each section.rows as row (row.path)}
-																<div class="proposal-change-card">
-																	<p class="eyebrow-copy">{row.label}</p>
-																	<p class="proposal-change-value">{row.draft}</p>
-																	<p class="proposal-change-previous">From {row.current}</p>
-																</div>
-															{/each}
-														</div>
-													</div>
-												{/each}
-											</section>
-										{/if}
-
-										<section class="proposal-workbench-card">
-											<p class="eyebrow-copy">Run posture</p>
-											{#if !proposalWorkbenchSections.length}
-												<p class="muted-copy">
-													This draft keeps the current policy. Review the evidence below before
-													deciding whether to ask again.
-												</p>
-											{/if}
-											{#if pendingProposalSelfCheck.summary}
-												<p class="inline-gate-copy proposal-warning-copy">
-													<span class="eyebrow-copy">Before you run it</span>
-													{pendingProposalSelfCheck.summary}
-												</p>
-											{/if}
-											{#if pendingProposalSelfCheck.issues?.length}
-												<ul class="proposal-issue-list">
-													{#each pendingProposalSelfCheck.issues ?? [] as issue (issue)}
-														<li>{issue}</li>
-													{/each}
-												</ul>
-											{/if}
-											{#if pendingProposalNeedsRefresh}
-												<p class="inline-gate-copy proposal-warning-copy">
-													<span class="eyebrow-copy">Refresh needed</span>
-													This draft no longer matches the current note or selected host.
-												</p>
-											{/if}
-										</section>
-									</div>
-
-									<details class="proposal-trace-shell diagnosis-details">
-										<summary>Bench context and trace</summary>
-										<div class="proposal-workbench-grid diagnosis-disclosure-grid">
-											<section class="proposal-workbench-card">
-												<p class="eyebrow-copy">Bench saw</p>
-												{#if pendingProposalTraceContext?.goal}
-													<p class="muted-copy">{pendingProposalTraceContext.goal}</p>
-												{/if}
-												{#if workbenchContextStats.length}
-													<div class="proposal-context-grid">
-														{#each workbenchContextStats as stat (stat.label)}
-															<div class="proposal-context-card">
-																<p class="eyebrow-copy">{stat.label}</p>
-																<p class="proposal-change-value">{stat.value}</p>
-																{#if stat.detail}
-																	<p class="muted-copy">{stat.detail}</p>
-																{/if}
-															</div>
-														{/each}
-													</div>
-												{/if}
-												{#if pendingProposal?.evidence_checked?.length}
-													<div class="pill-row">
-														{#each pendingProposal.evidence_checked ?? [] as evidence (evidence)}
-															<Pill label={evidence} variant="neutral" />
-														{/each}
-													</div>
-												{/if}
-											</section>
-
-											{#if workbenchMemoryEntries.length}
-												<section class="proposal-workbench-card">
-													<p class="eyebrow-copy">Retrieved memory</p>
-													<div class="proposal-memory-shell">
-														{#each workbenchMemoryEntries as entry (entry.title + entry.summary)}
-															<div class="proposal-memory-card">
-																<p class="proposal-memory-title">
-																	{entry.title || 'Prior approved tuning note'}
-																</p>
-																{#if entry.summary}
-																	<p class="muted-copy">{entry.summary}</p>
-																{/if}
-																{#if entry.excerpt}
-																	<p class="thread-support">{entry.excerpt}</p>
-																{/if}
-															</div>
-														{/each}
-													</div>
-												</section>
-											{/if}
-
-											<section class="proposal-workbench-card proposal-trace-card-shell">
-												<p class="eyebrow-copy">Advanced trace</p>
-												{#if pendingProposalTrace?.prompt_version}
-													<p class="muted-copy">
-														<strong>Prompt version:</strong>
-														{pendingProposalTrace.prompt_version}
-													</p>
-												{/if}
-												{#if workbenchToolbeltRows.length}
-													{#each workbenchToolbeltRows as row (row.label)}
-														<p class="muted-copy"><strong>{row.label}:</strong> {row.value}</p>
-													{/each}
-												{/if}
-												{#if proposalSteadyWorkbenchRows.length}
-													<p class="muted-copy"><strong>Unchanged settings</strong></p>
-													{#each proposalSteadyWorkbenchRows as row (row.path)}
-														<p class="muted-copy"><strong>{row.label}:</strong> {row.current}</p>
-													{/each}
-												{/if}
-												{#if pendingProposalRawResponse}
-													<pre class="proposal-trace-raw">{pendingProposalRawResponse}</pre>
-												{/if}
-											</section>
-										</div>
-									</details>
-								</div>
-							{:else if currentThreadSession}
-								<div class="proposal-shell diagnosis-shell archived-diagnosis-shell">
-									<p class="eyebrow-copy">Bench history</p>
-									<h4 class="proposal-title">{calibrationThreadCountLabel} saved in the thread</h4>
-									{#if archivedThreadHeadline}
-										<p class="thread-copy">{archivedThreadHeadline}</p>
-									{/if}
-									{#if archivedThreadDetail}
-										<p class="thread-support">{archivedThreadDetail}</p>
-									{/if}
-									<p class="thread-support">
-										{threadHistorySummaryCopy} Scroll the thread above when you want to reopen earlier
-										notes, compare bench replies, or rewrite the next draft request.
-									</p>
-								</div>
-							{/if}
-						</div>
+						<FolderStudioBenchWorkspace
+							{calibrationThreadSessions}
+							{calibrationThreadCountLabel}
+							{operatorRequestLabel}
+							{runVerdictOutcomeCopy}
+							{runVerdictOutcomeVariant}
+							{note}
+							onNoteInput={(value) => (note = value)}
+							onNoteKeydown={handleNoteKeydown}
+							{noteFieldLabel}
+							{noteFieldLede}
+							{notePlaceholder}
+							{reviewConversationCopy}
+							{approvedSeasonShortcut}
+							{approvedSeasonShortcutSummary}
+							{canUseApprovedSeasonShortcut}
+							onPreviewApprovedSeasonDraft={previewApprovedSeasonDraft}
+							{canRequestBenchDraft}
+							{previewButtonLabel}
+							onPreviewSampleDraft={handlePreviewSampleDraftClick}
+							{actionState}
+							{noteSubmitHint}
+							{pendingProposal}
+							{pendingProposalNeedsRefresh}
+							{proposalDraftHeading}
+							{pendingProposalSignal}
+							{pendingOperatorRequestLabel}
+							{pendingProposalSelfCheckLabel}
+							{pendingProposalSelfCheckVariant}
+							{pendingProposalSelfCheck}
+							{proposalWorkbenchSections}
+							{previewSubmission}
+							workbenchContextGoal={String(pendingProposalTraceContext?.goal ?? '').trim()}
+							{workbenchContextStats}
+							{workbenchMemoryEntries}
+							{workbenchToolbeltRows}
+							{proposalSteadyWorkbenchRows}
+							pendingProposalTracePromptVersion={String(
+								pendingProposalTrace?.prompt_version ?? ''
+							).trim()}
+							{pendingProposalRawResponse}
+							{currentThreadSession}
+							{archivedThreadHeadline}
+							archivedThreadDetail={String(archivedThreadDetail ?? '').trim()}
+							{threadHistorySummaryCopy}
+						/>
 					</div>
 				</div>
 			</div>
@@ -3442,16 +3101,6 @@
 		background: rgba(15, 23, 42, 0.68) !important;
 	}
 
-	.folder-workstation textarea {
-		background: rgba(9, 14, 22, 0.92);
-		border-color: rgba(148, 163, 184, 0.18);
-		color: #f8fafc;
-	}
-
-	.folder-workstation textarea::placeholder {
-		color: rgba(148, 163, 184, 0.72);
-	}
-
 	.folder-workstation :global(.section-head .lede) {
 		color: rgba(203, 213, 225, 0.76);
 	}
@@ -3526,169 +3175,6 @@
 		min-width: 0;
 	}
 
-	.bench-chat-shell,
-	.archived-diagnosis-shell {
-		display: grid;
-		gap: var(--space-2);
-		padding: 1rem 1.05rem;
-		border-radius: var(--radius-lg);
-		border: 1px solid rgba(23, 35, 31, 0.08);
-		background: rgba(255, 255, 255, 0.7);
-		box-shadow: 0 10px 28px rgba(23, 35, 31, 0.04);
-	}
-
-	.bench-workspace-shell {
-		display: grid;
-		gap: 0.9rem;
-		padding: 0.35rem;
-		min-width: 0;
-		border-radius: calc(var(--radius-lg) + 0.2rem);
-		background:
-			linear-gradient(180deg, rgba(255, 252, 246, 0.96), rgba(252, 249, 242, 0.92)),
-			radial-gradient(circle at top left, rgba(242, 220, 182, 0.2), transparent 34%);
-		box-shadow: 0 24px 46px rgba(62, 43, 24, 0.09);
-	}
-
-	.bench-workspace-shell .bench-chat-shell,
-	.bench-workspace-shell .diagnosis-shell,
-	.bench-workspace-shell .archived-diagnosis-shell {
-		background: rgba(255, 255, 255, 0.72);
-		border-color: rgba(104, 87, 61, 0.08);
-		box-shadow: none;
-	}
-
-	.bench-chat-shell {
-		gap: 0.9rem;
-		padding: 1rem 1.05rem;
-		background:
-			linear-gradient(180deg, rgba(255, 255, 255, 0.8), rgba(255, 251, 245, 0.72)),
-			radial-gradient(circle at top left, rgba(221, 199, 160, 0.16), transparent 36%);
-	}
-
-	.bench-workspace-shell .bench-chat-shell {
-		border-color: rgba(164, 115, 46, 0.12);
-		background:
-			linear-gradient(180deg, rgba(255, 255, 255, 0.8), rgba(255, 251, 245, 0.72)),
-			radial-gradient(circle at top left, rgba(221, 199, 160, 0.16), transparent 36%);
-	}
-
-	.bench-chat-head {
-		align-items: center;
-	}
-
-	.bench-chat-log {
-		max-height: 34rem;
-		padding: 0.95rem;
-		background:
-			linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(251, 247, 240, 0.9)),
-			rgba(221, 199, 160, 0.08);
-		border-color: rgba(164, 115, 46, 0.12);
-	}
-
-	.bench-chat-empty {
-		display: grid;
-		gap: 0.35rem;
-		align-content: center;
-		min-height: 12rem;
-		padding: 0.35rem 0.2rem;
-	}
-
-	.bench-chat-composer {
-		gap: 0.75rem;
-		padding: 0.95rem 1rem;
-		border-radius: var(--radius-md);
-		border: 1px solid rgba(15, 118, 110, 0.12);
-		background:
-			linear-gradient(180deg, rgba(244, 252, 249, 0.92), rgba(255, 255, 255, 0.84)),
-			radial-gradient(circle at bottom right, rgba(15, 118, 110, 0.08), transparent 34%);
-	}
-
-	.bench-chat-context {
-		display: grid;
-		gap: 0.55rem;
-	}
-
-	.bench-chat-footer {
-		align-items: center;
-	}
-
-	.bench-workspace-shell .diagnosis-shell {
-		background:
-			linear-gradient(180deg, rgba(255, 250, 240, 0.94), rgba(255, 255, 255, 0.84)),
-			radial-gradient(circle at top right, rgba(221, 199, 160, 0.18), transparent 38%);
-	}
-
-	.calibration-thread-shell {
-		display: grid;
-		gap: 0.85rem;
-		padding: 0.95rem 1rem;
-		min-width: 0;
-		border-radius: var(--radius-md);
-		border: 1px solid rgba(15, 118, 110, 0.12);
-		background:
-			linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.76)),
-			rgba(15, 118, 110, 0.04);
-	}
-
-	.history-thread-shell {
-		padding: 0.85rem;
-	}
-
-	.calibration-thread-list {
-		display: grid;
-		gap: 0.65rem;
-	}
-
-	.thread-scroll-list {
-		overflow: auto;
-		padding-right: 0.35rem;
-	}
-
-	.thread-turn {
-		display: grid;
-		gap: 0.32rem;
-		max-width: min(100%, 43rem);
-		min-width: 0;
-		padding: 0.85rem 0.95rem;
-		border-radius: 0;
-		border: 1px solid rgba(148, 163, 184, 0.14);
-		box-shadow: none;
-	}
-
-	.operator-turn {
-		justify-self: end;
-		background: rgba(8, 47, 73, 0.84);
-		border-color: rgba(56, 189, 248, 0.24);
-	}
-
-	.system-turn {
-		justify-self: start;
-		background: rgba(15, 23, 42, 0.8);
-		border-color: rgba(148, 163, 184, 0.16);
-		border-left: 4px solid rgba(251, 146, 60, 0.28);
-	}
-
-	.operator-turn .thread-copy {
-		color: #e0f2fe;
-	}
-
-	.system-turn .thread-copy {
-		color: #f8fafc;
-	}
-
-	.system-turn .thread-support {
-		color: rgba(203, 213, 225, 0.72);
-	}
-
-	.thread-role {
-		margin: 0;
-		font-size: 0.73rem;
-		font-weight: 700;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		color: var(--accent-deep);
-	}
-
 	.thread-copy {
 		margin: 0;
 		font-size: 0.98rem;
@@ -3704,105 +3190,10 @@
 		overflow-wrap: anywhere;
 	}
 
-	.thread-readout {
-		display: grid;
-		gap: 0.22rem;
-		padding-top: 0.55rem;
-		border-top: 1px solid rgba(23, 35, 31, 0.08);
-	}
-
-	.thread-chip-row {
-		padding-top: 0.1rem;
-	}
-
-	.proposal-shell {
-		display: grid;
-		gap: 0.8rem;
-		padding: 0.95rem 1rem;
-		border-radius: var(--radius-md);
-		border: 1px solid rgba(15, 118, 110, 0.16);
-		background:
-			linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(255, 255, 255, 0.8)),
-			rgba(15, 118, 110, 0.06);
-	}
-
-	.diagnosis-shell {
-		gap: 1rem;
-	}
-
-	.diagnosis-grid {
-		display: grid;
-		gap: 0.8rem;
-		grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-	}
-
-	.diagnosis-copy-card {
-		grid-column: span 2;
-	}
-
-	.diagnosis-details {
-		padding-top: 0.2rem;
-	}
-
-	.diagnosis-disclosure-grid {
-		padding-top: 0.7rem;
-	}
-
-	.proposal-shell.stale {
-		border-color: rgba(180, 83, 9, 0.24);
-		background:
-			linear-gradient(180deg, rgba(255, 251, 235, 0.94), rgba(255, 251, 235, 0.82)),
-			rgba(180, 83, 9, 0.04);
-	}
-
-	.proposal-head {
-		display: flex;
-		gap: var(--space-3);
-		justify-content: space-between;
-		align-items: start;
-		flex-wrap: wrap;
-		min-width: 0;
-	}
-
 	.proposal-title {
 		margin: 0;
 		font-size: 1.08rem;
 		line-height: 1.3;
-	}
-
-	.proposal-pill-row {
-		justify-content: flex-end;
-	}
-
-	.proposal-change-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-		gap: 0.7rem;
-	}
-
-	.proposal-change-card {
-		display: grid;
-		gap: 0.18rem;
-		padding: 0.82rem 0.85rem;
-		border-radius: var(--radius-md);
-		background: rgba(247, 246, 241, 0.92);
-		border: 1px solid rgba(23, 35, 31, 0.07);
-	}
-
-	.proposal-change-value {
-		margin: 0;
-		font-size: 0.98rem;
-		font-weight: 700;
-		line-height: 1.3;
-		overflow-wrap: anywhere;
-	}
-
-	.proposal-change-previous {
-		margin: 0;
-		font-size: 0.83rem;
-		line-height: 1.4;
-		color: var(--ink-soft);
-		overflow-wrap: anywhere;
 	}
 
 	.proposal-warning-copy {
@@ -3817,80 +3208,12 @@
 		border-color: rgba(180, 83, 9, 0.18);
 	}
 
-	.proposal-workbench-grid {
-		display: grid;
-		gap: 0.8rem;
-		grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-		min-width: 0;
-	}
-
-	.proposal-workbench-card {
-		display: grid;
-		gap: 0.65rem;
-		min-width: 0;
-		padding: 0.9rem;
-		border-radius: var(--radius-md);
-		background: rgba(255, 255, 255, 0.78);
-		border: 1px solid rgba(23, 35, 31, 0.08);
-		align-content: start;
-	}
-
-	.proposal-workbench-card .muted-copy {
-		min-width: 0;
-		max-width: 100%;
-		overflow-wrap: anywhere;
-		word-break: break-word;
-	}
-
-	.proposal-trace-card-shell {
-		grid-column: 1 / -1;
-	}
-
-	.proposal-context-grid {
-		display: grid;
-		gap: 0.65rem;
-	}
-
-	.proposal-context-card {
-		display: grid;
-		gap: 0.22rem;
-		min-width: 0;
-		padding: 0.75rem 0.8rem;
-		border-radius: calc(var(--radius-md) - 0.15rem);
-		background: rgba(247, 246, 241, 0.88);
-		border: 1px solid rgba(23, 35, 31, 0.06);
-	}
-
-	.workbench-change-grid {
-		grid-template-columns: 1fr;
-	}
-
-	.proposal-change-section {
-		display: grid;
-		gap: 0.5rem;
-	}
-
-	.proposal-section-title,
 	.proposal-memory-title {
 		margin: 0;
 		font-size: 0.9rem;
 		font-weight: 700;
 		line-height: 1.35;
 		overflow-wrap: anywhere;
-	}
-
-	.proposal-memory-shell {
-		display: grid;
-		gap: 0.55rem;
-	}
-
-	.proposal-memory-card {
-		display: grid;
-		gap: 0.22rem;
-		padding: 0.75rem 0.8rem;
-		border-radius: calc(var(--radius-md) - 0.15rem);
-		background: rgba(247, 246, 241, 0.88);
-		border: 1px solid rgba(23, 35, 31, 0.06);
 	}
 
 	.review-pack-shell {
@@ -3963,113 +3286,6 @@
 	.review-pack-copy {
 		display: grid;
 		gap: 0.22rem;
-	}
-
-	.proposal-trace-shell {
-		display: grid;
-		gap: 0.7rem;
-		padding-top: 0.1rem;
-		min-width: 0;
-	}
-
-	.proposal-trace-shell summary {
-		cursor: pointer;
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		padding: 0.8rem 0.95rem;
-		border-radius: calc(var(--radius-md) - 0.12rem);
-		background: rgba(255, 255, 255, 0.72);
-		border: 1px solid rgba(23, 35, 31, 0.08);
-		font-size: 0.84rem;
-		font-weight: 700;
-		letter-spacing: 0.05em;
-		text-transform: uppercase;
-		color: var(--accent-deep);
-	}
-
-	.proposal-trace-shell summary::after {
-		content: '+';
-		font-size: 1rem;
-		font-weight: 700;
-		line-height: 1;
-		color: var(--ink-soft);
-	}
-
-	.proposal-trace-shell[open] summary {
-		background: rgba(247, 244, 237, 0.92);
-	}
-
-	.proposal-trace-shell[open] summary::after {
-		content: '-';
-	}
-
-	.proposal-trace-raw {
-		display: block;
-		width: 100%;
-		margin: 0;
-		padding: 0.85rem;
-		min-width: 0;
-		max-width: 100%;
-		border-radius: calc(var(--radius-md) - 0.15rem);
-		background: rgba(23, 35, 31, 0.06);
-		border: 1px solid rgba(23, 35, 31, 0.08);
-		font-size: 0.82rem;
-		line-height: 1.45;
-		white-space: pre-wrap;
-		word-break: break-word;
-		overflow-wrap: anywhere;
-		overflow-x: auto;
-		box-sizing: border-box;
-	}
-
-	.proposal-issue-list {
-		margin: 0;
-		padding-left: 1.15rem;
-		display: grid;
-		gap: 0.32rem;
-		color: var(--ink-soft);
-		font-size: 0.88rem;
-		line-height: 1.45;
-	}
-
-	.note-panel {
-		padding: 1rem 1.05rem;
-	}
-
-	.note-lede {
-		max-width: 42ch;
-		overflow-wrap: anywhere;
-	}
-
-	.note-composer-footer {
-		display: flex;
-		justify-content: space-between;
-		gap: var(--space-2);
-		align-items: end;
-		flex-wrap: wrap;
-	}
-
-	.note-submit-hint {
-		max-width: 40ch;
-		font-size: 0.88rem;
-		line-height: 1.45;
-	}
-
-	.field-block {
-		display: grid;
-		gap: var(--space-2);
-	}
-
-	textarea {
-		width: 100%;
-		padding: 0.9rem 1rem;
-		border-radius: var(--radius-md);
-		border: 1px solid rgba(23, 35, 31, 0.12);
-		background: var(--surface-2);
-		color: var(--ink);
-		min-height: 7rem;
-		resize: vertical;
 	}
 
 	.action-row {
@@ -4504,14 +3720,6 @@
 		border: 1px solid rgba(23, 35, 31, 0.08);
 	}
 
-	.thread-inline-head {
-		display: flex;
-		justify-content: space-between;
-		gap: 1rem;
-		align-items: start;
-		min-width: 0;
-	}
-
 	.reference-disclosure summary,
 	.steady-details-shell summary {
 		cursor: pointer;
@@ -4554,17 +3762,6 @@
 		content: '-';
 	}
 
-	.thread-history-meta {
-		font-size: 0.8rem;
-		color: var(--ink-soft);
-		overflow-wrap: anywhere;
-	}
-
-	.thread-history-copy {
-		margin-top: -0.15rem;
-		overflow-wrap: anywhere;
-	}
-
 	.reference-disclosure-grid {
 		display: grid;
 		gap: var(--space-3);
@@ -4595,10 +3792,6 @@
 		.studio-sidebar,
 		.review-approval-column {
 			position: static;
-		}
-
-		.diagnosis-copy-card {
-			grid-column: auto;
 		}
 
 		.compact-row,
@@ -4644,16 +3837,6 @@
 	@media (max-width: 720px) {
 		.host-grid {
 			grid-template-columns: 1fr;
-		}
-
-		.note-composer-footer,
-		.thread-inline-head {
-			flex-direction: column;
-			align-items: start;
-		}
-
-		.note-composer-footer :global(button) {
-			width: 100%;
 		}
 
 		.reference-disclosure summary,
