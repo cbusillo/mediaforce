@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import unittest
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -44,6 +45,7 @@ from mediaforce.web.runtime import dashboard_payloads, encode_runtime, folder_ac
     host_runtime as host_runtime_module, job_runtime, queue_actions as queue_actions_runtime, \
     calibration_runtime
 from mediaforce.web.runtime import folder_cards as folder_cards_runtime
+from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 
 
 class EncodeQueueRecoveryTests(unittest.TestCase):
@@ -51,8 +53,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
         self.config = self._build_config()
+        web_app._reset_background_worker_leadership_for_tests()
 
     def tearDown(self) -> None:
+        web_app._reset_background_worker_leadership_for_tests()
         self.tempdir.cleanup()
 
     @staticmethod
@@ -206,6 +210,21 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(job["status"], "queued")
             self.assertIsNone(job["retry_not_before"])
             self.assertIsNone(job["waiting_reason"])
+
+    def test_reconcile_encode_jobs_clears_stale_encoding_items_when_idle(self) -> None:
+        source_path = self._create_source_file("episode-idle-clear.mkv")
+        staging_path = self._staging_path("episode-idle-clear.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+
+            web_app._reconcile_encode_jobs(connection, self.config)
+
+            item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+            assert item_status_row is not None
+            self.assertEqual(item_status_row["status"], "planned")
+            self.assertIsNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
 
     def test_host_selection_prefers_other_encode_capable_host_during_cooldown(self) -> None:
         job = {
@@ -3106,6 +3125,40 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         )):
             statuses = remote.collect_host_statuses(self.config)
         self.assertEqual([status.key for status in statuses], ["cbusillo@localhost", "cbusillo@example-host"])
+
+    def test_collect_host_statuses_checks_multiple_hosts_in_parallel(self) -> None:
+        configured_hosts = [
+            {"host": "first-host", "label": "First"},
+            {"host": "second-host", "label": "Second"},
+        ]
+        self.config.raw["remote_hosts"] = configured_hosts
+        second_started = threading.Event()
+
+        def _status_for(host: dict[str, object]) -> HostStatus:
+            return HostStatus(
+                key=str(host["host"]),
+                label=str(host["label"]),
+                mode="ssh",
+                priority=0,
+                capabilities=["encode_queue"],
+                available=True,
+                message="Mounted and ready",
+                missing_paths=[],
+                repo_path=None,
+            )
+
+        def _fake_remote_host_status(config: MediaforceConfig, host: dict[str, object]) -> HostStatus:
+            _ = config
+            if str(host.get("host")) == "first-host":
+                self.assertTrue(second_started.wait(timeout=0.5))
+                return _status_for(host)
+            second_started.set()
+            return _status_for(host)
+
+        with patch("mediaforce.remote._remote_host_status", side_effect=_fake_remote_host_status):
+            statuses = remote.collect_host_statuses(self.config)
+
+        self.assertEqual([status.key for status in statuses], ["first-host", "second-host"])
 
     def test_remote_host_status_targets_current_machine_without_ssh_probe(self) -> None:
         source_root = Path(next(iter(self.config.source_root_map.values())))
@@ -6550,6 +6603,85 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(ssh_cmd[-2], "cbusillo@extra-mbp.shiny")
         self.assertTrue(ssh_cmd[-1].startswith("sh -lc "))
         self.assertIn("ab-av1 --version", ssh_cmd[-1])
+
+    def test_worker_leadership_lease_blocks_second_acquire_until_release(self) -> None:
+        lock_path = self.root / "state" / "web" / "background-workers.lock"
+        first = WorkerLeadershipLease(lock_path, worker_name="background-workers")
+        second = WorkerLeadershipLease(lock_path, worker_name="background-workers")
+
+        self.assertTrue(first.acquire())
+        self.assertFalse(second.acquire())
+
+        owner = second.owner_metadata()
+        self.assertIsNotNone(owner)
+        assert owner is not None
+        self.assertEqual(owner["worker_name"], "background-workers")
+
+        first.release()
+        self.assertTrue(second.acquire())
+        second.release()
+
+    def test_start_background_workers_skips_startup_without_leadership(self) -> None:
+        with patch("mediaforce.web.app._acquire_background_worker_leadership", return_value=False), patch(
+                "mediaforce.web.app._start_calibration_queue_worker"
+        ) as start_calibration, patch("mediaforce.web.app._start_encode_queue_worker") as start_encode:
+            started = web_app._start_background_workers(self.config)
+
+        self.assertFalse(started)
+        start_calibration.assert_not_called()
+        start_encode.assert_not_called()
+
+    def test_start_background_workers_starts_both_workers_when_leader(self) -> None:
+        with patch("mediaforce.web.app._acquire_background_worker_leadership", return_value=True), patch(
+                "mediaforce.web.app._start_calibration_queue_worker"
+        ) as start_calibration, patch("mediaforce.web.app._start_encode_queue_worker") as start_encode:
+            started = web_app._start_background_workers(self.config)
+
+        self.assertTrue(started)
+        start_calibration.assert_called_once_with(self.config)
+        start_encode.assert_called_once_with(self.config)
+
+    def test_stop_encode_queue_action_sweeps_orphaned_processes_after_cancel(self) -> None:
+        cancel_queue_process = Mock()
+        sweep_orphaned_encode_processes = Mock()
+        clear_stale_encoding_items = Mock(return_value=4)
+
+        result = queue_actions_runtime.stop_encode_queue_action(
+            connection_factory=lambda: open_db(self.config.paths.db_path),
+            config=self.config,
+            now_iso=web_app._now_iso,
+            cancel_queue_process=cancel_queue_process,
+            sweep_orphaned_encode_processes=sweep_orphaned_encode_processes,
+            clear_stale_encoding_items=clear_stale_encoding_items,
+        )
+
+        self.assertTrue(result["ok"])
+        cancel_queue_process.assert_called_once_with()
+        sweep_orphaned_encode_processes.assert_called_once_with()
+        clear_stale_encoding_items.assert_called_once_with()
+        self.assertEqual(result["cleared_stale_item_count"], 4)
+
+        with open_db(self.config.paths.db_path) as connection:
+            state = load_queue_state(connection)
+        self.assertTrue(state["is_paused"])
+        self.assertTrue(state["stop_requested"])
+
+    def test_sweep_orphaned_encode_processes_only_targets_ssh_encode_hosts(self) -> None:
+        self.config.raw["remote_hosts"] = [
+            {"host": "encode-a", "label": "Encode A", "mode": "ssh", "capabilities": ["encode_queue"]},
+            {"host": "sample-only", "label": "Sample Only", "mode": "ssh", "capabilities": ["sample_calibration"]},
+            {"host": "local-ish", "label": "Local-ish", "mode": "local", "capabilities": ["encode_queue"]},
+        ]
+
+        with patch("mediaforce.web.app.run_remote_command") as run_remote_command_mock:
+            web_app._sweep_orphaned_encode_processes(self.config)
+
+        run_remote_command_mock.assert_called_once()
+        host_payload = run_remote_command_mock.call_args.args[0]
+        command_payload = run_remote_command_mock.call_args.args[1]
+        self.assertEqual(host_payload["host"], "encode-a")
+        self.assertEqual(command_payload[:2], ["sh", "-lc"])
+        self.assertIn("mediaforce_encoded_by=mediaforce", command_payload[2])
 
     def test_create_app_registers_folder_status_route_before_catch_all_folder_route(self) -> None:
         with patch("mediaforce.web.app.load_config", return_value=self.config), patch(

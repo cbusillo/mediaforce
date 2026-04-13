@@ -30,14 +30,31 @@ def resume_encode_queue_action(*, connection_factory: Any, config: MediaforceCon
     return {"ok": True, "message": "Resumed the encode queue."}
 
 
-def stop_encode_queue_action(*, connection_factory: Any, config: MediaforceConfig, now_iso: Any, cancel_queue_process: Any) -> dict[str, Any]:
+def stop_encode_queue_action(
+        *,
+        connection_factory: Any,
+        config: MediaforceConfig,
+        now_iso: Any,
+        cancel_queue_process: Any,
+        sweep_orphaned_encode_processes: Any | None = None,
+        clear_stale_encoding_items: Any | None = None,
+) -> dict[str, Any]:
     _ = config
     with connection_factory() as connection:
         state = load_queue_state(connection)
         state.update({"stop_requested": True, "is_paused": True, "updated_at": now_iso()})
         save_queue_state(connection, state)
     cancel_queue_process()
-    return {"ok": True, "message": "Stopped and cleaned the encode queue."}
+    if sweep_orphaned_encode_processes is not None:
+        sweep_orphaned_encode_processes()
+    cleared_stale_item_count = 0
+    if clear_stale_encoding_items is not None:
+        cleared_stale_item_count = int(clear_stale_encoding_items() or 0)
+    return {
+        "ok": True,
+        "message": "Stopped and cleaned the encode queue.",
+        "cleared_stale_item_count": cleared_stale_item_count,
+    }
 
 
 def retry_failed_encode_queue_action(

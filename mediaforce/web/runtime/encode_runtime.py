@@ -126,6 +126,36 @@ def reconcile_encode_jobs(
     if running_count == 0 and (state.get("active_job_id") or state.get("stop_requested")):
         state.update({"active_job_id": None, "stop_requested": False, "updated_at": deps.now_iso()})
         save_queue_state(connection, state)
+    clear_stale_encoding_items_when_idle(connection, deps)
+
+
+def clear_stale_encoding_items_when_idle(connection: DBClient, deps: EncodeQueueRuntimeDeps) -> int:
+    if running_encode_job_count(connection) > 0:
+        return 0
+    stale_ids = [
+        int(row["id"])
+        for row in connection.execute(
+            select(library_items.c.id)
+            .where(library_items.c.status == "encoding")
+            .order_by(library_items.c.updated_at.asc(), literal_column("rowid"))
+        ).mappings().fetchall()
+    ]
+    if not stale_ids:
+        return 0
+
+    updated_at = deps.now_iso()
+    connection.execute(
+        delete(staged_artifacts)
+        .where(staged_artifacts.c.library_item_id.in_(stale_ids))
+        .where(staged_artifacts.c.promoted_at.is_(None))
+    )
+    connection.execute(
+        update(library_items)
+        .where(library_items.c.id.in_(stale_ids))
+        .where(library_items.c.status == "encoding")
+        .values(status="planned", updated_at=updated_at)
+    )
+    return len(stale_ids)
 
 
 def running_encode_job_count(connection: DBClient) -> int:
