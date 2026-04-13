@@ -232,6 +232,34 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertFalse(staging_path.exists())
         self.assertFalse(partial_path.exists())
 
+    def test_reconcile_encode_jobs_skips_promoted_stale_encoding_rows(self) -> None:
+        source_path = self._create_source_file("episode-idle-promoted.mkv")
+        staging_path = self._staging_path("episode-idle-promoted.mkv")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("staged")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(promoted_at=web_app._now_iso())
+            )
+
+            cleared_count = encode_runtime.clear_stale_encoding_items_when_idle(
+                connection,
+                self.config,
+                web_app._encode_queue_runtime_deps(),
+            )
+
+            item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+            assert item_status_row is not None
+            self.assertEqual(cleared_count, 0)
+            self.assertEqual(item_status_row["status"], "encoding")
+            self.assertIsNotNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
+        self.assertTrue(staging_path.exists())
+
     def test_reconcile_encode_jobs_ignores_unlink_errors_during_stale_cleanup(self) -> None:
         first_source = self._create_source_file("episode-stale-first.mkv")
         second_source = self._create_source_file("episode-stale-second.mkv")

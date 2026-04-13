@@ -624,11 +624,16 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             )
 
     def _clear_completed_backups_action(prefixes: list[str] | None) -> dict[str, Any]:
+        archive_root = None
+        try:
+            archive_root = config.archive_root
+        except KeyError:
+            archive_root = None
         with open_db(config.paths.db_path) as connection:
             folders = list_completed_folders(
                 connection,
                 folder_group=_folder_group,
-                archive_root=config.archive_root,
+                archive_root=archive_root,
             )
         valid_prefixes = {folder.prefix for folder in folders}
         result = clear_completed_backups_action(

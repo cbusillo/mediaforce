@@ -8,6 +8,13 @@ from mediaforce.web.settings_runtime import settings_archive_root
 
 def archive_cleanup_summary(config: MediaforceConfig, *, transcode_root: str | None = None) -> dict[str, Any]:
     archive_root = _archive_root_for_cleanup(config, transcode_root=transcode_root)
+    if archive_root is None:
+        return {
+            "archive_root": "",
+            "file_count": 0,
+            "total_size_bytes": 0,
+            "has_cleanup": False,
+        }
     file_count = 0
     total_size_bytes = 0
 
@@ -32,6 +39,14 @@ def archive_cleanup_summary(config: MediaforceConfig, *, transcode_root: str | N
 def clear_archive_cleanup_action(config: MediaforceConfig, *, transcode_root: str | None = None) -> dict[str, Any]:
     archive_root = _archive_root_for_cleanup(config, transcode_root=transcode_root)
     summary = archive_cleanup_summary(config, transcode_root=transcode_root)
+    if archive_root is None:
+        return {
+            "ok": True,
+            "message": "No archived originals are waiting for cleanup.",
+            "removed_count": 0,
+            "removed_size_bytes": 0,
+            "archive_cleanup": summary,
+        }
     if not archive_root.exists() or summary["file_count"] <= 0:
         return {
             "ok": True,
@@ -69,7 +84,10 @@ def clear_archive_cleanup_action(config: MediaforceConfig, *, transcode_root: st
     }
 
 
-def _archive_root_for_cleanup(config: MediaforceConfig, *, transcode_root: str | None = None) -> Path:
+def _archive_root_for_cleanup(config: MediaforceConfig, *, transcode_root: str | None = None) -> Path | None:
     if transcode_root is not None and transcode_root.strip():
         return Path(settings_archive_root(transcode_root)).expanduser()
-    return config.archive_root
+    try:
+        return config.archive_root
+    except KeyError:
+        return None

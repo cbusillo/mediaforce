@@ -758,6 +758,27 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(archive_root.exists())
         self.assertEqual(result["archive_cleanup"]["file_count"], 0)
 
+    def test_clear_archive_cleanup_action_tolerates_missing_archive_root(self) -> None:
+        config = MediaforceConfig(
+            raw={
+                "state": {},
+                "media": {
+                    "source_roots": {"tv": str(self.root / "source" / "tv")},
+                    "staging_root": str(self.root / "staging"),
+                },
+                "remote_hosts": [],
+            },
+            paths=self.config.paths,
+        )
+
+        result = clear_archive_cleanup_action(config)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["removed_count"], 0)
+        self.assertEqual(result["removed_size_bytes"], 0)
+        self.assertEqual(result["archive_cleanup"]["archive_root"], "")
+        self.assertFalse(result["archive_cleanup"]["has_cleanup"])
+
     def test_completed_page_payload_groups_promoted_folders_and_active_backups(self) -> None:
         from mediaforce.web import app as web_app
 
@@ -820,6 +841,29 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertEqual(payload["archive_cleanup"]["file_count"], 1)
         self.assertEqual(payload["folders"][0]["archived_backup_count"], 0)
+
+    def test_completed_page_payload_tolerates_missing_archive_root(self) -> None:
+        from mediaforce.web import app as web_app
+
+        config = MediaforceConfig(
+            raw={
+                "state": {},
+                "media": {
+                    "source_roots": {"tv": str(self.root / "source" / "tv")},
+                    "staging_root": str(self.root / "staging"),
+                },
+                "remote_hosts": [],
+            },
+            paths=self.config.paths,
+        )
+
+        with open_db(config.paths.db_path) as connection:
+            payload = completed_page_payload(config, connection, folder_group=web_app._folder_group)
+
+        self.assertEqual(payload["completed_count"], 0)
+        self.assertEqual(payload["folders_with_backups_count"], 0)
+        self.assertEqual(payload["archive_cleanup"]["archive_root"], "")
+        self.assertFalse(payload["archive_cleanup"]["has_cleanup"])
 
     def test_completed_page_payload_keeps_total_bytes_saved_after_backup_is_deleted(self) -> None:
         from mediaforce.web import app as web_app
@@ -964,6 +1008,65 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(captured, [["tv/Example Show/Season 1"]])
+        self.assertEqual(json.loads(response.body)["completed"], expected_payload)
+
+    def test_completed_cleanup_route_tolerates_missing_archive_root(self) -> None:
+        from mediaforce.web import app as web_app
+
+        config = MediaforceConfig(
+            raw={
+                "state": {},
+                "media": {
+                    "source_roots": {"tv": str(self.root / "source" / "tv")},
+                    "staging_root": str(self.root / "staging"),
+                },
+                "remote_hosts": [],
+            },
+            paths=self.config.paths,
+        )
+
+        expected_payload = {
+            "folders": [],
+            "completed_count": 0,
+            "folders_with_backups_count": 0,
+            "archive_cleanup": {"archive_root": "", "file_count": 0, "total_size_bytes": 0, "has_cleanup": False},
+        }
+
+        with patch("mediaforce.web.app.load_config", return_value=config), patch(
+            "mediaforce.web.app.purge_transient_artifacts"
+        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
+            "mediaforce.web.app._start_encode_queue_worker"
+        ), patch("mediaforce.web.app._refresh_host_status_cache", return_value=[]), patch(
+            "mediaforce.web.app.completed_page_payload", return_value=expected_payload
+        ), patch("mediaforce.web.app.list_completed_folders", return_value=[]), patch(
+            "mediaforce.web.app.clear_completed_backups_action",
+            return_value={
+                "ok": True,
+                "message": "No archived originals are waiting for cleanup.",
+                "removed_count": 0,
+                "removed_size_bytes": 0,
+                "removed_prefix_count": 0,
+            },
+        ) as clear_mock:
+            app = web_app.create_app(self.root / "config.toml")
+            route = next(
+                route
+                for route in app.routes
+                if isinstance(route, APIRoute) and route.path == "/api/completed/backups/clear"
+            )
+            assert isinstance(route, APIRoute)
+
+            class _FakeRequest:
+                def __init__(self, payload: dict[str, object]) -> None:
+                    self._payload = payload
+
+                async def json(self) -> dict[str, object]:
+                    return self._payload
+
+            response = asyncio.run(route.endpoint(_FakeRequest({})))
+
+        self.assertEqual(response.status_code, 200)
+        clear_mock.assert_called_once()
         self.assertEqual(json.loads(response.body)["completed"], expected_payload)
 
     def test_completed_cleanup_route_rejects_malformed_prefix_payload(self) -> None:

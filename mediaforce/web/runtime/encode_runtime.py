@@ -170,7 +170,9 @@ def clear_stale_encoding_items_when_idle(
                 host=host,
             )
 
-    stale_ids = [int(row["id"]) for row in stale_rows]
+    stale_ids = [int(row["id"]) for row in stale_rows if row["promoted_at"] is None]
+    if not stale_ids:
+        return 0
     updated_at = deps.now_iso()
     connection.execute(
         delete(staged_artifacts)
