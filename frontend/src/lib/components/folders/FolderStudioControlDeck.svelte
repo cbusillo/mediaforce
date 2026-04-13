@@ -514,8 +514,9 @@
 
 	.sample-host-badges {
 		display: flex;
+		align-items: center;
 		flex-wrap: wrap;
-		gap: 0.45rem;
+		gap: var(--space-2);
 	}
 
 	.sample-host-state,
@@ -547,11 +548,69 @@
 		color: #dbeafe;
 	}
 
+	.sample-host-label {
+		font-size: 1.05rem;
+		font-weight: 700;
+		line-height: 1.2;
+	}
+
+	.compact-host-meta {
+		font-size: 0.84rem;
+		line-height: 1.45;
+	}
+
+	.compact-host-meta.secondary {
+		font-size: 0.79rem;
+	}
+
+	.compact-host-meta.tertiary {
+		font-size: 0.77rem;
+		font-weight: 700;
+		color: #7dd3fc;
+	}
+
 	.host-search-callout {
-		margin: 0;
+		margin: -0.18rem 0 0;
+		display: grid;
+		gap: 0.12rem;
+		font-size: 0.82rem;
+		line-height: 1.42;
 		padding: 0.78rem 0.84rem;
 		border: 1px solid rgba(56, 189, 248, 0.18);
 		background: rgba(8, 47, 73, 0.3);
+	}
+
+	.action-row {
+		display: flex;
+		gap: var(--space-2);
+		flex-wrap: wrap;
+		align-items: start;
+	}
+
+	.primary-action-row :global(button) {
+		min-width: min(100%, 18rem);
+	}
+
+	.compact-action-row :global(button) {
+		flex: 1 1 12rem;
+		min-width: 0;
+	}
+
+	.single-primary-action-row :global(button) {
+		flex-basis: 100%;
+	}
+
+	.utility-action-row {
+		padding-top: 0.15rem;
+	}
+
+	.action-inline-note {
+		padding: 0.15rem 0 0;
+		border-radius: 0;
+		background: transparent;
+		border: 0;
+		font-size: 0.86rem;
+		line-height: 1.4;
 	}
 
 	.host-search-callout-label {
