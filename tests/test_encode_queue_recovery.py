@@ -264,6 +264,30 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertTrue(first_staging.exists())
         self.assertFalse(second_staging.exists())
 
+    def test_reconcile_encode_jobs_prunes_empty_quality_temp_dirs(self) -> None:
+        source_path = self._create_source_file("episode-temp-dir.mkv")
+        temp_dir = self.root / "staging" / ".mediaforce-ab-av1-stale"
+        staging_path = temp_dir / "episode-temp-dir.mkv"
+        partial_path = temp_dir / "episode-temp-dir.partial.mkv"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("staged")
+        partial_path.write_text("partial")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+
+            web_app._reconcile_encode_jobs(connection, self.config)
+
+            item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+            assert item_status_row is not None
+            self.assertEqual(item_status_row["status"], "planned")
+            self.assertIsNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
+
+        self.assertFalse(staging_path.exists())
+        self.assertFalse(partial_path.exists())
+        self.assertFalse(temp_dir.exists())
+
     def test_host_selection_prefers_other_encode_capable_host_during_cooldown(self) -> None:
         job = {
             "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},

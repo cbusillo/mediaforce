@@ -209,6 +209,15 @@ def _remove_stale_staging_path(path: Path) -> None:
         safe_unlink(path)
     except OSError:
         return
+    _prune_empty_quality_temp_dir(path.parent)
+
+
+def _prune_empty_quality_temp_dir(path: Path) -> None:
+    if path.name.startswith(".mediaforce-ab-av1-") or path.name.startswith(".ab-av1-"):
+        try:
+            path.rmdir()
+        except OSError:
+            return
 
 
 def running_encode_job_count(connection: DBClient) -> int:
