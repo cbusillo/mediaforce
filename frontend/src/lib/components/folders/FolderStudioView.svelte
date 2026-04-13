@@ -150,6 +150,23 @@
 				Number(right.priority) - Number(left.priority) || left.label.localeCompare(right.label)
 		)
 	);
+	const readyReviewHostCount = $derived.by(
+		() => rankedHosts.filter((host) => host.available && host.queue_active).length
+	);
+	const scheduledReviewHostCount = $derived.by(
+		() => rankedHosts.filter((host) => host.available && host.schedule_open === false).length
+	);
+	const hostLaneSummaryCopy = $derived.by(() => {
+		if (rankedHosts.length === 0) return 'No host lanes are configured yet.';
+		const parts = [`${rankedHosts.length} host${rankedHosts.length === 1 ? '' : 's'} ranked`];
+		if (readyReviewHostCount > 0) {
+			parts.push(`${readyReviewHostCount} ready now`);
+		}
+		if (scheduledReviewHostCount > 0) {
+			parts.push(`${scheduledReviewHostCount} waiting for schedule`);
+		}
+		return parts.join(' · ');
+	});
 	const hostRuntimeByKey = $derived.by(
 		() => new Map(rankedHosts.map((host) => [host.key, host] as const))
 	);
@@ -1220,6 +1237,13 @@
 		const followUp = String(currentThreadSession?.suggestedFollowUp ?? '').trim();
 		if (followUp) return followUp;
 		return 'The latest bench read is pinned beside the review decision so you can scan it without leaving the proof clips.';
+	});
+	const representativeDisclosureSummaryCopy = $derived.by(() => {
+		const parts: string[] = [];
+		if (representativeExtension) parts.push(representativeExtension);
+		if (representativeResolution) parts.push(representativeResolution);
+		if (folderSnapshotItems.length > 0) parts.push(`${folderSnapshotItems.length} folder facts`);
+		return parts.length > 0 ? parts.join(' · ') : 'Representative file metadata and folder state';
 	});
 	const archivedThreadHeadline = $derived.by(
 		() =>
@@ -2907,11 +2931,13 @@
 						{/if}
 
 						<details class="reference-disclosure" open={false}>
-							<summary
-								><span>Representative file and folder context</span><span class="summary-hint"
-									>Inspect</span
-								></summary
-							>
+							<summary>
+								<span class="summary-copy-block">
+									<span class="summary-title">Representative file and folder context</span>
+									<span class="summary-detail">{representativeDisclosureSummaryCopy}</span>
+								</span>
+								<span class="summary-hint">Open context</span>
+							</summary>
 							<div class="reference-disclosure-grid">
 								<div class="review-block representative-block compact-reference-block">
 									<p class="eyebrow-copy">Representative file</p>
@@ -2970,8 +2996,13 @@
 						</details>
 
 						<details class="reference-disclosure host-detail-disclosure" open={false}>
-							<summary><span>All host lanes</span><span class="summary-hint">Inspect</span></summary
-							>
+							<summary>
+								<span class="summary-copy-block">
+									<span class="summary-title">All host lanes</span>
+									<span class="summary-detail">{hostLaneSummaryCopy}</span>
+								</span>
+								<span class="summary-hint">Open lanes</span>
+							</summary>
 							<div class="host-grid">
 								{#each rankedHosts as host (host.key)}
 									<HostCard {host} folderPrefix={folder.prefix} />
@@ -3794,7 +3825,7 @@
 	}
 
 	.compact-fact-card {
-		background: rgba(255, 255, 255, 0.58);
+		background: rgba(15, 20, 27, 0.76);
 	}
 
 	.snapshot-detail-copy {
@@ -3808,8 +3839,8 @@
 		gap: 0.75rem;
 		padding: 0.95rem 1rem;
 		border-radius: var(--radius-md);
-		background: rgba(255, 255, 255, 0.6);
-		border: 1px solid rgba(23, 35, 31, 0.08);
+		background: rgba(15, 20, 27, 0.86);
+		border: 1px solid rgba(45, 212, 191, 0.14);
 	}
 
 	.reference-disclosure summary,
@@ -3822,17 +3853,43 @@
 		padding: 0.8rem 0.95rem;
 		margin: -0.05rem -0.05rem 0;
 		border-radius: calc(var(--radius-md) - 0.12rem);
-		background: rgba(255, 255, 255, 0.72);
-		border: 1px solid rgba(23, 35, 31, 0.08);
+		background: rgba(15, 23, 42, 0.78);
+		border: 1px solid rgba(148, 163, 184, 0.16);
 		font-size: 0.9rem;
 		font-weight: 700;
-		color: var(--ink);
+		color: #f8fafc;
 	}
 
 	.summary-hint {
-		font-size: 0.82rem;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0.28rem 0.55rem;
+		border-radius: 999px;
+		border: 1px solid rgba(45, 212, 191, 0.16);
+		background: rgba(8, 47, 73, 0.68);
+		font-size: 0.76rem;
 		font-weight: 700;
-		color: var(--ink-soft);
+		color: #d5f5ff;
+	}
+
+	.summary-copy-block {
+		display: grid;
+		gap: 0.12rem;
+		min-width: 0;
+	}
+
+	.summary-title {
+		font-size: 0.9rem;
+		font-weight: 700;
+		color: #f8fafc;
+	}
+
+	.summary-detail {
+		font-size: 0.8rem;
+		font-weight: 600;
+		line-height: 1.4;
+		color: rgba(226, 232, 240, 0.74);
 	}
 
 	.reference-disclosure summary::after,
@@ -3841,12 +3898,12 @@
 		font-size: 1rem;
 		font-weight: 700;
 		line-height: 1;
-		color: var(--ink-soft);
+		color: rgba(226, 232, 240, 0.62);
 	}
 
 	.reference-disclosure[open] summary,
 	.steady-details-shell[open] summary {
-		background: rgba(247, 244, 237, 0.92);
+		background: rgba(8, 47, 73, 0.82);
 	}
 
 	.reference-disclosure[open] summary::after,
@@ -3861,7 +3918,7 @@
 	}
 
 	.compact-reference-block {
-		background: rgba(255, 255, 255, 0.74);
+		background: rgba(15, 23, 42, 0.82);
 	}
 
 	.compact-snapshot-grid {
@@ -3874,11 +3931,31 @@
 
 	@media (max-width: 900px) {
 		.studio-grid,
-		.review-grid,
-		.review-grid-balanced,
 		.review-player-columns,
 		.snapshot-grid {
 			grid-template-columns: 1fr;
+		}
+
+		.review-grid,
+		.review-grid-balanced {
+			display: flex;
+			flex-direction: column;
+		}
+
+		.review-main-column {
+			display: contents;
+		}
+
+		.review-evidence-block {
+			order: 1;
+		}
+
+		.review-approval-column {
+			order: 2;
+		}
+
+		.review-diff-block {
+			order: 3;
 		}
 
 		.studio-sidebar,
@@ -3933,8 +4010,16 @@
 
 		.reference-disclosure summary,
 		.steady-details-shell summary {
-			flex-direction: column;
+			grid-template-columns: 1fr auto;
 			align-items: start;
+		}
+
+		.summary-copy-block {
+			gap: 0.18rem;
+		}
+
+		.summary-detail {
+			font-size: 0.76rem;
 		}
 	}
 </style>

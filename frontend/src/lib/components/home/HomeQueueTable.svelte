@@ -307,10 +307,15 @@
 <style>
 	.station-card {
 		padding: 1.1rem;
+		min-width: 0;
+		width: 100%;
 	}
 
 	.table-deck {
 		padding-top: 1rem;
+		min-width: 0;
+		width: 100%;
+		overflow: hidden;
 	}
 
 	.section-head,
@@ -419,6 +424,9 @@
 	}
 
 	.table-shell {
+		min-width: 0;
+		max-width: 100%;
+		width: 100%;
 		max-height: min(74vh, 64rem);
 		overflow-x: auto;
 		overflow-y: auto;
@@ -427,7 +435,7 @@
 	}
 
 	table {
-		width: 100%;
+		width: max(100%, 72rem);
 		border-collapse: collapse;
 	}
 

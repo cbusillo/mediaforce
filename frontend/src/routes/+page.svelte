@@ -223,6 +223,32 @@
 		() => hosts.hosts.filter((host) => host.capabilities.includes('encode_queue')).length
 	);
 	const reachableHosts = $derived.by(() => hosts.hosts.filter((host) => host.available).length);
+	const queueStateTone = $derived.by(() => {
+		if (dashboard.encode_queue.state.stop_requested || dashboard.encode_queue.state.is_paused) {
+			return 'warning-state';
+		}
+		if (queueWorkersScheduledOffWindow && dashboard.encode_queue.queued_count > 0) {
+			return 'schedule-state';
+		}
+		return 'normal-state';
+	});
+	const workerStateTone = $derived.by(() => {
+		if (queueCapableHosts === 0) {
+			return 'warning-state';
+		}
+		if (readyHosts === 0 && dashboard.encode_queue.queued_count > 0) {
+			return 'schedule-state';
+		}
+		return 'normal-state';
+	});
+	const recoveryDetailCopy = $derived.by(() => {
+		const cleanupCount = Number(dashboard.archive_cleanup?.file_count ?? 0);
+		const cleanupCopy =
+			cleanupCount > 0
+				? `${cleanupCount} completed backups are ready for cleanup.`
+				: 'No completed backups are waiting for cleanup.';
+		return `${foldersPending} pending items across ${visibleFolders.length} visible folders. ${cleanupCopy}`;
+	});
 	const sortedVisibleFolderRows = $derived.by(() => {
 		const collator = new Intl.Collator('en-US', { sensitivity: 'base', numeric: true });
 		const rankedFolders = visibleFolders.map((folder, index) => ({
@@ -707,9 +733,7 @@
 
 <div class="workstation-screen">
 	<section class="system-strip" aria-label="Fleet system state">
-		<div
-			class={`system-cell queue-cell ${dashboard.encode_queue.state.stop_requested || dashboard.encode_queue.state.is_paused ? 'warning-state' : 'normal-state'}`.trim()}
-		>
+		<div class={`system-cell queue-cell ${queueStateTone}`.trim()}>
 			<p class="system-label">Queue state</p>
 			<p class="system-value">{fleetSnapshotLabel}</p>
 			<p class="system-detail">
@@ -742,7 +766,7 @@
 			{/if}
 		</div>
 
-		<div class="system-cell">
+		<div class={`system-cell ${workerStateTone}`.trim()}>
 			<p class="system-label">Workers</p>
 			<p class="system-value">{readyHosts} ready / {queueCapableHosts} queue-capable</p>
 			<p class="system-detail">
@@ -765,14 +789,7 @@
 		<div class="system-cell accent-cell">
 			<p class="system-label">Recovery</p>
 			<p class="system-value">{formatGiB(totalProjectedReclaim, 1)} visible reclaim</p>
-			<p class="system-detail">
-				{foldersPending} pending items across {visibleFolders.length} visible folders
-				{#if Number(dashboard.archive_cleanup?.file_count ?? 0) > 0}
-					. {dashboard.archive_cleanup?.file_count} completed backups are ready for cleanup.
-				{:else}
-					.
-				{/if}
-			</p>
+			<p class="system-detail">{recoveryDetailCopy}</p>
 		</div>
 	</section>
 
@@ -945,16 +962,7 @@
 	}
 
 	.workstation-screen::after {
-		content: '';
-		position: fixed;
-		inset: 0;
-		z-index: -1;
-		pointer-events: none;
-		background-image:
-			linear-gradient(rgba(148, 163, 184, 0.05) 1px, transparent 1px),
-			linear-gradient(90deg, rgba(148, 163, 184, 0.04) 1px, transparent 1px);
-		background-size: 28px 28px;
-		opacity: 0.32;
+		display: none;
 	}
 
 	.system-strip,
@@ -973,6 +981,12 @@
 		display: grid;
 		gap: 1rem;
 		align-content: start;
+		min-width: 0;
+		overflow: hidden;
+	}
+
+	.console-grid > :global(*),
+	.main-column > :global(*) {
 		min-width: 0;
 	}
 
@@ -1006,7 +1020,7 @@
 		position: absolute;
 		inset: 0 0 auto;
 		height: 2px;
-		background: linear-gradient(90deg, rgba(56, 189, 248, 0.75), rgba(34, 197, 94, 0.2));
+		background: rgba(56, 189, 248, 0.85);
 	}
 
 	.queue-cell.warning-state {
@@ -1015,11 +1029,20 @@
 	}
 
 	.queue-cell.warning-state::before {
-		background: linear-gradient(90deg, rgba(251, 146, 60, 0.95), rgba(248, 113, 113, 0.3));
+		background: rgba(251, 146, 60, 0.95);
+	}
+
+	.system-cell.schedule-state {
+		border-color: rgba(245, 158, 11, 0.28);
+		background: rgba(51, 28, 10, 0.94);
+	}
+
+	.system-cell.schedule-state::before {
+		background: rgba(245, 158, 11, 0.92);
 	}
 
 	.queue-cell.normal-state::before {
-		background: linear-gradient(90deg, rgba(56, 189, 248, 0.85), rgba(34, 197, 94, 0.22));
+		background: rgba(56, 189, 248, 0.85);
 	}
 
 	.system-label,
@@ -1069,7 +1092,7 @@
 		gap: 1rem;
 		align-items: center;
 		padding: 1rem 1.1rem;
-		background: linear-gradient(180deg, rgba(42, 22, 14, 0.96), rgba(69, 26, 3, 0.92));
+		background: rgba(55, 24, 11, 0.96);
 	}
 
 	.alert-action,

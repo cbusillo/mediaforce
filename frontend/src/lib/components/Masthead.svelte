@@ -155,16 +155,32 @@
 	}
 
 	@media (max-width: 560px) {
+		.brand-stack {
+			gap: 0.08rem;
+		}
+
+		.brand-mark {
+			font-size: 0.68rem;
+			letter-spacing: 0.16em;
+		}
+
+		.brand-name {
+			font-size: 0.96rem;
+		}
+
 		.nav-row {
 			display: grid;
 			grid-template-columns: repeat(2, minmax(0, 1fr));
-			gap: 0.45rem 0.75rem;
+			gap: 0.3rem 0.6rem;
 			width: 100%;
+			padding-top: 0.55rem;
 		}
 
 		.nav-row a {
 			justify-content: flex-start;
 			padding-inline: 0;
+			min-height: 1.95rem;
+			font-size: 0.84rem;
 		}
 	}
 </style>

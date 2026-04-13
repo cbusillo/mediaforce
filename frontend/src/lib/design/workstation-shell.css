@@ -13,14 +13,7 @@ body::after {
 }
 
 body::before {
-	inset: 0;
-	background-image:
-		linear-gradient(rgba(148, 163, 184, 0.05) 1px, transparent 1px),
-		linear-gradient(90deg, rgba(148, 163, 184, 0.04) 1px, transparent 1px);
-	background-size: 28px 28px;
-	opacity: 0.32;
-	mix-blend-mode: normal;
-	mask-image: none;
+	display: none;
 }
 
 .page-shell {
@@ -75,4 +68,28 @@ body::before {
 	background: transparent;
 	color: #f8fafc;
 	box-shadow: none;
+}
+
+@media (max-width: 720px) {
+	.page-shell {
+		width: min(1480px, calc(100vw - 1rem));
+		padding-top: 0.45rem;
+	}
+
+	.masthead {
+		padding: 0.65rem 0.8rem !important;
+		gap: 0.7rem;
+	}
+
+	.masthead .brand-link {
+		gap: 0.55rem;
+	}
+
+	.masthead .brand-context {
+		display: none;
+	}
+
+	.masthead .brand-name {
+		font-size: 1rem;
+	}
 }
