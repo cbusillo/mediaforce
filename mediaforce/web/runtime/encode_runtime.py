@@ -27,7 +27,7 @@ from mediaforce.core.process_control import ManagedProcessController, ProcessCan
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.quality import QualityTempCleanupError, QualityTempSetupError, quality_error_message
 from mediaforce.encoding.staging import safe_unlink
-from mediaforce.remote import execution_mode_for_host, run_remote_command
+from mediaforce.remote import execution_mode_for_host, host_media_access_for_host, run_remote_command
 from mediaforce.web.runtime.host_runtime import host_config_for_key
 from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
 
@@ -239,7 +239,11 @@ def _candidate_stale_staging_targets(
 
 def _remove_stale_staging_path(path: Path, *, host: dict[str, Any] | None = None) -> None:
     host_payload = object_dict(host)
-    if host_payload and execution_mode_for_host(host_payload) == "ssh":
+    if (
+            host_payload
+            and execution_mode_for_host(host_payload) == "ssh"
+            and host_media_access_for_host(host_payload) != "stream"
+    ):
         _remove_remote_stale_staging_path(path, host_payload)
         return
     if path.is_dir():

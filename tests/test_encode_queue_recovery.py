@@ -341,6 +341,41 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertTrue(host_staging_path.exists())
         self.assertTrue(host_partial_path.exists())
 
+    def test_reconcile_encode_jobs_keeps_stream_host_cleanup_local(self) -> None:
+        source_path = self._create_source_file("episode-stream-host.mkv")
+        self.config.raw["remote_hosts"] = [
+            {
+                "mode": "ssh",
+                "host": "stream-remote",
+                "label": "Stream Remote",
+                "media_access": "stream",
+                "staging_root": str(self.root / "stream-staging"),
+                "capabilities": ["encode_queue"],
+            }
+        ]
+        staging_path = self.root / "stream-staging" / ".mediaforce-ab-av1-stream" / "episode-stream-host.mkv"
+        partial_path = self.root / "stream-staging" / ".mediaforce-ab-av1-stream" / "episode-stream-host.partial.mkv"
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("staged")
+        partial_path.write_text("partial")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+
+            with patch("mediaforce.web.runtime.encode_runtime.run_remote_command") as run_remote_command_mock:
+                web_app._reconcile_encode_jobs(connection, self.config)
+
+            item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+            assert item_status_row is not None
+            self.assertEqual(item_status_row["status"], "planned")
+            self.assertIsNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
+            run_remote_command_mock.assert_not_called()
+
+        self.assertFalse(staging_path.exists())
+        self.assertFalse(partial_path.exists())
+        self.assertFalse(staging_path.parent.exists())
+
     def test_host_selection_prefers_other_encode_capable_host_during_cooldown(self) -> None:
         job = {
             "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
