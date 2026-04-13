@@ -1,7 +1,6 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import '$lib/design/workstation-shell.css';
-	import { resolve } from '$app/paths';
 	import { tick } from 'svelte';
 	import type {
 		EncodeJobProgressTelemetry,
@@ -18,6 +17,8 @@
 	import Panel from '$lib/components/Panel.svelte';
 	import Pill from '$lib/components/Pill.svelte';
 	import SectionHead from '$lib/components/SectionHead.svelte';
+	import FolderStudioControlDeck from '$lib/components/folders/FolderStudioControlDeck.svelte';
+	import FolderStudioHeader from '$lib/components/folders/FolderStudioHeader.svelte';
 	import {
 		codecLabel,
 		compactCopy,
@@ -2246,121 +2247,25 @@
 </svelte:head>
 
 <div class="page-stack folder-workstation">
-	<nav class="breadcrumb-row">
-		{#each breadcrumbItems as item, index (`${item.label}-${index}`)}
-			{#if index > 0}
-				<span aria-hidden="true">›</span>
-			{/if}
-			{#if item.href}
-				<a href={resolve(item.href)}>{item.label}</a>
-			{:else}
-				<span>{item.label}</span>
-			{/if}
-		{/each}
-	</nav>
-
-	<Panel class="folder-header" padding="1.35rem 1.45rem">
-		<div class="folder-header-grid">
-			<SectionHead
-				eyebrow="Calibration Studio"
-				heading={folder.prefix}
-				lede="Tune this folder with hard-scene samples before you run the real batch."
-				size="section"
-			/>
-			<div class="folder-header-side">
-				<p class="lede-copy">{folder.metric_status_copy}</p>
-				<div class="pill-row">
-					{#each headerFactItems as item (item.label)}
-						<Pill label={`${item.label}: ${item.value}`} variant="neutral" wide />
-					{/each}
-				</div>
-			</div>
-		</div>
-		{#if actionState === 'preview' && previewSubmission}
-			<div class="status-strip internal-status-strip">
-				<div class="section-copy-block">
-					<div class="status-strip-signal" aria-live="polite">
-						<span class="status-strip-beacon" aria-hidden="true"></span>
-						<span>Drafting bench reply</span>
-					</div>
-					<p class="eyebrow-copy">Bench request</p>
-					<p class="status-strip-title">The bench is preparing the next sample draft now</p>
-					<p class="muted-copy">
-						{previewSubmission.hostLabel
-							? `Mediaforce is reading the latest note and review context for ${previewSubmission.hostLabel}. The updated draft card will appear below when the reply lands.`
-							: 'Mediaforce is reading the latest note and review context. The updated draft card will appear below when the reply lands.'}
-					</p>
-				</div>
-				<p class="status-strip-meta">
-					{previewSubmission.note
-						? `Latest note: ${previewSubmission.note}`
-						: 'Using the current host and saved review context'}
-				</p>
-			</div>
-		{/if}
-		<div class="workflow-stage-strip" aria-label="Folder workflow stages">
-			{#each workflowStageCards as stage (stage.key)}
-				<div class={`workflow-stage-card ${stage.status}`.trim()}>
-					<p class="workflow-stage-label">{stage.label}</p>
-					<p class="workflow-stage-detail">{stage.detail}</p>
-				</div>
-			{/each}
-		</div>
-	</Panel>
-
-	{#if status.folder_scan_job && folderRefreshActive}
-		<Panel class="status-strip-panel in-progress" padding="0.95rem 1rem">
-			<div class="status-strip">
-				<div class="section-copy-block">
-					<div class="status-strip-signal" aria-live="polite">
-						<span class="status-strip-beacon" aria-hidden="true"></span>
-						<span>{folderRefreshSignal}</span>
-					</div>
-					<p class="eyebrow-copy">Folder refresh</p>
-					<p class="status-strip-title">Refreshing in the background before you start a run</p>
-					<p class="muted-copy">
-						The catalog snapshot is updating so this view stays aligned with the latest media state.
-					</p>
-				</div>
-				<p class="status-strip-meta">
-					Started {String(
-						status.folder_scan_job.started_at ?? status.folder_scan_job.created_at ?? ''
-					)}
-				</p>
-			</div>
-		</Panel>
-	{/if}
-
-	{#if calibrationJob && (status.calibration_status === 'queued' || status.calibration_status === 'running')}
-		<Panel class="status-strip-panel accent-strip in-progress" padding="0.95rem 1rem">
-			<div class="status-strip">
-				<div class="section-copy-block">
-					<div class="status-strip-signal" aria-live="polite">
-						<span class="status-strip-beacon" aria-hidden="true"></span>
-						<span>{calibrationSignal}</span>
-					</div>
-					<p class="eyebrow-copy">
-						{calibrationJob.mode === 'full' ? 'Proof encode' : 'Calibration'}
-					</p>
-					<p class="status-strip-title">
-						{calibrationJob.mode === 'full'
-							? 'Representative-file proof encode is running'
-							: 'Sample calibration is running'}
-					</p>
-					<p class="muted-copy">
-						{calibrationJob.mode === 'full'
-							? 'This full-file proof creates reviewable compare clips from a finished encode.'
-							: 'This sampled run predicts full size quickly, then renders hotspot clips for review.'}
-					</p>
-				</div>
-				<p class="status-strip-meta">
-					Action {String(calibrationJob.action ?? '')} · Host {String(
-						calibrationJob.host?.label ?? ''
-					)}
-				</p>
-			</div>
-		</Panel>
-	{/if}
+	<FolderStudioHeader
+		{breadcrumbItems}
+		folderPrefix={folder.prefix}
+		metricStatusCopy={folder.metric_status_copy}
+		{headerFactItems}
+		{actionState}
+		{previewSubmission}
+		{workflowStageCards}
+		showFolderRefresh={Boolean(status.folder_scan_job && folderRefreshActive)}
+		{folderRefreshSignal}
+		folderRefreshMeta={`Started ${String(status.folder_scan_job?.started_at ?? status.folder_scan_job?.created_at ?? '')}`}
+		showCalibrationStatus={Boolean(
+			calibrationJob &&
+			(status.calibration_status === 'queued' || status.calibration_status === 'running')
+		)}
+		{calibrationSignal}
+		calibrationMode={calibrationJob?.mode === 'full' ? 'full' : 'sample'}
+		calibrationMeta={`Action ${String(calibrationJob?.action ?? '')} · Host ${String(calibrationJob?.host?.label ?? '')}`}
+	/>
 
 	<div class="workflow-stack">
 		<Panel class="studio-panel" variant="accent">
@@ -2373,197 +2278,46 @@
 				/>
 				<div class="studio-grid">
 					<aside class="studio-sidebar">
-						<div class="control-deck">
-							<div class="run-readiness-card compact-status-card">
-								<p class="eyebrow-copy">Run environment</p>
-								<h3 class="run-card-title">{runReadinessHeading}</h3>
-								<p class="muted-copy">{runReadinessCopy}</p>
-								<div class="pill-row run-status-pills">
-									<Pill label={sampleQueueLabel} variant="neutral" wide />
-									<Pill label={encodeQueueLabel} variant="ghost" wide />
-								</div>
-								{#if encodeJobStatus && encodeJobStatus !== 'completed'}
-									<div class={`folder-encode-card ${encodeJobTone}`.trim()}>
-										<div class="folder-encode-header">
-											<div>
-												<p class="eyebrow-copy">Folder encode</p>
-												<p class="folder-encode-title">{encodeJobHeadline}</p>
-											</div>
-											<span class={`folder-encode-chip ${encodeJobTone}`.trim()}>
-												{encodeJobChipLabel}
-											</span>
-										</div>
-										{#if encodeJobDetail}
-											<p class="muted-copy folder-encode-detail">{encodeJobDetail}</p>
-										{/if}
-										{#if encodeJobNextActionCopy}
-											<p class="inline-gate-copy folder-encode-next-step">
-												<span class="eyebrow-copy">Next step</span>
-												{encodeJobNextActionCopy}
-											</p>
-										{/if}
-										{#if encodeJobFacts.length > 0}
-											<div class="folder-encode-facts" aria-label="Folder encode telemetry">
-												{#each encodeJobFacts as fact (`${fact.label}:${fact.value}`)}
-													<div class="folder-encode-fact">
-														<p>{fact.label}</p>
-														<strong>{fact.value}</strong>
-													</div>
-												{/each}
-											</div>
-										{/if}
-										{#if encodeJobMetaCopy}
-											<p class="muted-copy folder-encode-meta">{encodeJobMetaCopy}</p>
-										{/if}
-									</div>
-								{/if}
-							</div>
-
-							<div class="host-picker-shell">
-								<div class="section-copy-block">
-									<p class="eyebrow-copy">Host picker</p>
-									<p class="muted-copy host-section-copy">
-										Pick the machine for this representative pass. The chosen host stays visible in
-										the action bar below.
-									</p>
-									<p class="muted-copy host-section-copy host-schedule-note">
-										Representative samples can run now. Full-folder encodes still wait for the
-										worker windows you see in Ops.
-									</p>
-								</div>
-								<div class="sample-host-grid compact-host-grid">
-									{#each sampleHostCards as hostCard (hostCard.key)}
-										<button
-											type="button"
-											class:selected={selectedHost === hostCard.key}
-											class:disabled={!hostCard.available}
-											class:preferred={hostCard.preferred}
-											class="sample-host-card compact-host-card"
-											disabled={!hostCard.available}
-											onclick={() => (selectedHost = hostCard.key)}
-										>
-											<span class="sample-host-badges">
-												<span
-													class={`sample-host-state ${hostCard.available ? 'ready' : 'unavailable'}`}
-													>{hostCard.available ? 'Ready' : 'Unavailable'}</span
-												>
-												{#if hostCard.preferred}
-													<span class="sample-host-badge">Recommended</span>
-												{/if}
-											</span>
-											<span class="sample-host-label">{hostCard.label}</span>
-											{#if compactScheduleCopy(hostCard.runtime)}
-												<span class="muted-copy compact-host-meta"
-													>{compactScheduleCopy(hostCard.runtime)}</span
-												>
-											{/if}
-											<span class="muted-copy compact-host-meta secondary">
-												{hostCapacityCopy(hostCard.runtime) ||
-													hostCard.detail ||
-													'No runtime detail'}
-											</span>
-											{#if hostCard.searchSummary}
-												<span class="muted-copy compact-host-meta tertiary">
-													{hostCard.searchSummary.label}
-												</span>
-											{/if}
-										</button>
-									{/each}
-								</div>
-								{#if !selectedHostRuntime && folder.sample_host_help_text}
-									<p class="muted-copy host-selection-note">{folder.sample_host_help_text}</p>
-								{/if}
-							</div>
-
-							<div class="run-setup-card action-card">
-								<p class="eyebrow-copy">Next action</p>
-								<div class="action-card-head">
-									<h3 class="run-card-title">{nextActionHeading}</h3>
-									<Pill label={nextActionStatus.label} variant={nextActionStatus.variant} />
-								</div>
-								<p class="muted-copy">{sampleActionSupportCopy}</p>
-								<p class="selected-host-inline">
-									<span class="selected-host-inline-value"
-										>{selectedHostLabel || 'Choose a host above'}</span
-									>
-									{#if selectedHostScheduleCopy || selectedHostCapacityCopy}
-										<span class="muted-copy selected-host-inline-meta">
-											{[selectedHostScheduleCopy, selectedHostCapacityCopy]
-												.filter(Boolean)
-												.join(' · ')}
-										</span>
-									{:else if selectedHostDetail}
-										<span class="muted-copy selected-host-inline-meta">{selectedHostDetail}</span>
-									{/if}
-								</p>
-								{#if selectedHostSearchSummary}
-									<p class="muted-copy host-search-callout">
-										<span class="host-search-callout-label">{selectedHostSearchSummary.label}</span>
-										{selectedHostSearchSummary.detail}
-									</p>
-								{/if}
-								<div
-									class="action-row primary-action-row compact-action-row single-primary-action-row"
-								>
-									<Button
-										loading={actionState === 'sample' || actionState === 'preview'}
-										disabled={!canRunPrimarySampleAction}
-										onclick={runSample}>{confirmButtonLabel}</Button
-									>
-								</div>
-								<p class="inline-gate-copy sample-action-copy action-inline-note">
-									<span class="eyebrow-copy">Run gate</span>
-									{#if !canRunSample}
-										The sample button stays locked until the host is ready.
-									{:else if sampleRunActive}
-										Wait for the current sample to finish before starting another one.
-									{:else if canRetrySavedSampleDraft}
-										The last bench draft is already saved for this host, so this button reruns that
-										test encode directly.
-									{:else if retryableCalibrationRefreshBlockedByEmptyNote}
-										Add a note before refreshing this stopped sample draft. The tuner cannot build a
-										new draft from an empty request.
-									{:else if retryableCalibrationNeedsRefresh}
-										The saved sample draft no longer matches the current note or host. Refresh it
-										from the bench chat below before queueing the next run.
-									{:else if !pendingProposal}
-										Use the bench chat below to draft the next sample. This button only queues a
-										ready draft.
-									{:else if pendingProposalNeedsRefresh}
-										The note or host changed. Refresh the draft from the bench chat below so the
-										queued sample matches the latest request.
-									{:else if pendingProposalCanQueue}
-										The current draft is aligned with the selected host and can queue when you
-										confirm it.
-									{:else}
-										Adjust the draft or ask the bench again before queueing the sample.
-									{/if}
-								</p>
-								{#if hasClearableTuningState}
-									<details class="danger-disclosure">
-										<summary>
-											<span>Advanced reset</span>
-											<span class="summary-hint">Danger</span>
-										</summary>
-										<div class="danger-disclosure-body">
-											<p class="inline-gate-copy destructive-action-copy">
-												<span class="eyebrow-copy">Destructive</span>
-												Removes the tuning thread, retained sample context, and sample artifacts for this
-												folder only.
-											</p>
-											<div class="action-row utility-action-row">
-												<Button
-													variant="danger"
-													loading={actionState === 'clear'}
-													disabled={sampleRunActive}
-													onclick={clearTuningState}>Clear thread + sample artifacts</Button
-												>
-											</div>
-										</div>
-									</details>
-								{/if}
-							</div>
-						</div>
+						<FolderStudioControlDeck
+							{runReadinessHeading}
+							{runReadinessCopy}
+							{sampleQueueLabel}
+							{encodeQueueLabel}
+							{encodeJobStatus}
+							{encodeJobTone}
+							{encodeJobHeadline}
+							{encodeJobChipLabel}
+							{encodeJobDetail}
+							{encodeJobNextActionCopy}
+							{encodeJobFacts}
+							{encodeJobMetaCopy}
+							{sampleHostCards}
+							{selectedHost}
+							onSelectHost={(hostKey) => (selectedHost = hostKey)}
+							folderSampleHostHelpText={folder.sample_host_help_text || ''}
+							{nextActionHeading}
+							{nextActionStatus}
+							{sampleActionSupportCopy}
+							{selectedHostLabel}
+							{selectedHostScheduleCopy}
+							{selectedHostCapacityCopy}
+							{selectedHostDetail}
+							{selectedHostSearchSummary}
+							{actionState}
+							{canRunPrimarySampleAction}
+							onRunSample={runSample}
+							{confirmButtonLabel}
+							{canRunSample}
+							{sampleRunActive}
+							{canRetrySavedSampleDraft}
+							{retryableCalibrationRefreshBlockedByEmptyNote}
+							{retryableCalibrationNeedsRefresh}
+							hasPendingProposal={Boolean(pendingProposal)}
+							{pendingProposalNeedsRefresh}
+							{pendingProposalCanQueue}
+							{hasClearableTuningState}
+							onClearTuningState={clearTuningState}
+						/>
 					</aside>
 
 					<div class="studio-main">
@@ -3708,188 +3462,9 @@
 		gap: var(--space-3);
 	}
 
-	.folder-header-grid {
-		display: grid;
-		grid-template-columns: minmax(0, 1.05fr) minmax(280px, 0.95fr);
-		gap: var(--space-4);
-		align-items: start;
-	}
-
-	.workflow-stage-strip {
-		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
-		gap: 0.75rem;
-		margin-top: 1rem;
-	}
-
-	.workflow-stage-card {
-		display: grid;
-		gap: 0.2rem;
-		padding: 0.85rem 0.95rem;
-		border-radius: 0;
-		background: rgba(15, 23, 42, 0.68);
-		border: 1px solid rgba(148, 163, 184, 0.16);
-		box-shadow: none;
-	}
-
-	.workflow-stage-card.current {
-		background: rgba(8, 47, 73, 0.78);
-		border-color: rgba(56, 189, 248, 0.28);
-		box-shadow: none;
-	}
-
-	.workflow-stage-card.done {
-		background: rgba(20, 83, 45, 0.64);
-		border-color: rgba(74, 222, 128, 0.2);
-	}
-
-	.workflow-stage-card.pending {
-		border-style: dashed;
-		background: rgba(15, 20, 27, 0.72);
-	}
-
-	.workflow-stage-label,
-	.workflow-stage-detail {
-		margin: 0;
-	}
-
-	.workflow-stage-label {
-		font-size: 0.74rem;
-		font-weight: 800;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		color: rgba(125, 211, 252, 0.9);
-	}
-
-	.workflow-stage-detail {
-		font-size: 0.94rem;
-		font-weight: 700;
-		line-height: 1.3;
-		color: #f8fafc;
-	}
-
-	.folder-header-side {
-		display: grid;
-		gap: var(--space-3);
-	}
-
-	.breadcrumb-row {
-		display: flex;
-		gap: 0.55rem;
-		align-items: center;
-		font-size: 0.92rem;
-		color: rgba(148, 163, 184, 0.82);
-		flex-wrap: wrap;
-	}
-
-	.breadcrumb-row a {
-		color: #7dd3fc;
-		font-weight: 700;
-	}
-
 	.workflow-stack {
 		display: grid;
 		gap: var(--space-4);
-	}
-
-	.status-strip-panel {
-		background: rgba(15, 20, 27, 0.94);
-	}
-
-	.status-strip-panel.in-progress {
-		position: relative;
-		overflow: hidden;
-	}
-
-	.status-strip-panel.in-progress::after {
-		content: '';
-		position: absolute;
-		inset: 0;
-		pointer-events: none;
-		background: linear-gradient(
-			110deg,
-			rgba(125, 211, 252, 0) 0%,
-			rgba(125, 211, 252, 0.12) 18%,
-			rgba(125, 211, 252, 0) 36%
-		);
-		transform: translateX(-150%);
-		animation: status-strip-sheen 2.8s ease-in-out infinite;
-	}
-
-	.accent-strip {
-		background: rgba(8, 47, 73, 0.86);
-	}
-
-	.status-strip {
-		display: flex;
-		justify-content: space-between;
-		gap: 1rem;
-		align-items: end;
-		flex-wrap: wrap;
-	}
-
-	.status-strip-title {
-		margin: 0;
-		font-size: 1rem;
-		font-weight: 700;
-		line-height: 1.35;
-	}
-
-	.status-strip-signal {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.45rem;
-		margin-bottom: 0.35rem;
-		padding: 0.28rem 0.62rem;
-		border-radius: 999px;
-		background: rgba(30, 41, 59, 0.82);
-		color: #e2e8f0;
-		font-size: 0.72rem;
-		font-weight: 700;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-	}
-
-	.status-strip-beacon {
-		position: relative;
-		width: 0.62rem;
-		height: 0.62rem;
-		border-radius: 999px;
-		background: #e4572e;
-		box-shadow: 0 0 0 0 rgba(228, 87, 46, 0.4);
-		animation: status-strip-pulse 1.35s ease-out infinite;
-	}
-
-	.status-strip-meta {
-		margin: 0;
-		font-size: 0.82rem;
-		line-height: 1.45;
-		color: var(--ink-soft);
-		white-space: nowrap;
-	}
-
-	@keyframes status-strip-pulse {
-		0% {
-			box-shadow: 0 0 0 0 rgba(228, 87, 46, 0.38);
-		}
-
-		70% {
-			box-shadow: 0 0 0 0.68rem rgba(228, 87, 46, 0);
-		}
-
-		100% {
-			box-shadow: 0 0 0 0 rgba(228, 87, 46, 0);
-		}
-	}
-
-	@keyframes status-strip-sheen {
-		0% {
-			transform: translateX(-150%);
-		}
-
-		100% {
-			transform: translateX(150%);
-		}
 	}
 
 	.studio-grid {
@@ -3914,7 +3489,7 @@
 		align-self: start;
 	}
 
-	.studio-panel {
+	.folder-workstation :global(.studio-panel) {
 		background: rgba(10, 15, 21, 0.92);
 	}
 
@@ -3945,114 +3520,13 @@
 		gap: var(--space-3);
 	}
 
-	.run-layout {
-		display: grid;
-		gap: var(--space-3);
-	}
-
-	.run-host-section {
-		display: grid;
-		gap: var(--space-3);
-		align-content: start;
-	}
-
 	.section-copy-block {
 		display: grid;
 		gap: 0.3rem;
 		min-width: 0;
 	}
 
-	.host-section-copy {
-		max-width: 62ch;
-	}
-
-	.host-schedule-note {
-		margin-top: -0.12rem;
-	}
-
-	.run-readiness-card,
-	.run-setup-card {
-		display: grid;
-		gap: var(--space-2);
-		padding: 1.1rem 1.15rem;
-		border-radius: var(--radius-lg);
-		border: 1px solid rgba(15, 118, 110, 0.12);
-		background:
-			linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(255, 255, 255, 0.78)),
-			rgba(15, 118, 110, 0.04);
-		box-shadow: 0 16px 36px rgba(23, 35, 31, 0.05);
-	}
-
-	.control-deck {
-		display: grid;
-		gap: 0;
-		padding: 0.35rem;
-		border-radius: calc(var(--radius-lg) + 0.2rem);
-		background:
-			linear-gradient(180deg, rgba(255, 252, 246, 0.96), rgba(248, 244, 236, 0.92)),
-			radial-gradient(circle at top left, rgba(225, 241, 236, 0.18), transparent 34%),
-			radial-gradient(circle at bottom right, rgba(222, 207, 176, 0.16), transparent 36%);
-		box-shadow: 0 24px 46px rgba(62, 43, 24, 0.09);
-		border: 1px solid rgba(104, 87, 61, 0.08);
-		color: inherit;
-	}
-
-	.control-deck :global(.eyebrow-copy) {
-		color: var(--accent-deep);
-	}
-
-	.control-deck .muted-copy,
-	.control-deck .selected-host-inline-meta,
-	.control-deck .compact-host-meta,
-	.control-deck .inline-gate-copy {
-		color: var(--ink-soft);
-	}
-
-	.control-deck .run-readiness-card,
-	.control-deck .host-picker-shell,
-	.control-deck .action-card {
-		background: rgba(255, 255, 255, 0.6);
-		box-shadow: none;
-		border: 1px solid rgba(23, 35, 31, 0.07);
-		border-radius: calc(var(--radius-lg) - 0.1rem);
-	}
-
-	.control-deck .host-picker-shell,
-	.control-deck .action-card {
-		margin-top: 0.35rem;
-	}
-
-	.control-deck .sample-host-card {
-		background: rgba(250, 248, 242, 0.88);
-		border-color: rgba(23, 35, 31, 0.08);
-		color: var(--ink);
-	}
-
-	.control-deck .sample-host-card.selected {
-		background: rgba(222, 246, 239, 0.72);
-		border-color: rgba(15, 118, 110, 0.28);
-		box-shadow: 0 10px 24px rgba(15, 118, 110, 0.1);
-	}
-
-	.control-deck .sample-host-state.ready {
-		background: rgba(47, 107, 62, 0.12);
-		color: var(--ok);
-	}
-
-	.control-deck .sample-host-badge {
-		background: rgba(15, 118, 110, 0.1);
-		color: var(--accent-deep);
-	}
-
-	.control-deck .selected-host-inline-value,
-	.control-deck .run-card-title,
-	.control-deck .sample-host-label {
-		color: var(--ink);
-	}
-
-	.host-picker-shell,
 	.bench-chat-shell,
-	.note-composer-card,
 	.archived-diagnosis-shell {
 		display: grid;
 		gap: var(--space-2);
@@ -4061,11 +3535,6 @@
 		border: 1px solid rgba(23, 35, 31, 0.08);
 		background: rgba(255, 255, 255, 0.7);
 		box-shadow: 0 10px 28px rgba(23, 35, 31, 0.04);
-	}
-
-	.compact-status-card,
-	.action-card {
-		gap: 0.75rem;
 	}
 
 	.bench-workspace-shell {
@@ -4080,7 +3549,6 @@
 		box-shadow: 0 24px 46px rgba(62, 43, 24, 0.09);
 	}
 
-	.bench-workspace-shell .note-composer-card,
 	.bench-workspace-shell .bench-chat-shell,
 	.bench-workspace-shell .diagnosis-shell,
 	.bench-workspace-shell .archived-diagnosis-shell {
@@ -4148,279 +3616,6 @@
 		background:
 			linear-gradient(180deg, rgba(255, 250, 240, 0.94), rgba(255, 255, 255, 0.84)),
 			radial-gradient(circle at top right, rgba(221, 199, 160, 0.18), transparent 38%);
-	}
-
-	.run-card-title {
-		margin: 0;
-		font-size: 1.35rem;
-		line-height: 1.15;
-	}
-
-	.run-status-pills {
-		padding-top: 0.15rem;
-	}
-
-	.folder-encode-card {
-		display: grid;
-		gap: 0.75rem;
-		padding: 0.9rem 0.95rem;
-		border-radius: var(--radius-md);
-		border: 1px solid rgba(23, 35, 31, 0.08);
-		background: rgba(255, 255, 255, 0.74);
-	}
-
-	.folder-encode-card.live {
-		background:
-			linear-gradient(180deg, rgba(236, 250, 244, 0.92), rgba(255, 255, 255, 0.84)),
-			rgba(47, 107, 62, 0.06);
-		border-color: rgba(47, 107, 62, 0.16);
-	}
-
-	.folder-encode-card.queued {
-		background:
-			linear-gradient(180deg, rgba(238, 248, 250, 0.92), rgba(255, 255, 255, 0.84)),
-			rgba(15, 118, 110, 0.05);
-		border-color: rgba(15, 118, 110, 0.16);
-	}
-
-	.folder-encode-card.warning {
-		background:
-			linear-gradient(180deg, rgba(255, 245, 238, 0.94), rgba(255, 255, 255, 0.84)),
-			rgba(194, 65, 12, 0.05);
-		border-color: rgba(194, 65, 12, 0.16);
-	}
-
-	.folder-encode-header {
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto;
-		gap: 0.75rem;
-		align-items: start;
-	}
-
-	.folder-encode-title {
-		margin: 0.1rem 0 0;
-		font-size: 1rem;
-		font-weight: 700;
-		line-height: 1.2;
-	}
-
-	.folder-encode-chip {
-		display: inline-flex;
-		align-items: center;
-		padding: 0.28rem 0.55rem;
-		border-radius: 999px;
-		font-size: 0.72rem;
-		font-weight: 700;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		background: rgba(148, 163, 184, 0.16);
-		color: var(--ink-soft);
-	}
-
-	.folder-encode-chip.live {
-		background: rgba(47, 107, 62, 0.12);
-		color: var(--ok);
-	}
-
-	.folder-encode-chip.queued {
-		background: rgba(15, 118, 110, 0.12);
-		color: var(--accent-deep);
-	}
-
-	.folder-encode-chip.warning {
-		background: rgba(194, 65, 12, 0.12);
-		color: #b45309;
-	}
-
-	.folder-encode-detail,
-	.folder-encode-next-step,
-	.folder-encode-meta {
-		margin: 0;
-	}
-
-	.folder-encode-facts {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-		gap: 0.65rem;
-	}
-
-	.folder-encode-fact {
-		display: grid;
-		gap: 0.16rem;
-		padding: 0.72rem 0.78rem;
-		border-radius: var(--radius-md);
-		background: rgba(250, 248, 242, 0.9);
-		border: 1px solid rgba(23, 35, 31, 0.06);
-	}
-
-	.folder-encode-fact p,
-	.folder-encode-fact strong {
-		margin: 0;
-	}
-
-	.folder-encode-fact p {
-		font-size: 0.74rem;
-		font-weight: 700;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		color: var(--ink-soft);
-	}
-
-	.folder-encode-fact strong {
-		font-size: 0.92rem;
-		line-height: 1.3;
-		color: var(--ink);
-	}
-
-	.sample-host-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-		gap: var(--space-3);
-		justify-content: start;
-	}
-
-	.compact-host-grid {
-		grid-template-columns: 1fr;
-		gap: 0.7rem;
-	}
-
-	.sample-host-card {
-		display: grid;
-		gap: var(--space-2);
-		padding: 1rem;
-		border-radius: var(--radius-lg);
-		border: 1px solid rgba(23, 35, 31, 0.1);
-		background: rgba(255, 255, 255, 0.76);
-		text-align: left;
-		transition:
-			transform 160ms ease,
-			border-color 160ms ease,
-			box-shadow 160ms ease,
-			background 160ms ease;
-	}
-
-	.compact-host-card {
-		gap: 0.45rem;
-		padding: 0.85rem 0.9rem;
-		border-radius: var(--radius-md);
-	}
-
-	.sample-host-card:hover:not(.disabled) {
-		transform: translateY(-2px);
-		border-color: rgba(15, 118, 110, 0.22);
-		box-shadow: 0 14px 28px rgba(23, 35, 31, 0.08);
-	}
-
-	.sample-host-card.preferred {
-		border-color: rgba(15, 118, 110, 0.22);
-	}
-
-	.sample-host-card.selected {
-		border-color: rgba(15, 118, 110, 0.34);
-		background: rgba(15, 118, 110, 0.1);
-		box-shadow: 0 10px 30px rgba(15, 118, 110, 0.12);
-	}
-
-	.sample-host-card.disabled {
-		opacity: 0.7;
-		cursor: not-allowed;
-	}
-
-	.sample-host-badges {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-		flex-wrap: wrap;
-	}
-
-	.sample-host-state {
-		display: inline-flex;
-		align-items: center;
-		padding: 0.25rem 0.55rem;
-		border-radius: 999px;
-		font-size: 0.72rem;
-		font-weight: 700;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-	}
-
-	.sample-host-state.ready {
-		background: rgba(47, 107, 62, 0.12);
-		color: var(--ok);
-	}
-
-	.sample-host-state.unavailable {
-		background: rgba(148, 163, 184, 0.16);
-		color: var(--ink-soft);
-	}
-
-	.sample-host-label {
-		font-size: 1.05rem;
-		font-weight: 700;
-		line-height: 1.2;
-	}
-
-	.compact-host-meta {
-		font-size: 0.84rem;
-		line-height: 1.45;
-	}
-
-	.compact-host-meta.secondary {
-		font-size: 0.79rem;
-		color: var(--library-soft-text);
-	}
-
-	.compact-host-meta.tertiary {
-		font-size: 0.77rem;
-		font-weight: 700;
-		color: var(--accent-deep);
-	}
-
-	.sample-host-badge {
-		display: inline-flex;
-		align-items: center;
-		padding: 0.25rem 0.5rem;
-		border-radius: 999px;
-		background: rgba(15, 118, 110, 0.12);
-		color: var(--accent-deep);
-		font-size: 0.72rem;
-		font-weight: 700;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-	}
-
-	.sample-host-facts {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-		gap: 0.65rem;
-	}
-
-	.sample-host-fact {
-		display: grid;
-		gap: 0.18rem;
-		padding: 0.72rem 0.78rem;
-		border-radius: var(--radius-md);
-		background: rgba(247, 246, 241, 0.92);
-		border: 1px solid rgba(23, 35, 31, 0.06);
-	}
-
-	.sample-host-priority {
-		margin: 0;
-		font-size: 0.76rem;
-		font-weight: 700;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		color: var(--ink-soft);
-	}
-
-	.host-selection-note {
-		margin-top: -0.1rem;
-	}
-
-	.selected-host-inline {
-		display: grid;
-		margin: 0;
-		gap: 0.2rem;
 	}
 
 	.calibration-thread-shell {
@@ -4656,8 +3851,7 @@
 		gap: 0.65rem;
 	}
 
-	.proposal-context-card,
-	.proposal-trace-card {
+	.proposal-context-card {
 		display: grid;
 		gap: 0.22rem;
 		min-width: 0;
@@ -4810,13 +4004,6 @@
 		content: '-';
 	}
 
-	.proposal-trace-grid {
-		display: grid;
-		gap: 0.65rem;
-		padding: 0.2rem 0.1rem 0;
-		min-width: 0;
-	}
-
 	.proposal-trace-raw {
 		display: block;
 		width: 100%;
@@ -4844,46 +4031,6 @@
 		color: var(--ink-soft);
 		font-size: 0.88rem;
 		line-height: 1.45;
-	}
-
-	.selected-host-inline-value {
-		font-size: 1rem;
-		font-weight: 700;
-		line-height: 1.35;
-	}
-
-	.selected-host-inline-meta {
-		max-width: 44ch;
-	}
-
-	.host-search-callout {
-		margin: -0.18rem 0 0;
-		display: grid;
-		gap: 0.12rem;
-		font-size: 0.82rem;
-		line-height: 1.42;
-	}
-
-	.host-search-callout-label {
-		font-weight: 700;
-		color: var(--ink);
-	}
-
-	.action-inline-note {
-		padding: 0.15rem 0 0;
-		border-radius: 0;
-		background: transparent;
-		border: 0;
-		font-size: 0.86rem;
-		line-height: 1.4;
-	}
-
-	.utility-action-row {
-		padding-top: 0.15rem;
-	}
-
-	.destructive-action-copy {
-		padding-top: 0;
 	}
 
 	.note-panel {
@@ -4932,27 +4079,6 @@
 		align-items: start;
 	}
 
-	.primary-action-row :global(button) {
-		min-width: min(100%, 18rem);
-	}
-
-	.compact-action-row :global(button) {
-		flex: 1 1 12rem;
-		min-width: 0;
-	}
-
-	.single-primary-action-row :global(button) {
-		flex-basis: 100%;
-	}
-
-	.action-card-head {
-		display: flex;
-		justify-content: space-between;
-		gap: 0.8rem;
-		align-items: start;
-		flex-wrap: wrap;
-	}
-
 	.queue-action-block {
 		display: grid;
 		gap: 0.45rem;
@@ -4966,28 +4092,6 @@
 		line-height: 1.45;
 		color: var(--ink-soft);
 		overflow-wrap: anywhere;
-	}
-
-	.run-unlock-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-		gap: 0.75rem;
-	}
-
-	.run-unlock-card {
-		display: grid;
-		gap: 0.18rem;
-		padding: 0.85rem 0.9rem;
-		border-radius: var(--radius-md);
-		background: rgba(247, 246, 241, 0.92);
-		border: 1px solid rgba(23, 35, 31, 0.07);
-	}
-
-	.run-unlock-title {
-		margin: 0;
-		font-size: 0.98rem;
-		font-weight: 700;
-		line-height: 1.3;
 	}
 
 	.review-action-row {
@@ -5030,7 +4134,7 @@
 		border: 1px solid rgba(23, 35, 31, 0.08);
 	}
 
-	.review-panel {
+	.folder-workstation :global(.review-panel) {
 		background:
 			linear-gradient(180deg, rgba(255, 253, 247, 0.96), rgba(255, 251, 244, 0.9)),
 			radial-gradient(circle at top left, rgba(225, 241, 236, 0.22), transparent 34%);
@@ -5067,11 +4171,6 @@
 		display: flex;
 		gap: 0.5rem;
 		flex-wrap: wrap;
-	}
-
-	.representative-support-copy {
-		font-size: 0.88rem;
-		line-height: 1.45;
 	}
 
 	.review-player-shell-block,
@@ -5199,16 +4298,6 @@
 
 	.review-bench-headline {
 		font-weight: 700;
-	}
-
-	.review-compare-link {
-		padding: 0;
-		border: 0;
-		background: transparent;
-		font-size: 0.9rem;
-		font-weight: 700;
-		color: var(--accent-deep);
-		cursor: pointer;
 	}
 
 	.comparison-stack {
@@ -5382,7 +4471,6 @@
 		text-align: right;
 	}
 
-	.hotspot-block,
 	.folder-snapshot-block {
 		margin-top: 0;
 	}
@@ -5406,7 +4494,6 @@
 		line-height: 1.45;
 	}
 
-	.thread-history-shell,
 	.reference-disclosure,
 	.steady-details-shell {
 		display: grid;
@@ -5415,11 +4502,6 @@
 		border-radius: var(--radius-md);
 		background: rgba(255, 255, 255, 0.6);
 		border: 1px solid rgba(23, 35, 31, 0.08);
-	}
-
-	.inline-thread-shell {
-		padding: 0.95rem 1rem 1rem;
-		background: rgba(255, 255, 255, 0.66);
 	}
 
 	.thread-inline-head {
@@ -5489,44 +4571,6 @@
 		padding-top: 0.35rem;
 	}
 
-	.danger-disclosure {
-		display: grid;
-		gap: 0.75rem;
-		padding: 0.9rem 0.95rem;
-		border-radius: var(--radius-md);
-		background: rgba(255, 255, 255, 0.54);
-		border: 1px solid rgba(138, 68, 19, 0.14);
-	}
-
-	.danger-disclosure summary {
-		cursor: pointer;
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto auto;
-		gap: 0.8rem;
-		align-items: center;
-		font-size: 0.9rem;
-		font-weight: 700;
-		color: var(--ink);
-	}
-
-	.danger-disclosure summary::after {
-		content: '+';
-		font-size: 1rem;
-		font-weight: 700;
-		line-height: 1;
-		color: var(--ink-soft);
-	}
-
-	.danger-disclosure[open] summary::after {
-		content: '-';
-	}
-
-	.danger-disclosure-body {
-		display: grid;
-		gap: 0.7rem;
-		padding-top: 0.1rem;
-	}
-
 	.compact-reference-block {
 		background: rgba(255, 255, 255, 0.74);
 	}
@@ -5540,10 +4584,7 @@
 	}
 
 	@media (max-width: 900px) {
-		.folder-header-grid,
-		.workflow-stage-strip,
 		.studio-grid,
-		.run-layout,
 		.review-grid,
 		.review-grid-balanced,
 		.review-player-columns,
@@ -5601,8 +4642,7 @@
 	}
 
 	@media (max-width: 720px) {
-		.host-grid,
-		.sample-host-grid {
+		.host-grid {
 			grid-template-columns: 1fr;
 		}
 
@@ -5616,17 +4656,8 @@
 			width: 100%;
 		}
 
-		.status-strip {
-			align-items: start;
-		}
-
-		.status-strip-meta {
-			white-space: normal;
-		}
-
 		.reference-disclosure summary,
-		.steady-details-shell summary,
-		.danger-disclosure summary {
+		.steady-details-shell summary {
 			flex-direction: column;
 			align-items: start;
 		}
