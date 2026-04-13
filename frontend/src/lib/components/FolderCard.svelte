@@ -6,6 +6,7 @@
 	import {
 		folderLibraryKey,
 		folderLibraryLabel,
+		folderRoutePath,
 		folderLibraryThemeStyle,
 		folderScopeLabel
 	} from '$lib/folder-display';
@@ -67,7 +68,7 @@
 
 <a
 	class="folder-link"
-	href={resolve(`/folders/${folder.prefix}`)}
+	href={resolve(folderRoutePath(folder.prefix))}
 	style={cardThemeStyle}
 	title={folder.prefix}
 >

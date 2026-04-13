@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
+	import '$lib/design/workstation-shell.css';
 	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
 	import { fetchJson } from '$lib/api/client';
@@ -430,35 +431,147 @@
 <style>
 	.page-stack {
 		display: grid;
-		gap: var(--space-4);
+		gap: 1rem;
 	}
 
 	.ops-hero {
-		display: flex;
-		justify-content: space-between;
-		align-items: end;
-		gap: var(--space-3);
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: start;
+		gap: 1rem;
 		flex-wrap: wrap;
 	}
 
 	.ops-hero-side {
-		display: flex;
-		align-items: center;
-		flex-wrap: wrap;
+		display: grid;
+		align-content: start;
 		gap: 0.75rem;
-		justify-items: start;
+		justify-items: end;
 	}
 
 	.ops-pill-row {
 		display: flex;
 		flex-wrap: wrap;
 		gap: 0.7rem;
+		justify-content: flex-end;
 	}
 
 	:global(.ops-hero-panel) {
-		background:
-			radial-gradient(circle at top left, rgba(15, 118, 110, 0.14), transparent 36%),
-			linear-gradient(145deg, rgba(255, 253, 247, 0.9), rgba(244, 237, 224, 0.84));
+		border: 1px solid rgba(148, 163, 184, 0.18) !important;
+		background: rgba(15, 20, 27, 0.94) !important;
+		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2) !important;
+	}
+
+	:global(.ops-hero-panel)::before,
+	:global(.ops-hero-panel)::after,
+	:global(.ops-queue-panel)::before,
+	:global(.ops-queue-panel)::after,
+	:global(.folder-section)::before,
+	:global(.folder-section)::after,
+	:global(.host-card)::after {
+		display: none !important;
+	}
+
+	:global(.ops-queue-panel),
+	:global(.folder-section),
+	:global(.host-card) {
+		border: 1px solid rgba(148, 163, 184, 0.18) !important;
+		background: rgba(15, 20, 27, 0.94) !important;
+		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2) !important;
+	}
+
+	:global(.primary-ops-panel) {
+		border-color: rgba(56, 189, 248, 0.22) !important;
+	}
+
+	:global(.ops-queue-panel .eyebrow-copy),
+	:global(.folder-section .eyebrow-copy),
+	:global(.ops-hero-panel .eyebrow-copy) {
+		color: rgba(125, 211, 252, 0.84) !important;
+	}
+
+	:global(.ops-queue-panel h2),
+	:global(.folder-section h2),
+	:global(.folder-section h3),
+	:global(.ops-hero-panel h2),
+	:global(.host-card h3) {
+		color: #f8fafc !important;
+	}
+
+	:global(.ops-queue-panel .muted-copy),
+	:global(.folder-section .muted-copy),
+	:global(.host-card .muted-copy),
+	:global(.ops-hero-panel .lede-copy) {
+		color: rgba(226, 232, 240, 0.72) !important;
+	}
+
+	:global(.queue-pill.attention) {
+		background: rgba(120, 53, 15, 0.84) !important;
+		color: #ffedd5 !important;
+	}
+
+	:global(.queue-pill.ok) {
+		background: rgba(20, 83, 45, 0.82) !important;
+		color: #dcfce7 !important;
+	}
+
+	:global(.queue-pill.neutral),
+	:global(.queue-link-pill),
+	:global(.section-summary-chip) {
+		background: rgba(30, 41, 59, 0.78) !important;
+		color: rgba(226, 232, 240, 0.78) !important;
+	}
+
+	:global(.section-summary-chip.active) {
+		background: rgba(8, 47, 73, 0.82) !important;
+		color: #dbeafe !important;
+	}
+
+	:global(.section-action-link),
+	:global(.queue-link-pill) {
+		color: #7dd3fc !important;
+	}
+
+	:global(.queue-detail-shell),
+	:global(.encode-telemetry-row),
+	:global(.host-card .status-tray),
+	:global(.running-job-shell),
+	:global(.running-job-row) {
+		background: rgba(15, 23, 42, 0.6) !important;
+		border-color: rgba(148, 163, 184, 0.16) !important;
+	}
+
+	:global(.attention-detail-shell),
+	:global(.host-card .issues-box) {
+		background: rgba(67, 20, 7, 0.62) !important;
+		border-color: rgba(249, 115, 22, 0.24) !important;
+	}
+
+	:global(.host-card .state-chip),
+	:global(.host-card .meta-pill) {
+		background: rgba(30, 41, 59, 0.82) !important;
+		color: rgba(226, 232, 240, 0.78) !important;
+	}
+
+	:global(.host-card .state-chip.ok) {
+		background: rgba(20, 83, 45, 0.82) !important;
+		color: #dcfce7 !important;
+	}
+
+	:global(.host-card .state-chip.hold) {
+		background: rgba(120, 53, 15, 0.82) !important;
+		color: #ffedd5 !important;
+	}
+
+	:global(.host-card .search-mode-copy),
+	:global(.host-card .running-job-summary),
+	:global(.host-card .tray-headline),
+	:global(.host-card .attention-kicker),
+	:global(.queue-detail-shell summary),
+	:global(.attention-title),
+	:global(.encode-telemetry-summary),
+	:global(.encode-telemetry-title) {
+		color: #f8fafc !important;
 	}
 
 	.ops-return-link {
@@ -466,11 +579,29 @@
 		align-items: center;
 		justify-content: center;
 		padding: 0.72rem 0.95rem;
-		border-radius: var(--radius-pill);
-		border: 1px solid rgba(15, 118, 110, 0.18);
-		background: rgba(15, 118, 110, 0.1);
-		color: var(--accent-deep);
+		border: 1px solid rgba(56, 189, 248, 0.22);
+		background: rgba(15, 23, 42, 0.72);
+		color: #e2e8f0;
 		font-weight: 700;
 		text-decoration: none;
+	}
+
+	.ops-return-link:hover {
+		border-color: rgba(56, 189, 248, 0.5);
+		background: rgba(30, 41, 59, 0.94);
+	}
+
+	@media (max-width: 960px) {
+		.ops-hero {
+			grid-template-columns: 1fr;
+		}
+
+		.ops-hero-side {
+			justify-items: start;
+		}
+
+		.ops-pill-row {
+			justify-content: flex-start;
+		}
 	}
 </style>

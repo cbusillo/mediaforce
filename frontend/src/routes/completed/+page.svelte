@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import '$lib/design/workstation-shell.css';
 	import { resolve } from '$app/paths';
 	import type { CompletedBackupsClearResponse, CompletedPagePayload } from '$lib/api/types';
 	import { fetchJson, postJson } from '$lib/api/client';
@@ -7,6 +8,7 @@
 	import Panel from '$lib/components/Panel.svelte';
 	import Pill from '$lib/components/Pill.svelte';
 	import SectionHead from '$lib/components/SectionHead.svelte';
+	import { folderRoutePath } from '$lib/folder-display';
 	import { formatGiB } from '$lib/format';
 	import { toasts } from '$lib/stores/toasts';
 
@@ -35,8 +37,11 @@
 	const completed = $derived(completedPayload);
 	const folders = $derived(completed.folders);
 	const foldersWithBackups = $derived(folders.filter((folder) => folder.archived_backup_count > 0));
+	const cleanupAvailable = $derived(completed.archive_cleanup.has_cleanup);
 	const selectedFolders = $derived(
-		foldersWithBackups.filter((folder) => selectedPrefixes.includes(folder.prefix))
+		cleanupAvailable
+			? foldersWithBackups.filter((folder) => selectedPrefixes.includes(folder.prefix))
+			: []
 	);
 	const selectedBackupCount = $derived(
 		selectedFolders.reduce((total, folder) => total + folder.archived_backup_count, 0)
@@ -45,22 +50,22 @@
 		selectedFolders.reduce((total, folder) => total + folder.archived_backup_size_bytes, 0)
 	);
 	const allFoldersSelected = $derived(
-		foldersWithBackups.length > 0 && selectedPrefixes.length === foldersWithBackups.length
+		cleanupAvailable &&
+			foldersWithBackups.length > 0 &&
+			selectedPrefixes.length === foldersWithBackups.length
 	);
 
-	function folderPath(prefix: string): `/folders/${string}` {
-		const encodedPrefix = prefix
-			.split('/')
-			.map((segment) => encodeURIComponent(segment))
-			.join('/');
-		return `/folders/${encodedPrefix}`;
-	}
-
 	function toggleFolder(prefix: string): void {
+		if (!cleanupAvailable) {
+			return;
+		}
 		selectedPrefixes = nextSelection(prefix, selectedPrefixes);
 	}
 
 	function toggleAllFolders(): void {
+		if (!cleanupAvailable) {
+			return;
+		}
 		if (allFoldersSelected) {
 			selectedPrefixes = [];
 			return;
@@ -69,7 +74,7 @@
 	}
 
 	async function clearSelectedBackups(): Promise<void> {
-		if (selectedFolders.length <= 0) {
+		if (!cleanupAvailable || selectedFolders.length <= 0) {
 			return;
 		}
 		const confirmed = window.confirm(
@@ -85,7 +90,7 @@
 	}
 
 	async function clearAllBackups(): Promise<void> {
-		if (!completed.archive_cleanup.has_cleanup) {
+		if (!cleanupAvailable) {
 			return;
 		}
 		const confirmed = window.confirm(
@@ -153,6 +158,14 @@
 			? current.filter((value) => value !== prefix)
 			: [...current, prefix];
 	}
+
+	$effect(() => {
+		if (cleanupAvailable || selectedPrefixes.length === 0) {
+			return;
+		}
+
+		selectedPrefixes = [];
+	});
 </script>
 
 <svelte:head>
@@ -213,14 +226,14 @@
 				<Button
 					variant="ghost"
 					onclick={toggleAllFolders}
-					disabled={foldersWithBackups.length <= 0}
+					disabled={!cleanupAvailable || foldersWithBackups.length <= 0}
 				>
 					{allFoldersSelected ? 'Clear selection' : 'Select all folders with backups'}
 				</Button>
 				<Button
 					variant="danger"
 					onclick={clearSelectedBackups}
-					disabled={selectedFolders.length <= 0}
+					disabled={!cleanupAvailable || selectedFolders.length <= 0}
 					loading={actionState === 'selected'}
 				>
 					Delete selected backups
@@ -228,14 +241,14 @@
 				<Button
 					variant="danger"
 					onclick={clearAllBackups}
-					disabled={!completed.archive_cleanup.has_cleanup}
+					disabled={!cleanupAvailable}
 					loading={actionState === 'all'}
 				>
 					Delete all backups
 				</Button>
 			</div>
 		</div>
-		{#if selectedFolders.length > 0}
+		{#if cleanupAvailable && selectedFolders.length > 0}
 			<p class="selection-summary">
 				{selectedFolders.length} folder{selectedFolders.length === 1 ? '' : 's'} selected · {selectedBackupCount}
 				archived original{selectedBackupCount === 1 ? '' : 's'} · {formatGiB(
@@ -267,7 +280,7 @@
 							<h2>{folder.title}</h2>
 							<p class="card-subtitle">{folder.subtitle}</p>
 						</div>
-						{#if hasBackups}
+						{#if hasBackups && cleanupAvailable}
 							<label class="select-toggle">
 								<input
 									type="checkbox"
@@ -301,7 +314,7 @@
 						</div>
 					</div>
 					<div class="card-actions">
-						<a href={resolve(folderPath(folder.prefix))}>Open folder</a>
+						<a href={resolve(folderRoutePath(folder.prefix))}>Open folder</a>
 					</div>
 				</Panel>
 			{/each}
@@ -329,9 +342,20 @@
 	}
 
 	:global(.completed-hero) {
-		background:
-			linear-gradient(180deg, rgba(255, 251, 243, 0.96), rgba(247, 241, 229, 0.92)),
-			radial-gradient(circle at top left, rgba(15, 118, 110, 0.12), transparent 34%);
+		border: 1px solid rgba(148, 163, 184, 0.18) !important;
+		background: rgba(15, 20, 27, 0.94) !important;
+		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2) !important;
+	}
+
+	:global(.completed-hero)::before,
+	:global(.completed-hero)::after,
+	:global(.cleanup-panel)::before,
+	:global(.cleanup-panel)::after,
+	:global(.empty-panel)::before,
+	:global(.empty-panel)::after,
+	:global(.completed-card)::before,
+	:global(.completed-card)::after {
+		display: none !important;
 	}
 
 	.hero-copy,
@@ -363,21 +387,21 @@
 	.selection-summary,
 	.cleanup-copy {
 		margin: 0;
-		color: var(--ink-soft);
+		color: rgba(226, 232, 240, 0.68);
 	}
 
 	.hero-meta-value {
 		margin: 0;
 		font-size: 0.95rem;
 		line-height: 1.55;
-		color: var(--ink);
+		color: #f8fafc;
 		word-break: break-word;
 	}
 
 	.hero-links a,
 	.card-actions a {
 		font-weight: 700;
-		color: var(--accent-deep);
+		color: #7dd3fc;
 	}
 
 	:global(.cleanup-panel) h2,
@@ -386,6 +410,22 @@
 		margin: 0;
 		font-size: 1.2rem;
 		line-height: 1.15;
+		color: #f8fafc;
+	}
+
+	:global(.completed-hero h1),
+	:global(.completed-hero h2),
+	:global(.completed-hero .eyebrow-copy),
+	:global(.cleanup-panel .eyebrow-copy),
+	:global(.empty-panel .eyebrow-copy),
+	:global(.completed-card .eyebrow-copy) {
+		color: rgba(125, 211, 252, 0.84) !important;
+	}
+
+	:global(.completed-hero .lede-copy),
+	:global(.empty-panel p),
+	.card-subtitle {
+		color: rgba(226, 232, 240, 0.72) !important;
 	}
 
 	.cleanup-copy,
@@ -403,15 +443,14 @@
 	:global(.completed-card) {
 		display: grid;
 		gap: 0.95rem;
-		border: 1px solid rgba(15, 118, 110, 0.08);
-		background:
-			linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(252, 248, 241, 0.92)),
-			radial-gradient(circle at top right, rgba(15, 118, 110, 0.08), transparent 26%);
+		border: 1px solid rgba(148, 163, 184, 0.18) !important;
+		background: rgba(15, 20, 27, 0.94) !important;
+		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2) !important;
 	}
 
 	:global(.completed-card.selected) {
-		border-color: rgba(15, 118, 110, 0.34);
-		box-shadow: 0 16px 34px rgba(15, 118, 110, 0.1);
+		border-color: rgba(56, 189, 248, 0.32) !important;
+		box-shadow: 0 16px 34px rgba(8, 47, 73, 0.22) !important;
 	}
 
 	.card-header {
@@ -423,7 +462,7 @@
 
 	.card-subtitle {
 		margin: 0.2rem 0 0;
-		color: var(--ink-soft);
+		color: rgba(148, 163, 184, 0.82);
 	}
 
 	.select-toggle {
@@ -431,7 +470,7 @@
 		align-items: center;
 		gap: 0.45rem;
 		font-weight: 700;
-		color: var(--ink-soft);
+		color: rgba(226, 232, 240, 0.72);
 	}
 
 	.card-stats {
@@ -444,7 +483,7 @@
 		margin: 0.2rem 0 0;
 		font-size: 1rem;
 		font-weight: 700;
-		color: var(--ink);
+		color: #f8fafc;
 	}
 
 	.card-stat-value.time {
@@ -454,6 +493,44 @@
 
 	.selection-summary {
 		font-weight: 700;
+	}
+
+	:global(.cleanup-panel),
+	:global(.empty-panel) {
+		border: 1px solid rgba(148, 163, 184, 0.18) !important;
+		background: rgba(15, 20, 27, 0.94) !important;
+		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2) !important;
+	}
+
+	:global(.cleanup-panel .button.ghost),
+	:global(.empty-panel .button.ghost) {
+		border: 1px solid rgba(56, 189, 248, 0.22) !important;
+		background: rgba(15, 23, 42, 0.72) !important;
+		color: #e2e8f0 !important;
+	}
+
+	:global(.cleanup-panel .button.danger) {
+		background: rgba(120, 53, 15, 0.82) !important;
+		color: #ffedd5 !important;
+	}
+
+	:global(.pill.ok) {
+		background: rgba(20, 83, 45, 0.82) !important;
+		border-color: rgba(34, 197, 94, 0.28) !important;
+		color: #dcfce7 !important;
+	}
+
+	:global(.pill.warn) {
+		background: rgba(120, 53, 15, 0.82) !important;
+		border-color: rgba(249, 115, 22, 0.28) !important;
+		color: #ffedd5 !important;
+	}
+
+	:global(.pill.ghost),
+	:global(.pill.neutral) {
+		background: rgba(30, 41, 59, 0.78) !important;
+		border-color: rgba(148, 163, 184, 0.18) !important;
+		color: rgba(226, 232, 240, 0.78) !important;
 	}
 
 	@media (max-width: 720px) {

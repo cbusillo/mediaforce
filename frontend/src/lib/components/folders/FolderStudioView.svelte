@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
+	import '$lib/design/workstation-shell.css';
 	import { resolve } from '$app/paths';
 	import { tick } from 'svelte';
 	import type {
@@ -2244,7 +2245,7 @@
 	<title>{folder.prefix} · Mediaforce</title>
 </svelte:head>
 
-<div class="page-stack">
+<div class="page-stack folder-workstation">
 	<nav class="breadcrumb-row">
 		{#each breadcrumbItems as item, index (`${item.label}-${index}`)}
 			{#if index > 0}
@@ -3526,6 +3527,181 @@
 </div>
 
 <style>
+	.folder-workstation {
+		--surface-1: rgba(15, 20, 27, 0.94);
+		--surface-2: rgba(15, 23, 42, 0.72);
+		--surface-3: rgba(9, 14, 22, 0.92);
+		--surface-accent: rgba(10, 15, 21, 0.92);
+		--ink: #f8fafc;
+		--ink-muted: rgba(226, 232, 240, 0.88);
+		--ink-soft: rgba(203, 213, 225, 0.74);
+		--accent-deep: #7dd3fc;
+		--border: rgba(148, 163, 184, 0.18);
+		--shadow-md: 0 18px 38px rgba(2, 6, 23, 0.22);
+		position: relative;
+		isolation: isolate;
+		z-index: 0;
+		padding: 0.25rem 0 1rem;
+	}
+
+	.folder-workstation::before {
+		content: '';
+		position: fixed;
+		inset: 0;
+		z-index: -2;
+		pointer-events: none;
+		background: #0b1014;
+	}
+
+	.folder-workstation::after {
+		content: '';
+		position: fixed;
+		inset: 0;
+		z-index: -1;
+		pointer-events: none;
+		background-image:
+			linear-gradient(rgba(148, 163, 184, 0.05) 1px, transparent 1px),
+			linear-gradient(90deg, rgba(148, 163, 184, 0.04) 1px, transparent 1px);
+		background-size: 28px 28px;
+		opacity: 0.32;
+	}
+
+	.page-stack,
+	.panel-stack {
+		display: grid;
+		gap: var(--space-3);
+	}
+
+	.folder-workstation :global(.panel) {
+		border-radius: 0;
+		border-color: rgba(148, 163, 184, 0.18);
+		background: rgba(15, 20, 27, 0.94);
+		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2);
+		backdrop-filter: blur(14px);
+	}
+
+	.folder-workstation :global(.panel.accent),
+	.folder-workstation :global(.panel.inset) {
+		background: rgba(10, 15, 21, 0.92);
+	}
+
+	.folder-workstation :global(.panel::before) {
+		background: linear-gradient(180deg, rgba(125, 211, 252, 0.06), transparent 24%);
+		opacity: 1;
+	}
+
+	.folder-workstation :global(.panel::after) {
+		height: 2px;
+		background: linear-gradient(90deg, rgba(56, 189, 248, 0.75), rgba(34, 197, 94, 0.18));
+	}
+
+	.folder-workstation :global(.pill) {
+		box-shadow: none;
+	}
+
+	.folder-workstation :global(.pill.neutral),
+	.folder-workstation :global(.pill.ghost) {
+		background: rgba(30, 41, 59, 0.84);
+		border-color: rgba(148, 163, 184, 0.22);
+		color: rgba(226, 232, 240, 0.82);
+	}
+
+	.folder-workstation :global(.control-deck),
+	.folder-workstation :global(.bench-workspace-shell) {
+		background: rgba(9, 14, 22, 0.74);
+		border: 1px solid rgba(148, 163, 184, 0.14);
+		box-shadow: none;
+		border-radius: 0;
+	}
+
+	.folder-workstation :global(.run-readiness-card),
+	.folder-workstation :global(.run-setup-card),
+	.folder-workstation :global(.host-picker-shell),
+	.folder-workstation :global(.bench-chat-shell),
+	.folder-workstation :global(.note-panel),
+	.folder-workstation :global(.diagnosis-shell),
+	.folder-workstation :global(.archived-diagnosis-shell),
+	.folder-workstation :global(.proposal-shell),
+	.folder-workstation :global(.proposal-workbench-card),
+	.folder-workstation :global(.proposal-change-card),
+	.folder-workstation :global(.review-block),
+	.folder-workstation :global(.review-player-shell-block),
+	.folder-workstation :global(.legacy-review-note),
+	.folder-workstation :global(.review-player-panel),
+	.folder-workstation :global(.review-bench-summary-card),
+	.folder-workstation :global(.comparison-row),
+	.folder-workstation :global(.review-pack-card),
+	.folder-workstation :global(.review-pack-link),
+	.folder-workstation :global(.representative-path-shell),
+	.folder-workstation :global(.run-unlock-card),
+	.folder-workstation :global(.folder-encode-card),
+	.folder-workstation :global(.proposal-trace-shell summary),
+	.folder-workstation :global(.proposal-trace-raw),
+	.folder-workstation :global(.review-selector-chip) {
+		background: rgba(15, 23, 42, 0.76) !important;
+		border-color: rgba(148, 163, 184, 0.16) !important;
+		box-shadow: none !important;
+		border-radius: 0 !important;
+	}
+
+	.folder-workstation :global(.sample-host-card) {
+		background: rgba(15, 23, 42, 0.76) !important;
+		border-color: rgba(148, 163, 184, 0.16) !important;
+		color: #f8fafc !important;
+		box-shadow: none !important;
+		border-radius: 0 !important;
+	}
+
+	.folder-workstation :global(.sample-host-card.selected),
+	.folder-workstation :global(.review-selector-chip.selected),
+	.folder-workstation :global(.folder-encode-card.queued),
+	.folder-workstation :global(.draft-review-player-panel) {
+		background: rgba(8, 47, 73, 0.8) !important;
+		border-color: rgba(56, 189, 248, 0.24) !important;
+	}
+
+	.folder-workstation :global(.workflow-stage-card.done),
+	.folder-workstation :global(.folder-encode-card.live) {
+		background: rgba(20, 83, 45, 0.68) !important;
+		border-color: rgba(74, 222, 128, 0.2) !important;
+	}
+
+	.folder-workstation :global(.proposal-shell.stale),
+	.folder-workstation :global(.folder-encode-card.warning),
+	.folder-workstation :global(.impact-warning-copy) {
+		background: rgba(120, 53, 15, 0.7) !important;
+		border-color: rgba(251, 146, 60, 0.24) !important;
+	}
+
+	.folder-workstation :global(.proposal-warning-copy) {
+		background: rgba(8, 47, 73, 0.48) !important;
+		border-color: rgba(56, 189, 248, 0.18) !important;
+	}
+
+	.folder-workstation :global(.bench-chat-log) {
+		background: rgba(9, 14, 22, 0.92) !important;
+		border-color: rgba(148, 163, 184, 0.14) !important;
+	}
+
+	.folder-workstation :global(.thread-turn),
+	.folder-workstation :global(.review-pack-audio-grid .review-pack-link img) {
+		background: rgba(15, 23, 42, 0.68) !important;
+	}
+
+	.folder-workstation textarea {
+		background: rgba(9, 14, 22, 0.92);
+		border-color: rgba(148, 163, 184, 0.18);
+		color: #f8fafc;
+	}
+
+	.folder-workstation textarea::placeholder {
+		color: rgba(148, 163, 184, 0.72);
+	}
+
+	.folder-workstation :global(.section-head .lede) {
+		color: rgba(203, 213, 225, 0.76);
+	}
+
 	.page-stack,
 	.panel-stack {
 		display: grid;
@@ -3550,28 +3726,26 @@
 		display: grid;
 		gap: 0.2rem;
 		padding: 0.85rem 0.95rem;
-		border-radius: var(--radius-md);
-		background: rgba(255, 255, 255, 0.68);
-		border: 1px solid rgba(23, 35, 31, 0.08);
-		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+		border-radius: 0;
+		background: rgba(15, 23, 42, 0.68);
+		border: 1px solid rgba(148, 163, 184, 0.16);
+		box-shadow: none;
 	}
 
 	.workflow-stage-card.current {
-		background: linear-gradient(180deg, rgba(15, 118, 110, 0.14), rgba(255, 255, 255, 0.78));
-		border-color: rgba(15, 118, 110, 0.22);
-		box-shadow:
-			inset 0 1px 0 rgba(255, 255, 255, 0.56),
-			0 14px 24px rgba(15, 118, 110, 0.06);
+		background: rgba(8, 47, 73, 0.78);
+		border-color: rgba(56, 189, 248, 0.28);
+		box-shadow: none;
 	}
 
 	.workflow-stage-card.done {
-		background: linear-gradient(180deg, rgba(47, 107, 62, 0.14), rgba(255, 255, 255, 0.78));
-		border-color: rgba(47, 107, 62, 0.22);
+		background: rgba(20, 83, 45, 0.64);
+		border-color: rgba(74, 222, 128, 0.2);
 	}
 
 	.workflow-stage-card.pending {
 		border-style: dashed;
-		background: rgba(255, 255, 255, 0.54);
+		background: rgba(15, 20, 27, 0.72);
 	}
 
 	.workflow-stage-label,
@@ -3584,14 +3758,14 @@
 		font-weight: 800;
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
-		color: var(--accent-deep);
+		color: rgba(125, 211, 252, 0.9);
 	}
 
 	.workflow-stage-detail {
 		font-size: 0.94rem;
 		font-weight: 700;
 		line-height: 1.3;
-		color: var(--ink);
+		color: #f8fafc;
 	}
 
 	.folder-header-side {
@@ -3604,12 +3778,12 @@
 		gap: 0.55rem;
 		align-items: center;
 		font-size: 0.92rem;
-		color: var(--ink-soft);
+		color: rgba(148, 163, 184, 0.82);
 		flex-wrap: wrap;
 	}
 
 	.breadcrumb-row a {
-		color: var(--accent-deep);
+		color: #7dd3fc;
 		font-weight: 700;
 	}
 
@@ -3619,7 +3793,7 @@
 	}
 
 	.status-strip-panel {
-		background: rgba(255, 255, 255, 0.82);
+		background: rgba(15, 20, 27, 0.94);
 	}
 
 	.status-strip-panel.in-progress {
@@ -3634,16 +3808,16 @@
 		pointer-events: none;
 		background: linear-gradient(
 			110deg,
-			rgba(255, 255, 255, 0) 0%,
-			rgba(255, 255, 255, 0.45) 18%,
-			rgba(255, 255, 255, 0) 36%
+			rgba(125, 211, 252, 0) 0%,
+			rgba(125, 211, 252, 0.12) 18%,
+			rgba(125, 211, 252, 0) 36%
 		);
 		transform: translateX(-150%);
 		animation: status-strip-sheen 2.8s ease-in-out infinite;
 	}
 
 	.accent-strip {
-		background: rgba(241, 252, 248, 0.88);
+		background: rgba(8, 47, 73, 0.86);
 	}
 
 	.status-strip {
@@ -3668,8 +3842,8 @@
 		margin-bottom: 0.35rem;
 		padding: 0.28rem 0.62rem;
 		border-radius: 999px;
-		background: rgba(17, 24, 39, 0.08);
-		color: var(--ink);
+		background: rgba(30, 41, 59, 0.82);
+		color: #e2e8f0;
 		font-size: 0.72rem;
 		font-weight: 700;
 		letter-spacing: 0.08em;
@@ -3741,19 +3915,16 @@
 	}
 
 	.studio-panel {
-		background:
-			linear-gradient(180deg, rgba(241, 247, 241, 0.92), rgba(236, 244, 239, 0.88)),
-			radial-gradient(circle at top left, rgba(15, 118, 110, 0.1), transparent 40%),
-			radial-gradient(circle at bottom right, rgba(210, 180, 140, 0.12), transparent 38%);
+		background: rgba(10, 15, 21, 0.92);
 	}
 
 	.fact-card {
 		display: grid;
 		gap: var(--space-1);
 		padding: 0.95rem 1rem;
-		border-radius: var(--radius-md);
-		background: var(--surface-2);
-		border: 1px solid rgba(23, 35, 31, 0.08);
+		border-radius: 0;
+		background: rgba(15, 23, 42, 0.68);
+		border: 1px solid rgba(148, 163, 184, 0.16);
 	}
 
 	.fact-value {
@@ -4284,38 +4455,34 @@
 		max-width: min(100%, 43rem);
 		min-width: 0;
 		padding: 0.85rem 0.95rem;
-		border-radius: 1rem;
-		border: 1px solid rgba(23, 35, 31, 0.08);
-		box-shadow: 0 12px 24px rgba(23, 35, 31, 0.04);
+		border-radius: 0;
+		border: 1px solid rgba(148, 163, 184, 0.14);
+		box-shadow: none;
 	}
 
 	.operator-turn {
 		justify-self: end;
-		background:
-			linear-gradient(180deg, rgba(216, 243, 236, 0.96), rgba(200, 236, 227, 0.9)),
-			radial-gradient(circle at top right, rgba(255, 255, 255, 0.24), transparent 36%);
-		border-color: rgba(15, 118, 110, 0.22);
+		background: rgba(8, 47, 73, 0.84);
+		border-color: rgba(56, 189, 248, 0.24);
 	}
 
 	.system-turn {
 		justify-self: start;
-		background:
-			linear-gradient(180deg, rgba(255, 251, 244, 0.96), rgba(250, 246, 239, 0.9)),
-			radial-gradient(circle at top left, rgba(225, 200, 155, 0.16), transparent 38%);
-		border-color: rgba(164, 115, 46, 0.14);
-		border-left: 4px solid rgba(180, 83, 9, 0.18);
+		background: rgba(15, 23, 42, 0.8);
+		border-color: rgba(148, 163, 184, 0.16);
+		border-left: 4px solid rgba(251, 146, 60, 0.28);
 	}
 
 	.operator-turn .thread-copy {
-		color: #103e39;
+		color: #e0f2fe;
 	}
 
 	.system-turn .thread-copy {
-		color: #32251a;
+		color: #f8fafc;
 	}
 
 	.system-turn .thread-support {
-		color: rgba(23, 35, 31, 0.72);
+		color: rgba(203, 213, 225, 0.72);
 	}
 
 	.thread-role {
