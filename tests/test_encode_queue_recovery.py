@@ -311,6 +311,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         source_path = self._create_source_file("episode-host-orphan.mkv")
         self.config.raw["remote_hosts"] = [
             {
+                "mode": "ssh",
                 "host": "encode-remote",
                 "label": "Encode Remote",
                 "staging_root": str(self.root / "remote-staging"),
@@ -326,14 +327,19 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with open_db(self.config.paths.db_path) as connection:
             item_id = self._insert_library_item(connection, source_path, status="encoding")
 
-            web_app._reconcile_encode_jobs(connection, self.config)
+            with patch("mediaforce.web.runtime.encode_runtime.run_remote_command") as run_remote_command_mock:
+                web_app._reconcile_encode_jobs(connection, self.config)
 
             item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
             assert item_status_row is not None
             self.assertEqual(item_status_row["status"], "planned")
+            self.assertEqual(run_remote_command_mock.call_count, 2)
+            scripted_paths = "\n".join(str(call.args[1][2]) for call in run_remote_command_mock.call_args_list)
+            self.assertIn(str(host_staging_path), scripted_paths)
+            self.assertIn(str(host_partial_path), scripted_paths)
 
-        self.assertFalse(host_staging_path.exists())
-        self.assertFalse(host_partial_path.exists())
+        self.assertTrue(host_staging_path.exists())
+        self.assertTrue(host_partial_path.exists())
 
     def test_host_selection_prefers_other_encode_capable_host_during_cooldown(self) -> None:
         job = {

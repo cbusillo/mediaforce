@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import socket
 import threading
 import time
@@ -26,6 +27,7 @@ from mediaforce.core.process_control import ManagedProcessController, ProcessCan
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.quality import QualityTempCleanupError, QualityTempSetupError, quality_error_message
 from mediaforce.encoding.staging import safe_unlink
+from mediaforce.remote import execution_mode_for_host, run_remote_command
 from mediaforce.web.runtime.host_runtime import host_config_for_key
 from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
 
@@ -161,9 +163,12 @@ def clear_stale_encoding_items_when_idle(
     for row in stale_rows:
         if row["promoted_at"] is not None:
             continue
-        for staging_path in _candidate_stale_staging_paths(config, row):
-            _remove_stale_staging_path(staging_path)
-            _remove_stale_staging_path(staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}"))
+        for staging_path, host in _candidate_stale_staging_targets(config, row):
+            _remove_stale_staging_path(staging_path, host=host)
+            _remove_stale_staging_path(
+                staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}"),
+                host=host,
+            )
 
     stale_ids = [int(row["id"]) for row in stale_rows]
     updated_at = deps.now_iso()
@@ -181,23 +186,38 @@ def clear_stale_encoding_items_when_idle(
     return len(stale_ids)
 
 
-def _candidate_stale_staging_paths(config: MediaforceConfig, row: dict[str, Any]) -> list[Path]:
-    paths: list[Path] = []
+def _candidate_stale_staging_targets(
+        config: MediaforceConfig,
+        row: dict[str, Any],
+) -> list[tuple[Path, dict[str, Any] | None]]:
+    targets: list[tuple[Path, dict[str, Any] | None]] = []
 
-    def _add_path(path: Path | None) -> None:
+    def _add_target(path: Path | None, host: dict[str, Any] | None = None) -> None:
         if path is None:
             return
-        if any(existing == path for existing in paths):
+        normalized_host = object_dict(host)
+        host_key = str(
+            normalized_host.get("host")
+            or normalized_host.get("key")
+            or normalized_host.get("label")
+            or ""
+        ).strip()
+        if any(existing == path and existing_host_key == host_key for existing, existing_host_key in (
+            (candidate_path, str(object_dict(candidate_host).get("host") or object_dict(candidate_host).get("key") or object_dict(candidate_host).get("label") or "").strip())
+            for candidate_path, candidate_host in targets
+        )):
             return
-        paths.append(path)
+        targets.append((path, normalized_host or None))
 
     staging_value = str(row.get("staging_path") or "").strip()
     if staging_value:
-        _add_path(Path(staging_value))
+        host_key = str(row.get("encode_host_key") or row.get("encode_host_label") or "").strip()
+        host_config = host_config_for_key(config, host_key) if host_key else {}
+        _add_target(Path(staging_value), host_config or None)
 
     rel_path = str(row.get("rel_path") or "").strip()
     if not rel_path:
-        return paths
+        return targets
 
     output_suffix = str(object_dict(config.media).get("output_container") or "").strip()
     if output_suffix:
@@ -208,15 +228,20 @@ def _candidate_stale_staging_paths(config: MediaforceConfig, row: dict[str, Any]
     rel_output_path = Path(rel_path).with_suffix(output_suffix)
     host_key = str(row.get("encode_host_key") or row.get("encode_host_label") or "").strip()
     if host_key:
-        _add_path(config.staging_root_for_host(host_config_for_key(config, host_key)) / rel_output_path)
+        host_config = host_config_for_key(config, host_key)
+        _add_target(config.staging_root_for_host(host_config) / rel_output_path, host_config)
 
-    _add_path(config.staging_root / rel_output_path)
+    _add_target(config.staging_root / rel_output_path)
     for host in config.remote_hosts:
-        _add_path(config.staging_root_for_host(host) / rel_output_path)
-    return paths
+        _add_target(config.staging_root_for_host(host) / rel_output_path, host if isinstance(host, dict) else None)
+    return targets
 
 
-def _remove_stale_staging_path(path: Path) -> None:
+def _remove_stale_staging_path(path: Path, *, host: dict[str, Any] | None = None) -> None:
+    host_payload = object_dict(host)
+    if host_payload and execution_mode_for_host(host_payload) == "ssh":
+        _remove_remote_stale_staging_path(path, host_payload)
+        return
     if path.is_dir():
         return
     if path.exists():
@@ -233,6 +258,19 @@ def _prune_empty_quality_temp_dir(path: Path) -> None:
             path.rmdir()
         except OSError:
             return
+
+
+def _remove_remote_stale_staging_path(path: Path, host: dict[str, Any]) -> None:
+    quoted_path = shlex.quote(str(path))
+    quoted_parent = shlex.quote(str(path.parent))
+    script = (
+        f"rm -f {quoted_path}; "
+        f"if [ -d {quoted_parent} ]; then rmdir {quoted_parent} >/dev/null 2>&1 || true; fi"
+    )
+    try:
+        run_remote_command(host, ["sh", "-lc", script], timeout=10)
+    except Exception:
+        return
 
 
 def running_encode_job_count(connection: DBClient) -> int:
