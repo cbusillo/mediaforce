@@ -214,6 +214,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
     def test_reconcile_encode_jobs_clears_stale_encoding_items_when_idle(self) -> None:
         source_path = self._create_source_file("episode-idle-clear.mkv")
         staging_path = self._staging_path("episode-idle-clear.mkv")
+        partial_path = staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("staged")
+        partial_path.write_text("partial")
 
         with open_db(self.config.paths.db_path) as connection:
             item_id = self._insert_library_item(connection, source_path, status="encoding")
@@ -225,6 +229,40 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             assert item_status_row is not None
             self.assertEqual(item_status_row["status"], "planned")
             self.assertIsNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
+        self.assertFalse(staging_path.exists())
+        self.assertFalse(partial_path.exists())
+
+    def test_reconcile_encode_jobs_ignores_unlink_errors_during_stale_cleanup(self) -> None:
+        first_source = self._create_source_file("episode-stale-first.mkv")
+        second_source = self._create_source_file("episode-stale-second.mkv")
+        first_staging = self._staging_path("episode-stale-first.mkv")
+        second_staging = self._staging_path("episode-stale-second.mkv")
+        for path in (first_staging, second_staging):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("staged")
+
+        with open_db(self.config.paths.db_path) as connection:
+            first_id = self._insert_library_item(connection, first_source, status="encoding")
+            second_id = self._insert_library_item(connection, second_source, status="encoding")
+            self._insert_staged_artifact(connection, first_id, first_staging)
+            self._insert_staged_artifact(connection, second_id, second_staging)
+
+            def _unlink_with_one_failure(path: Path) -> None:
+                if path == first_staging:
+                    raise OSError("blocked")
+                path.unlink(missing_ok=True)
+
+            with patch("mediaforce.web.runtime.encode_runtime.safe_unlink", side_effect=_unlink_with_one_failure):
+                web_app._reconcile_encode_jobs(connection, self.config)
+
+            for item_id in (first_id, second_id):
+                item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+                assert item_status_row is not None
+                self.assertEqual(item_status_row["status"], "planned")
+                self.assertIsNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
+
+        self.assertTrue(first_staging.exists())
+        self.assertFalse(second_staging.exists())
 
     def test_host_selection_prefers_other_encode_capable_host_during_cooldown(self) -> None:
         job = {

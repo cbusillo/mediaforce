@@ -26,6 +26,7 @@ from mediaforce.core.process_control import ManagedProcessController, ProcessCan
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.quality import QualityTempCleanupError, QualityTempSetupError, quality_error_message
 from mediaforce.encoding.staging import safe_unlink
+from mediaforce.web.runtime.host_runtime import host_config_for_key
 from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
 
 
@@ -126,23 +127,47 @@ def reconcile_encode_jobs(
     if running_count == 0 and (state.get("active_job_id") or state.get("stop_requested")):
         state.update({"active_job_id": None, "stop_requested": False, "updated_at": deps.now_iso()})
         save_queue_state(connection, state)
-    clear_stale_encoding_items_when_idle(connection, deps)
+    clear_stale_encoding_items_when_idle(connection, config, deps)
 
 
-def clear_stale_encoding_items_when_idle(connection: DBClient, deps: EncodeQueueRuntimeDeps) -> int:
+def clear_stale_encoding_items_when_idle(
+        connection: DBClient,
+        config: MediaforceConfig,
+        deps: EncodeQueueRuntimeDeps,
+) -> int:
     if running_encode_job_count(connection) > 0:
         return 0
-    stale_ids = [
-        int(row["id"])
-        for row in connection.execute(
-            select(library_items.c.id)
-            .where(library_items.c.status == "encoding")
-            .order_by(library_items.c.updated_at.asc(), literal_column("rowid"))
-        ).mappings().fetchall()
-    ]
-    if not stale_ids:
+    stale_rows = connection.execute(
+        select(
+            library_items.c.id,
+            library_items.c.rel_path,
+            staged_artifacts.c.staging_path,
+            staged_artifacts.c.promoted_at,
+            staged_artifacts.c.encode_host_key,
+            staged_artifacts.c.encode_host_label,
+        )
+        .select_from(
+            library_items.outerjoin(
+                staged_artifacts,
+                staged_artifacts.c.library_item_id == library_items.c.id,
+            )
+        )
+        .where(library_items.c.status == "encoding")
+        .order_by(library_items.c.updated_at.asc(), library_items.c.id.asc())
+    ).mappings().fetchall()
+    if not stale_rows:
         return 0
 
+    for row in stale_rows:
+        if row["promoted_at"] is not None:
+            continue
+        staging_path = _resolve_stale_staging_path(config, row)
+        if staging_path is None:
+            continue
+        _remove_stale_staging_path(staging_path)
+        _remove_stale_staging_path(staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}"))
+
+    stale_ids = [int(row["id"]) for row in stale_rows]
     updated_at = deps.now_iso()
     connection.execute(
         delete(staged_artifacts)
@@ -156,6 +181,34 @@ def clear_stale_encoding_items_when_idle(connection: DBClient, deps: EncodeQueue
         .values(status="planned", updated_at=updated_at)
     )
     return len(stale_ids)
+
+
+def _resolve_stale_staging_path(config: MediaforceConfig, row: dict[str, Any]) -> Path | None:
+    staging_value = str(row.get("staging_path") or "").strip()
+    if staging_value:
+        return Path(staging_value)
+
+    rel_path = str(row.get("rel_path") or "").strip()
+    if not rel_path:
+        return None
+
+    host_key = str(row.get("encode_host_key") or row.get("encode_host_label") or "").strip()
+    host_config = host_config_for_key(config, host_key) if host_key else {}
+    output_suffix = str(object_dict(config.media).get("output_container") or "").strip()
+    if output_suffix:
+        output_suffix = f".{output_suffix.lstrip('.')}"
+    else:
+        output_suffix = Path(rel_path).suffix or ".mkv"
+    return config.staging_root_for_host(host_config) / Path(rel_path).with_suffix(output_suffix)
+
+
+def _remove_stale_staging_path(path: Path) -> None:
+    if not path.exists() or path.is_dir():
+        return
+    try:
+        safe_unlink(path)
+    except OSError:
+        return
 
 
 def running_encode_job_count(connection: DBClient) -> int:

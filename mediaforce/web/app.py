@@ -2141,7 +2141,7 @@ def _reconcile_encode_jobs(
 
 def _clear_stale_encoding_items_when_idle(config: MediaforceConfig) -> int:
     with open_db(config.paths.db_path) as connection:
-        return runtime_clear_stale_encoding_items_when_idle(connection, _encode_queue_runtime_deps())
+        return runtime_clear_stale_encoding_items_when_idle(connection, config, _encode_queue_runtime_deps())
 
 
 def _encode_job_manifest_totals(job: dict[str, Any]) -> dict[str, Any]:
