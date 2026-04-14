@@ -213,7 +213,6 @@ def preview_folder_cards(
     return sorted(
         cards,
         key=lambda item: (
-            item.estimated_savings_bytes,
             item.projected_reclaim_bytes,
             item.total_size_bytes,
         ),
@@ -300,6 +299,8 @@ def list_folder_cards(
                 )
                 card.estimated_savings_bytes += estimated_savings
                 card.sort_score += (estimated_savings / (1024 ** 3)) * age_multiplier
+            else:
+                card.sort_score += known_saved_bytes / (1024 ** 3)
         card.statuses[status] = card.statuses.get(status, 0) + 1
         card.video_codecs[codec] = card.video_codecs.get(codec, 0) + 1
     cards = list(grouped.values())
