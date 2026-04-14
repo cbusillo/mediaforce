@@ -8,19 +8,28 @@
 		FolderCard as FolderCardData,
 		HostsPayload
 	} from '$lib/api/types';
-	import { resolve } from '$app/paths';
 	import { onDestroy, onMount } from 'svelte';
 	import { fetchJson, postJson } from '$lib/api/client';
 	import HomeQueueContext from '$lib/components/home/HomeQueueContext.svelte';
+	import HomeQueueRail from '$lib/components/home/HomeQueueRail.svelte';
+	import HomeSystemStrip from '$lib/components/home/HomeSystemStrip.svelte';
 	import HomeQueueTable from '$lib/components/home/HomeQueueTable.svelte';
-	import { folderLibraryKey, folderLibraryLabel, folderRoutePrefix } from '$lib/folder-display';
+	import { folderLibraryKey, folderRoutePrefix } from '$lib/folder-display';
 	import { formatGiB } from '$lib/format';
 	import { hostsStatusPending } from '$lib/hosts/runtime';
 	import { allQueueWorkersScheduledOffWindow, nextQueueWindowCopy } from '$lib/hosts/schedule';
 	import { toasts } from '$lib/stores/toasts';
-
-	type FolderSortKey = 'priority' | 'title' | 'library' | 'pending' | 'reclaim' | 'age' | 'review';
-	type FolderSortDirection = 'asc' | 'desc';
+	import type { FolderSortDirection, FolderSortKey } from '$lib/components/home/home-queue-display';
+	import {
+		buildFolderLookup,
+		defaultFolderSortDirection,
+		deriveFolderLibraries,
+		formatCount,
+		formatRelativeTime,
+		formatTopCounts,
+		parseIsoDate,
+		rankVisibleFolders
+	} from '$lib/components/home/home-queue-display';
 
 	const EMPTY_DASHBOARD: DashboardSummaryPayload = {
 		folders_preview: [],
@@ -181,21 +190,7 @@
 		return facts;
 	});
 
-	const folderLibraries = $derived.by(() => {
-		const counts: Record<string, { key: string; label: string; count: number }> = {};
-
-		for (const folder of folders) {
-			const key = folderLibraryKey(folder.prefix);
-			const existing = counts[key];
-			if (existing) {
-				existing.count += 1;
-				continue;
-			}
-			counts[key] = { key, label: folderLibraryLabel(key), count: 1 };
-		}
-
-		return Object.values(counts).sort((left, right) => left.label.localeCompare(right.label));
-	});
+	const folderLibraries = $derived.by(() => deriveFolderLibraries(folders));
 
 	let disabledLibraries = $state<string[]>([]);
 	let libraryFiltersHydrated = $state(false);
@@ -249,53 +244,9 @@
 				: 'No completed backups are waiting for cleanup.';
 		return `${foldersPending} pending items across ${visibleFolders.length} visible folders. ${cleanupCopy}`;
 	});
-	const sortedVisibleFolderRows = $derived.by(() => {
-		const collator = new Intl.Collator('en-US', { sensitivity: 'base', numeric: true });
-		const rankedFolders = visibleFolders.map((folder, index) => ({
-			folder,
-			index,
-			priority: index + 1,
-			libraryLabel: folderLibraryLabel(folderLibraryKey(folder.prefix)),
-			reviewLabel: String(folder.review_badge_label ?? '')
-		}));
-
-		rankedFolders.sort((left, right) => {
-			const direction = folderSortDirection === 'asc' ? 1 : -1;
-			let comparison = 0;
-
-			switch (folderSortKey) {
-				case 'priority':
-					comparison = left.index - right.index;
-					break;
-				case 'title':
-					comparison = collator.compare(left.folder.title, right.folder.title);
-					break;
-				case 'library':
-					comparison = collator.compare(left.libraryLabel, right.libraryLabel);
-					break;
-				case 'pending':
-					comparison = left.folder.pending_count - right.folder.pending_count;
-					break;
-				case 'reclaim':
-					comparison = left.folder.projected_reclaim_bytes - right.folder.projected_reclaim_bytes;
-					break;
-				case 'age':
-					comparison = left.folder.average_age_days - right.folder.average_age_days;
-					break;
-				case 'review':
-					comparison = collator.compare(left.reviewLabel, right.reviewLabel);
-					break;
-			}
-
-			if (comparison === 0) {
-				comparison = left.index - right.index;
-			}
-
-			return comparison * direction;
-		});
-
-		return rankedFolders;
-	});
+	const sortedVisibleFolderRows = $derived.by(() =>
+		rankVisibleFolders(visibleFolders, folderSortKey, folderSortDirection)
+	);
 	const sortedVisibleFolders = $derived.by(() =>
 		sortedVisibleFolderRows.map(({ folder }) => folder)
 	);
@@ -316,15 +267,7 @@
 			.filter((job) => job.status !== 'completed')
 			.slice(0, 3)
 	);
-	const folderLookup = $derived.by(() => {
-		const lookup: Record<string, FolderCardData> = {};
-		for (const folder of [...dashboard.folders_preview, ...folders]) {
-			if (!lookup[folder.prefix]) {
-				lookup[folder.prefix] = folder;
-			}
-		}
-		return lookup;
-	});
+	const folderLookup = $derived.by(() => buildFolderLookup(dashboard.folders_preview, folders));
 	const activeWorkspaceQueued = $derived.by(() =>
 		activeWorkspaceFolder ? queuedFolderPrefixes.has(activeWorkspaceFolder.prefix) : false
 	);
@@ -340,20 +283,6 @@
 		disabledLibraries = [];
 	}
 
-	function defaultFolderSortDirection(key: FolderSortKey): FolderSortDirection {
-		switch (key) {
-			case 'priority':
-			case 'title':
-			case 'library':
-			case 'review':
-				return 'asc';
-			case 'pending':
-			case 'reclaim':
-			case 'age':
-				return 'desc';
-		}
-	}
-
 	function toggleFolderSort(key: FolderSortKey) {
 		if (folderSortKey === key) {
 			folderSortDirection = folderSortDirection === 'asc' ? 'desc' : 'asc';
@@ -362,88 +291,6 @@
 
 		folderSortKey = key;
 		folderSortDirection = defaultFolderSortDirection(key);
-	}
-
-	function parseIsoDate(value: string | null | undefined): Date | null {
-		if (!value) {
-			return null;
-		}
-		const parsed = new Date(value);
-		return Number.isNaN(parsed.getTime()) ? null : parsed;
-	}
-
-	function formatCount(value: number): string {
-		return new Intl.NumberFormat('en-US').format(value);
-	}
-
-	function formatRelativeTime(value: string | null | undefined, now: number): string {
-		const parsed = parseIsoDate(value);
-		if (!parsed) {
-			return 'just now';
-		}
-		const seconds = Math.max(0, Math.round((now - parsed.getTime()) / 1000));
-		if (seconds < 10) {
-			return 'moments ago';
-		}
-		if (seconds < 60) {
-			return `${seconds}s ago`;
-		}
-		const minutes = Math.round(seconds / 60);
-		if (minutes < 60) {
-			return `${minutes}m ago`;
-		}
-		const hours = Math.round(minutes / 60);
-		return `${hours}h ago`;
-	}
-
-	function formatTopCounts(
-		mapping: Record<string, number> | null | undefined,
-		limit = 3,
-		emptyCopy = 'No signal yet'
-	): string {
-		if (!mapping) {
-			return emptyCopy;
-		}
-		const entries = Object.entries(mapping)
-			.filter(([, value]) => Number(value) > 0)
-			.sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
-			.slice(0, limit);
-
-		if (!entries.length) {
-			return emptyCopy;
-		}
-
-		return entries.map(([key, value]) => `${value} ${key}`).join(' · ');
-	}
-
-	function folderTitleForPrefix(prefix: string): string {
-		return folderLookup[prefix]?.title || prefix.split('/').filter(Boolean).at(-1) || prefix;
-	}
-
-	function folderSubtitleForPrefix(prefix: string): string {
-		return folderLookup[prefix]?.subtitle || prefix;
-	}
-
-	function queueJobDetailCopy(
-		job: DashboardSummaryPayload['encode_queue']['running'][number]
-	): string {
-		const progressState = String(job.progress?.progress_state ?? '').trim();
-		if (progressState) {
-			return progressState;
-		}
-		const telemetrySummary = String(job.telemetry_summary ?? '').trim();
-		if (telemetrySummary) {
-			return telemetrySummary;
-		}
-		const schedulerCopy = String(job.scheduler_status_copy ?? '').trim();
-		if (schedulerCopy) {
-			return schedulerCopy;
-		}
-		const attemptSummary = String(job.attempt_summary ?? '').trim();
-		if (attemptSummary) {
-			return attemptSummary;
-		}
-		return 'Waiting for the next queue event.';
 	}
 
 	async function refreshHomeData() {
@@ -732,66 +579,26 @@
 </svelte:head>
 
 <div class="workstation-screen">
-	<section class="system-strip" aria-label="Fleet system state">
-		<div class={`system-cell queue-cell ${queueStateTone}`.trim()}>
-			<p class="system-label">Queue state</p>
-			<p class="system-value">{fleetSnapshotLabel}</p>
-			<p class="system-detail">
-				{#if dashboard.encode_queue.state.stop_requested}
-					Stop was requested across the fleet. Resume here when you are ready to restart queue work.
-				{:else if dashboard.encode_queue.state.is_paused}
-					Queue is paused. Resume it here or open Ops for full queue controls.
-				{:else if queueWorkersScheduledOffWindow}
-					{nextWorkerWindow
-						? `Waiting for the next worker window at ${nextWorkerWindow}.`
-						: 'All queue workers are currently scheduled off-window.'}
-				{:else}
-					{dashboard.encode_queue.telemetry?.eta_copy
-						? `Estimated queue finish in ${dashboard.encode_queue.telemetry.eta_copy}.`
-						: 'Queue is ready for the next operator decision.'}
-				{/if}
-			</p>
-			{#if dashboard.encode_queue.state.stop_requested || dashboard.encode_queue.state.is_paused}
-				<div class="queue-cell-actions">
-					<button
-						type="button"
-						class="system-action"
-						onclick={resumeQueueFromHome}
-						disabled={actionState !== null}
-					>
-						{actionState === 'resume-queue' ? 'Resuming queue...' : 'Resume queue'}
-					</button>
-					<a class="console-link" href={resolve('/ops')}>Open ops</a>
-				</div>
-			{/if}
-		</div>
-
-		<div class={`system-cell ${workerStateTone}`.trim()}>
-			<p class="system-label">Workers</p>
-			<p class="system-value">{readyHosts} ready / {queueCapableHosts} queue-capable</p>
-			<p class="system-detail">
-				{queueCapableHosts === 0
-					? `${reachableHosts} mounted now. No queue-capable workers configured.`
-					: `${reachableHosts} mounted now.`}
-			</p>
-		</div>
-
-		<div class="system-cell">
-			<p class="system-label">Catalog</p>
-			<p class="system-value">{catalogScanActive ? catalogScanHeading : 'Catalog standing by'}</p>
-			<p class="system-detail">
-				{catalogScanActive
-					? catalogScanProgressHeadline
-					: 'Folder ranking is ready for the next pick.'}
-			</p>
-		</div>
-
-		<div class="system-cell accent-cell">
-			<p class="system-label">Recovery</p>
-			<p class="system-value">{formatGiB(totalProjectedReclaim, 1)} visible reclaim</p>
-			<p class="system-detail">{recoveryDetailCopy}</p>
-		</div>
-	</section>
+	<HomeSystemStrip
+		{queueStateTone}
+		{workerStateTone}
+		{fleetSnapshotLabel}
+		stopRequested={dashboard.encode_queue.state.stop_requested}
+		queuePaused={dashboard.encode_queue.state.is_paused}
+		{queueWorkersScheduledOffWindow}
+		nextWorkerWindow={nextWorkerWindow ?? null}
+		etaCopy={dashboard.encode_queue.telemetry?.eta_copy}
+		{actionState}
+		{resumeQueueFromHome}
+		{readyHosts}
+		{queueCapableHosts}
+		{reachableHosts}
+		{catalogScanActive}
+		{catalogScanHeading}
+		{catalogScanProgressHeadline}
+		totalProjectedReclaimCopy={formatGiB(totalProjectedReclaim, 1)}
+		{recoveryDetailCopy}
+	/>
 
 	{#if landingLoadIssues.length > 0}
 		<section class="alert-strip" aria-label="Runtime issues">
@@ -831,113 +638,34 @@
 			/>
 		</div>
 
-		<div class="side-rail">
-			<HomeQueueContext
-				{activeWorkspaceFolder}
-				{libraryColors}
-				{metricsReady}
-				metricStatusCopy={dashboard.metric_status_copy}
-				{catalogEmpty}
-				{activeWorkspaceQueued}
-				queueActionDisabled={actionState !== null}
-				queueActionPending={actionState === 'queue-folder'}
-				{queueActiveWorkspaceFolder}
-				{formatTopCounts}
-			/>
+		<div class="side-column">
+			<div class="side-column-sticky">
+				<HomeQueueContext
+					{activeWorkspaceFolder}
+					{libraryColors}
+					{metricsReady}
+					metricStatusCopy={dashboard.metric_status_copy}
+					{catalogEmpty}
+					{activeWorkspaceQueued}
+					queueActionDisabled={actionState !== null}
+					queueActionPending={actionState === 'queue-folder'}
+					{queueActiveWorkspaceFolder}
+					{formatTopCounts}
+				/>
 
-			<section class="station-card rail-card control-card" aria-label="Console controls">
-				<div class="section-head compact">
-					<div>
-						<p class="section-label">Console controls</p>
-						<h2 class="section-title small">Global actions</h2>
-					</div>
-				</div>
-
-				<div class="rail-actions">
-					<a class="console-link" href={resolve('/ops')}>Open ops</a>
-					<a class="console-link" href={resolve('/settings')}>Settings</a>
-					<a class="console-link" href={resolve('/completed')}>Completed</a>
-				</div>
-			</section>
-
-			<section class="station-card rail-card" aria-label="Queue monitor">
-				<div class="section-head compact">
-					<div>
-						<p class="section-label">Queue monitor</p>
-						<h2 class="section-title small">Active encodes</h2>
-					</div>
-				</div>
-
-				<div class="rail-summary">
-					<p>{fleetSnapshotLabel}</p>
-					<p>{pendingReviewCount} pending review</p>
-				</div>
-
-				{#if queueWatchJobs.length > 0}
-					<ul class="watch-list">
-						{#each queueWatchJobs as job (job.job_id)}
-							<li>
-								<div class="watch-row">
-									<div>
-										<p class="watch-title">{folderTitleForPrefix(job.prefix)}</p>
-										<p class="watch-path mono-copy">{folderSubtitleForPrefix(job.prefix)}</p>
-										<p class="watch-copy">{queueJobDetailCopy(job)}</p>
-									</div>
-									<span class="watch-state">{job.status}</span>
-								</div>
-							</li>
-						{/each}
-					</ul>
-				{:else}
-					<p class="muted-block">
-						No encode jobs are active. The next folder pick will define the queue.
-					</p>
-				{/if}
-			</section>
-
-			<section class="station-card rail-card" aria-label="Catalog status">
-				<div class="section-head compact">
-					<div>
-						<p class="section-label">Catalog status</p>
-						<h2 class="section-title small">Scan and cleanup</h2>
-					</div>
-				</div>
-
-				<p class="catalog-headline">{catalogScanStatusCopy}</p>
-				{#if catalogScanProgressFacts.length > 0}
-					<ul class="fact-list">
-						{#each catalogScanProgressFacts as fact (fact)}
-							<li>{fact}</li>
-						{/each}
-					</ul>
-				{/if}
-
-				<div class="rail-summary stack">
-					<p>
-						Metrics: {metricsReady ? 'VMAF, XPSNR, and SSIM online' : dashboard.metric_status_copy}
-					</p>
-					<p>
-						Archive root: <span class="mono-copy"
-							>{dashboard.archive_cleanup?.archive_root || 'not set'}</span
-						>
-					</p>
-				</div>
-
-				{#if recentQueueIssues.length > 0}
-					<div class="issue-block">
-						<p class="signal-label">Recent blockers</p>
-						<ul class="watch-list compact-list">
-							{#each recentQueueIssues as job (job.job_id)}
-								<li>
-									<p class="watch-title">{folderTitleForPrefix(job.prefix)}</p>
-									<p class="watch-path mono-copy">{folderSubtitleForPrefix(job.prefix)}</p>
-									<p class="watch-copy">{job.error || queueJobDetailCopy(job)}</p>
-								</li>
-							{/each}
-						</ul>
-					</div>
-				{/if}
-			</section>
+				<HomeQueueRail
+					{folderLookup}
+					{queueWatchJobs}
+					{recentQueueIssues}
+					{fleetSnapshotLabel}
+					{pendingReviewCount}
+					{catalogScanStatusCopy}
+					{catalogScanProgressFacts}
+					{metricsReady}
+					metricStatusCopy={dashboard.metric_status_copy}
+					archiveRoot={dashboard.archive_cleanup?.archive_root || ''}
+				/>
+			</div>
 		</div>
 	</div>
 </div>
@@ -965,18 +693,6 @@
 		display: none;
 	}
 
-	.system-strip,
-	.console-grid,
-	.section-head,
-	.watch-row {
-		display: flex;
-	}
-
-	.system-strip,
-	.console-grid {
-		gap: 1rem;
-	}
-
 	.main-column {
 		display: grid;
 		gap: 1rem;
@@ -985,37 +701,53 @@
 		overflow: hidden;
 	}
 
+	.side-column {
+		display: grid;
+		gap: 1rem;
+		align-content: start;
+		min-width: 0;
+	}
+
+	.side-column-sticky {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+		align-content: start;
+		min-width: 0;
+	}
+
+	@media (min-width: 961px) {
+		.side-column-sticky {
+			position: sticky;
+			top: 5.9rem;
+			max-height: calc(100dvh - 5.9rem - 1rem);
+			overflow-y: auto;
+			overflow-x: clip;
+			scrollbar-gutter: stable;
+			padding-right: 0.15rem;
+			z-index: 5;
+		}
+	}
+
 	.console-grid > :global(*),
 	.main-column > :global(*) {
 		min-width: 0;
 	}
 
-	.system-strip {
-		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
-	}
-
-	.system-cell,
-	.station-card,
 	.alert-strip {
 		position: relative;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		gap: 1rem;
+		align-items: center;
+		padding: 1rem 1.1rem;
 		border: 1px solid rgba(148, 163, 184, 0.18);
-		background: rgba(15, 20, 27, 0.94);
+		background: rgba(55, 24, 11, 0.96);
 		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2);
 		overflow: hidden;
 	}
 
-	.system-cell {
-		padding: 1rem 1.1rem;
-		min-height: 8.5rem;
-	}
-
-	.accent-cell {
-		background: rgba(13, 33, 42, 0.94);
-	}
-
-	.alert-strip::before,
-	.queue-cell::before {
+	.alert-strip::before {
 		content: '';
 		position: absolute;
 		inset: 0 0 auto;
@@ -1023,32 +755,7 @@
 		background: rgba(56, 189, 248, 0.85);
 	}
 
-	.queue-cell.warning-state {
-		border-color: rgba(249, 115, 22, 0.3);
-		background: rgba(58, 26, 13, 0.94);
-	}
-
-	.queue-cell.warning-state::before {
-		background: rgba(251, 146, 60, 0.95);
-	}
-
-	.system-cell.schedule-state {
-		border-color: rgba(245, 158, 11, 0.28);
-		background: rgba(51, 28, 10, 0.94);
-	}
-
-	.system-cell.schedule-state::before {
-		background: rgba(245, 158, 11, 0.92);
-	}
-
-	.queue-cell.normal-state::before {
-		background: rgba(56, 189, 248, 0.85);
-	}
-
-	.system-label,
-	.section-label,
-	.alert-label,
-	.signal-label {
+	.alert-label {
 		margin: 0;
 		font-size: 0.72rem;
 		font-weight: 800;
@@ -1057,47 +764,13 @@
 		color: rgba(148, 163, 184, 0.88);
 	}
 
-	.system-value,
-	.section-title {
-		margin: 0;
-		color: #f8fafc;
-	}
-
-	.system-value {
-		margin-top: 0.4rem;
-		font-size: 1.2rem;
-		font-weight: 700;
-		line-height: 1.25;
-	}
-
-	.system-detail,
-	.alert-copy,
-	.watch-copy,
-	.catalog-headline,
-	.rail-summary,
-	.rail-summary p {
+	.alert-copy {
 		margin: 0;
 		color: rgba(226, 232, 240, 0.74);
 		line-height: 1.5;
 	}
 
-	.alert-strip,
-	.section-head,
-	.side-rail {
-		display: grid;
-	}
-
-	.alert-strip {
-		grid-template-columns: minmax(0, 1fr) auto;
-		gap: 1rem;
-		align-items: center;
-		padding: 1rem 1.1rem;
-		background: rgba(55, 24, 11, 0.96);
-	}
-
-	.alert-action,
-	.system-action,
-	.console-link {
+	.alert-action {
 		align-items: center;
 		justify-content: center;
 		font-weight: 700;
@@ -1108,9 +781,7 @@
 			transform 150ms ease;
 	}
 
-	.alert-action,
-	.system-action,
-	.console-link {
+	.alert-action {
 		display: inline-flex;
 		padding: 0.72rem 0.95rem;
 		border: 1px solid rgba(56, 189, 248, 0.22);
@@ -1118,186 +789,22 @@
 		color: #e2e8f0;
 	}
 
-	.console-link:hover,
-	.system-action:hover,
 	.alert-action:hover {
 		transform: translateY(-1px);
 		border-color: rgba(56, 189, 248, 0.5);
 		background: rgba(30, 41, 59, 0.94);
 	}
 
-	.system-action {
-		background: rgba(154, 52, 18, 0.84);
-		border-color: rgba(251, 146, 60, 0.5);
-		color: #fff7ed;
-	}
-
-	.system-action:hover {
-		background: rgba(194, 65, 12, 0.9);
-		border-color: rgba(253, 186, 116, 0.65);
-	}
-
-	.system-action:disabled {
-		opacity: 0.62;
-		cursor: default;
-		transform: none;
-	}
-
 	.console-grid {
 		display: grid;
+		gap: 1rem;
 		grid-template-columns: minmax(0, 1.8fr) minmax(22rem, 0.88fr);
 		align-items: start;
 	}
 
-	.station-card {
-		padding: 1.1rem;
-	}
-
-	.section-head {
-		grid-template-columns: minmax(0, 1fr) auto;
-		gap: 1rem;
-		align-items: start;
-		margin-bottom: 1rem;
-	}
-
-	.section-head.compact {
-		margin-bottom: 0.85rem;
-	}
-
-	.section-title {
-		margin-top: 0.3rem;
-		font-size: 1.25rem;
-		font-weight: 700;
-	}
-
-	.section-title.small {
-		font-size: 1rem;
-	}
-
-	.queue-cell-actions,
-	.rail-actions {
-		display: flex;
-		gap: 0.65rem;
-		flex-wrap: wrap;
-	}
-
-	.queue-cell-actions {
-		margin-top: 0.85rem;
-	}
-
-	.watch-state {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.45rem;
-		padding: 0.34rem 0.56rem;
-		font-size: 0.72rem;
-		font-weight: 800;
-		letter-spacing: 0.04em;
-		text-transform: uppercase;
-	}
-
-	.side-rail {
-		gap: 1rem;
-	}
-
-	.control-card {
-		padding-bottom: 1rem;
-	}
-
-	@media (min-width: 961px) {
-		.side-rail {
-			position: sticky;
-			top: 5.9rem;
-		}
-	}
-
-	.rail-summary {
-		display: flex;
-		gap: 0.75rem;
-		justify-content: space-between;
-		padding: 0.75rem 0.85rem;
-		border: 1px solid rgba(148, 163, 184, 0.16);
-		background: rgba(15, 23, 42, 0.64);
-	}
-
-	.rail-summary.stack {
-		display: grid;
-		gap: 0.45rem;
-		justify-content: stretch;
-	}
-
-	.watch-list,
-	.fact-list {
-		margin: 0.9rem 0 0;
-		padding: 0;
-		list-style: none;
-	}
-
-	.watch-list {
-		display: grid;
-		gap: 0.7rem;
-	}
-
-	.watch-row {
-		justify-content: space-between;
-		gap: 0.75rem;
-		padding: 0.75rem 0.85rem;
-		border: 1px solid rgba(148, 163, 184, 0.16);
-		background: rgba(15, 23, 42, 0.6);
-	}
-
-	.watch-title {
-		margin: 0;
-		color: #f8fafc;
-		font-size: 0.8rem;
-	}
-
-	.watch-copy {
-		margin-top: 0.25rem;
-		font-size: 0.88rem;
-	}
-
-	.watch-path {
-		margin-top: 0.18rem;
-		font-size: 0.76rem;
-		color: rgba(148, 163, 184, 0.82);
-	}
-
-	.watch-state {
-		align-self: start;
-		border: 1px solid rgba(56, 189, 248, 0.22);
-		background: rgba(30, 41, 59, 0.88);
-		color: #cbd5e1;
-	}
-
-	.fact-list {
-		display: grid;
-		gap: 0.45rem;
-		padding-left: 1rem;
-		color: rgba(226, 232, 240, 0.74);
-	}
-
-	.issue-block {
-		margin-top: 1rem;
-	}
-
-	.compact-list {
-		margin-top: 0.55rem;
-	}
-
-	.empty-shell {
-		padding: 0.95rem 1rem;
-		border: 1px solid rgba(148, 163, 184, 0.16);
-		background: rgba(15, 23, 42, 0.46);
-	}
-
 	@media (max-width: 1100px) {
-		.system-strip {
-			grid-template-columns: 1fr 1fr;
-		}
-
-		.section-head {
-			grid-template-columns: 1fr;
+		.console-grid {
+			grid-template-columns: minmax(0, 1fr) minmax(18rem, 0.85fr);
 		}
 	}
 
@@ -1308,10 +815,6 @@
 	}
 
 	@media (max-width: 720px) {
-		.system-strip {
-			grid-template-columns: 1fr;
-		}
-
 		.alert-strip {
 			grid-template-columns: 1fr;
 		}

@@ -21,6 +21,8 @@ Use this directory for guidance that should not live in `AGENTS.md`.
   workstation-style home screen reset
 - `docs/design/workstation-home-screen-inventory.md`: carry-forward, rewrite,
   and retire inventory for the home-screen reset
+- `docs/design/operator-workstation-shell-brief.md`: durable cross-route shell
+  brief for home, ops, completed, settings, and folder studio
 
 ## Developer workflows
 

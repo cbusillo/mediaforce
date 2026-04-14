@@ -5,7 +5,6 @@
 	import type { CompletedBackupsClearResponse, CompletedPagePayload } from '$lib/api/types';
 	import { fetchJson, postJson } from '$lib/api/client';
 	import Button from '$lib/components/Button.svelte';
-	import Pill from '$lib/components/Pill.svelte';
 	import { folderRoutePath } from '$lib/folder-display';
 	import { formatGiB } from '$lib/format';
 	import { toasts } from '$lib/stores/toasts';
@@ -170,7 +169,7 @@
 	<title>Completed · Mediaforce</title>
 </svelte:head>
 
-<div class="completed-screen">
+<div class="workstation-screen completed-screen">
 	<section class="system-strip" aria-label="Completed archive state">
 		<div class="system-cell accent-cell">
 			<p class="system-label">Completed archive</p>
@@ -269,21 +268,6 @@
 							Delete all backups
 						</Button>
 					</div>
-				</div>
-
-				<div class="pill-row cleanup-pill-row">
-					<Pill
-						label={`${completed.folders_with_backups_count} folders with backups`}
-						variant="warn"
-					/>
-					<Pill
-						label={`${completed.archive_cleanup.file_count} archived originals`}
-						variant="warn"
-					/>
-					<Pill
-						label={`${formatGiB(completed.archive_cleanup.total_size_bytes, 1)} reclaimable`}
-						variant="ghost"
-					/>
 				</div>
 
 				{#if selectedFolders.length > 0}

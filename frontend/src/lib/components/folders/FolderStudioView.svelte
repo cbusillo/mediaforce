@@ -2312,7 +2312,7 @@
 		<Panel class="studio-panel" variant="accent">
 			<div class="panel-stack">
 				<SectionHead
-					eyebrow="1. Shape the next draft"
+					eyebrow="Shape the next draft"
 					heading={sampleSetupHeading}
 					lede={sampleSetupLede}
 					size="section"
@@ -2416,7 +2416,7 @@
 		<Panel class="review-panel">
 			<div class="panel-stack">
 				<SectionHead
-					eyebrow="2. Review the sample"
+					eyebrow="Review the sample"
 					heading="Run the proof deck, lock the draft, then move the staged files"
 					lede="Review the synced proof moments first, confirm the draft only when the evidence holds up, then validate or promote the staged outputs from the same console."
 					size="section"
