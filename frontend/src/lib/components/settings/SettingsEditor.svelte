@@ -11,6 +11,7 @@
 	import Button from '$lib/components/Button.svelte';
 	import HostCard from '$lib/components/HostCard.svelte';
 	import { formatGiB, hostSettingsAnchor } from '$lib/format';
+	import { isPendingHostRuntime } from '$lib/hosts/runtime';
 	import {
 		SCHEDULE_DAY_OPTIONS,
 		scheduleWindowSummaryCopy,
@@ -200,8 +201,11 @@
 	const readyRuntimeHostCount = $derived.by(
 		() => runtimeHosts.filter((host) => host.available).length
 	);
+	const pendingRuntimeHostCount = $derived.by(
+		() => runtimeHosts.filter((host) => isPendingHostRuntime(host)).length
+	);
 	const runtimeHostIssueCount = $derived.by(
-		() => runtimeHosts.filter((host) => !host.available).length
+		() => runtimeHosts.filter((host) => !host.available && !isPendingHostRuntime(host)).length
 	);
 	const queueCapableHostCount = $derived.by(
 		() => remoteHosts.filter((host) => host.capabilities.includes('encode_queue')).length
@@ -225,7 +229,7 @@
 		if (runtimeHostIssueCount > 0) {
 			return 'warning-state';
 		}
-		if (isRefreshingHosts) {
+		if (pendingRuntimeHostCount > 0 || isRefreshingHosts) {
 			return 'selection-state';
 		}
 		return 'normal-state';
@@ -290,8 +294,14 @@
 				{#if hostsLoadError}
 					Live host status is unavailable: {hostsLoadError}
 				{:else if runtimeHostIssueCount > 0}
-					{runtimeHostIssueCount} worker{runtimeHostIssueCount === 1 ? '' : 's'} need attention. {queueCapableHostCount}
-					queue-capable host{queueCapableHostCount === 1 ? '' : 's'} configured.
+					{runtimeHostIssueCount} worker{runtimeHostIssueCount === 1 ? '' : 's'} need attention.
+					{#if pendingRuntimeHostCount > 0}
+						{pendingRuntimeHostCount} worker{pendingRuntimeHostCount === 1 ? '' : 's'} still refreshing.
+					{/if}
+					{queueCapableHostCount} queue-capable host{queueCapableHostCount === 1 ? '' : 's'} configured.
+				{:else if pendingRuntimeHostCount > 0}
+					{pendingRuntimeHostCount} worker{pendingRuntimeHostCount === 1 ? '' : 's'} still refreshing.
+					{queueCapableHostCount} queue-capable host{queueCapableHostCount === 1 ? '' : 's'} configured.
 				{:else if isRefreshingHosts}
 					Refreshing live host state now.
 				{:else}

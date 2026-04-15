@@ -86,9 +86,10 @@ export function folderAwareQualitySearchSummary(
 
 export function hostsStatusPending(payload: HostsPayload | null | undefined): boolean {
 	return (payload?.hosts ?? []).some(
-		(host) =>
-			String(host.message ?? '').trim() === HOST_STATUS_PENDING_MESSAGE &&
-			Array.isArray(host.issues) &&
-			host.issues.length === 0
+		(host) => isPendingHostRuntime(host) && Array.isArray(host.issues) && host.issues.length === 0
 	);
+}
+
+export function isPendingHostRuntime(runtime: HostRuntime | null | undefined): boolean {
+	return String(runtime?.message ?? '').trim() === HOST_STATUS_PENDING_MESSAGE;
 }
