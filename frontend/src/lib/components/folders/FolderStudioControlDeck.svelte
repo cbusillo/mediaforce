@@ -705,6 +705,10 @@
 		border-top: 1px solid rgba(148, 163, 184, 0.14);
 	}
 
+	.danger-disclosure:not([open]) .danger-disclosure-body {
+		display: none;
+	}
+
 	.destructive-action-copy {
 		margin: 0;
 		padding-top: 0.8rem;
