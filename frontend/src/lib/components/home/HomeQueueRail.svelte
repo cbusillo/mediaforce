@@ -35,21 +35,6 @@
 </script>
 
 <div class="side-rail">
-	<section class="station-card rail-card control-card" aria-label="Console controls">
-		<div class="section-head compact">
-			<div>
-				<p class="section-label">Console controls</p>
-				<h2 class="section-title small">Global actions</h2>
-			</div>
-		</div>
-
-		<div class="rail-actions">
-			<a class="console-link" href={resolve('/ops')}>Open ops</a>
-			<a class="console-link" href={resolve('/settings')}>Settings</a>
-			<a class="console-link" href={resolve('/completed')}>Completed</a>
-		</div>
-	</section>
-
 	<section class="station-card rail-card" aria-label="Queue monitor">
 		<div class="section-head compact">
 			<div>
@@ -61,6 +46,12 @@
 		<div class="rail-summary">
 			<p>{fleetSnapshotLabel}</p>
 			<p>{pendingReviewCount} pending review</p>
+		</div>
+
+		<div class="rail-actions quick-links">
+			<a class="console-link" href={resolve('/ops')}>Ops</a>
+			<a class="console-link" href={resolve('/completed')}>Completed</a>
+			<a class="console-link" href={resolve('/settings')}>Settings</a>
 		</div>
 
 		{#if queueWatchJobs.length > 0}
@@ -145,10 +136,6 @@
 		overflow: hidden;
 	}
 
-	.control-card {
-		padding-bottom: 1rem;
-	}
-
 	.section-head {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) auto;
@@ -193,11 +180,12 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		padding: 0.72rem 0.95rem;
+		padding: 0.58rem 0.8rem;
 		border: 1px solid rgba(56, 189, 248, 0.22);
 		background: rgba(15, 23, 42, 0.7);
 		color: #e2e8f0;
 		font-weight: 700;
+		font-size: 0.82rem;
 		transition:
 			border-color 150ms ease,
 			background-color 150ms ease,
@@ -224,9 +212,13 @@
 		display: flex;
 		gap: 0.75rem;
 		justify-content: space-between;
-		padding: 0.75rem 0.85rem;
+		padding: 0.65rem 0.75rem;
 		border: 1px solid rgba(148, 163, 184, 0.16);
 		background: rgba(15, 23, 42, 0.64);
+	}
+
+	.quick-links {
+		margin-top: 0.65rem;
 	}
 
 	.rail-summary.stack {

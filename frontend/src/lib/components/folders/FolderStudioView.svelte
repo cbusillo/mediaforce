@@ -485,16 +485,16 @@
 	);
 	const sampleSetupHeading = $derived.by(() =>
 		reviewGateStatus === 'accepted'
-			? 'Revise the approved draft'
+			? 'Approved draft'
 			: hasCalibration
-				? 'Continue the calibration'
-				: 'Start the sample'
+				? 'Continue calibration'
+				: 'Start sample'
 	);
 	const sampleSetupLede = $derived.by(() => {
 		if (reviewGateStatus === 'accepted') {
-			return 'The current draft is already saved for queueing. Keep tuning here only if you want to replace it with a newer draft.';
+			return 'Queued draft is already saved. Stay here only if you need a replacement.';
 		}
-		return 'Choose the host, steer the bench, and keep the latest diagnosis beside the controls instead of buried below them.';
+		return 'Choose the host, steer the bench, and keep the latest diagnosis beside the controls.';
 	});
 	const noteFieldLabel = $derived.by(() =>
 		hasCalibration ? 'Brief the next draft' : 'Describe the first sample'
@@ -2315,7 +2315,7 @@
 					eyebrow="Shape the next draft"
 					heading={sampleSetupHeading}
 					lede={sampleSetupLede}
-					size="section"
+					size="compact"
 				/>
 				<div class="studio-grid">
 					<aside class="studio-sidebar">

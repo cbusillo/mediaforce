@@ -10,7 +10,6 @@
 	} from '$lib/api/types';
 	import { onDestroy, onMount } from 'svelte';
 	import { fetchJson, postJson } from '$lib/api/client';
-	import HomeQueueContext from '$lib/components/home/HomeQueueContext.svelte';
 	import HomeQueueRail from '$lib/components/home/HomeQueueRail.svelte';
 	import HomeSystemStrip from '$lib/components/home/HomeSystemStrip.svelte';
 	import HomeQueueTable from '$lib/components/home/HomeQueueTable.svelte';
@@ -634,25 +633,17 @@
 				{enableAllLibraries}
 				{toggleLibraryFilter}
 				{toggleFolderSort}
+				{activeWorkspaceFolder}
+				{activeWorkspaceQueued}
+				queueActionDisabled={actionState !== null}
+				queueActionPending={actionState === 'queue-folder'}
+				{queueActiveWorkspaceFolder}
 				{formatTopCounts}
 			/>
 		</div>
 
 		<div class="side-column">
 			<div class="side-column-sticky">
-				<HomeQueueContext
-					{activeWorkspaceFolder}
-					{libraryColors}
-					{metricsReady}
-					metricStatusCopy={dashboard.metric_status_copy}
-					{catalogEmpty}
-					{activeWorkspaceQueued}
-					queueActionDisabled={actionState !== null}
-					queueActionPending={actionState === 'queue-folder'}
-					{queueActiveWorkspaceFolder}
-					{formatTopCounts}
-				/>
-
 				<HomeQueueRail
 					{folderLookup}
 					{queueWatchJobs}
@@ -798,13 +789,13 @@
 	.console-grid {
 		display: grid;
 		gap: 1rem;
-		grid-template-columns: minmax(0, 1.8fr) minmax(22rem, 0.88fr);
+		grid-template-columns: minmax(0, 1.95fr) minmax(18.5rem, 0.68fr);
 		align-items: start;
 	}
 
 	@media (max-width: 1100px) {
 		.console-grid {
-			grid-template-columns: minmax(0, 1fr) minmax(18rem, 0.85fr);
+			grid-template-columns: minmax(0, 1.16fr) minmax(16rem, 0.74fr);
 		}
 	}
 

@@ -22,6 +22,11 @@
 		sortedVisibleFolders,
 		sortedVisibleFolderRows,
 		activeWorkspacePrefix,
+		activeWorkspaceFolder,
+		activeWorkspaceQueued,
+		queueActionDisabled,
+		queueActionPending,
+		queueActiveWorkspaceFolder,
 		folderSortKey,
 		folderSortDirection,
 		enableAllLibraries,
@@ -41,6 +46,11 @@
 		sortedVisibleFolders: FolderCardData[];
 		sortedVisibleFolderRows: QueueRow[];
 		activeWorkspacePrefix: string | null;
+		activeWorkspaceFolder: FolderCardData | null;
+		activeWorkspaceQueued: boolean;
+		queueActionDisabled: boolean;
+		queueActionPending: boolean;
+		queueActiveWorkspaceFolder: () => void;
 		folderSortKey: FolderSortKey;
 		folderSortDirection: FolderSortDirection;
 		enableAllLibraries: () => void;
@@ -103,6 +113,75 @@
 			</div>
 		</div>
 	{/if}
+
+	{#if activeWorkspaceFolder}
+		<div class="queue-context-bar" aria-label="Top-ranked folder actions">
+			<div class="queue-context-copy">
+				<p class="queue-context-label">Top-ranked folder</p>
+				<p class="queue-context-title">{activeWorkspaceFolder.title}</p>
+				<p class="queue-context-detail">
+					{activeWorkspaceFolder.pending_count} pending · {formatGiB(
+						activeWorkspaceFolder.projected_reclaim_bytes,
+						1
+					)} reclaim · {formatTopCounts(activeWorkspaceFolder.statuses, 3)}
+				</p>
+			</div>
+			<div class="queue-context-actions">
+				<a class="queue-context-link" href={resolve(folderRoutePath(activeWorkspaceFolder.prefix))}>
+					Open folder
+				</a>
+				<button
+					type="button"
+					class="queue-context-button"
+					onclick={queueActiveWorkspaceFolder}
+					disabled={queueActionDisabled ||
+						activeWorkspaceQueued ||
+						activeWorkspaceFolder.pending_count <= 0}
+				>
+					{#if queueActionPending}
+						Queueing...
+					{:else if activeWorkspaceQueued}
+						Already queued
+					{:else if activeWorkspaceFolder.pending_count <= 0}
+						Nothing to queue
+					{:else}
+						Queue folder
+					{/if}
+				</button>
+			</div>
+		</div>
+	{/if}
+
+	<div class="mobile-sort-row" aria-label="Mobile sort controls">
+		<button
+			type="button"
+			class={`mobile-sort-chip ${folderSortKey === 'priority' ? 'active' : ''}`.trim()}
+			onclick={() => toggleFolderSort('priority')}
+		>
+			Priority {folderSortKey === 'priority' ? (folderSortDirection === 'asc' ? '↑' : '↓') : ''}
+		</button>
+		<button
+			type="button"
+			class={`mobile-sort-chip ${folderSortKey === 'pending' ? 'active' : ''}`.trim()}
+			onclick={() => toggleFolderSort('pending')}
+		>
+			Pending {folderSortKey === 'pending' ? (folderSortDirection === 'asc' ? '↑' : '↓') : ''}
+		</button>
+		<button
+			type="button"
+			class={`mobile-sort-chip ${folderSortKey === 'reclaim' ? 'active' : ''}`.trim()}
+			onclick={() => toggleFolderSort('reclaim')}
+		>
+			Reclaim {folderSortKey === 'reclaim' ? (folderSortDirection === 'asc' ? '↑' : '↓') : ''}
+		</button>
+		<button
+			type="button"
+			class={`mobile-sort-chip ${folderSortKey === 'review' ? 'active' : ''}`.trim()}
+			onclick={() => toggleFolderSort('review')}
+		>
+			Review {folderSortKey === 'review' ? (folderSortDirection === 'asc' ? '↑' : '↓') : ''}
+		</button>
+	</div>
 
 	{#if showInitialLoadingMessage}
 		<p class="muted-block">Loading the full folder queue from the active catalog snapshot.</p>
@@ -371,6 +450,97 @@
 		border-bottom: 1px solid rgba(148, 163, 184, 0.14);
 	}
 
+	.queue-context-bar {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		gap: 0.9rem;
+		align-items: start;
+		margin-bottom: 0.95rem;
+		padding: 0.8rem 0.9rem;
+		border: 1px solid rgba(148, 163, 184, 0.16);
+		background: rgba(15, 23, 42, 0.62);
+	}
+
+	.queue-context-copy,
+	.queue-context-actions {
+		display: grid;
+		gap: 0.28rem;
+	}
+
+	.queue-context-label {
+		margin: 0;
+		font-size: 0.72rem;
+		font-weight: 800;
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+		color: rgba(125, 211, 252, 0.84);
+	}
+
+	.queue-context-title {
+		margin: 0;
+		font-size: 1rem;
+		font-weight: 700;
+		color: #f8fafc;
+	}
+
+	.queue-context-detail {
+		margin: 0;
+		color: rgba(226, 232, 240, 0.74);
+		line-height: 1.45;
+	}
+
+	.queue-context-actions {
+		grid-auto-flow: column;
+		grid-auto-columns: max-content;
+		align-content: start;
+		gap: 0.65rem;
+	}
+
+	.queue-context-link,
+	.queue-context-button {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-height: 2.45rem;
+		padding: 0.65rem 0.9rem;
+		border: 1px solid rgba(148, 163, 184, 0.18);
+		background: rgba(9, 14, 22, 0.9);
+		font: inherit;
+		font-size: 0.84rem;
+		font-weight: 700;
+		color: #f8fafc;
+	}
+
+	.queue-context-button:disabled {
+		color: rgba(148, 163, 184, 0.72);
+		cursor: not-allowed;
+	}
+
+	.mobile-sort-row {
+		display: none;
+		gap: 0.65rem;
+		margin-bottom: 0.95rem;
+		flex-wrap: wrap;
+	}
+
+	.mobile-sort-chip {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0.55rem 0.75rem;
+		border: 1px solid rgba(148, 163, 184, 0.18);
+		background: rgba(15, 23, 42, 0.62);
+		font: inherit;
+		font-size: 0.8rem;
+		font-weight: 700;
+		color: rgba(226, 232, 240, 0.78);
+	}
+
+	.mobile-sort-chip.active {
+		border-color: rgba(56, 189, 248, 0.38);
+		color: #f8fafc;
+	}
+
 	.compact-filters {
 		align-items: center;
 	}
@@ -583,6 +753,7 @@
 	}
 
 	@media (max-width: 1100px) {
+		.queue-context-bar,
 		.section-head {
 			grid-template-columns: 1fr;
 		}
@@ -591,12 +762,21 @@
 			justify-items: start;
 		}
 
+		.queue-context-actions {
+			grid-auto-flow: row;
+			grid-auto-columns: unset;
+		}
+
 		.filter-hint.inline {
 			text-align: left;
 		}
 	}
 
 	@media (max-width: 720px) {
+		.mobile-sort-row {
+			display: flex;
+		}
+
 		.filter-row {
 			grid-template-columns: 1fr;
 		}

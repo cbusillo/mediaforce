@@ -112,8 +112,8 @@
 
 	.system-cell {
 		position: relative;
-		min-height: 8.5rem;
-		padding: 1rem 1.1rem;
+		min-height: 6.8rem;
+		padding: 0.9rem 1rem;
 		border: 1px solid rgba(148, 163, 184, 0.18);
 		background: rgba(15, 20, 27, 0.94);
 		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2);
@@ -169,7 +169,7 @@
 
 	.system-value {
 		margin: 0.4rem 0 0;
-		font-size: 1.2rem;
+		font-size: 1.06rem;
 		font-weight: 700;
 		line-height: 1.25;
 		color: #f8fafc;
@@ -229,7 +229,7 @@
 		transform: none;
 	}
 
-	@media (max-width: 1100px) {
+	@media (max-width: 980px) {
 		.system-strip {
 			grid-template-columns: 1fr 1fr;
 		}
