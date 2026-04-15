@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
+	import '$lib/design/workstation-shell.css';
 	import { onMount } from 'svelte';
 	import { fetchJson, postJson } from '$lib/api/client';
 	import type {
@@ -508,7 +509,7 @@
 		{refreshArchiveCleanup}
 	/>
 {:else}
-	<div class="page-stack">
+	<div class="page-stack settings-loading-shell">
 		<Panel padding="1.05rem 1.2rem">
 			<div class="panel-stack">
 				<SectionHead
@@ -527,3 +528,11 @@
 		</Panel>
 	</div>
 {/if}
+
+<style>
+	.page-stack.settings-loading-shell {
+		display: grid;
+		gap: 1rem;
+		padding: 0.25rem 0 1rem;
+	}
+</style>
