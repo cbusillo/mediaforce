@@ -616,7 +616,63 @@
 	}
 
 	.settings-loading-screen .system-strip {
+		display: grid;
+		gap: 1rem;
 		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+
+	.settings-loading-screen .system-cell {
+		position: relative;
+		min-height: 7rem;
+		padding: 1rem 1.1rem;
+		border: 1px solid rgba(148, 163, 184, 0.18);
+		background: rgba(15, 20, 27, 0.94);
+		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2);
+		overflow: hidden;
+	}
+
+	.settings-loading-screen .system-cell::before {
+		content: '';
+		position: absolute;
+		inset: 0 0 auto;
+		height: 2px;
+		background: rgba(56, 189, 248, 0.82);
+	}
+
+	.settings-loading-screen .accent-cell {
+		background: rgba(13, 33, 42, 0.94);
+	}
+
+	.settings-loading-screen .selection-state {
+		border-color: rgba(45, 212, 191, 0.24);
+		background: rgba(10, 36, 38, 0.94);
+	}
+
+	.settings-loading-screen .selection-state::before {
+		background: rgba(45, 212, 191, 0.88);
+	}
+
+	.settings-loading-screen .system-label {
+		margin: 0;
+		font-size: 0.72rem;
+		font-weight: 800;
+		letter-spacing: 0.16em;
+		text-transform: uppercase;
+		color: rgba(148, 163, 184, 0.88);
+	}
+
+	.settings-loading-screen .system-value {
+		margin: 0.4rem 0 0;
+		font-size: 1.15rem;
+		font-weight: 700;
+		line-height: 1.25;
+		color: #f8fafc;
+	}
+
+	.settings-loading-screen .system-detail {
+		margin: 0;
+		color: rgba(226, 232, 240, 0.74);
+		line-height: 1.5;
 	}
 
 	@media (max-width: 960px) {
