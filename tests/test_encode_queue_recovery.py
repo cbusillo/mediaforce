@@ -466,6 +466,732 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(host_payload["key"], "remote-b")
         self.assertIsNone(waiting_reason)
 
+    def test_host_selection_uses_backup_host_after_repeated_transient_failures(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "remote-a",
+                "label": "Remote A",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+            {
+                "key": "remote-b",
+                "label": "Remote B",
+                "priority": 70,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+        ]
+        manifest_path = self._write_manifest("manifest-global-host-backoff.json", [{"library_item_id": 1}])
+        second_manifest_path = self._write_manifest("manifest-global-host-backoff-b.json", [{"library_item_id": 2}])
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "cooling-remote-a",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(manifest_path),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 2,
+                    "process_pid": None,
+                    "error": "ssh: connect to host remote-a port 22: Operation timed out",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "cooling-remote-a-b",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(second_manifest_path),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": "Read from remote host remote-a: Operation timed out",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNotNone(host_payload)
+        assert host_payload is not None
+        self.assertEqual(host_payload["key"], "remote-b")
+        self.assertIsNone(waiting_reason)
+
+    def test_host_selection_does_not_globally_demote_host_after_single_transient_failure(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "remote-a",
+                "label": "Remote A",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+            {
+                "key": "remote-b",
+                "label": "Remote B",
+                "priority": 70,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+        ]
+        manifest_path = self._write_manifest("manifest-single-host-blip.json", [{"library_item_id": 1}])
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "single-blip-remote-a",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(manifest_path),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": "ssh: connect to host remote-a port 22: Operation timed out",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNotNone(host_payload)
+        assert host_payload is not None
+        self.assertEqual(host_payload["key"], "remote-a")
+        self.assertIsNone(waiting_reason)
+
+    def test_host_selection_waits_when_only_repeatedly_failing_host_is_available(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "remote-a",
+                "label": "Remote A",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+        ]
+        manifest_path = self._write_manifest("manifest-only-bad-host.json", [{"library_item_id": 1}])
+        second_manifest_path = self._write_manifest("manifest-only-bad-host-b.json", [{"library_item_id": 2}])
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "only-host-cooling",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(manifest_path),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 2,
+                    "process_pid": None,
+                    "error": "Read from remote host remote-a: Operation timed out",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "only-host-cooling-b",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(second_manifest_path),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": "ssh: connect to host remote-a port 22: Connection refused",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNone(host_payload)
+        self.assertEqual(waiting_reason, "waiting for host cooldown to expire on Remote A")
+
+    def test_host_selection_uses_startable_backup_when_active_host_is_globally_blocked(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "remote-a",
+                "label": "Remote A",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+            {
+                "key": "ct103",
+                "label": "CT103",
+                "priority": 70,
+                "capabilities": ["encode_queue"],
+                "available": False,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "start_command": "ssh prox-main.shiny pct start 103",
+                "schedule_profile": "always",
+            },
+        ]
+        manifest_path = self._write_manifest("manifest-active-blocked-host.json", [{"library_item_id": 1}])
+        second_manifest_path = self._write_manifest("manifest-active-blocked-host-b.json", [{"library_item_id": 2}])
+        with open_db(self.config.paths.db_path) as connection:
+            for job_id, path in (("blocked-remote-a", manifest_path), ("blocked-remote-a-b", second_manifest_path)):
+                save_encode_job(
+                    connection,
+                    {
+                        "job_id": job_id,
+                        "prefix": "tv/show",
+                        "job_kind": "shard",
+                        "parent_job_id": None,
+                        "status": "queued",
+                        "manifest_path": str(path),
+                        "item_count": 1,
+                        "saved_profile_path": None,
+                        "manifest_indexes": [0],
+                        "host": {},
+                        "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
+                        "notes": "",
+                        "bypass_schedule": False,
+                        "attempt_count": 1,
+                        "process_pid": None,
+                        "error": "ssh: connect to host remote-a port 22: Operation timed out",
+                        "leased_at": None,
+                        "lease_expires_at": None,
+                        "heartbeat_at": None,
+                        "worker_id": None,
+                        "retry_not_before": None,
+                        "waiting_reason": None,
+                        "terminal_reason": None,
+                        "last_failure_kind": "ssh_transport",
+                        "last_failure_at": web_app._now_iso(),
+                        "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                        "created_at": web_app._now_iso(),
+                        "started_at": web_app._now_iso(),
+                        "finished_at": None,
+                        "updated_at": web_app._now_iso(),
+                    },
+                )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNotNone(host_payload)
+        assert host_payload is not None
+        self.assertEqual(host_payload["key"], "ct103")
+        self.assertIsNone(waiting_reason)
+
+    def test_host_selection_blocks_globally_quarantined_host_by_host_alias(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "",
+                "host": "remote-a.internal",
+                "label": "Primary Encoder",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+            {
+                "key": "remote-b",
+                "host": "remote-b.internal",
+                "label": "Backup Encoder",
+                "priority": 70,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+        ]
+        manifest_path = self._write_manifest("manifest-host-alias-quarantine.json", [{"library_item_id": 1}])
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "host-alias-cooling-a",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(manifest_path),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"host": "remote-a.internal", "failure_streak": 2},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 2,
+                    "process_pid": None,
+                    "error": "ssh: connect to host remote-a.internal port 22: Operation timed out",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNotNone(host_payload)
+        assert host_payload is not None
+        self.assertEqual(host_payload["key"], "remote-b")
+        self.assertIsNone(waiting_reason)
+
+    def test_host_selection_merges_global_quarantine_rows_across_alias_drift(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "cbusillo@10.0.0.5",
+                "host": "10.0.0.5",
+                "label": "Primary Encoder",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+            {
+                "key": "remote-b",
+                "host": "10.0.0.6",
+                "label": "Backup Encoder",
+                "priority": 70,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+        ]
+        manifest_a = self._write_manifest("manifest-merged-quarantine-a.json", [{"library_item_id": 1}])
+        manifest_b = self._write_manifest("manifest-merged-quarantine-b.json", [{"library_item_id": 2}])
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "merged-quarantine-a",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(manifest_a),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"key": "cbusillo@10.0.0.5", "host": "10.0.0.5", "failure_streak": 1},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": "ssh: connect to host 10.0.0.5 port 22: Operation timed out",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "merged-quarantine-b",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(manifest_b),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"label": "Primary Encoder", "host": "10.0.0.5", "failure_streak": 1},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": "Read from remote host 10.0.0.5: Operation timed out",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNotNone(host_payload)
+        assert host_payload is not None
+        self.assertEqual(host_payload["key"], "remote-b")
+        self.assertIsNone(waiting_reason)
+
+    def test_host_selection_ignores_malformed_last_host_json_in_global_quarantine_scan(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "remote-a",
+                "label": "Remote A",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            }
+        ]
+        manifest_path = self._write_manifest("manifest-malformed-host-json.json", [{"library_item_id": 1}])
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "malformed-host-json",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(manifest_path),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"key": "remote-a", "label": "Remote A"},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": "ssh: connect to host remote-a port 22: Operation timed out",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            connection.execute(
+                update(encode_jobs)
+                .where(encode_jobs.c.job_id == "malformed-host-json")
+                .values(last_host_json="{")
+            )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNotNone(host_payload)
+        assert host_payload is not None
+        self.assertEqual(host_payload["key"], "remote-a")
+        self.assertIsNone(waiting_reason)
+
+    def test_global_quarantine_does_not_match_hosts_by_shared_label_only(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "remote-a",
+                "host": "10.0.0.10",
+                "label": "Shared Encoder",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+            {
+                "key": "remote-b",
+                "host": "10.0.0.20",
+                "label": "Shared Encoder",
+                "priority": 70,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+        ]
+        manifest_a = self._write_manifest("manifest-shared-label-a.json", [{"library_item_id": 1}])
+        manifest_b = self._write_manifest("manifest-shared-label-b.json", [{"library_item_id": 2}])
+        with open_db(self.config.paths.db_path) as connection:
+            for job_id, manifest_path in (("shared-label-cool-a", manifest_a), ("shared-label-cool-b", manifest_b)):
+                save_encode_job(
+                    connection,
+                    {
+                        "job_id": job_id,
+                        "prefix": "tv/show",
+                        "job_kind": "shard",
+                        "parent_job_id": None,
+                        "status": "queued",
+                        "manifest_path": str(manifest_path),
+                        "item_count": 1,
+                        "saved_profile_path": None,
+                        "manifest_indexes": [0],
+                        "host": {},
+                        "last_host": {"key": "remote-b", "host": "10.0.0.20", "label": "Shared Encoder", "failure_streak": 1},
+                        "notes": "",
+                        "bypass_schedule": False,
+                        "attempt_count": 1,
+                        "process_pid": None,
+                        "error": "ssh: connect to host 10.0.0.20 port 22: Operation timed out",
+                        "leased_at": None,
+                        "lease_expires_at": None,
+                        "heartbeat_at": None,
+                        "worker_id": None,
+                        "retry_not_before": None,
+                        "waiting_reason": None,
+                        "terminal_reason": None,
+                        "last_failure_kind": "ssh_transport",
+                        "last_failure_at": web_app._now_iso(),
+                        "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                        "created_at": web_app._now_iso(),
+                        "started_at": web_app._now_iso(),
+                        "finished_at": None,
+                        "updated_at": web_app._now_iso(),
+                    },
+                )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNotNone(host_payload)
+        assert host_payload is not None
+        self.assertEqual(host_payload["key"], "remote-a")
+        self.assertIsNone(waiting_reason)
+
+    def test_global_quarantine_wait_message_is_deterministic(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "remote-b",
+                "host": "10.0.0.20",
+                "label": "Backup Encoder",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+            {
+                "key": "remote-a",
+                "host": "10.0.0.10",
+                "label": "Primary Encoder",
+                "priority": 80,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+        ]
+        manifests = [
+            self._write_manifest("manifest-deterministic-wait-a.json", [{"library_item_id": 1}]),
+            self._write_manifest("manifest-deterministic-wait-b.json", [{"library_item_id": 2}]),
+            self._write_manifest("manifest-deterministic-wait-c.json", [{"library_item_id": 3}]),
+            self._write_manifest("manifest-deterministic-wait-d.json", [{"library_item_id": 4}]),
+        ]
+        rows = [
+            ("det-wait-b1", manifests[0], {"key": "remote-b", "host": "10.0.0.20", "label": "Backup Encoder", "failure_streak": 1}, "ssh: connect to host 10.0.0.20 port 22: Operation timed out", "2999-01-02T00:00:00+00:00"),
+            ("det-wait-b2", manifests[1], {"key": "remote-b", "host": "10.0.0.20", "label": "Backup Encoder", "failure_streak": 1}, "Read from remote host 10.0.0.20: Operation timed out", "2999-01-02T00:00:00+00:00"),
+            ("det-wait-a1", manifests[2], {"key": "remote-a", "host": "10.0.0.10", "label": "Primary Encoder", "failure_streak": 1}, "ssh: connect to host 10.0.0.10 port 22: Operation timed out", "2999-01-01T00:00:00+00:00"),
+            ("det-wait-a2", manifests[3], {"key": "remote-a", "host": "10.0.0.10", "label": "Primary Encoder", "failure_streak": 1}, "Read from remote host 10.0.0.10: Operation timed out", "2999-01-01T00:00:00+00:00"),
+        ]
+        with open_db(self.config.paths.db_path) as connection:
+            for job_id, manifest_path, last_host, error_message, cooldown_until in rows:
+                save_encode_job(
+                    connection,
+                    {
+                        "job_id": job_id,
+                        "prefix": "tv/show",
+                        "job_kind": "shard",
+                        "parent_job_id": None,
+                        "status": "queued",
+                        "manifest_path": str(manifest_path),
+                        "item_count": 1,
+                        "saved_profile_path": None,
+                        "manifest_indexes": [0],
+                        "host": {},
+                        "last_host": last_host,
+                        "notes": "",
+                        "bypass_schedule": False,
+                        "attempt_count": 1,
+                        "process_pid": None,
+                        "error": error_message,
+                        "leased_at": None,
+                        "lease_expires_at": None,
+                        "heartbeat_at": None,
+                        "worker_id": None,
+                        "retry_not_before": None,
+                        "waiting_reason": None,
+                        "terminal_reason": None,
+                        "last_failure_kind": "ssh_transport",
+                        "last_failure_at": web_app._now_iso(),
+                        "host_cooldown_until": cooldown_until,
+                        "created_at": web_app._now_iso(),
+                        "started_at": web_app._now_iso(),
+                        "finished_at": None,
+                        "updated_at": web_app._now_iso(),
+                    },
+                )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNone(host_payload)
+        self.assertEqual(waiting_reason, "waiting for host cooldown to expire on Primary Encoder")
+
     def test_deterministic_failure_moves_job_to_needs_attention(self) -> None:
         source_path = self._create_source_file("episode-d.mkv")
         staging_path = self._staging_path("episode-d.mkv")
@@ -500,6 +1226,225 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             assert updated is not None
             self.assertEqual(updated["status"], "needs_attention")
             self.assertEqual(updated["terminal_reason"], "deterministic")
+
+    def test_transient_ssh_failure_stays_in_retry_backoff_after_attempt_cap(self) -> None:
+        source_path = self._create_source_file("episode-host-retry.mkv")
+        staging_path = self._staging_path("episode-host-retry.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-host-retry.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-host-retry",
+                manifest_name="manifest-host-retry.json",
+                host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                status="running",
+                attempt_count=3,
+            )
+
+            job = load_encode_job(connection, "job-host-retry")
+            assert job is not None
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind="ssh_transport",
+                error_message="ssh: connect to host remote-a port 22: Operation timed out",
+            )
+
+            updated = load_encode_job(connection, "job-host-retry")
+            self.assertIsNotNone(updated)
+            assert updated is not None
+            self.assertEqual(updated["status"], "retry_backoff")
+            self.assertIsNone(updated["terminal_reason"])
+            self.assertEqual(updated["last_failure_kind"], "ssh_transport")
+            self.assertIn("SSH transport failure", str(updated["waiting_reason"]))
+            self.assertIsNone(updated["finished_at"])
+            self.assertIsNotNone(updated["host_cooldown_until"])
+            self.assertEqual(updated["last_host"]["failure_streak"], 1)
+
+    def test_same_job_repeated_host_failures_increment_last_host_failure_streak(self) -> None:
+        source_path = self._create_source_file("episode-host-repeat.mkv")
+        staging_path = self._staging_path("episode-host-repeat.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-host-repeat.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-host-repeat",
+                manifest_name="manifest-host-repeat.json",
+                host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                status="running",
+                attempt_count=2,
+            )
+            job = load_encode_job(connection, "job-host-repeat")
+            assert job is not None
+            job["last_host"] = {"key": "remote-a", "label": "Remote A", "mode": "ssh", "failure_streak": 1}
+            save_encode_job(connection, job)
+
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind="ssh_transport",
+                error_message="ssh: connect to host remote-a port 22: Operation timed out",
+            )
+
+            updated = load_encode_job(connection, "job-host-repeat")
+            self.assertIsNotNone(updated)
+            assert updated is not None
+            self.assertEqual(updated["status"], "retry_backoff")
+            self.assertEqual(updated["last_host"]["failure_streak"], 2)
+
+    def test_same_job_repeated_host_failures_preserve_streak_across_alias_change(self) -> None:
+        source_path = self._create_source_file("episode-host-repeat-alias.mkv")
+        staging_path = self._staging_path("episode-host-repeat-alias.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-host-repeat-alias.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-host-repeat-alias",
+                manifest_name="manifest-host-repeat-alias.json",
+                host={"key": "cbusillo@10.0.0.5", "host": "10.0.0.5", "label": "Primary Encoder", "mode": "ssh"},
+                status="running",
+                attempt_count=2,
+            )
+            job = load_encode_job(connection, "job-host-repeat-alias")
+            assert job is not None
+            job["last_host"] = {"host": "10.0.0.5", "label": "Primary Encoder", "failure_streak": 1}
+            save_encode_job(connection, job)
+
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind="ssh_transport",
+                error_message="ssh: connect to host 10.0.0.5 port 22: Operation timed out",
+            )
+
+            updated = load_encode_job(connection, "job-host-repeat-alias")
+            self.assertIsNotNone(updated)
+            assert updated is not None
+            self.assertEqual(updated["status"], "retry_backoff")
+            self.assertEqual(updated["last_host"]["failure_streak"], 2)
+            self.assertEqual(updated["last_host"]["host"], "10.0.0.5")
+            self.assertEqual(updated["last_host"]["key"], "cbusillo@10.0.0.5")
+
+    def test_host_selection_uses_backup_host_after_single_job_repeated_failures(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "remote-a",
+                "label": "Remote A",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+            {
+                "key": "remote-b",
+                "label": "Remote B",
+                "priority": 70,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+        ]
+        manifest_path = self._write_manifest("manifest-single-job-repeated-host.json", [{"library_item_id": 1}])
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "single-job-remote-a-repeat",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(manifest_path),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a", "failure_streak": 2},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 2,
+                    "process_pid": None,
+                    "error": "Read from remote host remote-a: Operation timed out",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNotNone(host_payload)
+        assert host_payload is not None
+        self.assertEqual(host_payload["key"], "remote-b")
+        self.assertIsNone(waiting_reason)
+
+    def test_permission_denied_ssh_failure_still_needs_attention_after_attempt_cap(self) -> None:
+        source_path = self._create_source_file("episode-host-permission.mkv")
+        staging_path = self._staging_path("episode-host-permission.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-host-permission.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-host-permission",
+                manifest_name="manifest-host-permission.json",
+                host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                status="running",
+                attempt_count=3,
+            )
+
+            job = load_encode_job(connection, "job-host-permission")
+            assert job is not None
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind="ssh_transport",
+                error_message="Permission denied (publickey).",
+            )
+
+            updated = load_encode_job(connection, "job-host-permission")
+            self.assertIsNotNone(updated)
+            assert updated is not None
+            self.assertEqual(updated["status"], "needs_attention")
+            self.assertEqual(updated["terminal_reason"], "max_attempts_exhausted")
 
     def test_runtime_settings_payload_normalizes_capabilities(self) -> None:
         payload = web_app._build_runtime_settings_payload(
@@ -1228,6 +2173,36 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         assert job is not None
         self.assertEqual(job["status"], "completed")
         self.assertIsNone(job["error"])
+
+    def test_run_encode_job_resets_host_failure_streak_after_success(self) -> None:
+        manifest_path = self._write_manifest("manifest-reset-streak.json", [{"library_item_id": 1}])
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(
+                connection,
+                job_id="job-reset-streak",
+                manifest_name=manifest_path.name,
+                host={"key": "ct103", "host": "ct103", "label": "CT103", "stop_command": "ssh prox-main.shiny pct shutdown 103"},
+                status="running",
+                attempt_count=2,
+                lease_expires_at=web_app._now_iso(),
+            )
+            job = load_encode_job(connection, "job-reset-streak")
+            assert job is not None
+            job["last_host"] = {"key": "ct103", "host": "ct103", "label": "CT103", "failure_streak": 2}
+            save_encode_job(connection, job)
+        with patch("mediaforce.web.app._ensure_encode_host_ready", return_value=False), patch(
+                "mediaforce.web.app._stop_encode_host_if_configured"
+        ) as stop_mock, patch(
+            "mediaforce.web.app.encode_manifest_items", return_value=[]
+        ), patch("mediaforce.web.app.load_config", return_value=self.config):
+            web_app._run_encode_job(config_path=self.config.paths.config_path, job_id="job-reset-streak")
+        stop_mock.assert_not_called()
+        with open_db(self.config.paths.db_path) as connection:
+            job = load_encode_job(connection, "job-reset-streak")
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job["status"], "completed")
+        self.assertNotIn("failure_streak", job["last_host"])
 
     def test_full_scan_becomes_stale_when_library_roots_change(self) -> None:
         source_path = self._create_source_file("episode-a.mkv")
@@ -5981,6 +6956,39 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         decorated = web_app._decorate_encode_queue_for_scheduler(self.config, encode_queue)
 
         self.assertEqual(decorated["recent"][0]["attempt_summary"], "attempt 1 of 3")
+
+    def test_decorate_encode_queue_for_scheduler_attempt_summary_clamps_to_max(self) -> None:
+        manifest_path = self.root / "clamped-attempt-manifest.json"
+        manifest_path.write_text(json.dumps({"items": [{"duration_seconds": 60.0, "source_size_bytes": 1000}]}))
+        encode_queue = {
+            "state": {"is_paused": False, "stop_requested": False},
+            "running": [],
+            "queued": [],
+            "recent": [
+                {
+                    "job_id": "retrying-host-job",
+                    "prefix": "tv/House/Season 2",
+                    "status": "retry_backoff",
+                    "manifest_path": str(manifest_path),
+                    "item_count": 1,
+                    "host": {},
+                    "attempt_count": 7,
+                    "started_at": "2026-04-03T21:14:17+00:00",
+                    "progress": {
+                        "progress_state": "retry_backoff",
+                        "overall_completed_duration_seconds": 12.0,
+                    },
+                }
+            ],
+            "queued_count": 0,
+            "running_count": 0,
+            "retry_backoff_count": 1,
+            "needs_attention_count": 0,
+        }
+
+        decorated = web_app._decorate_encode_queue_for_scheduler(self.config, encode_queue)
+
+        self.assertEqual(decorated["recent"][0]["attempt_summary"], "attempt 3 of 3")
 
     def test_encode_queue_summary_copy_labels_eta_as_estimated(self) -> None:
         encode_queue = {

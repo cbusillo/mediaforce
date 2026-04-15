@@ -31,6 +31,7 @@ RECENT_ENCODE_JOB_STATUSES = ("completed", "failed", "stopped", "needs_attention
 _PERSISTED_ENCODE_HOST_KEYS = (
     "allowed_libraries",
     "capabilities",
+    "failure_streak",
     "ffmpeg_path",
     "host",
     "key",
@@ -147,6 +148,14 @@ def persisted_encode_host_payload(payload: dict[str, Any] | None) -> dict[str, A
                 continue
             try:
                 persisted[key] = int(value)
+            except (TypeError, ValueError):
+                continue
+            continue
+        if key == "failure_streak":
+            if value in {None, ""}:
+                continue
+            try:
+                persisted[key] = max(1, int(value))
             except (TypeError, ValueError):
                 continue
             continue

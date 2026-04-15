@@ -304,6 +304,7 @@ def decorate_encode_job_for_scheduler(
             float_value(progress.get("overall_completed_duration_seconds")) > 0.0
         )
     effective_attempt_count = attempt_count if attempt_count > 0 else (1 if has_started else 0)
+    display_attempt_count = min(effective_attempt_count, deps.encode_job_max_attempts)
     schedule_waiting = (
         status == "queued"
         and not scheduler_allows_encode_run(
@@ -316,8 +317,8 @@ def decorate_encode_job_for_scheduler(
     decorated["schedule_waiting"] = schedule_waiting
     decorated["scheduler_summary"] = str(policy["summary"])
     decorated["attempt_summary"] = (
-        f"attempt {effective_attempt_count} of {deps.encode_job_max_attempts}"
-        if effective_attempt_count
+        f"attempt {display_attempt_count} of {deps.encode_job_max_attempts}"
+        if display_attempt_count
         else "not started yet"
     )
     if status == "running":
