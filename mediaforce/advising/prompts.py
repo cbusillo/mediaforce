@@ -53,6 +53,8 @@ def build_seed_prompt(
         "When operator_repeat_signal shows the same explicit experiment was asked for again after earlier softening, treat that as deliberate confirmation and keep the risky draft unless the request cannot be expressed with the available policy keys. "
         "If the request looks unrealistic, still try to draft the closest faithful experiment you can and mark it honored_with_risk instead of fighting the request. "
         "If the operator asks for a smaller encode, do not silently move to a higher quality target or otherwise preserve the old behavior behind reassuring wording. "
+        "When the available policy keys include video.black_bar_handling, consider setting it to smart for letterboxed, matted, widescreen, or black-bar-heavy sources when the operator note, folder class, or sample metadata makes that likely; prefer smart detection over manual crop unless the operator supplied an exact crop. "
+        "Treat video.max_height as an explicit downsample/cap-height request knob. Do not infer 1080p or 720p scaling from a size budget alone; use max_height only when the operator request or requested_experiment clearly asks for a scale target. "
         "Do not anchor on legacy H.264 or HEVC bitrate intuition when the policy is using AV1. For AV1, a projected bitrate that looks surprisingly low by older codec standards can still be a plausible high-quality outcome for clean or forgiving material, so do not soften a size-first request just because the bitrate number looks small on its own. "
         "Teach media-class taste, not a single-title compression floor, but do that in service of the operator's ask rather than as a reason to refuse it. "
         "If you soften or reject a request, say so explicitly and only do it for the narrow reasons above. "
@@ -104,6 +106,8 @@ def build_tune_prompt(
         "Use softened only when the note is exploratory, ambiguous, self-contradictory, or cannot be expressed with the available policy keys. "
         "If you intentionally soften or redirect an explicit request, say that plainly in request_response, diagnosis, and suggested_follow_up instead of hiding the tradeoff. "
         "If the operator asks for a smaller encode, do not silently move to a higher quality target or preserve the old behavior behind reassuring language. "
+        "When the available policy keys include video.black_bar_handling, consider setting it to smart for letterboxed, matted, widescreen, or black-bar-heavy sources when the operator note, review evidence, or sample metadata makes that likely; prefer smart detection over manual crop unless the operator supplied an exact crop. "
+        "Treat video.max_height as an explicit downsample/cap-height request knob. Do not infer 1080p or 720p scaling from a size budget alone; use max_height only when operator_note_parse.scale_height, requested_experiment, or the operator note clearly asks for a scale target. "
         "Do not anchor on legacy H.264 or HEVC bitrate intuition when the policy is using AV1. For AV1, a projected bitrate that looks surprisingly low by older codec standards can still be a plausible high-quality outcome for clean or forgiving material, so do not redirect a size-first request just because the bitrate number looks small on its own. "
         "When the operator explicitly wants heavy compression with very little perceptible loss, high-80s VMAF can still be a legitimate AV1 experiment on clean or forgiving material, but treat that as class-dependent and risk-aware rather than a universal default. "
         "When requested_experiment or retrieved_memory shows the operator repeated the same explicit risky request, treat that as deliberate confirmation and keep the risky draft unless the request cannot be expressed with the available policy keys. "
@@ -160,10 +164,11 @@ def build_operator_note_parse_prompt(payload: dict[str, Any]) -> str:
         "Mark operator_confirmed true only when the note is a clear instruction the system should act on now. "
         "Directive questions still count as direct requests when they clearly ask for action, such as 'Target 300MB per episode?' or 'Can you target 300MB per episode?'. "
         "Exploratory wording stays unconfirmed when the operator is asking whether a change would help or is realistic, such as 'Can we try to target 85 VMAF instead? Will that help?' or 'I want to understand if 300MB per episode is realistic.' "
-        "If both a size budget and a metric target are explicitly requested, use combined_experiment. "
+        "Extract explicit downsample or output-height cap requests into scale_height, such as 'downsample to 1080p', 'cap at 720p', or 'make the 4K files 1080p'. This is only for requested scaling; do not infer a scale target from source resolution, a size budget, or general smaller-file language. "
+        "If a scale target appears with a size budget or metric target, use combined_experiment. If only a scale target is requested, use scale_target. If both a size budget and a metric target are explicitly requested, use combined_experiment. "
         "Return JSON only with no markdown fences or extra commentary. "
         "Return valid JSON only with this exact shape: "
-        '{"summary":"short summary","intent_type":"direct_request|exploratory_question|approval_feedback|other|unclear","request_type":"none|metric_target|size_budget|combined_experiment","operator_confirmed":true,"metric":"vmaf|xpsnr|null","metric_target":85,"size_budget_value":300,"size_budget_unit":"mb|gb|kb|tb|null","reasoning_note":"short explanation"}. '
+        '{"summary":"short summary","intent_type":"direct_request|exploratory_question|approval_feedback|other|unclear","request_type":"none|metric_target|size_budget|scale_target|combined_experiment","operator_confirmed":true,"metric":"vmaf|xpsnr|null","metric_target":85,"size_budget_value":300,"size_budget_unit":"mb|gb|kb|tb|null","scale_height":1080,"reasoning_note":"short explanation"}. '
         "Do not invent requests that are not explicitly in the note. Here is the note context:\n\n"
         f"{serialized}"
     )

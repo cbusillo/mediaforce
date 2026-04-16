@@ -129,12 +129,25 @@ def _fake_operator_note_parse(*, project_root: Path, payload: dict[str, object])
         metric_target = float(metric_match.group("target") or 0)
     size_budget_value = float(budget_match.group("amount")) if budget_match else None
     size_budget_unit = str(budget_match.group("unit")) if budget_match else None
-    if size_budget_value is not None and metric_target is not None:
+    scale_match = re.search(
+        r"\b(?:downsample|downscale|scale|resize|cap|limit|convert|make)\b.{0,40}\b(?P<height>480|540|576|720|900|1080|1440|2160)p\b",
+        lower,
+    )
+    if scale_match is None:
+        scale_match = re.search(
+            r"\b(?P<height>480|540|576|720|900|1080|1440|2160)p\b.{0,40}\b(?:downsample|downscale|scale|resize|cap|limit)\b",
+            lower,
+        )
+    scale_height = int(scale_match.group("height")) if scale_match else None
+    explicit_request_count = sum(value is not None for value in (size_budget_value, metric_target, scale_height))
+    if explicit_request_count > 1:
         request_type = "combined_experiment"
     elif size_budget_value is not None:
         request_type = "size_budget"
     elif metric_target is not None:
         request_type = "metric_target"
+    elif scale_height is not None:
+        request_type = "scale_target"
     else:
         request_type = "none"
     exploratory = any(
@@ -157,6 +170,7 @@ def _fake_operator_note_parse(*, project_root: Path, payload: dict[str, object])
         "metric_target": metric_target,
         "size_budget_value": size_budget_value,
         "size_budget_unit": size_budget_unit,
+        "scale_height": scale_height,
         "reasoning_note": "test parser",
     }
 
@@ -273,6 +287,7 @@ class TuningRuntimeTests(unittest.TestCase):
                     "metric_target": None,
                     "size_budget_value": 300,
                     "size_budget_unit": "mb",
+                    "scale_height": None,
                     "reasoning_note": "Directive question asking for action.",
                 }
             )
@@ -3084,6 +3099,26 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertFalse(request["requires_confirmation"])
         self.assertAlmostEqual(request["estimated_source_percent"], 4.36, places=2)
 
+    def test_operator_requested_experiment_detects_scale_target_request(self) -> None:
+        request = _operator_requested_experiment("Downsample the 4K files to 1080p for this folder.")
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "scale_target")
+        self.assertTrue(request["operator_confirmed"])
+        self.assertEqual(request["scale_height"], 1080)
+        self.assertEqual(request["applied_policy"]["video"]["max_height"], 1080)
+
+    def test_operator_requested_experiment_combines_scale_with_metric_request(self) -> None:
+        request = _operator_requested_experiment("Downsample to 1080p and target 88 VMAF for the next sample.")
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "combined_experiment")
+        self.assertEqual(request["metric"], "vmaf")
+        self.assertEqual(request["target"], 88.0)
+        self.assertEqual(request["scale_height"], 1080)
+        self.assertEqual(request["applied_policy"]["video"]["target_vmaf"], 88.0)
+        self.assertEqual(request["applied_policy"]["video"]["max_height"], 1080)
+
     def test_size_budget_feasibility_treats_old_codec_style_low_bitrates_as_aggressive_first(self) -> None:
         feasibility, requires_confirmation = size_budget_feasibility(
             source_percent=4.36,
@@ -4457,7 +4492,7 @@ class TuningRuntimeTests(unittest.TestCase):
     def test_seed_prompt_adds_class_guardrails(self) -> None:
         prompt = _build_seed_prompt({"folder": "tv/House/Season 5"})
 
-        self.assertEqual(SEED_PROMPT_VERSION, "seed-v7")
+        self.assertEqual(SEED_PROMPT_VERSION, "seed-v8")
         self.assertIn("cold-start guess", prompt)
         self.assertIn("best first-pass attempt", prompt)
         self.assertIn("instruction to satisfy", prompt)
@@ -4471,6 +4506,8 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("clean 1080p catalog TV", prompt)
         self.assertIn("legacy H.264 or HEVC bitrate intuition", prompt)
         self.assertIn("high-80s VMAF", prompt)
+        self.assertIn("video.black_bar_handling", prompt)
+        self.assertIn("Do not infer 1080p or 720p scaling from a size budget alone", prompt)
         self.assertIn("request_response", prompt)
         self.assertIn("honored_with_risk", prompt)
 
@@ -4503,6 +4540,34 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(schema["properties"]["video"]["properties"]["target_vmaf"]["type"], ["number", "null"])
         self.assertEqual(schema["properties"]["video"]["properties"]["thorough"]["type"], ["boolean", "null"])
         self.assertEqual(schema["properties"]["audio"]["properties"]["keep_languages"]["type"], ["array", "null"])
+
+    def test_apply_seed_policy_normalizes_transform_policy_values(self) -> None:
+        _updated_policy, applied = apply_seed_policy(
+            {
+                "video": {
+                    "max_height": 0,
+                    "downsample_algorithm": "lanczos",
+                    "black_bar_handling": "off",
+                    "black_bar_detect_samples": 3,
+                    "crop": "",
+                }
+            },
+            {
+                "video": {
+                    "max_height": 1080,
+                    "downsample_algorithm": "bicubic",
+                    "black_bar_handling": "SMART",
+                    "black_bar_detect_samples": 8,
+                    "crop": "1920:800:0:140",
+                }
+            },
+        )
+
+        self.assertEqual(applied["video"]["max_height"], 1080)
+        self.assertEqual(applied["video"]["downsample_algorithm"], "bicubic")
+        self.assertEqual(applied["video"]["black_bar_handling"], "smart")
+        self.assertEqual(applied["video"]["black_bar_detect_samples"], 5)
+        self.assertEqual(applied["video"]["crop"], "1920:800:0:140")
 
     def test_tune_self_check_schema_requires_surround_audio_guardrail(self) -> None:
         schema = _tune_self_check_schema()
@@ -4543,6 +4608,8 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("instruction to satisfy", prompt)
         self.assertIn("runtime_toolbelt.audio_tradeoff_hint", prompt)
         self.assertIn("closest faithful experiment", prompt)
+        self.assertIn("video.black_bar_handling", prompt)
+        self.assertIn("operator_note_parse.scale_height", prompt)
 
     def test_tune_prompt_summarizes_multimodal_review_pack_without_paths(self) -> None:
         prompt = _build_tune_prompt(
@@ -4589,6 +4656,13 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("multimodal_review_pack", prompt)
         self.assertIn("image_count", prompt)
         self.assertNotIn("/tmp/private-artifact.png", prompt)
+
+    def test_operator_note_parse_prompt_extracts_scale_height_only_from_request(self) -> None:
+        prompt = _build_operator_note_parse_prompt({"operator_note": "Downsample the 4K files to 1080p."})
+
+        self.assertIn("scale_height", prompt)
+        self.assertIn("scale_target", prompt)
+        self.assertIn("do not infer a scale target", prompt)
 
     def test_build_tuning_runtime_toolbelt_summarizes_review_media(self) -> None:
         toolbelt = _build_tuning_runtime_toolbelt(

@@ -31,12 +31,12 @@ from mediaforce.advising.runtime import run_code_prompt as _run_code_prompt_impl
     run_structured_llm_request as _run_structured_llm_request_impl
 
 ADVISOR_MODEL = "gpt-5.4"
-SEED_PROMPT_VERSION = "seed-v7"
-TUNE_PROMPT_VERSION = "tune-v8"
+SEED_PROMPT_VERSION = "seed-v8"
+TUNE_PROMPT_VERSION = "tune-v9"
 TUNE_SELF_CHECK_VERSION = "tune-self-check-v1"
 RUN_VERDICT_PROMPT_VERSION = "run-verdict-v1"
 REVIEW_ARTIFACT_CRITIQUE_PROMPT_VERSION = "review-artifact-critique-v1"
-OPERATOR_NOTE_PARSE_PROMPT_VERSION = "operator-note-parse-v1"
+OPERATOR_NOTE_PARSE_PROMPT_VERSION = "operator-note-parse-v2"
 REQUEST_DISPOSITIONS = ("honored", "honored_with_risk", "softened", "rejected", "unclear")
 _GUARDED_AUDIO_POLICY_KEYS = ("surround_7_1_opus_bitrate", "surround_5_1_opus_bitrate", "stereo_opus_bitrate")
 _AUDIO_SPECIFIC_TOKENS = (

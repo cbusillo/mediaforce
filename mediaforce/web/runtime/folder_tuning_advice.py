@@ -36,7 +36,7 @@ _AUDIO_STEP_DOWN_CANDIDATES_KBPS = {
 }
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _NOTE_PARSE_INTENT_TYPES = {"direct_request", "exploratory_question", "approval_feedback", "other", "unclear"}
-_NOTE_PARSE_REQUEST_TYPES = {"none", "metric_target", "size_budget", "combined_experiment"}
+_NOTE_PARSE_REQUEST_TYPES = {"none", "metric_target", "size_budget", "scale_target", "combined_experiment"}
 _NOTE_PARSE_METRICS = {"vmaf", "xpsnr"}
 
 
@@ -54,18 +54,40 @@ def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, A
     metric_target = None
     size_budget_value = None
     size_budget_unit = None
+    scale_height = None
     if request_type in {"metric_target", "combined_experiment"}:
         if metric not in _NOTE_PARSE_METRICS:
-            return None
-        metric_target = round(float_value(parsed_object.get("metric_target")), 2)
-        if metric_target <= 0:
-            return None
+            if request_type == "metric_target":
+                return None
+        else:
+            metric_target = round(float_value(parsed_object.get("metric_target")), 2)
+            if metric_target <= 0 and request_type == "metric_target":
+                return None
+            if metric_target <= 0:
+                metric_target = None
     if request_type in {"size_budget", "combined_experiment"}:
         size_budget_unit = str(parsed_object.get("size_budget_unit") or "").strip().lower() or None
         if size_budget_unit not in _SIZE_BUDGET_UNIT_BYTES:
-            return None
-        size_budget_value = round(float_value(parsed_object.get("size_budget_value")), 3)
-        if size_budget_value <= 0:
+            if request_type == "size_budget":
+                return None
+            size_budget_unit = None
+        else:
+            size_budget_value = round(float_value(parsed_object.get("size_budget_value")), 3)
+            if size_budget_value <= 0 and request_type == "size_budget":
+                return None
+            if size_budget_value <= 0:
+                size_budget_value = None
+                size_budget_unit = None
+    if request_type in {"scale_target", "combined_experiment"}:
+        raw_scale_height = int_value(parsed_object.get("scale_height"))
+        if raw_scale_height <= 0:
+            if request_type == "scale_target":
+                return None
+        else:
+            scale_height = max(240, min(raw_scale_height, 4320))
+    if request_type == "combined_experiment":
+        explicit_parts = sum(part is not None for part in (metric_target, size_budget_value, scale_height))
+        if explicit_parts < 2:
             return None
     operator_confirmed = bool(parsed_object.get("operator_confirmed"))
     if request_type == "none":
@@ -81,6 +103,7 @@ def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, A
         "metric_target": metric_target,
         "size_budget_value": size_budget_value,
         "size_budget_unit": size_budget_unit,
+        "scale_height": scale_height,
         "reasoning_note": reasoning_note,
     }
 
@@ -386,6 +409,23 @@ def metric_target_request(trimmed: str, parsed_note: dict[str, Any]) -> dict[str
     return None
 
 
+def scale_target_request(trimmed: str, parsed_note: dict[str, Any]) -> dict[str, Any] | None:
+    height = int_value(parsed_note.get("scale_height"))
+    if height <= 0:
+        return None
+    height = max(240, min(height, 4320))
+    return {
+        "source": "operator_note",
+        "operator_note_parse": parsed_note,
+        "honor_mode": "literal_experiment",
+        "request_type": "scale_target",
+        "scale_height": height,
+        "scale_label": f"{height}p max height",
+        "applied_policy": {"video": {"max_height": height}},
+        "request_text": trimmed,
+    }
+
+
 def operator_requested_experiment(
         note: str,
         sample_item: dict[str, Any] | None = None,
@@ -409,30 +449,36 @@ def operator_requested_experiment(
         current_policy=current_policy,
     )
     requested_metric_target = metric_target_request(trimmed, note_parse)
-    if requested_size_budget and requested_metric_target:
+    requested_scale_target = scale_target_request(trimmed, note_parse)
+    explicit_requests = [request for request in (requested_metric_target, requested_size_budget, requested_scale_target) if request]
+    if len(explicit_requests) > 1:
         return {
             "source": "operator_note",
             "operator_note_parse": note_parse,
             "honor_mode": "combined_experiment",
             "request_type": "combined_experiment",
             "request_text": trimmed,
-            "metric": requested_metric_target.get("metric"),
-            "target": requested_metric_target.get("target"),
-            "budget_bytes": requested_size_budget.get("budget_bytes"),
-            "budget_label": requested_size_budget.get("budget_label"),
-            "estimated_source_percent": requested_size_budget.get("estimated_source_percent"),
-            "estimated_audio_bytes": requested_size_budget.get("estimated_audio_bytes"),
-            "estimated_video_bitrate_kbps": requested_size_budget.get("estimated_video_bitrate_kbps"),
-            "feasibility": requested_size_budget.get("feasibility"),
-            "requires_confirmation": requested_size_budget.get("requires_confirmation"),
-            "requested_max_encoded_percent": requested_size_budget.get("requested_max_encoded_percent"),
-            "applied_max_encoded_percent": requested_size_budget.get("applied_max_encoded_percent"),
+            "metric": object_dict(requested_metric_target).get("metric"),
+            "target": object_dict(requested_metric_target).get("target"),
+            "budget_bytes": object_dict(requested_size_budget).get("budget_bytes"),
+            "budget_label": object_dict(requested_size_budget).get("budget_label"),
+            "scale_height": object_dict(requested_scale_target).get("scale_height"),
+            "scale_label": object_dict(requested_scale_target).get("scale_label"),
+            "estimated_source_percent": object_dict(requested_size_budget).get("estimated_source_percent"),
+            "estimated_audio_bytes": object_dict(requested_size_budget).get("estimated_audio_bytes"),
+            "estimated_video_bitrate_kbps": object_dict(requested_size_budget).get("estimated_video_bitrate_kbps"),
+            "feasibility": object_dict(requested_size_budget).get("feasibility"),
+            "requires_confirmation": object_dict(requested_size_budget).get("requires_confirmation"),
+            "requested_max_encoded_percent": object_dict(requested_size_budget).get("requested_max_encoded_percent"),
+            "applied_max_encoded_percent": object_dict(requested_size_budget).get("applied_max_encoded_percent"),
             "operator_confirmed": operator_confirmed,
             "metric_request": requested_metric_target,
             "size_budget_request": requested_size_budget,
+            "scale_request": requested_scale_target,
             "applied_policy": merge_policy_fragments(
-                object_dict(requested_metric_target.get("applied_policy")),
-                object_dict(requested_size_budget.get("applied_policy")),
+                object_dict(object_dict(requested_metric_target).get("applied_policy")),
+                object_dict(object_dict(requested_size_budget).get("applied_policy")),
+                object_dict(object_dict(requested_scale_target).get("applied_policy")),
             ),
         }
     if requested_metric_target:
@@ -441,6 +487,9 @@ def operator_requested_experiment(
     if requested_size_budget:
         requested_size_budget["operator_confirmed"] = operator_confirmed
         return requested_size_budget
+    if requested_scale_target:
+        requested_scale_target["operator_confirmed"] = operator_confirmed
+        return requested_scale_target
     return None
 
 
@@ -459,13 +508,16 @@ def operator_request_signature(operator_request: dict[str, Any] | None) -> tuple
     metric = str(request.get("metric") or "").strip().lower() or None
     target = float_value(request.get("target")) if request.get("target") is not None else None
     budget_bytes = int_value(request.get("budget_bytes")) if request.get("budget_bytes") is not None else None
+    scale_height = int_value(request.get("scale_height")) if request.get("scale_height") is not None else None
     rounded_target = round(0.0 if target is None else target, 2)
     if request_type == "combined_experiment":
-        return request_type, metric, rounded_target, budget_bytes
+        return request_type, metric, rounded_target, budget_bytes, scale_height
     if request_type == "metric_target":
         return request_type, metric, rounded_target
     if request_type == "size_budget":
         return request_type, budget_bytes
+    if request_type == "scale_target":
+        return request_type, scale_height
     return None
 
 

@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Any
 
 from mediaforce.core.type_defs import JSONObject, JSONValue, float_value, int_value, object_dict
@@ -121,6 +122,7 @@ def operator_note_parse_schema() -> dict[str, Any]:
             "metric_target",
             "size_budget_value",
             "size_budget_unit",
+            "scale_height",
             "reasoning_note",
         ],
         "properties": {
@@ -131,13 +133,14 @@ def operator_note_parse_schema() -> dict[str, Any]:
             },
             "request_type": {
                 "type": "string",
-                "enum": ["none", "metric_target", "size_budget", "combined_experiment"],
+                "enum": ["none", "metric_target", "size_budget", "scale_target", "combined_experiment"],
             },
             "operator_confirmed": {"type": "boolean"},
             "metric": {"type": ["string", "null"], "enum": ["vmaf", "xpsnr", None]},
             "metric_target": {"type": ["number", "null"]},
             "size_budget_value": {"type": ["number", "null"]},
             "size_budget_unit": {"type": ["string", "null"], "enum": ["kb", "mb", "gb", "tb", None]},
+            "scale_height": {"type": ["number", "null"]},
             "reasoning_note": {"type": "string"},
         },
     }
@@ -342,6 +345,33 @@ def normalize_video_policy_value(key: str, value: JSONValue, base_value: JSONVal
         return clamp_int(value, minimum=0, maximum=63)
     if key == "max_encoded_percent":
         return clamp_int(value, minimum=1, maximum=100)
+    if key == "max_height":
+        return clamp_int(value, minimum=0, maximum=4320)
+    if key in {"black_bar_detect_samples"}:
+        return clamp_int(value, minimum=1, maximum=5)
+    if key in {"black_bar_detect_seconds", "black_bar_detect_limit"}:
+        return clamp_int(value, minimum=1, maximum=120)
+    if key == "black_bar_detect_round":
+        return clamp_int(value, minimum=2, maximum=64)
+    if key == "black_bar_detect_start_seconds":
+        return max(0, clamp_int(value, minimum=0, maximum=24 * 60 * 60))
+    if key == "black_bar_handling":
+        handling = str(value).strip().lower()
+        if handling in {"off", "auto", "smart"}:
+            return handling
+        return _SKIP_POLICY_VALUE
+    if key == "downsample_algorithm":
+        algorithm = str(value).strip().lower()
+        if algorithm in {"fast_bilinear", "bilinear", "bicubic", "area", "lanczos", "spline", "neighbor"}:
+            return algorithm
+        return _SKIP_POLICY_VALUE
+    if key == "crop":
+        crop = str(value).strip()
+        if not crop:
+            return ""
+        if re.fullmatch(r"\d+:\d+:\d+:\d+", crop):
+            return crop
+        return _SKIP_POLICY_VALUE
     if key == "default_grain":
         return clamp_int(value, minimum=0, maximum=50)
     if key == "grain_denoise":
