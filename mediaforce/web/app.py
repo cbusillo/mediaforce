@@ -49,6 +49,7 @@ from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY, clear_ter
 from mediaforce.execution import (
     build_svt_params,
     describe_item_plan,
+    detect_video_crop,
     encode_manifest_items,
     effective_video_preset,
     estimate_output_overhead_bytes,
@@ -1799,6 +1800,7 @@ def _calibration_run_deps() -> CalibrationRunDeps:
         effective_video_preset=effective_video_preset,
         search_quality_for_source=search_quality_for_source,
         run_sample_encode=run_sample_encode,
+        detect_video_crop=detect_video_crop,
         recommend_review_timestamps=recommend_review_timestamps,
         encode_preview_clips=encode_preview_clips,
         render_source_review_clips=render_source_review_clips,

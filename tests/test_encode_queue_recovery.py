@@ -32,6 +32,7 @@ from mediaforce.core.models import ProbeSummary
 from mediaforce.encoding import manifest as manifest
 from mediaforce.encoding import quality_search
 from mediaforce.encoding import staging as staging_runtime
+from mediaforce.encoding import video_filters
 from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_prefix, list_child_encode_jobs, \
     load_active_encode_job_for_prefix, load_encode_job, \
     load_latest_terminal_encode_job_for_prefix, load_queue_state, repair_persisted_encode_job_hosts, \
@@ -4122,6 +4123,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             source_codec="h264",
             width=None,
             height=None,
+            detected_crop=None,
             process_controller=unittest.mock.ANY,
             host=host,
             quality_temp_dir=self.config.staging_root,
@@ -4129,10 +4131,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         sample_encode_mock.assert_called_once()
         self.assertEqual(sample_encode_mock.call_args.kwargs["host"], host)
         self.assertEqual(sample_encode_mock.call_args.kwargs["source_codec"], "h264")
+        self.assertIsNone(sample_encode_mock.call_args.kwargs["video_filter"])
         self.assertEqual(sample_encode_mock.call_args.kwargs["quality_temp_dir"], self.config.staging_root)
         encode_preview_mock.assert_called_once()
         self.assertEqual(encode_preview_mock.call_args.kwargs["host"], host)
         self.assertEqual(encode_preview_mock.call_args.kwargs["source_codec"], "h264")
+        self.assertIsNone(encode_preview_mock.call_args.kwargs["video_filter"])
         self.assertEqual(payload["host"], host)
         self.assertEqual(payload["compare_clips"][0]["path"], "/review-media/remote-run/item-00/compare-01-12m-00s.mkv")
 
@@ -6050,6 +6054,42 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(temp_dir.parent, Path("/tmp/mediaforce-transcode"))
         self.assertTrue(temp_dir.name.startswith(".mediaforce-ab-av1-"))
 
+    def test_search_quality_passes_video_filter_to_ab_av1(self) -> None:
+        run_crf_search_mock = Mock(
+            return_value=QualitySearchResult(crf=28.0, metric="XPSNR", target=41.0, score=41.5, stdout="ok")
+        )
+
+        quality_search.search_quality(
+            Path("/tmp/input.mkv"),
+            {
+                "quality_metric": "xpsnr",
+                "target_xpsnr": 41.0,
+                "min_target_xpsnr": 39.0,
+                "target_relax_step_xpsnr": 1.0,
+                "pixel_format": "yuv420p10le",
+                "sample_every": "12m",
+                "sample_duration": "20s",
+                "min_crf": 20,
+                "max_crf": 35,
+                "max_encoded_percent": 70,
+                "black_bar_handling": "auto",
+                "max_height": 720,
+            },
+            width=1920,
+            height=1080,
+            detected_crop="1920:800:0:140",
+            host_media_access_for_host=Mock(return_value="mounted"),
+            select_quality_metric=quality.select_quality_metric,
+            build_svt_params=Mock(return_value=[]),
+            effective_video_preset=Mock(return_value=4),
+            run_crf_search=run_crf_search_mock,
+        )
+
+        self.assertEqual(
+            run_crf_search_mock.call_args.kwargs["video_filter"],
+            "crop=1920:800:0:140,scale=-2:720:flags=lanczos",
+        )
+
     def test_run_sample_encode_passes_temp_dir_to_ab_av1(self) -> None:
         with patch(
                 "mediaforce.quality._run_quality_command",
@@ -6698,6 +6738,94 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 host={"platform": "linux", "videotoolbox_available": False},
             )
         self.assertEqual(cmd[:3], ["/tmp/ffmpeg", "-y", "-i"])
+
+    def test_build_ffmpeg_command_applies_crop_then_downsample_filter(self) -> None:
+        with patch("mediaforce.execution.ffmpeg_binary", return_value="/tmp/ffmpeg"):
+            cmd = execution._build_ffmpeg_command(
+                source_path=Path("/tmp/input.mkv"),
+                staging_path=Path("/tmp/output.mkv"),
+                source_codec="h264",
+                video_policy={
+                    "encoder": "libsvtav1",
+                    "pixel_format": "yuv420p10le",
+                    "default_grain": 0,
+                    "grain_denoise": 0,
+                    "black_bar_handling": "auto",
+                    "max_height": 720,
+                    "downsample_algorithm": "lanczos",
+                },
+                preset=4,
+                audio_policy={},
+                subtitle_policy={},
+                selection={
+                    "audio_tracks": [{"index": 1, "codec_name": "aac", "channels": 2}],
+                    "subtitle_tracks": [],
+                },
+                quality=QualitySearchResult(crf=28.0, metric="XPSNR", target=41.0, score=41.5, stdout="ok"),
+                host={"platform": "macos", "videotoolbox_available": True},
+                width=1920,
+                height=1080,
+                detected_crop="1920:800:0:140",
+            )
+        self.assertIn("-vf", cmd)
+        self.assertEqual(cmd[cmd.index("-vf") + 1], "crop=1920:800:0:140,scale=-2:720:flags=lanczos")
+
+    def test_video_filter_skips_downsample_when_source_is_already_within_max_height(self) -> None:
+        self.assertIsNone(video_filters.build_video_filter({"max_height": 1080}, width=1920, height=800))
+
+    def test_video_filter_picks_most_common_meaningful_crop(self) -> None:
+        stderr = "\n".join(
+            [
+                "[Parsed_cropdetect_0] x crop=1920:1080:0:0",
+                "[Parsed_cropdetect_0] x crop=1920:800:0:140",
+                "[Parsed_cropdetect_0] x crop=1920:800:0:140",
+            ]
+        )
+        self.assertEqual(
+            video_filters.most_common_crop(stderr, source_width=1920, source_height=1080),
+            "1920:800:0:140",
+        )
+
+    def test_detect_video_crop_runs_only_for_smart_black_bar_policy(self) -> None:
+        with patch("mediaforce.execution.run_command") as run_mock:
+            self.assertIsNone(
+                execution.detect_video_crop(
+                    Path("/tmp/input.mkv"),
+                    {"black_bar_handling": "off"},
+                    width=1920,
+                    height=1080,
+                )
+            )
+        run_mock.assert_not_called()
+
+    def test_detect_video_crop_parses_ffmpeg_cropdetect_output(self) -> None:
+        with patch("mediaforce.execution.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
+            "mediaforce.execution.run_command",
+            return_value=subprocess.CompletedProcess(
+                args=["ffmpeg"],
+                returncode=0,
+                stdout="",
+                stderr="\n".join(
+                    [
+                        "[Parsed_cropdetect_0] crop=1920:1080:0:0",
+                        "[Parsed_cropdetect_0] crop=1920:800:0:140",
+                        "[Parsed_cropdetect_0] crop=1920:800:0:140",
+                    ]
+                ),
+            ),
+        ) as run_mock:
+            crop = execution.detect_video_crop(
+                Path("/tmp/input.mkv"),
+                {"black_bar_handling": "smart", "black_bar_detect_seconds": 8},
+                source_codec="h264",
+                width=1920,
+                height=1080,
+                duration_seconds=3600.0,
+            )
+
+        self.assertEqual(crop, "1920:800:0:140")
+        cmd = run_mock.call_args.args[0]
+        self.assertIn("cropdetect=limit=24:round=2:reset=0", cmd)
 
     def test_run_crf_search_enables_videotoolbox_for_h265_sources(self) -> None:
         with patch(

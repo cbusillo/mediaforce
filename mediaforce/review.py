@@ -173,6 +173,7 @@ def encode_preview_clips(
         preset: int,
         crf: float,
         svt_params: list[str],
+        video_filter: str | None = None,
         host: dict[str, Any] | None = None,
         process_controller: ManagedProcessController | None = None,
 ) -> list[EncodedPreviewClip]:
@@ -187,6 +188,7 @@ def encode_preview_clips(
         preset=preset,
         crf=crf,
         svt_params=svt_params,
+        video_filter=video_filter,
         host=host,
         process_controller=process_controller,
         execution_mode_for_host=execution_mode_for_host,
@@ -210,6 +212,7 @@ def _encode_preview_clips_remote(
         preset: int,
         crf: float,
         svt_params: list[str],
+        video_filter: str | None = None,
 ) -> list[EncodedPreviewClip]:
     return _encode_preview_clips_remote_impl(
         host=host,
@@ -223,6 +226,7 @@ def _encode_preview_clips_remote(
         preset=preset,
         crf=crf,
         svt_params=svt_params,
+        video_filter=video_filter,
         remote_preview_timeout_seconds=REMOTE_PREVIEW_TIMEOUT_SECONDS,
         uuid_factory=uuid.uuid4,
         run_remote_command=run_remote_command,
@@ -335,6 +339,7 @@ def _render_encoded_preview_clip(
         preset: int,
         crf: float,
         svt_params: list[str],
+        video_filter: str | None = None,
         process_controller: ManagedProcessController | None = None,
 ) -> None:
     return _render_encoded_preview_clip_impl(
@@ -348,6 +353,7 @@ def _render_encoded_preview_clip(
         preset=preset,
         crf=crf,
         svt_params=svt_params,
+        video_filter=video_filter,
         process_controller=process_controller,
         ffmpeg_binary=ffmpeg_binary,
         ffmpeg_hwaccel_input_args=ffmpeg_hwaccel_input_args,
@@ -369,6 +375,7 @@ def _render_encoded_preview_clip_remote(
         preset: int,
         crf: float,
         svt_params: list[str],
+        video_filter: str | None = None,
 ) -> None:
     return _render_encoded_preview_clip_remote_impl(
         host=host,
@@ -382,6 +389,7 @@ def _render_encoded_preview_clip_remote(
         preset=preset,
         crf=crf,
         svt_params=svt_params,
+        video_filter=video_filter,
         remote_preview_timeout_seconds=REMOTE_PREVIEW_TIMEOUT_SECONDS,
         ffmpeg_binary=ffmpeg_binary,
         ffmpeg_hwaccel_input_args=ffmpeg_hwaccel_input_args,

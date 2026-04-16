@@ -3,6 +3,7 @@ from typing import Any, Callable
 
 from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.quality import QualitySearchResult
+from mediaforce.encoding.video_filters import build_video_filter
 
 
 def build_ffmpeg_command(
@@ -16,7 +17,6 @@ def build_ffmpeg_command(
         subtitle_policy: dict[str, Any],
         selection: dict[str, Any],
         quality: QualitySearchResult,
-        host: dict[str, Any] | None = None,
         text_subtitle_codecs: set[str],
         ffmpeg_binary: Callable[[], str],
         ffmpeg_hwaccel_input_args: Callable[..., list[str]],
@@ -24,6 +24,10 @@ def build_ffmpeg_command(
         opus_layout_filter: Callable[[dict[str, Any]], str | None],
         opus_bitrate: Callable[[dict[str, Any], dict[str, Any]], str],
         format_crf: Callable[[float], str],
+        host: dict[str, Any] | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        detected_crop: str | None = None,
 ) -> list[str]:
     _ = subtitle_policy
     host_payload = object_dict(host)
@@ -79,6 +83,9 @@ def build_ffmpeg_command(
             f"tune=0:film-grain={int(video_policy.get('default_grain', 0))}:film-grain-denoise={int(video_policy.get('grain_denoise', 0))}",
         ]
     )
+    video_filter = build_video_filter(video_policy, width=width, height=height, detected_crop=detected_crop)
+    if video_filter:
+        cmd.extend(["-vf", video_filter])
 
     for output_index, audio in enumerate(selection["audio_tracks"]):
         codec = audio_codec(audio, audio_policy)

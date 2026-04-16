@@ -154,6 +154,7 @@ def encode_one_item(
         search_quality: Callable[..., Any],
         select_streams: Callable[[dict[str, Any]], dict[str, Any]],
         build_ffmpeg_command: Callable[..., list[str]],
+        detect_video_crop: Callable[..., str | None] | None,
         timestamp: Callable[[], str],
         record_event: Callable[[DBClient, int, str, dict[str, Any]], None],
         run_encode_command: Callable[..., Any],
@@ -173,6 +174,18 @@ def encode_one_item(
     policy = item["resolved_policy"]
     width = int_value(item.get("width")) or None
     height = int_value(item.get("height")) or None
+    detected_crop = None
+    if detect_video_crop is not None:
+        detected_crop = detect_video_crop(
+            source_path,
+            policy["video"],
+            source_codec=str(item.get("video_codec") or ""),
+            width=width,
+            height=height,
+            duration_seconds=item.get("duration_seconds"),
+            process_controller=process_controller,
+            host=host,
+        )
     preset = effective_video_preset(policy["video"], width=width, height=height)
     if progress_callback is not None:
         progress_callback(
@@ -197,6 +210,7 @@ def encode_one_item(
         source_codec=str(item.get("video_codec") or ""),
         width=width,
         height=height,
+        detected_crop=detected_crop,
         process_controller=process_controller,
         host=quality_search_host,
         quality_temp_dir=_quality_temp_dir_for_encode_host(config, quality_search_host),
@@ -213,6 +227,9 @@ def encode_one_item(
         selection=selection,
         quality=quality_result,
         host=host,
+        width=width,
+        height=height,
+        detected_crop=detected_crop,
     )
 
     started_at = timestamp()

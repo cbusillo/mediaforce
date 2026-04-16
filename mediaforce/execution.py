@@ -32,18 +32,21 @@ from mediaforce.encoding.streams import _audio_codec as _audio_codec_impl, _chec
     _pick_audio as _pick_audio_impl, _pick_subtitles as _pick_subtitles_impl, \
     _record_event as _record_event_impl, _select_streams as _select_streams_impl, \
     _source_has_preservable_subtitles as _source_has_preservable_subtitles_impl
+from mediaforce.encoding.video_filters import most_common_crop
 from mediaforce.encoding.ffmpeg import ffmpeg_hwaccel_input_args
 from mediaforce.library.probe import probe_media
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, run_command
+from mediaforce.core.type_defs import float_value, int_value, object_dict
 from mediaforce.encoding.quality import QualitySearchResult, run_crf_search, select_quality_metric
 from mediaforce.remote import execution_mode_for_host, host_media_access_for_host, remote_shell_path_export_line, \
-    ssh_client_options
+    run_remote_command, ssh_client_options
 from mediaforce.core.utils import file_fingerprint, timestamp
 
 TEXT_SUBTITLE_CODECS = {"ass", "mov_text", "srt", "ssa", "subrip", "text", "webvtt"}
 SVT_AV1_MIN_8K_PRESET = 5
 SVT_AV1_8K_DIMENSION_THRESHOLD = 7680
 ENCODE_PROGRESS_ARGS = ["-progress", "pipe:2", "-nostats"]
+VIDEO_CROP_DETECT_TIMEOUT_SECONDS = 90
 
 
 @dataclass(slots=True)
@@ -200,6 +203,7 @@ def encode_one_item(
         search_quality=_search_quality,
         select_streams=_select_streams,
         build_ffmpeg_command=_build_ffmpeg_command,
+        detect_video_crop=_detect_video_crop,
         timestamp=timestamp,
         record_event=_record_event,
         run_encode_command=_run_encode_command,
@@ -217,6 +221,7 @@ def search_quality_for_source(
         source_codec: str | None = None,
         width: int | None = None,
         height: int | None = None,
+        detected_crop: str | None = None,
         process_controller: ManagedProcessController | None = None,
         host: dict[str, Any] | None = None,
         quality_temp_dir: Path | None = None,
@@ -227,6 +232,7 @@ def search_quality_for_source(
         source_codec=source_codec,
         width=width,
         height=height,
+        detected_crop=detected_crop,
         process_controller=process_controller,
         host=host,
         quality_temp_dir=quality_temp_dir,
@@ -295,6 +301,7 @@ def _search_quality(
         source_codec: str | None = None,
         width: int | None = None,
         height: int | None = None,
+        detected_crop: str | None = None,
         process_controller: ManagedProcessController | None = None,
         host: dict[str, Any] | None = None,
         quality_temp_dir: Path | None = None,
@@ -305,6 +312,7 @@ def _search_quality(
         source_codec=source_codec,
         width=width,
         height=height,
+        detected_crop=detected_crop,
         process_controller=process_controller,
         host=host,
         quality_temp_dir=quality_temp_dir,
@@ -328,6 +336,9 @@ def _build_ffmpeg_command(
         selection: dict[str, Any],
         quality: QualitySearchResult,
         host: dict[str, Any] | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        detected_crop: str | None = None,
 ) -> list[str]:
     return _build_ffmpeg_command_impl(
         source_path=source_path,
@@ -340,6 +351,9 @@ def _build_ffmpeg_command(
         selection=selection,
         quality=quality,
         host=host,
+        width=width,
+        height=height,
+        detected_crop=detected_crop,
         text_subtitle_codecs=TEXT_SUBTITLE_CODECS,
         ffmpeg_binary=ffmpeg_binary,
         ffmpeg_hwaccel_input_args=ffmpeg_hwaccel_input_args,
@@ -348,6 +362,103 @@ def _build_ffmpeg_command(
         opus_bitrate=_opus_bitrate,
         format_crf=_format_crf,
     )
+
+
+def _detect_video_crop(
+        source_path: Path,
+        video_policy: dict[str, Any],
+        *,
+        source_codec: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        duration_seconds: Any = None,
+        process_controller: ManagedProcessController | None = None,
+        host: dict[str, Any] | None = None,
+) -> str | None:
+    handling = str(video_policy.get("black_bar_handling") or video_policy.get("crop_black_bars") or "off").lower()
+    if handling not in {"1", "true", "yes", "auto", "smart"}:
+        return None
+
+    host_payload = object_dict(host)
+    ffmpeg_name = str(host_payload.get("ffmpeg_path") or "").strip() or ffmpeg_binary()
+    detect_seconds = max(1, int_value(video_policy.get("black_bar_detect_seconds")) or 12)
+    limit = int_value(video_policy.get("black_bar_detect_limit")) or 24
+    round_value = int_value(video_policy.get("black_bar_detect_round")) or 2
+    stderr_parts: list[str] = []
+    try:
+        for detect_start in _cropdetect_start_seconds(duration_seconds, video_policy):
+            cmd = [
+                ffmpeg_name,
+                "-hide_banner",
+                *ffmpeg_hwaccel_input_args(
+                    source_codec,
+                    platform_name=str(host_payload.get("platform") or "") or None,
+                    videotoolbox_available=host_payload.get("videotoolbox_available")
+                    if "videotoolbox_available" in host_payload else None,
+                ),
+                "-ss",
+                f"{detect_start:.3f}",
+                "-i",
+                str(source_path),
+                "-t",
+                str(detect_seconds),
+                "-vf",
+                f"cropdetect=limit={limit}:round={round_value}:reset=0",
+                "-f",
+                "null",
+                "-",
+            ]
+            if execution_mode_for_host(host) == "ssh" and host_media_access_for_host(host) != "stream":
+                remote_cmd = list(cmd)
+                remote_cmd[0] = Path(remote_cmd[0]).name
+                result = run_remote_command(host_payload, remote_cmd, VIDEO_CROP_DETECT_TIMEOUT_SECONDS)
+            else:
+                result = run_command(cmd, process_controller=process_controller)
+            stderr_parts.append(result.stderr or "")
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return None
+    return most_common_crop("\n".join(stderr_parts), source_width=width, source_height=height)
+
+
+def detect_video_crop(
+        source_path: Path,
+        video_policy: dict[str, Any],
+        *,
+        source_codec: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        duration_seconds: Any = None,
+        process_controller: ManagedProcessController | None = None,
+        host: dict[str, Any] | None = None,
+) -> str | None:
+    return _detect_video_crop(
+        source_path,
+        video_policy,
+        source_codec=source_codec,
+        width=width,
+        height=height,
+        duration_seconds=duration_seconds,
+        process_controller=process_controller,
+        host=host,
+    )
+
+
+def _cropdetect_start_seconds(duration_seconds: Any, video_policy: dict[str, Any]) -> list[float]:
+    configured = float_value(video_policy.get("black_bar_detect_start_seconds"))
+    if configured > 0:
+        return [configured]
+    duration = float_value(duration_seconds)
+    if duration <= 0:
+        return [60.0]
+    sample_count = max(1, min(int_value(video_policy.get("black_bar_detect_samples")) or 3, 5))
+    return [max(0.0, min(duration * fraction, max(duration - 30.0, 0.0))) for fraction in _sample_fractions(sample_count)]
+
+
+def _sample_fractions(sample_count: int) -> list[float]:
+    if sample_count == 1:
+        return [0.35]
+    step = 0.6 / float(sample_count - 1)
+    return [0.2 + step * index for index in range(sample_count)]
 
 
 def _finalize_output_path(temp_output: Path, staging_path: Path) -> None:
