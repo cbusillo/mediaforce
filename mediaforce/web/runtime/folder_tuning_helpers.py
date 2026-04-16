@@ -128,6 +128,12 @@ def proposal_alignment_issue(
             return height
         return _float_or_none(video_policy.get("target_height"))
 
+    def _normalized_black_bar_handling(value: JSONValue) -> str:
+        handling = str(value or "").strip().lower()
+        if handling in {"auto", "smart", "true", "yes", "1"}:
+            return "smart"
+        return handling
+
     def _size_budget_alignment_issue() -> str | None:
         current_vmaf = _float_or_none(current_video.get("target_vmaf"))
         preview_vmaf = _float_or_none(preview_video.get("target_vmaf"))
@@ -197,11 +203,6 @@ def proposal_alignment_issue(
         return None
 
     def _transform_alignment_issue() -> str | None:
-        requested_handling = str(requested_video.get("black_bar_handling") or "").strip().lower()
-        if requested_handling in {"auto", "smart"}:
-            preview_handling = str(preview_video.get("black_bar_handling") or "").strip().lower()
-            if preview_handling != requested_handling:
-                return f"The draft does not apply the requested {requested_handling} black-bar handling."
         if "crop" in requested_video:
             requested_crop = str(requested_video.get("crop") or "").strip()
             preview_crop = str(preview_video.get("crop") or "").strip()
@@ -209,6 +210,13 @@ def proposal_alignment_issue(
                 if requested_crop:
                     return f"The draft uses crop {preview_crop or 'off'} instead of the requested {requested_crop}."
                 return "The draft keeps a manual crop even though smart black-bar detection was requested."
+            if requested_crop:
+                return None
+        requested_handling = str(requested_video.get("black_bar_handling") or "").strip().lower()
+        if requested_handling in {"auto", "smart"}:
+            preview_handling = _normalized_black_bar_handling(preview_video.get("black_bar_handling"))
+            if preview_handling != _normalized_black_bar_handling(requested_handling):
+                return f"The draft does not apply the requested {requested_handling} black-bar handling."
         return None
 
     if request_type == "size_budget":

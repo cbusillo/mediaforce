@@ -540,8 +540,13 @@ def operator_request_signature(operator_request: dict[str, Any] | None) -> tuple
     target = float_value(request.get("target")) if request.get("target") is not None else None
     budget_bytes = int_value(request.get("budget_bytes")) if request.get("budget_bytes") is not None else None
     scale_height = int_value(request.get("scale_height")) if request.get("scale_height") is not None else None
-    black_bar_handling = str(request.get("black_bar_handling") or "").strip().lower() or None
     crop = str(request.get("crop") or "").strip() or None
+    raw_black_bar_handling = str(request.get("black_bar_handling") or "").strip().lower()
+    black_bar_handling = "smart" if raw_black_bar_handling in {"auto", "smart", "true", "yes", "1"} else (
+        raw_black_bar_handling or None
+    )
+    if crop:
+        black_bar_handling = None
     rounded_target = round(0.0 if target is None else target, 2)
     if request_type == "combined_experiment":
         return request_type, metric, rounded_target, budget_bytes, scale_height, black_bar_handling, crop

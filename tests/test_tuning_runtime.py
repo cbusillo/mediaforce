@@ -86,7 +86,7 @@ from mediaforce.web.runtime.folder_ai_tuning import (
     folder_ai_tune_confirm_action,
     folder_ai_tune_preview_action,
 )
-from mediaforce.web.runtime.folder_tuning_advice import audio_tradeoff_hint, size_budget_feasibility
+from mediaforce.web.runtime.folder_tuning_advice import audio_tradeoff_hint, operator_request_signature, size_budget_feasibility
 from mediaforce.web.runtime.folder_tuning_helpers import proposal_alignment_issue
 
 
@@ -4388,6 +4388,47 @@ class TuningRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(issue, "The draft keeps a manual crop even though smart black-bar detection was requested.")
+
+    def test_proposal_alignment_issue_treats_auto_and_smart_black_bar_as_equivalent(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "scale_target",
+                "applied_policy": {"video": {"black_bar_handling": "smart", "crop": ""}},
+            },
+            request_disposition="honored",
+            current_policy={"video": {"black_bar_handling": "off"}},
+            preview_policy={"video": {"black_bar_handling": "auto", "crop": ""}},
+        )
+
+        self.assertIsNone(issue)
+
+    def test_operator_request_signature_ignores_black_bar_mode_when_crop_is_explicit(self) -> None:
+        manual_crop_signature = operator_request_signature(
+            {
+                "request_type": "scale_target",
+                "black_bar_handling": "smart",
+                "crop": "1920:800:0:140",
+            }
+        )
+        crop_only_signature = operator_request_signature(
+            {
+                "request_type": "scale_target",
+                "black_bar_handling": "off",
+                "crop": "1920:800:0:140",
+            }
+        )
+
+        self.assertEqual(manual_crop_signature, crop_only_signature)
+
+    def test_operator_request_signature_treats_auto_and_smart_black_bar_as_equivalent(self) -> None:
+        smart_signature = operator_request_signature(
+            {"request_type": "scale_target", "black_bar_handling": "smart"}
+        )
+        auto_signature = operator_request_signature(
+            {"request_type": "scale_target", "black_bar_handling": "auto"}
+        )
+
+        self.assertEqual(smart_signature, auto_signature)
 
     def test_run_calibration_job_marks_cancelled_run_stopped(self) -> None:
         saved_statuses: list[str] = []
