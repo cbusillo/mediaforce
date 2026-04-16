@@ -87,6 +87,7 @@ from mediaforce.web.runtime.folder_ai_tuning import (
     folder_ai_tune_preview_action,
 )
 from mediaforce.web.runtime.folder_tuning_advice import audio_tradeoff_hint, size_budget_feasibility
+from mediaforce.web.runtime.folder_tuning_helpers import proposal_alignment_issue
 
 
 def _runtime_settings_writer(path_text: str, ready_path_text: str, mode: str) -> None:
@@ -4244,6 +4245,77 @@ class TuningRuntimeTests(unittest.TestCase):
                 alignment_issue="The draft raises the VMAF target even though your note asked for a smaller encode.",
             )
         )
+
+    def test_proposal_alignment_issue_allows_explicit_combined_metric_target(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "combined_experiment",
+                "metric": "vmaf",
+                "target": 95.0,
+                "budget_label": "300 MB per episode",
+                "size_budget_request": {"budget_bytes": 300 * 1024 * 1024},
+                "applied_policy": {
+                    "video": {
+                        "target_vmaf": 95.0,
+                        "min_target_vmaf": 93.0,
+                        "max_encoded_percent": 8,
+                    }
+                },
+            },
+            request_disposition="honored",
+            current_policy={"video": {"target_vmaf": 88.0, "min_target_vmaf": 86.0}},
+            preview_policy={
+                "video": {
+                    "target_vmaf": 95.0,
+                    "min_target_vmaf": 93.0,
+                    "max_encoded_percent": 8,
+                }
+            },
+        )
+
+        self.assertIsNone(issue)
+
+    def test_proposal_alignment_issue_validates_combined_metric_target(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "combined_experiment",
+                "metric": "vmaf",
+                "target": 95.0,
+                "budget_label": "300 MB per episode",
+                "size_budget_request": {"budget_bytes": 300 * 1024 * 1024},
+                "applied_policy": {
+                    "video": {
+                        "target_vmaf": 95.0,
+                        "min_target_vmaf": 93.0,
+                        "max_encoded_percent": 8,
+                    }
+                },
+            },
+            request_disposition="honored",
+            current_policy={"video": {"target_vmaf": 88.0, "min_target_vmaf": 86.0}},
+            preview_policy={
+                "video": {
+                    "target_vmaf": 90.0,
+                    "min_target_vmaf": 88.0,
+                    "max_encoded_percent": 8,
+                }
+            },
+        )
+
+        self.assertEqual(issue, "The draft uses 90.00 VMAF instead of the requested 95.00 target.")
+
+    def test_proposal_alignment_issue_validates_scale_target(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "scale_target",
+                "applied_policy": {"video": {"max_height": 1080}},
+            },
+            request_disposition="honored",
+            current_policy={"video": {"max_height": 2160}},
+            preview_policy={"video": {"max_height": 720}},
+        )
+
+        self.assertEqual(issue, "The draft uses 720p instead of the requested 1080p height cap.")
 
     def test_run_calibration_job_marks_cancelled_run_stopped(self) -> None:
         saved_statuses: list[str] = []

@@ -109,10 +109,9 @@ def proposal_alignment_issue(
     if disposition in {"softened", "rejected", "unclear"}:
         return None
     request_type = str(operator_request.get("request_type") or "").strip().lower()
-    if request_type != "size_budget":
-        return None
     current_video = object_dict(current_policy.get("video"))
     preview_video = object_dict(preview_policy.get("video"))
+    requested_video = object_dict(object_dict(operator_request.get("applied_policy")).get("video"))
 
     def _float_or_none(value: JSONValue) -> float | None:
         if not isinstance(value, str | int | float):
@@ -123,12 +122,77 @@ def proposal_alignment_issue(
             return None
         return parsed
 
-    current_vmaf = _float_or_none(current_video.get("target_vmaf"))
-    preview_vmaf = _float_or_none(preview_video.get("target_vmaf"))
-    current_xpsnr = _float_or_none(current_video.get("target_xpsnr"))
-    preview_xpsnr = _float_or_none(preview_video.get("target_xpsnr"))
-    if current_vmaf is not None and preview_vmaf is not None and preview_vmaf > current_vmaf + 0.01:
-        return "The draft raises the VMAF target even though your note asked for a smaller encode."
-    if current_xpsnr is not None and preview_xpsnr is not None and preview_xpsnr > current_xpsnr + 0.01:
-        return "The draft raises the XPSNR target even though your note asked for a smaller encode."
+    def _policy_height(video_policy: dict[str, Any]) -> float | None:
+        height = _float_or_none(video_policy.get("max_height"))
+        if height is not None:
+            return height
+        return _float_or_none(video_policy.get("target_height"))
+
+    def _size_budget_alignment_issue() -> str | None:
+        current_vmaf = _float_or_none(current_video.get("target_vmaf"))
+        preview_vmaf = _float_or_none(preview_video.get("target_vmaf"))
+        current_xpsnr = _float_or_none(current_video.get("target_xpsnr"))
+        preview_xpsnr = _float_or_none(preview_video.get("target_xpsnr"))
+        if current_vmaf is not None and preview_vmaf is not None and preview_vmaf > current_vmaf + 0.01:
+            return "The draft raises the VMAF target even though your note asked for a smaller encode."
+        if current_xpsnr is not None and preview_xpsnr is not None and preview_xpsnr > current_xpsnr + 0.01:
+            return "The draft raises the XPSNR target even though your note asked for a smaller encode."
+        return None
+
+    def _metric_alignment_issue() -> str | None:
+        requested_metric = str(operator_request.get("metric") or "").strip().lower()
+        requested_target = _float_or_none(operator_request.get("target"))
+        if requested_metric not in {"vmaf", "xpsnr"} or requested_target is None:
+            return None
+        target_key = "target_vmaf" if requested_metric == "vmaf" else "target_xpsnr"
+        floor_key = "min_target_vmaf" if requested_metric == "vmaf" else "min_target_xpsnr"
+        preview_target = _float_or_none(preview_video.get(target_key))
+        if preview_target is None:
+            return f"The draft does not apply the requested {requested_metric.upper()} target."
+        if abs(preview_target - requested_target) > 0.01:
+            return (
+                f"The draft uses {preview_target:.2f} {requested_metric.upper()} instead of the requested "
+                f"{requested_target:.2f} target."
+            )
+        requested_floor = _float_or_none(requested_video.get(floor_key))
+        if requested_floor is None:
+            return None
+        preview_floor = _float_or_none(preview_video.get(floor_key))
+        if preview_floor is None:
+            return f"The draft does not preserve the requested {requested_metric.upper()} floor."
+        if abs(preview_floor - requested_floor) > 0.01:
+            return (
+                f"The draft uses {preview_floor:.2f} {requested_metric.upper()} as the floor instead of the requested "
+                f"{requested_floor:.2f} floor."
+            )
+        return None
+
+    def _scale_alignment_issue() -> str | None:
+        requested_height = _policy_height(requested_video)
+        if requested_height is None:
+            requested_height = _float_or_none(operator_request.get("scale_height"))
+        if requested_height is None:
+            return None
+        preview_height = _policy_height(preview_video)
+        if preview_height is None:
+            return f"The draft does not apply the requested {requested_height:.0f}p height cap."
+        if abs(preview_height - requested_height) > 0.01:
+            return f"The draft uses {preview_height:.0f}p instead of the requested {requested_height:.0f}p height cap."
+        return None
+
+    if request_type == "size_budget":
+        return _size_budget_alignment_issue()
+    if request_type == "metric_target":
+        return _metric_alignment_issue()
+    if request_type == "scale_target":
+        return _scale_alignment_issue()
+    if request_type == "combined_experiment":
+        metric_issue = _metric_alignment_issue()
+        if metric_issue is not None:
+            return metric_issue
+        scale_issue = _scale_alignment_issue()
+        if scale_issue is not None:
+            return scale_issue
+        if not operator_request.get("metric") and object_dict(operator_request.get("size_budget_request")):
+            return _size_budget_alignment_issue()
     return None
