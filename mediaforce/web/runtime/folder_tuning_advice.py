@@ -2,6 +2,7 @@ import json
 import subprocess
 import hashlib
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _NOTE_PARSE_INTENT_TYPES = {"direct_request", "exploratory_question", "approval_feedback", "other", "unclear"}
 _NOTE_PARSE_REQUEST_TYPES = {"none", "metric_target", "size_budget", "scale_target", "combined_experiment"}
 _NOTE_PARSE_METRICS = {"vmaf", "xpsnr"}
+_CROP_VALUE_RE = re.compile(r"\d+:\d+:\d+:\d+")
 
 
 def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -55,6 +57,8 @@ def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, A
     size_budget_value = None
     size_budget_unit = None
     scale_height = None
+    black_bar_handling = None
+    crop = None
     if request_type in {"metric_target", "combined_experiment"}:
         if metric not in _NOTE_PARSE_METRICS:
             if request_type == "metric_target":
@@ -80,13 +84,20 @@ def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, A
                 size_budget_unit = None
     if request_type in {"scale_target", "combined_experiment"}:
         raw_scale_height = int_value(parsed_object.get("scale_height"))
-        if raw_scale_height <= 0:
-            if request_type == "scale_target":
-                return None
-        else:
+        if raw_scale_height > 0:
             scale_height = max(240, min(raw_scale_height, 4320))
+        raw_black_bar_handling = str(parsed_object.get("black_bar_handling") or "").strip().lower()
+        if raw_black_bar_handling in {"auto", "smart"}:
+            black_bar_handling = raw_black_bar_handling
+        raw_crop = str(parsed_object.get("crop") or "").strip()
+        if _CROP_VALUE_RE.fullmatch(raw_crop):
+            crop = raw_crop
+        if request_type == "scale_target" and scale_height is None and black_bar_handling is None and crop is None:
+            return None
     if request_type == "combined_experiment":
-        explicit_parts = sum(part is not None for part in (metric_target, size_budget_value, scale_height))
+        explicit_parts = sum(
+            part is not None for part in (metric_target, size_budget_value, scale_height, black_bar_handling, crop)
+        )
         if explicit_parts < 2:
             return None
     operator_confirmed = bool(parsed_object.get("operator_confirmed"))
@@ -104,6 +115,8 @@ def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, A
         "size_budget_value": size_budget_value,
         "size_budget_unit": size_budget_unit,
         "scale_height": scale_height,
+        "black_bar_handling": black_bar_handling,
+        "crop": crop,
         "reasoning_note": reasoning_note,
     }
 
@@ -411,17 +424,33 @@ def metric_target_request(trimmed: str, parsed_note: dict[str, Any]) -> dict[str
 
 def scale_target_request(trimmed: str, parsed_note: dict[str, Any]) -> dict[str, Any] | None:
     height = int_value(parsed_note.get("scale_height"))
-    if height <= 0:
+    black_bar_handling = str(parsed_note.get("black_bar_handling") or "").strip().lower()
+    crop = str(parsed_note.get("crop") or "").strip()
+    video_policy: dict[str, Any] = {}
+    labels: list[str] = []
+    if height > 0:
+        height = max(240, min(height, 4320))
+        video_policy["max_height"] = height
+        labels.append(f"{height}p max height")
+    if black_bar_handling in {"auto", "smart"}:
+        video_policy["black_bar_handling"] = black_bar_handling
+        video_policy["crop"] = ""
+        labels.append("smart black-bar detection" if black_bar_handling == "smart" else "auto black-bar detection")
+    if _CROP_VALUE_RE.fullmatch(crop):
+        video_policy["crop"] = crop
+        labels.append(f"crop {crop}")
+    if not video_policy:
         return None
-    height = max(240, min(height, 4320))
     return {
         "source": "operator_note",
         "operator_note_parse": parsed_note,
         "honor_mode": "literal_experiment",
         "request_type": "scale_target",
-        "scale_height": height,
-        "scale_label": f"{height}p max height",
-        "applied_policy": {"video": {"max_height": height}},
+        "scale_height": height if height > 0 else None,
+        "scale_label": " + ".join(labels),
+        "black_bar_handling": black_bar_handling if black_bar_handling in {"auto", "smart"} else None,
+        "crop": crop if _CROP_VALUE_RE.fullmatch(crop) else None,
+        "applied_policy": {"video": video_policy},
         "request_text": trimmed,
     }
 
@@ -464,6 +493,8 @@ def operator_requested_experiment(
             "budget_label": object_dict(requested_size_budget).get("budget_label"),
             "scale_height": object_dict(requested_scale_target).get("scale_height"),
             "scale_label": object_dict(requested_scale_target).get("scale_label"),
+            "black_bar_handling": object_dict(requested_scale_target).get("black_bar_handling"),
+            "crop": object_dict(requested_scale_target).get("crop"),
             "estimated_source_percent": object_dict(requested_size_budget).get("estimated_source_percent"),
             "estimated_audio_bytes": object_dict(requested_size_budget).get("estimated_audio_bytes"),
             "estimated_video_bitrate_kbps": object_dict(requested_size_budget).get("estimated_video_bitrate_kbps"),
@@ -509,15 +540,17 @@ def operator_request_signature(operator_request: dict[str, Any] | None) -> tuple
     target = float_value(request.get("target")) if request.get("target") is not None else None
     budget_bytes = int_value(request.get("budget_bytes")) if request.get("budget_bytes") is not None else None
     scale_height = int_value(request.get("scale_height")) if request.get("scale_height") is not None else None
+    black_bar_handling = str(request.get("black_bar_handling") or "").strip().lower() or None
+    crop = str(request.get("crop") or "").strip() or None
     rounded_target = round(0.0 if target is None else target, 2)
     if request_type == "combined_experiment":
-        return request_type, metric, rounded_target, budget_bytes, scale_height
+        return request_type, metric, rounded_target, budget_bytes, scale_height, black_bar_handling, crop
     if request_type == "metric_target":
         return request_type, metric, rounded_target
     if request_type == "size_budget":
         return request_type, budget_bytes
     if request_type == "scale_target":
-        return request_type, scale_height
+        return request_type, scale_height, black_bar_handling, crop
     return None
 
 

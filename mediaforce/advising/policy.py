@@ -123,6 +123,8 @@ def operator_note_parse_schema() -> dict[str, Any]:
             "size_budget_value",
             "size_budget_unit",
             "scale_height",
+            "black_bar_handling",
+            "crop",
             "reasoning_note",
         ],
         "properties": {
@@ -141,6 +143,8 @@ def operator_note_parse_schema() -> dict[str, Any]:
             "size_budget_value": {"type": ["number", "null"]},
             "size_budget_unit": {"type": ["string", "null"], "enum": ["kb", "mb", "gb", "tb", None]},
             "scale_height": {"type": ["number", "null"]},
+            "black_bar_handling": {"type": ["string", "null"], "enum": ["smart", "auto", "off", None]},
+            "crop": {"type": ["string", "null"]},
             "reasoning_note": {"type": "string"},
         },
     }

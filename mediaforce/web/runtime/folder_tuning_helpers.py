@@ -137,6 +137,22 @@ def proposal_alignment_issue(
             return "The draft raises the VMAF target even though your note asked for a smaller encode."
         if current_xpsnr is not None and preview_xpsnr is not None and preview_xpsnr > current_xpsnr + 0.01:
             return "The draft raises the XPSNR target even though your note asked for a smaller encode."
+        return _size_budget_cap_alignment_issue()
+
+    def _size_budget_cap_alignment_issue() -> str | None:
+        requested_cap = _float_or_none(requested_video.get("max_encoded_percent"))
+        if requested_cap is None:
+            requested_cap = _float_or_none(operator_request.get("applied_max_encoded_percent"))
+        if requested_cap is None:
+            size_budget_request = object_dict(operator_request.get("size_budget_request"))
+            requested_cap = _float_or_none(size_budget_request.get("applied_max_encoded_percent"))
+        if requested_cap is None:
+            return None
+        preview_cap = _float_or_none(preview_video.get("max_encoded_percent"))
+        if preview_cap is None:
+            return f"The draft does not apply the requested {requested_cap:.0f}% size ceiling."
+        if preview_cap > requested_cap + 0.01:
+            return f"The draft uses a {preview_cap:.0f}% size ceiling instead of the requested {requested_cap:.0f}% ceiling."
         return None
 
     def _metric_alignment_issue() -> str | None:
@@ -180,12 +196,30 @@ def proposal_alignment_issue(
             return f"The draft uses {preview_height:.0f}p instead of the requested {requested_height:.0f}p height cap."
         return None
 
+    def _transform_alignment_issue() -> str | None:
+        requested_handling = str(requested_video.get("black_bar_handling") or "").strip().lower()
+        if requested_handling in {"auto", "smart"}:
+            preview_handling = str(preview_video.get("black_bar_handling") or "").strip().lower()
+            if preview_handling != requested_handling:
+                return f"The draft does not apply the requested {requested_handling} black-bar handling."
+        if "crop" in requested_video:
+            requested_crop = str(requested_video.get("crop") or "").strip()
+            preview_crop = str(preview_video.get("crop") or "").strip()
+            if preview_crop != requested_crop:
+                if requested_crop:
+                    return f"The draft uses crop {preview_crop or 'off'} instead of the requested {requested_crop}."
+                return "The draft keeps a manual crop even though smart black-bar detection was requested."
+        return None
+
     if request_type == "size_budget":
         return _size_budget_alignment_issue()
     if request_type == "metric_target":
         return _metric_alignment_issue()
     if request_type == "scale_target":
-        return _scale_alignment_issue()
+        scale_issue = _scale_alignment_issue()
+        if scale_issue is not None:
+            return scale_issue
+        return _transform_alignment_issue()
     if request_type == "combined_experiment":
         metric_issue = _metric_alignment_issue()
         if metric_issue is not None:
@@ -193,6 +227,13 @@ def proposal_alignment_issue(
         scale_issue = _scale_alignment_issue()
         if scale_issue is not None:
             return scale_issue
-        if not operator_request.get("metric") and object_dict(operator_request.get("size_budget_request")):
-            return _size_budget_alignment_issue()
+        transform_issue = _transform_alignment_issue()
+        if transform_issue is not None:
+            return transform_issue
+        if object_dict(operator_request.get("size_budget_request")):
+            cap_issue = _size_budget_cap_alignment_issue()
+            if cap_issue is not None:
+                return cap_issue
+            if not operator_request.get("metric"):
+                return _size_budget_alignment_issue()
     return None

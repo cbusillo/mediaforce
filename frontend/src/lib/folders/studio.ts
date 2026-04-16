@@ -165,6 +165,8 @@ export type FolderOperatorRequest = {
 	budget_label?: string;
 	scale_height?: number;
 	scale_label?: string;
+	black_bar_handling?: string;
+	crop?: string;
 	feasibility?: string;
 	requires_confirmation?: boolean;
 	estimated_source_percent?: number;

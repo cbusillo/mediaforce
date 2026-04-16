@@ -165,10 +165,11 @@ def build_operator_note_parse_prompt(payload: dict[str, Any]) -> str:
         "Directive questions still count as direct requests when they clearly ask for action, such as 'Target 300MB per episode?' or 'Can you target 300MB per episode?'. "
         "Exploratory wording stays unconfirmed when the operator is asking whether a change would help or is realistic, such as 'Can we try to target 85 VMAF instead? Will that help?' or 'I want to understand if 300MB per episode is realistic.' "
         "Extract explicit downsample or output-height cap requests into scale_height, such as 'downsample to 1080p', 'cap at 720p', or 'make the 4K files 1080p'. This is only for requested scaling; do not infer a scale target from source resolution, a size budget, or general smaller-file language. "
-        "If a scale target appears with a size budget or metric target, use combined_experiment. If only a scale target is requested, use scale_target. If both a size budget and a metric target are explicitly requested, use combined_experiment. "
+        "Extract explicit black-bar handling requests into black_bar_handling as smart when the operator asks for smart or automatic black-bar detection/cropping. Extract an exact manual crop into crop only when the note includes a concrete W:H:X:Y crop like 1920:800:0:140. Do not invent a crop. "
+        "If any scale, black-bar, or crop target appears with a size budget or metric target, use combined_experiment. If only scale, black-bar, or crop targets are requested, use scale_target. If both a size budget and a metric target are explicitly requested, use combined_experiment. "
         "Return JSON only with no markdown fences or extra commentary. "
         "Return valid JSON only with this exact shape: "
-        '{"summary":"short summary","intent_type":"direct_request|exploratory_question|approval_feedback|other|unclear","request_type":"none|metric_target|size_budget|scale_target|combined_experiment","operator_confirmed":true,"metric":"vmaf|xpsnr|null","metric_target":85,"size_budget_value":300,"size_budget_unit":"mb|gb|kb|tb|null","scale_height":1080,"reasoning_note":"short explanation"}. '
+        '{"summary":"short summary","intent_type":"direct_request|exploratory_question|approval_feedback|other|unclear","request_type":"none|metric_target|size_budget|scale_target|combined_experiment","operator_confirmed":true,"metric":"vmaf|xpsnr|null","metric_target":85,"size_budget_value":300,"size_budget_unit":"mb|gb|kb|tb|null","scale_height":1080,"black_bar_handling":"smart|null","crop":"1920:800:0:140|null","reasoning_note":"short explanation"}. '
         "Do not invent requests that are not explicitly in the note. Here is the note context:\n\n"
         f"{serialized}"
     )

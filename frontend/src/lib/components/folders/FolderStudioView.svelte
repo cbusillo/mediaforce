@@ -1676,7 +1676,10 @@
 	const draftTransformSummary = $derived(summarizeVideoTransformPolicy(policy));
 	const draftTransformHeadline = $derived(draftTransformSummary.headline);
 	const draftTransformDetail = $derived(
-		draftTransformSummary.detail ?? 'unchanged transform chain'
+		draftTransformSummary.detail ??
+			(draftTransformHeadline === 'No crop or scale'
+				? 'No transform filter configured.'
+				: 'Transform policy active.')
 	);
 	const representativeVideoBitrate = $derived.by(() => formatBitrateCopy(sampleItem.video_bitrate));
 	const representativeAudioTrack = $derived.by(() => {

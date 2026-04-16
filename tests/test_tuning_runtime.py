@@ -140,14 +140,21 @@ def _fake_operator_note_parse(*, project_root: Path, payload: dict[str, object])
             lower,
         )
     scale_height = int(scale_match.group("height")) if scale_match else None
-    explicit_request_count = sum(value is not None for value in (size_budget_value, metric_target, scale_height))
+    black_bar_handling = "smart" if re.search(r"\b(?:smart|auto(?:matic)?)\b.{0,24}\bblack[- ]?bar", lower) or re.search(
+        r"\bblack[- ]?bar.{0,24}\b(?:smart|auto(?:matic)?)\b", lower
+    ) else None
+    crop_match = re.search(r"\b(?P<crop>\d{3,5}:\d{3,5}:\d{1,5}:\d{1,5})\b", lower)
+    crop = crop_match.group("crop") if crop_match else None
+    explicit_request_count = sum(
+        value is not None for value in (size_budget_value, metric_target, scale_height, black_bar_handling, crop)
+    )
     if explicit_request_count > 1:
         request_type = "combined_experiment"
     elif size_budget_value is not None:
         request_type = "size_budget"
     elif metric_target is not None:
         request_type = "metric_target"
-    elif scale_height is not None:
+    elif scale_height is not None or black_bar_handling is not None or crop is not None:
         request_type = "scale_target"
     else:
         request_type = "none"
@@ -172,6 +179,8 @@ def _fake_operator_note_parse(*, project_root: Path, payload: dict[str, object])
         "size_budget_value": size_budget_value,
         "size_budget_unit": size_budget_unit,
         "scale_height": scale_height,
+        "black_bar_handling": black_bar_handling,
+        "crop": crop,
         "reasoning_note": "test parser",
     }
 
@@ -289,6 +298,8 @@ class TuningRuntimeTests(unittest.TestCase):
                     "size_budget_value": 300,
                     "size_budget_unit": "mb",
                     "scale_height": None,
+                    "black_bar_handling": None,
+                    "crop": None,
                     "reasoning_note": "Directive question asking for action.",
                 }
             )
@@ -3109,6 +3120,25 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(request["scale_height"], 1080)
         self.assertEqual(request["applied_policy"]["video"]["max_height"], 1080)
 
+    def test_operator_requested_experiment_detects_smart_black_bar_request(self) -> None:
+        request = _operator_requested_experiment("Use smart black-bar detection for this letterboxed season.")
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "scale_target")
+        self.assertTrue(request["operator_confirmed"])
+        self.assertEqual(request["black_bar_handling"], "smart")
+        self.assertEqual(request["applied_policy"]["video"]["black_bar_handling"], "smart")
+        self.assertEqual(request["applied_policy"]["video"]["crop"], "")
+
+    def test_operator_requested_experiment_detects_manual_crop_request(self) -> None:
+        request = _operator_requested_experiment("Use manual crop 1920:800:0:140 for this folder.")
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "scale_target")
+        self.assertTrue(request["operator_confirmed"])
+        self.assertEqual(request["crop"], "1920:800:0:140")
+        self.assertEqual(request["applied_policy"]["video"]["crop"], "1920:800:0:140")
+
     def test_operator_requested_experiment_combines_scale_with_metric_request(self) -> None:
         request = _operator_requested_experiment("Downsample to 1080p and target 88 VMAF for the next sample.")
 
@@ -4304,6 +4334,35 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertEqual(issue, "The draft uses 90.00 VMAF instead of the requested 95.00 target.")
 
+    def test_proposal_alignment_issue_validates_combined_size_budget_cap(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "combined_experiment",
+                "metric": "vmaf",
+                "target": 95.0,
+                "budget_label": "300 MB per episode",
+                "size_budget_request": {"budget_bytes": 300 * 1024 * 1024},
+                "applied_policy": {
+                    "video": {
+                        "target_vmaf": 95.0,
+                        "min_target_vmaf": 93.0,
+                        "max_encoded_percent": 8,
+                    }
+                },
+            },
+            request_disposition="honored",
+            current_policy={"video": {"target_vmaf": 88.0, "min_target_vmaf": 86.0}},
+            preview_policy={
+                "video": {
+                    "target_vmaf": 95.0,
+                    "min_target_vmaf": 93.0,
+                    "max_encoded_percent": 12,
+                }
+            },
+        )
+
+        self.assertEqual(issue, "The draft uses a 12% size ceiling instead of the requested 8% ceiling.")
+
     def test_proposal_alignment_issue_validates_scale_target(self) -> None:
         issue = proposal_alignment_issue(
             operator_request={
@@ -4316,6 +4375,19 @@ class TuningRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(issue, "The draft uses 720p instead of the requested 1080p height cap.")
+
+    def test_proposal_alignment_issue_validates_smart_black_bar_target(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "scale_target",
+                "applied_policy": {"video": {"black_bar_handling": "smart", "crop": ""}},
+            },
+            request_disposition="honored",
+            current_policy={"video": {"black_bar_handling": "off", "crop": "1920:800:0:140"}},
+            preview_policy={"video": {"black_bar_handling": "smart", "crop": "1920:800:0:140"}},
+        )
+
+        self.assertEqual(issue, "The draft keeps a manual crop even though smart black-bar detection was requested.")
 
     def test_run_calibration_job_marks_cancelled_run_stopped(self) -> None:
         saved_statuses: list[str] = []
@@ -4733,6 +4805,8 @@ class TuningRuntimeTests(unittest.TestCase):
         prompt = _build_operator_note_parse_prompt({"operator_note": "Downsample the 4K files to 1080p."})
 
         self.assertIn("scale_height", prompt)
+        self.assertIn("black_bar_handling", prompt)
+        self.assertIn("crop", prompt)
         self.assertIn("scale_target", prompt)
         self.assertIn("do not infer a scale target", prompt)
 
