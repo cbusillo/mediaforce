@@ -6,6 +6,7 @@ import {
 	describeHighImpactApprovalGate,
 	normalizeReviewArtifacts,
 	resolveBenchDraftNote,
+	summarizeVideoTransformPolicy,
 	type ComparisonRow
 } from './studio';
 
@@ -104,6 +105,38 @@ describe('resolveBenchDraftNote', () => {
 
 	it('falls back to the current note when a click event is passed through the button callback', () => {
 		expect(resolveBenchDraftNote('keep current note', { type: 'click' })).toBe('keep current note');
+	});
+});
+
+describe('summarizeVideoTransformPolicy', () => {
+	it('summarizes crop and scale transforms compactly', () => {
+		expect(
+			summarizeVideoTransformPolicy({
+				video: {
+					max_height: 1080,
+					downsample_algorithm: 'lanczos',
+					black_bar_handling: 'smart'
+				}
+			})
+		).toEqual({
+			headline: 'smart black-bar detect + max 1080p',
+			detail: 'lanczos'
+		});
+	});
+
+	it('uses manual crop as the leading transform when present', () => {
+		expect(
+			summarizeVideoTransformPolicy({
+				video: {
+					max_height: 720,
+					black_bar_handling: 'smart',
+					crop: '1920:800:0:140'
+				}
+			})
+		).toEqual({
+			headline: 'manual crop + max 720p',
+			detail: '1920:800:0:140'
+		});
 	});
 });
 

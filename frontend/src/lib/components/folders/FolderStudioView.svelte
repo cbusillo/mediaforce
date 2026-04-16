@@ -53,6 +53,7 @@
 		summarizeMetricPolicy,
 		summarizeSubtitlePlan,
 		summarizeSubtitleSource,
+		summarizeVideoTransformPolicy,
 		workbenchSection,
 		type ApprovedSeasonShortcut,
 		type BreadcrumbItem,
@@ -308,6 +309,8 @@
 	});
 	const operatorRequestLabel = $derived.by(() => {
 		if (operatorRequest?.budget_label) return String(operatorRequest.budget_label).trim();
+		if (operatorRequest?.scale_label) return String(operatorRequest.scale_label).trim();
+		if (operatorRequest?.scale_height) return `${operatorRequest.scale_height}p max height`;
 		if (!operatorRequest?.metric || operatorRequest.target == null) return '';
 		const metric = String(operatorRequest.metric).trim().toUpperCase();
 		const target = Number(operatorRequest.target);
@@ -317,6 +320,10 @@
 	const pendingOperatorRequestLabel = $derived.by(() => {
 		if (pendingOperatorRequest?.budget_label)
 			return String(pendingOperatorRequest.budget_label).trim();
+		if (pendingOperatorRequest?.scale_label)
+			return String(pendingOperatorRequest.scale_label).trim();
+		if (pendingOperatorRequest?.scale_height)
+			return `${pendingOperatorRequest.scale_height}p max height`;
 		if (!pendingOperatorRequest?.metric || pendingOperatorRequest.target == null) return '';
 		const metric = String(pendingOperatorRequest.metric).trim().toUpperCase();
 		const target = Number(pendingOperatorRequest.target);
@@ -1666,6 +1673,11 @@
 		if (!metric || !Number.isFinite(score) || score <= 0) return null;
 		return `${metric} ${score.toFixed(1)}`;
 	});
+	const draftTransformSummary = $derived(summarizeVideoTransformPolicy(policy));
+	const draftTransformHeadline = $derived(draftTransformSummary.headline);
+	const draftTransformDetail = $derived(
+		draftTransformSummary.detail ?? 'unchanged transform chain'
+	);
 	const representativeVideoBitrate = $derived.by(() => formatBitrateCopy(sampleItem.video_bitrate));
 	const representativeAudioTrack = $derived.by(() => {
 		const tracks = (sampleItem.audio_summary ?? []) as SampleAudioTrack[];
@@ -1748,6 +1760,15 @@
 			changed: compareValues(currentGrain, draftGrain)
 		});
 
+		const currentTransform = summarizeVideoTransformPolicy(baselinePolicy);
+		const draftTransform = summarizeVideoTransformPolicy(policy);
+		rows.push({
+			label: 'Video transform',
+			current: currentTransform,
+			draft: draftTransform,
+			changed: compareValues(currentTransform, draftTransform)
+		});
+
 		const currentSurround = comparisonValue(
 			formatBitrateCopy(baselinePolicy.audio?.surround_5_1_opus_bitrate) ?? 'n/a'
 		);
@@ -1794,7 +1815,7 @@
 	const changedPolicyRows = $derived.by(() => policyComparisonRows.filter((row) => row.changed));
 	const highImpactPolicyRows = $derived.by(() =>
 		changedPolicyRows.filter((row) =>
-			['Quality guardrail', 'Size ceiling', 'Film grain'].includes(row.label)
+			['Quality guardrail', 'Size ceiling', 'Film grain', 'Video transform'].includes(row.label)
 		)
 	);
 	const highImpactPolicyLabels = $derived.by(() =>
@@ -2769,6 +2790,11 @@
 										<span class="muted-copy">{reviewEstimateCopy}</span>
 									</div>
 								{/if}
+								<div class="review-console-fact">
+									<p class="eyebrow-copy">Video transform</p>
+									<strong>{draftTransformHeadline}</strong>
+									<span class="muted-copy">{draftTransformDetail}</span>
+								</div>
 							</div>
 							{#if reviewBenchSummary.available}
 								<div class="review-bench-summary-card">

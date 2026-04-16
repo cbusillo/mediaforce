@@ -122,6 +122,15 @@
 
 	let threadScrollViewport = $state<HTMLDivElement | null>(null);
 	let lastAutoScrolledThreadSignature = $state('');
+	let transformHeightDraft = $state('off');
+	let transformBlackBarDraft = $state('off');
+	let transformCropDraft = $state('');
+
+	const transformRequestReady = $derived.by(() => {
+		if (transformHeightDraft !== 'off') return true;
+		if (transformBlackBarDraft === 'smart') return true;
+		return transformBlackBarDraft === 'manual' && transformCropDraft.trim().length > 0;
+	});
 
 	$effect(() => {
 		const latestSession = calibrationThreadSessions.at(-1);
@@ -141,6 +150,29 @@
 			threadScrollViewport.scrollTop = threadScrollViewport.scrollHeight;
 		});
 	});
+
+	function buildTransformRequestText(): string {
+		const parts: string[] = [];
+		if (transformHeightDraft !== 'off') {
+			parts.push(`downsample to ${transformHeightDraft}p`);
+		}
+		if (transformBlackBarDraft === 'smart') {
+			parts.push('use smart black-bar detection');
+		}
+		if (transformBlackBarDraft === 'manual') {
+			const crop = transformCropDraft.trim();
+			if (crop) parts.push(`use manual crop ${crop}`);
+		}
+		return parts.join(' and ');
+	}
+
+	function applyTransformRequestToNote(): void {
+		const requestText = buildTransformRequestText();
+		if (!requestText) return;
+		const trimmedNote = note.trim();
+		const sentence = `For this bench draft, ${requestText}.`;
+		onNoteInput(trimmedNote ? `${trimmedNote}\n${sentence}` : sentence);
+	}
 </script>
 
 <div class="bench-workspace-shell">
@@ -166,6 +198,66 @@
 				onkeydown={onNoteKeydown}
 				placeholder={notePlaceholder}
 			></textarea>
+			<div class="transform-request-console">
+				<div class="transform-request-head">
+					<p class="eyebrow-copy">Transform request</p>
+					<Pill
+						label={transformRequestReady ? 'Ready to append' : 'No transform selected'}
+						variant={transformRequestReady ? 'neutral' : 'ghost'}
+					/>
+				</div>
+				<div class="transform-control-grid">
+					<label class="transform-field">
+						<span>Height cap</span>
+						<select bind:value={transformHeightDraft} aria-label="Output height cap">
+							<option value="off">Off</option>
+							<option value="2160">2160p</option>
+							<option value="1080">1080p</option>
+							<option value="720">720p</option>
+							<option value="540">540p</option>
+						</select>
+					</label>
+					<div class="transform-field transform-mode-field">
+						<span>Black bars</span>
+						<div class="segmented-control" role="group" aria-label="Black bar handling">
+							<button
+								type="button"
+								class:active={transformBlackBarDraft === 'off'}
+								onclick={() => (transformBlackBarDraft = 'off')}>Off</button
+							>
+							<button
+								type="button"
+								class:active={transformBlackBarDraft === 'smart'}
+								onclick={() => (transformBlackBarDraft = 'smart')}>Smart</button
+							>
+							<button
+								type="button"
+								class:active={transformBlackBarDraft === 'manual'}
+								onclick={() => (transformBlackBarDraft = 'manual')}>Manual</button
+							>
+						</div>
+					</div>
+					<label class="transform-field transform-crop-field">
+						<span>Crop</span>
+						<input
+							bind:value={transformCropDraft}
+							aria-label="Manual crop"
+							placeholder={transformBlackBarDraft === 'manual' ? '1920:800:0:140' : ''}
+							disabled={transformBlackBarDraft !== 'manual'}
+						/>
+					</label>
+				</div>
+				<div class="transform-request-footer">
+					<p class="muted-copy transform-request-preview">
+						{buildTransformRequestText() || 'Transform request stays unchanged.'}
+					</p>
+					<Button
+						variant="secondary"
+						disabled={!transformRequestReady}
+						onclick={applyTransformRequestToNote}>Append request</Button
+					>
+				</div>
+			</div>
 			{#if reviewConversationCopy || approvedSeasonShortcut}
 				<div class="bench-chat-context">
 					{#if reviewConversationCopy}
@@ -621,6 +713,97 @@
 		gap: 0.55rem;
 	}
 
+	.transform-request-console {
+		display: grid;
+		gap: 0.65rem;
+		padding: 0.8rem;
+		border-radius: calc(var(--radius-md) - 0.12rem);
+		border: 1px solid rgba(15, 118, 110, 0.13);
+		background: rgba(255, 255, 255, 0.62);
+	}
+
+	.transform-request-head,
+	.transform-request-footer {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+		min-width: 0;
+	}
+
+	.transform-control-grid {
+		display: grid;
+		grid-template-columns: minmax(7rem, 0.85fr) minmax(12rem, 1.25fr) minmax(10rem, 1fr);
+		gap: 0.65rem;
+		align-items: end;
+	}
+
+	.transform-field {
+		display: grid;
+		gap: 0.35rem;
+		min-width: 0;
+		font-size: 0.76rem;
+		font-weight: 700;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: #475569;
+	}
+
+	.transform-field select,
+	.transform-field input {
+		width: 100%;
+		min-height: 2.35rem;
+		padding: 0.5rem 0.65rem;
+		border-radius: calc(var(--radius-md) - 0.2rem);
+		border: 1px solid rgba(23, 35, 31, 0.14);
+		background: rgba(255, 255, 255, 0.9);
+		color: #0f172a;
+		font: inherit;
+		letter-spacing: 0;
+		text-transform: none;
+		box-sizing: border-box;
+	}
+
+	.transform-field input:disabled {
+		color: rgba(15, 23, 42, 0.42);
+		background: rgba(247, 246, 241, 0.76);
+	}
+
+	.segmented-control {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		min-height: 2.35rem;
+		padding: 0.16rem;
+		border-radius: calc(var(--radius-md) - 0.2rem);
+		border: 1px solid rgba(23, 35, 31, 0.14);
+		background: rgba(248, 250, 252, 0.92);
+	}
+
+	.segmented-control button {
+		min-width: 0;
+		border: 0;
+		border-radius: calc(var(--radius-md) - 0.28rem);
+		background: transparent;
+		color: #475569;
+		font-size: 0.78rem;
+		font-weight: 800;
+		letter-spacing: 0;
+		cursor: pointer;
+	}
+
+	.segmented-control button.active {
+		background: rgba(15, 118, 110, 0.13);
+		color: #0f766e;
+		box-shadow: inset 0 0 0 1px rgba(15, 118, 110, 0.16);
+	}
+
+	.transform-request-preview {
+		margin: 0;
+		min-width: 0;
+		color: #334155;
+		overflow-wrap: anywhere;
+	}
+
 	.bench-workspace-shell .diagnosis-shell {
 		background:
 			linear-gradient(180deg, rgba(255, 250, 240, 0.94), rgba(255, 255, 255, 0.84)),
@@ -1057,6 +1240,10 @@
 			grid-template-columns: 1fr;
 		}
 
+		.transform-control-grid {
+			grid-template-columns: 1fr;
+		}
+
 		.diagnosis-copy-card {
 			grid-column: auto;
 		}
@@ -1066,6 +1253,12 @@
 		.thread-inline-head {
 			flex-direction: column;
 			align-items: start;
+		}
+
+		.transform-request-head,
+		.transform-request-footer {
+			align-items: stretch;
+			flex-direction: column;
 		}
 
 		.bench-compose-actions :global(button) {
