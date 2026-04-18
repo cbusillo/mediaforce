@@ -31,6 +31,15 @@ export type FolderPolicy = {
 		min_crf?: number;
 		max_crf?: number;
 		max_encoded_percent?: number;
+		max_height?: number;
+		downsample_algorithm?: string;
+		black_bar_handling?: string;
+		black_bar_detect_samples?: number;
+		black_bar_detect_seconds?: number;
+		black_bar_detect_limit?: number;
+		black_bar_detect_round?: number;
+		black_bar_detect_start_seconds?: number;
+		crop?: string;
 		default_grain?: number;
 		grain_denoise?: number;
 		thorough?: boolean;
@@ -154,6 +163,10 @@ export type FolderOperatorRequest = {
 	metric?: string;
 	target?: number;
 	budget_label?: string;
+	scale_height?: number;
+	scale_label?: string;
+	black_bar_handling?: string;
+	crop?: string;
 	feasibility?: string;
 	requires_confirmation?: boolean;
 	estimated_source_percent?: number;
@@ -634,6 +647,38 @@ export function summarizeMetricPlan(plan: FolderItemPlan['video'] | undefined): 
 	);
 }
 
+function summarizeBlackBarHandling(value: string | null | undefined): string | null {
+	const handling = String(value ?? '')
+		.trim()
+		.toLowerCase();
+	if (!handling || handling === 'off') return null;
+	if (handling === 'smart') return 'smart black-bar detect';
+	if (handling === 'auto') return 'auto black-bar detect';
+	return `${handling} black-bar mode`;
+}
+
+export function summarizeVideoTransformPolicy(
+	policyValue: FolderPolicy | null | undefined
+): ComparisonValue {
+	const video = policyValue?.video ?? {};
+	const maxHeight = Number(video.max_height ?? 0);
+	const crop = String(video.crop ?? '').trim();
+	const headlineParts = [
+		crop ? 'manual crop' : summarizeBlackBarHandling(video.black_bar_handling),
+		Number.isFinite(maxHeight) && maxHeight > 0 ? `max ${maxHeight}p` : null
+	].filter(Boolean) as string[];
+	const detail = compactCopy([
+		Number.isFinite(maxHeight) && maxHeight > 0 && video.downsample_algorithm
+			? String(video.downsample_algorithm)
+			: null,
+		crop || null
+	]);
+	return comparisonValue(
+		headlineParts.length ? headlineParts.join(' + ') : 'No crop or scale',
+		detail
+	);
+}
+
 export function compareValues(
 	current: ComparisonValue | string,
 	draft: ComparisonValue | string
@@ -677,6 +722,15 @@ export function policyRowLabel(path: string): string {
 		'video.min_crf': 'Minimum CRF',
 		'video.max_crf': 'Maximum CRF',
 		'video.max_encoded_percent': 'Size ceiling',
+		'video.max_height': 'Output height cap',
+		'video.downsample_algorithm': 'Downsample filter',
+		'video.black_bar_handling': 'Black-bar handling',
+		'video.black_bar_detect_samples': 'Black-bar samples',
+		'video.black_bar_detect_seconds': 'Black-bar window',
+		'video.black_bar_detect_limit': 'Black-bar threshold',
+		'video.black_bar_detect_round': 'Black-bar rounding',
+		'video.black_bar_detect_start_seconds': 'Black-bar start',
+		'video.crop': 'Manual crop',
 		'video.default_grain': 'Film grain',
 		'video.grain_denoise': 'Film-grain denoise',
 		'video.thorough': 'Thorough search',
@@ -711,6 +765,20 @@ export function formatPolicyValue(
 	if (typeof value === 'boolean') return formatBooleanCopy(value);
 	if (path.includes('bitrate')) return formatBitrateCopy(value as number | string) ?? 'n/a';
 	if (path === 'video.max_encoded_percent') return formatPercentCopy(value as number | string);
+	if (path === 'video.max_height') {
+		const height = Number(value);
+		return Number.isFinite(height) && height > 0 ? `max ${height}p` : 'off';
+	}
+	if (path === 'video.black_bar_handling') {
+		return summarizeBlackBarHandling(String(value)) ?? 'off';
+	}
+	if (path === 'video.crop') return String(value).trim() || 'off';
+	if (
+		path === 'video.black_bar_detect_seconds' ||
+		path === 'video.black_bar_detect_start_seconds'
+	) {
+		return `${value}s`;
+	}
 	if (typeof value === 'number') {
 		return Number.isInteger(value)
 			? value.toLocaleString('en-US')

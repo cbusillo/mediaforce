@@ -49,6 +49,7 @@ from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY, clear_ter
 from mediaforce.execution import (
     build_svt_params,
     describe_item_plan,
+    detect_video_crop,
     encode_manifest_items,
     effective_video_preset,
     estimate_output_overhead_bytes,
@@ -62,10 +63,12 @@ from mediaforce.hosts.types import HostSetupResult
 from mediaforce.core.process_control import ManagedProcessController
 from mediaforce.encoding.quality import run_sample_encode, select_quality_metric
 from mediaforce.remote import (
+    DEFAULT_HOST_CAPABILITIES,
     HostStatus,
     collect_host_statuses,
     prepare_remote_host_with_password,
     reset_remote_host_trust,
+    run_remote_command,
     run_host_lifecycle_command,
 )
 from mediaforce.review import (
@@ -115,7 +118,9 @@ from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
     remove_path as runtime_remove_path, snapshot_staged_artifact as runtime_snapshot_staged_artifact
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail, \
     unavailable_host_error_message as runtime_unavailable_host_error_message
+from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 from mediaforce.web.runtime.encode_runtime import EncodeQueueRuntimeDeps, \
+    clear_stale_encoding_items_when_idle as runtime_clear_stale_encoding_items_when_idle, \
     encode_job_heartbeat_loop as runtime_encode_job_heartbeat_loop, \
     encode_job_manifest_totals as runtime_encode_job_manifest_totals, \
     encode_queue_worker_loop as runtime_encode_queue_worker_loop, \
@@ -246,6 +251,8 @@ ENCODE_QUEUE_PROCESSES: dict[str, ManagedProcessController] = {}
 ENCODE_QUEUE_PROCESSES_LOCK = threading.Lock()
 ENCODE_QUEUE_WORKER_LOCK = threading.Lock()
 ENCODE_QUEUE_WORKER_STARTED = False
+BACKGROUND_WORKER_LEASES: dict[Path, WorkerLeadershipLease] = {}
+BACKGROUND_WORKER_LEASES_LOCK = threading.Lock()
 
 
 _parse_audio_bitrate_kbps = runtime_parse_audio_bitrate_kbps
@@ -300,8 +307,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             ensure_queue_state(connection, updated_at=_now_iso())
             _recover_calibration_jobs(connection, config)
             _recover_encode_queue(connection, config)
-        _start_calibration_queue_worker(config)
-        _start_encode_queue_worker(config)
+        _start_background_workers(config)
         _refresh_host_status_cache(config)
         try:
             yield
@@ -619,11 +625,16 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             )
 
     def _clear_completed_backups_action(prefixes: list[str] | None) -> dict[str, Any]:
+        archive_root = None
+        try:
+            archive_root = config.archive_root
+        except KeyError:
+            archive_root = None
         with open_db(config.paths.db_path) as connection:
             folders = list_completed_folders(
                 connection,
                 folder_group=_folder_group,
-                archive_root=config.archive_root,
+                archive_root=archive_root,
             )
         valid_prefixes = {folder.prefix for folder in folders}
         result = clear_completed_backups_action(
@@ -803,6 +814,8 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             config=config,
             now_iso=_now_iso,
             cancel_queue_process=_cancel_active_encode_processes,
+            sweep_orphaned_encode_processes=lambda: _sweep_orphaned_encode_processes(config),
+            clear_stale_encoding_items=lambda: _clear_stale_encoding_items_when_idle(config),
         )
 
     def _retry_failed_encode_queue_action() -> dict[str, Any]:
@@ -1787,6 +1800,7 @@ def _calibration_run_deps() -> CalibrationRunDeps:
         effective_video_preset=effective_video_preset,
         search_quality_for_source=search_quality_for_source,
         run_sample_encode=run_sample_encode,
+        detect_video_crop=detect_video_crop,
         recommend_review_timestamps=recommend_review_timestamps,
         encode_preview_clips=encode_preview_clips,
         render_source_review_clips=render_source_review_clips,
@@ -2132,6 +2146,11 @@ def _reconcile_encode_jobs(
     runtime_reconcile_encode_jobs(connection, config, _encode_queue_runtime_deps(), restart_recovery=restart_recovery)
 
 
+def _clear_stale_encoding_items_when_idle(config: MediaforceConfig) -> int:
+    with open_db(config.paths.db_path) as connection:
+        return runtime_clear_stale_encoding_items_when_idle(connection, config, _encode_queue_runtime_deps())
+
+
 def _encode_job_manifest_totals(job: dict[str, Any]) -> dict[str, Any]:
     return runtime_encode_job_manifest_totals(job)
 
@@ -2293,6 +2312,76 @@ def _start_encode_queue_worker(config: MediaforceConfig) -> None:
                                   daemon=True)
         thread.start()
         ENCODE_QUEUE_WORKER_STARTED = True
+
+
+def _background_worker_lease(config: MediaforceConfig) -> WorkerLeadershipLease:
+    lock_path = config.paths.web_state_dir / "background-workers.lock"
+    with BACKGROUND_WORKER_LEASES_LOCK:
+        lease = BACKGROUND_WORKER_LEASES.get(lock_path)
+        if lease is None:
+            lease = WorkerLeadershipLease(lock_path, worker_name="background-workers")
+            BACKGROUND_WORKER_LEASES[lock_path] = lease
+        return lease
+
+
+def _acquire_background_worker_leadership(config: MediaforceConfig) -> bool:
+    lease = _background_worker_lease(config)
+    if lease.acquire():
+        return True
+    owner = lease.owner_metadata() or {}
+    owner_copy = ", ".join(
+        f"{key}={owner[key]}"
+        for key in ("pid", "hostname", "cwd", "started_at")
+        if owner.get(key) is not None
+    )
+    if owner_copy:
+        LOGGER.warning("Background workers disabled; lock %s is already held by %s.", lease.lock_path, owner_copy)
+    else:
+        LOGGER.warning("Background workers disabled; lock %s is already held by another process.", lease.lock_path)
+    return False
+
+
+def _start_background_workers(config: MediaforceConfig) -> bool:
+    if not _acquire_background_worker_leadership(config):
+        return False
+    _start_calibration_queue_worker(config)
+    _start_encode_queue_worker(config)
+    return True
+
+
+def _reset_background_worker_leadership_for_tests() -> None:
+    with BACKGROUND_WORKER_LEASES_LOCK:
+        leases = list(BACKGROUND_WORKER_LEASES.values())
+        BACKGROUND_WORKER_LEASES.clear()
+    for lease in leases:
+        lease.release()
+
+
+def _sweep_orphaned_encode_processes(config: MediaforceConfig) -> None:
+    sweep_script = (
+        "pids=$(pgrep -f 'mediaforce_encoded_by=mediaforce' || true); "
+        "if [ -n \"$pids\" ]; then "
+        "kill $pids 2>/dev/null || true; "
+        "sleep 2; "
+        "pids=$(pgrep -f 'mediaforce_encoded_by=mediaforce' || true); "
+        "if [ -n \"$pids\" ]; then kill -9 $pids 2>/dev/null || true; fi; "
+        "fi"
+    )
+    for host in config.remote_hosts:
+        capabilities = {
+            str(capability).strip().lower()
+            for capability in object_list(host.get("capabilities") or list(DEFAULT_HOST_CAPABILITIES))
+            if str(capability).strip()
+        }
+        if "encode_queue" not in capabilities:
+            continue
+        if str(host.get("mode") or "ssh").strip().lower() != "ssh":
+            continue
+        try:
+            run_remote_command(host, ["sh", "-lc", sweep_script], timeout=10)
+        except Exception as exc:
+            host_label = str(host.get("label") or host.get("host") or host.get("key") or "remote host")
+            LOGGER.warning("Orphan encode sweep failed for %s: %s", host_label, exc)
 
 
 def _encode_queue_worker_loop(*, config_path: Path) -> None:

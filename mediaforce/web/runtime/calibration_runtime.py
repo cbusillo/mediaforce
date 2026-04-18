@@ -15,6 +15,7 @@ from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.quality import quality_error_message, resolve_local_quality_temp_root
+from mediaforce.encoding.video_filters import build_video_filter
 from mediaforce.state_cleanup import purge_transient_artifacts
 
 
@@ -31,6 +32,7 @@ class CalibrationRunDeps:
     effective_video_preset: Any
     search_quality_for_source: Any
     run_sample_encode: Any
+    detect_video_crop: Any
     recommend_review_timestamps: Any
     encode_preview_clips: Any
     render_source_review_clips: Any
@@ -273,12 +275,24 @@ def run_sampled_calibration(
     width = int_value(sample_item.get("width")) or None
     height = int_value(sample_item.get("height")) or None
     preset = deps.effective_video_preset(video_policy, width=width, height=height)
+    detected_crop = deps.detect_video_crop(
+        source_path,
+        video_policy,
+        source_codec=str(sample_item.get("video_codec") or ""),
+        width=width,
+        height=height,
+        duration_seconds=sample_item.get("duration_seconds"),
+        process_controller=process_controller,
+        host=quality_host,
+    )
+    video_filter = build_video_filter(video_policy, width=width, height=height, detected_crop=detected_crop)
     quality_result = deps.search_quality_for_source(
         source_path,
         video_policy,
         source_codec=str(sample_item.get("video_codec") or ""),
         width=width,
         height=height,
+        detected_crop=detected_crop,
         process_controller=process_controller,
         host=quality_host,
         quality_temp_dir=quality_temp_dir,
@@ -293,6 +307,7 @@ def run_sampled_calibration(
         sample_every=str(video_policy["sample_every"]),
         sample_duration=str(video_policy["sample_duration"]),
         svt_params=deps.build_svt_params(video_policy),
+        video_filter=video_filter,
         process_controller=process_controller,
         host=quality_host,
         quality_temp_dir=quality_temp_dir,
@@ -316,6 +331,7 @@ def run_sampled_calibration(
         preset=preset,
         crf=quality_result.crf,
         svt_params=deps.build_svt_params(video_policy),
+        video_filter=video_filter,
         host=host_data,
         process_controller=process_controller,
     )

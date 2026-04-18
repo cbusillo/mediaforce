@@ -26,12 +26,17 @@ Only session-start facts that are easy to miss belong here.
 - Full local acceptance gate: `bash scripts/pre-commit-check.sh`
 - CLI smoke: `uv run mediaforce --help`
 - UI changes: validate in a real browser
+- Before changing primary operator surfaces, read
+  `docs/style/workstation-ui.md`
 - For browser exploration by subagents, explicitly use the `browser-ui-review`
   skill and follow the browser review launch contract below.
 - Follow `docs/style/index.md` plus
   `docs/policies/coding-standards.md`
 - Before commits or ending a session, satisfy
   `docs/policies/acceptance-gate.md`
+- Prefer making commits in smaller logical chunks as work is completed.
+- Before finalizing a change when practical, run PyCharm inspections in addition
+  to the required checks.
 - The checked-in Git hook lives at `.githooks/pre-commit`; fresh clones should
   enable it with `git config core.hooksPath .githooks`
 
@@ -53,11 +58,15 @@ Only session-start facts that are easy to miss belong here.
 - If `BROWSER BLOCKED` occurs, fix the browser-launch problem and rerun the
   review. Do not present the blocked subagent's code-informed notes as the
   requested review.
+- For reviews of home, queue, review, or folder-workspace screens, require the
+  critique to call out any SaaS-dashboard drift against
+  `docs/style/workstation-ui.md`.
 
 ## See also
 
 - `README.md`: durable operator and developer overview
 - `docs/README.md`: docs table of contents
+- `docs/style/workstation-ui.md`: primary operator-surface design doctrine
 - `docs/TODO.md`: current priorities
 - `docs/architecture/module-boundaries.md`: durable backend/frontend module
   boundaries after the structural refactor pass

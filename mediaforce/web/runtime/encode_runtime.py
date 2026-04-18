@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import socket
 import threading
 import time
@@ -26,6 +27,8 @@ from mediaforce.core.process_control import ManagedProcessController, ProcessCan
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.quality import QualityTempCleanupError, QualityTempSetupError, quality_error_message
 from mediaforce.encoding.staging import safe_unlink
+from mediaforce.remote import execution_mode_for_host, host_media_access_for_host, run_remote_command
+from mediaforce.web.runtime.host_runtime import host_config_for_key
 from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
 
 
@@ -52,6 +55,9 @@ class EncodeQueueRuntimeDeps:
     encode_job_retry_max_delay_seconds: int
     encode_job_max_attempts: int
     encode_host_cooldown_seconds: int
+
+
+ENCODE_HOST_BACKUP_FAILURE_THRESHOLD = 2
 
 
 def recover_encode_queue(
@@ -126,6 +132,156 @@ def reconcile_encode_jobs(
     if running_count == 0 and (state.get("active_job_id") or state.get("stop_requested")):
         state.update({"active_job_id": None, "stop_requested": False, "updated_at": deps.now_iso()})
         save_queue_state(connection, state)
+    clear_stale_encoding_items_when_idle(connection, config, deps)
+
+
+def clear_stale_encoding_items_when_idle(
+        connection: DBClient,
+        config: MediaforceConfig,
+        deps: EncodeQueueRuntimeDeps,
+) -> int:
+    if running_encode_job_count(connection) > 0:
+        return 0
+    stale_rows = connection.execute(
+        select(
+            library_items.c.id,
+            library_items.c.rel_path,
+            staged_artifacts.c.staging_path,
+            staged_artifacts.c.promoted_at,
+            staged_artifacts.c.encode_host_key,
+            staged_artifacts.c.encode_host_label,
+        )
+        .select_from(
+            library_items.outerjoin(
+                staged_artifacts,
+                staged_artifacts.c.library_item_id == library_items.c.id,
+            )
+        )
+        .where(library_items.c.status == "encoding")
+        .order_by(library_items.c.updated_at.asc(), library_items.c.id.asc())
+    ).mappings().fetchall()
+    if not stale_rows:
+        return 0
+
+    for row in stale_rows:
+        if row["promoted_at"] is not None:
+            continue
+        for staging_path, host in _candidate_stale_staging_targets(config, row):
+            _remove_stale_staging_path(staging_path, host=host)
+            _remove_stale_staging_path(
+                staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}"),
+                host=host,
+            )
+
+    stale_ids = [int(row["id"]) for row in stale_rows if row["promoted_at"] is None]
+    if not stale_ids:
+        return 0
+    updated_at = deps.now_iso()
+    connection.execute(
+        delete(staged_artifacts)
+        .where(staged_artifacts.c.library_item_id.in_(stale_ids))
+        .where(staged_artifacts.c.promoted_at.is_(None))
+    )
+    connection.execute(
+        update(library_items)
+        .where(library_items.c.id.in_(stale_ids))
+        .where(library_items.c.status == "encoding")
+        .values(status="planned", updated_at=updated_at)
+    )
+    return len(stale_ids)
+
+
+def _candidate_stale_staging_targets(
+        config: MediaforceConfig,
+        row: dict[str, Any],
+) -> list[tuple[Path, dict[str, Any] | None]]:
+    targets: list[tuple[Path, dict[str, Any] | None]] = []
+
+    def _add_target(path: Path | None, host: dict[str, Any] | None = None) -> None:
+        if path is None:
+            return
+        normalized_host = object_dict(host)
+        host_key = str(
+            normalized_host.get("host")
+            or normalized_host.get("key")
+            or normalized_host.get("label")
+            or ""
+        ).strip()
+        if any(existing == path and existing_host_key == host_key for existing, existing_host_key in (
+            (candidate_path, str(object_dict(candidate_host).get("host") or object_dict(candidate_host).get("key") or object_dict(candidate_host).get("label") or "").strip())
+            for candidate_path, candidate_host in targets
+        )):
+            return
+        targets.append((path, normalized_host or None))
+
+    staging_value = str(row.get("staging_path") or "").strip()
+    if staging_value:
+        host_key = str(row.get("encode_host_key") or row.get("encode_host_label") or "").strip()
+        host_config = host_config_for_key(config, host_key) if host_key else {}
+        _add_target(Path(staging_value), host_config or None)
+
+    rel_path = str(row.get("rel_path") or "").strip()
+    if not rel_path:
+        return targets
+
+    output_suffix = str(object_dict(config.media).get("output_container") or "").strip()
+    if output_suffix:
+        output_suffix = f".{output_suffix.lstrip('.')}"
+    else:
+        output_suffix = Path(rel_path).suffix or ".mkv"
+
+    rel_output_path = Path(rel_path).with_suffix(output_suffix)
+    host_key = str(row.get("encode_host_key") or row.get("encode_host_label") or "").strip()
+    if host_key:
+        host_config = host_config_for_key(config, host_key)
+        _add_target(config.staging_root_for_host(host_config) / rel_output_path, host_config)
+
+    _add_target(config.staging_root / rel_output_path)
+    for host in config.remote_hosts:
+        _add_target(config.staging_root_for_host(host) / rel_output_path, host if isinstance(host, dict) else None)
+    return targets
+
+
+def _remove_stale_staging_path(path: Path, *, host: dict[str, Any] | None = None) -> None:
+    host_payload = object_dict(host)
+    if (
+            host_payload
+            and execution_mode_for_host(host_payload) == "ssh"
+            and host_media_access_for_host(host_payload) != "stream"
+    ):
+        _remove_remote_stale_staging_path(path, host_payload)
+        return
+    if path.is_dir():
+        return
+    if path.exists():
+        try:
+            safe_unlink(path)
+        except OSError:
+            pass
+    _prune_empty_quality_temp_dir(path.parent)
+
+
+def _prune_empty_quality_temp_dir(path: Path) -> None:
+    if path.name.startswith(".mediaforce-ab-av1-") or path.name.startswith(".ab-av1-"):
+        try:
+            path.rmdir()
+        except OSError:
+            return
+
+
+def _remove_remote_stale_staging_path(path: Path, host: dict[str, Any]) -> None:
+    quoted_path = shlex.quote(str(path))
+    script = f"rm -f {quoted_path}"
+    if path.parent.name.startswith(".mediaforce-ab-av1-") or path.parent.name.startswith(".ab-av1-"):
+        quoted_parent = shlex.quote(str(path.parent))
+        script = (
+            f"{script}; "
+            f"if [ -d {quoted_parent} ]; then rmdir {quoted_parent} >/dev/null 2>&1 || true; fi"
+        )
+    try:
+        run_remote_command(host, ["sh", "-lc", script], timeout=10)
+    except Exception:
+        return
 
 
 def running_encode_job_count(connection: DBClient) -> int:
@@ -399,9 +555,15 @@ def transition_encode_job_failure(
     now = datetime.now(tz=UTC)
     now_iso = now.isoformat(timespec="seconds")
     assigned_host = object_dict(job.get("host"))
+    previous_last_host = object_dict(job.get("last_host"))
     attempt_count = int_value(job.get("attempt_count"))
     retryable = _encode_failure_is_retryable(failure_kind, error_message, assigned_host)
     host_related = _encode_failure_is_host_related(failure_kind, error_message, assigned_host)
+    retry_beyond_attempt_cap = _encode_failure_retries_after_attempt_cap(
+        failure_kind,
+        error_message,
+        assigned_host,
+    )
     job.update(
         {
             "process_pid": None,
@@ -412,20 +574,23 @@ def transition_encode_job_failure(
             "last_failure_kind": failure_kind,
             "last_failure_at": now_iso,
             "error": error_message,
-            "last_host": assigned_host,
-            "progress": _finalize_encode_job_progress(job, deps=deps, terminal_state="needs_attention"),
+            "last_host": _encode_failure_last_host_payload(
+                assigned_host,
+                previous_last_host=previous_last_host,
+                host_related=host_related,
+            ),
             "updated_at": now_iso,
         }
     )
 
-    if retryable and attempt_count < deps.encode_job_max_attempts:
+    if retryable and (attempt_count < deps.encode_job_max_attempts or retry_beyond_attempt_cap):
         _cleanup_encode_retry_artifacts(
             connection,
             manifest_path=Path(str(job["manifest_path"])),
             indexes=job.get("manifest_indexes"),
             deps=deps,
         )
-        retry_delay = _encode_job_retry_delay_seconds(attempt_count, deps)
+        retry_delay = _encode_job_retry_delay_seconds(min(attempt_count, deps.encode_job_max_attempts), deps)
         retry_not_before = (now + timedelta(seconds=retry_delay)).isoformat(timespec="seconds")
         job.update(
             {
@@ -442,6 +607,7 @@ def transition_encode_job_failure(
                     if host_related and assigned_host
                     else None
                 ),
+                "progress": _finalize_encode_job_progress(job, deps=deps, terminal_state="retry_backoff"),
             }
         )
         save_encode_job(connection, job)
@@ -457,6 +623,7 @@ def transition_encode_job_failure(
             "waiting_reason": None,
             "terminal_reason": terminal_reason,
             "host_cooldown_until": None,
+            "progress": _finalize_encode_job_progress(job, deps=deps, terminal_state="needs_attention"),
         }
     )
     save_encode_job(connection, job)
@@ -513,25 +680,50 @@ def select_encode_host(
     if not encode_capable_hosts and not startable_hosts:
         return None, "waiting for an available encode host"
 
-    cooldown_until = deps.parse_iso(job.get("host_cooldown_until"))
-    last_host = object_dict(job.get("last_host"))
-    blocked_keys = {
-        str(last_host.get("key") or ""),
-        str(last_host.get("label") or ""),
-        str(last_host.get("host") or ""),
+    globally_blocked_hosts = _globally_backed_off_encode_hosts(connection, deps, now=now)
+    blocked_host_tokens = {
+        token
+        for blocked_host in globally_blocked_hosts.values()
+        for token in _host_identity_tokens(blocked_host)
     }
-    if cooldown_until is not None and cooldown_until > now and any(blocked_keys):
+    if blocked_host_tokens:
+        had_blocked_candidate = any(
+            bool(_host_identity_tokens(host) & blocked_host_tokens)
+            for host in active_hosts + startable_hosts
+        )
         eligible_active_hosts = [
             host
             for host in active_hosts
-            if str(host.get("key") or "") not in blocked_keys and str(host.get("label") or "") not in blocked_keys
+            if not (_host_identity_tokens(host) & blocked_host_tokens)
+        ]
+        eligible_startable_hosts = [
+            host
+            for host in startable_hosts
+            if not (_host_identity_tokens(host) & blocked_host_tokens)
+        ]
+        active_hosts = eligible_active_hosts
+        startable_hosts = eligible_startable_hosts
+        if active_hosts or startable_hosts:
+            pass
+        elif had_blocked_candidate:
+            blocked_host_name = _blocked_host_wait_name(globally_blocked_hosts)
+            return None, f"waiting for host cooldown to expire on {blocked_host_name}"
+
+    cooldown_until = deps.parse_iso(job.get("host_cooldown_until"))
+    last_host = object_dict(job.get("last_host"))
+    blocked_tokens = _host_identity_tokens(last_host)
+    if cooldown_until is not None and cooldown_until > now and blocked_tokens:
+        eligible_active_hosts = [
+            host
+            for host in active_hosts
+            if not (_host_identity_tokens(host) & blocked_tokens)
         ]
         if eligible_active_hosts:
             return object_dict(eligible_active_hosts[0]), None
         eligible_startable_hosts = [
             host
             for host in startable_hosts
-            if str(host.get("key") or "") not in blocked_keys and str(host.get("label") or "") not in blocked_keys
+            if not (_host_identity_tokens(host) & blocked_tokens)
         ]
         if eligible_startable_hosts:
             return object_dict(eligible_startable_hosts[0]), None
@@ -558,6 +750,164 @@ def select_encode_host(
     if library_key and encode_capable_hosts:
         return None, f"waiting for a host allowed to encode {library_key}"
     return None, "waiting for an available encode host"
+
+
+def _globally_backed_off_encode_hosts(
+        connection: DBClient,
+        deps: EncodeQueueRuntimeDeps,
+        *,
+        now: datetime,
+) -> dict[str, dict[str, Any]]:
+    if connection is None:
+        return {}
+    rows = connection.execute(
+        select(
+            encode_jobs.c.last_host_json,
+            encode_jobs.c.host_cooldown_until,
+            encode_jobs.c.last_failure_kind,
+            encode_jobs.c.error,
+            encode_jobs.c.attempt_count,
+        )
+        .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
+        .where(encode_jobs.c.host_cooldown_until.is_not(None))
+    ).mappings().fetchall()
+    host_failures: list[dict[str, Any]] = []
+    for row in rows:
+        cooldown_until = deps.parse_iso(row["host_cooldown_until"])
+        if cooldown_until is None or cooldown_until <= now:
+            continue
+        host_payload = _load_quarantine_host_payload(row["last_host_json"])
+        identity_tokens = _host_identity_tokens(host_payload)
+        if not identity_tokens:
+            continue
+        failure_kind = str(row["last_failure_kind"] or "").strip()
+        error_message = str(row["error"] or "")
+        if not _encode_failure_retries_after_attempt_cap(failure_kind, error_message, host_payload):
+            continue
+        failure_state = _matching_host_failure_state(host_failures, identity_tokens)
+        if failure_state is None:
+            failure_state = {
+                "count": 0,
+                "cooldown_until": cooldown_until,
+                "identity_tokens": sorted(identity_tokens),
+                **host_payload,
+                "label": str(host_payload.get("label") or host_payload.get("key") or host_payload.get("host") or "blocked host"),
+            }
+            host_failures.append(failure_state)
+        else:
+            merged_tokens = set(object_list(failure_state.get("identity_tokens"))) | identity_tokens
+            failure_state["identity_tokens"] = sorted(merged_tokens)
+            for key in ("key", "label", "host"):
+                value = str(host_payload.get(key) or "").strip()
+                if value and not str(failure_state.get(key) or "").strip():
+                    failure_state[key] = value
+        failure_state["count"] = int(failure_state["count"]) + 1
+        failure_state["failure_streak"] = max(
+            int(failure_state.get("failure_streak") or 0),
+            int_value(host_payload.get("failure_streak")),
+        )
+        if cooldown_until > failure_state["cooldown_until"]:
+            failure_state["cooldown_until"] = cooldown_until
+    blocked_hosts = [
+        payload
+        for payload in host_failures
+        if int(payload["count"]) >= ENCODE_HOST_BACKUP_FAILURE_THRESHOLD
+        or int(payload.get("failure_streak") or 0) >= ENCODE_HOST_BACKUP_FAILURE_THRESHOLD
+    ]
+    blocked_hosts.sort(key=_blocked_host_sort_key)
+    return {
+        f"blocked-{index}": payload
+        for index, payload in enumerate(blocked_hosts)
+    }
+
+
+def _encode_failure_last_host_payload(
+        assigned_host: dict[str, Any],
+        *,
+        previous_last_host: dict[str, Any],
+        host_related: bool,
+) -> dict[str, Any]:
+    if not assigned_host:
+        return {}
+    payload = dict(assigned_host)
+    if not host_related:
+        payload.pop("failure_streak", None)
+        return payload
+    previous_streak = int_value(previous_last_host.get("failure_streak"))
+    if _host_identity_matches(assigned_host, previous_last_host):
+        payload = {**previous_last_host, **payload}
+        payload["failure_streak"] = previous_streak + 1
+    else:
+        payload["failure_streak"] = 1
+    return payload
+
+
+def _host_identity_tokens(host: dict[str, Any]) -> set[str]:
+    tokens: set[str] = set()
+    for value in object_list(host.get("identity_tokens")):
+        token = str(value or "").strip()
+        if token:
+            tokens.add(token)
+    for key in ("key", "host"):
+        value = str(host.get(key) or "").strip()
+        if value:
+            tokens.add(value)
+    return tokens
+
+
+def _host_identity_matches(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_tokens = _host_identity_tokens(left)
+    right_tokens = _host_identity_tokens(right)
+    return bool(left_tokens and right_tokens and left_tokens & right_tokens)
+
+
+def _matching_host_failure_state(
+        host_failures: list[dict[str, Any]],
+        identity_tokens: set[str],
+) -> dict[str, Any] | None:
+    for payload in host_failures:
+        if _host_identity_matches({"identity_tokens": sorted(identity_tokens)}, payload):
+            return payload
+    return None
+
+
+def _load_quarantine_host_payload(raw_payload: Any) -> dict[str, Any]:
+    try:
+        return object_dict(json.loads(str(raw_payload or "{}")))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def _reset_host_failure_streak(job: dict[str, Any]) -> dict[str, Any]:
+    payload = object_dict(job.get("host")) or object_dict(job.get("last_host"))
+    if not payload:
+        return {}
+    reset_payload = dict(payload)
+    reset_payload.pop("failure_streak", None)
+    return reset_payload
+
+
+def _blocked_host_sort_key(host_payload: dict[str, Any]) -> tuple[str, str, str]:
+    cooldown_until = str(host_payload.get("cooldown_until") or "")
+    identity_key = str(host_payload.get("key") or host_payload.get("host") or "")
+    display_name = _blocked_host_display_name(host_payload)
+    return cooldown_until, identity_key.lower(), display_name.lower()
+
+
+def _blocked_host_display_name(host_payload: dict[str, Any]) -> str:
+    return (
+        str(host_payload.get("label") or "").strip()
+        or str(host_payload.get("key") or "").strip()
+        or str(host_payload.get("host") or "").strip()
+        or "the blocked host"
+    )
+
+
+def _blocked_host_wait_name(blocked_hosts: dict[str, dict[str, Any]]) -> str:
+    if not blocked_hosts:
+        return "the blocked host"
+    first_blocked = sorted(blocked_hosts.values(), key=_blocked_host_sort_key)[0]
+    return _blocked_host_display_name(first_blocked)
 
 
 def _encode_job_library_key(job: dict[str, Any]) -> str:
@@ -815,6 +1165,9 @@ def run_encode_job(
             job = load_encode_job(connection, job_id)
             if job is not None:
                 if final_status is not None:
+                    last_host = object_dict(job.get("last_host"))
+                    if final_status == "completed":
+                        last_host = _reset_host_failure_streak(job)
                     job.update(
                         {
                             "status": final_status,
@@ -829,6 +1182,7 @@ def run_encode_job(
                             "waiting_reason": None,
                             "terminal_reason": None,
                             "last_failure_kind": None,
+                            "last_host": last_host,
                             "host_cooldown_until": None,
                             "progress": _finalize_encode_job_progress(job, deps=deps, terminal_state=final_status),
                             "updated_at": deps.now_iso(),
@@ -981,6 +1335,18 @@ def _encode_failure_is_retryable(failure_kind: str, error_message: str, host_pay
     if failure_kind in {"stopped", "deterministic"}:
         return False
     return _encode_failure_is_host_related(failure_kind, error_message, host_payload)
+
+
+def _encode_failure_retries_after_attempt_cap(
+        failure_kind: str,
+        error_message: str,
+        host_payload: dict[str, Any],
+) -> bool:
+    if not _encode_failure_is_host_related(failure_kind, error_message, host_payload):
+        return False
+    lowered = error_message.lower()
+    non_transient_markers = ("permission denied", "host key verification failed")
+    return not any(marker in lowered for marker in non_transient_markers)
 
 
 def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) -> str:

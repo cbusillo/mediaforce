@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
+	import '$lib/design/workstation-shell.css';
 	import { onMount } from 'svelte';
 	import { fetchJson, postJson } from '$lib/api/client';
 	import type {
@@ -12,8 +13,6 @@
 		SettingsPayload
 	} from '$lib/api/types';
 	import Button from '$lib/components/Button.svelte';
-	import Panel from '$lib/components/Panel.svelte';
-	import SectionHead from '$lib/components/SectionHead.svelte';
 	import SettingsEditor from '$lib/components/settings/SettingsEditor.svelte';
 	import { hostsStatusPending } from '$lib/hosts/runtime';
 	import {
@@ -508,22 +507,185 @@
 		{refreshArchiveCleanup}
 	/>
 {:else}
-	<div class="page-stack">
-		<Panel padding="1.05rem 1.2rem">
-			<div class="panel-stack">
-				<SectionHead
-					eyebrow="Runtime Settings"
-					heading={isLoadingSettings ? 'Loading runtime settings' : 'Runtime settings unavailable'}
-					lede={settingsLoadError ??
-						'Loading the current machine settings now. The page shell stays interactive while the runtime data catches up.'}
-					size="compact"
-				/>
+	<div class="workstation-screen settings-screen settings-loading-screen">
+		<section class="loading-shell" aria-label="Settings loading state">
+			<div class="loading-copy-stack">
+				<p class="system-label">Runtime settings</p>
+				<h1 class="loading-title">
+					{isLoadingSettings ? 'Loading workstation settings' : 'Runtime settings unavailable'}
+				</h1>
+				<p class="loading-copy">
+					{settingsLoadError ??
+						'The workstation shell is up. Waiting for the live runtime file and host snapshot to finish loading.'}
+				</p>
+			</div>
+			<div class="loading-actions">
+				<span class="loading-pill">
+					{isLoadingSettings ? 'Waiting for runtime file' : 'Retry required'}
+				</span>
 				{#if settingsLoadError}
-					<div class="section-actions-row">
-						<Button variant="secondary" onclick={() => loadSettings()}>Retry settings load</Button>
-					</div>
+					<Button variant="secondary" onclick={() => loadSettings()}>Retry settings load</Button>
 				{/if}
 			</div>
-		</Panel>
+		</section>
+
+		<section class="system-strip" aria-label="Settings loading snapshot">
+			<div class="system-cell accent-cell">
+				<p class="system-label">Runtime contract</p>
+				<p class="system-value">Editor warming up</p>
+				<p class="system-detail">Live settings will appear here once the runtime file arrives.</p>
+			</div>
+
+			<div class="system-cell selection-state">
+				<p class="system-label">Worker fleet</p>
+				<p class="system-value">Polling host status</p>
+				<p class="system-detail">Host readiness is still refreshing in the background.</p>
+			</div>
+
+			<div class="system-cell selection-state">
+				<p class="system-label">Save state</p>
+				<p class="system-value">Locked until load</p>
+				<p class="system-detail">The editor appears as soon as the runtime data lands.</p>
+			</div>
+		</section>
 	</div>
 {/if}
+
+<style>
+	.settings-loading-screen {
+		display: grid;
+		gap: 0.95rem;
+		padding: 0.25rem 0 1rem;
+	}
+
+	.loading-shell {
+		display: flex;
+		justify-content: space-between;
+		gap: 1rem;
+		align-items: start;
+		padding: 1rem 1.1rem;
+		border-radius: var(--radius-lg);
+		border: 1px solid rgba(23, 35, 31, 0.08);
+		background:
+			linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 250, 252, 0.96)),
+			var(--surface-1);
+		box-shadow: 0 14px 32px rgba(15, 23, 42, 0.06);
+	}
+
+	.loading-copy-stack {
+		display: grid;
+		gap: 0.3rem;
+		min-width: 0;
+	}
+
+	.loading-title {
+		margin: 0;
+		font-size: 1.4rem;
+		font-weight: 750;
+		line-height: 1.1;
+		color: var(--ink);
+	}
+
+	.loading-copy {
+		margin: 0;
+		max-width: 58ch;
+		color: var(--text-muted);
+		line-height: 1.5;
+	}
+
+	.loading-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.7rem;
+		flex-wrap: wrap;
+		justify-content: flex-end;
+	}
+
+	.loading-pill {
+		display: inline-flex;
+		align-items: center;
+		padding: 0.42rem 0.7rem;
+		border-radius: 999px;
+		border: 1px solid rgba(23, 35, 31, 0.12);
+		background: rgba(23, 35, 31, 0.04);
+		color: var(--ink-soft);
+		font-size: 0.78rem;
+		font-weight: 700;
+		letter-spacing: 0.03em;
+		text-transform: uppercase;
+	}
+
+	.settings-loading-screen .system-strip {
+		display: grid;
+		gap: 1rem;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+
+	.settings-loading-screen .system-cell {
+		position: relative;
+		min-height: 7rem;
+		padding: 1rem 1.1rem;
+		border: 1px solid rgba(148, 163, 184, 0.18);
+		background: rgba(15, 20, 27, 0.94);
+		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2);
+		overflow: hidden;
+	}
+
+	.settings-loading-screen .system-cell::before {
+		content: '';
+		position: absolute;
+		inset: 0 0 auto;
+		height: 2px;
+		background: rgba(56, 189, 248, 0.82);
+	}
+
+	.settings-loading-screen .accent-cell {
+		background: rgba(13, 33, 42, 0.94);
+	}
+
+	.settings-loading-screen .selection-state {
+		border-color: rgba(45, 212, 191, 0.24);
+		background: rgba(10, 36, 38, 0.94);
+	}
+
+	.settings-loading-screen .selection-state::before {
+		background: rgba(45, 212, 191, 0.88);
+	}
+
+	.settings-loading-screen .system-label {
+		margin: 0;
+		font-size: 0.72rem;
+		font-weight: 800;
+		letter-spacing: 0.16em;
+		text-transform: uppercase;
+		color: rgba(148, 163, 184, 0.88);
+	}
+
+	.settings-loading-screen .system-value {
+		margin: 0.4rem 0 0;
+		font-size: 1.15rem;
+		font-weight: 700;
+		line-height: 1.25;
+		color: #f8fafc;
+	}
+
+	.settings-loading-screen .system-detail {
+		margin: 0;
+		color: rgba(226, 232, 240, 0.74);
+		line-height: 1.5;
+	}
+
+	@media (max-width: 960px) {
+		.loading-shell {
+			flex-direction: column;
+		}
+
+		.loading-actions {
+			justify-content: flex-start;
+		}
+
+		.settings-loading-screen .system-strip {
+			grid-template-columns: 1fr;
+		}
+	}
+</style>

@@ -1,5 +1,6 @@
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -92,7 +93,20 @@ def _run_subprocess_text(
 
 
 def collect_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
-    return [_remote_host_status(config, host) for host in config.remote_hosts]
+    hosts = list(config.remote_hosts)
+    if len(hosts) <= 1:
+        return [_remote_host_status(config, host) for host in hosts]
+
+    max_workers = min(len(hosts), 6)
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="remote-host-status") as executor:
+        future_to_index = {
+            executor.submit(_remote_host_status, config, host): index
+            for index, host in enumerate(hosts)
+        }
+        statuses: list[HostStatus | None] = [None] * len(hosts)
+        for future in as_completed(future_to_index):
+            statuses[future_to_index[future]] = future.result()
+        return [status for status in statuses if status is not None]
 
 
 def run_remote_command(

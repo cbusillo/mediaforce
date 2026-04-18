@@ -65,6 +65,7 @@ def render_encoded_preview_clip(
         preset: int,
         crf: float,
         svt_params: list[str],
+        video_filter: str | None = None,
         process_controller: Any = None,
         ffmpeg_binary: Callable[[], str],
         ffmpeg_hwaccel_input_args: Callable[[str | None], list[str]],
@@ -82,6 +83,7 @@ def render_encoded_preview_clip(
         preset=preset,
         crf=crf,
         svt_params=svt_params,
+        video_filter=video_filter,
         ffmpeg_binary=ffmpeg_binary,
         ffmpeg_hwaccel_input_args=ffmpeg_hwaccel_input_args,
         format_crf=format_crf,
@@ -103,6 +105,7 @@ def render_encoded_preview_clip_remote(
         preset: int,
         crf: float,
         svt_params: list[str],
+        video_filter: str | None = None,
         remote_preview_timeout_seconds: int,
         ffmpeg_binary: Callable[[], str],
         ffmpeg_hwaccel_input_args: Callable[[str | None], list[str]],
@@ -120,6 +123,7 @@ def render_encoded_preview_clip_remote(
         preset=preset,
         crf=crf,
         svt_params=svt_params,
+        video_filter=video_filter,
         ffmpeg_binary=ffmpeg_binary,
         ffmpeg_hwaccel_input_args=ffmpeg_hwaccel_input_args,
         format_crf=format_crf,
@@ -140,6 +144,7 @@ def _preview_render_command(
         preset: int,
         crf: float,
         svt_params: list[str],
+        video_filter: str | None = None,
         ffmpeg_binary: Callable[[], str],
         ffmpeg_hwaccel_input_args: Callable[[str | None], list[str]],
         format_crf: Callable[[float], str],
@@ -175,6 +180,8 @@ def _preview_render_command(
     ]
     if encoder == "libsvtav1":
         cmd.extend(["-svtav1-params", ":".join(svt_params)])
+    if video_filter:
+        cmd.extend(["-vf", video_filter])
     cmd.append(str(output_path))
     return cmd
 

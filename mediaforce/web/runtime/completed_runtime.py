@@ -33,10 +33,18 @@ def completed_page_payload(
         *,
         folder_group: Callable[[str], FolderGroup | None],
 ) -> dict[str, Any]:
+    archive_root = _configured_archive_root(config)
+    if archive_root is None:
+        return {
+            "folders": [],
+            "completed_count": 0,
+            "folders_with_backups_count": 0,
+            "archive_cleanup": archive_cleanup_summary(config),
+        }
     folders = list_completed_folders(
         connection,
         folder_group=folder_group,
-        archive_root=config.archive_root,
+        archive_root=archive_root,
     )
     folders_with_backups_count = sum(1 for folder in folders if folder.archived_backup_count > 0)
     return {
@@ -71,7 +79,7 @@ def list_completed_folders(
     ).mappings().fetchall()
 
     grouped: dict[str, CompletedFolder] = {}
-    resolved_archive_root = archive_root.resolve(strict=False) if archive_root is not None else None
+    resolved_archive_root = archive_root.resolve() if archive_root is not None else None
     for row in rows:
         rel_path = str(row["rel_path"] or "")
         group = folder_group(rel_path)
@@ -130,7 +138,7 @@ def clear_completed_backups_action(
         prefixes: list[str] | None = None,
         valid_prefixes: set[str] | None = None,
 ) -> dict[str, Any]:
-    archive_root = config.archive_root
+    archive_root = _configured_archive_root(config)
     normalized_prefixes = _normalized_prefixes(prefixes)
     if prefixes is not None and not normalized_prefixes:
         raise ValueError("At least one completed-folder prefix must be provided for selected cleanup.")
@@ -141,6 +149,15 @@ def clear_completed_backups_action(
                 "Unknown completed-folder prefix"
                 f"{'es' if len(unknown_prefixes) != 1 else ''}: {', '.join(unknown_prefixes)}"
             )
+
+    if archive_root is None:
+        return {
+            "ok": True,
+            "message": "No archived originals are waiting for cleanup.",
+            "removed_count": 0,
+            "removed_size_bytes": 0,
+            "removed_prefix_count": 0,
+        }
 
     if not archive_root.exists():
         return {
@@ -218,6 +235,13 @@ def _path_matches_prefixes(rel_path: str, prefixes: set[str]) -> bool:
     return False
 
 
+def _configured_archive_root(config: MediaforceConfig) -> Path | None:
+    try:
+        return config.archive_root
+    except KeyError:
+        return None
+
+
 def _prune_empty_dirs(root: Path) -> None:
     for path in sorted(root.rglob("*"), reverse=True):
         if not path.is_dir():
@@ -234,6 +258,6 @@ def _clean_text(value: object) -> str:
 
 def _path_is_within_root(path: Path, root: Path) -> bool:
     try:
-        return path.resolve(strict=False).is_relative_to(root)
+        return path.resolve().is_relative_to(root)
     except OSError:
         return False

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
+	import '$lib/design/workstation-shell.css';
 	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
 	import { fetchJson } from '$lib/api/client';
@@ -7,9 +8,6 @@
 	import { goto } from '$app/navigation';
 	import DashboardHostGrid from '$lib/components/dashboard/DashboardHostGrid.svelte';
 	import DashboardQueues from '$lib/components/dashboard/DashboardQueues.svelte';
-	import Panel from '$lib/components/Panel.svelte';
-	import Pill from '$lib/components/Pill.svelte';
-	import SectionHead from '$lib/components/SectionHead.svelte';
 	import { hostSettingsAnchor } from '$lib/format';
 	import { hostsStatusPending } from '$lib/hosts/runtime';
 	import { allQueueWorkersScheduledOffWindow, nextQueueWindowCopy } from '$lib/hosts/schedule';
@@ -131,47 +129,88 @@
 		}
 		return 'Fleet idle';
 	});
-	const opsHeroPills = $derived.by(() => [
-		{
-			label: fleetSnapshotLabel,
-			variant: dashboard.encode_queue.queued_count > 0 ? ('warn' as const) : ('ghost' as const)
-		},
-		...(readyHosts > 0
-			? [{ label: `${readyHosts} hosts ready`, variant: 'ok' as const }]
-			: queueWorkersScheduledOffWindow
-				? [
-						{
-							label: nextWorkerWindow
-								? `Next worker window ${nextWorkerWindow}`
-								: 'All queue workers are scheduled off-window',
-							variant: 'neutral' as const
-						}
-					]
-				: [{ label: '0 hosts ready', variant: 'ghost' as const }]),
-		...(Number(dashboard.archive_cleanup?.file_count ?? 0) > 0
-			? [
-					{
-						label: `${Number(dashboard.archive_cleanup?.file_count ?? 0)} archived backups`,
-						variant: 'warn' as const
-					}
-				]
-			: []),
-		...(pendingReviewCount > 0
-			? [{ label: `${pendingReviewCount} pending review`, variant: 'warn' as const }]
-			: [])
-	]);
 	const queueCards = $derived.by(() => [
 		{
 			eyebrow: 'Calibration',
 			heading: `${dashboard.calibration_queue.sample.running_count + dashboard.calibration_queue.full.running_count} running · ${dashboard.calibration_queue.sample.queued_count + dashboard.calibration_queue.full.queued_count} queued`,
-			lede: 'Sample work stays separate from the full queue so you can tune before committing a folder run.'
+			lede: 'Sample lanes stay separate so tuning work does not obscure the full encode queue.'
 		},
 		{
 			eyebrow: 'Encode Queue',
 			heading: `${dashboard.encode_queue.running_count} running · ${dashboard.encode_queue.queued_count} queued`,
-			lede: 'Fleet state and controls for whole-folder runs.'
+			lede: 'Run-state, blockers, and queue controls for full-folder encodes.'
 		}
 	]);
+	const queueStateTone = $derived.by(() => {
+		if (dashboard.encode_queue.state.stop_requested || dashboard.encode_queue.state.is_paused) {
+			return 'warning-state';
+		}
+		if (queueWorkersScheduledOffWindow && dashboard.encode_queue.queued_count > 0) {
+			return 'schedule-state';
+		}
+		return 'normal-state';
+	});
+	const workerStateTone = $derived.by(() => {
+		if (encodeCapableHosts === 0) {
+			return 'warning-state';
+		}
+		if (readyHosts === 0 && dashboard.encode_queue.queued_count > 0) {
+			return 'schedule-state';
+		}
+		return 'normal-state';
+	});
+	const calibrationStateTone = $derived.by(() => {
+		if (pendingReviewCount > 0) {
+			return 'warning-state';
+		}
+		return calibrationQueueHasWork ? 'normal-state' : 'muted-state';
+	});
+	const cleanupStateTone = $derived.by(() =>
+		Number(dashboard.archive_cleanup?.file_count ?? 0) > 0 ? 'warning-state' : 'normal-state'
+	);
+	const queueStateDetail = $derived.by(() => {
+		if (dashboard.encode_queue.state.stop_requested) {
+			return 'Stop was requested. Review queue details below before restarting fleet work.';
+		}
+		if (dashboard.encode_queue.state.is_paused) {
+			return 'Queue is paused. Resume from the queue controls when the fleet is ready.';
+		}
+		if (queueWorkersScheduledOffWindow && dashboard.encode_queue.queued_count > 0) {
+			return nextWorkerWindow
+				? `Queued now. Next worker window opens at ${nextWorkerWindow}.`
+				: 'Queued now. All queue workers are currently scheduled off-window.';
+		}
+		return encodeQueueEtaCopy
+			? `Estimated queue finish in ${encodeQueueEtaCopy} at the current fleet pace.`
+			: 'Queue state and recent blockers stay visible below.';
+	});
+	const workerStateDetail = $derived.by(() => {
+		if (encodeCapableHosts === 0) {
+			return `${reachableHosts} mounted now. No encode-queue workers are configured.`;
+		}
+		if (readyHosts === 0 && dashboard.encode_queue.queued_count > 0) {
+			return queueWorkersScheduledOffWindow
+				? 'Workers exist, but none are inside the current queue schedule window.'
+				: 'Workers exist, but none are ready to take queued work right now.';
+		}
+		return `${reachableHosts} mounted now across ${encodeCapableHosts} queue-capable host${encodeCapableHosts === 1 ? '' : 's'}.`;
+	});
+	const calibrationDetail = $derived.by(() => {
+		if (pendingReviewCount > 0) {
+			return `${pendingReviewCount} calibration result${pendingReviewCount === 1 ? '' : 's'} need review before more tuning decisions.`;
+		}
+		if (calibrationQueueHasWork) {
+			return 'Sample and proof jobs are active without mixing into the full encode queue.';
+		}
+		return 'Calibration lanes are idle. Launch new sample work from folders when needed.';
+	});
+	const cleanupDetail = $derived.by(() => {
+		const cleanupCount = Number(dashboard.archive_cleanup?.file_count ?? 0);
+		if (cleanupCount > 0) {
+			return `${cleanupCount} archived original${cleanupCount === 1 ? '' : 's'} are waiting in completed cleanup.`;
+		}
+		return 'No archived originals are waiting for cleanup.';
+	});
 	let queueAction = $state<string | null>(null);
 	let calibrationQueueAction = $state<string | null>(null);
 
@@ -356,121 +395,413 @@
 	<title>Ops · Mediaforce</title>
 </svelte:head>
 
-<div class="page-stack">
+<div class="workstation-screen ops-screen">
 	{#if !dashboardPayload}
-		<Panel padding="1.1rem 1.2rem">
-			<div class="panel-stack">
-				<SectionHead
-					eyebrow="Operations"
-					heading={isLoadingOps ? 'Loading fleet status' : 'Ops unavailable'}
-					lede={opsLoadError ??
-						'The page shell is ready now. Queue state and host readiness will populate as soon as the runtime calls finish.'}
-					size="compact"
-				/>
+		<section class="loading-shell" aria-label="Ops loading state">
+			<div>
+				<p class="system-label">Operations</p>
+				<h1 class="loading-title">{isLoadingOps ? 'Loading fleet status' : 'Ops unavailable'}</h1>
+				<p class="loading-copy">
+					{opsLoadError ??
+						'The ops console is waiting for queue state, host readiness, and cleanup totals from the runtime.'}
+				</p>
+			</div>
+			<div class="loading-actions">
+				<a class="console-link" href={resolve('/')}>Back to folders</a>
 				{#if opsLoadError}
-					<div class="section-actions-row">
-						<a class="ops-return-link" href={resolve('/')}>Back to folders</a>
-						<button
-							type="button"
-							class="refresh-button"
-							onclick={() => refreshOpsData({ force: true })}
-						>
-							Retry ops load
-						</button>
-					</div>
+					<button
+						type="button"
+						class="alert-action"
+						onclick={() => refreshOpsData({ force: true })}
+					>
+						Retry ops load
+					</button>
 				{/if}
 			</div>
-		</Panel>
-	{/if}
+		</section>
+	{:else}
+		<section class="system-strip" aria-label="Operations fleet state">
+			<div class={`system-cell queue-cell ${queueStateTone}`.trim()}>
+				<p class="system-label">Queue state</p>
+				<p class="system-value">{fleetSnapshotLabel}</p>
+				<p class="system-detail">{queueStateDetail}</p>
+			</div>
 
-	<Panel class="ops-hero-panel" padding="1.1rem 1.2rem">
-		<div class="ops-hero">
-			<SectionHead
-				eyebrow="Operations"
-				heading="Fleet status, queue controls, and worker readiness"
-				lede="Use this view when you need queue detail and worker readiness, then jump back to folder selection when you are ready to choose work."
-				size="compact"
-			/>
-			<div class="ops-hero-side">
-				<div class="ops-pill-row">
-					{#each opsHeroPills as pill (pill.label)}
-						<Pill label={pill.label} variant={pill.variant} />
-					{/each}
+			<div class={`system-cell ${workerStateTone}`.trim()}>
+				<p class="system-label">Workers</p>
+				<p class="system-value">{readyHosts} ready / {encodeCapableHosts} queue-capable</p>
+				<p class="system-detail">{workerStateDetail}</p>
+			</div>
+
+			<div class={`system-cell ${calibrationStateTone}`.trim()}>
+				<p class="system-label">Calibration</p>
+				<p class="system-value">
+					{dashboard.calibration_queue.sample.running_count +
+						dashboard.calibration_queue.full.running_count} running ·
+					{dashboard.calibration_queue.sample.queued_count +
+						dashboard.calibration_queue.full.queued_count}
+					queued
+				</p>
+				<p class="system-detail">{calibrationDetail}</p>
+			</div>
+
+			<div class={`system-cell ${cleanupStateTone}`.trim()}>
+				<p class="system-label">Cleanup and routes</p>
+				<p class="system-value">
+					{Number(dashboard.archive_cleanup?.file_count ?? 0)} archived original{Number(
+						dashboard.archive_cleanup?.file_count ?? 0
+					) === 1
+						? ''
+						: 's'}
+				</p>
+				<p class="system-detail">{cleanupDetail}</p>
+				<div class="ops-control-row">
+					<a class="console-link" href={resolve('/')}>Back to folders</a>
+					<a class="console-link" href={resolve('/settings')}>Settings</a>
+					{#if Number(dashboard.archive_cleanup?.file_count ?? 0) > 0}
+						<a class="console-link" href={resolve('/completed')}>Open completed</a>
+					{/if}
 				</div>
-				{#if Number(dashboard.archive_cleanup?.file_count ?? 0) > 0}
-					<a class="ops-return-link" href={resolve('/completed')}> Open completed </a>
-				{/if}
-				<a class="ops-return-link" href={resolve('/')}> Back to folders </a>
 			</div>
-		</div>
-	</Panel>
+		</section>
 
-	<DashboardQueues
-		{queueCards}
-		{pendingReviewCount}
-		{calibrationQueueAction}
-		{calibrationQueueHasWork}
-		{stopCalibrationQueue}
-		{encodeQueueStatus}
-		{queueAction}
-		{dashboard}
-		{readyHosts}
-		{encodeCapableHosts}
-		{reachableHosts}
-		{runQueueAction}
-		{encodeQueueEtaCopy}
-		{encodeRunningJobs}
-		{queueWorkersScheduledOffWindow}
-		nextQueueWindowCopy={nextWorkerWindow}
-	/>
+		{#if opsLoadError}
+			<section class="alert-strip" aria-label="Ops runtime issue">
+				<div>
+					<p class="alert-label">Ops runtime issue</p>
+					<p class="alert-copy">{opsLoadError}</p>
+				</div>
+				<button type="button" class="alert-action" onclick={() => refreshOpsData({ force: true })}>
+					Retry ops load
+				</button>
+			</section>
+		{/if}
 
-	<DashboardHostGrid {rankedHosts} {readyHosts} onOpenHostSettings={openHostSettings} />
+		<DashboardQueues
+			{queueCards}
+			{pendingReviewCount}
+			{calibrationQueueAction}
+			{calibrationQueueHasWork}
+			{stopCalibrationQueue}
+			{encodeQueueStatus}
+			{queueAction}
+			{dashboard}
+			{readyHosts}
+			{encodeCapableHosts}
+			{reachableHosts}
+			{runQueueAction}
+			{encodeQueueEtaCopy}
+			{encodeRunningJobs}
+			{queueWorkersScheduledOffWindow}
+			nextQueueWindowCopy={nextWorkerWindow}
+		/>
+
+		<DashboardHostGrid {rankedHosts} {readyHosts} onOpenHostSettings={openHostSettings} />
+	{/if}
 </div>
 
 <style>
-	.page-stack {
+	.workstation-screen {
 		display: grid;
-		gap: var(--space-4);
+		gap: 1rem;
+		padding: 0.25rem 0 1rem;
+		position: relative;
+		isolation: isolate;
+		z-index: 0;
 	}
 
-	.ops-hero {
+	.workstation-screen::before {
+		content: '';
+		position: fixed;
+		inset: 0;
+		z-index: -2;
+		pointer-events: none;
+		background: #0b1014;
+	}
+
+	.workstation-screen::after {
+		display: none;
+	}
+
+	.loading-shell {
+		display: grid;
+		gap: 1rem;
+		padding: 1.1rem;
+		border: 1px solid rgba(148, 163, 184, 0.18);
+		background: rgba(15, 20, 27, 0.94);
+		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2);
+	}
+
+	.loading-title {
+		margin: 0.3rem 0 0;
+		color: #f8fafc;
+		font-size: 1.35rem;
+		font-weight: 700;
+	}
+
+	.loading-copy {
+		margin: 0.7rem 0 0;
+		max-width: 42rem;
+		color: rgba(226, 232, 240, 0.74);
+		line-height: 1.5;
+	}
+
+	.loading-actions {
 		display: flex;
-		justify-content: space-between;
-		align-items: end;
-		gap: var(--space-3);
+		gap: 0.65rem;
 		flex-wrap: wrap;
 	}
 
-	.ops-hero-side {
+	.system-strip {
+		display: grid;
+		gap: 1rem;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+	}
+
+	.system-cell {
+		position: relative;
+		display: grid;
+		gap: 0.55rem;
+		min-height: 8.5rem;
+		padding: 1rem 1.1rem;
+		border: 1px solid rgba(148, 163, 184, 0.18);
+		background: rgba(15, 20, 27, 0.94);
+		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2);
+		overflow: hidden;
+	}
+
+	.queue-cell::before,
+	.alert-strip::before {
+		content: '';
+		position: absolute;
+		inset: 0 0 auto;
+		height: 2px;
+		background: rgba(56, 189, 248, 0.85);
+	}
+
+	.system-cell.warning-state {
+		border-color: rgba(249, 115, 22, 0.3);
+		background: rgba(58, 26, 13, 0.94);
+	}
+
+	.system-cell.warning-state::before {
+		content: '';
+		position: absolute;
+		inset: 0 0 auto;
+		height: 2px;
+		background: rgba(251, 146, 60, 0.95);
+	}
+
+	.system-cell.schedule-state {
+		border-color: rgba(245, 158, 11, 0.28);
+		background: rgba(51, 28, 10, 0.94);
+	}
+
+	.system-cell.schedule-state::before {
+		content: '';
+		position: absolute;
+		inset: 0 0 auto;
+		height: 2px;
+		background: rgba(245, 158, 11, 0.92);
+	}
+
+	.system-cell.muted-state {
+		border-color: rgba(71, 85, 105, 0.2);
+		background: rgba(12, 17, 23, 0.94);
+	}
+
+	.system-label,
+	.alert-label {
+		margin: 0;
+		font-size: 0.72rem;
+		font-weight: 800;
+		letter-spacing: 0.16em;
+		text-transform: uppercase;
+		color: rgba(148, 163, 184, 0.88);
+	}
+
+	.system-value {
+		margin: 0;
+		color: #f8fafc;
+		font-size: 1.2rem;
+		font-weight: 700;
+		line-height: 1.25;
+	}
+
+	.system-detail,
+	.alert-copy {
+		margin: 0;
+		color: rgba(226, 232, 240, 0.74);
+		line-height: 1.5;
+	}
+
+	.ops-control-row {
 		display: flex;
+		gap: 0.65rem;
+		flex-wrap: wrap;
+		margin-top: 0.25rem;
+	}
+
+	.alert-strip {
+		position: relative;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		gap: 1rem;
 		align-items: center;
-		flex-wrap: wrap;
-		gap: 0.75rem;
-		justify-items: start;
+		padding: 1rem 1.1rem;
+		border: 1px solid rgba(148, 163, 184, 0.18);
+		background: rgba(55, 24, 11, 0.96);
+		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2);
+		overflow: hidden;
 	}
 
-	.ops-pill-row {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.7rem;
-	}
-
-	:global(.ops-hero-panel) {
-		background:
-			radial-gradient(circle at top left, rgba(15, 118, 110, 0.14), transparent 36%),
-			linear-gradient(145deg, rgba(255, 253, 247, 0.9), rgba(244, 237, 224, 0.84));
-	}
-
-	.ops-return-link {
+	.console-link,
+	.alert-action {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
 		padding: 0.72rem 0.95rem;
-		border-radius: var(--radius-pill);
-		border: 1px solid rgba(15, 118, 110, 0.18);
-		background: rgba(15, 118, 110, 0.1);
-		color: var(--accent-deep);
+		border: 1px solid rgba(56, 189, 248, 0.22);
+		background: rgba(15, 23, 42, 0.72);
+		color: #e2e8f0;
 		font-weight: 700;
 		text-decoration: none;
+		transition:
+			border-color 150ms ease,
+			background-color 150ms ease,
+			color 150ms ease,
+			transform 150ms ease;
+	}
+
+	.console-link:hover,
+	.alert-action:hover {
+		transform: translateY(-1px);
+		border-color: rgba(56, 189, 248, 0.5);
+		background: rgba(30, 41, 59, 0.94);
+	}
+
+	:global(.ops-queue-panel)::before,
+	:global(.ops-queue-panel)::after,
+	:global(.folder-section)::before,
+	:global(.folder-section)::after,
+	:global(.host-card)::after {
+		display: none !important;
+	}
+
+	:global(.ops-queue-panel),
+	:global(.folder-section),
+	:global(.host-card) {
+		border: 1px solid rgba(148, 163, 184, 0.18) !important;
+		background: rgba(15, 20, 27, 0.94) !important;
+		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2) !important;
+	}
+
+	:global(.primary-ops-panel) {
+		border-color: rgba(56, 189, 248, 0.22) !important;
+	}
+
+	:global(.ops-queue-panel .eyebrow-copy),
+	:global(.folder-section .eyebrow-copy) {
+		color: rgba(125, 211, 252, 0.84) !important;
+	}
+
+	:global(.ops-queue-panel h2),
+	:global(.folder-section h2),
+	:global(.folder-section h3),
+	:global(.host-card h3) {
+		color: #f8fafc !important;
+	}
+
+	:global(.ops-queue-panel .muted-copy),
+	:global(.folder-section .muted-copy),
+	:global(.host-card .muted-copy) {
+		color: rgba(226, 232, 240, 0.72) !important;
+	}
+
+	:global(.queue-pill.attention) {
+		background: rgba(120, 53, 15, 0.84) !important;
+		color: #ffedd5 !important;
+	}
+
+	:global(.queue-pill.ok) {
+		background: rgba(20, 83, 45, 0.82) !important;
+		color: #dcfce7 !important;
+	}
+
+	:global(.queue-pill.neutral),
+	:global(.queue-link-pill),
+	:global(.section-summary-chip) {
+		background: rgba(30, 41, 59, 0.78) !important;
+		color: rgba(226, 232, 240, 0.78) !important;
+	}
+
+	:global(.section-summary-chip.active) {
+		background: rgba(8, 47, 73, 0.82) !important;
+		color: #dbeafe !important;
+	}
+
+	:global(.section-action-link),
+	:global(.queue-link-pill) {
+		color: #7dd3fc !important;
+	}
+
+	:global(.queue-detail-shell),
+	:global(.encode-telemetry-row),
+	:global(.host-card .status-tray),
+	:global(.running-job-shell),
+	:global(.running-job-row) {
+		background: rgba(15, 23, 42, 0.6) !important;
+		border-color: rgba(148, 163, 184, 0.16) !important;
+	}
+
+	:global(.attention-detail-shell),
+	:global(.host-card .issues-box) {
+		background: rgba(67, 20, 7, 0.62) !important;
+		border-color: rgba(249, 115, 22, 0.24) !important;
+	}
+
+	:global(.host-card .state-chip),
+	:global(.host-card .meta-pill) {
+		background: rgba(30, 41, 59, 0.82) !important;
+		color: rgba(226, 232, 240, 0.78) !important;
+	}
+
+	:global(.host-card .state-chip.ok) {
+		background: rgba(20, 83, 45, 0.82) !important;
+		color: #dcfce7 !important;
+	}
+
+	:global(.host-card .state-chip.hold) {
+		background: rgba(120, 53, 15, 0.82) !important;
+		color: #ffedd5 !important;
+	}
+
+	:global(.host-card .search-mode-copy),
+	:global(.host-card .running-job-summary),
+	:global(.host-card .tray-headline),
+	:global(.host-card .attention-kicker),
+	:global(.queue-detail-shell summary),
+	:global(.attention-title),
+	:global(.encode-telemetry-summary),
+	:global(.encode-telemetry-title) {
+		color: #f8fafc !important;
+	}
+
+	@media (max-width: 1100px) {
+		.system-strip {
+			grid-template-columns: 1fr 1fr;
+		}
+	}
+
+	@media (max-width: 960px) {
+		.alert-strip {
+			grid-template-columns: 1fr;
+		}
+	}
+
+	@media (max-width: 720px) {
+		.system-strip {
+			grid-template-columns: 1fr;
+		}
 	}
 </style>

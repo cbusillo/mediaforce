@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
+	import '$lib/design/workstation-shell.css';
 	import type {
 		DashboardScanJob,
 		DashboardFoldersPayload,
@@ -7,17 +8,27 @@
 		FolderCard as FolderCardData,
 		HostsPayload
 	} from '$lib/api/types';
-	import { resolve } from '$app/paths';
 	import { onDestroy, onMount } from 'svelte';
-	import { fetchJson } from '$lib/api/client';
-	import { folderLibraryKey, folderLibraryLabel } from '$lib/folder-display';
+	import { fetchJson, postJson } from '$lib/api/client';
+	import HomeQueueRail from '$lib/components/home/HomeQueueRail.svelte';
+	import HomeSystemStrip from '$lib/components/home/HomeSystemStrip.svelte';
+	import HomeQueueTable from '$lib/components/home/HomeQueueTable.svelte';
+	import { folderLibraryKey, folderRoutePrefix } from '$lib/folder-display';
 	import { formatGiB } from '$lib/format';
 	import { hostsStatusPending } from '$lib/hosts/runtime';
 	import { allQueueWorkersScheduledOffWindow, nextQueueWindowCopy } from '$lib/hosts/schedule';
-	import DashboardFolderGrid from '$lib/components/dashboard/DashboardFolderGrid.svelte';
-	import DashboardHero from '$lib/components/dashboard/DashboardHero.svelte';
-	import Panel from '$lib/components/Panel.svelte';
-	import Pill from '$lib/components/Pill.svelte';
+	import { toasts } from '$lib/stores/toasts';
+	import type { FolderSortDirection, FolderSortKey } from '$lib/components/home/home-queue-display';
+	import {
+		buildFolderLookup,
+		defaultFolderSortDirection,
+		deriveFolderLibraries,
+		formatCount,
+		formatRelativeTime,
+		formatTopCounts,
+		parseIsoDate,
+		rankVisibleFolders
+	} from '$lib/components/home/home-queue-display';
 
 	const EMPTY_DASHBOARD: DashboardSummaryPayload = {
 		folders_preview: [],
@@ -76,6 +87,7 @@
 	let activeFolderRequest = 0;
 	let requestedFolderCacheKey = $state<string | null>(null);
 	let pendingStoredDisabledLibraries = $state<string[] | null>(null);
+	let libraryFilterStorageLoaded = $state(false);
 	let folderLoadController: AbortController | null = null;
 	let dashboardRefreshController: AbortController | null = null;
 	let hostsSummaryController: AbortController | null = null;
@@ -96,12 +108,6 @@
 	});
 	const libraryColors = $derived(dashboard.library_colors ?? {});
 	const LIBRARY_FILTER_STORAGE_KEY = 'mediaforce.dashboard.disabledLibraries';
-	const totalEstimatedSavings = $derived.by(() =>
-		folders.reduce((total, folder) => total + folder.estimated_savings_bytes, 0)
-	);
-	const foldersPending = $derived.by(() =>
-		folders.reduce((total, folder) => total + folder.pending_count, 0)
-	);
 	const readyHosts = $derived.by(() => hosts.hosts.filter((host) => host.queue_active).length);
 	const pendingReviewCount = $derived.by(
 		() =>
@@ -121,45 +127,6 @@
 		}
 		return 'Fleet idle';
 	});
-	const opsSnapshotPills = $derived.by(() => [
-		{
-			label: fleetSnapshotLabel,
-			variant: dashboard.encode_queue.queued_count > 0 ? ('warn' as const) : ('ghost' as const)
-		},
-		...(readyHosts > 0
-			? [{ label: `${readyHosts} hosts ready`, variant: 'ok' as const }]
-			: queueWorkersScheduledOffWindow
-				? [
-						{
-							label: nextWorkerWindow
-								? `Next worker window ${nextWorkerWindow}`
-								: 'All queue workers are scheduled off-window',
-							variant: 'neutral' as const
-						}
-					]
-				: [{ label: '0 hosts ready', variant: 'ghost' as const }]),
-		...(Number(dashboard.archive_cleanup?.file_count ?? 0) > 0
-			? [
-					{
-						label: `${Number(dashboard.archive_cleanup?.file_count ?? 0)} archived backups`,
-						variant: 'warn' as const
-					}
-				]
-			: []),
-		...(pendingReviewCount > 0
-			? [
-					{
-						label: `${pendingReviewCount} pending review`,
-						variant: 'warn' as const
-					}
-				]
-			: [])
-	]);
-	const heroFacts = $derived.by(() => [
-		{ label: 'Top folders', value: String(folders.length) },
-		{ label: 'Pending items', value: String(foldersPending) },
-		{ label: 'Potential reclaim', value: formatGiB(totalEstimatedSavings, 1) }
-	]);
 	const metricsReady = $derived(
 		dashboard.metric_support.vmaf && dashboard.metric_support.xpsnr && dashboard.metric_support.ssim
 	);
@@ -203,7 +170,10 @@
 		if (catalogScanLikelyStalled) {
 			return 'Still marked running, but no new progress has been recorded recently. This can happen on a slow mount or if the scan is hung.';
 		}
-		return 'New or changed library roots are being rescanned before this recommendation list updates.';
+		if (catalogScanActive) {
+			return 'New or changed library roots are being rescanned before this recommendation list updates.';
+		}
+		return 'No library scan is active. Ranked folders reflect the latest completed catalog pass.';
 	});
 	const catalogScanProgressFacts = $derived.by(() => {
 		const facts: string[] = [];
@@ -219,35 +189,88 @@
 		return facts;
 	});
 
-	const folderLibraries = $derived.by(() => {
-		const counts: Record<string, { key: string; label: string; count: number }> = {};
-
-		for (const folder of folders) {
-			const key = folderLibraryKey(folder.prefix);
-			const existing = counts[key];
-			if (existing) {
-				existing.count += 1;
-				continue;
-			}
-			counts[key] = { key, label: folderLibraryLabel(key), count: 1 };
-		}
-
-		return Object.values(counts).sort((left, right) => left.label.localeCompare(right.label));
-	});
+	const folderLibraries = $derived.by(() => deriveFolderLibraries(folders));
 
 	let disabledLibraries = $state<string[]>([]);
 	let libraryFiltersHydrated = $state(false);
+	let folderSortKey = $state<FolderSortKey>('priority');
+	let folderSortDirection = $state<FolderSortDirection>('asc');
+	const fullFolderLibrariesReady = $derived(catalogEmpty || folderLoadState === 'ready');
 
 	const visibleFolders = $derived.by(() =>
 		folders.filter((folder) => !disabledLibraries.includes(folderLibraryKey(folder.prefix)))
+	);
+	const totalProjectedReclaim = $derived.by(() =>
+		visibleFolders.reduce((total, folder) => total + folder.projected_reclaim_bytes, 0)
+	);
+	const foldersPending = $derived.by(() =>
+		visibleFolders.reduce((total, folder) => total + folder.pending_count, 0)
 	);
 	const libraryFiltersActive = $derived(disabledLibraries.length > 0);
 	const availableLibraryKeys = $derived.by(() => folderLibraries.map((library) => library.key));
 	const filterHintCopy = $derived(
 		libraryFiltersActive
-			? 'Click an inactive pill to restore it, or All to reset.'
-			: 'Click a pill to hide that library.'
+			? 'Show a hidden library again, or use Show all to reset the queue view.'
+			: 'Click a library to hide it from the queue.'
 	);
+	const queueCapableHosts = $derived.by(
+		() => hosts.hosts.filter((host) => host.capabilities.includes('encode_queue')).length
+	);
+	const reachableHosts = $derived.by(() => hosts.hosts.filter((host) => host.available).length);
+	const queueStateTone = $derived.by(() => {
+		if (dashboard.encode_queue.state.stop_requested || dashboard.encode_queue.state.is_paused) {
+			return 'warning-state';
+		}
+		if (queueWorkersScheduledOffWindow && dashboard.encode_queue.queued_count > 0) {
+			return 'schedule-state';
+		}
+		return 'normal-state';
+	});
+	const workerStateTone = $derived.by(() => {
+		if (queueCapableHosts === 0) {
+			return 'warning-state';
+		}
+		if (readyHosts === 0 && dashboard.encode_queue.queued_count > 0) {
+			return 'schedule-state';
+		}
+		return 'normal-state';
+	});
+	const recoveryDetailCopy = $derived.by(() => {
+		const cleanupCount = Number(dashboard.archive_cleanup?.file_count ?? 0);
+		const cleanupCopy =
+			cleanupCount > 0
+				? `${cleanupCount} completed backups are ready for cleanup.`
+				: 'No completed backups are waiting for cleanup.';
+		return `${foldersPending} pending items across ${visibleFolders.length} visible folders. ${cleanupCopy}`;
+	});
+	const sortedVisibleFolderRows = $derived.by(() =>
+		rankVisibleFolders(visibleFolders, folderSortKey, folderSortDirection)
+	);
+	const sortedVisibleFolders = $derived.by(() =>
+		sortedVisibleFolderRows.map(({ folder }) => folder)
+	);
+	const activeWorkspaceFolder = $derived(sortedVisibleFolderRows[0]?.folder ?? null);
+	const queueWatchJobs = $derived.by(() =>
+		[...dashboard.encode_queue.running, ...dashboard.encode_queue.queued].slice(0, 5)
+	);
+	const queuedFolderPrefixes = $derived.by(
+		() =>
+			new Set(
+				[...dashboard.encode_queue.running, ...dashboard.encode_queue.queued].map(
+					(job) => job.prefix
+				)
+			)
+	);
+	const recentQueueIssues = $derived.by(() =>
+		[...(dashboard.encode_queue.recent ?? [])]
+			.filter((job) => job.status !== 'completed')
+			.slice(0, 3)
+	);
+	const folderLookup = $derived.by(() => buildFolderLookup(dashboard.folders_preview, folders));
+	const activeWorkspaceQueued = $derived.by(() =>
+		activeWorkspaceFolder ? queuedFolderPrefixes.has(activeWorkspaceFolder.prefix) : false
+	);
+	let actionState = $state<null | 'resume-queue' | 'queue-folder'>(null);
 
 	function toggleLibraryFilter(libraryKey: string) {
 		disabledLibraries = disabledLibraries.includes(libraryKey)
@@ -259,36 +282,65 @@
 		disabledLibraries = [];
 	}
 
-	function parseIsoDate(value: string | null | undefined): Date | null {
-		if (!value) {
-			return null;
+	function toggleFolderSort(key: FolderSortKey) {
+		if (folderSortKey === key) {
+			folderSortDirection = folderSortDirection === 'asc' ? 'desc' : 'asc';
+			return;
 		}
-		const parsed = new Date(value);
-		return Number.isNaN(parsed.getTime()) ? null : parsed;
+
+		folderSortKey = key;
+		folderSortDirection = defaultFolderSortDirection(key);
 	}
 
-	function formatCount(value: number): string {
-		return new Intl.NumberFormat('en-US').format(value);
+	async function refreshHomeData() {
+		await Promise.all([loadDashboardSummary(), loadHostsSummary()]);
 	}
 
-	function formatRelativeTime(value: string | null | undefined, now: number): string {
-		const parsed = parseIsoDate(value);
-		if (!parsed) {
-			return 'just now';
+	async function resumeQueueFromHome() {
+		actionState = 'resume-queue';
+		try {
+			const response = await postJson<{ message?: string }>('/api/encode-queue/resume', {});
+			toasts.success('Queue resumed', response.message ?? 'Resumed the encode queue.');
+			await refreshHomeData();
+		} catch (error) {
+			toasts.error(
+				'Could not resume queue',
+				error instanceof Error ? error.message : 'Unexpected queue resume error'
+			);
+		} finally {
+			actionState = null;
 		}
-		const seconds = Math.max(0, Math.round((now - parsed.getTime()) / 1000));
-		if (seconds < 10) {
-			return 'moments ago';
+	}
+
+	async function queueActiveWorkspaceFolder() {
+		if (
+			!activeWorkspaceFolder ||
+			activeWorkspaceQueued ||
+			activeWorkspaceFolder.pending_count <= 0
+		) {
+			return;
 		}
-		if (seconds < 60) {
-			return `${seconds}s ago`;
+
+		actionState = 'queue-folder';
+		try {
+			const encodedPrefix = folderRoutePrefix(activeWorkspaceFolder.prefix);
+			const response = await postJson<{ message?: string; action?: string }>(
+				`/api/folders/${encodedPrefix}/queue-encode`,
+				{ notes: '', bypass_schedule: false }
+			);
+			toasts.success(
+				response.action === 'recovered' ? 'Failed files recovered' : 'Folder queued',
+				response.message ?? 'Queued the current folder.'
+			);
+			await refreshHomeData();
+		} catch (error) {
+			toasts.error(
+				'Could not queue folder',
+				error instanceof Error ? error.message : 'Unexpected queue error'
+			);
+		} finally {
+			actionState = null;
 		}
-		const minutes = Math.round(seconds / 60);
-		if (minutes < 60) {
-			return `${minutes}m ago`;
-		}
-		const hours = Math.round(minutes / 60);
-		return `${hours}h ago`;
 	}
 
 	async function loadDashboardSummary() {
@@ -416,12 +468,14 @@
 			const storedValue = window.localStorage.getItem(LIBRARY_FILTER_STORAGE_KEY);
 			if (!storedValue) {
 				pendingStoredDisabledLibraries = [];
+				libraryFilterStorageLoaded = true;
 				return;
 			}
 
 			const parsed = JSON.parse(storedValue);
 			if (!Array.isArray(parsed)) {
 				pendingStoredDisabledLibraries = [];
+				libraryFilterStorageLoaded = true;
 				return;
 			}
 
@@ -430,6 +484,8 @@
 				.filter((value, index, values) => values.indexOf(value) === index);
 		} catch {
 			pendingStoredDisabledLibraries = [];
+		} finally {
+			libraryFilterStorageLoaded = true;
 		}
 	});
 
@@ -464,41 +520,39 @@
 	});
 
 	$effect(() => {
-		if (!browser || libraryFiltersHydrated || (!folders.length && !catalogEmpty)) {
+		if (
+			!browser ||
+			!libraryFilterStorageLoaded ||
+			libraryFiltersHydrated ||
+			(!folders.length && !catalogEmpty)
+		) {
 			return;
 		}
 
-		const knownLibraries = new Set(availableLibraryKeys);
-		disabledLibraries = (pendingStoredDisabledLibraries ?? []).filter((value) =>
-			knownLibraries.has(value)
-		);
+		disabledLibraries = [...(pendingStoredDisabledLibraries ?? [])];
 		libraryFiltersHydrated = true;
 	});
 
 	$effect(() => {
-		if (!browser || !libraryFiltersHydrated || (!folders.length && !catalogEmpty)) {
+		if (!browser || !libraryFiltersHydrated) {
 			return;
 		}
 
-		const knownLibraries = new Set(availableLibraryKeys);
-		const normalizedDisabledLibraries = disabledLibraries.filter((value) =>
-			knownLibraries.has(value)
-		);
+		const nextDisabledLibraries = fullFolderLibrariesReady
+			? disabledLibraries.filter((value) => new Set(availableLibraryKeys).has(value))
+			: disabledLibraries;
 
-		if (normalizedDisabledLibraries.length !== disabledLibraries.length) {
-			disabledLibraries = normalizedDisabledLibraries;
+		if (nextDisabledLibraries.length !== disabledLibraries.length) {
+			disabledLibraries = nextDisabledLibraries;
 			return;
 		}
 
-		if (!normalizedDisabledLibraries.length) {
+		if (!nextDisabledLibraries.length) {
 			window.localStorage.removeItem(LIBRARY_FILTER_STORAGE_KEY);
 			return;
 		}
 
-		window.localStorage.setItem(
-			LIBRARY_FILTER_STORAGE_KEY,
-			JSON.stringify(normalizedDisabledLibraries)
-		);
+		window.localStorage.setItem(LIBRARY_FILTER_STORAGE_KEY, JSON.stringify(nextDisabledLibraries));
 	});
 
 	$effect(() => {
@@ -523,188 +577,237 @@
 	<title>Folders · Mediaforce</title>
 </svelte:head>
 
-<div class="page-stack">
-	{#if landingLoadIssues.length > 0}
-		<Panel class="load-warning-panel" padding="1rem 1.1rem">
-			<div class="load-warning-shell">
-				<div class="load-warning-copy">
-					<p class="load-warning-label">Runtime issue</p>
-					<h2 class="load-warning-heading">Some dashboard data did not load</h2>
-					{#each landingLoadIssues as issue (issue)}
-						<p class="load-warning-detail">{issue}</p>
-					{/each}
-				</div>
-				<button type="button" class="load-warning-action" onclick={retryLandingLoads}>
-					Retry load
-				</button>
-			</div>
-		</Panel>
-	{/if}
-
-	<DashboardHero
-		foldersCount={folders.length}
-		{totalEstimatedSavings}
-		{heroFacts}
-		{metricsReady}
-		metricSupport={dashboard.metric_support}
-		metricStatusCopy={dashboard.metric_status_copy}
-	/>
-
-	<Panel class="ops-summary-panel" padding="1rem 1.1rem">
-		<div class="ops-summary-shell">
-			<p class="ops-summary-label">Ops snapshot</p>
-			<div class="ops-summary-side">
-				<div class="ops-summary-pills">
-					{#each opsSnapshotPills as pill (pill.label)}
-						<Pill label={pill.label} variant={pill.variant} />
-					{/each}
-				</div>
-				<div class="ops-summary-links">
-					{#if Number(dashboard.archive_cleanup?.file_count ?? 0) > 0}
-						<a class="ops-summary-link" href={resolve('/completed')}> Open completed </a>
-					{/if}
-					<a class="ops-summary-link" href={resolve('/ops')}> Open ops </a>
-				</div>
-			</div>
-		</div>
-	</Panel>
-
-	<DashboardFolderGrid
+<div class="workstation-screen">
+	<HomeSystemStrip
+		{queueStateTone}
+		{workerStateTone}
+		{fleetSnapshotLabel}
+		stopRequested={dashboard.encode_queue.state.stop_requested}
+		queuePaused={dashboard.encode_queue.state.is_paused}
+		{queueWorkersScheduledOffWindow}
+		nextWorkerWindow={nextWorkerWindow ?? null}
+		etaCopy={dashboard.encode_queue.telemetry?.eta_copy}
+		{actionState}
+		{resumeQueueFromHome}
+		{readyHosts}
+		{queueCapableHosts}
+		{reachableHosts}
 		{catalogScanActive}
-		{catalogScanLikelyStalled}
 		{catalogScanHeading}
 		{catalogScanProgressHeadline}
-		{catalogScanStatusCopy}
-		{catalogScanProgressFacts}
-		{folderLoadState}
-		{folders}
-		{folderLoadError}
-		{folderLibraries}
-		{disabledLibraries}
-		onEnableAllLibraries={enableAllLibraries}
-		onToggleLibraryFilter={toggleLibraryFilter}
-		{libraryColors}
-		{filterHintCopy}
-		{visibleFolders}
-		{catalogEmpty}
+		totalProjectedReclaimCopy={formatGiB(totalProjectedReclaim, 1)}
+		{recoveryDetailCopy}
 	/>
+
+	{#if landingLoadIssues.length > 0}
+		<section class="alert-strip" aria-label="Runtime issues">
+			<div>
+				<p class="alert-label">Runtime issue</p>
+				{#each landingLoadIssues as issue (issue)}
+					<p class="alert-copy">{issue}</p>
+				{/each}
+			</div>
+			<button type="button" class="alert-action" onclick={retryLandingLoads}>Retry load</button>
+		</section>
+	{/if}
+
+	<div class="console-grid">
+		<div class="main-column">
+			<HomeQueueTable
+				{folderLibraries}
+				{libraryColors}
+				{disabledLibraries}
+				{libraryFiltersActive}
+				{filterHintCopy}
+				{folderLoadState}
+				{folderLoadError}
+				showInitialLoadingMessage={folderLoadState === 'loading' &&
+					folders.length === 0 &&
+					!catalogEmpty}
+				{catalogEmpty}
+				{sortedVisibleFolders}
+				{sortedVisibleFolderRows}
+				activeWorkspacePrefix={activeWorkspaceFolder?.prefix ?? null}
+				{folderSortKey}
+				{folderSortDirection}
+				{enableAllLibraries}
+				{toggleLibraryFilter}
+				{toggleFolderSort}
+				{activeWorkspaceFolder}
+				{activeWorkspaceQueued}
+				queueActionDisabled={actionState !== null}
+				queueActionPending={actionState === 'queue-folder'}
+				{queueActiveWorkspaceFolder}
+				{formatTopCounts}
+			/>
+		</div>
+
+		<div class="side-column">
+			<div class="side-column-sticky">
+				<HomeQueueRail
+					{folderLookup}
+					{queueWatchJobs}
+					{recentQueueIssues}
+					{fleetSnapshotLabel}
+					{pendingReviewCount}
+					{catalogScanStatusCopy}
+					{catalogScanProgressFacts}
+					{metricsReady}
+					metricStatusCopy={dashboard.metric_status_copy}
+					archiveRoot={dashboard.archive_cleanup?.archive_root || ''}
+				/>
+			</div>
+		</div>
+	</div>
 </div>
 
 <style>
-	.page-stack {
+	.workstation-screen {
 		display: grid;
-		gap: var(--space-3);
+		gap: 1rem;
+		padding: 0.25rem 0 1rem;
+		position: relative;
+		isolation: isolate;
+		z-index: 0;
 	}
 
-	.load-warning-shell {
+	.workstation-screen::before {
+		content: '';
+		position: fixed;
+		inset: 0;
+		z-index: -2;
+		pointer-events: none;
+		background: #0b1014;
+	}
+
+	.workstation-screen::after {
+		display: none;
+	}
+
+	.main-column {
+		display: grid;
+		gap: 1rem;
+		align-content: start;
+		min-width: 0;
+		overflow: hidden;
+	}
+
+	.side-column {
+		display: grid;
+		gap: 1rem;
+		align-content: start;
+		min-width: 0;
+	}
+
+	.side-column-sticky {
 		display: flex;
-		justify-content: space-between;
+		flex-direction: column;
+		gap: 1rem;
+		align-content: start;
+		min-width: 0;
+	}
+
+	@media (min-width: 961px) {
+		.side-column-sticky {
+			position: sticky;
+			top: 5.9rem;
+			max-height: calc(100dvh - 5.9rem - 1rem);
+			overflow-y: auto;
+			overflow-x: clip;
+			scrollbar-gutter: stable;
+			padding-right: 0.15rem;
+			z-index: 5;
+		}
+	}
+
+	.console-grid > :global(*),
+	.main-column > :global(*) {
+		min-width: 0;
+	}
+
+	.alert-strip {
+		position: relative;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
 		gap: 1rem;
 		align-items: center;
-		flex-wrap: wrap;
+		padding: 1rem 1.1rem;
+		border: 1px solid rgba(148, 163, 184, 0.18);
+		background: rgba(55, 24, 11, 0.96);
+		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2);
+		overflow: hidden;
 	}
 
-	.load-warning-copy {
-		display: grid;
-		gap: 0.4rem;
+	.alert-strip::before {
+		content: '';
+		position: absolute;
+		inset: 0 0 auto;
+		height: 2px;
+		background: rgba(56, 189, 248, 0.85);
 	}
 
-	.load-warning-label {
+	.alert-label {
 		margin: 0;
-		font-size: 0.78rem;
+		font-size: 0.72rem;
 		font-weight: 800;
-		letter-spacing: 0.14em;
+		letter-spacing: 0.16em;
 		text-transform: uppercase;
-		color: #9a3412;
+		color: rgba(148, 163, 184, 0.88);
 	}
 
-	.load-warning-heading {
+	.alert-copy {
 		margin: 0;
-		font-size: clamp(1.05rem, 2vw, 1.35rem);
-		color: #7c2d12;
-	}
-
-	.load-warning-detail {
-		margin: 0;
-		max-width: 54rem;
-		color: #7c2d12;
+		color: rgba(226, 232, 240, 0.74);
 		line-height: 1.5;
 	}
 
-	.load-warning-action {
-		border: 1px solid rgba(154, 52, 18, 0.18);
-		background: rgba(154, 52, 18, 0.1);
-		color: #7c2d12;
-		font: inherit;
-		font-weight: 700;
-		padding: 0.76rem 1rem;
-		border-radius: var(--radius-pill);
-		cursor: pointer;
-	}
-
-	:global(.load-warning-panel) {
-		background:
-			radial-gradient(circle at top left, rgba(251, 146, 60, 0.18), transparent 36%),
-			linear-gradient(140deg, rgba(255, 247, 237, 0.95), rgba(255, 237, 213, 0.88));
-	}
-
-	.ops-summary-shell {
-		display: flex;
-		justify-content: space-between;
-		gap: 1rem;
-		align-items: center;
-		flex-wrap: wrap;
-	}
-
-	.ops-summary-side {
-		display: grid;
-		gap: 0.7rem;
-	}
-
-	.ops-summary-label {
-		margin: 0;
-		font-size: 0.78rem;
-		font-weight: 800;
-		letter-spacing: 0.14em;
-		text-transform: uppercase;
-		color: var(--accent-deep);
-	}
-
-	.ops-summary-side {
-		justify-items: start;
-	}
-
-	.ops-summary-pills {
-		display: flex;
-		gap: 0.65rem;
-		flex-wrap: wrap;
-	}
-
-	.ops-summary-links {
-		display: flex;
-		gap: 0.65rem;
-		flex-wrap: wrap;
-	}
-
-	.ops-summary-link {
-		display: inline-flex;
+	.alert-action {
 		align-items: center;
 		justify-content: center;
-		padding: 0.74rem 1rem;
-		border-radius: var(--radius-pill);
-		border: 1px solid rgba(15, 118, 110, 0.18);
-		background: rgba(15, 118, 110, 0.1);
-		color: var(--accent-deep);
 		font-weight: 700;
-		text-decoration: none;
-		box-shadow:
-			inset 0 1px 0 rgba(255, 255, 255, 0.55),
-			0 12px 22px rgba(15, 118, 110, 0.08);
+		transition:
+			border-color 150ms ease,
+			background-color 150ms ease,
+			color 150ms ease,
+			transform 150ms ease;
 	}
 
-	:global(.ops-summary-panel) {
-		background:
-			radial-gradient(circle at top left, rgba(15, 118, 110, 0.12), transparent 34%),
-			linear-gradient(140deg, rgba(255, 253, 247, 0.88), rgba(244, 237, 224, 0.84));
+	.alert-action {
+		display: inline-flex;
+		padding: 0.72rem 0.95rem;
+		border: 1px solid rgba(56, 189, 248, 0.22);
+		background: rgba(15, 23, 42, 0.7);
+		color: #e2e8f0;
+	}
+
+	.alert-action:hover {
+		transform: translateY(-1px);
+		border-color: rgba(56, 189, 248, 0.5);
+		background: rgba(30, 41, 59, 0.94);
+	}
+
+	.console-grid {
+		display: grid;
+		gap: 1rem;
+		grid-template-columns: minmax(0, 1.95fr) minmax(18.5rem, 0.68fr);
+		align-items: start;
+	}
+
+	@media (max-width: 1100px) {
+		.console-grid {
+			grid-template-columns: minmax(0, 1.16fr) minmax(16rem, 0.74fr);
+		}
+	}
+
+	@media (max-width: 960px) {
+		.console-grid {
+			grid-template-columns: 1fr;
+		}
+	}
+
+	@media (max-width: 720px) {
+		.alert-strip {
+			grid-template-columns: 1fr;
+		}
 	}
 </style>

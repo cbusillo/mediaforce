@@ -1,17 +1,17 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
-	import Panel from '$lib/components/Panel.svelte';
 </script>
 
-<Panel class="masthead" padding="1rem 1.25rem">
+<header class="masthead">
 	<div class="brand-block">
-		<div class="brand-row">
-			<a class="brand-link" href={resolve('/')}>
+		<a class="brand-link" href={resolve('/')}>
+			<div class="brand-stack">
 				<span class="brand-mark">Mediaforce</span>
-				<span class="brand-name serif">AV1 calibration bench</span>
-			</a>
-		</div>
+				<span class="brand-name">AV1 operations console</span>
+			</div>
+			<span class="brand-context">Operator workstation</span>
+		</a>
 	</div>
 
 	<nav class="nav-row" aria-label="Primary">
@@ -36,26 +36,25 @@
 			aria-current={page.url.pathname === '/settings' ? 'page' : undefined}>Settings</a
 		>
 	</nav>
-</Panel>
+</header>
 
 <style>
-	:global(.masthead) {
+	.masthead {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) auto;
-		gap: var(--space-4);
+		gap: 1.25rem;
 		align-items: center;
 		position: sticky;
 		top: 0.75rem;
 		z-index: 10;
-		box-shadow: var(--shadow-md);
+		padding: 0.9rem 1.1rem;
+		border: 1px solid rgba(23, 35, 31, 0.1);
+		background: rgba(255, 252, 246, 0.9);
 		backdrop-filter: blur(18px);
-		background:
-			linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(255, 251, 243, 0.8)),
-			radial-gradient(circle at top left, rgba(15, 118, 110, 0.08), transparent 28%);
+		box-shadow: var(--shadow-md);
 	}
 
 	.brand-block,
-	.brand-row,
 	.nav-row,
 	.brand-link {
 		display: flex;
@@ -63,31 +62,43 @@
 	}
 
 	.brand-block {
-		gap: 0;
-	}
-
-	.brand-row {
-		gap: 0.85rem;
-		flex-wrap: wrap;
+		min-width: 0;
 	}
 
 	.brand-link {
-		gap: 0.7rem;
+		justify-content: space-between;
+		gap: 1rem;
 		flex-wrap: wrap;
+		width: 100%;
 	}
 
-	.brand-mark {
+	.brand-stack {
+		display: grid;
+		gap: 0.18rem;
+	}
+
+	.brand-mark,
+	.brand-context {
 		font-size: 0.76rem;
 		font-weight: 800;
 		text-transform: uppercase;
 		letter-spacing: 0.18em;
+	}
+
+	.brand-mark {
 		color: var(--accent-deep);
 	}
 
 	.brand-name {
-		font-size: clamp(1.35rem, 2vw, 1.8rem);
+		font-size: clamp(1.15rem, 1.75vw, 1.45rem);
+		font-weight: 700;
 		line-height: 1;
 		color: var(--ink);
+	}
+
+	.brand-context {
+		color: var(--ink-soft);
+		white-space: nowrap;
 	}
 
 	.brand-link:hover .brand-name {
@@ -95,50 +106,81 @@
 	}
 
 	.nav-row {
-		gap: 0.65rem;
+		gap: 0.3rem;
 		justify-content: flex-end;
 		flex-wrap: wrap;
+		padding-left: 1rem;
+		border-left: 1px solid rgba(23, 35, 31, 0.08);
 	}
 
 	.nav-row a {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		min-height: 2.55rem;
-		padding: 0.65rem 1rem;
-		border-radius: var(--radius-pill);
-		border: 1px solid rgba(23, 35, 31, 0.08);
-		background: rgba(255, 255, 255, 0.56);
+		min-height: 2.35rem;
+		padding: 0.58rem 0.82rem;
+		border-bottom: 2px solid transparent;
 		color: var(--ink-muted);
-		font-size: 0.94rem;
+		font-size: 0.9rem;
 		font-weight: 700;
-		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
 		transition:
 			transform 150ms ease,
 			border-color 150ms ease,
-			background-color 150ms ease,
 			color 150ms ease;
 	}
 
 	.nav-row a:hover,
 	.nav-row a.active {
 		transform: translateY(-1px);
-		border-color: rgba(15, 118, 110, 0.2);
-		background: rgba(15, 118, 110, 0.11);
+		border-color: rgba(15, 118, 110, 0.7);
 		color: var(--accent-deep);
-		box-shadow:
-			inset 0 1px 0 rgba(255, 255, 255, 0.66),
-			0 10px 22px rgba(15, 118, 110, 0.08);
 	}
 
 	@media (max-width: 860px) {
-		:global(.masthead) {
+		.masthead {
 			grid-template-columns: 1fr;
 			top: 0.5rem;
 		}
 
 		.nav-row {
+			padding-left: 0;
+			border-left: 0;
+			border-top: 1px solid rgba(23, 35, 31, 0.08);
+			padding-top: 0.75rem;
+		}
+
+		.nav-row {
 			justify-content: flex-start;
+		}
+	}
+
+	@media (max-width: 560px) {
+		.brand-stack {
+			gap: 0.08rem;
+		}
+
+		.brand-mark {
+			font-size: 0.68rem;
+			letter-spacing: 0.16em;
+		}
+
+		.brand-name {
+			font-size: 0.96rem;
+		}
+
+		.nav-row {
+			display: grid;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 0.3rem 0.6rem;
+			width: 100%;
+			padding-top: 0.55rem;
+		}
+
+		.nav-row a {
+			justify-content: flex-start;
+			padding-inline: 0;
+			min-height: 1.95rem;
+			font-size: 0.84rem;
 		}
 	}
 </style>

@@ -14,4 +14,8 @@
 - `docs/policies/coding-standards.md`: project-wide coding rules and guardrails
 - `docs/style/python.md`: Python and FastAPI style
 - `docs/style/frontend.md`: Svelte, TypeScript, and UI style
+- `docs/style/workstation-ui.md`: doctrine for Mediaforce's primary operator
+  surfaces
+- `docs/design/operator-workstation-shell-brief.md`: durable route-to-route
+  shell brief for the operator workstation family
 - `docs/style/testing.md`: test scope and validation expectations

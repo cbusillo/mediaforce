@@ -19,6 +19,7 @@ def encode_preview_clips(
         preset: int,
         crf: float,
         svt_params: list[str],
+        video_filter: str | None = None,
         host: dict[str, Any] | None = None,
         process_controller: Any = None,
         execution_mode_for_host: Callable[[dict[str, Any] | None], str],
@@ -42,6 +43,7 @@ def encode_preview_clips(
             preset=preset,
             crf=crf,
             svt_params=svt_params,
+            video_filter=video_filter,
         )
 
     encoded: list[Any] = []
@@ -58,6 +60,7 @@ def encode_preview_clips(
             preset=preset,
             crf=crf,
             svt_params=svt_params,
+            video_filter=video_filter,
             process_controller=process_controller,
         )
         encoded.append(
@@ -84,6 +87,7 @@ def encode_preview_clips_remote(
         preset: int,
         crf: float,
         svt_params: list[str],
+        video_filter: str | None = None,
         remote_preview_timeout_seconds: int,
         uuid_factory: Callable[[], Any],
         run_remote_command: Callable[..., Any],
@@ -112,6 +116,7 @@ def encode_preview_clips_remote(
                 preset=preset,
                 crf=crf,
                 svt_params=svt_params,
+                video_filter=video_filter,
             )
             copy_remote_file_to_local(host, remote_output_path, output_path, remote_preview_timeout_seconds)
             encoded.append(

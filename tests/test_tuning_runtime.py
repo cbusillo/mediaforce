@@ -86,7 +86,8 @@ from mediaforce.web.runtime.folder_ai_tuning import (
     folder_ai_tune_confirm_action,
     folder_ai_tune_preview_action,
 )
-from mediaforce.web.runtime.folder_tuning_advice import audio_tradeoff_hint, size_budget_feasibility
+from mediaforce.web.runtime.folder_tuning_advice import audio_tradeoff_hint, operator_request_signature, size_budget_feasibility
+from mediaforce.web.runtime.folder_tuning_helpers import proposal_alignment_issue
 
 
 def _runtime_settings_writer(path_text: str, ready_path_text: str, mode: str) -> None:
@@ -129,12 +130,32 @@ def _fake_operator_note_parse(*, project_root: Path, payload: dict[str, object])
         metric_target = float(metric_match.group("target") or 0)
     size_budget_value = float(budget_match.group("amount")) if budget_match else None
     size_budget_unit = str(budget_match.group("unit")) if budget_match else None
-    if size_budget_value is not None and metric_target is not None:
+    scale_match = re.search(
+        r"\b(?:downsample|downscale|scale|resize|cap|limit|convert|make)\b.{0,40}\b(?P<height>480|540|576|720|900|1080|1440|2160)p\b",
+        lower,
+    )
+    if scale_match is None:
+        scale_match = re.search(
+            r"\b(?P<height>480|540|576|720|900|1080|1440|2160)p\b.{0,40}\b(?:downsample|downscale|scale|resize|cap|limit)\b",
+            lower,
+        )
+    scale_height = int(scale_match.group("height")) if scale_match else None
+    black_bar_handling = "smart" if re.search(r"\b(?:smart|auto(?:matic)?)\b.{0,24}\bblack[- ]?bar", lower) or re.search(
+        r"\bblack[- ]?bar.{0,24}\b(?:smart|auto(?:matic)?)\b", lower
+    ) else None
+    crop_match = re.search(r"\b(?P<crop>\d{3,5}:\d{3,5}:\d{1,5}:\d{1,5})\b", lower)
+    crop = crop_match.group("crop") if crop_match else None
+    explicit_request_count = sum(
+        value is not None for value in (size_budget_value, metric_target, scale_height, black_bar_handling, crop)
+    )
+    if explicit_request_count > 1:
         request_type = "combined_experiment"
     elif size_budget_value is not None:
         request_type = "size_budget"
     elif metric_target is not None:
         request_type = "metric_target"
+    elif scale_height is not None or black_bar_handling is not None or crop is not None:
+        request_type = "scale_target"
     else:
         request_type = "none"
     exploratory = any(
@@ -157,6 +178,9 @@ def _fake_operator_note_parse(*, project_root: Path, payload: dict[str, object])
         "metric_target": metric_target,
         "size_budget_value": size_budget_value,
         "size_budget_unit": size_budget_unit,
+        "scale_height": scale_height,
+        "black_bar_handling": black_bar_handling,
+        "crop": crop,
         "reasoning_note": "test parser",
     }
 
@@ -273,6 +297,9 @@ class TuningRuntimeTests(unittest.TestCase):
                     "metric_target": None,
                     "size_budget_value": 300,
                     "size_budget_unit": "mb",
+                    "scale_height": None,
+                    "black_bar_handling": None,
+                    "crop": None,
                     "reasoning_note": "Directive question asking for action.",
                 }
             )
@@ -758,6 +785,27 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(archive_root.exists())
         self.assertEqual(result["archive_cleanup"]["file_count"], 0)
 
+    def test_clear_archive_cleanup_action_tolerates_missing_archive_root(self) -> None:
+        config = MediaforceConfig(
+            raw={
+                "state": {},
+                "media": {
+                    "source_roots": {"tv": str(self.root / "source" / "tv")},
+                    "staging_root": str(self.root / "staging"),
+                },
+                "remote_hosts": [],
+            },
+            paths=self.config.paths,
+        )
+
+        result = clear_archive_cleanup_action(config)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["removed_count"], 0)
+        self.assertEqual(result["removed_size_bytes"], 0)
+        self.assertEqual(result["archive_cleanup"]["archive_root"], "")
+        self.assertFalse(result["archive_cleanup"]["has_cleanup"])
+
     def test_completed_page_payload_groups_promoted_folders_and_active_backups(self) -> None:
         from mediaforce.web import app as web_app
 
@@ -820,6 +868,29 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertEqual(payload["archive_cleanup"]["file_count"], 1)
         self.assertEqual(payload["folders"][0]["archived_backup_count"], 0)
+
+    def test_completed_page_payload_tolerates_missing_archive_root(self) -> None:
+        from mediaforce.web import app as web_app
+
+        config = MediaforceConfig(
+            raw={
+                "state": {},
+                "media": {
+                    "source_roots": {"tv": str(self.root / "source" / "tv")},
+                    "staging_root": str(self.root / "staging"),
+                },
+                "remote_hosts": [],
+            },
+            paths=self.config.paths,
+        )
+
+        with open_db(config.paths.db_path) as connection:
+            payload = completed_page_payload(config, connection, folder_group=web_app._folder_group)
+
+        self.assertEqual(payload["completed_count"], 0)
+        self.assertEqual(payload["folders_with_backups_count"], 0)
+        self.assertEqual(payload["archive_cleanup"]["archive_root"], "")
+        self.assertFalse(payload["archive_cleanup"]["has_cleanup"])
 
     def test_completed_page_payload_keeps_total_bytes_saved_after_backup_is_deleted(self) -> None:
         from mediaforce.web import app as web_app
@@ -964,6 +1035,65 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(captured, [["tv/Example Show/Season 1"]])
+        self.assertEqual(json.loads(response.body)["completed"], expected_payload)
+
+    def test_completed_cleanup_route_tolerates_missing_archive_root(self) -> None:
+        from mediaforce.web import app as web_app
+
+        config = MediaforceConfig(
+            raw={
+                "state": {},
+                "media": {
+                    "source_roots": {"tv": str(self.root / "source" / "tv")},
+                    "staging_root": str(self.root / "staging"),
+                },
+                "remote_hosts": [],
+            },
+            paths=self.config.paths,
+        )
+
+        expected_payload = {
+            "folders": [],
+            "completed_count": 0,
+            "folders_with_backups_count": 0,
+            "archive_cleanup": {"archive_root": "", "file_count": 0, "total_size_bytes": 0, "has_cleanup": False},
+        }
+
+        with patch("mediaforce.web.app.load_config", return_value=config), patch(
+            "mediaforce.web.app.purge_transient_artifacts"
+        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
+            "mediaforce.web.app._start_encode_queue_worker"
+        ), patch("mediaforce.web.app._refresh_host_status_cache", return_value=[]), patch(
+            "mediaforce.web.app.completed_page_payload", return_value=expected_payload
+        ), patch("mediaforce.web.app.list_completed_folders", return_value=[]), patch(
+            "mediaforce.web.app.clear_completed_backups_action",
+            return_value={
+                "ok": True,
+                "message": "No archived originals are waiting for cleanup.",
+                "removed_count": 0,
+                "removed_size_bytes": 0,
+                "removed_prefix_count": 0,
+            },
+        ) as clear_mock:
+            app = web_app.create_app(self.root / "config.toml")
+            route = next(
+                route
+                for route in app.routes
+                if isinstance(route, APIRoute) and route.path == "/api/completed/backups/clear"
+            )
+            assert isinstance(route, APIRoute)
+
+            class _FakeRequest:
+                def __init__(self, payload: dict[str, object]) -> None:
+                    self._payload = payload
+
+                async def json(self) -> dict[str, object]:
+                    return self._payload
+
+            response = asyncio.run(route.endpoint(_FakeRequest({})))
+
+        self.assertEqual(response.status_code, 200)
+        clear_mock.assert_called_once()
         self.assertEqual(json.loads(response.body)["completed"], expected_payload)
 
     def test_completed_cleanup_route_rejects_malformed_prefix_payload(self) -> None:
@@ -2981,6 +3111,45 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertFalse(request["requires_confirmation"])
         self.assertAlmostEqual(request["estimated_source_percent"], 4.36, places=2)
 
+    def test_operator_requested_experiment_detects_scale_target_request(self) -> None:
+        request = _operator_requested_experiment("Downsample the 4K files to 1080p for this folder.")
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "scale_target")
+        self.assertTrue(request["operator_confirmed"])
+        self.assertEqual(request["scale_height"], 1080)
+        self.assertEqual(request["applied_policy"]["video"]["max_height"], 1080)
+
+    def test_operator_requested_experiment_detects_smart_black_bar_request(self) -> None:
+        request = _operator_requested_experiment("Use smart black-bar detection for this letterboxed season.")
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "scale_target")
+        self.assertTrue(request["operator_confirmed"])
+        self.assertEqual(request["black_bar_handling"], "smart")
+        self.assertEqual(request["applied_policy"]["video"]["black_bar_handling"], "smart")
+        self.assertEqual(request["applied_policy"]["video"]["crop"], "")
+
+    def test_operator_requested_experiment_detects_manual_crop_request(self) -> None:
+        request = _operator_requested_experiment("Use manual crop 1920:800:0:140 for this folder.")
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "scale_target")
+        self.assertTrue(request["operator_confirmed"])
+        self.assertEqual(request["crop"], "1920:800:0:140")
+        self.assertEqual(request["applied_policy"]["video"]["crop"], "1920:800:0:140")
+
+    def test_operator_requested_experiment_combines_scale_with_metric_request(self) -> None:
+        request = _operator_requested_experiment("Downsample to 1080p and target 88 VMAF for the next sample.")
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "combined_experiment")
+        self.assertEqual(request["metric"], "vmaf")
+        self.assertEqual(request["target"], 88.0)
+        self.assertEqual(request["scale_height"], 1080)
+        self.assertEqual(request["applied_policy"]["video"]["target_vmaf"], 88.0)
+        self.assertEqual(request["applied_policy"]["video"]["max_height"], 1080)
+
     def test_size_budget_feasibility_treats_old_codec_style_low_bitrates_as_aggressive_first(self) -> None:
         feasibility, requires_confirmation = size_budget_feasibility(
             source_percent=4.36,
@@ -4107,6 +4276,160 @@ class TuningRuntimeTests(unittest.TestCase):
             )
         )
 
+    def test_proposal_alignment_issue_allows_explicit_combined_metric_target(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "combined_experiment",
+                "metric": "vmaf",
+                "target": 95.0,
+                "budget_label": "300 MB per episode",
+                "size_budget_request": {"budget_bytes": 300 * 1024 * 1024},
+                "applied_policy": {
+                    "video": {
+                        "target_vmaf": 95.0,
+                        "min_target_vmaf": 93.0,
+                        "max_encoded_percent": 8,
+                    }
+                },
+            },
+            request_disposition="honored",
+            current_policy={"video": {"target_vmaf": 88.0, "min_target_vmaf": 86.0}},
+            preview_policy={
+                "video": {
+                    "target_vmaf": 95.0,
+                    "min_target_vmaf": 93.0,
+                    "max_encoded_percent": 8,
+                }
+            },
+        )
+
+        self.assertIsNone(issue)
+
+    def test_proposal_alignment_issue_validates_combined_metric_target(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "combined_experiment",
+                "metric": "vmaf",
+                "target": 95.0,
+                "budget_label": "300 MB per episode",
+                "size_budget_request": {"budget_bytes": 300 * 1024 * 1024},
+                "applied_policy": {
+                    "video": {
+                        "target_vmaf": 95.0,
+                        "min_target_vmaf": 93.0,
+                        "max_encoded_percent": 8,
+                    }
+                },
+            },
+            request_disposition="honored",
+            current_policy={"video": {"target_vmaf": 88.0, "min_target_vmaf": 86.0}},
+            preview_policy={
+                "video": {
+                    "target_vmaf": 90.0,
+                    "min_target_vmaf": 88.0,
+                    "max_encoded_percent": 8,
+                }
+            },
+        )
+
+        self.assertEqual(issue, "The draft uses 90.00 VMAF instead of the requested 95.00 target.")
+
+    def test_proposal_alignment_issue_validates_combined_size_budget_cap(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "combined_experiment",
+                "metric": "vmaf",
+                "target": 95.0,
+                "budget_label": "300 MB per episode",
+                "size_budget_request": {"budget_bytes": 300 * 1024 * 1024},
+                "applied_policy": {
+                    "video": {
+                        "target_vmaf": 95.0,
+                        "min_target_vmaf": 93.0,
+                        "max_encoded_percent": 8,
+                    }
+                },
+            },
+            request_disposition="honored",
+            current_policy={"video": {"target_vmaf": 88.0, "min_target_vmaf": 86.0}},
+            preview_policy={
+                "video": {
+                    "target_vmaf": 95.0,
+                    "min_target_vmaf": 93.0,
+                    "max_encoded_percent": 12,
+                }
+            },
+        )
+
+        self.assertEqual(issue, "The draft uses a 12% size ceiling instead of the requested 8% ceiling.")
+
+    def test_proposal_alignment_issue_validates_scale_target(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "scale_target",
+                "applied_policy": {"video": {"max_height": 1080}},
+            },
+            request_disposition="honored",
+            current_policy={"video": {"max_height": 2160}},
+            preview_policy={"video": {"max_height": 720}},
+        )
+
+        self.assertEqual(issue, "The draft uses 720p instead of the requested 1080p height cap.")
+
+    def test_proposal_alignment_issue_validates_smart_black_bar_target(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "scale_target",
+                "applied_policy": {"video": {"black_bar_handling": "smart", "crop": ""}},
+            },
+            request_disposition="honored",
+            current_policy={"video": {"black_bar_handling": "off", "crop": "1920:800:0:140"}},
+            preview_policy={"video": {"black_bar_handling": "smart", "crop": "1920:800:0:140"}},
+        )
+
+        self.assertEqual(issue, "The draft keeps a manual crop even though smart black-bar detection was requested.")
+
+    def test_proposal_alignment_issue_treats_auto_and_smart_black_bar_as_equivalent(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "scale_target",
+                "applied_policy": {"video": {"black_bar_handling": "smart", "crop": ""}},
+            },
+            request_disposition="honored",
+            current_policy={"video": {"black_bar_handling": "off"}},
+            preview_policy={"video": {"black_bar_handling": "auto", "crop": ""}},
+        )
+
+        self.assertIsNone(issue)
+
+    def test_operator_request_signature_ignores_black_bar_mode_when_crop_is_explicit(self) -> None:
+        manual_crop_signature = operator_request_signature(
+            {
+                "request_type": "scale_target",
+                "black_bar_handling": "smart",
+                "crop": "1920:800:0:140",
+            }
+        )
+        crop_only_signature = operator_request_signature(
+            {
+                "request_type": "scale_target",
+                "black_bar_handling": "off",
+                "crop": "1920:800:0:140",
+            }
+        )
+
+        self.assertEqual(manual_crop_signature, crop_only_signature)
+
+    def test_operator_request_signature_treats_auto_and_smart_black_bar_as_equivalent(self) -> None:
+        smart_signature = operator_request_signature(
+            {"request_type": "scale_target", "black_bar_handling": "smart"}
+        )
+        auto_signature = operator_request_signature(
+            {"request_type": "scale_target", "black_bar_handling": "auto"}
+        )
+
+        self.assertEqual(smart_signature, auto_signature)
+
     def test_run_calibration_job_marks_cancelled_run_stopped(self) -> None:
         saved_statuses: list[str] = []
 
@@ -4131,6 +4454,7 @@ class TuningRuntimeTests(unittest.TestCase):
             effective_video_preset=lambda *_args, **_kwargs: 4,
             search_quality_for_source=lambda *_args, **_kwargs: (_ for _ in ()).throw(ProcessCancelledError()),
             run_sample_encode=lambda *_args, **_kwargs: None,
+            detect_video_crop=lambda *_args, **_kwargs: None,
             recommend_review_timestamps=lambda *_args, **_kwargs: [],
             encode_preview_clips=lambda *_args, **_kwargs: [],
             render_source_review_clips=lambda *_args, **_kwargs: [],
@@ -4203,6 +4527,7 @@ class TuningRuntimeTests(unittest.TestCase):
             effective_video_preset=lambda *_args, **_kwargs: 4,
             search_quality_for_source=lambda *_args, **_kwargs: (_ for _ in ()).throw(ProcessCancelledError()),
             run_sample_encode=lambda *_args, **_kwargs: None,
+            detect_video_crop=lambda *_args, **_kwargs: None,
             recommend_review_timestamps=lambda *_args, **_kwargs: [],
             encode_preview_clips=lambda *_args, **_kwargs: [],
             render_source_review_clips=lambda *_args, **_kwargs: [],
@@ -4352,7 +4677,7 @@ class TuningRuntimeTests(unittest.TestCase):
     def test_seed_prompt_adds_class_guardrails(self) -> None:
         prompt = _build_seed_prompt({"folder": "tv/House/Season 5"})
 
-        self.assertEqual(SEED_PROMPT_VERSION, "seed-v7")
+        self.assertEqual(SEED_PROMPT_VERSION, "seed-v8")
         self.assertIn("cold-start guess", prompt)
         self.assertIn("best first-pass attempt", prompt)
         self.assertIn("instruction to satisfy", prompt)
@@ -4366,6 +4691,8 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("clean 1080p catalog TV", prompt)
         self.assertIn("legacy H.264 or HEVC bitrate intuition", prompt)
         self.assertIn("high-80s VMAF", prompt)
+        self.assertIn("video.black_bar_handling", prompt)
+        self.assertIn("Do not infer 1080p or 720p scaling from a size budget alone", prompt)
         self.assertIn("request_response", prompt)
         self.assertIn("honored_with_risk", prompt)
 
@@ -4398,6 +4725,34 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(schema["properties"]["video"]["properties"]["target_vmaf"]["type"], ["number", "null"])
         self.assertEqual(schema["properties"]["video"]["properties"]["thorough"]["type"], ["boolean", "null"])
         self.assertEqual(schema["properties"]["audio"]["properties"]["keep_languages"]["type"], ["array", "null"])
+
+    def test_apply_seed_policy_normalizes_transform_policy_values(self) -> None:
+        _updated_policy, applied = apply_seed_policy(
+            {
+                "video": {
+                    "max_height": 0,
+                    "downsample_algorithm": "lanczos",
+                    "black_bar_handling": "off",
+                    "black_bar_detect_samples": 3,
+                    "crop": "",
+                }
+            },
+            {
+                "video": {
+                    "max_height": 1080,
+                    "downsample_algorithm": "bicubic",
+                    "black_bar_handling": "SMART",
+                    "black_bar_detect_samples": 8,
+                    "crop": "1920:800:0:140",
+                }
+            },
+        )
+
+        self.assertEqual(applied["video"]["max_height"], 1080)
+        self.assertEqual(applied["video"]["downsample_algorithm"], "bicubic")
+        self.assertEqual(applied["video"]["black_bar_handling"], "smart")
+        self.assertEqual(applied["video"]["black_bar_detect_samples"], 5)
+        self.assertEqual(applied["video"]["crop"], "1920:800:0:140")
 
     def test_tune_self_check_schema_requires_surround_audio_guardrail(self) -> None:
         schema = _tune_self_check_schema()
@@ -4438,6 +4793,8 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("instruction to satisfy", prompt)
         self.assertIn("runtime_toolbelt.audio_tradeoff_hint", prompt)
         self.assertIn("closest faithful experiment", prompt)
+        self.assertIn("video.black_bar_handling", prompt)
+        self.assertIn("operator_note_parse.scale_height", prompt)
 
     def test_tune_prompt_summarizes_multimodal_review_pack_without_paths(self) -> None:
         prompt = _build_tune_prompt(
@@ -4484,6 +4841,15 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("multimodal_review_pack", prompt)
         self.assertIn("image_count", prompt)
         self.assertNotIn("/tmp/private-artifact.png", prompt)
+
+    def test_operator_note_parse_prompt_extracts_scale_height_only_from_request(self) -> None:
+        prompt = _build_operator_note_parse_prompt({"operator_note": "Downsample the 4K files to 1080p."})
+
+        self.assertIn("scale_height", prompt)
+        self.assertIn("black_bar_handling", prompt)
+        self.assertIn("crop", prompt)
+        self.assertIn("scale_target", prompt)
+        self.assertIn("do not infer a scale target", prompt)
 
     def test_build_tuning_runtime_toolbelt_summarizes_review_media(self) -> None:
         toolbelt = _build_tuning_runtime_toolbelt(

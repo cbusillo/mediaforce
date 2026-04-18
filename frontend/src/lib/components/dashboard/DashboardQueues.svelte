@@ -127,6 +127,9 @@
 		}
 		return '';
 	});
+	const calibrationIdleCompact = $derived.by(
+		() => !calibrationQueueHasWork && pendingReviewCount === 0
+	);
 
 	function formatAttentionTimestamp(job: EncodeQueueJob): string | null {
 		const timestamp = attentionTimestampMs(job);
@@ -167,14 +170,16 @@
 <div class="queue-grid">
 	{#each queueCards as card, index (card.eyebrow)}
 		<Panel
-			class={`ops-queue-panel ${index === 1 ? 'primary-ops-panel' : 'secondary-ops-panel'}`.trim()}
+			class={`${index === 1 ? 'ops-queue-panel primary-ops-panel' : 'ops-queue-panel secondary-ops-panel'} ${index === 0 && calibrationIdleCompact ? 'idle-compact-panel' : ''}`.trim()}
 			variant={index === 1 ? 'accent' : 'default'}
 		>
 			<div class="panel-stack">
 				<SectionHead
 					eyebrow={card.eyebrow}
 					heading={card.heading}
-					lede={card.lede}
+					lede={index === 0 && calibrationIdleCompact
+						? 'Calibration lanes are idle. Launch the next sample from folders when you are ready to tune again.'
+						: card.lede}
 					size="compact"
 				/>
 				{#if index === 0}
@@ -239,7 +244,7 @@
 							{/if}
 							{#if encodeQueueHasWork || dashboard.encode_queue.state.stop_requested}
 								<Button
-									variant="ghost"
+									variant="danger"
 									loading={queueAction === 'stop'}
 									disabled={dashboard.encode_queue.state.stop_requested}
 									onclick={() => runQueueAction('stop')}>Stop + Clean</Button
@@ -334,7 +339,7 @@
 
 	.queue-grid {
 		display: grid;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
+		grid-template-columns: minmax(18rem, 0.8fr) minmax(0, 1.2fr);
 		gap: var(--space-4);
 	}
 
@@ -348,6 +353,10 @@
 		background:
 			radial-gradient(circle at top left, rgba(15, 118, 110, 0.18), transparent 34%),
 			linear-gradient(145deg, rgba(255, 253, 247, 0.9), rgba(239, 235, 225, 0.82));
+	}
+
+	:global(.idle-compact-panel) {
+		padding-block: 1rem;
 	}
 
 	.queue-pill-row {

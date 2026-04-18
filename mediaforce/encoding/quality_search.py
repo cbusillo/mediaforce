@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from mediaforce.encoding.quality import QualitySearchError, QualitySearchResult
+from mediaforce.encoding.video_filters import build_video_filter
 
 
 def search_quality(
@@ -11,6 +12,7 @@ def search_quality(
         source_codec: str | None = None,
         width: int | None = None,
         height: int | None = None,
+        detected_crop: str | None = None,
         process_controller: Any = None,
         host: dict[str, Any] | None = None,
         quality_temp_dir: Path | None = None,
@@ -31,6 +33,7 @@ def search_quality(
     )
     svt_params = build_svt_params(video_policy)
     preset = effective_video_preset(video_policy, width=width, height=height)
+    video_filter = build_video_filter(video_policy, width=width, height=height, detected_crop=detected_crop)
     attempted_target = metric_target
     last_error: Exception | None = None
 
@@ -49,6 +52,7 @@ def search_quality(
                 max_crf=int(video_policy["max_crf"]),
                 max_encoded_percent=int(video_policy["max_encoded_percent"]),
                 svt_params=svt_params,
+                video_filter=video_filter,
                 thorough=bool(video_policy.get("thorough", False)),
                 process_controller=process_controller,
                 host=quality_host,

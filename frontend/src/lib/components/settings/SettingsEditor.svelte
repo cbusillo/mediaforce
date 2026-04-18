@@ -11,13 +11,12 @@
 	import Button from '$lib/components/Button.svelte';
 	import HostCard from '$lib/components/HostCard.svelte';
 	import { formatGiB, hostSettingsAnchor } from '$lib/format';
+	import { isPendingHostRuntime } from '$lib/hosts/runtime';
 	import {
 		SCHEDULE_DAY_OPTIONS,
 		scheduleWindowSummaryCopy,
 		type ScheduleDayKey
 	} from '$lib/settings/editor';
-	import Panel from '$lib/components/Panel.svelte';
-	import SectionHead from '$lib/components/SectionHead.svelte';
 
 	let {
 		settings,
@@ -138,16 +137,29 @@
 		{ anchor: 'schedule-profiles', label: 'Schedules' },
 		{ anchor: 'remote-hosts', label: 'Hosts' }
 	] as const;
+	const runtimeHosts = $derived.by(() => Array.from(runtimeHostsByKey.values()));
 	const sectionSummary = {
 		libraries: () => `${libraries.length} ${libraries.length === 1 ? 'library' : 'libraries'}`,
 		schedules: () =>
 			`${scheduleProfiles.length} ${scheduleProfiles.length === 1 ? 'schedule' : 'schedules'}`,
 		hosts: () => `${remoteHosts.length} ${remoteHosts.length === 1 ? 'worker' : 'workers'}`
 	};
-	const pathHighlights = [
-		{ label: 'Live runtime file', value: 'runtime-settings.json' },
-		{ label: 'Checked-in defaults', value: 'config/defaults.toml' }
-	];
+
+	function fileTail(path: string, fallback: string): string {
+		const tail = path.split('/').filter(Boolean).at(-1)?.trim();
+		return tail || fallback;
+	}
+
+	const pathHighlights = $derived.by(() => [
+		{
+			label: 'Live runtime file',
+			value: fileTail(settings.runtime_settings_path, 'runtime-settings.json')
+		},
+		{
+			label: 'Checked-in defaults',
+			value: fileTail(settings.repo_config_path, 'defaults.toml')
+		}
+	]);
 	const draftArchiveRoot = $derived.by(() => {
 		const cleanedRoot = transcodeRoot.trim().replace(/\/$/, '');
 		return cleanedRoot ? `${cleanedRoot}/_replaced` : settings.archive_root;
@@ -186,6 +198,46 @@
 					? 'Draft path'
 					: formatGiB(Number(archiveCleanup.total_size_bytes ?? 0), 2)
 	);
+	const readyRuntimeHostCount = $derived.by(
+		() => runtimeHosts.filter((host) => host.available).length
+	);
+	const pendingRuntimeHostCount = $derived.by(
+		() => runtimeHosts.filter((host) => isPendingHostRuntime(host)).length
+	);
+	const runtimeHostIssueCount = $derived.by(
+		() => runtimeHosts.filter((host) => !host.available && !isPendingHostRuntime(host)).length
+	);
+	const queueCapableHostCount = $derived.by(
+		() => remoteHosts.filter((host) => host.capabilities.includes('encode_queue')).length
+	);
+	const archiveStateTone = $derived.by(() => {
+		if (archiveCleanupError && !archiveCleanupUsesDraftPath) {
+			return 'warning-state';
+		}
+		if (archiveCleanup.file_count > 0) {
+			return 'warning-state';
+		}
+		if (archiveCleanupPending) {
+			return 'selection-state';
+		}
+		return 'normal-state';
+	});
+	const hostStateTone = $derived.by(() => {
+		if (hostsLoadError) {
+			return 'warning-state';
+		}
+		if (runtimeHostIssueCount > 0) {
+			return 'warning-state';
+		}
+		if (pendingRuntimeHostCount > 0 || isRefreshingHosts) {
+			return 'selection-state';
+		}
+		return 'normal-state';
+	});
+	const saveStateTone = $derived.by(() => (isDirty ? 'warning-state' : 'selection-state'));
+	const saveStateLabel = $derived.by(() =>
+		isDirty ? 'Unsaved changes are staged in the editor now.' : 'Live runtime file is in sync.'
+	);
 	let expandedHostAnchor = $state<string | null>(null);
 
 	function syncExpandedHostAnchor() {
@@ -210,86 +262,76 @@
 	});
 </script>
 
-<div class="page-stack">
-	<Panel padding="1.05rem 1.2rem">
-		<div class="settings-hero">
-			<div class="settings-hero-copy">
-				<SectionHead
-					eyebrow="Runtime Settings"
-					heading="Configure libraries, hosts, and queue windows"
-					lede="The runtime file below is the live machine-specific contract."
-					size="compact"
-				/>
-				<div class="settings-hero-pills">
-					<span class="section-summary-badge">{sectionSummary.libraries()}</span>
-					<span class="section-summary-badge">{sectionSummary.schedules()}</span>
-					<span class="section-summary-badge">{sectionSummary.hosts()}</span>
-					{#if archiveCleanupError && !archiveCleanupUsesDraftPath}
-						<span class="section-summary-badge warn">Backup status unavailable</span>
-					{:else if archiveCleanup.file_count > 0}
-						<span class="section-summary-badge warn">
-							{archiveCleanup.file_count} archived backups
-						</span>
-					{:else if archiveCleanupPending}
-						<span class="section-summary-badge">Checking backups</span>
-					{/if}
-				</div>
-			</div>
-			<div class="path-card compact-paths">
-				<p class="eyebrow-copy">Paths</p>
-				<div class="path-highlight-row">
-					{#each pathHighlights as item (item.label)}
-						<div class="path-highlight-chip">
-							<span class="eyebrow-copy">{item.label}</span>
-							<strong>{item.value}</strong>
-						</div>
-					{/each}
-				</div>
-				<details class="path-disclosure">
-					<summary>Show full file paths</summary>
-					<p class="mono-copy">Runtime file: {settings.runtime_settings_path}</p>
-					<p class="mono-copy">Repo defaults: {settings.repo_config_path}</p>
-				</details>
-			</div>
+<div class="workstation-screen settings-screen">
+	<section class="system-strip" aria-label="Runtime settings state">
+		<div class="system-cell accent-cell">
+			<p class="system-label">Runtime contract</p>
+			<p class="system-value">Configure the live machine state</p>
+			<p class="system-detail">
+				{sectionSummary.libraries()} · {sectionSummary.schedules()} · {sectionSummary.hosts()}.
+				Settings writes go to the machine-local runtime file, not repo defaults.
+			</p>
 		</div>
-	</Panel>
 
-	<nav class="settings-jump-nav" aria-label="Settings sections">
-		{#each settingsSections as section (section.anchor)}
-			<button
-				type="button"
-				class="settings-jump-link"
-				onclick={() => jumpToSettingsAnchor(section.anchor)}
-			>
-				{section.label}
-			</button>
-		{/each}
-		{#if isDirty}
-			<button
-				type="button"
-				class="settings-jump-link"
-				onclick={() => jumpToSettingsAnchor('save-settings')}
-			>
-				Save
-			</button>
-		{/if}
-		{#if isDirty}
-			<span class="settings-jump-status dirty">Unsaved changes</span>
-		{:else}
-			<span class="settings-jump-status">All changes saved</span>
-		{/if}
-	</nav>
+		<div class={`system-cell ${archiveStateTone}`.trim()}>
+			<p class="system-label">Archived originals</p>
+			<p class="system-value">{archiveCleanupCopy}</p>
+			<p class="system-detail">
+				{#if archiveCleanupUsesDraftPath}
+					Using the draft transcode path until you save.
+				{:else}
+					{formatGiB(Number(archiveCleanup.total_size_bytes ?? 0), 1)} waiting under the archive root.
+				{/if}
+			</p>
+		</div>
 
-	<div class="settings-grid">
-		<Panel>
-			<div id="libraries" class="panel-stack">
-				<div class="section-row">
-					<SectionHead
-						eyebrow="Libraries"
-						heading="Mounted media roots"
-						lede="These become the top-level prefixes throughout Mediaforce."
-						size="compact"
-					/>
+		<div class={`system-cell ${hostStateTone}`.trim()}>
+			<p class="system-label">Worker fleet</p>
+			<p class="system-value">
+				{readyRuntimeHostCount} ready / {remoteHosts.length} configured
+			</p>
+			<p class="system-detail">
+				{#if hostsLoadError}
+					Live host status is unavailable: {hostsLoadError}
+				{:else if runtimeHostIssueCount > 0}
+					{runtimeHostIssueCount} worker{runtimeHostIssueCount === 1 ? '' : 's'} need attention.
+					{#if pendingRuntimeHostCount > 0}
+						{pendingRuntimeHostCount} worker{pendingRuntimeHostCount === 1 ? '' : 's'} still refreshing.
+					{/if}
+					{queueCapableHostCount} queue-capable host{queueCapableHostCount === 1 ? '' : 's'} configured.
+				{:else if pendingRuntimeHostCount > 0}
+					{pendingRuntimeHostCount} worker{pendingRuntimeHostCount === 1 ? '' : 's'} still refreshing.
+					{queueCapableHostCount} queue-capable host{queueCapableHostCount === 1 ? '' : 's'} configured.
+				{:else if isRefreshingHosts}
+					Refreshing live host state now.
+				{:else}
+					All visible workers report clean runtime status. {queueCapableHostCount} queue-capable host{queueCapableHostCount ===
+					1
+						? ''
+						: 's'} configured.
+				{/if}
+			</p>
+		</div>
+
+		<div class={`system-cell ${saveStateTone}`.trim()}>
+			<p class="system-label">Save state</p>
+			<p class="system-value">{isDirty ? 'Changes waiting to write' : 'Runtime file synced'}</p>
+			<p class="system-detail">{saveStateLabel}</p>
+		</div>
+	</section>
+
+	<div class="settings-console-grid">
+		<div class="settings-main-column">
+			<section id="libraries" class="station-card settings-section" aria-label="Library settings">
+				<div class="section-head compact">
+					<div>
+						<p class="section-label">Libraries</p>
+						<h2 class="section-title small">Mounted media roots</h2>
+						<p class="section-copy">
+							These keys become the top-level prefixes used across queue, review, and folder
+							workstation flows.
+						</p>
+					</div>
 					<div class="section-actions-row">
 						<span class="section-summary-badge">{sectionSummary.libraries()}</span>
 						<Button variant="secondary" onclick={addLibrary}>Add Library</Button>
@@ -352,32 +394,28 @@
 						</details>
 					{/each}
 				</div>
-			</div>
-		</Panel>
+			</section>
 
-		<Panel>
-			<div id="transcode" class="panel-stack">
-				<details class="transcode-shell">
-					<summary class="transcode-summary">
-						<span class="summary-copy-block">
-							<span class="eyebrow-copy">Transcode</span>
-							<span class="transcode-summary-title">Scratch and replacement root</span>
-							<span class="muted-copy"
-								>Archive path is derived automatically from the transcode root.</span
-							>
-						</span>
-						<span class="summary-action-block transcode-action-block">
-							<span class="summary-action-copy">Edit</span>
-							<span class="transcode-summary-chip"
-								>{transcodeRoot || '/Volumes/media/transcode'}</span
-							>
-						</span>
-					</summary>
+			<section id="transcode" class="station-card settings-section" aria-label="Transcode settings">
+				<div class="section-head compact">
+					<div>
+						<p class="section-label">Transcode</p>
+						<h2 class="section-title small">Scratch and replacement root</h2>
+						<p class="section-copy">
+							Archive cleanup is derived from this root so scratch space, rollback media, and the
+							live transcode target stay in one operator flow.
+						</p>
+					</div>
+					<div class="section-actions-row">
+						<span class="section-summary-badge">{transcodeRoot || '/Volumes/media/transcode'}</span>
+					</div>
+				</div>
+				<div class="transcode-shell">
 					<label class="field-block">
 						<span class="eyebrow-copy">Transcode root</span>
 						<input bind:value={transcodeRoot} placeholder="/Volumes/media/transcode" />
 					</label>
-					<div class="path-card">
+					<div class="embedded-path-card">
 						<p class="eyebrow-copy">Derived archive path</p>
 						<p class="mono-copy">{settings.archive_root}</p>
 					</div>
@@ -421,428 +459,540 @@
 							</Button>
 						</div>
 					</div>
-				</details>
-			</div>
-		</Panel>
-	</div>
-
-	<Panel>
-		<div id="schedule-profiles" class="panel-stack">
-			<div class="section-row">
-				<SectionHead
-					eyebrow="Schedules"
-					heading="Reusable worker windows"
-					lede="Define hour windows plus any full-day exceptions like Sunday, then assign one of these schedules to each host."
-					size="compact"
-				/>
-				<div class="section-actions-row">
-					<span class="section-summary-badge">{sectionSummary.schedules()}</span>
-					<Button variant="secondary" onclick={addSchedule}>Add Schedule</Button>
 				</div>
-			</div>
-			<p class="muted-copy schedule-section-note">
-				The machine key is how hosts remember a schedule. Rename it carefully after workers are
-				assigned.
-			</p>
-			<div class="field-grid-header schedule-grid-header" aria-hidden="true">
-				<span>Machine key</span>
-				<span>Label</span>
-				<span>Start</span>
-				<span>End</span>
-				<span>Actions</span>
-			</div>
-			<div class="row-stack">
-				{#each scheduleProfiles as profile, index (`profile-${profile.index || index}`)}
-					<details class="editor-card schedule-shell">
-						<summary class="schedule-summary">
-							<span class="summary-copy-block">
-								<span class="eyebrow-copy">Schedule</span>
-								<span class="schedule-summary-title"
-									>{profile.label || profile.key || 'Untitled schedule'}</span
-								>
-							</span>
-							<span class="summary-action-block">
-								<span class="summary-action-copy">Edit</span>
-								<span class="schedule-summary-chip">{scheduleSummaryCopy(profile)}</span>
-							</span>
-						</summary>
-						<div class="schedule-editor">
-							<label class="field-block">
-								<span class="eyebrow-copy field-label-hidden">Machine key</span>
-								<input bind:value={profile.key} placeholder="quiet_hours" />
-							</label>
-							<label class="field-block">
-								<span class="eyebrow-copy field-label-hidden">Label</span>
-								<input bind:value={profile.label} placeholder="Quiet Hours" />
-							</label>
-							<label class="field-block">
-								<span class="eyebrow-copy field-label-hidden">Start</span>
-								<input
-									type="number"
-									min="0"
-									max="23"
-									step="1"
-									bind:value={profile.start_hour}
-									placeholder="0-23"
-								/>
-							</label>
-							<label class="field-block">
-								<span class="eyebrow-copy field-label-hidden">End</span>
-								<input
-									type="number"
-									min="0"
-									max="23"
-									step="1"
-									bind:value={profile.end_hour}
-									placeholder="0-23"
-								/>
-							</label>
-							<div class="editor-actions compact-actions">
-								<button
-									type="button"
-									class="icon-button danger"
-									aria-label="Remove schedule"
-									title="Remove schedule"
-									onclick={() => removeSchedule(index)}
-								>
-									<svg viewBox="0 0 24 24" aria-hidden="true">
-										<path
-											d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 7h2v7h-2v-7Zm4 0h2v7h-2v-7ZM7 10h2v7H7v-7Zm-1 10h12a2 2 0 0 0 2-2V8H4v10a2 2 0 0 0 2 2Z"
-										/>
-									</svg>
-								</button>
-							</div>
-							<fieldset class="field-block schedule-days-field">
-								<legend class="eyebrow-copy">Window days</legend>
-								<div class="weekday-pill-row">
-									{#each SCHEDULE_DAY_OPTIONS as option (option.key)}
-										<button
-											type="button"
-											class:active={profile.days_of_week.includes(option.key)}
-											class="weekday-pill"
-											aria-pressed={profile.days_of_week.includes(option.key)}
-											title={option.label}
-											onclick={() => toggleScheduleDay(index, option.key, 'days_of_week')}
-										>
-											{option.shortLabel}
-										</button>
-									{/each}
-								</div>
-							</fieldset>
-							<fieldset class="field-block schedule-days-field">
-								<legend class="eyebrow-copy">All day</legend>
-								<div class="weekday-pill-row">
-									{#each SCHEDULE_DAY_OPTIONS as option (option.key)}
-										<button
-											type="button"
-											class:active={profile.all_day_days_of_week.includes(option.key)}
-											class="weekday-pill"
-											aria-pressed={profile.all_day_days_of_week.includes(option.key)}
-											title={`${option.label} all day`}
-											onclick={() => toggleScheduleDay(index, option.key, 'all_day_days_of_week')}
-										>
-											{option.shortLabel}
-										</button>
-									{/each}
-								</div>
-							</fieldset>
-						</div>
-					</details>
-				{/each}
-			</div>
-		</div>
-	</Panel>
+			</section>
 
-	<Panel>
-		<div class="legacy-anchor" id="remote-workers" aria-hidden="true"></div>
-		<div id="remote-hosts" class="panel-stack">
-			<div class="section-row">
-				<SectionHead
-					eyebrow="Hosts"
-					heading="Remote workers"
-					lede="Click a worker row to edit scheduling, queue policy, and live-host setup details in one place."
-					size="compact"
-				/>
-				<div class="section-actions-row">
-					<span class="section-summary-badge">{sectionSummary.hosts()}</span>
-					<button
-						type="button"
-						class="refresh-status-button"
-						disabled={isRefreshingHosts}
-						onclick={refreshHostStatuses}
-					>
-						{isRefreshingHosts ? 'Refreshing...' : 'Refresh Status'}
-					</button>
-					<Button variant="secondary" onclick={addHost}>Add Host</Button>
+			<section
+				id="schedule-profiles"
+				class="station-card settings-section"
+				aria-label="Schedule profiles"
+			>
+				<div class="section-head compact">
+					<div>
+						<p class="section-label">Schedules</p>
+						<h2 class="section-title small">Reusable worker windows</h2>
+						<p class="section-copy">
+							Define queue windows plus all-day exceptions, then assign those profiles to each
+							worker.
+						</p>
+					</div>
+					<div class="section-actions-row">
+						<span class="section-summary-badge">{sectionSummary.schedules()}</span>
+						<Button variant="secondary" onclick={addSchedule}>Add Schedule</Button>
+					</div>
 				</div>
-			</div>
-			<div class="row-stack">
-				{#if isRefreshingHosts && runtimeHostsByKey.size === 0}
-					<p class="muted-copy">Loading live host status…</p>
-				{:else if hostsLoadError}
-					<p class="muted-copy">Live host status unavailable: {hostsLoadError}</p>
-				{/if}
-				{#each remoteHosts as host, index (`host-${host.index || index}`)}
-					{@const runtimeHost = runtimeHostsByKey.get(host.host) ?? null}
-					{@const runtimeHostKey = hostActionKey(host, runtimeHost, index)}
-					{@const runtimeActionState = getHostActionState(runtimeHostKey)}
-					{@const primaryActionKind = runtimeHost ? primaryHostAction(runtimeHost, host) : null}
-					{@const showPrimaryHostAction = runtimeHost
-						? hasPrimaryHostAction(runtimeHost, host)
-						: false}
-					{@const hostAnchor = hostSettingsAnchor(host.host || `host-${index}`)}
-					{@const hostSummaryLabel = host.label || 'Untitled host'}
-					{@const hostSummaryAddress = host.host || 'Set an SSH target to bring this host online.'}
-					{@const hostSummaryStatus = runtimeHost?.available
-						? `${runtimeHost.label} ready`
-						: runtimeHost?.message || 'No live status yet'}
-					<div id={hostAnchor} class="editor-card host-card-editor">
-						<details class="host-editor-shell" open={expandedHostAnchor === hostAnchor}>
-							<summary class="host-head">
-								<span class="host-summary-main">
-									<span class="eyebrow-copy">Remote worker</span>
-									<span class="host-summary-title">{hostSummaryLabel}</span>
-									<span class="muted-copy">{hostSummaryAddress}</span>
+				<p class="muted-copy schedule-section-note">
+					The machine key is how hosts remember a schedule. Rename it carefully after workers are
+					assigned.
+				</p>
+				<div class="field-grid-header schedule-grid-header" aria-hidden="true">
+					<span>Machine key</span>
+					<span>Label</span>
+					<span>Start</span>
+					<span>End</span>
+					<span>Actions</span>
+				</div>
+				<div class="row-stack">
+					{#each scheduleProfiles as profile, index (`profile-${profile.index || index}`)}
+						<details class="editor-card schedule-shell">
+							<summary class="schedule-summary">
+								<span class="summary-copy-block">
+									<span class="eyebrow-copy">Schedule</span>
+									<span class="schedule-summary-title"
+										>{profile.label || profile.key || 'Untitled schedule'}</span
+									>
 								</span>
-								<span class="host-summary-side">
+								<span class="summary-action-block">
 									<span class="summary-action-copy">Edit</span>
-									<span class="host-summary-chip">{hostSummaryStatus}</span>
+									<span class="schedule-summary-chip">{scheduleSummaryCopy(profile)}</span>
 								</span>
 							</summary>
-							<div class="host-editor-layout">
-								<div class="two-col">
-									<p class="form-subhead">Connection</p>
-									<label class="field-block"
-										><span class="eyebrow-copy">Label</span><input
-											bind:value={host.label}
-											placeholder="M4 Studio"
-										/></label
+							<div class="schedule-editor">
+								<label class="field-block">
+									<span class="eyebrow-copy field-label-hidden">Machine key</span>
+									<input bind:value={profile.key} placeholder="quiet_hours" />
+								</label>
+								<label class="field-block">
+									<span class="eyebrow-copy field-label-hidden">Label</span>
+									<input bind:value={profile.label} placeholder="Quiet Hours" />
+								</label>
+								<label class="field-block">
+									<span class="eyebrow-copy field-label-hidden">Start</span>
+									<input
+										type="number"
+										min="0"
+										max="23"
+										step="1"
+										bind:value={profile.start_hour}
+										placeholder="0-23"
+									/>
+								</label>
+								<label class="field-block">
+									<span class="eyebrow-copy field-label-hidden">End</span>
+									<input
+										type="number"
+										min="0"
+										max="23"
+										step="1"
+										bind:value={profile.end_hour}
+										placeholder="0-23"
+									/>
+								</label>
+								<div class="editor-actions compact-actions">
+									<button
+										type="button"
+										class="icon-button danger"
+										aria-label="Remove schedule"
+										title="Remove schedule"
+										onclick={() => removeSchedule(index)}
 									>
-									<label class="field-block"
-										><span class="eyebrow-copy">SSH host</span><input
-											bind:value={host.host}
-											placeholder="cbusillo@localhost"
-										/></label
-									>
-									<p class="form-subhead">Queue behavior</p>
-									<label class="field-block host-schedule-field"
-										><span class="eyebrow-copy">Schedule profile</span><span class="select-shell"
-											><select bind:value={host.schedule_profile}
-												>{#each settings.schedule_profile_options as option (option.key)}<option
-														value={option.key}>{option.label}</option
-													>{/each}</select
-											></span
-										></label
-									>
-									<label class="field-block"
-										><span class="eyebrow-copy">Priority</span><input
-											type="number"
-											min="0"
-											step="1"
-											bind:value={host.priority}
-										/></label
-									>
-									<label class="field-block"
-										><span class="eyebrow-copy">Parallel encodes</span><input
-											type="number"
-											min="1"
-											step="1"
-											bind:value={host.max_parallel_encodes}
-										/></label
-									>
-									<label class="field-block"
-										><span class="eyebrow-copy">Host staging root</span><input
-											bind:value={host.staging_root}
-											placeholder="Defaults to global transcode root"
-										/></label
-									>
-									<p class="form-subhead">Library access</p>
-									<label class="field-block host-json-field"
-										><span class="eyebrow-copy">Allowed libraries</span>
-										<span class="library-allowlist" aria-label="Allowed libraries for this host">
+										<svg viewBox="0 0 24 24" aria-hidden="true">
+											<path
+												d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 7h2v7h-2v-7Zm4 0h2v7h-2v-7ZM7 10h2v7H7v-7Zm-1 10h12a2 2 0 0 0 2-2V8H4v10a2 2 0 0 0 2 2Z"
+											/>
+										</svg>
+									</button>
+								</div>
+								<fieldset class="field-block schedule-days-field">
+									<legend class="eyebrow-copy">Window days</legend>
+									<div class="weekday-pill-row">
+										{#each SCHEDULE_DAY_OPTIONS as option (option.key)}
 											<button
 												type="button"
-												class={`library-allow-pill ${host.allowed_libraries.length === 0 ? 'active' : ''}`.trim()}
-												onclick={() => (host.allowed_libraries = [])}
+												class:active={profile.days_of_week.includes(option.key)}
+												class="weekday-pill"
+												aria-pressed={profile.days_of_week.includes(option.key)}
+												title={option.label}
+												onclick={() => toggleScheduleDay(index, option.key, 'days_of_week')}
 											>
-												All libraries
+												{option.shortLabel}
 											</button>
-											{#each libraries.filter( (library) => library.key.trim() ) as library (`${host.index}-${library.key}`)}
+										{/each}
+									</div>
+								</fieldset>
+								<fieldset class="field-block schedule-days-field">
+									<legend class="eyebrow-copy">All day</legend>
+									<div class="weekday-pill-row">
+										{#each SCHEDULE_DAY_OPTIONS as option (option.key)}
+											<button
+												type="button"
+												class:active={profile.all_day_days_of_week.includes(option.key)}
+												class="weekday-pill"
+												aria-pressed={profile.all_day_days_of_week.includes(option.key)}
+												title={`${option.label} all day`}
+												onclick={() => toggleScheduleDay(index, option.key, 'all_day_days_of_week')}
+											>
+												{option.shortLabel}
+											</button>
+										{/each}
+									</div>
+								</fieldset>
+							</div>
+						</details>
+					{/each}
+				</div>
+			</section>
+
+			<section id="remote-hosts" class="station-card settings-section" aria-label="Remote hosts">
+				<div class="legacy-anchor" id="remote-workers" aria-hidden="true"></div>
+				<div class="section-head compact">
+					<div>
+						<p class="section-label">Hosts</p>
+						<h2 class="section-title small">Remote workers</h2>
+						<p class="section-copy">
+							Edit queue policy, scheduling, and live-host setup from the same worker row so machine
+							state stays explicit.
+						</p>
+					</div>
+					<div class="section-actions-row">
+						<span class="section-summary-badge">{sectionSummary.hosts()}</span>
+						<button
+							type="button"
+							class="refresh-status-button"
+							disabled={isRefreshingHosts}
+							onclick={refreshHostStatuses}
+						>
+							{isRefreshingHosts ? 'Refreshing...' : 'Refresh Status'}
+						</button>
+						<Button variant="secondary" onclick={addHost}>Add Host</Button>
+					</div>
+				</div>
+				<div class="row-stack">
+					{#if isRefreshingHosts && runtimeHostsByKey.size === 0}
+						<p class="muted-copy">Loading live host status…</p>
+					{:else if hostsLoadError}
+						<p class="muted-copy">Live host status unavailable: {hostsLoadError}</p>
+					{/if}
+					{#each remoteHosts as host, index (`host-${host.index || index}`)}
+						{@const runtimeHost = runtimeHostsByKey.get(host.host) ?? null}
+						{@const runtimeHostKey = hostActionKey(host, runtimeHost, index)}
+						{@const runtimeActionState = getHostActionState(runtimeHostKey)}
+						{@const primaryActionKind = runtimeHost ? primaryHostAction(runtimeHost, host) : null}
+						{@const showPrimaryHostAction = runtimeHost
+							? hasPrimaryHostAction(runtimeHost, host)
+							: false}
+						{@const hostAnchor = hostSettingsAnchor(host.host || `host-${index}`)}
+						{@const hostSummaryLabel = host.label || 'Untitled host'}
+						{@const hostSummaryAddress =
+							host.host || 'Set an SSH target to bring this host online.'}
+						{@const hostSummaryStatus = runtimeHost?.available
+							? `${runtimeHost.label} ready`
+							: runtimeHost?.message || 'No live status yet'}
+						<div id={hostAnchor} class="editor-card host-card-editor">
+							<details class="host-editor-shell" open={expandedHostAnchor === hostAnchor}>
+								<summary class="host-head">
+									<span class="host-summary-main">
+										<span class="eyebrow-copy">Remote worker</span>
+										<span class="host-summary-title">{hostSummaryLabel}</span>
+										<span class="muted-copy">{hostSummaryAddress}</span>
+									</span>
+									<span class="host-summary-side">
+										<span class="summary-action-copy">Edit</span>
+										<span class="host-summary-chip">{hostSummaryStatus}</span>
+									</span>
+								</summary>
+								<div class="host-editor-layout">
+									<div class="two-col">
+										<p class="form-subhead">Connection</p>
+										<label class="field-block"
+											><span class="eyebrow-copy">Label</span><input
+												bind:value={host.label}
+												placeholder="M4 Studio"
+											/></label
+										>
+										<label class="field-block"
+											><span class="eyebrow-copy">SSH host</span><input
+												bind:value={host.host}
+												placeholder="cbusillo@localhost"
+											/></label
+										>
+										<p class="form-subhead">Queue behavior</p>
+										<label class="field-block host-schedule-field"
+											><span class="eyebrow-copy">Schedule profile</span><span class="select-shell"
+												><select bind:value={host.schedule_profile}
+													>{#each settings.schedule_profile_options as option (option.key)}<option
+															value={option.key}>{option.label}</option
+														>{/each}</select
+												></span
+											></label
+										>
+										<label class="field-block"
+											><span class="eyebrow-copy">Priority</span><input
+												type="number"
+												min="0"
+												step="1"
+												bind:value={host.priority}
+											/></label
+										>
+										<label class="field-block"
+											><span class="eyebrow-copy">Parallel encodes</span><input
+												type="number"
+												min="1"
+												step="1"
+												bind:value={host.max_parallel_encodes}
+											/></label
+										>
+										<label class="field-block"
+											><span class="eyebrow-copy">Host staging root</span><input
+												bind:value={host.staging_root}
+												placeholder="Defaults to global transcode root"
+											/></label
+										>
+										<p class="form-subhead">Library access</p>
+										<label class="field-block host-json-field"
+											><span class="eyebrow-copy">Allowed libraries</span>
+											<span class="library-allowlist" aria-label="Allowed libraries for this host">
 												<button
 													type="button"
-													class={`library-allow-pill ${host.allowed_libraries.includes(library.key) ? 'active' : ''}`.trim()}
-													onclick={() => toggleAllowedLibrary(host, library.key)}
+													class={`library-allow-pill ${host.allowed_libraries.length === 0 ? 'active' : ''}`.trim()}
+													onclick={() => (host.allowed_libraries = [])}
 												>
-													{library.key}
+													All libraries
 												</button>
-											{/each}
-										</span></label
-									>
-									<details class="host-advanced-shell host-json-field">
-										<summary>Advanced worker settings</summary>
-										<div class="two-col advanced-host-grid">
-											<label class="field-block"
-												><span class="eyebrow-copy">Repo path</span><input
-													bind:value={host.repo_path}
-													placeholder="/Users/.../mediaforce"
-												/></label
-											>
-											<label class="field-block"
-												><span class="eyebrow-copy">Wake MAC</span><input
-													bind:value={host.wake_mac}
-													placeholder="Optional"
-												/></label
-											>
-											<label class="field-block"
-												><span class="eyebrow-copy">Start command</span><input
-													bind:value={host.start_command}
-													placeholder="ssh prox-main.shiny pct start 103"
-												/></label
-											>
-											<label class="field-block"
-												><span class="eyebrow-copy">Stop command</span><input
-													bind:value={host.stop_command}
-													placeholder="ssh prox-main.shiny pct shutdown 103"
-												/></label
-											>
-											<label class="field-block"
-												><span class="eyebrow-copy">Start timeout sec</span><input
-													type="number"
-													min="1"
-													step="1"
-													bind:value={host.start_timeout_seconds}
-												/></label
-											>
-											<label class="field-block"
-												><span class="eyebrow-copy">Media access</span><span class="select-shell"
-													><select bind:value={host.media_access}
-														><option value="mounted">Mounted paths</option><option value="stream"
-															>Two-way stream</option
-														></select
-													></span
-												></label
-											>
-											<label class="field-block host-json-field advanced-textarea-field"
-												><span class="eyebrow-copy">Library path overrides</span><textarea
-													bind:value={host.source_roots_json}
-													rows="5"
-													placeholder={`{
+												{#each libraries.filter( (library) => library.key.trim() ) as library (`${host.index}-${library.key}`)}
+													<button
+														type="button"
+														class={`library-allow-pill ${host.allowed_libraries.includes(library.key) ? 'active' : ''}`.trim()}
+														onclick={() => toggleAllowedLibrary(host, library.key)}
+													>
+														{library.key}
+													</button>
+												{/each}
+											</span></label
+										>
+										<details class="host-advanced-shell host-json-field">
+											<summary>Advanced worker settings</summary>
+											<div class="two-col advanced-host-grid">
+												<label class="field-block"
+													><span class="eyebrow-copy">Repo path</span><input
+														bind:value={host.repo_path}
+														placeholder="/Users/.../mediaforce"
+													/></label
+												>
+												<label class="field-block"
+													><span class="eyebrow-copy">Wake MAC</span><input
+														bind:value={host.wake_mac}
+														placeholder="Optional"
+													/></label
+												>
+												<label class="field-block"
+													><span class="eyebrow-copy">Start command</span><input
+														bind:value={host.start_command}
+														placeholder="ssh prox-main.shiny pct start 103"
+													/></label
+												>
+												<label class="field-block"
+													><span class="eyebrow-copy">Stop command</span><input
+														bind:value={host.stop_command}
+														placeholder="ssh prox-main.shiny pct shutdown 103"
+													/></label
+												>
+												<label class="field-block"
+													><span class="eyebrow-copy">Start timeout sec</span><input
+														type="number"
+														min="1"
+														step="1"
+														bind:value={host.start_timeout_seconds}
+													/></label
+												>
+												<label class="field-block"
+													><span class="eyebrow-copy">Media access</span><span class="select-shell"
+														><select bind:value={host.media_access}
+															><option value="mounted">Mounted paths</option><option value="stream"
+																>Two-way stream</option
+															></select
+														></span
+													></label
+												>
+												<label class="field-block host-json-field advanced-textarea-field"
+													><span class="eyebrow-copy">Library path overrides</span><textarea
+														bind:value={host.source_roots_json}
+														rows="5"
+														placeholder={`{
   "movies": "/mnt/media/movies",
   "tv": "/mnt/media/tv"
 }`}
-												></textarea></label
-											>
-										</div>
-									</details>
-								</div>
-								{#if runtimeHost}
-									<div class="host-runtime-column">
-										<p class="eyebrow-copy">Live Status</p>
-										<HostCard host={runtimeHost} />
-										{#if shouldShowHostActions(runtimeHost, host)}
-											<div class="host-actions-panel">
-												<div class="host-actions-head">
-													<p class="eyebrow-copy">Remote Actions</p>
-													{#if isDirty}
-														<p class="muted-copy">Save host edits before running remote actions.</p>
-													{:else if showPrimaryHostAction}
-														<p class="muted-copy">{primaryHostActionHelp(runtimeHost, host)}</p>
-													{/if}
-												</div>
-												{#if showPrimaryHostAction}
-													{#if runtimeHost.setup_requires_password || runtimeActionState.showPassword}
-														<label class="field-block inline-password-field">
-															<span class="eyebrow-copy">Remote account password</span>
-															<input
-																type="password"
-																value={runtimeActionState.password}
-																oninput={(event) =>
-																	handleHostActionPasswordInput(runtimeHostKey, event)}
-																placeholder="Only used for this setup run"
-															/>
-														</label>
-													{/if}
-													<div class="host-actions-row">
-														<Button
-															variant="secondary"
-															loading={runtimeActionState.preparing}
-															disabled={isDirty}
-															onclick={() =>
-																primaryActionKind === 'start'
-																	? startHost(runtimeHostKey, runtimeHost)
-																	: prepareHost(runtimeHostKey, runtimeHost)}
-															>{primaryHostActionLabel(runtimeHost, host)}</Button
-														>
-														{#if runtimeHost.setup_requires_password && !runtimeActionState.showPassword}
-															<Button
-																variant="ghost"
-																disabled={isDirty}
-																onclick={() => revealHostActionPassword(runtimeHostKey)}
-																>Add Password</Button
-															>
+													></textarea></label
+												>
+											</div>
+										</details>
+									</div>
+									{#if runtimeHost}
+										<div class="host-runtime-column">
+											<p class="eyebrow-copy">Live Status</p>
+											<HostCard host={runtimeHost} />
+											{#if shouldShowHostActions(runtimeHost, host)}
+												<div class="host-actions-panel">
+													<div class="host-actions-head">
+														<p class="eyebrow-copy">Remote Actions</p>
+														{#if isDirty}
+															<p class="muted-copy">
+																Save host edits before running remote actions.
+															</p>
+														{:else if showPrimaryHostAction}
+															<p class="muted-copy">{primaryHostActionHelp(runtimeHost, host)}</p>
 														{/if}
-														{#if runtimeHost.trust_reset_supported}
+													</div>
+													{#if showPrimaryHostAction}
+														{#if runtimeHost.setup_requires_password || runtimeActionState.showPassword}
+															<label class="field-block inline-password-field">
+																<span class="eyebrow-copy">Remote account password</span>
+																<input
+																	type="password"
+																	value={runtimeActionState.password}
+																	oninput={(event) =>
+																		handleHostActionPasswordInput(runtimeHostKey, event)}
+																	placeholder="Only used for this setup run"
+																/>
+															</label>
+														{/if}
+														<div class="host-actions-row">
+															<Button
+																variant="secondary"
+																loading={runtimeActionState.preparing}
+																disabled={isDirty}
+																onclick={() =>
+																	primaryActionKind === 'start'
+																		? startHost(runtimeHostKey, runtimeHost)
+																		: prepareHost(runtimeHostKey, runtimeHost)}
+																>{primaryHostActionLabel(runtimeHost, host)}</Button
+															>
+															{#if runtimeHost.setup_requires_password && !runtimeActionState.showPassword}
+																<Button
+																	variant="ghost"
+																	disabled={isDirty}
+																	onclick={() => revealHostActionPassword(runtimeHostKey)}
+																	>Add Password</Button
+																>
+															{/if}
+															{#if runtimeHost.trust_reset_supported}
+																<Button
+																	variant="ghost"
+																	loading={runtimeActionState.resettingTrust}
+																	disabled={isDirty || runtimeActionState.preparing}
+																	onclick={() => resetHostTrust(runtimeHostKey)}
+																	>Reset SSH Trust</Button
+																>
+															{/if}
+														</div>
+													{:else if runtimeHost.trust_reset_supported}
+														<div class="host-actions-row">
 															<Button
 																variant="ghost"
 																loading={runtimeActionState.resettingTrust}
-																disabled={isDirty || runtimeActionState.preparing}
+																disabled={isDirty}
 																onclick={() => resetHostTrust(runtimeHostKey)}
 																>Reset SSH Trust</Button
 															>
-														{/if}
-													</div>
-												{:else if runtimeHost.trust_reset_supported}
-													<div class="host-actions-row">
-														<Button
-															variant="ghost"
-															loading={runtimeActionState.resettingTrust}
-															disabled={isDirty}
-															onclick={() => resetHostTrust(runtimeHostKey)}>Reset SSH Trust</Button
-														>
-													</div>
-												{/if}
-											</div>
-										{/if}
-									</div>
-								{/if}
-							</div>
-							<div class="capability-row">
-								{#each settings.host_capability_options as capability (capability.key)}
-									<label
-										class={`capability-pill ${host.capabilities.includes(capability.key) ? 'checked' : ''}`.trim()}
+														</div>
+													{/if}
+												</div>
+											{/if}
+										</div>
+									{/if}
+								</div>
+								<div class="capability-row">
+									{#each settings.host_capability_options as capability (capability.key)}
+										<label
+											class={`capability-pill ${host.capabilities.includes(capability.key) ? 'checked' : ''}`.trim()}
+										>
+											<input
+												type="checkbox"
+												class="visually-hidden"
+												checked={host.capabilities.includes(capability.key)}
+												onchange={() => toggleCapability(index, capability.key)}
+											/>
+											<span class="capability-mark" aria-hidden="true">✓</span>
+											<span class="capability-label">{capability.label}</span>
+										</label>
+									{/each}
+								</div>
+								<div class="host-remove-row">
+									<button
+										type="button"
+										class="icon-button danger"
+										aria-label="Remove host"
+										title="Remove host"
+										onclick={() => removeHost(index)}
 									>
-										<input
-											type="checkbox"
-											class="visually-hidden"
-											checked={host.capabilities.includes(capability.key)}
-											onchange={() => toggleCapability(index, capability.key)}
-										/>
-										<span class="capability-mark" aria-hidden="true">✓</span>
-										<span class="capability-label">{capability.label}</span>
-									</label>
-								{/each}
-							</div>
-							<div class="host-remove-row">
-								<button
-									type="button"
-									class="icon-button danger"
-									aria-label="Remove host"
-									title="Remove host"
-									onclick={() => removeHost(index)}
-								>
-									<svg viewBox="0 0 24 24" aria-hidden="true">
-										<path
-											d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 7h2v7h-2v-7Zm4 0h2v7h-2v-7ZM7 10h2v7H7v-7Zm-1 10h12a2 2 0 0 0 2-2V8H4v10a2 2 0 0 0 2 2Z"
-										/>
-									</svg>
-								</button>
-							</div>
-						</details>
-					</div>
-				{/each}
-			</div>
+										<svg viewBox="0 0 24 24" aria-hidden="true">
+											<path
+												d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 7h2v7h-2v-7Zm4 0h2v7h-2v-7ZM7 10h2v7H7v-7Zm-1 10h12a2 2 0 0 0 2-2V8H4v10a2 2 0 0 0 2 2Z"
+											/>
+										</svg>
+									</button>
+								</div>
+							</details>
+						</div>
+					{/each}
+				</div>
+			</section>
 		</div>
-	</Panel>
+
+		<aside class="settings-side-rail" aria-label="Settings side rail">
+			<div class="side-column-sticky">
+				<section class="station-card rail-card settings-rail-card" aria-label="Settings navigation">
+					<div class="section-head compact rail-head">
+						<div>
+							<p class="section-label">Console map</p>
+							<h2 class="section-title small">Jump between runtime sections</h2>
+							<p class="section-copy">
+								The same operator shell now frames Settings, so navigation, save state, and next
+								actions stay visible while you edit.
+							</p>
+						</div>
+					</div>
+					<nav class="settings-jump-nav" aria-label="Settings sections">
+						{#each settingsSections as section (section.anchor)}
+							<button
+								type="button"
+								class="settings-jump-link"
+								onclick={() => jumpToSettingsAnchor(section.anchor)}
+							>
+								{section.label}
+							</button>
+						{/each}
+						{#if isDirty}
+							<button
+								type="button"
+								class="settings-jump-link attention-link"
+								onclick={() => jumpToSettingsAnchor('save-settings')}
+							>
+								Save checkpoint
+							</button>
+						{/if}
+					</nav>
+					<p class={`settings-jump-status ${isDirty ? 'dirty' : ''}`.trim()}>
+						{isDirty ? 'Unsaved changes waiting' : 'All changes saved'}
+					</p>
+					{#if isDirty}
+						<Button loading={isSaving} onclick={saveSettings}>Save Runtime Settings</Button>
+					{/if}
+				</section>
+
+				<section class="station-card rail-card settings-rail-card" aria-label="Runtime files">
+					<div class="section-head compact rail-head">
+						<div>
+							<p class="section-label">Runtime files</p>
+							<h2 class="section-title small">Live machine contract</h2>
+							<p class="section-copy">
+								Edits write to the runtime file below. Repo defaults remain the baseline reference.
+							</p>
+						</div>
+					</div>
+					<div class="path-highlight-row">
+						{#each pathHighlights as item (item.label)}
+							<div class="path-highlight-chip">
+								<span class="eyebrow-copy">{item.label}</span>
+								<strong>{item.value}</strong>
+							</div>
+						{/each}
+					</div>
+					<details class="path-disclosure">
+						<summary>Show full file paths</summary>
+						<p class="mono-copy">Runtime file: {settings.runtime_settings_path}</p>
+						<p class="mono-copy">Repo defaults: {settings.repo_config_path}</p>
+					</details>
+				</section>
+
+				<section class="station-card rail-card settings-rail-card" aria-label="Operator guidance">
+					<div class="section-head compact rail-head">
+						<div>
+							<p class="section-label">Operator flow</p>
+							<h2 class="section-title small">Edit, verify, then save</h2>
+						</div>
+					</div>
+					<ul class="rail-guidance-list">
+						<li>
+							Refresh host status after changing worker connectivity, schedules, or startup details.
+						</li>
+						<li>
+							Save before using remote setup actions so runtime behavior matches the edited form.
+						</li>
+						<li>
+							Clear archived originals only after promoted outputs are trusted and rollback media is
+							no longer needed.
+						</li>
+					</ul>
+					<div class="rail-actions">
+						<button
+							type="button"
+							class="refresh-status-button"
+							disabled={isRefreshingHosts}
+							onclick={refreshHostStatuses}
+						>
+							{isRefreshingHosts ? 'Refreshing...' : 'Refresh Host Status'}
+						</button>
+						{#if archiveCleanupError && !archiveCleanupUsesDraftPath}
+							<Button variant="ghost" onclick={() => refreshArchiveCleanup({ silent: false })}>
+								Retry cleanup status
+							</Button>
+						{/if}
+					</div>
+				</section>
+			</div>
+		</aside>
+	</div>
 </div>
 
 {#if isDirty}
@@ -858,27 +1008,205 @@
 {/if}
 
 <style>
-	.page-stack,
-	.panel-stack,
 	.row-stack {
 		display: grid;
 		gap: var(--space-3);
 	}
 
+	.workstation-screen {
+		display: grid;
+		gap: 1rem;
+		padding: 0.25rem 0 1rem;
+		position: relative;
+		isolation: isolate;
+		z-index: 0;
+	}
+
+	.workstation-screen::before {
+		content: '';
+		position: fixed;
+		inset: 0;
+		z-index: -2;
+		pointer-events: none;
+		background: #0b1014;
+	}
+
+	.workstation-screen::after {
+		display: none;
+	}
+
+	.system-strip {
+		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		gap: 1rem;
+	}
+
+	.system-cell,
+	.station-card {
+		position: relative;
+		border: 1px solid rgba(148, 163, 184, 0.18);
+		background: rgba(15, 20, 27, 0.94);
+		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2);
+		overflow: hidden;
+	}
+
+	.system-cell::before {
+		content: '';
+		position: absolute;
+		inset: 0 0 auto;
+		height: 2px;
+		background: rgba(56, 189, 248, 0.82);
+	}
+
+	.system-cell {
+		padding: 1rem 1.1rem;
+		min-height: 8.4rem;
+	}
+
+	.accent-cell {
+		background: rgba(13, 33, 42, 0.94);
+	}
+
+	.normal-state {
+		background: rgba(15, 20, 27, 0.94);
+	}
+
+	.warning-state {
+		border-color: rgba(249, 115, 22, 0.28);
+		background: rgba(58, 26, 13, 0.94);
+	}
+
+	.warning-state::before {
+		background: rgba(251, 146, 60, 0.92);
+	}
+
+	.selection-state {
+		border-color: rgba(45, 212, 191, 0.24);
+		background: rgba(10, 36, 38, 0.94);
+	}
+
+	.selection-state::before {
+		background: rgba(45, 212, 191, 0.88);
+	}
+
+	.system-label,
+	.section-label {
+		margin: 0;
+		font-size: 0.72rem;
+		font-weight: 800;
+		letter-spacing: 0.16em;
+		text-transform: uppercase;
+		color: rgba(148, 163, 184, 0.88);
+	}
+
+	.system-value,
+	.section-title,
+	.transcode-summary-title,
+	.library-summary-title,
+	.schedule-summary-title,
+	.host-summary-title {
+		margin: 0;
+		color: #f8fafc;
+	}
+
+	.system-value {
+		margin-top: 0.4rem;
+		font-size: 1.2rem;
+		font-weight: 700;
+		line-height: 1.25;
+	}
+
+	.system-detail,
+	.section-copy,
+	.path-disclosure,
+	.path-disclosure p,
+	.rail-guidance-list,
+	.rail-guidance-list li,
+	.schedule-section-note,
+	.warning-copy,
+	.host-summary-main .muted-copy,
+	.path-card p,
+	.archive-cleanup-copy .muted-copy {
+		margin: 0;
+		color: rgba(226, 232, 240, 0.74);
+		line-height: 1.5;
+	}
+
+	.section-title {
+		margin-top: 0.28rem;
+		font-size: 1rem;
+		font-weight: 700;
+		line-height: 1.28;
+	}
+
+	.section-title.small {
+		font-size: 1rem;
+	}
+
+	.station-card {
+		padding: 1.1rem;
+	}
+
+	.settings-console-grid {
+		display: grid;
+		grid-template-columns: minmax(0, 1.7fr) minmax(21rem, 0.92fr);
+		gap: 1rem;
+		align-items: start;
+	}
+
+	.settings-main-column,
+	.settings-side-rail {
+		display: grid;
+		gap: 1rem;
+		min-width: 0;
+	}
+
+	.side-column-sticky {
+		display: grid;
+		gap: 1rem;
+		align-content: start;
+		min-width: 0;
+	}
+
+	@media (min-width: 961px) {
+		.side-column-sticky {
+			position: sticky;
+			top: 5.9rem;
+			max-height: calc(100dvh - 5.9rem - 1rem);
+			overflow-y: auto;
+			overflow-x: clip;
+			scrollbar-gutter: stable;
+			padding-right: 0.15rem;
+			z-index: 5;
+		}
+	}
+
+	.settings-section,
+	.settings-rail-card {
+		display: grid;
+		gap: 0.95rem;
+	}
+
+	.section-head {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		gap: 1rem;
+		align-items: start;
+		margin-bottom: 0.15rem;
+	}
+
+	.section-head.compact {
+		margin-bottom: 0.1rem;
+	}
+
+	.rail-head {
+		margin-bottom: 0;
+	}
+
 	.settings-jump-nav {
-		position: sticky;
-		top: 0.8rem;
-		z-index: 2;
-		display: flex;
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
 		gap: 0.7rem;
-		align-items: center;
-		flex-wrap: wrap;
-		padding: 0.75rem 0.9rem;
-		border-radius: var(--radius-lg);
-		background: rgba(255, 253, 248, 0.9);
-		backdrop-filter: blur(14px);
-		border: 1px solid rgba(23, 35, 31, 0.08);
-		box-shadow: 0 16px 30px rgba(23, 35, 31, 0.05);
 	}
 
 	.settings-jump-link,
@@ -886,69 +1214,47 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		padding: 0.45rem 0.8rem;
-		border-radius: var(--radius-pill);
+		padding: 0.62rem 0.8rem;
+		border-radius: 0;
 		font-size: 0.82rem;
 		font-weight: 700;
 		text-decoration: none;
 	}
 
 	.settings-jump-link {
-		background: rgba(255, 255, 255, 0.72);
-		border: 1px solid rgba(23, 35, 31, 0.08);
-		color: var(--ink-soft);
+		background: rgba(15, 23, 42, 0.82);
+		border: 1px solid rgba(148, 163, 184, 0.16);
+		color: rgba(226, 232, 240, 0.84);
+		font: inherit;
+		cursor: pointer;
+	}
+
+	.settings-jump-link:hover {
+		border-color: rgba(56, 189, 248, 0.38);
+		color: #f8fafc;
+	}
+
+	.settings-jump-link.attention-link {
+		border-color: rgba(251, 146, 60, 0.28);
+		background: rgba(67, 20, 7, 0.78);
 	}
 
 	.settings-jump-status {
-		margin-left: auto;
-		background: rgba(23, 35, 31, 0.06);
-		color: var(--ink-soft);
+		justify-content: flex-start;
+		background: rgba(15, 23, 42, 0.7);
+		border: 1px solid rgba(148, 163, 184, 0.16);
+		color: rgba(226, 232, 240, 0.74);
 	}
 
 	.settings-jump-status.dirty {
-		background: rgba(180, 83, 9, 0.12);
-		color: #8f450a;
-	}
-
-	.settings-grid {
-		display: grid;
-		grid-template-columns: 1.4fr 1fr;
-		gap: var(--space-4);
-	}
-
-	.settings-hero {
-		display: grid;
-		grid-template-columns: minmax(0, 1.35fr) minmax(20rem, 28rem);
-		gap: var(--space-3);
-		align-items: start;
-	}
-
-	.settings-hero-copy {
-		display: grid;
-		gap: 1rem;
-	}
-
-	.settings-hero-pills {
-		display: flex;
-		gap: 0.65rem;
-		flex-wrap: wrap;
-	}
-
-	.compact-paths {
-		min-width: 0;
-		max-inline-size: 28rem;
-		justify-self: end;
+		background: rgba(67, 20, 7, 0.78);
+		border-color: rgba(251, 146, 60, 0.28);
+		color: #fed7aa;
 	}
 
 	.transcode-shell {
 		display: grid;
 		gap: 0.85rem;
-	}
-
-	.transcode-summary {
-		display: grid;
-		gap: 0.75rem;
-		cursor: pointer;
 	}
 
 	.summary-copy-block {
@@ -962,23 +1268,21 @@
 	}
 
 	.transcode-summary-title {
-		margin: 0;
 		font-size: 1rem;
 		font-weight: 700;
 		line-height: 1.3;
-		color: var(--ink);
 	}
 
 	.transcode-summary-chip {
 		display: inline-flex;
 		align-items: center;
 		padding: 0.45rem 0.7rem;
-		border-radius: var(--radius-pill);
-		background: rgba(255, 255, 255, 0.72);
-		border: 1px solid rgba(23, 35, 31, 0.08);
+		border-radius: 0;
+		background: rgba(15, 23, 42, 0.82);
+		border: 1px solid rgba(148, 163, 184, 0.16);
 		font-size: 0.82rem;
 		font-weight: 700;
-		color: var(--ink-soft);
+		color: rgba(226, 232, 240, 0.84);
 		max-width: 18rem;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -991,9 +1295,9 @@
 		gap: 1rem;
 		align-items: start;
 		padding: 0.95rem 1rem;
-		border-radius: var(--radius-lg);
-		background: rgba(255, 248, 240, 0.9);
-		border: 1px solid rgba(180, 83, 9, 0.16);
+		border-radius: 0;
+		background: rgba(58, 26, 13, 0.72);
+		border: 1px solid rgba(249, 115, 22, 0.22);
 	}
 
 	.archive-cleanup-copy,
@@ -1007,8 +1311,7 @@
 	}
 
 	.warning-copy {
-		margin: 0;
-		color: #9a3412;
+		color: #fdba74;
 		font-weight: 600;
 	}
 
@@ -1021,15 +1324,15 @@
 		display: grid;
 		gap: 0.12rem;
 		padding: 0.68rem 0.78rem;
-		border-radius: var(--radius-md);
-		background: rgba(255, 255, 255, 0.7);
-		border: 1px solid rgba(23, 35, 31, 0.08);
+		border-radius: 0;
+		background: rgba(15, 23, 42, 0.82);
+		border: 1px solid rgba(148, 163, 184, 0.16);
 	}
 
 	.path-highlight-chip strong {
 		font-size: 0.98rem;
 		line-height: 1.3;
-		color: var(--ink);
+		color: #f8fafc;
 	}
 
 	.path-disclosure {
@@ -1041,14 +1344,9 @@
 		cursor: pointer;
 		font-size: 0.86rem;
 		font-weight: 700;
-		color: var(--accent-deep);
+		color: #7dd3fc;
 	}
 
-	.compact-paths .mono-copy {
-		line-height: 1.45;
-	}
-
-	.section-row,
 	.section-actions-row {
 		display: flex;
 		justify-content: space-between;
@@ -1062,18 +1360,18 @@
 		align-items: center;
 		justify-content: center;
 		padding: 0.42rem 0.72rem;
-		border-radius: var(--radius-pill);
-		background: rgba(23, 35, 31, 0.06);
-		border: 1px solid rgba(23, 35, 31, 0.08);
+		border-radius: 0;
+		background: rgba(15, 23, 42, 0.82);
+		border: 1px solid rgba(148, 163, 184, 0.16);
 		font-size: 0.8rem;
 		font-weight: 700;
-		color: var(--ink-soft);
+		color: rgba(226, 232, 240, 0.78);
 	}
 
 	.section-summary-badge.warn {
-		background: rgba(180, 83, 9, 0.12);
-		border-color: rgba(180, 83, 9, 0.18);
-		color: #8f450a;
+		background: rgba(67, 20, 7, 0.78);
+		border-color: rgba(251, 146, 60, 0.28);
+		color: #fed7aa;
 	}
 
 	.field-grid-header {
@@ -1084,7 +1382,7 @@
 		font-weight: 800;
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
-		color: var(--ink-soft);
+		color: rgba(148, 163, 184, 0.88);
 	}
 
 	.library-grid-header {
@@ -1118,7 +1416,7 @@
 	.summary-action-copy {
 		font-size: 0.8rem;
 		font-weight: 700;
-		color: var(--ink-soft);
+		color: rgba(148, 163, 184, 0.82);
 	}
 
 	.library-summary-title,
@@ -1128,19 +1426,12 @@
 		margin: 0;
 	}
 
-	.library-summary-title {
-		font-size: 1rem;
-		font-weight: 700;
-		line-height: 1.25;
-		color: var(--ink);
-	}
-
+	.library-summary-title,
 	.schedule-summary-title,
 	.host-summary-title {
 		font-size: 1rem;
 		font-weight: 700;
 		line-height: 1.25;
-		color: var(--ink);
 	}
 
 	.library-summary-path {
@@ -1151,10 +1442,9 @@
 		display: inline-flex;
 		width: 2.5rem;
 		height: 2.5rem;
-		border-radius: var(--radius-md);
+		border-radius: 0;
 		background: var(--library-swatch);
-		border: 1px solid rgba(23, 35, 31, 0.08);
-		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.42);
+		border: 1px solid rgba(148, 163, 184, 0.22);
 	}
 
 	.schedule-grid-header {
@@ -1172,11 +1462,11 @@
 	}
 
 	.editor-card,
-	.path-card {
+	.embedded-path-card {
 		padding: 1rem;
-		border-radius: var(--radius-lg);
-		background: rgba(255, 255, 255, 0.56);
-		border: 1px solid rgba(23, 35, 31, 0.08);
+		border-radius: 0;
+		background: rgba(9, 14, 22, 0.88);
+		border: 1px solid rgba(148, 163, 184, 0.16);
 	}
 
 	.library-editor,
@@ -1204,10 +1494,10 @@
 	}
 
 	.weekday-pill {
-		border: 1px solid rgba(23, 35, 31, 0.12);
-		background: rgba(255, 255, 255, 0.76);
-		color: var(--ink-soft);
-		border-radius: var(--radius-pill);
+		border: 1px solid rgba(148, 163, 184, 0.16);
+		background: rgba(15, 23, 42, 0.82);
+		color: rgba(226, 232, 240, 0.74);
+		border-radius: 0;
 		padding: 0.48rem 0.72rem;
 		font: inherit;
 		font-size: 0.84rem;
@@ -1216,9 +1506,9 @@
 	}
 
 	.weekday-pill.active {
-		background: rgba(15, 118, 110, 0.12);
-		border-color: rgba(15, 118, 110, 0.2);
-		color: var(--accent-deep);
+		background: rgba(8, 47, 73, 0.82);
+		border-color: rgba(56, 189, 248, 0.24);
+		color: #dbeafe;
 	}
 
 	.field-block {
@@ -1231,7 +1521,7 @@
 		font-size: 0.98rem;
 		font-weight: 700;
 		line-height: 1.3;
-		color: var(--ink);
+		color: #f8fafc;
 		padding-top: 0.2rem;
 	}
 
@@ -1252,11 +1542,16 @@
 	.select-shell select {
 		width: 100%;
 		padding: 0.72rem 0.82rem;
-		border-radius: var(--radius-md);
-		border: 1px solid rgba(23, 35, 31, 0.12);
-		background: #fff;
+		border-radius: 0;
+		border: 1px solid rgba(148, 163, 184, 0.16);
+		background: rgba(15, 23, 42, 0.92);
 		font: inherit;
-		color: var(--ink);
+		color: #f8fafc;
+	}
+
+	.field-block textarea::placeholder,
+	.field-block input::placeholder {
+		color: rgba(148, 163, 184, 0.72);
 	}
 
 	.select-shell select {
@@ -1276,7 +1571,7 @@
 		transform: translateY(-50%);
 		pointer-events: none;
 		font-size: 0.82rem;
-		color: var(--ink-soft);
+		color: rgba(148, 163, 184, 0.82);
 	}
 
 	.select-shell select {
@@ -1300,10 +1595,11 @@
 		justify-content: center;
 		width: 2.75rem;
 		height: 2.75rem;
-		border-radius: var(--radius-md);
-		border: 1px solid rgba(23, 35, 31, 0.12);
-		background: rgba(255, 255, 255, 0.76);
+		border-radius: 0;
+		border: 1px solid rgba(148, 163, 184, 0.16);
+		background: rgba(15, 23, 42, 0.82);
 		cursor: pointer;
+		color: rgba(226, 232, 240, 0.82);
 	}
 
 	.icon-button svg {
@@ -1313,7 +1609,7 @@
 	}
 
 	.icon-button.danger {
-		color: #9a4b0b;
+		color: #fdba74;
 	}
 
 	.host-card-editor {
@@ -1367,7 +1663,7 @@
 		font-size: 0.92rem;
 		font-weight: 700;
 		line-height: 1;
-		color: var(--ink-soft);
+		color: rgba(148, 163, 184, 0.82);
 		width: 0.85rem;
 		text-align: center;
 		justify-self: end;
@@ -1377,12 +1673,12 @@
 		display: inline-flex;
 		align-items: center;
 		padding: 0.42rem 0.7rem;
-		border-radius: var(--radius-pill);
-		background: rgba(255, 255, 255, 0.74);
-		border: 1px solid rgba(23, 35, 31, 0.08);
+		border-radius: 0;
+		background: rgba(15, 23, 42, 0.82);
+		border: 1px solid rgba(148, 163, 184, 0.16);
 		font-size: 0.82rem;
 		font-weight: 700;
-		color: var(--ink-soft);
+		color: rgba(226, 232, 240, 0.78);
 	}
 
 	.path-card p {
@@ -1429,9 +1725,9 @@
 		display: grid;
 		gap: 0.85rem;
 		padding: 0.85rem 0.95rem;
-		border-radius: var(--radius-md);
-		background: rgba(255, 255, 255, 0.48);
-		border: 1px solid rgba(23, 35, 31, 0.08);
+		border-radius: 0;
+		background: rgba(15, 23, 42, 0.62);
+		border: 1px solid rgba(148, 163, 184, 0.14);
 	}
 
 	.host-advanced-shell summary {
@@ -1440,7 +1736,7 @@
 		font-weight: 800;
 		letter-spacing: 0.06em;
 		text-transform: uppercase;
-		color: var(--accent-deep);
+		color: #7dd3fc;
 	}
 
 	.advanced-host-grid {
@@ -1470,10 +1766,10 @@
 	}
 
 	.library-allow-pill {
-		border: 1px solid rgba(23, 35, 31, 0.12);
-		background: rgba(255, 255, 255, 0.76);
-		color: var(--ink-soft);
-		border-radius: var(--radius-pill);
+		border: 1px solid rgba(148, 163, 184, 0.16);
+		background: rgba(15, 23, 42, 0.82);
+		color: rgba(226, 232, 240, 0.74);
+		border-radius: 0;
 		padding: 0.42rem 0.7rem;
 		font: inherit;
 		font-size: 0.86rem;
@@ -1482,9 +1778,9 @@
 	}
 
 	.library-allow-pill.active {
-		background: rgba(15, 118, 110, 0.11);
-		border-color: rgba(15, 118, 110, 0.18);
-		color: #0f5f59;
+		background: rgba(8, 47, 73, 0.82);
+		border-color: rgba(56, 189, 248, 0.24);
+		color: #dbeafe;
 	}
 
 	.capability-pill {
@@ -1492,16 +1788,17 @@
 		align-items: center;
 		gap: 0.45rem;
 		padding: 0.48rem 0.72rem;
-		border-radius: var(--radius-pill);
-		border: 1px solid rgba(23, 35, 31, 0.12);
-		background: rgba(255, 255, 255, 0.76);
+		border-radius: 0;
+		border: 1px solid rgba(148, 163, 184, 0.16);
+		background: rgba(15, 23, 42, 0.82);
+		color: rgba(226, 232, 240, 0.82);
 		font-weight: 700;
 	}
 
 	.capability-pill.checked {
-		background: rgba(15, 118, 110, 0.12);
-		border-color: rgba(15, 118, 110, 0.18);
-		color: var(--accent-deep);
+		background: rgba(8, 47, 73, 0.82);
+		border-color: rgba(56, 189, 248, 0.24);
+		color: #dbeafe;
 	}
 
 	.capability-mark {
@@ -1510,12 +1807,19 @@
 
 	.refresh-status-button {
 		padding: 0.7rem 0.9rem;
-		border-radius: var(--radius-pill);
-		border: 1px solid rgba(23, 35, 31, 0.12);
-		background: rgba(255, 255, 255, 0.76);
+		border-radius: 0;
+		border: 1px solid rgba(148, 163, 184, 0.16);
+		background: rgba(15, 23, 42, 0.82);
 		font: inherit;
 		font-weight: 700;
+		color: rgba(226, 232, 240, 0.84);
 		cursor: pointer;
+	}
+
+	.rail-guidance-list {
+		padding-left: 1.15rem;
+		display: grid;
+		gap: 0.45rem;
 	}
 
 	.settings-save-bar {
@@ -1530,9 +1834,9 @@
 		gap: 1rem;
 		align-items: center;
 		padding: 1rem 1.15rem;
-		border-radius: var(--radius-lg);
-		background: rgba(23, 35, 31, 0.94);
-		color: #f8fcfb;
+		border: 1px solid rgba(251, 146, 60, 0.24);
+		background: rgba(58, 26, 13, 0.96);
+		color: #f8fafc;
 	}
 
 	.settings-save-shell p {
@@ -1540,13 +1844,9 @@
 	}
 
 	@media (max-width: 960px) {
-		.settings-grid,
+		.settings-console-grid,
 		.host-editor-layout {
 			grid-template-columns: 1fr;
-		}
-
-		.settings-jump-nav {
-			position: static;
 		}
 
 		.library-editor,
@@ -1581,19 +1881,28 @@
 	}
 
 	@media (max-width: 720px) {
-		.settings-hero,
+		.system-strip,
+		.section-head,
 		.settings-save-shell,
 		.host-head {
 			grid-template-columns: 1fr;
 			flex-direction: column;
 		}
 
-		.transcode-summary {
-			flex-direction: column;
+		.section-actions-row,
+		.library-summary,
+		.schedule-summary {
+			width: 100%;
 		}
 
-		.transcode-summary .summary-action-block {
-			width: 100%;
+		.library-summary,
+		.schedule-summary,
+		.host-head {
+			align-items: start;
+		}
+
+		.summary-action-block,
+		.section-actions-row {
 			justify-content: space-between;
 		}
 
@@ -1605,13 +1914,8 @@
 			justify-items: start;
 		}
 
-		.compact-paths {
-			max-inline-size: none;
-			justify-self: stretch;
-		}
-
-		.settings-jump-status {
-			margin-left: 0;
+		.settings-jump-nav {
+			grid-template-columns: 1fr;
 		}
 	}
 </style>

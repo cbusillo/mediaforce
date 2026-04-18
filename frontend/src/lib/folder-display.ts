@@ -15,6 +15,18 @@ export function folderLibraryKey(prefix: string): string {
 	return prefix.split('/')[0] ?? prefix;
 }
 
+export function folderRoutePath(prefix: string): `/folders/${string}` {
+	const encodedPrefix = folderRoutePrefix(prefix);
+	return `/folders/${encodedPrefix}` as `/folders/${string}`;
+}
+
+export function folderRoutePrefix(prefix: string): string {
+	return prefix
+		.split('/')
+		.map((segment) => encodeURIComponent(segment))
+		.join('/');
+}
+
 export function folderLibraryLabel(key: string): string {
 	return key.toLowerCase() === 'tv' ? 'TV' : titleCase(key);
 }

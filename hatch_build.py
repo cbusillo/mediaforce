@@ -24,6 +24,7 @@ class CustomBuildHook(BuildHookInterface):
                 "Cannot build the packaged frontend because frontend sources are incomplete."
             )
 
+        # noinspection PyDeprecation
         npm = shutil.which("npm")
         if npm is None:
             raise RuntimeError(
@@ -33,7 +34,8 @@ class CustomBuildHook(BuildHookInterface):
         self._run([npm, "ci"], cwd=frontend_dir, env=self._npm_install_env())
         self._run([npm, "run", "build"], cwd=frontend_dir, env=self._build_env())
 
-    def _build_env(self) -> dict[str, str]:
+    @staticmethod
+    def _build_env() -> dict[str, str]:
         env = os.environ.copy()
         env.setdefault("CI", "1")
         return env
@@ -46,7 +48,8 @@ class CustomBuildHook(BuildHookInterface):
         env.pop("NPM_CONFIG_OMIT", None)
         return env
 
-    def _run(self, command: list[str], cwd: Path, env: dict[str, str]) -> None:
+    @staticmethod
+    def _run(command: list[str], cwd: Path, env: dict[str, str]) -> None:
         try:
             subprocess.run(command, cwd=cwd, env=env, check=True)
         except subprocess.CalledProcessError as exc:

@@ -101,6 +101,7 @@ def run_crf_search(
         max_encoded_percent: int,
         svt_params: list[str],
         thorough: bool,
+        video_filter: str | None = None,
         process_controller: ManagedProcessController | None = None,
         host: dict[str, object] | None = None,
         quality_temp_dir: Path | None = None,
@@ -138,6 +139,8 @@ def run_crf_search(
     )
     if thorough:
         cmd.append("--thorough")
+    if video_filter:
+        cmd.extend(["--vfilter", video_filter])
     for param in svt_params:
         cmd.extend(["--svt", param])
 
@@ -202,6 +205,7 @@ def run_sample_encode(
         sample_every: str,
         sample_duration: str,
         svt_params: list[str],
+        video_filter: str | None = None,
         process_controller: ManagedProcessController | None = None,
         host: dict[str, object] | None = None,
         quality_temp_dir: Path | None = None,
@@ -235,6 +239,8 @@ def run_sample_encode(
             videotoolbox_available=videotoolbox_available,
         )
     )
+    if video_filter:
+        cmd.extend(["--vfilter", video_filter])
     for param in svt_params:
         cmd.extend(["--svt", param])
     if metric == "xpsnr":

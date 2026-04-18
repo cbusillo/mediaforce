@@ -10,14 +10,15 @@
 	.page-shell {
 		width: var(--shell-width);
 		margin: 0 auto;
-		padding: 1.25rem 0 4.5rem;
+		padding: 0.9rem 0 4rem;
 		display: grid;
-		gap: var(--space-4);
+		gap: 0.85rem;
+		position: relative;
 	}
 
 	@media (max-width: 720px) {
 		.page-shell {
-			padding-top: 0.75rem;
+			padding-top: 0.55rem;
 		}
 	}
 </style>

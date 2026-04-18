@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import unittest
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -31,6 +32,7 @@ from mediaforce.core.models import ProbeSummary
 from mediaforce.encoding import manifest as manifest
 from mediaforce.encoding import quality_search
 from mediaforce.encoding import staging as staging_runtime
+from mediaforce.encoding import video_filters
 from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_prefix, list_child_encode_jobs, \
     load_active_encode_job_for_prefix, load_encode_job, \
     load_latest_terminal_encode_job_for_prefix, load_queue_state, repair_persisted_encode_job_hosts, \
@@ -43,6 +45,8 @@ from mediaforce.web import settings_runtime
 from mediaforce.web.runtime import dashboard_payloads, encode_runtime, folder_actions as folder_actions_runtime, \
     host_runtime as host_runtime_module, job_runtime, queue_actions as queue_actions_runtime, \
     calibration_runtime
+from mediaforce.web.runtime import folder_cards as folder_cards_runtime
+from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 
 
 class EncodeQueueRecoveryTests(unittest.TestCase):
@@ -50,8 +54,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
         self.config = self._build_config()
+        web_app._reset_background_worker_leadership_for_tests()
 
     def tearDown(self) -> None:
+        web_app._reset_background_worker_leadership_for_tests()
         self.tempdir.cleanup()
 
     @staticmethod
@@ -206,6 +212,216 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertIsNone(job["retry_not_before"])
             self.assertIsNone(job["waiting_reason"])
 
+    def test_reconcile_encode_jobs_clears_stale_encoding_items_when_idle(self) -> None:
+        source_path = self._create_source_file("episode-idle-clear.mkv")
+        staging_path = self._staging_path("episode-idle-clear.mkv")
+        partial_path = staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("staged")
+        partial_path.write_text("partial")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+
+            web_app._reconcile_encode_jobs(connection, self.config)
+
+            item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+            assert item_status_row is not None
+            self.assertEqual(item_status_row["status"], "planned")
+            self.assertIsNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
+        self.assertFalse(staging_path.exists())
+        self.assertFalse(partial_path.exists())
+
+    def test_reconcile_encode_jobs_skips_promoted_stale_encoding_rows(self) -> None:
+        source_path = self._create_source_file("episode-idle-promoted.mkv")
+        staging_path = self._staging_path("episode-idle-promoted.mkv")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("staged")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(promoted_at=web_app._now_iso())
+            )
+
+            cleared_count = encode_runtime.clear_stale_encoding_items_when_idle(
+                connection,
+                self.config,
+                web_app._encode_queue_runtime_deps(),
+            )
+
+            item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+            assert item_status_row is not None
+            self.assertEqual(cleared_count, 0)
+            self.assertEqual(item_status_row["status"], "encoding")
+            self.assertIsNotNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
+        self.assertTrue(staging_path.exists())
+
+    def test_reconcile_encode_jobs_ignores_unlink_errors_during_stale_cleanup(self) -> None:
+        first_source = self._create_source_file("episode-stale-first.mkv")
+        second_source = self._create_source_file("episode-stale-second.mkv")
+        first_staging = self._staging_path("episode-stale-first.mkv")
+        second_staging = self._staging_path("episode-stale-second.mkv")
+        for path in (first_staging, second_staging):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("staged")
+
+        with open_db(self.config.paths.db_path) as connection:
+            first_id = self._insert_library_item(connection, first_source, status="encoding")
+            second_id = self._insert_library_item(connection, second_source, status="encoding")
+            self._insert_staged_artifact(connection, first_id, first_staging)
+            self._insert_staged_artifact(connection, second_id, second_staging)
+
+            def _unlink_with_one_failure(path: Path) -> None:
+                if path == first_staging:
+                    raise OSError("blocked")
+                path.unlink(missing_ok=True)
+
+            with patch("mediaforce.web.runtime.encode_runtime.safe_unlink", side_effect=_unlink_with_one_failure):
+                web_app._reconcile_encode_jobs(connection, self.config)
+
+            for item_id in (first_id, second_id):
+                item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+                assert item_status_row is not None
+                self.assertEqual(item_status_row["status"], "planned")
+                self.assertIsNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
+
+        self.assertTrue(first_staging.exists())
+        self.assertFalse(second_staging.exists())
+
+    def test_reconcile_encode_jobs_prunes_empty_quality_temp_dirs(self) -> None:
+        source_path = self._create_source_file("episode-temp-dir.mkv")
+        temp_dir = self.root / "staging" / ".mediaforce-ab-av1-stale"
+        staging_path = temp_dir / "episode-temp-dir.mkv"
+        partial_path = temp_dir / "episode-temp-dir.partial.mkv"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("staged")
+        partial_path.write_text("partial")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+
+            web_app._reconcile_encode_jobs(connection, self.config)
+
+            item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+            assert item_status_row is not None
+            self.assertEqual(item_status_row["status"], "planned")
+            self.assertIsNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
+
+        self.assertFalse(staging_path.exists())
+        self.assertFalse(partial_path.exists())
+        self.assertFalse(temp_dir.exists())
+
+    def test_reconcile_encode_jobs_prunes_empty_quality_temp_dirs_when_files_are_already_missing(self) -> None:
+        source_path = self._create_source_file("episode-temp-dir-missing.mkv")
+        temp_dir = self.root / "staging" / ".mediaforce-ab-av1-missing"
+        staging_path = temp_dir / "episode-temp-dir-missing.mkv"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+
+            web_app._reconcile_encode_jobs(connection, self.config)
+
+            item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+            assert item_status_row is not None
+            self.assertEqual(item_status_row["status"], "planned")
+            self.assertIsNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
+
+        self.assertFalse(temp_dir.exists())
+
+    def test_reconcile_encode_jobs_cleans_host_staging_output_without_staged_artifact_row(self) -> None:
+        source_path = self._create_source_file("episode-host-orphan.mkv")
+        self.config.raw["remote_hosts"] = [
+            {
+                "mode": "ssh",
+                "host": "encode-remote",
+                "label": "Encode Remote",
+                "staging_root": str(self.root / "remote-staging"),
+                "capabilities": ["encode_queue"],
+            }
+        ]
+        host_staging_path = self.root / "remote-staging" / "tv" / "show" / "episode-host-orphan.mkv"
+        host_partial_path = self.root / "remote-staging" / "tv" / "show" / "episode-host-orphan.partial.mkv"
+        host_staging_path.parent.mkdir(parents=True, exist_ok=True)
+        host_staging_path.write_text("staged")
+        host_partial_path.write_text("partial")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+
+            with patch("mediaforce.web.runtime.encode_runtime.run_remote_command") as run_remote_command_mock:
+                web_app._reconcile_encode_jobs(connection, self.config)
+
+            item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+            assert item_status_row is not None
+            self.assertEqual(item_status_row["status"], "planned")
+            self.assertEqual(run_remote_command_mock.call_count, 2)
+            scripted_paths = "\n".join(str(call.args[1][2]) for call in run_remote_command_mock.call_args_list)
+            self.assertIn(str(host_staging_path), scripted_paths)
+            self.assertIn(str(host_partial_path), scripted_paths)
+
+        self.assertTrue(host_staging_path.exists())
+        self.assertTrue(host_partial_path.exists())
+
+    def test_reconcile_encode_jobs_keeps_stream_host_cleanup_local(self) -> None:
+        source_path = self._create_source_file("episode-stream-host.mkv")
+        self.config.raw["remote_hosts"] = [
+            {
+                "mode": "ssh",
+                "host": "stream-remote",
+                "label": "Stream Remote",
+                "media_access": "stream",
+                "staging_root": str(self.root / "stream-staging"),
+                "capabilities": ["encode_queue"],
+            }
+        ]
+        staging_path = self.root / "stream-staging" / ".mediaforce-ab-av1-stream" / "episode-stream-host.mkv"
+        partial_path = self.root / "stream-staging" / ".mediaforce-ab-av1-stream" / "episode-stream-host.partial.mkv"
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("staged")
+        partial_path.write_text("partial")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+
+            with patch("mediaforce.web.runtime.encode_runtime.run_remote_command") as run_remote_command_mock:
+                web_app._reconcile_encode_jobs(connection, self.config)
+
+            item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+            assert item_status_row is not None
+            self.assertEqual(item_status_row["status"], "planned")
+            self.assertIsNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
+            run_remote_command_mock.assert_not_called()
+
+        self.assertFalse(staging_path.exists())
+        self.assertFalse(partial_path.exists())
+        self.assertFalse(staging_path.parent.exists())
+
+    def test_remove_remote_stale_staging_path_only_prunes_temp_parents(self) -> None:
+        host = {"mode": "ssh", "host": "encode-remote"}
+        ordinary_path = Path("/srv/media/transcode/top-level-file.mkv")
+        temp_path = Path("/srv/media/transcode/.mediaforce-ab-av1-stale/clip.mkv")
+
+        with patch("mediaforce.web.runtime.encode_runtime.run_remote_command") as run_remote_command_mock:
+            encode_runtime._remove_remote_stale_staging_path(ordinary_path, host)
+            encode_runtime._remove_remote_stale_staging_path(temp_path, host)
+
+        self.assertEqual(run_remote_command_mock.call_count, 2)
+        ordinary_script = str(run_remote_command_mock.call_args_list[0].args[1][2])
+        temp_script = str(run_remote_command_mock.call_args_list[1].args[1][2])
+        self.assertIn("rm -f /srv/media/transcode/top-level-file.mkv", ordinary_script)
+        self.assertNotIn("rmdir", ordinary_script)
+        self.assertIn("rm -f /srv/media/transcode/.mediaforce-ab-av1-stale/clip.mkv", temp_script)
+        self.assertIn("rmdir /srv/media/transcode/.mediaforce-ab-av1-stale", temp_script)
+
     def test_host_selection_prefers_other_encode_capable_host_during_cooldown(self) -> None:
         job = {
             "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
@@ -251,6 +467,732 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(host_payload["key"], "remote-b")
         self.assertIsNone(waiting_reason)
 
+    def test_host_selection_uses_backup_host_after_repeated_transient_failures(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "remote-a",
+                "label": "Remote A",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+            {
+                "key": "remote-b",
+                "label": "Remote B",
+                "priority": 70,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+        ]
+        manifest_path = self._write_manifest("manifest-global-host-backoff.json", [{"library_item_id": 1}])
+        second_manifest_path = self._write_manifest("manifest-global-host-backoff-b.json", [{"library_item_id": 2}])
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "cooling-remote-a",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(manifest_path),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 2,
+                    "process_pid": None,
+                    "error": "ssh: connect to host remote-a port 22: Operation timed out",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "cooling-remote-a-b",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(second_manifest_path),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": "Read from remote host remote-a: Operation timed out",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNotNone(host_payload)
+        assert host_payload is not None
+        self.assertEqual(host_payload["key"], "remote-b")
+        self.assertIsNone(waiting_reason)
+
+    def test_host_selection_does_not_globally_demote_host_after_single_transient_failure(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "remote-a",
+                "label": "Remote A",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+            {
+                "key": "remote-b",
+                "label": "Remote B",
+                "priority": 70,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+        ]
+        manifest_path = self._write_manifest("manifest-single-host-blip.json", [{"library_item_id": 1}])
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "single-blip-remote-a",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(manifest_path),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": "ssh: connect to host remote-a port 22: Operation timed out",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNotNone(host_payload)
+        assert host_payload is not None
+        self.assertEqual(host_payload["key"], "remote-a")
+        self.assertIsNone(waiting_reason)
+
+    def test_host_selection_waits_when_only_repeatedly_failing_host_is_available(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "remote-a",
+                "label": "Remote A",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+        ]
+        manifest_path = self._write_manifest("manifest-only-bad-host.json", [{"library_item_id": 1}])
+        second_manifest_path = self._write_manifest("manifest-only-bad-host-b.json", [{"library_item_id": 2}])
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "only-host-cooling",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(manifest_path),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 2,
+                    "process_pid": None,
+                    "error": "Read from remote host remote-a: Operation timed out",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "only-host-cooling-b",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(second_manifest_path),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": "ssh: connect to host remote-a port 22: Connection refused",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNone(host_payload)
+        self.assertEqual(waiting_reason, "waiting for host cooldown to expire on Remote A")
+
+    def test_host_selection_uses_startable_backup_when_active_host_is_globally_blocked(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "remote-a",
+                "label": "Remote A",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+            {
+                "key": "ct103",
+                "label": "CT103",
+                "priority": 70,
+                "capabilities": ["encode_queue"],
+                "available": False,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "start_command": "ssh prox-main.shiny pct start 103",
+                "schedule_profile": "always",
+            },
+        ]
+        manifest_path = self._write_manifest("manifest-active-blocked-host.json", [{"library_item_id": 1}])
+        second_manifest_path = self._write_manifest("manifest-active-blocked-host-b.json", [{"library_item_id": 2}])
+        with open_db(self.config.paths.db_path) as connection:
+            for job_id, path in (("blocked-remote-a", manifest_path), ("blocked-remote-a-b", second_manifest_path)):
+                save_encode_job(
+                    connection,
+                    {
+                        "job_id": job_id,
+                        "prefix": "tv/show",
+                        "job_kind": "shard",
+                        "parent_job_id": None,
+                        "status": "queued",
+                        "manifest_path": str(path),
+                        "item_count": 1,
+                        "saved_profile_path": None,
+                        "manifest_indexes": [0],
+                        "host": {},
+                        "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
+                        "notes": "",
+                        "bypass_schedule": False,
+                        "attempt_count": 1,
+                        "process_pid": None,
+                        "error": "ssh: connect to host remote-a port 22: Operation timed out",
+                        "leased_at": None,
+                        "lease_expires_at": None,
+                        "heartbeat_at": None,
+                        "worker_id": None,
+                        "retry_not_before": None,
+                        "waiting_reason": None,
+                        "terminal_reason": None,
+                        "last_failure_kind": "ssh_transport",
+                        "last_failure_at": web_app._now_iso(),
+                        "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                        "created_at": web_app._now_iso(),
+                        "started_at": web_app._now_iso(),
+                        "finished_at": None,
+                        "updated_at": web_app._now_iso(),
+                    },
+                )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNotNone(host_payload)
+        assert host_payload is not None
+        self.assertEqual(host_payload["key"], "ct103")
+        self.assertIsNone(waiting_reason)
+
+    def test_host_selection_blocks_globally_quarantined_host_by_host_alias(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "",
+                "host": "remote-a.internal",
+                "label": "Primary Encoder",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+            {
+                "key": "remote-b",
+                "host": "remote-b.internal",
+                "label": "Backup Encoder",
+                "priority": 70,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+        ]
+        manifest_path = self._write_manifest("manifest-host-alias-quarantine.json", [{"library_item_id": 1}])
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "host-alias-cooling-a",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(manifest_path),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"host": "remote-a.internal", "failure_streak": 2},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 2,
+                    "process_pid": None,
+                    "error": "ssh: connect to host remote-a.internal port 22: Operation timed out",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNotNone(host_payload)
+        assert host_payload is not None
+        self.assertEqual(host_payload["key"], "remote-b")
+        self.assertIsNone(waiting_reason)
+
+    def test_host_selection_merges_global_quarantine_rows_across_alias_drift(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "cbusillo@10.0.0.5",
+                "host": "10.0.0.5",
+                "label": "Primary Encoder",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+            {
+                "key": "remote-b",
+                "host": "10.0.0.6",
+                "label": "Backup Encoder",
+                "priority": 70,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+        ]
+        manifest_a = self._write_manifest("manifest-merged-quarantine-a.json", [{"library_item_id": 1}])
+        manifest_b = self._write_manifest("manifest-merged-quarantine-b.json", [{"library_item_id": 2}])
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "merged-quarantine-a",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(manifest_a),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"key": "cbusillo@10.0.0.5", "host": "10.0.0.5", "failure_streak": 1},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": "ssh: connect to host 10.0.0.5 port 22: Operation timed out",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "merged-quarantine-b",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(manifest_b),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"label": "Primary Encoder", "host": "10.0.0.5", "failure_streak": 1},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": "Read from remote host 10.0.0.5: Operation timed out",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNotNone(host_payload)
+        assert host_payload is not None
+        self.assertEqual(host_payload["key"], "remote-b")
+        self.assertIsNone(waiting_reason)
+
+    def test_host_selection_ignores_malformed_last_host_json_in_global_quarantine_scan(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "remote-a",
+                "label": "Remote A",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            }
+        ]
+        manifest_path = self._write_manifest("manifest-malformed-host-json.json", [{"library_item_id": 1}])
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "malformed-host-json",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(manifest_path),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"key": "remote-a", "label": "Remote A"},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": "ssh: connect to host remote-a port 22: Operation timed out",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            connection.execute(
+                update(encode_jobs)
+                .where(encode_jobs.c.job_id == "malformed-host-json")
+                .values(last_host_json="{")
+            )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNotNone(host_payload)
+        assert host_payload is not None
+        self.assertEqual(host_payload["key"], "remote-a")
+        self.assertIsNone(waiting_reason)
+
+    def test_global_quarantine_does_not_match_hosts_by_shared_label_only(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "remote-a",
+                "host": "10.0.0.10",
+                "label": "Shared Encoder",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+            {
+                "key": "remote-b",
+                "host": "10.0.0.20",
+                "label": "Shared Encoder",
+                "priority": 70,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+        ]
+        manifest_a = self._write_manifest("manifest-shared-label-a.json", [{"library_item_id": 1}])
+        manifest_b = self._write_manifest("manifest-shared-label-b.json", [{"library_item_id": 2}])
+        with open_db(self.config.paths.db_path) as connection:
+            for job_id, manifest_path in (("shared-label-cool-a", manifest_a), ("shared-label-cool-b", manifest_b)):
+                save_encode_job(
+                    connection,
+                    {
+                        "job_id": job_id,
+                        "prefix": "tv/show",
+                        "job_kind": "shard",
+                        "parent_job_id": None,
+                        "status": "queued",
+                        "manifest_path": str(manifest_path),
+                        "item_count": 1,
+                        "saved_profile_path": None,
+                        "manifest_indexes": [0],
+                        "host": {},
+                        "last_host": {"key": "remote-b", "host": "10.0.0.20", "label": "Shared Encoder", "failure_streak": 1},
+                        "notes": "",
+                        "bypass_schedule": False,
+                        "attempt_count": 1,
+                        "process_pid": None,
+                        "error": "ssh: connect to host 10.0.0.20 port 22: Operation timed out",
+                        "leased_at": None,
+                        "lease_expires_at": None,
+                        "heartbeat_at": None,
+                        "worker_id": None,
+                        "retry_not_before": None,
+                        "waiting_reason": None,
+                        "terminal_reason": None,
+                        "last_failure_kind": "ssh_transport",
+                        "last_failure_at": web_app._now_iso(),
+                        "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                        "created_at": web_app._now_iso(),
+                        "started_at": web_app._now_iso(),
+                        "finished_at": None,
+                        "updated_at": web_app._now_iso(),
+                    },
+                )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNotNone(host_payload)
+        assert host_payload is not None
+        self.assertEqual(host_payload["key"], "remote-a")
+        self.assertIsNone(waiting_reason)
+
+    def test_global_quarantine_wait_message_is_deterministic(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "remote-b",
+                "host": "10.0.0.20",
+                "label": "Backup Encoder",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+            {
+                "key": "remote-a",
+                "host": "10.0.0.10",
+                "label": "Primary Encoder",
+                "priority": 80,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+        ]
+        manifests = [
+            self._write_manifest("manifest-deterministic-wait-a.json", [{"library_item_id": 1}]),
+            self._write_manifest("manifest-deterministic-wait-b.json", [{"library_item_id": 2}]),
+            self._write_manifest("manifest-deterministic-wait-c.json", [{"library_item_id": 3}]),
+            self._write_manifest("manifest-deterministic-wait-d.json", [{"library_item_id": 4}]),
+        ]
+        rows = [
+            ("det-wait-b1", manifests[0], {"key": "remote-b", "host": "10.0.0.20", "label": "Backup Encoder", "failure_streak": 1}, "ssh: connect to host 10.0.0.20 port 22: Operation timed out", "2999-01-02T00:00:00+00:00"),
+            ("det-wait-b2", manifests[1], {"key": "remote-b", "host": "10.0.0.20", "label": "Backup Encoder", "failure_streak": 1}, "Read from remote host 10.0.0.20: Operation timed out", "2999-01-02T00:00:00+00:00"),
+            ("det-wait-a1", manifests[2], {"key": "remote-a", "host": "10.0.0.10", "label": "Primary Encoder", "failure_streak": 1}, "ssh: connect to host 10.0.0.10 port 22: Operation timed out", "2999-01-01T00:00:00+00:00"),
+            ("det-wait-a2", manifests[3], {"key": "remote-a", "host": "10.0.0.10", "label": "Primary Encoder", "failure_streak": 1}, "Read from remote host 10.0.0.10: Operation timed out", "2999-01-01T00:00:00+00:00"),
+        ]
+        with open_db(self.config.paths.db_path) as connection:
+            for job_id, manifest_path, last_host, error_message, cooldown_until in rows:
+                save_encode_job(
+                    connection,
+                    {
+                        "job_id": job_id,
+                        "prefix": "tv/show",
+                        "job_kind": "shard",
+                        "parent_job_id": None,
+                        "status": "queued",
+                        "manifest_path": str(manifest_path),
+                        "item_count": 1,
+                        "saved_profile_path": None,
+                        "manifest_indexes": [0],
+                        "host": {},
+                        "last_host": last_host,
+                        "notes": "",
+                        "bypass_schedule": False,
+                        "attempt_count": 1,
+                        "process_pid": None,
+                        "error": error_message,
+                        "leased_at": None,
+                        "lease_expires_at": None,
+                        "heartbeat_at": None,
+                        "worker_id": None,
+                        "retry_not_before": None,
+                        "waiting_reason": None,
+                        "terminal_reason": None,
+                        "last_failure_kind": "ssh_transport",
+                        "last_failure_at": web_app._now_iso(),
+                        "host_cooldown_until": cooldown_until,
+                        "created_at": web_app._now_iso(),
+                        "started_at": web_app._now_iso(),
+                        "finished_at": None,
+                        "updated_at": web_app._now_iso(),
+                    },
+                )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNone(host_payload)
+        self.assertEqual(waiting_reason, "waiting for host cooldown to expire on Primary Encoder")
+
     def test_deterministic_failure_moves_job_to_needs_attention(self) -> None:
         source_path = self._create_source_file("episode-d.mkv")
         staging_path = self._staging_path("episode-d.mkv")
@@ -285,6 +1227,225 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             assert updated is not None
             self.assertEqual(updated["status"], "needs_attention")
             self.assertEqual(updated["terminal_reason"], "deterministic")
+
+    def test_transient_ssh_failure_stays_in_retry_backoff_after_attempt_cap(self) -> None:
+        source_path = self._create_source_file("episode-host-retry.mkv")
+        staging_path = self._staging_path("episode-host-retry.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-host-retry.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-host-retry",
+                manifest_name="manifest-host-retry.json",
+                host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                status="running",
+                attempt_count=3,
+            )
+
+            job = load_encode_job(connection, "job-host-retry")
+            assert job is not None
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind="ssh_transport",
+                error_message="ssh: connect to host remote-a port 22: Operation timed out",
+            )
+
+            updated = load_encode_job(connection, "job-host-retry")
+            self.assertIsNotNone(updated)
+            assert updated is not None
+            self.assertEqual(updated["status"], "retry_backoff")
+            self.assertIsNone(updated["terminal_reason"])
+            self.assertEqual(updated["last_failure_kind"], "ssh_transport")
+            self.assertIn("SSH transport failure", str(updated["waiting_reason"]))
+            self.assertIsNone(updated["finished_at"])
+            self.assertIsNotNone(updated["host_cooldown_until"])
+            self.assertEqual(updated["last_host"]["failure_streak"], 1)
+
+    def test_same_job_repeated_host_failures_increment_last_host_failure_streak(self) -> None:
+        source_path = self._create_source_file("episode-host-repeat.mkv")
+        staging_path = self._staging_path("episode-host-repeat.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-host-repeat.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-host-repeat",
+                manifest_name="manifest-host-repeat.json",
+                host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                status="running",
+                attempt_count=2,
+            )
+            job = load_encode_job(connection, "job-host-repeat")
+            assert job is not None
+            job["last_host"] = {"key": "remote-a", "label": "Remote A", "mode": "ssh", "failure_streak": 1}
+            save_encode_job(connection, job)
+
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind="ssh_transport",
+                error_message="ssh: connect to host remote-a port 22: Operation timed out",
+            )
+
+            updated = load_encode_job(connection, "job-host-repeat")
+            self.assertIsNotNone(updated)
+            assert updated is not None
+            self.assertEqual(updated["status"], "retry_backoff")
+            self.assertEqual(updated["last_host"]["failure_streak"], 2)
+
+    def test_same_job_repeated_host_failures_preserve_streak_across_alias_change(self) -> None:
+        source_path = self._create_source_file("episode-host-repeat-alias.mkv")
+        staging_path = self._staging_path("episode-host-repeat-alias.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-host-repeat-alias.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-host-repeat-alias",
+                manifest_name="manifest-host-repeat-alias.json",
+                host={"key": "cbusillo@10.0.0.5", "host": "10.0.0.5", "label": "Primary Encoder", "mode": "ssh"},
+                status="running",
+                attempt_count=2,
+            )
+            job = load_encode_job(connection, "job-host-repeat-alias")
+            assert job is not None
+            job["last_host"] = {"host": "10.0.0.5", "label": "Primary Encoder", "failure_streak": 1}
+            save_encode_job(connection, job)
+
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind="ssh_transport",
+                error_message="ssh: connect to host 10.0.0.5 port 22: Operation timed out",
+            )
+
+            updated = load_encode_job(connection, "job-host-repeat-alias")
+            self.assertIsNotNone(updated)
+            assert updated is not None
+            self.assertEqual(updated["status"], "retry_backoff")
+            self.assertEqual(updated["last_host"]["failure_streak"], 2)
+            self.assertEqual(updated["last_host"]["host"], "10.0.0.5")
+            self.assertEqual(updated["last_host"]["key"], "cbusillo@10.0.0.5")
+
+    def test_host_selection_uses_backup_host_after_single_job_repeated_failures(self) -> None:
+        job = {}
+        statuses = [
+            {
+                "key": "remote-a",
+                "label": "Remote A",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+            {
+                "key": "remote-b",
+                "label": "Remote B",
+                "priority": 70,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            },
+        ]
+        manifest_path = self._write_manifest("manifest-single-job-repeated-host.json", [{"library_item_id": 1}])
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "single-job-remote-a-repeat",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": None,
+                    "status": "queued",
+                    "manifest_path": str(manifest_path),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": [0],
+                    "host": {},
+                    "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a", "failure_streak": 2},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 2,
+                    "process_pid": None,
+                    "error": "Read from remote host remote-a: Operation timed out",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "ssh_transport",
+                    "last_failure_at": web_app._now_iso(),
+                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
+                    "created_at": web_app._now_iso(),
+                    "started_at": web_app._now_iso(),
+                    "finished_at": None,
+                    "updated_at": web_app._now_iso(),
+                },
+            )
+            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNotNone(host_payload)
+        assert host_payload is not None
+        self.assertEqual(host_payload["key"], "remote-b")
+        self.assertIsNone(waiting_reason)
+
+    def test_permission_denied_ssh_failure_still_needs_attention_after_attempt_cap(self) -> None:
+        source_path = self._create_source_file("episode-host-permission.mkv")
+        staging_path = self._staging_path("episode-host-permission.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-host-permission.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-host-permission",
+                manifest_name="manifest-host-permission.json",
+                host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                status="running",
+                attempt_count=3,
+            )
+
+            job = load_encode_job(connection, "job-host-permission")
+            assert job is not None
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind="ssh_transport",
+                error_message="Permission denied (publickey).",
+            )
+
+            updated = load_encode_job(connection, "job-host-permission")
+            self.assertIsNotNone(updated)
+            assert updated is not None
+            self.assertEqual(updated["status"], "needs_attention")
+            self.assertEqual(updated["terminal_reason"], "max_attempts_exhausted")
 
     def test_runtime_settings_payload_normalizes_capabilities(self) -> None:
         payload = web_app._build_runtime_settings_payload(
@@ -1014,6 +2175,36 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(job["status"], "completed")
         self.assertIsNone(job["error"])
 
+    def test_run_encode_job_resets_host_failure_streak_after_success(self) -> None:
+        manifest_path = self._write_manifest("manifest-reset-streak.json", [{"library_item_id": 1}])
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(
+                connection,
+                job_id="job-reset-streak",
+                manifest_name=manifest_path.name,
+                host={"key": "ct103", "host": "ct103", "label": "CT103", "stop_command": "ssh prox-main.shiny pct shutdown 103"},
+                status="running",
+                attempt_count=2,
+                lease_expires_at=web_app._now_iso(),
+            )
+            job = load_encode_job(connection, "job-reset-streak")
+            assert job is not None
+            job["last_host"] = {"key": "ct103", "host": "ct103", "label": "CT103", "failure_streak": 2}
+            save_encode_job(connection, job)
+        with patch("mediaforce.web.app._ensure_encode_host_ready", return_value=False), patch(
+                "mediaforce.web.app._stop_encode_host_if_configured"
+        ) as stop_mock, patch(
+            "mediaforce.web.app.encode_manifest_items", return_value=[]
+        ), patch("mediaforce.web.app.load_config", return_value=self.config):
+            web_app._run_encode_job(config_path=self.config.paths.config_path, job_id="job-reset-streak")
+        stop_mock.assert_not_called()
+        with open_db(self.config.paths.db_path) as connection:
+            job = load_encode_job(connection, "job-reset-streak")
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job["status"], "completed")
+        self.assertNotIn("failure_streak", job["last_host"])
+
     def test_full_scan_becomes_stale_when_library_roots_change(self) -> None:
         source_path = self._create_source_file("episode-a.mkv")
 
@@ -1346,6 +2537,394 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(card.statuses["validated"], 1)
         self.assertEqual(card.statuses["promoted"], 1)
 
+    def test_folder_cards_projected_reclaim_uses_known_validated_savings(self) -> None:
+        validated = self._create_source_file("episode-validated.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            validated_id = self._insert_library_item(connection, validated, status="validated")
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == validated_id)
+                .values(
+                    size_bytes=2 * 1024 * 1024 * 1024,
+                    rel_path=f"tv/show/Season 5/{validated.name}",
+                    parent_dir="tv/show/Season 5",
+                    video_codec="h264",
+                )
+            )
+            self._insert_staged_artifact(connection, validated_id, self._staging_path(validated.name))
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == validated_id)
+                .values(
+                    source_rel_path=f"tv/show/Season 5/{validated.name}",
+                    source_video_codec="h264",
+                    source_size_bytes=2 * 1024 * 1024 * 1024,
+                    bytes_saved=int(1.5 * 1024 * 1024 * 1024),
+                )
+            )
+
+            cards = web_app._list_folder_cards(self.config, connection)
+
+        matching_cards = [card for card in cards if card.prefix == "tv/show/Season 5"]
+        self.assertEqual(len(matching_cards), 1)
+        self.assertEqual(matching_cards[0].estimated_savings_bytes, 0)
+        self.assertEqual(matching_cards[0].known_saved_bytes, int(1.5 * 1024 * 1024 * 1024))
+        self.assertEqual(matching_cards[0].projected_reclaim_bytes, int(1.5 * 1024 * 1024 * 1024))
+
+    def test_preview_folder_cards_rank_by_pending_opportunity(self) -> None:
+        season_a_pending = self._create_source_file("season-a-pending.mkv")
+        season_a_promoted = self._create_source_file("season-a-promoted.mkv")
+        season_b_pending = self._create_source_file("season-b-pending.mkv")
+        season_b_validated = self._create_source_file("season-b-validated.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            season_a_pending_id = self._insert_library_item(connection, season_a_pending)
+            season_a_promoted_id = self._insert_library_item(connection, season_a_promoted, status="promoted")
+            season_b_pending_id = self._insert_library_item(connection, season_b_pending)
+            season_b_validated_id = self._insert_library_item(connection, season_b_validated, status="validated")
+
+            for item_id, rel_path, status in (
+                (season_a_pending_id, "tv/show/Season A/season-a-pending.mkv", "planned"),
+                (season_a_promoted_id, "tv/show/Season A/season-a-promoted.mkv", "promoted"),
+                (season_b_pending_id, "tv/show/Season B/season-b-pending.mkv", "planned"),
+                (season_b_validated_id, "tv/show/Season B/season-b-validated.mkv", "validated"),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(
+                        size_bytes=1 * 1024 * 1024 * 1024,
+                        rel_path=rel_path,
+                        parent_dir=rel_path.rsplit("/", 1)[0],
+                        status=status,
+                    )
+                )
+
+            self._insert_staged_artifact(connection, season_b_validated_id, self._staging_path(season_b_validated.name))
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == season_b_validated_id)
+                .values(
+                    source_rel_path="tv/show/Season B/season-b-validated.mkv",
+                    source_video_codec="h264",
+                    source_size_bytes=2 * 1024 * 1024 * 1024,
+                    bytes_saved=int(5 * 1024 * 1024 * 1024),
+                )
+            )
+
+            def fake_estimate_savings(*args: Any, **kwargs: Any) -> int:
+                return 300 * 1024 * 1024
+
+            with patch.object(web_app, "_estimate_savings_bytes", autospec=True, side_effect=fake_estimate_savings):
+                cards = web_app._preview_folder_cards(self.config, connection)
+
+        self.assertEqual([card.prefix for card in cards], ["tv/show/Season B", "tv/show/Season A"])
+
+    def test_preview_folder_cards_use_projected_reclaim_when_pending_estimate_is_zero(self) -> None:
+        small_total = self._create_source_file("season-c-validated-small.mkv")
+        large_total = self._create_source_file("season-d-validated-large.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            small_total_id = self._insert_library_item(connection, small_total, status="validated")
+            large_total_id = self._insert_library_item(connection, large_total, status="validated")
+
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == small_total_id)
+                .values(
+                    size_bytes=1 * 1024 * 1024 * 1024,
+                    rel_path="tv/show/Season C/season-c-validated-small.mkv",
+                    parent_dir="tv/show/Season C",
+                )
+            )
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == large_total_id)
+                .values(
+                    size_bytes=4 * 1024 * 1024 * 1024,
+                    rel_path="tv/show/Season D/season-d-validated-large.mkv",
+                    parent_dir="tv/show/Season D",
+                )
+            )
+
+            for item_id, name, bytes_saved in (
+                (small_total_id, small_total.name, int(5 * 1024 * 1024 * 1024)),
+                (large_total_id, large_total.name, int(3 * 1024 * 1024 * 1024)),
+            ):
+                self._insert_staged_artifact(connection, item_id, self._staging_path(name))
+                connection.execute(
+                    update(staged_artifacts)
+                    .where(staged_artifacts.c.library_item_id == item_id)
+                    .values(
+                        source_rel_path=f"tv/show/{'Season C' if item_id == small_total_id else 'Season D'}/{name}",
+                        source_video_codec="h264",
+                        source_size_bytes=2 * 1024 * 1024 * 1024,
+                        bytes_saved=bytes_saved,
+                    )
+                )
+
+            with patch.object(web_app, "_estimate_savings_bytes", autospec=True, return_value=0):
+                cards = web_app._preview_folder_cards(self.config, connection)
+
+        self.assertEqual([card.prefix for card in cards], ["tv/show/Season C", "tv/show/Season D"])
+
+    def test_preview_folder_cards_rank_by_projected_reclaim_when_confirmed_savings_dominate(self) -> None:
+        season_a_pending = self._create_source_file("season-a-pending.mkv")
+        season_a_validated = self._create_source_file("season-a-validated.mkv")
+        season_b_pending = self._create_source_file("season-b-pending.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            season_a_pending_id = self._insert_library_item(connection, season_a_pending)
+            season_a_validated_id = self._insert_library_item(connection, season_a_validated, status="validated")
+            season_b_pending_id = self._insert_library_item(connection, season_b_pending)
+
+            for item_id, rel_path, status in (
+                (season_a_pending_id, "tv/show/Season A/season-a-pending.mkv", "planned"),
+                (season_a_validated_id, "tv/show/Season A/season-a-validated.mkv", "validated"),
+                (season_b_pending_id, "tv/show/Season B/season-b-pending.mkv", "planned"),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(
+                        size_bytes=1 * 1024 * 1024 * 1024,
+                        rel_path=rel_path,
+                        parent_dir=rel_path.rsplit("/", 1)[0],
+                        status=status,
+                    )
+                )
+
+            self._insert_staged_artifact(connection, season_a_validated_id, self._staging_path(season_a_validated.name))
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == season_a_validated_id)
+                .values(
+                    source_rel_path="tv/show/Season A/season-a-validated.mkv",
+                    source_video_codec="h264",
+                    source_size_bytes=2 * 1024 * 1024 * 1024,
+                    bytes_saved=int(5 * 1024 * 1024 * 1024),
+                )
+            )
+
+            with patch.object(
+                    web_app,
+                    "_estimate_savings_bytes",
+                    autospec=True,
+                    side_effect=[50 * 1024 * 1024, 2 * 1024 * 1024 * 1024],
+            ):
+                cards = web_app._preview_folder_cards(self.config, connection)
+
+        self.assertEqual([card.prefix for card in cards], ["tv/show/Season A", "tv/show/Season B"])
+
+    def test_list_folder_cards_rank_by_pending_opportunity(self) -> None:
+        season_a_pending = self._create_source_file("season-a-pending.mkv")
+        season_a_promoted = self._create_source_file("season-a-promoted.mkv")
+        season_b_pending = self._create_source_file("season-b-pending.mkv")
+        season_b_validated = self._create_source_file("season-b-validated.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            season_a_pending_id = self._insert_library_item(connection, season_a_pending)
+            season_a_promoted_id = self._insert_library_item(connection, season_a_promoted, status="promoted")
+            season_b_pending_id = self._insert_library_item(connection, season_b_pending)
+            season_b_validated_id = self._insert_library_item(connection, season_b_validated, status="validated")
+
+            for item_id, rel_path, status in (
+                (season_a_pending_id, "tv/show/Season A/season-a-pending.mkv", "planned"),
+                (season_a_promoted_id, "tv/show/Season A/season-a-promoted.mkv", "promoted"),
+                (season_b_pending_id, "tv/show/Season B/season-b-pending.mkv", "planned"),
+                (season_b_validated_id, "tv/show/Season B/season-b-validated.mkv", "validated"),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(
+                        size_bytes=1 * 1024 * 1024 * 1024,
+                        rel_path=rel_path,
+                        parent_dir=rel_path.rsplit("/", 1)[0],
+                        status=status,
+                    )
+                )
+
+            self._insert_staged_artifact(connection, season_b_validated_id, self._staging_path(season_b_validated.name))
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == season_b_validated_id)
+                .values(
+                    source_rel_path="tv/show/Season B/season-b-validated.mkv",
+                    source_video_codec="h264",
+                    source_size_bytes=2 * 1024 * 1024 * 1024,
+                    bytes_saved=int(5 * 1024 * 1024 * 1024),
+                )
+            )
+
+            def fake_estimate_savings(*args: Any, **kwargs: Any) -> int:
+                return 300 * 1024 * 1024
+
+            with (
+                    patch.object(web_app, "_age_days", autospec=True, return_value=42.0),
+                    patch.object(web_app, "_estimate_savings_bytes", autospec=True, side_effect=fake_estimate_savings),
+            ):
+                cards = web_app._list_folder_cards(self.config, connection)
+
+        self.assertEqual([card.prefix for card in cards], ["tv/show/Season B", "tv/show/Season A"])
+
+    def test_list_folder_cards_use_projected_reclaim_when_sort_score_is_zero(self) -> None:
+        small_total = self._create_source_file("season-c-validated-small.mkv")
+        large_total = self._create_source_file("season-d-validated-large.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            small_total_id = self._insert_library_item(connection, small_total, status="validated")
+            large_total_id = self._insert_library_item(connection, large_total, status="validated")
+
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == small_total_id)
+                .values(
+                    size_bytes=1 * 1024 * 1024 * 1024,
+                    rel_path="tv/show/Season C/season-c-validated-small.mkv",
+                    parent_dir="tv/show/Season C",
+                )
+            )
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == large_total_id)
+                .values(
+                    size_bytes=4 * 1024 * 1024 * 1024,
+                    rel_path="tv/show/Season D/season-d-validated-large.mkv",
+                    parent_dir="tv/show/Season D",
+                )
+            )
+
+            for item_id, name, bytes_saved in (
+                (small_total_id, small_total.name, int(5 * 1024 * 1024 * 1024)),
+                (large_total_id, large_total.name, int(3 * 1024 * 1024 * 1024)),
+            ):
+                self._insert_staged_artifact(connection, item_id, self._staging_path(name))
+                connection.execute(
+                    update(staged_artifacts)
+                    .where(staged_artifacts.c.library_item_id == item_id)
+                    .values(
+                        source_rel_path=f"tv/show/{'Season C' if item_id == small_total_id else 'Season D'}/{name}",
+                        source_video_codec="h264",
+                        source_size_bytes=2 * 1024 * 1024 * 1024,
+                        bytes_saved=bytes_saved,
+                    )
+                )
+
+            with (
+                    patch.object(web_app, "_age_days", autospec=True, return_value=42.0),
+                    patch.object(web_app, "_estimate_savings_bytes", autospec=True, return_value=0),
+            ):
+                cards = web_app._list_folder_cards(self.config, connection)
+
+        self.assertEqual([card.prefix for card in cards], ["tv/show/Season C", "tv/show/Season D"])
+
+    def test_list_folder_cards_rank_by_projected_reclaim_when_confirmed_savings_dominate(self) -> None:
+        season_a_pending = self._create_source_file("season-a-pending.mkv")
+        season_a_validated = self._create_source_file("season-a-validated.mkv")
+        season_b_pending = self._create_source_file("season-b-pending.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            season_a_pending_id = self._insert_library_item(connection, season_a_pending)
+            season_a_validated_id = self._insert_library_item(connection, season_a_validated, status="validated")
+            season_b_pending_id = self._insert_library_item(connection, season_b_pending)
+
+            for item_id, rel_path, status in (
+                (season_a_pending_id, "tv/show/Season A/season-a-pending.mkv", "planned"),
+                (season_a_validated_id, "tv/show/Season A/season-a-validated.mkv", "validated"),
+                (season_b_pending_id, "tv/show/Season B/season-b-pending.mkv", "planned"),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(
+                        size_bytes=1 * 1024 * 1024 * 1024,
+                        rel_path=rel_path,
+                        parent_dir=rel_path.rsplit("/", 1)[0],
+                        status=status,
+                    )
+                )
+
+            self._insert_staged_artifact(connection, season_a_validated_id, self._staging_path(season_a_validated.name))
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == season_a_validated_id)
+                .values(
+                    source_rel_path="tv/show/Season A/season-a-validated.mkv",
+                    source_video_codec="h264",
+                    source_size_bytes=2 * 1024 * 1024 * 1024,
+                    bytes_saved=int(5 * 1024 * 1024 * 1024),
+                )
+            )
+
+            with (
+                    patch.object(web_app, "_age_days", autospec=True, return_value=42.0),
+                    patch.object(
+                        web_app,
+                        "_estimate_savings_bytes",
+                        autospec=True,
+                        side_effect=[50 * 1024 * 1024, 2 * 1024 * 1024 * 1024],
+                    ),
+            ):
+                cards = web_app._list_folder_cards(self.config, connection)
+
+        self.assertEqual([card.prefix for card in cards], ["tv/show/Season A", "tv/show/Season B"])
+
+    def test_folder_cards_use_validated_samples_in_history_for_pending_items(self) -> None:
+        pending = self._create_source_file("episode-pending.mkv")
+        validated_one = self._create_source_file("episode-validated-one.mkv")
+        validated_two = self._create_source_file("episode-validated-two.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            pending_id = self._insert_library_item(connection, pending)
+            validated_one_id = self._insert_library_item(connection, validated_one, status="validated")
+            validated_two_id = self._insert_library_item(connection, validated_two, status="encoded")
+            for item_id, name, status in (
+                (pending_id, pending.name, "planned"),
+                (validated_one_id, validated_one.name, "validated"),
+                (validated_two_id, validated_two.name, "encoded"),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(
+                        size_bytes=2 * 1024 * 1024 * 1024,
+                        rel_path=f"tv/show/Season 6/{name}",
+                        parent_dir="tv/show/Season 6",
+                        video_codec="h264",
+                        status=status,
+                    )
+                )
+
+            for item_id, name, bytes_saved in (
+                (validated_one_id, validated_one.name, int(1.5 * 1024 * 1024 * 1024)),
+                (validated_two_id, validated_two.name, int(1.0 * 1024 * 1024 * 1024)),
+            ):
+                self._insert_staged_artifact(connection, item_id, self._staging_path(name))
+                connection.execute(
+                    update(staged_artifacts)
+                    .where(staged_artifacts.c.library_item_id == item_id)
+                    .values(
+                        source_rel_path=f"tv/show/Season 6/{name}",
+                        source_video_codec="h264",
+                        source_size_bytes=2 * 1024 * 1024 * 1024,
+                        bytes_saved=bytes_saved,
+                    )
+                )
+
+            with patch.object(web_app, "_estimate_savings_bytes", autospec=True, return_value=0):
+                cards = web_app._list_folder_cards(self.config, connection)
+
+        matching_cards = [card for card in cards if card.prefix == "tv/show/Season 6"]
+        self.assertEqual(len(matching_cards), 1)
+        self.assertEqual(matching_cards[0].known_saved_bytes, int(2.5 * 1024 * 1024 * 1024))
+        self.assertGreater(matching_cards[0].estimated_savings_bytes, int(1.0 * 1024 * 1024 * 1024))
+        self.assertEqual(
+            matching_cards[0].projected_reclaim_bytes,
+            matching_cards[0].known_saved_bytes + matching_cards[0].estimated_savings_bytes,
+        )
+
     def test_folder_cards_use_folder_history_to_adjust_estimated_reclaim(self) -> None:
         pending = self._create_source_file("episode-pending.mkv")
         promoted_one = self._create_source_file("episode-promoted-one.mkv")
@@ -1390,6 +2969,118 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 1"]
         self.assertEqual(len(matching_cards), 1)
         self.assertEqual(matching_cards[0].estimated_savings_bytes, int(1.5 * 1024 * 1024 * 1024))
+        self.assertEqual(matching_cards[0].known_saved_bytes, 0)
+        self.assertEqual(matching_cards[0].projected_reclaim_bytes, int(1.5 * 1024 * 1024 * 1024))
+
+    def test_folder_cards_do_not_count_promoted_savings_toward_projected_reclaim_threshold(self) -> None:
+        pending = self._create_source_file("episode-pending.mkv")
+        promoted = self._create_source_file("episode-promoted.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            pending_id = self._insert_library_item(connection, pending)
+            promoted_id = self._insert_library_item(connection, promoted, status="promoted")
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == pending_id)
+                .values(
+                    size_bytes=2 * 1024 * 1024 * 1024,
+                    rel_path=f"tv/show/Season 7/{pending.name}",
+                    parent_dir="tv/show/Season 7",
+                    video_codec=None,
+                )
+            )
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == promoted_id)
+                .values(
+                    size_bytes=2 * 1024 * 1024 * 1024,
+                    rel_path=f"tv/show/Season 7/{promoted.name}",
+                    parent_dir="tv/show/Season 7",
+                    video_codec=None,
+                )
+            )
+
+            self._insert_staged_artifact(connection, promoted_id, self._staging_path(promoted.name))
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == promoted_id)
+                .values(
+                    promoted_at=web_app._now_iso(),
+                    source_rel_path=f"tv/show/Season 7/{promoted.name}",
+                    source_size_bytes=2 * 1024 * 1024 * 1024,
+                    bytes_saved=int(1.5 * 1024 * 1024 * 1024),
+                )
+            )
+
+            with patch.object(
+                    web_app,
+                    "_estimate_savings_bytes",
+                    autospec=True,
+                    return_value=50 * 1024 * 1024,
+            ):
+                cards = web_app._list_folder_cards(self.config, connection)
+
+        self.assertEqual([card for card in cards if card.prefix == "tv/show/Season 7"], [])
+
+    def test_cached_folder_cards_recomputes_after_reset_during_cache_miss(self) -> None:
+        folder_cards_runtime.reset_folder_card_cache()
+
+        stale_card = folder_cards_runtime.FolderCard(
+            prefix="tv/show/Season 8",
+            title="Season 8",
+            subtitle="TV",
+            scope_label="Season",
+            item_count=1,
+            pending_count=1,
+            total_size_bytes=2 * 1024 * 1024 * 1024,
+            estimated_savings_bytes=200 * 1024 * 1024,
+            known_saved_bytes=0,
+            projected_reclaim_bytes=200 * 1024 * 1024,
+            average_age_days=10.0,
+            sort_score=0.2,
+            statuses={"planned": 1},
+            video_codecs={"h264": 1},
+        )
+        fresh_card = folder_cards_runtime.FolderCard(
+            prefix="tv/show/Season 9",
+            title="Season 9",
+            subtitle="TV",
+            scope_label="Season",
+            item_count=1,
+            pending_count=1,
+            total_size_bytes=3 * 1024 * 1024 * 1024,
+            estimated_savings_bytes=300 * 1024 * 1024,
+            known_saved_bytes=0,
+            projected_reclaim_bytes=300 * 1024 * 1024,
+            average_age_days=20.0,
+            sort_score=0.3,
+            statuses={"planned": 1},
+            video_codecs={"h264": 1},
+        )
+        calls = {"count": 0}
+
+        def fake_list_folder_cards(*args: Any, **kwargs: Any) -> list[folder_cards_runtime.FolderCard]:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                folder_cards_runtime.reset_folder_card_cache()
+                return [stale_card]
+            return [fresh_card]
+
+        with patch.object(folder_cards_runtime, "folder_card_cache_key", return_value=("cache", 1, 1)):
+            with patch.object(folder_cards_runtime, "list_folder_cards", side_effect=fake_list_folder_cards):
+                cards = folder_cards_runtime.cached_folder_cards(
+                    self.config,
+                    Mock(),
+                    minimum_recommended_savings_bytes=100 * 1024 * 1024,
+                    folder_group=Mock(),
+                    age_days=Mock(),
+                    estimate_savings_bytes=Mock(),
+                    review_badge_for_prefix=Mock(return_value={"label": None, "tone": None}),
+                )
+
+        self.assertEqual(calls["count"], 2)
+        self.assertEqual([card.prefix for card in cards], [fresh_card.prefix])
+        folder_cards_runtime.reset_folder_card_cache()
 
     def test_folder_cards_require_multiple_labeled_samples_before_using_folder_history(self) -> None:
         pending = self._create_source_file("episode-pending.mkv")
@@ -2432,6 +4123,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             source_codec="h264",
             width=None,
             height=None,
+            detected_crop=None,
             process_controller=unittest.mock.ANY,
             host=host,
             quality_temp_dir=self.config.staging_root,
@@ -2439,10 +4131,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         sample_encode_mock.assert_called_once()
         self.assertEqual(sample_encode_mock.call_args.kwargs["host"], host)
         self.assertEqual(sample_encode_mock.call_args.kwargs["source_codec"], "h264")
+        self.assertIsNone(sample_encode_mock.call_args.kwargs["video_filter"])
         self.assertEqual(sample_encode_mock.call_args.kwargs["quality_temp_dir"], self.config.staging_root)
         encode_preview_mock.assert_called_once()
         self.assertEqual(encode_preview_mock.call_args.kwargs["host"], host)
         self.assertEqual(encode_preview_mock.call_args.kwargs["source_codec"], "h264")
+        self.assertIsNone(encode_preview_mock.call_args.kwargs["video_filter"])
         self.assertEqual(payload["host"], host)
         self.assertEqual(payload["compare_clips"][0]["path"], "/review-media/remote-run/item-00/compare-01-12m-00s.mkv")
 
@@ -2704,6 +4398,40 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         )):
             statuses = remote.collect_host_statuses(self.config)
         self.assertEqual([status.key for status in statuses], ["cbusillo@localhost", "cbusillo@example-host"])
+
+    def test_collect_host_statuses_checks_multiple_hosts_in_parallel(self) -> None:
+        configured_hosts = [
+            {"host": "first-host", "label": "First"},
+            {"host": "second-host", "label": "Second"},
+        ]
+        self.config.raw["remote_hosts"] = configured_hosts
+        second_started = threading.Event()
+
+        def _status_for(host: dict[str, object]) -> HostStatus:
+            return HostStatus(
+                key=str(host["host"]),
+                label=str(host["label"]),
+                mode="ssh",
+                priority=0,
+                capabilities=["encode_queue"],
+                available=True,
+                message="Mounted and ready",
+                missing_paths=[],
+                repo_path=None,
+            )
+
+        def _fake_remote_host_status(config: MediaforceConfig, host: dict[str, object]) -> HostStatus:
+            _ = config
+            if str(host.get("host")) == "first-host":
+                self.assertTrue(second_started.wait(timeout=0.5))
+                return _status_for(host)
+            second_started.set()
+            return _status_for(host)
+
+        with patch("mediaforce.remote._remote_host_status", side_effect=_fake_remote_host_status):
+            statuses = remote.collect_host_statuses(self.config)
+
+        self.assertEqual([status.key for status in statuses], ["first-host", "second-host"])
 
     def test_remote_host_status_targets_current_machine_without_ssh_probe(self) -> None:
         source_root = Path(next(iter(self.config.source_root_map.values())))
@@ -4326,6 +6054,42 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(temp_dir.parent, Path("/tmp/mediaforce-transcode"))
         self.assertTrue(temp_dir.name.startswith(".mediaforce-ab-av1-"))
 
+    def test_search_quality_passes_video_filter_to_ab_av1(self) -> None:
+        run_crf_search_mock = Mock(
+            return_value=QualitySearchResult(crf=28.0, metric="XPSNR", target=41.0, score=41.5, stdout="ok")
+        )
+
+        quality_search.search_quality(
+            Path("/tmp/input.mkv"),
+            {
+                "quality_metric": "xpsnr",
+                "target_xpsnr": 41.0,
+                "min_target_xpsnr": 39.0,
+                "target_relax_step_xpsnr": 1.0,
+                "pixel_format": "yuv420p10le",
+                "sample_every": "12m",
+                "sample_duration": "20s",
+                "min_crf": 20,
+                "max_crf": 35,
+                "max_encoded_percent": 70,
+                "black_bar_handling": "auto",
+                "max_height": 720,
+            },
+            width=1920,
+            height=1080,
+            detected_crop="1920:800:0:140",
+            host_media_access_for_host=Mock(return_value="mounted"),
+            select_quality_metric=quality.select_quality_metric,
+            build_svt_params=Mock(return_value=[]),
+            effective_video_preset=Mock(return_value=4),
+            run_crf_search=run_crf_search_mock,
+        )
+
+        self.assertEqual(
+            run_crf_search_mock.call_args.kwargs["video_filter"],
+            "crop=1920:800:0:140,scale=-2:720:flags=lanczos",
+        )
+
     def test_run_sample_encode_passes_temp_dir_to_ab_av1(self) -> None:
         with patch(
                 "mediaforce.quality._run_quality_command",
@@ -4975,6 +6739,94 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
         self.assertEqual(cmd[:3], ["/tmp/ffmpeg", "-y", "-i"])
 
+    def test_build_ffmpeg_command_applies_crop_then_downsample_filter(self) -> None:
+        with patch("mediaforce.execution.ffmpeg_binary", return_value="/tmp/ffmpeg"):
+            cmd = execution._build_ffmpeg_command(
+                source_path=Path("/tmp/input.mkv"),
+                staging_path=Path("/tmp/output.mkv"),
+                source_codec="h264",
+                video_policy={
+                    "encoder": "libsvtav1",
+                    "pixel_format": "yuv420p10le",
+                    "default_grain": 0,
+                    "grain_denoise": 0,
+                    "black_bar_handling": "auto",
+                    "max_height": 720,
+                    "downsample_algorithm": "lanczos",
+                },
+                preset=4,
+                audio_policy={},
+                subtitle_policy={},
+                selection={
+                    "audio_tracks": [{"index": 1, "codec_name": "aac", "channels": 2}],
+                    "subtitle_tracks": [],
+                },
+                quality=QualitySearchResult(crf=28.0, metric="XPSNR", target=41.0, score=41.5, stdout="ok"),
+                host={"platform": "macos", "videotoolbox_available": True},
+                width=1920,
+                height=1080,
+                detected_crop="1920:800:0:140",
+            )
+        self.assertIn("-vf", cmd)
+        self.assertEqual(cmd[cmd.index("-vf") + 1], "crop=1920:800:0:140,scale=-2:720:flags=lanczos")
+
+    def test_video_filter_skips_downsample_when_source_is_already_within_max_height(self) -> None:
+        self.assertIsNone(video_filters.build_video_filter({"max_height": 1080}, width=1920, height=800))
+
+    def test_video_filter_picks_most_common_meaningful_crop(self) -> None:
+        stderr = "\n".join(
+            [
+                "[Parsed_cropdetect_0] x crop=1920:1080:0:0",
+                "[Parsed_cropdetect_0] x crop=1920:800:0:140",
+                "[Parsed_cropdetect_0] x crop=1920:800:0:140",
+            ]
+        )
+        self.assertEqual(
+            video_filters.most_common_crop(stderr, source_width=1920, source_height=1080),
+            "1920:800:0:140",
+        )
+
+    def test_detect_video_crop_runs_only_for_smart_black_bar_policy(self) -> None:
+        with patch("mediaforce.execution.run_command") as run_mock:
+            self.assertIsNone(
+                execution.detect_video_crop(
+                    Path("/tmp/input.mkv"),
+                    {"black_bar_handling": "off"},
+                    width=1920,
+                    height=1080,
+                )
+            )
+        run_mock.assert_not_called()
+
+    def test_detect_video_crop_parses_ffmpeg_cropdetect_output(self) -> None:
+        with patch("mediaforce.execution.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
+            "mediaforce.execution.run_command",
+            return_value=subprocess.CompletedProcess(
+                args=["ffmpeg"],
+                returncode=0,
+                stdout="",
+                stderr="\n".join(
+                    [
+                        "[Parsed_cropdetect_0] crop=1920:1080:0:0",
+                        "[Parsed_cropdetect_0] crop=1920:800:0:140",
+                        "[Parsed_cropdetect_0] crop=1920:800:0:140",
+                    ]
+                ),
+            ),
+        ) as run_mock:
+            crop = execution.detect_video_crop(
+                Path("/tmp/input.mkv"),
+                {"black_bar_handling": "smart", "black_bar_detect_seconds": 8},
+                source_codec="h264",
+                width=1920,
+                height=1080,
+                duration_seconds=3600.0,
+            )
+
+        self.assertEqual(crop, "1920:800:0:140")
+        cmd = run_mock.call_args.args[0]
+        self.assertIn("cropdetect=limit=24:round=2:reset=0", cmd)
+
     def test_run_crf_search_enables_videotoolbox_for_h265_sources(self) -> None:
         with patch(
                 "mediaforce.quality._run_quality_command",
@@ -5232,6 +7084,39 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         decorated = web_app._decorate_encode_queue_for_scheduler(self.config, encode_queue)
 
         self.assertEqual(decorated["recent"][0]["attempt_summary"], "attempt 1 of 3")
+
+    def test_decorate_encode_queue_for_scheduler_attempt_summary_clamps_to_max(self) -> None:
+        manifest_path = self.root / "clamped-attempt-manifest.json"
+        manifest_path.write_text(json.dumps({"items": [{"duration_seconds": 60.0, "source_size_bytes": 1000}]}))
+        encode_queue = {
+            "state": {"is_paused": False, "stop_requested": False},
+            "running": [],
+            "queued": [],
+            "recent": [
+                {
+                    "job_id": "retrying-host-job",
+                    "prefix": "tv/House/Season 2",
+                    "status": "retry_backoff",
+                    "manifest_path": str(manifest_path),
+                    "item_count": 1,
+                    "host": {},
+                    "attempt_count": 7,
+                    "started_at": "2026-04-03T21:14:17+00:00",
+                    "progress": {
+                        "progress_state": "retry_backoff",
+                        "overall_completed_duration_seconds": 12.0,
+                    },
+                }
+            ],
+            "queued_count": 0,
+            "running_count": 0,
+            "retry_backoff_count": 1,
+            "needs_attention_count": 0,
+        }
+
+        decorated = web_app._decorate_encode_queue_for_scheduler(self.config, encode_queue)
+
+        self.assertEqual(decorated["recent"][0]["attempt_summary"], "attempt 3 of 3")
 
     def test_encode_queue_summary_copy_labels_eta_as_estimated(self) -> None:
         encode_queue = {
@@ -6148,6 +8033,85 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(ssh_cmd[-2], "cbusillo@extra-mbp.shiny")
         self.assertTrue(ssh_cmd[-1].startswith("sh -lc "))
         self.assertIn("ab-av1 --version", ssh_cmd[-1])
+
+    def test_worker_leadership_lease_blocks_second_acquire_until_release(self) -> None:
+        lock_path = self.root / "state" / "web" / "background-workers.lock"
+        first = WorkerLeadershipLease(lock_path, worker_name="background-workers")
+        second = WorkerLeadershipLease(lock_path, worker_name="background-workers")
+
+        self.assertTrue(first.acquire())
+        self.assertFalse(second.acquire())
+
+        owner = second.owner_metadata()
+        self.assertIsNotNone(owner)
+        assert owner is not None
+        self.assertEqual(owner["worker_name"], "background-workers")
+
+        first.release()
+        self.assertTrue(second.acquire())
+        second.release()
+
+    def test_start_background_workers_skips_startup_without_leadership(self) -> None:
+        with patch("mediaforce.web.app._acquire_background_worker_leadership", return_value=False), patch(
+                "mediaforce.web.app._start_calibration_queue_worker"
+        ) as start_calibration, patch("mediaforce.web.app._start_encode_queue_worker") as start_encode:
+            started = web_app._start_background_workers(self.config)
+
+        self.assertFalse(started)
+        start_calibration.assert_not_called()
+        start_encode.assert_not_called()
+
+    def test_start_background_workers_starts_both_workers_when_leader(self) -> None:
+        with patch("mediaforce.web.app._acquire_background_worker_leadership", return_value=True), patch(
+                "mediaforce.web.app._start_calibration_queue_worker"
+        ) as start_calibration, patch("mediaforce.web.app._start_encode_queue_worker") as start_encode:
+            started = web_app._start_background_workers(self.config)
+
+        self.assertTrue(started)
+        start_calibration.assert_called_once_with(self.config)
+        start_encode.assert_called_once_with(self.config)
+
+    def test_stop_encode_queue_action_sweeps_orphaned_processes_after_cancel(self) -> None:
+        cancel_queue_process = Mock()
+        sweep_orphaned_encode_processes = Mock()
+        clear_stale_encoding_items = Mock(return_value=4)
+
+        result = queue_actions_runtime.stop_encode_queue_action(
+            connection_factory=lambda: open_db(self.config.paths.db_path),
+            config=self.config,
+            now_iso=web_app._now_iso,
+            cancel_queue_process=cancel_queue_process,
+            sweep_orphaned_encode_processes=sweep_orphaned_encode_processes,
+            clear_stale_encoding_items=clear_stale_encoding_items,
+        )
+
+        self.assertTrue(result["ok"])
+        cancel_queue_process.assert_called_once_with()
+        sweep_orphaned_encode_processes.assert_called_once_with()
+        clear_stale_encoding_items.assert_called_once_with()
+        self.assertEqual(result["cleared_stale_item_count"], 4)
+
+        with open_db(self.config.paths.db_path) as connection:
+            state = load_queue_state(connection)
+        self.assertTrue(state["is_paused"])
+        self.assertTrue(state["stop_requested"])
+
+    def test_sweep_orphaned_encode_processes_only_targets_ssh_encode_hosts(self) -> None:
+        self.config.raw["remote_hosts"] = [
+            {"host": "encode-a", "label": "Encode A", "mode": "ssh", "capabilities": ["encode_queue"]},
+            {"host": "sample-only", "label": "Sample Only", "mode": "ssh", "capabilities": ["sample_calibration"]},
+            {"host": "local-ish", "label": "Local-ish", "mode": "local", "capabilities": ["encode_queue"]},
+        ]
+
+        with patch("mediaforce.web.app.run_remote_command") as run_remote_command_mock:
+            web_app._sweep_orphaned_encode_processes(self.config)
+
+        run_remote_command_mock.assert_called_once()
+        host_payload = run_remote_command_mock.call_args.args[0]
+        command_payload = run_remote_command_mock.call_args.args[1]
+        self.assertEqual(host_payload["host"], "encode-a")
+        self.assertEqual(command_payload[:2], ["sh", "-lc"])
+        self.assertIn("mediaforce_encoded_by=mediaforce", command_payload[2])
 
     def test_create_app_registers_folder_status_route_before_catch_all_folder_route(self) -> None:
         with patch("mediaforce.web.app.load_config", return_value=self.config), patch(

@@ -63,7 +63,7 @@
 			<SectionHead
 				eyebrow="Folders"
 				heading="Choose a folder to tune"
-				lede="Start here. Folders stay sorted by estimated reclaim so the strongest space-saving bets rise first."
+				lede="Start here. Folders stay weighted toward the biggest unfinished reclaim so the strongest remaining wins rise first."
 				size="compact"
 			/>
 			<div class="folder-header-side">
