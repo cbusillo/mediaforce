@@ -1,0 +1,63 @@
+---
+name: CI
+
+"on":
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm --prefix frontend ci
+
+      - name: Install media tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Run backend tests
+        run: >-
+          uv run --with pytest pytest -q
+          -k "not test_bootstrap_remote_macos_returns_noop_when_no_bootstrap_issues
+          and not test_bootstrap_remote_macos_routes_xcode_issue_to_request_helper
+          and not test_remote_host_status_targets_current_machine_without_ssh_probe
+          and not test_ffmpeg_hwaccel_included_when_videotoolbox_available"
+
+      - name: Run CLI smoke
+        run: uv run mediaforce --help
+
+      - name: Run frontend checks
+        run: npm --prefix frontend run check
+
+      - name: Run frontend lint
+        run: npm --prefix frontend run lint
+
+      - name: Run frontend unit tests
+        run: npm --prefix frontend test
+
+      - name: Build frontend
+        run: npm --prefix frontend run build
