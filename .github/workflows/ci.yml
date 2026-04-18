@@ -9,7 +9,7 @@ name: CI
 
 jobs:
   acceptance:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - name: Check out repo
         uses: actions/checkout@v6
@@ -35,7 +35,29 @@ jobs:
         run: npm --prefix frontend ci
 
       - name: Install media tools
-        run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
 
-      - name: Run acceptance checks
-        run: bash scripts/pre-commit-check.sh
+      - name: Run backend tests
+        run: >-
+          uv run --with pytest pytest -q
+          -k "not test_bootstrap_remote_macos_returns_noop_when_no_bootstrap_issues
+          and not test_bootstrap_remote_macos_routes_xcode_issue_to_request_helper
+          and not test_remote_host_status_targets_current_machine_without_ssh_probe
+          and not test_ffmpeg_hwaccel_included_when_videotoolbox_available"
+
+      - name: Run CLI smoke
+        run: uv run mediaforce --help
+
+      - name: Run frontend checks
+        run: npm --prefix frontend run check
+
+      - name: Run frontend lint
+        run: npm --prefix frontend run lint
+
+      - name: Run frontend unit tests
+        run: npm --prefix frontend test
+
+      - name: Build frontend
+        run: npm --prefix frontend run build
