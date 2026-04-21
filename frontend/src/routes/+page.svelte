@@ -221,6 +221,9 @@
 		if (dashboard.encode_queue.state.stop_requested || dashboard.encode_queue.state.is_paused) {
 			return 'warning-state';
 		}
+		if (dashboard.encode_queue.queued_count > 0 && readyHosts === 0) {
+			return 'schedule-state';
+		}
 		if (queueWorkersScheduledOffWindow && dashboard.encode_queue.queued_count > 0) {
 			return 'schedule-state';
 		}

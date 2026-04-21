@@ -51,6 +51,12 @@
 				Stop was requested across the fleet. Resume here when you are ready to restart queue work.
 			{:else if queuePaused}
 				Queue is paused. Resume it here or open Ops for full queue controls.
+			{:else if readyHosts === 0 && queueWorkersScheduledOffWindow}
+				{nextWorkerWindow
+					? `Queued work is waiting for the next worker window at ${nextWorkerWindow}.`
+					: 'Queued work is waiting for a scheduled worker window.'}
+			{:else if readyHosts === 0}
+				Queued work is waiting for a worker to become ready.
 			{:else if queueWorkersScheduledOffWindow}
 				{nextWorkerWindow
 					? `Waiting for the next worker window at ${nextWorkerWindow}.`
