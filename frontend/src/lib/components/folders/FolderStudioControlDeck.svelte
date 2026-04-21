@@ -29,6 +29,7 @@
 		onReviseDraft,
 		onApproveDraft,
 		approvalButtonDisabled,
+		approvalButtonLabel,
 		confirmButtonLabel,
 		canRunSample,
 		sampleRunActive,
@@ -62,6 +63,7 @@
 		onReviseDraft: () => void;
 		onApproveDraft: () => void;
 		approvalButtonDisabled: boolean;
+		approvalButtonLabel: string;
 		confirmButtonLabel: string;
 		canRunSample: boolean;
 		sampleRunActive: boolean;
@@ -196,7 +198,7 @@
 						disabled={approvalButtonDisabled}
 						onclick={onApproveDraft}
 					>
-						Approve and queue encode
+						{approvalButtonLabel}
 					</Button>
 					<Button variant="secondary" onclick={onReviseDraft}>Request changes</Button>
 				{:else}

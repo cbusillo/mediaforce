@@ -92,6 +92,7 @@ from mediaforce.web.runtime.folder_ai_tuning import (
 )
 from mediaforce.web.runtime.folder_tuning_advice import audio_tradeoff_hint, operator_request_signature, size_budget_feasibility
 from mediaforce.web.runtime.folder_tuning_helpers import proposal_alignment_issue
+from mediaforce.web.runtime.folder_state import _merge_review_pairs
 
 
 def _runtime_settings_writer(path_text: str, ready_path_text: str, mode: str) -> None:
@@ -733,6 +734,38 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertNotIn("scale=", filter_complex)
             self.assertNotIn("-ss", command)
         self.assertTrue(bundle_path.exists())
+
+    def test_merge_review_pairs_preserves_chronological_order(self) -> None:
+        merged_pairs = _merge_review_pairs(
+            [
+                {
+                    "timestamp_seconds": 20.0,
+                    "duration_seconds": 8.0,
+                    "source_clip": {"path": "/review-media/run/source-20.mp4"},
+                    "preview_clip": {"path": "/review-media/run/encoded-20.mp4"},
+                    "compare_clip": None,
+                }
+            ],
+            [
+                {
+                    "timestamp_seconds": 10.0,
+                    "duration_seconds": 8.0,
+                    "source_clip": {"path": "/review-media/run/source-10.mp4"},
+                    "preview_clip": {"path": "/review-media/run/encoded-10.mp4"},
+                    "compare_clip": {"path": "/review-media/run/compare-10.mkv"},
+                },
+                {
+                    "timestamp_seconds": 20.0,
+                    "duration_seconds": 8.0,
+                    "source_clip": {"path": "/review-media/run/source-20.mp4"},
+                    "preview_clip": {"path": "/review-media/run/encoded-20.mp4"},
+                    "compare_clip": {"path": "/review-media/run/compare-20.mkv"},
+                },
+            ],
+        )
+
+        self.assertEqual([pair["timestamp_seconds"] for pair in merged_pairs], [10.0, 20.0])
+        self.assertEqual(merged_pairs[1]["compare_clip"]["path"], "/review-media/run/compare-20.mkv")
 
     def test_review_compare_pair_entries_reads_retained_source_and_preview_clips(self) -> None:
         review_run_dir = self.config.paths.review_dir / "sample-run"

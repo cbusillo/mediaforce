@@ -2402,6 +2402,7 @@
 						onReviseDraft={enterRevisionFlow}
 						onApproveDraft={saveProfile}
 						{approvalButtonDisabled}
+						{approvalButtonLabel}
 						{confirmButtonLabel}
 						{canRunSample}
 						{sampleRunActive}

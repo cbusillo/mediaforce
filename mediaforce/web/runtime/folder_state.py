@@ -100,7 +100,7 @@ def _merge_review_pairs(
             continue
         seen_keys.add(key)
         merged.append(pair)
-    return merged
+    return sorted(merged, key=lambda pair: review_pair_key(float_value(pair.get("timestamp_seconds"))))
 
 
 def _valid_retained_review_pairs(
