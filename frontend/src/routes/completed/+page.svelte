@@ -252,12 +252,12 @@
 							{allFoldersSelected ? 'Clear selection' : 'Select all folders with backups'}
 						</Button>
 						<Button
-							variant="danger"
+							variant={selectedFolders.length > 0 ? 'danger' : 'ghost'}
 							onclick={clearSelectedBackups}
 							disabled={!cleanupAvailable || selectedFolders.length <= 0}
 							loading={actionState === 'selected'}
 						>
-							Delete selected backups
+							{selectedFolders.length > 0 ? 'Delete selected backups' : 'Select folders first'}
 						</Button>
 						<Button
 							variant="danger"
@@ -618,8 +618,35 @@
 	}
 
 	table {
-		width: max(100%, 70rem);
+		width: 100%;
+		min-width: 66rem;
 		border-collapse: collapse;
+		table-layout: fixed;
+	}
+
+	th:nth-child(1),
+	td:nth-child(1) {
+		width: 28%;
+	}
+
+	th:nth-child(2),
+	td:nth-child(2) {
+		width: 18%;
+	}
+
+	th:nth-child(3),
+	td:nth-child(3) {
+		width: 16%;
+	}
+
+	th:nth-child(4),
+	td:nth-child(4) {
+		width: 25%;
+	}
+
+	th:nth-child(5),
+	td:nth-child(5) {
+		width: 13%;
 	}
 
 	thead {
@@ -687,6 +714,7 @@
 
 	.row-title-link {
 		font-size: 1rem;
+		overflow-wrap: anywhere;
 	}
 
 	.row-subcopy,
@@ -823,7 +851,7 @@
 		}
 	}
 
-	@media (max-width: 720px) {
+	@media (max-width: 900px) {
 		.system-strip {
 			grid-template-columns: 1fr;
 		}
@@ -837,6 +865,15 @@
 		tr,
 		td {
 			display: block;
+			width: 100%;
+			min-width: 0;
+		}
+
+		table {
+			min-width: 0;
+		}
+
+		td:nth-child(n) {
 			width: 100%;
 		}
 
