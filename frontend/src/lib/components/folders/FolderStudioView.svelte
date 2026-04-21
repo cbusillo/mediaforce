@@ -1080,8 +1080,6 @@
 	});
 	const selectedReviewMoment = $derived(reviewMomentPills[selectedReviewPairIndex] ?? null);
 	const approvedProcessingMode = $derived(reviewGateStatus === 'accepted');
-	const showBenchColumn = $derived(!approvedProcessingMode || approvedChatOpen);
-	const showReviewEvidence = $derived(!approvedProcessingMode || approvedEvidenceOpen);
 	const reviewMomentCount = $derived(reviewMomentPills.length);
 	const hasPreviousReviewMoment = $derived(selectedReviewPairIndex > 0);
 	const hasNextReviewMoment = $derived(selectedReviewPairIndex < reviewMomentCount - 1);
@@ -1217,6 +1215,16 @@
 	const encodeJobTone = $derived.by(() => encodeStatusTone(encodeJobStatus));
 	const encodeJobStalled = $derived.by(() =>
 		['needs_attention', 'failed', 'stopped'].includes(encodeJobStatus)
+	);
+	const approvedEncodeRepairMode = $derived(approvedProcessingMode && encodeJobStalled);
+	const showBenchColumn = $derived(
+		!approvedProcessingMode || approvedChatOpen || approvedEncodeRepairMode
+	);
+	const showReviewEvidence = $derived(
+		!approvedProcessingMode || approvedEvidenceOpen || approvedEncodeRepairMode
+	);
+	const reviewPackCommandVisible = $derived(
+		hasFullCompareDownload && (!approvedProcessingMode || approvedEncodeRepairMode)
 	);
 	const encodeJobChipLabel = $derived.by(() => {
 		if (encodeJobStatus === 'queued' && encodeQueueStopping) {
@@ -1781,6 +1789,29 @@
 		composer.scrollIntoView({ behavior: 'smooth', block: 'center' });
 	}
 
+	function encodeRepairNote() {
+		const reason = encodeJobDetail || 'The approved folder encode stopped before it finished.';
+		return `This approved folder encode needs attention: ${reason}. Diagnose the likely policy issue and draft a safer recovery sample for this folder.`;
+	}
+
+	async function askBenchForEncodeRepair() {
+		approvedChatOpen = true;
+		if (!note.trim()) {
+			note = encodeRepairNote();
+		}
+		await focusBenchComposer();
+	}
+
+	async function focusReviewEvidence() {
+		approvedEvidenceOpen = true;
+		if (!browser) return;
+		await tick();
+		document.querySelector('.review-player-shell-block, .review-pack-command')?.scrollIntoView({
+			behavior: 'smooth',
+			block: 'start'
+		});
+	}
+
 	async function enterRevisionFlow() {
 		approvedChatOpen = true;
 		approvedEvidenceOpen = false;
@@ -1794,12 +1825,8 @@
 
 	async function toggleApprovedEvidence() {
 		approvedEvidenceOpen = !approvedEvidenceOpen;
-		if (!approvedEvidenceOpen || !browser) return;
-		await tick();
-		document.querySelector('.review-player-shell-block')?.scrollIntoView({
-			behavior: 'smooth',
-			block: 'start'
-		});
+		if (!approvedEvidenceOpen) return;
+		await focusReviewEvidence();
 	}
 
 	$effect(() => {
@@ -2373,6 +2400,14 @@
 											/>
 											<div class="action-row processing-strip-action-row">
 												{#if encodeJobStalled && queueActionVisible}
+													<Button variant="ghost" onclick={askBenchForEncodeRepair}>
+														Ask bench to repair
+													</Button>
+													{#if hasFullCompareDownload || reviewPairs.length}
+														<Button variant="ghost" onclick={focusReviewEvidence}>
+															Focus review evidence
+														</Button>
+													{/if}
 													<Button
 														variant="primary"
 														loading={actionState === 'encode'}
@@ -2437,7 +2472,7 @@
 							{/if}
 
 							{#if showReviewEvidence}
-								{#if hasFullCompareDownload && !approvedProcessingMode}
+								{#if reviewPackCommandVisible}
 									<section class:opened={reviewPackOpened} class="review-pack-command">
 										<div class="section-copy-block review-pack-command-copy">
 											<p class="eyebrow-copy">Review artifact</p>

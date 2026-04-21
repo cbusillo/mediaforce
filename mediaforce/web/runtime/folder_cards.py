@@ -31,6 +31,7 @@ class FolderCard:
     video_codecs: dict[str, int]
     review_badge_label: str | None = None
     review_badge_tone: str | None = None
+    review_badge_detail: str | None = None
     details_loading: bool = False
 
 
@@ -97,8 +98,11 @@ def cached_folder_cards(
         cache_key = folder_card_cache_key(config)
         with _FOLDER_CARD_CACHE_LOCK:
             cache_generation = _FOLDER_CARD_CACHE_GENERATION
-            if _FOLDER_CARD_CACHE_KEY == cache_key:
-                return list(_FOLDER_CARD_CACHE_VALUE)
+            cache_hit = _FOLDER_CARD_CACHE_KEY == cache_key
+            cached_cards = list(_FOLDER_CARD_CACHE_VALUE) if cache_hit else []
+        if cache_hit:
+            _apply_folder_review_badges(cached_cards, review_badge_for_prefix)
+            return cached_cards
         cards = list_folder_cards(
             connection,
             minimum_recommended_savings_bytes=minimum_recommended_savings_bytes,
@@ -354,6 +358,7 @@ def _apply_folder_review_badges(cards: list[FolderCard], review_badge_for_prefix
         badge = review_badge_for_prefix(card.prefix)
         card.review_badge_label = badge["label"]
         card.review_badge_tone = badge["tone"]
+        card.review_badge_detail = badge.get("detail")
 
 
 def _load_savings_history(

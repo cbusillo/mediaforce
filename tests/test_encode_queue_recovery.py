@@ -3966,6 +3966,56 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             {"label": "Refresh review", "tone": "warning"},
         )
 
+    def test_folder_review_badge_prioritizes_encode_needs_attention(self) -> None:
+        accepted_calibration = web_app._calibration_file(self.config, "tv/show")
+        accepted_calibration.parent.mkdir(parents=True, exist_ok=True)
+        accepted_calibration.write_text(json.dumps({"accepted_at": web_app._now_iso()}))
+        manifest_path = self._write_manifest("manifest-needs-attention.json", [])
+        now = web_app._now_iso()
+
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "encode-needs-attention",
+                    "prefix": "tv/show",
+                    "status": "needs_attention",
+                    "manifest_path": str(manifest_path),
+                    "item_count": 2,
+                    "saved_profile_path": None,
+                    "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                    "last_host": {},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": "ffmpeg output\nError: Failed to find a suitable crf",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": "needs_attention",
+                    "last_failure_kind": "deterministic",
+                    "last_failure_at": now,
+                    "host_cooldown_until": None,
+                    "created_at": now,
+                    "started_at": now,
+                    "finished_at": now,
+                    "updated_at": now,
+                },
+            )
+
+            self.assertEqual(
+                web_app._folder_review_badge(self.config, "tv/show", connection),
+                {
+                    "label": "Needs attention",
+                    "tone": "warning",
+                    "detail": "Error: Failed to find a suitable crf",
+                },
+            )
+
     def test_resolve_sample_host_maps_legacy_local_key_to_self_host(self) -> None:
         statuses = [
             HostStatus(

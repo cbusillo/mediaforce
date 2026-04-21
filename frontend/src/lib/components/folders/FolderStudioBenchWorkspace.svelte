@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { browser } from '$app/environment';
 	import Button from '$lib/components/Button.svelte';
 	import Pill from '$lib/components/Pill.svelte';
 	import {
@@ -31,6 +32,8 @@
 		label: string;
 		value: string;
 	};
+
+	const TRANSFORM_DEFAULTS_STORAGE_KEY = 'mediaforce:bench-transform-defaults';
 
 	let {
 		calibrationThreadSessions,
@@ -116,9 +119,10 @@
 
 	let threadScrollViewport = $state<HTMLDivElement | null>(null);
 	let lastAutoScrolledThreadSignature = $state('');
-	let transformHeightDraft = $state('off');
-	let transformBlackBarDraft = $state('off');
+	let transformHeightDraft = $state('1080');
+	let transformBlackBarDraft = $state('smart');
 	let transformCropDraft = $state('');
+	let transformDefaultsLoaded = $state(false);
 
 	const transformRequestReady = $derived.by(() => {
 		if (transformHeightDraft !== 'off') return true;
@@ -127,6 +131,34 @@
 	});
 
 	const latestThreadSession = $derived(calibrationThreadSessions.at(-1) ?? null);
+
+	$effect(() => {
+		if (!browser || transformDefaultsLoaded) return;
+		try {
+			const storedDefaults = JSON.parse(
+				window.localStorage.getItem(TRANSFORM_DEFAULTS_STORAGE_KEY) || '{}'
+			) as { height?: unknown; blackBars?: unknown };
+			const storedHeight = String(storedDefaults.height ?? '').trim();
+			const storedBlackBars = String(storedDefaults.blackBars ?? '').trim();
+			if (['off', '2160', '1080', '720', '540'].includes(storedHeight)) {
+				transformHeightDraft = storedHeight;
+			}
+			if (['off', 'smart', 'manual'].includes(storedBlackBars)) {
+				transformBlackBarDraft = storedBlackBars;
+			}
+		} catch {
+			// Ignore corrupt browser-local defaults and keep the workstation defaults.
+		}
+		transformDefaultsLoaded = true;
+	});
+
+	$effect(() => {
+		if (!browser || !transformDefaultsLoaded) return;
+		window.localStorage.setItem(
+			TRANSFORM_DEFAULTS_STORAGE_KEY,
+			JSON.stringify({ height: transformHeightDraft, blackBars: transformBlackBarDraft })
+		);
+	});
 
 	$effect(() => {
 		const latestSession = calibrationThreadSessions.at(-1);
@@ -226,7 +258,7 @@
 					{/if}
 				</div>
 			</div>
-			<details class="transform-request-disclosure">
+			<details class="transform-request-disclosure" open>
 				<summary>
 					<span>Transform</span>
 					<span>{transformRequestReady ? 'Ready' : 'Off'}</span>

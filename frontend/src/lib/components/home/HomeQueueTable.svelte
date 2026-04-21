@@ -65,6 +65,16 @@
 		}
 		return folderSortDirection === 'asc' ? 'ascending' : 'descending';
 	}
+
+	function folderNeedsAttention(folder: FolderCardData): boolean {
+		return (
+			folder.review_badge_label === 'Needs attention' && folder.review_badge_tone === 'warning'
+		);
+	}
+
+	function folderReviewDetail(folder: FolderCardData): string {
+		return String(folder.review_badge_detail ?? '').trim();
+	}
 </script>
 
 <section class="station-card table-deck" aria-label="Folder work queue">
@@ -322,13 +332,22 @@
 				</thead>
 				<tbody>
 					{#each sortedVisibleFolderRows as row (row.folder.prefix)}
-						<tr class:active-row={row.folder.prefix === activeWorkspacePrefix}>
+						<tr
+							class:active-row={row.folder.prefix === activeWorkspacePrefix}
+							class:attention-row={folderNeedsAttention(row.folder)}
+						>
 							<td data-label="Priority">#{row.priority}</td>
 							<td data-label="Folder">
 								<a class="folder-link" href={resolve(folderRoutePath(row.folder.prefix))}>
 									<span class="folder-title">{row.folder.title}</span>
 									<span class="folder-meta">{row.folder.subtitle || row.folder.prefix}</span>
 								</a>
+								{#if folderNeedsAttention(row.folder)}
+									<span class="folder-attention-inline">
+										<span>Needs attention</span>
+										{folderReviewDetail(row.folder) || 'Open folder to inspect the stalled encode.'}
+									</span>
+								{/if}
 							</td>
 							<td data-label="Library">
 								<span
@@ -367,7 +386,12 @@
 								<span class={`review-tag ${row.folder.review_badge_tone ?? 'neutral'}`.trim()}>
 									{row.folder.review_badge_label || 'Ready to inspect'}
 								</span>
-								<span class="table-subcopy">{row.folder.scope_label}</span>
+								<span
+									class:attention-detail={folderNeedsAttention(row.folder)}
+									class="table-subcopy"
+								>
+									{folderReviewDetail(row.folder) || row.folder.scope_label}
+								</span>
 							</td>
 							<td data-label="Status">
 								<span class="table-value">{formatTopCounts(row.folder.statuses, 3)}</span>
@@ -685,7 +709,6 @@
 		background: transparent;
 		color: inherit;
 		font: inherit;
-		font-weight: inherit;
 		letter-spacing: inherit;
 		text-transform: inherit;
 	}
@@ -721,6 +744,15 @@
 		background: rgba(8, 47, 73, 0.34);
 	}
 
+	tbody tr.attention-row {
+		background: rgba(67, 20, 7, 0.46);
+		box-shadow: inset 3px 0 0 rgba(249, 115, 22, 0.72);
+	}
+
+	tbody tr.attention-row.active-row {
+		background: rgba(88, 36, 10, 0.56);
+	}
+
 	.folder-link {
 		display: grid;
 		gap: 0.18rem;
@@ -738,6 +770,33 @@
 		display: block;
 		margin-top: 0.18rem;
 		font-size: 0.84rem;
+	}
+
+	.folder-attention-inline {
+		display: grid;
+		gap: 0.18rem;
+		margin-top: 0.45rem;
+		max-width: 34rem;
+		padding: 0.48rem 0.58rem;
+		border: 1px solid rgba(249, 115, 22, 0.26);
+		background: rgba(67, 20, 7, 0.48);
+		color: #fed7aa;
+		font-size: 0.82rem;
+		font-weight: 700;
+		line-height: 1.35;
+	}
+
+	.folder-attention-inline span {
+		font-size: 0.68rem;
+		font-weight: 900;
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: #fdba74;
+	}
+
+	.table-subcopy.attention-detail {
+		color: #fed7aa;
+		font-weight: 700;
 	}
 
 	.library-tag,

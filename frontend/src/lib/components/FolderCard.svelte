@@ -28,6 +28,10 @@
 	);
 	const cardThemeStyle = $derived(folderLibraryThemeStyle(libraryColor));
 	const reviewBadgeTone = $derived(folder.review_badge_tone ?? 'neutral');
+	const reviewBadgeDetail = $derived(String(folder.review_badge_detail ?? '').trim());
+	const operatorAttentionVisible = $derived(
+		reviewBadgeTone === 'warning' && folder.review_badge_label === 'Needs attention'
+	);
 	const progressVisible = $derived(completedCount > 0 && completedCount < folder.item_count);
 	const displayedProjectedReclaimBytes = $derived(folder.projected_reclaim_bytes);
 	const folderStateCopy = $derived.by(() => {
@@ -73,7 +77,7 @@
 	title={folder.prefix}
 >
 	<Panel class="folder-card" variant="default" padding="1.2rem 1.2rem 1.25rem">
-		<div class="card-shell">
+		<div class="card-shell" class:operator-attention={operatorAttentionVisible}>
 			<div class="card-header">
 				<div class="badge-row">
 					<span class="folder-badge library">{libraryLabel}</span>
@@ -98,6 +102,12 @@
 					</div>
 				{/if}
 				<p class="status-line">{statusLineCopy}</p>
+				{#if operatorAttentionVisible}
+					<p class="attention-line">
+						<span>Action required</span>
+						{reviewBadgeDetail || 'Open studio to inspect the stalled encode.'}
+					</p>
+				{/if}
 				{#if secondaryMetaCopy}
 					<p class="secondary-meta-line">{secondaryMetaCopy}</p>
 				{/if}
@@ -156,6 +166,13 @@
 		gap: 1rem;
 		height: 100%;
 		padding-left: 0.55rem;
+	}
+
+	.card-shell.operator-attention {
+		padding: 0.85rem 0.85rem 0.85rem 0.95rem;
+		margin: -0.85rem -0.85rem -0.85rem -0.3rem;
+		border-left: 3px solid rgba(194, 65, 12, 0.78);
+		background: rgba(194, 65, 12, 0.08);
 	}
 
 	.card-header {
@@ -276,6 +293,26 @@
 		font-size: 0.88rem;
 		line-height: 1.45;
 		color: var(--ink-soft);
+	}
+
+	.attention-line {
+		display: grid;
+		gap: 0.2rem;
+		margin: 0;
+		padding: 0.58rem 0.62rem;
+		border: 1px solid rgba(194, 65, 12, 0.28);
+		background: rgba(194, 65, 12, 0.1);
+		color: color-mix(in srgb, var(--warn) 74%, #17231f);
+		font-size: 0.82rem;
+		font-weight: 700;
+		line-height: 1.35;
+	}
+
+	.attention-line span {
+		font-size: 0.68rem;
+		font-weight: 900;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
 	}
 
 	.secondary-meta-line {

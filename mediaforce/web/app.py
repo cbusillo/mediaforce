@@ -1115,7 +1115,7 @@ def _list_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[F
         folder_group=_folder_group,
         age_days=_age_days,
         estimate_savings_bytes=_estimate_savings_bytes,
-        review_badge_for_prefix=lambda prefix: _folder_review_badge(config, prefix),
+        review_badge_for_prefix=lambda prefix: _folder_review_badge(config, prefix, connection),
     )
 
 
@@ -1125,7 +1125,7 @@ def _preview_folder_cards(config: MediaforceConfig, connection: DBClient) -> lis
         minimum_recommended_savings_bytes=MIN_RECOMMENDED_SAVINGS_BYTES,
         folder_group=_folder_group,
         estimate_savings_bytes=_estimate_savings_bytes,
-        review_badge_for_prefix=lambda prefix: _folder_review_badge(config, prefix),
+        review_badge_for_prefix=lambda prefix: _folder_review_badge(config, prefix, connection),
     )
 
 
@@ -1263,7 +1263,36 @@ def _encode_queue_scheduler_from_form(form_data: dict[str, str]) -> dict[str, An
     return _normalize_encode_queue_scheduler({"mode": "anytime", "timezone": "host_local"})
 
 
-def _folder_review_badge(config: MediaforceConfig, prefix: str) -> dict[str, str | None]:
+def _folder_badge_failure_detail(raw_error: Any, raw_waiting_reason: Any = None) -> str | None:
+    error_text = str(raw_error or raw_waiting_reason or "").strip()
+    if not error_text:
+        return None
+    if "Error:" in error_text:
+        error_text = error_text[error_text.rfind("Error:"):]
+    else:
+        lines = [line.strip() for line in error_text.splitlines() if line.strip()]
+        error_text = lines[-1] if lines else error_text
+    compact = " ".join(error_text.split())
+    return f"{compact[:157]}..." if len(compact) > 160 else compact
+
+
+def _folder_review_badge(
+        config: MediaforceConfig,
+        prefix: str,
+        connection: DBClient | None = None,
+) -> dict[str, str | None]:
+    if connection is not None:
+        encode_job = load_latest_encode_job(connection, prefix)
+        if encode_job and str(encode_job.get("status") or "") == "needs_attention":
+            return {
+                "label": "Needs attention",
+                "tone": "warning",
+                "detail": _folder_badge_failure_detail(
+                    encode_job.get("error"),
+                    encode_job.get("waiting_reason"),
+                ),
+            }
+
     calibration = _load_calibration_state(config, prefix)
     if calibration is None:
         return {"label": None, "tone": None}

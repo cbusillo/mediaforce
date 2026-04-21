@@ -21,6 +21,7 @@ export interface FolderCard {
 	video_codecs: Record<string, number>;
 	review_badge_label?: string | null;
 	review_badge_tone?: string | null;
+	review_badge_detail?: string | null;
 	details_loading: boolean;
 }
 
