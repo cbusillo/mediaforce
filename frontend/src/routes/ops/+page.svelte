@@ -680,41 +680,7 @@
 		background: rgba(30, 41, 59, 0.94);
 	}
 
-	:global(.ops-queue-panel)::before,
-	:global(.ops-queue-panel)::after,
-	:global(.folder-section)::before,
-	:global(.folder-section)::after,
-	:global(.host-card)::after {
-		display: none !important;
-	}
-
-	:global(.ops-queue-panel),
-	:global(.folder-section),
-	:global(.host-card) {
-		border: 1px solid rgba(148, 163, 184, 0.18) !important;
-		background: rgba(15, 20, 27, 0.94) !important;
-		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2) !important;
-	}
-
-	:global(.primary-ops-panel) {
-		border-color: rgba(56, 189, 248, 0.22) !important;
-	}
-
-	:global(.ops-queue-panel .eyebrow-copy),
-	:global(.folder-section .eyebrow-copy) {
-		color: rgba(125, 211, 252, 0.84) !important;
-	}
-
-	:global(.ops-queue-panel h2),
-	:global(.folder-section h2),
-	:global(.folder-section h3),
-	:global(.host-card h3) {
-		color: #f8fafc !important;
-	}
-
-	:global(.ops-queue-panel .muted-copy),
-	:global(.folder-section .muted-copy),
-	:global(.host-card .muted-copy) {
+	:global(.ops-screen .muted-copy) {
 		color: rgba(226, 232, 240, 0.72) !important;
 	}
 
@@ -746,40 +712,16 @@
 	}
 
 	:global(.queue-detail-shell),
-	:global(.encode-telemetry-row),
-	:global(.host-card .status-tray),
-	:global(.running-job-shell),
-	:global(.running-job-row) {
+	:global(.encode-telemetry-row) {
 		background: rgba(15, 23, 42, 0.6) !important;
 		border-color: rgba(148, 163, 184, 0.16) !important;
 	}
 
-	:global(.attention-detail-shell),
-	:global(.host-card .issues-box) {
+	:global(.attention-detail-shell) {
 		background: rgba(67, 20, 7, 0.62) !important;
 		border-color: rgba(249, 115, 22, 0.24) !important;
 	}
 
-	:global(.host-card .state-chip),
-	:global(.host-card .meta-pill) {
-		background: rgba(30, 41, 59, 0.82) !important;
-		color: rgba(226, 232, 240, 0.78) !important;
-	}
-
-	:global(.host-card .state-chip.ok) {
-		background: rgba(20, 83, 45, 0.82) !important;
-		color: #dcfce7 !important;
-	}
-
-	:global(.host-card .state-chip.hold) {
-		background: rgba(120, 53, 15, 0.82) !important;
-		color: #ffedd5 !important;
-	}
-
-	:global(.host-card .search-mode-copy),
-	:global(.host-card .running-job-summary),
-	:global(.host-card .tray-headline),
-	:global(.host-card .attention-kicker),
 	:global(.queue-detail-shell summary),
 	:global(.attention-title),
 	:global(.encode-telemetry-summary),

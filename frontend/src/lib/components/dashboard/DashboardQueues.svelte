@@ -2,8 +2,6 @@
 	import { resolve } from '$app/paths';
 	import type { EncodeQueueJob, DashboardSummaryPayload } from '$lib/api/types';
 	import Button from '$lib/components/Button.svelte';
-	import Panel from '$lib/components/Panel.svelte';
-	import SectionHead from '$lib/components/SectionHead.svelte';
 
 	type QueueAction = 'pause' | 'resume' | 'retry' | 'stop';
 	type QueueCard = { eyebrow: string; heading: string; lede: string };
@@ -167,196 +165,273 @@
 	}
 </script>
 
-<div class="queue-grid">
-	{#each queueCards as card, index (card.eyebrow)}
-		<Panel
-			class={`${index === 1 ? 'ops-queue-panel primary-ops-panel' : 'ops-queue-panel secondary-ops-panel'} ${index === 0 && calibrationIdleCompact ? 'idle-compact-panel' : ''}`.trim()}
-			variant={index === 1 ? 'accent' : 'default'}
-		>
-			<div class="panel-stack">
-				<SectionHead
-					eyebrow={card.eyebrow}
-					heading={card.heading}
-					lede={index === 0 && calibrationIdleCompact
-						? 'Calibration lanes are idle. Launch the next sample from folders when you are ready to tune again.'
-						: card.lede}
-					size="compact"
-				/>
-				{#if index === 0}
-					{#if pendingReviewCount > 0}
-						<div class="queue-pill-row">
-							<span class="queue-pill attention">Pending review: {pendingReviewCount}</span>
-						</div>
-					{/if}
-					{#if calibrationQueueHasWork}
-						<div class="action-row">
-							<Button
-								variant="danger"
-								loading={calibrationQueueAction === 'stop'}
-								onclick={stopCalibrationQueue}>Stop + Clean</Button
-							>
-						</div>
-					{:else if pendingReviewCount === 0}
-						<p class="queue-empty-copy muted-copy">
-							Calibration lanes are idle. <a href={resolve('/')}>Go to folders</a> when you want a new
-							sample or proof encode.
-						</p>
-					{/if}
-				{:else}
-					<div class="queue-pill-row">
-						<span class={`queue-pill ${encodeQueueStatus.tone}`.trim()}
-							>{encodeQueueStatus.label}</span
-						>
-						{#if dashboard.encode_queue.needs_attention_count}
-							<span class="queue-pill attention"
-								>Needs attention: {dashboard.encode_queue.needs_attention_count}</span
-							>
+<section class="queue-console" aria-label="Ops queue control">
+	<div class="queue-console-head">
+		<div>
+			<p class="queue-console-kicker">Queue Control</p>
+			<h2>Work lanes and queue actions</h2>
+		</div>
+		<p class="queue-console-summary">
+			{dashboard.encode_queue.running_count} encode running · {dashboard.encode_queue.queued_count}
+			queued · {pendingReviewCount} calibration review
+		</p>
+	</div>
+
+	<div class="queue-lane-list">
+		{#each queueCards as card, index (card.eyebrow)}
+			<div
+				class={`${index === 1 ? 'queue-lane primary-lane' : 'queue-lane'} ${index === 0 && calibrationIdleCompact ? 'idle-lane' : ''}`.trim()}
+			>
+				<div class="lane-main">
+					<p class="lane-eyebrow">{card.eyebrow}</p>
+					<h3>{card.heading}</h3>
+					<p class="lane-copy muted-copy">
+						{index === 0 && calibrationIdleCompact
+							? 'Calibration lanes are idle. Launch the next sample from folders when you are ready to tune again.'
+							: card.lede}
+					</p>
+				</div>
+				<div class="lane-state">
+					{#if index === 0}
+						{#if pendingReviewCount > 0}
+							<div class="queue-pill-row">
+								<span class="queue-pill attention">Pending review: {pendingReviewCount}</span>
+							</div>
 						{/if}
-						{#if dashboard.encode_queue.state.stop_requested}
-							<span class="queue-pill attention">Stop requested</span>
-						{/if}
-						<a class="queue-link-pill" href="#remote-hosts">Workers ready: {readyHosts}</a>
-						{#if readyHosts < encodeCapableHosts}
-							<span class="queue-pill neutral">{reachableHosts} mounted</span>
-						{/if}
-					</div>
-					{#if encodeQueueActionable}
-						<div class="action-row">
-							{#if dashboard.encode_queue.needs_attention_count}
-								<Button
-									variant="ghost"
-									loading={queueAction === 'retry'}
-									onclick={() => runQueueAction('retry')}>Retry All Failed</Button
-								>
-							{/if}
-							{#if dashboard.encode_queue.state.is_paused}
-								<Button
-									variant="primary"
-									loading={queueAction === 'resume'}
-									onclick={() => runQueueAction('resume')}>Resume Queue</Button
-								>
-							{:else}
-								<Button
-									variant="primary"
-									loading={queueAction === 'pause'}
-									onclick={() => runQueueAction('pause')}>Pause Queue</Button
-								>
-							{/if}
-							{#if encodeQueueHasWork || dashboard.encode_queue.state.stop_requested}
+						{#if calibrationQueueHasWork}
+							<div class="action-row">
 								<Button
 									variant="danger"
-									loading={queueAction === 'stop'}
-									disabled={dashboard.encode_queue.state.stop_requested}
-									onclick={() => runQueueAction('stop')}>Stop + Clean</Button
+									loading={calibrationQueueAction === 'stop'}
+									onclick={stopCalibrationQueue}>Stop + Clean</Button
+								>
+							</div>
+						{:else if pendingReviewCount === 0}
+							<p class="queue-empty-copy muted-copy">
+								Calibration lanes are idle. <a href={resolve('/')}>Go to folders</a> when you want a new
+								sample or proof encode.
+							</p>
+						{/if}
+					{:else}
+						<div class="queue-pill-row">
+							<span class={`queue-pill ${encodeQueueStatus.tone}`.trim()}
+								>{encodeQueueStatus.label}</span
+							>
+							{#if dashboard.encode_queue.needs_attention_count}
+								<span class="queue-pill attention"
+									>Needs attention: {dashboard.encode_queue.needs_attention_count}</span
 								>
 							{/if}
-						</div>
-					{/if}
-					{#if encodeQueueActionHelp}
-						<p class="queue-action-help muted-copy">{encodeQueueActionHelp}</p>
-					{/if}
-					{#if encodeQueueGuidanceCopy}
-						<p class="queue-empty-copy muted-copy">
-							{#if encodeQueueIdle}
-								<a href={resolve('/')}>Go to folders</a> when you want the next full run to start.
-							{:else}
-								{encodeQueueGuidanceCopy}
+							{#if dashboard.encode_queue.state.stop_requested}
+								<span class="queue-pill attention">Stop requested</span>
 							{/if}
-						</p>
-					{/if}
-					{#if encodeQueueEtaCopy}
-						<p class="queue-telemetry-note muted-copy">
-							Estimated queue finish in {encodeQueueEtaCopy} at the current fleet pace.
-						</p>
-					{/if}
-					{#if recentAttentionJobs.length > 0}
-						<details
-							class="queue-detail-shell attention-detail-shell"
-							aria-label="Recent queue blockers"
-							open={!encodeQueueHasWork}
-						>
-							<summary>
-								<span>{blockersSummary}</span>
-								<span class="muted-copy">{blockersLeadCopy}</span>
-							</summary>
-							<div class="attention-list">
-								{#each recentAttentionJobs as job (job.job_id)}
-									<div class="attention-row">
-										<div>
-											<p class="attention-title">{job.prefix}</p>
-											<p class="attention-detail muted-copy">{attentionReason(job)}</p>
-										</div>
-										<div class="attention-meta muted-copy">
-											{#if job.attempt_summary}
-												<span>{job.attempt_summary}</span>
-											{/if}
-											{#if formatAttentionTimestamp(job)}
-												<span>{formatAttentionTimestamp(job)}</span>
-											{/if}
-										</div>
-									</div>
-								{/each}
+							<a class="queue-link-pill" href="#remote-hosts">Workers ready: {readyHosts}</a>
+							{#if readyHosts < encodeCapableHosts}
+								<span class="queue-pill neutral">{reachableHosts} mounted</span>
+							{/if}
+						</div>
+						{#if encodeQueueActionable}
+							<div class="action-row">
+								{#if dashboard.encode_queue.needs_attention_count}
+									<Button
+										variant="ghost"
+										loading={queueAction === 'retry'}
+										onclick={() => runQueueAction('retry')}>Retry All Failed</Button
+									>
+								{/if}
+								{#if dashboard.encode_queue.state.is_paused}
+									<Button
+										variant="primary"
+										loading={queueAction === 'resume'}
+										onclick={() => runQueueAction('resume')}>Resume Queue</Button
+									>
+								{:else}
+									<Button
+										variant="primary"
+										loading={queueAction === 'pause'}
+										onclick={() => runQueueAction('pause')}>Pause Queue</Button
+									>
+								{/if}
+								{#if encodeQueueHasWork || dashboard.encode_queue.state.stop_requested}
+									<Button
+										variant="danger"
+										loading={queueAction === 'stop'}
+										disabled={dashboard.encode_queue.state.stop_requested}
+										onclick={() => runQueueAction('stop')}>Stop + Clean</Button
+									>
+								{/if}
 							</div>
-						</details>
-					{/if}
-					{#if encodeRunningJobs.length > 0}
-						<details class="queue-detail-shell" aria-label="Running encode telemetry">
-							<summary>
-								<span>{runningTelemetrySummary}</span>
-								<span class="muted-copy">Open details</span>
-							</summary>
-							<div class="encode-telemetry-list">
-								{#each encodeRunningJobs as job (job.job_id)}
-									<div class="encode-telemetry-row">
-										<div>
-											<p class="encode-telemetry-title">{job.prefix}</p>
-											<p class="muted-copy encode-telemetry-detail">
-												{String(job.host?.label ?? job.host?.key ?? 'Worker')}
-												{#if job.progress?.current_item_rel_path}
-													· {job.progress.current_item_rel_path}
+						{/if}
+						{#if encodeQueueActionHelp}
+							<p class="queue-action-help muted-copy">{encodeQueueActionHelp}</p>
+						{/if}
+						{#if encodeQueueGuidanceCopy}
+							<p class="queue-empty-copy muted-copy">
+								{#if encodeQueueIdle}
+									<a href={resolve('/')}>Go to folders</a> when you want the next full run to start.
+								{:else}
+									{encodeQueueGuidanceCopy}
+								{/if}
+							</p>
+						{/if}
+						{#if encodeQueueEtaCopy}
+							<p class="queue-telemetry-note muted-copy">
+								Estimated queue finish in {encodeQueueEtaCopy} at the current fleet pace.
+							</p>
+						{/if}
+						{#if recentAttentionJobs.length > 0}
+							<details
+								class="queue-detail-shell attention-detail-shell"
+								aria-label="Recent queue blockers"
+								open={!encodeQueueHasWork}
+							>
+								<summary>
+									<span>{blockersSummary}</span>
+									<span class="muted-copy">{blockersLeadCopy}</span>
+								</summary>
+								<div class="attention-list">
+									{#each recentAttentionJobs as job (job.job_id)}
+										<div class="attention-row">
+											<div>
+												<p class="attention-title">{job.prefix}</p>
+												<p class="attention-detail muted-copy">{attentionReason(job)}</p>
+											</div>
+											<div class="attention-meta muted-copy">
+												{#if job.attempt_summary}
+													<span>{job.attempt_summary}</span>
 												{/if}
+												{#if formatAttentionTimestamp(job)}
+													<span>{formatAttentionTimestamp(job)}</span>
+												{/if}
+											</div>
+										</div>
+									{/each}
+								</div>
+							</details>
+						{/if}
+						{#if encodeRunningJobs.length > 0}
+							<details class="queue-detail-shell" aria-label="Running encode telemetry">
+								<summary>
+									<span>{runningTelemetrySummary}</span>
+									<span class="muted-copy">Open details</span>
+								</summary>
+								<div class="encode-telemetry-list">
+									{#each encodeRunningJobs as job (job.job_id)}
+										<div class="encode-telemetry-row">
+											<div>
+												<p class="encode-telemetry-title">{job.prefix}</p>
+												<p class="muted-copy encode-telemetry-detail">
+													{String(job.host?.label ?? job.host?.key ?? 'Worker')}
+													{#if job.progress?.current_item_rel_path}
+														· {job.progress.current_item_rel_path}
+													{/if}
+												</p>
+											</div>
+											<p class="encode-telemetry-summary">
+												{job.telemetry_summary || job.scheduler_status_copy || 'Running now'}
 											</p>
 										</div>
-										<p class="encode-telemetry-summary">
-											{job.telemetry_summary || job.scheduler_status_copy || 'Running now'}
-										</p>
-									</div>
-								{/each}
-							</div>
-						</details>
+									{/each}
+								</div>
+							</details>
+						{/if}
 					{/if}
-				{/if}
+				</div>
 			</div>
-		</Panel>
-	{/each}
-</div>
+		{/each}
+	</div>
+</section>
 
 <style>
-	.panel-stack {
+	.queue-console {
 		display: grid;
-		gap: var(--space-3);
+		gap: 0;
+		border: 1px solid rgba(148, 163, 184, 0.18);
+		background: rgba(15, 20, 27, 0.94);
+		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2);
 	}
 
-	.queue-grid {
+	.queue-console-head {
+		display: flex;
+		justify-content: space-between;
+		gap: 1rem;
+		align-items: end;
+		padding: 0.95rem 1.1rem;
+		border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+	}
+
+	.queue-console-kicker,
+	.lane-eyebrow,
+	.queue-console-summary,
+	.lane-copy,
+	h2,
+	h3 {
+		margin: 0;
+	}
+
+	.queue-console-kicker,
+	.lane-eyebrow {
+		font-size: 0.72rem;
+		font-weight: 800;
+		letter-spacing: 0.16em;
+		text-transform: uppercase;
+		color: rgba(125, 211, 252, 0.86);
+	}
+
+	h2 {
+		margin-top: 0.2rem;
+		font-size: 1.08rem;
+		line-height: 1.2;
+		color: #f8fafc;
+	}
+
+	.queue-console-summary {
+		flex-shrink: 0;
+		font-size: 0.84rem;
+		font-weight: 700;
+		color: rgba(226, 232, 240, 0.76);
+	}
+
+	.queue-lane-list {
 		display: grid;
-		grid-template-columns: minmax(18rem, 0.8fr) minmax(0, 1.2fr);
-		gap: var(--space-4);
 	}
 
-	:global(.ops-queue-panel) {
-		background:
-			radial-gradient(circle at top left, rgba(255, 255, 255, 0.38), transparent 32%),
-			linear-gradient(145deg, rgba(255, 253, 247, 0.88), rgba(245, 236, 220, 0.8));
+	.queue-lane {
+		display: grid;
+		grid-template-columns: minmax(16rem, 0.36fr) minmax(0, 1fr);
+		gap: 1rem;
+		padding: 1rem 1.1rem;
+		border-top: 1px solid rgba(148, 163, 184, 0.12);
 	}
 
-	:global(.primary-ops-panel) {
-		background:
-			radial-gradient(circle at top left, rgba(15, 118, 110, 0.18), transparent 34%),
-			linear-gradient(145deg, rgba(255, 253, 247, 0.9), rgba(239, 235, 225, 0.82));
+	.queue-lane:first-child {
+		border-top: 0;
 	}
 
-	:global(.idle-compact-panel) {
-		padding-block: 1rem;
+	.primary-lane {
+		background: rgba(8, 47, 73, 0.18);
+	}
+
+	.idle-lane {
+		background: rgba(15, 23, 42, 0.26);
+	}
+
+	.lane-main,
+	.lane-state {
+		display: grid;
+		align-content: start;
+		gap: 0.65rem;
+	}
+
+	h3 {
+		font-size: 1.42rem;
+		line-height: 1.1;
+		color: #f8fafc;
+	}
+
+	.lane-copy {
+		max-width: 30rem;
+		line-height: 1.45;
 	}
 
 	.queue-pill-row {
@@ -516,8 +591,14 @@
 	}
 
 	@media (max-width: 860px) {
-		.queue-grid {
+		.queue-console-head,
+		.queue-lane {
 			grid-template-columns: 1fr;
+		}
+
+		.queue-console-head {
+			display: grid;
+			align-items: start;
 		}
 
 		.encode-telemetry-row,

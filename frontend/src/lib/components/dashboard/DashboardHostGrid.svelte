@@ -1,9 +1,7 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import type { HostRuntime } from '$lib/api/types';
-	import HostCard from '$lib/components/HostCard.svelte';
-	import Panel from '$lib/components/Panel.svelte';
-	import SectionHead from '$lib/components/SectionHead.svelte';
+	import { qualitySearchSummary } from '$lib/hosts/runtime';
 
 	let {
 		rankedHosts,
@@ -14,36 +12,166 @@
 		readyHosts: number;
 		onOpenHostSettings: (hostKey: string) => Promise<void>;
 	} = $props();
+
+	type HostTone = 'ok' | 'warn' | 'hold' | 'neutral';
+
+	const capabilityLabels: Record<string, string> = {
+		encode_queue: 'Queue',
+		sample_calibration: 'Sample'
+	};
+
+	function hostTone(host: HostRuntime): HostTone {
+		if (!host.available) return 'warn';
+		if (host.queue_active) return 'ok';
+		if (host.schedule_open === false) return 'hold';
+		if (host.active_reason === 'encode queue capability disabled') return 'warn';
+		return 'neutral';
+	}
+
+	function hostStatusLabel(host: HostRuntime): string {
+		if (!host.available) return 'Needs attention';
+		if (host.queue_active) return 'Ready';
+		if (host.schedule_profile_label === 'Never') return 'Disabled';
+		if (host.schedule_open === false) return 'Scheduled';
+		if (host.active_reason === 'parallel encode slots are full') return 'At capacity';
+		if (host.active_reason === 'encode queue capability disabled') return 'Needs setup';
+		return 'Mounted';
+	}
+
+	function laneCopy(host: HostRuntime): string {
+		const laneLabel = `lane${host.max_parallel_encodes === 1 ? '' : 's'}`;
+		if (host.active_encode_count > 0) {
+			return `${host.active_encode_count}/${host.max_parallel_encodes} ${laneLabel} running`;
+		}
+		if (host.queue_active) return `${host.max_parallel_encodes} ${laneLabel} available`;
+		if (host.schedule_profile_label === 'Never')
+			return `${host.max_parallel_encodes} ${laneLabel} disabled`;
+		if (host.schedule_open === false) {
+			return `${host.max_parallel_encodes} ${laneLabel} scheduled for the next window`;
+		}
+		if (host.active_reason === 'parallel encode slots are full') {
+			return `${host.max_parallel_encodes} ${laneLabel} busy`;
+		}
+		return `${host.max_parallel_encodes} ${laneLabel} mounted`;
+	}
+
+	function scheduleCopy(host: HostRuntime): string {
+		if (!host.schedule_detail || ['Always', 'Never'].includes(host.schedule_profile_label)) {
+			return host.schedule_profile_label;
+		}
+		return `${host.schedule_profile_label}: ${host.schedule_detail
+			.replace(/^window\s+/i, '')
+			.replace(/\s+in host local time$/i, ' local time')}`;
+	}
+
+	function capabilityCopy(host: HostRuntime): string {
+		const labels = host.capabilities.map(
+			(capability) => capabilityLabels[capability] ?? capability.replace(/_/g, ' ')
+		);
+		return [`P${host.priority}`, ...labels].join(' · ');
+	}
+
+	function attentionLabel(host: HostRuntime): string {
+		if (!host.available) {
+			return host.message || 'Host is unavailable.';
+		}
+		if (host.active_reason === 'encode queue capability disabled') {
+			return 'Needs setup';
+		}
+		const search = qualitySearchSummary(host);
+		return search?.label ?? host.active_reason ?? 'No current issue';
+	}
+
+	function attentionDetail(host: HostRuntime): string | null {
+		if (!host.available) return hostIssueCopy(host);
+		if (host.active_reason === 'encode queue capability disabled') {
+			return 'Enable queue support for this worker in Settings.';
+		}
+		return qualitySearchSummary(host)?.detail ?? null;
+	}
+
+	function hostIssueCopy(host: HostRuntime): string | null {
+		if (host.issues.length > 0) return host.issues[0];
+		if (host.missing_paths.length > 0) return `Missing path: ${host.missing_paths[0]}`;
+		return host.detail;
+	}
 </script>
 
-<Panel variant="inset" class="folder-section" padding="1.2rem 1.3rem 1.4rem">
-	<div class="section-stack">
-		<div class="section-header-row">
-			<SectionHead
-				eyebrow="Remote Hosts"
-				heading="Where encodes can run"
-				lede="See which workers are ready now, scheduled for later, or need attention."
-				size="compact"
-			/>
-			<div class="section-header-tools">
-				<span class={`section-summary-chip ${readyHosts > 0 ? 'active' : ''}`.trim()}
-					>{readyHosts} ready</span
-				>
-				<a class="section-action-link" href={resolve('/settings')}> Edit in Settings </a>
-			</div>
+<section class="host-console" aria-label="Remote hosts">
+	<div class="section-header-row">
+		<div>
+			<p class="section-kicker">Remote Hosts</p>
+			<h2>Worker readiness</h2>
+			<p class="section-lede">
+				Workers ranked by priority, queue availability, and current setup state.
+			</p>
 		</div>
-		<div id="remote-hosts" class="host-grid">
-			{#each rankedHosts as host (host.key)}
-				<HostCard {host} onSettingsClick={() => onOpenHostSettings(host.key)} />
-			{/each}
+		<div class="section-header-tools">
+			<span class={`section-summary-chip ${readyHosts > 0 ? 'active' : ''}`.trim()}
+				>{readyHosts} ready</span
+			>
+			<a class="section-action-link" href={resolve('/settings')}>Edit in Settings</a>
 		</div>
 	</div>
-</Panel>
+
+	<div id="remote-hosts" class="host-list" role="table" aria-label="Remote host readiness table">
+		<div class="host-table-head" role="row">
+			<span role="columnheader">Host</span>
+			<span role="columnheader">State</span>
+			<span role="columnheader">Lanes / schedule</span>
+			<span role="columnheader">Capability</span>
+			<span role="columnheader">Attention</span>
+		</div>
+		{#each rankedHosts as host (host.key)}
+			{@const tone = hostTone(host)}
+			<div class={`host-row ${tone}`.trim()} role="row">
+				<div class="host-name-cell" role="cell">
+					<p class="host-label">{host.label}</p>
+					<p class="host-key muted-copy">{host.key}</p>
+				</div>
+				<div class="host-status-cell" role="cell">
+					<button
+						type="button"
+						class={`state-chip ${tone}`.trim()}
+						onclick={() => onOpenHostSettings(host.key)}
+					>
+						{hostStatusLabel(host)}
+					</button>
+				</div>
+				<div class="host-lanes-cell" role="cell">
+					<p class="cell-strong">{laneCopy(host)}</p>
+					<p class="muted-copy">{scheduleCopy(host)}</p>
+				</div>
+				<div class="host-capability-cell" role="cell">
+					<p class="cell-strong">{capabilityCopy(host)}</p>
+					{#if host.running_jobs && host.running_jobs.length > 0}
+						<p class="muted-copy">
+							{host.running_jobs.length} live encode{host.running_jobs.length === 1 ? '' : 's'}
+						</p>
+					{:else}
+						<p class="muted-copy">
+							{host.media_access === 'stream' ? 'Streams media' : 'Mounted media'}
+						</p>
+					{/if}
+				</div>
+				<div class="host-attention-cell" role="cell">
+					<p class="attention-copy">{attentionLabel(host)}</p>
+					{#if attentionDetail(host)}
+						<p class="muted-copy issue-copy">{attentionDetail(host)}</p>
+					{/if}
+				</div>
+			</div>
+		{/each}
+	</div>
+</section>
 
 <style>
-	.section-stack {
+	.host-console {
 		display: grid;
-		gap: var(--space-3);
+		gap: 0;
+		border: 1px solid rgba(148, 163, 184, 0.18);
+		background: rgba(15, 20, 27, 0.94);
+		box-shadow: 0 18px 38px rgba(2, 6, 23, 0.2);
 	}
 
 	.section-header-row {
@@ -52,6 +180,39 @@
 		gap: 1rem;
 		align-items: start;
 		flex-wrap: wrap;
+		padding: 0.95rem 1.1rem;
+		border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+	}
+
+	.section-kicker,
+	.section-lede,
+	h2,
+	.host-label,
+	.host-key,
+	.cell-strong,
+	.attention-copy,
+	.issue-copy {
+		margin: 0;
+	}
+
+	.section-kicker {
+		font-size: 0.72rem;
+		font-weight: 800;
+		letter-spacing: 0.16em;
+		text-transform: uppercase;
+		color: rgba(125, 211, 252, 0.86);
+	}
+
+	h2 {
+		margin-top: 0.2rem;
+		font-size: 1.08rem;
+		line-height: 1.2;
+		color: #f8fafc;
+	}
+
+	.section-lede {
+		margin-top: 0.35rem;
+		color: rgba(226, 232, 240, 0.72);
 	}
 
 	.section-header-tools {
@@ -71,24 +232,146 @@
 		font-weight: 700;
 		letter-spacing: 0.03em;
 		text-transform: uppercase;
-		background: rgba(23, 35, 31, 0.08);
-		color: var(--ink-soft);
+		background: rgba(30, 41, 59, 0.78);
+		color: rgba(226, 232, 240, 0.78);
 	}
 
 	.section-summary-chip.active {
-		background: rgba(15, 118, 110, 0.14);
-		color: #0f5f59;
+		background: rgba(20, 83, 45, 0.82);
+		color: #dcfce7;
 	}
 
 	.section-action-link {
 		font-weight: 700;
-		color: var(--accent-deep);
+		color: #7dd3fc;
 		text-decoration: none;
 	}
 
-	.host-grid {
+	.host-list {
 		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-		gap: var(--space-4);
+	}
+
+	.host-table-head,
+	.host-row {
+		display: grid;
+		grid-template-columns:
+			minmax(11rem, 0.9fr) minmax(7.5rem, 0.55fr) minmax(12rem, 1fr) minmax(11rem, 0.8fr)
+			minmax(16rem, 1.3fr);
+		gap: 0.85rem;
+		align-items: start;
+	}
+
+	.host-table-head {
+		padding: 0.58rem 1.1rem;
+		border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+		color: rgba(148, 163, 184, 0.88);
+		font-size: 0.68rem;
+		font-weight: 800;
+		letter-spacing: 0.13em;
+		text-transform: uppercase;
+	}
+
+	.host-row {
+		position: relative;
+		padding: 0.88rem 1.1rem;
+		border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+	}
+
+	.host-row:last-child {
+		border-bottom: 0;
+	}
+
+	.host-row::before {
+		content: '';
+		position: absolute;
+		inset: 0 auto 0 0;
+		width: 3px;
+		background: rgba(71, 85, 105, 0.7);
+	}
+
+	.host-row.ok::before {
+		background: rgba(34, 197, 94, 0.9);
+	}
+
+	.host-row.warn::before {
+		background: rgba(249, 115, 22, 0.94);
+	}
+
+	.host-row.hold::before {
+		background: rgba(245, 158, 11, 0.9);
+	}
+
+	.host-label,
+	.cell-strong,
+	.attention-copy {
+		color: #f8fafc;
+		font-weight: 700;
+	}
+
+	.host-key,
+	.host-row .muted-copy {
+		color: rgba(226, 232, 240, 0.7);
+	}
+
+	.host-key,
+	.cell-strong,
+	.attention-copy,
+	.issue-copy,
+	.host-row .muted-copy {
+		overflow-wrap: anywhere;
+	}
+
+	.state-chip {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: fit-content;
+		padding: 0.36rem 0.66rem;
+		border: 1px solid rgba(148, 163, 184, 0.18);
+		border-radius: var(--radius-pill);
+		background: rgba(30, 41, 59, 0.82);
+		color: rgba(226, 232, 240, 0.82);
+		font-size: 0.74rem;
+		font-weight: 800;
+		line-height: 1;
+		cursor: pointer;
+	}
+
+	.state-chip.ok {
+		background: rgba(20, 83, 45, 0.82);
+		color: #dcfce7;
+	}
+
+	.state-chip.warn,
+	.state-chip.hold {
+		background: rgba(120, 53, 15, 0.82);
+		color: #ffedd5;
+	}
+
+	.issue-copy {
+		margin-top: 0.25rem;
+	}
+
+	@media (max-width: 1120px) {
+		.host-table-head {
+			display: none;
+		}
+
+		.host-row {
+			grid-template-columns: minmax(12rem, 1fr) minmax(7rem, auto);
+			gap: 0.65rem 1rem;
+		}
+
+		.host-lanes-cell,
+		.host-capability-cell,
+		.host-attention-cell {
+			grid-column: 1 / -1;
+		}
+	}
+
+	@media (max-width: 640px) {
+		.host-row {
+			grid-template-columns: 1fr;
+		}
 	}
 </style>
