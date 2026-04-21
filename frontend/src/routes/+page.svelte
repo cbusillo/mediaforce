@@ -591,6 +591,7 @@
 		stopRequested={dashboard.encode_queue.state.stop_requested}
 		queuePaused={dashboard.encode_queue.state.is_paused}
 		{queueWorkersScheduledOffWindow}
+		runningCount={dashboard.encode_queue.running_count}
 		queuedCount={dashboard.encode_queue.queued_count}
 		nextWorkerWindow={nextWorkerWindow ?? null}
 		etaCopy={dashboard.encode_queue.telemetry?.eta_copy}

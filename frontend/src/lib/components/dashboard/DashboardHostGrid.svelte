@@ -23,8 +23,8 @@
 	function hostTone(host: HostRuntime): HostTone {
 		if (!host.available) return 'warn';
 		if (host.queue_active) return 'ok';
-		if (host.schedule_open === false) return 'hold';
 		if (host.active_reason === 'encode queue capability disabled') return 'warn';
+		if (host.schedule_open === false) return 'hold';
 		return 'neutral';
 	}
 
@@ -32,9 +32,9 @@
 		if (!host.available) return 'Needs attention';
 		if (host.queue_active) return 'Ready';
 		if (host.schedule_profile_label === 'Never') return 'Disabled';
-		if (host.schedule_open === false) return 'Scheduled';
 		if (host.active_reason === 'parallel encode slots are full') return 'At capacity';
 		if (host.active_reason === 'encode queue capability disabled') return 'Needs setup';
+		if (host.schedule_open === false) return 'Scheduled';
 		return 'Mounted';
 	}
 
@@ -46,11 +46,14 @@
 		if (host.queue_active) return `${host.max_parallel_encodes} ${laneLabel} available`;
 		if (host.schedule_profile_label === 'Never')
 			return `${host.max_parallel_encodes} ${laneLabel} disabled`;
-		if (host.schedule_open === false) {
-			return `${host.max_parallel_encodes} ${laneLabel} scheduled for the next window`;
-		}
 		if (host.active_reason === 'parallel encode slots are full') {
 			return `${host.max_parallel_encodes} ${laneLabel} busy`;
+		}
+		if (host.active_reason === 'encode queue capability disabled') {
+			return `${host.max_parallel_encodes} ${laneLabel} need queue setup`;
+		}
+		if (host.schedule_open === false) {
+			return `${host.max_parallel_encodes} ${laneLabel} scheduled for the next window`;
 		}
 		return `${host.max_parallel_encodes} ${laneLabel} mounted`;
 	}

@@ -186,7 +186,7 @@
 				? `Queued now. Next worker window opens at ${nextWorkerWindow}.`
 				: 'Queued now. All queue workers are currently scheduled off-window.';
 		}
-		if (queueWorkersScheduledOffWindow) {
+		if (queueWorkersScheduledOffWindow && dashboard.encode_queue.running_count === 0) {
 			return nextWorkerWindow
 				? `Queue is idle. Next worker window opens at ${nextWorkerWindow}.`
 				: 'Queue is idle. All queue workers are currently scheduled off-window.';

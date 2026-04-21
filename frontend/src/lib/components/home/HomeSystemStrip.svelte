@@ -8,6 +8,7 @@
 		stopRequested,
 		queuePaused,
 		queueWorkersScheduledOffWindow,
+		runningCount,
 		queuedCount,
 		nextWorkerWindow,
 		etaCopy,
@@ -28,6 +29,7 @@
 		stopRequested: boolean;
 		queuePaused: boolean;
 		queueWorkersScheduledOffWindow: boolean;
+		runningCount: number;
 		queuedCount: number;
 		nextWorkerWindow: string | null;
 		etaCopy: string | null | undefined;
@@ -59,7 +61,7 @@
 					: 'Queued work is waiting for a scheduled worker window.'}
 			{:else if queuedCount > 0 && readyHosts === 0}
 				Queued work is waiting for a worker to become ready.
-			{:else if queueWorkersScheduledOffWindow}
+			{:else if queueWorkersScheduledOffWindow && runningCount === 0}
 				{nextWorkerWindow
 					? `Queue is idle. Next worker window opens at ${nextWorkerWindow}.`
 					: 'Queue is idle. All queue workers are currently scheduled off-window.'}
