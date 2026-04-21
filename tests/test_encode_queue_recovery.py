@@ -1228,6 +1228,24 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(updated["status"], "needs_attention")
             self.assertEqual(updated["terminal_reason"], "deterministic")
 
+    def test_quality_search_failure_is_deterministic_even_for_ssh_host(self) -> None:
+        job = {
+            "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+        }
+        exc = quality.QualitySearchError(
+            "ssh remote command exited with status 1\nError: Failed to find a suitable crf"
+        )
+
+        self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "deterministic")
+
+    def test_quality_search_failure_message_is_deterministic_before_ssh_retry(self) -> None:
+        job = {
+            "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+        }
+        exc = RuntimeError("ssh remote command exited with status 1\nError: Failed to find a suitable crf")
+
+        self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "deterministic")
+
     def test_transient_ssh_failure_stays_in_retry_backoff_after_attempt_cap(self) -> None:
         source_path = self._create_source_file("episode-host-retry.mkv")
         staging_path = self._staging_path("episode-host-retry.mkv")

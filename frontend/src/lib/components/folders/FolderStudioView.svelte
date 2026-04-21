@@ -114,6 +114,16 @@
 		);
 	}
 
+	function compactFailureCopy(rawError: string | null | undefined) {
+		const errorText = String(rawError ?? '').trim();
+		if (!errorText) return '';
+		const errorTail = errorText.includes('Error:')
+			? errorText.slice(errorText.lastIndexOf('Error:'))
+			: (errorText.split(/\r?\n/).filter(Boolean).at(-1) ?? errorText);
+		const compactError = errorTail.replace(/\s+/g, ' ').trim();
+		return compactError.length > 180 ? `${compactError.slice(0, 177)}...` : compactError;
+	}
+
 	async function refreshFolderView() {
 		if (autoRefreshInFlight) return;
 		autoRefreshInFlight = true;
@@ -1258,6 +1268,7 @@
 	});
 	const encodeJobDetail = $derived.by(() => {
 		const schedulerCopy = String(encodeJob?.scheduler_status_copy ?? '').trim();
+		const failureCopy = compactFailureCopy(encodeJob?.error);
 		const currentItem = String(encodeJobProgress?.current_item_rel_path ?? '').trim();
 		const activeHostLabels = encodeJobActiveHosts
 			.map((host) => String(host.label ?? host.key ?? '').trim())
@@ -1279,6 +1290,7 @@
 			if (schedulerCopy) return schedulerCopy;
 			return 'Waiting for an open worker lane.';
 		}
+		if (encodeJobStalled && failureCopy) return failureCopy;
 		if (schedulerCopy) return schedulerCopy;
 		if (encodeJobStatus === 'running' && activeHostLabels.length > 1) {
 			return `${activeHostLabels.join(', ')} are encoding now.`;
@@ -1994,7 +2006,7 @@
 			previewDraftEcho = response.proposal ?? null;
 			previewSubmission = null;
 			if (response.proposal?.can_queue === false) {
-				toasts.info('Bench draft needs revision', response.message);
+				toasts.warning('Bench draft needs revision', response.message);
 			} else {
 				toasts.success('Bench draft ready', response.message);
 			}
@@ -2094,7 +2106,7 @@
 				highImpactApprovalLocked = false;
 				highImpactApprovalLockTimer = null;
 			}, 750);
-			toasts.info(
+			toasts.warning(
 				'Review high-impact changes',
 				`Read the diff for ${highImpactPolicyLabels || 'the highlighted policy rows'}, then press "Approve" again to save the draft.`
 			);
@@ -2193,7 +2205,7 @@
 			}>(`/api/folders/${apiPrefix}/validate-outputs`, {});
 			const failedCount = Number(response.failed_count ?? 0);
 			if (failedCount > 0) {
-				toasts.info('Validation finished with warnings', response.message);
+				toasts.warning('Validation finished with warnings', response.message);
 			} else {
 				toasts.success('Validation finished', response.message);
 			}

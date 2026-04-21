@@ -25,6 +25,7 @@
 		if (eyebrow?.trim()) return eyebrow.trim();
 		if (kind === 'success') return 'All Set';
 		if (kind === 'info') return 'Heads Up';
+		if (kind === 'warning') return 'Check This';
 		return 'Needs Attention';
 	});
 	const cardClassName = $derived(`notice-card ${kind}`);
@@ -51,11 +52,12 @@
 	:global(.notice-card) {
 		position: relative;
 		isolation: isolate;
+		overflow: hidden;
+		border-color: rgba(148, 163, 184, 0.22);
 		background:
-			radial-gradient(circle at top right, rgba(255, 255, 255, 0.82), transparent 34%),
-			rgba(255, 252, 246, 0.97);
-		box-shadow: 0 22px 48px rgba(45, 30, 20, 0.16);
-		backdrop-filter: blur(26px);
+			linear-gradient(135deg, rgba(20, 26, 32, 0.96), rgba(10, 15, 21, 0.98)), var(--surface-1);
+		box-shadow: 0 22px 44px rgba(0, 0, 0, 0.32);
+		backdrop-filter: blur(24px);
 	}
 
 	:global(.notice-card)::before {
@@ -64,43 +66,53 @@
 		inset: 0 auto 0 0;
 		width: 5px;
 		border-radius: 999px;
-		background: var(--notice-edge, rgba(15, 118, 110, 0.38));
+		background: var(--notice-edge, rgba(145, 205, 253, 0.62));
+	}
+
+	:global(.notice-card)::after {
+		content: '';
+		position: absolute;
+		inset: 0 0 auto;
+		height: 1px;
+		background: linear-gradient(
+			90deg,
+			transparent,
+			var(--notice-glint, rgba(145, 205, 253, 0.36)),
+			transparent
+		);
+		pointer-events: none;
 	}
 
 	:global(.notice-card.success) {
-		--notice-edge: rgba(47, 107, 62, 0.58);
-		border-color: rgba(47, 107, 62, 0.26);
+		--notice-edge: rgba(55, 166, 107, 0.72);
+		--notice-glint: rgba(55, 166, 107, 0.42);
+		border-color: rgba(55, 166, 107, 0.28);
 		background:
-			radial-gradient(circle at top right, rgba(222, 247, 228, 0.88), transparent 38%),
-			rgba(247, 255, 249, 0.98);
+			linear-gradient(135deg, rgba(20, 36, 29, 0.98), rgba(10, 15, 21, 0.98)), var(--surface-1);
 	}
 
 	:global(.notice-card.info) {
-		--notice-edge: rgba(15, 118, 110, 0.5);
-		border-color: rgba(15, 118, 110, 0.24);
+		--notice-edge: rgba(145, 205, 253, 0.72);
+		--notice-glint: rgba(145, 205, 253, 0.44);
+		border-color: rgba(145, 205, 253, 0.26);
 		background:
-			radial-gradient(circle at top right, rgba(214, 247, 239, 0.84), transparent 38%),
-			rgba(246, 255, 252, 0.98);
+			linear-gradient(135deg, rgba(13, 32, 45, 0.98), rgba(10, 15, 21, 0.98)), var(--surface-1);
+	}
+
+	:global(.notice-card.warning) {
+		--notice-edge: rgba(214, 132, 54, 0.78);
+		--notice-glint: rgba(214, 132, 54, 0.44);
+		border-color: rgba(214, 132, 54, 0.3);
+		background:
+			linear-gradient(135deg, rgba(42, 27, 13, 0.98), rgba(10, 15, 21, 0.98)), var(--surface-1);
 	}
 
 	:global(.notice-card.error) {
-		--notice-edge: rgba(194, 65, 12, 0.62);
-		border-color: rgba(194, 65, 12, 0.28);
+		--notice-edge: rgba(208, 92, 79, 0.82);
+		--notice-glint: rgba(208, 92, 79, 0.46);
+		border-color: rgba(208, 92, 79, 0.32);
 		background:
-			radial-gradient(circle at top right, rgba(255, 228, 217, 0.92), transparent 38%),
-			rgba(255, 247, 242, 0.98);
-	}
-
-	:global(.notice-card.success)::after {
-		background: linear-gradient(90deg, transparent, rgba(47, 107, 62, 0.18), transparent);
-	}
-
-	:global(.notice-card.info)::after {
-		background: linear-gradient(90deg, transparent, rgba(15, 118, 110, 0.18), transparent);
-	}
-
-	:global(.notice-card.error)::after {
-		background: linear-gradient(90deg, transparent, rgba(194, 65, 12, 0.18), transparent);
+			linear-gradient(135deg, rgba(46, 18, 16, 0.98), rgba(10, 15, 21, 0.98)), var(--surface-1);
 	}
 
 	:global(.notice-card.success .eyebrow-copy) {
@@ -111,8 +123,12 @@
 		color: var(--accent-deep);
 	}
 
-	:global(.notice-card.error .eyebrow-copy) {
+	:global(.notice-card.warning .eyebrow-copy) {
 		color: var(--warn);
+	}
+
+	:global(.notice-card.error .eyebrow-copy) {
+		color: var(--fail);
 	}
 
 	.notice-layout {
@@ -134,15 +150,16 @@
 		min-width: 2.45rem;
 		border-radius: var(--radius-pill);
 		padding: 0.42rem 0.78rem;
-		border: 1px solid var(--border-strong);
-		background: rgba(255, 255, 255, 0.76);
+		border: 1px solid rgba(148, 163, 184, 0.26);
+		background: rgba(15, 23, 42, 0.62);
 		font-size: 0.78rem;
 		font-weight: 700;
-		color: var(--ink-soft);
+		color: var(--ink-muted);
 	}
 
 	.dismiss-button:hover {
-		border-color: var(--border-focus);
+		border-color: rgba(145, 205, 253, 0.42);
+		background: rgba(30, 41, 59, 0.72);
 		color: var(--ink);
 	}
 

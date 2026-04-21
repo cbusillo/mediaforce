@@ -25,7 +25,8 @@ from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS, ensure_q
     load_encode_job, load_queue_state, persisted_encode_host_payload, save_encode_job, save_queue_state
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
-from mediaforce.encoding.quality import QualityTempCleanupError, QualityTempSetupError, quality_error_message
+from mediaforce.encoding.quality import QualitySearchError, QualityTempCleanupError, QualityTempSetupError, \
+    quality_error_message
 from mediaforce.encoding.staging import safe_unlink
 from mediaforce.remote import execution_mode_for_host, host_media_access_for_host, run_remote_command
 from mediaforce.web.runtime.host_runtime import host_config_for_key
@@ -1435,15 +1436,27 @@ def _cleanup_encode_retry_artifacts(
 
 
 def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
-    if isinstance(exc, (QualityTempCleanupError, QualityTempSetupError)):
+    if isinstance(exc, (QualitySearchError, QualityTempCleanupError, QualityTempSetupError)):
         return "deterministic"
     message = str(exc).lower()
+    if _encode_failure_is_quality_policy_failure(message):
+        return "deterministic"
     host_payload = object_dict(job.get("host"))
     if _encode_failure_is_host_related("ssh_transport", message, host_payload):
         return "ssh_transport"
     if "staging file already exists" in message:
         return "deterministic"
     return "deterministic"
+
+
+def _encode_failure_is_quality_policy_failure(message: str) -> bool:
+    return any(
+        marker in message
+        for marker in (
+            "failed to find a suitable crf",
+            "quality search did not run",
+        )
+    )
 
 
 def _remove_path(path: Path | None) -> None:
