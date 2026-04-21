@@ -1385,7 +1385,7 @@
 		return 'Validate and promote staged output';
 	});
 	const deliverEyebrow = $derived.by(() =>
-		promotedOutputCount > 0 ? '3. Validation complete' : '3. Validate'
+		promotedOutputCount > 0 ? 'Validation complete' : 'Validate'
 	);
 	const reviewGateStatusPill = $derived.by(() => {
 		if (reviewGateStatus === 'accepted') return { label: 'Approved', variant: 'ok' as const };

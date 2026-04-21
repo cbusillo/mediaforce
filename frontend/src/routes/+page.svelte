@@ -796,15 +796,16 @@
 		align-items: start;
 	}
 
-	@media (max-width: 1100px) {
-		.console-grid {
-			grid-template-columns: minmax(0, 1.16fr) minmax(16rem, 0.74fr);
-		}
-	}
-
-	@media (max-width: 960px) {
+	@media (max-width: 1180px) {
 		.console-grid {
 			grid-template-columns: 1fr;
+		}
+
+		.side-column-sticky {
+			position: static;
+			max-height: none;
+			overflow: visible;
+			padding-right: 0;
 		}
 	}
 
