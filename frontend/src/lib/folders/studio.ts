@@ -86,7 +86,7 @@ export type FolderItemPlan = {
 		codecs?: string[];
 	};
 };
-export type EncodeStatusTone = 'live' | 'queued' | 'warning' | 'neutral';
+export type EncodeStatusTone = 'live' | 'queued' | 'warning' | 'blocked' | 'neutral';
 export type HighImpactApprovalGate = {
 	requiresConfirmation: boolean;
 	armed: boolean;
@@ -853,7 +853,7 @@ export function compactScheduleCopy(runtime: HostRuntime | null): string | null 
 export function encodeStatusTone(status: string): EncodeStatusTone {
 	if (status === 'running') return 'live';
 	if (status === 'queued' || status === 'retry_backoff') return 'queued';
-	if (status === 'needs_attention' || status === 'failed' || status === 'stopped') return 'warning';
+	if (status === 'needs_attention' || status === 'failed' || status === 'stopped') return 'blocked';
 	return 'neutral';
 }
 

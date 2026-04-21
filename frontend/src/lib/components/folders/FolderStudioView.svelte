@@ -1187,6 +1187,9 @@
 		return hostRuntimeByKey.get(hostKey) ?? null;
 	});
 	const encodeJobTone = $derived.by(() => encodeStatusTone(encodeJobStatus));
+	const encodeJobStalled = $derived.by(() =>
+		['needs_attention', 'failed', 'stopped'].includes(encodeJobStatus)
+	);
 	const encodeJobChipLabel = $derived.by(() => {
 		if (encodeJobStatus === 'queued' && encodeQueueStopping) {
 			return 'Stopping';
@@ -1422,7 +1425,7 @@
 		encodeJobCanRecoverNow
 			? 'Recover Failed Files'
 			: ['needs_attention', 'failed', 'stopped'].includes(encodeJobStatus)
-				? 'Retry Folder Encode'
+				? 'Retry'
 				: 'Start Saved Folder Encode'
 	);
 	const queueActionVisible = $derived.by(() => {
@@ -1435,9 +1438,7 @@
 		if (encodeJobStatus === 'running') return 'Folder encode running';
 		if (encodeJobStatus === 'queued') return 'Approved and queued';
 		if (encodeJobStatus === 'retry_backoff') return 'Retry scheduled';
-		if (encodeJobStatus === 'needs_attention') return 'Encode needs attention';
-		if (encodeJobStatus === 'failed') return 'Encode failed';
-		if (encodeJobStatus === 'stopped') return 'Encode stopped';
+		if (encodeJobStalled) return 'Encode stalled';
 		if (encodeJobStatus === 'completed') return 'Encode complete';
 		return 'Approved and waiting for queue';
 	});
@@ -1445,8 +1446,9 @@
 		if (encodeJobCanRecoverNow) {
 			return 'Recover the interrupted files or open Ops for deeper queue detail.';
 		}
-		if (['needs_attention', 'failed', 'stopped'].includes(encodeJobStatus)) {
-			return encodeJobDetail || 'This folder encode stopped before it finished.';
+		if (encodeJobStalled) {
+			const reason = encodeJobDetail || 'The folder encode stopped before it finished.';
+			return `Reason: ${reason}`;
 		}
 		if (encodeJobDetail) return encodeJobDetail;
 		if (encodeJobNextActionCopy) return encodeJobNextActionCopy;
@@ -1458,7 +1460,7 @@
 	});
 	const approvedProcessingStatusVariant = $derived.by(() => {
 		if (encodeJobCanRecoverNow) return 'warn' as const;
-		if (['needs_attention', 'failed', 'stopped'].includes(encodeJobStatus)) return 'warn' as const;
+		if (encodeJobStalled) return 'warn' as const;
 		if (encodeJobStatus === 'queued' || encodeJobStatus === 'retry_backoff')
 			return 'neutral' as const;
 		return 'ok' as const;
@@ -2340,26 +2342,34 @@
 												variant={approvedProcessingStatusVariant}
 											/>
 											<div class="action-row processing-strip-action-row">
-												<Button variant="ghost" onclick={openApprovedChat}>
-													{showBenchColumn ? 'Focus bench thread' : 'Open bench thread'}
-												</Button>
-												<Button variant="ghost" onclick={toggleApprovedEvidence}>
-													{showReviewEvidence ? 'Hide review evidence' : 'Reopen review evidence'}
-												</Button>
-												<a class="processing-strip-link" href={resolve('/ops')}>Open ops</a>
-												{#if queueActionVisible}
+												{#if encodeJobStalled && queueActionVisible}
 													<Button
-														variant={['needs_attention', 'failed', 'stopped'].includes(
-															encodeJobStatus
-														)
-															? 'primary'
-															: 'secondary'}
+														variant="primary"
 														loading={actionState === 'encode'}
 														disabled={!reviewGate.can_confirm_full}
 														onclick={queueEncode}
 													>
 														{queueEncodeButtonLabel}
 													</Button>
+													<a class="processing-strip-link" href={resolve('/ops')}>Open ops</a>
+												{:else}
+													<Button variant="ghost" onclick={openApprovedChat}>
+														{showBenchColumn ? 'Focus bench thread' : 'Open bench thread'}
+													</Button>
+													<Button variant="ghost" onclick={toggleApprovedEvidence}>
+														{showReviewEvidence ? 'Hide review evidence' : 'Reopen review evidence'}
+													</Button>
+													<a class="processing-strip-link" href={resolve('/ops')}>Open ops</a>
+													{#if queueActionVisible}
+														<Button
+															variant="secondary"
+															loading={actionState === 'encode'}
+															disabled={!reviewGate.can_confirm_full}
+															onclick={queueEncode}
+														>
+															{queueEncodeButtonLabel}
+														</Button>
+													{/if}
 												{/if}
 											</div>
 										</div>
@@ -3441,6 +3451,11 @@
 	.processing-strip-warning {
 		border-color: rgba(251, 146, 60, 0.32);
 		background: rgba(62, 31, 11, 0.96);
+	}
+
+	.processing-strip-blocked {
+		border-color: rgba(248, 113, 113, 0.34);
+		background: rgba(62, 15, 17, 0.96);
 	}
 
 	.processing-strip-head {

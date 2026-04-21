@@ -4,6 +4,7 @@ import {
 	approvalReviewSignature,
 	buildCalibrationThreadScrollSignature,
 	describeHighImpactApprovalGate,
+	encodeStatusTone,
 	normalizeReviewArtifacts,
 	resolveBenchDraftNote,
 	summarizeVideoTransformPolicy,
@@ -63,6 +64,20 @@ describe('describeHighImpactApprovalGate', () => {
 			armed: false,
 			buttonLabel: 'Approved'
 		});
+	});
+});
+
+describe('encodeStatusTone', () => {
+	it('uses blocked tone for stopped encode states', () => {
+		expect(encodeStatusTone('needs_attention')).toBe('blocked');
+		expect(encodeStatusTone('failed')).toBe('blocked');
+		expect(encodeStatusTone('stopped')).toBe('blocked');
+	});
+
+	it('keeps active and waiting encode tones distinct', () => {
+		expect(encodeStatusTone('running')).toBe('live');
+		expect(encodeStatusTone('queued')).toBe('queued');
+		expect(encodeStatusTone('retry_backoff')).toBe('queued');
 	});
 });
 
