@@ -898,6 +898,7 @@
 
 	function downloadReviewCompareVideo(): void {
 		if (!browser) return;
+		reviewPackOpened = true;
 		const link = document.createElement('a');
 		link.href = reviewCompareDownloadHref();
 		link.rel = 'noopener noreferrer';
@@ -905,6 +906,15 @@
 		document.body.appendChild(link);
 		link.click();
 		link.remove();
+	}
+
+	async function scrollToDecisionBlock(): Promise<void> {
+		if (!browser) return;
+		await tick();
+		document.querySelector('.inline-decision-block')?.scrollIntoView({
+			behavior: 'smooth',
+			block: 'center'
+		});
 	}
 
 	$effect(() => {
@@ -1016,6 +1026,8 @@
 	let selectedReviewPairIndex = $state(0);
 	const selectedReviewPair = $derived(reviewPairs[selectedReviewPairIndex] ?? null);
 	let seenReviewMomentKeys = $state<string[]>([]);
+	let reviewPackOpened = $state(false);
+	let reviewPackSignature = $state('');
 	let sourceReviewVideo = $state<HTMLVideoElement | null>(null);
 	let draftReviewVideo = $state<HTMLVideoElement | null>(null);
 	let reviewSyncLocked = false;
@@ -1079,6 +1091,26 @@
 		}
 		return `${seenReviewMomentCount}/${reviewMomentCount} checked. ${remainingReviewMomentCount} left.`;
 	});
+	const reviewPackOpenSignature = $derived(
+		`${folder.prefix}:${currentCalibrationDraftHash || String(calibration.accepted_draft_hash ?? '').trim()}:${fullCompareClipCount}`
+	);
+	const reviewPackCommandHeading = $derived.by(() =>
+		reviewPackOpened ? 'Record the decision' : 'Download review pack'
+	);
+	const reviewPackCommandDetail = $derived.by(() => {
+		if (reviewPackOpened) {
+			return 'Use the decision controls below when you return from the full comparison pack.';
+		}
+		return 'Open the full source-versus-draft comparison pack for final judgment. The inline player stays here for orientation and spot checks.';
+	});
+	const reviewPackCommandStatus = $derived.by(() =>
+		reviewPackOpened
+			? { label: 'Pack opened', variant: 'ok' as const }
+			: { label: 'External review', variant: 'neutral' as const }
+	);
+	const reviewPackCommandActionLabel = $derived.by(() =>
+		reviewPackOpened ? 'Download again' : 'Download review pack'
+	);
 	const threadHistorySummaryCopy = $derived.by(() => {
 		if (!hasCalibrationThread) return '';
 		const nextStep = String(currentThreadSession?.runNextStep ?? '').trim();
@@ -1809,6 +1841,12 @@
 		selectedReviewPairIndex = 0;
 	});
 
+	$effect(() => {
+		if (reviewPackOpenSignature === reviewPackSignature) return;
+		reviewPackSignature = reviewPackOpenSignature;
+		reviewPackOpened = false;
+	});
+
 	function markReviewMomentSeen(index: number) {
 		const key = reviewMomentPills[index]?.key;
 		if (!key || seenReviewMomentSet.has(key)) return;
@@ -2359,6 +2397,37 @@
 							{/if}
 
 							{#if showReviewEvidence}
+								{#if hasFullCompareDownload && !approvedProcessingMode}
+									<section class:opened={reviewPackOpened} class="review-pack-command">
+										<div class="section-copy-block review-pack-command-copy">
+											<p class="eyebrow-copy">Review artifact</p>
+											<h3 class="review-block-title">{reviewPackCommandHeading}</h3>
+											<p class="muted-copy">{reviewPackCommandDetail}</p>
+										</div>
+										<div class="review-pack-command-side">
+											<Pill
+												label={reviewPackCommandStatus.label}
+												variant={reviewPackCommandStatus.variant}
+											/>
+											<div class="action-row review-pack-command-actions">
+												<Button
+													variant={reviewPackOpened ? 'secondary' : 'primary'}
+													onclick={() => {
+														markReviewMomentSeen(selectedReviewPairIndex);
+														downloadReviewCompareVideo();
+													}}
+												>
+													{reviewPackCommandActionLabel}
+												</Button>
+												{#if reviewPackOpened}
+													<Button variant="ghost" onclick={() => void scrollToDecisionBlock()}>
+														Go to decision
+													</Button>
+												{/if}
+											</div>
+										</div>
+									</section>
+								{/if}
 								<div class="review-block review-evidence-block">
 									{#if reviewPairs.length && selectedReviewPair}
 										<div class="review-player-shell-block">
@@ -2382,17 +2451,6 @@
 															disabled={!hasNextReviewMoment}
 															onclick={() => void stepReviewMoment(1)}>Next</Button
 														>
-														{#if hasFullCompareDownload}
-															<Button
-																variant={approvedProcessingMode ? 'secondary' : 'primary'}
-																onclick={() => {
-																	markReviewMomentSeen(selectedReviewPairIndex);
-																	downloadReviewCompareVideo();
-																}}
-															>
-																Download review pack
-															</Button>
-														{/if}
 													</div>
 												</div>
 											</div>
@@ -2489,6 +2547,13 @@
 												<p class="eyebrow-copy">{reviewGateEyebrow}</p>
 												<h3 class="review-block-title">{reviewGateHeading}</h3>
 												<p class="muted-copy">{reviewGateDetail}</p>
+												{#if hasFullCompareDownload}
+													<p class:ready={reviewPackOpened} class="decision-review-pack-state">
+														{reviewPackOpened
+															? 'Review pack opened. Approve or revise when ready.'
+															: 'Download the review pack above before making the final call.'}
+													</p>
+												{/if}
 											</div>
 											<div class="decision-head-side">
 												<Pill
@@ -2498,9 +2563,9 @@
 												<div
 													class="action-row review-action-row decision-action-row inline-decision-actions"
 												>
-													<Button variant="ghost" onclick={enterRevisionFlow}>Revise</Button>
+													<Button variant="secondary" onclick={enterRevisionFlow}>Revise</Button>
 													<Button
-														variant="primary"
+														variant="approve"
 														loading={actionState === 'save'}
 														disabled={approvalButtonDisabled}
 														onclick={saveProfile}
@@ -3317,6 +3382,40 @@
 		border: 0;
 	}
 
+	.review-pack-command {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		gap: 0.85rem;
+		align-items: start;
+		padding: 0.86rem 0.95rem;
+		border: 1px solid rgba(56, 189, 248, 0.24);
+		background: rgba(9, 33, 49, 0.82);
+	}
+
+	.review-pack-command.opened {
+		border-color: rgba(74, 222, 128, 0.2);
+		background: rgba(13, 45, 29, 0.68);
+	}
+
+	.review-pack-command-copy {
+		gap: 0.28rem;
+	}
+
+	.review-pack-command-side {
+		display: grid;
+		justify-items: end;
+		gap: 0.55rem;
+		min-width: min(100%, 18rem);
+	}
+
+	.review-pack-command-actions {
+		justify-content: flex-end;
+	}
+
+	.review-pack-command-actions :global(button) {
+		min-width: min(100%, 12rem);
+	}
+
 	.folder-workstation :global(.review-panel) {
 		background: rgba(10, 15, 21, 0.92);
 	}
@@ -3440,6 +3539,20 @@
 
 	.review-console-copy {
 		gap: 0.3rem;
+	}
+
+	.decision-review-pack-state {
+		margin: 0.1rem 0 0;
+		padding-left: 0.55rem;
+		border-left: 2px solid rgba(251, 191, 36, 0.38);
+		font-size: 0.83rem;
+		line-height: 1.35;
+		color: rgba(226, 232, 240, 0.76);
+	}
+
+	.decision-review-pack-state.ready {
+		border-left-color: rgba(74, 222, 128, 0.42);
+		color: rgba(220, 252, 231, 0.86);
 	}
 
 	.decision-head-side {
@@ -3931,6 +4044,19 @@
 
 		.review-console-head {
 			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.review-pack-command {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.review-pack-command-side {
+			justify-items: start;
+			min-width: 0;
+		}
+
+		.review-pack-command-actions {
+			justify-content: flex-start;
 		}
 
 		.decision-head-side {
