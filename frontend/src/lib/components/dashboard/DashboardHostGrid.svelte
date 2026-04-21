@@ -94,9 +94,15 @@
 	}
 
 	function hostIssueCopy(host: HostRuntime): string | null {
-		if (host.issues.length > 0) return host.issues[0];
-		if (host.missing_paths.length > 0) return `Missing path: ${host.missing_paths[0]}`;
+		const blockers = hostBlockers(host);
+		if (blockers.length > 0) return blockers[0];
 		return host.detail;
+	}
+
+	function hostBlockers(host: HostRuntime): string[] {
+		return [...host.issues, ...host.missing_paths.map((path) => `Missing path: ${path}`)].filter(
+			(item) => item.trim().length > 0
+		);
 	}
 </script>
 
@@ -127,6 +133,7 @@
 		</div>
 		{#each rankedHosts as host (host.key)}
 			{@const tone = hostTone(host)}
+			{@const blockers = hostBlockers(host)}
 			<div class={`host-row ${tone}`.trim()} role="row">
 				<div class="host-name-cell" role="cell">
 					<p class="host-label">{host.label}</p>
@@ -148,9 +155,24 @@
 				<div class="host-capability-cell" role="cell">
 					<p class="cell-strong">{capabilityCopy(host)}</p>
 					{#if host.running_jobs && host.running_jobs.length > 0}
-						<p class="muted-copy">
-							{host.running_jobs.length} live encode{host.running_jobs.length === 1 ? '' : 's'}
-						</p>
+						<details class="running-job-shell" aria-label={`Active encode jobs on ${host.label}`}>
+							<summary>
+								{host.running_jobs.length} live encode{host.running_jobs.length === 1 ? '' : 's'}
+							</summary>
+							<div class="running-job-list">
+								{#each host.running_jobs as job (job.job_id)}
+									<div class="running-job-row">
+										<p class="running-job-title">{job.prefix}</p>
+										<p class="muted-copy running-job-detail">
+											{job.progress?.current_item_rel_path ?? 'Preparing encode job'}
+										</p>
+										<p class="running-job-summary">
+											{job.telemetry_summary || job.scheduler_status_copy || 'Running now'}
+										</p>
+									</div>
+								{/each}
+							</div>
+						</details>
 					{:else}
 						<p class="muted-copy">
 							{host.media_access === 'stream' ? 'Streams media' : 'Mounted media'}
@@ -159,7 +181,13 @@
 				</div>
 				<div class="host-attention-cell" role="cell">
 					<p class="attention-copy">{attentionLabel(host)}</p>
-					{#if attentionDetail(host)}
+					{#if blockers.length > 0}
+						<ul class="blocker-list" aria-label={`Host blockers for ${host.label}`}>
+							{#each blockers as blocker (blocker)}
+								<li>{blocker}</li>
+							{/each}
+						</ul>
+					{:else if attentionDetail(host)}
 						<p class="muted-copy issue-copy">{attentionDetail(host)}</p>
 					{/if}
 				</div>
@@ -353,6 +381,84 @@
 
 	.issue-copy {
 		margin-top: 0.25rem;
+	}
+
+	.blocker-list,
+	.running-job-list {
+		display: grid;
+		gap: 0.45rem;
+		margin: 0.4rem 0 0;
+		padding: 0;
+		list-style: none;
+	}
+
+	.blocker-list li {
+		position: relative;
+		padding-left: 0.72rem;
+		color: rgba(226, 232, 240, 0.72);
+		line-height: 1.35;
+		overflow-wrap: anywhere;
+	}
+
+	.blocker-list li::before {
+		content: '';
+		position: absolute;
+		left: 0;
+		top: 0.62em;
+		width: 0.28rem;
+		height: 0.28rem;
+		border-radius: 999px;
+		background: rgba(249, 115, 22, 0.88);
+	}
+
+	.running-job-shell {
+		margin-top: 0.32rem;
+	}
+
+	.running-job-shell summary {
+		cursor: pointer;
+		width: fit-content;
+		color: rgba(125, 211, 252, 0.88);
+		font-size: 0.84rem;
+		font-weight: 700;
+	}
+
+	.running-job-shell summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.running-job-row {
+		display: grid;
+		gap: 0.24rem;
+		padding-top: 0.48rem;
+		border-top: 1px solid rgba(148, 163, 184, 0.14);
+	}
+
+	.running-job-row:first-child {
+		padding-top: 0;
+		border-top: 0;
+	}
+
+	.running-job-title,
+	.running-job-summary,
+	.running-job-detail {
+		margin: 0;
+		overflow-wrap: anywhere;
+	}
+
+	.running-job-title {
+		font-weight: 700;
+		color: #f8fafc;
+	}
+
+	.running-job-summary {
+		width: fit-content;
+		padding: 0.18rem 0.4rem;
+		border-radius: var(--radius-pill);
+		background: rgba(14, 165, 233, 0.14);
+		color: rgba(186, 230, 253, 0.94);
+		font-size: 0.76rem;
+		font-weight: 800;
 	}
 
 	@media (max-width: 1120px) {
