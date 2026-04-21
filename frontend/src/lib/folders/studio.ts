@@ -86,8 +86,6 @@ export type FolderItemPlan = {
 		codecs?: string[];
 	};
 };
-export type FolderQueueSample = { running_count?: number; queued_count?: number };
-export type FolderCalibrationQueue = { sample?: FolderQueueSample };
 export type EncodeStatusTone = 'live' | 'queued' | 'warning' | 'neutral';
 export type HighImpactApprovalGate = {
 	requiresConfirmation: boolean;
@@ -852,42 +850,6 @@ export function compactScheduleCopy(runtime: HostRuntime | null): string | null 
 	return detail.replace(/^window\s+/i, '');
 }
 
-export function hostCapacityCopy(runtime: HostRuntime | null): string | null {
-	if (!runtime) return null;
-	const laneLabel = `lane${runtime.max_parallel_encodes === 1 ? '' : 's'}`;
-	if (runtime.active_encode_count > 0) {
-		return `${runtime.active_encode_count}/${runtime.max_parallel_encodes} ${laneLabel} running`;
-	}
-	if (runtime.queue_active) {
-		return `${runtime.max_parallel_encodes} ${laneLabel} free`;
-	}
-	if (runtime.schedule_open === false) {
-		return `${runtime.max_parallel_encodes} ${laneLabel} scheduled`;
-	}
-	if (runtime.active_reason === 'parallel encode slots are full') {
-		return `${runtime.max_parallel_encodes} ${laneLabel} busy`;
-	}
-	return runtime.message;
-}
-
-export function queueSummaryCopy(runningCount: number, queuedCount: number, label: string): string {
-	if (runningCount === 0 && queuedCount === 0) {
-		return `${label}: idle`;
-	}
-	return `${label}: ${runningCount} running · ${queuedCount} queued`;
-}
-
-export function encodeQueueSummaryCopy(summary: string | undefined): string {
-	const trimmed = String(summary ?? '').trim();
-	if (!trimmed || trimmed.startsWith('0 running · 0 queued')) {
-		return 'Encode queue: idle';
-	}
-	if (/waiting for a host schedule window/i.test(trimmed)) {
-		return `Encode queue: ${trimmed.replace(/\s*·\s*waiting for a host schedule window/i, ' · next worker window')}`;
-	}
-	return `Encode queue: ${trimmed}`;
-}
-
 export function encodeStatusTone(status: string): EncodeStatusTone {
 	if (status === 'running') return 'live';
 	if (status === 'queued' || status === 'retry_backoff') return 'queued';
@@ -921,7 +883,7 @@ export function describeHighImpactApprovalGate({
 		return {
 			requiresConfirmation: false,
 			armed: false,
-			buttonLabel: 'Draft already approved'
+			buttonLabel: 'Approved'
 		};
 	}
 	const requiresConfirmation = highImpactPolicyCount > 0;
@@ -929,7 +891,7 @@ export function describeHighImpactApprovalGate({
 	return {
 		requiresConfirmation,
 		armed: confirmationArmed,
-		buttonLabel: confirmationArmed ? 'Confirm High-Impact Approval' : 'Approve Draft + Queue Folder'
+		buttonLabel: 'Approve'
 	};
 }
 

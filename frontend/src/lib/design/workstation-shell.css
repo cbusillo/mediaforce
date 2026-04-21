@@ -17,16 +17,15 @@ body::before {
 }
 
 .page-shell {
-	width: min(1480px, calc(100vw - 1.75rem));
+	width: var(--shell-width);
 	gap: 0.95rem;
 	padding-top: 0.7rem;
 }
 
 .masthead {
 	border: 1px solid rgba(148, 163, 184, 0.18) !important;
-	box-shadow: 0 18px 34px rgba(2, 6, 23, 0.26) !important;
-	backdrop-filter: blur(14px);
-	background: rgba(10, 15, 21, 0.9) !important;
+	box-shadow: none !important;
+	background: rgba(10, 15, 21, 0.98) !important;
 }
 
 .masthead::before,
@@ -72,7 +71,7 @@ body::before {
 
 @media (max-width: 720px) {
 	.page-shell {
-		width: min(1480px, calc(100vw - 1rem));
+		width: min(1680px, calc(100vw - 1rem));
 		padding-top: 0.45rem;
 	}
 

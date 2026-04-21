@@ -21,7 +21,7 @@ describe('describeHighImpactApprovalGate', () => {
 		).toEqual({
 			requiresConfirmation: false,
 			armed: false,
-			buttonLabel: 'Approve Draft + Queue Folder'
+			buttonLabel: 'Approve'
 		});
 	});
 
@@ -35,7 +35,7 @@ describe('describeHighImpactApprovalGate', () => {
 		).toEqual({
 			requiresConfirmation: true,
 			armed: false,
-			buttonLabel: 'Approve Draft + Queue Folder'
+			buttonLabel: 'Approve'
 		});
 
 		expect(
@@ -47,7 +47,7 @@ describe('describeHighImpactApprovalGate', () => {
 		).toEqual({
 			requiresConfirmation: true,
 			armed: true,
-			buttonLabel: 'Confirm High-Impact Approval'
+			buttonLabel: 'Approve'
 		});
 	});
 
@@ -61,7 +61,7 @@ describe('describeHighImpactApprovalGate', () => {
 		).toEqual({
 			requiresConfirmation: false,
 			armed: false,
-			buttonLabel: 'Draft already approved'
+			buttonLabel: 'Approved'
 		});
 	});
 });

@@ -1,20 +1,11 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import Panel from '$lib/components/Panel.svelte';
-	import Pill from '$lib/components/Pill.svelte';
-	import SectionHead from '$lib/components/SectionHead.svelte';
 	import type { BreadcrumbItem } from '$lib/folders/studio';
 
 	type HeaderFactItem = {
 		label: string;
 		value: string;
-	};
-
-	type WorkflowStageCard = {
-		key: string;
-		label: string;
-		status: string;
-		detail: string;
 	};
 
 	type PreviewSubmission = {
@@ -24,12 +15,10 @@
 
 	let {
 		breadcrumbItems,
-		folderPrefix,
-		metricStatusCopy,
+		folderTitle,
 		headerFactItems,
 		actionState,
 		previewSubmission,
-		workflowStageCards,
 		showFolderRefresh,
 		folderRefreshSignal,
 		folderRefreshMeta,
@@ -39,12 +28,10 @@
 		calibrationMeta
 	}: {
 		breadcrumbItems: BreadcrumbItem[];
-		folderPrefix: string;
-		metricStatusCopy: string;
+		folderTitle: string;
 		headerFactItems: HeaderFactItem[];
 		actionState: string | null;
 		previewSubmission: PreviewSubmission | null;
-		workflowStageCards: WorkflowStageCard[];
 		showFolderRefresh: boolean;
 		folderRefreshSignal: string;
 		folderRefreshMeta: string;
@@ -68,21 +55,15 @@
 	{/each}
 </nav>
 
-<Panel class="folder-header" padding="1.35rem 1.45rem">
-	<div class="folder-header-grid">
-		<SectionHead
-			eyebrow="Calibration Studio"
-			heading={folderPrefix}
-			lede="Tune this folder with hard-scene samples before you run the real batch."
-			size="section"
-		/>
-		<div class="folder-header-side">
-			<p class="lede-copy">{metricStatusCopy}</p>
-			<div class="pill-row">
-				{#each headerFactItems as item (item.label)}
-					<Pill label={`${item.label}: ${item.value}`} variant="neutral" wide />
-				{/each}
-			</div>
+<section class="folder-header">
+	<div class="folder-header-bar">
+		<div class="folder-title-block">
+			<h1>{folderTitle}</h1>
+		</div>
+		<div class="fact-row">
+			{#each headerFactItems as item (item.label)}
+				<span>{item.label}: {item.value}</span>
+			{/each}
 		</div>
 	</div>
 	{#if actionState === 'preview' && previewSubmission}
@@ -107,15 +88,7 @@
 			</p>
 		</div>
 	{/if}
-	<div class="workflow-stage-strip" aria-label="Folder workflow stages">
-		{#each workflowStageCards as stage (stage.key)}
-			<div class={`workflow-stage-card ${stage.status}`.trim()}>
-				<p class="workflow-stage-label">{stage.label}</p>
-				<p class="workflow-stage-detail">{stage.detail}</p>
-			</div>
-		{/each}
-	</div>
-</Panel>
+</section>
 
 {#if showFolderRefresh}
 	<Panel class="status-strip-panel in-progress" padding="0.95rem 1rem">
@@ -162,94 +135,92 @@
 {/if}
 
 <style>
-	.folder-header-grid {
+	.folder-header-bar {
 		display: grid;
-		grid-template-columns: minmax(0, 1.05fr) minmax(280px, 0.95fr);
-		gap: var(--space-4);
-		align-items: start;
+		grid-template-columns: minmax(0, 1fr) auto;
+		gap: 0.85rem;
+		align-items: end;
 	}
 
-	.folder-header-side {
+	.folder-header {
 		display: grid;
-		gap: var(--space-3);
+		gap: 0.35rem;
+		padding: 0.05rem 0 0.45rem;
+		border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+	}
+
+	.folder-title-block {
+		display: grid;
+		gap: 0.15rem;
+		min-width: 0;
+	}
+
+	.folder-title-block h1 {
+		margin: 0;
+		font-size: clamp(1.1rem, 1.8vw, 1.4rem);
+		line-height: 1.05;
+		overflow-wrap: break-word;
 	}
 
 	.breadcrumb-row {
 		display: flex;
-		gap: 0.55rem;
+		gap: 0.45rem;
 		align-items: center;
-		font-size: 0.92rem;
+		font-size: 0.82rem;
 		color: rgba(148, 163, 184, 0.82);
 		flex-wrap: wrap;
 	}
 
 	.breadcrumb-row a {
 		color: #7dd3fc;
+		font-weight: 600;
+	}
+
+	.fact-row {
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.9rem;
+		flex-wrap: wrap;
+		font-size: 0.82rem;
 		font-weight: 700;
+		color: rgba(226, 232, 240, 0.78);
 	}
 
-	.workflow-stage-strip {
-		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
-		gap: 0.75rem;
-		margin-top: 1rem;
+	@media (max-width: 1100px) {
+		.breadcrumb-row {
+			gap: 0.35rem;
+			font-size: 0.76rem;
+		}
+
+		.folder-header {
+			gap: 0.22rem;
+			padding: 0 0 0.3rem;
+		}
+
+		.folder-header-bar {
+			gap: 0.6rem;
+		}
+
+		.folder-title-block h1 {
+			font-size: 1rem;
+		}
+
+		.fact-row {
+			gap: 0.65rem;
+			font-size: 0.76rem;
+		}
 	}
 
-	.workflow-stage-card {
-		display: grid;
-		gap: 0.2rem;
-		padding: 0.85rem 0.95rem;
-		border-radius: 0;
-		background: rgba(15, 23, 42, 0.68);
-		border: 1px solid rgba(148, 163, 184, 0.16);
-		box-shadow: none;
-	}
-
-	.workflow-stage-card.current {
-		background: rgba(8, 47, 73, 0.78);
-		border-color: rgba(56, 189, 248, 0.28);
-	}
-
-	.workflow-stage-card.done {
-		background: rgba(20, 83, 45, 0.64);
-		border-color: rgba(74, 222, 128, 0.2);
-	}
-
-	.workflow-stage-card.pending {
-		border-style: dashed;
-		background: rgba(15, 20, 27, 0.72);
-	}
-
-	.workflow-stage-label,
-	.workflow-stage-detail {
-		margin: 0;
-	}
-
-	.workflow-stage-label {
-		font-size: 0.74rem;
-		font-weight: 800;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		color: rgba(125, 211, 252, 0.9);
-	}
-
-	.workflow-stage-detail {
-		font-size: 0.94rem;
-		font-weight: 700;
-		line-height: 1.3;
-		color: #f8fafc;
-	}
-
-	.status-strip-panel {
+	:global(.status-strip-panel) {
 		background: rgba(15, 20, 27, 0.94);
 	}
 
-	.status-strip-panel.in-progress {
+	:global(.status-strip-panel.in-progress) {
 		position: relative;
 		overflow: hidden;
 	}
 
-	.status-strip-panel.in-progress::after {
+	:global(.status-strip-panel.in-progress)::after {
 		content: '';
 		position: absolute;
 		inset: 0;
@@ -264,7 +235,7 @@
 		animation: status-strip-sheen 2.8s ease-in-out infinite;
 	}
 
-	.accent-strip {
+	:global(.accent-strip) {
 		background: rgba(8, 47, 73, 0.86);
 	}
 
@@ -316,7 +287,16 @@
 		white-space: nowrap;
 	}
 
-	.pill-row,
+	.fact-row {
+		display: flex;
+		gap: 1rem;
+		flex-wrap: wrap;
+		justify-content: flex-end;
+		font-size: 0.84rem;
+		font-weight: 700;
+		color: rgba(203, 213, 225, 0.82);
+	}
+
 	.section-copy-block {
 		display: grid;
 		gap: 0.3rem;
@@ -348,13 +328,25 @@
 	}
 
 	@media (max-width: 900px) {
-		.folder-header-grid,
-		.workflow-stage-strip {
+		.folder-header-bar {
 			grid-template-columns: 1fr;
+		}
+
+		.fact-row {
+			justify-content: flex-start;
 		}
 	}
 
 	@media (max-width: 720px) {
+		.folder-header-bar {
+			grid-template-columns: 1fr;
+			align-items: start;
+		}
+
+		.fact-row {
+			justify-content: flex-start;
+		}
+
 		.status-strip {
 			align-items: start;
 		}

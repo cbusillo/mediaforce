@@ -8,9 +8,8 @@
 		<a class="brand-link" href={resolve('/')}>
 			<div class="brand-stack">
 				<span class="brand-mark">Mediaforce</span>
-				<span class="brand-name">AV1 operations console</span>
+				<span class="brand-name">AV1 ops</span>
 			</div>
-			<span class="brand-context">Operator workstation</span>
 		</a>
 	</div>
 
@@ -42,12 +41,12 @@
 	.masthead {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) auto;
-		gap: 1.25rem;
+		gap: 1rem;
 		align-items: center;
 		position: sticky;
 		top: 0.75rem;
 		z-index: 10;
-		padding: 0.9rem 1.1rem;
+		padding: 0.65rem 0.85rem;
 		border: 1px solid rgba(23, 35, 31, 0.1);
 		background: rgba(255, 252, 246, 0.9);
 		backdrop-filter: blur(18px);
@@ -66,39 +65,32 @@
 	}
 
 	.brand-link {
-		justify-content: space-between;
-		gap: 1rem;
+		justify-content: flex-start;
+		gap: 0.8rem;
 		flex-wrap: wrap;
 		width: 100%;
 	}
 
 	.brand-stack {
-		display: grid;
-		gap: 0.18rem;
+		display: flex;
+		align-items: baseline;
+		gap: 0.55rem;
+		flex-wrap: wrap;
 	}
 
-	.brand-mark,
-	.brand-context {
+	.brand-mark {
 		font-size: 0.76rem;
 		font-weight: 800;
 		text-transform: uppercase;
 		letter-spacing: 0.18em;
-	}
-
-	.brand-mark {
 		color: var(--accent-deep);
 	}
 
 	.brand-name {
-		font-size: clamp(1.15rem, 1.75vw, 1.45rem);
+		font-size: clamp(1rem, 1.3vw, 1.18rem);
 		font-weight: 700;
 		line-height: 1;
 		color: var(--ink);
-	}
-
-	.brand-context {
-		color: var(--ink-soft);
-		white-space: nowrap;
 	}
 
 	.brand-link:hover .brand-name {
@@ -106,10 +98,10 @@
 	}
 
 	.nav-row {
-		gap: 0.3rem;
+		gap: 0.15rem;
 		justify-content: flex-end;
 		flex-wrap: wrap;
-		padding-left: 1rem;
+		padding-left: 0.8rem;
 		border-left: 1px solid rgba(23, 35, 31, 0.08);
 	}
 
@@ -117,11 +109,11 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		min-height: 2.35rem;
-		padding: 0.58rem 0.82rem;
+		min-height: 2rem;
+		padding: 0.42rem 0.68rem;
 		border-bottom: 2px solid transparent;
 		color: var(--ink-muted);
-		font-size: 0.9rem;
+		font-size: 0.84rem;
 		font-weight: 700;
 		transition:
 			transform 150ms ease,
@@ -154,9 +146,36 @@
 		}
 	}
 
+	@media (max-width: 1100px) {
+		.masthead {
+			gap: 0.75rem;
+			padding: 0.5rem 0.7rem;
+			top: 0.5rem;
+		}
+
+		.brand-mark {
+			font-size: 0.72rem;
+			letter-spacing: 0.16em;
+		}
+
+		.brand-name {
+			font-size: 1rem;
+		}
+
+		.nav-row {
+			padding-left: 0.65rem;
+		}
+
+		.nav-row a {
+			min-height: 1.8rem;
+			padding: 0.32rem 0.56rem;
+			font-size: 0.8rem;
+		}
+	}
+
 	@media (max-width: 560px) {
 		.brand-stack {
-			gap: 0.08rem;
+			gap: 0.4rem;
 		}
 
 		.brand-mark {
@@ -165,7 +184,7 @@
 		}
 
 		.brand-name {
-			font-size: 0.96rem;
+			font-size: 0.92rem;
 		}
 
 		.nav-row {
