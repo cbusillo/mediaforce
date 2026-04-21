@@ -145,8 +145,11 @@
 		if (dashboard.encode_queue.state.stop_requested || dashboard.encode_queue.state.is_paused) {
 			return 'warning-state';
 		}
-		if (queueWorkersScheduledOffWindow && dashboard.encode_queue.queued_count > 0) {
+		if (queueWorkersScheduledOffWindow) {
 			return 'schedule-state';
+		}
+		if (dashboard.encode_queue.queued_count > 0 && readyHosts === 0) {
+			return 'warning-state';
 		}
 		return 'normal-state';
 	});
@@ -154,8 +157,11 @@
 		if (encodeCapableHosts === 0) {
 			return 'warning-state';
 		}
-		if (readyHosts === 0 && dashboard.encode_queue.queued_count > 0) {
+		if (queueWorkersScheduledOffWindow) {
 			return 'schedule-state';
+		}
+		if (readyHosts === 0 && dashboard.encode_queue.queued_count > 0) {
+			return 'warning-state';
 		}
 		return 'normal-state';
 	});
@@ -179,6 +185,14 @@
 			return nextWorkerWindow
 				? `Queued now. Next worker window opens at ${nextWorkerWindow}.`
 				: 'Queued now. All queue workers are currently scheduled off-window.';
+		}
+		if (queueWorkersScheduledOffWindow) {
+			return nextWorkerWindow
+				? `Waiting for the next worker window at ${nextWorkerWindow}.`
+				: 'All queue workers are currently scheduled off-window.';
+		}
+		if (dashboard.encode_queue.queued_count > 0 && readyHosts === 0) {
+			return 'Queued work is waiting for a ready host.';
 		}
 		return encodeQueueEtaCopy
 			? `Estimated queue finish in ${encodeQueueEtaCopy} at the current fleet pace.`

@@ -550,6 +550,11 @@
 		border-color: rgba(251, 146, 60, 0.24);
 	}
 
+	.queue-watch-shell.blocked {
+		background: rgba(62, 15, 17, 0.96);
+		border-color: rgba(248, 113, 113, 0.34);
+	}
+
 	.folder-encode-chip {
 		background: rgba(148, 163, 184, 0.16);
 		color: rgba(226, 232, 240, 0.78);
@@ -568,6 +573,11 @@
 	.folder-encode-chip.warning {
 		background: rgba(120, 53, 15, 0.82);
 		color: #ffedd5;
+	}
+
+	.folder-encode-chip.blocked {
+		background: rgba(62, 15, 17, 0.82);
+		color: #fee2e2;
 	}
 
 	.folder-encode-facts {

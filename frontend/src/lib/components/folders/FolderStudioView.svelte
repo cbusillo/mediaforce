@@ -62,6 +62,7 @@
 		type FolderMultimodalReviewPack,
 		type FolderOperatorRequest,
 		type FolderPolicy,
+		type FolderReviewClip,
 		type FolderReviewPair,
 		type FolderRunVerdict,
 		type FolderSampleItem,
@@ -1023,6 +1024,18 @@
 		).length
 	);
 	const hasFullCompareDownload = $derived(fullCompareClipCount > 0);
+	const reviewPackContentSignature = $derived.by(() =>
+		((calibration.compare_clips as FolderReviewClip[] | undefined) ?? [])
+			.map((clip) =>
+				[
+					String(clip.path ?? '').trim(),
+					String(clip.size_bytes ?? '').trim(),
+					String(clip.duration_seconds ?? '').trim(),
+					String(clip.timestamp_seconds ?? '').trim()
+				].join('\u001f')
+			)
+			.join('\u001e')
+	);
 	let selectedReviewPairIndex = $state(0);
 	const selectedReviewPair = $derived(reviewPairs[selectedReviewPairIndex] ?? null);
 	let seenReviewMomentKeys = $state<string[]>([]);
@@ -1092,7 +1105,12 @@
 		return `${seenReviewMomentCount}/${reviewMomentCount} checked. ${remainingReviewMomentCount} left.`;
 	});
 	const reviewPackOpenSignature = $derived(
-		`${folder.prefix}:${currentCalibrationDraftHash || String(calibration.accepted_draft_hash ?? '').trim()}:${fullCompareClipCount}`
+		[
+			folder.prefix,
+			currentCalibrationDraftHash || String(calibration.accepted_draft_hash ?? '').trim(),
+			String(fullCompareClipCount),
+			reviewPackContentSignature
+		].join('\u001f')
 	);
 	const reviewPackCommandHeading = $derived.by(() =>
 		reviewPackOpened ? 'Record the decision' : 'Download review pack'

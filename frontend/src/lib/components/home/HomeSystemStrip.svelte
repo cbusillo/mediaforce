@@ -8,6 +8,7 @@
 		stopRequested,
 		queuePaused,
 		queueWorkersScheduledOffWindow,
+		queuedCount,
 		nextWorkerWindow,
 		etaCopy,
 		actionState,
@@ -27,6 +28,7 @@
 		stopRequested: boolean;
 		queuePaused: boolean;
 		queueWorkersScheduledOffWindow: boolean;
+		queuedCount: number;
 		nextWorkerWindow: string | null;
 		etaCopy: string | null | undefined;
 		actionState: null | 'resume-queue' | 'queue-folder';
@@ -51,11 +53,11 @@
 				Stop was requested across the fleet. Resume here when you are ready to restart queue work.
 			{:else if queuePaused}
 				Queue is paused. Resume it here or open Ops for full queue controls.
-			{:else if readyHosts === 0 && queueWorkersScheduledOffWindow}
+			{:else if queuedCount > 0 && readyHosts === 0 && queueWorkersScheduledOffWindow}
 				{nextWorkerWindow
 					? `Queued work is waiting for the next worker window at ${nextWorkerWindow}.`
 					: 'Queued work is waiting for a scheduled worker window.'}
-			{:else if readyHosts === 0}
+			{:else if queuedCount > 0 && readyHosts === 0}
 				Queued work is waiting for a worker to become ready.
 			{:else if queueWorkersScheduledOffWindow}
 				{nextWorkerWindow

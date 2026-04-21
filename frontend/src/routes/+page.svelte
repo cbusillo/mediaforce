@@ -221,11 +221,11 @@
 		if (dashboard.encode_queue.state.stop_requested || dashboard.encode_queue.state.is_paused) {
 			return 'warning-state';
 		}
-		if (dashboard.encode_queue.queued_count > 0 && readyHosts === 0) {
+		if (queueWorkersScheduledOffWindow) {
 			return 'schedule-state';
 		}
-		if (queueWorkersScheduledOffWindow && dashboard.encode_queue.queued_count > 0) {
-			return 'schedule-state';
+		if (dashboard.encode_queue.queued_count > 0 && readyHosts === 0) {
+			return 'warning-state';
 		}
 		return 'normal-state';
 	});
@@ -233,8 +233,11 @@
 		if (queueCapableHosts === 0) {
 			return 'warning-state';
 		}
-		if (readyHosts === 0 && dashboard.encode_queue.queued_count > 0) {
+		if (queueWorkersScheduledOffWindow) {
 			return 'schedule-state';
+		}
+		if (readyHosts === 0 && dashboard.encode_queue.queued_count > 0) {
+			return 'warning-state';
 		}
 		return 'normal-state';
 	});
@@ -588,6 +591,7 @@
 		stopRequested={dashboard.encode_queue.state.stop_requested}
 		queuePaused={dashboard.encode_queue.state.is_paused}
 		{queueWorkersScheduledOffWindow}
+		queuedCount={dashboard.encode_queue.queued_count}
 		nextWorkerWindow={nextWorkerWindow ?? null}
 		etaCopy={dashboard.encode_queue.telemetry?.eta_copy}
 		{actionState}
