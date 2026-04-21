@@ -48,6 +48,56 @@ completed, settings, and folder studio.
 - Folder studio: the active review workspace. It should feel like an in-flight
   operator session, not a wizard with numbered steps.
 
+## Canonical folder workflow
+
+- Folder studio is the canonical operator route because it contains the core
+  loop: run a representative sample, inspect the evidence, and approve the
+  folder draft.
+- The first viewport should make the folder, library, parent context, current
+  sample or draft state, review readiness, main next action, proposed settings
+  or important deltas, and any block or waiting reason clear without scrolling.
+- Before approval, keep the request thread as a persistent left column and keep
+  the main pane focused on evidence and decision support.
+- Treat `Download review pack` as the primary approval-step review action. The
+  inline viewer is secondary: useful for orientation and spot checks, not the
+  final inspection surface.
+- After the review pack has been opened, narrow the page toward the final
+  `Approve` or `Revise` decision. Keep decision context compact: final size,
+  duration, and resolution are enough unless a warning changes the decision.
+- `Revise` should return naturally to the chat-led workflow and review posture;
+  do not require a separate structured reason form.
+- After approval, leave the operator on the folder in a calm approved-and-
+  processing state. Collapse chat and evidence by default, and lead the main
+  body with one combined processing strip.
+- The approved-and-processing strip should lead with progress, ETA, and FPS,
+  then carry minimal output facts: final size, duration, and resolution. Link
+  to Ops for deeper operational detail instead of turning Folder Studio into a
+  fleet console.
+- Normal long encodes should stay visually quiet. Slow AV1 is not a warning by
+  itself. Stalled, blocked, or failed states should show the reason first and
+  foreground `Retry` as the recommended recovery action when retry is valid.
+
+## Semantic state color contract
+
+- Red: failed, blocked, dangerous, or otherwise requiring hard attention.
+- Amber: warning, waiting, degraded, or needs attention but not failed.
+- Green: approved, healthy, ready, or successfully completed.
+- Blue: active, running, selected, or currently in progress.
+- Gray: inactive, unavailable, not started, or intentionally disabled.
+- Color should communicate machine or workflow state before brand emphasis. Do
+  not weaken contrast or blur these meanings for visual softness.
+
+## Operator copy posture
+
+- Headings orient; labels name state directly.
+- Helper copy should appear only when it changes operator understanding or
+  prevents a bad action.
+- Factual values, statuses, and action placement should carry more meaning than
+  paragraphs.
+- Prune decorative, redundant, or space-filling copy. The product should read
+  as plain, compact, credible, and slightly blunt rather than chatty or
+  promotional.
+
 ## Visual rules
 
 - Favor dense layouts, restrained chrome, and strong dividers over decorative
