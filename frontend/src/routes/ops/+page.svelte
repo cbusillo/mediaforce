@@ -188,8 +188,8 @@
 		}
 		if (queueWorkersScheduledOffWindow) {
 			return nextWorkerWindow
-				? `Waiting for the next worker window at ${nextWorkerWindow}.`
-				: 'All queue workers are currently scheduled off-window.';
+				? `Queue is idle. Next worker window opens at ${nextWorkerWindow}.`
+				: 'Queue is idle. All queue workers are currently scheduled off-window.';
 		}
 		if (dashboard.encode_queue.queued_count > 0 && readyHosts === 0) {
 			return 'Queued work is waiting for a ready host.';
@@ -206,6 +206,11 @@
 			return queueWorkersScheduledOffWindow
 				? 'Workers exist, but none are inside the current queue schedule window.'
 				: 'Workers exist, but none are ready to take queued work right now.';
+		}
+		if (queueWorkersScheduledOffWindow) {
+			return nextWorkerWindow
+				? `${reachableHosts} mounted now. Queue dispatch resumes at ${nextWorkerWindow}.`
+				: `${reachableHosts} mounted now. Queue dispatch is outside the active schedule window.`;
 		}
 		return `${reachableHosts} mounted now across ${encodeCapableHosts} queue-capable host${encodeCapableHosts === 1 ? '' : 's'}.`;
 	});

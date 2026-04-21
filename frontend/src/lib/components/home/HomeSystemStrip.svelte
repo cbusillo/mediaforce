@@ -61,8 +61,8 @@
 				Queued work is waiting for a worker to become ready.
 			{:else if queueWorkersScheduledOffWindow}
 				{nextWorkerWindow
-					? `Waiting for the next worker window at ${nextWorkerWindow}.`
-					: 'All queue workers are currently scheduled off-window.'}
+					? `Queue is idle. Next worker window opens at ${nextWorkerWindow}.`
+					: 'Queue is idle. All queue workers are currently scheduled off-window.'}
 			{:else}
 				{etaCopy
 					? `Estimated queue finish in ${etaCopy}.`
@@ -90,7 +90,11 @@
 		<p class="system-detail">
 			{queueCapableHosts === 0
 				? `${reachableHosts} mounted now. No queue-capable workers configured.`
-				: `${reachableHosts} mounted now.`}
+				: queueWorkersScheduledOffWindow
+					? nextWorkerWindow
+						? `${reachableHosts} mounted now. Queue dispatch resumes at ${nextWorkerWindow}.`
+						: `${reachableHosts} mounted now. Queue dispatch is outside the active schedule window.`
+					: `${reachableHosts} mounted now.`}
 		</p>
 	</div>
 
