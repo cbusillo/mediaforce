@@ -39,7 +39,8 @@ completed, settings, and folder studio.
 - Home: the main workbench. The ranked queue is the primary surface, with a
   compact system strip above and an adjacent operational rail.
 - Ops: the fleet console. Lead with queue, workers, calibration, and cleanup
-  state in one scan-friendly strip, followed by direct queue and host control.
+  state in one scan-friendly strip, then keep queue lanes and host readiness in
+  list/table-first control surfaces rather than separate dashboard cards.
 - Completed: the archive cleanup surface. Keep the header light and route users
   directly into cleanup decisions instead of repeating summary pills.
 - Settings: the runtime configuration surface. It may stay more utilitarian and
