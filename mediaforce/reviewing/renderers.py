@@ -2,6 +2,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+NATIVE_COMPARE_FILTER = (
+    "[0:v]setsar=1[left];"
+    "[1:v]setsar=1[right];"
+    "[left][right]xstack=inputs=2:layout=0_0|w0_0:fill=black[v]"
+)
+
+
 def render_compare_clip(
         source_path: Path,
         staged_path: Path,
@@ -15,7 +22,6 @@ def render_compare_clip(
         ffmpeg_hwaccel_input_args: Callable[[str | None], list[str]],
         run_command: Callable[..., Any],
 ) -> None:
-    filter_complex = "[0:v]scale=-2:540:flags=lanczos,setsar=1[left];[1:v]scale=-2:540:flags=lanczos,setsar=1[right];[left][right]hstack=inputs=2[v]"
     cmd = [
         ffmpeg_binary(),
         "-hide_banner",
@@ -37,7 +43,7 @@ def render_compare_clip(
         "-i",
         str(staged_path),
         "-filter_complex",
-        filter_complex,
+        NATIVE_COMPARE_FILTER,
         "-map",
         "[v]",
         "-an",
@@ -199,7 +205,6 @@ def render_compare_clip_from_preview(
         ffmpeg_hwaccel_input_args: Callable[[str | None], list[str]],
         run_command: Callable[..., Any],
 ) -> None:
-    filter_complex = "[0:v]scale=-2:540:flags=lanczos,setsar=1[left];[1:v]scale=-2:540:flags=lanczos,setsar=1[right];[left][right]hstack=inputs=2[v]"
     cmd = [
         ffmpeg_binary(),
         "-hide_banner",
@@ -217,7 +222,7 @@ def render_compare_clip_from_preview(
         "-i",
         str(preview_path),
         "-filter_complex",
-        filter_complex,
+        NATIVE_COMPARE_FILTER,
         "-map",
         "[v]",
         "-an",

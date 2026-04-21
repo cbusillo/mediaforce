@@ -25,7 +25,12 @@
 		showCalibrationStatus,
 		calibrationSignal,
 		calibrationMode,
-		calibrationMeta
+		calibrationMeta,
+		showCalibrationFailure,
+		calibrationFailureEyebrow,
+		calibrationFailureHeading,
+		calibrationFailureDetail,
+		calibrationFailureMeta
 	}: {
 		breadcrumbItems: BreadcrumbItem[];
 		folderTitle: string;
@@ -39,6 +44,11 @@
 		calibrationSignal: string;
 		calibrationMode: 'full' | 'sample';
 		calibrationMeta: string;
+		showCalibrationFailure: boolean;
+		calibrationFailureEyebrow: string;
+		calibrationFailureHeading: string;
+		calibrationFailureDetail: string;
+		calibrationFailureMeta: string;
 	} = $props();
 </script>
 
@@ -130,6 +140,25 @@
 				</p>
 			</div>
 			<p class="status-strip-meta">{calibrationMeta}</p>
+		</div>
+	</Panel>
+{/if}
+
+{#if showCalibrationFailure}
+	<Panel class="status-strip-panel failure-strip" padding="0.95rem 1rem">
+		<div class="status-strip">
+			<div class="section-copy-block">
+				<div class="status-strip-signal" aria-live="polite">
+					<span class="status-strip-beacon" aria-hidden="true"></span>
+					<span>{calibrationFailureEyebrow}</span>
+				</div>
+				<p class="eyebrow-copy">Calibration</p>
+				<p class="status-strip-title">{calibrationFailureHeading}</p>
+				<p class="muted-copy">{calibrationFailureDetail}</p>
+			</div>
+			{#if calibrationFailureMeta}
+				<p class="status-strip-meta">{calibrationFailureMeta}</p>
+			{/if}
 		</div>
 	</Panel>
 {/if}
@@ -237,6 +266,16 @@
 
 	:global(.accent-strip) {
 		background: rgba(8, 47, 73, 0.86);
+	}
+
+	:global(.failure-strip) {
+		background: rgba(69, 26, 3, 0.9);
+		border-color: rgba(251, 146, 60, 0.34);
+	}
+
+	:global(.failure-strip) :global(.status-strip-beacon) {
+		background: #fb923c;
+		box-shadow: 0 0 0 5px rgba(251, 146, 60, 0.16);
 	}
 
 	.status-strip {

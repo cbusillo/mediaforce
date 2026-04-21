@@ -3040,6 +3040,38 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual([card for card in cards if card.prefix == "tv/show/Season 7"], [])
 
+    def test_list_folder_cards_does_not_scan_encode_jobs_on_cache_hit(self) -> None:
+        folder_cards_runtime.reset_folder_card_cache()
+        pending = self._create_source_file("episode-cache-hit.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            pending_id = self._insert_library_item(connection, pending)
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == pending_id)
+                .values(
+                    size_bytes=2 * 1024 * 1024 * 1024,
+                    rel_path=f"tv/show/Season 8/{pending.name}",
+                    parent_dir="tv/show/Season 8",
+                    video_codec="h264",
+                )
+            )
+
+            with patch.object(folder_cards_runtime, "folder_card_cache_key", return_value=("cache", 1, 1)):
+                with patch.object(web_app, "_estimate_savings_bytes", autospec=True, return_value=2 * 1024 * 1024 * 1024):
+                    with patch.object(web_app, "_folder_needs_attention_badges", autospec=True, return_value={}):
+                        first_cards = web_app._list_folder_cards(self.config, connection)
+                    with patch.object(
+                            web_app,
+                            "_folder_needs_attention_badges",
+                            side_effect=AssertionError("cache hit scanned encode jobs"),
+                    ):
+                        second_cards = web_app._list_folder_cards(self.config, connection)
+
+        self.assertEqual([card.prefix for card in first_cards], ["tv/show/Season 8"])
+        self.assertEqual([card.prefix for card in second_cards], ["tv/show/Season 8"])
+        folder_cards_runtime.reset_folder_card_cache()
+
     def test_cached_folder_cards_recomputes_after_reset_during_cache_miss(self) -> None:
         folder_cards_runtime.reset_folder_card_cache()
 
@@ -3098,6 +3130,76 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual(calls["count"], 2)
         self.assertEqual([card.prefix for card in cards], [fresh_card.prefix])
+        folder_cards_runtime.reset_folder_card_cache()
+
+    def test_cached_folder_cards_preserves_cached_review_badges_without_shared_mutation(self) -> None:
+        folder_cards_runtime.reset_folder_card_cache()
+
+        cached_source_card = folder_cards_runtime.FolderCard(
+            prefix="tv/show/Season 10",
+            title="Season 10",
+            subtitle="TV",
+            scope_label="Season",
+            item_count=1,
+            pending_count=1,
+            total_size_bytes=2 * 1024 * 1024 * 1024,
+            estimated_savings_bytes=200 * 1024 * 1024,
+            known_saved_bytes=0,
+            projected_reclaim_bytes=200 * 1024 * 1024,
+            average_age_days=10.0,
+            sort_score=0.2,
+            statuses={"planned": 1},
+            video_codecs={"h264": 1},
+            review_badge_label="First badge",
+            review_badge_tone="attention",
+            review_badge_detail="First detail",
+        )
+        list_folder_cards = Mock(return_value=[cached_source_card])
+
+        with patch.object(folder_cards_runtime, "folder_card_cache_key", return_value=("cache", 1, 1)):
+            with patch.object(folder_cards_runtime, "list_folder_cards", list_folder_cards):
+                first_cards = folder_cards_runtime.cached_folder_cards(
+                    self.config,
+                    Mock(),
+                    minimum_recommended_savings_bytes=100 * 1024 * 1024,
+                    folder_group=Mock(),
+                    age_days=Mock(),
+                    estimate_savings_bytes=Mock(),
+                    review_badge_for_prefix=Mock(return_value={"label": "First badge", "tone": "attention"}),
+                )
+                second_cards = folder_cards_runtime.cached_folder_cards(
+                    self.config,
+                    Mock(),
+                    minimum_recommended_savings_bytes=100 * 1024 * 1024,
+                    folder_group=Mock(),
+                    age_days=Mock(),
+                    estimate_savings_bytes=Mock(),
+                    review_badge_for_prefix=Mock(side_effect=AssertionError("cache hit refreshed badges")),
+                )
+
+        self.assertEqual(list_folder_cards.call_count, 1)
+        self.assertIsNot(first_cards[0], second_cards[0])
+        self.assertEqual(first_cards[0].review_badge_label, "First badge")
+        self.assertEqual(first_cards[0].review_badge_tone, "attention")
+        self.assertEqual(first_cards[0].review_badge_detail, "First detail")
+        self.assertEqual(second_cards[0].review_badge_label, "First badge")
+        self.assertEqual(second_cards[0].review_badge_tone, "attention")
+        self.assertEqual(second_cards[0].review_badge_detail, "First detail")
+
+        with patch.object(folder_cards_runtime, "folder_card_cache_key", return_value=("cache", 1, 1)):
+            with patch.object(folder_cards_runtime, "list_folder_cards", list_folder_cards):
+                second_cards[0].review_badge_label = "Mutated response copy"
+                third_cards = folder_cards_runtime.cached_folder_cards(
+                    self.config,
+                    Mock(),
+                    minimum_recommended_savings_bytes=100 * 1024 * 1024,
+                    folder_group=Mock(),
+                    age_days=Mock(),
+                    estimate_savings_bytes=Mock(),
+                    review_badge_for_prefix=Mock(side_effect=AssertionError("cache hit refreshed badges")),
+                )
+
+        self.assertEqual(third_cards[0].review_badge_label, "First badge")
         folder_cards_runtime.reset_folder_card_cache()
 
     def test_folder_cards_require_multiple_labeled_samples_before_using_folder_history(self) -> None:
@@ -3907,6 +4009,54 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(payload["review_pairs"][0]["preview_clip"]["path"],
                          "/review-media/run-pairs/item-00/encoded-01-00-10.mp4")
 
+    def test_load_calibration_state_merges_retained_compare_clip_into_existing_pair(self) -> None:
+        review_dir = self.config.paths.review_dir / "run-pairs" / "item-00"
+        review_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("source-01-00-10.mp4", "encoded-01-00-10.mp4", "compare-01-00-10.mkv"):
+            (review_dir / name).write_text("clip")
+        calibration_path = web_app._calibration_file(self.config, "tv/show")
+        calibration_path.parent.mkdir(parents=True, exist_ok=True)
+        calibration_path.write_text(
+            json.dumps(
+                {
+                    "mode": "sample",
+                    "job_id": "sample-9",
+                    "source_clips": [
+                        {
+                            "path": "/review-media/run-pairs/item-00/source-01-00-10.mp4",
+                            "timestamp_seconds": 10.0,
+                            "duration_seconds": 8.0,
+                        }
+                    ],
+                    "preview_clips": [
+                        {
+                            "path": "/review-media/run-pairs/item-00/encoded-01-00-10.mp4",
+                            "timestamp_seconds": 10.0,
+                            "duration_seconds": 8.0,
+                        }
+                    ],
+                    "review_pairs": [
+                        {
+                            "timestamp_seconds": 10.0,
+                            "duration_seconds": 8.0,
+                            "source_clip": {"path": "/review-media/run-pairs/item-00/source-01-00-10.mp4"},
+                            "preview_clip": {"path": "/review-media/run-pairs/item-00/encoded-01-00-10.mp4"},
+                            "compare_clip": {"path": "/review-media/run-pairs/item-00/compare-01-00-10.mkv"},
+                        }
+                    ],
+                }
+            )
+        )
+
+        payload = web_app._load_calibration_state(self.config, "tv/show")
+
+        assert payload is not None
+        self.assertEqual(len(payload["review_pairs"]), 1)
+        self.assertEqual(
+            payload["review_pairs"][0]["compare_clip"]["path"],
+            "/review-media/run-pairs/item-00/compare-01-00-10.mkv",
+        )
+
     def test_folder_review_badge_marks_ready_and_refresh_states(self) -> None:
         ready_dir = self.config.paths.review_dir / "run-ready" / "item-00"
         ready_dir.mkdir(parents=True, exist_ok=True)
@@ -3966,6 +4116,97 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             {"label": "Refresh review", "tone": "warning"},
         )
 
+    def test_folder_review_badge_prioritizes_active_sample_job(self) -> None:
+        ready_dir = self.config.paths.review_dir / "run-active-sample" / "item-00"
+        ready_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("source-01-00-10.mp4", "encoded-01-00-10.mp4"):
+            (ready_dir / name).write_text("clip")
+        ready_calibration = web_app._calibration_file(self.config, "tv/show")
+        ready_calibration.parent.mkdir(parents=True, exist_ok=True)
+        ready_calibration.write_text(
+            json.dumps(
+                {
+                    "mode": "sample",
+                    "job_id": "sample-ready",
+                    "source_clips": [
+                        {
+                            "path": "/review-media/run-active-sample/item-00/source-01-00-10.mp4",
+                            "timestamp_seconds": 10.0,
+                            "duration_seconds": 8.0,
+                        }
+                    ],
+                    "preview_clips": [
+                        {
+                            "path": "/review-media/run-active-sample/item-00/encoded-01-00-10.mp4",
+                            "timestamp_seconds": 10.0,
+                            "duration_seconds": 8.0,
+                        }
+                    ],
+                }
+            )
+        )
+        now = web_app._now_iso()
+
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                calibration_jobs.insert().values(
+                    job_id="sample-running",
+                    prefix="tv/show",
+                    status="running",
+                    lane="sample",
+                    action="ai_tune",
+                    host_json=json.dumps({"key": "local", "label": "Local"}),
+                    notes="",
+                    policy_json="{}",
+                    sample_item_json="{}",
+                    owner_pid=os.getpid(),
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                )
+            )
+
+            self.assertEqual(
+                web_app._folder_review_badge(self.config, "tv/show", connection),
+                {
+                    "label": "Sample running",
+                    "tone": "attention",
+                    "detail": "Sample calibration is active.",
+                },
+            )
+
+    def test_folder_review_badge_exposes_failed_sample_job(self) -> None:
+        now = web_app._now_iso()
+
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                calibration_jobs.insert().values(
+                    job_id="sample-failed",
+                    prefix="tv/show",
+                    status="failed",
+                    lane="sample",
+                    action="ai_tune",
+                    host_json=json.dumps({"key": "local", "label": "Local"}),
+                    notes="",
+                    policy_json="{}",
+                    sample_item_json="{}",
+                    error="ffmpeg output\nError: source disappeared after reset",
+                    created_at=now,
+                    started_at=now,
+                    finished_at=now,
+                    updated_at=now,
+                )
+            )
+
+            self.assertEqual(
+                web_app._folder_review_badge(self.config, "tv/show", connection),
+                {
+                    "label": "Sample failed",
+                    "tone": "warning",
+                    "detail": "Error: source disappeared after reset",
+                },
+            )
+
     def test_folder_review_badge_prioritizes_encode_needs_attention(self) -> None:
         accepted_calibration = web_app._calibration_file(self.config, "tv/show")
         accepted_calibration.parent.mkdir(parents=True, exist_ok=True)
@@ -4015,6 +4256,66 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     "detail": "Error: Failed to find a suitable crf",
                 },
             )
+
+    def test_folder_needs_attention_badges_use_latest_jobs_in_one_pass(self) -> None:
+        manifest_path = self._write_manifest("manifest-needs-attention-badges.json", [])
+        base_time = datetime.now(UTC)
+
+        def job_payload(job_id: str, prefix: str, status: str, created_at: str) -> dict[str, Any]:
+            return {
+                "job_id": job_id,
+                "prefix": prefix,
+                "status": status,
+                "manifest_path": str(manifest_path),
+                "item_count": 1,
+                "saved_profile_path": None,
+                "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                "last_host": {},
+                "notes": "",
+                "bypass_schedule": False,
+                "attempt_count": 1,
+                "process_pid": None,
+                "error": "Error: bad source",
+                "leased_at": None,
+                "lease_expires_at": None,
+                "heartbeat_at": None,
+                "worker_id": None,
+                "retry_not_before": None,
+                "waiting_reason": None,
+                "terminal_reason": status,
+                "last_failure_kind": "deterministic",
+                "last_failure_at": created_at,
+                "host_cooldown_until": None,
+                "created_at": created_at,
+                "started_at": created_at,
+                "finished_at": created_at,
+                "updated_at": created_at,
+            }
+
+        stale_attention_at = (base_time - timedelta(minutes=2)).isoformat()
+        completed_at = (base_time - timedelta(minutes=1)).isoformat()
+        latest_attention_at = base_time.isoformat()
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                job_payload("stale-attention", "tv/stale", "needs_attention", stale_attention_at),
+            )
+            save_encode_job(
+                connection,
+                job_payload("stale-completed", "tv/stale", "completed", completed_at),
+            )
+            save_encode_job(
+                connection,
+                job_payload("latest-attention", "tv/latest", "needs_attention", latest_attention_at),
+            )
+
+            badges = web_app._folder_needs_attention_badges(connection)
+
+        self.assertNotIn("tv/stale", badges)
+        self.assertEqual(
+            badges["tv/latest"],
+            {"label": "Needs attention", "tone": "warning", "detail": "Error: bad source"},
+        )
 
     def test_resolve_sample_host_maps_legacy_local_key_to_self_host(self) -> None:
         statuses = [
@@ -7837,6 +8138,48 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ])
         self.assertIn("-hwaccel", cmd)
         self.assertIn("videotoolbox", cmd)
+
+    def test_render_compare_clip_preserves_native_resolution(self) -> None:
+        with patch("mediaforce.review.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
+                "mediaforce.review.ffmpeg_hwaccel_input_args", return_value=[]
+        ), patch(
+            "mediaforce.review.run_command",
+            return_value=subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr=""),
+        ) as run_mock:
+            review._render_compare_clip(
+                Path("/tmp/source.mkv"),
+                Path("/tmp/staged.mkv"),
+                Path("/tmp/compare.mkv"),
+                12.0,
+                8.0,
+            )
+
+        cmd = run_mock.call_args.args[0]
+        filter_complex = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn("xstack=inputs=2", filter_complex)
+        self.assertNotIn("scale=", filter_complex)
+        self.assertNotIn("hstack", filter_complex)
+
+    def test_render_compare_clip_from_preview_preserves_native_resolution(self) -> None:
+        with patch("mediaforce.review.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
+                "mediaforce.review.ffmpeg_hwaccel_input_args", return_value=[]
+        ), patch(
+            "mediaforce.review.run_command",
+            return_value=subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr=""),
+        ) as run_mock:
+            review._render_compare_clip_from_preview(
+                source_path=Path("/tmp/source.mkv"),
+                preview_path=Path("/tmp/preview.mp4"),
+                output_path=Path("/tmp/compare.mkv"),
+                clip_time=12.0,
+                duration_seconds=8.0,
+            )
+
+        cmd = run_mock.call_args.args[0]
+        filter_complex = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn("xstack=inputs=2", filter_complex)
+        self.assertNotIn("scale=", filter_complex)
+        self.assertNotIn("hstack", filter_complex)
 
     def test_encode_preview_clips_localhost_ssh_executes_locally(self) -> None:
         output_dir = self.root / "review"

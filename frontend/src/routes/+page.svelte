@@ -135,6 +135,12 @@
 	const catalogScanActive = $derived(
 		catalogScanStatus === 'queued' || catalogScanStatus === 'running'
 	);
+	const dashboardWorkActive = $derived(
+		catalogScanActive ||
+			dashboard.calibration_queue.active_count > 0 ||
+			dashboard.encode_queue.running_count > 0 ||
+			dashboard.encode_queue.queued_count > 0
+	);
 	const catalogScanStats = $derived(
 		catalogScanJob?.stats ?? { items_seen: 0, updated_paths: 0, unchanged: 0 }
 	);
@@ -506,7 +512,7 @@
 	});
 
 	$effect(() => {
-		if (!browser || !catalogScanActive) {
+		if (!browser || !dashboardWorkActive) {
 			return;
 		}
 

@@ -22,6 +22,7 @@ def load_calibration_state(deps: FolderStateDeps, config: MediaforceConfig, pref
     if not path.exists():
         return None
     payload = object_dict(json.loads(path.read_text()))
+    raw_review_pairs = object_list(payload.get("review_pairs"))
     compare_clips: list[dict[str, Any]] = []
     preview_clips: list[dict[str, Any]] = []
     source_clips: list[dict[str, Any]] = []
@@ -55,15 +56,84 @@ def load_calibration_state(deps: FolderStateDeps, config: MediaforceConfig, pref
     payload["compare_clips_purged"] = compare_clips_purged
     payload["preview_clips_purged"] = preview_clips_purged
     payload["source_clips_purged"] = source_clips_purged
-    payload["review_pairs"] = review_pairs(source_clips, preview_clips, compare_clips)
+    payload["review_pairs"] = _merge_review_pairs(
+        review_pairs(source_clips, preview_clips, compare_clips),
+        _valid_retained_review_pairs(deps, config, raw_review_pairs),
+    )
     payload["browser_review_ready"] = bool(payload["review_pairs"])
-    payload["review_media_ready"] = bool(compare_clips or preview_clips or source_clips)
+    payload["review_media_ready"] = bool(compare_clips or preview_clips or source_clips or payload["review_pairs"])
     payload.setdefault("mode", "full" if payload.get("encode_result") else "sample")
     advice_payload = deps.load_advice_state(config, prefix)
     if advice_payload is not None:
         payload["advice"] = advice_payload
     payload["draft_hash"] = deps.calibration_draft_hash(payload)
     return payload
+
+
+def _merge_review_pairs(
+        primary_pairs: list[dict[str, Any]],
+        fallback_pairs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    fallback_by_key = {
+        review_pair_key(float_value(pair.get("timestamp_seconds"))): pair for pair in fallback_pairs
+    }
+    merged = []
+    seen_keys: set[int] = set()
+    for pair in primary_pairs:
+        key = review_pair_key(float_value(pair.get("timestamp_seconds")))
+        seen_keys.add(key)
+        fallback_pair = fallback_by_key.get(key)
+        if fallback_pair is None:
+            merged.append(pair)
+            continue
+        merged_pair = dict(pair)
+        if not object_dict(merged_pair.get("compare_clip")):
+            fallback_compare_clip = object_dict(fallback_pair.get("compare_clip"))
+            if fallback_compare_clip:
+                merged_pair["compare_clip"] = fallback_compare_clip
+        if float_value(merged_pair.get("duration_seconds")) <= 0:
+            merged_pair["duration_seconds"] = float_value(fallback_pair.get("duration_seconds"))
+        merged.append(merged_pair)
+    for pair in fallback_pairs:
+        key = review_pair_key(float_value(pair.get("timestamp_seconds")))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        merged.append(pair)
+    return merged
+
+
+def _valid_retained_review_pairs(
+        deps: FolderStateDeps,
+        config: MediaforceConfig,
+        raw_review_pairs: list[Any],
+) -> list[dict[str, Any]]:
+    pairs: list[dict[str, Any]] = []
+    for raw_pair in raw_review_pairs:
+        pair = object_dict(raw_pair)
+        source_clip = object_dict(pair.get("source_clip"))
+        preview_clip = object_dict(pair.get("preview_clip"))
+        source_path = deps.review_file_from_url(config, str(source_clip.get("path") or ""))
+        preview_path = deps.review_file_from_url(config, str(preview_clip.get("path") or ""))
+        if source_path is None or preview_path is None:
+            continue
+        if not source_path.exists() or not preview_path.exists():
+            continue
+        compare_clip = object_dict(pair.get("compare_clip"))
+        compare_path_text = str(compare_clip.get("path") or "")
+        compare_path = deps.review_file_from_url(config, compare_path_text) if compare_path_text else None
+        if compare_path_text and compare_path is not None and not compare_path.exists():
+            compare_clip = {}
+        pairs.append(
+            {
+                "timestamp_seconds": float_value(pair.get("timestamp_seconds")),
+                "duration_seconds": float_value(pair.get("duration_seconds")),
+                "source_clip": source_clip,
+                "preview_clip": preview_clip,
+                "compare_clip": compare_clip or None,
+            }
+        )
+    return pairs
 
 
 def save_calibration_state(calibration_file: Path, payload: dict[str, Any], *, calibration_draft_hash: Any) -> None:

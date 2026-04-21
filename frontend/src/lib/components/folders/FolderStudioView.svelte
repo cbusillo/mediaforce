@@ -210,6 +210,33 @@
 		const hostLabel = String(calibrationJob?.host?.label ?? '').trim();
 		return hostLabel ? `Host: ${hostLabel} · ${summaryLine}` : summaryLine;
 	});
+	const calibrationFailureVisible = $derived.by(() =>
+		Boolean(
+			calibrationJob &&
+			['failed', 'stopped'].includes(String(status.calibration_status ?? '').trim())
+		)
+	);
+	const calibrationFailureEyebrow = $derived.by(() =>
+		status.calibration_status === 'stopped'
+			? calibrationJob?.mode === 'full'
+				? 'Proof stopped'
+				: 'Sample stopped'
+			: calibrationJob?.mode === 'full'
+				? 'Proof failed'
+				: 'Sample failed'
+	);
+	const calibrationFailureHeading = $derived.by(() =>
+		calibrationJob?.mode === 'full'
+			? 'Representative-file proof encode stopped before review clips were ready'
+			: 'Sample calibration stopped before a reviewable draft was ready'
+	);
+	const calibrationFailureMeta = $derived.by(() => {
+		const action = String(calibrationJob?.action ?? '').trim();
+		const host = String(calibrationJob?.host?.label ?? calibrationJob?.host?.key ?? '').trim();
+		return [action ? `Action ${action}` : '', host ? `Host ${host}` : '']
+			.filter(Boolean)
+			.join(' · ');
+	});
 	const sampleItem = $derived((folder.sample_item as FolderSampleItem | undefined) ?? {});
 	const itemPlan = $derived((folder.item_plan as FolderItemPlan | undefined) ?? {});
 	const policy = $derived((folder.policy as FolderPolicy | undefined) ?? {});
@@ -491,9 +518,9 @@
 	const notePlaceholder = $derived.by(() =>
 		hasCalibration
 			? calibration.review_media_ready
-				? 'Keep dark scenes cleaner.'
-				: 'Spend more bits on motion.'
-			: 'Protect dark scenes.'
+				? 'Type a revision request, for example: keep dark scenes cleaner.'
+				: 'Type a sample request, for example: spend more bits on motion.'
+			: 'Type a first sample request, for example: protect dark scenes.'
 	);
 	const apiPrefix = $derived(
 		folder.prefix
@@ -645,14 +672,14 @@
 		Boolean(retryableCalibrationJob && !retryableCalibrationNeedsRefresh)
 	);
 	const previewButtonLabel = $derived.by(() => {
-		if (benchDraftBlockedByEmptyNote) return 'Draft with bench';
+		if (benchDraftBlockedByEmptyNote) return 'Type a request first';
 		if (retryableCalibrationNeedsRefresh || pendingProposalNeedsRefresh)
 			return 'Refresh bench draft';
 		return 'Draft with bench';
 	});
 	const confirmButtonLabel = $derived.by(() => {
 		if (reviewGateStatus === 'accepted') return 'Monitor folder encode';
-		if (reviewGateStatus === 'needs_approval') return 'Review current draft';
+		if (reviewGateStatus === 'needs_approval') return 'Approve and queue encode';
 		if (canRetrySavedSampleDraft)
 			return selectedHostLabel ? `Run this sample on ${selectedHostLabel}` : 'Run this sample';
 		if (retryableCalibrationRefreshBlockedByEmptyNote) return 'Add note first';
@@ -715,7 +742,7 @@
 			return selectedHostLabel ? `Drafting for ${selectedHostLabel}.` : 'Drafting now.';
 		}
 		if (benchDraftBlockedByEmptyNote) {
-			return 'Add a request to draft.';
+			return 'Type a request above to ask for a revised draft.';
 		}
 		if (canRequestBenchDraft) {
 			return 'Shift+Enter adds a line.';
@@ -924,7 +951,7 @@
 		await tick();
 		document.querySelector('.inline-decision-block')?.scrollIntoView({
 			behavior: 'smooth',
-			block: 'center'
+			block: 'start'
 		});
 	}
 
@@ -1129,11 +1156,6 @@
 		}
 		return 'Open the full source-versus-draft comparison pack for final judgment. The inline player stays here for orientation and spot checks.';
 	});
-	const reviewPackCommandStatus = $derived.by(() =>
-		reviewPackOpened
-			? { label: 'Pack opened', variant: 'ok' as const }
-			: { label: 'External review', variant: 'neutral' as const }
-	);
 	const reviewPackCommandActionLabel = $derived.by(() =>
 		reviewPackOpened ? 'Download again' : 'Download review pack'
 	);
@@ -1220,6 +1242,7 @@
 	const showBenchColumn = $derived(
 		!approvedProcessingMode || approvedChatOpen || approvedEncodeRepairMode
 	);
+	const showBenchWorkspace = $derived(reviewGateStatus !== 'needs_approval' || approvedChatOpen);
 	const showReviewEvidence = $derived(
 		!approvedProcessingMode || approvedEvidenceOpen || approvedEncodeRepairMode
 	);
@@ -2294,6 +2317,11 @@
 		{calibrationSignal}
 		calibrationMode={calibrationJob?.mode === 'full' ? 'full' : 'sample'}
 		calibrationMeta={`Action ${String(calibrationJob?.action ?? '')} · Host ${String(calibrationJob?.host?.label ?? '')}`}
+		showCalibrationFailure={calibrationFailureVisible}
+		{calibrationFailureEyebrow}
+		{calibrationFailureHeading}
+		{calibrationFailureDetail}
+		{calibrationFailureMeta}
 	/>
 
 	<div class="workflow-stack">
@@ -2302,50 +2330,55 @@
 			class:approved-processing-layout={approvedProcessingMode && !showBenchColumn}
 		>
 			{#if showBenchColumn}
-				<aside class="bench-column">
-					<FolderStudioBenchWorkspace
-						{calibrationThreadSessions}
-						{calibrationThreadCountLabel}
-						{operatorRequestLabel}
-						{note}
-						onNoteInput={(value) => (note = value)}
-						onNoteKeydown={handleNoteKeydown}
-						{noteFieldLabel}
-						{noteFieldLede}
-						{notePlaceholder}
-						{approvedSeasonShortcut}
-						{approvedSeasonShortcutSummary}
-						{canUseApprovedSeasonShortcut}
-						onPreviewApprovedSeasonDraft={previewApprovedSeasonDraft}
-						{canRequestBenchDraft}
-						{previewButtonLabel}
-						onPreviewSampleDraft={handlePreviewSampleDraftClick}
-						{actionState}
-						{noteSubmitHint}
-						{pendingProposal}
-						{pendingProposalNeedsRefresh}
-						{proposalDraftHeading}
-						{pendingProposalSignal}
-						{pendingOperatorRequestLabel}
-						{pendingProposalSelfCheckLabel}
-						{pendingProposalSelfCheckVariant}
-						{pendingProposalSelfCheck}
-						{proposalWorkbenchSections}
-						{previewSubmission}
-						workbenchContextGoal={String(pendingProposalTraceContext?.goal ?? '').trim()}
-						{workbenchContextStats}
-						{workbenchMemoryEntries}
-						{workbenchToolbeltRows}
-						{proposalSteadyWorkbenchRows}
-						pendingProposalTracePromptVersion={String(
-							pendingProposalTrace?.prompt_version ?? ''
-						).trim()}
-						{pendingProposalRawResponse}
-						{currentThreadSession}
-						{archivedThreadHeadline}
-						archivedThreadDetail={String(archivedThreadDetail ?? '').trim()}
-						{threadHistorySummaryCopy}
-					/>
+				<aside
+					class="bench-column"
+					class:ready-to-approve-bench={reviewGateStatus === 'needs_approval'}
+				>
+					{#if showBenchWorkspace}
+						<FolderStudioBenchWorkspace
+							{calibrationThreadSessions}
+							{calibrationThreadCountLabel}
+							{operatorRequestLabel}
+							{note}
+							onNoteInput={(value) => (note = value)}
+							onNoteKeydown={handleNoteKeydown}
+							{noteFieldLabel}
+							{noteFieldLede}
+							{notePlaceholder}
+							{approvedSeasonShortcut}
+							{approvedSeasonShortcutSummary}
+							{canUseApprovedSeasonShortcut}
+							onPreviewApprovedSeasonDraft={previewApprovedSeasonDraft}
+							{canRequestBenchDraft}
+							{previewButtonLabel}
+							onPreviewSampleDraft={handlePreviewSampleDraftClick}
+							{actionState}
+							{noteSubmitHint}
+							{pendingProposal}
+							{pendingProposalNeedsRefresh}
+							{proposalDraftHeading}
+							{pendingProposalSignal}
+							{pendingOperatorRequestLabel}
+							{pendingProposalSelfCheckLabel}
+							{pendingProposalSelfCheckVariant}
+							{pendingProposalSelfCheck}
+							{proposalWorkbenchSections}
+							{previewSubmission}
+							workbenchContextGoal={String(pendingProposalTraceContext?.goal ?? '').trim()}
+							{workbenchContextStats}
+							{workbenchMemoryEntries}
+							{workbenchToolbeltRows}
+							{proposalSteadyWorkbenchRows}
+							pendingProposalTracePromptVersion={String(
+								pendingProposalTrace?.prompt_version ?? ''
+							).trim()}
+							{pendingProposalRawResponse}
+							{currentThreadSession}
+							{archivedThreadHeadline}
+							archivedThreadDetail={String(archivedThreadDetail ?? '').trim()}
+							{threadHistorySummaryCopy}
+						/>
+					{/if}
 
 					<FolderStudioControlDeck
 						{encodeJobStatus}
@@ -2366,6 +2399,9 @@
 						{actionState}
 						{canRunPrimarySampleAction}
 						onRunSample={runSample}
+						onReviseDraft={enterRevisionFlow}
+						onApproveDraft={saveProfile}
+						{approvalButtonDisabled}
 						{confirmButtonLabel}
 						{canRunSample}
 						{sampleRunActive}
@@ -2480,10 +2516,6 @@
 											<p class="muted-copy">{reviewPackCommandDetail}</p>
 										</div>
 										<div class="review-pack-command-side">
-											<Pill
-												label={reviewPackCommandStatus.label}
-												variant={reviewPackCommandStatus.variant}
-											/>
 											<div class="action-row review-pack-command-actions">
 												<Button
 													variant={reviewPackOpened ? 'secondary' : 'primary'}
@@ -2635,20 +2667,22 @@
 													label={reviewGateStatusPill.label}
 													variant={reviewGateStatusPill.variant}
 												/>
-												<div
-													class="action-row review-action-row decision-action-row inline-decision-actions"
-												>
-													<Button variant="secondary" onclick={enterRevisionFlow}>Revise</Button>
-													<Button
-														variant="approve"
-														loading={actionState === 'save'}
-														disabled={approvalButtonDisabled}
-														onclick={saveProfile}
-													>
-														{approvalButtonLabel}
-													</Button>
-												</div>
 											</div>
+										</div>
+										<div
+											class="action-row review-action-row decision-action-row inline-decision-actions"
+										>
+											<Button
+												variant="approve"
+												loading={actionState === 'save'}
+												disabled={approvalButtonDisabled}
+												onclick={saveProfile}
+											>
+												{approvalButtonLabel}
+											</Button>
+											<Button variant="secondary" onclick={enterRevisionFlow}
+												>Request changes</Button
+											>
 										</div>
 										{#if !reviewGate.can_confirm_full}
 											<p class="inline-gate-copy decision-gate-copy">
@@ -3256,6 +3290,10 @@
 		overflow: hidden;
 	}
 
+	.bench-column.ready-to-approve-bench :global(.control-deck) {
+		order: -1;
+	}
+
 	.operations-column {
 		padding-left: 0;
 	}
@@ -3419,15 +3457,25 @@
 
 	.inline-decision-block {
 		gap: 0.9rem;
+		scroll-margin-top: 7.25rem;
+	}
+
+	.review-player-shell-block,
+	.review-pack-command {
+		scroll-margin-top: 7.25rem;
 	}
 
 	.inline-decision-actions {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr);
+		gap: var(--space-2);
 		padding-top: 0;
-		justify-content: flex-end;
+		width: 100%;
 	}
 
 	.inline-decision-actions :global(button) {
-		min-width: min(100%, 16rem);
+		width: 100%;
+		min-width: 0;
 	}
 
 	.decision-gate-copy {
@@ -3459,7 +3507,7 @@
 
 	.review-pack-command {
 		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto;
+		grid-template-columns: minmax(0, 1fr) minmax(0, 14rem);
 		gap: 0.85rem;
 		align-items: start;
 		padding: 0.86rem 0.95rem;
@@ -3478,17 +3526,18 @@
 
 	.review-pack-command-side {
 		display: grid;
-		justify-items: end;
+		justify-items: stretch;
 		gap: 0.55rem;
-		min-width: min(100%, 18rem);
+		min-width: 0;
 	}
 
 	.review-pack-command-actions {
-		justify-content: flex-end;
+		justify-content: stretch;
 	}
 
 	.review-pack-command-actions :global(button) {
-		min-width: min(100%, 12rem);
+		width: 100%;
+		min-width: 0;
 	}
 
 	.folder-workstation :global(.review-panel) {
@@ -4126,19 +4175,6 @@
 			grid-template-columns: minmax(0, 1fr);
 		}
 
-		.review-pack-command {
-			grid-template-columns: minmax(0, 1fr);
-		}
-
-		.review-pack-command-side {
-			justify-items: start;
-			min-width: 0;
-		}
-
-		.review-pack-command-actions {
-			justify-content: flex-start;
-		}
-
 		.decision-head-side {
 			justify-items: start;
 			min-width: 0;
@@ -4213,7 +4249,16 @@
 
 	@media (max-width: 1100px) {
 		.workspace-grid {
-			grid-template-columns: minmax(248px, 288px) minmax(0, 1fr);
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.bench-column {
+			position: static;
+			padding-right: 0;
+			padding-bottom: 0.85rem;
+			border-right: 0;
+			border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+			overflow: visible;
 		}
 
 		.review-player-head {
@@ -4255,6 +4300,7 @@
 		}
 
 		.review-console-facts-inline {
+			grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
 			gap: 0.35rem;
 		}
 
@@ -4264,6 +4310,23 @@
 	}
 
 	@media (max-width: 760px) {
+		.inline-decision-actions {
+			width: 100%;
+		}
+
+		.review-pack-command {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.review-pack-command-side {
+			justify-items: start;
+			min-width: 0;
+		}
+
+		.review-pack-command-actions {
+			justify-content: flex-start;
+		}
+
 		.workspace-grid,
 		.review-player-columns,
 		.snapshot-grid {
@@ -4278,6 +4341,25 @@
 			position: static;
 			padding-right: 0;
 			border-right: 0;
+		}
+
+		.inline-decision-actions :global(button) {
+			flex-basis: 100%;
+		}
+
+		.review-console-fact {
+			gap: 0.08rem;
+			padding: 0.42rem 0.5rem;
+		}
+
+		.review-console-fact strong {
+			font-size: 0.86rem;
+			line-height: 1.18;
+		}
+
+		.review-console-fact .muted-copy {
+			font-size: 0.78rem;
+			line-height: 1.22;
 		}
 
 		.compact-row,
@@ -4323,7 +4405,8 @@
 
 		.reference-disclosure summary,
 		.steady-details-shell summary {
-			grid-template-columns: 1fr auto;
+			grid-template-columns: minmax(0, 1fr) auto auto;
+			gap: 0.55rem;
 			align-items: start;
 		}
 

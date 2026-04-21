@@ -1,7 +1,6 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import type { HostRuntime } from '$lib/api/types';
-	import { qualitySearchSummary } from '$lib/hosts/runtime';
 
 	let {
 		rankedHosts,
@@ -74,15 +73,15 @@
 		return [`P${host.priority}`, ...labels].join(' · ');
 	}
 
-	function attentionLabel(host: HostRuntime): string {
+	function attentionLabel(host: HostRuntime): string | null {
 		if (!host.available) {
 			return host.message || 'Host is unavailable.';
 		}
 		if (host.active_reason === 'encode queue capability disabled') {
 			return 'Needs setup';
 		}
-		const search = qualitySearchSummary(host);
-		return search?.label ?? host.active_reason ?? 'No current issue';
+		if (hostBlockers(host).length > 0) return 'Needs attention';
+		return null;
 	}
 
 	function attentionDetail(host: HostRuntime): string | null {
@@ -90,7 +89,7 @@
 		if (host.active_reason === 'encode queue capability disabled') {
 			return 'Enable queue support for this worker in Settings.';
 		}
-		return qualitySearchSummary(host)?.detail ?? null;
+		return null;
 	}
 
 	function hostIssueCopy(host: HostRuntime): string | null {
@@ -134,6 +133,8 @@
 		{#each rankedHosts as host (host.key)}
 			{@const tone = hostTone(host)}
 			{@const blockers = hostBlockers(host)}
+			{@const attention = attentionLabel(host)}
+			{@const detail = attentionDetail(host)}
 			<div class={`host-row ${tone}`.trim()} role="row">
 				<div class="host-name-cell" role="cell">
 					<p class="host-label">{host.label}</p>
@@ -180,15 +181,17 @@
 					{/if}
 				</div>
 				<div class="host-attention-cell" role="cell">
-					<p class="attention-copy">{attentionLabel(host)}</p>
+					{#if attention}
+						<p class="attention-copy">{attention}</p>
+					{/if}
 					{#if blockers.length > 0}
 						<ul class="blocker-list" aria-label={`Host blockers for ${host.label}`}>
 							{#each blockers as blocker (blocker)}
 								<li>{blocker}</li>
 							{/each}
 						</ul>
-					{:else if attentionDetail(host)}
-						<p class="muted-copy issue-copy">{attentionDetail(host)}</p>
+					{:else if detail}
+						<p class="muted-copy issue-copy">{detail}</p>
 					{/if}
 				</div>
 			</div>

@@ -6,6 +6,18 @@ from mediaforce.core.type_defs import JSONObject, JSONValue, float_value, int_va
 
 _SKIP_POLICY_VALUE = object()
 
+_VIDEO_TRANSFORM_DEFAULTS: dict[str, JSONValue] = {
+    "max_height": 0,
+    "downsample_algorithm": "lanczos",
+    "black_bar_handling": "off",
+    "black_bar_detect_samples": 3,
+    "black_bar_detect_seconds": 60,
+    "black_bar_detect_limit": 24,
+    "black_bar_detect_round": 2,
+    "black_bar_detect_start_seconds": 0,
+    "crop": "",
+}
+
 
 def tune_response_schema(current_policy: dict[str, Any], *, request_dispositions: tuple[str, ...]) -> dict[str, Any]:
     return _advice_response_schema(policy_response_schema(current_policy), request_dispositions=request_dispositions)
@@ -195,7 +207,7 @@ def policy_key_paths(policy: dict[str, Any]) -> list[str]:
 def _section_key_paths(policy: dict[str, Any]) -> list[str]:
     paths: list[str] = []
     for section in ("video", "audio", "subtitle"):
-        raw_section = policy.get(section)
+        raw_section = _policy_section_with_implicit_keys(section, policy.get(section))
         if not isinstance(raw_section, dict):
             continue
         for key in raw_section:
@@ -206,7 +218,7 @@ def _section_key_paths(policy: dict[str, Any]) -> list[str]:
 def policy_shape_example(policy: dict[str, Any]) -> dict[str, Any]:
     shape: dict[str, Any] = {}
     for section in ("video", "audio", "subtitle"):
-        raw_section = policy.get(section)
+        raw_section = _policy_section_with_implicit_keys(section, policy.get(section))
         if not isinstance(raw_section, dict):
             continue
         shape[section] = {key: None for key in raw_section}
@@ -244,7 +256,7 @@ def policy_response_schema(policy: dict[str, Any]) -> dict[str, Any]:
     properties: dict[str, Any] = {}
     required: list[str] = []
     for section in ("video", "audio", "subtitle"):
-        raw_section = policy.get(section)
+        raw_section = _policy_section_with_implicit_keys(section, policy.get(section))
         if not isinstance(raw_section, dict):
             continue
         properties[section] = policy_section_schema(raw_section)
@@ -298,7 +310,10 @@ def normalize_policy_section(section: str, raw: JSONValue, base_section: JSONObj
     if not isinstance(raw, dict):
         return {}
     updates: dict[str, Any] = {}
-    for key, base_value in base_section.items():
+    normalized_base_section = _policy_section_with_implicit_keys(section, base_section)
+    if not isinstance(normalized_base_section, dict):
+        return {}
+    for key, base_value in normalized_base_section.items():
         if key not in raw or raw.get(key) is None:
             continue
         normalized = normalize_policy_value(section, key, raw[key], base_value, mode=mode)
@@ -307,6 +322,14 @@ def normalize_policy_section(section: str, raw: JSONValue, base_section: JSONObj
     if section == "video":
         updates = finalize_video_policy_updates(updates, base_section)
     return updates
+
+
+def _policy_section_with_implicit_keys(section: str, raw_section: JSONValue) -> dict[str, JSONValue] | JSONValue:
+    if not isinstance(raw_section, dict):
+        return raw_section
+    if section != "video":
+        return raw_section
+    return {**_VIDEO_TRANSFORM_DEFAULTS, **raw_section}
 
 
 def normalize_policy_value(section: str, key: str, value: JSONValue, base_value: JSONValue, *, mode: str) -> JSONValue | object:

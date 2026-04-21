@@ -26,6 +26,9 @@
 		actionState,
 		canRunPrimarySampleAction,
 		onRunSample,
+		onReviseDraft,
+		onApproveDraft,
+		approvalButtonDisabled,
 		confirmButtonLabel,
 		canRunSample,
 		sampleRunActive,
@@ -56,6 +59,9 @@
 		actionState: string | null;
 		canRunPrimarySampleAction: boolean;
 		onRunSample: () => void;
+		onReviseDraft: () => void;
+		onApproveDraft: () => void;
+		approvalButtonDisabled: boolean;
 		confirmButtonLabel: string;
 		canRunSample: boolean;
 		sampleRunActive: boolean;
@@ -71,7 +77,7 @@
 
 	const launchHeading = $derived.by(() => {
 		if (reviewGateStatus === 'accepted') return 'Monitor folder encode';
-		if (reviewGateStatus === 'needs_approval') return 'Review current draft';
+		if (reviewGateStatus === 'needs_approval') return 'Approve or revise draft';
 		if (sampleRunActive) return 'Sample in progress';
 		if (!canRunSample) return 'Choose a ready host';
 		if (canRetrySavedSampleDraft) {
@@ -93,7 +99,7 @@
 			return 'The draft is already approved. Monitor encode progress here or in Ops.';
 		}
 		if (reviewGateStatus === 'needs_approval') {
-			return 'The current draft is ready to review and approve.';
+			return 'Approve queues the full folder encode. Revise returns this draft to the bench.';
 		}
 		if (!canRunSample) {
 			return 'Host not ready.';
@@ -123,6 +129,8 @@
 		Boolean(encodeJobStatus && encodeJobStatus !== 'completed')
 	);
 
+	const isApprovalDecision = $derived(reviewGateStatus === 'needs_approval');
+
 	const queueSummaryCopy = $derived.by(() => {
 		const parts = [encodeJobHeadline, encodeJobChipLabel].filter(Boolean);
 		return parts.join(' · ');
@@ -133,56 +141,73 @@
 	<section class="launch-console deck-block">
 		<div class="launch-head">
 			<div class="launch-heading-block">
-				<p class="eyebrow-copy">Run</p>
+				<p class="eyebrow-copy">{isApprovalDecision ? 'Decision' : 'Run'}</p>
 				<h3 class="run-card-title">{launchHeading}</h3>
 			</div>
 		</div>
 
-		<div class="host-picker-inline">
-			<div class="section-copy-block host-picker-copy">
-				<p class="eyebrow-copy">Host</p>
-			</div>
-			<div class="sample-host-grid compact-host-grid">
-				{#each sampleHostCards as hostCard (hostCard.key)}
-					<button
-						type="button"
-						class:selected={selectedHost === hostCard.key}
-						class:disabled={!hostCard.available}
-						class:preferred={hostCard.preferred}
-						class="sample-host-card compact-host-card"
-						disabled={!hostCard.available}
-						onclick={() => onSelectHost(hostCard.key)}
-					>
-						<span class="sample-host-primary">
-							<span class="sample-host-label">{hostCard.label}</span>
-							<span class="sample-host-badges">
-								<span class={`sample-host-state ${hostCard.available ? 'ready' : 'unavailable'}`}
-									>{hostCard.available ? 'Ready' : 'Unavailable'}</span
-								>
+		{#if !isApprovalDecision}
+			<div class="host-picker-inline">
+				<div class="section-copy-block host-picker-copy">
+					<p class="eyebrow-copy">Host</p>
+				</div>
+				<div class="sample-host-grid compact-host-grid">
+					{#each sampleHostCards as hostCard (hostCard.key)}
+						<button
+							type="button"
+							class:selected={selectedHost === hostCard.key}
+							class:disabled={!hostCard.available}
+							class:preferred={hostCard.preferred}
+							class="sample-host-card compact-host-card"
+							disabled={!hostCard.available}
+							onclick={() => onSelectHost(hostCard.key)}
+						>
+							<span class="sample-host-primary">
+								<span class="sample-host-label">{hostCard.label}</span>
+								<span class="sample-host-badges">
+									<span class={`sample-host-state ${hostCard.available ? 'ready' : 'unavailable'}`}
+										>{hostCard.available ? 'Ready' : 'Unavailable'}</span
+									>
+								</span>
 							</span>
-						</span>
-						{#if compactScheduleCopy(hostCard.runtime)}
-							<span class="muted-copy compact-host-meta"
-								>{compactScheduleCopy(hostCard.runtime)}</span
-							>
-						{/if}
-					</button>
-				{/each}
+							{#if compactScheduleCopy(hostCard.runtime)}
+								<span class="muted-copy compact-host-meta"
+									>{compactScheduleCopy(hostCard.runtime)}</span
+								>
+							{/if}
+						</button>
+					{/each}
+				</div>
+				{#if !sampleHostCards.some((hostCard) => hostCard.key === selectedHost) && folderSampleHostHelpText}
+					<p class="muted-copy host-selection-note">{folderSampleHostHelpText}</p>
+				{/if}
 			</div>
-			{#if !sampleHostCards.some((hostCard) => hostCard.key === selectedHost) && folderSampleHostHelpText}
-				<p class="muted-copy host-selection-note">{folderSampleHostHelpText}</p>
-			{/if}
-		</div>
+		{/if}
 
 		<div class="launch-action-footer">
-			<div class="action-row primary-action-row compact-action-row single-primary-action-row">
-				<Button
-					loading={actionState === 'sample' || actionState === 'preview'}
-					disabled={!canRunPrimarySampleAction}
-					onclick={onRunSample}
-				>
-					{confirmButtonLabel}
-				</Button>
+			<div
+				class="action-row primary-action-row compact-action-row single-primary-action-row"
+				class:approval-action-row={isApprovalDecision}
+			>
+				{#if isApprovalDecision}
+					<Button
+						variant="approve"
+						loading={actionState === 'save'}
+						disabled={approvalButtonDisabled}
+						onclick={onApproveDraft}
+					>
+						Approve and queue encode
+					</Button>
+					<Button variant="secondary" onclick={onReviseDraft}>Request changes</Button>
+				{:else}
+					<Button
+						loading={actionState === 'sample' || actionState === 'preview'}
+						disabled={!canRunPrimarySampleAction}
+						onclick={onRunSample}
+					>
+						{confirmButtonLabel}
+					</Button>
+				{/if}
 			</div>
 			<p class="inline-gate-copy sample-action-copy action-inline-note">
 				<span class="eyebrow-copy">Status</span>
@@ -225,15 +250,17 @@
 	{/if}
 
 	{#if hasClearableTuningState}
-		<details class="danger-disclosure">
+		<details class="danger-disclosure" class:approval-recovery-disclosure={isApprovalDecision}>
 			<summary>
-				<span>Advanced reset</span>
-				<span class="summary-hint">Danger</span>
+				<span>{isApprovalDecision ? 'Recovery reset' : 'Advanced reset'}</span>
+				<span class="summary-hint">{isApprovalDecision ? 'Advanced' : 'Danger'}</span>
 			</summary>
 			<div class="danger-disclosure-body">
 				<p class="inline-gate-copy destructive-action-copy">
 					<span class="eyebrow-copy">Destructive</span>
-					Removes the tuning thread, retained sample context, and sample artifacts for this folder only.
+					{isApprovalDecision
+						? 'Use only if stale tuning artifacts are blocking this approval. This removes the tuning thread, retained sample context, and sample artifacts for this folder only.'
+						: 'Removes the tuning thread, retained sample context, and sample artifacts for this folder only.'}
 				</p>
 				<div class="action-row utility-action-row">
 					<Button
@@ -491,6 +518,15 @@
 		flex-basis: 100%;
 	}
 
+	.approval-action-row :global(button) {
+		flex: 1 1 100%;
+		min-width: 0;
+	}
+
+	.single-primary-action-row.approval-action-row :global(button) {
+		flex-basis: 100%;
+	}
+
 	.utility-action-row {
 		padding-top: 0.15rem;
 	}
@@ -614,6 +650,12 @@
 		min-width: 0;
 	}
 
+	.approval-recovery-disclosure summary {
+		padding: 0.35rem 0;
+		color: rgba(203, 213, 225, 0.78);
+		font-size: 0.82rem;
+	}
+
 	.danger-disclosure summary::-webkit-details-marker {
 		display: none;
 	}
@@ -621,6 +663,11 @@
 	.summary-hint {
 		background: rgba(127, 29, 29, 0.72);
 		color: #fee2e2;
+	}
+
+	.approval-recovery-disclosure .summary-hint {
+		background: rgba(30, 41, 59, 0.72);
+		color: rgba(226, 232, 240, 0.78);
 	}
 
 	.danger-disclosure-body {

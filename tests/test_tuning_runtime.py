@@ -2,6 +2,7 @@ import asyncio
 import multiprocessing
 import json
 import re
+import shutil
 import tempfile
 import threading
 import time
@@ -59,8 +60,10 @@ from mediaforce.web.app import (
     _advice_file,
     _backfill_multimodal_review_pack,
     _build_multimodal_review_pack,
+    _build_review_compare_video_from_pairs,
     _build_seed_policy_payload,
     _build_review_compare_video,
+    _download_review_compare_action,
     _ffmpeg_concat_file_line,
     _maybe_seed_baseline_policy,
     _build_tuning_runtime_toolbelt,
@@ -69,6 +72,7 @@ from mediaforce.web.app import (
     _folder_display_policy,
     _run_periodic_cleanup,
     _review_compare_bundle_entries,
+    _review_compare_pair_entries,
     _multimodal_review_pack_public_view,
     _operator_requested_experiment,
     _planned_audio_review_context,
@@ -671,6 +675,177 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertFalse(concat_list.exists())
         self.assertEqual(bundle_path.suffix, ".mov")
         self.assertEqual(bundle_path.read_bytes(), b"mov")
+
+    def test_build_review_compare_video_from_pairs_renders_native_compare_clips(self) -> None:
+        review_run_dir = self.config.paths.review_dir / "sample-run"
+        review_run_dir.mkdir(parents=True, exist_ok=True)
+        source_clip = review_run_dir / "source-01.mp4"
+        preview_clip = review_run_dir / "encoded-01.mp4"
+        wide_source_clip = review_run_dir / "source-02.mp4"
+        wide_preview_clip = review_run_dir / "encoded-02.mp4"
+        source_clip.write_bytes(b"source")
+        preview_clip.write_bytes(b"preview")
+        wide_source_clip.write_bytes(b"wide-source")
+        wide_preview_clip.write_bytes(b"wide-preview")
+        commands: list[list[str]] = []
+        geometry_by_path = {
+            source_clip: {"width": 1280, "height": 720},
+            preview_clip: {"width": 1280, "height": 720},
+            wide_source_clip: {"width": 3840, "height": 1606},
+            wide_preview_clip: {"width": 3840, "height": 1606},
+        }
+
+        def fake_run(command: list[str], **_kwargs: object) -> object:
+            commands.append(command)
+            if command[0] == "ffprobe":
+                geometry = geometry_by_path[Path(command[-1])]
+                return type(
+                    "Result",
+                    (),
+                    {"returncode": 0, "stdout": json.dumps({"streams": [geometry]}), "stderr": ""},
+                )()
+            output_path = Path(command[-1])
+            output_path.write_bytes(b"video")
+            return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+        with patch("mediaforce.web.app.subprocess.run", side_effect=fake_run), patch(
+                "mediaforce.web.app.ffmpeg_binary", return_value="ffmpeg"
+        ):
+            bundle_path, download_name, cleanup_path = _build_review_compare_video_from_pairs(
+                config=self.config,
+                prefix="tv/Suits/Season 5",
+                retained_pairs=[(source_clip, preview_clip), (wide_source_clip, wide_preview_clip)],
+            )
+        self.addCleanup(lambda: shutil.rmtree(cleanup_path, ignore_errors=True))
+
+        self.assertEqual(download_name, "tv-suits-season-5-full-review-compare.mov")
+        self.assertEqual(bundle_path.parent, cleanup_path)
+        self.assertEqual(len([command for command in commands if command[0] == "ffprobe"]), 4)
+        render_commands = [command for command in commands if "-filter_complex" in command]
+        self.assertEqual(len(render_commands), 2)
+        render_command = render_commands[0]
+        self.assertEqual(render_command[render_command.index("-i") + 1], str(source_clip))
+        self.assertEqual(render_command[render_command.index("-i", render_command.index("-i") + 1) + 1], str(preview_clip))
+        for command in render_commands:
+            filter_complex = command[command.index("-filter_complex") + 1]
+            self.assertIn("xstack=inputs=2", filter_complex)
+            self.assertIn("pad=7680:1606", filter_complex)
+            self.assertNotIn("scale=", filter_complex)
+            self.assertNotIn("-ss", command)
+        self.assertTrue(bundle_path.exists())
+
+    def test_review_compare_pair_entries_reads_retained_source_and_preview_clips(self) -> None:
+        review_run_dir = self.config.paths.review_dir / "sample-run"
+        review_run_dir.mkdir(parents=True, exist_ok=True)
+        source_clip = review_run_dir / "source-01.mp4"
+        preview_clip = review_run_dir / "encoded-01.mp4"
+        source_clip.write_bytes(b"source")
+        preview_clip.write_bytes(b"preview")
+        stale_compare_clip = review_run_dir / "compare-01.mkv"
+        stale_compare_clip.write_bytes(b"stale-low-resolution-compare")
+
+        calibration = {
+            "compare_clips": [{"path": "/review-media/sample-run/compare-01.mkv"}],
+            "review_pairs": [
+                {
+                    "source_clip": {"path": "/review-media/sample-run/source-01.mp4"},
+                    "preview_clip": {"path": "/review-media/sample-run/encoded-01.mp4"},
+                    "compare_clip": {"path": "/review-media/sample-run/compare-01.mkv"},
+                }
+            ],
+        }
+
+        entries = _review_compare_pair_entries(self.config, calibration)
+
+        self.assertEqual(entries, [(source_clip.resolve(), preview_clip.resolve())])
+
+    def test_download_review_compare_prefers_full_size_retained_pairs(self) -> None:
+        review_run_dir = self.config.paths.review_dir / "sample-run"
+        review_run_dir.mkdir(parents=True, exist_ok=True)
+        source_clip = review_run_dir / "source-01.mp4"
+        preview_clip = review_run_dir / "encoded-01.mp4"
+        stale_compare_clip = review_run_dir / "compare-01.mkv"
+        source_clip.write_bytes(b"source")
+        preview_clip.write_bytes(b"preview")
+        stale_compare_clip.write_bytes(b"stale-low-resolution-compare")
+        bundle_path = self.root / "full-size-review.mov"
+        bundle_path.write_bytes(b"bundle")
+        cleanup_path = self.root / "download-cleanup"
+
+        calibration_path = _calibration_file(self.config, "tv/Suits/Season 5")
+        calibration_path.parent.mkdir(parents=True, exist_ok=True)
+        calibration_path.write_text(json.dumps({
+            "review_pairs": [
+                {
+                    "source_clip": {"path": "/review-media/sample-run/source-01.mp4"},
+                    "preview_clip": {"path": "/review-media/sample-run/encoded-01.mp4"},
+                    "compare_clip": {"path": "/review-media/sample-run/compare-01.mkv"},
+                }
+            ],
+            "compare_clips": [{"path": "/review-media/sample-run/compare-01.mkv"}],
+        }))
+
+        with patch(
+                "mediaforce.web.app._build_review_compare_video_from_pairs",
+                return_value=(bundle_path, "full-size.mov", cleanup_path),
+        ) as pair_builder, patch(
+            "mediaforce.web.app._build_review_compare_video",
+            side_effect=AssertionError("download used stale resized compare clips"),
+        ):
+            response = _download_review_compare_action(self.config, "tv/Suits/Season 5")
+
+        pair_builder.assert_called_once_with(
+            config=self.config,
+            prefix="tv/Suits/Season 5",
+            retained_pairs=[(source_clip.resolve(), preview_clip.resolve())],
+        )
+        self.assertIn('filename="full-size.mov"', response.headers["content-disposition"])
+
+    def test_download_review_compare_uses_existing_compare_set_when_retained_pairs_are_partial(self) -> None:
+        review_run_dir = self.config.paths.review_dir / "sample-run"
+        review_run_dir.mkdir(parents=True, exist_ok=True)
+        source_clip = review_run_dir / "source-01.mp4"
+        preview_clip = review_run_dir / "encoded-01.mp4"
+        compare_clip_1 = review_run_dir / "compare-01.mkv"
+        compare_clip_2 = review_run_dir / "compare-02.mkv"
+        source_clip.write_bytes(b"source")
+        preview_clip.write_bytes(b"preview")
+        compare_clip_1.write_bytes(b"compare1")
+        compare_clip_2.write_bytes(b"compare2")
+        bundle_path = self.root / "full-existing-review.mov"
+        bundle_path.write_bytes(b"bundle")
+
+        calibration_path = _calibration_file(self.config, "tv/Suits/Season 5")
+        calibration_path.parent.mkdir(parents=True, exist_ok=True)
+        calibration_path.write_text(json.dumps({
+            "review_pairs": [
+                {
+                    "source_clip": {"path": "/review-media/sample-run/source-01.mp4"},
+                    "preview_clip": {"path": "/review-media/sample-run/encoded-01.mp4"},
+                    "compare_clip": {"path": "/review-media/sample-run/compare-01.mkv"},
+                }
+            ],
+            "compare_clips": [
+                {"path": "/review-media/sample-run/compare-01.mkv"},
+                {"path": "/review-media/sample-run/compare-02.mkv"},
+            ],
+        }))
+
+        with patch(
+                "mediaforce.web.app._build_review_compare_video_from_pairs",
+                side_effect=AssertionError("partial retained pairs dropped compare moments"),
+        ), patch(
+            "mediaforce.web.app._build_review_compare_video",
+            return_value=(bundle_path, "existing-full.mov"),
+        ) as compare_builder:
+            response = _download_review_compare_action(self.config, "tv/Suits/Season 5")
+
+        compare_builder.assert_called_once_with(
+            config=self.config,
+            prefix="tv/Suits/Season 5",
+            compare_clips=[compare_clip_1.resolve(), compare_clip_2.resolve()],
+        )
+        self.assertIn('filename="existing-full.mov"', response.headers["content-disposition"])
 
     def test_review_compare_bundle_entries_prefers_compare_clips_over_review_pairs(self) -> None:
         review_run_dir = self.config.paths.review_dir / "sample-run"
@@ -4724,7 +4899,24 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(schema["required"], ["video", "audio", "subtitle"])
         self.assertEqual(schema["properties"]["video"]["properties"]["target_vmaf"]["type"], ["number", "null"])
         self.assertEqual(schema["properties"]["video"]["properties"]["thorough"]["type"], ["boolean", "null"])
+        self.assertEqual(schema["properties"]["video"]["properties"]["max_height"]["type"], ["number", "null"])
+        self.assertEqual(
+            schema["properties"]["video"]["properties"]["black_bar_handling"]["type"],
+            ["string", "null"],
+        )
         self.assertEqual(schema["properties"]["audio"]["properties"]["keep_languages"]["type"], ["array", "null"])
+
+    def test_apply_seed_policy_allows_transform_keys_when_base_policy_omits_them(self) -> None:
+        updated_policy, applied = apply_seed_policy(
+            {"video": {"target_vmaf": 94.0}},
+            {"video": {"max_height": 1080, "black_bar_handling": "smart", "crop": ""}},
+        )
+
+        self.assertEqual(applied["video"]["max_height"], 1080)
+        self.assertEqual(applied["video"]["black_bar_handling"], "smart")
+        self.assertEqual(applied["video"]["crop"], "")
+        self.assertEqual(updated_policy["video"]["max_height"], 1080)
+        self.assertEqual(updated_policy["video"]["black_bar_handling"], "smart")
 
     def test_apply_seed_policy_normalizes_transform_policy_values(self) -> None:
         _updated_policy, applied = apply_seed_policy(

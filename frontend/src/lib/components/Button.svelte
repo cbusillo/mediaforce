@@ -31,6 +31,9 @@
 		padding: 0.72rem 0.92rem;
 		border-radius: var(--radius-md);
 		font-weight: 700;
+		line-height: 1.2;
+		min-height: 2.9rem;
+		text-align: center;
 		letter-spacing: 0;
 		border: 1px solid transparent;
 		transition:
@@ -52,8 +55,8 @@
 	}
 
 	.primary {
-		background: var(--accent);
-		border-color: rgba(145, 205, 253, 0.26);
+		background: #1e6fb8;
+		border-color: rgba(145, 205, 253, 0.3);
 		color: #f4f9fd;
 	}
 

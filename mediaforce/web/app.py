@@ -12,8 +12,8 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
-from tempfile import NamedTemporaryFile
-from typing import Any
+from tempfile import NamedTemporaryFile, mkdtemp
+from typing import Any, NamedTuple
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
@@ -38,11 +38,13 @@ from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_c
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import calibration_jobs as calibration_jobs_table
+from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import learning_artifacts
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.db_tables import tuning_sessions
-from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY, clear_terminal_encode_jobs_for_prefix, \
+from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY, DISPLAY_ENCODE_JOB_KINDS, \
+    clear_terminal_encode_jobs_for_prefix, \
     ensure_queue_state, load_active_encode_job_for_prefix, load_latest_encode_job, \
     repair_persisted_encode_job_hosts, \
     queue_position as encode_queue_position, save_encode_job, summarize_encode_queue
@@ -78,6 +80,7 @@ from mediaforce.review import (
     recommend_review_timestamps,
     render_source_review_clips,
 )
+from mediaforce.reviewing.renderers import NATIVE_COMPARE_FILTER
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.tuning.tuning_memory import (
     record_tuning_session,
@@ -191,6 +194,11 @@ from mediaforce.web.settings_runtime import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+class VideoGeometry(NamedTuple):
+    width: int
+    height: int
 
 MIN_RECOMMENDED_SAVINGS_BYTES = 100 * 1024 * 1024
 FULL_SCAN_STALE_AFTER = timedelta(minutes=15)
@@ -916,10 +924,24 @@ def _download_review_compare_action(config: MediaforceConfig, prefix: str) -> Fi
     calibration = _load_calibration_state(config, prefix)
     if calibration is None:
         raise HTTPException(status_code=404, detail="No sampled review clips are available for this folder yet.")
+    retained_pairs = _review_compare_pair_entries(config, calibration)
     compare_clips = [
         clip_path for clip_path in _review_compare_bundle_entries(config, calibration)
         if clip_path.exists()
     ]
+    if retained_pairs and len(retained_pairs) >= max(len(compare_clips), 1):
+        bundle_path, download_name, cleanup_path = _build_review_compare_video_from_pairs(
+            config=config,
+            prefix=prefix,
+            retained_pairs=retained_pairs,
+        )
+        return FileResponse(
+            bundle_path,
+            filename=download_name,
+            media_type="video/quicktime",
+            background=BackgroundTask(_remove_path_if_exists, cleanup_path),
+        )
+
     if not compare_clips:
         raise HTTPException(status_code=404, detail="No side-by-side compare clips are available for this folder yet.")
     bundle_path, download_name = _build_review_compare_video(
@@ -948,6 +970,173 @@ def _build_review_compare_video(
     _concat_review_compare_clips(bundle_path=bundle_path, compare_clips=compare_clips)
     download_name = f"{_download_name_slug(prefix)}-full-review-compare.mov"
     return bundle_path, download_name
+
+
+def _build_review_compare_video_from_pairs(
+        *,
+        config: MediaforceConfig,
+        prefix: str,
+        retained_pairs: list[tuple[Path, Path]],
+) -> tuple[Path, str, Path]:
+    downloads_dir = config.paths.web_state_dir / "downloads"
+    downloads_dir.mkdir(parents=True, exist_ok=True)
+    bundle_dir = Path(mkdtemp(prefix="review-bundle-", dir=downloads_dir))
+    compare_clips: list[Path] = []
+    try:
+        geometry = _retained_review_pairs_compare_geometry(retained_pairs)
+        for index, (source_clip, preview_clip) in enumerate(retained_pairs, start=1):
+            output_path = bundle_dir / f"native-compare-{index:02d}.mkv"
+            _render_retained_review_pair_compare(
+                source_clip=source_clip,
+                preview_clip=preview_clip,
+                output_path=output_path,
+                geometry=geometry,
+            )
+            compare_clips.append(output_path)
+        bundle_path = bundle_dir / f"{_download_name_slug(prefix)}-full-review-compare.mov"
+        _concat_review_compare_clips(bundle_path=bundle_path, compare_clips=compare_clips)
+    except Exception:
+        _remove_path_if_exists(bundle_dir)
+        raise
+    download_name = f"{_download_name_slug(prefix)}-full-review-compare.mov"
+    return bundle_path, download_name, bundle_dir
+
+
+def _retained_review_pair_compare_geometry(retained_pair: tuple[Path, Path]) -> VideoGeometry:
+    source_clip, preview_clip = retained_pair
+    source_geometry = _video_geometry(source_clip)
+    preview_geometry = _video_geometry(preview_clip)
+    return VideoGeometry(
+        width=source_geometry.width + preview_geometry.width,
+        height=max(source_geometry.height, preview_geometry.height),
+    )
+
+
+def _retained_review_pairs_compare_geometry(retained_pairs: list[tuple[Path, Path]]) -> VideoGeometry:
+    geometries = [_retained_review_pair_compare_geometry(pair) for pair in retained_pairs]
+    return VideoGeometry(
+        width=max(geometry.width for geometry in geometries),
+        height=max(geometry.height for geometry in geometries),
+    )
+
+
+def _video_geometry(path: Path) -> VideoGeometry:
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-of",
+        "json",
+        str(path),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        detail = stderr or f"ffprobe could not read video dimensions for {path.name}."
+        raise HTTPException(status_code=500, detail=detail)
+    try:
+        payload = json.loads(result.stdout or "{}")
+        stream = object_dict(object_list(payload.get("streams"))[0] if object_list(payload.get("streams")) else {})
+        width = int(stream.get("width") or 0)
+        height = int(stream.get("height") or 0)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        width = 0
+        height = 0
+    if width <= 0 or height <= 0:
+        raise HTTPException(status_code=500, detail=f"Could not read video dimensions for {path.name}.")
+    return VideoGeometry(width=width, height=height)
+
+
+def _retained_review_pair_compare_filter(geometry: VideoGeometry | None = None) -> str:
+    if geometry is None:
+        return NATIVE_COMPARE_FILTER
+    return (
+        f"{NATIVE_COMPARE_FILTER};"
+        f"[v]pad={geometry.width}:{geometry.height}:0:0:black,setsar=1[vout]"
+    )
+
+
+def _retained_review_pair_compare_map(geometry: VideoGeometry | None = None) -> str:
+    return "[vout]" if geometry is not None else "[v]"
+
+
+def _render_retained_review_pair_compare(
+        *,
+        source_clip: Path,
+        preview_clip: Path,
+        output_path: Path,
+        geometry: VideoGeometry | None = None,
+) -> None:
+    command = [
+        ffmpeg_binary(),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-i",
+        str(source_clip),
+        "-i",
+        str(preview_clip),
+        "-filter_complex",
+        _retained_review_pair_compare_filter(geometry),
+        "-map",
+        _retained_review_pair_compare_map(geometry),
+        "-an",
+        "-c:v",
+        "libx264",
+        "-crf",
+        "16",
+        "-preset",
+        "veryfast",
+        str(output_path),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size <= 0:
+        _remove_path_if_exists(output_path)
+        stderr = (result.stderr or "").strip()
+        detail = stderr or "ffmpeg could not build a native-resolution review comparison clip."
+        raise HTTPException(status_code=500, detail=detail)
+
+
+def _review_compare_pair_entries(config: MediaforceConfig, calibration: dict[str, Any]) -> list[tuple[Path, Path]]:
+    entries: list[tuple[Path, Path]] = []
+    for raw_pair in object_list(calibration.get("review_pairs")):
+        pair = object_dict(raw_pair)
+        source_clip = _review_file_from_url(config, str(object_dict(pair.get("source_clip")).get("path") or ""))
+        preview_clip = _review_file_from_url(config, str(object_dict(pair.get("preview_clip")).get("path") or ""))
+        if source_clip is None or preview_clip is None:
+            continue
+        if source_clip.exists() and preview_clip.exists():
+            entries.append((source_clip, preview_clip))
+    if entries:
+        return entries
+
+    source_by_timestamp = {
+        _review_pair_timestamp_key(float_value(clip.get("timestamp_seconds"))): _review_file_from_url(
+            config,
+            str(clip.get("path") or ""),
+        )
+        for clip in (object_dict(raw_clip) for raw_clip in object_list(calibration.get("source_clips")))
+    }
+    for raw_clip in object_list(calibration.get("preview_clips")):
+        preview = object_dict(raw_clip)
+        key = _review_pair_timestamp_key(float_value(preview.get("timestamp_seconds")))
+        source_clip = source_by_timestamp.get(key)
+        preview_clip = _review_file_from_url(config, str(preview.get("path") or ""))
+        if source_clip is None or preview_clip is None:
+            continue
+        if source_clip.exists() and preview_clip.exists():
+            entries.append((source_clip, preview_clip))
+    return entries
+
+
+def _review_pair_timestamp_key(timestamp: float | None) -> int:
+    return int(round(float(timestamp or 0.0) * 1000))
 
 
 def _review_compare_bundle_entries(config: MediaforceConfig, calibration: dict[str, Any]) -> list[Path]:
@@ -1108,6 +1297,22 @@ def _reset_folder_card_cache() -> None:
 
 
 def _list_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
+    needs_attention_badges: dict[str, dict[str, str | None]] | None = None
+    calibration_job_badges: dict[str, dict[str, str | None]] | None = None
+
+    def review_badge_for_prefix(prefix: str) -> dict[str, str | None]:
+        nonlocal calibration_job_badges, needs_attention_badges
+        if needs_attention_badges is None:
+            needs_attention_badges = _folder_needs_attention_badges(connection)
+        if calibration_job_badges is None:
+            calibration_job_badges = _folder_calibration_job_badges(connection)
+        return _folder_review_badge(
+            config,
+            prefix,
+            needs_attention_badges=needs_attention_badges,
+            calibration_job_badges=calibration_job_badges,
+        )
+
     return cached_folder_cards(
         config,
         connection,
@@ -1115,17 +1320,24 @@ def _list_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[F
         folder_group=_folder_group,
         age_days=_age_days,
         estimate_savings_bytes=_estimate_savings_bytes,
-        review_badge_for_prefix=lambda prefix: _folder_review_badge(config, prefix, connection),
+        review_badge_for_prefix=review_badge_for_prefix,
     )
 
 
 def _preview_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
+    needs_attention_badges = _folder_needs_attention_badges(connection)
+    calibration_job_badges = _folder_calibration_job_badges(connection)
     return preview_folder_cards(
         connection,
         minimum_recommended_savings_bytes=MIN_RECOMMENDED_SAVINGS_BYTES,
         folder_group=_folder_group,
         estimate_savings_bytes=_estimate_savings_bytes,
-        review_badge_for_prefix=lambda prefix: _folder_review_badge(config, prefix, connection),
+        review_badge_for_prefix=lambda prefix: _folder_review_badge(
+            config,
+            prefix,
+            needs_attention_badges=needs_attention_badges,
+            calibration_job_badges=calibration_job_badges,
+        ),
     )
 
 
@@ -1276,11 +1488,107 @@ def _folder_badge_failure_detail(raw_error: Any, raw_waiting_reason: Any = None)
     return f"{compact[:157]}..." if len(compact) > 160 else compact
 
 
+def _folder_needs_attention_badges(connection: DBClient) -> dict[str, dict[str, str | None]]:
+    rows = connection.execute(
+        select(
+            encode_jobs.c.prefix,
+            encode_jobs.c.status,
+            encode_jobs.c.error,
+            encode_jobs.c.waiting_reason,
+        )
+        .where(encode_jobs.c.job_kind.in_(DISPLAY_ENCODE_JOB_KINDS))
+        .order_by(encode_jobs.c.prefix.asc(), encode_jobs.c.created_at.desc(), literal_column("rowid").desc())
+    ).mappings().fetchall()
+    badges: dict[str, dict[str, str | None]] = {}
+    seen_prefixes: set[str] = set()
+    for row in rows:
+        prefix = str(row["prefix"] or "").strip().strip("/")
+        if not prefix or prefix in seen_prefixes:
+            continue
+        seen_prefixes.add(prefix)
+        if str(row["status"] or "") != "needs_attention":
+            continue
+        badges[prefix] = {
+            "label": "Needs attention",
+            "tone": "warning",
+            "detail": _folder_badge_failure_detail(row["error"], row["waiting_reason"]),
+        }
+    return badges
+
+
+def _folder_calibration_job_badges(connection: DBClient) -> dict[str, dict[str, str | None]]:
+    rows = connection.execute(
+        select(
+            calibration_jobs_table.c.prefix,
+            calibration_jobs_table.c.status,
+            calibration_jobs_table.c.lane,
+            calibration_jobs_table.c.error,
+        )
+        .order_by(
+            calibration_jobs_table.c.prefix.asc(),
+            calibration_jobs_table.c.created_at.desc(),
+            literal_column("rowid").desc(),
+        )
+    ).mappings().fetchall()
+    badges: dict[str, dict[str, str | None]] = {}
+    seen_prefixes: set[str] = set()
+    for row in rows:
+        prefix = str(row["prefix"] or "").strip().strip("/")
+        if not prefix or prefix in seen_prefixes:
+            continue
+        seen_prefixes.add(prefix)
+        badge = _calibration_job_badge(
+            status=str(row["status"] or ""),
+            lane=str(row["lane"] or "sample"),
+            error=row["error"],
+        )
+        if badge is not None:
+            badges[prefix] = badge
+    return badges
+
+
+def _calibration_job_badge(*, status: str, lane: str, error: Any) -> dict[str, str | None] | None:
+    mode = "full" if lane == "full" else "sample"
+    if status == "running":
+        return {
+            "label": "Proof running" if mode == "full" else "Sample running",
+            "tone": "attention",
+            "detail": "Representative-file proof encode is active." if mode == "full" else "Sample calibration is active.",
+        }
+    if status == "queued":
+        return {
+            "label": "Proof queued" if mode == "full" else "Sample queued",
+            "tone": "attention",
+            "detail": "Waiting for proof encode capacity." if mode == "full" else "Waiting for sample host capacity.",
+        }
+    if status == "pending_review":
+        return {"label": "Review pending", "tone": "attention", "detail": None}
+    if status == "failed":
+        return {
+            "label": "Proof failed" if mode == "full" else "Sample failed",
+            "tone": "warning",
+            "detail": _folder_badge_failure_detail(error),
+        }
+    if status == "stopped":
+        return {
+            "label": "Proof stopped" if mode == "full" else "Sample stopped",
+            "tone": "warning",
+            "detail": _folder_badge_failure_detail(error),
+        }
+    return None
+
+
 def _folder_review_badge(
         config: MediaforceConfig,
         prefix: str,
         connection: DBClient | None = None,
+        needs_attention_badges: dict[str, dict[str, str | None]] | None = None,
+        calibration_job_badges: dict[str, dict[str, str | None]] | None = None,
 ) -> dict[str, str | None]:
+    if needs_attention_badges is not None:
+        badge = needs_attention_badges.get(prefix)
+        if badge is not None:
+            return badge
     if connection is not None:
         encode_job = load_latest_encode_job(connection, prefix)
         if encode_job and str(encode_job.get("status") or "") == "needs_attention":
@@ -1292,6 +1600,21 @@ def _folder_review_badge(
                     encode_job.get("waiting_reason"),
                 ),
             }
+
+    if calibration_job_badges is not None:
+        badge = calibration_job_badges.get(prefix)
+        if badge is not None:
+            return badge
+    elif connection is not None:
+        calibration_job = _load_job_state(connection, config, prefix)
+        if calibration_job is not None:
+            badge = _calibration_job_badge(
+                status=str(calibration_job.get("status") or ""),
+                lane=str(calibration_job.get("lane") or calibration_job.get("mode") or "sample"),
+                error=calibration_job.get("error"),
+            )
+            if badge is not None:
+                return badge
 
     calibration = _load_calibration_state(config, prefix)
     if calibration is None:

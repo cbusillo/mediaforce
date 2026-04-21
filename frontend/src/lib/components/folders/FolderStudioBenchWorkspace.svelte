@@ -131,6 +131,11 @@
 	});
 
 	const latestThreadSession = $derived(calibrationThreadSessions.at(-1) ?? null);
+	const hasTypedRequest = $derived(note.trim().length > 0);
+	const benchDraftActionLabel = $derived(
+		hasTypedRequest ? 'Send request to bench' : previewButtonLabel
+	);
+	const benchDraftActionVariant = $derived(hasTypedRequest ? 'primary' : 'secondary');
 
 	$effect(() => {
 		if (!browser || transformDefaultsLoaded) return;
@@ -239,12 +244,12 @@
 					class="action-row note-composer-actions bench-compose-actions primary-bench-action-row"
 				>
 					<Button
-						variant="secondary"
+						variant={benchDraftActionVariant}
 						loading={actionState === 'preview'}
 						disabled={!canRequestBenchDraft}
 						onclick={onPreviewSampleDraft}
 					>
-						{previewButtonLabel}
+						{benchDraftActionLabel}
 					</Button>
 					{#if approvedSeasonShortcut}
 						<Button
@@ -1315,6 +1320,11 @@
 		color: var(--ink);
 		min-height: 4.6rem;
 		resize: vertical;
+	}
+
+	textarea::placeholder {
+		color: rgba(148, 163, 184, 0.42);
+		font-style: italic;
 	}
 
 	.bench-compose-shell textarea {

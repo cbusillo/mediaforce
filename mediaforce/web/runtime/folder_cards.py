@@ -2,6 +2,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 from sqlalchemy import select
 
@@ -96,14 +97,15 @@ def cached_folder_cards(
 
     while True:
         cache_key = folder_card_cache_key(config)
+        cached_cards: list[FolderCard] = []
         with _FOLDER_CARD_CACHE_LOCK:
             cache_generation = _FOLDER_CARD_CACHE_GENERATION
             cache_hit = _FOLDER_CARD_CACHE_KEY == cache_key
-            cached_cards = list(_FOLDER_CARD_CACHE_VALUE) if cache_hit else []
+            if cache_hit:
+                cached_cards = _copy_folder_cards(_FOLDER_CARD_CACHE_VALUE)
         if cache_hit:
-            _apply_folder_review_badges(cached_cards, review_badge_for_prefix)
             return cached_cards
-        cards = list_folder_cards(
+        cards: list[FolderCard] = list_folder_cards(
             connection,
             minimum_recommended_savings_bytes=minimum_recommended_savings_bytes,
             folder_group=folder_group,
@@ -116,10 +118,16 @@ def cached_folder_cards(
             if cache_generation != _FOLDER_CARD_CACHE_GENERATION or cache_key != current_cache_key:
                 continue
             if _FOLDER_CARD_CACHE_KEY == cache_key:
-                return list(_FOLDER_CARD_CACHE_VALUE)
-            _FOLDER_CARD_CACHE_KEY = cache_key
-            _FOLDER_CARD_CACHE_VALUE = list(cards)
-            return cards
+                cached_cards = _copy_folder_cards(_FOLDER_CARD_CACHE_VALUE)
+                use_cached_cards = True
+            else:
+                _FOLDER_CARD_CACHE_KEY = cache_key
+                _FOLDER_CARD_CACHE_VALUE = _copy_folder_cards(cards)
+                use_cached_cards = False
+        if use_cached_cards:
+            return cached_cards
+        return cards
+    raise RuntimeError("folder card cache loop exited unexpectedly")
 
 
 def reset_folder_card_cache() -> None:
@@ -361,6 +369,33 @@ def _apply_folder_review_badges(cards: list[FolderCard], review_badge_for_prefix
         card.review_badge_detail = badge.get("detail")
 
 
+def _copy_folder_cards(cards: list[FolderCard], *, include_review_badges: bool = True) -> list[FolderCard]:
+    return [_copy_folder_card(card, include_review_badges=include_review_badges) for card in cards]
+
+
+def _copy_folder_card(card: FolderCard, *, include_review_badges: bool = True) -> FolderCard:
+    return FolderCard(
+        prefix=card.prefix,
+        title=card.title,
+        subtitle=card.subtitle,
+        scope_label=card.scope_label,
+        item_count=card.item_count,
+        pending_count=card.pending_count,
+        total_size_bytes=card.total_size_bytes,
+        estimated_savings_bytes=card.estimated_savings_bytes,
+        known_saved_bytes=card.known_saved_bytes,
+        projected_reclaim_bytes=card.projected_reclaim_bytes,
+        average_age_days=card.average_age_days,
+        sort_score=card.sort_score,
+        statuses=dict(card.statuses),
+        video_codecs=dict(card.video_codecs),
+        review_badge_label=card.review_badge_label if include_review_badges else None,
+        review_badge_tone=card.review_badge_tone if include_review_badges else None,
+        review_badge_detail=card.review_badge_detail if include_review_badges else None,
+        details_loading=card.details_loading,
+    )
+
+
 def _load_savings_history(
         connection: DBClient,
         *,
@@ -433,7 +468,7 @@ def _pending_folder_item_savings_bytes(*, status: str, bytes_saved: object) -> i
         return None
     if bytes_saved is None:
         return None
-    return int(bytes_saved)
+    return int(cast(float | int | str | bytes, bytes_saved))
 
 
 def _folder_history_matches_pending_codec(history: SavingsHistory | None, pending_codec: str) -> bool:
