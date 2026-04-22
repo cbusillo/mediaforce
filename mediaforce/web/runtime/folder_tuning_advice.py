@@ -875,6 +875,7 @@ def build_seed_policy_payload(
         metric_support_payload: dict[str, bool],
         recent_sessions_payload: list[dict[str, Any]] | None = None,
         requested_experiment: dict[str, Any] | None = None,
+        latest_failed_sample_job: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     suggested_override = object_dict(summary.get("suggested_override"))
     resolved_requested_experiment = object_dict(requested_experiment) or operator_requested_experiment(user_note, sample_item)
@@ -933,6 +934,7 @@ def build_seed_policy_payload(
         "operator_note": user_note or None,
         "requested_experiment": resolved_requested_experiment,
         "operator_repeat_signal": repeat_signal,
+        "latest_failed_sample_job": object_dict(latest_failed_sample_job) or None,
         "metric_support": metric_support_payload,
         "preferred_metric": "vmaf" if metric_support_payload.get("vmaf") else (
             "xpsnr" if metric_support_payload.get("xpsnr") else None
@@ -1027,6 +1029,7 @@ def maybe_seed_baseline_policy(
         existing_calibration: dict[str, Any] | None,
         connection: DBClient,
         requested_experiment: dict[str, Any] | None = None,
+        latest_failed_sample_job: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if action != "baseline" or existing_calibration is not None:
         return None
@@ -1047,6 +1050,7 @@ def maybe_seed_baseline_policy(
         metric_support_payload=metric_support_payload,
         recent_sessions_payload=recent_sessions_payload,
         requested_experiment=requested_experiment,
+        latest_failed_sample_job=latest_failed_sample_job,
     )
     seed_response = request_seed_policy(project_root=project_root, payload=payload)
     maybe_force_repeated_seed_experiment(

@@ -1829,6 +1829,7 @@ def _build_seed_policy_payload(
         metric_support: dict[str, bool],
         recent_sessions_payload: list[dict[str, Any]] | None = None,
         requested_experiment: dict[str, Any] | None = None,
+        latest_failed_sample_job: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return runtime_build_seed_policy_payload(
         prefix=prefix,
@@ -1839,6 +1840,7 @@ def _build_seed_policy_payload(
         metric_support_payload=metric_support,
         recent_sessions_payload=recent_sessions_payload,
         requested_experiment=requested_experiment,
+        latest_failed_sample_job=latest_failed_sample_job,
     )
 
 
@@ -2741,6 +2743,7 @@ def _maybe_seed_baseline_policy(
         existing_calibration: dict[str, Any] | None,
         connection: DBClient,
         requested_experiment: dict[str, Any] | None = None,
+        latest_failed_sample_job: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     return runtime_maybe_seed_baseline_policy(
         config=config,
@@ -2753,6 +2756,7 @@ def _maybe_seed_baseline_policy(
         existing_calibration=existing_calibration,
         connection=connection,
         requested_experiment=requested_experiment,
+        latest_failed_sample_job=latest_failed_sample_job,
     )
 
 

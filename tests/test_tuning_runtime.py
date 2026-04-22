@@ -3732,6 +3732,46 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(request["target"], 85.0)
         self.assertEqual(request["applied_policy"]["video"]["target_vmaf"], 85.0)
 
+    def test_build_seed_policy_payload_carries_latest_failed_sample_job(self) -> None:
+        failed_job = {
+            "job_id": "failed-sample-1",
+            "status": "failed",
+            "action": "baseline",
+            "error": "Error: Failed to find a suitable crf",
+            "policy": {"video": {"target_vmaf": 97.0, "max_encoded_percent": 14}},
+        }
+
+        payload = _build_seed_policy_payload(
+            prefix="tv/Sanctuary",
+            user_note="What can we do about the failure?",
+            base_policy={"video": {"target_vmaf": 95.0, "max_encoded_percent": 30}},
+            sample_item={
+                "rel_path": "tv/Sanctuary/S01E01.mkv",
+                "source_size_bytes": 3_000_000_000,
+                "video_codec": "h264",
+                "video_bitrate": None,
+                "width": 1920,
+                "height": 1080,
+                "duration_seconds": 2600.0,
+                "audio_summary": [],
+                "subtitle_summary": [],
+                "recommendation": None,
+                "recommendation_reason": None,
+            },
+            summary={
+                "item_count": 13,
+                "total_size_bytes": 39_000_000_000,
+                "statuses": {"discovered": 13},
+                "video_codecs": {"h264": 13},
+                "audio_codecs": {"aac:2": 13},
+                "seasons": ["Season 1"],
+            },
+            metric_support={"vmaf": True, "xpsnr": True, "ssim": True, "psnr": True},
+            latest_failed_sample_job=failed_job,
+        )
+
+        self.assertEqual(payload["latest_failed_sample_job"], failed_job)
+
     def test_build_seed_policy_payload_marks_repeated_operator_confirmation(self) -> None:
         payload = _build_seed_policy_payload(
             prefix="tv/House/Season 5",
@@ -3901,6 +3941,75 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(job_fields["seed_request_disposition"], "honored_with_risk")
         self.assertEqual(job_fields["seed_applied_policy"]["video"]["target_vmaf"], 85.0)
         self.assertEqual(job_fields["seed_applied_policy"]["video"]["max_encoded_percent"], 4)
+
+    def test_maybe_seed_baseline_policy_sends_latest_failed_sample_job(self) -> None:
+        captured_payloads: list[dict[str, object]] = []
+        failed_job = {
+            "job_id": "failed-sample-1",
+            "status": "failed",
+            "action": "baseline",
+            "error": "Error: Failed to find a suitable crf",
+            "policy": {"video": {"target_vmaf": 97.0, "max_encoded_percent": 14}},
+        }
+
+        def fake_request_seed_policy(*, project_root: Path, payload: dict[str, object]) -> SeedPolicyResponse:
+            self.assertEqual(project_root, self.config.paths.project_root)
+            captured_payloads.append(payload)
+            return SeedPolicyResponse(
+                ok=True,
+                summary="Use the failed sample details to avoid the same CRF dead end.",
+                raw="{}",
+                prompt_version=SEED_PROMPT_VERSION,
+                diagnosis="The prior sample missed the size and quality constraints together.",
+                confidence="medium",
+                evidence_checked=["latest_failed_sample_job.error"],
+                suggested_follow_up=None,
+                request_disposition="honored",
+                request_response="I adjusted this from the failed sample evidence.",
+                feasibility_note=None,
+                proposed_policy={"video": {"target_vmaf": 93.0, "max_encoded_percent": 18}},
+            )
+
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.web.runtime.folder_tuning_advice.inspect_prefix",
+                return_value={
+                    "item_count": 13,
+                    "total_size_bytes": 39_000_000_000,
+                    "statuses": {"discovered": 13},
+                    "video_codecs": {"h264": 13},
+                    "audio_codecs": {"aac:2": 13},
+                    "seasons": ["Season 1"],
+                },
+        ), patch(
+            "mediaforce.web.runtime.folder_tuning_advice.request_seed_policy",
+            side_effect=fake_request_seed_policy,
+        ):
+            metadata = _maybe_seed_baseline_policy(
+                config=self.config,
+                prefix="tv/Sanctuary",
+                action="baseline",
+                user_note="What can we do about the failure?",
+                base_policy={"video": {"target_vmaf": 95.0, "max_encoded_percent": 30}},
+                sample_item={
+                    "rel_path": "tv/Sanctuary/S01E01.mkv",
+                    "source_size_bytes": 3_000_000_000,
+                    "video_codec": "h264",
+                    "video_bitrate": None,
+                    "width": 1920,
+                    "height": 1080,
+                    "duration_seconds": 2600.0,
+                    "audio_summary": [],
+                    "subtitle_summary": [],
+                },
+                existing_calibration=None,
+                connection=connection,
+                latest_failed_sample_job=failed_job,
+            )
+
+        assert metadata is not None
+        self.assertEqual(len(captured_payloads), 1)
+        self.assertEqual(captured_payloads[0]["latest_failed_sample_job"], failed_job)
+        self.assertEqual(metadata["job_fields"]["seed_evidence_checked"], ["latest_failed_sample_job.error"])
 
     def test_request_note_tuning_carries_explicit_budget_into_honored_risky_draft(self) -> None:
         responses = [

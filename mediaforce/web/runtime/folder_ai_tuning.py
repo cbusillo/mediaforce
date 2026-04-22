@@ -413,6 +413,7 @@ def _seed_preview_action(
         existing_calibration=None,
         connection=connection,
         requested_experiment=operator_request,
+        latest_failed_sample_job=latest_failed_sample_job,
     )
     seed_metadata = object_dict(seed_metadata_raw)
     seed_job_fields = object_dict(seed_metadata.get("job_fields"))
