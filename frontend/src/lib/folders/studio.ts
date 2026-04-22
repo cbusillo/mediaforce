@@ -170,12 +170,14 @@ function summarizeCalibrationError(rawError: string, status: string | null | und
 		.split('\n')
 		.map((line) => line.trim())
 		.filter((line) => line.length > 0 && !line.startsWith('export '));
-	const actionableLine = lines.find(isActionableFailureLine);
+	const diagnosticLines = lines.filter((line) => !isCleanupWarningLine(line));
+	const primaryLines = diagnosticLines.length > 0 ? diagnosticLines : lines;
+	const actionableLine = primaryLines.find(isActionableFailureLine);
 	if (actionableLine) {
-		const crfSearchSummary = summarizeFailedCrfSearch(lines);
+		const crfSearchSummary = summarizeFailedCrfSearch(primaryLines);
 		return crfSearchSummary ?? actionableLine;
 	}
-	const progressLine = lines.find(parseAbAv1SampleProgress);
+	const progressLine = primaryLines.find(parseAbAv1SampleProgress);
 	if (progressLine) {
 		const progress = parseAbAv1SampleProgress(progressLine);
 		const stopped = String(status ?? '').trim() === 'stopped';
@@ -184,7 +186,11 @@ function summarizeCalibrationError(rawError: string, status: string | null | und
 			: 'ab-av1 was still encoding when the run ended';
 		return `${prefix} ${progress}. No specific error line was recorded.`;
 	}
-	return lines[0] ?? rawError;
+	return primaryLines[0] ?? rawError;
+}
+
+function isCleanupWarningLine(line: string): boolean {
+	return /^cleanup warning:/i.test(line);
 }
 
 function summarizeFailedCrfSearch(lines: string[]): string | null {

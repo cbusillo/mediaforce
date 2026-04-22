@@ -265,6 +265,33 @@ describe('calibration failure copy', () => {
 		);
 	});
 
+	it('ignores appended cleanup warnings when summarizing the primary failure', () => {
+		expect(
+			summarizeCalibrationFailureDetail(
+				[
+					'[2026-04-22T14:48:43Z INFO ab_av1::command::sample_encode] encoding sample 1/8 crf 31',
+					'Cleanup warning: Failed to remove remote quality temp dir /tmp/mediaforce-quality: Permission denied'
+				].join('\n'),
+				'M4 Studio',
+				'failed'
+			)
+		).toBe(
+			'Host: M4 Studio · ab-av1 was still encoding when the run ended sample 1/8 at CRF 31. No specific error line was recorded.'
+		);
+	});
+
+	it('still surfaces cleanup failures when cleanup is the only recorded error', () => {
+		expect(
+			summarizeCalibrationFailureDetail(
+				'Cleanup warning: Failed to remove remote quality temp dir /tmp/mediaforce-quality: Permission denied',
+				'M4 Studio',
+				'failed'
+			)
+		).toBe(
+			'Host: M4 Studio · Cleanup warning: Failed to remove remote quality temp dir /tmp/mediaforce-quality: Permission denied'
+		);
+	});
+
 	it('uses direct stopped copy for stopped samples', () => {
 		expect(calibrationFailureHeading('sample', 'stopped')).toBe(
 			'Sample run stopped before review clips were ready'
