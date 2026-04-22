@@ -46,6 +46,7 @@ class FolderAiTuneDeps:
     save_job_state: Any
     clear_pending_proposal: Any
     record_tuning_session: Any
+    load_latest_failed_sample_job_state: Any | None = None
 
 
 def _job_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
@@ -154,8 +155,9 @@ def folder_ai_tune_preview_action(
         existing_job = deps.load_job_state(connection, config, normalized_prefix)
         if existing_job and existing_job.get("status") in {"queued", "running", "pending_review"}:
             return {"ok": False, "message": "A calibration job is already active for this folder."}
+        latest_failed_sample_job_loader = deps.load_latest_failed_sample_job_state or deps.load_retryable_sample_job_state
         latest_failed_sample_job = _latest_failed_sample_job_payload(
-            deps.load_retryable_sample_job_state(connection, config, normalized_prefix)
+            latest_failed_sample_job_loader(connection, config, normalized_prefix)
         )
         summary = inspect_prefix(connection, config, normalized_prefix)
         sample_item = deps.sample_item(connection, config, normalized_prefix)

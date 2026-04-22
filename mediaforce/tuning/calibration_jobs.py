@@ -28,7 +28,7 @@ def load_latest_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
     return _hydrate_job(row) if row is not None else None
 
 
-def load_latest_retryable_sample_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
+def load_latest_failed_sample_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
     row = connection.execute(
         _calibration_job_select()
         .where(calibration_jobs.c.prefix == prefix)
@@ -39,6 +39,10 @@ def load_latest_retryable_sample_job(connection: DBClient, prefix: str) -> dict[
         .limit(1)
     ).mappings().fetchone()
     return _hydrate_job(row) if row is not None else None
+
+
+def load_latest_retryable_sample_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
+    return load_latest_failed_sample_job(connection, prefix)
 
 
 def load_latest_sample_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:

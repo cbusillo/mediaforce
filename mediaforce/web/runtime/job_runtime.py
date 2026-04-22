@@ -15,8 +15,8 @@ from sqlalchemy import literal_column
 from sqlalchemy import select
 from sqlalchemy import update
 
-from mediaforce.tuning.calibration_jobs import claim_next_queued_calibration_job, load_latest_job, \
-    load_latest_retryable_sample_job, load_latest_sample_job, queue_position, save_job
+from mediaforce.tuning.calibration_jobs import claim_next_queued_calibration_job, load_latest_failed_sample_job, \
+    load_latest_job, load_latest_retryable_sample_job, load_latest_sample_job, queue_position, save_job
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, DBRow, open_db
 from mediaforce.core.db_tables import calibration_jobs
@@ -127,6 +127,16 @@ def load_retryable_sample_job_state(
         ):
             return None
     return payload
+
+
+def load_latest_failed_sample_job_state(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+        deps: JobRuntimeDeps,
+) -> dict[str, Any] | None:
+    _ = config, deps
+    return load_latest_failed_sample_job(connection, prefix)
 
 
 def save_job_state(

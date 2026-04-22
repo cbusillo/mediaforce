@@ -3551,7 +3551,7 @@ class TuningRuntimeTests(unittest.TestCase):
         deps = FolderAiTuneDeps(
             resolve_sample_host=lambda _config, _host_key: host,
             load_job_state=lambda *_args, **_kwargs: None,
-            load_retryable_sample_job_state=lambda *_args, **_kwargs: dict(failed_job),
+            load_retryable_sample_job_state=lambda *_args, **_kwargs: None,
             sample_item=lambda *_args, **_kwargs: dict(sample_item),
             operator_requested_experiment=lambda *_args, **_kwargs: None,
             load_calibration_state=lambda *_args, **_kwargs: {
@@ -3581,6 +3581,7 @@ class TuningRuntimeTests(unittest.TestCase):
             save_job_state=lambda *_args, **_kwargs: None,
             clear_pending_proposal=lambda *_args, **_kwargs: None,
             record_tuning_session=lambda *_args, **_kwargs: "session-1",
+            load_latest_failed_sample_job_state=lambda *_args, **_kwargs: dict(failed_job),
         )
 
         with patch("mediaforce.web.runtime.folder_ai_tuning.inspect_prefix", return_value={"item_count": 1}), patch(
@@ -3608,8 +3609,14 @@ class TuningRuntimeTests(unittest.TestCase):
         assert isinstance(toolbelt, dict)
         self.assertEqual(toolbelt["latest_failed_sample_job"], latest_failed)
         self.assertEqual(saved_proposals[0]["latest_failed_sample_job"], latest_failed)
+        trace = saved_proposals[0]["trace"]
+        self.assertIsInstance(trace, dict)
+        assert isinstance(trace, dict)
+        context = trace["context"]
+        self.assertIsInstance(context, dict)
+        assert isinstance(context, dict)
         self.assertEqual(
-            saved_proposals[0]["trace"]["context"]["latest_failed_sample_job"],
+            context["latest_failed_sample_job"],
             latest_failed,
         )
 

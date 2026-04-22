@@ -114,7 +114,8 @@ from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_fo
     sample_calibration_host_statuses, sample_host_options, sample_host_options_from_statuses, \
     settings_page_payload, stop_calibration_queue_action, stop_encode_queue_action, \
     validate_folder_outputs_action, \
-    build_multimodal_review_pack, build_tuning_runtime_toolbelt, load_retryable_sample_job_state
+    build_multimodal_review_pack, build_tuning_runtime_toolbelt, load_latest_failed_sample_job_state, \
+    load_retryable_sample_job_state
 from mediaforce.web.runtime.folder_actions import ActionPayload, FolderItem
 from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
     restore_staged_artifact as runtime_restore_staged_artifact, \
@@ -690,6 +691,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             resolve_sample_host=_resolve_sample_host,
             load_job_state=_load_job_state,
             load_retryable_sample_job_state=_load_retryable_sample_job_state,
+            load_latest_failed_sample_job_state=_load_latest_failed_sample_job_state,
             sample_item=_sample_item,
             operator_requested_experiment=_operator_requested_experiment,
             load_calibration_state=_load_calibration_state,
@@ -2297,6 +2299,14 @@ def _load_job_state(connection: DBClient, config: MediaforceConfig, prefix: str)
 
 def _load_retryable_sample_job_state(connection: DBClient, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
     return load_retryable_sample_job_state(connection, config, prefix, _job_runtime_deps())
+
+
+def _load_latest_failed_sample_job_state(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+) -> dict[str, Any] | None:
+    return load_latest_failed_sample_job_state(connection, config, prefix, _job_runtime_deps())
 
 
 def _save_job_state(

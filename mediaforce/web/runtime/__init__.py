@@ -26,7 +26,7 @@ from mediaforce.web.runtime.host_runtime import default_sample_host_key, default
 from mediaforce.web.runtime.host_status import refresh_host_status_cache, safe_collect_host_statuses
 from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_db, \
     calibration_job_belongs_to_current_process, expire_calibration_job, latest_scan_completed_at, \
-    load_job_state, load_retryable_sample_job_state, maybe_schedule_scan, \
+    load_job_state, load_latest_failed_sample_job_state, load_retryable_sample_job_state, maybe_schedule_scan, \
     load_scan_job_state as load_scan_job_state_runtime, \
     save_job_state, save_scan_job_state as save_scan_job_state_runtime, scan_is_stale, \
     scan_job_belongs_to_current_process, scan_process_is_alive
@@ -67,6 +67,7 @@ __all__ = [
     "latest_scan_completed_at",
     "load_calibration_state",
     "load_job_state",
+    "load_latest_failed_sample_job_state",
     "load_retryable_sample_job_state",
     "load_json_object",
     "load_pending_proposal",

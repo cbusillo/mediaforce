@@ -11596,6 +11596,58 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(latest_payload["job_id"], "completed-sample-job")
         self.assertIsNone(retryable_payload)
 
+    def test_load_latest_failed_sample_job_state_keeps_context_after_newer_sample_run(self) -> None:
+        prefix = "tv/show/season-1-bench-failure-context"
+        older_finished_at = (
+                    datetime.now(tz=UTC) - web_app.CALIBRATION_JOB_NOTICE_AFTER - timedelta(minutes=5)).isoformat()
+        newer_finished_at = (datetime.now(tz=UTC) - timedelta(minutes=1)).isoformat()
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                calibration_jobs.insert().values(
+                    job_id="failed-sample-job",
+                    prefix=prefix,
+                    status="failed",
+                    lane="sample",
+                    action="baseline",
+                    host_json=json.dumps({"key": "cbusillo@localhost", "label": "M4 Studio"}, sort_keys=True),
+                    notes="what can we do about the failure?",
+                    policy_json=json.dumps({"video": {"target_vmaf": 97.0}}, sort_keys=True),
+                    sample_item_json=json.dumps({"rel_path": "tv/show/season-1/episode.mkv"}, sort_keys=True),
+                    created_at=older_finished_at,
+                    started_at=older_finished_at,
+                    finished_at=older_finished_at,
+                    updated_at=older_finished_at,
+                    error="Error: Failed to find a suitable crf",
+                )
+            )
+            connection.execute(
+                calibration_jobs.insert().values(
+                    job_id="completed-sample-job",
+                    prefix=prefix,
+                    status="completed",
+                    lane="sample",
+                    action="ai_tune",
+                    host_json=json.dumps({"key": "cbusillo@localhost", "label": "M4 Studio"}, sort_keys=True),
+                    notes="newer completed sample",
+                    policy_json=json.dumps({"video": {"target_vmaf": 90.0}}, sort_keys=True),
+                    sample_item_json=json.dumps({"rel_path": "tv/show/season-1/episode.mkv"}, sort_keys=True),
+                    created_at=newer_finished_at,
+                    started_at=newer_finished_at,
+                    finished_at=newer_finished_at,
+                    updated_at=newer_finished_at,
+                    error=None,
+                )
+            )
+
+            retryable_payload = web_app._load_retryable_sample_job_state(connection, self.config, prefix)
+            failed_payload = web_app._load_latest_failed_sample_job_state(connection, self.config, prefix)
+
+        self.assertIsNone(retryable_payload)
+        self.assertIsNotNone(failed_payload)
+        assert failed_payload is not None
+        self.assertEqual(failed_payload["job_id"], "failed-sample-job")
+        self.assertEqual(failed_payload["error"], "Error: Failed to find a suitable crf")
+
     def test_load_job_state_still_hides_old_stopped_full_job_notice(self) -> None:
         prefix = "tv/show/season-2"
         stale_finished_at = (
