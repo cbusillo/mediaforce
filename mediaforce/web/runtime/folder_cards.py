@@ -102,8 +102,9 @@ def cached_folder_cards(
             cache_generation = _FOLDER_CARD_CACHE_GENERATION
             cache_hit = _FOLDER_CARD_CACHE_KEY == cache_key
             if cache_hit:
-                cached_cards = _copy_folder_cards(_FOLDER_CARD_CACHE_VALUE)
+                cached_cards = _copy_folder_cards(_FOLDER_CARD_CACHE_VALUE, include_review_badges=False)
         if cache_hit:
+            _apply_folder_review_badges(cached_cards, review_badge_for_prefix)
             return cached_cards
         cards: list[FolderCard] = list_folder_cards(
             connection,
@@ -118,13 +119,14 @@ def cached_folder_cards(
             if cache_generation != _FOLDER_CARD_CACHE_GENERATION or cache_key != current_cache_key:
                 continue
             if _FOLDER_CARD_CACHE_KEY == cache_key:
-                cached_cards = _copy_folder_cards(_FOLDER_CARD_CACHE_VALUE)
+                cached_cards = _copy_folder_cards(_FOLDER_CARD_CACHE_VALUE, include_review_badges=False)
                 use_cached_cards = True
             else:
                 _FOLDER_CARD_CACHE_KEY = cache_key
-                _FOLDER_CARD_CACHE_VALUE = _copy_folder_cards(cards)
+                _FOLDER_CARD_CACHE_VALUE = _copy_folder_cards(cards, include_review_badges=False)
                 use_cached_cards = False
         if use_cached_cards:
+            _apply_folder_review_badges(cached_cards, review_badge_for_prefix)
             return cached_cards
         return cards
     raise RuntimeError("folder card cache loop exited unexpectedly")

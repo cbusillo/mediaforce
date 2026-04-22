@@ -3040,7 +3040,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual([card for card in cards if card.prefix == "tv/show/Season 7"], [])
 
-    def test_list_folder_cards_does_not_scan_encode_jobs_on_cache_hit(self) -> None:
+    def test_list_folder_cards_recomputes_review_badges_on_cache_hit(self) -> None:
         folder_cards_runtime.reset_folder_card_cache()
         pending = self._create_source_file("episode-cache-hit.mkv")
 
@@ -3059,17 +3059,20 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             with patch.object(folder_cards_runtime, "folder_card_cache_key", return_value=("cache", 1, 1)):
                 with patch.object(web_app, "_estimate_savings_bytes", autospec=True, return_value=2 * 1024 * 1024 * 1024):
-                    with patch.object(web_app, "_folder_needs_attention_badges", autospec=True, return_value={}):
-                        first_cards = web_app._list_folder_cards(self.config, connection)
                     with patch.object(
                             web_app,
                             "_folder_needs_attention_badges",
-                            side_effect=AssertionError("cache hit scanned encode jobs"),
-                    ):
+                            autospec=True,
+                            side_effect=[{}, {"tv/show/Season 8": {"label": "Encode failed", "tone": "danger"}}],
+                    ), patch.object(web_app, "_folder_calibration_job_badges", autospec=True, return_value={}):
+                        first_cards = web_app._list_folder_cards(self.config, connection)
                         second_cards = web_app._list_folder_cards(self.config, connection)
 
         self.assertEqual([card.prefix for card in first_cards], ["tv/show/Season 8"])
         self.assertEqual([card.prefix for card in second_cards], ["tv/show/Season 8"])
+        self.assertIsNone(first_cards[0].review_badge_label)
+        self.assertEqual(second_cards[0].review_badge_label, "Encode failed")
+        self.assertEqual(second_cards[0].review_badge_tone, "danger")
         folder_cards_runtime.reset_folder_card_cache()
 
     def test_cached_folder_cards_recomputes_after_reset_during_cache_miss(self) -> None:
@@ -3132,7 +3135,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual([card.prefix for card in cards], [fresh_card.prefix])
         folder_cards_runtime.reset_folder_card_cache()
 
-    def test_cached_folder_cards_preserves_cached_review_badges_without_shared_mutation(self) -> None:
+    def test_cached_folder_cards_reapplies_review_badges_without_shared_mutation(self) -> None:
         folder_cards_runtime.reset_folder_card_cache()
 
         cached_source_card = folder_cards_runtime.FolderCard(
@@ -3174,7 +3177,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     folder_group=Mock(),
                     age_days=Mock(),
                     estimate_savings_bytes=Mock(),
-                    review_badge_for_prefix=Mock(side_effect=AssertionError("cache hit refreshed badges")),
+                    review_badge_for_prefix=Mock(return_value={"label": "Second badge", "tone": "ready", "detail": "Second detail"}),
                 )
 
         self.assertEqual(list_folder_cards.call_count, 1)
@@ -3182,9 +3185,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(first_cards[0].review_badge_label, "First badge")
         self.assertEqual(first_cards[0].review_badge_tone, "attention")
         self.assertEqual(first_cards[0].review_badge_detail, "First detail")
-        self.assertEqual(second_cards[0].review_badge_label, "First badge")
-        self.assertEqual(second_cards[0].review_badge_tone, "attention")
-        self.assertEqual(second_cards[0].review_badge_detail, "First detail")
+        self.assertEqual(second_cards[0].review_badge_label, "Second badge")
+        self.assertEqual(second_cards[0].review_badge_tone, "ready")
+        self.assertEqual(second_cards[0].review_badge_detail, "Second detail")
 
         with patch.object(folder_cards_runtime, "folder_card_cache_key", return_value=("cache", 1, 1)):
             with patch.object(folder_cards_runtime, "list_folder_cards", list_folder_cards):
@@ -3196,10 +3199,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     folder_group=Mock(),
                     age_days=Mock(),
                     estimate_savings_bytes=Mock(),
-                    review_badge_for_prefix=Mock(side_effect=AssertionError("cache hit refreshed badges")),
+                    review_badge_for_prefix=Mock(return_value={"label": "Third badge", "tone": "attention"}),
                 )
 
-        self.assertEqual(third_cards[0].review_badge_label, "First badge")
+        self.assertEqual(third_cards[0].review_badge_label, "Third badge")
+        self.assertEqual(third_cards[0].review_badge_tone, "attention")
+        self.assertIsNone(third_cards[0].review_badge_detail)
         folder_cards_runtime.reset_folder_card_cache()
 
     def test_folder_cards_require_multiple_labeled_samples_before_using_folder_history(self) -> None:
@@ -8157,6 +8162,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         cmd = run_mock.call_args.args[0]
         filter_complex = cmd[cmd.index("-filter_complex") + 1]
         self.assertIn("xstack=inputs=2", filter_complex)
+        self.assertIn("pad=ceil(iw/2)*2:ceil(ih/2)*2", filter_complex)
         self.assertNotIn("scale=", filter_complex)
         self.assertNotIn("hstack", filter_complex)
 
@@ -8178,6 +8184,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         cmd = run_mock.call_args.args[0]
         filter_complex = cmd[cmd.index("-filter_complex") + 1]
         self.assertIn("xstack=inputs=2", filter_complex)
+        self.assertIn("pad=ceil(iw/2)*2:ceil(ih/2)*2", filter_complex)
         self.assertNotIn("scale=", filter_complex)
         self.assertNotIn("hstack", filter_complex)
 

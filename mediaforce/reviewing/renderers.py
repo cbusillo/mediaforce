@@ -5,7 +5,8 @@ from typing import Any, Callable
 NATIVE_COMPARE_FILTER = (
     "[0:v]setsar=1[left];"
     "[1:v]setsar=1[right];"
-    "[left][right]xstack=inputs=2:layout=0_0|w0_0:fill=black[v]"
+    "[left][right]xstack=inputs=2:layout=0_0|w0_0:fill=black[stacked];"
+    "[stacked]pad=ceil(iw/2)*2:ceil(ih/2)*2[v]"
 )
 
 
