@@ -3,10 +3,13 @@ import { describe, expect, it } from 'vitest';
 import {
 	approvalReviewSignature,
 	buildCalibrationThreadScrollSignature,
+	calibrationFailureHeading,
+	calibrationFailureLede,
 	describeHighImpactApprovalGate,
 	encodeStatusTone,
 	normalizeReviewArtifacts,
 	resolveBenchDraftNote,
+	summarizeCalibrationFailureDetail,
 	summarizeVideoTransformPolicy,
 	type ComparisonRow
 } from './studio';
@@ -220,6 +223,55 @@ describe('buildCalibrationThreadScrollSignature', () => {
 		);
 
 		expect(updated).not.toBe(baseline);
+	});
+});
+
+describe('calibration failure copy', () => {
+	it('summarizes ab-av1 progress logs as stopped progress instead of raw stderr', () => {
+		expect(
+			summarizeCalibrationFailureDetail(
+				'[2026-04-22T14:48:43Z INFO ab_av1::command::sample_encode] encoding sample 1/8 crf 31',
+				'M4 Studio',
+				'stopped'
+			)
+		).toBe(
+			'Host: M4 Studio · Stopped while ab-av1 was encoding sample 1/8 at CRF 31. No specific error line was recorded.'
+		);
+	});
+
+	it('prefers actionable failure lines over progress chatter', () => {
+		expect(
+			summarizeCalibrationFailureDetail(
+				'encoding sample 1/8 crf 31\nPermission denied (publickey).',
+				'M4 Studio',
+				'failed'
+			)
+		).toBe('Host: M4 Studio · Permission denied (publickey).');
+	});
+
+	it('translates failed CRF search logs into the quality and size conflict', () => {
+		expect(
+			summarizeCalibrationFailureDetail(
+				[
+					'[2026-04-22T14:48:44Z INFO ab_av1::command::crf_search] crf 31 VMAF 97.48 (33%) (cache)',
+					'[2026-04-22T14:48:44Z INFO ab_av1::command::crf_search] crf 44 VMAF 90.55 (14%) (cache)',
+					'Error: Failed to find a suitable crf'
+				].join('\n'),
+				'M4 Studio',
+				'failed'
+			)
+		).toBe(
+			'Host: M4 Studio · No CRF satisfied both the quality target and size limit. Search tried CRF 31 at VMAF 97.48 / 33% and CRF 44 at VMAF 90.55 / 14%.'
+		);
+	});
+
+	it('uses direct stopped copy for stopped samples', () => {
+		expect(calibrationFailureHeading('sample', 'stopped')).toBe(
+			'Sample run stopped before review clips were ready'
+		);
+		expect(calibrationFailureLede('stopped')).toBe(
+			'The previous run ended before review clips were produced. If you stopped it intentionally, retry when ready; otherwise check the host log.'
+		);
 	});
 });
 

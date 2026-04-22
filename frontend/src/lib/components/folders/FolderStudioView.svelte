@@ -21,6 +21,8 @@
 	import FolderStudioControlDeck from '$lib/components/folders/FolderStudioControlDeck.svelte';
 	import FolderStudioHeader from '$lib/components/folders/FolderStudioHeader.svelte';
 	import {
+		calibrationFailureHeading as describeCalibrationFailureHeading,
+		calibrationFailureLede,
 		codecLabel,
 		compactCopy,
 		compareValues,
@@ -45,6 +47,7 @@
 		softWrapTokens,
 		summarizeAudioPlan,
 		summarizeAudioTrack,
+		summarizeCalibrationFailureDetail,
 		summarizeMetricPlan,
 		summarizeMetricPolicy,
 		summarizeSubtitlePlan,
@@ -196,19 +199,12 @@
 		return `${folder.prefix}:${identity}`;
 	});
 	const calibrationFailureDetail = $derived.by(() => {
-		const rawError = String(calibrationJob?.error ?? '').trim();
-		if (!rawError) {
-			return calibrationJob?.host?.label
-				? `Host: ${String(calibrationJob.host.label)}`
-				: 'Open the latest calibration job details to inspect the failure.';
-		}
-		const summaryLine =
-			rawError
-				.split('\n')
-				.map((line) => line.trim())
-				.find((line) => line.length > 0 && !line.startsWith('export ')) ?? rawError;
-		const hostLabel = String(calibrationJob?.host?.label ?? '').trim();
-		return hostLabel ? `Host: ${hostLabel} · ${summaryLine}` : summaryLine;
+		const hostLabel = String(calibrationJob?.host?.label ?? calibrationJob?.host?.key ?? '').trim();
+		return summarizeCalibrationFailureDetail(
+			calibrationJob?.error,
+			hostLabel,
+			String(status.calibration_status ?? '')
+		);
 	});
 	const calibrationFailureVisible = $derived.by(() =>
 		Boolean(
@@ -226,9 +222,7 @@
 				: 'Sample failed'
 	);
 	const calibrationFailureHeading = $derived.by(() =>
-		calibrationJob?.mode === 'full'
-			? 'Representative-file proof encode stopped before review clips were ready'
-			: 'Sample calibration stopped before a reviewable draft was ready'
+		describeCalibrationFailureHeading(calibrationJob?.mode, String(status.calibration_status ?? ''))
 	);
 	const calibrationFailureMeta = $derived.by(() => {
 		const action = String(calibrationJob?.action ?? '').trim();
@@ -1882,14 +1876,8 @@
 					: status.calibration_status === 'stopped'
 						? 'Calibration Stopped'
 						: 'Calibration Failed',
-			heading:
-				calibrationJob.mode === 'full'
-					? 'Representative-file proof encode stopped before review clips were ready'
-					: 'Sample calibration stopped before a reviewable draft was ready',
-			lede:
-				status.calibration_status === 'stopped'
-					? 'The last background run was stopped. Review the stop detail before retrying so the next click does not feel like a no-op.'
-					: 'The last background run failed. Review the failure detail before retrying so the next click does not feel like a no-op.',
+			heading: calibrationFailureHeading,
+			lede: calibrationFailureLede(String(status.calibration_status ?? '')),
 			detail: calibrationFailureDetail,
 			dismissLabel: 'Dismiss',
 			autoCloseMs: null,

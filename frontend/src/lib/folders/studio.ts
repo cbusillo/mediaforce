@@ -120,6 +120,93 @@ export function buildCalibrationThreadScrollSignature(
 	].join('\u001f');
 }
 
+export function calibrationFailureHeading(
+	mode: string | null | undefined,
+	status: string | null | undefined
+) {
+	const stopped = String(status ?? '').trim() === 'stopped';
+	if (String(mode ?? '').trim() === 'full') {
+		return stopped
+			? 'Representative-file proof stopped before review clips were ready'
+			: 'Representative-file proof failed before review clips were ready';
+	}
+	return stopped
+		? 'Sample run stopped before review clips were ready'
+		: 'Sample run failed before review clips were ready';
+}
+
+export function calibrationFailureLede(status: string | null | undefined) {
+	if (String(status ?? '').trim() === 'stopped') {
+		return 'The previous run ended before review clips were produced. If you stopped it intentionally, retry when ready; otherwise check the host log.';
+	}
+	return 'The previous run ended before review clips were produced. Check the detail below, then retry the sample.';
+}
+
+export function summarizeCalibrationFailureDetail(
+	error: string | null | undefined,
+	hostLabel: string | null | undefined,
+	status: string | null | undefined
+): string {
+	const host = String(hostLabel ?? '').trim();
+	const rawError = String(error ?? '').trim();
+	const detail = rawError
+		? summarizeCalibrationError(rawError, status)
+		: 'No failure detail was recorded for this run.';
+	return host ? `Host: ${host} · ${detail}` : detail;
+}
+
+function summarizeCalibrationError(rawError: string, status: string | null | undefined): string {
+	const lines = rawError
+		.split('\n')
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0 && !line.startsWith('export '));
+	const actionableLine = lines.find(isActionableFailureLine);
+	if (actionableLine) {
+		const crfSearchSummary = summarizeFailedCrfSearch(lines);
+		return crfSearchSummary ?? actionableLine;
+	}
+	const progressLine = lines.find(parseAbAv1SampleProgress);
+	if (progressLine) {
+		const progress = parseAbAv1SampleProgress(progressLine);
+		const stopped = String(status ?? '').trim() === 'stopped';
+		const prefix = stopped
+			? 'Stopped while ab-av1 was encoding'
+			: 'ab-av1 was still encoding when the run ended';
+		return `${prefix} ${progress}. No specific error line was recorded.`;
+	}
+	return lines[0] ?? rawError;
+}
+
+function summarizeFailedCrfSearch(lines: string[]): string | null {
+	if (!lines.some((line) => /failed to find a suitable crf/i.test(line))) return null;
+	const probes = lines.map(parseCrfSearchProbe).filter((probe): probe is string => Boolean(probe));
+	const uniqueProbes = Array.from(new Set(probes));
+	if (uniqueProbes.length === 0) {
+		return 'No CRF satisfied both the quality target and size limit. Try relaxing the target, raising the size cap, or adjusting the sample note.';
+	}
+	return `No CRF satisfied both the quality target and size limit. Search tried ${uniqueProbes.join(
+		' and '
+	)}.`;
+}
+
+function parseCrfSearchProbe(line: string): string | null {
+	const match = line.match(/crf_search\]\s+crf\s+([\d.]+)\s+([A-Z0-9]+)\s+([\d.]+)\s+\((\d+)%\)/i);
+	if (!match) return null;
+	return `CRF ${match[1]} at ${match[2].toUpperCase()} ${match[3]} / ${match[4]}%`;
+}
+
+function isActionableFailureLine(line: string): boolean {
+	return /\b(error|failed|failure|denied|timed out|timeout|no such|not found|unable|invalid|panic|killed|exited|permission)\b/i.test(
+		line
+	);
+}
+
+function parseAbAv1SampleProgress(line: string): string | null {
+	const match = line.match(/encoding sample\s+(\d+)\/(\d+)\s+crf\s+([\d.]+)/i);
+	if (!match) return null;
+	return `sample ${match[1]}/${match[2]} at CRF ${match[3]}`;
+}
+
 export type FolderReviewClip = {
 	path?: string;
 	timestamp_seconds?: number;
