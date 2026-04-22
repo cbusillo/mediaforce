@@ -8522,7 +8522,16 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         command_payload = run_remote_command_mock.call_args.args[1]
         self.assertEqual(host_payload["host"], "encode-a")
         self.assertEqual(command_payload[:2], ["sh", "-lc"])
+        self.assertIn("self_pgid=$(ps -o pgid= -p \"$self_pid\"", command_payload[2])
+        self.assertIn("kill_tree() ( signal=$1; target=$2;", command_payload[2])
         self.assertIn("mediaforce_encoded_by=mediaforce", command_payload[2])
+        self.assertIn("ab-av1 .*--temp-dir .*\\.mediaforce-ab-av1-", command_payload[2])
+        self.assertIn("$0 !~ /(^|[[:space:]/])awk([[:space:]]|$)/", command_payload[2])
+        self.assertIn("[ \"$pgid\" != \"$self_pgid\" ]", command_payload[2])
+        self.assertIn("kill -TERM -\"$pgid\"", command_payload[2])
+        self.assertIn("kill_tree TERM \"$pid\"", command_payload[2])
+        self.assertIn("kill -KILL -\"$pgid\"", command_payload[2])
+        self.assertIn("kill_tree KILL \"$pid\"", command_payload[2])
 
     def test_create_app_registers_folder_status_route_before_catch_all_folder_route(self) -> None:
         with patch("mediaforce.web.app.load_config", return_value=self.config), patch(

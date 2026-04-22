@@ -2711,12 +2711,20 @@ def _reset_background_worker_leadership_for_tests() -> None:
 
 def _sweep_orphaned_encode_processes(config: MediaforceConfig) -> None:
     sweep_script = (
-        "pids=$(pgrep -f 'mediaforce_encoded_by=mediaforce' || true); "
+        "self_pid=$$; "
+        "self_pgid=$(ps -o pgid= -p \"$self_pid\" 2>/dev/null | tr -d ' '); "
+        "kill_tree() ( signal=$1; target=$2; children=$(ps -axo pid=,ppid= | awk -v target=\"$target\" '$2 == target { print $1 }'); for child in $children; do kill_tree \"$signal\" \"$child\"; done; kill -\"$signal\" \"$target\" 2>/dev/null || true; ); "
+        "patterns='mediaforce_encoded_by=mediaforce|ab-av1 .*--temp-dir .*\\.mediaforce-ab-av1-'; "
+        "pids=$(ps -axo pid=,command= | awk -v self=\"$self_pid\" -v pat=\"$patterns\" '$1 != self && $0 !~ /(^|[[:space:]/])awk([[:space:]]|$)/ { pid=$1; $1=\"\"; if ($0 ~ pat) print pid }' || true); "
         "if [ -n \"$pids\" ]; then "
-        "kill $pids 2>/dev/null || true; "
+        "for pid in $pids; do pgid=$(ps -o pgid= -p \"$pid\" 2>/dev/null | tr -d ' '); "
+        "if [ -n \"$pgid\" ] && [ \"$pgid\" != \"$self_pgid\" ]; then kill -TERM -\"$pgid\" 2>/dev/null || true; else kill_tree TERM \"$pid\"; fi; done; "
         "sleep 2; "
-        "pids=$(pgrep -f 'mediaforce_encoded_by=mediaforce' || true); "
-        "if [ -n \"$pids\" ]; then kill -9 $pids 2>/dev/null || true; fi; "
+        "pids=$(ps -axo pid=,command= | awk -v self=\"$self_pid\" -v pat=\"$patterns\" '$1 != self && $0 !~ /(^|[[:space:]/])awk([[:space:]]|$)/ { pid=$1; $1=\"\"; if ($0 ~ pat) print pid }' || true); "
+        "if [ -n \"$pids\" ]; then "
+        "for pid in $pids; do pgid=$(ps -o pgid= -p \"$pid\" 2>/dev/null | tr -d ' '); "
+        "if [ -n \"$pgid\" ] && [ \"$pgid\" != \"$self_pgid\" ]; then kill -KILL -\"$pgid\" 2>/dev/null || true; else kill_tree KILL \"$pid\"; fi; done; "
+        "fi; "
         "fi"
     )
     for host in config.remote_hosts:
