@@ -1877,7 +1877,7 @@
 						? 'Calibration Stopped'
 						: 'Calibration Failed',
 			heading: calibrationFailureHeading,
-			lede: calibrationFailureLede(String(status.calibration_status ?? '')),
+			lede: calibrationFailureLede(calibrationJob.mode, String(status.calibration_status ?? '')),
 			detail: calibrationFailureDetail,
 			dismissLabel: 'Dismiss',
 			autoCloseMs: null,

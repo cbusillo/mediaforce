@@ -253,8 +253,8 @@ describe('calibration failure copy', () => {
 		expect(
 			summarizeCalibrationFailureDetail(
 				[
-					'[2026-04-22T14:48:44Z INFO ab_av1::command::crf_search] crf 31 VMAF 97.48 (33%) (cache)',
-					'[2026-04-22T14:48:44Z INFO ab_av1::command::crf_search] crf 44 VMAF 90.55 (14%) (cache)',
+					'[2026-04-22T14:48:44Z INFO  ab_av1::command::sample_encode] crf 31 VMAF 97.48 predicted video stream size 1.01 GiB (33%) taking 17 minutes (cache)',
+					'[2026-04-22T14:48:44Z INFO  ab_av1::command::sample_encode] crf 44 VMAF 90.55 predicted video stream size 444.92 MiB (14%) taking 20 minutes (cache)',
 					'Error: Failed to find a suitable crf'
 				].join('\n'),
 				'M4 Studio',
@@ -269,8 +269,17 @@ describe('calibration failure copy', () => {
 		expect(calibrationFailureHeading('sample', 'stopped')).toBe(
 			'Sample run stopped before review clips were ready'
 		);
-		expect(calibrationFailureLede('stopped')).toBe(
+		expect(calibrationFailureLede('sample', 'stopped')).toBe(
 			'The previous run ended before review clips were produced. If you stopped it intentionally, retry when ready; otherwise check the host log.'
+		);
+	});
+
+	it('keeps proof encode failures out of sample retry copy', () => {
+		expect(calibrationFailureHeading('full', 'failed')).toBe(
+			'Representative-file proof failed before review clips were ready'
+		);
+		expect(calibrationFailureLede('full', 'failed')).toBe(
+			'The previous proof encode ended before review clips were produced. Check the detail below, then rerun the proof.'
 		);
 	});
 });

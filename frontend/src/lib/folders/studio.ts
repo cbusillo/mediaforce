@@ -135,9 +135,19 @@ export function calibrationFailureHeading(
 		: 'Sample run failed before review clips were ready';
 }
 
-export function calibrationFailureLede(status: string | null | undefined) {
+export function calibrationFailureLede(
+	mode: string | null | undefined,
+	status: string | null | undefined
+) {
+	const fullMode = String(mode ?? '').trim() === 'full';
 	if (String(status ?? '').trim() === 'stopped') {
+		if (fullMode) {
+			return 'The previous proof encode ended before review clips were produced. If you stopped it intentionally, rerun the proof when ready; otherwise check the host log.';
+		}
 		return 'The previous run ended before review clips were produced. If you stopped it intentionally, retry when ready; otherwise check the host log.';
+	}
+	if (fullMode) {
+		return 'The previous proof encode ended before review clips were produced. Check the detail below, then rerun the proof.';
 	}
 	return 'The previous run ended before review clips were produced. Check the detail below, then retry the sample.';
 }
@@ -190,7 +200,9 @@ function summarizeFailedCrfSearch(lines: string[]): string | null {
 }
 
 function parseCrfSearchProbe(line: string): string | null {
-	const match = line.match(/crf_search\]\s+crf\s+([\d.]+)\s+([A-Z0-9]+)\s+([\d.]+)\s+\((\d+)%\)/i);
+	const match = line.match(
+		/\bcrf\s+([\d.]+)\s+([A-Z0-9]+)\s+([\d.]+)(?:\s+predicted\b.*?)?\s+\((\d+(?:\.\d+)?)%\)/i
+	);
 	if (!match) return null;
 	return `CRF ${match[1]} at ${match[2].toUpperCase()} ${match[3]} / ${match[4]}%`;
 }
