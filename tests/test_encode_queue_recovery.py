@@ -3459,15 +3459,108 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(web_app._default_web_host(), "0.0.0.0")
             self.assertTrue(web_app._default_web_reload_enabled())
 
+    def test_web_startup_cli_args_override_environment_defaults(self) -> None:
+        with patch.dict(
+                os.environ,
+                {
+                    "MEDIAFORCE_WEB_HOST": "0.0.0.0",
+                    "MEDIAFORCE_WEB_PORT": "8777",
+                    "MEDIAFORCE_WEB_RELOAD": "true",
+                },
+                clear=True,
+        ):
+            args = web_app._parse_web_startup_args([
+                "--host",
+                "127.0.0.9",
+                "--port",
+                "5555",
+                "--no-reload",
+            ])
+            settings = web_app._web_startup_settings(args)
+
+        self.assertEqual(settings.host, "127.0.0.9")
+        self.assertEqual(settings.port, 5555)
+        self.assertFalse(settings.reload_enabled)
+
+    def test_web_startup_shell_env_overrides_project_env_file(self) -> None:
+        env_path = self.root / ".env"
+        env_path.write_text(
+            "MEDIAFORCE_WEB_HOST=0.0.0.0\n"
+            "MEDIAFORCE_WEB_PORT=8777\n"
+            "MEDIAFORCE_WEB_RELOAD=true\n"
+        )
+        with patch.object(web_app, "DEFAULT_CONFIG_PATH", self.root / "config" / "defaults.toml"):
+            with patch.dict(os.environ, {"MEDIAFORCE_WEB_PORT": "9999"}, clear=True):
+                web_app._load_project_env_file()
+                args = web_app._parse_web_startup_args([])
+                settings = web_app._web_startup_settings(args)
+
+        self.assertEqual(settings.host, "0.0.0.0")
+        self.assertEqual(settings.port, 9999)
+        self.assertTrue(settings.reload_enabled)
+
+    def test_main_uses_cli_values_for_uvicorn(self) -> None:
+        config = self.config
+        with patch.dict(
+                os.environ,
+                {
+                    "MEDIAFORCE_WEB_HOST": "0.0.0.0",
+                    "MEDIAFORCE_WEB_PORT": "8777",
+                    "MEDIAFORCE_WEB_RELOAD": "true",
+                },
+                clear=True,
+        ), patch("mediaforce.web.app.load_config", return_value=config), patch(
+                "mediaforce.web.app.create_app", return_value=object()
+        ), patch("mediaforce.web.app.uvicorn.run") as uvicorn_run_mock:
+            web_app.main(["--host", "127.0.0.9", "--port", "5555", "--no-reload"])
+
+        uvicorn_run_mock.assert_called_once()
+        self.assertEqual(uvicorn_run_mock.call_args.kwargs["host"], "127.0.0.9")
+        self.assertEqual(uvicorn_run_mock.call_args.kwargs["port"], 5555)
+        self.assertNotIn("reload", uvicorn_run_mock.call_args.kwargs)
+
+    def test_main_uses_cli_config_path_for_reload_app(self) -> None:
+        config = self.config
+        config_path = self.root / "custom.toml"
+        with patch.dict(os.environ, {"MEDIAFORCE_WEB_RELOAD": "false"}, clear=True), patch(
+                "mediaforce.web.app.load_config", return_value=config
+        ) as load_config_mock, patch("mediaforce.web.app.uvicorn.run") as uvicorn_run_mock:
+            web_app.main(["--config", str(config_path), "--reload"])
+            self.assertEqual(os.environ["MEDIAFORCE_CONFIG_PATH"], str(config.paths.config_path))
+
+        load_config_mock.assert_called_once_with(config_path)
+        uvicorn_run_mock.assert_called_once()
+        self.assertTrue(uvicorn_run_mock.call_args.kwargs["reload"])
+
     def test_main_uses_default_port_when_mediaforce_web_port_is_blank(self) -> None:
         config = self.config
         with patch.dict(os.environ, {"MEDIAFORCE_WEB_PORT": "", "MEDIAFORCE_WEB_RELOAD": "false"}, clear=True), patch(
                 "mediaforce.web.app.load_config", return_value=config
+        ), patch(
+                "mediaforce.web.app.create_app", return_value=object()
         ), patch("mediaforce.web.app.uvicorn.run") as uvicorn_run_mock:
-            web_app.main()
+            web_app.main([])
 
         uvicorn_run_mock.assert_called_once()
         self.assertEqual(uvicorn_run_mock.call_args.kwargs["port"], 8777)
+
+    def test_web_server_lock_rejects_second_backend_instance(self) -> None:
+        settings = web_app.WebStartupSettings(
+            config_path=self.config.paths.config_path,
+            host="127.0.0.1",
+            port=8777,
+            reload_enabled=False,
+        )
+        lock_path = web_app._web_server_lock_path(self.config)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps({"pid": 123, "host": "127.0.0.1", "port": 8777}))
+
+        with patch("mediaforce.web.app.fcntl.flock", side_effect=BlockingIOError):
+            with self.assertRaises(SystemExit) as raised:
+                with web_app._exclusive_web_server_lock(self.config, settings):
+                    pass
+
+        self.assertIn("pid 123 on 127.0.0.1:8777", str(raised.exception))
 
     @staticmethod
     def test_create_reloadable_app_uses_default_config_when_env_path_is_blank() -> None:

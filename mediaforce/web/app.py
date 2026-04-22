@@ -1,3 +1,5 @@
+import argparse
+import fcntl
 import json
 import logging
 import os
@@ -6,9 +8,10 @@ import shutil
 import subprocess
 import threading
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -1203,27 +1206,144 @@ def _download_name_slug(value: str) -> str:
     return slug or "review-bundle"
 
 
-def main() -> None:
+@dataclass(frozen=True)
+class WebStartupSettings:
+    config_path: Path
+    host: str
+    port: int
+    reload_enabled: bool
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = _parse_web_startup_args(argv)
     _load_project_env_file()
-    config = load_config(DEFAULT_CONFIG_PATH)
-    host = _default_web_host()
-    configured_port = _preferred_env("MEDIAFORCE_WEB_PORT")
-    port_value = configured_port.strip() if configured_port is not None else ""
-    port = int(port_value) if port_value else 8777
-    reload_enabled = _default_web_reload_enabled()
-    if reload_enabled:
-        config_path = str(config.paths.config_path)
-        os.environ.setdefault("MEDIAFORCE_CONFIG_PATH", config_path)
-        uvicorn.run(
-            "mediaforce.web.app:create_reloadable_app",
-            host=str(host),
-            port=port,
-            reload=True,
-            factory=True,
-            log_level="info",
-        )
+    settings = _web_startup_settings(args)
+    config = load_config(settings.config_path)
+    with _exclusive_web_server_lock(config, settings):
+        if settings.reload_enabled:
+            os.environ["MEDIAFORCE_CONFIG_PATH"] = str(config.paths.config_path)
+            uvicorn.run(
+                "mediaforce.web.app:create_reloadable_app",
+                host=settings.host,
+                port=settings.port,
+                reload=True,
+                factory=True,
+                log_level="info",
+            )
+            return
+        uvicorn.run(create_app(config.paths.config_path), host=settings.host, port=settings.port, log_level="info")
+
+
+def _parse_web_startup_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="mediaforce-web", description="Run the Mediaforce web UI.")
+    parser.add_argument("--config", help="Path to the TOML config file")
+    parser.add_argument("--host", help="Bind host for the FastAPI app")
+    parser.add_argument("--port", type=int, help="Bind port for the FastAPI app")
+    reload_group = parser.add_mutually_exclusive_group()
+    reload_group.add_argument("--reload", dest="reload", action="store_true", help="Enable uvicorn reload mode")
+    reload_group.add_argument("--no-reload", dest="reload", action="store_false", help="Disable uvicorn reload mode")
+    parser.set_defaults(reload=None)
+    return parser.parse_args(argv)
+
+
+def _web_startup_settings(args: argparse.Namespace) -> WebStartupSettings:
+    config_value = _startup_arg_value(args.config) or _startup_env_value("MEDIAFORCE_CONFIG_PATH")
+    config_path = Path(config_value or str(DEFAULT_CONFIG_PATH)).expanduser()
+    host = _startup_arg_value(args.host) or _default_web_host()
+    port = args.port if args.port is not None else _default_web_port()
+    reload_enabled = bool(args.reload) if args.reload is not None else _default_web_reload_enabled()
+    return WebStartupSettings(
+        config_path=config_path,
+        host=host,
+        port=port,
+        reload_enabled=reload_enabled,
+    )
+
+
+def _startup_arg_value(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _startup_env_value(name: str) -> str | None:
+    value = _preferred_env(name)
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _default_web_port() -> int:
+    port_value = _startup_env_value("MEDIAFORCE_WEB_PORT")
+    if port_value is None:
+        return 8777
+    return int(port_value)
+
+
+@contextmanager
+def _exclusive_web_server_lock(config: MediaforceConfig, settings: WebStartupSettings) -> Iterator[None]:
+    lock_path = _web_server_lock_path(config)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            owner = _web_server_lock_owner(lock_path)
+            owner_detail = f" ({owner})" if owner else ""
+            raise SystemExit(f"mediaforce-web is already running{owner_detail}") from exc
+
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.write(json.dumps(_web_server_lock_payload(config, settings), indent=2, sort_keys=True))
+        lock_file.write("\n")
+        lock_file.flush()
+        os.fsync(lock_file.fileno())
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            _remove_web_server_lock(lock_path)
+
+
+def _web_server_lock_path(config: MediaforceConfig) -> Path:
+    return config.paths.web_state_dir.parent / "mediaforce-web.lock"
+
+
+def _web_server_lock_payload(config: MediaforceConfig, settings: WebStartupSettings) -> dict[str, object]:
+    return {
+        "pid": os.getpid(),
+        "host": settings.host,
+        "port": settings.port,
+        "reload": settings.reload_enabled,
+        "config_path": str(config.paths.config_path),
+        "started_at": _now_iso(),
+    }
+
+
+def _web_server_lock_owner(lock_path: Path) -> str | None:
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    pid = payload.get("pid")
+    host = payload.get("host")
+    port = payload.get("port")
+    if pid and host and port:
+        return f"pid {pid} on {host}:{port}"
+    if pid:
+        return f"pid {pid}"
+    return None
+
+
+def _remove_web_server_lock(lock_path: Path) -> None:
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
         return
-    uvicorn.run(create_app(config.paths.config_path), host=str(host), port=port, log_level="info")
 
 
 def create_reloadable_app() -> FastAPI:
@@ -1259,14 +1379,14 @@ def _parse_project_env_value(value: str) -> str:
 
 
 def _default_web_reload_enabled() -> bool:
-    explicit_value = _preferred_env("MEDIAFORCE_WEB_RELOAD")
+    explicit_value = _startup_env_value("MEDIAFORCE_WEB_RELOAD")
     if explicit_value is not None:
-        return explicit_value.strip().lower() in {"1", "true", "yes", "on"}
+        return explicit_value.lower() in {"1", "true", "yes", "on"}
     return False
 
 
 def _default_web_host() -> str:
-    explicit_host = _preferred_env("MEDIAFORCE_WEB_HOST")
+    explicit_host = _startup_env_value("MEDIAFORCE_WEB_HOST")
     if explicit_host is not None:
         return explicit_host
     return "127.0.0.1"

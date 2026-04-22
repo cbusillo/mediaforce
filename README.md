@@ -307,19 +307,18 @@ into `config/folder-defaults.toml` intentionally.
 Use the web Settings page for local libraries, the transcode folder, and remote
 host definitions so those environment details stay off the checked-in repo.
 
-`mediaforce-web` now reads optional startup defaults from
-`.env` before falling back to the process environment.
-Use that local `.env` file for machine-specific web launcher settings like bind
-address, port, and reload mode. A checked-in template lives at
-`.env.example`. Shell environment variables still win
-over the file, so you can override any setting for a single launch. Prefer the
-`MEDIAFORCE_WEB_*` variable names.
+`mediaforce-web` reads optional startup defaults from the repo-local `.env`.
+Use that file for machine-specific web launcher settings like bind address,
+port, and reload mode. A checked-in template lives at `.env.example`. Startup
+precedence is explicit CLI arguments, then shell environment variables, then
+`.env`, then built-in defaults. Prefer the `MEDIAFORCE_WEB_*` variable names
+for local defaults.
 
 The frontend dev server now reads the same repo-local `.env` file. The clearest
 local setup is:
 
 - `MEDIAFORCE_WEB_PORT=8777` for the FastAPI app
-- `MEDIAFORCE_FRONTEND_DEV_PORT=4173` for `cd frontend && npm run dev`
+- `MEDIAFORCE_FRONTEND_DEV_PORT=4173` for `scripts/mediaforce-dev.sh start`
 - `MEDIAFORCE_FRONTEND_API_ORIGIN=http://127.0.0.1:8777` so the frontend dev
   server proxies API requests to the backend explicitly
 
@@ -333,11 +332,18 @@ The web UI is now split cleanly:
 - FastAPI serves the backend API and review media.
 - A SvelteKit frontend lives under `frontend/`.
 
-For local backend work, use
-`scripts/mediaforce-web-dev.sh` with
-`start|stop|restart|status|smoke`. It uses the repo-local `.env`, writes a pid
-file and log under `~/Library/Application Support/mediaforce/`, and the
-`smoke` action checks `/`, `/api/dashboard`, `/api/settings`, and `/api/hosts`.
+For local web work, use `scripts/mediaforce-dev.sh` with
+`start|stop|restart|status|smoke`. It manages the backend and frontend together,
+uses the repo-local `.env`, writes pid files and logs under
+`~/Library/Application Support/mediaforce/`, starts Vite with `--strictPort`,
+and keeps the command lines aligned with the actual configured ports. Pass
+`backend` or `frontend` as a second argument when you intentionally want only
+one side, for example `scripts/mediaforce-dev.sh restart backend`.
+
+The backend also holds a Python-level singleton lock while running, so a second
+`mediaforce-web` process exits instead of binding another port and confusing the
+local session. `scripts/mediaforce-web-dev.sh` remains as a compatibility alias
+for backend-only actions.
 
 To enforce the local acceptance gate before each commit, point Git at the
 checked-in hooks once per clone:
@@ -350,11 +356,10 @@ That pre-commit hook runs `scripts/pre-commit-check.sh`, which executes the
 full backend pytest suite, CLI smoke, frontend type checks, frontend lint,
 frontend unit tests, and frontend build.
 
-For frontend development, run the Svelte app from
-`frontend/` with `npm run dev`. The Vite dev server
-proxies `/api/*` and `/review-media/*` back to the FastAPI backend. For the
-single-server local UI, build the frontend with `npm run build`; FastAPI will
-then serve the built SPA from `frontend/build/`.
+For frontend development, let `scripts/mediaforce-dev.sh start` run the Svelte
+app. The Vite dev server proxies `/api/*` and `/review-media/*` back to the
+FastAPI backend. For the single-server local UI, build the frontend with
+`npm run build`; FastAPI will then serve the built SPA from `frontend/build/`.
 
 When packaging Mediaforce with `uv build`, the wheel build now runs
 `npm ci` plus `npm run build` automatically so the packaged app always embeds a
