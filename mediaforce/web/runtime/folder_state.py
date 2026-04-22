@@ -271,6 +271,7 @@ def pending_proposal_public_view(deps: FolderStateDeps, payload: dict[str, Any] 
         "preview_policy": deps.tuning_policy_focus(object_dict(payload.get("preview_policy"))),
         "current_policy": deps.tuning_policy_focus(object_dict(payload.get("current_policy"))),
         "host": object_dict(payload.get("host")),
+        "latest_failed_sample_job": object_dict(payload.get("latest_failed_sample_job")) or None,
         "self_check": {
             "status": self_check.get("status"),
             "summary": self_check.get("summary"),

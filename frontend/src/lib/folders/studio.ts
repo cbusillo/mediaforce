@@ -370,6 +370,7 @@ export type PendingSampleProposal = {
 	preview_policy?: FolderPolicy;
 	current_policy?: FolderPolicy;
 	host?: { key?: string; label?: string };
+	latest_failed_sample_job?: Record<string, unknown> | null;
 	self_check?: ProposalSelfCheck;
 	operator_signal?: string | null;
 	evidence_checked?: string[];
@@ -391,6 +392,7 @@ export type ProposalTrace = {
 		metric_support?: Record<string, unknown> | null;
 		requested_experiment?: FolderOperatorRequest | null;
 		multimodal_review_pack?: FolderMultimodalReviewPack | null;
+		latest_failed_sample_job?: Record<string, unknown> | null;
 	} | null;
 };
 export type TuningSessionSummary = {

@@ -52,6 +52,7 @@ def build_seed_prompt(
         "Use softened only when the operator note is exploratory, ambiguous, self-contradictory, or cannot be expressed with the available policy keys. "
         "When operator_repeat_signal shows the same explicit experiment was asked for again after earlier softening, treat that as deliberate confirmation and keep the risky draft unless the request cannot be expressed with the available policy keys. "
         "If the request looks unrealistic, still try to draft the closest faithful experiment you can and mark it honored_with_risk instead of fighting the request. "
+        "When latest_failed_sample_job is present, treat it as the most recent failed or stopped sample attempt; use its error, policy, and result fields to avoid repeating the same failure. "
         "If the operator asks for a smaller encode, do not silently move to a higher quality target or otherwise preserve the old behavior behind reassuring wording. "
         "When the available policy keys include video.black_bar_handling, consider setting it to smart for letterboxed, matted, widescreen, or black-bar-heavy sources when the operator note, folder class, or sample metadata makes that likely; prefer smart detection over manual crop unless the operator supplied an exact crop. "
         "Treat video.max_height as an explicit downsample/cap-height request knob. Do not infer 1080p or 720p scaling from a size budget alone; use max_height only when the operator request or requested_experiment clearly asks for a scale target. "
@@ -112,6 +113,7 @@ def build_tune_prompt(
         "When the operator explicitly wants heavy compression with very little perceptible loss, high-80s VMAF can still be a legitimate AV1 experiment on clean or forgiving material, but treat that as class-dependent and risk-aware rather than a universal default. "
         "When requested_experiment or retrieved_memory shows the operator repeated the same explicit risky request, treat that as deliberate confirmation and keep the risky draft unless the request cannot be expressed with the available policy keys. "
         "If the request looks unrealistic, still draft the closest faithful experiment you can, mark it honored_with_risk, and explain the risk plainly instead of fighting the request. "
+        "When latest_failed_sample_job is present, treat it as the most recent failed or stopped sample attempt; use its error, policy, and result fields to diagnose what to change instead of repeating that run. "
         "Return JSON only with no markdown fences or extra commentary. "
         "Return valid JSON only with this exact shape: "
         f'{{"request_response":"short conversational reply","request_disposition":"honored|honored_with_risk|softened|rejected|unclear","summary":"short sentence","diagnosis":"short diagnosis","confidence":"high|medium|low","evidence_checked":["..."],"suggested_follow_up":"optional short suggestion","feasibility_note":"optional short feasibility note","policy":{json.dumps(policy_shape, sort_keys=True)}}}. '

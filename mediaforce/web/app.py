@@ -1867,6 +1867,7 @@ def _proposal_context_snapshot(
         requested_experiment: dict[str, Any] | None = None,
         multimodal_review_pack: dict[str, Any] | None = None,
         review_artifact_critique: dict[str, Any] | None = None,
+        latest_failed_sample_job: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return proposal_context_snapshot(
         _folder_tuning_runtime_deps(),
@@ -1881,6 +1882,7 @@ def _proposal_context_snapshot(
         requested_experiment=requested_experiment,
         multimodal_review_pack=multimodal_review_pack,
         review_artifact_critique=review_artifact_critique,
+        latest_failed_sample_job=latest_failed_sample_job,
     )
 
 

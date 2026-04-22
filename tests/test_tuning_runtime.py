@@ -19,6 +19,7 @@ from mediaforce.advisor import (
     REVIEW_ARTIFACT_CRITIQUE_PROMPT_VERSION,
     SEED_PROMPT_VERSION,
     SeedPolicyResponse,
+    TuningPolicyResponse,
     _build_prompt,
     _build_review_artifact_critique_prompt,
     _build_tune_prompt,
@@ -3475,6 +3476,142 @@ class TuningRuntimeTests(unittest.TestCase):
             )
 
         self.assertEqual(captured_current_policy, [{"video": {"encoder": "libsvtav1"}}])
+
+    def test_folder_ai_tune_preview_exposes_latest_failed_sample_job_to_bench(self) -> None:
+        captured_payloads: list[dict[str, object]] = []
+        saved_proposals: list[dict[str, object]] = []
+        failed_job = {
+            "job_id": "failed-sample-1",
+            "status": "failed",
+            "lane": "sample",
+            "mode": "sample",
+            "action": "ai_tune",
+            "host": {"key": "host-1", "label": "M4 Studio"},
+            "notes": "Target 14% while preserving quality.",
+            "policy": {"video": {"target_vmaf": 97.0, "max_encoded_percent": 14}},
+            "sample_item": {
+                "library_item_id": 7,
+                "rel_path": "tv/show/episode.mkv",
+                "source_path": str(self.root / "source" / "tv" / "show" / "episode.mkv"),
+                "source_size_bytes": 3_000_000_000,
+                "video_codec": "h264",
+                "duration_seconds": 2400.0,
+                "audio_summary": [{"codec_name": "eac3", "channels": 6}],
+                "subtitle_summary": [],
+            },
+            "result": None,
+            "error": "Error: Failed to find a suitable crf",
+            "created_at": "2026-04-22T14:00:00+00:00",
+            "started_at": "2026-04-22T14:00:05+00:00",
+            "finished_at": "2026-04-22T14:03:00+00:00",
+            "updated_at": "2026-04-22T14:03:00+00:00",
+        }
+        sample_item = {
+            "library_item_id": 7,
+            "rel_path": "tv/show/episode.mkv",
+            "source_path": str(self.root / "source" / "tv" / "show" / "episode.mkv"),
+            "source_size_bytes": 3_000_000_000,
+            "video_codec": "h264",
+            "duration_seconds": 2400.0,
+            "audio_summary": [{"codec_name": "eac3", "channels": 6}],
+            "subtitle_summary": [],
+            "resolved_policy": {"video": {"target_vmaf": 95.0, "max_encoded_percent": 30}},
+        }
+        host = HostStatus(
+            key="host-1",
+            label="M4 Studio",
+            mode="ssh",
+            priority=10,
+            capabilities=["sample_calibration"],
+            available=True,
+            message="Mounted and ready",
+            missing_paths=[],
+        )
+
+        def fake_request_note_tuning(*, project_root: Path, payload: dict[str, object]) -> TuningPolicyResponse:
+            self.assertEqual(project_root, self.config.paths.project_root)
+            captured_payloads.append(payload)
+            return TuningPolicyResponse(
+                ok=True,
+                summary="Relax the target enough to avoid the same CRF dead end.",
+                raw="{}",
+                prompt_version="test",
+                diagnosis="The last sample could not satisfy quality and size together.",
+                confidence="medium",
+                evidence_checked=["latest_failed_sample_job.error"],
+                suggested_follow_up=None,
+                request_disposition="honored",
+                request_response="I adjusted the next draft based on the failed CRF search.",
+                feasibility_note=None,
+                proposed_policy={"video": {"target_vmaf": 93.0, "max_encoded_percent": 18}},
+                toolbelt_used=["latest_failed_sample_job"],
+                self_check={"status": "pass", "summary": "ok", "issues": []},
+            )
+
+        deps = FolderAiTuneDeps(
+            resolve_sample_host=lambda _config, _host_key: host,
+            load_job_state=lambda *_args, **_kwargs: None,
+            load_retryable_sample_job_state=lambda *_args, **_kwargs: dict(failed_job),
+            sample_item=lambda *_args, **_kwargs: dict(sample_item),
+            operator_requested_experiment=lambda *_args, **_kwargs: None,
+            load_calibration_state=lambda *_args, **_kwargs: {
+                "policy": {"video": {"target_vmaf": 95.0, "max_encoded_percent": 30}},
+                "sample_result": {"quality_score": 95.1, "predicted_encode_percent": 25.0},
+            },
+            recent_tuning_sessions=lambda *_args, **_kwargs: [],
+            matching_request_history=lambda *_args, **_kwargs: None,
+            metric_support=lambda: {"vmaf": True},
+            maybe_seed_baseline_policy=lambda *_args, **_kwargs: None,
+            seed_advice_payload=lambda *_args, **_kwargs: None,
+            proposal_alignment_issue=lambda *_args, **_kwargs: None,
+            now_iso=lambda: "2026-04-22T14:10:00+00:00",
+            proposal_signal_copy=lambda *_args, **_kwargs: "The bench translated your note into a draft.",
+            proposal_context_snapshot=lambda **kwargs: dict(kwargs),
+            save_pending_proposal=lambda _config, _prefix, payload: saved_proposals.append(dict(payload)),
+            pending_proposal_public_view=lambda payload: payload,
+            build_tuning_runtime_toolbelt=lambda *_args, **_kwargs: {"recent_sample_result": {"quality_score": 95.1}},
+            review_pack_dir=lambda *_args, **_kwargs: self.root / "review-pack",
+            remove_path_if_exists=lambda *_args, **_kwargs: None,
+            build_multimodal_review_pack=lambda *_args, **_kwargs: None,
+            multimodal_review_pack_public_view=lambda *_args, **_kwargs: None,
+            tuning_advice_payload=lambda **kwargs: {"summary": kwargs["tuning"].summary},
+            load_pending_proposal=lambda *_args, **_kwargs: None,
+            apply_policy_fragment=lambda current, fragment: {**current, **fragment},
+            save_advice_state=lambda *_args, **_kwargs: None,
+            save_job_state=lambda *_args, **_kwargs: None,
+            clear_pending_proposal=lambda *_args, **_kwargs: None,
+            record_tuning_session=lambda *_args, **_kwargs: "session-1",
+        )
+
+        with patch("mediaforce.web.runtime.folder_ai_tuning.inspect_prefix", return_value={"item_count": 1}), patch(
+            "mediaforce.web.runtime.folder_ai_tuning.request_note_tuning",
+            side_effect=fake_request_note_tuning,
+        ):
+            result = folder_ai_tune_preview_action(
+                self.config,
+                deps,
+                "tv/show",
+                "Fix the failed sample without going much larger.",
+                "host-1",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(captured_payloads), 1)
+        latest_failed = captured_payloads[0]["latest_failed_sample_job"]
+        self.assertIsInstance(latest_failed, dict)
+        assert isinstance(latest_failed, dict)
+        self.assertEqual(latest_failed["job_id"], "failed-sample-1")
+        self.assertEqual(latest_failed["error"], "Error: Failed to find a suitable crf")
+        self.assertNotIn("source_path", latest_failed["sample_item"])
+        toolbelt = captured_payloads[0]["runtime_toolbelt"]
+        self.assertIsInstance(toolbelt, dict)
+        assert isinstance(toolbelt, dict)
+        self.assertEqual(toolbelt["latest_failed_sample_job"], latest_failed)
+        self.assertEqual(saved_proposals[0]["latest_failed_sample_job"], latest_failed)
+        self.assertEqual(
+            saved_proposals[0]["trace"]["context"]["latest_failed_sample_job"],
+            latest_failed,
+        )
 
     def test_operator_requested_experiment_leaves_exploratory_note_unconfirmed(self) -> None:
         request = _operator_requested_experiment("Can we try to target 85 VMAF instead? Will that help?")

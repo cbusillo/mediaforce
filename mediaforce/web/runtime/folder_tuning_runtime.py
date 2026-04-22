@@ -39,6 +39,7 @@ def proposal_context_snapshot(
         requested_experiment: dict[str, Any] | None = None,
         multimodal_review_pack: dict[str, Any] | None = None,
         review_artifact_critique: dict[str, Any] | None = None,
+        latest_failed_sample_job: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     snapshot: dict[str, Any] = {
         "goal": goal,
@@ -77,6 +78,8 @@ def proposal_context_snapshot(
         snapshot["multimodal_review_pack"] = multimodal_review_pack
     if review_artifact_critique:
         snapshot["review_artifact_critique"] = review_artifact_critique
+    if latest_failed_sample_job:
+        snapshot["latest_failed_sample_job"] = latest_failed_sample_job
     return snapshot
 
 

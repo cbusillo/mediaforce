@@ -65,6 +65,50 @@ def _job_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _latest_failed_sample_job_payload(job: dict[str, Any] | None) -> dict[str, Any] | None:
+    payload = object_dict(job)
+    if not payload:
+        return None
+    status = str(payload.get("status") or "").strip()
+    if status not in {"failed", "stopped"}:
+        return None
+    lane = str(payload.get("lane") or payload.get("mode") or "sample").strip()
+    if lane != "sample":
+        return None
+    sample_item = object_dict(payload.get("sample_item"))
+    compact_sample_item = {
+        key: sample_item.get(key)
+        for key in (
+            "library_item_id",
+            "rel_path",
+            "source_size_bytes",
+            "video_codec",
+            "video_bitrate",
+            "width",
+            "height",
+            "duration_seconds",
+            "audio_summary",
+            "subtitle_summary",
+        )
+        if key in sample_item
+    }
+    return {
+        "job_id": payload.get("job_id"),
+        "status": status,
+        "action": payload.get("action"),
+        "host": object_dict(payload.get("host")),
+        "notes": payload.get("notes"),
+        "policy": object_dict(payload.get("policy")),
+        "result": object_dict(payload.get("result")) or None,
+        "error": payload.get("error"),
+        "created_at": payload.get("created_at"),
+        "started_at": payload.get("started_at"),
+        "finished_at": payload.get("finished_at"),
+        "updated_at": payload.get("updated_at"),
+        "sample_item": compact_sample_item,
+    }
+
+
 def _proposal_can_queue(
         *,
         applied_fragment: dict[str, Any],
@@ -110,6 +154,9 @@ def folder_ai_tune_preview_action(
         existing_job = deps.load_job_state(connection, config, normalized_prefix)
         if existing_job and existing_job.get("status") in {"queued", "running", "pending_review"}:
             return {"ok": False, "message": "A calibration job is already active for this folder."}
+        latest_failed_sample_job = _latest_failed_sample_job_payload(
+            deps.load_retryable_sample_job_state(connection, config, normalized_prefix)
+        )
         summary = inspect_prefix(connection, config, normalized_prefix)
         sample_item = deps.sample_item(connection, config, normalized_prefix)
         if sample_item is None:
@@ -132,6 +179,7 @@ def folder_ai_tune_preview_action(
                 sample_item=sample_item,
                 summary=summary,
                 operator_request=operator_request,
+                latest_failed_sample_job=latest_failed_sample_job,
             )
         return _tuned_preview_action(
             config,
@@ -144,6 +192,7 @@ def folder_ai_tune_preview_action(
             summary=summary,
             operator_request=operator_request,
             calibration=calibration,
+            latest_failed_sample_job=latest_failed_sample_job,
         )
 
 
@@ -350,6 +399,7 @@ def _seed_preview_action(
         sample_item: dict[str, Any],
         summary: dict[str, Any],
         operator_request: dict[str, Any] | None,
+        latest_failed_sample_job: dict[str, Any] | None,
 ) -> dict[str, Any]:
     base_policy = object_dict(sample_item.get("resolved_policy"))
     metric_support = deps.metric_support()
@@ -404,6 +454,8 @@ def _seed_preview_action(
     )
     proposal_created_at = deps.now_iso()
     session_toolbelt: dict[str, Any] = {}
+    if latest_failed_sample_job is not None:
+        session_toolbelt["latest_failed_sample_job"] = latest_failed_sample_job
     operator_note_parse = object_dict(object_dict(operator_request).get("operator_note_parse"))
     if operator_note_parse:
         session_toolbelt["operator_note_parse"] = operator_note_parse
@@ -453,6 +505,7 @@ def _seed_preview_action(
         "advice_payload": advice_payload,
         "job_fields": seed_job_fields,
         "metric_support": metric_support,
+        "latest_failed_sample_job": latest_failed_sample_job,
         "trace": {
             "prompt_version": advice_details.get("prompt_version"),
             "raw_response": advice_details.get("raw"),
@@ -464,6 +517,7 @@ def _seed_preview_action(
                 summary=summary,
                 metric_support=metric_support,
                 requested_experiment=operator_request,
+                latest_failed_sample_job=latest_failed_sample_job,
             ),
         },
     }
@@ -487,6 +541,7 @@ def _tuned_preview_action(
         summary: dict[str, Any],
         operator_request: dict[str, Any] | None,
         calibration: dict[str, Any],
+        latest_failed_sample_job: dict[str, Any] | None,
 ) -> dict[str, Any]:
     if not trimmed_note:
         raise HTTPException(status_code=400, detail="Add a note so the tuner knows what to change before running another sample.")
@@ -509,6 +564,8 @@ def _tuned_preview_action(
         calibration=calibration,
         metric_support=metric_support,
     )
+    if latest_failed_sample_job is not None:
+        runtime_toolbelt["latest_failed_sample_job"] = latest_failed_sample_job
     operator_note_parse = object_dict(object_dict(operator_request).get("operator_note_parse"))
     if operator_note_parse:
         runtime_toolbelt["operator_note_parse"] = operator_note_parse
@@ -576,6 +633,7 @@ def _tuned_preview_action(
         "runtime_toolbelt": runtime_toolbelt,
         "retrieved_memory": learning_context,
         "operator_repeat_signal": repeat_signal,
+        "latest_failed_sample_job": latest_failed_sample_job,
     }
     if multimodal_review_pack is not None:
         tuning_payload["multimodal_review_pack"] = multimodal_review_pack
@@ -654,6 +712,7 @@ def _tuned_preview_action(
         "self_check": tuning.self_check,
         "evidence_checked": tuning.evidence_checked,
         "advice_payload": advice_payload,
+        "latest_failed_sample_job": latest_failed_sample_job,
         "trace": {
             "prompt_version": tuning.prompt_version,
             "raw_response": tuning.raw,
@@ -670,6 +729,7 @@ def _tuned_preview_action(
                 requested_experiment=operator_request,
                 multimodal_review_pack=public_review_pack,
                 review_artifact_critique=review_artifact_critique,
+                latest_failed_sample_job=latest_failed_sample_job,
             ),
         },
         "tuning_record": {
