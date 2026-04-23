@@ -1,0 +1,13 @@
+{
+  "defaultBranch": "main",
+  "importantWorkflows": ["CI"],
+  "qaLabels": [],
+  "deployLabels": [],
+  "healthUrls": [],
+  "relatedRepos": [],
+  "validatedThrough": [],
+  "cleanup": {
+    "deleteMergedLocalBranches": true,
+    "removeMergedCleanWorktrees": true
+  }
+}
