@@ -12,7 +12,7 @@ from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.tuning.tuning_memory import promote_learning_artifact, retrieve_learning_context
 
 
-QUEUEABLE_NO_CHANGE_DISPOSITIONS = {"honored", "honored_with_risk", "softened"}
+QUEUEABLE_NO_CHANGE_DISPOSITIONS = {"honored", "honored_with_risk"}
 
 
 @dataclass(slots=True)
@@ -139,6 +139,16 @@ def _proposal_ready_message(
     if can_queue:
         return f"The bench kept the current policy. Confirm when you are ready to rerun the {run_label} unchanged."
     return "The bench did not produce a queueable draft yet. Adjust the note and ask again."
+
+
+def _size_budget_measurement_fragment(operator_request: dict[str, Any] | None) -> dict[str, Any] | None:
+    request = object_dict(operator_request)
+    request_type = str(request.get("request_type") or "").strip().lower()
+    if request_type == "size_budget":
+        return object_dict(request.get("applied_policy"))
+    if request_type == "combined_experiment" and object_dict(request.get("size_budget_request")):
+        return object_dict(request.get("applied_policy"))
+    return None
 
 
 def folder_ai_tune_preview_action(
@@ -443,6 +453,40 @@ def _seed_preview_action(
         current_policy=base_policy,
         preview_policy=seeded_policy,
     )
+    measurement_fragment = _size_budget_measurement_fragment(operator_request)
+    if alignment_issue is not None and measurement_fragment is not None:
+        seeded_policy = deps.apply_policy_fragment(base_policy, measurement_fragment) if measurement_fragment else base_policy
+        seed_fragment = measurement_fragment
+        combined_fragment = measurement_fragment
+        alignment_issue = None
+        seed_job_fields["seed_source"] = "operator_request" if measurement_fragment else "default"
+        seed_job_fields["seed_summary"] = "Kept the first sample to the explicit request before measuring the size target."
+        seed_job_fields["seed_diagnosis"] = (
+            "A size budget is a planning target, so the first sample keeps only the operator's explicit "
+            "request before trading quality or hard caps for size."
+        )
+        seed_job_fields["seed_request_disposition"] = "honored"
+        seed_job_fields["seed_request_response"] = (
+            "I kept this first sample to the explicit request so we can compare the measured result to your size target."
+        )
+        seed_job_fields["seed_feasibility_note"] = object_dict(operator_request).get("feasibility")
+        seed_job_fields["seed_applied_policy"] = measurement_fragment or None
+        if advice_payload is None:
+            advice_payload = {}
+        advice_payload.update(
+            {
+                "ok": True,
+                "summary": seed_job_fields["seed_summary"],
+                "kind": "seed_baseline",
+                "operator_note": trimmed_note or None,
+                "request_disposition": "honored",
+                "request_response": seed_job_fields["seed_request_response"],
+                "feasibility_note": seed_job_fields["seed_feasibility_note"],
+                "diagnosis": seed_job_fields["seed_diagnosis"],
+                "applied_policy": measurement_fragment,
+            }
+        )
+        advice_details = object_dict(advice_payload)
     can_queue = _proposal_can_queue(
         applied_fragment=combined_fragment,
         preview_policy=seeded_policy,
@@ -566,6 +610,7 @@ def _tuned_preview_action(
         current_policy=current_policy,
         calibration=calibration,
         metric_support=metric_support,
+        operator_request=operator_request,
     )
     if latest_failed_sample_job is not None:
         runtime_toolbelt["latest_failed_sample_job"] = latest_failed_sample_job
@@ -655,11 +700,17 @@ def _tuned_preview_action(
         advice_payload["operator_request"] = operator_request
     if combined_fragment:
         advice_payload["applied_policy"] = combined_fragment
+    size_target_analysis = object_dict(runtime_toolbelt.get("size_target_analysis"))
+    allow_measured_size_quality_tradeoff = str(size_target_analysis.get("status") or "").strip() in {
+        "under_target",
+        "over_target",
+    }
     alignment_issue = deps.proposal_alignment_issue(
         operator_request=operator_request,
         request_disposition=tuning.request_disposition,
         current_policy=current_policy,
         preview_policy=tuned_policy,
+        allow_measured_size_quality_tradeoff=allow_measured_size_quality_tradeoff,
     )
     can_queue = _proposal_can_queue(
         applied_fragment=combined_fragment,

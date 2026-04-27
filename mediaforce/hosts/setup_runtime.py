@@ -8,7 +8,7 @@ import time
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.hosts.config import _host_supports_capability, _ssh_lookup_host, host_media_access_for_host, \
-    remote_shell_path_export_line
+    remote_shell_path_export_line, stream_host_has_remote_source_roots
 from mediaforce.hosts.types import HostSetupResult, HostStatus
 
 
@@ -80,9 +80,7 @@ def _finish_remote_host_prepare(
     repo_path = str(host.get("repo_path") or "").strip()
     staging_root = str(config.staging_root_for_host(host))
     archive_root = str(config.archive_root_for_host(host))
-    supports_remote_stream_quality = (
-        host_media_access_for_host(host) == "stream" and bool(config.source_root_map_for_host(host))
-    )
+    supports_remote_stream_quality = stream_host_has_remote_source_roots(host)
     installs_ab_av1 = _host_supports_capability(host, "sample_calibration") or (
         _host_supports_capability(host, "encode_queue")
         and (host_media_access_for_host(host) != "stream" or supports_remote_stream_quality)

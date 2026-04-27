@@ -64,11 +64,16 @@ class MediaforceConfig:
 
     def source_root_map_for_host(self, host: dict[str, Any] | None = None) -> dict[str, Path]:
         resolved = dict(self.source_root_map)
+        resolved.update(self.explicit_source_root_map_for_host(host))
+        return resolved
+
+    def explicit_source_root_map_for_host(self, host: dict[str, Any] | None = None) -> dict[str, Path]:
         if not isinstance(host, dict):
-            return resolved
+            return {}
         overrides = host.get("source_roots")
         if not isinstance(overrides, dict):
-            return resolved
+            return {}
+        resolved: dict[str, Path] = {}
         for key, value in overrides.items():
             key_text = str(key or "").strip()
             path_text = str(value or "").strip()

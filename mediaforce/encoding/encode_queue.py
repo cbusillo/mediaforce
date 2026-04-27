@@ -240,7 +240,12 @@ def clear_terminal_encode_jobs_for_prefix(connection: DBClient, prefix: str) -> 
         delete(encode_jobs)
         .where(encode_jobs.c.prefix == prefix)
         .where(or_(encode_jobs.c.job_kind != "shard", encode_jobs.c.status != "completed"))
-        .where(encode_jobs.c.status.in_(RECENT_ENCODE_JOB_STATUSES))
+        .where(
+            or_(
+                encode_jobs.c.status.in_(RECENT_ENCODE_JOB_STATUSES),
+                encode_jobs.c.job_kind == "shard",
+            )
+        )
     )
 
 

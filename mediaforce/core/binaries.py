@@ -1,5 +1,6 @@
 import os
 import shutil
+import subprocess
 from functools import lru_cache
 from pathlib import Path
 
@@ -16,15 +17,29 @@ def media_binary(name: str) -> str:
         return override
 
     preferred = _HOMEBREW_BINARIES.get(name)
-    if preferred and preferred.exists():
+    if preferred and preferred.exists() and _binary_runs(preferred):
         return str(preferred)
 
     # noinspection PyDeprecation
     discovered = shutil.which(name)
-    if discovered:
+    if discovered and _binary_runs(Path(discovered)):
         return discovered
 
     return name
+
+
+def _binary_runs(path: Path) -> bool:
+    try:
+        result = subprocess.run(
+            [str(path), "-version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def ffmpeg_binary() -> str:

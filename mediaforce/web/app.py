@@ -678,12 +678,14 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             request_disposition: str | None,
             current_policy: dict[str, Any],
             preview_policy: dict[str, Any],
+            allow_measured_size_quality_tradeoff: bool = False,
     ) -> str | None:
         return proposal_alignment_issue(
             operator_request=operator_request,
             request_disposition=request_disposition,
             current_policy=current_policy,
             preview_policy=preview_policy,
+            allow_measured_size_quality_tradeoff=allow_measured_size_quality_tradeoff,
         )
 
     def _folder_ai_tune_deps() -> FolderAiTuneDeps:
@@ -1896,6 +1898,7 @@ def _build_tuning_runtime_toolbelt(
         current_policy: dict[str, Any],
         calibration: dict[str, Any] | None,
         metric_support: dict[str, bool],
+        operator_request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return build_tuning_runtime_toolbelt(
         _folder_tuning_runtime_deps(),
@@ -1903,6 +1906,7 @@ def _build_tuning_runtime_toolbelt(
         current_policy=current_policy,
         calibration=calibration,
         metric_support=metric_support,
+        operator_request=operator_request,
     )
 
 

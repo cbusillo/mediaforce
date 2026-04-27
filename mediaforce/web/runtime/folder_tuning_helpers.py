@@ -96,12 +96,23 @@ def load_json_object(raw: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _number_or_none(value: JSONValue) -> float | None:
+    if not isinstance(value, str | int | float):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed
+
+
 def proposal_alignment_issue(
         *,
         operator_request: dict[str, Any] | None,
         request_disposition: str | None,
         current_policy: dict[str, Any],
         preview_policy: dict[str, Any],
+        allow_measured_size_quality_tradeoff: bool = False,
 ) -> str | None:
     if not operator_request:
         return None
@@ -111,7 +122,10 @@ def proposal_alignment_issue(
     request_type = str(operator_request.get("request_type") or "").strip().lower()
     current_video = object_dict(current_policy.get("video"))
     preview_video = object_dict(preview_policy.get("video"))
+    current_audio = object_dict(current_policy.get("audio"))
+    preview_audio = object_dict(preview_policy.get("audio"))
     requested_video = object_dict(object_dict(operator_request.get("applied_policy")).get("video"))
+    requested_audio = object_dict(object_dict(operator_request.get("applied_policy")).get("audio"))
 
     def _float_or_none(value: JSONValue) -> float | None:
         if not isinstance(value, str | int | float):
@@ -134,16 +148,90 @@ def proposal_alignment_issue(
             return "smart"
         return handling
 
+    def _unrequested_size_tradeoff_issue() -> str | None:
+        if _policy_height(requested_video) is None:
+            current_height = _policy_height(current_video)
+            preview_height = _policy_height(preview_video)
+            if preview_height is not None and (
+                    current_height is None or abs(preview_height - current_height) > 0.01
+            ):
+                return (
+                    "The draft changes resolution based only on a size budget. Ask for that resolution or run a "
+                    "measured follow-up before changing the height cap."
+                )
+        for key in ("stereo_opus_bitrate", "surround_5_1_opus_bitrate", "surround_7_1_opus_bitrate"):
+            if key in requested_audio:
+                continue
+            current_value = current_audio.get(key)
+            preview_value = preview_audio.get(key)
+            if preview_value is not None and preview_value != current_value:
+                return (
+                    f"The draft changes audio.{key} based only on a size budget. Ask for that audio tradeoff "
+                    "or measure it explicitly before changing audio quality."
+                )
+        return None
+
     def _size_budget_alignment_issue() -> str | None:
         current_vmaf = _float_or_none(current_video.get("target_vmaf"))
         preview_vmaf = _float_or_none(preview_video.get("target_vmaf"))
         current_xpsnr = _float_or_none(current_video.get("target_xpsnr"))
         preview_xpsnr = _float_or_none(preview_video.get("target_xpsnr"))
-        if current_vmaf is not None and preview_vmaf is not None and preview_vmaf > current_vmaf + 0.01:
+        if (
+                not allow_measured_size_quality_tradeoff
+                and current_vmaf is not None
+                and preview_vmaf is not None
+                and preview_vmaf > current_vmaf + 0.01
+        ):
             return "The draft raises the VMAF target even though your note asked for a smaller encode."
-        if current_xpsnr is not None and preview_xpsnr is not None and preview_xpsnr > current_xpsnr + 0.01:
+        if (
+                not allow_measured_size_quality_tradeoff
+                and current_vmaf is not None
+                and preview_vmaf is not None
+                and preview_vmaf < current_vmaf - 0.01
+        ):
+            return (
+                "The draft lowers the VMAF target based only on a size budget. Run a measured sample or ask for "
+                "a specific quality tradeoff before changing quality targets."
+            )
+        if (
+                not allow_measured_size_quality_tradeoff
+                and current_xpsnr is not None
+                and preview_xpsnr is not None
+                and preview_xpsnr > current_xpsnr + 0.01
+        ):
             return "The draft raises the XPSNR target even though your note asked for a smaller encode."
-        return _size_budget_cap_alignment_issue()
+        if (
+                not allow_measured_size_quality_tradeoff
+                and current_xpsnr is not None
+                and preview_xpsnr is not None
+                and preview_xpsnr < current_xpsnr - 0.01
+        ):
+            return (
+                "The draft lowers the XPSNR target based only on a size budget. Run a measured sample or ask for "
+                "a specific quality tradeoff before changing quality targets."
+            )
+        current_cap = _float_or_none(current_video.get("max_encoded_percent"))
+        preview_cap = _float_or_none(preview_video.get("max_encoded_percent"))
+        if preview_cap is not None and (current_cap is None or abs(preview_cap - current_cap) > 0.01):
+            return (
+                "The draft turns the size budget into a max_encoded_percent change. Size budgets are planning "
+                "targets for measured comparison unless the operator explicitly asks for a hard cap."
+            )
+        if not allow_measured_size_quality_tradeoff:
+            tradeoff_issue = _unrequested_size_tradeoff_issue()
+            if tradeoff_issue is not None:
+                return tradeoff_issue
+            for key in ("default_grain", "grain_denoise", "min_crf", "max_crf", "preset"):
+                if key in requested_video:
+                    continue
+                current_value = current_video.get(key)
+                preview_value = preview_video.get(key)
+                if current_value is not None and preview_value is not None and preview_value != current_value:
+                    return (
+                        f"The draft changes video.{key} based only on a size budget. Run a measured sample or "
+                        "ask for that specific tradeoff before changing video tuning knobs."
+                    )
+        return None
 
     def _size_budget_cap_alignment_issue() -> str | None:
         requested_cap = _float_or_none(requested_video.get("max_encoded_percent"))
@@ -153,6 +241,27 @@ def proposal_alignment_issue(
             size_budget_request = object_dict(operator_request.get("size_budget_request"))
             requested_cap = _float_or_none(size_budget_request.get("applied_max_encoded_percent"))
         if requested_cap is None:
+            current_cap = _float_or_none(current_video.get("max_encoded_percent"))
+            preview_cap = _float_or_none(preview_video.get("max_encoded_percent"))
+            if preview_cap is not None and (current_cap is None or abs(preview_cap - current_cap) > 0.01):
+                return (
+                    "The draft turns the size budget into a max_encoded_percent change. Size budgets are planning "
+                    "targets for measured comparison unless the operator explicitly asks for a hard cap."
+                )
+            if not allow_measured_size_quality_tradeoff:
+                tradeoff_issue = _unrequested_size_tradeoff_issue()
+                if tradeoff_issue is not None:
+                    return tradeoff_issue
+                for key in ("default_grain", "grain_denoise", "min_crf", "max_crf", "preset"):
+                    if key in requested_video:
+                        continue
+                    current_value = current_video.get(key)
+                    preview_value = preview_video.get(key)
+                    if current_value is not None and preview_value is not None and preview_value != current_value:
+                        return (
+                            f"The draft changes video.{key} based only on a size budget. Run a measured sample or "
+                            "ask for that specific tradeoff before changing video tuning knobs."
+                        )
             return None
         preview_cap = _float_or_none(preview_video.get("max_encoded_percent"))
         if preview_cap is None:
@@ -245,3 +354,90 @@ def proposal_alignment_issue(
             if not operator_request.get("metric"):
                 return _size_budget_alignment_issue()
     return None
+
+
+def size_budget_sample_issue(
+        *,
+        operator_request: dict[str, Any] | None,
+        calibration_payload: dict[str, Any],
+        tolerance: float = 0.15,
+) -> str | None:
+    analysis = size_budget_sample_analysis(
+        operator_request=operator_request,
+        calibration_payload=calibration_payload,
+        tolerance=tolerance,
+    )
+    status = str(analysis.get("status") or "").strip().lower()
+    if status == "missing_prediction":
+        return "The sampled run did not report a predicted total size for the requested size target."
+    if status == "under_target":
+        return (
+            f"The sampled run predicts {_format_bytes(float(analysis['predicted_total_size_bytes']))}, below the "
+            f"requested {_format_bytes(float(analysis['budget_bytes']))} target band. Run another sample that spends "
+            "the saved bitrate on quality or explicitly approve a smaller-size tradeoff."
+        )
+    if status == "over_target":
+        return (
+            f"The sampled run predicts {_format_bytes(float(analysis['predicted_total_size_bytes']))}, above the "
+            f"requested {_format_bytes(float(analysis['budget_bytes']))} target band. Run another sample that moves "
+            "closer to the requested size or explicitly approve the larger quality tradeoff."
+        )
+    return None
+
+
+def size_budget_sample_analysis(
+        *,
+        operator_request: dict[str, Any] | None,
+        calibration_payload: dict[str, Any],
+        tolerance: float = 0.15,
+) -> dict[str, Any]:
+    request = object_dict(operator_request)
+    if not request or not bool(request.get("operator_confirmed")):
+        return {}
+    budget_bytes = _operator_budget_bytes(request)
+    if budget_bytes is None or budget_bytes <= 0:
+        return {}
+    sample_result = object_dict(calibration_payload.get("sample_result"))
+    predicted_total = _number_or_none(sample_result.get("predicted_total_size_bytes"))
+    lower_bound = float(budget_bytes) * (1.0 - tolerance)
+    upper_bound = float(budget_bytes) * (1.0 + tolerance)
+    analysis = {
+        "budget_bytes": budget_bytes,
+        "budget_label": request.get("budget_label"),
+        "tolerance": tolerance,
+        "lower_bound_bytes": int(round(lower_bound)),
+        "upper_bound_bytes": int(round(upper_bound)),
+        "predicted_total_size_bytes": int(round(predicted_total)) if predicted_total is not None else None,
+    }
+    if predicted_total is None or predicted_total <= 0:
+        return {**analysis, "status": "missing_prediction"}
+    ratio = predicted_total / float(budget_bytes)
+    analysis["predicted_to_budget_ratio"] = round(ratio, 4)
+    if predicted_total < lower_bound:
+        return {**analysis, "status": "under_target"}
+    if predicted_total > upper_bound:
+        return {**analysis, "status": "over_target"}
+    return {**analysis, "status": "inside_target_band"}
+
+
+def _operator_budget_bytes(operator_request: dict[str, Any]) -> int | None:
+    budget = _int_or_none(operator_request.get("budget_bytes"))
+    if budget is not None:
+        return budget
+    size_budget_request = object_dict(operator_request.get("size_budget_request"))
+    return _int_or_none(size_budget_request.get("budget_bytes"))
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _format_bytes(value: float) -> str:
+    mib = value / 1024 / 1024
+    if mib < 1024:
+        return f"{mib:.0f} MiB"
+    return f"{mib / 1024:.2f} GiB"

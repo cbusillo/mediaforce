@@ -10,12 +10,14 @@ def _mapped_item_source_path(
         item: dict[str, Any],
         *,
         host: dict[str, Any] | None = None,
+        source_roots: dict[str, Path] | None = None,
 ) -> Path | None:
     media_root = str(item.get("media_root") or "").strip()
     rel_path = str(item.get("rel_path") or "").strip()
     if not media_root or not rel_path:
         return None
-    root = config.source_root_map_for_host(host).get(media_root)
+    root_map = source_roots if source_roots is not None else config.source_root_map_for_host(host)
+    root = root_map.get(media_root)
     if root is None:
         return None
     return root.parent / Path(rel_path)
@@ -82,7 +84,8 @@ def resolve_item_quality_source_path(
             host=host,
             host_media_access_for_host=host_media_access_for_host,
         )
-    mapped_path = _mapped_item_source_path(config, item, host=host)
+    explicit_source_roots = config.explicit_source_root_map_for_host(host)
+    mapped_path = _mapped_item_source_path(config, item, host=host, source_roots=explicit_source_roots)
     if mapped_path is not None:
         return mapped_path
     return _controller_item_source_path(item)

@@ -4,6 +4,7 @@
 	import '$lib/design/workstation-shell.css';
 	import { tick } from 'svelte';
 	import type {
+		EncodeFailureAnalysis,
 		EncodeJobProgressTelemetry,
 		EncodeQueueJob,
 		EncodeQueueSummary,
@@ -1215,6 +1216,9 @@
 	const encodeJobProgress = $derived(
 		(encodeJob?.progress as EncodeJobProgressTelemetry | null | undefined) ?? null
 	);
+	const encodeFailureAnalysis = $derived(
+		(encodeJobProgress?.failure_analysis as EncodeFailureAnalysis | null | undefined) ?? null
+	);
 	const encodeJobActiveHosts = $derived.by(() =>
 		((encodeJob?.active_hosts as Array<Record<string, unknown>> | undefined) ?? []).filter(Boolean)
 	);
@@ -1293,6 +1297,7 @@
 	});
 	const encodeJobDetail = $derived.by(() => {
 		const schedulerCopy = String(encodeJob?.scheduler_status_copy ?? '').trim();
+		const measuredFailureCopy = String(encodeFailureAnalysis?.summary ?? '').trim();
 		const failureCopy = compactFailureCopy(encodeJob?.error);
 		const currentItem = String(encodeJobProgress?.current_item_rel_path ?? '').trim();
 		const activeHostLabels = encodeJobActiveHosts
@@ -1315,6 +1320,7 @@
 			if (schedulerCopy) return schedulerCopy;
 			return 'Waiting for an open worker lane.';
 		}
+		if (encodeJobStalled && measuredFailureCopy) return measuredFailureCopy;
 		if (encodeJobStalled && failureCopy) return failureCopy;
 		if (schedulerCopy) return schedulerCopy;
 		if (encodeJobStatus === 'running' && activeHostLabels.length > 1) {
@@ -1339,6 +1345,9 @@
 			encodeJobStatus === 'failed' ||
 			encodeJobStatus === 'stopped'
 		) {
+			if (encodeFailureAnalysis?.retry_strategy === 'needs_operator_approval') {
+				return 'Review the measured policy tradeoff, then approve a retry adjustment when you want Mediaforce to continue.';
+			}
 			return 'Review the failure detail, then retry the folder encode when you want Mediaforce to continue this folder.';
 		}
 		if (encodeJobStatus === 'retry_backoff') {

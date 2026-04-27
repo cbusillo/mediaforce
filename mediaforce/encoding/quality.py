@@ -1,11 +1,12 @@
 import os
 import json
+import math
 import re
 import shutil
 import subprocess
 import tempfile
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -16,6 +17,12 @@ from mediaforce.remote import execution_mode_for_host, run_remote_command
 
 RESULT_RE = re.compile(
     r"crf\s+(?P<crf>[0-9.]+)\s+(?P<metric>VMAF|XPSNR)\s+(?P<score>[0-9.]+)",
+    re.IGNORECASE,
+)
+QUALITY_PREDICTION_RE = re.compile(
+    r"crf\s+(?P<crf>[0-9.]+)\s+(?P<metric>VMAF|XPSNR)\s+(?P<score>[0-9.]+)"
+    r"\s+predicted video stream size\s+(?P<size>[0-9.]+)\s+(?P<unit>[KMGT]?i?B)"
+    r"\s+\((?P<percent>[0-9.]+)%\)",
     re.IGNORECASE,
 )
 
@@ -37,6 +44,30 @@ class SampleEncodeResult:
     predicted_encode_seconds: float
     predicted_encode_size_bytes: int
     stdout: str
+
+
+@dataclass(slots=True)
+class QualitySearchMeasurement:
+    crf: float
+    metric: str
+    score: float
+    predicted_encode_percent: float
+    predicted_encode_size_bytes: int
+    line: str
+
+
+@dataclass(slots=True)
+class QualityFailureAnalysis:
+    kind: str
+    retry_strategy: str
+    auto_retry_allowed: bool
+    requested_metric: str
+    target_score: float
+    min_score: float
+    max_encoded_percent: float
+    best_candidate: QualitySearchMeasurement | None
+    proposed_max_encoded_percent: int | None
+    summary: str
 
 
 class QualitySearchError(RuntimeError):
@@ -62,6 +93,173 @@ DEFAULT_LOCAL_QUALITY_TEMP_ROOT_NAME = "mediaforce-quality-temp"
 LEGACY_LOCAL_QUALITY_TEMP_ROOT_NAME = "quality-temp"
 PREVIOUS_LOCAL_QUALITY_TEMP_ROOT_NAME = "mediaforce-quality"
 QUALITY_CLEANUP_NOTE_PREFIX = "Cleanup warning: "
+QUALITY_SIZE_NEAR_MISS_PERCENT = 2.0
+QUALITY_MAX_AUTO_PERCENT = 25
+
+
+def parse_quality_search_measurements(stdout: str) -> list[QualitySearchMeasurement]:
+    measurements: list[QualitySearchMeasurement] = []
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        match = QUALITY_PREDICTION_RE.search(line)
+        if match is None:
+            continue
+        measurements.append(
+            QualitySearchMeasurement(
+                crf=float(match.group("crf")),
+                metric=match.group("metric").upper(),
+                score=float(match.group("score")),
+                predicted_encode_percent=float(match.group("percent")),
+                predicted_encode_size_bytes=_size_to_bytes(float(match.group("size")), match.group("unit")),
+                line=line,
+            )
+        )
+    return measurements
+
+
+def analyze_quality_policy_failure(
+        error_message: str,
+        video_policy: dict[str, object],
+) -> dict[str, object] | None:
+    if "failed to find a suitable crf" not in error_message.lower():
+        return None
+    measurements = parse_quality_search_measurements(error_message)
+    if not measurements:
+        return None
+    metric = _analysis_metric(video_policy, measurements)
+    target_score = _float_policy(video_policy, f"target_{metric.lower()}", 0.0)
+    min_score = _float_policy(video_policy, f"min_target_{metric.lower()}", target_score)
+    max_encoded_percent = _float_policy(video_policy, "max_encoded_percent", 100.0)
+    same_metric = [measurement for measurement in measurements if measurement.metric.lower() == metric.lower()]
+    if not same_metric:
+        return None
+    candidates_above_floor = [measurement for measurement in same_metric if measurement.score >= min_score]
+    if candidates_above_floor:
+        best_candidate = min(
+            candidates_above_floor,
+            key=lambda measurement: (
+                measurement.predicted_encode_percent,
+                -measurement.score,
+                measurement.crf,
+            ),
+        )
+    else:
+        best_candidate = max(
+            same_metric,
+            key=lambda measurement: (
+                measurement.score,
+                -measurement.predicted_encode_percent,
+                -measurement.crf,
+            ),
+        )
+    proposed_cap = None
+    auto_retry_allowed = False
+    retry_strategy = "needs_operator_approval"
+    kind = "quality_floor_too_strict"
+    if best_candidate.score >= min_score and best_candidate.predicted_encode_percent > max_encoded_percent:
+        kind = "size_cap_too_strict"
+        proposed_cap = _proposed_size_cap(max_encoded_percent, best_candidate.predicted_encode_percent)
+        auto_retry_allowed = (
+            proposed_cap is not None
+            and proposed_cap <= QUALITY_MAX_AUTO_PERCENT
+            and proposed_cap - max_encoded_percent <= QUALITY_SIZE_NEAR_MISS_PERCENT
+        )
+        retry_strategy = "auto_adjust_cap" if auto_retry_allowed else "needs_operator_approval"
+    elif best_candidate.score < min_score:
+        kind = "quality_floor_too_strict"
+
+    analysis = QualityFailureAnalysis(
+        kind=kind,
+        retry_strategy=retry_strategy,
+        auto_retry_allowed=auto_retry_allowed,
+        requested_metric=metric.upper(),
+        target_score=target_score,
+        min_score=min_score,
+        max_encoded_percent=max_encoded_percent,
+        best_candidate=best_candidate,
+        proposed_max_encoded_percent=proposed_cap,
+        summary=_quality_failure_summary(
+            kind=kind,
+            metric=metric.upper(),
+            best_candidate=best_candidate,
+            max_encoded_percent=max_encoded_percent,
+            proposed_cap=proposed_cap,
+            auto_retry_allowed=auto_retry_allowed,
+        ),
+    )
+    return _analysis_to_dict(analysis)
+
+
+def _analysis_metric(video_policy: dict[str, object], measurements: list[QualitySearchMeasurement]) -> str:
+    configured = str(video_policy.get("quality_metric") or "").strip().lower()
+    if configured in {"vmaf", "xpsnr"}:
+        return configured
+    return measurements[-1].metric.lower()
+
+
+def _float_policy(video_policy: dict[str, object], key: str, default: float) -> float:
+    value = video_policy.get(key, default)
+    if not isinstance(value, (int, float, str)):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _proposed_size_cap(max_encoded_percent: float, measured_percent: float) -> int | None:
+    proposed = max(math.floor(max_encoded_percent) + 1, math.ceil(measured_percent + 0.25))
+    if proposed <= max_encoded_percent:
+        proposed = math.floor(max_encoded_percent) + 1
+    return proposed
+
+
+def _quality_failure_summary(
+        *,
+        kind: str,
+        metric: str,
+        best_candidate: QualitySearchMeasurement,
+        max_encoded_percent: float,
+        proposed_cap: int | None,
+        auto_retry_allowed: bool,
+) -> str:
+    if kind == "size_cap_too_strict":
+        retry_copy = (
+            f"; retrying with max_encoded_percent {proposed_cap}"
+            if auto_retry_allowed and proposed_cap is not None
+            else ""
+        )
+        return (
+            f"Best measured candidate was CRF {best_candidate.crf:g} at {metric} {best_candidate.score:.2f} "
+            f"and {best_candidate.predicted_encode_percent:.1f}% against the {max_encoded_percent:g}% cap{retry_copy}."
+        )
+    return (
+        f"Best measured candidate was CRF {best_candidate.crf:g} at {metric} {best_candidate.score:.2f} "
+        f"and {best_candidate.predicted_encode_percent:.1f}%, below the requested quality floor."
+    )
+
+
+def _analysis_to_dict(analysis: QualityFailureAnalysis) -> dict[str, object]:
+    payload = asdict(analysis)
+    if analysis.best_candidate is not None:
+        payload["best_candidate"] = asdict(analysis.best_candidate)
+    return payload
+
+
+def _size_to_bytes(size: float, unit: str) -> int:
+    normalized = unit.strip().lower()
+    multipliers = {
+        "b": 1,
+        "kb": 1000,
+        "mb": 1000 ** 2,
+        "gb": 1000 ** 3,
+        "tb": 1000 ** 4,
+        "kib": 1024,
+        "mib": 1024 ** 2,
+        "gib": 1024 ** 3,
+        "tib": 1024 ** 4,
+    }
+    return int(size * multipliers.get(normalized, 1))
 
 
 def _host_hwaccel_context(host: dict[str, object] | None) -> tuple[str | None, bool | None]:

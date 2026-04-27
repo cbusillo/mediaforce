@@ -16,6 +16,11 @@ from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, list_ch
     load_latest_terminal_encode_job_for_prefix
 from mediaforce.encoding.staging import safe_unlink
 from mediaforce.library.run_manifests import create_folder_manifest
+from mediaforce.web.runtime.folder_tuning_helpers import (
+    proposal_alignment_issue,
+    size_budget_sample_analysis,
+    size_budget_sample_issue,
+)
 
 ActionPayload: TypeAlias = dict[str, Any]
 FolderItem: TypeAlias = dict[str, Any]
@@ -621,6 +626,40 @@ def save_profile_action(
                 status_code=409,
                 detail="This draft changed after the high-impact review. Review the diff and confirm approval again.",
             )
+    advice_state = object_dict(load_advice_state(config, normalized_prefix))
+    operator_request = object_dict(advice_state.get("operator_request"))
+    request_disposition = str(advice_state.get("request_disposition") or "").strip().lower()
+    if bool(operator_request.get("operator_confirmed")) and request_disposition in {"softened", "rejected", "unclear"}:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This draft does not carry the approved operator request forward. "
+                "Run a fresh sample that follows the requested experiment before approving it."
+            ),
+        )
+    size_target_analysis = size_budget_sample_analysis(
+        operator_request=operator_request or None,
+        calibration_payload=calibration_payload,
+    )
+    allow_measured_size_quality_tradeoff = (
+            str(calibration_payload.get("action") or "").strip() == "ai_tune"
+            and str(size_target_analysis.get("status") or "").strip() == "inside_target_band"
+    )
+    alignment_issue = proposal_alignment_issue(
+        operator_request=operator_request or None,
+        request_disposition=request_disposition or None,
+        current_policy=baseline_policy,
+        preview_policy=object_dict(calibration_payload.get("policy")),
+        allow_measured_size_quality_tradeoff=allow_measured_size_quality_tradeoff,
+    )
+    if alignment_issue is not None:
+        raise HTTPException(status_code=409, detail=alignment_issue)
+    size_issue = size_budget_sample_issue(
+        operator_request=operator_request or None,
+        calibration_payload=calibration_payload,
+    )
+    if size_issue is not None:
+        raise HTTPException(status_code=409, detail=size_issue)
     if str(calibration_payload.get("mode") or "sample") == "sample":
         if not calibration_payload.get("review_media_ready"):
             raise HTTPException(
@@ -632,7 +671,6 @@ def save_profile_action(
         calibration_payload["accepted_policy_hash"] = _calibration_policy_hash(calibration_payload)
         calibration_payload["accepted_sample_job_id"] = str(calibration_payload.get("job_id") or "")
         save_calibration_state(config, normalized_prefix, calibration_payload)
-        advice_state = object_dict(load_advice_state(config, normalized_prefix))
         existing_approval = object_dict(advice_state.get("approval_artifact"))
         if str(existing_approval.get("sample_job_id") or "") != str(calibration_payload.get("job_id") or ""):
             with open_db(config.paths.db_path) as connection:

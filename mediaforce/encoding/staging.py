@@ -12,6 +12,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
+from mediaforce.core.type_defs import float_value
 from mediaforce.core.type_defs import object_list
 
 TRANSIENT_FILE_BUSY_ERRNOS = {errno.EBUSY}
@@ -100,6 +101,18 @@ def validate_one_item(
     require_size_reduction = bool(config.validation.get("require_size_reduction", True))
     if require_size_reduction:
         check(validation, staged_size_bytes < source_size_bytes, "staged file is smaller than source")
+
+    source_duration_seconds = float_value(item.get("duration_seconds") or row.get("source_duration_seconds"))
+    staged_duration_seconds = float_value(staged_probe.duration_seconds)
+    if source_duration_seconds > 0:
+        check(validation, staged_duration_seconds > 0, "staged file duration is readable")
+        if staged_duration_seconds > 0:
+            minimum_expected_duration = max(source_duration_seconds * 0.98, source_duration_seconds - 2.0)
+            check(
+                validation,
+                staged_duration_seconds >= minimum_expected_duration,
+                "staged duration closely matches the source",
+            )
 
     now = timestamp()
     connection.execute(
