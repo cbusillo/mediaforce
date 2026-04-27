@@ -122,6 +122,30 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         }
 
     @staticmethod
+    def _folder_card_for_delivery_badge(
+            *,
+            item_count: int,
+            pending_count: int,
+            statuses: dict[str, int],
+    ) -> folder_cards_runtime.FolderCard:
+        return folder_cards_runtime.FolderCard(
+            prefix="tv/show/Season 10",
+            title="Season 10",
+            subtitle="TV",
+            scope_label="Season",
+            item_count=item_count,
+            pending_count=pending_count,
+            total_size_bytes=0,
+            estimated_savings_bytes=0,
+            known_saved_bytes=0,
+            projected_reclaim_bytes=0,
+            average_age_days=0.0,
+            sort_score=0.0,
+            statuses=statuses,
+            video_codecs={},
+        )
+
+    @staticmethod
     def _noop_upsert_override(
             _file_path: Path,
             _prefix: str,
@@ -3526,6 +3550,36 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(card.review_badge_label, "Ready to promote")
         self.assertEqual(card.review_badge_tone, "ok")
         self.assertEqual(card.review_badge_detail, "All staged outputs passed validation.")
+
+    def test_folder_delivery_badge_ignores_mixed_validated_and_encoded_items(self) -> None:
+        card = self._folder_card_for_delivery_badge(
+            item_count=4,
+            pending_count=4,
+            statuses={"validated": 2, "encoded": 2},
+        )
+
+        self.assertIsNone(folder_cards_runtime._folder_delivery_badge(card))
+
+    def test_folder_delivery_badge_still_marks_promoted_and_encoded_items_ready_to_validate(self) -> None:
+        card = self._folder_card_for_delivery_badge(
+            item_count=4,
+            pending_count=2,
+            statuses={"promoted": 2, "encoded": 2},
+        )
+
+        self.assertEqual(
+            folder_cards_runtime._folder_delivery_badge(card),
+            {"label": "Ready to validate", "tone": "attention", "detail": "All pending outputs are encoded."},
+        )
+
+    def test_folder_delivery_badge_ignores_fully_promoted_folders(self) -> None:
+        card = self._folder_card_for_delivery_badge(
+            item_count=4,
+            pending_count=0,
+            statuses={"promoted": 4},
+        )
+
+        self.assertIsNone(folder_cards_runtime._folder_delivery_badge(card))
 
     def test_cached_folder_cards_recomputes_after_reset_during_cache_miss(self) -> None:
         folder_cards_runtime.reset_folder_card_cache()

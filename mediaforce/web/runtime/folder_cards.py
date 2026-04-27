@@ -377,15 +377,11 @@ def _apply_folder_review_badges(cards: list[FolderCard], review_badge_for_prefix
 def _folder_delivery_badge(card: FolderCard) -> FolderBadge | None:
     if card.item_count <= 0:
         return None
-    promoted_count = card.statuses.get("promoted", 0)
     validated_count = card.statuses.get("validated", 0)
     encoded_count = card.statuses.get("encoded", 0)
-    delivered_count = promoted_count + validated_count
-    if promoted_count == card.item_count:
-        return {"label": "Promoted", "tone": "ok", "detail": "All outputs are in the library."}
-    if validated_count > 0 and delivered_count == card.item_count:
+    if validated_count > 0 and validated_count == card.pending_count:
         return {"label": "Ready to promote", "tone": "ok", "detail": "All staged outputs passed validation."}
-    if encoded_count > 0 and encoded_count + delivered_count == card.item_count:
+    if encoded_count > 0 and encoded_count == card.pending_count:
         return {"label": "Ready to validate", "tone": "attention", "detail": "All pending outputs are encoded."}
     return None
 
