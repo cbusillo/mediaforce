@@ -106,6 +106,7 @@ from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_fo
     multimodal_review_pack_public_view, pause_encode_queue_action, pending_proposal_public_view, \
     planned_audio_review_context, preview_folder_cards, proposal_alignment_issue, \
     proposal_context_snapshot, proposal_signal_copy, promote_folder_outputs_action, \
+    approve_measured_encode_recovery_action, \
     queue_folder_encode_action, recent_tuning_sessions, \
     refresh_host_status_cache, reset_folder_card_cache, resume_encode_queue_action, \
     retry_failed_encode_queue_action, review_media_context, \
@@ -769,6 +770,19 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             save_encode_job=save_encode_job,
         )
 
+    def _approve_measured_encode_recovery_action(normalized_prefix: str) -> ActionPayload:
+        return approve_measured_encode_recovery_action(
+            config,
+            normalized_prefix,
+            now_iso=_now_iso,
+            load_calibration_state=_load_calibration_state,
+            calibration_draft_hash=_calibration_draft_hash,
+            save_calibration_state=_save_calibration_state,
+            review_gate=_review_gate,
+            upsert_override=_upsert_override,
+            queue_folder_encode_action=_queue_folder_encode_action,
+        )
+
     def _validate_folder_outputs_action(normalized_prefix: str) -> ActionPayload:
         return validate_folder_outputs_action(
             config,
@@ -872,6 +886,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         folder_ai_tune_preview_action=_folder_ai_tune_preview_action,
         folder_ai_tune_confirm_action=_folder_ai_tune_confirm_action,
         clear_folder_tuning_action=_clear_folder_tuning_action,
+        approve_measured_encode_recovery_action=_approve_measured_encode_recovery_action,
         queue_folder_encode_action=_queue_folder_encode_action,
         validate_folder_outputs_action=_validate_folder_outputs_action,
         promote_folder_outputs_action=_promote_folder_outputs_action,

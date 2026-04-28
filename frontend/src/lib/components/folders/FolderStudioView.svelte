@@ -1285,6 +1285,11 @@
 		});
 	});
 	const encodeFailureItemCount = $derived(encodeFailureItems.length);
+	const measuredRecoveryButtonLabel = $derived.by(() =>
+		encodeFailureItemCount === 1
+			? 'Approve recovery and retry 1 file'
+			: `Approve recovery and retry ${encodeFailureItemCount} files`
+	);
 	const encodeFailureSummaryCopy = $derived.by(() => {
 		if (!encodeFailureItemCount) return '';
 		const completedCount = Number(encodeJobProgress?.completed_item_count ?? 0);
@@ -1311,6 +1316,9 @@
 	const encodeJobTone = $derived.by(() => encodeStatusTone(encodeJobStatus));
 	const encodeJobStalled = $derived.by(() =>
 		['needs_attention', 'failed', 'stopped'].includes(encodeJobStatus)
+	);
+	const measuredRecoveryAvailable = $derived(
+		encodeJobStalled && encodeFailureItemCount > 0 && reviewGate.can_confirm_full
 	);
 	const approvedEncodeRepairMode = $derived(approvedProcessingMode && encodeJobStalled);
 	const showBenchColumn = $derived(
@@ -1562,6 +1570,15 @@
 		return { label: 'Waiting', variant: 'ghost' as const };
 	});
 	const queueEncodeButtonLabel = $derived.by(() =>
+		measuredRecoveryAvailable
+			? measuredRecoveryButtonLabel
+			: encodeJobCanRecoverNow
+				? 'Recover Failed Files'
+				: ['needs_attention', 'failed', 'stopped'].includes(encodeJobStatus)
+					? 'Retry'
+					: 'Start Saved Folder Encode'
+	);
+	const rawQueueEncodeButtonLabel = $derived.by(() =>
 		encodeJobCanRecoverNow
 			? 'Recover Failed Files'
 			: ['needs_attention', 'failed', 'stopped'].includes(encodeJobStatus)
@@ -1590,6 +1607,9 @@
 			return 'Recover the interrupted files or open Ops for deeper queue detail.';
 		}
 		if (encodeJobStalled) {
+			if (measuredRecoveryAvailable) {
+				return `${encodeFailureSummaryCopy} Approving recovery updates the measured policy and retries only the failed files; completed staged encodes stay untouched.`;
+			}
 			if (encodeFailureSummaryCopy) return encodeFailureSummaryCopy;
 			const reason = encodeJobDetail || 'The folder encode stopped before it finished.';
 			return `Reason: ${reason}`;
@@ -2321,6 +2341,31 @@
 		}
 	}
 
+	async function approveMeasuredRecovery() {
+		actionState = 'recovery';
+		try {
+			const response = await postJson<{ message: string; recovery?: { file_count?: number } }>(
+				`/api/folders/${apiPrefix}/approve-recovery`,
+				{}
+			);
+			const recoveredCount = Number(response.recovery?.file_count ?? encodeFailureItemCount);
+			toasts.success(
+				recoveredCount > 0
+					? `Retrying ${recoveredCount} failed file${recoveredCount === 1 ? '' : 's'}`
+					: 'Recovery queued',
+				response.message
+			);
+			await invalidateAll();
+		} catch (error) {
+			toasts.error(
+				'Could not approve recovery',
+				error instanceof Error ? error.message : 'Unexpected recovery error'
+			);
+		} finally {
+			actionState = null;
+		}
+	}
+
 	async function validateOutputs() {
 		actionState = 'validate';
 		try {
@@ -2514,21 +2559,31 @@
 											/>
 											<div class="action-row processing-strip-action-row">
 												{#if encodeJobStalled && queueActionVisible}
-													<Button variant="ghost" onclick={askBenchForEncodeRepair}>
-														Ask bench to repair
-													</Button>
+													{#if measuredRecoveryAvailable}
+														<Button
+															variant="primary"
+															loading={actionState === 'recovery'}
+															onclick={approveMeasuredRecovery}
+														>
+															{measuredRecoveryButtonLabel}
+														</Button>
+													{:else}
+														<Button
+															variant="primary"
+															loading={actionState === 'encode'}
+															disabled={!reviewGate.can_confirm_full}
+															onclick={queueEncode}
+														>
+															{queueEncodeButtonLabel}
+														</Button>
+													{/if}
 													{#if hasFullCompareDownload || reviewPairs.length}
 														<Button variant="ghost" onclick={focusReviewEvidence}>
 															Focus review evidence
 														</Button>
 													{/if}
-													<Button
-														variant="primary"
-														loading={actionState === 'encode'}
-														disabled={!reviewGate.can_confirm_full}
-														onclick={queueEncode}
-													>
-														{queueEncodeButtonLabel}
+													<Button variant="ghost" onclick={askBenchForEncodeRepair}>
+														Ask bench for another option
 													</Button>
 													<a class="processing-strip-link" href={resolve('/ops')}>Open ops</a>
 												{:else}
@@ -2546,7 +2601,7 @@
 															disabled={!reviewGate.can_confirm_full}
 															onclick={queueEncode}
 														>
-															{queueEncodeButtonLabel}
+															{rawQueueEncodeButtonLabel}
 														</Button>
 													{/if}
 												{/if}

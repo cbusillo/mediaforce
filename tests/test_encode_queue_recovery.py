@@ -10932,6 +10932,153 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(len(object_list(failure_analysis["item_analyses"])), 2)
         self.assertIn("2 of 2 selected items", str(failure_analysis["summary"]))
 
+    def test_approve_measured_encode_recovery_updates_policy_and_queues_failed_items(self) -> None:
+        manifest_path = self._write_manifest(
+            "manifest-recovery-approval.json",
+            [
+                {"library_item_id": 1, "source_path": "tv/show/e09.mkv"},
+                {"library_item_id": 2, "source_path": "tv/show/e10.mkv"},
+            ],
+        )
+        now = web_app._now_iso()
+        failure_analysis = {
+            "kind": "quality_floor_too_strict",
+            "retry_strategy": "needs_operator_approval",
+            "auto_retry_allowed": False,
+            "manifest_indexes": [0, 1],
+            "summary": "Measured policy analysis covers 2 of 2 selected items; operator approval is required.",
+            "item_analyses": [
+                {
+                    "kind": "quality_floor_too_strict",
+                    "manifest_index": 0,
+                    "manifest_indexes": [0],
+                    "item_rel_path": "tv/show/e09.mkv",
+                    "requested_metric": "VMAF",
+                    "target_score": 88.0,
+                    "min_score": 86.5,
+                    "max_encoded_percent": 15.0,
+                    "best_candidate": {
+                        "crf": 50.0,
+                        "metric": "VMAF",
+                        "score": 87.15,
+                        "predicted_encode_percent": 15.0,
+                    },
+                },
+                {
+                    "kind": "size_cap_too_strict",
+                    "manifest_index": 1,
+                    "manifest_indexes": [1],
+                    "item_rel_path": "tv/show/e10.mkv",
+                    "requested_metric": "VMAF",
+                    "target_score": 88.0,
+                    "min_score": 86.5,
+                    "max_encoded_percent": 15.0,
+                    "proposed_max_encoded_percent": 18,
+                    "best_candidate": {
+                        "crf": 48.0,
+                        "metric": "VMAF",
+                        "score": 87.12,
+                        "predicted_encode_percent": 17.0,
+                    },
+                },
+            ],
+        }
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "terminal-recovery-parent",
+                    "prefix": "tv/show",
+                    "job_kind": "folder",
+                    "parent_job_id": None,
+                    "status": "needs_attention",
+                    "manifest_path": str(manifest_path),
+                    "item_count": 2,
+                    "saved_profile_path": None,
+                    "manifest_indexes": None,
+                    "host": {},
+                    "last_host": {},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": "quality policy needs approval",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": "deterministic",
+                    "last_failure_kind": "deterministic",
+                    "last_failure_at": now,
+                    "host_cooldown_until": None,
+                    "created_at": now,
+                    "started_at": now,
+                    "finished_at": now,
+                    "updated_at": now,
+                    "progress": {"failure_analysis": failure_analysis},
+                },
+            )
+
+        calibration_state = {
+            "accepted_at": now,
+            "policy": {
+                "video": {
+                    "quality_metric": "vmaf",
+                    "target_vmaf": 88.0,
+                    "min_target_vmaf": 86.5,
+                    "max_encoded_percent": 15,
+                    "max_crf": 46,
+                }
+            },
+        }
+        saved_calibrations: list[folder_actions_runtime.ActionPayload] = []
+        saved_overrides: list[folder_actions_runtime.ActionPayload] = []
+        queue_calls: list[tuple[str, str, bool]] = []
+
+        def save_calibration(
+                _config: MediaforceConfig,
+                _prefix: str,
+                payload: folder_actions_runtime.ActionPayload,
+        ) -> None:
+            saved_calibrations.append(payload)
+
+        def upsert_override(
+                _file_path: Path,
+                _prefix: str,
+                policy: folder_actions_runtime.ActionPayload,
+        ) -> None:
+            saved_overrides.append(policy)
+
+        def queue_action(prefix: str, notes: str, bypass_schedule: bool) -> folder_actions_runtime.ActionPayload:
+            queue_calls.append((prefix, notes, bypass_schedule))
+            return {"ok": True, "message": "Recovered 2 failed files.", "recovered_item_count": 2}
+
+        result = folder_actions_runtime.approve_measured_encode_recovery_action(
+            self.config,
+            "tv/show",
+            now_iso=web_app._now_iso,
+            load_calibration_state=lambda _config, _prefix: calibration_state,
+            calibration_draft_hash=lambda _payload: "draft-hash",
+            save_calibration_state=save_calibration,
+            review_gate=self._accepted_review_gate,
+            upsert_override=upsert_override,
+            queue_folder_encode_action=queue_action,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["action"], "approved_measured_recovery")
+        self.assertEqual(queue_calls[0][0], "tv/show")
+        self.assertFalse(queue_calls[0][2])
+        self.assertIn("Preserve completed staged encodes", queue_calls[0][1])
+        saved_video = object_dict(object_dict(saved_calibrations[0]["policy"]).get("video"))
+        self.assertEqual(saved_video["target_vmaf"], 87.0)
+        self.assertEqual(saved_video["min_target_vmaf"], 86.5)
+        self.assertEqual(saved_video["max_encoded_percent"], 18)
+        self.assertEqual(saved_video["max_crf"], 50)
+        self.assertEqual(object_dict(saved_overrides[0]).get("video"), saved_video)
+
     def test_queue_folder_encode_rejects_existing_active_encode_for_prefix(self) -> None:
         manifest_path = self._write_manifest("manifest-existing-active.json", [{"library_item_id": 1}])
         with open_db(self.config.paths.db_path) as connection:

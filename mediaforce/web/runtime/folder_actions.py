@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 from collections.abc import Callable
 import uuid
 from pathlib import Path
@@ -11,7 +12,7 @@ from sqlalchemy import delete, or_, select, update
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import encode_jobs, library_items, staged_artifacts
-from mediaforce.core.type_defs import object_dict, object_list
+from mediaforce.core.type_defs import float_value, object_dict, object_list
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, list_child_encode_jobs, \
     load_latest_terminal_encode_job_for_prefix
 from mediaforce.encoding.staging import safe_unlink
@@ -43,6 +44,7 @@ LoadAdviceStateFn: TypeAlias = Callable[[MediaforceConfig, str], ActionPayload |
 MergeAdviceStateFn: TypeAlias = Callable[[MediaforceConfig, str, ActionPayload], ActionPayload]
 AutoQueueApprovedFolderEncodeFn: TypeAlias = Callable[[str, str, bool], ActionPayload]
 LoadSampleItemFn: TypeAlias = Callable[[DBClient, MediaforceConfig, str], FolderItem | None]
+QueueFolderEncodeActionFn: TypeAlias = Callable[[str, str, bool], ActionPayload]
 
 
 def _calibration_policy_hash(payload: ActionPayload) -> str:
@@ -255,6 +257,150 @@ def queue_folder_encode_action(
                 },
             )
     return {"ok": True, "message": "Queued the full folder encode.", "job": queue_job}
+
+
+def approve_measured_encode_recovery_action(
+        config: MediaforceConfig,
+        normalized_prefix: str,
+        *,
+        now_iso: NowIsoFn,
+        load_calibration_state: LoadCalibrationStateFn,
+        calibration_draft_hash: CalibrationDraftHashFn,
+        save_calibration_state: SaveCalibrationStateFn,
+        review_gate: ReviewGateFn,
+        upsert_override: UpsertOverrideFn,
+        queue_folder_encode_action: QueueFolderEncodeActionFn,
+) -> ActionPayload:
+    calibration = load_calibration_state(config, normalized_prefix)
+    gate = review_gate(calibration)
+    if not bool(gate.get("can_confirm_full")):
+        raise HTTPException(status_code=400, detail=str(gate.get("message") or "Approve a sampled draft first."))
+    calibration_payload = object_dict(calibration)
+    if not calibration_payload:
+        raise HTTPException(status_code=400, detail="Run and approve a sampled draft first.")
+
+    with open_db(config.paths.db_path) as connection:
+        latest_encode_job = load_latest_terminal_encode_job_for_prefix(connection, normalized_prefix)
+    if latest_encode_job is None:
+        raise HTTPException(status_code=400, detail="No failed folder encode was found for this folder.")
+    if str(latest_encode_job.get("status") or "") not in {"needs_attention", "failed", "stopped"}:
+        raise HTTPException(status_code=400, detail="The latest folder encode is not waiting for recovery.")
+
+    failure_analysis = object_dict(object_dict(latest_encode_job.get("progress")).get("failure_analysis"))
+    recovery = _measured_recovery_policy(calibration_payload, failure_analysis)
+    if recovery is None:
+        raise HTTPException(
+            status_code=400,
+            detail="This failure does not have enough measured quality data for one-click recovery.",
+        )
+
+    calibration_payload["policy"] = recovery["policy"]
+    calibration_payload["accepted_at"] = now_iso()
+    calibration_payload["accepted_policy_hash"] = _calibration_policy_hash(calibration_payload)
+    calibration_payload["accepted_draft_hash"] = calibration_draft_hash(calibration_payload)
+    calibration_payload["accepted_recovery_note"] = recovery["summary"]
+    save_calibration_state(config, normalized_prefix, calibration_payload)
+    upsert_override(config.paths.runtime_settings_path, normalized_prefix, object_dict(calibration_payload["policy"]))
+
+    queue_result = queue_folder_encode_action(normalized_prefix, recovery["summary"], False)
+    return {
+        **queue_result,
+        "action": "approved_measured_recovery",
+        "message": str(queue_result.get("message") or "Measured recovery was approved and queued."),
+        "recovery": recovery["public"],
+    }
+
+
+def _measured_recovery_policy(
+        calibration_payload: ActionPayload,
+        failure_analysis: ActionPayload,
+) -> ActionPayload | None:
+    analyses = [object_dict(item) for item in object_list(failure_analysis.get("item_analyses"))]
+    if not analyses and failure_analysis:
+        analyses = [failure_analysis]
+    analyses = [analysis for analysis in analyses if object_dict(analysis.get("best_candidate"))]
+    if not analyses:
+        return None
+
+    policy = object_dict(calibration_payload.get("policy"))
+    video = object_dict(policy.get("video"))
+    metric = str(analyses[0].get("requested_metric") or video.get("quality_metric") or "vmaf").strip().lower()
+    if metric not in {"vmaf", "xpsnr"}:
+        return None
+    target_key = "target_vmaf" if metric == "vmaf" else "target_xpsnr"
+    min_key = "min_target_vmaf" if metric == "vmaf" else "min_target_xpsnr"
+
+    scores: list[float] = []
+    crfs: list[float] = []
+    percents: list[float] = []
+    rel_paths: list[str] = []
+    for analysis in analyses:
+        candidate = object_dict(analysis.get("best_candidate"))
+        score = float_value(candidate.get("score"))
+        crf = float_value(candidate.get("crf"))
+        percent = float_value(candidate.get("predicted_encode_percent"))
+        proposed_percent = float_value(analysis.get("proposed_max_encoded_percent"))
+        min_score = float_value(analysis.get("min_score") or video.get(min_key))
+        if score <= 0 or crf <= 0:
+            return None
+        if min_score > 0 and score < min_score:
+            return None
+        scores.append(score)
+        crfs.append(crf)
+        if percent > 0:
+            percents.append(percent)
+        if proposed_percent > 0:
+            percents.append(proposed_percent)
+        rel_path = str(analysis.get("item_rel_path") or "").strip()
+        if rel_path:
+            rel_paths.append(rel_path)
+
+    if not scores or not crfs:
+        return None
+
+    current_target = float_value(video.get(target_key))
+    current_min = float_value(video.get(min_key))
+    current_cap = float_value(video.get("max_encoded_percent"))
+    current_max_crf = float_value(video.get("max_crf"))
+
+    measured_target = math.floor(min(scores) * 2.0) / 2.0
+    if current_min > 0:
+        measured_target = max(measured_target, current_min)
+    if current_target > 0:
+        measured_target = min(current_target, measured_target)
+
+    measured_cap = current_cap if current_cap > 0 else 0.0
+    if percents:
+        measured_cap = max(measured_cap, float(math.ceil(max(percents))))
+    measured_max_crf = max(current_max_crf, float(math.ceil(max(crfs))))
+
+    updated_video = dict(video)
+    updated_video[target_key] = measured_target
+    updated_video["max_encoded_percent"] = int(measured_cap) if measured_cap.is_integer() else measured_cap
+    updated_video["max_crf"] = int(measured_max_crf) if measured_max_crf.is_integer() else measured_max_crf
+    updated_video["quality_metric"] = metric
+    updated_policy = dict(policy)
+    updated_policy["video"] = updated_video
+
+    file_count = len(analyses)
+    metric_label = metric.upper()
+    summary = (
+        f"Measured recovery for {file_count} failed file{'s' if file_count != 1 else ''}: "
+        f"allow {metric_label} {measured_target:.1f}, cap {updated_video['max_encoded_percent']}%, "
+        f"and CRF {updated_video['max_crf']}. Preserve completed staged encodes."
+    )
+    return {
+        "policy": updated_policy,
+        "summary": summary,
+        "public": {
+            "file_count": file_count,
+            "item_rel_paths": rel_paths,
+            "quality_metric": metric_label,
+            "target_score": measured_target,
+            "max_encoded_percent": updated_video["max_encoded_percent"],
+            "max_crf": updated_video["max_crf"],
+        },
+    }
 
 
 def validate_folder_outputs_action(
