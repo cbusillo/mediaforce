@@ -2642,7 +2642,18 @@ def _recover_calibration_jobs(connection: DBClient, config: MediaforceConfig) ->
 
 
 def _recover_encode_queue(connection: DBClient, config: MediaforceConfig) -> None:
+    running_prefixes = [
+        str(row["prefix"] or "").strip()
+        for row in connection.execute(
+            select(encode_jobs.c.prefix)
+            .where(encode_jobs.c.status == "running")
+            .where(encode_jobs.c.job_kind.in_(("single", "shard")))
+        ).mappings().fetchall()
+    ]
     runtime_recover_encode_queue(connection, config, _encode_queue_runtime_deps())
+    cleaned_prefixes = sorted({prefix for prefix in running_prefixes if prefix})
+    if cleaned_prefixes:
+        _sweep_orphaned_encode_processes(config, prefixes=cleaned_prefixes)
 
 
 def _reconcile_encode_jobs(
@@ -2864,18 +2875,37 @@ def _reset_background_worker_leadership_for_tests() -> None:
         lease.release()
 
 
-def _sweep_orphaned_encode_processes(config: MediaforceConfig) -> None:
+def _sweep_orphaned_encode_processes(config: MediaforceConfig, *, prefixes: list[str] | None = None) -> None:
+    normalized_prefixes = [prefix.strip().strip("/") for prefix in prefixes or [] if prefix.strip().strip("/")]
+
+    def path_filter_for_host(target_host: dict[str, Any]) -> str:
+        if not normalized_prefixes:
+            return ""
+        patterns: list[str] = []
+        for prefix in normalized_prefixes:
+            patterns.append(re.escape(str(config.staging_root_for_host(target_host) / prefix)))
+            for root_key, source_root in config.source_root_map_for_host(target_host).items():
+                root_prefix = str(root_key).strip().strip("/")
+                if prefix == root_prefix:
+                    patterns.append(re.escape(str(source_root)))
+                    continue
+                root_leader = f"{root_prefix}/"
+                if prefix.startswith(root_leader):
+                    patterns.append(re.escape(str(source_root / prefix[len(root_leader):])))
+        return "|".join(patterns)
+
     sweep_script = (
         "self_pid=$$; "
         "self_pgid=$(ps -o pgid= -p \"$self_pid\" 2>/dev/null | tr -d ' '); "
         "kill_tree() ( signal=$1; target=$2; children=$(ps -axo pid=,ppid= | awk -v target=\"$target\" '$2 == target { print $1 }'); for child in $children; do kill_tree \"$signal\" \"$child\"; done; kill -\"$signal\" \"$target\" 2>/dev/null || true; ); "
         "patterns='mediaforce_encoded_by=mediaforce|ab-av1 .*--temp-dir .*\\.mediaforce-ab-av1-'; "
-        "pids=$(ps -axo pid=,command= | awk -v self=\"$self_pid\" -v pat=\"$patterns\" '$1 != self && $0 !~ /(^|[[:space:]/])awk([[:space:]]|$)/ { pid=$1; $1=\"\"; if ($0 ~ pat) print pid }' || true); "
+        "extra_patterns=$1; "
+        "pids=$(ps -axo pid=,command= | awk -v self=\"$self_pid\" -v pat=\"$patterns\" -v extra=\"$extra_patterns\" '$1 != self && $0 !~ /(^|[[:space:]/])awk([[:space:]]|$)/ { pid=$1; $1=\"\"; if ($0 ~ pat && (extra == \"\" || $0 ~ extra)) print pid }' || true); "
         "if [ -n \"$pids\" ]; then "
         "for pid in $pids; do pgid=$(ps -o pgid= -p \"$pid\" 2>/dev/null | tr -d ' '); "
         "if [ -n \"$pgid\" ] && [ \"$pgid\" != \"$self_pgid\" ]; then kill -TERM -\"$pgid\" 2>/dev/null || true; else kill_tree TERM \"$pid\"; fi; done; "
         "sleep 2; "
-        "pids=$(ps -axo pid=,command= | awk -v self=\"$self_pid\" -v pat=\"$patterns\" '$1 != self && $0 !~ /(^|[[:space:]/])awk([[:space:]]|$)/ { pid=$1; $1=\"\"; if ($0 ~ pat) print pid }' || true); "
+        "pids=$(ps -axo pid=,command= | awk -v self=\"$self_pid\" -v pat=\"$patterns\" -v extra=\"$extra_patterns\" '$1 != self && $0 !~ /(^|[[:space:]/])awk([[:space:]]|$)/ { pid=$1; $1=\"\"; if ($0 ~ pat && (extra == \"\" || $0 ~ extra)) print pid }' || true); "
         "if [ -n \"$pids\" ]; then "
         "for pid in $pids; do pgid=$(ps -o pgid= -p \"$pid\" 2>/dev/null | tr -d ' '); "
         "if [ -n \"$pgid\" ] && [ \"$pgid\" != \"$self_pgid\" ]; then kill -KILL -\"$pgid\" 2>/dev/null || true; else kill_tree KILL \"$pid\"; fi; done; "
@@ -2893,7 +2923,8 @@ def _sweep_orphaned_encode_processes(config: MediaforceConfig) -> None:
         if str(host.get("mode") or "ssh").strip().lower() != "ssh":
             continue
         try:
-            run_remote_command(host, ["sh", "-lc", sweep_script], timeout=10)
+            path_filter = path_filter_for_host(host)
+            run_remote_command(host, ["sh", "-lc", sweep_script, "mediaforce-sweep", path_filter], timeout=10)
         except Exception as exc:
             host_label = str(host.get("label") or host.get("host") or host.get("key") or "remote host")
             LOGGER.warning("Orphan encode sweep failed for %s: %s", host_label, exc)

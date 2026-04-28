@@ -2,6 +2,7 @@ import errno
 import io
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -270,6 +271,75 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(job["status"], "queued")
             self.assertIsNone(job["retry_not_before"])
             self.assertIsNone(job["waiting_reason"])
+
+    def test_retry_backoff_recleans_partial_before_queueing(self) -> None:
+        source_path = self._create_source_file("episode-backoff-cleanup.mkv")
+        staging_path = self._staging_path("episode-backoff-cleanup.mkv")
+        partial_path = staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("staged")
+        partial_path.write_text("partial")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            self._write_manifest(
+                "manifest-backoff-cleanup.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-backoff-cleanup",
+                manifest_name="manifest-backoff-cleanup.json",
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="retry_backoff",
+                attempt_count=1,
+                retry_not_before="2000-01-01T00:00:00+00:00",
+                waiting_reason="retrying",
+            )
+
+            web_app._reconcile_encode_jobs(connection, self.config)
+
+            job = load_encode_job(connection, "job-backoff-cleanup")
+            item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job["status"], "queued")
+        self.assertFalse(staging_path.exists())
+        self.assertFalse(partial_path.exists())
+        assert item_status_row is not None
+        self.assertEqual(item_status_row["status"], "planned")
+
+    def test_recover_encode_queue_sweeps_processes_for_interrupted_prefixes(self) -> None:
+        source_path = self._create_source_file("episode-restart-sweep.mkv")
+        staging_path = self._staging_path("episode-restart-sweep.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-restart-sweep.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-restart-sweep",
+                manifest_name="manifest-restart-sweep.json",
+                host={"key": "remote", "label": "Remote", "mode": "ssh"},
+                status="running",
+                attempt_count=1,
+                lease_expires_at="2999-01-01T00:00:00+00:00",
+            )
+
+            with patch("mediaforce.web.app._sweep_orphaned_encode_processes") as sweep_mock:
+                web_app._recover_encode_queue(connection, self.config)
+
+            job = load_encode_job(connection, "job-restart-sweep")
+
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job["status"], "retry_backoff")
+        sweep_mock.assert_called_once_with(self.config, prefixes=["tv/show"])
 
     def test_reconcile_encode_jobs_clears_stale_encoding_items_when_idle(self) -> None:
         source_path = self._create_source_file("episode-idle-clear.mkv")
@@ -9905,6 +9975,28 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIn("kill_tree TERM \"$pid\"", command_payload[2])
         self.assertIn("kill -KILL -\"$pgid\"", command_payload[2])
         self.assertIn("kill_tree KILL \"$pid\"", command_payload[2])
+
+    def test_sweep_orphaned_encode_processes_can_scope_to_recovered_prefix(self) -> None:
+        host_staging_root = self.root / "remote-transcode"
+        self.config.raw["remote_hosts"] = [
+            {
+                "host": "encode-a",
+                "label": "Encode A",
+                "mode": "ssh",
+                "capabilities": ["encode_queue"],
+                "staging_root": str(host_staging_root),
+            }
+        ]
+
+        with patch("mediaforce.web.app.run_remote_command") as run_remote_command_mock:
+            web_app._sweep_orphaned_encode_processes(self.config, prefixes=["tv/show"])
+
+        run_remote_command_mock.assert_called_once()
+        command_payload = run_remote_command_mock.call_args.args[1]
+        self.assertEqual(command_payload[:3], ["sh", "-lc", command_payload[2]])
+        self.assertEqual(command_payload[3], "mediaforce-sweep")
+        self.assertIn(re.escape(str(host_staging_root / "tv" / "show")), command_payload[4])
+        self.assertIn(re.escape(str(self.root / "source" / "tv" / "show")), command_payload[4])
 
     def test_create_app_registers_folder_status_route_before_catch_all_folder_route(self) -> None:
         with patch("mediaforce.web.app.load_config", return_value=self.config), patch(

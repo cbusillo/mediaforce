@@ -120,6 +120,14 @@ def reconcile_encode_jobs(
         retry_not_before = deps.parse_iso(payload.get("retry_not_before"))
         if retry_not_before is not None and retry_not_before > now:
             continue
+        manifest_path = str(payload.get("manifest_path") or "").strip()
+        if manifest_path:
+            _cleanup_encode_retry_artifacts(
+                connection,
+                manifest_path=Path(manifest_path),
+                indexes=payload.get("manifest_indexes"),
+                deps=deps,
+            )
         payload.update(
             {
                 "status": "queued",
