@@ -19,7 +19,7 @@ from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy import update
 
-from mediaforce import execution, quality, remote, review
+from mediaforce import execution, quality, remote, review, state_cleanup
 from mediaforce.core import binaries
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
@@ -5407,6 +5407,104 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         web_app.purge_transient_artifacts(self.config, force=True)
 
         self.assertFalse(temp_dir.exists())
+
+    def test_purge_transient_artifacts_prunes_orphaned_quality_temp_dirs_before_general_retention(self) -> None:
+        temp_dir = self.config.paths.web_state_dir / "quality-temp" / ".mediaforce-ab-av1-orphan"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        (temp_dir / "sample.mkv").write_text("sample")
+        old_time = datetime.now().timestamp() - (2 * 3600)
+        os.utime(temp_dir, (old_time, old_time))
+        self.config.raw["state"]["cleanup"]["orphan_temp_retention_minutes"] = 60
+
+        with patch(
+                "mediaforce.state_cleanup._cleanup_process_snapshot",
+                return_value=state_cleanup.CleanupProcessSnapshot((), ()),
+        ):
+            web_app.purge_transient_artifacts(self.config, force=True)
+
+        self.assertFalse(temp_dir.exists())
+
+    def test_purge_transient_artifacts_keeps_quality_temp_dirs_used_by_active_processes(self) -> None:
+        temp_dir = self.config.staging_root / ".mediaforce-ab-av1-active"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        (temp_dir / "sample.mkv").write_text("sample")
+        old_time = datetime.now().timestamp() - (2 * 3600)
+        os.utime(temp_dir, (old_time, old_time))
+        self.config.raw["state"]["cleanup"]["orphan_temp_retention_minutes"] = 60
+        snapshot = state_cleanup.CleanupProcessSnapshot((f"ab-av1 crf-search --temp-dir {temp_dir}",), ())
+
+        with patch("mediaforce.state_cleanup._cleanup_process_snapshot", return_value=snapshot):
+            web_app.purge_transient_artifacts(self.config, force=True)
+
+        self.assertTrue(temp_dir.exists())
+
+    def test_purge_transient_artifacts_keeps_temp_dirs_when_host_processes_are_unverified(self) -> None:
+        temp_dir = self.config.staging_root / ".mediaforce-ab-av1-unverified"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        (temp_dir / "sample.mkv").write_text("sample")
+        old_time = datetime.now().timestamp() - (2 * 3600)
+        os.utime(temp_dir, (old_time, old_time))
+        self.config.raw["state"]["cleanup"]["orphan_temp_retention_minutes"] = 60
+        snapshot = state_cleanup.CleanupProcessSnapshot((), (self.config.staging_root,))
+
+        with patch("mediaforce.state_cleanup._cleanup_process_snapshot", return_value=snapshot):
+            web_app.purge_transient_artifacts(self.config, force=True)
+
+        self.assertTrue(temp_dir.exists())
+
+    def test_purge_transient_artifacts_prunes_old_unowned_run_manifests_only(self) -> None:
+        old_manifest = self._write_manifest("manifest-old-unowned.json", [{"library_item_id": 1}])
+        active_manifest = self._write_manifest("manifest-needs-attention.json", [{"library_item_id": 2}])
+        for path in (old_manifest, active_manifest):
+            old_time = datetime.now().timestamp() - (16 * 86400)
+            os.utime(path, (old_time, old_time))
+
+        with open_db(self.config.paths.db_path) as connection:
+            now = web_app._now_iso()
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "manifest-needs-attention-job",
+                    "prefix": "tv/show",
+                    "job_kind": "folder",
+                    "parent_job_id": None,
+                    "status": "needs_attention",
+                    "manifest_path": str(active_manifest),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": None,
+                    "host": {},
+                    "last_host": {},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 0,
+                    "process_pid": None,
+                    "error": "needs operator decision",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": None,
+                    "last_failure_at": None,
+                    "host_cooldown_until": None,
+                    "created_at": now,
+                    "started_at": now,
+                    "finished_at": now,
+                    "updated_at": now,
+                },
+            )
+
+        with patch(
+                "mediaforce.state_cleanup._cleanup_process_snapshot",
+                return_value=state_cleanup.CleanupProcessSnapshot((), ()),
+        ):
+            web_app.purge_transient_artifacts(self.config, force=True)
+
+        self.assertFalse(old_manifest.exists())
+        self.assertTrue(active_manifest.exists())
 
     def test_purge_transient_artifacts_prunes_legacy_local_quality_temp_root(self) -> None:
         legacy_root = quality.legacy_local_quality_temp_root()
