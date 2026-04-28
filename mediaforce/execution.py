@@ -22,7 +22,8 @@ from mediaforce.encoding.runner import run_encode_command as _run_encode_command
     run_streamed_remote_encode_command as _run_streamed_remote_encode_command_impl, \
     run_tracked_process as _run_tracked_process_impl
 from mediaforce.encoding.staging import finalize_output_path as _finalize_output_path_impl, \
-    promote_one_item as promote_one_item_impl, validate_one_item as validate_one_item_impl
+    probe_packet_end_seconds, promote_one_item as promote_one_item_impl, remux_container_metadata, \
+    validate_one_item as validate_one_item_impl
 from mediaforce.encoding.streams import _audio_codec as _audio_codec_impl, _check as _check_impl, \
     estimate_output_overhead_bytes as estimate_output_overhead_bytes_impl, \
     _estimate_audio_track_bytes as _estimate_audio_track_bytes_impl, \
@@ -263,6 +264,8 @@ def validate_one_item(connection: DBClient, config: MediaforceConfig, item: dict
         check=_check,
         timestamp=timestamp,
         record_event=_record_event,
+        packet_end_probe=probe_packet_end_seconds,
+        remux_container=remux_container_metadata,
     )
 
 

@@ -6979,6 +6979,162 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             assert stored_status_row is not None
             self.assertEqual(stored_status_row["status"], "encoded")
 
+    def test_validate_one_item_repairs_unreadable_container_duration(self) -> None:
+        source_path = self._create_source_file("episode-remux-repair.mkv")
+        staging_path = self._staging_path("episode-remux-repair.mkv")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("encoded")
+        self.config.raw["validation"] = {"require_size_reduction": True}
+        unreadable_staged_probe = ProbeSummary(
+            duration_seconds=None,
+            video_codec="av1",
+            video_bitrate=900000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+        repaired_probe = ProbeSummary(
+            duration_seconds=120.0,
+            video_codec="av1",
+            video_bitrate=900000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+        staging_probe_calls = 0
+
+        def fake_probe(path: Path) -> ProbeSummary:
+            nonlocal staging_probe_calls
+            if path == source_path:
+                return repaired_probe
+            if path == staging_path:
+                staging_probe_calls += 1
+                return unreadable_staged_probe if staging_probe_calls == 1 else repaired_probe
+            return repaired_probe
+
+        def fake_remux(_staged_path: Path, repaired_path: Path) -> None:
+            repaired_path.write_text("remuxed")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoded")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            item = {
+                "library_item_id": item_id,
+                "source_path": str(source_path),
+                "source_size_bytes": 1024,
+                "duration_seconds": 120.0,
+                "subtitle_summary": [],
+            }
+            with patch("mediaforce.execution.probe_media", side_effect=fake_probe), patch(
+                    "mediaforce.execution.probe_packet_end_seconds", return_value=120.2
+            ) as packet_probe_mock, patch(
+                    "mediaforce.execution.remux_container_metadata", side_effect=fake_remux
+            ) as remux_mock:
+                validation = execution.validate_one_item(connection, self.config, item)
+
+            self.assertTrue(validation["passed"])
+            self.assertEqual(validation["container_metadata_repair"]["repaired"], True)
+            self.assertIn(
+                {"passed": True, "message": "staged file duration is readable"},
+                validation["checks"],
+            )
+            self.assertEqual(packet_probe_mock.call_count, 2)
+            remux_mock.assert_called_once()
+            stored_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+            stored_validation_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.validation_json)
+            assert stored_status_row is not None
+            assert stored_validation_row is not None
+            self.assertEqual(stored_status_row["status"], "validated")
+            self.assertTrue(json.loads(cast(str, stored_validation_row["validation_json"]))["passed"])
+
+    def test_validate_one_item_does_not_repair_when_packet_duration_is_short(self) -> None:
+        source_path = self._create_source_file("episode-remux-short.mkv")
+        staging_path = self._staging_path("episode-remux-short.mkv")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("encoded")
+        self.config.raw["validation"] = {"require_size_reduction": True}
+        unreadable_staged_probe = ProbeSummary(
+            duration_seconds=None,
+            video_codec="av1",
+            video_bitrate=900000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+        source_probe = ProbeSummary(
+            duration_seconds=120.0,
+            video_codec="h264",
+            video_bitrate=1800000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+
+        def fake_probe(path: Path) -> ProbeSummary:
+            return source_probe if path == source_path else unreadable_staged_probe
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoded")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            item = {
+                "library_item_id": item_id,
+                "source_path": str(source_path),
+                "source_size_bytes": 1024,
+                "duration_seconds": 120.0,
+                "subtitle_summary": [],
+            }
+            with patch("mediaforce.execution.probe_media", side_effect=fake_probe), patch(
+                    "mediaforce.execution.probe_packet_end_seconds", return_value=60.0
+            ), patch("mediaforce.execution.remux_container_metadata") as remux_mock:
+                validation = execution.validate_one_item(connection, self.config, item)
+
+            self.assertFalse(validation["passed"])
+            self.assertEqual(validation["container_metadata_repair"]["repaired"], False)
+            self.assertEqual(
+                validation["container_metadata_repair"]["skipped_reason"],
+                "packet timestamps did not prove the staged file is complete",
+            )
+            self.assertIn(
+                {"passed": False, "message": "staged file duration is readable"},
+                validation["checks"],
+            )
+            remux_mock.assert_not_called()
+            stored_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+            assert stored_status_row is not None
+            self.assertEqual(stored_status_row["status"], "encoded")
+
     def test_promote_one_item_moves_source_and_updates_metadata(self) -> None:
         source_path = self._create_source_file("episode-promote.mkv")
         staging_path = self._staging_path("episode-promote.mp4")
