@@ -44,6 +44,7 @@ export interface EncodeJobProgressTelemetry {
 	eta_copy?: string | null;
 	current_item_number?: number;
 	total_item_count?: number;
+	completed_item_count?: number;
 	current_item_rel_path?: string;
 	progress_state?: string;
 	failure_analysis?: EncodeFailureAnalysis | null;
@@ -70,7 +71,9 @@ export interface EncodeFailureAnalysis {
 	proposed_max_encoded_percent?: number | null;
 	summary?: string;
 	manifest_indexes?: number[];
+	manifest_index?: number;
 	item_rel_path?: string;
+	item_analyses?: EncodeFailureAnalysis[];
 }
 
 export interface EncodeQueueJob {

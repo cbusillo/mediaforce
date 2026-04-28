@@ -462,11 +462,31 @@ def aggregate_encode_parent_job(
         ],
         "updated_at": deps.now_iso(),
     }
+    failure_analyses: list[dict[str, Any]] = []
+    failure_indexes: list[int] = []
     for child in attention_children + failed_children + stopped_children:
         failure_analysis = object_dict(object_dict(child.get("progress")).get("failure_analysis"))
-        if failure_analysis:
-            progress["failure_analysis"] = failure_analysis
-            break
+        if not failure_analysis:
+            continue
+        child_item_analyses = [object_dict(item) for item in object_list(failure_analysis.get("item_analyses"))]
+        if child_item_analyses:
+            failure_analyses.extend(child_item_analyses)
+        else:
+            failure_analyses.append(failure_analysis)
+        for index in object_list(failure_analysis.get("manifest_indexes")):
+            if isinstance(index, int) and index >= 0:
+                failure_indexes.append(index)
+    if failure_analyses:
+        if not failure_indexes:
+            failure_indexes = [
+                int_value(analysis.get("manifest_index"))
+                for analysis in failure_analyses
+                if int_value(analysis.get("manifest_index")) >= 0
+            ]
+        progress["failure_analysis"] = _aggregate_quality_failure_analysis(
+            sorted(set(failure_indexes)),
+            failure_analyses,
+        )
     waiting_reason = None
     if not running_children:
         for child in children:

@@ -10803,6 +10803,135 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(aggregated["running_shard_count"], 1)
         self.assertEqual(aggregated["progress"]["progress_state"], "running")
 
+    def test_aggregate_encode_parent_job_includes_all_quality_failures(self) -> None:
+        manifest_path = self._write_manifest(
+            "manifest-parent-quality-failures.json",
+            [
+                {"library_item_id": 1, "duration_seconds": 120.0, "source_size_bytes": 1000},
+                {"library_item_id": 2, "duration_seconds": 180.0, "source_size_bytes": 2000},
+            ],
+        )
+        now = web_app._now_iso()
+
+        def job_payload(**overrides: object) -> dict[str, object]:
+            payload: dict[str, object] = {
+                "job_id": "folder-quality-failures",
+                "prefix": "tv/show",
+                "job_kind": "folder",
+                "parent_job_id": None,
+                "status": "running",
+                "manifest_path": str(manifest_path),
+                "manifest_indexes": None,
+                "item_count": 2,
+                "saved_profile_path": None,
+                "host": {},
+                "last_host": {},
+                "notes": "",
+                "bypass_schedule": False,
+                "attempt_count": 0,
+                "process_pid": None,
+                "error": None,
+                "leased_at": None,
+                "lease_expires_at": None,
+                "heartbeat_at": None,
+                "worker_id": None,
+                "retry_not_before": None,
+                "waiting_reason": None,
+                "terminal_reason": None,
+                "last_failure_kind": None,
+                "last_failure_at": None,
+                "host_cooldown_until": None,
+                "created_at": now,
+                "started_at": now,
+                "finished_at": None,
+                "updated_at": now,
+            }
+            payload.update(overrides)
+            return payload
+
+        first_analysis = {
+            "kind": "quality_floor_too_strict",
+            "retry_strategy": "needs_operator_approval",
+            "auto_retry_allowed": False,
+            "manifest_index": 0,
+            "manifest_indexes": [0],
+            "item_rel_path": "tv/show/e01.mkv",
+            "requested_metric": "VMAF",
+            "target_score": 88.0,
+            "best_candidate": {"crf": 50.0, "metric": "VMAF", "score": 87.15, "predicted_encode_percent": 15.0},
+            "summary": "First failed policy search.",
+        }
+        second_analysis = {
+            "kind": "size_cap_too_strict",
+            "retry_strategy": "needs_operator_approval",
+            "auto_retry_allowed": False,
+            "manifest_index": 1,
+            "manifest_indexes": [1],
+            "item_rel_path": "tv/show/e02.mkv",
+            "requested_metric": "VMAF",
+            "target_score": 88.0,
+            "proposed_max_encoded_percent": 18,
+            "best_candidate": {"crf": 48.0, "metric": "VMAF", "score": 87.12, "predicted_encode_percent": 17.0},
+            "summary": "Second failed policy search.",
+        }
+
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(connection, job_payload())
+            save_encode_job(
+                connection,
+                job_payload(
+                    job_id="quality-failure-a",
+                    job_kind="shard",
+                    parent_job_id="folder-quality-failures",
+                    status="needs_attention",
+                    manifest_indexes=[0],
+                    item_count=1,
+                    error="Failed to find a suitable crf",
+                    terminal_reason="deterministic",
+                    last_failure_kind="deterministic",
+                    progress={
+                        "total_item_count": 1,
+                        "completed_item_count": 0,
+                        "total_duration_seconds": 120.0,
+                        "overall_completed_duration_seconds": 0.0,
+                        "failure_analysis": first_analysis,
+                    },
+                ),
+            )
+            save_encode_job(
+                connection,
+                job_payload(
+                    job_id="quality-failure-b",
+                    job_kind="shard",
+                    parent_job_id="folder-quality-failures",
+                    status="needs_attention",
+                    manifest_indexes=[1],
+                    item_count=1,
+                    error="Failed to find a suitable crf",
+                    terminal_reason="deterministic",
+                    last_failure_kind="deterministic",
+                    progress={
+                        "total_item_count": 1,
+                        "completed_item_count": 0,
+                        "total_duration_seconds": 180.0,
+                        "overall_completed_duration_seconds": 0.0,
+                        "failure_analysis": second_analysis,
+                    },
+                ),
+            )
+            parent = load_encode_job(connection, "folder-quality-failures")
+            assert parent is not None
+            aggregated = encode_runtime.aggregate_encode_parent_job(
+                connection,
+                parent,
+                web_app._encode_queue_runtime_deps(),
+            )
+
+        failure_analysis = object_dict(object_dict(aggregated["progress"]).get("failure_analysis"))
+        self.assertEqual(failure_analysis["manifest_indexes"], [0, 1])
+        self.assertEqual(len(object_list(failure_analysis["item_analyses"])), 2)
+        self.assertIn("2 of 2 selected items", str(failure_analysis["summary"]))
+
     def test_queue_folder_encode_rejects_existing_active_encode_for_prefix(self) -> None:
         manifest_path = self._write_manifest("manifest-existing-active.json", [{"library_item_id": 1}])
         with open_db(self.config.paths.db_path) as connection:

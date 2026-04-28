@@ -128,6 +128,58 @@
 		return compactError.length > 180 ? `${compactError.slice(0, 177)}...` : compactError;
 	}
 
+	function encodeFailureFileName(relPath: string | undefined) {
+		const path = String(relPath ?? '').trim();
+		const fileName = path.split('/').filter(Boolean).at(-1) ?? path;
+		const episodeMatch = fileName.match(/S\d{2}E\d{2}/i);
+		if (!episodeMatch) return fileName;
+		const detailParts = [
+			fileName.match(/\b\d{3,4}p\b/i)?.[0],
+			/BluRay/i.test(fileName) ? 'BluRay' : null,
+			/WEB[-.]?DL/i.test(fileName) ? 'WEB-DL' : null,
+			/x265|H\.265|HEVC/i.test(fileName) ? 'x265' : null
+		].filter(Boolean);
+		return detailParts.length
+			? `${episodeMatch[0].toUpperCase()} · ${detailParts.join(' ')}`
+			: episodeMatch[0].toUpperCase();
+	}
+
+	function encodeFailureKindCopy(kind: string | undefined) {
+		if (kind === 'size_cap_too_strict') return 'Size cap blocks the floor';
+		if (kind === 'quality_floor_too_strict') return 'Quality floor blocks the cap';
+		return kind ? titleCase(kind.replace(/_/g, ' ')) : 'Policy search stopped';
+	}
+
+	function encodeFailureMeasuredCopy(analysis: EncodeFailureAnalysis) {
+		const candidate = analysis.best_candidate;
+		const metric = String(candidate?.metric ?? analysis.requested_metric ?? 'score').trim();
+		const score = Number(candidate?.score ?? NaN);
+		const crf = Number(candidate?.crf ?? NaN);
+		const percent = Number(candidate?.predicted_encode_percent ?? NaN);
+		const parts: string[] = [];
+		if (Number.isFinite(crf)) parts.push(`CRF ${crf}`);
+		if (Number.isFinite(score)) parts.push(`${metric} ${score.toFixed(2)}`);
+		if (Number.isFinite(percent)) parts.push(formatPercentCopy(percent));
+		return parts.length ? parts.join(' · ') : 'Measured candidates did not satisfy policy';
+	}
+
+	function encodeFailureDecisionCopy(analysis: EncodeFailureAnalysis) {
+		const proposedCap = Number(analysis.proposed_max_encoded_percent ?? NaN);
+		const target = Number(analysis.target_score ?? NaN);
+		const metric = String(analysis.requested_metric ?? 'quality').trim();
+		if (
+			analysis.kind === 'size_cap_too_strict' &&
+			Number.isFinite(proposedCap) &&
+			proposedCap > 0
+		) {
+			return `Approve ${formatPercentCopy(proposedCap)} cap or lower ${metric} target`;
+		}
+		if (Number.isFinite(target)) {
+			return `Approve lower ${metric} than ${target.toFixed(1)} or raise the cap`;
+		}
+		return 'Approve a policy change, then retry';
+	}
+
 	async function refreshFolderView() {
 		if (autoRefreshInFlight) return;
 		autoRefreshInFlight = true;
@@ -1219,6 +1271,30 @@
 	const encodeFailureAnalysis = $derived(
 		(encodeJobProgress?.failure_analysis as EncodeFailureAnalysis | null | undefined) ?? null
 	);
+	const encodeFailureItems = $derived.by(() => {
+		if (!encodeFailureAnalysis) return [] as EncodeFailureAnalysis[];
+		const rawItems = encodeFailureAnalysis.item_analyses?.length
+			? encodeFailureAnalysis.item_analyses
+			: [encodeFailureAnalysis];
+		const seen: string[] = [];
+		return rawItems.filter((item) => {
+			const key = `${item.manifest_index ?? ''}:${item.item_rel_path ?? ''}:${item.summary ?? ''}`;
+			if (seen.includes(key)) return false;
+			seen.push(key);
+			return true;
+		});
+	});
+	const encodeFailureItemCount = $derived(encodeFailureItems.length);
+	const encodeFailureSummaryCopy = $derived.by(() => {
+		if (!encodeFailureItemCount) return '';
+		const completedCount = Number(encodeJobProgress?.completed_item_count ?? 0);
+		const totalCount = Number(encodeJobProgress?.total_item_count ?? 0);
+		const completedCopy =
+			completedCount > 0 && totalCount > 0
+				? `${completedCount} of ${totalCount} files encoded. `
+				: '';
+		return `${completedCopy}${encodeFailureItemCount} file${encodeFailureItemCount === 1 ? '' : 's'} need a policy decision before the folder can continue.`;
+	});
 	const encodeJobActiveHosts = $derived.by(() =>
 		((encodeJob?.active_hosts as Array<Record<string, unknown>> | undefined) ?? []).filter(Boolean)
 	);
@@ -1502,6 +1578,9 @@
 		if (encodeJobStatus === 'running') return 'Folder encode running';
 		if (encodeJobStatus === 'queued') return 'Approved and queued';
 		if (encodeJobStatus === 'retry_backoff') return 'Retry scheduled';
+		if (encodeJobStalled && encodeFailureItemCount > 0) {
+			return `${encodeFailureItemCount} file${encodeFailureItemCount === 1 ? '' : 's'} need a policy decision`;
+		}
 		if (encodeJobStalled) return 'Encode stalled';
 		if (encodeJobStatus === 'completed') return 'Encode complete';
 		return 'Approved and waiting for queue';
@@ -1511,6 +1590,7 @@
 			return 'Recover the interrupted files or open Ops for deeper queue detail.';
 		}
 		if (encodeJobStalled) {
+			if (encodeFailureSummaryCopy) return encodeFailureSummaryCopy;
 			const reason = encodeJobDetail || 'The folder encode stopped before it finished.';
 			return `Reason: ${reason}`;
 		}
@@ -2473,6 +2553,30 @@
 											</div>
 										</div>
 									</div>
+									{#if encodeJobStalled && encodeFailureItems.length}
+										<div
+											class="processing-failure-table"
+											aria-label="Files needing encode attention"
+										>
+											<div
+												class="processing-failure-row processing-failure-head"
+												aria-hidden="true"
+											>
+												<span>File</span>
+												<span>Issue</span>
+												<span>Measured best</span>
+												<span>Decision</span>
+											</div>
+											{#each encodeFailureItems as failureItem, index (`${failureItem.manifest_index ?? index}:${failureItem.item_rel_path ?? ''}`)}
+												<div class="processing-failure-row">
+													<strong>{encodeFailureFileName(failureItem.item_rel_path)}</strong>
+													<span>{encodeFailureKindCopy(failureItem.kind)}</span>
+													<span>{encodeFailureMeasuredCopy(failureItem)}</span>
+													<span>{encodeFailureDecisionCopy(failureItem)}</span>
+												</div>
+											{/each}
+										</div>
+									{/if}
 									<div
 										class="processing-strip-stats"
 										aria-label="Approved encode status and output facts"
@@ -3617,6 +3721,51 @@
 		background: rgba(15, 23, 42, 0.48);
 	}
 
+	.processing-failure-table {
+		display: grid;
+		border: 1px solid rgba(251, 146, 60, 0.3);
+		background: rgba(7, 10, 16, 0.42);
+		overflow: hidden;
+	}
+
+	.processing-failure-row {
+		display: grid;
+		grid-template-columns: minmax(13rem, 1.25fr) minmax(8rem, 0.9fr) minmax(9rem, 0.85fr) minmax(
+				12rem,
+				1fr
+			);
+		gap: 0.65rem;
+		align-items: start;
+		padding: 0.55rem 0.65rem;
+		border-top: 1px solid rgba(148, 163, 184, 0.14);
+		font-size: 0.82rem;
+		line-height: 1.3;
+		color: rgba(241, 245, 249, 0.86);
+	}
+
+	.processing-failure-row:first-child {
+		border-top: 0;
+	}
+
+	.processing-failure-row strong {
+		color: #f8fafc;
+		overflow-wrap: anywhere;
+	}
+
+	.processing-failure-row span {
+		overflow-wrap: anywhere;
+	}
+
+	.processing-failure-head {
+		padding-block: 0.42rem;
+		background: rgba(251, 146, 60, 0.12);
+		color: rgba(255, 237, 213, 0.78);
+		font-size: 0.68rem;
+		font-weight: 800;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
 	.processing-strip-stats {
 		display: grid;
 		grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -4169,6 +4318,13 @@
 			grid-template-columns: repeat(3, minmax(0, 1fr));
 		}
 
+		.processing-failure-row {
+			grid-template-columns: minmax(11rem, 1.2fr) minmax(8rem, 0.9fr) minmax(8rem, 0.8fr) minmax(
+					10rem,
+					1fr
+				);
+		}
+
 		.review-console-head {
 			grid-template-columns: minmax(0, 1fr);
 		}
@@ -4333,6 +4489,15 @@
 
 		.processing-strip-stats {
 			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+
+		.processing-failure-head {
+			display: none;
+		}
+
+		.processing-failure-row {
+			grid-template-columns: minmax(0, 1fr);
+			gap: 0.3rem;
 		}
 
 		.bench-column {
