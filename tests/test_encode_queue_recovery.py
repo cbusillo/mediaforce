@@ -7063,6 +7063,100 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(stored_status_row["status"], "validated")
             self.assertTrue(json.loads(cast(str, stored_validation_row["validation_json"]))["passed"])
 
+    def test_validate_one_item_keeps_original_when_remux_candidate_fails_validation(self) -> None:
+        source_path = self._create_source_file("episode-remux-candidate-fails.mkv")
+        staging_path = self._staging_path("episode-remux-candidate-fails.mkv")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("encoded")
+        candidate_path = staging_path.with_name(f"{staging_path.stem}.remuxing{staging_path.suffix}")
+        self.config.raw["validation"] = {"require_size_reduction": True}
+        unreadable_staged_probe = ProbeSummary(
+            duration_seconds=None,
+            video_codec="av1",
+            video_bitrate=900000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+        source_probe = ProbeSummary(
+            duration_seconds=120.0,
+            video_codec="h264",
+            video_bitrate=1800000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+        bad_candidate_probe = ProbeSummary(
+            duration_seconds=120.0,
+            video_codec="av1",
+            video_bitrate=900000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=2,
+            subtitle_track_count=0,
+            english_audio_count=2,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+
+        def fake_probe(path: Path) -> ProbeSummary:
+            if path == source_path:
+                return source_probe
+            if path == candidate_path:
+                return bad_candidate_probe
+            return unreadable_staged_probe
+
+        def fake_remux(_staged_path: Path, repaired_path: Path) -> None:
+            repaired_path.write_text("remuxed")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoded")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            item = {
+                "library_item_id": item_id,
+                "source_path": str(source_path),
+                "source_size_bytes": 1024,
+                "duration_seconds": 120.0,
+                "subtitle_summary": [],
+            }
+            with patch("mediaforce.execution.probe_media", side_effect=fake_probe), patch(
+                    "mediaforce.execution.probe_packet_end_seconds", return_value=120.2
+            ), patch("mediaforce.execution.remux_container_metadata", side_effect=fake_remux):
+                validation = execution.validate_one_item(connection, self.config, item)
+
+            self.assertFalse(validation["passed"])
+            self.assertEqual(validation["container_metadata_repair"]["repaired"], False)
+            self.assertEqual(
+                validation["container_metadata_repair"]["skipped_reason"],
+                "normal validation failed after remux candidate",
+            )
+            self.assertIn(
+                {"passed": False, "message": "exactly one audio track remains"},
+                validation["checks"],
+            )
+            self.assertEqual(staging_path.read_text(), "encoded")
+            self.assertFalse(candidate_path.exists())
+
     def test_validate_one_item_does_not_repair_when_packet_duration_is_short(self) -> None:
         source_path = self._create_source_file("episode-remux-short.mkv")
         staging_path = self._staging_path("episode-remux-short.mkv")
@@ -10151,8 +10245,16 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         command_payload = run_remote_command_mock.call_args.args[1]
         self.assertEqual(command_payload[:3], ["sh", "-lc", command_payload[2]])
         self.assertEqual(command_payload[3], "mediaforce-sweep")
-        self.assertIn(re.escape(str(host_staging_root / "tv" / "show")), command_payload[4])
-        self.assertIn(re.escape(str(self.root / "source" / "tv" / "show")), command_payload[4])
+        self.assertIn(
+            f"{re.escape(str(host_staging_root / 'tv' / 'show'))}(/|[[:space:]]|$)",
+            command_payload[4],
+        )
+        self.assertIn(
+            f"{re.escape(str(self.root / 'source' / 'tv' / 'show'))}(/|[[:space:]]|$)",
+            command_payload[4],
+        )
+        self.assertNotIn(re.escape(str(host_staging_root / "tv" / "showing")), command_payload[4])
+        self.assertNotIn(re.escape(str(self.root / "source" / "tv" / "showing")), command_payload[4])
 
     def test_create_app_registers_folder_status_route_before_catch_all_folder_route(self) -> None:
         with patch("mediaforce.web.app.load_config", return_value=self.config), patch(

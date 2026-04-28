@@ -152,6 +152,7 @@ def validate_one_item(
     require_size_reduction = bool(config.validation.get("require_size_reduction", True))
     source_duration_seconds = float_value(item.get("duration_seconds") or row.get("source_duration_seconds"))
     staged_duration_seconds = float_value(staged_probe.duration_seconds)
+    repair_candidate_path: Path | None = None
     if source_duration_seconds > 0:
         repair = _maybe_repair_unreadable_container_duration(
             item,
@@ -168,10 +169,12 @@ def validate_one_item(
             remux_container=remux_container,
         )
         if repair:
+            candidate_path_value = repair.pop("_candidate_path", None)
             validation["container_metadata_repair"] = repair
-            if repair.get("repaired"):
-                staged_probe = probe_media(staging_path)
-                staged_size_bytes = staging_path.stat().st_size
+            if candidate_path_value:
+                repair_candidate_path = Path(str(candidate_path_value))
+                staged_probe = probe_media(repair_candidate_path)
+                staged_size_bytes = repair_candidate_path.stat().st_size
                 validation.update(
                     {
                         "staged_size_bytes": staged_size_bytes,
@@ -210,6 +213,23 @@ def validate_one_item(
                 staged_duration_seconds >= minimum_expected_duration,
                 "staged duration closely matches the source",
             )
+
+    if repair_candidate_path is not None:
+        repair_payload = validation.get("container_metadata_repair")
+        if validation["passed"]:
+            try:
+                repair_candidate_path.replace(staging_path)
+                if isinstance(repair_payload, dict):
+                    repair_payload["repaired"] = True
+            except Exception as exc:  # noqa: BLE001 - leave validation failed if the repaired file cannot be installed.
+                if isinstance(repair_payload, dict):
+                    repair_payload["error"] = str(exc)
+                check(validation, False, "container metadata repair replaced staged file")
+                safe_unlink(repair_candidate_path)
+        else:
+            if isinstance(repair_payload, dict):
+                repair_payload["skipped_reason"] = "normal validation failed after remux candidate"
+            safe_unlink(repair_candidate_path)
 
     now = timestamp()
     connection.execute(
@@ -306,14 +326,14 @@ def _maybe_repair_unreadable_container_duration(
         if repaired_duration_seconds < _minimum_expected_duration(effective_source_duration):
             repair["skipped_reason"] = "remuxed duration still did not match source"
             return repair
-        repaired_path.replace(staging_path)
+        repair["_candidate_path"] = str(repaired_path)
     except Exception as exc:  # noqa: BLE001 - validation should retain original staged file on repair issues.
         repair["error"] = str(exc)
         return repair
     finally:
-        safe_unlink(repaired_path)
+        if "_candidate_path" not in repair:
+            safe_unlink(repaired_path)
 
-    repair["repaired"] = True
     return repair
 
 

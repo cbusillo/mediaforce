@@ -2882,16 +2882,20 @@ def _sweep_orphaned_encode_processes(config: MediaforceConfig, *, prefixes: list
         if not normalized_prefixes:
             return ""
         patterns: list[str] = []
+
+        def path_prefix_pattern(path: Path) -> str:
+            return f"{re.escape(str(path))}(/|[[:space:]]|$)"
+
         for prefix in normalized_prefixes:
-            patterns.append(re.escape(str(config.staging_root_for_host(target_host) / prefix)))
+            patterns.append(path_prefix_pattern(config.staging_root_for_host(target_host) / prefix))
             for root_key, source_root in config.source_root_map_for_host(target_host).items():
                 root_prefix = str(root_key).strip().strip("/")
                 if prefix == root_prefix:
-                    patterns.append(re.escape(str(source_root)))
+                    patterns.append(path_prefix_pattern(source_root))
                     continue
                 root_leader = f"{root_prefix}/"
                 if prefix.startswith(root_leader):
-                    patterns.append(re.escape(str(source_root / prefix[len(root_leader):])))
+                    patterns.append(path_prefix_pattern(source_root / prefix[len(root_leader):]))
         return "|".join(patterns)
 
     sweep_script = (
