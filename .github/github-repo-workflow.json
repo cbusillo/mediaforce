@@ -1,13 +1,101 @@
 {
   "defaultBranch": "main",
-  "importantWorkflows": ["CI"],
+  "projectType": "media-workstation-app",
+  "docs": {
+    "index": "docs/README.md",
+    "acceptanceGate": "docs/policies/acceptance-gate.md",
+    "codingStandards": "docs/policies/coding-standards.md",
+    "architecture": "docs/architecture/module-boundaries.md",
+    "databaseTooling": "docs/development/database-tooling.md",
+    "workstationUi": "docs/style/workstation-ui.md",
+    "style": [
+      "docs/style/index.md",
+      "docs/style/python.md",
+      "docs/style/frontend.md",
+      "docs/style/testing.md",
+      "docs/style/workstation-ui.md"
+    ],
+    "design": [
+      "docs/design/workstation-home-screen-brief.md",
+      "docs/design/workstation-home-screen-inventory.md",
+      "docs/design/operator-workstation-shell-brief.md"
+    ]
+  },
+  "qualityGate": {
+    "test": {
+      "backendCi": "uv run --with pytest pytest -q -k \"not test_bootstrap_remote_macos_returns_noop_when_no_bootstrap_issues and not test_bootstrap_remote_macos_routes_xcode_issue_to_request_helper and not test_remote_host_status_targets_current_machine_without_ssh_probe and not test_ffmpeg_hwaccel_included_when_videotoolbox_available\"",
+      "backendFull": "uv run --with pytest pytest",
+      "frontend": "npm --prefix frontend test"
+    },
+    "lint": {
+      "frontend": "npm --prefix frontend run lint"
+    },
+    "typecheck": {
+      "frontend": "npm --prefix frontend run check"
+    },
+    "build": {
+      "frontend": "npm --prefix frontend run build",
+      "package": "uv build"
+    },
+    "smoke": {
+      "cli": "uv run mediaforce --help"
+    },
+    "acceptance": {
+      "default": "bash scripts/pre-commit-check.sh"
+    },
+    "inspection": {
+      "tool": "jetbrains",
+      "ide": "PyCharm",
+      "scopePreference": ["changed_files", "directory", "whole_project"]
+    },
+    "docsRequiredWhen": [
+      "behavior changes",
+      "api changes",
+      "config changes",
+      "operations changes",
+      "ownership boundaries change",
+      "user-visible UI changes",
+      "operator workflow changes",
+      "media processing behavior changes"
+    ]
+  },
+  "importantWorkflows": ["CI", "CodeQL", "Dependency Graph"],
   "qaLabels": [],
   "deployLabels": [],
   "healthUrls": [],
   "relatedRepos": [],
   "validatedThrough": [],
+  "githubSignals": {
+    "postMerge": {
+      "waitForActions": true,
+      "checkSecurityAndQuality": true
+    },
+    "capabilities": {
+      "codeScanning": "available",
+      "secretScanning": "available",
+      "dependabotAlerts": "available",
+      "securityAdvisories": "available"
+    },
+    "refreshWhen": [
+      "repo visibility changes",
+      "GitHub plan changes",
+      "security settings change",
+      "token permissions change"
+    ]
+  },
   "cleanup": {
     "deleteMergedLocalBranches": true,
     "removeMergedCleanWorktrees": true
+  },
+  "metadataFreshness": {
+    "updateWhen": [
+      "docs routing changes",
+      "validation gates change",
+      "primary commands change",
+      "important workflows change",
+      "repo relationship changes",
+      "cleanup policy changes",
+      "ownership boundaries change"
+    ]
   }
 }

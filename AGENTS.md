@@ -17,14 +17,10 @@ Only session-start facts that are easy to miss belong here.
   media artifacts into the repo
 - `uv build` now auto-builds `frontend/` during wheel packaging; do not rely on
   stale checked-in or local `frontend/build/` artifacts
+- Use `.github/github-repo-workflow.json` for repo commands and quality gates
 
-## Defaults
+## Workflow Notes
 
-- Backend targeted tests:
-  `uv run --with pytest pytest tests/test_encode_queue_recovery.py tests/test_tuning_runtime.py`
-- Frontend checks: `cd frontend && npm run check`
-- Full local acceptance gate: `bash scripts/pre-commit-check.sh`
-- CLI smoke: `uv run mediaforce --help`
 - UI changes: validate in a real browser
 - Before changing primary operator surfaces, read
   `docs/style/workstation-ui.md`
