@@ -59,7 +59,7 @@
       "media processing behavior changes"
     ]
   },
-  "importantWorkflows": ["CI", "CodeQL", "Dependency Graph"],
+  "importantWorkflows": ["CI"],
   "qaLabels": [],
   "deployLabels": [],
   "healthUrls": [],

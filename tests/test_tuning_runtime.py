@@ -1366,7 +1366,13 @@ class TuningRuntimeTests(unittest.TestCase):
             response = asyncio.run(route.endpoint(_FakeRequest({"prefixes": ["tv"]})))
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("Unknown completed-folder prefix", json.loads(response.body)["message"])
+        self.assertEqual(
+            json.loads(response.body),
+            {
+                "ok": False,
+                "message": "Completed cleanup request could not be processed. Review the selected folders and try again.",
+            },
+        )
 
     def test_completed_cleanup_route_rejects_malformed_json(self) -> None:
         from mediaforce.web import app as web_app

@@ -5,6 +5,10 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+COMPLETED_CLEANUP_ERROR_MESSAGE = (
+    "Completed cleanup request could not be processed. Review the selected folders and try again."
+)
+
 
 def register_completed_routes(
         app: FastAPI,
@@ -30,5 +34,5 @@ def register_completed_routes(
         prefixes = raw_prefixes if isinstance(raw_prefixes, list) else None
         try:
             return JSONResponse(clear_completed_backups_action(prefixes))
-        except ValueError as exc:
-            return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+        except ValueError:
+            return JSONResponse({"ok": False, "message": COMPLETED_CLEANUP_ERROR_MESSAGE}, status_code=400)
