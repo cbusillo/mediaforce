@@ -10256,6 +10256,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
     def test_sweep_orphaned_encode_processes_only_targets_ssh_encode_hosts(self) -> None:
         self.config.raw["remote_hosts"] = [
             {"host": "encode-a", "label": "Encode A", "mode": "ssh", "capabilities": ["encode_queue"]},
+            {"host": "encode-b", "label": "Encode B", "capabilities": ["encode_queue"]},
+            {"host": "encode-c", "label": "Encode C", "mode": "   ", "capabilities": ["encode_queue"]},
             {"host": "sample-only", "label": "Sample Only", "mode": "ssh", "capabilities": ["sample_calibration"]},
             {"host": "local-ish", "label": "Local-ish", "mode": "local", "capabilities": ["encode_queue"]},
         ]
@@ -10263,10 +10265,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with patch("mediaforce.web.app.run_remote_command") as run_remote_command_mock:
             web_app._sweep_orphaned_encode_processes(self.config)
 
-        run_remote_command_mock.assert_called_once()
-        host_payload = run_remote_command_mock.call_args.args[0]
+        self.assertEqual(run_remote_command_mock.call_count, 3)
+        self.assertEqual(
+            [call.args[0]["host"] for call in run_remote_command_mock.call_args_list],
+            ["encode-a", "encode-b", "encode-c"],
+        )
         command_payload = run_remote_command_mock.call_args.args[1]
-        self.assertEqual(host_payload["host"], "encode-a")
         self.assertEqual(command_payload[:2], ["sh", "-lc"])
         self.assertIn("self_pgid=$(ps -o pgid= -p \"$self_pid\"", command_payload[2])
         self.assertIn("kill_tree() ( signal=$1; target=$2;", command_payload[2])

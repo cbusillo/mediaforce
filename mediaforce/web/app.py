@@ -65,6 +65,7 @@ from mediaforce.execution import (
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.planner import build_manifest_item
 from mediaforce.hosts.types import HostSetupResult
+from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.core.process_control import ManagedProcessController
 from mediaforce.encoding.quality import run_sample_encode, select_quality_metric
 from mediaforce.remote import (
@@ -2924,7 +2925,7 @@ def _sweep_orphaned_encode_processes(config: MediaforceConfig, *, prefixes: list
         }
         if "encode_queue" not in capabilities:
             continue
-        if str(host.get("mode") or "ssh").strip().lower() != "ssh":
+        if configured_remote_host_execution_mode(host) != "ssh":
             continue
         try:
             path_filter = path_filter_for_host(host)
