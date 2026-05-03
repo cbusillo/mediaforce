@@ -67,7 +67,6 @@ later revisions run. Encode artifacts also persist richer telemetry now: source
 size and path at encode time, host and worker metadata, wall-clock encode
 duration, and append-only item events for encode start, completion, and
 failure.
-subsequent Alembic upgrades run.
 
 For migration authoring and review workflow, see
 `docs/development/database-tooling.md`.
