@@ -327,7 +327,10 @@ def _remote_hosts_requiring_process_probe(
 ) -> list[dict[str, object]]:
     hosts: list[dict[str, object]] = []
     for host in config.remote_hosts:
-        mode = str(host.get("mode") or "ssh").strip().lower() or "ssh"
+        raw_mode = host.get("mode")
+        if raw_mode is not None and not str(raw_mode).strip():
+            continue
+        mode = str(raw_mode or "ssh").strip().lower() or "ssh"
         if mode != "ssh":
             continue
         if host_targets_current_machine(host):
