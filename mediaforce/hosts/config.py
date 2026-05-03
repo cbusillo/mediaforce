@@ -91,6 +91,14 @@ def execution_mode_for_host(host: dict[str, object] | None) -> str:
     return mode
 
 
+def configured_remote_host_execution_mode(host: dict[str, object]) -> str:
+    host_payload = object_dict(host)
+    mode = str(host_payload.get("mode") or "ssh").strip().lower() or "ssh"
+    if mode == "ssh" and host_targets_current_machine(host_payload):
+        return "local"
+    return mode
+
+
 def _ssh_lookup_host(ssh_host: str) -> str:
     host_part = ssh_host.rsplit("@", 1)[-1].strip()
     if host_part.startswith("[") and "]" in host_part:
@@ -123,6 +131,7 @@ __all__ = [
     "_host_supports_capability",
     "_parse_utc_offset_minutes",
     "_ssh_lookup_host",
+    "configured_remote_host_execution_mode",
     "execution_mode_for_host",
     "host_media_access_for_host",
     "host_status_targets_current_machine",
