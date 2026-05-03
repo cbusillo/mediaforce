@@ -10,6 +10,8 @@ AB_AV1_MISSING_ISSUE = "ab-av1 is not installed on the remote PATH."
 SAMPLE_METRIC_MISSING_ISSUE = "ffmpeg is missing both libvmaf and xpsnr support required for sampled calibration."
 SAMPLE_AV1_ENCODER_MISSING_ISSUE = "ffmpeg is missing libsvtav1 support required for sampled calibration."
 LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE = "Sampled calibration is not supported on Linux hosts."
+SOURCE_ROOT_READ_MISSING_ISSUE = "Source root is not readable on this host."
+STAGING_ROOT_WRITE_MISSING_ISSUE = "Staging root is not writable on this host."
 
 
 @dataclass(slots=True)
@@ -56,4 +58,6 @@ __all__ = [
     "REMOTE_STATUS_RETRY_DELAY_SECONDS",
     "SAMPLE_AV1_ENCODER_MISSING_ISSUE",
     "SAMPLE_METRIC_MISSING_ISSUE",
+    "SOURCE_ROOT_READ_MISSING_ISSUE",
+    "STAGING_ROOT_WRITE_MISSING_ISSUE",
 ]

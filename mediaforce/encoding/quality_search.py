@@ -4,6 +4,8 @@ from typing import Any, Callable
 from mediaforce.encoding.quality import QualitySearchError, QualitySearchResult
 from mediaforce.encoding.video_filters import build_video_filter
 
+MAX_CRF_SEARCH_CEILING = 63
+
 
 def search_quality(
         source_path: Path,
@@ -36,32 +38,47 @@ def search_quality(
     video_filter = build_video_filter(video_policy, width=width, height=height, detected_crop=detected_crop)
     attempted_target = metric_target
     last_error: Exception | None = None
+    configured_max_crf = int(video_policy["max_crf"])
 
     while attempted_target >= min_target:
-        try:
-            return run_crf_search(
-                source_path,
-                source_codec=source_codec,
-                preferred_metric=metric_name,
-                metric_target=attempted_target,
-                preset=preset,
-                pixel_format=str(video_policy["pixel_format"]),
-                sample_every=str(video_policy["sample_every"]),
-                sample_duration=str(video_policy["sample_duration"]),
-                min_crf=int(video_policy["min_crf"]),
-                max_crf=int(video_policy["max_crf"]),
-                max_encoded_percent=int(video_policy["max_encoded_percent"]),
-                svt_params=svt_params,
-                video_filter=video_filter,
-                thorough=bool(video_policy.get("thorough", False)),
-                process_controller=process_controller,
-                host=quality_host,
-                quality_temp_dir=quality_temp_dir,
-            )
-        except QualitySearchError as exc:
-            last_error = exc
-            attempted_target = round(attempted_target - relax_step, 3)
+        for max_crf in _max_crf_attempts(configured_max_crf):
+            try:
+                return run_crf_search(
+                    source_path,
+                    source_codec=source_codec,
+                    preferred_metric=metric_name,
+                    metric_target=attempted_target,
+                    preset=preset,
+                    pixel_format=str(video_policy["pixel_format"]),
+                    sample_every=str(video_policy["sample_every"]),
+                    sample_duration=str(video_policy["sample_duration"]),
+                    min_crf=int(video_policy["min_crf"]),
+                    max_crf=max_crf,
+                    max_encoded_percent=int(video_policy["max_encoded_percent"]),
+                    svt_params=svt_params,
+                    video_filter=video_filter,
+                    thorough=bool(video_policy.get("thorough", False)),
+                    process_controller=process_controller,
+                    host=quality_host,
+                    quality_temp_dir=quality_temp_dir,
+                )
+            except QualitySearchError as exc:
+                last_error = exc
+                if max_crf < MAX_CRF_SEARCH_CEILING and _failed_to_find_suitable_crf(exc):
+                    continue
+                break
+        attempted_target = round(attempted_target - relax_step, 3)
 
     if last_error is not None:
         raise last_error
     raise RuntimeError("Quality search did not run")
+
+
+def _max_crf_attempts(configured_max_crf: int) -> list[int]:
+    if configured_max_crf >= MAX_CRF_SEARCH_CEILING:
+        return [MAX_CRF_SEARCH_CEILING]
+    return [configured_max_crf, MAX_CRF_SEARCH_CEILING]
+
+
+def _failed_to_find_suitable_crf(exc: QualitySearchError) -> bool:
+    return "failed to find a suitable crf" in str(exc).lower()

@@ -10,6 +10,7 @@ from mediaforce.execution import describe_item_plan, estimate_output_overhead_by
 from mediaforce.review import render_audio_spectrogram_compare, render_review_contact_sheet, render_review_timeline_strip
 from mediaforce.reviewing.helpers import planned_audio_action, planned_opus_bitrate, select_primary_audio_track
 from mediaforce.web.runtime.folder_tuning_advice import audio_tradeoff_hint
+from mediaforce.web.runtime.folder_tuning_helpers import size_budget_sample_analysis
 
 LOGGER = logging.getLogger(__name__)
 
@@ -90,6 +91,7 @@ def build_tuning_runtime_toolbelt(
         current_policy: dict[str, Any],
         calibration: dict[str, Any] | None,
         metric_support: dict[str, bool],
+        operator_request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     sample_plan_item = dict(sample_item)
     sample_plan_item["resolved_policy"] = current_policy
@@ -122,6 +124,12 @@ def build_tuning_runtime_toolbelt(
     tradeoff_hint = audio_tradeoff_hint(sample_item, object_dict(current_policy.get("audio")))
     if tradeoff_hint is not None:
         toolbelt["audio_tradeoff_hint"] = tradeoff_hint
+    size_target_analysis = size_budget_sample_analysis(
+        operator_request=operator_request,
+        calibration_payload=object_dict(calibration),
+    )
+    if size_target_analysis:
+        toolbelt["size_target_analysis"] = size_target_analysis
     review_media_context = deps.review_media_context(calibration)
     if review_media_context.get("review_media_ready") or review_media_context.get("moment_count"):
         toolbelt["review_media_context"] = review_media_context

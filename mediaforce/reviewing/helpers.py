@@ -5,6 +5,8 @@ from typing import Any, Callable
 
 from mediaforce.core.type_defs import int_value, object_list
 
+MAX_AUTO_SCAN_DURATION_SECONDS = 30 * 60
+
 
 def planned_audio_action(audio_track: dict[str, Any], audio_policy: dict[str, Any]) -> str:
     codec = str(audio_track.get("codec_name") or "").lower()
@@ -59,14 +61,15 @@ def auto_timestamps(
         scene_change_timestamps_fn: Callable[..., list[float]],
         default_timestamps_fn: Callable[[float, float], list[float]],
 ) -> list[float]:
-    complexity_points = complexity_timestamps_fn(
-        source_path,
-        total_duration,
-        clip_duration,
-        process_controller=process_controller,
-    )
-    if complexity_points:
-        return complexity_points
+    if total_duration <= MAX_AUTO_SCAN_DURATION_SECONDS:
+        complexity_points = complexity_timestamps_fn(
+            source_path,
+            total_duration,
+            clip_duration,
+            process_controller=process_controller,
+        )
+        if complexity_points:
+            return complexity_points
     scene_points = scene_change_timestamps_fn(
         source_path,
         total_duration,

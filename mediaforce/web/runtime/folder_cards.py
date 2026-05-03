@@ -366,9 +366,24 @@ def _web_state_latest_mtime_ns(config: MediaforceConfig) -> int:
 def _apply_folder_review_badges(cards: list[FolderCard], review_badge_for_prefix: Callable[[str], FolderBadge]) -> None:
     for card in cards:
         badge = review_badge_for_prefix(card.prefix)
+        delivery_badge = _folder_delivery_badge(card)
+        if delivery_badge is not None and badge.get("label") in (None, "Approved draft"):
+            badge = delivery_badge
         card.review_badge_label = badge["label"]
         card.review_badge_tone = badge["tone"]
         card.review_badge_detail = badge.get("detail")
+
+
+def _folder_delivery_badge(card: FolderCard) -> FolderBadge | None:
+    if card.item_count <= 0:
+        return None
+    validated_count = card.statuses.get("validated", 0)
+    encoded_count = card.statuses.get("encoded", 0)
+    if validated_count > 0 and validated_count == card.pending_count:
+        return {"label": "Ready to promote", "tone": "ok", "detail": "All staged outputs passed validation."}
+    if encoded_count > 0 and encoded_count == card.pending_count:
+        return {"label": "Ready to validate", "tone": "attention", "detail": "All pending outputs are encoded."}
+    return None
 
 
 def _copy_folder_cards(cards: list[FolderCard], *, include_review_badges: bool = True) -> list[FolderCard]:

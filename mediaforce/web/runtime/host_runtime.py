@@ -63,16 +63,19 @@ def host_runtime_rows(
             for value in raw_allowed_libraries
             if isinstance(value, str)
         ] if isinstance(raw_allowed_libraries, list) else []
-        merged_source_roots = {
-            key: str(path)
-            for key, path in config.source_root_map_for_host(host_config).items()
-        }
+        media_access = normalize_host_media_access(host_config.get("media_access"))
+        host_source_roots = (
+            config.explicit_source_root_map_for_host(host_config)
+            if media_access == "stream"
+            else config.source_root_map_for_host(host_config)
+        )
+        merged_source_roots = {key: str(path) for key, path in host_source_roots.items()}
         runtime_host_payload = {
             "host": str(host_config.get("host") or status.key),
             "start_command": str(host_config.get("start_command") or ""),
             "stop_command": str(host_config.get("stop_command") or ""),
             "start_timeout_seconds": host_lifecycle_start_timeout_seconds(host_config),
-            "media_access": normalize_host_media_access(host_config.get("media_access")),
+            "media_access": media_access,
             "allowed_libraries": allowed_libraries,
             "source_roots": merged_source_roots,
             "staging_root": str(host_config.get("staging_root") or "").strip() or None,
@@ -81,10 +84,15 @@ def host_runtime_rows(
         schedule_profile = host_schedule_profile_key(host_config)
         policy = object_dict(profiles.get(schedule_profile) or profiles[default_host_schedule_profile])
         active_encode_count = running_counts.get(status.key, 0)
-        schedule_open = scheduler_allows_encode_run(policy, now=current_time, host_payload=asdict(status))
+        status_payload = asdict(status)
+        schedule_open = scheduler_allows_encode_run(policy, now=current_time, host_payload=status_payload)
         encode_capable = "encode_queue" in capabilities
         queue_active = status.available and encode_capable and schedule_open and active_encode_count < max_parallel_encodes
-        if not status.available:
+        host_running_jobs = [job for job in running_jobs if str(job.get("host_key") or "") == status.key]
+        active_probe_degraded = bool(active_encode_count > 0 and not status.available and host_running_jobs)
+        if active_probe_degraded:
+            active_reason = "status check deferred while encode is running"
+        elif not status.available:
             active_reason = status.message
         elif not encode_capable:
             active_reason = "encode queue capability disabled"
@@ -99,15 +107,31 @@ def host_runtime_rows(
         schedule_detail = str(policy["summary"])
         if schedule_profile == always_schedule_profile and schedule_detail == "runs anytime":
             schedule_detail = ""
-        host_running_jobs = [job for job in running_jobs if str(job.get("host_key") or "") == status.key]
         host_speed = sum(_progress_float(job, "speed") for job in host_running_jobs)
         host_remaining_duration_seconds = sum(
             _progress_float(job, "remaining_duration_seconds") for job in host_running_jobs
         )
         host_eta_seconds = (host_remaining_duration_seconds / host_speed) if host_speed > 0 else None
+        if active_probe_degraded:
+            status_payload = {
+                **status_payload,
+                "probe_available": False,
+                "probe_message": status.message,
+                "probe_issues": list(status.issues),
+                "available": True,
+                "message": "Encoding in progress; latest host check was deferred",
+                "issues": [],
+            }
+        else:
+            status_payload = {
+                **status_payload,
+                "probe_available": status.available,
+                "probe_message": status.message,
+                "probe_issues": list(status.issues),
+            }
         rows.append(
             {
-                **asdict(status),
+                **status_payload,
                 **runtime_host_payload,
                 "schedule_profile": schedule_profile,
                 "schedule_profile_label": str(policy.get("label") or "Always"),

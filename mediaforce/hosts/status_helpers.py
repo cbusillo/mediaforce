@@ -12,7 +12,8 @@ from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQU
 from mediaforce.hosts.config import _host_supports_capability, host_media_access_for_host, \
     _parse_utc_offset_minutes, remote_shell_path_export_line, stream_host_has_remote_source_roots
 from mediaforce.hosts.types import AB_AV1_MISSING_ISSUE, FFMPEG_MISSING_ISSUE, HostStatus, \
-    LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE, SAMPLE_AV1_ENCODER_MISSING_ISSUE, SAMPLE_METRIC_MISSING_ISSUE
+    LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE, SAMPLE_AV1_ENCODER_MISSING_ISSUE, SAMPLE_METRIC_MISSING_ISSUE, \
+    SOURCE_ROOT_READ_MISSING_ISSUE, STAGING_ROOT_WRITE_MISSING_ISSUE
 
 
 def _local_tool_status_snapshot() -> dict[str, bool]:
@@ -58,6 +59,9 @@ def _host_capability_issues(
         platform_name: str,
         repo_path: str | None,
         repo_path_exists: bool,
+        path_access: dict[str, dict[str, bool]] | None = None,
+        source_paths: list[str] | None = None,
+        staging_path: str | None = None,
         supports_remote_stream_quality: bool | None = None,
 ) -> list[str]:
     capability_issues: list[str] = []
@@ -106,9 +110,35 @@ def _host_capability_issues(
     else:
         capability_issues.append("Unsupported remote platform.")
 
+    if supports_encode or supports_sample:
+        path_issues = _host_path_access_issues(
+            path_access=path_access or {},
+            source_paths=source_paths or [],
+            staging_path=staging_path,
+        )
+        capability_issues.extend(path_issues)
+
     if repo_path and not repo_path_exists and supports_sample:
         capability_issues.append(f"Repo path is missing: {repo_path}")
     return capability_issues
+
+
+def _host_path_access_issues(
+        *,
+        path_access: dict[str, dict[str, bool]],
+        source_paths: list[str],
+        staging_path: str | None,
+) -> list[str]:
+    issues: list[str] = []
+    for source_path in source_paths:
+        access = path_access.get(source_path, {})
+        if access and bool(access.get("exists", True)) and not bool(access.get("read")):
+            issues.append(f"{SOURCE_ROOT_READ_MISSING_ISSUE} {source_path}")
+    if staging_path:
+        access = path_access.get(staging_path, {})
+        if access and bool(access.get("exists", True)) and not bool(access.get("write")):
+            issues.append(f"{STAGING_ROOT_WRITE_MISSING_ISSUE} {staging_path}")
+    return issues
 
 
 def _find_local_tool(name: str, *, fallback_paths: list[str]) -> str | None:
@@ -201,6 +231,10 @@ def _host_message(*, available: bool, missing_paths: list[str], issues: list[str
         return "Install ab-av1 first"
     if any(issue == SVT_AV1_REQUIRED_ISSUE for issue in issues):
         return "Install AV1 encoder support"
+    if any(issue.startswith(SOURCE_ROOT_READ_MISSING_ISSUE) for issue in issues):
+        return "Source root not readable"
+    if any(issue.startswith(STAGING_ROOT_WRITE_MISSING_ISSUE) for issue in issues):
+        return "Staging root not writable"
     if issues:
         return "Needs remote setup"
     return "Missing required paths"
@@ -341,8 +375,15 @@ def _classify_ssh_failure(detail: str) -> dict[str, Any]:
     }
 
 
-def _remote_status_script(*, paths: list[str], repo_path: str) -> str:
+def _remote_status_script(
+        *,
+        paths: list[str],
+        repo_path: str,
+        include_expensive_tools: bool = True,
+        writable_paths: list[str] | None = None,
+) -> str:
     quoted_paths = " ".join(shlex.quote(path) for path in paths)
+    quoted_writable_paths = " ".join(shlex.quote(path) for path in (writable_paths or []))
     lines = [
         remote_shell_path_export_line(),
         'BREW_BIN="$(command -v brew || true)"',
@@ -354,34 +395,62 @@ def _remote_status_script(*, paths: list[str], repo_path: str) -> str:
         'AB_AV1_BIN="$(command -v ab-av1 || true)"',
         'if [ -z "$AB_AV1_BIN" ] && [ -x /opt/homebrew/bin/ab-av1 ]; then AB_AV1_BIN=/opt/homebrew/bin/ab-av1; fi',
         'if [ -z "$AB_AV1_BIN" ] && [ -x /usr/local/bin/ab-av1 ]; then AB_AV1_BIN=/usr/local/bin/ab-av1; fi',
-        'FFMPEG_FILTERS=""',
-        'FFMPEG_ENCODERS=""',
-        'FFMPEG_HWACCELS=""',
-        'if [ -n "$FFMPEG_BIN" ]; then FFMPEG_FILTERS="$("$FFMPEG_BIN" -hide_banner -filters 2>/dev/null || true)"; fi',
-        'if [ -n "$FFMPEG_BIN" ]; then FFMPEG_ENCODERS="$("$FFMPEG_BIN" -hide_banner -encoders 2>/dev/null || true)"; fi',
-        'if [ -n "$FFMPEG_BIN" ]; then FFMPEG_HWACCELS="$("$FFMPEG_BIN" -hide_banner -hwaccels 2>/dev/null || true)"; fi',
+    ]
+    if include_expensive_tools:
+        lines.extend([
+            'FFMPEG_FILTERS=""',
+            'FFMPEG_ENCODERS=""',
+            'FFMPEG_HWACCELS=""',
+            'if [ -n "$FFMPEG_BIN" ]; then FFMPEG_FILTERS="$("$FFMPEG_BIN" -hide_banner -filters 2>/dev/null || true)"; fi',
+            'if [ -n "$FFMPEG_BIN" ]; then FFMPEG_ENCODERS="$("$FFMPEG_BIN" -hide_banner -encoders 2>/dev/null || true)"; fi',
+            'if [ -n "$FFMPEG_BIN" ]; then FFMPEG_HWACCELS="$("$FFMPEG_BIN" -hide_banner -hwaccels 2>/dev/null || true)"; fi',
+        ])
+    lines.extend([
         'if xcode-select -p >/dev/null 2>&1; then printf "tool|xcode_clt|1\\n"; else printf "tool|xcode_clt|0\\n"; fi',
         'if [ -n "$BREW_BIN" ]; then printf "tool|brew|1\\n"; else printf "tool|brew|0\\n"; fi',
         'if [ -n "$FFMPEG_BIN" ]; then printf "tool|ffmpeg|1\\n"; else printf "tool|ffmpeg|0\\n"; fi',
         'if [ -n "$FFMPEG_BIN" ]; then printf "toolpath|ffmpeg|%s\\n" "$FFMPEG_BIN"; fi',
-        'if printf "%s\\n" "$FFMPEG_HWACCELS" | grep -qi "videotoolbox"; then printf "tool|ffmpeg_videotoolbox|1\\n"; else printf "tool|ffmpeg_videotoolbox|0\\n"; fi',
-        'if printf "%s\\n" "$FFMPEG_FILTERS" | grep -qi "libvmaf"; then printf "tool|ffmpeg_libvmaf|1\\n"; else printf "tool|ffmpeg_libvmaf|0\\n"; fi',
-        'if printf "%s\\n" "$FFMPEG_FILTERS" | grep -qi "xpsnr"; then printf "tool|ffmpeg_xpsnr|1\\n"; else printf "tool|ffmpeg_xpsnr|0\\n"; fi',
-        'if printf "%s\\n" "$FFMPEG_ENCODERS" | grep -qi "libsvtav1"; then printf "tool|ffmpeg_libsvtav1|1\\n"; else printf "tool|ffmpeg_libsvtav1|0\\n"; fi',
+        'if [ -n "$FFMPEG_BIN" ]; then FFMPEG_REAL="$FFMPEG_BIN"; if command -v realpath >/dev/null 2>&1; then FFMPEG_REAL="$(realpath "$FFMPEG_BIN" 2>/dev/null || printf "%s" "$FFMPEG_BIN")"; fi; if FFMPEG_SIGNATURE="$(stat -f "%N:%z:%m" "$FFMPEG_REAL" 2>/dev/null)"; then :; else FFMPEG_SIGNATURE="$(stat -c "%N:%s:%Y" "$FFMPEG_REAL" 2>/dev/null || true)"; fi; printf "toolmeta|ffmpeg_signature|%s\\n" "$FFMPEG_SIGNATURE"; fi',
+    ])
+    if include_expensive_tools:
+        lines.extend([
+            'if printf "%s\\n" "$FFMPEG_HWACCELS" | grep -qi "videotoolbox"; then printf "tool|ffmpeg_videotoolbox|1\\n"; else printf "tool|ffmpeg_videotoolbox|0\\n"; fi',
+            'if printf "%s\\n" "$FFMPEG_FILTERS" | grep -qi "libvmaf"; then printf "tool|ffmpeg_libvmaf|1\\n"; else printf "tool|ffmpeg_libvmaf|0\\n"; fi',
+            'if printf "%s\\n" "$FFMPEG_FILTERS" | grep -qi "xpsnr"; then printf "tool|ffmpeg_xpsnr|1\\n"; else printf "tool|ffmpeg_xpsnr|0\\n"; fi',
+            'if printf "%s\\n" "$FFMPEG_ENCODERS" | grep -qi "libsvtav1"; then printf "tool|ffmpeg_libsvtav1|1\\n"; else printf "tool|ffmpeg_libsvtav1|0\\n"; fi',
+        ])
+    lines.extend([
         'if [ -n "$AB_AV1_BIN" ]; then printf "tool|ab_av1|1\\n"; else printf "tool|ab_av1|0\\n"; fi',
         'printf "meta|platform|%s\\n" "$PLATFORM_NAME"',
         'printf "time|utc_offset|%s\\n" "$(date +%z)"',
-    ]
+    ])
     if paths:
         lines[16:16] = [
             f"for path in {quoted_paths}; do",
+            '  exists=0',
+            '  readable=0',
+            '  writable=0',
+            '  should_probe_write=0',
+            f"  for write_path in {quoted_writable_paths}; do",
+            '    if [ "$path" = "$write_path" ]; then should_probe_write=1; fi',
+            '  done',
             '  if [ -d "$path" ]; then',
-            '    if ls "$path" >/dev/null 2>&1; then printf "path|%s|1\\n" "$path"; else printf "path|%s|0\\n" "$path"; fi',
+            '    exists=1',
+            '    if ls "$path" >/dev/null 2>&1; then readable=1; fi',
+            '    if [ "$should_probe_write" = "1" ]; then',
+            '      probe="$(mktemp "$path/.mediaforce-write-test.XXXXXX" 2>/dev/null || true)"',
+            '      if [ -n "$probe" ]; then writable=1; rm -f "$probe" >/dev/null 2>&1 || true; fi',
+            '    fi',
             '  elif [ -e "$path" ] && [ -r "$path" ]; then',
-            '    printf "path|%s|1\\n" "$path"',
-            '  else',
-            '    printf "path|%s|0\\n" "$path"',
+            '    exists=1',
+            '    readable=1',
+            '  elif [ -e "$path" ]; then',
+            '    exists=1',
             '  fi',
+            '  if [ "$exists" = "1" ]; then printf "path|%s|1\\n" "$path"; else printf "path|%s|0\\n" "$path"; fi',
+            '  printf "pathexists|%s|%s\\n" "$path" "$exists"',
+            '  printf "pathread|%s|%s\\n" "$path" "$readable"',
+            '  printf "pathwrite|%s|%s\\n" "$path" "$writable"',
             "done",
         ]
     if repo_path:
@@ -398,6 +467,8 @@ def _parse_remote_status_output(stdout: str) -> dict[str, Any]:
         "paths": {},
         "tools": {},
         "tool_paths": {},
+        "tool_meta": {},
+        "path_access": {},
         "repo_path_exists": True,
         "utc_offset": None,
         "platform": "unknown",
@@ -412,10 +483,21 @@ def _parse_remote_status_output(stdout: str) -> dict[str, Any]:
         kind, key, value = parts
         if kind == "path":
             payload["paths"][key] = value == "1"
+        elif kind == "pathexists":
+            access = payload["path_access"].setdefault(key, {})
+            access["exists"] = value == "1"
+        elif kind == "pathread":
+            access = payload["path_access"].setdefault(key, {})
+            access["read"] = value == "1"
+        elif kind == "pathwrite":
+            access = payload["path_access"].setdefault(key, {})
+            access["write"] = value == "1"
         elif kind == "tool":
             payload["tools"][key] = value == "1"
         elif kind == "toolpath":
             payload["tool_paths"][key] = value
+        elif kind == "toolmeta":
+            payload["tool_meta"][key] = value
         elif kind == "repo":
             payload["repo_path_exists"] = value == "1"
         elif kind == "time":

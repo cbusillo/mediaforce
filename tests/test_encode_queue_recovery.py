@@ -2,6 +2,7 @@ import errno
 import io
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -19,7 +20,8 @@ from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy import update
 
-from mediaforce import execution, quality, remote, review
+from mediaforce import execution, quality, remote, review, state_cleanup
+from mediaforce.core import binaries
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import calibration_jobs
@@ -29,6 +31,7 @@ from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.models import ProbeSummary
+from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.encoding import manifest as manifest
 from mediaforce.encoding import quality_search
 from mediaforce.encoding import staging as staging_runtime
@@ -38,6 +41,7 @@ from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_pref
     load_latest_terminal_encode_job_for_prefix, load_queue_state, repair_persisted_encode_job_hosts, \
     save_encode_job, save_queue_state
 from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
+from mediaforce.hosts import status_runtime as host_status_runtime
 from mediaforce.remote import HostStatus
 from mediaforce.review import BrowserReviewClip, CompareClip, EncodedPreviewClip
 from mediaforce.web import app as web_app
@@ -58,7 +62,39 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         web_app._reset_background_worker_leadership_for_tests()
+        binaries.media_binary.cache_clear()
         self.tempdir.cleanup()
+
+    def test_media_binary_falls_back_when_preferred_homebrew_binary_is_broken(self) -> None:
+        binaries.media_binary.cache_clear()
+        preferred = self.root / "ffmpeg-full" / "ffprobe"
+        discovered = self.root / "bin" / "ffprobe"
+        preferred.parent.mkdir(parents=True)
+        discovered.parent.mkdir(parents=True)
+        preferred.write_text("broken", encoding="utf-8")
+        discovered.write_text("ok", encoding="utf-8")
+
+        def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(cmd, 1 if cmd[0] == str(preferred) else 0)
+
+        with patch.dict(binaries._HOMEBREW_BINARIES, {"ffprobe": preferred}), patch(
+                "mediaforce.core.binaries.shutil.which", return_value=str(discovered)
+        ), patch("mediaforce.core.binaries.subprocess.run", side_effect=fake_run):
+            self.assertEqual(binaries.ffprobe_binary(), str(discovered))
+
+    def test_media_binary_uses_preferred_homebrew_binary_when_it_runs(self) -> None:
+        binaries.media_binary.cache_clear()
+        preferred = self.root / "ffmpeg-full" / "ffprobe"
+        preferred.parent.mkdir(parents=True)
+        preferred.write_text("ok", encoding="utf-8")
+
+        with patch.dict(binaries._HOMEBREW_BINARIES, {"ffprobe": preferred}), patch(
+                "mediaforce.core.binaries.shutil.which", return_value="/usr/bin/ffprobe"
+        ), patch(
+                "mediaforce.core.binaries.subprocess.run",
+                return_value=subprocess.CompletedProcess([str(preferred), "-version"], 0),
+        ):
+            self.assertEqual(binaries.ffprobe_binary(), str(preferred))
 
     @staticmethod
     def _noop_load_job_state(
@@ -85,6 +121,30 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "status": "accepted",
             "next_action_label": "Auto-queued after approval",
         }
+
+    @staticmethod
+    def _folder_card_for_delivery_badge(
+            *,
+            item_count: int,
+            pending_count: int,
+            statuses: dict[str, int],
+    ) -> folder_cards_runtime.FolderCard:
+        return folder_cards_runtime.FolderCard(
+            prefix="tv/show/Season 10",
+            title="Season 10",
+            subtitle="TV",
+            scope_label="Season",
+            item_count=item_count,
+            pending_count=pending_count,
+            total_size_bytes=0,
+            estimated_savings_bytes=0,
+            known_saved_bytes=0,
+            projected_reclaim_bytes=0,
+            average_age_days=0.0,
+            sort_score=0.0,
+            statuses=statuses,
+            video_codecs={},
+        )
 
     @staticmethod
     def _noop_upsert_override(
@@ -211,6 +271,75 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(job["status"], "queued")
             self.assertIsNone(job["retry_not_before"])
             self.assertIsNone(job["waiting_reason"])
+
+    def test_retry_backoff_recleans_partial_before_queueing(self) -> None:
+        source_path = self._create_source_file("episode-backoff-cleanup.mkv")
+        staging_path = self._staging_path("episode-backoff-cleanup.mkv")
+        partial_path = staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("staged")
+        partial_path.write_text("partial")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            self._write_manifest(
+                "manifest-backoff-cleanup.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-backoff-cleanup",
+                manifest_name="manifest-backoff-cleanup.json",
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="retry_backoff",
+                attempt_count=1,
+                retry_not_before="2000-01-01T00:00:00+00:00",
+                waiting_reason="retrying",
+            )
+
+            web_app._reconcile_encode_jobs(connection, self.config)
+
+            job = load_encode_job(connection, "job-backoff-cleanup")
+            item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job["status"], "queued")
+        self.assertFalse(staging_path.exists())
+        self.assertFalse(partial_path.exists())
+        assert item_status_row is not None
+        self.assertEqual(item_status_row["status"], "planned")
+
+    def test_recover_encode_queue_sweeps_processes_for_interrupted_prefixes(self) -> None:
+        source_path = self._create_source_file("episode-restart-sweep.mkv")
+        staging_path = self._staging_path("episode-restart-sweep.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-restart-sweep.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-restart-sweep",
+                manifest_name="manifest-restart-sweep.json",
+                host={"key": "remote", "label": "Remote", "mode": "ssh"},
+                status="running",
+                attempt_count=1,
+                lease_expires_at="2999-01-01T00:00:00+00:00",
+            )
+
+            with patch("mediaforce.web.app._sweep_orphaned_encode_processes") as sweep_mock:
+                web_app._recover_encode_queue(connection, self.config)
+
+            job = load_encode_job(connection, "job-restart-sweep")
+
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job["status"], "retry_backoff")
+        sweep_mock.assert_called_once_with(self.config, prefixes=["tv/show"])
 
     def test_reconcile_encode_jobs_clears_stale_encoding_items_when_idle(self) -> None:
         source_path = self._create_source_file("episode-idle-clear.mkv")
@@ -1228,6 +1357,343 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(updated["status"], "needs_attention")
             self.assertEqual(updated["terminal_reason"], "deterministic")
 
+    def test_quality_policy_near_miss_raises_size_cap_and_retries(self) -> None:
+        source_path = self._create_source_file("episode-near-miss.mkv")
+        staging_path = self._staging_path("episode-near-miss.mkv")
+        error_message = "\n".join(
+            [
+                "[INFO ab_av1::command::sample_encode] crf 48 VMAF 89.20 predicted video stream size 130.00 MiB (18%) taking 40 minutes",
+                "[INFO ab_av1::command::sample_encode] crf 51 VMAF 86.93 predicted video stream size 108.70 MiB (16%) taking 25 minutes",
+                "[INFO ab_av1::command::crf_search] crf 51 VMAF 86.93 (16%)",
+                "Error: Failed to find a suitable crf",
+            ]
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            manifest_path = self._write_manifest(
+                "manifest-quality-near-miss.json",
+                [
+                    {
+                        "library_item_id": item_id,
+                        "rel_path": "tv/show/episode-near-miss.mkv",
+                        "staging_path": str(staging_path),
+                        "resolved_policy": {
+                            "video": {
+                                "quality_metric": "vmaf",
+                                "target_vmaf": 88.0,
+                                "min_target_vmaf": 86.5,
+                                "max_encoded_percent": 15,
+                            }
+                        },
+                    }
+                ],
+            )
+            self._save_job(
+                connection,
+                job_id="job-quality-near-miss",
+                manifest_name="manifest-quality-near-miss.json",
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="running",
+                attempt_count=1,
+            )
+
+            job = load_encode_job(connection, "job-quality-near-miss")
+            assert job is not None
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind="deterministic",
+                error_message=error_message,
+            )
+
+            updated = load_encode_job(connection, "job-quality-near-miss")
+            manifest = json.loads(manifest_path.read_text())
+
+        self.assertIsNotNone(updated)
+        assert updated is not None
+        self.assertEqual(updated["status"], "retry_backoff")
+        self.assertIsNone(updated["terminal_reason"])
+        self.assertIn("measured policy adjustment", str(updated["waiting_reason"]))
+        failure_analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
+        self.assertEqual(failure_analysis["kind"], "size_cap_too_strict")
+        self.assertTrue(failure_analysis["auto_retry_allowed"])
+        self.assertEqual(failure_analysis["proposed_max_encoded_percent"], 17)
+        self.assertEqual(
+            manifest["items"][0]["resolved_policy"]["video"]["max_encoded_percent"],
+            17,
+        )
+
+    def test_quality_policy_large_size_miss_stays_attention_with_analysis(self) -> None:
+        source_path = self._create_source_file("episode-large-miss.mkv")
+        staging_path = self._staging_path("episode-large-miss.mkv")
+        error_message = "\n".join(
+            [
+                "[INFO ab_av1::command::sample_encode] crf 44 VMAF 87.30 predicted video stream size 190.00 MiB (24%) taking 40 minutes",
+                "Error: Failed to find a suitable crf",
+            ]
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-quality-large-miss.json",
+                [
+                    {
+                        "library_item_id": item_id,
+                        "rel_path": "tv/show/episode-large-miss.mkv",
+                        "staging_path": str(staging_path),
+                        "resolved_policy": {
+                            "video": {
+                                "quality_metric": "vmaf",
+                                "target_vmaf": 88.0,
+                                "min_target_vmaf": 86.5,
+                                "max_encoded_percent": 15,
+                            }
+                        },
+                    }
+                ],
+            )
+            self._save_job(
+                connection,
+                job_id="job-quality-large-miss",
+                manifest_name="manifest-quality-large-miss.json",
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="running",
+                attempt_count=1,
+            )
+
+            job = load_encode_job(connection, "job-quality-large-miss")
+            assert job is not None
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind="deterministic",
+                error_message=error_message,
+            )
+
+            updated = load_encode_job(connection, "job-quality-large-miss")
+
+        self.assertIsNotNone(updated)
+        assert updated is not None
+        self.assertEqual(updated["status"], "needs_attention")
+        failure_analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
+        self.assertEqual(failure_analysis["kind"], "size_cap_too_strict")
+        self.assertFalse(failure_analysis["auto_retry_allowed"])
+
+    def test_quality_policy_ignores_missing_configured_metric_measurements(self) -> None:
+        error_message = "\n".join(
+            [
+                "[INFO ab_av1::command::sample_encode] crf 42 XPSNR 10.20 predicted video stream size 120.00 MiB (16%) taking 20 minutes",
+                "Error: Failed to find a suitable crf",
+            ]
+        )
+
+        analysis = quality.analyze_quality_policy_failure(
+            error_message,
+            {
+                "quality_metric": "vmaf",
+                "target_vmaf": 88.0,
+                "min_target_vmaf": 86.5,
+                "max_encoded_percent": 15,
+            },
+        )
+
+        self.assertIsNone(analysis)
+
+    def test_quality_policy_floor_miss_uses_best_score_candidate(self) -> None:
+        error_message = "\n".join(
+            [
+                "[INFO ab_av1::command::sample_encode] crf 48 VMAF 80.00 predicted video stream size 80.00 MiB (8%) taking 12 minutes",
+                "[INFO ab_av1::command::sample_encode] crf 40 VMAF 85.90 predicted video stream size 160.00 MiB (18%) taking 25 minutes",
+                "Error: Failed to find a suitable crf",
+            ]
+        )
+
+        analysis = object_dict(
+            quality.analyze_quality_policy_failure(
+                error_message,
+                {
+                    "quality_metric": "vmaf",
+                    "target_vmaf": 88.0,
+                    "min_target_vmaf": 86.5,
+                    "max_encoded_percent": 20,
+                },
+            )
+        )
+
+        self.assertEqual(analysis["kind"], "quality_floor_too_strict")
+        self.assertEqual(object_dict(analysis["best_candidate"])["score"], 85.9)
+
+    def test_quality_policy_multi_item_retry_updates_each_selected_item_cap(self) -> None:
+        first_source_path = self._create_source_file("episode-multi-a.mkv")
+        second_source_path = self._create_source_file("episode-multi-b.mkv")
+        first_staging_path = self._staging_path("episode-multi-a.mkv")
+        second_staging_path = self._staging_path("episode-multi-b.mkv")
+        error_message = "\n".join(
+            [
+                "[INFO ab_av1::command::sample_encode] crf 42 VMAF 87.30 predicted video stream size 126.00 MiB (16.2%) taking 25 minutes",
+                "Error: Failed to find a suitable crf",
+            ]
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            first_item_id = self._insert_library_item(connection, first_source_path, status="encoding")
+            second_item_id = self._insert_library_item(connection, second_source_path, status="encoding")
+            manifest_path = self._write_manifest(
+                "manifest-quality-multi-miss.json",
+                [
+                    {
+                        "library_item_id": first_item_id,
+                        "rel_path": "tv/show/episode-multi-a.mkv",
+                        "staging_path": str(first_staging_path),
+                        "resolved_policy": {
+                            "video": {
+                                "quality_metric": "vmaf",
+                                "target_vmaf": 88.0,
+                                "min_target_vmaf": 86.5,
+                                "max_encoded_percent": 15,
+                            }
+                        },
+                    },
+                    {
+                        "library_item_id": second_item_id,
+                        "rel_path": "tv/show/episode-multi-b.mkv",
+                        "staging_path": str(second_staging_path),
+                        "resolved_policy": {
+                            "video": {
+                                "quality_metric": "vmaf",
+                                "target_vmaf": 88.0,
+                                "min_target_vmaf": 86.5,
+                                "max_encoded_percent": 16,
+                            }
+                        },
+                    },
+                ],
+            )
+            self._save_job(
+                connection,
+                job_id="job-quality-multi-miss",
+                manifest_name="manifest-quality-multi-miss.json",
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="running",
+                attempt_count=1,
+            )
+
+            job = load_encode_job(connection, "job-quality-multi-miss")
+            assert job is not None
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind="deterministic",
+                error_message=error_message,
+            )
+
+            updated = load_encode_job(connection, "job-quality-multi-miss")
+            manifest = json.loads(manifest_path.read_text())
+
+        self.assertIsNotNone(updated)
+        assert updated is not None
+        self.assertEqual(updated["status"], "retry_backoff")
+        failure_analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
+        self.assertTrue(failure_analysis["auto_retry_allowed"])
+        self.assertEqual(len(object_list(failure_analysis["item_analyses"])), 2)
+        self.assertEqual(
+            manifest["items"][0]["resolved_policy"]["video"]["max_encoded_percent"],
+            17,
+        )
+        self.assertEqual(
+            manifest["items"][1]["resolved_policy"]["video"]["max_encoded_percent"],
+            17,
+        )
+
+    def test_quality_policy_multi_item_partial_analysis_requires_attention(self) -> None:
+        first_source_path = self._create_source_file("episode-partial-a.mkv")
+        second_source_path = self._create_source_file("episode-partial-b.mkv")
+        first_staging_path = self._staging_path("episode-partial-a.mkv")
+        second_staging_path = self._staging_path("episode-partial-b.mkv")
+        error_message = "\n".join(
+            [
+                "[INFO ab_av1::command::sample_encode] crf 42 VMAF 87.30 predicted video stream size 126.00 MiB (16.2%) taking 25 minutes",
+                "Error: Failed to find a suitable crf",
+            ]
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            first_item_id = self._insert_library_item(connection, first_source_path, status="encoding")
+            second_item_id = self._insert_library_item(connection, second_source_path, status="encoding")
+            manifest_path = self._write_manifest(
+                "manifest-quality-partial-miss.json",
+                [
+                    {
+                        "library_item_id": first_item_id,
+                        "rel_path": "tv/show/episode-partial-a.mkv",
+                        "staging_path": str(first_staging_path),
+                        "resolved_policy": {
+                            "video": {
+                                "quality_metric": "vmaf",
+                                "target_vmaf": 88.0,
+                                "min_target_vmaf": 86.5,
+                                "max_encoded_percent": 15,
+                            }
+                        },
+                    },
+                    {
+                        "library_item_id": second_item_id,
+                        "rel_path": "tv/show/episode-partial-b.mkv",
+                        "staging_path": str(second_staging_path),
+                        "resolved_policy": {
+                            "video": {
+                                "quality_metric": "xpsnr",
+                                "target_xpsnr": 12.0,
+                                "min_target_xpsnr": 11.0,
+                                "max_encoded_percent": 15,
+                            }
+                        },
+                    },
+                ],
+            )
+            self._save_job(
+                connection,
+                job_id="job-quality-partial-miss",
+                manifest_name="manifest-quality-partial-miss.json",
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="running",
+                attempt_count=1,
+            )
+
+            job = load_encode_job(connection, "job-quality-partial-miss")
+            assert job is not None
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind="deterministic",
+                error_message=error_message,
+            )
+
+            updated = load_encode_job(connection, "job-quality-partial-miss")
+            manifest = json.loads(manifest_path.read_text())
+
+        self.assertIsNotNone(updated)
+        assert updated is not None
+        self.assertEqual(updated["status"], "needs_attention")
+        failure_analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
+        self.assertFalse(failure_analysis["auto_retry_allowed"])
+        self.assertEqual(failure_analysis["retry_strategy"], "needs_operator_approval")
+        self.assertIn("1 of 2 selected items", str(failure_analysis["summary"]))
+        self.assertEqual(
+            manifest["items"][0]["resolved_policy"]["video"]["max_encoded_percent"],
+            15,
+        )
+        self.assertEqual(
+            manifest["items"][1]["resolved_policy"]["video"]["max_encoded_percent"],
+            15,
+        )
+
     def test_quality_search_failure_is_deterministic_even_for_ssh_host(self) -> None:
         job = {
             "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},
@@ -1235,6 +1701,22 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         exc = quality.QualitySearchError(
             "ssh remote command exited with status 1\nError: Failed to find a suitable crf"
         )
+
+        self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "deterministic")
+
+    def test_quality_temp_setup_timeout_is_ssh_transport_for_remote_host(self) -> None:
+        job = {
+            "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+        }
+        exc = quality.QualityTempSetupError("mkdir: /Volumes/media/transcode: Operation timed out")
+
+        self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "ssh_transport")
+
+    def test_quality_temp_setup_plain_failure_stays_deterministic(self) -> None:
+        job = {
+            "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+        }
+        exc = quality.QualityTempSetupError("No writable quality temp root available")
 
         self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "deterministic")
 
@@ -1997,7 +2479,35 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(rows[0]["stop_command"], "ssh prox-main.shiny pct shutdown 103")
         self.assertEqual(rows[0]["start_timeout_seconds"], 420)
 
-    def test_host_runtime_rows_include_merged_source_roots(self) -> None:
+    def test_host_runtime_rows_include_merged_source_roots_for_mounted_hosts(self) -> None:
+        merged_tv_root = self.root / "source" / "tv"
+        self.config.raw["media"]["source_roots"] = {"tv": str(merged_tv_root)}
+        self.config.raw["remote_hosts"] = [
+            {
+                "host": "ct103",
+                "label": "CT103",
+                "media_access": "mounted",
+                "capabilities": ["encode_queue"],
+            }
+        ]
+        status = HostStatus(
+            key="ct103",
+            label="CT103",
+            mode="ssh",
+            priority=50,
+            capabilities=["encode_queue"],
+            available=True,
+            message="Mounted and ready",
+            missing_paths=[],
+        )
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.web.app._safe_collect_host_statuses", return_value=[status]
+        ):
+            rows = web_app._host_runtime_rows(connection, self.config)
+
+        self.assertEqual(rows[0]["source_roots"], {"tv": str(merged_tv_root)})
+
+    def test_host_runtime_rows_do_not_inherit_source_roots_for_stream_hosts(self) -> None:
         merged_tv_root = self.root / "source" / "tv"
         self.config.raw["media"]["source_roots"] = {"tv": str(merged_tv_root)}
         self.config.raw["remote_hosts"] = [
@@ -2023,7 +2533,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ):
             rows = web_app._host_runtime_rows(connection, self.config)
 
-        self.assertEqual(rows[0]["source_roots"], {"tv": str(merged_tv_root)})
+        self.assertEqual(rows[0]["source_roots"], {})
 
     def test_select_encode_host_waits_for_cooldown_when_only_startable_host_is_blocked(self) -> None:
         job = {
@@ -3075,6 +3585,72 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(second_cards[0].review_badge_tone, "danger")
         folder_cards_runtime.reset_folder_card_cache()
 
+    def test_folder_cards_show_delivery_badge_after_approved_draft_validates(self) -> None:
+        validated = self._create_source_file("episode-validated-badge.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            validated_id = self._insert_library_item(connection, validated, status="validated")
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == validated_id)
+                .values(
+                    size_bytes=2 * 1024 * 1024 * 1024,
+                    rel_path=f"tv/show/Season 9/{validated.name}",
+                    parent_dir="tv/show/Season 9",
+                    video_codec="h264",
+                )
+            )
+            self._insert_staged_artifact(connection, validated_id, self._staging_path(validated.name))
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == validated_id)
+                .values(bytes_saved=2 * 1024 * 1024 * 1024)
+            )
+
+            cards = folder_cards_runtime.list_folder_cards(
+                connection,
+                minimum_recommended_savings_bytes=100 * 1024 * 1024,
+                folder_group=web_app._folder_group,
+                age_days=lambda _path: 1.0,
+                estimate_savings_bytes=Mock(return_value=2 * 1024 * 1024 * 1024),
+                review_badge_for_prefix=Mock(return_value={"label": "Approved draft", "tone": "ok"}),
+            )
+
+        card = next(card for card in cards if card.prefix == "tv/show/Season 9")
+        self.assertEqual(card.review_badge_label, "Ready to promote")
+        self.assertEqual(card.review_badge_tone, "ok")
+        self.assertEqual(card.review_badge_detail, "All staged outputs passed validation.")
+
+    def test_folder_delivery_badge_ignores_mixed_validated_and_encoded_items(self) -> None:
+        card = self._folder_card_for_delivery_badge(
+            item_count=4,
+            pending_count=4,
+            statuses={"validated": 2, "encoded": 2},
+        )
+
+        self.assertIsNone(folder_cards_runtime._folder_delivery_badge(card))
+
+    def test_folder_delivery_badge_still_marks_promoted_and_encoded_items_ready_to_validate(self) -> None:
+        card = self._folder_card_for_delivery_badge(
+            item_count=4,
+            pending_count=2,
+            statuses={"promoted": 2, "encoded": 2},
+        )
+
+        self.assertEqual(
+            folder_cards_runtime._folder_delivery_badge(card),
+            {"label": "Ready to validate", "tone": "attention", "detail": "All pending outputs are encoded."},
+        )
+
+    def test_folder_delivery_badge_ignores_fully_promoted_folders(self) -> None:
+        card = self._folder_card_for_delivery_badge(
+            item_count=4,
+            pending_count=0,
+            statuses={"promoted": 4},
+        )
+
+        self.assertIsNone(folder_cards_runtime._folder_delivery_badge(card))
+
     def test_cached_folder_cards_recomputes_after_reset_during_cache_miss(self) -> None:
         folder_cards_runtime.reset_folder_card_cache()
 
@@ -3987,6 +4563,88 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(exc.exception.status_code, 409)
         self.assertIn("high-impact policy changes", str(exc.exception.detail))
 
+    def test_save_profile_action_rejects_softened_confirmed_operator_request(self) -> None:
+        calibration_payload: folder_actions_runtime.ActionPayload = {
+            "mode": "sample",
+            "job_id": "sample-1",
+            "review_media_ready": True,
+            "policy": {"video": {"target_vmaf": 95.0}},
+            "sample_item": {
+                "library_item_id": 1,
+                "resolved_policy": {"video": {"target_vmaf": 95.0}},
+            },
+        }
+
+        with self.assertRaises(HTTPException) as exc:
+            folder_actions_runtime.save_profile_action(
+                self.config,
+                "tv/show",
+                now_iso=web_app._now_iso,
+                load_sample_item=lambda *_args, **_kwargs: None,
+                load_calibration_state=lambda *_args, **_kwargs: dict(calibration_payload),
+                calibration_draft_hash=web_app._calibration_draft_hash,
+                save_calibration_state=lambda *_args, **_kwargs: None,
+                load_advice_state=lambda *_args, **_kwargs: {
+                    "request_disposition": "softened",
+                    "operator_request": {
+                        "operator_confirmed": True,
+                        "request_type": "size_budget",
+                        "applied_policy": {"video": {"max_encoded_percent": 8}},
+                    },
+                },
+                record_visual_approval_artifact=lambda *_args, **_kwargs: None,
+                merge_advice_state=lambda *_args, **_kwargs: {},
+                upsert_override=web_app._upsert_override,
+                confirm_high_impact=True,
+                reviewed_draft_hash=web_app._calibration_draft_hash(calibration_payload),
+            )
+
+        self.assertEqual(exc.exception.status_code, 409)
+        self.assertIn("does not carry the approved operator request", str(exc.exception.detail))
+
+    def test_save_profile_action_rejects_alignment_mismatch_before_approval(self) -> None:
+        calibration_payload: folder_actions_runtime.ActionPayload = {
+            "mode": "sample",
+            "job_id": "sample-1",
+            "review_media_ready": True,
+            "policy": {"video": {"target_vmaf": 89.0, "max_encoded_percent": 2}},
+            "sample_item": {
+                "library_item_id": 1,
+                "resolved_policy": {"video": {"target_vmaf": 95.0, "max_encoded_percent": 55}},
+            },
+        }
+
+        with self.assertRaises(HTTPException) as exc:
+            folder_actions_runtime.save_profile_action(
+                self.config,
+                "tv/show",
+                now_iso=web_app._now_iso,
+                load_sample_item=lambda *_args, **_kwargs: None,
+                load_calibration_state=lambda *_args, **_kwargs: dict(calibration_payload),
+                calibration_draft_hash=web_app._calibration_draft_hash,
+                save_calibration_state=lambda *_args, **_kwargs: None,
+                load_advice_state=lambda *_args, **_kwargs: {
+                    "request_disposition": "honored_with_risk",
+                    "operator_request": {
+                        "operator_confirmed": True,
+                        "request_type": "combined_experiment",
+                        "scale_height": 1080,
+                        "budget_bytes": 314572800,
+                        "applied_max_encoded_percent": 2,
+                        "applied_policy": {"video": {"max_height": 1080, "max_encoded_percent": 2}},
+                        "size_budget_request": {"applied_max_encoded_percent": 2},
+                    },
+                },
+                record_visual_approval_artifact=lambda *_args, **_kwargs: None,
+                merge_advice_state=lambda *_args, **_kwargs: {},
+                upsert_override=web_app._upsert_override,
+                confirm_high_impact=True,
+                reviewed_draft_hash=web_app._calibration_draft_hash(calibration_payload),
+            )
+
+        self.assertEqual(exc.exception.status_code, 409)
+        self.assertIn("does not apply the requested 1080p height cap", str(exc.exception.detail))
+
     def test_run_sampled_calibration_keeps_review_directory_for_approval(self) -> None:
         source_path = self._create_source_file("episode-review.mkv")
         preview_dir = self.config.paths.review_dir / "run-123" / "item-00"
@@ -4820,6 +5478,130 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertFalse(temp_dir.exists())
 
+    def test_cleanup_process_snapshot_probes_remote_hosts_without_explicit_mode(self) -> None:
+        self.config.raw["remote_hosts"] = [
+            {
+                "host": "cbusillo@example-host",
+                "label": "Remote",
+                "capabilities": ["encode_queue"],
+            }
+        ]
+
+        with patch(
+                "mediaforce.state_cleanup._local_process_commands",
+                return_value=[],
+        ), patch(
+                "mediaforce.state_cleanup.run_remote_command",
+                return_value=subprocess.CompletedProcess(
+                    args=["ssh"],
+                    returncode=0,
+                    stdout="remote-proc\n",
+                    stderr="",
+                ),
+        ) as run_remote_mock:
+            snapshot = state_cleanup._cleanup_process_snapshot(self.config)
+
+        run_remote_mock.assert_called_once()
+        self.assertEqual(snapshot.commands, ("remote-proc",))
+
+    def test_purge_transient_artifacts_prunes_orphaned_quality_temp_dirs_before_general_retention(self) -> None:
+        temp_dir = self.config.paths.web_state_dir / "quality-temp" / ".mediaforce-ab-av1-orphan"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        (temp_dir / "sample.mkv").write_text("sample")
+        old_time = datetime.now().timestamp() - (2 * 3600)
+        os.utime(temp_dir, (old_time, old_time))
+        self.config.raw["state"]["cleanup"]["orphan_temp_retention_minutes"] = 60
+
+        with patch(
+                "mediaforce.state_cleanup._cleanup_process_snapshot",
+                return_value=state_cleanup.CleanupProcessSnapshot((), ()),
+        ):
+            web_app.purge_transient_artifacts(self.config, force=True)
+
+        self.assertFalse(temp_dir.exists())
+
+    def test_purge_transient_artifacts_keeps_quality_temp_dirs_used_by_active_processes(self) -> None:
+        temp_dir = self.config.staging_root / ".mediaforce-ab-av1-active"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        (temp_dir / "sample.mkv").write_text("sample")
+        old_time = datetime.now().timestamp() - (2 * 3600)
+        os.utime(temp_dir, (old_time, old_time))
+        self.config.raw["state"]["cleanup"]["orphan_temp_retention_minutes"] = 60
+        snapshot = state_cleanup.CleanupProcessSnapshot((f"ab-av1 crf-search --temp-dir {temp_dir}",), ())
+
+        with patch("mediaforce.state_cleanup._cleanup_process_snapshot", return_value=snapshot):
+            web_app.purge_transient_artifacts(self.config, force=True)
+
+        self.assertTrue(temp_dir.exists())
+
+    def test_purge_transient_artifacts_keeps_temp_dirs_when_host_processes_are_unverified(self) -> None:
+        temp_dir = self.config.staging_root / ".mediaforce-ab-av1-unverified"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        (temp_dir / "sample.mkv").write_text("sample")
+        old_time = datetime.now().timestamp() - (2 * 3600)
+        os.utime(temp_dir, (old_time, old_time))
+        self.config.raw["state"]["cleanup"]["orphan_temp_retention_minutes"] = 60
+        snapshot = state_cleanup.CleanupProcessSnapshot((), (self.config.staging_root,))
+
+        with patch("mediaforce.state_cleanup._cleanup_process_snapshot", return_value=snapshot):
+            web_app.purge_transient_artifacts(self.config, force=True)
+
+        self.assertTrue(temp_dir.exists())
+
+    def test_purge_transient_artifacts_prunes_old_unowned_run_manifests_only(self) -> None:
+        old_manifest = self._write_manifest("manifest-old-unowned.json", [{"library_item_id": 1}])
+        active_manifest = self._write_manifest("manifest-needs-attention.json", [{"library_item_id": 2}])
+        for path in (old_manifest, active_manifest):
+            old_time = datetime.now().timestamp() - (16 * 86400)
+            os.utime(path, (old_time, old_time))
+
+        with open_db(self.config.paths.db_path) as connection:
+            now = web_app._now_iso()
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "manifest-needs-attention-job",
+                    "prefix": "tv/show",
+                    "job_kind": "folder",
+                    "parent_job_id": None,
+                    "status": "needs_attention",
+                    "manifest_path": str(active_manifest),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "manifest_indexes": None,
+                    "host": {},
+                    "last_host": {},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 0,
+                    "process_pid": None,
+                    "error": "needs operator decision",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": None,
+                    "last_failure_at": None,
+                    "host_cooldown_until": None,
+                    "created_at": now,
+                    "started_at": now,
+                    "finished_at": now,
+                    "updated_at": now,
+                },
+            )
+
+        with patch(
+                "mediaforce.state_cleanup._cleanup_process_snapshot",
+                return_value=state_cleanup.CleanupProcessSnapshot((), ()),
+        ):
+            web_app.purge_transient_artifacts(self.config, force=True)
+
+        self.assertFalse(old_manifest.exists())
+        self.assertTrue(active_manifest.exists())
+
     def test_purge_transient_artifacts_prunes_legacy_local_quality_temp_root(self) -> None:
         legacy_root = quality.legacy_local_quality_temp_root()
         temp_dir = legacy_root / ".mediaforce-ab-av1-legacy"
@@ -4994,6 +5776,280 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertTrue(status.available)
         self.assertIn("/srv/media/tv", run_remote_ssh_mock.call_args.kwargs["input_text"])
         self.assertIn("/srv/media/transcode", run_remote_ssh_mock.call_args.kwargs["input_text"])
+        script = run_remote_ssh_mock.call_args.kwargs["input_text"]
+        self.assertIn("for write_path in /srv/media/transcode", script)
+        self.assertNotIn("for write_path in /srv/media/tv /srv/media/transcode", script)
+        self.assertIn('mktemp "$path/.mediaforce-write-test.XXXXXX"', script)
+
+    def test_remote_host_status_keeps_missing_mounts_as_missing_paths(self) -> None:
+        host: dict[str, object] = {
+            "host": "cbusillo@encode-host",
+            "label": "Encode Host",
+            "capabilities": ["encode_queue"],
+            "source_roots": {"tv": "/srv/media/tv"},
+            "staging_root": "/srv/media/transcode",
+        }
+        stdout = "\n".join(
+            [
+                "path|/srv/media/tv|0",
+                "pathexists|/srv/media/tv|0",
+                "pathread|/srv/media/tv|0",
+                "pathwrite|/srv/media/tv|0",
+                "path|/srv/media/transcode|1",
+                "pathexists|/srv/media/transcode|1",
+                "pathread|/srv/media/transcode|1",
+                "pathwrite|/srv/media/transcode|1",
+                "tool|xcode_clt|1",
+                "tool|brew|1",
+                "tool|ffmpeg|1",
+                "tool|ffmpeg_videotoolbox|1",
+                "tool|ffmpeg_libvmaf|1",
+                "tool|ffmpeg_xpsnr|1",
+                "tool|ffmpeg_libsvtav1|1",
+                "tool|ab_av1|1",
+                "meta|platform|macos",
+                "time|utc_offset|+0000",
+                "repo|exists|1",
+            ]
+        )
+        with patch(
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
+        ), patch("mediaforce.remote._learn_remote_wake_mac"):
+            status = remote._remote_host_status(self.config, host)
+
+        self.assertFalse(status.available)
+        self.assertEqual(status.message, "Missing required paths")
+        self.assertEqual(status.missing_paths, ["/srv/media/tv"])
+        self.assertEqual(status.issues, [])
+
+    def test_remote_host_status_rejects_unwritable_staging_root(self) -> None:
+        host: dict[str, object] = {
+            "host": "cbusillo@encode-host",
+            "label": "Encode Host",
+            "capabilities": ["encode_queue"],
+            "source_roots": {"tv": "/srv/media/tv"},
+            "staging_root": "/srv/media/transcode",
+        }
+        stdout = "\n".join(
+            [
+                "path|/srv/media/tv|1",
+                "pathexists|/srv/media/tv|1",
+                "pathread|/srv/media/tv|1",
+                "pathwrite|/srv/media/tv|0",
+                "path|/srv/media/transcode|1",
+                "pathexists|/srv/media/transcode|1",
+                "pathread|/srv/media/transcode|1",
+                "pathwrite|/srv/media/transcode|0",
+                "tool|xcode_clt|1",
+                "tool|brew|1",
+                "tool|ffmpeg|1",
+                "tool|ffmpeg_videotoolbox|1",
+                "tool|ffmpeg_libvmaf|1",
+                "tool|ffmpeg_xpsnr|1",
+                "tool|ffmpeg_libsvtav1|1",
+                "tool|ab_av1|1",
+                "meta|platform|macos",
+                "time|utc_offset|+0000",
+                "repo|exists|1",
+            ]
+        )
+        with patch(
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
+        ), patch("mediaforce.remote._learn_remote_wake_mac"):
+            status = remote._remote_host_status(self.config, host)
+
+        self.assertFalse(status.available)
+        self.assertEqual(status.message, "Staging root not writable")
+        self.assertIn("Staging root is not writable on this host. /srv/media/transcode", status.issues)
+
+    def test_remote_host_status_rejects_unreadable_source_root(self) -> None:
+        host: dict[str, object] = {
+            "host": "cbusillo@encode-host",
+            "label": "Encode Host",
+            "capabilities": ["encode_queue"],
+            "source_roots": {"tv": "/srv/media/tv"},
+            "staging_root": "/srv/media/transcode",
+        }
+        stdout = "\n".join(
+            [
+                "path|/srv/media/tv|1",
+                "pathexists|/srv/media/tv|1",
+                "pathread|/srv/media/tv|0",
+                "pathwrite|/srv/media/tv|0",
+                "path|/srv/media/transcode|1",
+                "pathexists|/srv/media/transcode|1",
+                "pathread|/srv/media/transcode|1",
+                "pathwrite|/srv/media/transcode|1",
+                "tool|xcode_clt|1",
+                "tool|brew|1",
+                "tool|ffmpeg|1",
+                "tool|ffmpeg_videotoolbox|1",
+                "tool|ffmpeg_libvmaf|1",
+                "tool|ffmpeg_xpsnr|1",
+                "tool|ffmpeg_libsvtav1|1",
+                "tool|ab_av1|1",
+                "meta|platform|macos",
+                "time|utc_offset|+0000",
+                "repo|exists|1",
+            ]
+        )
+        with patch(
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
+        ), patch("mediaforce.remote._learn_remote_wake_mac"):
+            status = remote._remote_host_status(self.config, host)
+
+        self.assertFalse(status.available)
+        self.assertEqual(status.message, "Source root not readable")
+        self.assertIn("Source root is not readable on this host. /srv/media/tv", status.issues)
+
+    def test_remote_host_status_reuses_cached_expensive_tool_probe(self) -> None:
+        host_status_runtime._REMOTE_TOOL_CACHE.clear()
+        host: dict[str, object] = {
+            "host": "cbusillo@encode-host",
+            "label": "Encode Host",
+            "capabilities": ["encode_queue"],
+            "source_roots": {"tv": "/srv/media/tv"},
+            "staging_root": "/srv/media/transcode",
+        }
+        full_stdout = "\n".join(
+            [
+                "path|/srv/media/tv|1",
+                "path|/srv/media/transcode|1",
+                "tool|xcode_clt|1",
+                "tool|brew|1",
+                "tool|ffmpeg|1",
+                "toolpath|ffmpeg|/opt/homebrew/bin/ffmpeg",
+                "toolmeta|ffmpeg_signature|/opt/homebrew/Cellar/ffmpeg-full/8.1/bin/ffmpeg:123:456",
+                "tool|ffmpeg_videotoolbox|1",
+                "tool|ffmpeg_libvmaf|1",
+                "tool|ffmpeg_xpsnr|1",
+                "tool|ffmpeg_libsvtav1|1",
+                "tool|ab_av1|1",
+                "meta|platform|macos",
+                "time|utc_offset|+0000",
+                "repo|exists|1",
+            ]
+        )
+        cheap_stdout = "\n".join(
+            [
+                "path|/srv/media/tv|1",
+                "path|/srv/media/transcode|1",
+                "tool|xcode_clt|1",
+                "tool|brew|1",
+                "tool|ffmpeg|1",
+                "toolpath|ffmpeg|/opt/homebrew/bin/ffmpeg",
+                "toolmeta|ffmpeg_signature|/opt/homebrew/Cellar/ffmpeg-full/8.1/bin/ffmpeg:123:456",
+                "tool|ab_av1|1",
+                "meta|platform|macos",
+                "time|utc_offset|+0000",
+                "repo|exists|1",
+            ]
+        )
+        with patch(
+                "mediaforce.remote._run_remote_ssh",
+                side_effect=[
+                    subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=full_stdout, stderr=""),
+                    subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=cheap_stdout, stderr=""),
+                ],
+        ) as run_remote_ssh_mock, patch("mediaforce.remote._learn_remote_wake_mac"):
+            first = remote._remote_host_status(self.config, host)
+            second = remote._remote_host_status(self.config, host)
+
+        self.assertTrue(first.available)
+        self.assertTrue(second.available)
+        first_script = run_remote_ssh_mock.call_args_list[0].kwargs["input_text"]
+        second_script = run_remote_ssh_mock.call_args_list[1].kwargs["input_text"]
+        self.assertIn("-filters", first_script)
+        self.assertIn("ffmpeg_libvmaf", first_script)
+        self.assertNotIn("-filters", second_script)
+        self.assertNotIn("ffmpeg_libvmaf", second_script)
+
+    def test_remote_host_status_revalidates_cached_tools_when_ffmpeg_changes(self) -> None:
+        host_status_runtime._REMOTE_TOOL_CACHE.clear()
+        host: dict[str, object] = {
+            "host": "cbusillo@encode-host",
+            "label": "Encode Host",
+            "capabilities": ["encode_queue"],
+            "source_roots": {"tv": "/srv/media/tv"},
+            "staging_root": "/srv/media/transcode",
+        }
+        full_stdout = "\n".join(
+            [
+                "path|/srv/media/tv|1",
+                "path|/srv/media/transcode|1",
+                "tool|xcode_clt|1",
+                "tool|brew|1",
+                "tool|ffmpeg|1",
+                "toolpath|ffmpeg|/opt/homebrew/bin/ffmpeg",
+                "toolmeta|ffmpeg_signature|/opt/homebrew/Cellar/ffmpeg-full/8.1/bin/ffmpeg:123:456",
+                "tool|ffmpeg_videotoolbox|1",
+                "tool|ffmpeg_libvmaf|1",
+                "tool|ffmpeg_xpsnr|1",
+                "tool|ffmpeg_libsvtav1|1",
+                "tool|ab_av1|1",
+                "meta|platform|macos",
+                "time|utc_offset|+0000",
+                "repo|exists|1",
+            ]
+        )
+        changed_cheap_stdout = "\n".join(
+            [
+                "path|/srv/media/tv|1",
+                "path|/srv/media/transcode|1",
+                "tool|xcode_clt|1",
+                "tool|brew|1",
+                "tool|ffmpeg|1",
+                "toolpath|ffmpeg|/opt/homebrew/bin/ffmpeg",
+                "toolmeta|ffmpeg_signature|/opt/homebrew/Cellar/ffmpeg-full/8.2/bin/ffmpeg:222:999",
+                "tool|ab_av1|1",
+                "meta|platform|macos",
+                "time|utc_offset|+0000",
+                "repo|exists|1",
+            ]
+        )
+        refreshed_full_stdout = "\n".join(
+            [
+                "path|/srv/media/tv|1",
+                "path|/srv/media/transcode|1",
+                "tool|xcode_clt|1",
+                "tool|brew|1",
+                "tool|ffmpeg|1",
+                "toolpath|ffmpeg|/opt/homebrew/bin/ffmpeg",
+                "toolmeta|ffmpeg_signature|/opt/homebrew/Cellar/ffmpeg-full/8.2/bin/ffmpeg:222:999",
+                "tool|ffmpeg_videotoolbox|1",
+                "tool|ffmpeg_libvmaf|0",
+                "tool|ffmpeg_xpsnr|0",
+                "tool|ffmpeg_libsvtav1|1",
+                "tool|ab_av1|1",
+                "meta|platform|macos",
+                "time|utc_offset|+0000",
+                "repo|exists|1",
+            ]
+        )
+        try:
+            with patch(
+                    "mediaforce.remote._run_remote_ssh",
+                    side_effect=[
+                        subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=full_stdout, stderr=""),
+                        subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=changed_cheap_stdout, stderr=""),
+                        subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=refreshed_full_stdout, stderr=""),
+                    ],
+            ) as run_remote_ssh_mock, patch("mediaforce.remote._learn_remote_wake_mac"):
+                first = remote._remote_host_status(self.config, host)
+                second = remote._remote_host_status(self.config, host)
+        finally:
+            host_status_runtime._REMOTE_TOOL_CACHE.clear()
+
+        self.assertTrue(first.available)
+        self.assertFalse(second.available)
+        self.assertIn("ffmpeg is missing both libvmaf and xpsnr", second.issues[0])
+        scripts = [call.kwargs["input_text"] for call in run_remote_ssh_mock.call_args_list]
+        self.assertIn("-filters", scripts[0])
+        self.assertNotIn("-filters", scripts[1])
+        self.assertIn("-filters", scripts[2])
 
     def test_remote_host_status_requires_metric_for_mounted_encode_hosts(self) -> None:
         host: dict[str, object] = {
@@ -5026,8 +6082,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertFalse(status.available)
         self.assertIn(remote.SAMPLE_METRIC_MISSING_ISSUE, status.issues)
 
-    def test_remote_host_status_stream_mode_ignores_missing_library_paths(self) -> None:
-        self.config.raw["media"]["source_roots"] = {}
+    def test_remote_host_status_stream_mode_ignores_inherited_library_paths(self) -> None:
+        self.config.raw["media"]["source_roots"] = {"tv": "/Volumes/media/tv"}
         host: dict[str, object] = {
             "host": "cbusillo@stream-host",
             "label": "Stream Host",
@@ -5056,6 +6112,128 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             status = remote._remote_host_status(self.config, host)
         self.assertTrue(status.available)
         self.assertEqual(status.missing_paths, [])
+
+    def test_remote_host_status_stream_mode_ignores_unwritable_staging_root(self) -> None:
+        host: dict[str, object] = {
+            "host": "cbusillo@stream-host",
+            "label": "Stream Host",
+            "capabilities": ["encode_queue"],
+            "media_access": "stream",
+            "source_roots": {"tv": "/srv/media/tv"},
+            "staging_root": "/srv/media/transcode",
+        }
+        stdout = "\n".join(
+            [
+                "path|/srv/media/tv|1",
+                "pathexists|/srv/media/tv|1",
+                "pathread|/srv/media/tv|1",
+                "pathwrite|/srv/media/tv|0",
+                "path|/srv/media/transcode|1",
+                "pathexists|/srv/media/transcode|1",
+                "pathread|/srv/media/transcode|1",
+                "pathwrite|/srv/media/transcode|0",
+                "tool|xcode_clt|0",
+                "tool|brew|0",
+                "tool|ffmpeg|1",
+                "tool|ffmpeg_videotoolbox|0",
+                "tool|ffmpeg_libvmaf|1",
+                "tool|ffmpeg_xpsnr|1",
+                "tool|ffmpeg_libsvtav1|1",
+                "tool|ab_av1|1",
+                "meta|platform|linux",
+                "time|utc_offset|+0000",
+                "repo|exists|1",
+            ]
+        )
+        with patch(
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
+        ), patch("mediaforce.remote._learn_remote_wake_mac"):
+            status = remote._remote_host_status(self.config, host)
+
+        self.assertTrue(status.available)
+        self.assertEqual(status.issues, [])
+
+    def test_remote_host_status_stream_mode_probes_explicit_source_roots(self) -> None:
+        self.config.raw["media"]["source_roots"] = {"tv": "/Volumes/media/tv"}
+        host: dict[str, object] = {
+            "host": "cbusillo@stream-host",
+            "label": "Stream Host",
+            "capabilities": ["encode_queue"],
+            "media_access": "stream",
+            "source_roots": {"tv": "/srv/media/tv"},
+        }
+        stdout = "\n".join(
+            [
+                "path|/srv/media/tv|1",
+                "pathexists|/srv/media/tv|1",
+                "pathread|/srv/media/tv|1",
+                "pathwrite|/srv/media/tv|0",
+                "tool|xcode_clt|0",
+                "tool|brew|0",
+                "tool|ffmpeg|1",
+                "tool|ffmpeg_videotoolbox|0",
+                "tool|ffmpeg_libvmaf|1",
+                "tool|ffmpeg_xpsnr|1",
+                "tool|ffmpeg_libsvtav1|1",
+                "tool|ab_av1|1",
+                "meta|platform|linux",
+                "time|utc_offset|+0000",
+                "repo|exists|1",
+            ]
+        )
+        with patch(
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
+        ) as run_remote_ssh_mock, patch("mediaforce.remote._learn_remote_wake_mac"):
+            status = remote._remote_host_status(self.config, host)
+
+        self.assertTrue(status.available)
+        script = run_remote_ssh_mock.call_args.kwargs["input_text"]
+        self.assertIn("/srv/media/tv", script)
+        self.assertNotIn("/Volumes/media/tv", script)
+        self.assertIn("for write_path in ; do", script)
+
+    def test_remote_host_status_rejects_sample_host_unwritable_staging_root(self) -> None:
+        host: dict[str, object] = {
+            "host": "cbusillo@sample-host",
+            "label": "Sample Host",
+            "capabilities": ["sample_calibration"],
+            "source_roots": {"tv": "/srv/media/tv"},
+            "staging_root": "/srv/media/transcode",
+        }
+        stdout = "\n".join(
+            [
+                "path|/srv/media/tv|1",
+                "pathexists|/srv/media/tv|1",
+                "pathread|/srv/media/tv|1",
+                "pathwrite|/srv/media/tv|0",
+                "path|/srv/media/transcode|1",
+                "pathexists|/srv/media/transcode|1",
+                "pathread|/srv/media/transcode|1",
+                "pathwrite|/srv/media/transcode|0",
+                "tool|xcode_clt|1",
+                "tool|brew|1",
+                "tool|ffmpeg|1",
+                "tool|ffmpeg_videotoolbox|1",
+                "tool|ffmpeg_libvmaf|1",
+                "tool|ffmpeg_xpsnr|1",
+                "tool|ffmpeg_libsvtav1|1",
+                "tool|ab_av1|1",
+                "meta|platform|macos",
+                "time|utc_offset|+0000",
+                "repo|exists|1",
+            ]
+        )
+        with patch(
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
+        ), patch("mediaforce.remote._learn_remote_wake_mac"):
+            status = remote._remote_host_status(self.config, host)
+
+        self.assertFalse(status.available)
+        self.assertEqual(status.message, "Staging root not writable")
+        self.assertIn("Staging root is not writable on this host. /srv/media/transcode", status.issues)
 
     def test_remote_host_status_requires_ab_av1_for_stream_encode_host_with_remote_roots(self) -> None:
         host: dict[str, object] = {
@@ -5185,10 +6363,11 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with patch(
                 "mediaforce.remote._run_remote_ssh",
                 return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
-        ), patch("mediaforce.remote._learn_remote_wake_mac"):
+        ) as run_remote_ssh_mock, patch("mediaforce.remote._learn_remote_wake_mac"):
             status = remote._remote_host_status(self.config, host)
         self.assertTrue(status.available)
         self.assertEqual(status.missing_paths, [])
+        self.assertNotIn("/srv/media/tv", run_remote_ssh_mock.call_args.kwargs["input_text"])
 
     def test_current_machine_status_ignores_inherited_stream_source_roots_without_host_overrides(self) -> None:
         missing_root = self.root / "missing-tv-root"
@@ -5781,6 +6960,300 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             stored_validation = cast(str, stored_validation_row["validation_json"])
             self.assertEqual(stored_status, "validated")
             self.assertTrue(json.loads(stored_validation)["passed"])
+
+    def test_validate_one_item_rejects_truncated_output_duration(self) -> None:
+        source_path = self._create_source_file("episode-truncated.mkv")
+        staging_path = self._staging_path("episode-truncated.mkv")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("encoded")
+        self.config.raw["validation"] = {"require_size_reduction": True}
+        staged_probe = ProbeSummary(
+            duration_seconds=60.0,
+            video_codec="av1",
+            video_bitrate=900000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoded")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            item = {
+                "library_item_id": item_id,
+                "source_size_bytes": 1024,
+                "duration_seconds": 120.0,
+                "subtitle_summary": [],
+            }
+            with patch("mediaforce.execution.probe_media", return_value=staged_probe):
+                validation = execution.validate_one_item(connection, self.config, item)
+
+            self.assertFalse(validation["passed"])
+            self.assertIn(
+                {"passed": False, "message": "staged duration closely matches the source"},
+                validation["checks"],
+            )
+            stored_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+            assert stored_status_row is not None
+            self.assertEqual(stored_status_row["status"], "encoded")
+
+    def test_validate_one_item_repairs_unreadable_container_duration(self) -> None:
+        source_path = self._create_source_file("episode-remux-repair.mkv")
+        staging_path = self._staging_path("episode-remux-repair.mkv")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("encoded")
+        self.config.raw["validation"] = {"require_size_reduction": True}
+        unreadable_staged_probe = ProbeSummary(
+            duration_seconds=None,
+            video_codec="av1",
+            video_bitrate=900000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+        repaired_probe = ProbeSummary(
+            duration_seconds=120.0,
+            video_codec="av1",
+            video_bitrate=900000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+        staging_probe_calls = 0
+
+        def fake_probe(path: Path) -> ProbeSummary:
+            nonlocal staging_probe_calls
+            if path == source_path:
+                return repaired_probe
+            if path == staging_path:
+                staging_probe_calls += 1
+                return unreadable_staged_probe if staging_probe_calls == 1 else repaired_probe
+            return repaired_probe
+
+        def fake_remux(_staged_path: Path, repaired_path: Path) -> None:
+            repaired_path.write_text("remuxed")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoded")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            item = {
+                "library_item_id": item_id,
+                "source_path": str(source_path),
+                "source_size_bytes": 1024,
+                "duration_seconds": 120.0,
+                "subtitle_summary": [],
+            }
+            with patch("mediaforce.execution.probe_media", side_effect=fake_probe), patch(
+                    "mediaforce.execution.probe_packet_end_seconds", return_value=120.2
+            ) as packet_probe_mock, patch(
+                    "mediaforce.execution.remux_container_metadata", side_effect=fake_remux
+            ) as remux_mock:
+                validation = execution.validate_one_item(connection, self.config, item)
+
+            self.assertTrue(validation["passed"])
+            self.assertEqual(validation["container_metadata_repair"]["repaired"], True)
+            self.assertIn(
+                {"passed": True, "message": "staged file duration is readable"},
+                validation["checks"],
+            )
+            self.assertEqual(packet_probe_mock.call_count, 2)
+            remux_mock.assert_called_once()
+            stored_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+            stored_validation_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.validation_json)
+            assert stored_status_row is not None
+            assert stored_validation_row is not None
+            self.assertEqual(stored_status_row["status"], "validated")
+            self.assertTrue(json.loads(cast(str, stored_validation_row["validation_json"]))["passed"])
+
+    def test_validate_one_item_keeps_original_when_remux_candidate_fails_validation(self) -> None:
+        source_path = self._create_source_file("episode-remux-candidate-fails.mkv")
+        staging_path = self._staging_path("episode-remux-candidate-fails.mkv")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("encoded")
+        candidate_path = staging_path.with_name(f"{staging_path.stem}.remuxing{staging_path.suffix}")
+        self.config.raw["validation"] = {"require_size_reduction": True}
+        unreadable_staged_probe = ProbeSummary(
+            duration_seconds=None,
+            video_codec="av1",
+            video_bitrate=900000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+        source_probe = ProbeSummary(
+            duration_seconds=120.0,
+            video_codec="h264",
+            video_bitrate=1800000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+        bad_candidate_probe = ProbeSummary(
+            duration_seconds=120.0,
+            video_codec="av1",
+            video_bitrate=900000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=2,
+            subtitle_track_count=0,
+            english_audio_count=2,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+
+        def fake_probe(path: Path) -> ProbeSummary:
+            if path == source_path:
+                return source_probe
+            if path == candidate_path:
+                return bad_candidate_probe
+            return unreadable_staged_probe
+
+        def fake_remux(_staged_path: Path, repaired_path: Path) -> None:
+            repaired_path.write_text("remuxed")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoded")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            item = {
+                "library_item_id": item_id,
+                "source_path": str(source_path),
+                "source_size_bytes": 1024,
+                "duration_seconds": 120.0,
+                "subtitle_summary": [],
+            }
+            with patch("mediaforce.execution.probe_media", side_effect=fake_probe), patch(
+                    "mediaforce.execution.probe_packet_end_seconds", return_value=120.2
+            ), patch("mediaforce.execution.remux_container_metadata", side_effect=fake_remux):
+                validation = execution.validate_one_item(connection, self.config, item)
+
+            self.assertFalse(validation["passed"])
+            self.assertEqual(validation["container_metadata_repair"]["repaired"], False)
+            self.assertEqual(
+                validation["container_metadata_repair"]["skipped_reason"],
+                "normal validation failed after remux candidate",
+            )
+            self.assertIn(
+                {"passed": False, "message": "exactly one audio track remains"},
+                validation["checks"],
+            )
+            self.assertEqual(staging_path.read_text(), "encoded")
+            self.assertFalse(candidate_path.exists())
+
+    def test_validate_one_item_does_not_repair_when_packet_duration_is_short(self) -> None:
+        source_path = self._create_source_file("episode-remux-short.mkv")
+        staging_path = self._staging_path("episode-remux-short.mkv")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("encoded")
+        self.config.raw["validation"] = {"require_size_reduction": True}
+        unreadable_staged_probe = ProbeSummary(
+            duration_seconds=None,
+            video_codec="av1",
+            video_bitrate=900000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+        source_probe = ProbeSummary(
+            duration_seconds=120.0,
+            video_codec="h264",
+            video_bitrate=1800000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+
+        def fake_probe(path: Path) -> ProbeSummary:
+            return source_probe if path == source_path else unreadable_staged_probe
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoded")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            item = {
+                "library_item_id": item_id,
+                "source_path": str(source_path),
+                "source_size_bytes": 1024,
+                "duration_seconds": 120.0,
+                "subtitle_summary": [],
+            }
+            with patch("mediaforce.execution.probe_media", side_effect=fake_probe), patch(
+                    "mediaforce.execution.probe_packet_end_seconds", return_value=60.0
+            ), patch("mediaforce.execution.remux_container_metadata") as remux_mock:
+                validation = execution.validate_one_item(connection, self.config, item)
+
+            self.assertFalse(validation["passed"])
+            self.assertEqual(validation["container_metadata_repair"]["repaired"], False)
+            self.assertEqual(
+                validation["container_metadata_repair"]["skipped_reason"],
+                "packet timestamps did not prove the staged file is complete",
+            )
+            self.assertIn(
+                {"passed": False, "message": "staged file duration is readable"},
+                validation["checks"],
+            )
+            remux_mock.assert_not_called()
+            stored_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+            assert stored_status_row is not None
+            self.assertEqual(stored_status_row["status"], "encoded")
 
     def test_promote_one_item_moves_source_and_updates_metadata(self) -> None:
         source_path = self._create_source_file("episode-promote.mkv")
@@ -6493,6 +7966,74 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         run_crf_search_mock.assert_called_once()
 
+    def test_search_quality_extends_crf_ceiling_when_size_cap_needs_more_range(self) -> None:
+        run_crf_search_mock = Mock(
+            side_effect=[
+                quality.QualitySearchError("Error: Failed to find a suitable crf"),
+                QualitySearchResult(crf=48.0, metric="VMAF", target=88.0, score=88.7, stdout="ok"),
+            ]
+        )
+
+        result = quality_search.search_quality(
+            Path("/tmp/input.mkv"),
+            {
+                "quality_metric": "vmaf",
+                "target_vmaf": 88.0,
+                "min_target_vmaf": 86.5,
+                "target_relax_step_vmaf": 1.0,
+                "pixel_format": "yuv420p10le",
+                "sample_every": "6m",
+                "sample_duration": "30s",
+                "min_crf": 18,
+                "max_crf": 46,
+                "max_encoded_percent": 15,
+            },
+            host_media_access_for_host=Mock(return_value="stream"),
+            select_quality_metric=Mock(return_value=("vmaf", 95.0)),
+            build_svt_params=Mock(return_value=[]),
+            effective_video_preset=Mock(return_value=4),
+            run_crf_search=run_crf_search_mock,
+        )
+
+        self.assertEqual(result.crf, 48.0)
+        self.assertEqual(
+            [call.kwargs["max_crf"] for call in run_crf_search_mock.call_args_list],
+            [46, 63],
+        )
+        self.assertEqual(
+            [call.kwargs["metric_target"] for call in run_crf_search_mock.call_args_list],
+            [88.0, 88.0],
+        )
+
+    def test_search_quality_clamps_configured_crf_ceiling_above_encoder_range(self) -> None:
+        run_crf_search_mock = Mock(
+            return_value=QualitySearchResult(crf=61.0, metric="VMAF", target=88.0, score=88.1, stdout="ok")
+        )
+
+        quality_search.search_quality(
+            Path("/tmp/input.mkv"),
+            {
+                "quality_metric": "vmaf",
+                "target_vmaf": 88.0,
+                "min_target_vmaf": 86.5,
+                "target_relax_step_vmaf": 1.0,
+                "pixel_format": "yuv420p10le",
+                "sample_every": "6m",
+                "sample_duration": "30s",
+                "min_crf": 18,
+                "max_crf": 70,
+                "max_encoded_percent": 15,
+            },
+            host_media_access_for_host=Mock(return_value="stream"),
+            select_quality_metric=Mock(return_value=("vmaf", 95.0)),
+            build_svt_params=Mock(return_value=[]),
+            effective_video_preset=Mock(return_value=4),
+            run_crf_search=run_crf_search_mock,
+        )
+
+        run_crf_search_mock.assert_called_once()
+        self.assertEqual(run_crf_search_mock.call_args.kwargs["max_crf"], 63)
+
     def test_run_crf_search_passes_temp_dir_to_ab_av1(self) -> None:
         with patch(
                 "mediaforce.quality._run_quality_command",
@@ -6966,6 +8507,26 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             default = review._auto_timestamps(Path("/tmp/input.mkv"), 100.0, 10.0)
         self.assertEqual(default, [18.0, 45.0, 72.0])
 
+    def test_review_auto_timestamps_skips_expensive_scans_for_long_media(self) -> None:
+        with patch("mediaforce.review._complexity_timestamps", return_value=[30.0, 60.0, 90.0]) as complexity, patch(
+                "mediaforce.review._scene_change_timestamps", return_value=[12.0, 48.0, 84.0]
+        ) as scene:
+            timestamps = review._auto_timestamps(Path("/tmp/input.mkv"), 3600.0, 10.0)
+
+        self.assertEqual(timestamps, [12.0, 48.0, 84.0])
+        complexity.assert_not_called()
+        scene.assert_called_once()
+
+    def test_review_auto_timestamps_uses_defaults_for_long_media_without_scenes(self) -> None:
+        with patch("mediaforce.review._complexity_timestamps", return_value=[30.0, 60.0, 90.0]) as complexity, patch(
+                "mediaforce.review._scene_change_timestamps", return_value=[]
+        ) as scene:
+            timestamps = review._auto_timestamps(Path("/tmp/input.mkv"), 3600.0, 10.0)
+
+        self.assertEqual(timestamps, [718.0, 1795.0, 2872.0])
+        complexity.assert_not_called()
+        scene.assert_called_once()
+
     def test_render_encoded_preview_clip_adds_svt_params_and_formatted_crf(self) -> None:
         with patch("mediaforce.review.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
                 "mediaforce.review.ffmpeg_hwaccel_input_args", return_value=["-hwaccel", "videotoolbox"]
@@ -7118,7 +8679,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(resolved, Path("/Volumes/media/tv/show/episode.mkv"))
 
-    def test_resolve_item_quality_source_path_uses_inherited_source_root_for_stream_host(self) -> None:
+    def test_resolve_item_quality_source_path_ignores_inherited_source_root_for_stream_host(self) -> None:
         self.config.raw["media"]["source_roots"] = {"tv": "/srv/media/tv"}
         item = {
             "media_root": "tv",
@@ -7133,7 +8694,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "media_access": "stream",
             },
         )
-        self.assertEqual(resolved, Path("/srv/media/tv/show/episode.mkv"))
+        self.assertEqual(resolved, Path("/Volumes/media/tv/show/episode.mkv"))
 
     def test_run_quality_command_localhost_ssh_executes_locally(self) -> None:
         with patch(
@@ -7797,6 +9358,64 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["active_encode_count"], 1)
         self.assertEqual(rows[0]["running_jobs"][0]["job_id"], "shard-runtime")
+
+    def test_host_runtime_rows_keep_active_host_visible_when_probe_fails(self) -> None:
+        status = HostStatus(
+            key="busy-host",
+            label="Busy Host",
+            mode="ssh",
+            priority=50,
+            capabilities=["encode_queue"],
+            available=False,
+            message="SSH unavailable",
+            missing_paths=[],
+            issues=["Mediaforce could not reach this host over SSH."],
+            detail="operation timed out",
+        )
+
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.web.app._safe_collect_host_statuses", return_value=[status]
+        ):
+            self._save_job(
+                connection,
+                job_id="running-on-busy-host",
+                manifest_name="manifest-running-on-busy-host.json",
+                host={"key": "busy-host", "label": "Busy Host", "mode": "ssh"},
+                status="running",
+                attempt_count=1,
+            )
+
+            rows = web_app._host_runtime_rows(connection, self.config)
+
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["available"])
+        self.assertFalse(rows[0]["probe_available"])
+        self.assertEqual(rows[0]["probe_message"], "SSH unavailable")
+        self.assertEqual(rows[0]["message"], "Encoding in progress; latest host check was deferred")
+        self.assertEqual(rows[0]["issues"], [])
+        self.assertFalse(rows[0]["queue_active"])
+        self.assertEqual(rows[0]["active_reason"], "status check deferred while encode is running")
+
+    def test_select_encode_host_skips_probe_degraded_active_hosts(self) -> None:
+        statuses = [
+            {
+                "key": "busy-host",
+                "label": "Busy Host",
+                "priority": 50,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "probe_available": False,
+                "active_encode_count": 1,
+                "max_parallel_encodes": 2,
+                "schedule_profile": "always",
+            }
+        ]
+        with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
+            host_payload, waiting_reason = web_app._select_encode_host(cast(Any, None), self.config,
+                                                                       {"bypass_schedule": False})
+
+        self.assertIsNone(host_payload)
+        self.assertEqual(waiting_reason, "waiting for an available encode host")
 
     def test_host_runtime_rows_prefer_current_host_over_last_host(self) -> None:
         statuses = [
@@ -8632,6 +10251,36 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIn("kill_tree TERM \"$pid\"", command_payload[2])
         self.assertIn("kill -KILL -\"$pgid\"", command_payload[2])
         self.assertIn("kill_tree KILL \"$pid\"", command_payload[2])
+
+    def test_sweep_orphaned_encode_processes_can_scope_to_recovered_prefix(self) -> None:
+        host_staging_root = self.root / "remote-transcode"
+        self.config.raw["remote_hosts"] = [
+            {
+                "host": "encode-a",
+                "label": "Encode A",
+                "mode": "ssh",
+                "capabilities": ["encode_queue"],
+                "staging_root": str(host_staging_root),
+            }
+        ]
+
+        with patch("mediaforce.web.app.run_remote_command") as run_remote_command_mock:
+            web_app._sweep_orphaned_encode_processes(self.config, prefixes=["tv/show"])
+
+        run_remote_command_mock.assert_called_once()
+        command_payload = run_remote_command_mock.call_args.args[1]
+        self.assertEqual(command_payload[:3], ["sh", "-lc", command_payload[2]])
+        self.assertEqual(command_payload[3], "mediaforce-sweep")
+        self.assertIn(
+            f"{re.escape(str(host_staging_root / 'tv' / 'show'))}(/|[[:space:]]|$)",
+            command_payload[4],
+        )
+        self.assertIn(
+            f"{re.escape(str(self.root / 'source' / 'tv' / 'show'))}(/|[[:space:]]|$)",
+            command_payload[4],
+        )
+        self.assertNotIn(re.escape(str(host_staging_root / "tv" / "showing")), command_payload[4])
+        self.assertNotIn(re.escape(str(self.root / "source" / "tv" / "showing")), command_payload[4])
 
     def test_create_app_registers_folder_status_route_before_catch_all_folder_route(self) -> None:
         with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
@@ -9628,6 +11277,282 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(aggregated["running_shard_count"], 1)
         self.assertEqual(aggregated["progress"]["progress_state"], "running")
 
+    def test_aggregate_encode_parent_job_includes_all_quality_failures(self) -> None:
+        manifest_path = self._write_manifest(
+            "manifest-parent-quality-failures.json",
+            [
+                {"library_item_id": 1, "duration_seconds": 120.0, "source_size_bytes": 1000},
+                {"library_item_id": 2, "duration_seconds": 180.0, "source_size_bytes": 2000},
+            ],
+        )
+        now = web_app._now_iso()
+
+        def job_payload(**overrides: object) -> dict[str, object]:
+            payload: dict[str, object] = {
+                "job_id": "folder-quality-failures",
+                "prefix": "tv/show",
+                "job_kind": "folder",
+                "parent_job_id": None,
+                "status": "running",
+                "manifest_path": str(manifest_path),
+                "manifest_indexes": None,
+                "item_count": 2,
+                "saved_profile_path": None,
+                "host": {},
+                "last_host": {},
+                "notes": "",
+                "bypass_schedule": False,
+                "attempt_count": 0,
+                "process_pid": None,
+                "error": None,
+                "leased_at": None,
+                "lease_expires_at": None,
+                "heartbeat_at": None,
+                "worker_id": None,
+                "retry_not_before": None,
+                "waiting_reason": None,
+                "terminal_reason": None,
+                "last_failure_kind": None,
+                "last_failure_at": None,
+                "host_cooldown_until": None,
+                "created_at": now,
+                "started_at": now,
+                "finished_at": None,
+                "updated_at": now,
+            }
+            payload.update(overrides)
+            return payload
+
+        first_analysis = {
+            "kind": "quality_floor_too_strict",
+            "retry_strategy": "needs_operator_approval",
+            "auto_retry_allowed": False,
+            "manifest_index": 0,
+            "manifest_indexes": [0],
+            "item_rel_path": "tv/show/e01.mkv",
+            "requested_metric": "VMAF",
+            "target_score": 88.0,
+            "best_candidate": {"crf": 50.0, "metric": "VMAF", "score": 87.15, "predicted_encode_percent": 15.0},
+            "summary": "First failed policy search.",
+        }
+        second_analysis = {
+            "kind": "size_cap_too_strict",
+            "retry_strategy": "needs_operator_approval",
+            "auto_retry_allowed": False,
+            "manifest_index": 1,
+            "manifest_indexes": [1],
+            "item_rel_path": "tv/show/e02.mkv",
+            "requested_metric": "VMAF",
+            "target_score": 88.0,
+            "proposed_max_encoded_percent": 18,
+            "best_candidate": {"crf": 48.0, "metric": "VMAF", "score": 87.12, "predicted_encode_percent": 17.0},
+            "summary": "Second failed policy search.",
+        }
+
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(connection, job_payload())
+            save_encode_job(
+                connection,
+                job_payload(
+                    job_id="quality-failure-a",
+                    job_kind="shard",
+                    parent_job_id="folder-quality-failures",
+                    status="needs_attention",
+                    manifest_indexes=[0],
+                    item_count=1,
+                    error="Failed to find a suitable crf",
+                    terminal_reason="deterministic",
+                    last_failure_kind="deterministic",
+                    progress={
+                        "total_item_count": 1,
+                        "completed_item_count": 0,
+                        "total_duration_seconds": 120.0,
+                        "overall_completed_duration_seconds": 0.0,
+                        "failure_analysis": first_analysis,
+                    },
+                ),
+            )
+            save_encode_job(
+                connection,
+                job_payload(
+                    job_id="quality-failure-b",
+                    job_kind="shard",
+                    parent_job_id="folder-quality-failures",
+                    status="needs_attention",
+                    manifest_indexes=[1],
+                    item_count=1,
+                    error="Failed to find a suitable crf",
+                    terminal_reason="deterministic",
+                    last_failure_kind="deterministic",
+                    progress={
+                        "total_item_count": 1,
+                        "completed_item_count": 0,
+                        "total_duration_seconds": 180.0,
+                        "overall_completed_duration_seconds": 0.0,
+                        "failure_analysis": second_analysis,
+                    },
+                ),
+            )
+            parent = load_encode_job(connection, "folder-quality-failures")
+            assert parent is not None
+            aggregated = encode_runtime.aggregate_encode_parent_job(
+                connection,
+                parent,
+                web_app._encode_queue_runtime_deps(),
+            )
+
+        failure_analysis = object_dict(object_dict(aggregated["progress"]).get("failure_analysis"))
+        self.assertEqual(failure_analysis["manifest_indexes"], [0, 1])
+        self.assertEqual(len(object_list(failure_analysis["item_analyses"])), 2)
+        self.assertIn("2 of 2 selected items", str(failure_analysis["summary"]))
+
+    def test_approve_measured_encode_recovery_updates_policy_and_queues_failed_items(self) -> None:
+        manifest_path = self._write_manifest(
+            "manifest-recovery-approval.json",
+            [
+                {"library_item_id": 1, "source_path": "tv/show/e09.mkv"},
+                {"library_item_id": 2, "source_path": "tv/show/e10.mkv"},
+            ],
+        )
+        now = web_app._now_iso()
+        failure_analysis = {
+            "kind": "quality_floor_too_strict",
+            "retry_strategy": "needs_operator_approval",
+            "auto_retry_allowed": False,
+            "manifest_indexes": [0, 1],
+            "summary": "Measured policy analysis covers 2 of 2 selected items; operator approval is required.",
+            "item_analyses": [
+                {
+                    "kind": "quality_floor_too_strict",
+                    "manifest_index": 0,
+                    "manifest_indexes": [0],
+                    "item_rel_path": "tv/show/e09.mkv",
+                    "requested_metric": "VMAF",
+                    "target_score": 88.0,
+                    "min_score": 86.5,
+                    "max_encoded_percent": 15.0,
+                    "best_candidate": {
+                        "crf": 50.0,
+                        "metric": "VMAF",
+                        "score": 87.15,
+                        "predicted_encode_percent": 15.0,
+                    },
+                },
+                {
+                    "kind": "size_cap_too_strict",
+                    "manifest_index": 1,
+                    "manifest_indexes": [1],
+                    "item_rel_path": "tv/show/e10.mkv",
+                    "requested_metric": "VMAF",
+                    "target_score": 88.0,
+                    "min_score": 86.5,
+                    "max_encoded_percent": 15.0,
+                    "proposed_max_encoded_percent": 18,
+                    "best_candidate": {
+                        "crf": 48.0,
+                        "metric": "VMAF",
+                        "score": 87.12,
+                        "predicted_encode_percent": 17.0,
+                    },
+                },
+            ],
+        }
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "terminal-recovery-parent",
+                    "prefix": "tv/show",
+                    "job_kind": "folder",
+                    "parent_job_id": None,
+                    "status": "needs_attention",
+                    "manifest_path": str(manifest_path),
+                    "item_count": 2,
+                    "saved_profile_path": None,
+                    "manifest_indexes": None,
+                    "host": {},
+                    "last_host": {},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": "quality policy needs approval",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": "deterministic",
+                    "last_failure_kind": "deterministic",
+                    "last_failure_at": now,
+                    "host_cooldown_until": None,
+                    "created_at": now,
+                    "started_at": now,
+                    "finished_at": now,
+                    "updated_at": now,
+                    "progress": {"failure_analysis": failure_analysis},
+                },
+            )
+
+        calibration_state = {
+            "accepted_at": now,
+            "policy": {
+                "video": {
+                    "quality_metric": "vmaf",
+                    "target_vmaf": 88.0,
+                    "min_target_vmaf": 86.5,
+                    "max_encoded_percent": 15,
+                    "max_crf": 46,
+                }
+            },
+        }
+        saved_calibrations: list[folder_actions_runtime.ActionPayload] = []
+        saved_overrides: list[folder_actions_runtime.ActionPayload] = []
+        queue_calls: list[tuple[str, str, bool]] = []
+
+        def save_calibration(
+                _config: MediaforceConfig,
+                _prefix: str,
+                payload: folder_actions_runtime.ActionPayload,
+        ) -> None:
+            saved_calibrations.append(payload)
+
+        def upsert_override(
+                _file_path: Path,
+                _prefix: str,
+                policy: folder_actions_runtime.ActionPayload,
+        ) -> None:
+            saved_overrides.append(policy)
+
+        def queue_action(prefix: str, notes: str, bypass_schedule: bool) -> folder_actions_runtime.ActionPayload:
+            queue_calls.append((prefix, notes, bypass_schedule))
+            return {"ok": True, "message": "Recovered 2 failed files.", "recovered_item_count": 2}
+
+        result = folder_actions_runtime.approve_measured_encode_recovery_action(
+            self.config,
+            "tv/show",
+            now_iso=web_app._now_iso,
+            load_calibration_state=lambda _config, _prefix: calibration_state,
+            calibration_draft_hash=lambda _payload: "draft-hash",
+            save_calibration_state=save_calibration,
+            review_gate=self._accepted_review_gate,
+            upsert_override=upsert_override,
+            queue_folder_encode_action=queue_action,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["action"], "approved_measured_recovery")
+        self.assertEqual(queue_calls[0][0], "tv/show")
+        self.assertFalse(queue_calls[0][2])
+        self.assertIn("Preserve completed staged encodes", queue_calls[0][1])
+        saved_video = object_dict(object_dict(saved_calibrations[0]["policy"]).get("video"))
+        self.assertEqual(saved_video["target_vmaf"], 87.0)
+        self.assertEqual(saved_video["min_target_vmaf"], 86.5)
+        self.assertEqual(saved_video["max_encoded_percent"], 18)
+        self.assertEqual(saved_video["max_crf"], 50)
+        self.assertEqual(object_dict(saved_overrides[0]).get("video"), saved_video)
+
     def test_queue_folder_encode_rejects_existing_active_encode_for_prefix(self) -> None:
         manifest_path = self._write_manifest("manifest-existing-active.json", [{"library_item_id": 1}])
         with open_db(self.config.paths.db_path) as connection:
@@ -10400,6 +12325,42 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     "updated_at": shared_created_at,
                 },
             )
+            for job_id, status in (("queued-stale-shard", "queued"), ("running-stale-shard", "running")):
+                save_encode_job(
+                    connection,
+                    {
+                        "job_id": job_id,
+                        "prefix": "tv/show",
+                        "job_kind": "shard",
+                        "parent_job_id": "terminal-folder",
+                        "status": status,
+                        "manifest_path": str(manifest_path),
+                        "manifest_indexes": [0],
+                        "item_count": 1,
+                        "saved_profile_path": None,
+                        "host": {},
+                        "last_host": {},
+                        "notes": "",
+                        "bypass_schedule": False,
+                        "attempt_count": 1,
+                        "process_pid": None,
+                        "error": None,
+                        "leased_at": None,
+                        "lease_expires_at": None,
+                        "heartbeat_at": None,
+                        "worker_id": None,
+                        "retry_not_before": None,
+                        "waiting_reason": None,
+                        "terminal_reason": None,
+                        "last_failure_kind": None,
+                        "last_failure_at": None,
+                        "host_cooldown_until": None,
+                        "created_at": shared_created_at,
+                        "started_at": None,
+                        "finished_at": None,
+                        "updated_at": shared_created_at,
+                    },
+                )
 
             clear_terminal_encode_jobs_for_prefix(connection, "tv/show")
 

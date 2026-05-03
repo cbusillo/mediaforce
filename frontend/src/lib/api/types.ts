@@ -44,8 +44,36 @@ export interface EncodeJobProgressTelemetry {
 	eta_copy?: string | null;
 	current_item_number?: number;
 	total_item_count?: number;
+	completed_item_count?: number;
 	current_item_rel_path?: string;
 	progress_state?: string;
+	failure_analysis?: EncodeFailureAnalysis | null;
+}
+
+export interface EncodeFailureCandidate {
+	crf?: number;
+	metric?: string;
+	score?: number;
+	predicted_encode_percent?: number;
+	predicted_encode_size_bytes?: number;
+	line?: string;
+}
+
+export interface EncodeFailureAnalysis {
+	kind?: string;
+	retry_strategy?: string;
+	auto_retry_allowed?: boolean;
+	requested_metric?: string;
+	target_score?: number;
+	min_score?: number;
+	max_encoded_percent?: number;
+	best_candidate?: EncodeFailureCandidate | null;
+	proposed_max_encoded_percent?: number | null;
+	summary?: string;
+	manifest_indexes?: number[];
+	manifest_index?: number;
+	item_rel_path?: string;
+	item_analyses?: EncodeFailureAnalysis[];
 }
 
 export interface EncodeQueueJob {
@@ -146,11 +174,14 @@ export interface HostRuntime {
 	key: string;
 	label: string;
 	available: boolean;
+	probe_available?: boolean;
 	message: string;
+	probe_message?: string;
 	media_access?: string;
 	source_roots?: Record<string, string>;
 	missing_paths: string[];
 	issues: string[];
+	probe_issues?: string[];
 	detail: string | null;
 	capabilities: string[];
 	priority: number;

@@ -1,7 +1,6 @@
 import json
 import subprocess
 import hashlib
-import math
 import re
 from pathlib import Path
 from typing import Any
@@ -14,9 +13,14 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.type_defs import JSONValue, float_value, int_value, object_dict, object_list
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.reviewing.helpers import planned_audio_action, select_primary_audio_track
-from mediaforce.web.runtime.folder_tuning_helpers import load_json_object, recent_tuning_sessions
+from mediaforce.web.runtime.folder_tuning_helpers import (
+    load_json_object,
+    recent_tuning_sessions,
+    size_budget_sample_analysis,
+)
 
 MIN_RECOMMENDED_SAVINGS_BYTES = 100 * 1024 * 1024
+SIZE_BUDGET_TARGET_TOLERANCE = 0.15
 CALIBRATION_REVIEW_FIELDS = {
     "accepted_at",
     "accepted_draft_hash",
@@ -40,6 +44,14 @@ _NOTE_PARSE_INTENT_TYPES = {"direct_request", "exploratory_question", "approval_
 _NOTE_PARSE_REQUEST_TYPES = {"none", "metric_target", "size_budget", "scale_target", "combined_experiment"}
 _NOTE_PARSE_METRICS = {"vmaf", "xpsnr"}
 _CROP_VALUE_RE = re.compile(r"\d+:\d+:\d+:\d+")
+_SIZE_BUDGET_RE = re.compile(r"(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>kb|mb|gb|tb)\b", re.IGNORECASE)
+_SCALE_HEIGHT_RE = re.compile(r"(?<!\d)(?P<height>240|360|480|540|720|1080|1440|2160|4320)p\b", re.IGNORECASE)
+_METRIC_TARGET_RE = re.compile(r"\b(?P<metric>vmaf|xpsnr)\s*(?:of\s*)?(?:around\s*)?(?P<target>\d+(?:\.\d+)?)\b", re.IGNORECASE)
+_METRIC_DIRECTIVE_RE = re.compile(
+    r"\b(?:use|using|with|evaluate(?:\s+with)?|measure(?:\s+with)?|run(?:\s+with)?|metric(?:\s+is)?)\s+"
+    r"(?P<metric>vmaf|xpsnr)\b",
+    re.IGNORECASE,
+)
 
 
 def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -65,8 +77,6 @@ def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, A
                 return None
         else:
             metric_target = round(float_value(parsed_object.get("metric_target")), 2)
-            if metric_target <= 0 and request_type == "metric_target":
-                return None
             if metric_target <= 0:
                 metric_target = None
     if request_type in {"size_budget", "combined_experiment"}:
@@ -96,7 +106,7 @@ def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, A
             return None
     if request_type == "combined_experiment":
         explicit_parts = sum(
-            part is not None for part in (metric_target, size_budget_value, scale_height, black_bar_handling, crop)
+            part is not None for part in (metric, size_budget_value, scale_height, black_bar_handling, crop)
         )
         if explicit_parts < 2:
             return None
@@ -119,6 +129,146 @@ def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, A
         "crop": crop,
         "reasoning_note": reasoning_note,
     }
+
+
+def _heuristic_operator_note_parse(note: str) -> dict[str, Any] | None:
+    trimmed = note.strip()
+    if not trimmed:
+        return None
+    lowered = trimmed.lower()
+
+    size_budget_match = _SIZE_BUDGET_RE.search(trimmed)
+    metric_match = _METRIC_TARGET_RE.search(trimmed)
+    metric_directive_match = _METRIC_DIRECTIVE_RE.search(trimmed)
+    scale_match = _SCALE_HEIGHT_RE.search(trimmed)
+    crop_match = _CROP_VALUE_RE.search(trimmed)
+
+    black_bar_handling = None
+    if "black-bar" in lowered or "black bar" in lowered:
+        if any(token in lowered for token in ("smart", "auto", "automatic")):
+            black_bar_handling = "smart"
+
+    scale_height = int(scale_match.group("height")) if scale_match is not None else None
+    crop = crop_match.group(0) if crop_match is not None else None
+    size_budget_value = float(size_budget_match.group("amount")) if size_budget_match is not None else None
+    size_budget_unit = size_budget_match.group("unit").lower() if size_budget_match is not None else None
+    metric = (
+        metric_match.group("metric").lower()
+        if metric_match is not None
+        else metric_directive_match.group("metric").lower() if metric_directive_match is not None else None
+    )
+    metric_target = round(float(metric_match.group("target")), 2) if metric_match is not None else None
+
+    explicit_parts = sum(
+        part is not None for part in (metric, size_budget_value, scale_height, black_bar_handling, crop)
+    )
+    if explicit_parts == 0:
+        return None
+
+    if explicit_parts >= 2:
+        request_type = "combined_experiment"
+    elif metric is not None:
+        request_type = "metric_target"
+    elif size_budget_value is not None:
+        request_type = "size_budget"
+    else:
+        request_type = "scale_target"
+
+    exploratory_markers = (
+        "i want to understand",
+        "is it realistic",
+        "would that help",
+        "will that help",
+        "do you think",
+        "what do you think",
+    )
+    operator_confirmed = True
+    intent_type = "direct_request"
+    if any(marker in lowered for marker in exploratory_markers):
+        operator_confirmed = False
+        intent_type = "exploratory_question"
+
+    summary_parts: list[str] = []
+    if scale_height is not None:
+        summary_parts.append(f"drop to {scale_height}p")
+    if size_budget_value is not None and size_budget_unit is not None:
+        summary_parts.append(f"target about {size_budget_value:g}{size_budget_unit.upper()}")
+    if metric is not None:
+        if metric_target is not None:
+            summary_parts.append(f"target {metric.upper()} {metric_target:g}")
+        else:
+            summary_parts.append(f"use {metric.upper()}")
+    if black_bar_handling is not None:
+        summary_parts.append("use smart black-bar handling")
+    if crop is not None:
+        summary_parts.append(f"apply crop {crop}")
+
+    return {
+        "summary": "Direct request: " + ", ".join(summary_parts),
+        "intent_type": intent_type,
+        "request_type": request_type,
+        "operator_confirmed": operator_confirmed,
+        "metric": metric,
+        "metric_target": metric_target,
+        "size_budget_value": size_budget_value,
+        "size_budget_unit": size_budget_unit,
+        "scale_height": scale_height,
+        "black_bar_handling": black_bar_handling,
+        "crop": crop,
+        "reasoning_note": "Local heuristic recovered the explicit operator request from the note text.",
+    }
+
+
+def _explicit_note_part_count(parsed: dict[str, Any] | None) -> int:
+    payload = object_dict(parsed)
+    if not payload:
+        return 0
+    return sum(
+        value is not None
+        for value in (
+            payload.get("metric_target") if payload.get("metric_target") is not None else payload.get("metric"),
+            payload.get("size_budget_value"),
+            payload.get("scale_height"),
+            payload.get("black_bar_handling"),
+            payload.get("crop"),
+        )
+    )
+
+
+def _merge_operator_note_parse(
+        structured_parse: dict[str, Any] | None,
+        heuristic_parse: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    structured = object_dict(structured_parse)
+    heuristic = object_dict(heuristic_parse)
+    if not structured:
+        return heuristic or None
+    if not heuristic:
+        return structured
+    if _explicit_note_part_count(heuristic) > _explicit_note_part_count(structured):
+        return heuristic
+    merged = dict(structured)
+    for key in (
+            "metric",
+            "metric_target",
+            "size_budget_value",
+            "size_budget_unit",
+            "scale_height",
+            "black_bar_handling",
+            "crop",
+    ):
+        if merged.get(key) in {None, ""} and heuristic.get(key) not in {None, ""}:
+            merged[key] = heuristic.get(key)
+    if not merged.get("operator_confirmed") and heuristic.get("operator_confirmed"):
+        merged["operator_confirmed"] = True
+        if str(merged.get("intent_type") or "").strip().lower() in {"unclear", "other"}:
+            merged["intent_type"] = "direct_request"
+    merged = _normalize_operator_note_parse(merged)
+    if merged is None:
+        return heuristic
+    if _explicit_note_part_count(merged) < _explicit_note_part_count(heuristic):
+        return heuristic
+    return merged
 
 
 def parse_audio_bitrate_kbps(value: JSONValue, fallback: float) -> float:
@@ -291,7 +441,7 @@ def _parsed_operator_note(note: str) -> dict[str, Any] | None:
     trimmed = note.strip()
     if not trimmed:
         return None
-    return _normalize_operator_note_parse(
+    structured_parse = _normalize_operator_note_parse(
         request_operator_note_parse(
             project_root=_PROJECT_ROOT,
             payload={
@@ -300,6 +450,8 @@ def _parsed_operator_note(note: str) -> dict[str, Any] | None:
             },
         )
     )
+    heuristic_parse = _heuristic_operator_note_parse(trimmed)
+    return _merge_operator_note_parse(structured_parse, heuristic_parse)
 
 
 def size_budget_request(
@@ -345,14 +497,11 @@ def size_budget_request(
         video_bitrate_kbps=estimated_video_bitrate_kbps,
         video_encoder=video_encoder,
     )
-    applied_policy: dict[str, Any] | None = None
     requested_max_encoded_percent = None
-    applied_max_encoded_percent = None
+    target_encoded_percent = None
     if estimated_source_percent is not None:
         requested_max_encoded_percent = round(estimated_source_percent, 2)
-        # Floor the cap so an explicit size budget stays at or below the requested target.
-        applied_max_encoded_percent = max(1, min(100, int(math.floor(estimated_source_percent))))
-        applied_policy = {"video": {"max_encoded_percent": applied_max_encoded_percent}}
+        target_encoded_percent = requested_max_encoded_percent
     tradeoff_hint = None
     if isinstance(effective_sample_item, dict):
         tradeoff_hint = audio_tradeoff_hint(
@@ -371,11 +520,14 @@ def size_budget_request(
         "estimated_source_percent": estimated_source_percent,
         "estimated_audio_bytes": estimated_audio_bytes,
         "estimated_video_bitrate_kbps": estimated_video_bitrate_kbps,
+        "target_video_bitrate_kbps": estimated_video_bitrate_kbps,
+        "target_encoded_percent": target_encoded_percent,
+        "target_tolerance_percent": SIZE_BUDGET_TARGET_TOLERANCE,
         "feasibility": feasibility,
         "requires_confirmation": requires_confirmation,
         "requested_max_encoded_percent": requested_max_encoded_percent,
-        "applied_max_encoded_percent": applied_max_encoded_percent,
-        "applied_policy": applied_policy,
+        "applied_max_encoded_percent": None,
+        "applied_policy": None,
         "audio_tradeoff_hint": tradeoff_hint,
     }
 
@@ -383,40 +535,36 @@ def size_budget_request(
 def metric_target_request(trimmed: str, parsed_note: dict[str, Any]) -> dict[str, Any] | None:
     metric = str(parsed_note.get("metric") or "").strip().lower()
     target = float_value(parsed_note.get("metric_target"))
-    if metric == "vmaf" and target > 0:
-        target = round(max(80.0, min(target, 98.0)), 2)
-        min_target = round(min(target, max(75.0, target - 2.0)), 2)
+    if metric == "vmaf":
+        applied_video: dict[str, JSONValue] = {"quality_metric": "vmaf"}
+        if target > 0:
+            target = round(max(80.0, min(target, 98.0)), 2)
+            min_target = round(min(target, max(75.0, target - 2.0)), 2)
+            applied_video.update({"target_vmaf": target, "min_target_vmaf": min_target})
         return {
             "source": "operator_note",
             "operator_note_parse": parsed_note,
             "honor_mode": "literal_experiment",
             "request_type": "metric_target",
             "metric": "vmaf",
-            "target": target,
-            "applied_policy": {
-                "video": {
-                    "target_vmaf": target,
-                    "min_target_vmaf": min_target,
-                }
-            },
+            "target": target if target > 0 else None,
+            "applied_policy": {"video": applied_video},
             "request_text": trimmed,
         }
-    if metric == "xpsnr" and target > 0:
-        target = round(max(30.0, min(target, 41.0)), 2)
-        min_target = round(min(target, max(29.0, target - 1.0)), 2)
+    if metric == "xpsnr":
+        applied_video: dict[str, JSONValue] = {"quality_metric": "xpsnr"}
+        if target > 0:
+            target = round(max(30.0, min(target, 41.0)), 2)
+            min_target = round(min(target, max(29.0, target - 1.0)), 2)
+            applied_video.update({"target_xpsnr": target, "min_target_xpsnr": min_target})
         return {
             "source": "operator_note",
             "operator_note_parse": parsed_note,
             "honor_mode": "literal_experiment",
             "request_type": "metric_target",
             "metric": "xpsnr",
-            "target": target,
-            "applied_policy": {
-                "video": {
-                    "target_xpsnr": target,
-                    "min_target_xpsnr": min_target,
-                }
-            },
+            "target": target if target > 0 else None,
+            "applied_policy": {"video": applied_video},
             "request_text": trimmed,
         }
     return None
@@ -655,7 +803,7 @@ def build_run_verdict_payload(
     sample_item = object_dict(calibration_payload.get("sample_item"))
     policy = object_dict(calibration_payload.get("policy"))
     advice_details = object_dict(advice_state)
-    return {
+    payload = {
         "folder": prefix,
         "action": calibration_payload.get("action"),
         "mode": calibration_payload.get("mode"),
@@ -676,6 +824,13 @@ def build_run_verdict_payload(
             "predicted_encode_seconds": sample_result.get("predicted_encode_seconds"),
         },
     }
+    target_analysis = size_budget_sample_analysis(
+        operator_request=object_dict(advice_details.get("operator_request")) or None,
+        calibration_payload=calibration_payload,
+    )
+    if target_analysis:
+        payload["size_target_analysis"] = target_analysis
+    return payload
 
 
 def record_run_verdict(

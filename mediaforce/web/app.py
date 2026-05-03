@@ -106,6 +106,7 @@ from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_fo
     multimodal_review_pack_public_view, pause_encode_queue_action, pending_proposal_public_view, \
     planned_audio_review_context, preview_folder_cards, proposal_alignment_issue, \
     proposal_context_snapshot, proposal_signal_copy, promote_folder_outputs_action, \
+    approve_measured_encode_recovery_action, \
     queue_folder_encode_action, recent_tuning_sessions, \
     refresh_host_status_cache, reset_folder_card_cache, resume_encode_queue_action, \
     retry_failed_encode_queue_action, review_media_context, \
@@ -678,12 +679,14 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             request_disposition: str | None,
             current_policy: dict[str, Any],
             preview_policy: dict[str, Any],
+            allow_measured_size_quality_tradeoff: bool = False,
     ) -> str | None:
         return proposal_alignment_issue(
             operator_request=operator_request,
             request_disposition=request_disposition,
             current_policy=current_policy,
             preview_policy=preview_policy,
+            allow_measured_size_quality_tradeoff=allow_measured_size_quality_tradeoff,
         )
 
     def _folder_ai_tune_deps() -> FolderAiTuneDeps:
@@ -765,6 +768,19 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 deps=_encode_queue_runtime_deps(),
             ),
             save_encode_job=save_encode_job,
+        )
+
+    def _approve_measured_encode_recovery_action(normalized_prefix: str) -> ActionPayload:
+        return approve_measured_encode_recovery_action(
+            config,
+            normalized_prefix,
+            now_iso=_now_iso,
+            load_calibration_state=_load_calibration_state,
+            calibration_draft_hash=_calibration_draft_hash,
+            save_calibration_state=_save_calibration_state,
+            review_gate=_review_gate,
+            upsert_override=_upsert_override,
+            queue_folder_encode_action=_queue_folder_encode_action,
         )
 
     def _validate_folder_outputs_action(normalized_prefix: str) -> ActionPayload:
@@ -870,6 +886,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         folder_ai_tune_preview_action=_folder_ai_tune_preview_action,
         folder_ai_tune_confirm_action=_folder_ai_tune_confirm_action,
         clear_folder_tuning_action=_clear_folder_tuning_action,
+        approve_measured_encode_recovery_action=_approve_measured_encode_recovery_action,
         queue_folder_encode_action=_queue_folder_encode_action,
         validate_folder_outputs_action=_validate_folder_outputs_action,
         promote_folder_outputs_action=_promote_folder_outputs_action,
@@ -1896,6 +1913,7 @@ def _build_tuning_runtime_toolbelt(
         current_policy: dict[str, Any],
         calibration: dict[str, Any] | None,
         metric_support: dict[str, bool],
+        operator_request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return build_tuning_runtime_toolbelt(
         _folder_tuning_runtime_deps(),
@@ -1903,6 +1921,7 @@ def _build_tuning_runtime_toolbelt(
         current_policy=current_policy,
         calibration=calibration,
         metric_support=metric_support,
+        operator_request=operator_request,
     )
 
 
@@ -2623,7 +2642,18 @@ def _recover_calibration_jobs(connection: DBClient, config: MediaforceConfig) ->
 
 
 def _recover_encode_queue(connection: DBClient, config: MediaforceConfig) -> None:
+    running_prefixes = [
+        str(row["prefix"] or "").strip()
+        for row in connection.execute(
+            select(encode_jobs.c.prefix)
+            .where(encode_jobs.c.status == "running")
+            .where(encode_jobs.c.job_kind.in_(("single", "shard")))
+        ).mappings().fetchall()
+    ]
     runtime_recover_encode_queue(connection, config, _encode_queue_runtime_deps())
+    cleaned_prefixes = sorted({prefix for prefix in running_prefixes if prefix})
+    if cleaned_prefixes:
+        _sweep_orphaned_encode_processes(config, prefixes=cleaned_prefixes)
 
 
 def _reconcile_encode_jobs(
@@ -2845,18 +2875,41 @@ def _reset_background_worker_leadership_for_tests() -> None:
         lease.release()
 
 
-def _sweep_orphaned_encode_processes(config: MediaforceConfig) -> None:
+def _sweep_orphaned_encode_processes(config: MediaforceConfig, *, prefixes: list[str] | None = None) -> None:
+    normalized_prefixes = [prefix.strip().strip("/") for prefix in prefixes or [] if prefix.strip().strip("/")]
+
+    def path_filter_for_host(target_host: dict[str, Any]) -> str:
+        if not normalized_prefixes:
+            return ""
+        patterns: list[str] = []
+
+        def path_prefix_pattern(path: Path) -> str:
+            return f"{re.escape(str(path))}(/|[[:space:]]|$)"
+
+        for prefix in normalized_prefixes:
+            patterns.append(path_prefix_pattern(config.staging_root_for_host(target_host) / prefix))
+            for root_key, source_root in config.source_root_map_for_host(target_host).items():
+                root_prefix = str(root_key).strip().strip("/")
+                if prefix == root_prefix:
+                    patterns.append(path_prefix_pattern(source_root))
+                    continue
+                root_leader = f"{root_prefix}/"
+                if prefix.startswith(root_leader):
+                    patterns.append(path_prefix_pattern(source_root / prefix[len(root_leader):]))
+        return "|".join(patterns)
+
     sweep_script = (
         "self_pid=$$; "
         "self_pgid=$(ps -o pgid= -p \"$self_pid\" 2>/dev/null | tr -d ' '); "
         "kill_tree() ( signal=$1; target=$2; children=$(ps -axo pid=,ppid= | awk -v target=\"$target\" '$2 == target { print $1 }'); for child in $children; do kill_tree \"$signal\" \"$child\"; done; kill -\"$signal\" \"$target\" 2>/dev/null || true; ); "
         "patterns='mediaforce_encoded_by=mediaforce|ab-av1 .*--temp-dir .*\\.mediaforce-ab-av1-'; "
-        "pids=$(ps -axo pid=,command= | awk -v self=\"$self_pid\" -v pat=\"$patterns\" '$1 != self && $0 !~ /(^|[[:space:]/])awk([[:space:]]|$)/ { pid=$1; $1=\"\"; if ($0 ~ pat) print pid }' || true); "
+        "extra_patterns=$1; "
+        "pids=$(ps -axo pid=,command= | awk -v self=\"$self_pid\" -v pat=\"$patterns\" -v extra=\"$extra_patterns\" '$1 != self && $0 !~ /(^|[[:space:]/])awk([[:space:]]|$)/ { pid=$1; $1=\"\"; if ($0 ~ pat && (extra == \"\" || $0 ~ extra)) print pid }' || true); "
         "if [ -n \"$pids\" ]; then "
         "for pid in $pids; do pgid=$(ps -o pgid= -p \"$pid\" 2>/dev/null | tr -d ' '); "
         "if [ -n \"$pgid\" ] && [ \"$pgid\" != \"$self_pgid\" ]; then kill -TERM -\"$pgid\" 2>/dev/null || true; else kill_tree TERM \"$pid\"; fi; done; "
         "sleep 2; "
-        "pids=$(ps -axo pid=,command= | awk -v self=\"$self_pid\" -v pat=\"$patterns\" '$1 != self && $0 !~ /(^|[[:space:]/])awk([[:space:]]|$)/ { pid=$1; $1=\"\"; if ($0 ~ pat) print pid }' || true); "
+        "pids=$(ps -axo pid=,command= | awk -v self=\"$self_pid\" -v pat=\"$patterns\" -v extra=\"$extra_patterns\" '$1 != self && $0 !~ /(^|[[:space:]/])awk([[:space:]]|$)/ { pid=$1; $1=\"\"; if ($0 ~ pat && (extra == \"\" || $0 ~ extra)) print pid }' || true); "
         "if [ -n \"$pids\" ]; then "
         "for pid in $pids; do pgid=$(ps -o pgid= -p \"$pid\" 2>/dev/null | tr -d ' '); "
         "if [ -n \"$pgid\" ] && [ \"$pgid\" != \"$self_pgid\" ]; then kill -KILL -\"$pgid\" 2>/dev/null || true; else kill_tree KILL \"$pid\"; fi; done; "
@@ -2874,7 +2927,8 @@ def _sweep_orphaned_encode_processes(config: MediaforceConfig) -> None:
         if str(host.get("mode") or "ssh").strip().lower() != "ssh":
             continue
         try:
-            run_remote_command(host, ["sh", "-lc", sweep_script], timeout=10)
+            path_filter = path_filter_for_host(host)
+            run_remote_command(host, ["sh", "-lc", sweep_script, "mediaforce-sweep", path_filter], timeout=10)
         except Exception as exc:
             host_label = str(host.get("label") or host.get("host") or host.get("key") or "remote host")
             LOGGER.warning("Orphan encode sweep failed for %s: %s", host_label, exc)

@@ -4,6 +4,9 @@ import shlex
 import socket
 import threading
 import time
+import fcntl
+from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -26,7 +29,7 @@ from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS, ensure_q
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.quality import QualitySearchError, QualityTempCleanupError, QualityTempSetupError, \
-    quality_error_message
+    analyze_quality_policy_failure, quality_error_message
 from mediaforce.encoding.staging import safe_unlink
 from mediaforce.remote import execution_mode_for_host, host_media_access_for_host, run_remote_command
 from mediaforce.web.runtime.host_runtime import host_config_for_key
@@ -117,6 +120,14 @@ def reconcile_encode_jobs(
         retry_not_before = deps.parse_iso(payload.get("retry_not_before"))
         if retry_not_before is not None and retry_not_before > now:
             continue
+        manifest_path = str(payload.get("manifest_path") or "").strip()
+        if manifest_path:
+            _cleanup_encode_retry_artifacts(
+                connection,
+                manifest_path=Path(manifest_path),
+                indexes=payload.get("manifest_indexes"),
+                deps=deps,
+            )
         payload.update(
             {
                 "status": "queued",
@@ -194,7 +205,7 @@ def clear_stale_encoding_items_when_idle(
 
 def _candidate_stale_staging_targets(
         config: MediaforceConfig,
-        row: dict[str, Any],
+        row: Mapping[str, Any],
 ) -> list[tuple[Path, dict[str, Any] | None]]:
     targets: list[tuple[Path, dict[str, Any] | None]] = []
 
@@ -459,6 +470,31 @@ def aggregate_encode_parent_job(
         ],
         "updated_at": deps.now_iso(),
     }
+    failure_analyses: list[dict[str, Any]] = []
+    failure_indexes: list[int] = []
+    for child in attention_children + failed_children + stopped_children:
+        failure_analysis = object_dict(object_dict(child.get("progress")).get("failure_analysis"))
+        if not failure_analysis:
+            continue
+        child_item_analyses = [object_dict(item) for item in object_list(failure_analysis.get("item_analyses"))]
+        if child_item_analyses:
+            failure_analyses.extend(child_item_analyses)
+        else:
+            failure_analyses.append(failure_analysis)
+        for index in object_list(failure_analysis.get("manifest_indexes")):
+            if isinstance(index, int) and index >= 0:
+                failure_indexes.append(index)
+    if failure_analyses:
+        if not failure_indexes:
+            failure_indexes = [
+                int_value(analysis.get("manifest_index"))
+                for analysis in failure_analyses
+                if int_value(analysis.get("manifest_index")) >= 0
+            ]
+        progress["failure_analysis"] = _aggregate_quality_failure_analysis(
+            sorted(set(failure_indexes)),
+            failure_analyses,
+        )
     waiting_reason = None
     if not running_children:
         for child in children:
@@ -558,7 +594,11 @@ def transition_encode_job_failure(
     assigned_host = object_dict(job.get("host"))
     previous_last_host = object_dict(job.get("last_host"))
     attempt_count = int_value(job.get("attempt_count"))
+    failure_analysis = _encode_failure_analysis(job, failure_kind=failure_kind, error_message=error_message)
+    auto_policy_retry = _apply_auto_quality_policy_retry(job, failure_analysis)
     retryable = _encode_failure_is_retryable(failure_kind, error_message, assigned_host)
+    if auto_policy_retry:
+        retryable = True
     host_related = _encode_failure_is_host_related(failure_kind, error_message, assigned_host)
     retry_beyond_attempt_cap = _encode_failure_retries_after_attempt_cap(
         failure_kind,
@@ -593,15 +633,18 @@ def transition_encode_job_failure(
         )
         retry_delay = _encode_job_retry_delay_seconds(min(attempt_count, deps.encode_job_max_attempts), deps)
         retry_not_before = (now + timedelta(seconds=retry_delay)).isoformat(timespec="seconds")
+        retry_reason = _encode_retry_waiting_reason(
+            failure_kind=failure_kind,
+            retry_not_before=retry_not_before,
+        )
+        if auto_policy_retry and failure_analysis:
+            retry_reason = f"retrying after measured policy adjustment at {retry_not_before}"
         job.update(
             {
                 "status": "retry_backoff",
                 "finished_at": None,
                 "retry_not_before": retry_not_before,
-                "waiting_reason": _encode_retry_waiting_reason(
-                    failure_kind=failure_kind,
-                    retry_not_before=retry_not_before,
-                ),
+                "waiting_reason": retry_reason,
                 "terminal_reason": None,
                 "host_cooldown_until": (
                     (now + timedelta(seconds=deps.encode_host_cooldown_seconds)).isoformat(timespec="seconds")
@@ -611,6 +654,7 @@ def transition_encode_job_failure(
                 "progress": _finalize_encode_job_progress(job, deps=deps, terminal_state="retry_backoff"),
             }
         )
+        _attach_failure_analysis_to_progress(job, failure_analysis)
         save_encode_job(connection, job)
         sync_encode_job_parent(connection, job, deps)
         return
@@ -627,8 +671,195 @@ def transition_encode_job_failure(
             "progress": _finalize_encode_job_progress(job, deps=deps, terminal_state="needs_attention"),
         }
     )
+    _attach_failure_analysis_to_progress(job, failure_analysis)
     save_encode_job(connection, job)
     sync_encode_job_parent(connection, job, deps)
+
+
+def _encode_failure_analysis(
+        job: dict[str, Any],
+        *,
+        failure_kind: str,
+        error_message: str,
+) -> dict[str, Any] | None:
+    if failure_kind != "deterministic":
+        return None
+    manifest_path = Path(str(job.get("manifest_path") or "").strip())
+    if not manifest_path.exists():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
+    indexes = _manifest_indexes_for_job(job, manifest_items)
+    if not indexes:
+        return None
+    item_analyses: list[dict[str, Any]] = []
+    for index in indexes:
+        if index < 0 or index >= len(manifest_items):
+            continue
+        item = manifest_items[index]
+        video_policy = object_dict(object_dict(item.get("resolved_policy")).get("video"))
+        item_analysis = analyze_quality_policy_failure(error_message, video_policy)
+        if not item_analysis:
+            continue
+        item_analysis["manifest_index"] = index
+        item_analysis["manifest_indexes"] = [index]
+        item_analysis["item_rel_path"] = str(item.get("rel_path") or item.get("source_path") or "")
+        item_analyses.append(item_analysis)
+    if not item_analyses:
+        return None
+    return _aggregate_quality_failure_analysis(indexes, item_analyses)
+
+
+def _aggregate_quality_failure_analysis(
+        indexes: list[int],
+        item_analyses: list[dict[str, Any]],
+) -> dict[str, Any]:
+    selected_indexes = {index for index in indexes if index >= 0}
+    analyzed_indexes = {
+        int_value(item.get("manifest_index"))
+        for item in item_analyses
+        if int_value(item.get("manifest_index")) >= 0
+    }
+    all_selected_analyzed = selected_indexes == analyzed_indexes
+    if len(item_analyses) == 1:
+        analysis = dict(item_analyses[0])
+        analysis["manifest_indexes"] = indexes
+        analysis["item_analyses"] = item_analyses
+        if not all_selected_analyzed:
+            analysis["auto_retry_allowed"] = False
+            analysis["retry_strategy"] = "needs_operator_approval"
+            analysis["summary"] = (
+                f"Measured policy analysis covers {len(item_analyses)} of {len(selected_indexes)} selected items; "
+                "operator approval is required."
+            )
+        return analysis
+    all_auto_retry = all(
+        bool(item.get("auto_retry_allowed"))
+        and str(item.get("retry_strategy") or "") == "auto_adjust_cap"
+        and int_value(item.get("proposed_max_encoded_percent")) > 0
+        for item in item_analyses
+    ) and all_selected_analyzed
+    proposed_caps = [
+        int_value(item.get("proposed_max_encoded_percent"))
+        for item in item_analyses
+        if int_value(item.get("proposed_max_encoded_percent")) > 0
+    ]
+    first = dict(item_analyses[0])
+    first.update(
+        {
+            "manifest_indexes": indexes,
+            "item_analyses": item_analyses,
+            "auto_retry_allowed": all_auto_retry,
+            "retry_strategy": "auto_adjust_cap" if all_auto_retry else "needs_operator_approval",
+            "proposed_max_encoded_percent": max(proposed_caps) if proposed_caps else None,
+            "summary": (
+                f"Measured policy analysis covers {len(item_analyses)} selected items; "
+                "all are safe for bounded cap adjustment."
+                if all_auto_retry
+                else (
+                    f"Measured policy analysis covers {len(item_analyses)} of {len(selected_indexes)} selected items; "
+                    "operator approval is required."
+                )
+            ),
+        }
+    )
+    return first
+
+
+def _apply_auto_quality_policy_retry(job: dict[str, Any], analysis: dict[str, Any] | None) -> bool:
+    if not analysis or not bool(analysis.get("auto_retry_allowed")):
+        return False
+    if str(analysis.get("retry_strategy") or "") != "auto_adjust_cap":
+        return False
+    manifest_path = Path(str(job.get("manifest_path") or "").strip())
+    if not manifest_path.exists():
+        return False
+    with _locked_manifest_file(manifest_path):
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+        manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
+        cap_by_index = _quality_policy_retry_caps_by_index(job, analysis, manifest_items)
+        if not cap_by_index:
+            return False
+        changed = False
+        for index, proposed_cap in cap_by_index.items():
+            if index < 0 or index >= len(manifest_items):
+                continue
+            item = manifest_items[index]
+            policy = object_dict(item.get("resolved_policy"))
+            video_policy = dict(object_dict(policy.get("video")))
+            current_cap = int_value(video_policy.get("max_encoded_percent"))
+            if proposed_cap <= current_cap:
+                continue
+            video_policy["max_encoded_percent"] = proposed_cap
+            policy["video"] = video_policy
+            item["resolved_policy"] = policy
+            manifest["items"][index] = item
+            changed = True
+        if not changed:
+            return False
+        try:
+            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        except OSError:
+            return False
+    return True
+
+
+def _quality_policy_retry_caps_by_index(
+        job: dict[str, Any],
+        analysis: dict[str, Any],
+        manifest_items: list[dict[str, Any]],
+) -> dict[int, int]:
+    item_analyses = [object_dict(item) for item in object_list(analysis.get("item_analyses"))]
+    if item_analyses:
+        caps: dict[int, int] = {}
+        expected_indexes = {index for index in object_list(analysis.get("manifest_indexes")) if isinstance(index, int)}
+        for item_analysis in item_analyses:
+            if not bool(item_analysis.get("auto_retry_allowed")):
+                return {}
+            if str(item_analysis.get("retry_strategy") or "") != "auto_adjust_cap":
+                return {}
+            index = int_value(item_analysis.get("manifest_index"))
+            proposed_cap = int_value(item_analysis.get("proposed_max_encoded_percent"))
+            if index < 0 or proposed_cap <= 0:
+                return {}
+            caps[index] = proposed_cap
+        if expected_indexes and set(caps) != expected_indexes:
+            return {}
+        return caps
+
+    indexes = [index for index in object_list(analysis.get("manifest_indexes")) if isinstance(index, int)]
+    if not indexes:
+        indexes = _manifest_indexes_for_job(job, manifest_items)
+    if len(indexes) != 1:
+        return {}
+    proposed_cap = int_value(analysis.get("proposed_max_encoded_percent"))
+    return {indexes[0]: proposed_cap} if proposed_cap > 0 else {}
+
+
+@contextmanager
+def _locked_manifest_file(manifest_path: Path):
+    lock_path = manifest_path.with_suffix(f"{manifest_path.suffix}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _attach_failure_analysis_to_progress(job: dict[str, Any], analysis: dict[str, Any] | None) -> None:
+    if not analysis:
+        return
+    progress = object_dict(job.get("progress"))
+    progress["failure_analysis"] = analysis
+    job["progress"] = progress
 
 
 def select_encode_host(
@@ -655,10 +886,14 @@ def select_encode_host(
             host_payload=host,
         )
 
+    def _probe_available(host: dict[str, Any]) -> bool:
+        return bool(host.get("probe_available", host.get("available")))
+
     active_hosts = [
         host
         for host in host_rows
         if bool(host.get("available"))
+        and _probe_available(host)
         and "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
         and int(host.get("active_encode_count") or 0) < int(host.get("max_parallel_encodes") or 1)
         and _schedule_open(host)
@@ -672,6 +907,7 @@ def select_encode_host(
         host
         for host in host_rows
         if not bool(host.get("available"))
+        and not _probe_available(host)
         and not object_list(host.get("issues"))
         and bool(deps.host_lifecycle_start_command(host))
         and "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
@@ -1330,6 +1566,26 @@ def _encode_failure_is_host_related(failure_kind: str, error_message: str, host_
     return str(host_payload.get("mode") or "") == "ssh" and "permission denied" in lowered
 
 
+def _quality_temp_setup_is_host_related(message: str) -> bool:
+    lowered = message.lower()
+    mount_markers = (
+        "/volumes/",
+        "mount",
+        "staging",
+        "transcode",
+    )
+    transport_markers = (
+        "operation timed out",
+        "connection timed out",
+        "broken pipe",
+        "connection reset",
+        "ssh:",
+    )
+    return any(marker in lowered for marker in mount_markers) and any(
+        marker in lowered for marker in transport_markers
+    )
+
+
 def _encode_failure_is_retryable(failure_kind: str, error_message: str, host_payload: dict[str, Any]) -> bool:
     if failure_kind in {"worker_restart", "stale_lease", "host_unavailable", "ssh_transport"}:
         return True
@@ -1436,12 +1692,14 @@ def _cleanup_encode_retry_artifacts(
 
 
 def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
+    message = str(exc).lower()
+    host_payload = object_dict(job.get("host"))
+    if isinstance(exc, QualityTempSetupError) and _quality_temp_setup_is_host_related(message):
+        return "ssh_transport"
     if isinstance(exc, (QualitySearchError, QualityTempCleanupError, QualityTempSetupError)):
         return "deterministic"
-    message = str(exc).lower()
     if _encode_failure_is_quality_policy_failure(message):
         return "deterministic"
-    host_payload = object_dict(job.get("host"))
     if _encode_failure_is_host_related("ssh_transport", message, host_payload):
         return "ssh_transport"
     if "staging file already exists" in message:

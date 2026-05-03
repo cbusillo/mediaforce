@@ -9,6 +9,7 @@ review_dir = "~/Library/Caches/mediaforce/review"
 
 [state.cleanup]
 transient_artifact_retention_days = 14
+orphan_temp_retention_minutes = 360
 periodic_sweep_minutes = 60
 
 [media]
