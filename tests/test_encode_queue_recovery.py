@@ -5478,6 +5478,32 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertFalse(temp_dir.exists())
 
+    def test_cleanup_process_snapshot_probes_remote_hosts_without_explicit_mode(self) -> None:
+        self.config.raw["remote_hosts"] = [
+            {
+                "host": "cbusillo@example-host",
+                "label": "Remote",
+                "capabilities": ["encode_queue"],
+            }
+        ]
+
+        with patch(
+                "mediaforce.state_cleanup._local_process_commands",
+                return_value=[],
+        ), patch(
+                "mediaforce.state_cleanup.run_remote_command",
+                return_value=subprocess.CompletedProcess(
+                    args=["ssh"],
+                    returncode=0,
+                    stdout="remote-proc\n",
+                    stderr="",
+                ),
+        ) as run_remote_mock:
+            snapshot = state_cleanup._cleanup_process_snapshot(self.config)
+
+        run_remote_mock.assert_called_once()
+        self.assertEqual(snapshot.commands, ("remote-proc",))
+
     def test_purge_transient_artifacts_prunes_orphaned_quality_temp_dirs_before_general_retention(self) -> None:
         temp_dir = self.config.paths.web_state_dir / "quality-temp" / ".mediaforce-ab-av1-orphan"
         temp_dir.mkdir(parents=True, exist_ok=True)

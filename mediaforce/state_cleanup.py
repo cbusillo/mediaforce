@@ -17,7 +17,7 @@ from mediaforce.encoding.quality import (
     previous_local_quality_temp_root,
 )
 from mediaforce.hosts import DEFAULT_HOST_CAPABILITIES
-from mediaforce.hosts.config import execution_mode_for_host
+from mediaforce.hosts.config import host_targets_current_machine
 from mediaforce.remote import run_remote_command
 
 SECONDS_PER_DAY = 86400
@@ -327,7 +327,10 @@ def _remote_hosts_requiring_process_probe(
 ) -> list[dict[str, object]]:
     hosts: list[dict[str, object]] = []
     for host in config.remote_hosts:
-        if execution_mode_for_host(host) != "ssh":
+        mode = str(host.get("mode") or "ssh").strip().lower() or "ssh"
+        if mode != "ssh":
+            continue
+        if host_targets_current_machine(host):
             continue
         capabilities = {
             str(capability).strip().lower()
