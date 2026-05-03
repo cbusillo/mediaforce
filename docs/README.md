@@ -9,6 +9,8 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 - `docs/style/index.md`: entry point for language and testing style guides
 - `docs/style/workstation-ui.md`: UI doctrine for operator-facing workstation
   surfaces
+- `.github/github-repo-workflow.json`: canonical repo commands, quality gates,
+  workflow metadata, and cleanup policy
 
 ## Architecture
 
@@ -28,3 +30,5 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 
 - `docs/development/database-tooling.md`: SQLAlchemy/Alembic schema workflow,
   legacy-bridge notes, and migration validation commands
+- `docs/development/browser-review-guidance.md`: browser-review subagent launch
+  contract for UI exploration and critique

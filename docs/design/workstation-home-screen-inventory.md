@@ -58,23 +58,27 @@ for the workstation model.
   - Rebuild these as purpose-fit workstation components instead of one large
     page template.
 
-## Retire from the home route
+## Retired from the home route
 
-These pieces represent the old dashboard language and should stop driving the
-home screen once replacements exist.
+These pieces represented the old dashboard language and were removed after the
+workstation replacement stopped referencing them.
 
 - `frontend/src/lib/components/dashboard/DashboardHero.svelte`
   - Hero framing is the wrong reference model for the operator home screen.
 - `frontend/src/lib/components/dashboard/DashboardFolderGrid.svelte`
   - Card-grid folder browsing is not the right primary queue surface.
-- `frontend/src/lib/components/dashboard/DashboardHostGrid.svelte`
-  - Host cards may still be useful elsewhere, but not as the home route's main
-    presentation model.
-- `frontend/src/lib/components/dashboard/DashboardQueues.svelte`
-  - Encodes and blockers should move into tighter workstation monitors, not
-    broad dashboard panels.
 - `frontend/src/lib/components/HeroCard.svelte`
-  - Retire from the operator home route.
+  - Retired with the dashboard hero wrapper.
+
+## Reassess outside the home route
+
+These old dashboard components are no longer home-screen drivers, but they are
+still used by adjacent routes and should be judged in their active context.
+
+- `frontend/src/lib/components/dashboard/DashboardHostGrid.svelte`
+  - Used by the Ops route.
+- `frontend/src/lib/components/dashboard/DashboardQueues.svelte`
+  - Used by the Ops route.
 
 ## Shared primitives to reassess
 
