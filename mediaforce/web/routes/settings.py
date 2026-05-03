@@ -4,6 +4,10 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+SETTINGS_SAVE_ERROR_MESSAGE = (
+    "Settings could not be saved. Review the submitted values and try again."
+)
+
 
 def register_settings_routes(
         app: FastAPI,
@@ -32,8 +36,8 @@ def register_settings_routes(
                 encode_queue_scheduler=dict(body.get("encode_queue_scheduler", {})),
                 schedule_profiles=[dict(item) for item in body.get("schedule_profiles", [])],
             )
-        except ValueError as exc:
-            return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+        except ValueError:
+            return JSONResponse({"ok": False, "message": SETTINGS_SAVE_ERROR_MESSAGE}, status_code=400)
         return JSONResponse(result)
 
     @app.post("/api/archive-cleanup/clear")
