@@ -87,7 +87,9 @@ export interface EncodeQueueJob {
 	error?: string | null;
 	last_failure_kind?: string | null;
 	last_failure_at?: string | null;
+	created_at?: string | null;
 	finished_at?: string | null;
+	updated_at?: string | null;
 	attempt_summary?: string | null;
 	active_hosts?: Array<Record<string, unknown>>;
 	running_shard_count?: number;

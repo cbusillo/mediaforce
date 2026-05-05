@@ -9,7 +9,8 @@ import {
 	hostStateCopy,
 	hostTone,
 	rowRecoveryLabel,
-	rowRecoveryTitle
+	rowRecoveryTitle,
+	retryableEncodeJobIds
 } from './ops-workstation';
 
 function dashboardFixture(): DashboardSummaryPayload {
@@ -245,5 +246,34 @@ describe('Ops workstation mapping', () => {
 		expect(hostPrepareTitle(passwordHost)).toBe('Enter the prepare password for this host.');
 		expect(hostPrepareDisabled(unsupportedHost, 'secret')).toBe(true);
 		expect(hostPrepareTitle(unsupportedHost)).toBe('Prepare is unavailable for this host.');
+	});
+
+	it('does not expose prefix retry for stale historical encode rows', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.queued.push({
+			job_id: 'encode-newer',
+			prefix: 'tv/show/season 3',
+			status: 'queued',
+			created_at: '2026-05-05T12:00:00Z',
+			updated_at: '2026-05-05T12:00:00Z'
+		});
+		dashboard.encode_queue.recent = [
+			{
+				job_id: 'encode-stale',
+				prefix: 'tv/show/season 3',
+				status: 'needs_attention',
+				error: 'older quality target miss',
+				created_at: '2026-05-05T11:00:00Z',
+				updated_at: '2026-05-05T11:00:00Z'
+			}
+		];
+
+		const rows = buildOpsQueueRows(dashboard);
+		const staleRow = rows.find((row) => row.key === 'encode:encode-stale');
+
+		expect(staleRow).toMatchObject({ action: undefined, actionScope: undefined });
+		expect(
+			retryableEncodeJobIds([...dashboard.encode_queue.queued, ...dashboard.encode_queue.recent])
+		).not.toContain('encode-stale');
 	});
 });

@@ -17,6 +17,7 @@
 		addHostDraft,
 		addLibraryDraft,
 		addScheduleDraft,
+		buildArchiveCleanupClearPayload,
 		buildSettingsSavePayload,
 		draftFromSettings,
 		hostDraftRuntimeKey,
@@ -289,7 +290,7 @@
 		try {
 			const response = await postJson<ArchiveClearResponse>(
 				`${resolve('/')}api/archive-cleanup/clear`,
-				{ transcode_root: draft.transcode_root }
+				buildArchiveCleanupClearPayload(savedSettings)
 			);
 			if (!response.ok) {
 				throw new Error(response.message || 'Archive cleanup failed.');
