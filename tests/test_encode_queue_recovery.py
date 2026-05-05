@@ -13513,6 +13513,62 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(summary["sample"]["recent_failed"][0]["prefix"], "tv/sample-failed")
         self.assertEqual(summary["full"]["recent_failed"][0]["prefix"], "tv/proof-stopped")
 
+    def test_calibration_queue_summary_limits_recent_failed_jobs_per_lane(self) -> None:
+        now = web_app._now_iso()
+        with open_db(self.config.paths.db_path) as connection:
+            for index in range(4):
+                prefix = f"tv/sample-failed-{index}"
+                web_app._save_job_state(
+                    connection,
+                    self.config,
+                    prefix,
+                    {
+                        "job_id": f"sample-failed-{index}",
+                        "prefix": prefix,
+                        "status": "failed",
+                        "lane": "sample",
+                        "action": "baseline",
+                        "host": {"key": "cbusillo@localhost", "label": "M4 Studio"},
+                        "notes": "",
+                        "policy": {},
+                        "sample_item": {},
+                        "owner_pid": None,
+                        "created_at": now,
+                        "started_at": now,
+                        "finished_at": now,
+                        "error": "sample failed detail",
+                    },
+                )
+            web_app._save_job_state(
+                connection,
+                self.config,
+                "tv/proof-failed",
+                {
+                    "job_id": "proof-failed",
+                    "prefix": "tv/proof-failed",
+                    "status": "failed",
+                    "lane": "full",
+                    "action": "full",
+                    "host": {"key": "cbusillo@localhost", "label": "M4 Studio"},
+                    "notes": "",
+                    "policy": {},
+                    "sample_item": {},
+                    "owner_pid": None,
+                    "created_at": now,
+                    "started_at": now,
+                    "finished_at": now,
+                    "error": "proof failed detail",
+                },
+            )
+            connection.commit()
+
+            summary = list_queue_summary(connection, limit_per_lane=2)
+
+        self.assertEqual(summary["sample"]["recent_failed_count"], 2)
+        self.assertEqual(summary["full"]["recent_failed_count"], 1)
+        self.assertEqual(len(summary["sample"]["recent_failed"]), 2)
+        self.assertEqual(summary["full"]["recent_failed"][0]["prefix"], "tv/proof-failed")
+
     def test_run_remote_status_probe_retries_timeout_once(self) -> None:
         host: dict[str, object] = {"host": "cbusillo@chris-mini.local"}
         timeout_exc = subprocess.TimeoutExpired(cmd=["ssh"], timeout=8)

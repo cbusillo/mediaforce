@@ -167,8 +167,8 @@ describe('Ops workstation mapping', () => {
 		]);
 		expect(rows[1]).toMatchObject({
 			tone: 'wait',
-			action: 'retry-encode-prefix',
-			actionScope: 'row',
+			action: undefined,
+			actionScope: undefined,
 			detail: 'transient worker fault'
 		});
 		expect(rows[2]).toMatchObject({
@@ -177,8 +177,10 @@ describe('Ops workstation mapping', () => {
 			actionScope: 'row',
 			detail: 'quality target missed'
 		});
-		expect(rowRecoveryLabel(rows[1])).toBe('Retry folder');
-		expect(rowRecoveryTitle(rows[1])).toContain('folder prefix only');
+		expect(rowRecoveryLabel(rows[1])).toBe('No action');
+		expect(rowRecoveryTitle(rows[1])).toBe('No runtime action is available for this row.');
+		expect(rowRecoveryLabel(rows[2])).toBe('Retry folder');
+		expect(rowRecoveryTitle(rows[2])).toContain('folder prefix only');
 		expect(rowRecoveryLabel(rows[3])).toBe('No action');
 		expect(rows[4]).toMatchObject({
 			tone: 'fail',

@@ -140,27 +140,28 @@ export function buildEncodeRows(
 ): OpsQueueRow[] {
 	const queue = dashboard?.encode_queue;
 	if (!queue) return [];
+	const prefixRetryStatuses = new Set(['failed', 'needs_attention', 'stopped']);
 	const recentAttention = (queue.recent ?? []).filter((job) =>
-		['failed', 'needs_attention', 'stopped'].includes(String(job.status ?? '').toLowerCase())
+		prefixRetryStatuses.has(String(job.status ?? '').toLowerCase())
 	);
-	return [...queue.running, ...queue.queued, ...recentAttention].map((job) => ({
-		key: `encode:${job.job_id}`,
-		kind: 'encode',
-		tone: encodeJobTone(job),
-		status: statusCopy(job.status || 'unknown'),
-		prefix: job.prefix || 'runtime scope',
-		host: job.active_hosts?.map(hostCopy).filter(Boolean).join(', ') || hostCopy(job.host),
-		phase: job.running_shard_count ? `${job.running_shard_count} active shards` : 'encode queue',
-		progress: encodeJobProgress(job),
-		scheduler: job.scheduler_status_copy || (job.schedule_waiting ? 'schedule waiting' : 'ready'),
-		detail: encodeJobDetail(job),
-		action: ['failed', 'needs_attention', 'stopped', 'retry_backoff'].includes(job.status)
-			? 'retry-encode-prefix'
-			: undefined,
-		actionScope: ['failed', 'needs_attention', 'stopped', 'retry_backoff'].includes(job.status)
-			? 'row'
-			: undefined
-	}));
+	return [...queue.running, ...queue.queued, ...recentAttention].map((job) => {
+		const status = String(job.status ?? '').toLowerCase();
+		const canRetryPrefix = prefixRetryStatuses.has(status);
+		return {
+			key: `encode:${job.job_id}`,
+			kind: 'encode',
+			tone: encodeJobTone(job),
+			status: statusCopy(job.status || 'unknown'),
+			prefix: job.prefix || 'runtime scope',
+			host: job.active_hosts?.map(hostCopy).filter(Boolean).join(', ') || hostCopy(job.host),
+			phase: job.running_shard_count ? `${job.running_shard_count} active shards` : 'encode queue',
+			progress: encodeJobProgress(job),
+			scheduler: job.scheduler_status_copy || (job.schedule_waiting ? 'schedule waiting' : 'ready'),
+			detail: encodeJobDetail(job),
+			action: canRetryPrefix ? 'retry-encode-prefix' : undefined,
+			actionScope: canRetryPrefix ? 'row' : undefined
+		};
+	});
 }
 
 function buildCalibrationLaneRows(
