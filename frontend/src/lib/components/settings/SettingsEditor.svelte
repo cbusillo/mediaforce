@@ -76,8 +76,17 @@
 	let lastSettingsKey = '';
 
 	$effect(() => {
+		if (!settings) {
+			if (!loadError) return;
+			lastSettingsKey = '';
+			savedSettings = null;
+			draft = emptyDraft;
+			clearArchiveArmed = false;
+			archiveMessage = '';
+			return;
+		}
 		const nextSettingsKey = settingsKey(settings);
-		if (!settings || nextSettingsKey === lastSettingsKey || savePending) return;
+		if (nextSettingsKey === lastSettingsKey || savePending) return;
 		lastSettingsKey = nextSettingsKey;
 		savedSettings = settings;
 		draft = draftFromSettings(settings);
