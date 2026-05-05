@@ -182,6 +182,125 @@
 
 <OperatorShell route="queue" subject="Queue" {crumb} {statusTiles} {footerSignals}>
 	<main class="home">
+		<section class="home__main" aria-label="Operational review queue">
+			<header class="queue-header">
+				<div>
+					<span class="mf-eyebrow">Queue</span>
+					<h1>Operator queue</h1>
+					<p>
+						Filter the current queue, start from the highest-priority folder, or search directly for
+						a folder context.
+					</p>
+				</div>
+				<div class="queue-header__facts">
+					<div>
+						<span>Visible folders</span>
+						<strong>{visibleFolders.length.toLocaleString('en-US')}</strong>
+					</div>
+					<div>
+						<span>Pending items</span>
+						<strong>{totalPendingItems(visibleFolders).toLocaleString('en-US')}</strong>
+					</div>
+					<div>
+						<span>Projected reclaim</span>
+						<strong>{formatBytes(totalProjectedReclaim(visibleFolders))}</strong>
+					</div>
+				</div>
+			</header>
+
+			<WorkstationPanel eyebrow="Highest priority" title="Next folder">
+				{#if nextFolder}
+					<div class="next-card">
+						<StateBadge tone={queueFolderTone(nextFolder)} label={queueFolderState(nextFolder)} />
+						<div>
+							<h2>{nextFolder.title}</h2>
+							<p>{nextFolder.prefix}</p>
+						</div>
+						<div class="next-card__metrics">
+							<div>
+								<span>Items</span>
+								<strong>{nextFolder.item_count.toLocaleString('en-US')}</strong>
+							</div>
+							<div>
+								<span>Pending</span>
+								<strong>{nextFolder.pending_count.toLocaleString('en-US')}</strong>
+							</div>
+							<div>
+								<span>Reclaim</span>
+								<strong>{formatBytes(nextFolder.projected_reclaim_bytes)}</strong>
+							</div>
+							<div>
+								<span>Status</span>
+								<strong>{folderStatusCopy(nextFolder)}</strong>
+							</div>
+						</div>
+						<a class="control control--primary" href={resolve(folderRoutePath(nextFolder.prefix))}
+							>Open Folder Studio</a
+						>
+					</div>
+				{:else}
+					<div class="empty-note">No folders match the current filters.</div>
+				{/if}
+			</WorkstationPanel>
+
+			<WorkstationPanel eyebrow="Ranked queue" title="Folders needing operator attention">
+				<div class="table-wrap">
+					<table>
+						<thead>
+							<tr>
+								<th>State</th>
+								<th>Folder</th>
+								<th>Pending</th>
+								<th>Source</th>
+								<th>Reclaim</th>
+								<th>Codec</th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each visibleFolders.slice(0, 18) as folder (rowKey(folder))}
+								<tr>
+									<td>
+										<StateBadge
+											compact
+											tone={queueFolderTone(folder)}
+											label={queueFolderState(folder)}
+										/>
+									</td>
+									<td>
+										<a class="folder-link" href={resolve(folderRoutePath(folder.prefix))}>
+											<strong>{folder.title}</strong>
+											<span>{folder.prefix}</span>
+										</a>
+									</td>
+									<td>{folder.pending_count.toLocaleString('en-US')}</td>
+									<td>{formatBytes(folder.total_size_bytes)}</td>
+									<td>{formatBytes(folder.projected_reclaim_bytes)}</td>
+									<td>{codecSummary(folder.video_codecs)}</td>
+								</tr>
+							{:else}
+								<tr>
+									<td colspan="6">No folders match the current library filters.</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+			</WorkstationPanel>
+
+			<WorkstationPanel eyebrow="Archive" title="Cleanup signal">
+				<dl class="kv">
+					<dt>Archive root</dt>
+					<dd>{dashboard.archive_cleanup?.archive_root ?? '—'}</dd>
+					<dt>Files</dt>
+					<dd>{dashboard.archive_cleanup?.file_count?.toLocaleString('en-US') ?? '0'}</dd>
+					<dt>Size</dt>
+					<dd>{formatBytes(dashboard.archive_cleanup?.total_size_bytes)}</dd>
+					<dt>Ready</dt>
+					<dd>{dashboard.archive_cleanup?.has_cleanup ? 'yes' : 'no'}</dd>
+				</dl>
+			</WorkstationPanel>
+		</section>
+
 		<aside class="home__rail" aria-label="Queue scope">
 			<WorkstationPanel eyebrow="Scope" title="Operator queue">
 				<div class="scope-list">
@@ -306,125 +425,6 @@
 				</div>
 			</WorkstationPanel>
 		</aside>
-
-		<section class="home__main" aria-label="Operational review queue">
-			<header class="queue-header">
-				<div>
-					<span class="mf-eyebrow">Queue</span>
-					<h1>Operator queue</h1>
-					<p>
-						Filter the current queue, start from the highest-priority folder, or search directly for
-						a folder context.
-					</p>
-				</div>
-				<div class="queue-header__facts">
-					<div>
-						<span>Visible folders</span>
-						<strong>{visibleFolders.length.toLocaleString('en-US')}</strong>
-					</div>
-					<div>
-						<span>Pending items</span>
-						<strong>{totalPendingItems(visibleFolders).toLocaleString('en-US')}</strong>
-					</div>
-					<div>
-						<span>Projected reclaim</span>
-						<strong>{formatBytes(totalProjectedReclaim(visibleFolders))}</strong>
-					</div>
-				</div>
-			</header>
-
-			<WorkstationPanel eyebrow="Highest priority" title="Next folder">
-				{#if nextFolder}
-					<div class="next-card">
-						<StateBadge tone={queueFolderTone(nextFolder)} label={queueFolderState(nextFolder)} />
-						<div>
-							<h2>{nextFolder.title}</h2>
-							<p>{nextFolder.prefix}</p>
-						</div>
-						<div class="next-card__metrics">
-							<div>
-								<span>Items</span>
-								<strong>{nextFolder.item_count.toLocaleString('en-US')}</strong>
-							</div>
-							<div>
-								<span>Pending</span>
-								<strong>{nextFolder.pending_count.toLocaleString('en-US')}</strong>
-							</div>
-							<div>
-								<span>Reclaim</span>
-								<strong>{formatBytes(nextFolder.projected_reclaim_bytes)}</strong>
-							</div>
-							<div>
-								<span>Status</span>
-								<strong>{folderStatusCopy(nextFolder)}</strong>
-							</div>
-						</div>
-						<a class="control control--primary" href={resolve(folderRoutePath(nextFolder.prefix))}
-							>Open Folder Studio</a
-						>
-					</div>
-				{:else}
-					<div class="empty-note">No folders match the current filters.</div>
-				{/if}
-			</WorkstationPanel>
-
-			<WorkstationPanel eyebrow="Ranked queue" title="Folders needing operator attention">
-				<div class="table-wrap">
-					<table>
-						<thead>
-							<tr>
-								<th>State</th>
-								<th>Folder</th>
-								<th>Pending</th>
-								<th>Source</th>
-								<th>Reclaim</th>
-								<th>Codec</th>
-							</tr>
-						</thead>
-						<tbody>
-							{#each visibleFolders.slice(0, 18) as folder (rowKey(folder))}
-								<tr>
-									<td>
-										<StateBadge
-											compact
-											tone={queueFolderTone(folder)}
-											label={queueFolderState(folder)}
-										/>
-									</td>
-									<td>
-										<a class="folder-link" href={resolve(folderRoutePath(folder.prefix))}>
-											<strong>{folder.title}</strong>
-											<span>{folder.prefix}</span>
-										</a>
-									</td>
-									<td>{folder.pending_count.toLocaleString('en-US')}</td>
-									<td>{formatBytes(folder.total_size_bytes)}</td>
-									<td>{formatBytes(folder.projected_reclaim_bytes)}</td>
-									<td>{codecSummary(folder.video_codecs)}</td>
-								</tr>
-							{:else}
-								<tr>
-									<td colspan="6">No folders match the current library filters.</td>
-								</tr>
-							{/each}
-						</tbody>
-					</table>
-				</div>
-			</WorkstationPanel>
-
-			<WorkstationPanel eyebrow="Archive" title="Cleanup signal">
-				<dl class="kv">
-					<dt>Archive root</dt>
-					<dd>{dashboard.archive_cleanup?.archive_root ?? '—'}</dd>
-					<dt>Files</dt>
-					<dd>{dashboard.archive_cleanup?.file_count?.toLocaleString('en-US') ?? '0'}</dd>
-					<dt>Size</dt>
-					<dd>{formatBytes(dashboard.archive_cleanup?.total_size_bytes)}</dd>
-					<dt>Ready</dt>
-					<dd>{dashboard.archive_cleanup?.has_cleanup ? 'yes' : 'no'}</dd>
-				</dl>
-			</WorkstationPanel>
-		</section>
 	</main>
 </OperatorShell>
 
@@ -440,6 +440,8 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--mf-space-5);
+		grid-column: 1;
+		grid-row: 1;
 		padding: var(--mf-space-5);
 	}
 
@@ -450,6 +452,8 @@
 	.home__main {
 		display: grid;
 		gap: var(--mf-space-5);
+		grid-column: 2;
+		grid-row: 1;
 		min-width: 0;
 		padding: var(--mf-space-6);
 	}
@@ -767,9 +771,16 @@
 			grid-template-columns: 1fr;
 		}
 
+		.home__main {
+			grid-column: auto;
+			grid-row: auto;
+		}
+
 		.home__rail {
 			border-left: 0;
 			border-right: 0;
+			grid-column: auto;
+			grid-row: auto;
 		}
 
 		.queue-header {

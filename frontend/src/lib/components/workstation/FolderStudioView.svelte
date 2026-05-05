@@ -100,47 +100,6 @@
 	{footerSignals}
 >
 	<main class="studio">
-		<aside class="studio__left" aria-label="Folder workflow context">
-			<WorkstationPanel eyebrow="Folder" title="Active context">
-				<div class="context-list">
-					<div>
-						<span>Library</span>
-						<strong>{library}</strong>
-					</div>
-					<div>
-						<span>Items</span>
-						<strong>{summary?.item_count?.toLocaleString('en-US') ?? '—'}</strong>
-					</div>
-					<div>
-						<span>Pending</span>
-						<strong>{summary?.statuses ? summarizeStatuses(summary.statuses) : '—'}</strong>
-					</div>
-					<div>
-						<span>Source size</span>
-						<strong>{formatBytes(summary?.total_size_bytes)}</strong>
-					</div>
-				</div>
-			</WorkstationPanel>
-
-			<WorkstationPanel eyebrow="Hosts" title="Sample readiness">
-				<div class="host-list">
-					{#each hosts.hosts.slice(0, 6) as host (host.key)}
-						<div class="host-row">
-							<StateBadge
-								compact
-								tone={host.available ? 'ready' : host.schedule_open === false ? 'wait' : 'fail'}
-								label={host.label}
-							/>
-							<span>{host.message || host.schedule_detail || 'No detail'}</span>
-						</div>
-					{/each}
-					{#if hosts.hosts.length === 0}
-						<div class="empty-note">No host runtime data returned.</div>
-					{/if}
-				</div>
-			</WorkstationPanel>
-		</aside>
-
 		<section class="studio__main" aria-label="Folder decision surface">
 			<header class="folder-header">
 				<div>
@@ -401,6 +360,47 @@
 				</div>
 			</WorkstationPanel>
 		</section>
+
+		<aside class="studio__left" aria-label="Folder workflow context">
+			<WorkstationPanel eyebrow="Folder" title="Active context">
+				<div class="context-list">
+					<div>
+						<span>Library</span>
+						<strong>{library}</strong>
+					</div>
+					<div>
+						<span>Items</span>
+						<strong>{summary?.item_count?.toLocaleString('en-US') ?? '—'}</strong>
+					</div>
+					<div>
+						<span>Pending</span>
+						<strong>{summary?.statuses ? summarizeStatuses(summary.statuses) : '—'}</strong>
+					</div>
+					<div>
+						<span>Source size</span>
+						<strong>{formatBytes(summary?.total_size_bytes)}</strong>
+					</div>
+				</div>
+			</WorkstationPanel>
+
+			<WorkstationPanel eyebrow="Hosts" title="Sample readiness">
+				<div class="host-list">
+					{#each hosts.hosts.slice(0, 6) as host (host.key)}
+						<div class="host-row">
+							<StateBadge
+								compact
+								tone={host.available ? 'ready' : host.schedule_open === false ? 'wait' : 'fail'}
+								label={host.label}
+							/>
+							<span>{host.message || host.schedule_detail || 'No detail'}</span>
+						</div>
+					{/each}
+					{#if hosts.hosts.length === 0}
+						<div class="empty-note">No host runtime data returned.</div>
+					{/if}
+				</div>
+			</WorkstationPanel>
+		</aside>
 	</main>
 </OperatorShell>
 
@@ -417,6 +417,8 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--mf-space-5);
+		grid-column: 1;
+		grid-row: 1;
 		padding: var(--mf-space-5);
 	}
 
@@ -427,6 +429,8 @@
 	.studio__main {
 		display: grid;
 		gap: var(--mf-space-5);
+		grid-column: 2;
+		grid-row: 1;
 		min-width: 0;
 		padding: var(--mf-space-6);
 	}
@@ -873,8 +877,15 @@
 			grid-template-columns: 1fr;
 		}
 
+		.studio__main {
+			grid-column: auto;
+			grid-row: auto;
+		}
+
 		.studio__left {
 			border-right: 0;
+			grid-column: auto;
+			grid-row: auto;
 		}
 
 		.folder-header,
