@@ -1,16 +1,25 @@
 <script lang="ts">
-	import type { FolderPayload, FolderStatusPayload, HostsPayload } from '$lib/api/types';
-	import FolderStudioView from '$lib/components/folders/FolderStudioView.svelte';
+	import FolderStudioView from '$lib/components/workstation/FolderStudioView.svelte';
+	import HomeWorkbenchView from '$lib/components/workstation/HomeWorkbenchView.svelte';
 
-	let {
-		data
-	}: {
-		data: {
-			folder: FolderPayload;
-			status: FolderStatusPayload;
-			hosts: HostsPayload;
-		};
-	} = $props();
+	let { data } = $props();
 </script>
 
-<FolderStudioView {data} />
+<svelte:head>
+	<title
+		>{data.mode === 'studio'
+			? `${data.folder.prefix} · Mediaforce Folder Studio`
+			: 'Mediaforce Queue'}</title
+	>
+</svelte:head>
+
+{#if data.mode === 'studio'}
+	<FolderStudioView folder={data.folder} status={data.status} hosts={data.hosts} />
+{:else}
+	<HomeWorkbenchView
+		crumb="/folders"
+		dashboard={data.dashboard}
+		foldersPayload={data.foldersPayload}
+		hosts={data.hosts}
+	/>
+{/if}
