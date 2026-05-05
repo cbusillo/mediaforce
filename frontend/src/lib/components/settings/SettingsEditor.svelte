@@ -81,8 +81,11 @@
 			lastSettingsKey = '';
 			savedSettings = null;
 			draft = emptyDraft;
+			saveMessage = '';
+			saveError = '';
 			clearArchiveArmed = false;
 			archiveMessage = '';
+			archiveError = '';
 			return;
 		}
 		const nextSettingsKey = settingsKey(settings);
