@@ -208,6 +208,102 @@
 				</div>
 			</header>
 
+			<WorkstationPanel eyebrow="Filters" title="Queue filters">
+				<div class="queue-filter" aria-label="Queue filters">
+					<div class="queue-filter__summary">
+						<span>Visible queue</span>
+						<strong
+							>{visibleFolders.length.toLocaleString('en-US')} / {folders.length.toLocaleString(
+								'en-US'
+							)}
+							folders</strong
+						>
+						<small
+							>{[
+								excludedLibraryCount ? `${excludedLibraryCount} libraries excluded` : '',
+								excludedStateCount ? `${excludedStateCount} states excluded` : '',
+								searchQuery.trim() ? 'search active' : ''
+							]
+								.filter(Boolean)
+								.join(' · ') || 'all queue items included'}</small
+						>
+					</div>
+
+					<label class="queue-filter__search">
+						<span>Search</span>
+						<input
+							type="search"
+							value={searchQuery}
+							placeholder="Name, path, or status"
+							oninput={handleSearchInput}
+						/>
+					</label>
+
+					<div class="queue-filter__group">
+						<div class="queue-filter__group-head">
+							<span>Libraries</span>
+							<div class="queue-filter__actions" aria-label="Bulk library filters">
+								<button type="button" onclick={() => setAllLibraries(true)}>All</button>
+								<button type="button" onclick={() => setAllLibraries(false)}>None</button>
+							</div>
+						</div>
+						{#each libraryOptions as option (option.key)}
+							<label
+								class="queue-filter__row"
+								class:queue-filter__row--excluded={!libraryIncluded(option.key)}
+							>
+								<input
+									type="checkbox"
+									checked={libraryIncluded(option.key)}
+									onchange={(event) => handleLibraryFilterChange(option.key, event)}
+								/>
+								<span>
+									<strong>{option.label}</strong>
+									<small
+										>{option.folders.toLocaleString('en-US')} folders · {option.pending.toLocaleString(
+											'en-US'
+										)}
+										pending</small
+									>
+								</span>
+								<em>{formatBytes(option.reclaim)}</em>
+							</label>
+						{/each}
+					</div>
+
+					<div class="queue-filter__group">
+						<div class="queue-filter__group-head">
+							<span>States</span>
+							<div class="queue-filter__actions" aria-label="Bulk state filters">
+								<button type="button" onclick={() => setAllStates(true)}>All</button>
+								<button type="button" onclick={() => setAllStates(false)}>None</button>
+							</div>
+						</div>
+						{#each stateOptions as option (option.key)}
+							<label
+								class="queue-filter__row"
+								class:queue-filter__row--excluded={!stateIncluded(option.key)}
+							>
+								<input
+									type="checkbox"
+									checked={stateIncluded(option.key)}
+									onchange={(event) => handleStateFilterChange(option.key, event)}
+								/>
+								<span>
+									<strong>{option.label}</strong>
+									<small
+										>{option.folders.toLocaleString('en-US')} folders · {option.pending.toLocaleString(
+											'en-US'
+										)}
+										pending</small
+									>
+								</span>
+							</label>
+						{/each}
+					</div>
+				</div>
+			</WorkstationPanel>
+
 			<WorkstationPanel eyebrow="Highest priority" title="Next folder">
 				{#if nextFolder}
 					<div class="next-card">
@@ -307,7 +403,12 @@
 					<div class="scope-row scope-row--active">
 						<span>Primary</span>
 						<strong>Review candidates</strong>
-						<small>{folders.length} folders</small>
+						<small
+							>{visibleFolders.length.toLocaleString('en-US')} / {folders.length.toLocaleString(
+								'en-US'
+							)}
+							folders</small
+						>
 					</div>
 					<div class="scope-row">
 						<span>Samples</span>
@@ -325,102 +426,6 @@
 							>{dashboard.encode_queue.state.scheduler_summary ??
 								'scheduler state unavailable'}</small
 						>
-					</div>
-				</div>
-			</WorkstationPanel>
-
-			<WorkstationPanel eyebrow="Filters" title="Queue filters">
-				<div class="queue-filter" aria-label="Queue filters">
-					<div class="queue-filter__summary">
-						<span>Visible queue</span>
-						<strong
-							>{visibleFolders.length.toLocaleString('en-US')} / {folders.length.toLocaleString(
-								'en-US'
-							)}
-							folders</strong
-						>
-						<small
-							>{[
-								excludedLibraryCount ? `${excludedLibraryCount} libraries excluded` : '',
-								excludedStateCount ? `${excludedStateCount} states excluded` : '',
-								searchQuery.trim() ? 'search active' : ''
-							]
-								.filter(Boolean)
-								.join(' · ') || 'all queue items included'}</small
-						>
-					</div>
-
-					<label class="queue-filter__search">
-						<span>Search</span>
-						<input
-							type="search"
-							value={searchQuery}
-							placeholder="Name, path, or status"
-							oninput={handleSearchInput}
-						/>
-					</label>
-
-					<div class="queue-filter__group">
-						<div class="queue-filter__group-head">
-							<span>Libraries</span>
-							<div class="queue-filter__actions" aria-label="Bulk library filters">
-								<button type="button" onclick={() => setAllLibraries(true)}>All</button>
-								<button type="button" onclick={() => setAllLibraries(false)}>None</button>
-							</div>
-						</div>
-						{#each libraryOptions as option (option.key)}
-							<label
-								class="queue-filter__row"
-								class:queue-filter__row--excluded={!libraryIncluded(option.key)}
-							>
-								<input
-									type="checkbox"
-									checked={libraryIncluded(option.key)}
-									onchange={(event) => handleLibraryFilterChange(option.key, event)}
-								/>
-								<span>
-									<strong>{option.label}</strong>
-									<small
-										>{option.folders.toLocaleString('en-US')} folders · {option.pending.toLocaleString(
-											'en-US'
-										)}
-										pending</small
-									>
-								</span>
-								<em>{formatBytes(option.reclaim)}</em>
-							</label>
-						{/each}
-					</div>
-
-					<div class="queue-filter__group">
-						<div class="queue-filter__group-head">
-							<span>States</span>
-							<div class="queue-filter__actions" aria-label="Bulk state filters">
-								<button type="button" onclick={() => setAllStates(true)}>All</button>
-								<button type="button" onclick={() => setAllStates(false)}>None</button>
-							</div>
-						</div>
-						{#each stateOptions as option (option.key)}
-							<label
-								class="queue-filter__row"
-								class:queue-filter__row--excluded={!stateIncluded(option.key)}
-							>
-								<input
-									type="checkbox"
-									checked={stateIncluded(option.key)}
-									onchange={(event) => handleStateFilterChange(option.key, event)}
-								/>
-								<span>
-									<strong>{option.label}</strong>
-									<small
-										>{option.folders.toLocaleString('en-US')} folders · {option.pending.toLocaleString(
-											'en-US'
-										)}
-										pending</small
-									>
-								</span>
-							</label>
-						{/each}
 					</div>
 				</div>
 			</WorkstationPanel>
@@ -587,6 +592,16 @@
 	.queue-filter__group {
 		display: grid;
 		gap: var(--mf-space-2);
+	}
+
+	.queue-filter {
+		grid-template-columns: minmax(180px, 0.8fr) minmax(240px, 1.2fr);
+	}
+
+	.queue-filter__summary,
+	.queue-filter__search,
+	.queue-filter__group {
+		min-width: 0;
 	}
 
 	.queue-filter__group-head {
@@ -790,6 +805,10 @@
 		.queue-header__facts,
 		.next-card__metrics {
 			flex-wrap: wrap;
+		}
+
+		.queue-filter {
+			grid-template-columns: 1fr;
 		}
 	}
 </style>
