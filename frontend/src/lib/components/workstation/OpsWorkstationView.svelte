@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
+	import { onDestroy, onMount } from 'svelte';
 	import { resolve } from '$app/paths';
 	import { postJson } from '$lib/api/client';
 	import type { DashboardSummaryPayload, HostRuntime, HostsPayload } from '$lib/api/types';
@@ -12,11 +13,17 @@
 		buildOpsFooterSignals,
 		buildOpsQueueRows,
 		buildOpsStatusTiles,
+		hostPrepareDisabled,
+		hostPrepareTitle,
 		hostStateCopy,
 		hostTone,
+		rowRecoveryLabel,
+		rowRecoveryTitle,
 		type OpsActionId,
 		type OpsQueueRow
 	} from './ops-workstation';
+
+	const OPS_REFRESH_INTERVAL_MS = 15_000;
 
 	let {
 		dashboard,
@@ -48,6 +55,11 @@
 	let confirmationAction = $state<OpsActionId | null>(null);
 	let actionMessage = $state('');
 	let actionError = $state('');
+	let refreshPending = $state(false);
+	let refreshError = $state('');
+	let lastRefreshAt = $state<Date | null>(null);
+	let hostPasswords = $state<Record<string, string>>({});
+	let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
 	const actionEndpoints: Record<OpsActionId, string> = {
 		'pause-encode': '/api/encode-queue/pause',
@@ -76,8 +88,13 @@
 		return 'Reset stored trust for this host';
 	}
 
-	function actionBody(host?: HostRuntime): Record<string, unknown> {
-		return host ? { host_key: host.key } : {};
+	function actionBody(action: OpsActionId, host?: HostRuntime): Record<string, unknown> {
+		if (!host) return {};
+		const body: Record<string, unknown> = { host_key: host.key };
+		if (action === 'prepare-host' && host.setup_requires_password) {
+			body.remote_password = hostPasswords[host.key] ?? '';
+		}
+		return body;
 	}
 
 	async function runAction(action: OpsActionId, host?: HostRuntime) {
@@ -92,17 +109,50 @@
 		actionPending = action;
 		try {
 			const endpoint = `${resolve('/')}${actionEndpoints[action].slice(1)}`;
-			const response = await postJson<Record<string, unknown>>(endpoint, actionBody(host));
+			const response = await postJson<Record<string, unknown>>(endpoint, actionBody(action, host));
 			actionMessage =
 				typeof response.message === 'string' && response.message.trim()
 					? response.message
 					: 'Action completed.';
+			if (action === 'prepare-host' && host) {
+				hostPasswords = { ...hostPasswords, [host.key]: '' };
+			}
 			await invalidateAll();
 		} catch (error) {
 			actionError = error instanceof Error ? error.message : 'Action failed.';
 		} finally {
 			actionPending = null;
 		}
+	}
+
+	async function refreshOps({ quiet = false }: { quiet?: boolean } = {}) {
+		if (refreshPending) return;
+		refreshPending = true;
+		if (!quiet) {
+			actionMessage = '';
+			actionError = '';
+		}
+		refreshError = '';
+		try {
+			await invalidateAll();
+			lastRefreshAt = new Date();
+			if (!quiet) actionMessage = 'Ops runtime refreshed.';
+		} catch (error) {
+			refreshError = error instanceof Error ? error.message : 'Refresh failed.';
+			if (!quiet) actionError = refreshError;
+		} finally {
+			refreshPending = false;
+		}
+	}
+
+	function refreshCopy(): string {
+		if (refreshPending) return 'refreshing';
+		if (!lastRefreshAt) return 'auto-refresh every 15s';
+		return `refreshed ${lastRefreshAt.toLocaleTimeString([], {
+			hour: '2-digit',
+			minute: '2-digit',
+			second: '2-digit'
+		})}`;
 	}
 
 	function rowActionDisabled(row: OpsQueueRow): boolean {
@@ -112,9 +162,18 @@
 	function hostActionDisabled(action: OpsActionId, host: HostRuntime): boolean {
 		if (actionPending !== null) return true;
 		if (action === 'start-host') return host.available || !host.setup_supported;
-		if (action === 'prepare-host') return host.setup_requires_password || !host.setup_supported;
+		if (action === 'prepare-host') {
+			return hostPrepareDisabled(host, hostPasswords[host.key] ?? '');
+		}
 		if (action === 'reset-host-trust') return !host.trust_reset_supported;
 		return false;
+	}
+
+	function handleHostPasswordInput(host: HostRuntime, event: Event) {
+		hostPasswords = {
+			...hostPasswords,
+			[host.key]: (event.currentTarget as HTMLInputElement).value
+		};
 	}
 
 	function queueActionLabel(action: OpsActionId): string {
@@ -134,6 +193,15 @@
 	function canOpenFolder(row: OpsQueueRow): boolean {
 		return row.prefix !== 'runtime scope';
 	}
+
+	onMount(() => {
+		lastRefreshAt = new Date();
+		refreshTimer = setInterval(() => void refreshOps({ quiet: true }), OPS_REFRESH_INTERVAL_MS);
+	});
+
+	onDestroy(() => {
+		if (refreshTimer) clearInterval(refreshTimer);
+	});
 </script>
 
 <OperatorShell route="ops" subject="Ops" crumb="/ops" {statusTiles} {footerSignals}>
@@ -161,6 +229,13 @@
 						<span>Hosts ready</span>
 						<strong>{readyHosts.toLocaleString('en-US')}</strong>
 					</div>
+					<button
+						type="button"
+						class="control control--compact"
+						disabled={refreshPending}
+						title="Refresh Ops runtime state now"
+						onclick={() => refreshOps()}>{refreshPending ? 'Refreshing' : 'Refresh'}</button
+					>
 				</div>
 			</header>
 
@@ -248,6 +323,9 @@
 					{#if actionError}
 						<p class="action-error">{actionError}</p>
 					{/if}
+					<p class="refresh-note" class:refresh-note--error={Boolean(refreshError)}>
+						{refreshError || refreshCopy()}
+					</p>
 				</div>
 			</WorkstationPanel>
 
@@ -329,11 +407,11 @@
 												type="button"
 												class="control control--compact"
 												disabled={rowActionDisabled(row)}
-												title={actionTitle(action)}
-												onclick={() => runAction(action)}>{queueActionLabel(action)}</button
+												title={rowRecoveryTitle(row)}
+												onclick={() => runAction(action)}>{rowRecoveryLabel(row)}</button
 											>
 										{:else}
-											<span class="disabled-copy">No action</span>
+											<span class="disabled-copy">{rowRecoveryLabel(row)}</span>
 										{/if}
 									</td>
 								</tr>
@@ -374,6 +452,18 @@
 								<dt>Reason</dt>
 								<dd>{host.message || host.active_reason || 'ready'}</dd>
 							</dl>
+							{#if host.setup_requires_password && host.setup_supported}
+								<label class="host-password">
+									<span>Prepare password</span>
+									<input
+										type="password"
+										autocomplete="current-password"
+										value={hostPasswords[host.key] ?? ''}
+										placeholder="Required for setup"
+										oninput={(event) => handleHostPasswordInput(host, event)}
+									/>
+								</label>
+							{/if}
 							<div class="host-row__actions" aria-label={`${host.label} controls`}>
 								<button
 									type="button"
@@ -388,9 +478,7 @@
 									type="button"
 									class="control control--compact"
 									disabled={hostActionDisabled('prepare-host', host)}
-									title={host.setup_requires_password
-										? 'Prepare requires a password from Settings.'
-										: actionTitle('prepare-host')}
+									title={hostPrepareTitle(host)}
 									onclick={() => runAction('prepare-host', host)}>Prepare</button
 								>
 								<button
@@ -571,6 +659,16 @@
 		color: var(--mf-fail-fg);
 	}
 
+	.refresh-note {
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-mono);
+		font-size: var(--mf-text-2xs);
+	}
+
+	.refresh-note--error {
+		color: var(--mf-fail-fg);
+	}
+
 	.blocker-row {
 		background: var(--mf-bg-panel-2);
 		border: var(--mf-border-muted);
@@ -726,6 +824,31 @@
 		display: grid;
 		grid-template-columns: 72px minmax(0, 1fr);
 		row-gap: var(--mf-space-3);
+	}
+
+	.host-password {
+		display: grid;
+		gap: var(--mf-space-2);
+	}
+
+	.host-password span {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.host-password input {
+		background: var(--mf-bg-input);
+		border: var(--mf-border);
+		border-radius: var(--mf-radius-1);
+		color: var(--mf-fg-primary);
+		font: inherit;
+		min-height: var(--mf-control-md);
+		min-width: 0;
+		padding: 0 var(--mf-space-3);
+		width: 100%;
 	}
 
 	.host-row dd {

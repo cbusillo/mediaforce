@@ -4,8 +4,12 @@ import {
 	buildOpsBlockers,
 	buildOpsQueueRows,
 	buildOpsStatusTiles,
+	hostPrepareDisabled,
+	hostPrepareTitle,
 	hostStateCopy,
-	hostTone
+	hostTone,
+	rowRecoveryLabel,
+	rowRecoveryTitle
 } from './ops-workstation';
 
 function dashboardFixture(): DashboardSummaryPayload {
@@ -150,13 +154,18 @@ describe('Ops workstation mapping', () => {
 		expect(rows[1]).toMatchObject({
 			tone: 'wait',
 			action: 'retry-failed-encode',
+			actionScope: 'global',
 			detail: 'transient worker fault'
 		});
 		expect(rows[2]).toMatchObject({
 			tone: 'fail',
 			action: 'retry-failed-encode',
+			actionScope: 'global',
 			detail: 'quality target missed'
 		});
+		expect(rowRecoveryLabel(rows[1])).toBe('Retry all');
+		expect(rowRecoveryTitle(rows[1])).toContain('global retry');
+		expect(rowRecoveryLabel(rows[3])).toBe('No action');
 	});
 
 	it('surfaces runtime partials, failed encodes, and closed schedules as blockers', () => {
@@ -193,5 +202,25 @@ describe('Ops workstation mapping', () => {
 		expect(hostStateCopy(scheduledOff)).toBe('Off window');
 		expect(hostTone(unavailable)).toBe('fail');
 		expect(hostStateCopy(unavailable)).toBe('Unavailable');
+	});
+
+	it('keeps password-gated host prepare disabled until a password is present', () => {
+		const [ready] = hostsFixture().hosts;
+		const passwordHost = {
+			...ready,
+			setup_supported: true,
+			setup_requires_password: true
+		};
+		const unsupportedHost = {
+			...ready,
+			setup_supported: false,
+			setup_requires_password: false
+		};
+
+		expect(hostPrepareDisabled(passwordHost, '')).toBe(true);
+		expect(hostPrepareDisabled(passwordHost, 'secret')).toBe(false);
+		expect(hostPrepareTitle(passwordHost)).toBe('Enter the prepare password for this host.');
+		expect(hostPrepareDisabled(unsupportedHost, 'secret')).toBe(true);
+		expect(hostPrepareTitle(unsupportedHost)).toBe('Prepare is unavailable for this host.');
 	});
 });

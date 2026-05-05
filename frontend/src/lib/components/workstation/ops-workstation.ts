@@ -29,6 +29,7 @@ export type OpsQueueRow = {
 	scheduler: string;
 	detail: string;
 	action?: OpsActionId;
+	actionScope?: 'global' | 'row';
 };
 
 export type OpsBlocker = {
@@ -147,6 +148,9 @@ export function buildEncodeRows(
 		detail: encodeJobDetail(job),
 		action: ['failed', 'needs_attention', 'stopped', 'retry_backoff'].includes(job.status)
 			? 'retry-failed-encode'
+			: undefined,
+		actionScope: ['failed', 'needs_attention', 'stopped', 'retry_backoff'].includes(job.status)
+			? 'global'
 			: undefined
 	}));
 }
@@ -167,9 +171,37 @@ function buildCalibrationLaneRows(
 		progress: compactText(job.progress) || compactText(job.stage) || '—',
 		scheduler:
 			compactText(job.scheduler_status_copy) || compactText(job.created_at) || 'queued order',
-		detail: calibrationDetail(job),
-		action: ['failed', 'stopped'].includes(status) ? 'stop-calibration' : undefined
+		detail: calibrationDetail(job)
 	}));
+}
+
+export function rowRecoveryLabel(row: OpsQueueRow): string {
+	if (!row.action) return 'No action';
+	if (row.action === 'retry-failed-encode') return 'Retry all';
+	if (row.action === 'stop-calibration') return 'Stop samples';
+	return row.actionScope === 'global' ? 'Global action' : 'Run action';
+}
+
+export function rowRecoveryTitle(row: OpsQueueRow): string {
+	if (!row.action) return 'No runtime action is available for this row.';
+	if (row.action === 'retry-failed-encode') {
+		return 'Runs the global retry for all approved failed folder encodes. Per-row retry is not wired yet.';
+	}
+	return row.actionScope === 'global'
+		? 'Runs a global queue action; this is not scoped to one row.'
+		: 'Runs the action for this row.';
+}
+
+export function hostPrepareDisabled(host: HostRuntime, password: string): boolean {
+	return (
+		host.setup_supported === false || (Boolean(host.setup_requires_password) && !password.trim())
+	);
+}
+
+export function hostPrepareTitle(host: HostRuntime): string {
+	if (host.setup_supported === false) return 'Prepare is unavailable for this host.';
+	if (host.setup_requires_password) return 'Enter the prepare password for this host.';
+	return 'Prepare this host for Mediaforce work';
 }
 
 export function buildCalibrationRows(
