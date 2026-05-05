@@ -404,6 +404,12 @@ export interface FolderPayload {
 	encode_queue_scheduler?: Record<string, unknown>;
 }
 
+export interface FolderBenchPreviewResponse {
+	ok: boolean;
+	message?: string;
+	proposal?: Record<string, unknown> | null;
+}
+
 export interface FolderStatusPayload {
 	prefix: string;
 	polling_active: boolean;

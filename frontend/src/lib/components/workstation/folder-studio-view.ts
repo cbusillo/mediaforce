@@ -20,6 +20,7 @@ import type {
 	EncodeQueueJob,
 	FolderPayload,
 	FolderStatusPayload,
+	HostRuntime,
 	HostsPayload
 } from '$lib/api/types';
 import type { FooterSignal, ShellTone, StatusTile } from './OperatorShell.svelte';
@@ -64,12 +65,77 @@ export type BenchMessage = {
 	tone?: ShellTone | 'neutral';
 };
 
+export type BenchHostOption = {
+	key: string;
+	label: string;
+	detail: string;
+	available: boolean;
+};
+
+export type BenchRequestState = {
+	disabled: boolean;
+	blocker: string;
+	selectedHost: BenchHostOption | null;
+	activeCalibrationJob: boolean;
+};
+
 export function record<T extends Record<string, unknown>>(value: unknown): T | null {
 	return value && typeof value === 'object' ? (value as T) : null;
 }
 
 function compactText(value: unknown): string {
 	return typeof value === 'string' ? value.trim() : '';
+}
+
+function activeCalibrationStatus(value: unknown): boolean {
+	return ['queued', 'running', 'pending_review'].includes(String(value ?? '').toLowerCase());
+}
+
+export function buildBenchHostOptions(
+	folderOptions: Array<Record<string, unknown>> | undefined,
+	hosts: HostRuntime[]
+): BenchHostOption[] {
+	const source = folderOptions && folderOptions.length > 0 ? folderOptions : hosts;
+	return source
+		.map((host) => {
+			const key = compactText(host.key);
+			return {
+				key,
+				label: compactText(host.label) || key || 'Host',
+				detail: compactText(host.detail) || compactText(host.message),
+				available: host.available !== false
+			};
+		})
+		.filter((host) => host.key);
+}
+
+export function resolveBenchRequestState(
+	note: string,
+	selectedHostKey: string,
+	hostOptions: BenchHostOption[],
+	calibrationJob: FolderCalibrationJob | null,
+	pending: boolean
+): BenchRequestState {
+	const selectedHost = hostOptions.find((host) => host.key === selectedHostKey) ?? null;
+	const activeCalibrationJob = activeCalibrationStatus(calibrationJob?.status);
+	let blocker = '';
+	if (!note.trim()) {
+		blocker = 'Describe the Bench request before sending.';
+	} else if (!selectedHostKey) {
+		blocker = 'Choose an available host before sending.';
+	} else if (!selectedHost) {
+		blocker = 'Selected host is no longer available for this folder.';
+	} else if (!selectedHost.available) {
+		blocker = 'Selected host is not available right now.';
+	} else if (activeCalibrationJob) {
+		blocker = 'A sample job is already active for this folder.';
+	}
+	return {
+		disabled: pending || Boolean(blocker),
+		blocker: pending ? 'Sending request to Bench.' : blocker,
+		selectedHost,
+		activeCalibrationJob
+	};
 }
 
 function requestSummary(request: FolderOperatorRequest | null | undefined): string {

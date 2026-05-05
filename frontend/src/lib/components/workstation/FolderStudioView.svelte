@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
+	import { postJson } from '$lib/api/client';
 	import { folderRoutePrefix } from '$lib/folder-display';
 	import {
 		codecLabel,
@@ -13,12 +14,18 @@
 		type PendingSampleProposal,
 		type ReviewGate
 	} from '$lib/folders/studio';
-	import type { FolderPayload, FolderStatusPayload, HostsPayload } from '$lib/api/types';
+	import type {
+		FolderBenchPreviewResponse,
+		FolderPayload,
+		FolderStatusPayload,
+		HostsPayload
+	} from '$lib/api/types';
 	import OperatorShell from './OperatorShell.svelte';
 	import StateBadge from './StateBadge.svelte';
 	import WorkstationPanel from './WorkstationPanel.svelte';
 	import {
 		buildBenchMessages,
+		buildBenchHostOptions,
 		buildFooterSignals,
 		buildProposalRows,
 		buildSampleFacts,
@@ -26,6 +33,7 @@
 		formatBytes,
 		projectedReclaimBytes,
 		record,
+		resolveBenchRequestState,
 		resolvedMetricCopy,
 		resolveFolderTitle,
 		resolveReviewArtifacts,
@@ -45,18 +53,45 @@
 		hosts: HostsPayload;
 	} = $props();
 
-	const prefix = $derived(folder.prefix);
+	let benchNote = $state('');
+	let selectedHostKey = $state('');
+	let benchPending = $state(false);
+	let benchMessage = $state('');
+	let benchError = $state('');
+	let localPendingProposal = $state<Record<string, unknown> | null | undefined>(undefined);
+	let localProposalPrefix = $state('');
+	const studioFolder = $derived({
+		...folder,
+		pending_proposal:
+			localPendingProposal === undefined || localProposalPrefix !== folder.prefix
+				? folder.pending_proposal
+				: localPendingProposal
+	});
+	const prefix = $derived(studioFolder.prefix);
 	const encodedPrefix = $derived(folderRoutePrefix(prefix));
-	const summary = $derived(folder.summary);
+	const sampleHostOptions = $derived(
+		buildBenchHostOptions(studioFolder.sample_host_options, hosts.hosts)
+	);
+	const folderSampleHostKey = $derived(String(folder.sample_host_key ?? '').trim());
+	const fallbackHostKey = $derived(folderSampleHostKey || sampleHostOptions[0]?.key || '');
+
+	$effect(() => {
+		if (!selectedHostKey || !sampleHostOptions.some((host) => host.key === selectedHostKey)) {
+			selectedHostKey = fallbackHostKey;
+		}
+		benchMessage = '';
+		benchError = '';
+	});
+	const summary = $derived(studioFolder.summary);
 	const title = $derived(resolveFolderTitle(prefix));
 	const library = $derived(prefix.split('/')[0] || 'Library');
-	const sampleItem = $derived(record<FolderSampleItem>(folder.sample_item));
-	const calibration = $derived(record<FolderCalibrationState>(folder.calibration));
-	const pendingProposal = $derived(record<PendingSampleProposal>(folder.pending_proposal));
-	const reviewGate = $derived(record<ReviewGate>(folder.review_gate));
-	const calibrationJob = $derived(record<FolderCalibrationJob>(folder.calibration_job));
+	const sampleItem = $derived(record<FolderSampleItem>(studioFolder.sample_item));
+	const calibration = $derived(record<FolderCalibrationState>(studioFolder.calibration));
+	const pendingProposal = $derived(record<PendingSampleProposal>(studioFolder.pending_proposal));
+	const reviewGate = $derived(record<ReviewGate>(studioFolder.review_gate));
+	const calibrationJob = $derived(record<FolderCalibrationJob>(studioFolder.calibration_job));
 	const retryableSampleJob = $derived(record<FolderCalibrationJob>(status.retryable_sample_job));
-	const encodeJob = $derived(folder.encode_job ?? null);
+	const encodeJob = $derived(studioFolder.encode_job ?? null);
 	const reviewArtifacts = $derived(resolveReviewArtifacts(calibration, pendingProposal));
 	const workflow = $derived(
 		resolveWorkflow(
@@ -69,13 +104,24 @@
 			encodeJob
 		)
 	);
-	const proposalRows = $derived(buildProposalRows(folder, pendingProposal));
-	const statusTiles = $derived(buildStatusTiles(folder, status, hosts, workflow));
-	const footerSignals = $derived(buildFooterSignals(folder, status, hosts));
+	const proposalRows = $derived(buildProposalRows(studioFolder, pendingProposal));
+	const statusTiles = $derived(buildStatusTiles(studioFolder, status, hosts, workflow));
+	const footerSignals = $derived(buildFooterSignals(studioFolder, status, hosts));
 	const sampleFacts = $derived(buildSampleFacts(sampleItem, summary));
 	const benchMessages = $derived(
 		buildBenchMessages(calibration, pendingProposal, retryableSampleJob)
 	);
+	const trimmedBenchNote = $derived(benchNote.trim());
+	const benchRequestState = $derived(
+		resolveBenchRequestState(
+			benchNote,
+			selectedHostKey,
+			sampleHostOptions,
+			calibrationJob,
+			benchPending
+		)
+	);
+	const benchRequestDisabled = $derived(benchRequestState.disabled);
 
 	function workflowActionEnabled(action: WorkflowAction): boolean {
 		if (action === 'open-ops') return true;
@@ -89,6 +135,32 @@
 		if (workflowActionEnabled(action)) return '';
 		if (action === 'download-review-pack') return 'Review pack is not ready yet.';
 		return 'Wiring handoff pending for this workflow action.';
+	}
+
+	function handleBenchNoteInput(event: Event) {
+		benchNote = (event.currentTarget as HTMLTextAreaElement).value;
+	}
+
+	async function sendBenchRequest() {
+		if (benchRequestDisabled) return;
+		benchPending = true;
+		benchMessage = '';
+		benchError = '';
+		try {
+			const response = await postJson<FolderBenchPreviewResponse>(
+				`${resolve('/')}api/folders/${encodedPrefix}/ai-tune/preview`,
+				{ note: trimmedBenchNote, host_key: selectedHostKey }
+			);
+			localPendingProposal = response.proposal ?? studioFolder.pending_proposal ?? null;
+			localProposalPrefix = prefix;
+			benchMessage =
+				response.message || 'Bench draft ready. Nothing is queued until you confirm it.';
+			benchNote = '';
+		} catch (error) {
+			benchError = error instanceof Error ? error.message : 'Bench request failed.';
+		} finally {
+			benchPending = false;
+		}
 	}
 </script>
 
@@ -113,11 +185,11 @@
 					</div>
 					<div>
 						<span>Projected reclaim</span>
-						<strong>{formatBytes(projectedReclaimBytes(folder))}</strong>
+						<strong>{formatBytes(projectedReclaimBytes(studioFolder))}</strong>
 					</div>
 					<div>
 						<span>Metric</span>
-						<strong>{folder.metric_status_copy || resolvedMetricCopy(folder)}</strong>
+						<strong>{studioFolder.metric_status_copy || resolvedMetricCopy(studioFolder)}</strong>
 					</div>
 				</div>
 			</header>
@@ -220,26 +292,38 @@
 							<textarea
 								rows="5"
 								placeholder="Ask Bench what to sample, revise, or validate for this folder."
+								value={benchNote}
+								oninput={handleBenchNoteInput}
 							></textarea>
 						</label>
 						<div class="bench__controls">
 							<label>
 								<span>Host</span>
-								<select>
-									{#each hosts.hosts as host (host.key)}
-										<option value={host.key}>{host.label}</option>
+								<select bind:value={selectedHostKey}>
+									{#each sampleHostOptions as host (host.key)}
+										<option value={host.key}
+											>{host.label}{host.available ? '' : ' · unavailable'}</option
+										>
 									{/each}
 								</select>
 							</label>
 							<button
 								class="control control--primary"
 								type="button"
-								disabled
-								title="Bench request wiring is pending."
+								disabled={benchRequestDisabled}
+								title={benchRequestDisabled ? benchRequestState.blocker : ''}
+								onclick={sendBenchRequest}
 								data-mf-action="bench-request"
-								data-mf-wire="pending">Send to Bench</button
+								data-mf-wire="live">{benchPending ? 'Sending' : 'Send to Bench'}</button
 							>
 						</div>
+						{#if benchError}
+							<p class="bench__status bench__status--fail">{benchError}</p>
+						{:else if benchMessage}
+							<p class="bench__status bench__status--ready">{benchMessage}</p>
+						{:else if benchRequestState.blocker}
+							<p class="bench__status">{benchRequestState.blocker}</p>
+						{/if}
 					</div>
 				</div>
 			</WorkstationPanel>
@@ -254,7 +338,7 @@
 						<dt>Approval</dt>
 						<dd>{reviewGate?.status ?? '—'}</dd>
 						<dt>Encode</dt>
-						<dd>{encodeJob?.status ?? folder.encode_queue_summary ?? '—'}</dd>
+						<dd>{encodeJob?.status ?? studioFolder.encode_queue_summary ?? '—'}</dd>
 					</dl>
 				</WorkstationPanel>
 
@@ -267,13 +351,13 @@
 						<dt>Bitrate</dt>
 						<dd>{formatBitrateCopy(sampleItem?.video_bitrate) ?? '—'}</dd>
 						<dt>Metric</dt>
-						<dd>{resolvedMetricCopy(folder)}</dd>
+						<dd>{resolvedMetricCopy(studioFolder)}</dd>
 					</dl>
 				</WorkstationPanel>
 
 				<WorkstationPanel title="Recent">
 					<div class="history-list history-list--compact">
-						{#each (folder.recent_tuning_sessions ?? []).slice(0, 3) as session, index (`${session.session_id ?? session.created_at ?? index}`)}
+						{#each (studioFolder.recent_tuning_sessions ?? []).slice(0, 3) as session, index (`${session.session_id ?? session.created_at ?? index}`)}
 							<div>
 								<span>{formatDateTimeCopy(String(session.created_at ?? '')) || '—'}</span>
 								<strong>{String(session.summary ?? session.note ?? 'Tuning session')}</strong>
@@ -701,6 +785,24 @@
 		display: grid;
 		gap: var(--mf-space-4);
 		grid-template-columns: minmax(0, 1fr) auto;
+	}
+
+	.bench__status {
+		border-left: 2px solid var(--mf-idle-fg);
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+		line-height: var(--mf-leading-normal);
+		padding-left: var(--mf-space-3);
+	}
+
+	.bench__status--ready {
+		border-left-color: var(--mf-ready-fg);
+		color: var(--mf-ready-fg);
+	}
+
+	.bench__status--fail {
+		border-left-color: var(--mf-fail-fg);
+		color: var(--mf-fail-fg);
 	}
 
 	.support-grid {
