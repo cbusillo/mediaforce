@@ -122,12 +122,17 @@ def list_queue_summary(connection: DBClient, *, limit_per_lane: int = 6) -> dict
         .where(calibration_jobs.c.status.in_(("queued", "running", "pending_review")))
         .order_by(calibration_jobs.c.created_at.asc(), _rowid_column().asc())
     ).mappings().fetchall()
-    recent_terminal_rows = connection.execute(
-        _calibration_job_select()
-        .where(calibration_jobs.c.status.in_(("failed", "stopped")))
-        .order_by(calibration_jobs.c.updated_at.desc(), _rowid_column().desc())
-        .limit(limit_per_lane * 2)
-    ).mappings().fetchall()
+    recent_terminal_rows = []
+    for lane in ("sample", "full"):
+        recent_terminal_rows.extend(
+            connection.execute(
+                _calibration_job_select()
+                .where(calibration_jobs.c.lane == lane)
+                .where(calibration_jobs.c.status.in_(("failed", "stopped")))
+                .order_by(calibration_jobs.c.updated_at.desc(), _rowid_column().desc())
+                .limit(limit_per_lane)
+            ).mappings().fetchall()
+        )
     summary: dict[str, Any] = {
         "sample": {"running": [], "queued": [], "pending_review": [], "running_count": 0, "queued_count": 0,
                    "pending_review_count": 0, "recent_failed": [], "recent_failed_count": 0},
