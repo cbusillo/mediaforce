@@ -11,6 +11,7 @@ export type OpsActionId =
 	| 'pause-encode'
 	| 'resume-encode'
 	| 'retry-failed-encode'
+	| 'retry-encode-prefix'
 	| 'stop-encode'
 	| 'stop-calibration'
 	| 'start-host'
@@ -29,6 +30,7 @@ export type OpsQueueRow = {
 	scheduler: string;
 	detail: string;
 	action?: OpsActionId;
+	actionScope?: 'global' | 'row';
 };
 
 export type OpsBlocker = {
@@ -74,12 +76,19 @@ function calibrationPrefix(job: CalibrationJob): string {
 }
 
 function calibrationDetail(job: CalibrationJob): string {
-	return (
+	const raw =
 		compactText(job.error) ||
 		compactText(job.notes) ||
 		compactText(job.operator_note) ||
 		compactText(job.created_at) ||
-		'waiting for worker update'
+		'waiting for worker update';
+	return (
+		raw
+			.split('\n')
+			.map((line) => line.trim())
+			.filter(Boolean)
+			.at(-1)
+			?.slice(0, 180) ?? 'waiting for worker update'
 	);
 }
 
@@ -146,7 +155,10 @@ export function buildEncodeRows(
 		scheduler: job.scheduler_status_copy || (job.schedule_waiting ? 'schedule waiting' : 'ready'),
 		detail: encodeJobDetail(job),
 		action: ['failed', 'needs_attention', 'stopped', 'retry_backoff'].includes(job.status)
-			? 'retry-failed-encode'
+			? 'retry-encode-prefix'
+			: undefined,
+		actionScope: ['failed', 'needs_attention', 'stopped', 'retry_backoff'].includes(job.status)
+			? 'row'
 			: undefined
 	}));
 }
@@ -167,9 +179,41 @@ function buildCalibrationLaneRows(
 		progress: compactText(job.progress) || compactText(job.stage) || '—',
 		scheduler:
 			compactText(job.scheduler_status_copy) || compactText(job.created_at) || 'queued order',
-		detail: calibrationDetail(job),
-		action: ['failed', 'stopped'].includes(status) ? 'stop-calibration' : undefined
+		detail: calibrationDetail(job)
 	}));
+}
+
+export function rowRecoveryLabel(row: OpsQueueRow): string {
+	if (!row.action) return 'No action';
+	if (row.action === 'retry-encode-prefix') return 'Retry folder';
+	if (row.action === 'retry-failed-encode') return 'Retry all';
+	if (row.action === 'stop-calibration') return 'Stop samples';
+	return row.actionScope === 'global' ? 'Global action' : 'Run action';
+}
+
+export function rowRecoveryTitle(row: OpsQueueRow): string {
+	if (!row.action) return 'No runtime action is available for this row.';
+	if (row.action === 'retry-encode-prefix') {
+		return 'Retry the failed encode for this folder prefix only.';
+	}
+	if (row.action === 'retry-failed-encode') {
+		return 'Runs the global retry for all approved failed folder encodes.';
+	}
+	return row.actionScope === 'global'
+		? 'Runs a global queue action; this is not scoped to one row.'
+		: 'Runs the action for this row.';
+}
+
+export function hostPrepareDisabled(host: HostRuntime, password: string): boolean {
+	return (
+		host.setup_supported === false || (Boolean(host.setup_requires_password) && !password.trim())
+	);
+}
+
+export function hostPrepareTitle(host: HostRuntime): string {
+	if (host.setup_supported === false) return 'Prepare is unavailable for this host.';
+	if (host.setup_requires_password) return 'Enter the prepare password for this host.';
+	return 'Prepare this host for Mediaforce work';
 }
 
 export function buildCalibrationRows(
@@ -181,9 +225,11 @@ export function buildCalibrationRows(
 		...buildCalibrationLaneRows('sample', queue.sample.running, 'running'),
 		...buildCalibrationLaneRows('sample', queue.sample.queued, 'queued'),
 		...buildCalibrationLaneRows('sample', queue.sample.pending_review, 'pending_review'),
+		...buildCalibrationLaneRows('sample', queue.sample.recent_failed, 'failed'),
 		...buildCalibrationLaneRows('proof', queue.full.running, 'running'),
 		...buildCalibrationLaneRows('proof', queue.full.queued, 'queued'),
-		...buildCalibrationLaneRows('proof', queue.full.pending_review, 'pending_review')
+		...buildCalibrationLaneRows('proof', queue.full.pending_review, 'pending_review'),
+		...buildCalibrationLaneRows('proof', queue.full.recent_failed, 'failed')
 	];
 }
 

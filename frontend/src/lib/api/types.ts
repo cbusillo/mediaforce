@@ -29,9 +29,11 @@ export interface QueueLane {
 	running: Array<Record<string, unknown>>;
 	queued: Array<Record<string, unknown>>;
 	pending_review: Array<Record<string, unknown>>;
+	recent_failed?: Array<Record<string, unknown>>;
 	running_count: number;
 	queued_count: number;
 	pending_review_count: number;
+	recent_failed_count?: number;
 }
 
 export interface EncodeJobProgressTelemetry {
@@ -150,6 +152,7 @@ export interface DashboardSummaryPayload {
 		sample: QueueLane;
 		full: QueueLane;
 		active_count: number;
+		recent_failed_count?: number;
 	};
 	encode_queue: EncodeQueueSummary;
 	archive_cleanup?: {

@@ -110,7 +110,7 @@ from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_fo
     approve_measured_encode_recovery_action, \
     queue_folder_encode_action, recent_tuning_sessions, \
     refresh_host_status_cache, reset_folder_card_cache, resume_encode_queue_action, \
-    retry_failed_encode_queue_action, review_media_context, \
+    retry_failed_encode_prefix_action, retry_failed_encode_queue_action, review_media_context, \
     review_pack_dir, review_pair_key, review_pairs, safe_collect_host_statuses, save_advice_state, \
     save_calibration_state, save_pending_proposal, save_profile_action, \
     sample_calibration_host_statuses, sample_host_options, sample_host_options_from_statuses, \
@@ -857,6 +857,16 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             queue_folder_encode_action=_queue_folder_encode_action,
         )
 
+    def _retry_failed_encode_prefix_action(prefix: str) -> dict[str, Any]:
+        return retry_failed_encode_prefix_action(
+            connection_factory=lambda: open_db(config.paths.db_path),
+            config=config,
+            prefix=prefix,
+            load_calibration_state=_load_calibration_state,
+            review_gate=_review_gate,
+            queue_folder_encode_action=_queue_folder_encode_action,
+        )
+
     def _stop_calibration_queue_action() -> dict[str, Any]:
         return stop_calibration_queue_action(
             connection_factory=lambda: open_db(config.paths.db_path),
@@ -898,6 +908,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         pause_encode_queue_action=_pause_encode_queue_action,
         resume_encode_queue_action=_resume_encode_queue_action,
         retry_failed_encode_queue_action=_retry_failed_encode_queue_action,
+        retry_failed_encode_prefix_action=_retry_failed_encode_prefix_action,
         stop_encode_queue_action=_stop_encode_queue_action,
         stop_calibration_queue_action=_stop_calibration_queue_action,
     )

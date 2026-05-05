@@ -31,7 +31,8 @@ from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_
     save_job_state, save_scan_job_state as save_scan_job_state_runtime, scan_is_stale, \
     scan_job_belongs_to_current_process, scan_process_is_alive
 from mediaforce.web.runtime.queue_actions import pause_encode_queue_action, resume_encode_queue_action, \
-    retry_failed_encode_queue_action, stop_calibration_queue_action, stop_encode_queue_action
+    retry_failed_encode_prefix_action, retry_failed_encode_queue_action, stop_calibration_queue_action, \
+    stop_encode_queue_action
 from mediaforce.web.runtime.settings_payloads import settings_page_payload
 
 __all__ = [
@@ -91,6 +92,7 @@ __all__ = [
     "proposal_alignment_issue",
     "proposal_signal_copy",
     "resume_encode_queue_action",
+    "retry_failed_encode_prefix_action",
     "retry_failed_encode_queue_action",
     "review_pack_dir",
     "review_media_context",

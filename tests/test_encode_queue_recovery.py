@@ -43,6 +43,7 @@ from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_pref
 from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
 from mediaforce.hosts import status_runtime as host_status_runtime
 from mediaforce.remote import HostStatus
+from mediaforce.tuning.calibration_jobs import list_queue_summary
 from mediaforce.review import BrowserReviewClip, CompareClip, EncodedPreviewClip
 from mediaforce.web import app as web_app
 from mediaforce.web import settings_runtime
@@ -4451,6 +4452,85 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(result["queued_count"], 2)
         self.assertEqual(result["review_blocked_count"], 1)
         self.assertEqual(result["review_blocked_prefixes"], ["tv/review-blocked"])
+
+    def test_retry_failed_encode_prefix_action_retries_only_requested_prefix(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            now = web_app._now_iso()
+            for prefix in ("tv/approved-a", "tv/approved-b"):
+                save_encode_job(
+                    connection,
+                    {
+                        "job_id": f"job-{prefix.rsplit('/', 1)[-1]}",
+                        "prefix": prefix,
+                        "job_kind": "folder",
+                        "parent_job_id": None,
+                        "status": "needs_attention",
+                        "manifest_path": str(self.root / "runs" / f"{prefix.rsplit('/', 1)[-1]}.json"),
+                        "item_count": 1,
+                        "saved_profile_path": None,
+                        "host": {},
+                        "last_host": {},
+                        "notes": "",
+                        "bypass_schedule": False,
+                        "attempt_count": 3,
+                        "process_pid": None,
+                        "error": None,
+                        "leased_at": None,
+                        "lease_expires_at": None,
+                        "heartbeat_at": None,
+                        "worker_id": None,
+                        "retry_not_before": None,
+                        "waiting_reason": None,
+                        "terminal_reason": None,
+                        "last_failure_kind": None,
+                        "last_failure_at": None,
+                        "host_cooldown_until": None,
+                        "created_at": now,
+                        "started_at": None,
+                        "finished_at": now,
+                        "updated_at": now,
+                    },
+                )
+
+        queued_prefixes: list[str] = []
+
+        def queue_folder_encode_action(prefix: str, _notes: str,
+                                       _bypass_schedule: bool) -> folder_actions_runtime.ActionPayload:
+            queued_prefixes.append(prefix)
+            return {"ok": True, "message": "Queued the full folder encode."}
+
+        result = queue_actions_runtime.retry_failed_encode_prefix_action(
+            connection_factory=lambda: open_db(self.config.paths.db_path),
+            config=self.config,
+            prefix="tv/approved-b",
+            load_calibration_state=lambda _config, _prefix: {
+                "policy": {},
+                "accepted_at": web_app._now_iso(),
+                "accepted_sample_job_id": "sample-1",
+                "job_id": "sample-1",
+            },
+            review_gate=self._accepted_review_gate,
+            queue_folder_encode_action=queue_folder_encode_action,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(queued_prefixes, ["tv/approved-b"])
+        self.assertEqual(result["queued_prefixes"], ["tv/approved-b"])
+
+    def test_retry_failed_encode_prefix_action_reports_non_retryable_prefix(self) -> None:
+        result = queue_actions_runtime.retry_failed_encode_prefix_action(
+            connection_factory=lambda: open_db(self.config.paths.db_path),
+            config=self.config,
+            prefix="tv/not-failed",
+            load_calibration_state=lambda _config, _prefix: None,
+            review_gate=self._accepted_review_gate,
+            queue_folder_encode_action=lambda _prefix, _notes, _bypass_schedule: {"ok": True},
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["queued_count"], 0)
+        self.assertEqual(result["queued_prefixes"], [])
+        self.assertIn("No failed folder encode was ready", result["message"])
 
     def test_save_profile_action_requires_high_impact_confirmation(self) -> None:
         calibration_payload: folder_actions_runtime.ActionPayload = {
@@ -13392,6 +13472,46 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             controller.cancel.assert_called_once_with()
         finally:
             web_app.CALIBRATION_QUEUE_PROCESSES.clear()
+
+    def test_calibration_queue_summary_surfaces_recent_failed_jobs(self) -> None:
+        now = web_app._now_iso()
+        with open_db(self.config.paths.db_path) as connection:
+            for job_id, prefix, lane, status in (
+                    ("sample-failed", "tv/sample-failed", "sample", "failed"),
+                    ("proof-stopped", "tv/proof-stopped", "full", "stopped"),
+                    ("sample-running", "tv/sample-running", "sample", "running"),
+            ):
+                web_app._save_job_state(
+                    connection,
+                    self.config,
+                    prefix,
+                    {
+                        "job_id": job_id,
+                        "prefix": prefix,
+                        "status": status,
+                        "lane": lane,
+                        "action": "baseline" if lane == "sample" else "full",
+                        "host": {"key": "cbusillo@localhost", "label": "M4 Studio"},
+                        "notes": "",
+                        "policy": {},
+                        "sample_item": {},
+                        "owner_pid": None,
+                        "created_at": now,
+                        "started_at": now,
+                        "finished_at": now if status in {"failed", "stopped"} else None,
+                        "error": f"{job_id} failed detail" if status == "failed" else "Stopped by operator.",
+                    },
+                )
+            connection.commit()
+
+            summary = list_queue_summary(connection)
+
+        self.assertEqual(summary["active_count"], 1)
+        self.assertEqual(summary["recent_failed_count"], 2)
+        self.assertEqual(summary["sample"]["recent_failed_count"], 1)
+        self.assertEqual(summary["full"]["recent_failed_count"], 1)
+        self.assertEqual(summary["sample"]["recent_failed"][0]["prefix"], "tv/sample-failed")
+        self.assertEqual(summary["full"]["recent_failed"][0]["prefix"], "tv/proof-stopped")
 
     def test_run_remote_status_probe_retries_timeout_once(self) -> None:
         host: dict[str, object] = {"host": "cbusillo@chris-mini.local"}
