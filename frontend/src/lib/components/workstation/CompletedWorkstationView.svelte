@@ -103,6 +103,8 @@
 	);
 	const counts = $derived(cleanupStateCounts(folders, archive));
 	const recommendedFolder = $derived(cleanupReadyFolders[0] ?? null);
+	const cleanupWorkAvailable = $derived(archive.has_cleanup || cleanupReadyFolders.length > 0);
+	const cleanupReviewCount = $derived(counts.blocked + counts.unknown);
 	const historyRows = $derived([
 		...localHistory.map((event) => ({ ...event, source: 'api' as const })),
 		...(completed ? buildCompletedHistoryRows(completed) : [])
@@ -424,7 +426,10 @@
 					</div>
 				</WorkstationPanel>
 
-				<WorkstationPanel eyebrow="Action" title="Cleanup command">
+				<WorkstationPanel
+					eyebrow="Action"
+					title={cleanupWorkAvailable ? 'Cleanup command' : 'Cleanup review'}
+				>
 					<div class="cleanup-command">
 						<div class="cleanup-command__state">
 							<StateBadge
@@ -451,36 +456,52 @@
 							</div>
 						</div>
 
-						<div class="cleanup-command__actions" aria-label="Cleanup actions">
-							<button
-								type="button"
-								class="control"
-								disabled={filteredReadyFolders.length === 0}
-								onclick={selectVisibleReady}>Select visible ready</button
-							>
-							<button
-								type="button"
-								class="control"
-								disabled={selectedFolders.length === 0}
-								onclick={clearSelection}>Clear selection</button
-							>
-							<button
-								type="button"
-								class="control control--danger"
-								class:armed={armedScope === 'selected'}
-								disabled={cleanupDisabled('selected')}
-								onclick={() => armCleanup('selected')}
-								>{armedScope === 'selected' ? 'Selected armed' : 'Clear selected backups'}</button
-							>
-							<button
-								type="button"
-								class="control control--danger"
-								class:armed={armedScope === 'global'}
-								disabled={cleanupDisabled('global')}
-								onclick={() => armCleanup('global')}
-								>{armedScope === 'global' ? 'Global armed' : 'Clear entire archive'}</button
-							>
-						</div>
+						{#if cleanupWorkAvailable}
+							<div class="cleanup-command__actions" aria-label="Cleanup actions">
+								<button
+									type="button"
+									class="control"
+									disabled={filteredReadyFolders.length === 0}
+									onclick={selectVisibleReady}>Select visible ready</button
+								>
+								<button
+									type="button"
+									class="control"
+									disabled={selectedFolders.length === 0}
+									onclick={clearSelection}>Clear selection</button
+								>
+								<button
+									type="button"
+									class="control control--danger"
+									class:armed={armedScope === 'selected'}
+									disabled={cleanupDisabled('selected')}
+									onclick={() => armCleanup('selected')}
+									>{armedScope === 'selected' ? 'Selected armed' : 'Clear selected backups'}</button
+								>
+								<button
+									type="button"
+									class="control control--danger"
+									class:armed={armedScope === 'global'}
+									disabled={cleanupDisabled('global')}
+									onclick={() => armCleanup('global')}
+									>{armedScope === 'global' ? 'Global armed' : 'Clear entire archive'}</button
+								>
+							</div>
+						{:else}
+							<div class="cleanup-standby" aria-label="Cleanup standby state">
+								<span>No destructive action is available</span>
+								<strong
+									>{cleanupReviewCount > 0
+										? `${cleanupReviewCount.toLocaleString('en-US')} completed folders need backup review.`
+										: `${folders.length.toLocaleString('en-US')} completed folders are clean.`}</strong
+								>
+								<small
+									>{cleanupReviewCount > 0
+										? 'Resolve missing or unverifiable archived originals before cleanup controls appear.'
+										: 'When archived originals appear, selected cleanup controls return here.'}</small
+								>
+							</div>
+						{/if}
 
 						{#if armedScope}
 							{@const scope = armedScope}
@@ -676,7 +697,7 @@
 			>
 				<div class="history-list">
 					{#each historyRows.slice(0, 8) as event (`rail:${event.source}:${event.id}:${event.created_at}`)}
-						<div class="history-row">
+						<div class="history-row history-row--rail">
 							<StateBadge compact tone={eventTone(event.tone)} label={event.label} />
 							<div>
 								<strong>{event.title}</strong>
@@ -948,6 +969,33 @@
 		gap: var(--mf-space-3);
 	}
 
+	.cleanup-standby {
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border-muted);
+		border-left: 2px solid var(--mf-line-strong);
+		display: grid;
+		gap: var(--mf-space-2);
+		padding: var(--mf-space-4);
+	}
+
+	.cleanup-standby span {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.cleanup-standby strong {
+		font-size: var(--mf-text-sm);
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.cleanup-standby small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+	}
+
 	.confirm-panel {
 		align-items: center;
 		background: var(--mf-fail-bg);
@@ -1166,6 +1214,17 @@
 
 	.history-list--wide .history-row {
 		grid-template-columns: minmax(150px, auto) minmax(0, 1fr) minmax(180px, 0.7fr) auto;
+	}
+
+	.history-row--rail {
+		gap: var(--mf-space-2);
+		grid-template-columns: 1fr;
+		min-height: 0;
+		padding: var(--mf-space-3);
+	}
+
+	.history-row--rail time {
+		white-space: normal;
 	}
 
 	.history-row > div {
