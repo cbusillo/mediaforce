@@ -17,6 +17,7 @@
 		addHostDraft,
 		addLibraryDraft,
 		addScheduleDraft,
+		archiveCleanupTargetDirty,
 		buildArchiveCleanupClearPayload,
 		buildSettingsSavePayload,
 		draftFromSettings,
@@ -98,10 +99,9 @@
 	const readyHostCount = $derived(runtimeHosts.filter((host) => host.available).length);
 	const archiveCleanup = $derived(savedSettings?.archive_cleanup ?? null);
 	const dirty = $derived(savedSettings ? settingsDraftIsDirty(draft, savedSettings) : false);
-	const archiveRootCopy = $derived(
-		draft.transcode_root.trim()
-			? `${draft.transcode_root.trim().replace(/\/+$/, '')}/_replaced`
-			: ''
+	const savedArchiveRootCopy = $derived(savedSettings?.archive_root || 'unset');
+	const cleanupTargetDirty = $derived(
+		savedSettings ? archiveCleanupTargetDirty(draft, savedSettings) : false
 	);
 	const draftScheduleOptions = $derived([
 		{ key: 'always', label: 'Always', summary: 'Runs anytime.' },
@@ -283,7 +283,7 @@
 		archiveError = '';
 		if (!clearArchiveArmed) {
 			clearArchiveArmed = true;
-			archiveMessage = 'Confirm archive cleanup with a second click.';
+			archiveMessage = `Confirm archive cleanup for ${savedArchiveRootCopy} with a second click.`;
 			return;
 		}
 		clearArchivePending = true;
@@ -457,9 +457,10 @@
 						</label>
 						<div class="storage-readout">
 							<span>Archive cleanup root</span>
-							<strong class="mf-path"
-								>{archiveRootCopy || savedSettings.archive_root || 'unset'}</strong
-							>
+							<strong class="mf-path">{savedArchiveRootCopy}</strong>
+							{#if cleanupTargetDirty}
+								<small>Save settings before clearing a changed archive target.</small>
+							{/if}
 						</div>
 						<div class="storage-readout">
 							<span>Archived originals</span>
@@ -475,8 +476,11 @@
 								type="button"
 								class="control control--danger"
 								class:control--armed={clearArchiveArmed}
-								disabled={!archiveCleanup?.has_cleanup || clearArchivePending}
+								disabled={!archiveCleanup?.has_cleanup || clearArchivePending || cleanupTargetDirty}
 								onclick={clearArchiveCleanup}
+								title={cleanupTargetDirty
+									? 'Save the changed transcode root before clearing archived originals.'
+									: undefined}
 							>
 								{clearArchivePending ? 'Clearing' : clearArchiveArmed ? 'Confirm' : 'Clear archive'}
 							</button>
@@ -841,9 +845,7 @@
 						</div>
 						<div class="rail-row">
 							<span>Review/archive output</span>
-							<strong class="mf-path"
-								>{archiveRootCopy || savedSettings.archive_root || 'unset'}</strong
-							>
+							<strong class="mf-path">{savedArchiveRootCopy}</strong>
 						</div>
 					</div>
 				</WorkstationPanel>

@@ -175,6 +175,13 @@ export function settingsDraftIsDirty(draft: SettingsDraft, settings: SettingsPay
 	);
 }
 
+export function archiveCleanupTargetDirty(
+	draft: SettingsDraft,
+	settings: SettingsPayload
+): boolean {
+	return draft.transcode_root.trim() !== settings.transcode_root.trim();
+}
+
 export function buildArchiveCleanupClearPayload(
 	settings: SettingsPayload
 ): ArchiveCleanupClearPayload {

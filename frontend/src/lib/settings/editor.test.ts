@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	DEFAULT_SCHEDULE_DAYS,
 	addScheduleDraft,
+	archiveCleanupTargetDirty,
 	buildArchiveCleanupClearPayload,
 	buildSettingsSavePayload,
 	cloneScheduleProfile,
@@ -182,6 +183,18 @@ describe('settings draft helpers', () => {
 		expect(buildArchiveCleanupClearPayload(payload)).toEqual({
 			transcode_root: '/Volumes/Transcode'
 		});
+	});
+
+	it('flags archive cleanup as dirty when the cleanup target is edited but unsaved', () => {
+		const draft = draftFromSettings(payload);
+
+		expect(archiveCleanupTargetDirty(draft, payload)).toBe(false);
+
+		draft.transcode_root = ' /Volumes/Transcode ';
+		expect(archiveCleanupTargetDirty(draft, payload)).toBe(false);
+
+		draft.transcode_root = '/Volumes/UnsavedTranscode';
+		expect(archiveCleanupTargetDirty(draft, payload)).toBe(true);
 	});
 
 	it('toggles host library assignment without duplicating selected keys', () => {
