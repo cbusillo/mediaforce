@@ -41,8 +41,10 @@ completed, settings, and folder studio.
 - Ops: the fleet console. Lead with queue, workers, calibration, and cleanup
   state in one scan-friendly strip, then keep queue lanes and host readiness in
   list/table-first control surfaces rather than separate dashboard cards.
-- Completed: the archive cleanup surface. Keep the header light and route users
-  directly into cleanup decisions instead of repeating summary pills.
+- Completed: the archive cleanup and history surface. Keep cleanup readiness,
+  selected versus global destructive scope, archive-root health, and recent
+  encode/cleanup events visible in one route so the operator can remove
+  archived originals without treating it like another active queue.
 - Settings: the runtime configuration surface. It may stay more utilitarian and
   form-heavy than the other routes, but it should still inherit the same shell,
   typography, and navigation language.
