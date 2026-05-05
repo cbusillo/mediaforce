@@ -65,6 +65,7 @@
 		'pause-encode': '/api/encode-queue/pause',
 		'resume-encode': '/api/encode-queue/resume',
 		'retry-failed-encode': '/api/encode-queue/retry-failed',
+		'retry-encode-prefix': '/api/encode-queue/retry-prefix',
 		'stop-encode': '/api/encode-queue/stop',
 		'stop-calibration': '/api/calibration-queue/stop',
 		'start-host': '/api/hosts/start',
@@ -81,6 +82,7 @@
 		if (action === 'stop-calibration') return 'Stop running and queued sample/proof jobs';
 		if (action === 'retry-failed-encode')
 			return 'Retry failed folder encodes that are still approved';
+		if (action === 'retry-encode-prefix') return 'Retry this failed folder encode';
 		if (action === 'pause-encode') return 'Pause the encode scheduler';
 		if (action === 'resume-encode') return 'Resume the encode scheduler and clear stop request';
 		if (action === 'start-host') return 'Start or wake this host';
@@ -88,7 +90,12 @@
 		return 'Reset stored trust for this host';
 	}
 
-	function actionBody(action: OpsActionId, host?: HostRuntime): Record<string, unknown> {
+	function actionBody(
+		action: OpsActionId,
+		host?: HostRuntime,
+		row?: OpsQueueRow
+	): Record<string, unknown> {
+		if (action === 'retry-encode-prefix' && row) return { prefix: row.prefix };
 		if (!host) return {};
 		const body: Record<string, unknown> = { host_key: host.key };
 		if (action === 'prepare-host' && host.setup_requires_password) {
@@ -97,7 +104,7 @@
 		return body;
 	}
 
-	async function runAction(action: OpsActionId, host?: HostRuntime) {
+	async function runAction(action: OpsActionId, host?: HostRuntime, row?: OpsQueueRow) {
 		actionMessage = '';
 		actionError = '';
 		if (actionRequiresConfirmation(action) && confirmationAction !== action) {
@@ -109,7 +116,10 @@
 		actionPending = action;
 		try {
 			const endpoint = `${resolve('/')}${actionEndpoints[action].slice(1)}`;
-			const response = await postJson<Record<string, unknown>>(endpoint, actionBody(action, host));
+			const response = await postJson<Record<string, unknown>>(
+				endpoint,
+				actionBody(action, host, row)
+			);
 			actionMessage =
 				typeof response.message === 'string' && response.message.trim()
 					? response.message
@@ -182,6 +192,7 @@
 		if (action === 'pause-encode') return 'Pause';
 		if (action === 'resume-encode') return 'Resume';
 		if (action === 'retry-failed-encode') return 'Retry failed';
+		if (action === 'retry-encode-prefix') return 'Retry folder';
 		if (action === 'stop-encode') return 'Stop encode';
 		if (action === 'stop-calibration') return 'Stop samples';
 		if (action === 'start-host') return 'Start';
@@ -408,7 +419,8 @@
 												class="control control--compact"
 												disabled={rowActionDisabled(row)}
 												title={rowRecoveryTitle(row)}
-												onclick={() => runAction(action)}>{rowRecoveryLabel(row)}</button
+												onclick={() => runAction(action, undefined, row)}
+												>{rowRecoveryLabel(row)}</button
 											>
 										{:else}
 											<span class="disabled-copy">{rowRecoveryLabel(row)}</span>
@@ -506,6 +518,7 @@
 						<small
 							>{queuedWaitingCount.toLocaleString('en-US')} encode jobs waiting on schedule</small
 						>
+						<a class="inline-link" href={resolve('/settings')}>Edit schedule</a>
 					</div>
 					{#each closedHosts as host (host.key)}
 						<div class="scope-row scope-row--wait">
@@ -752,9 +765,19 @@
 	}
 
 	.work-link span,
-	.disabled-copy {
+	.disabled-copy,
+	.inline-link {
 		color: var(--mf-fg-tertiary);
 		font-size: var(--mf-text-2xs);
+	}
+
+	.inline-link {
+		font-weight: var(--mf-weight-semibold);
+		text-transform: uppercase;
+	}
+
+	.inline-link:hover {
+		color: var(--mf-active-fg);
 	}
 
 	.control {

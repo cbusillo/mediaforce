@@ -65,6 +65,55 @@ def retry_failed_encode_queue_action(
         review_gate: Any,
         queue_folder_encode_action: Any,
 ) -> dict[str, Any]:
+    terminal_prefixes = _retryable_terminal_encode_prefixes(connection_factory=connection_factory)
+    if not terminal_prefixes:
+        return {"ok": True, "message": "No failed folder encodes were ready to retry.", "queued_count": 0}
+
+    return _retry_failed_encode_prefixes(
+        terminal_prefixes,
+        config=config,
+        load_calibration_state=load_calibration_state,
+        review_gate=review_gate,
+        queue_folder_encode_action=queue_folder_encode_action,
+    )
+
+
+def retry_failed_encode_prefix_action(
+        *,
+        connection_factory: Any,
+        config: MediaforceConfig,
+        prefix: str,
+        load_calibration_state: Any,
+        review_gate: Any,
+        queue_folder_encode_action: Any,
+) -> dict[str, Any]:
+    normalized_prefix = prefix.strip("/").strip()
+    if not normalized_prefix:
+        raise HTTPException(status_code=400, detail="A folder prefix is required.")
+
+    retryable_prefixes = set(_retryable_terminal_encode_prefixes(connection_factory=connection_factory))
+    if normalized_prefix not in retryable_prefixes:
+        return {
+            "ok": True,
+            "message": f"No failed folder encode was ready to retry for {normalized_prefix}.",
+            "queued_count": 0,
+            "queued_prefixes": [],
+            "review_blocked_count": 0,
+            "review_blocked_prefixes": [],
+            "blocked_count": 0,
+            "blocked": [],
+        }
+
+    return _retry_failed_encode_prefixes(
+        [normalized_prefix],
+        config=config,
+        load_calibration_state=load_calibration_state,
+        review_gate=review_gate,
+        queue_folder_encode_action=queue_folder_encode_action,
+    )
+
+
+def _retryable_terminal_encode_prefixes(*, connection_factory: Any) -> list[str]:
     with connection_factory() as connection:
         rows = connection.execute(
             select(encode_jobs.c.prefix, encode_jobs.c.status)
@@ -79,13 +128,21 @@ def retry_failed_encode_queue_action(
             continue
         latest_status_by_prefix[prefix] = str(row["status"] or "").strip()
 
-    terminal_prefixes = [
+    return [
         prefix
         for prefix, status in latest_status_by_prefix.items()
         if status in RETRYABLE_TERMINAL_ENCODE_JOB_STATUSES
     ]
-    if not terminal_prefixes:
-        return {"ok": True, "message": "No failed folder encodes were ready to retry.", "queued_count": 0}
+
+
+def _retry_failed_encode_prefixes(
+        terminal_prefixes: list[str],
+        *,
+        config: MediaforceConfig,
+        load_calibration_state: Any,
+        review_gate: Any,
+        queue_folder_encode_action: Any,
+) -> dict[str, Any]:
 
     queued_prefixes: list[str] = []
     review_blocked_prefixes: list[str] = []

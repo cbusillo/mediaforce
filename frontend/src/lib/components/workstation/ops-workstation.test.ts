@@ -31,7 +31,17 @@ function dashboardFixture(): DashboardSummaryPayload {
 				pending_review: [],
 				running_count: 1,
 				queued_count: 0,
-				pending_review_count: 0
+				pending_review_count: 0,
+				recent_failed: [
+					{
+						job_id: 'sample-failed-1',
+						prefix: 'tv/show/season 4',
+						status: 'failed',
+						error: 'could not find a viable sample',
+						host: { label: 'studio-mini' }
+					}
+				],
+				recent_failed_count: 1
 			},
 			full: {
 				running: [],
@@ -39,9 +49,12 @@ function dashboardFixture(): DashboardSummaryPayload {
 				pending_review: [],
 				running_count: 0,
 				queued_count: 0,
-				pending_review_count: 0
+				pending_review_count: 0,
+				recent_failed: [],
+				recent_failed_count: 0
 			},
-			active_count: 1
+			active_count: 1,
+			recent_failed_count: 1
 		},
 		encode_queue: {
 			running_count: 1,
@@ -149,23 +162,31 @@ describe('Ops workstation mapping', () => {
 			'encode:encode-1',
 			'encode:encode-2',
 			'encode:encode-3',
-			'sample:sample-1'
+			'sample:sample-1',
+			'sample:sample-failed-1'
 		]);
 		expect(rows[1]).toMatchObject({
 			tone: 'wait',
-			action: 'retry-failed-encode',
-			actionScope: 'global',
+			action: 'retry-encode-prefix',
+			actionScope: 'row',
 			detail: 'transient worker fault'
 		});
 		expect(rows[2]).toMatchObject({
 			tone: 'fail',
-			action: 'retry-failed-encode',
-			actionScope: 'global',
+			action: 'retry-encode-prefix',
+			actionScope: 'row',
 			detail: 'quality target missed'
 		});
-		expect(rowRecoveryLabel(rows[1])).toBe('Retry all');
-		expect(rowRecoveryTitle(rows[1])).toContain('global retry');
+		expect(rowRecoveryLabel(rows[1])).toBe('Retry folder');
+		expect(rowRecoveryTitle(rows[1])).toContain('folder prefix only');
 		expect(rowRecoveryLabel(rows[3])).toBe('No action');
+		expect(rows[4]).toMatchObject({
+			tone: 'fail',
+			status: 'failed',
+			prefix: 'tv/show/season 4',
+			detail: 'could not find a viable sample'
+		});
+		expect(rowRecoveryLabel(rows[4])).toBe('No action');
 	});
 
 	it('surfaces runtime partials, failed encodes, and closed schedules as blockers', () => {

@@ -117,19 +117,26 @@ def claim_next_queued_calibration_job(
 
 
 def list_queue_summary(connection: DBClient, *, limit_per_lane: int = 6) -> dict[str, Any]:
-    rows = connection.execute(
+    active_rows = connection.execute(
         _calibration_job_select()
         .where(calibration_jobs.c.status.in_(("queued", "running", "pending_review")))
         .order_by(calibration_jobs.c.created_at.asc(), _rowid_column().asc())
     ).mappings().fetchall()
+    recent_terminal_rows = connection.execute(
+        _calibration_job_select()
+        .where(calibration_jobs.c.status.in_(("failed", "stopped")))
+        .order_by(calibration_jobs.c.updated_at.desc(), _rowid_column().desc())
+        .limit(limit_per_lane * 2)
+    ).mappings().fetchall()
     summary: dict[str, Any] = {
         "sample": {"running": [], "queued": [], "pending_review": [], "running_count": 0, "queued_count": 0,
-                   "pending_review_count": 0},
+                   "pending_review_count": 0, "recent_failed": [], "recent_failed_count": 0},
         "full": {"running": [], "queued": [], "pending_review": [], "running_count": 0, "queued_count": 0,
-                 "pending_review_count": 0},
+                 "pending_review_count": 0, "recent_failed": [], "recent_failed_count": 0},
         "active_count": 0,
+        "recent_failed_count": 0,
     }
-    for row in rows:
+    for row in active_rows:
         payload = _hydrate_job(row)
         lane = str(payload.get("lane") or "sample")
         lane_summary = summary[lane]
@@ -141,6 +148,19 @@ def list_queue_summary(connection: DBClient, *, limit_per_lane: int = 6) -> dict
             summary["active_count"] += 1
         if status in lane_summary and len(lane_summary[status]) < limit_per_lane:
             lane_summary[status].append(payload)
+    seen_terminal_prefix_lanes: set[tuple[str, str]] = set()
+    for row in recent_terminal_rows:
+        payload = _hydrate_job(row)
+        lane = str(payload.get("lane") or "sample")
+        lane_summary = summary[lane]
+        lane_summary["recent_failed_count"] += 1
+        summary["recent_failed_count"] += 1
+        prefix_lane = (str(payload.get("prefix") or ""), lane)
+        if prefix_lane in seen_terminal_prefix_lanes:
+            continue
+        seen_terminal_prefix_lanes.add(prefix_lane)
+        if len(lane_summary["recent_failed"]) < limit_per_lane:
+            lane_summary["recent_failed"].append(payload)
     return summary
 
 
