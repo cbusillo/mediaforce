@@ -146,6 +146,60 @@ export interface DashboardScanJob {
 	} | null;
 }
 
+export interface ArchiveCleanupSummary {
+	archive_root: string;
+	file_count: number;
+	total_size_bytes: number;
+	has_cleanup: boolean;
+}
+
+export interface CompletedFolderRow {
+	prefix: string;
+	title: string;
+	subtitle: string;
+	scope_label: string;
+	promoted_item_count: number;
+	archived_backup_count: number;
+	archived_backup_size_bytes: number;
+	total_bytes_saved: number;
+	latest_promoted_at: string | null;
+	cleanup_state?: 'ready' | 'blocked' | 'unknown' | 'cleaned' | string;
+	cleanup_detail?: string;
+	missing_backup_count?: number;
+	outside_archive_root_count?: number;
+}
+
+export interface CompletedHistoryEvent {
+	id: number;
+	event_type: string;
+	label: string;
+	tone: 'active' | 'ready' | 'wait' | 'fail' | 'idle' | string;
+	prefix: string;
+	title: string;
+	subtitle: string;
+	scope_label: string;
+	created_at: string;
+	detail: string;
+	size_bytes?: number | null;
+}
+
+export interface CompletedPayload {
+	folders: CompletedFolderRow[];
+	completed_count: number;
+	folders_with_backups_count: number;
+	archive_cleanup: ArchiveCleanupSummary;
+	history?: CompletedHistoryEvent[];
+}
+
+export interface CompletedCleanupResult {
+	ok: boolean;
+	message: string;
+	removed_count: number;
+	removed_size_bytes: number;
+	removed_prefix_count: number;
+	completed?: CompletedPayload;
+}
+
 export interface DashboardSummaryPayload {
 	folders_preview: FolderCard[];
 	library_colors: Record<string, string>;
@@ -157,12 +211,7 @@ export interface DashboardSummaryPayload {
 		recent_failed_count?: number;
 	};
 	encode_queue: EncodeQueueSummary;
-	archive_cleanup?: {
-		archive_root: string;
-		file_count: number;
-		total_size_bytes: number;
-		has_cleanup: boolean;
-	};
+	archive_cleanup?: ArchiveCleanupSummary;
 	catalog_empty: boolean;
 	folder_cache_key: string;
 	metric_support: MetricSupport;
