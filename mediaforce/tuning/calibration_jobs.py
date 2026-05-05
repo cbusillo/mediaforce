@@ -163,10 +163,10 @@ def list_queue_summary(connection: DBClient, *, limit_per_lane: int = 6) -> dict
         if prefix_lane in seen_terminal_prefix_lanes:
             continue
         seen_terminal_prefix_lanes.add(prefix_lane)
+        lane_summary["recent_failed_count"] += 1
+        summary["recent_failed_count"] += 1
         if len(lane_summary["recent_failed"]) < limit_per_lane:
             lane_summary["recent_failed"].append(payload)
-            lane_summary["recent_failed_count"] += 1
-            summary["recent_failed_count"] += 1
     return summary
 
 

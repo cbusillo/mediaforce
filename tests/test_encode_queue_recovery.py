@@ -13564,7 +13564,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             summary = list_queue_summary(connection, limit_per_lane=2)
 
-        self.assertEqual(summary["sample"]["recent_failed_count"], 2)
+        self.assertEqual(summary["sample"]["recent_failed_count"], 4)
         self.assertEqual(summary["full"]["recent_failed_count"], 1)
         self.assertEqual(len(summary["sample"]["recent_failed"]), 2)
         self.assertEqual(summary["full"]["recent_failed"][0]["prefix"], "tv/proof-failed")
@@ -13611,6 +13611,45 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             [job["prefix"] for job in summary["sample"]["recent_failed"]],
             ["tv/duplicate", "tv/distinct"],
         )
+
+    def test_calibration_queue_summary_counts_recent_failures_beyond_display_limit(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            for index in range(5):
+                updated_at = f"2026-05-05T12:0{index}:00+00:00"
+                prefix = f"tv/count-failed-{index}"
+                web_app._save_job_state(
+                    connection,
+                    self.config,
+                    prefix,
+                    {
+                        "job_id": f"count-failed-{index}",
+                        "prefix": prefix,
+                        "status": "failed",
+                        "lane": "sample",
+                        "action": "baseline",
+                        "host": {"key": "cbusillo@localhost", "label": "M4 Studio"},
+                        "notes": "",
+                        "policy": {},
+                        "sample_item": {},
+                        "owner_pid": None,
+                        "created_at": updated_at,
+                        "started_at": updated_at,
+                        "finished_at": updated_at,
+                        "error": "sample failed detail",
+                    },
+                )
+                connection.execute(
+                    calibration_jobs.update()
+                    .where(calibration_jobs.c.job_id == f"count-failed-{index}")
+                    .values(updated_at=updated_at)
+                )
+            connection.commit()
+
+            summary = list_queue_summary(connection, limit_per_lane=2)
+
+        self.assertEqual(summary["sample"]["recent_failed_count"], 5)
+        self.assertEqual(summary["recent_failed_count"], 5)
+        self.assertEqual(len(summary["sample"]["recent_failed"]), 2)
 
     def test_run_remote_status_probe_retries_timeout_once(self) -> None:
         host: dict[str, object] = {"host": "cbusillo@chris-mini.local"}
