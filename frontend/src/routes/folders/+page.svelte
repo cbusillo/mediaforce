@@ -9,6 +9,7 @@
 </svelte:head>
 
 <HomeWorkbenchView
+	crumb="/folders"
 	dashboard={data.dashboard}
 	foldersPayload={data.foldersPayload}
 	hosts={data.hosts}

@@ -1,0 +1,895 @@
+<script lang="ts">
+	import { resolve } from '$app/paths';
+	import { folderRoutePrefix } from '$lib/folder-display';
+	import {
+		codecLabel,
+		formatBitrateCopy,
+		formatDateTimeCopy,
+		formatResolutionCopy,
+		pathFilename,
+		type FolderCalibrationJob,
+		type FolderCalibrationState,
+		type FolderSampleItem,
+		type PendingSampleProposal,
+		type ReviewGate
+	} from '$lib/folders/studio';
+	import type { FolderPayload, FolderStatusPayload, HostsPayload } from '$lib/api/types';
+	import OperatorShell from './OperatorShell.svelte';
+	import StateBadge from './StateBadge.svelte';
+	import WorkstationPanel from './WorkstationPanel.svelte';
+	import {
+		buildBenchMessages,
+		buildFooterSignals,
+		buildProposalRows,
+		buildSampleFacts,
+		buildStatusTiles,
+		formatBytes,
+		projectedReclaimBytes,
+		record,
+		resolvedMetricCopy,
+		resolveFolderTitle,
+		resolveReviewArtifacts,
+		resolveWorkflow,
+		reviewReadyCopy,
+		summarizeStatuses,
+		type WorkflowAction
+	} from './folder-studio-view';
+
+	let {
+		folder,
+		status,
+		hosts
+	}: {
+		folder: FolderPayload;
+		status: FolderStatusPayload;
+		hosts: HostsPayload;
+	} = $props();
+
+	const prefix = $derived(folder.prefix);
+	const encodedPrefix = $derived(folderRoutePrefix(prefix));
+	const summary = $derived(folder.summary);
+	const title = $derived(resolveFolderTitle(prefix));
+	const library = $derived(prefix.split('/')[0] || 'Library');
+	const sampleItem = $derived(record<FolderSampleItem>(folder.sample_item));
+	const calibration = $derived(record<FolderCalibrationState>(folder.calibration));
+	const pendingProposal = $derived(record<PendingSampleProposal>(folder.pending_proposal));
+	const reviewGate = $derived(record<ReviewGate>(folder.review_gate));
+	const calibrationJob = $derived(record<FolderCalibrationJob>(folder.calibration_job));
+	const retryableSampleJob = $derived(record<FolderCalibrationJob>(status.retryable_sample_job));
+	const encodeJob = $derived(folder.encode_job ?? null);
+	const reviewArtifacts = $derived(resolveReviewArtifacts(calibration, pendingProposal));
+	const workflow = $derived(
+		resolveWorkflow(
+			folder,
+			status,
+			calibration,
+			pendingProposal,
+			reviewGate,
+			calibrationJob,
+			encodeJob
+		)
+	);
+	const proposalRows = $derived(buildProposalRows(folder, pendingProposal));
+	const statusTiles = $derived(buildStatusTiles(folder, status, hosts, workflow));
+	const footerSignals = $derived(buildFooterSignals(folder, status, hosts));
+	const sampleFacts = $derived(buildSampleFacts(sampleItem, summary));
+	const benchMessages = $derived(
+		buildBenchMessages(calibration, pendingProposal, retryableSampleJob)
+	);
+
+	function workflowActionEnabled(action: WorkflowAction): boolean {
+		if (action === 'open-ops') return true;
+		if (action === 'download-review-pack') {
+			return reviewArtifacts.length > 0 || reviewReadyCopy(calibration) === 'Ready';
+		}
+		return false;
+	}
+
+	function workflowActionTitle(action: WorkflowAction): string {
+		if (workflowActionEnabled(action)) return '';
+		if (action === 'download-review-pack') return 'Review pack is not ready yet.';
+		return 'Wiring handoff pending for this workflow action.';
+	}
+</script>
+
+<OperatorShell
+	route="studio"
+	subject={title}
+	crumb={`/folders/${prefix}`}
+	{statusTiles}
+	{footerSignals}
+>
+	<main class="studio">
+		<aside class="studio__left" aria-label="Folder workflow context">
+			<WorkstationPanel eyebrow="Folder" title="Active context">
+				<div class="context-list">
+					<div>
+						<span>Library</span>
+						<strong>{library}</strong>
+					</div>
+					<div>
+						<span>Items</span>
+						<strong>{summary?.item_count?.toLocaleString('en-US') ?? '—'}</strong>
+					</div>
+					<div>
+						<span>Pending</span>
+						<strong>{summary?.statuses ? summarizeStatuses(summary.statuses) : '—'}</strong>
+					</div>
+					<div>
+						<span>Source size</span>
+						<strong>{formatBytes(summary?.total_size_bytes)}</strong>
+					</div>
+				</div>
+			</WorkstationPanel>
+
+			<WorkstationPanel eyebrow="Hosts" title="Sample readiness">
+				<div class="host-list">
+					{#each hosts.hosts.slice(0, 6) as host (host.key)}
+						<div class="host-row">
+							<StateBadge
+								compact
+								tone={host.available ? 'ready' : host.schedule_open === false ? 'wait' : 'fail'}
+								label={host.label}
+							/>
+							<span>{host.message || host.schedule_detail || 'No detail'}</span>
+						</div>
+					{/each}
+					{#if hosts.hosts.length === 0}
+						<div class="empty-note">No host runtime data returned.</div>
+					{/if}
+				</div>
+			</WorkstationPanel>
+		</aside>
+
+		<section class="studio__main" aria-label="Folder decision surface">
+			<header class="folder-header">
+				<div>
+					<div class="mf-path">{prefix}</div>
+					<h1>{title}</h1>
+				</div>
+				<div class="folder-header__facts">
+					<div>
+						<span>Source</span>
+						<strong>{formatBytes(summary?.total_size_bytes)}</strong>
+					</div>
+					<div>
+						<span>Projected reclaim</span>
+						<strong>{formatBytes(projectedReclaimBytes(folder))}</strong>
+					</div>
+					<div>
+						<span>Metric</span>
+						<strong>{folder.metric_status_copy || resolvedMetricCopy(folder)}</strong>
+					</div>
+				</div>
+			</header>
+
+			<section class="decision decision--{workflow.tone}" aria-labelledby="decision-title">
+				<div>
+					<StateBadge tone={workflow.tone} label={workflow.label} />
+					<h2 id="decision-title">{workflow.title}</h2>
+					<p>{workflow.copy}</p>
+				</div>
+				<div class="decision__metrics">
+					<div>
+						<span>Review pack</span>
+						<strong
+							>{reviewArtifacts.length
+								? `${reviewArtifacts.length} artifacts`
+								: reviewReadyCopy(calibration)}</strong
+						>
+					</div>
+					<div>
+						<span>Sample</span>
+						<strong>{sampleItem ? pathFilename(sampleItem.rel_path) : '—'}</strong>
+					</div>
+				</div>
+				<div class="decision__actions">
+					{#if workflow.primaryAction === 'open-ops'}
+						<a
+							class="control control--primary"
+							href={resolve('/ops')}
+							data-mf-action={workflow.primaryAction}>{workflow.primary}</a
+						>
+					{:else if workflow.primaryAction === 'download-review-pack' && workflowActionEnabled(workflow.primaryAction)}
+						<form
+							class="action-form"
+							method="get"
+							action={`${resolve('/')}api/folders/${encodedPrefix}/review-compare/download`}
+							data-mf-action={workflow.primaryAction}
+						>
+							<button class="control control--primary" type="submit">{workflow.primary}</button>
+						</form>
+					{:else}
+						<button
+							class="control control--primary"
+							type="button"
+							disabled={!workflowActionEnabled(workflow.primaryAction)}
+							title={workflowActionTitle(workflow.primaryAction)}
+							data-mf-action={workflow.primaryAction}
+							data-mf-wire="pending">{workflow.primary}</button
+						>
+					{/if}
+					{#if workflow.secondaryAction === 'open-ops'}
+						<a class="control" href={resolve('/ops')} data-mf-action={workflow.secondaryAction}
+							>{workflow.secondary}</a
+						>
+					{:else if workflow.secondaryAction === 'download-review-pack' && workflowActionEnabled(workflow.secondaryAction)}
+						<form
+							class="action-form"
+							method="get"
+							action={`${resolve('/')}api/folders/${encodedPrefix}/review-compare/download`}
+							data-mf-action={workflow.secondaryAction}
+						>
+							<button class="control" type="submit">{workflow.secondary}</button>
+						</form>
+					{:else}
+						<button
+							class="control"
+							type="button"
+							disabled={!workflowActionEnabled(workflow.secondaryAction)}
+							title={workflowActionTitle(workflow.secondaryAction)}
+							data-mf-action={workflow.secondaryAction}
+							data-mf-wire="pending">{workflow.secondary}</button
+						>
+					{/if}
+				</div>
+			</section>
+
+			<WorkstationPanel title="Bench">
+				<div class="bench">
+					<div class="bench__thread" aria-label="Bench conversation">
+						{#each benchMessages as message (message.id)}
+							<div
+								class="bench-message bench-message--{message.role} bench-message--tone-{message.tone ??
+									'neutral'}"
+							>
+								<header>
+									<span>{message.label}</span>
+									{#if message.meta}
+										<small>{message.meta}</small>
+									{/if}
+								</header>
+								<strong>{message.title}</strong>
+								<p>{message.body}</p>
+							</div>
+						{/each}
+					</div>
+
+					<div class="bench__composer" aria-label="Bench request composer">
+						<label>
+							<span>Request</span>
+							<textarea
+								rows="5"
+								placeholder="Ask Bench what to sample, revise, or validate for this folder."
+							></textarea>
+						</label>
+						<div class="bench__controls">
+							<label>
+								<span>Host</span>
+								<select>
+									{#each hosts.hosts as host (host.key)}
+										<option value={host.key}>{host.label}</option>
+									{/each}
+								</select>
+							</label>
+							<button
+								class="control control--primary"
+								type="button"
+								disabled
+								title="Bench request wiring is pending."
+								data-mf-action="bench-request"
+								data-mf-wire="pending">Send to Bench</button
+							>
+						</div>
+					</div>
+				</div>
+			</WorkstationPanel>
+
+			<div class="support-grid" aria-label="Folder supporting signals">
+				<WorkstationPanel title="Queue">
+					<dl class="kv kv--compact">
+						<dt>Calibration</dt>
+						<dd>{status.calibration_status || '—'}</dd>
+						<dt>Scan</dt>
+						<dd>{status.folder_scan_status || '—'}</dd>
+						<dt>Approval</dt>
+						<dd>{reviewGate?.status ?? '—'}</dd>
+						<dt>Encode</dt>
+						<dd>{encodeJob?.status ?? folder.encode_queue_summary ?? '—'}</dd>
+					</dl>
+				</WorkstationPanel>
+
+				<WorkstationPanel title="Target">
+					<dl class="kv kv--compact">
+						<dt>Codec</dt>
+						<dd>{codecLabel(sampleItem?.video_codec) || '—'}</dd>
+						<dt>Resolution</dt>
+						<dd>{formatResolutionCopy(sampleItem?.width, sampleItem?.height) ?? '—'}</dd>
+						<dt>Bitrate</dt>
+						<dd>{formatBitrateCopy(sampleItem?.video_bitrate) ?? '—'}</dd>
+						<dt>Metric</dt>
+						<dd>{resolvedMetricCopy(folder)}</dd>
+					</dl>
+				</WorkstationPanel>
+
+				<WorkstationPanel title="Recent">
+					<div class="history-list history-list--compact">
+						{#each (folder.recent_tuning_sessions ?? []).slice(0, 3) as session, index (`${session.session_id ?? session.created_at ?? index}`)}
+							<div>
+								<span>{formatDateTimeCopy(String(session.created_at ?? '')) || '—'}</span>
+								<strong>{String(session.summary ?? session.note ?? 'Tuning session')}</strong>
+							</div>
+						{:else}
+							<div class="empty-note empty-note--compact">No recent tuning sessions returned.</div>
+						{/each}
+					</div>
+				</WorkstationPanel>
+			</div>
+
+			<div class="evidence-grid">
+				<WorkstationPanel title="Representative sample">
+					<div class="sample-card">
+						<div class="sample-frame">
+							<span>{sampleItem ? 'Representative sample' : 'No sample selected'}</span>
+							<strong
+								>{sampleItem
+									? pathFilename(sampleItem.rel_path)
+									: 'Run a sample to populate review evidence.'}</strong
+							>
+						</div>
+						<div class="sample-facts">
+							{#each sampleFacts as fact (fact.label)}
+								<div>
+									<span>{fact.label}</span>
+									<strong>{fact.value}</strong>
+								</div>
+							{/each}
+						</div>
+					</div>
+				</WorkstationPanel>
+
+				<WorkstationPanel title="Evidence artifacts">
+					<div class="artifact-list">
+						{#each reviewArtifacts.slice(0, 4) as artifact (artifact.label + artifact.detail)}
+							<div class="artifact-row">
+								<StateBadge
+									compact
+									tone={artifact.category === 'audio' ? 'wait' : 'active'}
+									label={artifact.kind || artifact.category}
+								/>
+								<div>
+									<strong>{artifact.label || 'Review artifact'}</strong>
+									<span>{artifact.detail || artifact.imageUrl || 'No detail returned'}</span>
+								</div>
+							</div>
+						{:else}
+							<div class="empty-note">Review pack artifacts are not available yet.</div>
+						{/each}
+					</div>
+				</WorkstationPanel>
+			</div>
+
+			<WorkstationPanel
+				title="Current policy vs. draft"
+				meta={proposalRows.length ? `${proposalRows.length} rows` : 'No draft'}
+			>
+				<div class="table-wrap">
+					<table>
+						<thead>
+							<tr>
+								<th>Area</th>
+								<th>Setting</th>
+								<th>Current</th>
+								<th>Draft</th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each proposalRows as row (row.section + row.label)}
+								<tr class:changed={row.changed}>
+									<td>{row.section}</td>
+									<td>{row.label}</td>
+									<td>{row.current}</td>
+									<td>{row.draft}</td>
+								</tr>
+							{:else}
+								<tr>
+									<td colspan="4">No pending proposal was returned for this folder.</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+			</WorkstationPanel>
+		</section>
+	</main>
+</OperatorShell>
+
+<style>
+	.studio {
+		display: grid;
+		grid-template-columns: minmax(0, 280px) minmax(0, 1fr);
+		min-height: calc(100vh - 178px);
+		overflow: hidden;
+	}
+
+	.studio__left {
+		background: var(--mf-bg-shell);
+		display: flex;
+		flex-direction: column;
+		gap: var(--mf-space-5);
+		padding: var(--mf-space-5);
+	}
+
+	.studio__left {
+		border-right: var(--mf-border);
+	}
+
+	.studio__main {
+		display: grid;
+		gap: var(--mf-space-5);
+		min-width: 0;
+		padding: var(--mf-space-6);
+	}
+
+	.folder-header {
+		align-items: start;
+		border-bottom: var(--mf-border);
+		display: grid;
+		gap: var(--mf-space-6);
+		grid-template-columns: minmax(0, 1fr);
+		padding-bottom: var(--mf-space-5);
+	}
+
+	.folder-header h1 {
+		margin-top: var(--mf-space-3);
+	}
+
+	.folder-header__facts,
+	.decision__metrics,
+	.sample-facts {
+		display: flex;
+		gap: var(--mf-space-5);
+		min-width: 0;
+	}
+
+	.sample-facts {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+
+	.sample-facts div:first-child {
+		grid-column: 1 / -1;
+	}
+
+	.folder-header__facts div,
+	.decision__metrics div,
+	.sample-facts div,
+	.context-list div {
+		display: grid;
+		gap: var(--mf-space-2);
+		min-width: 88px;
+	}
+
+	.folder-header__facts span,
+	.decision__metrics span,
+	.sample-facts span,
+	.context-list span {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.folder-header__facts strong,
+	.decision__metrics strong,
+	.sample-facts strong,
+	.context-list strong {
+		font-family: var(--mf-font-mono);
+		font-size: var(--mf-text-sm);
+		font-weight: var(--mf-weight-medium);
+		overflow-wrap: anywhere;
+	}
+
+	.decision {
+		--decision-line: var(--mf-idle-line);
+		background: var(--mf-bg-panel);
+		border: var(--mf-border);
+		border-left: 3px solid var(--decision-line);
+		display: grid;
+		gap: var(--mf-space-6);
+		grid-template-columns: minmax(0, 1fr) minmax(160px, 260px) auto;
+		padding: var(--mf-space-6);
+	}
+
+	.decision--active {
+		--decision-line: var(--mf-active-fg);
+	}
+
+	.decision--ready {
+		--decision-line: var(--mf-ready-fg);
+	}
+
+	.decision--wait {
+		--decision-line: var(--mf-wait-fg);
+	}
+
+	.decision--fail {
+		--decision-line: var(--mf-fail-fg);
+	}
+
+	.decision h2 {
+		margin-top: var(--mf-space-5);
+	}
+
+	.decision p {
+		margin-top: var(--mf-space-3);
+		max-width: 68ch;
+	}
+
+	.decision__actions {
+		align-items: center;
+		display: flex;
+		gap: var(--mf-space-4);
+		min-width: 0;
+	}
+
+	.action-form {
+		margin: 0;
+	}
+
+	.control {
+		align-items: center;
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border-strong);
+		border-radius: var(--mf-radius-1);
+		color: var(--mf-fg-primary);
+		display: inline-flex;
+		font-weight: var(--mf-weight-semibold);
+		justify-content: center;
+		min-height: var(--mf-control-lg);
+		padding: 0 var(--mf-space-5);
+		white-space: nowrap;
+	}
+
+	.control:hover {
+		background: var(--mf-bg-raised);
+	}
+
+	.control:disabled {
+		background: var(--mf-bg-input);
+		border-color: var(--mf-line-muted);
+		color: var(--mf-fg-quaternary);
+	}
+
+	.control--primary {
+		background: var(--mf-active-solid);
+		border-color: var(--mf-active-solid-hi);
+		color: var(--mf-fg-on-accent);
+	}
+
+	.control--primary:disabled {
+		background: var(--mf-active-bg);
+		border-color: var(--mf-active-line);
+		color: var(--mf-fg-tertiary);
+	}
+
+	.bench {
+		display: grid;
+		gap: var(--mf-space-5);
+		grid-template-columns: minmax(0, 1fr) minmax(280px, 0.65fr);
+		padding: var(--mf-space-5);
+	}
+
+	.bench__thread {
+		display: grid;
+		gap: var(--mf-space-4);
+		min-width: 0;
+	}
+
+	.bench-message {
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border);
+		border-left: 2px solid var(--mf-idle-fg);
+		display: grid;
+		gap: var(--mf-space-3);
+		padding: var(--mf-space-5);
+	}
+
+	.bench-message--operator {
+		border-left-color: var(--mf-ready-fg);
+	}
+
+	.bench-message--bench {
+		border-left-color: var(--mf-active-fg);
+	}
+
+	.bench-message--fail {
+		border-left-color: var(--mf-fail-fg);
+	}
+
+	.bench-message--system {
+		border-left-color: var(--mf-wait-fg);
+	}
+
+	.bench-message--tone-ready {
+		background: var(--mf-ready-bg);
+	}
+
+	.bench-message--tone-active {
+		background: var(--mf-active-bg);
+	}
+
+	.bench-message--tone-wait {
+		background: var(--mf-wait-bg);
+	}
+
+	.bench-message--tone-fail {
+		background: var(--mf-fail-bg);
+	}
+
+	.bench-message header {
+		align-items: center;
+		display: flex;
+		gap: var(--mf-space-4);
+		justify-content: space-between;
+		min-width: 0;
+	}
+
+	.bench-message span,
+	.bench__composer label span {
+		color: var(--mf-fg-tertiary);
+		display: block;
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.bench-message small {
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-mono);
+		font-size: var(--mf-text-2xs);
+		overflow-wrap: anywhere;
+	}
+
+	.bench-message strong {
+		color: var(--mf-fg-primary);
+		font-size: var(--mf-text-sm);
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.bench-message p {
+		font-size: var(--mf-text-sm);
+	}
+
+	.bench__composer {
+		background: var(--mf-bg-input);
+		border: var(--mf-border-strong);
+		display: grid;
+		gap: var(--mf-space-4);
+		padding: var(--mf-space-5);
+	}
+
+	.bench__composer textarea,
+	.bench__composer select {
+		background: var(--mf-bg-base);
+		border: var(--mf-border);
+		border-radius: var(--mf-radius-1);
+		color: var(--mf-fg-primary);
+		min-width: 0;
+		width: 100%;
+	}
+
+	.bench__composer textarea {
+		line-height: var(--mf-leading-normal);
+		padding: var(--mf-space-4);
+		resize: vertical;
+	}
+
+	.bench__composer select {
+		min-height: var(--mf-control-md);
+		padding: 0 var(--mf-space-4);
+	}
+
+	.bench__controls {
+		align-items: end;
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-template-columns: minmax(0, 1fr) auto;
+	}
+
+	.support-grid {
+		display: grid;
+		gap: var(--mf-space-5);
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+
+	.evidence-grid {
+		display: grid;
+		gap: var(--mf-space-5);
+		grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+	}
+
+	.sample-card {
+		display: grid;
+		gap: var(--mf-space-5);
+		padding: var(--mf-space-5);
+	}
+
+	.sample-frame {
+		align-content: center;
+		aspect-ratio: 16 / 7;
+		background:
+			linear-gradient(var(--mf-line-muted) 1px, transparent 1px),
+			linear-gradient(90deg, var(--mf-line-muted) 1px, transparent 1px), var(--mf-bg-input);
+		background-size: 36px 36px;
+		border: var(--mf-border-strong);
+		color: var(--mf-fg-tertiary);
+		display: grid;
+		justify-items: center;
+		padding: var(--mf-space-6);
+		text-align: center;
+	}
+
+	.sample-frame strong {
+		color: var(--mf-fg-primary);
+		font-family: var(--mf-font-mono);
+		font-size: var(--mf-text-sm);
+		font-weight: var(--mf-weight-medium);
+		margin-top: var(--mf-space-3);
+		overflow-wrap: anywhere;
+	}
+
+	.artifact-list,
+	.host-list,
+	.history-list {
+		display: grid;
+		gap: var(--mf-space-4);
+		padding: var(--mf-space-5);
+	}
+
+	.artifact-row,
+	.host-row {
+		align-items: start;
+		border-bottom: var(--mf-border-muted);
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-template-columns: auto minmax(0, 1fr);
+		padding-bottom: var(--mf-space-4);
+	}
+
+	.artifact-row strong,
+	.history-list strong {
+		display: block;
+		font-size: var(--mf-text-sm);
+		font-weight: var(--mf-weight-semibold);
+		overflow-wrap: anywhere;
+	}
+
+	.artifact-row span,
+	.host-row span,
+	.history-list span {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+	}
+
+	.empty-note {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-sm);
+		padding: var(--mf-space-5);
+	}
+
+	.empty-note--compact {
+		padding: 0;
+	}
+
+	.table-wrap {
+		overflow: auto;
+	}
+
+	table {
+		border-collapse: collapse;
+		min-width: 720px;
+		width: 100%;
+	}
+
+	th,
+	td {
+		border-bottom: var(--mf-border-muted);
+		font-size: var(--mf-text-xs);
+		padding: 0 var(--mf-space-5);
+		text-align: left;
+		vertical-align: middle;
+	}
+
+	th {
+		background: var(--mf-bg-strip);
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		height: var(--mf-row-compact);
+		letter-spacing: 0.08em;
+		position: sticky;
+		text-transform: uppercase;
+		top: 0;
+	}
+
+	td {
+		color: var(--mf-fg-secondary);
+		height: var(--mf-row-default);
+	}
+
+	td:nth-child(3),
+	td:nth-child(4) {
+		font-family: var(--mf-font-mono);
+	}
+
+	tr.changed td:first-child {
+		box-shadow: inset 2px 0 0 var(--mf-active-fg);
+	}
+
+	.kv {
+		column-gap: var(--mf-space-5);
+		display: grid;
+		grid-template-columns: minmax(88px, auto) minmax(0, 1fr);
+		padding: var(--mf-space-5);
+		row-gap: var(--mf-space-4);
+	}
+
+	.kv dt {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.kv dd {
+		color: var(--mf-fg-primary);
+		font-family: var(--mf-font-mono);
+		font-size: var(--mf-text-xs);
+		overflow-wrap: anywhere;
+	}
+
+	.kv--compact {
+		grid-template-columns: minmax(74px, auto) minmax(0, 1fr);
+		padding: var(--mf-space-5);
+		row-gap: var(--mf-space-3);
+	}
+
+	.history-list--compact {
+		padding: var(--mf-space-5);
+	}
+
+	@media (max-width: 1180px) {
+		.studio {
+			grid-template-columns: minmax(190px, 240px) minmax(0, 1fr);
+		}
+	}
+
+	@media (max-width: 820px) {
+		.studio {
+			grid-template-columns: 1fr;
+		}
+
+		.studio__left {
+			border-right: 0;
+		}
+
+		.folder-header,
+		.decision,
+		.bench,
+		.support-grid,
+		.evidence-grid {
+			grid-template-columns: 1fr;
+		}
+
+		.folder-header__facts,
+		.decision__metrics,
+		.sample-facts,
+		.decision__actions {
+			flex-wrap: wrap;
+		}
+	}
+</style>

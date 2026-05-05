@@ -1,0 +1,784 @@
+<script lang="ts">
+	import { resolve } from '$app/paths';
+	import { folderRoutePath } from '$lib/folder-display';
+	import type {
+		DashboardFoldersPayload,
+		DashboardSummaryPayload,
+		FolderCard,
+		HostsPayload
+	} from '$lib/api/types';
+	import OperatorShell from './OperatorShell.svelte';
+	import StateBadge from './StateBadge.svelte';
+	import WorkstationPanel from './WorkstationPanel.svelte';
+	import {
+		buildQueueFooterSignals,
+		buildQueueStatusTiles,
+		codecSummary,
+		folderStatusCopy,
+		queueFolderState,
+		queueFolderTone,
+		totalPendingItems,
+		totalProjectedReclaim
+	} from './queue-workstation';
+	import { formatBytes } from './folder-studio-view';
+
+	let {
+		dashboard,
+		foldersPayload,
+		hosts,
+		crumb = '/'
+	}: {
+		dashboard: DashboardSummaryPayload;
+		foldersPayload: DashboardFoldersPayload;
+		hosts: HostsPayload;
+		crumb?: string;
+	} = $props();
+
+	const folders = $derived(foldersPayload.folders);
+	let searchQuery = $state('');
+	let libraryFilters = $state<Record<string, boolean>>({});
+	let stateFilters = $state<Record<string, boolean>>({});
+	const libraryOptions = $derived(buildLibraryOptions(folders));
+	const stateOptions = $derived(buildStateOptions(folders));
+	const normalizedSearchQuery = $derived(searchQuery.trim().toLowerCase());
+	const visibleFolders = $derived(
+		folders.filter((folder) => {
+			const searchMatches =
+				normalizedSearchQuery.length === 0 ||
+				[folder.title, folder.prefix, folder.subtitle, folderStatusCopy(folder)]
+					.join(' ')
+					.toLowerCase()
+					.includes(normalizedSearchQuery);
+			return (
+				searchMatches &&
+				libraryIncluded(libraryKey(folderLibrary(folder))) &&
+				stateIncluded(stateKey(queueFolderState(folder)))
+			);
+		})
+	);
+	const visibleFoldersPayload = $derived({ ...foldersPayload, folders: visibleFolders });
+	const nextFolder = $derived(visibleFolders[0] ?? null);
+	const excludedLibraryCount = $derived(
+		libraryOptions.filter((option) => !libraryIncluded(option.key)).length
+	);
+	const excludedStateCount = $derived(
+		stateOptions.filter((option) => !stateIncluded(option.key)).length
+	);
+	const statusTiles = $derived(buildQueueStatusTiles(dashboard, visibleFoldersPayload, hosts));
+	const footerSignals = $derived(buildQueueFooterSignals(dashboard, visibleFoldersPayload, hosts));
+	const runningSamples = $derived(dashboard.calibration_queue.sample.running_count);
+	const queuedSamples = $derived(dashboard.calibration_queue.sample.queued_count);
+	const pendingReviews = $derived(dashboard.calibration_queue.sample.pending_review_count);
+
+	type LibraryOption = {
+		key: string;
+		label: string;
+		folders: number;
+		pending: number;
+		reclaim: number;
+	};
+
+	type StateOption = {
+		key: string;
+		label: string;
+		folders: number;
+		pending: number;
+	};
+
+	function rowKey(folder: FolderCard): string {
+		return `${folder.prefix}:${folder.sort_score}`;
+	}
+
+	function libraryKey(label: string): string {
+		return label.trim().toLowerCase() || 'library';
+	}
+
+	function libraryLabel(label: string): string {
+		return label.trim() || 'Library';
+	}
+
+	function stateKey(label: string): string {
+		return label.trim().toLowerCase() || 'state';
+	}
+
+	function folderLibrary(folder: FolderCard): string {
+		return folder.prefix.split('/')[0] || folder.scope_label || 'library';
+	}
+
+	function buildLibraryOptions(queue: FolderCard[]): LibraryOption[] {
+		const byLibrary: Record<string, LibraryOption> = {};
+		for (const folder of queue) {
+			const library = folderLibrary(folder);
+			const key = libraryKey(library);
+			const existing = byLibrary[key] ?? {
+				key,
+				label: libraryLabel(library),
+				folders: 0,
+				pending: 0,
+				reclaim: 0
+			};
+			existing.folders += 1;
+			existing.pending += Math.max(folder.pending_count ?? 0, 0);
+			existing.reclaim += Math.max(folder.projected_reclaim_bytes ?? 0, 0);
+			byLibrary[key] = existing;
+		}
+		return Object.values(byLibrary).sort((left, right) => right.pending - left.pending);
+	}
+
+	function buildStateOptions(queue: FolderCard[]): StateOption[] {
+		const byState: Record<string, StateOption> = {};
+		for (const folder of queue) {
+			const label = queueFolderState(folder);
+			const key = stateKey(label);
+			const existing = byState[key] ?? {
+				key,
+				label,
+				folders: 0,
+				pending: 0
+			};
+			existing.folders += 1;
+			existing.pending += Math.max(folder.pending_count ?? 0, 0);
+			byState[key] = existing;
+		}
+		return Object.values(byState).sort((left, right) => right.pending - left.pending);
+	}
+
+	function libraryIncluded(key: string): boolean {
+		return libraryFilters[key] ?? true;
+	}
+
+	function stateIncluded(key: string): boolean {
+		return stateFilters[key] ?? true;
+	}
+
+	function setLibraryIncluded(key: string, included: boolean) {
+		libraryFilters = { ...libraryFilters, [key]: included };
+	}
+
+	function setStateIncluded(key: string, included: boolean) {
+		stateFilters = { ...stateFilters, [key]: included };
+	}
+
+	function setAllLibraries(included: boolean) {
+		libraryFilters = Object.fromEntries(libraryOptions.map((option) => [option.key, included]));
+	}
+
+	function setAllStates(included: boolean) {
+		stateFilters = Object.fromEntries(stateOptions.map((option) => [option.key, included]));
+	}
+
+	function handleSearchInput(event: Event) {
+		searchQuery = (event.currentTarget as HTMLInputElement).value;
+	}
+
+	function handleLibraryFilterChange(key: string, event: Event) {
+		setLibraryIncluded(key, (event.currentTarget as HTMLInputElement).checked);
+	}
+
+	function handleStateFilterChange(key: string, event: Event) {
+		setStateIncluded(key, (event.currentTarget as HTMLInputElement).checked);
+	}
+</script>
+
+<OperatorShell route="queue" subject="Queue" {crumb} {statusTiles} {footerSignals}>
+	<main class="home">
+		<aside class="home__rail" aria-label="Queue scope">
+			<WorkstationPanel eyebrow="Scope" title="Operator queue">
+				<div class="scope-list">
+					<div class="scope-row scope-row--active">
+						<span>Primary</span>
+						<strong>Review candidates</strong>
+						<small>{folders.length} folders</small>
+					</div>
+					<div class="scope-row">
+						<span>Samples</span>
+						<strong>{runningSamples} running · {queuedSamples} queued</strong>
+						<small>{pendingReviews} waiting for review</small>
+					</div>
+					<div class="scope-row">
+						<span>Encode</span>
+						<strong
+							>{dashboard.encode_queue.running_count} running · {dashboard.encode_queue
+								.queued_count}
+							queued</strong
+						>
+						<small
+							>{dashboard.encode_queue.state.scheduler_summary ??
+								'scheduler state unavailable'}</small
+						>
+					</div>
+				</div>
+			</WorkstationPanel>
+
+			<WorkstationPanel eyebrow="Filters" title="Queue filters">
+				<div class="queue-filter" aria-label="Queue filters">
+					<div class="queue-filter__summary">
+						<span>Visible queue</span>
+						<strong
+							>{visibleFolders.length.toLocaleString('en-US')} / {folders.length.toLocaleString(
+								'en-US'
+							)}
+							folders</strong
+						>
+						<small
+							>{[
+								excludedLibraryCount ? `${excludedLibraryCount} libraries excluded` : '',
+								excludedStateCount ? `${excludedStateCount} states excluded` : '',
+								searchQuery.trim() ? 'search active' : ''
+							]
+								.filter(Boolean)
+								.join(' · ') || 'all queue items included'}</small
+						>
+					</div>
+
+					<label class="queue-filter__search">
+						<span>Search</span>
+						<input
+							type="search"
+							value={searchQuery}
+							placeholder="Name, path, or status"
+							oninput={handleSearchInput}
+						/>
+					</label>
+
+					<div class="queue-filter__group">
+						<div class="queue-filter__group-head">
+							<span>Libraries</span>
+							<div class="queue-filter__actions" aria-label="Bulk library filters">
+								<button type="button" onclick={() => setAllLibraries(true)}>All</button>
+								<button type="button" onclick={() => setAllLibraries(false)}>None</button>
+							</div>
+						</div>
+						{#each libraryOptions as option (option.key)}
+							<label
+								class="queue-filter__row"
+								class:queue-filter__row--excluded={!libraryIncluded(option.key)}
+							>
+								<input
+									type="checkbox"
+									checked={libraryIncluded(option.key)}
+									onchange={(event) => handleLibraryFilterChange(option.key, event)}
+								/>
+								<span>
+									<strong>{option.label}</strong>
+									<small
+										>{option.folders.toLocaleString('en-US')} folders · {option.pending.toLocaleString(
+											'en-US'
+										)}
+										pending</small
+									>
+								</span>
+								<em>{formatBytes(option.reclaim)}</em>
+							</label>
+						{/each}
+					</div>
+
+					<div class="queue-filter__group">
+						<div class="queue-filter__group-head">
+							<span>States</span>
+							<div class="queue-filter__actions" aria-label="Bulk state filters">
+								<button type="button" onclick={() => setAllStates(true)}>All</button>
+								<button type="button" onclick={() => setAllStates(false)}>None</button>
+							</div>
+						</div>
+						{#each stateOptions as option (option.key)}
+							<label
+								class="queue-filter__row"
+								class:queue-filter__row--excluded={!stateIncluded(option.key)}
+							>
+								<input
+									type="checkbox"
+									checked={stateIncluded(option.key)}
+									onchange={(event) => handleStateFilterChange(option.key, event)}
+								/>
+								<span>
+									<strong>{option.label}</strong>
+									<small
+										>{option.folders.toLocaleString('en-US')} folders · {option.pending.toLocaleString(
+											'en-US'
+										)}
+										pending</small
+									>
+								</span>
+							</label>
+						{/each}
+					</div>
+				</div>
+			</WorkstationPanel>
+		</aside>
+
+		<section class="home__main" aria-label="Operational review queue">
+			<header class="queue-header">
+				<div>
+					<span class="mf-eyebrow">Queue</span>
+					<h1>Operator queue</h1>
+					<p>
+						Filter the current queue, start from the highest-priority folder, or search directly for
+						a folder context.
+					</p>
+				</div>
+				<div class="queue-header__facts">
+					<div>
+						<span>Visible folders</span>
+						<strong>{visibleFolders.length.toLocaleString('en-US')}</strong>
+					</div>
+					<div>
+						<span>Pending items</span>
+						<strong>{totalPendingItems(visibleFolders).toLocaleString('en-US')}</strong>
+					</div>
+					<div>
+						<span>Projected reclaim</span>
+						<strong>{formatBytes(totalProjectedReclaim(visibleFolders))}</strong>
+					</div>
+				</div>
+			</header>
+
+			<WorkstationPanel eyebrow="Highest priority" title="Next folder">
+				{#if nextFolder}
+					<div class="next-card">
+						<StateBadge tone={queueFolderTone(nextFolder)} label={queueFolderState(nextFolder)} />
+						<div>
+							<h2>{nextFolder.title}</h2>
+							<p>{nextFolder.prefix}</p>
+						</div>
+						<div class="next-card__metrics">
+							<div>
+								<span>Items</span>
+								<strong>{nextFolder.item_count.toLocaleString('en-US')}</strong>
+							</div>
+							<div>
+								<span>Pending</span>
+								<strong>{nextFolder.pending_count.toLocaleString('en-US')}</strong>
+							</div>
+							<div>
+								<span>Reclaim</span>
+								<strong>{formatBytes(nextFolder.projected_reclaim_bytes)}</strong>
+							</div>
+							<div>
+								<span>Status</span>
+								<strong>{folderStatusCopy(nextFolder)}</strong>
+							</div>
+						</div>
+						<a class="control control--primary" href={resolve(folderRoutePath(nextFolder.prefix))}
+							>Open Folder Studio</a
+						>
+					</div>
+				{:else}
+					<div class="empty-note">No folders match the current filters.</div>
+				{/if}
+			</WorkstationPanel>
+
+			<WorkstationPanel eyebrow="Ranked queue" title="Folders needing operator attention">
+				<div class="table-wrap">
+					<table>
+						<thead>
+							<tr>
+								<th>State</th>
+								<th>Folder</th>
+								<th>Pending</th>
+								<th>Source</th>
+								<th>Reclaim</th>
+								<th>Codec</th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each visibleFolders.slice(0, 18) as folder (rowKey(folder))}
+								<tr>
+									<td>
+										<StateBadge
+											compact
+											tone={queueFolderTone(folder)}
+											label={queueFolderState(folder)}
+										/>
+									</td>
+									<td>
+										<a class="folder-link" href={resolve(folderRoutePath(folder.prefix))}>
+											<strong>{folder.title}</strong>
+											<span>{folder.prefix}</span>
+										</a>
+									</td>
+									<td>{folder.pending_count.toLocaleString('en-US')}</td>
+									<td>{formatBytes(folder.total_size_bytes)}</td>
+									<td>{formatBytes(folder.projected_reclaim_bytes)}</td>
+									<td>{codecSummary(folder.video_codecs)}</td>
+								</tr>
+							{:else}
+								<tr>
+									<td colspan="6">No folders match the current library filters.</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+			</WorkstationPanel>
+
+			<WorkstationPanel eyebrow="Archive" title="Cleanup signal">
+				<dl class="kv">
+					<dt>Archive root</dt>
+					<dd>{dashboard.archive_cleanup?.archive_root ?? '—'}</dd>
+					<dt>Files</dt>
+					<dd>{dashboard.archive_cleanup?.file_count?.toLocaleString('en-US') ?? '0'}</dd>
+					<dt>Size</dt>
+					<dd>{formatBytes(dashboard.archive_cleanup?.total_size_bytes)}</dd>
+					<dt>Ready</dt>
+					<dd>{dashboard.archive_cleanup?.has_cleanup ? 'yes' : 'no'}</dd>
+				</dl>
+			</WorkstationPanel>
+		</section>
+	</main>
+</OperatorShell>
+
+<style>
+	.home {
+		display: grid;
+		grid-template-columns: var(--mf-workstation-rail-width) minmax(0, 1fr);
+		min-height: calc(100vh - 178px);
+	}
+
+	.home__rail {
+		background: var(--mf-bg-shell);
+		display: flex;
+		flex-direction: column;
+		gap: var(--mf-space-5);
+		padding: var(--mf-space-5);
+	}
+
+	.home__rail {
+		border-right: var(--mf-border);
+	}
+
+	.home__main {
+		display: grid;
+		gap: var(--mf-space-5);
+		min-width: 0;
+		padding: var(--mf-space-6);
+	}
+
+	.queue-header {
+		align-items: end;
+		border-bottom: var(--mf-border);
+		display: grid;
+		gap: var(--mf-space-6);
+		grid-template-columns: minmax(0, 1fr) auto;
+		padding-bottom: var(--mf-space-5);
+	}
+
+	.queue-header h1 {
+		margin-top: var(--mf-space-3);
+	}
+
+	.queue-header p {
+		max-width: 74ch;
+		margin-top: var(--mf-space-3);
+	}
+
+	.queue-header__facts,
+	.next-card__metrics {
+		display: flex;
+		gap: var(--mf-space-5);
+		flex-wrap: wrap;
+	}
+
+	.queue-header__facts div,
+	.next-card__metrics div {
+		display: grid;
+		gap: var(--mf-space-2);
+		min-width: 96px;
+	}
+
+	.queue-header__facts span,
+	.next-card__metrics span,
+	.scope-row span,
+	.kv dt {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.queue-header__facts strong,
+	.next-card__metrics strong,
+	.kv dd {
+		font-family: var(--mf-font-mono);
+		font-size: var(--mf-text-sm);
+		font-weight: var(--mf-weight-medium);
+	}
+
+	.scope-list,
+	.queue-filter,
+	.next-card {
+		display: grid;
+		gap: var(--mf-space-4);
+		padding: var(--mf-space-5);
+	}
+
+	.scope-row {
+		border-left: 2px solid var(--mf-line-strong);
+		display: grid;
+		gap: var(--mf-space-2);
+		padding: var(--mf-space-4);
+	}
+
+	.scope-row--active {
+		background: var(--mf-active-bg);
+		border-left-color: var(--mf-active-fg);
+	}
+
+	.scope-row strong {
+		font-size: var(--mf-text-sm);
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.scope-row small,
+	.next-card p {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+	}
+
+	.queue-filter__summary {
+		border-left: 2px solid var(--mf-active-fg);
+		display: grid;
+		gap: var(--mf-space-2);
+		padding: var(--mf-space-3) var(--mf-space-4);
+	}
+
+	.queue-filter__summary span,
+	.queue-filter__search span,
+	.queue-filter__group-head > span,
+	.queue-filter__row small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.queue-filter__summary strong {
+		font-family: var(--mf-font-mono);
+		font-size: var(--mf-text-sm);
+	}
+
+	.queue-filter__summary small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+	}
+
+	.queue-filter__search {
+		display: grid;
+		gap: var(--mf-space-2);
+	}
+
+	.queue-filter__search input {
+		background: var(--mf-bg-input);
+		border: var(--mf-border);
+		border-radius: var(--mf-radius-1);
+		color: var(--mf-fg-primary);
+		font: inherit;
+		min-height: var(--mf-control-lg);
+		padding: 0 var(--mf-space-4);
+		width: 100%;
+	}
+
+	.queue-filter__group {
+		display: grid;
+		gap: var(--mf-space-2);
+	}
+
+	.queue-filter__group-head {
+		align-items: center;
+		display: flex;
+		gap: var(--mf-space-3);
+		justify-content: space-between;
+	}
+
+	.queue-filter__actions {
+		display: grid;
+		gap: var(--mf-space-2);
+		grid-template-columns: 1fr 1fr;
+	}
+
+	.queue-filter__actions button {
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border);
+		border-radius: var(--mf-radius-1);
+		color: var(--mf-fg-secondary);
+		font-size: var(--mf-text-xs);
+		font-weight: var(--mf-weight-semibold);
+		min-height: var(--mf-control-sm);
+		padding: 0 var(--mf-space-3);
+	}
+
+	.queue-filter__actions button:hover {
+		background: var(--mf-bg-raised);
+		color: var(--mf-fg-primary);
+	}
+
+	.queue-filter__row {
+		align-items: center;
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border-muted);
+		border-radius: var(--mf-radius-1);
+		display: grid;
+		gap: var(--mf-space-3);
+		grid-template-columns: auto minmax(0, 1fr) auto;
+		min-height: var(--mf-row-default);
+		padding: var(--mf-space-3);
+	}
+
+	.queue-filter__row input {
+		accent-color: var(--mf-active-solid);
+		height: 16px;
+		width: 16px;
+	}
+
+	.queue-filter__row > span {
+		display: grid;
+		gap: var(--mf-space-1);
+		min-width: 0;
+	}
+
+	.queue-filter__row--excluded {
+		opacity: 0.52;
+	}
+
+	.queue-filter__row--excluded strong {
+		text-decoration: line-through;
+		text-decoration-thickness: 1px;
+	}
+
+	.queue-filter__row small {
+		letter-spacing: 0;
+		text-transform: none;
+	}
+
+	.queue-filter__row em {
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-mono);
+		font-size: var(--mf-text-2xs);
+		font-style: normal;
+	}
+
+	.table-wrap {
+		overflow: auto;
+	}
+
+	table {
+		border-collapse: collapse;
+		min-width: 760px;
+		width: 100%;
+	}
+
+	th,
+	td {
+		border-bottom: var(--mf-border-muted);
+		font-size: var(--mf-text-xs);
+		height: var(--mf-row-default);
+		padding: 0 var(--mf-space-5);
+		text-align: left;
+		vertical-align: middle;
+	}
+
+	th {
+		background: var(--mf-bg-strip);
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		position: sticky;
+		text-transform: uppercase;
+		top: 0;
+	}
+
+	td:nth-child(3),
+	td:nth-child(4),
+	td:nth-child(5),
+	td:nth-child(6) {
+		font-family: var(--mf-font-mono);
+	}
+
+	.folder-link {
+		display: grid;
+		gap: var(--mf-space-1);
+		min-width: 0;
+	}
+
+	.folder-link strong {
+		font-size: var(--mf-text-sm);
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.folder-link span {
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-mono);
+		font-size: var(--mf-text-2xs);
+		overflow-wrap: anywhere;
+	}
+
+	.next-card h2 {
+		margin-top: var(--mf-space-2);
+		overflow-wrap: anywhere;
+	}
+
+	.control {
+		align-items: center;
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border-strong);
+		border-radius: var(--mf-radius-1);
+		color: var(--mf-fg-primary);
+		display: inline-flex;
+		font-weight: var(--mf-weight-semibold);
+		justify-content: center;
+		min-height: var(--mf-control-lg);
+		padding: 0 var(--mf-space-5);
+	}
+
+	.control--primary {
+		background: var(--mf-active-solid);
+		border-color: var(--mf-active-solid-hi);
+		color: var(--mf-fg-on-accent);
+	}
+
+	.kv {
+		display: grid;
+		grid-template-columns: minmax(88px, auto) minmax(0, 1fr);
+		padding: var(--mf-space-5);
+		row-gap: var(--mf-space-4);
+	}
+
+	.kv dd {
+		overflow-wrap: anywhere;
+	}
+
+	.empty-note {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-sm);
+		padding: var(--mf-space-5);
+	}
+
+	@media (max-width: 1180px) {
+		.home {
+			grid-template-columns: var(--mf-workstation-rail-width) minmax(0, 1fr);
+		}
+	}
+
+	@media (max-width: 820px) {
+		.home {
+			grid-template-columns: 1fr;
+		}
+
+		.home__rail {
+			border-left: 0;
+			border-right: 0;
+		}
+
+		.queue-header {
+			grid-template-columns: 1fr;
+		}
+
+		.queue-header__facts,
+		.next-card__metrics {
+			flex-wrap: wrap;
+		}
+	}
+</style>
