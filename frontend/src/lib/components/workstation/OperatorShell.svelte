@@ -2,7 +2,7 @@
 	import { resolve } from '$app/paths';
 	import type { Snippet } from 'svelte';
 
-	export type ShellRouteId = 'queue' | 'ops' | 'studio';
+	export type ShellRouteId = 'queue' | 'ops' | 'settings' | 'studio';
 	export type ShellTone = 'active' | 'ready' | 'wait' | 'fail' | 'idle';
 	export type StatusTile = {
 		label: string;
@@ -20,10 +20,11 @@
 	const navItems: Array<{
 		id: ShellRouteId;
 		label: string;
-		href: '/' | '/folders' | '/ops';
+		href: '/' | '/folders' | '/ops' | '/settings';
 	}> = [
 		{ id: 'queue', label: 'Queue', href: '/' },
-		{ id: 'ops', label: 'Ops', href: '/ops' }
+		{ id: 'ops', label: 'Ops', href: '/ops' },
+		{ id: 'settings', label: 'Settings', href: '/settings' }
 	];
 
 	let {
@@ -388,11 +389,14 @@
 			position: static;
 		}
 
-		.brand,
-		.operator-context {
-			border-left: 0;
+		.brand {
 			border-right: 0;
 			min-height: 40px;
+			padding: 0 var(--mf-space-4);
+		}
+
+		.operator-context {
+			display: none;
 		}
 
 		.nav {
@@ -401,11 +405,14 @@
 		}
 
 		.nav a {
-			flex: 0 0 auto;
+			flex: 1 0 auto;
+			justify-content: center;
+			min-height: 38px;
+			padding: 0 var(--mf-space-4);
 		}
 
 		.status-strip {
-			grid-template-columns: 1fr 1fr;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
 		}
 
 		.routebar__crumb {

@@ -34,6 +34,14 @@ export type HostActionState = {
 };
 
 export type HostPrimaryAction = 'prepare' | 'start' | null;
+export type SettingsDraft = ReturnType<typeof draftFromSettings>;
+export type SettingsSavePayload = {
+	libraries: SettingsLibrary[];
+	remote_hosts: SettingsHost[];
+	transcode_root: string;
+	encode_queue_scheduler: SettingsPayload['encode_queue_scheduler'];
+	schedule_profiles: ScheduleProfile[];
+};
 
 export function cloneScheduleProfile(profile: ScheduleProfile): ScheduleProfile {
 	return normalizeScheduleProfile(profile);
@@ -140,6 +148,34 @@ export function draftFromSettings(payload: SettingsPayload) {
 	};
 }
 
+export function buildSettingsSavePayload(
+	draft: SettingsDraft,
+	settings: SettingsPayload
+): SettingsSavePayload {
+	return {
+		libraries: draft.libraries.map((library) => ({ ...library })),
+		remote_hosts: draft.remote_hosts.map((host) => ({
+			...host,
+			capabilities: [...host.capabilities],
+			allowed_libraries: [...host.allowed_libraries]
+		})),
+		transcode_root: draft.transcode_root,
+		encode_queue_scheduler: { ...settings.encode_queue_scheduler },
+		schedule_profiles: draft.schedule_profiles.map((profile) => cloneScheduleProfile(profile))
+	};
+}
+
+export function settingsDraftIsDirty(draft: SettingsDraft, settings: SettingsPayload): boolean {
+	return (
+		JSON.stringify(buildSettingsSavePayload(draft, settings)) !==
+		JSON.stringify(buildSettingsSavePayload(draftFromSettings(settings), settings))
+	);
+}
+
+export function hostDraftRuntimeKey(host: SettingsHost): string {
+	return host.host.trim() || host.label.trim();
+}
+
 export function addLibraryDraft(libraries: SettingsLibrary[]): SettingsLibrary[] {
 	return [...libraries, { index: String(libraries.length), key: '', path: '', color: '#0f766e' }];
 }
@@ -201,6 +237,22 @@ export function toggleHostCapability(
 			? host.capabilities.filter((value) => value !== capability)
 			: [...host.capabilities, capability];
 		return { ...host, capabilities };
+	});
+}
+
+export function toggleHostAllowedLibrary(
+	remoteHosts: SettingsHost[],
+	index: number,
+	libraryKey: string
+): SettingsHost[] {
+	const normalizedKey = libraryKey.trim();
+	if (!normalizedKey) return remoteHosts;
+	return remoteHosts.map((host, candidate) => {
+		if (candidate !== index) return host;
+		const allowed_libraries = host.allowed_libraries.includes(normalizedKey)
+			? host.allowed_libraries.filter((value) => value !== normalizedKey)
+			: [...host.allowed_libraries, normalizedKey];
+		return { ...host, allowed_libraries };
 	});
 }
 

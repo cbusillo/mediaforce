@@ -36,6 +36,7 @@
 		background: var(--mf-bg-panel);
 		border: var(--mf-border);
 		min-width: 0;
+		overflow: hidden;
 	}
 
 	.panel__header {

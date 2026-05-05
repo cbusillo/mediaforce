@@ -176,6 +176,7 @@ export interface DashboardFoldersPayload {
 export interface HostRuntime {
 	key: string;
 	label: string;
+	host?: string;
 	available: boolean;
 	probe_available?: boolean;
 	message: string;

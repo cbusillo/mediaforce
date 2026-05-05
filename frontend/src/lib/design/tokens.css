@@ -198,6 +198,7 @@ body {
 	color: var(--mf-fg-primary);
 	font-size: var(--mf-text-sm);
 	line-height: var(--mf-leading-normal);
+	overflow-x: hidden;
 }
 
 body {
