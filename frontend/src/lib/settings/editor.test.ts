@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	DEFAULT_SCHEDULE_DAYS,
 	addScheduleDraft,
+	buildArchiveCleanupClearPayload,
 	buildSettingsSavePayload,
 	cloneScheduleProfile,
 	draftFromSettings,
@@ -172,6 +173,15 @@ describe('settings draft helpers', () => {
 
 		draft.libraries[0] = { ...draft.libraries[0], path: '/Volumes/TV2' };
 		expect(settingsDraftIsDirty(draft, payload)).toBe(true);
+	});
+
+	it('uses the saved transcode root for destructive archive cleanup', () => {
+		const draft = draftFromSettings(payload);
+		draft.transcode_root = '/Volumes/UnsavedTranscode';
+
+		expect(buildArchiveCleanupClearPayload(payload)).toEqual({
+			transcode_root: '/Volumes/Transcode'
+		});
 	});
 
 	it('toggles host library assignment without duplicating selected keys', () => {

@@ -42,6 +42,9 @@ export type SettingsSavePayload = {
 	encode_queue_scheduler: SettingsPayload['encode_queue_scheduler'];
 	schedule_profiles: ScheduleProfile[];
 };
+export type ArchiveCleanupClearPayload = {
+	transcode_root: string;
+};
 
 export function cloneScheduleProfile(profile: ScheduleProfile): ScheduleProfile {
 	return normalizeScheduleProfile(profile);
@@ -170,6 +173,12 @@ export function settingsDraftIsDirty(draft: SettingsDraft, settings: SettingsPay
 		JSON.stringify(buildSettingsSavePayload(draft, settings)) !==
 		JSON.stringify(buildSettingsSavePayload(draftFromSettings(settings), settings))
 	);
+}
+
+export function buildArchiveCleanupClearPayload(
+	settings: SettingsPayload
+): ArchiveCleanupClearPayload {
+	return { transcode_root: settings.transcode_root };
 }
 
 export function hostDraftRuntimeKey(host: SettingsHost): string {

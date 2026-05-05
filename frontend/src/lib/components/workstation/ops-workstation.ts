@@ -135,6 +135,33 @@ export function encodeJobDetail(job: EncodeQueueJob): string {
 	);
 }
 
+function encodeJobTimestamp(job: EncodeQueueJob): number {
+	const raw = job.updated_at || job.finished_at || job.created_at || '';
+	const timestamp = Date.parse(raw);
+	return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+export function retryableEncodeJobIds(jobs: EncodeQueueJob[]): Set<string> {
+	const prefixRetryStatuses = new Set(['failed', 'needs_attention', 'stopped']);
+	const latestJobByPrefix = new Map<string, EncodeQueueJob>();
+	for (const job of jobs) {
+		const prefix = String(job.prefix ?? '').trim();
+		if (!prefix) continue;
+		const current = latestJobByPrefix.get(prefix);
+		if (!current || encodeJobTimestamp(job) >= encodeJobTimestamp(current)) {
+			latestJobByPrefix.set(prefix, job);
+		}
+	}
+
+	const retryableJobIds = new Set<string>();
+	for (const job of latestJobByPrefix.values()) {
+		if (prefixRetryStatuses.has(String(job.status ?? '').toLowerCase())) {
+			retryableJobIds.add(job.job_id);
+		}
+	}
+	return retryableJobIds;
+}
+
 export function buildEncodeRows(
 	dashboard: DashboardSummaryPayload | null | undefined
 ): OpsQueueRow[] {
@@ -144,9 +171,11 @@ export function buildEncodeRows(
 	const recentAttention = (queue.recent ?? []).filter((job) =>
 		prefixRetryStatuses.has(String(job.status ?? '').toLowerCase())
 	);
-	return [...queue.running, ...queue.queued, ...recentAttention].map((job) => {
+	const displayJobs = [...queue.running, ...queue.queued, ...recentAttention];
+	const retryableJobIds = retryableEncodeJobIds(displayJobs);
+	return displayJobs.map((job) => {
 		const status = String(job.status ?? '').toLowerCase();
-		const canRetryPrefix = prefixRetryStatuses.has(status);
+		const canRetryPrefix = prefixRetryStatuses.has(status) && retryableJobIds.has(job.job_id);
 		return {
 			key: `encode:${job.job_id}`,
 			kind: 'encode',
