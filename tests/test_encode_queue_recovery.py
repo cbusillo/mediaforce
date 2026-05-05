@@ -13569,6 +13569,49 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(len(summary["sample"]["recent_failed"]), 2)
         self.assertEqual(summary["full"]["recent_failed"][0]["prefix"], "tv/proof-failed")
 
+    def test_calibration_queue_summary_deduplicates_failed_prefixes_before_limit(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            for job_id, prefix, updated_at in (
+                    ("sample-duplicate-newer", "tv/duplicate", "2026-05-05T12:03:00+00:00"),
+                    ("sample-duplicate-older", "tv/duplicate", "2026-05-05T12:02:00+00:00"),
+                    ("sample-distinct", "tv/distinct", "2026-05-05T12:01:00+00:00"),
+            ):
+                web_app._save_job_state(
+                    connection,
+                    self.config,
+                    prefix,
+                    {
+                        "job_id": job_id,
+                        "prefix": prefix,
+                        "status": "failed",
+                        "lane": "sample",
+                        "action": "baseline",
+                        "host": {"key": "cbusillo@localhost", "label": "M4 Studio"},
+                        "notes": "",
+                        "policy": {},
+                        "sample_item": {},
+                        "owner_pid": None,
+                        "created_at": updated_at,
+                        "started_at": updated_at,
+                        "finished_at": updated_at,
+                        "error": "sample failed detail",
+                    },
+                )
+                connection.execute(
+                    calibration_jobs.update()
+                    .where(calibration_jobs.c.job_id == job_id)
+                    .values(updated_at=updated_at)
+                )
+            connection.commit()
+
+            summary = list_queue_summary(connection, limit_per_lane=2)
+
+        self.assertEqual(summary["sample"]["recent_failed_count"], 2)
+        self.assertEqual(
+            [job["prefix"] for job in summary["sample"]["recent_failed"]],
+            ["tv/duplicate", "tv/distinct"],
+        )
+
     def test_run_remote_status_probe_retries_timeout_once(self) -> None:
         host: dict[str, object] = {"host": "cbusillo@chris-mini.local"}
         timeout_exc = subprocess.TimeoutExpired(cmd=["ssh"], timeout=8)
