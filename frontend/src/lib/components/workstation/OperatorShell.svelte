@@ -2,7 +2,7 @@
 	import { resolve } from '$app/paths';
 	import type { Snippet } from 'svelte';
 
-	export type ShellRouteId = 'queue' | 'studio';
+	export type ShellRouteId = 'queue' | 'ops' | 'studio';
 	export type ShellTone = 'active' | 'ready' | 'wait' | 'fail' | 'idle';
 	export type StatusTile = {
 		label: string;
@@ -20,8 +20,11 @@
 	const navItems: Array<{
 		id: ShellRouteId;
 		label: string;
-		href: '/' | '/folders';
-	}> = [{ id: 'queue', label: 'Queue', href: '/' }];
+		href: '/' | '/folders' | '/ops';
+	}> = [
+		{ id: 'queue', label: 'Queue', href: '/' },
+		{ id: 'ops', label: 'Ops', href: '/ops' }
+	];
 
 	let {
 		route,
