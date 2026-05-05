@@ -123,7 +123,6 @@ def list_queue_summary(connection: DBClient, *, limit_per_lane: int = 6) -> dict
         .order_by(calibration_jobs.c.created_at.asc(), _rowid_column().asc())
     ).mappings().fetchall()
     recent_terminal_rows = []
-    recent_terminal_limit = limit_per_lane * 4 if limit_per_lane > 0 else 0
     for lane in ("sample", "full"):
         recent_terminal_rows.extend(
             connection.execute(
@@ -131,7 +130,6 @@ def list_queue_summary(connection: DBClient, *, limit_per_lane: int = 6) -> dict
                 .where(calibration_jobs.c.lane == lane)
                 .where(calibration_jobs.c.status.in_(("failed", "stopped")))
                 .order_by(calibration_jobs.c.updated_at.desc(), _rowid_column().desc())
-                .limit(recent_terminal_limit)
             ).mappings().fetchall()
         )
     summary: dict[str, Any] = {
