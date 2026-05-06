@@ -78,6 +78,11 @@ export type BenchRequestState = {
 	activeCalibrationJob: boolean;
 };
 
+export type WorkflowActionState = {
+	disabled: boolean;
+	title: string;
+};
+
 export function record<T extends Record<string, unknown>>(value: unknown): T | null {
 	return value && typeof value === 'object' ? (value as T) : null;
 }
@@ -133,6 +138,51 @@ export function resolveBenchRequestState(
 		selectedHost,
 		activeCalibrationJob
 	};
+}
+
+export function resolveWorkflowActionState(
+	action: WorkflowAction,
+	{
+		reviewPackReady,
+		pendingProposal,
+		calibrationJob,
+		pendingAction
+	}: {
+		reviewPackReady: boolean;
+		pendingProposal: PendingSampleProposal | null;
+		calibrationJob: FolderCalibrationJob | null;
+		pendingAction?: WorkflowAction | null;
+	}
+): WorkflowActionState {
+	if (pendingAction) {
+		return {
+			disabled: true,
+			title: pendingAction === action ? 'Action is running.' : 'Another folder action is running.'
+		};
+	}
+	if (action === 'open-ops') return { disabled: false, title: '' };
+	if (action === 'download-review-pack') {
+		return reviewPackReady
+			? { disabled: false, title: '' }
+			: { disabled: true, title: 'Review pack is not ready yet.' };
+	}
+	if (action === 'start-sample' || action === 'retry-sample') {
+		if (activeCalibrationStatus(calibrationJob?.status)) {
+			return { disabled: true, title: 'A sample job is already active for this folder.' };
+		}
+		if (action === 'retry-sample') return { disabled: false, title: '' };
+		if (!pendingProposal?.proposal_id) {
+			return { disabled: true, title: 'Ask Bench for a draft before starting the sample.' };
+		}
+		if (pendingProposal.can_queue === false) {
+			return {
+				disabled: true,
+				title: pendingProposal.message || 'The current bench draft is not ready to queue.'
+			};
+		}
+		return { disabled: false, title: '' };
+	}
+	return { disabled: true, title: 'Wiring handoff pending for this workflow action.' };
 }
 
 function requestSummary(request: FolderOperatorRequest | null | undefined): string {
