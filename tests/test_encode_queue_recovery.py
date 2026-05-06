@@ -13614,7 +13614,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
     def test_calibration_queue_summary_counts_recent_failures_beyond_display_limit(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
-            for index in range(11):
+            for index in range(13):
                 updated_at = f"2026-05-05T12:{index:02d}:00+00:00"
                 prefix = f"tv/count-failed-{index}"
                 web_app._save_job_state(
@@ -13647,8 +13647,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             summary = list_queue_summary(connection, limit_per_lane=2)
 
-        self.assertEqual(summary["sample"]["recent_failed_count"], 11)
-        self.assertEqual(summary["recent_failed_count"], 11)
+        self.assertEqual(summary["sample"]["recent_failed_count"], 13)
+        self.assertEqual(summary["recent_failed_count"], 13)
         self.assertEqual(len(summary["sample"]["recent_failed"]), 2)
 
     def test_run_remote_status_probe_retries_timeout_once(self) -> None:

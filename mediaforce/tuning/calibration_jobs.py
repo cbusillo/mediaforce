@@ -6,6 +6,7 @@ from sqlalchemy import func
 from sqlalchemy import literal_column
 from sqlalchemy import select
 from sqlalchemy import update
+from sqlalchemy import distinct
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.db import DBClient
@@ -122,14 +123,26 @@ def list_queue_summary(connection: DBClient, *, limit_per_lane: int = 6) -> dict
         .where(calibration_jobs.c.status.in_(("queued", "running", "pending_review")))
         .order_by(calibration_jobs.c.created_at.asc(), _rowid_column().asc())
     ).mappings().fetchall()
+    recent_terminal_counts = {
+        str(row["lane"]): int(row["count"])
+        for row in connection.execute(
+            select(calibration_jobs.c.lane, func.count(distinct(calibration_jobs.c.prefix)).label("count"))
+            .where(calibration_jobs.c.status.in_(("failed", "stopped")))
+            .group_by(calibration_jobs.c.lane)
+        ).mappings()
+    }
     recent_terminal_rows = []
+    recent_terminal_limit = max(limit_per_lane * 4, limit_per_lane) if limit_per_lane > 0 else 0
     for lane in ("sample", "full"):
+        if recent_terminal_limit <= 0:
+            continue
         recent_terminal_rows.extend(
             connection.execute(
                 _calibration_job_select()
                 .where(calibration_jobs.c.lane == lane)
                 .where(calibration_jobs.c.status.in_(("failed", "stopped")))
                 .order_by(calibration_jobs.c.updated_at.desc(), _rowid_column().desc())
+                .limit(recent_terminal_limit)
             ).mappings().fetchall()
         )
     summary: dict[str, Any] = {
@@ -152,6 +165,10 @@ def list_queue_summary(connection: DBClient, *, limit_per_lane: int = 6) -> dict
             summary["active_count"] += 1
         if status in lane_summary and len(lane_summary[status]) < limit_per_lane:
             lane_summary[status].append(payload)
+    for lane in ("sample", "full"):
+        count = recent_terminal_counts.get(lane, 0)
+        summary[lane]["recent_failed_count"] = count
+        summary["recent_failed_count"] += count
     seen_terminal_prefix_lanes: set[tuple[str, str]] = set()
     for row in recent_terminal_rows:
         payload = _hydrate_job(row)
@@ -161,8 +178,6 @@ def list_queue_summary(connection: DBClient, *, limit_per_lane: int = 6) -> dict
         if prefix_lane in seen_terminal_prefix_lanes:
             continue
         seen_terminal_prefix_lanes.add(prefix_lane)
-        lane_summary["recent_failed_count"] += 1
-        summary["recent_failed_count"] += 1
         if len(lane_summary["recent_failed"]) < limit_per_lane:
             lane_summary["recent_failed"].append(payload)
     return summary

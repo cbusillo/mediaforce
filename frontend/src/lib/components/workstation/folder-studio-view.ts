@@ -20,7 +20,6 @@ import type {
 	EncodeQueueJob,
 	FolderPayload,
 	FolderStatusPayload,
-	HostRuntime,
 	HostsPayload
 } from '$lib/api/types';
 import type { FooterSignal, ShellTone, StatusTile } from './OperatorShell.svelte';
@@ -92,11 +91,9 @@ function activeCalibrationStatus(value: unknown): boolean {
 }
 
 export function buildBenchHostOptions(
-	folderOptions: Array<Record<string, unknown>> | undefined,
-	hosts: HostRuntime[]
+	folderOptions: Array<Record<string, unknown>> | undefined
 ): BenchHostOption[] {
-	const source = folderOptions && folderOptions.length > 0 ? folderOptions : hosts;
-	return source
+	return (folderOptions ?? [])
 		.map((host) => {
 			const key = compactText(host.key);
 			return {
