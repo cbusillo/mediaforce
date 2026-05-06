@@ -410,6 +410,13 @@ export interface FolderBenchPreviewResponse {
 	proposal?: Record<string, unknown> | null;
 }
 
+export interface FolderBenchConfirmResponse {
+	ok: boolean;
+	message?: string;
+	job?: Record<string, unknown> | null;
+	advice?: Record<string, unknown> | null;
+}
+
 export interface FolderStatusPayload {
 	prefix: string;
 	polling_active: boolean;

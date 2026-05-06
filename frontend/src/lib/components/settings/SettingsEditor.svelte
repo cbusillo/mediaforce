@@ -79,8 +79,6 @@
 		if (!settings) {
 			if (!loadError) return;
 			lastSettingsKey = '';
-			savedSettings = null;
-			draft = emptyDraft;
 			saveMessage = '';
 			saveError = '';
 			clearArchiveArmed = false;

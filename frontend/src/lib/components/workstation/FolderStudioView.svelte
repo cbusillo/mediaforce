@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { invalidateAll } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { postJson } from '$lib/api/client';
 	import { folderRoutePrefix } from '$lib/folder-display';
@@ -15,6 +16,7 @@
 		type ReviewGate
 	} from '$lib/folders/studio';
 	import type {
+		FolderBenchConfirmResponse,
 		FolderBenchPreviewResponse,
 		FolderPayload,
 		FolderStatusPayload,
@@ -37,6 +39,7 @@
 		resolvedMetricCopy,
 		resolveFolderTitle,
 		resolveReviewArtifacts,
+		resolveWorkflowActionState,
 		resolveWorkflow,
 		reviewReadyCopy,
 		summarizeStatuses,
@@ -56,6 +59,7 @@
 	let benchNote = $state('');
 	let selectedHostKey = $state('');
 	let benchPending = $state(false);
+	let workflowPending = $state<WorkflowAction | null>(null);
 	let benchMessage = $state('');
 	let benchError = $state('');
 	let localPendingProposal = $state<Record<string, unknown> | null | undefined>(undefined);
@@ -120,19 +124,17 @@
 		)
 	);
 	const benchRequestDisabled = $derived(benchRequestState.disabled);
+	const reviewPackReady = $derived(
+		reviewArtifacts.length > 0 || reviewReadyCopy(calibration) === 'Ready'
+	);
 
-	function workflowActionEnabled(action: WorkflowAction): boolean {
-		if (action === 'open-ops') return true;
-		if (action === 'download-review-pack') {
-			return reviewArtifacts.length > 0 || reviewReadyCopy(calibration) === 'Ready';
-		}
-		return false;
-	}
-
-	function workflowActionTitle(action: WorkflowAction): string {
-		if (workflowActionEnabled(action)) return '';
-		if (action === 'download-review-pack') return 'Review pack is not ready yet.';
-		return 'Wiring handoff pending for this workflow action.';
+	function workflowActionState(action: WorkflowAction) {
+		return resolveWorkflowActionState(action, {
+			reviewPackReady,
+			pendingProposal,
+			calibrationJob,
+			pendingAction: workflowPending
+		});
 	}
 
 	function handleBenchNoteInput(event: Event) {
@@ -158,6 +160,29 @@
 			benchError = error instanceof Error ? error.message : 'Bench request failed.';
 		} finally {
 			benchPending = false;
+		}
+	}
+
+	async function confirmBenchProposal(action: WorkflowAction) {
+		if (!['start-sample', 'retry-sample'].includes(action)) return;
+		const actionState = workflowActionState(action);
+		if (actionState.disabled) return;
+		workflowPending = action;
+		benchMessage = '';
+		benchError = '';
+		try {
+			const response = await postJson<FolderBenchConfirmResponse>(
+				`${resolve('/')}api/folders/${encodedPrefix}/ai-tune/confirm`,
+				{ proposal_id: pendingProposal?.proposal_id ?? '' }
+			);
+			localPendingProposal = null;
+			localProposalPrefix = prefix;
+			benchMessage = response.message || 'Queued the sample run from the bench draft.';
+			await invalidateAll();
+		} catch (error) {
+			benchError = error instanceof Error ? error.message : 'Sample could not be queued.';
+		} finally {
+			workflowPending = null;
 		}
 	}
 </script>
@@ -219,7 +244,7 @@
 							href={resolve('/ops')}
 							data-mf-action={workflow.primaryAction}>{workflow.primary}</a
 						>
-					{:else if workflow.primaryAction === 'download-review-pack' && workflowActionEnabled(workflow.primaryAction)}
+					{:else if workflow.primaryAction === 'download-review-pack' && !workflowActionState(workflow.primaryAction).disabled}
 						<form
 							class="action-form"
 							method="get"
@@ -228,12 +253,23 @@
 						>
 							<button class="control control--primary" type="submit">{workflow.primary}</button>
 						</form>
+					{:else if workflow.primaryAction === 'start-sample' || workflow.primaryAction === 'retry-sample'}
+						<button
+							class="control control--primary"
+							type="button"
+							disabled={workflowActionState(workflow.primaryAction).disabled}
+							title={workflowActionState(workflow.primaryAction).title}
+							onclick={() => confirmBenchProposal(workflow.primaryAction)}
+							data-mf-action={workflow.primaryAction}
+							data-mf-wire="live"
+							>{workflowPending === workflow.primaryAction ? 'Queueing' : workflow.primary}</button
+						>
 					{:else}
 						<button
 							class="control control--primary"
 							type="button"
-							disabled={!workflowActionEnabled(workflow.primaryAction)}
-							title={workflowActionTitle(workflow.primaryAction)}
+							disabled={workflowActionState(workflow.primaryAction).disabled}
+							title={workflowActionState(workflow.primaryAction).title}
 							data-mf-action={workflow.primaryAction}
 							data-mf-wire="pending">{workflow.primary}</button
 						>
@@ -242,7 +278,7 @@
 						<a class="control" href={resolve('/ops')} data-mf-action={workflow.secondaryAction}
 							>{workflow.secondary}</a
 						>
-					{:else if workflow.secondaryAction === 'download-review-pack' && workflowActionEnabled(workflow.secondaryAction)}
+					{:else if workflow.secondaryAction === 'download-review-pack' && !workflowActionState(workflow.secondaryAction).disabled}
 						<form
 							class="action-form"
 							method="get"
@@ -251,12 +287,25 @@
 						>
 							<button class="control" type="submit">{workflow.secondary}</button>
 						</form>
+					{:else if workflow.secondaryAction === 'start-sample' || workflow.secondaryAction === 'retry-sample'}
+						<button
+							class="control"
+							type="button"
+							disabled={workflowActionState(workflow.secondaryAction).disabled}
+							title={workflowActionState(workflow.secondaryAction).title}
+							onclick={() => confirmBenchProposal(workflow.secondaryAction)}
+							data-mf-action={workflow.secondaryAction}
+							data-mf-wire="live"
+							>{workflowPending === workflow.secondaryAction
+								? 'Queueing'
+								: workflow.secondary}</button
+						>
 					{:else}
 						<button
 							class="control"
 							type="button"
-							disabled={!workflowActionEnabled(workflow.secondaryAction)}
-							title={workflowActionTitle(workflow.secondaryAction)}
+							disabled={workflowActionState(workflow.secondaryAction).disabled}
+							title={workflowActionState(workflow.secondaryAction).title}
 							data-mf-action={workflow.secondaryAction}
 							data-mf-wire="pending">{workflow.secondary}</button
 						>
