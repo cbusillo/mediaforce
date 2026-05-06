@@ -69,9 +69,7 @@
 	});
 	const prefix = $derived(studioFolder.prefix);
 	const encodedPrefix = $derived(folderRoutePrefix(prefix));
-	const sampleHostOptions = $derived(
-		buildBenchHostOptions(studioFolder.sample_host_options, hosts.hosts)
-	);
+	const sampleHostOptions = $derived(buildBenchHostOptions(studioFolder.sample_host_options));
 	const folderSampleHostKey = $derived(String(folder.sample_host_key ?? '').trim());
 	const fallbackHostKey = $derived(folderSampleHostKey || sampleHostOptions[0]?.key || '');
 
@@ -95,7 +93,7 @@
 	const reviewArtifacts = $derived(resolveReviewArtifacts(calibration, pendingProposal));
 	const workflow = $derived(
 		resolveWorkflow(
-			folder,
+			studioFolder,
 			status,
 			calibration,
 			pendingProposal,
