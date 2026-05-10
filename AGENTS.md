@@ -17,7 +17,7 @@ Only session-start facts that are easy to miss belong here.
   media artifacts into the repo
 - `uv build` now auto-builds `frontend/` during wheel packaging; do not rely on
   stale checked-in or local `frontend/build/` artifacts
-- Use `.github/github-repo-workflow.json` for repo commands and quality gates
+- Use `.github/github.json` for repo commands and quality gates
 
 ## Workflow Notes
 
