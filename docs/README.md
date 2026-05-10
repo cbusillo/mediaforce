@@ -9,7 +9,7 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 - `docs/style/index.md`: entry point for language and testing style guides
 - `docs/style/workstation-ui.md`: UI doctrine for operator-facing workstation
   surfaces
-- `.github/github-repo-workflow.json`: canonical repo commands, quality gates,
+- `.github/github.json`: canonical repo commands, quality gates,
   workflow metadata, and cleanup policy
 
 ## Architecture
