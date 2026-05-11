@@ -46,7 +46,11 @@
     "inspection": {
       "tool": "jetbrains",
       "ide": "PyCharm",
-      "scopePreference": ["changed_files", "directory", "whole_project"]
+      "scopePreference": [
+        "changed_files",
+        "directory",
+        "whole_project"
+      ]
     },
     "docsRequiredWhen": [
       "behavior changes",
@@ -59,26 +63,13 @@
       "media processing behavior changes"
     ]
   },
-  "importantWorkflows": ["CI"],
+  "importantWorkflows": [
+    "CI"
+  ],
   "qaLabels": [],
   "deployLabels": [],
   "healthUrls": [],
   "relatedRepos": [],
-  "validatedThrough": [
-    {
-      "date": "2026-05-10",
-      "source": "cbusillo/mediaforce#47",
-      "checks": [
-        "jq empty .github/github.json",
-        "rg github-repo-workflow\\.json",
-        "codex-skills github-repo-snapshot.sh --json",
-        "pre-commit acceptance gate"
-      ],
-      "caveats": [
-        "Metadata contents were not otherwise changed during the config-path migration."
-      ]
-    }
-  ],
   "githubSignals": {
     "postMerge": {
       "waitForActions": true,
