@@ -662,8 +662,28 @@ def _quality_temp_dir_arg(cmd: list[str]) -> str | None:
 def _local_quality_environment() -> dict[str, str]:
     env = dict(os.environ)
     current_path = env.get("PATH", "")
-    env["PATH"] = f"{LOCAL_QUALITY_PATH_PREFIX}:{current_path}" if current_path else LOCAL_QUALITY_PATH_PREFIX
+    override_dirs = _mediaforce_binary_override_dirs(env)
+    prefixes = [*override_dirs, LOCAL_QUALITY_PATH_PREFIX]
+    prefix = ":".join(prefixes)
+    env["PATH"] = f"{prefix}:{current_path}" if current_path else prefix
     return env
+
+
+def _mediaforce_binary_override_dirs(env: dict[str, str]) -> list[str]:
+    directories: list[str] = []
+    for key in ("MEDIAFORCE_FFMPEG", "MEDIAFORCE_FFPROBE"):
+        raw_value = env.get(key, "").strip()
+        if not raw_value:
+            continue
+        override_path = Path(raw_value).expanduser()
+        directory = override_path.parent
+        if not directory.is_absolute():
+            continue
+
+        directory_str = str(directory)
+        if directory_str not in directories:
+            directories.append(directory_str)
+    return directories
 
 
 @lru_cache(maxsize=1)

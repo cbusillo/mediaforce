@@ -49,21 +49,28 @@ export function cleanupTone(state: CleanupState): ShellTone {
 }
 
 export function cleanupLabel(state: CleanupState): string {
-	if (state === 'ready') return 'Ready';
-	if (state === 'blocked') return 'Blocked';
-	if (state === 'unknown') return 'Risky';
-	return 'Cleaned';
+	if (state === 'ready') return 'Originals waiting';
+	if (state === 'blocked') return 'Check settings';
+	if (state === 'unknown') return 'Originals already removed';
+	return 'Handled';
 }
 
 export function cleanupDetail(folder: CompletedFolderRow, archive: ArchiveCleanupSummary): string {
 	if (folder.cleanup_detail?.trim()) return folder.cleanup_detail.trim();
 	const state = cleanupState(folder, archive);
-	if (state === 'ready') return 'Archived originals are present and eligible for selected cleanup.';
+	if (state === 'ready') return 'Originals are waiting and can be removed when you are ready.';
 	if (state === 'blocked')
-		return 'Cleanup cannot safely verify this folder against the archive root.';
+		return 'Mediaforce cannot check the originals with the current settings.';
 	if (state === 'unknown')
-		return 'Cleanup needs operator review before deleting archived originals.';
-	return 'No archived originals are waiting for cleanup.';
+		return 'The originals are already gone; confirm after checking the new files.';
+	return 'No originals are waiting to be removed.';
+}
+
+export function folderCanBeMarkedHandled(
+	folder: CompletedFolderRow,
+	archive: ArchiveCleanupSummary
+): boolean {
+	return cleanupState(folder, archive) === 'unknown' && (folder.missing_backup_count ?? 0) > 0;
 }
 
 export function folderCanBeSelected(
@@ -110,7 +117,7 @@ export function buildCompletedStatusTiles(
 			{
 				label: 'Completed',
 				value: loadError ? 'Unavailable' : 'Loading',
-				detail: loadError ?? 'waiting for completed payload',
+				detail: loadError ?? 'waiting for completed work',
 				tone: loadError ? 'fail' : 'idle'
 			}
 		];
@@ -126,9 +133,9 @@ export function buildCompletedStatusTiles(
 			tone: payload.completed_count > 0 ? 'ready' : 'idle'
 		},
 		{
-			label: 'Backups waiting',
+			label: 'Originals waiting',
 			value: payload.folders_with_backups_count.toLocaleString('en-US'),
-			detail: `${archive.file_count.toLocaleString('en-US')} archive files`,
+			detail: `${archive.file_count.toLocaleString('en-US')} files ready to remove`,
 			tone: payload.folders_with_backups_count > 0 ? 'wait' : 'idle'
 		},
 		{
@@ -139,9 +146,9 @@ export function buildCompletedStatusTiles(
 			mono: true
 		},
 		{
-			label: 'Ready / blocked',
+			label: 'Waiting / review',
 			value: `${counts.ready} / ${counts.blocked + counts.unknown}`,
-			detail: 'folders eligible versus needs review',
+			detail: 'folders with originals waiting versus folders needing review',
 			tone:
 				counts.blocked > 0
 					? 'fail'
@@ -152,9 +159,9 @@ export function buildCompletedStatusTiles(
 							: 'idle'
 		},
 		{
-			label: 'Archive root',
+			label: 'Cleanup folder',
 			value: archive.archive_root ? 'Configured' : 'Missing',
-			detail: archive.archive_root || 'cleanup root unavailable',
+			detail: archive.archive_root || 'cleanup folder unavailable',
 			tone: archive.archive_root ? 'ready' : 'fail'
 		}
 	];
@@ -165,10 +172,10 @@ export function buildCompletedFooterSignals(payload: CompletedPayload | null): F
 	const counts = cleanupStateCounts(payload.folders, payload.archive_cleanup);
 	return [
 		{ label: 'Completed', value: String(payload.completed_count), tone: 'ready' },
-		{ label: 'Waiting', value: String(payload.folders_with_backups_count), tone: 'wait' },
-		{ label: 'Ready', value: String(counts.ready), tone: counts.ready > 0 ? 'ready' : 'idle' },
+		{ label: 'Originals', value: String(payload.folders_with_backups_count), tone: 'wait' },
+		{ label: 'Waiting', value: String(counts.ready), tone: counts.ready > 0 ? 'ready' : 'idle' },
 		{
-			label: 'Risk',
+			label: 'Review',
 			value: String(counts.blocked + counts.unknown),
 			tone: counts.blocked > 0 ? 'fail' : 'wait'
 		},

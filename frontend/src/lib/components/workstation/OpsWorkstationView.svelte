@@ -11,6 +11,7 @@
 	import {
 		buildOpsBlockers,
 		buildOpsFooterSignals,
+		buildOpsHistoryRows,
 		buildOpsQueueRows,
 		buildOpsStatusTiles,
 		hostPrepareDisabled,
@@ -36,6 +37,7 @@
 	} = $props();
 
 	const queueRows = $derived(buildOpsQueueRows(dashboard));
+	const historyRows = $derived(buildOpsHistoryRows(dashboard));
 	const blockers = $derived(buildOpsBlockers(dashboard, hosts, loadError));
 	const statusTiles = $derived(buildOpsStatusTiles(dashboard, hosts, loadError));
 	const footerSignals = $derived(buildOpsFooterSignals(dashboard, hosts));
@@ -49,6 +51,7 @@
 	const queuedWaitingCount = $derived(encodeQueue?.queued_waiting_count ?? 0);
 	const needsAttentionCount = $derived(encodeQueue?.needs_attention_count ?? 0);
 	const readyHosts = $derived(hosts?.hosts.filter((host) => host.available).length ?? 0);
+	const fleetHasReadyCapacity = $derived(readyHosts > 0);
 	const closedHosts = $derived(hosts?.hosts.filter((host) => host.schedule_open === false) ?? []);
 
 	let actionPending = $state<OpsActionId | null>(null);
@@ -81,8 +84,8 @@
 		if (action === 'stop-encode') return 'Stop running encode workers and pause the queue';
 		if (action === 'stop-calibration') return 'Stop running and queued sample/proof jobs';
 		if (action === 'retry-failed-encode')
-			return 'Retry failed folder encodes that are still approved';
-		if (action === 'retry-encode-prefix') return 'Retry this failed folder encode';
+			return 'Retry approved folder encodes that are ready to try again';
+		if (action === 'retry-encode-prefix') return 'Retry this folder encode';
 		if (action === 'pause-encode') return 'Pause the encode scheduler';
 		if (action === 'resume-encode') return 'Resume the encode scheduler and clear stop request';
 		if (action === 'start-host') return 'Start or wake this host';
@@ -146,7 +149,7 @@
 		try {
 			await invalidateAll();
 			lastRefreshAt = new Date();
-			if (!quiet) actionMessage = 'Ops runtime refreshed.';
+			if (!quiet) actionMessage = 'Ops state refreshed.';
 		} catch (error) {
 			refreshError = error instanceof Error ? error.message : 'Refresh failed.';
 			if (!quiet) actionError = refreshError;
@@ -191,7 +194,7 @@
 		if (actionPending === action) return 'Working';
 		if (action === 'pause-encode') return 'Pause';
 		if (action === 'resume-encode') return 'Resume';
-		if (action === 'retry-failed-encode') return 'Retry failed';
+		if (action === 'retry-failed-encode') return 'Retry available';
 		if (action === 'retry-encode-prefix') return 'Retry folder';
 		if (action === 'stop-encode') return 'Stop encode';
 		if (action === 'stop-calibration') return 'Stop samples';
@@ -202,7 +205,7 @@
 	}
 
 	function canOpenFolder(row: OpsQueueRow): boolean {
-		return row.prefix !== 'runtime scope';
+		return row.prefix !== 'system scope';
 	}
 
 	onMount(() => {
@@ -221,10 +224,10 @@
 			<header class="ops-header">
 				<div>
 					<span class="mf-eyebrow">Ops</span>
-					<h1>Encode and sample control</h1>
+					<h1>Can Mediaforce work right now?</h1>
 					<p>
-						Monitor active work, scheduler pressure, blocked retries, and host readiness from the
-						workstation shell.
+						Check whether encoding can run, what needs attention, and which hosts are available
+						without treating normal schedule waits as failures.
 					</p>
 				</div>
 				<div class="ops-header__facts">
@@ -233,7 +236,7 @@
 						<strong>{activeJobCount.toLocaleString('en-US')}</strong>
 					</div>
 					<div>
-						<span>Blocked</span>
+						<span>Needs attention</span>
 						<strong>{needsAttentionCount.toLocaleString('en-US')}</strong>
 					</div>
 					<div>
@@ -244,13 +247,13 @@
 						type="button"
 						class="control control--compact"
 						disabled={refreshPending}
-						title="Refresh Ops runtime state now"
+						title="Refresh Ops state now"
 						onclick={() => refreshOps()}>{refreshPending ? 'Refreshing' : 'Refresh'}</button
 					>
 				</div>
 			</header>
 
-			<WorkstationPanel eyebrow="Control" title="Scheduler and recovery">
+			<WorkstationPanel eyebrow="Current state" title="Encoding control">
 				<div class="scheduler-console">
 					<div class="scheduler-console__state">
 						<StateBadge
@@ -263,7 +266,7 @@
 								? 'Stopping'
 								: encodeQueue?.state.is_paused
 									? 'Paused'
-									: 'Open'}
+									: 'Ready'}
 						/>
 						<div>
 							<strong>{encodeQueue?.state.scheduler_summary ?? 'Scheduler data unavailable'}</strong
@@ -340,13 +343,13 @@
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="Blockers" title="Blocked and retryable work">
+			<WorkstationPanel eyebrow="Attention" title="What needs the operator">
 				<div class="blocker-list">
 					{#each blockers.slice(0, 6) as blocker (blocker.key)}
 						<div class="blocker-row blocker-row--{blocker.tone}">
 							<StateBadge
 								tone={blocker.tone}
-								label={blocker.tone === 'fail' ? 'Blocked' : 'Waiting'}
+								label={blocker.tone === 'fail' ? 'Blocked' : 'Attention'}
 							/>
 							<div>
 								<strong>{blocker.title}</strong>
@@ -365,7 +368,8 @@
 						</div>
 					{:else}
 						<div class="empty-note">
-							No blocked or retryable work is visible in the runtime payload.
+							No operator action is needed right now. Schedule waits and covered host issues stay in
+							the side rail.
 						</div>
 					{/each}
 				</div>
@@ -373,72 +377,127 @@
 
 			<WorkstationPanel
 				eyebrow="Jobs"
-				title="Running, queued, and recovery queue"
+				title="Running, queued, and retry-ready work"
 				meta={`${queueRows.length.toLocaleString('en-US')} visible`}
 			>
-				<div class="table-wrap">
-					<table>
-						<thead>
-							<tr>
-								<th>State</th>
-								<th>Work</th>
-								<th>Host</th>
-								<th>Progress</th>
-								<th>Scheduler</th>
-								<th>Recovery</th>
-							</tr>
-						</thead>
-						<tbody>
-							{#each queueRows as row (row.key)}
-								<tr class:job-row--blocked={row.tone === 'fail'}>
-									<td><StateBadge compact tone={row.tone} label={row.status} /></td>
-									<td>
-										{#if canOpenFolder(row)}
-											<a class="work-link" href={resolve(folderRoutePath(row.prefix))}>
-												<strong>{row.prefix}</strong>
-												<span>{row.kind} · {row.phase}</span>
-											</a>
-										{:else}
-											<div class="work-link">
-												<strong>{row.prefix}</strong>
-												<span>{row.kind} · {row.phase}</span>
-											</div>
-										{/if}
-									</td>
-									<td>{row.host}</td>
-									<td>
-										<strong>{row.progress}</strong>
-										<span>{row.detail}</span>
-									</td>
-									<td>{row.scheduler}</td>
-									<td>
-										{#if row.action}
-											{@const action = row.action}
-											<button
-												type="button"
-												class="control control--compact"
-												disabled={rowActionDisabled(row)}
-												title={rowRecoveryTitle(row)}
-												onclick={() => runAction(action, undefined, row)}
-												>{rowRecoveryLabel(row)}</button
-											>
-										{:else}
-											<span class="disabled-copy">{rowRecoveryLabel(row)}</span>
-										{/if}
-									</td>
-								</tr>
-							{:else}
+				{#if queueRows.length > 0}
+					<div class="table-wrap">
+						<table>
+							<thead>
 								<tr>
-									<td colspan="6">
-										No active encode, sample, or proof jobs are visible. Scheduler controls remain
-										available when runtime data is present.
-									</td>
+									<th>State</th>
+									<th>Work</th>
+									<th>Host</th>
+									<th>Progress</th>
+									<th>Scheduler</th>
+									<th>Recovery</th>
 								</tr>
-							{/each}
-						</tbody>
-					</table>
-				</div>
+							</thead>
+							<tbody>
+								{#each queueRows as row (row.key)}
+									<tr class:job-row--blocked={row.tone === 'fail'}>
+										<td><StateBadge compact tone={row.tone} label={row.status} /></td>
+										<td>
+											{#if canOpenFolder(row)}
+												<a class="work-link" href={resolve(folderRoutePath(row.prefix))}>
+													<strong>{row.prefix}</strong>
+													<span>{row.kind} · {row.phase}</span>
+												</a>
+											{:else}
+												<div class="work-link">
+													<strong>{row.prefix}</strong>
+													<span>{row.kind} · {row.phase}</span>
+												</div>
+											{/if}
+										</td>
+										<td>{row.host}</td>
+										<td>
+											<strong>{row.progress}</strong>
+											<span>{row.detail}</span>
+										</td>
+										<td>{row.scheduler}</td>
+										<td>
+											{#if row.action}
+												{@const action = row.action}
+												<button
+													type="button"
+													class="control control--compact"
+													disabled={rowActionDisabled(row)}
+													title={rowRecoveryTitle(row)}
+													onclick={() => runAction(action, undefined, row)}
+													>{rowRecoveryLabel(row)}</button
+												>
+											{:else}
+												<span class="disabled-copy">{rowRecoveryLabel(row)}</span>
+											{/if}
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				{:else}
+					<div class="current-standby">
+						<StateBadge tone="ready" label="No current work" />
+						<div>
+							<strong>Encoding is idle and ready.</strong>
+							<span>Queued folders, active samples, and retry-ready encodes will appear here.</span>
+						</div>
+					</div>
+				{/if}
 			</WorkstationPanel>
+
+			{#if historyRows.length > 0}
+				<WorkstationPanel
+					eyebrow="History"
+					title="Recent sample and proof history"
+					meta={`${historyRows.length.toLocaleString('en-US')} visible`}
+				>
+					<div class="history-note">
+						<StateBadge compact tone="idle" label="History" />
+						<span>Past sample/proof issues are not blocking current encoding.</span>
+					</div>
+					<div class="table-wrap table-wrap--history">
+						<table>
+							<thead>
+								<tr>
+									<th>State</th>
+									<th>Work</th>
+									<th>Host</th>
+									<th>Last note</th>
+									<th>When</th>
+								</tr>
+							</thead>
+							<tbody>
+								{#each historyRows as row (row.key)}
+									<tr class="job-row--history">
+										<td><StateBadge compact tone={row.tone} label={row.status} /></td>
+										<td>
+											{#if canOpenFolder(row)}
+												<a class="work-link" href={resolve(folderRoutePath(row.prefix))}>
+													<strong>{row.prefix}</strong>
+													<span>{row.kind} · {row.phase}</span>
+												</a>
+											{:else}
+												<div class="work-link">
+													<strong>{row.prefix}</strong>
+													<span>{row.kind} · {row.phase}</span>
+												</div>
+											{/if}
+										</td>
+										<td>{row.host}</td>
+										<td>
+											<strong>{row.progress}</strong>
+											<span>{row.detail}</span>
+										</td>
+										<td>{row.scheduler}</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				</WorkstationPanel>
+			{/if}
 		</section>
 
 		<aside class="ops__rail" aria-label="Host readiness">
@@ -451,7 +510,11 @@
 					{#each hosts?.hosts ?? [] as host (host.key)}
 						<div class="host-row">
 							<div class="host-row__head">
-								<StateBadge compact tone={hostTone(host)} label={hostStateCopy(host)} />
+								<StateBadge
+									compact
+									tone={hostTone(host, fleetHasReadyCapacity)}
+									label={hostStateCopy(host)}
+								/>
 								<strong>{host.label}</strong>
 							</div>
 							<dl>
@@ -505,12 +568,12 @@
 							</div>
 						</div>
 					{:else}
-						<div class="empty-note">Host runtime data is missing.</div>
+						<div class="empty-note">Host status is unavailable.</div>
 					{/each}
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="Schedule" title="Window state">
+			<WorkstationPanel eyebrow="Schedule" title="Encode windows">
 				<div class="schedule-list">
 					<div class="scope-row scope-row--active">
 						<span>Policy</span>
@@ -523,14 +586,14 @@
 					{#each closedHosts as host (host.key)}
 						<div class="scope-row scope-row--wait">
 							<span>{host.label}</span>
-							<strong>Closed</strong>
+							<strong>Scheduled off</strong>
 							<small>{host.schedule_detail}</small>
 						</div>
 					{:else}
 						<div class="scope-row">
 							<span>Host windows</span>
-							<strong>Open or unavailable</strong>
-							<small>No scheduled-off host reported by the runtime payload</small>
+							<strong>Open or not reported</strong>
+							<small>No host is currently scheduled off</small>
 						</div>
 					{/each}
 				</div>
@@ -607,22 +670,26 @@
 
 	.ops-header__facts strong,
 	.host-row dd {
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-sm);
 		font-weight: var(--mf-weight-medium);
 	}
 
 	.scheduler-console,
 	.blocker-list,
+	.current-standby,
 	.host-list,
-	.schedule-list {
+	.schedule-list,
+	.history-note {
 		display: grid;
 		gap: var(--mf-space-4);
 		padding: var(--mf-space-5);
 	}
 
 	.scheduler-console__state,
-	.blocker-row {
+	.blocker-row,
+	.current-standby,
+	.history-note {
 		align-items: center;
 		display: grid;
 		gap: var(--mf-space-4);
@@ -630,7 +697,8 @@
 	}
 
 	.scheduler-console__state > div,
-	.blocker-row > div {
+	.blocker-row > div,
+	.current-standby > div {
 		display: grid;
 		gap: var(--mf-space-1);
 		min-width: 0;
@@ -638,6 +706,7 @@
 
 	.scheduler-console__state strong,
 	.blocker-row strong,
+	.current-standby strong,
 	.host-row strong,
 	.scope-row strong {
 		font-size: var(--mf-text-sm);
@@ -647,6 +716,8 @@
 
 	.scheduler-console__state span,
 	.blocker-row span,
+	.current-standby span,
+	.history-note span,
 	.scope-row small {
 		color: var(--mf-fg-tertiary);
 		font-size: var(--mf-text-xs);
@@ -674,7 +745,7 @@
 
 	.refresh-note {
 		color: var(--mf-fg-tertiary);
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-2xs);
 	}
 
@@ -688,6 +759,19 @@
 		border-left: 2px solid var(--mf-line-strong);
 		min-height: var(--mf-row-comfy);
 		padding: var(--mf-space-4);
+	}
+
+	.current-standby {
+		background: var(--mf-bg-strip);
+		border-left: 2px solid var(--mf-ready-fg);
+		grid-template-columns: auto minmax(0, 1fr);
+		min-height: var(--mf-row-comfy);
+	}
+
+	.history-note {
+		border-bottom: var(--mf-border-muted);
+		grid-template-columns: auto minmax(0, 1fr);
+		padding-bottom: var(--mf-space-4);
 	}
 
 	.blocker-row--fail {
@@ -734,7 +818,7 @@
 	td:nth-child(3),
 	td:nth-child(4),
 	td:nth-child(5) {
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 	}
 
 	td:nth-child(4) {
@@ -744,12 +828,20 @@
 
 	td:nth-child(4) span {
 		color: var(--mf-fg-tertiary);
-		font-family: var(--mf-font-sans);
+		font-family: var(--mf-font-sans), sans-serif;
 		overflow-wrap: anywhere;
 	}
 
 	.job-row--blocked {
 		background: var(--mf-fail-bg);
+	}
+
+	.job-row--history {
+		color: var(--mf-fg-secondary);
+	}
+
+	.job-row--history .work-link strong {
+		color: var(--mf-fg-secondary);
 	}
 
 	.work-link {
@@ -918,7 +1010,9 @@
 
 	@media (max-width: 680px) {
 		.scheduler-console__state,
-		.blocker-row {
+		.blocker-row,
+		.current-standby,
+		.history-note {
 			align-items: start;
 			grid-template-columns: 1fr;
 		}

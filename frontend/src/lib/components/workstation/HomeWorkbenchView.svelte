@@ -186,10 +186,10 @@
 			<header class="queue-header">
 				<div>
 					<span class="mf-eyebrow">Queue</span>
-					<h1>Operator queue</h1>
+					<h1>Choose what to encode next</h1>
 					<p>
-						Filter the current queue, start from the highest-priority folder, or search directly for
-						a folder context.
+						Start from the highest-ranked folder, then use filters only when you need to narrow the
+						work list.
 					</p>
 				</div>
 				<div class="queue-header__facts">
@@ -208,7 +208,42 @@
 				</div>
 			</header>
 
-			<WorkstationPanel eyebrow="Filters" title="Queue filters">
+			<WorkstationPanel eyebrow="Recommended" title="Next folder">
+				{#if nextFolder}
+					<div class="next-card">
+						<StateBadge tone={queueFolderTone(nextFolder)} label={queueFolderState(nextFolder)} />
+						<div>
+							<h2>{nextFolder.title}</h2>
+							<p>{nextFolder.prefix}</p>
+						</div>
+						<div class="next-card__metrics">
+							<div>
+								<span>Items</span>
+								<strong>{nextFolder.item_count.toLocaleString('en-US')}</strong>
+							</div>
+							<div>
+								<span>Pending</span>
+								<strong>{nextFolder.pending_count.toLocaleString('en-US')}</strong>
+							</div>
+							<div>
+								<span>Reclaim</span>
+								<strong>{formatBytes(nextFolder.projected_reclaim_bytes)}</strong>
+							</div>
+							<div>
+								<span>Status</span>
+								<strong>{folderStatusCopy(nextFolder)}</strong>
+							</div>
+						</div>
+						<a class="control control--primary" href={resolve(folderRoutePath(nextFolder.prefix))}
+							>Open Folder Studio</a
+						>
+					</div>
+				{:else}
+					<div class="empty-note">No folders match the current filters.</div>
+				{/if}
+			</WorkstationPanel>
+
+			<WorkstationPanel eyebrow="Filters" title="Narrow the queue">
 				<div class="queue-filter" aria-label="Queue filters">
 					<div class="queue-filter__summary">
 						<span>Visible queue</span>
@@ -234,7 +269,7 @@
 						<input
 							type="search"
 							value={searchQuery}
-							placeholder="Name, path, or status"
+							placeholder="Name, path, or state"
 							oninput={handleSearchInput}
 						/>
 					</label>
@@ -304,42 +339,11 @@
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="Highest priority" title="Next folder">
-				{#if nextFolder}
-					<div class="next-card">
-						<StateBadge tone={queueFolderTone(nextFolder)} label={queueFolderState(nextFolder)} />
-						<div>
-							<h2>{nextFolder.title}</h2>
-							<p>{nextFolder.prefix}</p>
-						</div>
-						<div class="next-card__metrics">
-							<div>
-								<span>Items</span>
-								<strong>{nextFolder.item_count.toLocaleString('en-US')}</strong>
-							</div>
-							<div>
-								<span>Pending</span>
-								<strong>{nextFolder.pending_count.toLocaleString('en-US')}</strong>
-							</div>
-							<div>
-								<span>Reclaim</span>
-								<strong>{formatBytes(nextFolder.projected_reclaim_bytes)}</strong>
-							</div>
-							<div>
-								<span>Status</span>
-								<strong>{folderStatusCopy(nextFolder)}</strong>
-							</div>
-						</div>
-						<a class="control control--primary" href={resolve(folderRoutePath(nextFolder.prefix))}
-							>Open Folder Studio</a
-						>
-					</div>
-				{:else}
-					<div class="empty-note">No folders match the current filters.</div>
-				{/if}
-			</WorkstationPanel>
-
-			<WorkstationPanel eyebrow="Ranked queue" title="Folders needing operator attention">
+			<WorkstationPanel
+				eyebrow="Ranked queue"
+				title="Folders needing operator attention"
+				meta={`${visibleFolders.length.toLocaleString('en-US')} visible`}
+			>
 				<div class="table-wrap">
 					<table>
 						<thead>
@@ -383,21 +387,21 @@
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="Archive" title="Cleanup signal">
+			<WorkstationPanel eyebrow="Cleanup" title="Originals waiting">
 				<dl class="kv">
-					<dt>Archive root</dt>
+					<dt>Cleanup folder</dt>
 					<dd>{dashboard.archive_cleanup?.archive_root ?? '—'}</dd>
 					<dt>Files</dt>
 					<dd>{dashboard.archive_cleanup?.file_count?.toLocaleString('en-US') ?? '0'}</dd>
 					<dt>Size</dt>
 					<dd>{formatBytes(dashboard.archive_cleanup?.total_size_bytes)}</dd>
-					<dt>Ready</dt>
-					<dd>{dashboard.archive_cleanup?.has_cleanup ? 'yes' : 'no'}</dd>
+					<dt>Action</dt>
+					<dd>{dashboard.archive_cleanup?.has_cleanup ? 'review on Completed' : 'no action'}</dd>
 				</dl>
 			</WorkstationPanel>
 		</section>
 
-		<aside class="home__rail" aria-label="Queue scope">
+		<aside class="home__rail" aria-label="Queue filters and scope">
 			<WorkstationPanel eyebrow="Scope" title="Operator queue">
 				<div class="scope-list">
 					<div class="scope-row scope-row--active">
@@ -509,7 +513,7 @@
 	.queue-header__facts strong,
 	.next-card__metrics strong,
 	.kv dd {
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-sm);
 		font-weight: var(--mf-weight-medium);
 	}
@@ -520,6 +524,18 @@
 		display: grid;
 		gap: var(--mf-space-4);
 		padding: var(--mf-space-5);
+	}
+
+	.next-card {
+		border-left: 2px solid var(--mf-wait-fg);
+	}
+
+	.next-card :global(.state-badge) {
+		justify-self: start;
+	}
+
+	.next-card .control {
+		justify-self: start;
 	}
 
 	.scope-row {
@@ -564,7 +580,7 @@
 	}
 
 	.queue-filter__summary strong {
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-sm);
 	}
 
@@ -673,7 +689,7 @@
 
 	.queue-filter__row em {
 		color: var(--mf-fg-tertiary);
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-2xs);
 		font-style: normal;
 	}
@@ -713,7 +729,7 @@
 	td:nth-child(4),
 	td:nth-child(5),
 	td:nth-child(6) {
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 	}
 
 	.folder-link {
@@ -729,7 +745,7 @@
 
 	.folder-link span {
 		color: var(--mf-fg-tertiary);
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-2xs);
 		overflow-wrap: anywhere;
 	}

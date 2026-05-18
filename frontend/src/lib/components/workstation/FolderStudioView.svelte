@@ -137,10 +137,6 @@
 		});
 	}
 
-	function handleBenchNoteInput(event: Event) {
-		benchNote = (event.currentTarget as HTMLTextAreaElement).value;
-	}
-
 	async function sendBenchRequest() {
 		if (benchRequestDisabled) return;
 		benchPending = true;
@@ -339,8 +335,7 @@
 							<textarea
 								rows="5"
 								placeholder="Ask Bench what to sample, revise, or validate for this folder."
-								value={benchNote}
-								oninput={handleBenchNoteInput}
+								bind:value={benchNote}
 							></textarea>
 						</label>
 						<div class="bench__controls">
@@ -527,7 +522,7 @@
 						</div>
 					{/each}
 					{#if hosts.hosts.length === 0}
-						<div class="empty-note">No host runtime data returned.</div>
+						<div class="empty-note">Host status is unavailable.</div>
 					{/if}
 				</div>
 			</WorkstationPanel>
@@ -620,7 +615,7 @@
 	.decision__metrics strong,
 	.sample-facts strong,
 	.context-list strong {
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-sm);
 		font-weight: var(--mf-weight-medium);
 		overflow-wrap: anywhere;
@@ -783,7 +778,7 @@
 
 	.bench-message small {
 		color: var(--mf-fg-tertiary);
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-2xs);
 		overflow-wrap: anywhere;
 	}
@@ -887,7 +882,7 @@
 
 	.sample-frame strong {
 		color: var(--mf-fg-primary);
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-sm);
 		font-weight: var(--mf-weight-medium);
 		margin-top: var(--mf-space-3);
@@ -975,7 +970,7 @@
 
 	td:nth-child(3),
 	td:nth-child(4) {
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 	}
 
 	tr.changed td:first-child {
@@ -1000,7 +995,7 @@
 
 	.kv dd {
 		color: var(--mf-fg-primary);
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-xs);
 		overflow-wrap: anywhere;
 	}

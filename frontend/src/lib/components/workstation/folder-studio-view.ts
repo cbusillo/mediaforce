@@ -402,13 +402,13 @@ export function resolveWorkflow(
 	const encodeStatus = String(encodeJob?.status ?? '').toLowerCase();
 	if (['failed', 'needs_attention', 'stopped'].includes(encodeStatus)) {
 		return {
-			tone: 'fail',
-			label: 'Blocked',
+			tone: 'wait',
+			label: 'Retry available',
 			title: 'Encode needs recovery',
 			copy:
 				encodeJob?.error ??
 				encodeJob?.attempt_summary ??
-				'The approved encode is blocked. Review the failure and retry from Ops when valid.',
+				'The approved encode needs review before it runs again. Retry from Ops when the folder is still safe to process.',
 			primary: 'Open Ops',
 			primaryAction: 'open-ops',
 			secondary: 'Retry',
@@ -594,7 +594,7 @@ export function buildStatusTiles(
 		{
 			label: 'Hosts',
 			value: `${readyHosts} ready / ${totalHosts}`,
-			detail: totalHosts ? 'runtime probe complete' : 'no host payload',
+			detail: totalHosts ? 'capacity check complete' : 'host status unavailable',
 			tone: readyHosts > 0 ? 'ready' : totalHosts > 0 ? 'wait' : 'idle'
 		}
 	];

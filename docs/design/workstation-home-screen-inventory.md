@@ -1,5 +1,10 @@
 # Workstation Home Screen Inventory
 
+> Status: Historical/superseded inventory. Do not use this as the active
+> Queue/Home implementation plan. Start with `docs/design/README.md`,
+> `docs/design/operator-workstation-shell-brief.md`, and GitHub issue `#56`
+> instead.
+
 This inventory records what should carry forward, what should be rewritten, and
 what should stop shaping the Mediaforce home screen during the workstation UI
 reset.

@@ -98,7 +98,8 @@ from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_fo
     dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
     archive_cleanup_summary, clear_archive_cleanup_action, \
-    clear_completed_backups_action, completed_page_payload, list_completed_folders, \
+    clear_completed_backups_action, completed_page_payload, confirm_originals_removed_action, \
+    list_completed_folders, \
     ensure_encode_host_ready, \
     folder_ai_tune_action, folder_ai_tune_confirm_action, folder_ai_tune_preview_action, \
     folder_card_cache_key, folder_status_payload, host_config_for_key, host_lifecycle_start_command, \
@@ -517,6 +518,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         app,
         completed_payload=lambda: _completed_page_payload(),
         clear_completed_backups_action=lambda prefixes=None: _clear_completed_backups_action(prefixes),
+        confirm_originals_removed_action=lambda prefixes: _confirm_originals_removed_action(prefixes),
     )
     register_host_routes(
         app,
@@ -639,7 +641,6 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             )
 
     def _clear_completed_backups_action(prefixes: list[str] | None) -> dict[str, Any]:
-        archive_root = None
         try:
             archive_root = config.archive_root
         except KeyError:
@@ -657,6 +658,28 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             prefixes=prefixes,
             valid_prefixes=valid_prefixes,
         )
+        result["completed"] = _completed_page_payload()
+        return result
+
+    def _confirm_originals_removed_action(prefixes: list[str]) -> dict[str, Any]:
+        try:
+            archive_root = config.archive_root
+        except KeyError:
+            archive_root = None
+        with open_db(config.paths.db_path) as connection:
+            folders = list_completed_folders(
+                connection,
+                folder_group=_folder_group,
+                archive_root=archive_root,
+            )
+            valid_prefixes = {folder.prefix for folder in folders}
+            result = confirm_originals_removed_action(
+                connection,
+                folder_group=_folder_group,
+                archive_root=archive_root,
+                prefixes=prefixes,
+                valid_prefixes=valid_prefixes,
+            )
         result["completed"] = _completed_page_payload()
         return result
 
@@ -1639,6 +1662,10 @@ def _folder_badge_failure_detail(raw_error: Any, raw_waiting_reason: Any = None)
     return f"{compact[:157]}..." if len(compact) > 160 else compact
 
 
+def _folder_badge_prefix(raw_prefix: Any) -> str:
+    return raw_prefix.strip().strip("/") if isinstance(raw_prefix, str) else ""
+
+
 def _folder_needs_attention_badges(connection: DBClient) -> dict[str, dict[str, str | None]]:
     rows = connection.execute(
         select(
@@ -1653,7 +1680,7 @@ def _folder_needs_attention_badges(connection: DBClient) -> dict[str, dict[str, 
     badges: dict[str, dict[str, str | None]] = {}
     seen_prefixes: set[str] = set()
     for row in rows:
-        prefix = str(row["prefix"] or "").strip().strip("/")
+        prefix = _folder_badge_prefix(row["prefix"])
         if not prefix or prefix in seen_prefixes:
             continue
         seen_prefixes.add(prefix)
@@ -1684,7 +1711,7 @@ def _folder_calibration_job_badges(connection: DBClient) -> dict[str, dict[str, 
     badges: dict[str, dict[str, str | None]] = {}
     seen_prefixes: set[str] = set()
     for row in rows:
-        prefix = str(row["prefix"] or "").strip().strip("/")
+        prefix = _folder_badge_prefix(row["prefix"])
         if not prefix or prefix in seen_prefixes:
             continue
         seen_prefixes.add(prefix)

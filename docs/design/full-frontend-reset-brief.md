@@ -1,5 +1,10 @@
 # Full Frontend Reset Brief
 
+> Status: Historical/superseded background. Do not use this as the active
+> implementation plan for current Mediaforce UI work. Start with
+> `docs/design/README.md`, `docs/style/workstation-ui.md`, and the GitHub
+> issue-backed UI/UX reset plan instead.
+
 This branch intentionally removes the old Mediaforce visual frontend so the
 next design pass starts from product workflow and preserved contracts instead of
 existing panels, cards, and route layouts.

@@ -1,5 +1,10 @@
 # Operator Workstation Shell Brief
 
+> Status: Current shell doctrine, with active execution tracked in GitHub issue
+> `#62` and its sub-issues. The May 2026 UI/UX reset plan keeps this shell
+> direction but treats route workflows, basic-user language, and visual polish
+> as active work, not settled implementation.
+
 This brief captures the durable shell language that now ties Mediaforce's main
 operator routes together after the workstation reset and final consistency
 audit. It is the carry-forward reference for future changes to home, ops,
@@ -13,8 +18,11 @@ completed, settings, and folder studio.
   `home.png`, `ops.png`, `completed.png`, `settings.png`,
   `folder-workspace.png`, `ops-live-check.png`, and
   `settings-live-check.png`.
-- Current verdict: the product now reads as one operator workstation family
-  instead of a home page plus several adjacent dashboard-like tools.
+- April 2026 verdict: the product read more like one operator workstation
+  family than a home page plus several adjacent dashboard-like tools.
+- May 2026 planning note: that family-level direction remains useful, but the
+  current UI still needs a basic-user reset for route hierarchy, wording, and
+  visual finish.
 
 ## Goal
 
@@ -89,6 +97,13 @@ completed, settings, and folder studio.
 - Gray: inactive, unavailable, not started, or intentionally disabled.
 - Color should communicate machine or workflow state before brand emphasis. Do
   not weaken contrast or blur these meanings for visual softness.
+- Judge severity by operator impact, not raw subsystem status. A single host
+  being unavailable, scheduled off, or not accepting work is not red when other
+  hosts can still carry the workflow. Retryable work is amber unless the
+  workflow is unsafe or no required capacity remains.
+- Keep old sample/proof failures out of current-work tables. Show them as
+  neutral history with operator-facing explanations unless they directly block
+  the next safe action.
 
 ## Operator copy posture
 

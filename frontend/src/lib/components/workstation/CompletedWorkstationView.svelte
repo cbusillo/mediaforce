@@ -5,6 +5,7 @@
 		CompletedCleanupResult,
 		CompletedFolderRow,
 		CompletedHistoryEvent,
+		CompletedOriginalsResolvedResult,
 		CompletedPayload
 	} from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
@@ -23,6 +24,7 @@
 		cleanupTone,
 		completedLibraryOptions,
 		completedStateOptions,
+		folderCanBeMarkedHandled,
 		folderCanBeSelected,
 		folderSearchText,
 		readyFolders,
@@ -34,6 +36,7 @@
 
 	type WorkstationMode = 'completed' | 'history';
 	type CleanupScope = 'selected' | 'global';
+	type ReviewScope = 'already-removed';
 
 	let {
 		completed: loadedCompleted,
@@ -50,8 +53,11 @@
 	let libraryFilters = $state<Record<string, boolean>>({});
 	let stateFilters = $state<Record<string, boolean>>({});
 	let selectedPrefixes = $state<Record<string, boolean>>({});
+	let reviewPrefixes = $state<Record<string, boolean>>({});
 	let armedScope = $state<CleanupScope | null>(null);
+	let armedReview = $state<ReviewScope | null>(null);
 	let cleanupPending = $state(false);
+	let reviewPending = $state(false);
 	let actionMessage = $state('');
 	let actionError = $state('');
 	let lastCleanupResult = $state<CompletedCleanupResult | null>(null);
@@ -92,6 +98,9 @@
 	const filteredReadyFolders = $derived(
 		filteredFolders.filter((folder) => folderCanBeSelected(folder, archive))
 	);
+	const filteredReviewFolders = $derived(
+		filteredFolders.filter((folder) => folderCanBeMarkedHandled(folder, archive))
+	);
 	const selectedFolders = $derived(
 		folders.filter(
 			(folder) => selectedPrefixes[folder.prefix] && folderCanBeSelected(folder, archive)
@@ -100,6 +109,17 @@
 	const selectedBackupSize = $derived(totalArchivedBackupSize(selectedFolders));
 	const selectedBackupCount = $derived(
 		selectedFolders.reduce((total, folder) => total + Math.max(folder.archived_backup_count, 0), 0)
+	);
+	const reviewFolders = $derived(
+		folders.filter(
+			(folder) => reviewPrefixes[folder.prefix] && folderCanBeMarkedHandled(folder, archive)
+		)
+	);
+	const reviewItemCount = $derived(
+		reviewFolders.reduce(
+			(total, folder) => total + Math.max(folder.missing_backup_count ?? 0, 0),
+			0
+		)
 	);
 	const counts = $derived(cleanupStateCounts(folders, archive));
 	const recommendedFolder = $derived(cleanupReadyFolders[0] ?? null);
@@ -129,10 +149,15 @@
 	const selectedSummary = $derived(
 		selectedFolders.length
 			? `${selectedFolders.length.toLocaleString('en-US')} folders · ${selectedBackupCount.toLocaleString('en-US')} files · ${formatBytes(selectedBackupSize)}`
-			: 'No cleanup-ready folders selected'
+			: 'No folders with originals waiting are selected'
+	);
+	const reviewSummary = $derived(
+		reviewFolders.length
+			? `${reviewFolders.length.toLocaleString('en-US')} folders · ${reviewItemCount.toLocaleString('en-US')} originals already gone`
+			: 'No folders selected for review'
 	);
 	const globalSummary = $derived(
-		`${archive.file_count.toLocaleString('en-US')} archived files · ${formatBytes(archive.total_size_bytes)} under ${archive.archive_root || 'missing archive root'}`
+		`${archive.file_count.toLocaleString('en-US')} waiting originals · ${formatBytes(archive.total_size_bytes)} in ${archive.archive_root || 'the missing cleanup folder'}`
 	);
 
 	function libraryKey(label: string): string {
@@ -178,14 +203,28 @@
 		return Boolean(selectedPrefixes[folder.prefix]);
 	}
 
+	function selectedForReview(folder: CompletedFolderRow): boolean {
+		return Boolean(reviewPrefixes[folder.prefix]);
+	}
+
 	function setFolderSelected(folder: CompletedFolderRow, value: boolean) {
 		if (!folderCanBeSelected(folder, archive)) return;
 		selectedPrefixes = { ...selectedPrefixes, [folder.prefix]: value };
 		armedScope = null;
 	}
 
+	function setFolderReviewSelected(folder: CompletedFolderRow, value: boolean) {
+		if (!folderCanBeMarkedHandled(folder, archive)) return;
+		reviewPrefixes = { ...reviewPrefixes, [folder.prefix]: value };
+		armedReview = null;
+	}
+
 	function handleRowSelection(folder: CompletedFolderRow, event: Event) {
 		setFolderSelected(folder, (event.currentTarget as HTMLInputElement).checked);
+	}
+
+	function handleReviewSelection(folder: CompletedFolderRow, event: Event) {
+		setFolderReviewSelected(folder, (event.currentTarget as HTMLInputElement).checked);
 	}
 
 	function selectVisibleReady() {
@@ -196,9 +235,19 @@
 		armedScope = null;
 	}
 
+	function selectVisibleReview() {
+		reviewPrefixes = {
+			...reviewPrefixes,
+			...Object.fromEntries(filteredReviewFolders.map((folder) => [folder.prefix, true]))
+		};
+		armedReview = null;
+	}
+
 	function clearSelection() {
 		selectedPrefixes = {};
+		reviewPrefixes = {};
 		armedScope = null;
+		armedReview = null;
 	}
 
 	function cleanupDisabled(scope: CleanupScope): boolean {
@@ -212,6 +261,55 @@
 		actionError = '';
 		lastCleanupResult = null;
 		armedScope = armedScope === scope ? null : scope;
+		armedReview = null;
+	}
+
+	function armReview(scope: ReviewScope) {
+		actionMessage = '';
+		actionError = '';
+		lastCleanupResult = null;
+		armedScope = null;
+		armedReview = armedReview === scope ? null : scope;
+	}
+
+	async function confirmAlreadyRemoved() {
+		if (!completed || reviewFolders.length === 0 || reviewPending) return;
+		reviewPending = true;
+		actionMessage = '';
+		actionError = '';
+		try {
+			const foldersToResolve = reviewFolders;
+			const result = await postJson<CompletedOriginalsResolvedResult>(
+				`${resolve('/')}api/completed/originals/confirm-removed`,
+				{ prefixes: foldersToResolve.map((folder) => folder.prefix) }
+			);
+			actionMessage = result.message || 'Marked as already handled.';
+			if (result.completed) {
+				completed = result.completed;
+			}
+			localHistory = [
+				{
+					id: Date.now(),
+					event_type: 'originals_removed_confirmed',
+					label: 'Originals marked removed',
+					tone: 'ready',
+					prefix: `${foldersToResolve.length} selected folders`,
+					title: 'Originals already removed',
+					subtitle: result.message,
+					scope_label: 'review',
+					created_at: new Date().toISOString(),
+					detail: `${result.resolved_count.toLocaleString('en-US')} items marked handled · no files deleted`,
+					size_bytes: 0
+				},
+				...localHistory
+			];
+			reviewPrefixes = {};
+			armedReview = null;
+		} catch (error) {
+			actionError = error instanceof Error ? error.message : 'Review update failed.';
+		} finally {
+			reviewPending = false;
+		}
 	}
 
 	async function confirmCleanup(scope: CleanupScope) {
@@ -239,7 +337,7 @@
 					label: scope === 'selected' ? 'Selected cleanup completed' : 'Global cleanup completed',
 					tone: 'ready',
 					prefix:
-						scope === 'selected' ? `${cleanupFolders.length} selected folders` : 'archive root',
+						scope === 'selected' ? `${cleanupFolders.length} selected folders` : 'cleanup folder',
 					title: scope === 'selected' ? 'Selected cleanup' : 'Global cleanup',
 					subtitle: result.message,
 					scope_label: 'cleanup',
@@ -290,23 +388,23 @@
 			<header class="completed-header">
 				<div>
 					<span class="mf-eyebrow">Completed</span>
-					<h1>Archive cleanup and history</h1>
+					<h1>Review completed encodes</h1>
 					<p>
-						Review promoted folders, select cleanup-ready backups, and scan recent encode history
-						without returning to the active queue.
+						Remove originals that are still waiting, mark originals already removed, and keep
+						finished work out of the active queue.
 					</p>
 				</div>
 				<div class="completed-header__facts" aria-label="Completed cleanup totals">
 					<div>
 						<span>Completed</span>
-						<strong>{completed?.completed_count.toLocaleString('en-US') ?? '—'}</strong>
+						<strong>{folders.length.toLocaleString('en-US')}</strong>
 					</div>
 					<div>
-						<span>Ready</span>
+						<span>Waiting</span>
 						<strong>{counts.ready.toLocaleString('en-US')}</strong>
 					</div>
 					<div>
-						<span>Risk</span>
+						<span>Review</span>
 						<strong>{(counts.blocked + counts.unknown).toLocaleString('en-US')}</strong>
 					</div>
 					<div>
@@ -334,7 +432,7 @@
 			</div>
 
 			{#if !completed}
-				<WorkstationPanel eyebrow="Runtime" title="Completed payload unavailable">
+				<WorkstationPanel eyebrow="Runtime" title="Completed work unavailable">
 					<div class="empty-note empty-note--error">
 						{actionError || 'Completed data is loading or unavailable.'}
 					</div>
@@ -350,7 +448,7 @@
 								)}
 								folders</strong
 							>
-							<small>{selectedSummary}</small>
+							<small>{reviewFolders.length > 0 ? reviewSummary : selectedSummary}</small>
 						</div>
 
 						<label class="completed-filter__search">
@@ -384,7 +482,7 @@
 											>{option.folders.toLocaleString('en-US')} folders · {option.backups.toLocaleString(
 												'en-US'
 											)}
-											backups</small
+											waiting originals</small
 										>
 									</span>
 									<em>{formatBytes(option.size)}</em>
@@ -394,7 +492,7 @@
 
 						<div class="completed-filter__group">
 							<div class="completed-filter__group-head">
-								<span>Cleanup states</span>
+								<span>Folder state</span>
 								<div class="completed-filter__actions" aria-label="Bulk cleanup state filters">
 									<button type="button" onclick={() => setAllStates(true)}>All</button>
 									<button type="button" onclick={() => setAllStates(false)}>None</button>
@@ -416,7 +514,7 @@
 											>{option.folders.toLocaleString('en-US')} folders · {option.backups.toLocaleString(
 												'en-US'
 											)}
-											backups</small
+											waiting originals</small
 										>
 									</span>
 									<em>{formatBytes(option.size)}</em>
@@ -428,46 +526,58 @@
 
 				<WorkstationPanel
 					eyebrow="Action"
-					title={cleanupWorkAvailable ? 'Cleanup command' : 'Cleanup review'}
+					title={cleanupWorkAvailable
+						? 'Remove waiting originals'
+						: cleanupReviewCount > 0
+							? 'Review already-removed originals'
+							: 'No originals waiting'}
 				>
 					<div class="cleanup-command">
 						<div class="cleanup-command__state">
 							<StateBadge
-								tone={recommendedFolder ? 'ready' : archive.has_cleanup ? 'wait' : 'idle'}
+								tone={recommendedFolder ? 'ready' : cleanupReviewCount > 0 ? 'wait' : 'idle'}
 								label={recommendedFolder
-									? 'Selected cleanup'
-									: archive.has_cleanup
-										? 'Review'
-										: 'Idle'}
+									? 'Originals waiting'
+									: cleanupReviewCount > 0
+										? 'Needs review'
+										: 'Handled'}
 							/>
 							<div>
 								<strong
 									>{recommendedFolder
 										? `Safest next cleanup: ${recommendedFolder.title}`
-										: archive.has_cleanup
-											? 'Backups exist, but no cleanup-ready folder is visible'
-											: 'No archived originals are waiting'}</strong
+										: cleanupReviewCount > 0
+											? 'Some originals were already removed'
+											: 'No originals are waiting'}</strong
 								>
 								<span
 									>{recommendedFolder
 										? cleanupDetail(recommendedFolder, archive)
-										: archive.archive_root || 'Archive root is not configured'}</span
+										: cleanupReviewCount > 0
+											? 'After checking the new files, mark these folders handled so they leave review.'
+											: archive.archive_root || 'Cleanup folder is not configured'}</span
 								>
 							</div>
 						</div>
 
-						{#if cleanupWorkAvailable}
+						{#if cleanupWorkAvailable || cleanupReviewCount > 0}
 							<div class="cleanup-command__actions" aria-label="Cleanup actions">
 								<button
 									type="button"
 									class="control"
 									disabled={filteredReadyFolders.length === 0}
-									onclick={selectVisibleReady}>Select visible ready</button
+									onclick={selectVisibleReady}>Select waiting originals</button
 								>
 								<button
 									type="button"
 									class="control"
-									disabled={selectedFolders.length === 0}
+									disabled={filteredReviewFolders.length === 0}
+									onclick={selectVisibleReview}>Select needs review</button
+								>
+								<button
+									type="button"
+									class="control"
+									disabled={selectedFolders.length === 0 && reviewFolders.length === 0}
 									onclick={clearSelection}>Clear selection</button
 								>
 								<button
@@ -476,7 +586,9 @@
 									class:armed={armedScope === 'selected'}
 									disabled={cleanupDisabled('selected')}
 									onclick={() => armCleanup('selected')}
-									>{armedScope === 'selected' ? 'Selected armed' : 'Clear selected backups'}</button
+									>{armedScope === 'selected'
+										? 'Selected armed'
+										: 'Remove selected originals'}</button
 								>
 								<button
 									type="button"
@@ -486,35 +598,41 @@
 									onclick={() => armCleanup('global')}
 									>{armedScope === 'global' ? 'Global armed' : 'Clear entire archive'}</button
 								>
+								<button
+									type="button"
+									class="control control--primary"
+									class:armed={armedReview === 'already-removed'}
+									disabled={reviewFolders.length === 0 || reviewPending}
+									onclick={() => armReview('already-removed')}
+									>{armedReview === 'already-removed'
+										? 'Ready to mark handled'
+										: 'Mark originals already removed'}</button
+								>
 							</div>
 						{:else}
 							<div class="cleanup-standby" aria-label="Cleanup standby state">
-								<span>No destructive action is available</span>
+								<span>No action needed</span>
 								<strong
 									>{cleanupReviewCount > 0
-										? `${cleanupReviewCount.toLocaleString('en-US')} completed folders need backup review.`
-										: `${folders.length.toLocaleString('en-US')} completed folders are clean.`}</strong
+										? `${cleanupReviewCount.toLocaleString('en-US')} completed folders need review.`
+										: `${folders.length.toLocaleString('en-US')} completed folders are handled.`}</strong
 								>
 								<small
 									>{cleanupReviewCount > 0
-										? 'Resolve missing or unverifiable archived originals before cleanup controls appear.'
-										: 'When archived originals appear, selected cleanup controls return here.'}</small
+										? 'Check the new files, then mark the originals as already removed.'
+										: 'When originals are waiting, cleanup controls return here.'}</small
 								>
 							</div>
 						{/if}
 
 						{#if armedScope}
 							{@const scope = armedScope}
-							<div
-								class="confirm-panel"
-								role="alertdialog"
-								aria-label="Confirm destructive cleanup"
-							>
+							<div class="confirm-panel" role="alertdialog" aria-label="Confirm original removal">
 								<div>
 									<strong
 										>{scope === 'selected'
-											? 'Confirm selected cleanup'
-											: 'Confirm global cleanup'}</strong
+											? 'Remove selected originals'
+											: 'Remove all waiting originals'}</strong
 									>
 									<span>{scope === 'selected' ? selectedSummary : globalSummary}</span>
 								</div>
@@ -524,13 +642,43 @@
 										class="control control--danger armed"
 										disabled={cleanupPending}
 										onclick={() => confirmCleanup(scope)}
-										>{cleanupPending ? 'Working' : 'Confirm delete'}</button
+										>{cleanupPending ? 'Working' : 'Confirm removal'}</button
 									>
 									<button
 										type="button"
 										class="control"
 										disabled={cleanupPending}
 										onclick={() => (armedScope = null)}>Cancel</button
+									>
+								</div>
+							</div>
+						{/if}
+
+						{#if armedReview === 'already-removed'}
+							<div
+								class="confirm-panel confirm-panel--review"
+								role="alertdialog"
+								aria-label="Confirm originals already removed"
+							>
+								<div>
+									<strong>Mark originals as already removed</strong>
+									<span
+										>{reviewSummary}. This does not delete files; it only clears the review state.</span
+									>
+								</div>
+								<div class="confirm-panel__actions">
+									<button
+										type="button"
+										class="control control--primary armed"
+										disabled={reviewPending}
+										onclick={confirmAlreadyRemoved}
+										>{reviewPending ? 'Working' : 'Confirm reviewed'}</button
+									>
+									<button
+										type="button"
+										class="control"
+										disabled={reviewPending}
+										onclick={() => (armedReview = null)}>Cancel</button
 									>
 								</div>
 							</div>
@@ -563,10 +711,10 @@
 						<table>
 							<thead>
 								<tr>
-									<th>Select</th>
+									<th>Choose</th>
 									<th>State</th>
 									<th>Folder</th>
-									<th>Backups</th>
+									<th>Waiting originals</th>
 									<th>Reclaim</th>
 									<th>Saved</th>
 									<th>Latest</th>
@@ -575,15 +723,26 @@
 							<tbody>
 								{#each filteredFolders as folder (folder.prefix)}
 									{@const state = cleanupState(folder, archive)}
-									<tr class:selected={selected(folder)} class:blocked={state === 'blocked'}>
+									<tr
+										class:selected={selected(folder) || selectedForReview(folder)}
+										class:blocked={state === 'blocked'}
+									>
 										<td>
-											<input
-												type="checkbox"
-												checked={selected(folder)}
-												disabled={!folderCanBeSelected(folder, archive)}
-												aria-label={`Select ${folder.title} for cleanup`}
-												onchange={(event) => handleRowSelection(folder, event)}
-											/>
+											{#if folderCanBeSelected(folder, archive)}
+												<input
+													type="checkbox"
+													checked={selected(folder)}
+													aria-label={`Select ${folder.title} for cleanup`}
+													onchange={(event) => handleRowSelection(folder, event)}
+												/>
+											{:else if folderCanBeMarkedHandled(folder, archive)}
+												<input
+													type="checkbox"
+													checked={selectedForReview(folder)}
+													aria-label={`Select ${folder.title} to mark handled`}
+													onchange={(event) => handleReviewSelection(folder, event)}
+												/>
+											{/if}
 										</td>
 										<td>
 											<StateBadge compact tone={cleanupTone(state)} label={cleanupLabel(state)} />
@@ -650,7 +809,7 @@
 		</section>
 
 		<aside class="completed__rail" aria-label="Completed cleanup context">
-			<WorkstationPanel eyebrow="Archive" title="Cleanup root">
+			<WorkstationPanel eyebrow="Cleanup" title="Originals waiting folder">
 				<dl class="kv">
 					<dt>Root</dt>
 					<dd>{archive.archive_root || 'not configured'}</dd>
@@ -659,33 +818,31 @@
 					<dt>Size</dt>
 					<dd>{formatBytes(archive.total_size_bytes)}</dd>
 					<dt>State</dt>
-					<dd>{archive.has_cleanup ? 'cleanup available' : 'no cleanup files'}</dd>
+					<dd>{archive.has_cleanup ? 'originals waiting' : 'nothing waiting'}</dd>
 				</dl>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="State" title="Cleanup readiness">
+			<WorkstationPanel eyebrow="State" title="Originals review">
 				<div class="scope-list">
 					<div class="scope-row scope-row--ready">
-						<span>Ready</span>
+						<span>Waiting originals</span>
 						<strong>{counts.ready.toLocaleString('en-US')} folders</strong>
-						<small
-							>{formatBytes(totalArchivedBackupSize(cleanupReadyFolders))} selected-cleanup candidates</small
-						>
+						<small>{formatBytes(totalArchivedBackupSize(cleanupReadyFolders))} waiting</small>
 					</div>
 					<div class="scope-row" class:scope-row--fail={counts.blocked > 0}>
-						<span>Blocked</span>
+						<span>Check settings</span>
 						<strong>{counts.blocked.toLocaleString('en-US')} folders</strong>
-						<small>outside root or archive root unavailable</small>
+						<small>Mediaforce cannot check these originals</small>
 					</div>
 					<div class="scope-row" class:scope-row--wait={counts.unknown > 0}>
-						<span>Risky</span>
+						<span>Needs review</span>
 						<strong>{counts.unknown.toLocaleString('en-US')} folders</strong>
-						<small>missing backup evidence or unknown cleanup state</small>
+						<small>originals already gone; confirm after review</small>
 					</div>
 					<div class="scope-row">
-						<span>Cleaned</span>
+						<span>Handled</span>
 						<strong>{counts.cleaned.toLocaleString('en-US')} folders</strong>
-						<small>completed work without archived backups waiting</small>
+						<small>nothing waiting to remove</small>
 					</div>
 				</div>
 			</WorkstationPanel>
@@ -788,7 +945,7 @@
 	.completed-header__facts strong,
 	.completed-filter__summary strong,
 	.kv dd {
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-sm);
 		font-weight: var(--mf-weight-medium);
 	}
@@ -942,7 +1099,7 @@
 
 	.completed-filter__row em {
 		color: var(--mf-fg-tertiary);
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-2xs);
 		font-style: normal;
 	}
@@ -1015,7 +1172,7 @@
 
 	.confirm-panel span {
 		color: var(--mf-fg-secondary);
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-xs);
 		overflow-wrap: anywhere;
 	}
@@ -1074,7 +1231,7 @@
 		color: var(--mf-ready-fg);
 		display: flex;
 		flex-wrap: wrap;
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-xs);
 		gap: var(--mf-space-5);
 		padding: var(--mf-space-3) var(--mf-space-4);
@@ -1129,7 +1286,7 @@
 	td:nth-child(5),
 	td:nth-child(6),
 	td:nth-child(7) {
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 	}
 
 	td:nth-child(4) {
@@ -1139,7 +1296,7 @@
 
 	td:nth-child(4) span {
 		color: var(--mf-fg-tertiary);
-		font-family: var(--mf-font-sans);
+		font-family: var(--mf-font-sans), sans-serif;
 	}
 
 	.folder-link {
@@ -1155,7 +1312,7 @@
 	}
 
 	.folder-link span {
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-2xs);
 		overflow-wrap: anywhere;
 	}
@@ -1241,7 +1398,7 @@
 
 	.history-row time {
 		color: var(--mf-fg-tertiary);
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-2xs);
 		white-space: nowrap;
 	}
@@ -1353,7 +1510,7 @@
 		td:nth-child(6)::before,
 		td:nth-child(7)::before {
 			color: var(--mf-fg-tertiary);
-			font-family: var(--mf-font-sans);
+			font-family: var(--mf-font-sans), sans-serif;
 			font-size: var(--mf-text-2xs);
 			font-weight: var(--mf-weight-semibold);
 			letter-spacing: 0.08em;

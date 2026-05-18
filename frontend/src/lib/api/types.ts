@@ -167,6 +167,7 @@ export interface CompletedFolderRow {
 	cleanup_detail?: string;
 	missing_backup_count?: number;
 	outside_archive_root_count?: number;
+	originals_removed_count?: number;
 }
 
 export interface CompletedHistoryEvent {
@@ -197,6 +198,14 @@ export interface CompletedCleanupResult {
 	removed_count: number;
 	removed_size_bytes: number;
 	removed_prefix_count: number;
+	completed?: CompletedPayload;
+}
+
+export interface CompletedOriginalsResolvedResult {
+	ok: boolean;
+	message: string;
+	resolved_count: number;
+	resolved_prefix_count: number;
 	completed?: CompletedPayload;
 }
 
@@ -332,34 +341,6 @@ export interface ArchiveCleanupPayload {
 	file_count: number;
 	total_size_bytes: number;
 	has_cleanup: boolean;
-}
-
-export interface CompletedFolder {
-	prefix: string;
-	title: string;
-	subtitle: string;
-	scope_label: string;
-	promoted_item_count: number;
-	archived_backup_count: number;
-	archived_backup_size_bytes: number;
-	total_bytes_saved: number;
-	latest_promoted_at: string | null;
-}
-
-export interface CompletedPagePayload {
-	folders: CompletedFolder[];
-	completed_count: number;
-	folders_with_backups_count: number;
-	archive_cleanup: ArchiveCleanupPayload;
-}
-
-export interface CompletedBackupsClearResponse {
-	ok: boolean;
-	message: string;
-	removed_count: number;
-	removed_size_bytes: number;
-	removed_prefix_count: number;
-	completed: CompletedPagePayload;
 }
 
 export interface FolderSummary {
