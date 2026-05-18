@@ -182,6 +182,22 @@
 		return false;
 	}
 
+	function hostReadinessReason(host: HostRuntime): string {
+		if (host.available && host.schedule_open === false) {
+			return host.schedule_detail || 'Scheduled off; this is a normal wait, not a failure.';
+		}
+		if (host.available && host.queue_active === false) {
+			return host.message || 'Host is reachable but not accepting Mediaforce work.';
+		}
+		if (host.available) {
+			return host.message || host.active_reason || 'Ready for assigned work.';
+		}
+		if (host.setup_supported === false) {
+			return host.message || 'Unavailable and cannot be prepared from this screen.';
+		}
+		return host.message || 'Unavailable; start or prepare this host when it should be working.';
+	}
+
 	function handleHostPasswordInput(host: HostRuntime, event: Event) {
 		hostPasswords = {
 			...hostPasswords,
@@ -253,7 +269,42 @@
 				</div>
 			</header>
 
-			<WorkstationPanel eyebrow="Current state" title="Encoding control">
+			<WorkstationPanel eyebrow="Attention" title="What needs the operator">
+				<div class="blocker-list">
+					{#each blockers.slice(0, 6) as blocker (blocker.key)}
+						<div class="blocker-row blocker-row--{blocker.tone}">
+							<StateBadge
+								tone={blocker.tone}
+								label={blocker.tone === 'fail' ? 'Blocked' : 'Attention'}
+							/>
+							<div>
+								<strong>{blocker.title}</strong>
+								<span>{blocker.detail}</span>
+							</div>
+							{#if blocker.action}
+								{@const action = blocker.action}
+								<button
+									type="button"
+									class="control"
+									disabled={actionPending !== null}
+									title={actionTitle(action)}
+									onclick={() => runAction(action)}>{queueActionLabel(action)}</button
+								>
+							{/if}
+						</div>
+					{:else}
+						<div class="empty-note empty-note--ready">
+							<StateBadge compact tone="ready" label="Clear" />
+							<div>
+								<strong>No operator action is needed right now.</strong>
+								<span>Schedule waits and covered host issues stay in the readiness rail.</span>
+							</div>
+						</div>
+					{/each}
+				</div>
+			</WorkstationPanel>
+
+			<WorkstationPanel eyebrow="Global controls" title="Encode and sample queues">
 				<div class="scheduler-console">
 					<div class="scheduler-console__state">
 						<StateBadge
@@ -278,6 +329,10 @@
 								need attention</span
 							>
 						</div>
+					</div>
+					<div class="scheduler-console__scope">
+						<strong>Global queue controls</strong>
+						<span>Pause, resume, retry, and stop actions affect the queue, not one folder.</span>
 					</div>
 					<div class="scheduler-console__actions" aria-label="Scheduler controls">
 						<button
@@ -340,38 +395,6 @@
 					<p class="refresh-note" class:refresh-note--error={Boolean(refreshError)}>
 						{refreshError || refreshCopy()}
 					</p>
-				</div>
-			</WorkstationPanel>
-
-			<WorkstationPanel eyebrow="Attention" title="What needs the operator">
-				<div class="blocker-list">
-					{#each blockers.slice(0, 6) as blocker (blocker.key)}
-						<div class="blocker-row blocker-row--{blocker.tone}">
-							<StateBadge
-								tone={blocker.tone}
-								label={blocker.tone === 'fail' ? 'Blocked' : 'Attention'}
-							/>
-							<div>
-								<strong>{blocker.title}</strong>
-								<span>{blocker.detail}</span>
-							</div>
-							{#if blocker.action}
-								{@const action = blocker.action}
-								<button
-									type="button"
-									class="control"
-									disabled={actionPending !== null}
-									title={actionTitle(action)}
-									onclick={() => runAction(action)}>{queueActionLabel(action)}</button
-								>
-							{/if}
-						</div>
-					{:else}
-						<div class="empty-note">
-							No operator action is needed right now. Schedule waits and covered host issues stay in
-							the side rail.
-						</div>
-					{/each}
 				</div>
 			</WorkstationPanel>
 
@@ -453,49 +476,51 @@
 					title="Recent sample and proof history"
 					meta={`${historyRows.length.toLocaleString('en-US')} visible`}
 				>
-					<div class="history-note">
-						<StateBadge compact tone="idle" label="History" />
-						<span>Past sample/proof issues are not blocking current encoding.</span>
-					</div>
-					<div class="table-wrap table-wrap--history">
-						<table>
-							<thead>
-								<tr>
-									<th>State</th>
-									<th>Work</th>
-									<th>Host</th>
-									<th>Last note</th>
-									<th>When</th>
-								</tr>
-							</thead>
-							<tbody>
-								{#each historyRows as row (row.key)}
-									<tr class="job-row--history">
-										<td><StateBadge compact tone={row.tone} label={row.status} /></td>
-										<td>
-											{#if canOpenFolder(row)}
-												<a class="work-link" href={resolve(folderRoutePath(row.prefix))}>
-													<strong>{row.prefix}</strong>
-													<span>{row.kind} · {row.phase}</span>
-												</a>
-											{:else}
-												<div class="work-link">
-													<strong>{row.prefix}</strong>
-													<span>{row.kind} · {row.phase}</span>
-												</div>
-											{/if}
-										</td>
-										<td>{row.host}</td>
-										<td>
-											<strong>{row.progress}</strong>
-											<span>{row.detail}</span>
-										</td>
-										<td>{row.scheduler}</td>
+					<details class="history-disclosure">
+						<summary>
+							<StateBadge compact tone="idle" label="History" />
+							<span>Past sample/proof issues are not blocking current encoding.</span>
+						</summary>
+						<div class="table-wrap table-wrap--history">
+							<table>
+								<thead>
+									<tr>
+										<th>State</th>
+										<th>Work</th>
+										<th>Host</th>
+										<th>Last note</th>
+										<th>When</th>
 									</tr>
-								{/each}
-							</tbody>
-						</table>
-					</div>
+								</thead>
+								<tbody>
+									{#each historyRows as row (row.key)}
+										<tr class="job-row--history">
+											<td><StateBadge compact tone={row.tone} label={row.status} /></td>
+											<td>
+												{#if canOpenFolder(row)}
+													<a class="work-link" href={resolve(folderRoutePath(row.prefix))}>
+														<strong>{row.prefix}</strong>
+														<span>{row.kind} · {row.phase}</span>
+													</a>
+												{:else}
+													<div class="work-link">
+														<strong>{row.prefix}</strong>
+														<span>{row.kind} · {row.phase}</span>
+													</div>
+												{/if}
+											</td>
+											<td>{row.host}</td>
+											<td>
+												<strong>{row.progress}</strong>
+												<span>{row.detail}</span>
+											</td>
+											<td>{row.scheduler}</td>
+										</tr>
+									{/each}
+								</tbody>
+							</table>
+						</div>
+					</details>
 				</WorkstationPanel>
 			{/if}
 		</section>
@@ -566,6 +591,7 @@
 									onclick={() => runAction('reset-host-trust', host)}>Trust</button
 								>
 							</div>
+							<p class="host-row__reason">{hostReadinessReason(host)}</p>
 						</div>
 					{:else}
 						<div class="empty-note">Host status is unavailable.</div>
@@ -680,7 +706,7 @@
 	.current-standby,
 	.host-list,
 	.schedule-list,
-	.history-note {
+	.history-disclosure {
 		display: grid;
 		gap: var(--mf-space-4);
 		padding: var(--mf-space-5);
@@ -688,8 +714,7 @@
 
 	.scheduler-console__state,
 	.blocker-row,
-	.current-standby,
-	.history-note {
+	.current-standby {
 		align-items: center;
 		display: grid;
 		gap: var(--mf-space-4);
@@ -704,6 +729,7 @@
 		min-width: 0;
 	}
 
+	.scheduler-console__scope strong,
 	.scheduler-console__state strong,
 	.blocker-row strong,
 	.current-standby strong,
@@ -714,10 +740,11 @@
 		overflow-wrap: anywhere;
 	}
 
+	.scheduler-console__scope span,
 	.scheduler-console__state span,
 	.blocker-row span,
 	.current-standby span,
-	.history-note span,
+	.history-disclosure summary span,
 	.scope-row small {
 		color: var(--mf-fg-tertiary);
 		font-size: var(--mf-text-xs);
@@ -761,6 +788,14 @@
 		padding: var(--mf-space-4);
 	}
 
+	.scheduler-console__scope {
+		background: var(--mf-bg-strip);
+		border-left: 2px solid var(--mf-wait-fg);
+		display: grid;
+		gap: var(--mf-space-1);
+		padding: var(--mf-space-4);
+	}
+
 	.current-standby {
 		background: var(--mf-bg-strip);
 		border-left: 2px solid var(--mf-ready-fg);
@@ -768,10 +803,44 @@
 		min-height: var(--mf-row-comfy);
 	}
 
-	.history-note {
-		border-bottom: var(--mf-border-muted);
+	.empty-note--ready {
+		align-items: center;
+		background: var(--mf-ready-bg);
+		border-left: 2px solid var(--mf-ready-fg);
+		display: grid;
+		gap: var(--mf-space-4);
 		grid-template-columns: auto minmax(0, 1fr);
+	}
+
+	.empty-note--ready div {
+		display: grid;
+		gap: var(--mf-space-1);
+	}
+
+	.history-disclosure {
+		gap: 0;
+	}
+
+	.history-disclosure summary {
+		align-items: center;
+		cursor: pointer;
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-template-columns: auto minmax(0, 1fr);
+		list-style: none;
+	}
+
+	.history-disclosure summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.history-disclosure[open] summary {
+		border-bottom: var(--mf-border-muted);
 		padding-bottom: var(--mf-space-4);
+	}
+
+	.history-disclosure[open] .table-wrap {
+		margin-top: var(--mf-space-4);
 	}
 
 	.blocker-row--fail {
@@ -970,6 +1039,15 @@
 		overflow-wrap: anywhere;
 	}
 
+	.host-row__reason {
+		border-left: 2px solid var(--mf-line-strong);
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+		line-height: 1.45;
+		margin: 0;
+		padding-left: var(--mf-space-3);
+	}
+
 	.scope-row {
 		border-left: 2px solid var(--mf-line-strong);
 		display: grid;
@@ -1012,7 +1090,7 @@
 		.scheduler-console__state,
 		.blocker-row,
 		.current-standby,
-		.history-note {
+		.empty-note--ready {
 			align-items: start;
 			grid-template-columns: 1fr;
 		}
