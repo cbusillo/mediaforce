@@ -380,6 +380,11 @@
 					</div>
 				{/if}
 
+				<div class="settings-band">
+					<strong>Basic setup</strong>
+					<span>Library folders and working storage used by normal Mediaforce runs.</span>
+				</div>
+
 				<WorkstationPanel
 					eyebrow="Libraries"
 					title="Media folders"
@@ -437,7 +442,7 @@
 												class="control control--compact control--danger"
 												onclick={() => (draft.libraries = removeAtIndex(draft.libraries, index))}
 											>
-												Remove
+												Remove library
 											</button>
 										</td>
 									</tr>
@@ -479,35 +484,21 @@
 							<strong>{archiveCleanup?.file_count.toLocaleString('en-US') ?? '0'} files</strong>
 							<small>{formatGiB(archiveCleanup?.total_size_bytes ?? 0)}</small>
 						</div>
-						<div class="archive-actions">
+						<div class="storage-readout">
+							<span>Cleanup action</span>
 							<StateBadge
 								tone={archiveCleanup?.has_cleanup ? 'wait' : 'ready'}
 								label={archiveCleanup?.has_cleanup ? 'Waiting' : 'Handled'}
 							/>
-							<button
-								type="button"
-								class="control control--danger"
-								class:control--armed={clearArchiveArmed}
-								disabled={!archiveCleanup?.has_cleanup || clearArchivePending || cleanupTargetDirty}
-								onclick={clearArchiveCleanup}
-								title={cleanupTargetDirty
-									? 'Save the changed transcode root before clearing archived originals.'
-									: undefined}
-							>
-								{clearArchivePending
-									? 'Removing'
-									: clearArchiveArmed
-										? 'Confirm'
-										: 'Remove waiting originals'}
-							</button>
+							<small>Destructive cleanup lives in the danger zone below.</small>
 						</div>
 					</div>
-					{#if archiveError}
-						<p class="action-error">{archiveError}</p>
-					{:else if archiveMessage}
-						<p class="action-message">{archiveMessage}</p>
-					{/if}
 				</WorkstationPanel>
+
+				<div class="settings-band">
+					<strong>Advanced operation</strong>
+					<span>Schedule windows, worker routing, commands, and source overrides.</span>
+				</div>
 
 				<WorkstationPanel
 					eyebrow="Schedules"
@@ -574,7 +565,7 @@
 										onclick={() =>
 											(draft.schedule_profiles = removeAtIndex(draft.schedule_profiles, index))}
 									>
-										Remove
+										Remove schedule
 									</button>
 								</div>
 								<div
@@ -667,7 +658,7 @@
 										class="control control--compact control--danger"
 										onclick={() => (draft.remote_hosts = removeAtIndex(draft.remote_hosts, index))}
 									>
-										Remove
+										Remove worker
 									</button>
 								</header>
 								<div class="host-grid">
@@ -751,45 +742,63 @@
 											oninput={(event) => updateHost(index, { staging_root: inputValue(event) })}
 										/>
 									</label>
-									<label>
-										<span>Start command</span>
-										<input
-											class="field field--path"
-											value={host.start_command}
-											placeholder="Optional wake/start command"
-											oninput={(event) => updateHost(index, { start_command: inputValue(event) })}
-										/>
-									</label>
-									<label>
-										<span>Stop command</span>
-										<input
-											class="field field--path"
-											value={host.stop_command}
-											placeholder="Optional stop command"
-											oninput={(event) => updateHost(index, { stop_command: inputValue(event) })}
-										/>
-									</label>
-									<label>
-										<span>Wake MAC</span>
-										<input
-											class="field"
-											value={host.wake_mac}
-											placeholder="Optional"
-											oninput={(event) => updateHost(index, { wake_mac: inputValue(event) })}
-										/>
-									</label>
-									<label>
-										<span>Start timeout</span>
-										<input
-											class="field field--number"
-											type="number"
-											min="1"
-											value={host.start_timeout_seconds}
-											oninput={(event) =>
-												updateHost(index, { start_timeout_seconds: inputValue(event) })}
-										/>
-									</label>
 								</div>
+								<details class="host-advanced">
+									<summary>
+										<strong>Advanced worker internals</strong>
+										<span>Start/stop commands, wake settings, timeout, and source overrides.</span>
+									</summary>
+									<div class="host-grid host-grid--advanced">
+										<label>
+											<span>Start command</span>
+											<input
+												class="field field--path"
+												value={host.start_command}
+												placeholder="Optional wake/start command"
+												oninput={(event) => updateHost(index, { start_command: inputValue(event) })}
+											/>
+										</label>
+										<label>
+											<span>Stop command</span>
+											<input
+												class="field field--path"
+												value={host.stop_command}
+												placeholder="Optional stop command"
+												oninput={(event) => updateHost(index, { stop_command: inputValue(event) })}
+											/>
+										</label>
+										<label>
+											<span>Wake MAC</span>
+											<input
+												class="field"
+												value={host.wake_mac}
+												placeholder="Optional"
+												oninput={(event) => updateHost(index, { wake_mac: inputValue(event) })}
+											/>
+										</label>
+										<label>
+											<span>Start timeout</span>
+											<input
+												class="field field--number"
+												type="number"
+												min="1"
+												value={host.start_timeout_seconds}
+												oninput={(event) =>
+													updateHost(index, { start_timeout_seconds: inputValue(event) })}
+											/>
+										</label>
+									</div>
+									<label class="stacked-field">
+										<span>Source root overrides JSON</span>
+										<textarea
+											class="field field--textarea"
+											bind:value={draft.remote_hosts[index].source_roots_json}
+											placeholder={'{"tv": "/Volumes/TV"}'}
+											oninput={(event) =>
+												updateHost(index, { source_roots_json: inputValue(event) })}
+										></textarea>
+									</label>
+								</details>
 								<div class="host-options">
 									<div>
 										<span class="option-label">Capabilities</span>
@@ -824,15 +833,6 @@
 										</div>
 									</div>
 								</div>
-								<label class="stacked-field">
-									<span>Source root overrides JSON</span>
-									<textarea
-										class="field field--textarea"
-										bind:value={draft.remote_hosts[index].source_roots_json}
-										placeholder={'{"tv": "/Volumes/TV"}'}
-										oninput={(event) => updateHost(index, { source_roots_json: inputValue(event) })}
-									></textarea>
-								</label>
 							</section>
 						{/each}
 					</div>
@@ -846,6 +846,52 @@
 							Add host
 						</button>
 					</div>
+				</WorkstationPanel>
+
+				<div class="settings-band settings-band--danger">
+					<strong>Danger zone</strong>
+					<span>Actions here delete waiting originals from the cleanup folder.</span>
+				</div>
+
+				<WorkstationPanel eyebrow="Danger zone" title="Clear originals waiting folder">
+					<div class="danger-zone">
+						<div>
+							<span>Target</span>
+							<strong class="mf-path">{savedArchiveRootCopy}</strong>
+							<small
+								>{archiveCleanup?.file_count.toLocaleString('en-US') ?? '0'} files · {formatGiB(
+									archiveCleanup?.total_size_bytes ?? 0
+								)}</small
+							>
+						</div>
+						<div class="archive-actions">
+							<StateBadge
+								tone={archiveCleanup?.has_cleanup ? 'wait' : 'ready'}
+								label={archiveCleanup?.has_cleanup ? 'Originals waiting' : 'Nothing waiting'}
+							/>
+							<button
+								type="button"
+								class="control control--danger"
+								class:control--armed={clearArchiveArmed}
+								disabled={!archiveCleanup?.has_cleanup || clearArchivePending || cleanupTargetDirty}
+								onclick={clearArchiveCleanup}
+								title={cleanupTargetDirty
+									? 'Save the changed transcode root before clearing archived originals.'
+									: undefined}
+							>
+								{clearArchivePending
+									? 'Removing originals'
+									: clearArchiveArmed
+										? 'Confirm delete originals'
+										: 'Delete waiting originals'}
+							</button>
+						</div>
+					</div>
+					{#if archiveError}
+						<p class="action-error">{archiveError}</p>
+					{:else if archiveMessage}
+						<p class="action-message">{archiveMessage}</p>
+					{/if}
 				</WorkstationPanel>
 			</section>
 
@@ -949,6 +995,29 @@
 		color: var(--mf-fail-fg);
 	}
 
+	.settings-band {
+		background: var(--mf-bg-strip);
+		border-left: 2px solid var(--mf-active-fg);
+		display: grid;
+		gap: var(--mf-space-1);
+		padding: var(--mf-space-4) var(--mf-space-5);
+	}
+
+	.settings-band strong {
+		font-size: var(--mf-text-sm);
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.settings-band span {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+	}
+
+	.settings-band--danger {
+		background: var(--mf-fail-bg);
+		border-left-color: var(--mf-fail-fg);
+	}
+
 	.table-wrap {
 		overflow: auto;
 	}
@@ -1043,6 +1112,7 @@
 	}
 
 	.stacked-field,
+	.host-advanced label,
 	.host-grid label,
 	.schedule-row__fields label {
 		display: grid;
@@ -1051,9 +1121,11 @@
 	}
 
 	.stacked-field span,
+	.host-advanced label span,
 	.host-grid label span,
 	.schedule-row__fields label span,
 	.storage-readout span,
+	.danger-zone > div > span,
 	.option-label,
 	.rail-row span {
 		color: var(--mf-fg-tertiary);
@@ -1071,6 +1143,7 @@
 	}
 
 	.storage-readout,
+	.danger-zone > div,
 	.rail-row {
 		display: grid;
 		gap: var(--mf-space-2);
@@ -1078,6 +1151,7 @@
 	}
 
 	.storage-readout strong,
+	.danger-zone strong,
 	.rail-row strong,
 	.host-editor__head strong,
 	.schedule-row strong {
@@ -1087,6 +1161,7 @@
 	}
 
 	.storage-readout small,
+	.danger-zone small,
 	.rail-row small,
 	.muted-copy,
 	.schedule-summary,
@@ -1236,9 +1311,50 @@
 	}
 
 	.host-grid label:nth-child(3),
-	.host-grid label:nth-child(9),
-	.host-grid label:nth-child(10) {
+	.host-grid label:nth-child(8) {
 		grid-column: span 2;
+	}
+
+	.host-advanced {
+		background: var(--mf-bg-strip);
+		border: var(--mf-border-muted);
+		display: grid;
+		gap: var(--mf-space-4);
+		padding: var(--mf-space-4);
+	}
+
+	.host-advanced summary {
+		cursor: pointer;
+		display: grid;
+		gap: var(--mf-space-1);
+		list-style-position: inside;
+	}
+
+	.host-advanced summary strong {
+		font-size: var(--mf-text-sm);
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.host-advanced summary span {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+	}
+
+	.host-grid--advanced {
+		grid-template-columns: repeat(4, minmax(130px, 1fr));
+	}
+
+	.host-grid--advanced label:nth-child(1),
+	.host-grid--advanced label:nth-child(2) {
+		grid-column: span 2;
+	}
+
+	.danger-zone {
+		align-items: center;
+		display: grid;
+		gap: var(--mf-space-5);
+		grid-template-columns: minmax(0, 1fr) auto;
+		padding: var(--mf-space-5);
 	}
 
 	.host-options {
@@ -1332,6 +1448,7 @@
 	@media (max-width: 1120px) {
 		.settings-console,
 		.storage-grid,
+		.danger-zone,
 		.host-options {
 			grid-template-columns: 1fr;
 		}
