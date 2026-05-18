@@ -20,7 +20,7 @@ export function queueFolderTone(folder: FolderCard): ShellTone {
 
 export function queueFolderState(folder: FolderCard): string {
 	if (folder.review_badge_label) return folder.review_badge_label;
-	if (folder.pending_count > 0) return 'Needs check';
+	if (folder.pending_count > 0) return 'Ready to start';
 	if (folder.known_saved_bytes > 0) return 'Completed';
 	return 'Cataloged';
 }
