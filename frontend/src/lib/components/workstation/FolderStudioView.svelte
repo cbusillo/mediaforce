@@ -28,6 +28,7 @@
 	import {
 		buildBenchMessages,
 		buildBenchHostOptions,
+		buildWorkflowSteps,
 		buildFooterSignals,
 		buildProposalRows,
 		buildSampleFacts,
@@ -62,6 +63,7 @@
 	let workflowPending = $state<WorkflowAction | null>(null);
 	let benchMessage = $state('');
 	let benchError = $state('');
+	let benchTextarea = $state<HTMLTextAreaElement | null>(null);
 	let localPendingProposal = $state<Record<string, unknown> | null | undefined>(undefined);
 	let localProposalPrefix = $state('');
 	const studioFolder = $derived({
@@ -106,6 +108,7 @@
 			encodeJob
 		)
 	);
+	const workflowSteps = $derived(buildWorkflowSteps(workflow));
 	const proposalRows = $derived(buildProposalRows(studioFolder, pendingProposal));
 	const statusTiles = $derived(buildStatusTiles(studioFolder, status, hosts, workflow));
 	const footerSignals = $derived(buildFooterSignals(studioFolder, status, hosts));
@@ -127,6 +130,7 @@
 	const reviewPackReady = $derived(
 		reviewArtifacts.length > 0 || reviewReadyCopy(calibration) === 'Ready'
 	);
+	const primaryActionState = $derived(workflowActionState(workflow.primaryAction));
 
 	function workflowActionState(action: WorkflowAction) {
 		return resolveWorkflowActionState(action, {
@@ -135,6 +139,11 @@
 			calibrationJob,
 			pendingAction: workflowPending
 		});
+	}
+
+	function focusBenchComposer() {
+		benchTextarea?.focus();
+		benchTextarea?.scrollIntoView({ block: 'center' });
 	}
 
 	async function sendBenchRequest() {
@@ -208,7 +217,7 @@
 					</div>
 					<div>
 						<span>Metric</span>
-						<strong>{studioFolder.metric_status_copy || resolvedMetricCopy(studioFolder)}</strong>
+						<strong>{resolvedMetricCopy(studioFolder)}</strong>
 					</div>
 				</div>
 			</header>
@@ -218,6 +227,11 @@
 					<StateBadge tone={workflow.tone} label={workflow.label} />
 					<h2 id="decision-title">{workflow.title}</h2>
 					<p>{workflow.copy}</p>
+				</div>
+				<div class="decision__next">
+					<span>Next action</span>
+					<strong>{workflow.primary}</strong>
+					<small>{primaryActionState.disabled ? primaryActionState.title : 'Ready now'}</small>
 				</div>
 				<div class="decision__metrics">
 					<div>
@@ -234,7 +248,14 @@
 					</div>
 				</div>
 				<div class="decision__actions">
-					{#if workflow.primaryAction === 'open-ops'}
+					{#if workflow.primaryAction === 'focus-bench'}
+						<button
+							class="control control--primary"
+							type="button"
+							onclick={focusBenchComposer}
+							data-mf-action={workflow.primaryAction}>{workflow.primary}</button
+						>
+					{:else if workflow.primaryAction === 'open-ops'}
 						<a
 							class="control control--primary"
 							href={resolve('/ops')}
@@ -270,7 +291,14 @@
 							data-mf-wire="pending">{workflow.primary}</button
 						>
 					{/if}
-					{#if workflow.secondaryAction === 'open-ops'}
+					{#if workflow.secondaryAction === 'focus-bench'}
+						<button
+							class="control"
+							type="button"
+							onclick={focusBenchComposer}
+							data-mf-action={workflow.secondaryAction}>{workflow.secondary}</button
+						>
+					{:else if workflow.secondaryAction === 'open-ops'}
 						<a class="control" href={resolve('/ops')} data-mf-action={workflow.secondaryAction}
 							>{workflow.secondary}</a
 						>
@@ -335,6 +363,7 @@
 							<textarea
 								rows="5"
 								placeholder="Ask Bench what to sample, revise, or validate for this folder."
+								bind:this={benchTextarea}
 								bind:value={benchNote}
 							></textarea>
 						</label>
@@ -526,6 +555,18 @@
 					{/if}
 				</div>
 			</WorkstationPanel>
+
+			<WorkstationPanel eyebrow="Flow" title="Folder steps">
+				<div class="step-list">
+					{#each workflowSteps as step (step.label)}
+						<div class:step-row--current={step.current} class="step-row step-row--{step.tone}">
+							<span>{step.label}</span>
+							<strong>{step.current ? 'Current' : 'Pending'}</strong>
+							<small>{step.detail}</small>
+						</div>
+					{/each}
+				</div>
+			</WorkstationPanel>
 		</aside>
 	</main>
 </OperatorShell>
@@ -575,6 +616,7 @@
 	}
 
 	.folder-header__facts,
+	.decision__next,
 	.decision__metrics,
 	.sample-facts {
 		display: flex;
@@ -585,6 +627,15 @@
 	.sample-facts {
 		display: grid;
 		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+
+	.decision__next {
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border-muted);
+		border-left: 2px solid var(--decision-line);
+		display: grid;
+		gap: var(--mf-space-2);
+		padding: var(--mf-space-4);
 	}
 
 	.sample-facts div:first-child {
@@ -601,6 +652,7 @@
 	}
 
 	.folder-header__facts span,
+	.decision__next span,
 	.decision__metrics span,
 	.sample-facts span,
 	.context-list span {
@@ -612,6 +664,7 @@
 	}
 
 	.folder-header__facts strong,
+	.decision__next strong,
 	.decision__metrics strong,
 	.sample-facts strong,
 	.context-list strong {
@@ -621,6 +674,11 @@
 		overflow-wrap: anywhere;
 	}
 
+	.decision__next small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+	}
+
 	.decision {
 		--decision-line: var(--mf-idle-line);
 		background: var(--mf-bg-panel);
@@ -628,7 +686,7 @@
 		border-left: 3px solid var(--decision-line);
 		display: grid;
 		gap: var(--mf-space-6);
-		grid-template-columns: minmax(0, 1fr) minmax(160px, 260px) auto;
+		grid-template-columns: minmax(0, 1fr) minmax(180px, 240px) minmax(160px, 240px) auto;
 		padding: var(--mf-space-6);
 	}
 
@@ -891,7 +949,8 @@
 
 	.artifact-list,
 	.host-list,
-	.history-list {
+	.history-list,
+	.step-list {
 		display: grid;
 		gap: var(--mf-space-4);
 		padding: var(--mf-space-5);
@@ -918,6 +977,51 @@
 	.artifact-row span,
 	.host-row span,
 	.history-list span {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+	}
+
+	.step-row {
+		border-left: 2px solid var(--mf-line-strong);
+		display: grid;
+		gap: var(--mf-space-2);
+		padding: var(--mf-space-3) var(--mf-space-4);
+	}
+
+	.step-row--current {
+		background: var(--mf-active-bg);
+	}
+
+	.step-row--active {
+		border-left-color: var(--mf-active-fg);
+	}
+
+	.step-row--ready {
+		border-left-color: var(--mf-ready-fg);
+	}
+
+	.step-row--wait {
+		border-left-color: var(--mf-wait-fg);
+	}
+
+	.step-row--fail {
+		border-left-color: var(--mf-fail-fg);
+	}
+
+	.step-row > span {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.step-row strong {
+		font-size: var(--mf-text-xs);
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.step-row small {
 		color: var(--mf-fg-tertiary);
 		font-size: var(--mf-text-xs);
 	}
@@ -1014,6 +1118,14 @@
 		.studio {
 			grid-template-columns: minmax(190px, 240px) minmax(0, 1fr);
 		}
+
+		.decision {
+			grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
+		}
+
+		.decision__actions {
+			grid-column: 1 / -1;
+		}
 	}
 
 	@media (max-width: 820px) {
@@ -1041,6 +1153,7 @@
 		}
 
 		.folder-header__facts,
+		.decision__next,
 		.decision__metrics,
 		.sample-facts,
 		.decision__actions {

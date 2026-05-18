@@ -1,11 +1,46 @@
 import { describe, expect, it } from 'vitest';
+import type { FolderPayload, FolderStatusPayload } from '$lib/api/types';
 import type { FolderCalibrationJob } from '$lib/folders/studio';
 import {
 	buildBenchHostOptions,
+	buildWorkflowSteps,
 	resolveBenchRequestState,
+	resolveWorkflow,
 	resolveWorkflowActionState
 } from './folder-studio-view';
 import type { PendingSampleProposal } from '$lib/folders/studio';
+
+function folderPayload(overrides: Partial<FolderPayload> = {}): FolderPayload {
+	return {
+		prefix: 'tv/Example/Season 1',
+		pending: true,
+		summary: {
+			prefix: 'tv/Example/Season 1',
+			item_count: 1,
+			total_size_bytes: 1,
+			statuses: {},
+			video_codecs: {},
+			audio_codecs: {},
+			seasons: {},
+			resolved_policy: {}
+		},
+		metric_support: { vmaf: true, xpsnr: false, ssim: false },
+		metric_status_copy: 'VMAF available',
+		...overrides
+	};
+}
+
+function folderStatusPayload(overrides: Partial<FolderStatusPayload> = {}): FolderStatusPayload {
+	return {
+		prefix: 'tv/Example/Season 1',
+		polling_active: false,
+		calibration_status: 'idle',
+		folder_scan_status: 'idle',
+		calibration_job: null,
+		folder_scan_job: null,
+		...overrides
+	};
+}
 
 describe('Folder Studio Bench request mapping', () => {
 	it('uses only folder-scoped host options and removes empty keys', () => {
@@ -64,6 +99,14 @@ describe('Folder Studio Bench request mapping', () => {
 
 	it('enables sample confirmation only for queueable Bench drafts', () => {
 		expect(
+			resolveWorkflowActionState('focus-bench', {
+				reviewPackReady: false,
+				pendingProposal: null,
+				calibrationJob: null
+			})
+		).toEqual({ disabled: false, title: '' });
+
+		expect(
 			resolveWorkflowActionState('start-sample', {
 				reviewPackReady: false,
 				pendingProposal: null,
@@ -104,5 +147,71 @@ describe('Folder Studio Bench request mapping', () => {
 			disabled: true,
 			title: 'A sample job is already active for this folder.'
 		});
+	});
+
+	it('keeps Bench drafts on the sample confirmation action', () => {
+		const workflow = resolveWorkflow(
+			folderPayload({
+				pending_proposal: {
+					proposal_id: 'draft-2',
+					can_queue: true,
+					message: 'Queue this representative sample.'
+				}
+			}),
+			folderStatusPayload(),
+			null,
+			{
+				proposal_id: 'draft-2',
+				can_queue: true,
+				message: 'Queue this representative sample.'
+			} as PendingSampleProposal,
+			null,
+			null,
+			null
+		);
+
+		expect(workflow).toMatchObject({
+			label: 'Draft ready',
+			primary: 'Start sample',
+			primaryAction: 'start-sample'
+		});
+	});
+
+	it('makes unsampled folders start with Bench instead of a disabled sample action', () => {
+		const workflow = resolveWorkflow(
+			folderPayload(),
+			folderStatusPayload(),
+			null,
+			null,
+			null,
+			null,
+			null
+		);
+
+		expect(workflow).toMatchObject({
+			label: 'Not sampled',
+			primary: 'Ask Bench for draft',
+			primaryAction: 'focus-bench'
+		});
+	});
+
+	it('marks the current folder workflow step', () => {
+		const steps = buildWorkflowSteps({
+			tone: 'ready',
+			label: 'Draft ready',
+			title: 'Bench draft is ready to sample',
+			copy: 'Review the draft.',
+			primary: 'Start sample',
+			primaryAction: 'start-sample',
+			secondary: 'Revise',
+			secondaryAction: 'revise-proposal'
+		});
+
+		expect(steps.map((step) => [step.label, step.current])).toEqual([
+			['Sample', true],
+			['Review', false],
+			['Approve', false],
+			['Encode', false]
+		]);
 	});
 });
