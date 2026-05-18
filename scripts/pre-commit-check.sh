@@ -20,6 +20,7 @@ run_step "Frontend checks" npm --prefix frontend run check
 run_step "Frontend lint" npm --prefix frontend run lint
 run_step "Frontend unit tests" npm --prefix frontend test
 run_step "Frontend build" npm --prefix frontend run build
+run_step "Web route smoke" npm --prefix frontend run smoke:web
 
 echo
 echo "Pre-commit acceptance checks passed."

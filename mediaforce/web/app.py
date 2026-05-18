@@ -387,7 +387,6 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             maybe_schedule_scan=_maybe_schedule_scan,
             decorate_encode_queue_for_scheduler=_decorate_encode_queue_for_scheduler,
             library_color_map_for_config=_library_color_map_for_config,
-            archive_cleanup_summary_fn=archive_cleanup_summary,
         )
 
     def _dashboard_folders_payload() -> dict[str, Any]:

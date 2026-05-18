@@ -387,16 +387,14 @@
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="Cleanup" title="Originals waiting">
+			<WorkstationPanel eyebrow="Completed" title="Originals cleanup">
 				<dl class="kv">
-					<dt>Cleanup folder</dt>
-					<dd>{dashboard.archive_cleanup?.archive_root ?? '—'}</dd>
-					<dt>Files</dt>
-					<dd>{dashboard.archive_cleanup?.file_count?.toLocaleString('en-US') ?? '0'}</dd>
-					<dt>Size</dt>
-					<dd>{formatBytes(dashboard.archive_cleanup?.total_size_bytes)}</dd>
+					<dt>Route</dt>
+					<dd>Completed</dd>
+					<dt>Scope</dt>
+					<dd>Archived originals</dd>
 					<dt>Action</dt>
-					<dd>{dashboard.archive_cleanup?.has_cleanup ? 'review on Completed' : 'no action'}</dd>
+					<dd><a href={resolve('/completed')}>Review cleanup</a></dd>
 				</dl>
 			</WorkstationPanel>
 		</section>
