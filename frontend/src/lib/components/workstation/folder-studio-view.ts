@@ -37,6 +37,7 @@ export type WorkflowState = {
 
 export type WorkflowAction =
 	| 'download-review-pack'
+	| 'focus-bench'
 	| 'open-ops'
 	| 'queue-encode'
 	| 'retry-encode'
@@ -81,6 +82,13 @@ export type BenchRequestState = {
 export type WorkflowActionState = {
 	disabled: boolean;
 	title: string;
+};
+
+export type WorkflowStep = {
+	label: string;
+	detail: string;
+	tone: ShellTone;
+	current: boolean;
 };
 
 export function record<T extends Record<string, unknown>>(value: unknown): T | null {
@@ -160,6 +168,7 @@ export function resolveWorkflowActionState(
 			title: pendingAction === action ? 'Action is running.' : 'Another folder action is running.'
 		};
 	}
+	if (action === 'focus-bench') return { disabled: false, title: '' };
 	if (action === 'open-ops') return { disabled: false, title: '' };
 	if (action === 'download-review-pack') {
 		return reviewPackReady
@@ -489,6 +498,20 @@ export function resolveWorkflow(
 			secondaryAction: 'revise-proposal'
 		};
 	}
+	if (pendingProposal?.proposal_id && pendingProposal.can_queue !== false) {
+		return {
+			tone: 'ready',
+			label: 'Draft ready',
+			title: 'Bench draft is ready to sample',
+			copy:
+				pendingProposal.message ??
+				'Review the Bench draft, then queue the representative sample when it looks right.',
+			primary: 'Start sample',
+			primaryAction: 'start-sample',
+			secondary: 'Revise',
+			secondaryAction: 'revise-proposal'
+		};
+	}
 	if (pendingProposal || calibration?.browser_review_ready || calibration?.review_media_ready) {
 		return {
 			tone: 'ready',
@@ -508,9 +531,9 @@ export function resolveWorkflow(
 			tone: 'idle',
 			label: 'Not sampled',
 			title: 'No representative sample yet',
-			copy: 'Start a sample before approving folder-wide settings. Host readiness and policy context remain visible while the sample is queued.',
-			primary: 'Start sample',
-			primaryAction: 'start-sample',
+			copy: 'Ask Bench for a sample draft before approving folder-wide settings. Host readiness and policy context stay visible while the sample is queued.',
+			primary: 'Ask Bench for draft',
+			primaryAction: 'focus-bench',
 			secondary: 'Open Ops',
 			secondaryAction: 'open-ops'
 		};
@@ -520,11 +543,52 @@ export function resolveWorkflow(
 		label: 'Waiting',
 		title: 'Folder is waiting for review evidence',
 		copy: 'A representative item exists, but the current review state is incomplete. Refresh status or rerun the sample if the evidence is stale.',
-		primary: 'Download review pack',
-		primaryAction: 'download-review-pack',
-		secondary: 'Re-sample',
-		secondaryAction: 'resample'
+		primary: 'Ask Bench to refresh',
+		primaryAction: 'focus-bench',
+		secondary: 'Open Ops',
+		secondaryAction: 'open-ops'
 	};
+}
+
+export function buildWorkflowSteps(workflow: WorkflowState): WorkflowStep[] {
+	const activeAction = workflow.primaryAction;
+	const activeLabel = workflow.label.toLowerCase();
+	const sampleCurrent =
+		['focus-bench', 'start-sample', 'retry-sample', 'stop-sample'].includes(activeAction) ||
+		['not sampled', 'sampling', 'retryable', 'draft ready'].includes(activeLabel);
+	const reviewCurrent =
+		['download-review-pack', 'revise-proposal'].includes(activeAction) ||
+		['review ready', 'check draft'].includes(activeLabel);
+	const approveCurrent = ['queue-encode'].includes(activeAction) || activeLabel === 'approved';
+	const encodeCurrent =
+		['open-ops', 'retry-encode'].includes(activeAction) ||
+		['processing', 'retry available'].includes(activeLabel);
+	return [
+		{
+			label: 'Sample',
+			detail: sampleCurrent ? workflow.title : 'Choose representative evidence',
+			tone: sampleCurrent ? workflow.tone : 'idle',
+			current: sampleCurrent
+		},
+		{
+			label: 'Review',
+			detail: reviewCurrent ? workflow.title : 'Compare the sample pack',
+			tone: reviewCurrent ? workflow.tone : 'idle',
+			current: reviewCurrent
+		},
+		{
+			label: 'Approve',
+			detail: approveCurrent ? workflow.title : 'Accept or revise policy',
+			tone: approveCurrent ? workflow.tone : 'idle',
+			current: approveCurrent
+		},
+		{
+			label: 'Encode',
+			detail: encodeCurrent ? workflow.title : 'Run approved folder work',
+			tone: encodeCurrent ? workflow.tone : 'idle',
+			current: encodeCurrent
+		}
+	];
 }
 
 export function buildProposalRows(
