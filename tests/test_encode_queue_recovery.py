@@ -8821,6 +8821,66 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         )
         run_remote_command_mock.assert_not_called()
 
+    def test_local_quality_environment_prefers_mediaforce_binary_overrides(self) -> None:
+        with patch.dict(
+                "mediaforce.quality.os.environ",
+                {
+                    "MEDIAFORCE_FFMPEG": "/tmp/mediaforce-tools/ffmpeg",
+                    "MEDIAFORCE_FFPROBE": "/tmp/mediaforce-tools/ffprobe",
+                    "PATH": "/usr/bin:/bin",
+                },
+                clear=True,
+        ):
+            env = quality._local_quality_environment()
+
+        self.assertTrue(env["PATH"].startswith("/tmp/mediaforce-tools:/opt/homebrew/opt/ffmpeg-full/bin:"))
+
+    def test_local_quality_environment_ignores_bare_override_names(self) -> None:
+        with patch.dict(
+                "mediaforce.quality.os.environ",
+                {
+                    "MEDIAFORCE_FFMPEG": "ffmpeg",
+                    "MEDIAFORCE_FFPROBE": "ffprobe",
+                    "PATH": "/usr/bin:/bin",
+                },
+                clear=True,
+        ):
+            env = quality._local_quality_environment()
+
+        self.assertEqual(
+            env["PATH"].split(":", 2)[:2],
+            ["/opt/homebrew/opt/ffmpeg-full/bin", "/usr/local/opt/ffmpeg-full/bin"],
+        )
+        self.assertNotIn(".", env["PATH"].split(":"))
+
+    def test_local_quality_environment_ignores_relative_override_paths(self) -> None:
+        with patch.dict(
+                "mediaforce.quality.os.environ",
+                {
+                    "MEDIAFORCE_FFMPEG": "tools/ffmpeg",
+                    "MEDIAFORCE_FFPROBE": "tools/ffprobe",
+                    "PATH": "/usr/bin:/bin",
+                },
+                clear=True,
+        ):
+            env = quality._local_quality_environment()
+
+        self.assertNotIn("tools", env["PATH"].split(":"))
+        self.assertTrue(env["PATH"].startswith("/opt/homebrew/opt/ffmpeg-full/bin:/usr/local/opt/ffmpeg-full/bin:"))
+
+    def test_local_quality_environment_deduplicates_override_dirs(self) -> None:
+        with patch.dict(
+                "mediaforce.quality.os.environ",
+                {
+                    "MEDIAFORCE_FFMPEG": "/tmp/mediaforce-tools/ffmpeg",
+                    "MEDIAFORCE_FFPROBE": "/tmp/mediaforce-tools/ffprobe",
+                },
+                clear=True,
+        ):
+            env = quality._local_quality_environment()
+
+        self.assertEqual(env["PATH"].count("/tmp/mediaforce-tools"), 1)
+
     def test_build_ffmpeg_command_enables_videotoolbox_decode_for_h264_sources(self) -> None:
         with patch("mediaforce.execution.ffmpeg_binary", return_value="/tmp/ffmpeg"):
             cmd = execution._build_ffmpeg_command(
