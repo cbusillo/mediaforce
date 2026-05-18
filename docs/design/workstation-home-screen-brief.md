@@ -1,5 +1,10 @@
 # Workstation Home Screen Brief
 
+> Status: Superseded first-pass home brief. Do not use this as the current
+> Queue/Home execution plan. Start with `docs/design/README.md`,
+> `docs/design/operator-workstation-shell-brief.md`, and GitHub issue `#56`
+> instead.
+
 This brief defines the durable reset direction for the Mediaforce home screen
 as an operator workstation surface. It replaces the earlier prototype framing
 with a stricter console model based on live browser review of the current home

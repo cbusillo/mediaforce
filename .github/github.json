@@ -16,8 +16,9 @@
       "docs/style/workstation-ui.md"
     ],
     "design": [
-      "docs/design/workstation-home-screen-brief.md",
-      "docs/design/workstation-home-screen-inventory.md",
+      "docs/design/README.md",
+      "docs/design/basic-user-vocabulary.md",
+      "docs/design/calm-workstation-visual-system.md",
       "docs/design/operator-workstation-shell-brief.md"
     ]
   },
