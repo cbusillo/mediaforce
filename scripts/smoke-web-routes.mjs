@@ -109,10 +109,18 @@ async function prepareSmokeState() {
 	await Promise.all(paths.map((parts) => mkdir(path.join(rootDir, ...parts), { recursive: true })));
 }
 
-async function seedSmokeFixtures(configPath) {
+async function seedSmokeFixtures(configPath, profile = 'default') {
 	const { stdout, stderr } = await execFile(
 		'uv',
-		['run', 'python', 'scripts/seed-web-smoke-fixtures.py', '--config', configPath],
+		[
+			'run',
+			'python',
+			'scripts/seed-web-smoke-fixtures.py',
+			'--config',
+			configPath,
+			'--profile',
+			profile
+		],
 		{
 			cwd: rootDir,
 			timeout: 15000,
@@ -123,7 +131,9 @@ async function seedSmokeFixtures(configPath) {
 		console.error(stderr.trim());
 	}
 	const result = JSON.parse(stdout.trim());
-	console.log(`fixture ok: ${result.libraryItems} items seeded`);
+	console.log(
+		`fixture ok: ${result.profile ?? profile} ${result.libraryItems} items seeded, ${result.encodeJobs ?? 0} encode jobs seeded`
+	);
 	return result;
 }
 
@@ -349,6 +359,20 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
 	}
 }
 
+async function checkEmptyFixtureRoutes(baseUrl, configPath, timeoutMs, narrow) {
+	await seedSmokeFixtures(configPath, 'empty');
+	const emptyRouteChecks = [
+		['Empty Queue', '/', 'No folders match the current filters'],
+		['Empty Folders', '/folders', 'No folders match the current filters'],
+		['Empty Ops', '/ops', 'Encoding is idle and ready'],
+		['Empty Completed', '/completed', 'No completed folders match the active filters']
+	];
+	await checkRoutes(baseUrl, emptyRouteChecks, timeoutMs);
+	if (narrow) {
+		await checkNarrowRoutes(baseUrl, emptyRouteChecks, timeoutMs);
+	}
+}
+
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
 	let managedServer = null;
@@ -372,6 +396,9 @@ async function main() {
 		await checkRoutes(targetUrl, browserRouteChecks, args.routeTimeoutMs);
 		if (args.narrow) {
 			await checkNarrowRoutes(targetUrl, browserRouteChecks, args.routeTimeoutMs);
+		}
+		if (managedServer && shouldSeedFixtures) {
+			await checkEmptyFixtureRoutes(targetUrl, args.config, args.routeTimeoutMs, args.narrow);
 		}
 		console.log(`web route smoke passed: ${targetUrl}`);
 	} catch (error) {

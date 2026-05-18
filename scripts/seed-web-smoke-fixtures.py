@@ -6,23 +6,42 @@ import argparse
 from datetime import UTC, datetime
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 from mediaforce.core.config import load_config
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import (
     calibration_jobs,
+    encode_jobs,
+    encode_queue_state,
     item_events,
     library_items,
     staged_artifacts,
 )
 
 FIXTURE_SCAN_ID = "web-smoke-fixtures"
+LEGACY_FIXTURE_SCAN_IDS = ("fixture-scan",)
 FOLDER_PREFIX = "tv/Example Show/Season 1"
 SAMPLING_PREFIX = "tv/Sampling Show/Season 1"
 RETRY_PREFIX = "tv/Retry Show/Season 1"
 COMPLETED_PREFIX = "movies/Archive Ready"
 BLOCKED_COMPLETED_PREFIX = "movies/Blocked Cleanup"
+REVIEW_READY_PREFIX = "tv/Review Ready/Season 1"
+ENCODE_RUNNING_PREFIX = "tv/Encoding Show/Season 1"
+ENCODE_RETRY_PREFIX = "tv/Failed Encode/Season 1"
+ENCODE_WAITING_PREFIX = "movies/Waiting Encode"
+FIXTURE_PREFIXES = (
+    FOLDER_PREFIX,
+    SAMPLING_PREFIX,
+    RETRY_PREFIX,
+    COMPLETED_PREFIX,
+    BLOCKED_COMPLETED_PREFIX,
+    REVIEW_READY_PREFIX,
+    ENCODE_RUNNING_PREFIX,
+    ENCODE_RETRY_PREFIX,
+    ENCODE_WAITING_PREFIX,
+)
 
 
 def _now() -> str:
@@ -31,6 +50,10 @@ def _now() -> str:
 
 def _resolve_under_project(project_root: Path, value: Path) -> Path:
     return value if value.is_absolute() else (project_root / value).resolve()
+
+
+def _slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
 
 
 def _library_item(
@@ -125,18 +148,202 @@ def _job(
     }
 
 
-def seed(config_path: Path) -> dict[str, Any]:
+def _encode_host() -> dict[str, Any]:
+    return {
+        "key": "web-smoke-worker",
+        "label": "Smoke Worker",
+        "host": "web-smoke-worker.invalid",
+        "mode": "ssh",
+        "capabilities": ["encode_queue", "sample_calibration"],
+        "priority": 10,
+        "platform": "linux",
+    }
+
+
+def _manifest(project_root: Path, rel_path: str, job_id: str) -> Path:
+    manifest_path = project_root / "state/web-smoke/runs" / f"{job_id}.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "run_id": job_id,
+                "items": [
+                    {
+                        "rel_path": rel_path,
+                        "source_size_bytes": 7 * 1024**3,
+                        "duration_seconds": 3_600.0,
+                    }
+                ],
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return manifest_path
+
+
+def _encode_job(
+    *,
+    project_root: Path,
+    job_id: str,
+    prefix: str,
+    rel_path: str,
+    status: str,
+    progress: dict[str, Any] | None = None,
+    error: str | None = None,
+    waiting_reason: str | None = None,
+) -> dict[str, Any]:
+    timestamp = _now()
+    started_at = timestamp if status == "running" else None
+    finished_at = (
+        timestamp if status in {"failed", "stopped", "needs_attention"} else None
+    )
+    host = _encode_host()
+    return {
+        "job_id": job_id,
+        "prefix": prefix,
+        "job_kind": "folder",
+        "parent_job_id": None,
+        "status": status,
+        "manifest_path": str(_manifest(project_root, rel_path, job_id)),
+        "manifest_indexes_json": None,
+        "item_count": 1,
+        "saved_profile_path": None,
+        "host_json": json.dumps(host, sort_keys=True),
+        "last_host_json": json.dumps(host, sort_keys=True),
+        "notes": "Seeded browser QA encode fixture.",
+        "process_pid": None,
+        "error": error,
+        "bypass_schedule": 0,
+        "attempt_count": 1 if started_at else 0,
+        "leased_at": started_at,
+        "lease_expires_at": None,
+        "heartbeat_at": started_at,
+        "worker_id": "web-smoke-worker" if status == "running" else None,
+        "retry_not_before": None,
+        "waiting_reason": waiting_reason,
+        "terminal_reason": "quality_threshold" if status == "needs_attention" else None,
+        "last_failure_kind": "quality_threshold"
+        if status == "needs_attention"
+        else None,
+        "last_failure_at": finished_at,
+        "host_cooldown_until": None,
+        "progress_json": json.dumps(progress or {}, sort_keys=True),
+        "created_at": timestamp,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "updated_at": timestamp,
+    }
+
+
+def _write_review_ready_state(
+    config: Any, rows_by_prefix: dict[str, dict[str, Any]]
+) -> None:
+    prefix = REVIEW_READY_PREFIX
+    row = rows_by_prefix[prefix]
+    policy = config.resolve_policy(row["rel_path"])
+    review_dir = config.paths.review_dir / "web-smoke-review-ready"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    source_clip = review_dir / "source.mov"
+    preview_clip = review_dir / "preview.mov"
+    artifact_image = review_dir / "contact-sheet.png"
+    source_clip.write_bytes(b"mediaforce smoke source clip\n")
+    preview_clip.write_bytes(b"mediaforce smoke preview clip\n")
+    artifact_image.write_bytes(b"mediaforce smoke contact sheet\n")
+
+    sample_item = {
+        **row,
+        "source_size_bytes": row["size_bytes"],
+        "resolved_policy": policy,
+    }
+    calibration_payload = {
+        "job_id": "web-smoke-review-ready",
+        "mode": "sample",
+        "action": "ai_tune",
+        "sample_item": sample_item,
+        "policy": policy,
+        "sample_result": {
+            "predicted_total_size_bytes": int(row["size_bytes"] * 0.58),
+            "quality_metric": "vmaf",
+            "quality_score": 96.2,
+        },
+        "review_pairs": [
+            {
+                "timestamp_seconds": 60,
+                "duration_seconds": 12,
+                "source_clip": {
+                    "path": "/review-media/web-smoke-review-ready/source.mov"
+                },
+                "preview_clip": {
+                    "path": "/review-media/web-smoke-review-ready/preview.mov"
+                },
+            }
+        ],
+        "review_media_ready": True,
+        "browser_review_ready": True,
+    }
+    advice_payload = {
+        "summary": "Fixture review pack is ready for operator inspection.",
+        "confidence": "high",
+        "multimodal_review_pack": {
+            "artifacts": [
+                {
+                    "kind": "video_contact_sheet",
+                    "label": "Fixture contact sheet",
+                    "detail": "Representative before/after review stills.",
+                    "image_url": "/review-media/web-smoke-review-ready/contact-sheet.png",
+                },
+                {
+                    "kind": "audio_spectrogram_compare",
+                    "label": "Fixture audio compare",
+                    "detail": "Primary track is ready for review.",
+                },
+            ]
+        },
+    }
+    web_dir = config.paths.web_state_dir
+    web_dir.mkdir(parents=True, exist_ok=True)
+    slug = _slug(prefix)
+    (web_dir / f"{slug}.json").write_text(
+        json.dumps(calibration_payload, indent=2, sort_keys=True) + "\n"
+    )
+    (web_dir / f"{slug}.advice.json").write_text(
+        json.dumps(advice_payload, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def _clear_fixture_files(config: Any) -> None:
+    for prefix in FIXTURE_PREFIXES:
+        slug = _slug(prefix)
+        for suffix in (".json", ".advice.json", ".proposal.json", ".job.json"):
+            try:
+                (config.paths.web_state_dir / f"{slug}{suffix}").unlink()
+            except FileNotFoundError:
+                pass
+
+
+def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
     config = load_config(config_path)
     project_root = config.paths.project_root
     archive_root = _resolve_under_project(project_root, config.archive_root)
     staging_root = _resolve_under_project(project_root, config.staging_root)
     archive_root.mkdir(parents=True, exist_ok=True)
     staging_root.mkdir(parents=True, exist_ok=True)
+    config.paths.web_state_dir.mkdir(parents=True, exist_ok=True)
+    _clear_fixture_files(config)
     archived_source = archive_root / "movies" / "Archive Ready" / "Feature.mkv"
     archived_source.parent.mkdir(parents=True, exist_ok=True)
     archived_source.write_bytes(b"mediaforce smoke archived original\n")
 
     with open_db(config.paths.db_path) as connection:
+        connection.execute(
+            encode_jobs.delete().where(encode_jobs.c.job_id.like("web-smoke-%"))
+        )
+        connection.execute(
+            encode_queue_state.delete().where(
+                encode_queue_state.c.queue_name == "heavy"
+            )
+        )
         connection.execute(
             calibration_jobs.delete().where(
                 calibration_jobs.c.job_id.like("web-smoke-%")
@@ -147,7 +354,11 @@ def seed(config_path: Path) -> dict[str, Any]:
             for row in connection.execute(
                 library_items.select()
                 .with_only_columns(library_items.c.id)
-                .where(library_items.c.last_scan_id == FIXTURE_SCAN_ID)
+                .where(
+                    library_items.c.last_scan_id.in_(
+                        (FIXTURE_SCAN_ID, *LEGACY_FIXTURE_SCAN_IDS)
+                    )
+                )
             )
             .mappings()
             .fetchall()
@@ -166,6 +377,14 @@ def seed(config_path: Path) -> dict[str, Any]:
             connection.execute(
                 library_items.delete().where(library_items.c.id.in_(fixture_ids))
             )
+
+        if profile == "empty":
+            return {
+                "profile": profile,
+                "folderRoutes": [],
+                "libraryItems": 0,
+                "encodeJobs": 0,
+            }
 
         rows = [
             _library_item(
@@ -245,20 +464,65 @@ def seed(config_path: Path) -> dict[str, Any]:
                 recommendation="priority_encode",
                 recommendation_reason="Fixture blocked completed cleanup state.",
             ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
+                rel_path="tv/Review Ready/Season 1/Episode 01.mkv",
+                size_bytes=7 * 1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=84,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture review-pack-ready state for browser QA.",
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
+                rel_path="tv/Encoding Show/Season 1/Episode 01.mkv",
+                size_bytes=9 * 1024**3,
+                status="approved",
+                video_codec="h264",
+                priority_score=80,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture active encode state for browser QA.",
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
+                rel_path="tv/Failed Encode/Season 1/Episode 01.mkv",
+                size_bytes=9 * 1024**3,
+                status="approved",
+                video_codec="h264",
+                priority_score=79,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture retryable encode state for browser QA.",
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="movies",
+                rel_path="movies/Waiting Encode/Feature.mkv",
+                size_bytes=6 * 1024**3,
+                status="approved",
+                video_codec="h264",
+                priority_score=73,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture queued encode with unavailable host state.",
+            ),
         ]
         inserted_ids: list[int] = []
         for row in rows:
             result = connection.execute(library_items.insert().values(**row))
             inserted_ids.append(int(result.inserted_primary_key[0]))
+        rows_by_prefix = {str(row["parent_dir"]): row for row in rows}
 
         completed_id = inserted_ids[3]
-        blocked_completed_id = inserted_ids[-1]
+        blocked_completed_id = inserted_ids[6]
         timestamp = _now()
         for item_id, row, archived_path in (
             (completed_id, rows[3], str(archived_source)),
             (
                 blocked_completed_id,
-                rows[-1],
+                rows[6],
                 str(
                     Path(
                         "/tmp/mediaforce-web-smoke-outside/Blocked Cleanup/Feature.mkv"
@@ -358,7 +622,66 @@ def seed(config_path: Path) -> dict[str, Any]:
             _ = item_id, row
             connection.execute(calibration_jobs.insert().values(**job))
 
+        encode_rows = [
+            _encode_job(
+                project_root=project_root,
+                job_id="web-smoke-encode-running",
+                prefix=ENCODE_RUNNING_PREFIX,
+                rel_path="tv/Encoding Show/Season 1/Episode 01.mkv",
+                status="running",
+                progress={
+                    "total_duration_seconds": 3600.0,
+                    "overall_completed_duration_seconds": 1512.0,
+                    "remaining_duration_seconds": 2088.0,
+                    "percent_complete": 42,
+                    "fps": 82.4,
+                    "speed": 1.72,
+                    "current_item_number": 1,
+                    "total_item_count": 1,
+                    "current_item_rel_path": "tv/Encoding Show/Season 1/Episode 01.mkv",
+                    "progress_state": "encoding",
+                },
+            ),
+            _encode_job(
+                project_root=project_root,
+                job_id="web-smoke-encode-retry",
+                prefix=ENCODE_RETRY_PREFIX,
+                rel_path="tv/Failed Encode/Season 1/Episode 01.mkv",
+                status="needs_attention",
+                error="Fixture encode missed the requested quality target; retry is available.",
+                waiting_reason="Review quality target and retry the folder.",
+                progress={
+                    "failure_analysis": {
+                        "kind": "quality_threshold",
+                        "summary": "Fixture encode missed the requested quality target.",
+                    }
+                },
+            ),
+            _encode_job(
+                project_root=project_root,
+                job_id="web-smoke-encode-waiting",
+                prefix=ENCODE_WAITING_PREFIX,
+                rel_path="movies/Waiting Encode/Feature.mkv",
+                status="queued",
+                waiting_reason="No configured host is available for queued encode work.",
+            ),
+        ]
+        for row in encode_rows:
+            connection.execute(encode_jobs.insert().values(**row))
+        connection.execute(
+            encode_queue_state.insert().values(
+                queue_name="heavy",
+                is_paused=0,
+                stop_requested=0,
+                active_job_id="web-smoke-encode-running",
+                updated_at=_now(),
+            )
+        )
+
+    _write_review_ready_state(config, rows_by_prefix)
+
     return {
+        "profile": profile,
         "folderPrefix": FOLDER_PREFIX,
         "folderRoute": "/folders/tv/Example%20Show/Season%201",
         "folderRoutes": [
@@ -382,9 +705,30 @@ def seed(config_path: Path) -> dict[str, Any]:
                 "route": "/completed",
                 "marker": "Blocked Cleanup",
             },
+            {
+                "label": "Ops unavailable host fixture",
+                "route": "/ops",
+                "marker": "No hosts can encode right now",
+            },
+            {
+                "label": "Folder Studio review-ready fixture",
+                "route": "/folders/tv/Review%20Ready/Season%201",
+                "marker": "Review the sample pack",
+            },
+            {
+                "label": "Folder Studio active encode fixture",
+                "route": "/folders/tv/Encoding%20Show/Season%201",
+                "marker": "Approved encode is in the queue",
+            },
+            {
+                "label": "Folder Studio retryable encode fixture",
+                "route": "/folders/tv/Failed%20Encode/Season%201",
+                "marker": "Encode needs recovery",
+            },
         ],
         "completedPrefix": COMPLETED_PREFIX,
         "libraryItems": len(rows),
+        "encodeJobs": 3,
     }
 
 
@@ -393,8 +737,14 @@ def main() -> None:
         description="Seed deterministic web smoke fixture state."
     )
     parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument(
+        "--profile",
+        choices=("default", "empty"),
+        default="default",
+        help="Fixture profile to seed.",
+    )
     args = parser.parse_args()
-    print(json.dumps(seed(args.config), sort_keys=True))
+    print(json.dumps(seed(args.config, profile=args.profile), sort_keys=True))
 
 
 if __name__ == "__main__":
