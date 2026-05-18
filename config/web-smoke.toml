@@ -84,3 +84,12 @@ default = 18
 [planning.bucket_thresholds]
 priority_encode = 70
 review_encode = 35
+
+[[remote_hosts]]
+key = "web-smoke-worker"
+label = "Smoke Worker"
+host = "web-smoke-worker.invalid"
+mode = "ssh"
+capabilities = ["encode_queue", "sample_calibration"]
+priority = 10
+max_parallel_encodes = 1
