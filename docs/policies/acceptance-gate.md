@@ -9,6 +9,8 @@ We do not stop at "it works." We stop when we fully like the result.
 - Run the full available test suite before commits or ending a session
 - Run browser validation for UI changes; for primary operator surfaces, read
   `docs/style/workstation-ui.md` together with `docs/style/frontend.md`
+- Use `docs/development/browser-qa-matrix.md` for route, fixture, and narrow
+  browser coverage expectations
 - Use the `qualityGate` section in `.github/github.json` as the
   canonical source for repo validation commands
 

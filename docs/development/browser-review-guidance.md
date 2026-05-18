@@ -3,6 +3,10 @@
 Use this contract when launching browser-review subagents for UI exploration or
 critique.
 
+For repeatable route and fixture coverage, start from
+`docs/development/browser-qa-matrix.md`. Browser-review subagents should add
+visual and interaction judgment on top of that automated matrix, not replace it.
+
 ## Launch Contract
 
 - For the first browser-review subagent in a session, run a tiny smoke pass

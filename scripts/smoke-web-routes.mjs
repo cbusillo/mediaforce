@@ -1,20 +1,23 @@
 #!/usr/bin/env node
 
-import { spawn } from 'node:child_process';
+import { execFile as execFileCallback, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import net from 'node:net';
 import { mkdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(path.join(rootDir, 'frontend', 'package.json'));
 const { chromium } = require('@playwright/test');
+const execFile = promisify(execFileCallback);
 
 const DEFAULT_ENDPOINT_TIMEOUT_MS = 2000;
 const DEFAULT_ROUTE_TIMEOUT_MS = 3500;
 const SERVER_START_TIMEOUT_MS = 12000;
+const NARROW_VIEWPORT = { width: 390, height: 844 };
 
 const endpointChecks = [
 	['Dashboard summary', '/api/dashboard'],
@@ -37,7 +40,9 @@ function parseArgs(argv) {
 		baseUrl: '',
 		config: path.join(rootDir, 'config', 'web-smoke.toml'),
 		endpointTimeoutMs: DEFAULT_ENDPOINT_TIMEOUT_MS,
-		routeTimeoutMs: DEFAULT_ROUTE_TIMEOUT_MS
+		routeTimeoutMs: DEFAULT_ROUTE_TIMEOUT_MS,
+		seedFixtures: null,
+		narrow: true
 	};
 	for (let index = 0; index < argv.length; index += 1) {
 		const arg = argv[index];
@@ -49,6 +54,12 @@ function parseArgs(argv) {
 			parsed.endpointTimeoutMs = Number(argv[++index] ?? parsed.endpointTimeoutMs);
 		} else if (arg === '--route-timeout-ms') {
 			parsed.routeTimeoutMs = Number(argv[++index] ?? parsed.routeTimeoutMs);
+		} else if (arg === '--seed-fixtures') {
+			parsed.seedFixtures = true;
+		} else if (arg === '--skip-fixture-seed') {
+			parsed.seedFixtures = false;
+		} else if (arg === '--skip-narrow') {
+			parsed.narrow = false;
 		} else {
 			throw new Error(`Unknown argument: ${arg}`);
 		}
@@ -98,6 +109,24 @@ async function prepareSmokeState() {
 	await Promise.all(paths.map((parts) => mkdir(path.join(rootDir, ...parts), { recursive: true })));
 }
 
+async function seedSmokeFixtures(configPath) {
+	const { stdout, stderr } = await execFile(
+		'uv',
+		['run', 'python', 'scripts/seed-web-smoke-fixtures.py', '--config', configPath],
+		{
+			cwd: rootDir,
+			timeout: 15000,
+			maxBuffer: 1024 * 1024
+		}
+	);
+	if (stderr.trim()) {
+		console.error(stderr.trim());
+	}
+	const result = JSON.parse(stdout.trim());
+	console.log(`fixture ok: ${result.libraryItems} items seeded`);
+	return result;
+}
+
 async function fetchWithTimeout(url, timeoutMs) {
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -142,7 +171,9 @@ async function waitForServer(baseUrl, child) {
 async function startServer(configPath) {
 	const indexPath = path.join(rootDir, 'frontend', 'build', 'index.html');
 	if (!(await pathExists(indexPath))) {
-		throw new Error('frontend/build/index.html is missing. Run npm --prefix frontend run build first.');
+		throw new Error(
+			'frontend/build/index.html is missing. Run npm --prefix frontend run build first.'
+		);
 	}
 	await prepareSmokeState();
 	const port = await freePort();
@@ -180,20 +211,20 @@ async function startServer(configPath) {
 	await waitForServer(baseUrl, child);
 	return {
 		baseUrl,
-			stop: async () => {
-				if (child.exitCode !== null) return;
-				child.kill('SIGTERM');
-				let exited = false;
-				await new Promise((resolve) => {
-					const timeout = setTimeout(resolve, 3000);
-					child.once('exit', () => {
-						exited = true;
-						clearTimeout(timeout);
-						resolve();
-					});
+		stop: async () => {
+			if (child.exitCode !== null) return;
+			child.kill('SIGTERM');
+			let exited = false;
+			await new Promise((resolve) => {
+				const timeout = setTimeout(resolve, 3000);
+				child.once('exit', () => {
+					exited = true;
+					clearTimeout(timeout);
+					resolve();
 				});
-				if (!exited) child.kill('SIGKILL');
-			},
+			});
+			if (!exited) child.kill('SIGKILL');
+		},
 		logs: () => logs.join('')
 	};
 }
@@ -205,18 +236,29 @@ async function checkEndpoints(baseUrl, timeoutMs) {
 	}
 }
 
-async function checkRoutes(baseUrl, timeoutMs) {
+async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
 	const browser = await chromium.launch();
 	try {
-		const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+		const page = await browser.newPage({
+			viewport: { width: 1440, height: 1000 }
+		});
 		const pageErrors = [];
 		page.on('pageerror', (error) => pageErrors.push(error.message));
-		for (const [label, route, marker] of routeChecks) {
+		for (const [label, route, marker] of routeChecksForBrowser) {
 			pageErrors.length = 0;
 			const started = performance.now();
-			await page.goto(`${baseUrl}${route}`, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
-			await page.waitForSelector('.operator-shell', { state: 'visible', timeout: timeoutMs });
-			await page.waitForSelector('main', { state: 'visible', timeout: timeoutMs });
+			await page.goto(`${baseUrl}${route}`, {
+				waitUntil: 'domcontentloaded',
+				timeout: timeoutMs
+			});
+			await page.waitForSelector('.operator-shell', {
+				state: 'visible',
+				timeout: timeoutMs
+			});
+			await page.waitForSelector('main', {
+				state: 'visible',
+				timeout: timeoutMs
+			});
 			const state = await page.evaluate((expectedMarker) => {
 				const bodyText = document.body.innerText.trim();
 				return {
@@ -240,17 +282,97 @@ async function checkRoutes(baseUrl, timeoutMs) {
 	}
 }
 
+async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
+	const browser = await chromium.launch();
+	try {
+		const page = await browser.newPage({
+			viewport: NARROW_VIEWPORT,
+			deviceScaleFactor: 2,
+			isMobile: true
+		});
+		const pageErrors = [];
+		page.on('pageerror', (error) => pageErrors.push(error.message));
+		for (const [label, route, marker] of routeChecksForNarrow) {
+			pageErrors.length = 0;
+			const started = performance.now();
+			await page.goto(`${baseUrl}${route}`, {
+				waitUntil: 'domcontentloaded',
+				timeout: timeoutMs
+			});
+			await page.waitForSelector('.operator-shell', {
+				state: 'visible',
+				timeout: timeoutMs
+			});
+			await page.waitForSelector('main', {
+				state: 'visible',
+				timeout: timeoutMs
+			});
+			const state = await page.evaluate((expectedMarker) => {
+				const bodyText = document.body.innerText.trim();
+				const visibleWideTables = [...document.querySelectorAll('table')]
+					.map((el) => {
+						const rect = el.getBoundingClientRect();
+						return {
+							text: el.textContent?.trim().replace(/\s+/g, ' ').slice(0, 80) ?? '',
+							width: Math.round(rect.width),
+							height: Math.round(rect.height),
+							display: getComputedStyle(el).display
+						};
+					})
+					.filter((item) => item.width > window.innerWidth + 2 && item.height > 0);
+				return {
+					bodyLength: bodyText.length,
+					hasMarker: bodyText.includes(expectedMarker),
+					pageOverflow: document.documentElement.scrollWidth > window.innerWidth + 2,
+					scrollWidth: document.documentElement.scrollWidth,
+					visibleWideTables
+				};
+			}, marker);
+			if (
+				state.bodyLength < 80 ||
+				!state.hasMarker ||
+				state.pageOverflow ||
+				state.visibleWideTables.length
+			) {
+				throw new Error(`${label} narrow layout failed: ${JSON.stringify(state)}`);
+			}
+			if (pageErrors.length > 0) {
+				throw new Error(
+					`${label} raised browser errors in narrow layout: ${pageErrors.join(' | ')}`
+				);
+			}
+			const elapsedMs = Math.round(performance.now() - started);
+			console.log(`narrow route ok: ${label} ${elapsedMs}ms`);
+		}
+	} finally {
+		await browser.close();
+	}
+}
+
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
 	let managedServer = null;
 	let targetUrl = args.baseUrl ? normalizeBaseUrl(args.baseUrl) : null;
+	let fixtures = null;
+	const shouldSeedFixtures = args.seedFixtures ?? !targetUrl;
 	try {
+		if (shouldSeedFixtures) {
+			await prepareSmokeState();
+			fixtures = await seedSmokeFixtures(args.config);
+		}
 		if (!targetUrl) {
 			managedServer = await startServer(args.config);
 			targetUrl = managedServer.baseUrl;
 		}
+		const browserRouteChecks = [...routeChecks];
+		for (const fixtureRoute of fixtures?.folderRoutes ?? []) {
+			browserRouteChecks.push([fixtureRoute.label, fixtureRoute.route, fixtureRoute.marker]);
+		}
 		await checkEndpoints(targetUrl, args.endpointTimeoutMs);
-		await checkRoutes(targetUrl, args.routeTimeoutMs);
+		await checkRoutes(targetUrl, browserRouteChecks, args.routeTimeoutMs);
+		if (args.narrow) {
+			await checkNarrowRoutes(targetUrl, browserRouteChecks, args.routeTimeoutMs);
+		}
 		console.log(`web route smoke passed: ${targetUrl}`);
 	} catch (error) {
 		if (managedServer) {
