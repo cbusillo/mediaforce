@@ -405,7 +405,7 @@
 			>
 				{#if queueRows.length > 0}
 					<div class="table-wrap">
-						<table>
+						<table class="ops-table ops-table--jobs">
 							<thead>
 								<tr>
 									<th>State</th>
@@ -419,8 +419,10 @@
 							<tbody>
 								{#each queueRows as row (row.key)}
 									<tr class:job-row--blocked={row.tone === 'fail'}>
-										<td><StateBadge compact tone={row.tone} label={row.status} /></td>
-										<td>
+										<td data-label="State"
+											><StateBadge compact tone={row.tone} label={row.status} /></td
+										>
+										<td data-label="Work">
 											{#if canOpenFolder(row)}
 												<a class="work-link" href={resolve(folderRoutePath(row.prefix))}>
 													<strong>{row.prefix}</strong>
@@ -433,13 +435,13 @@
 												</div>
 											{/if}
 										</td>
-										<td>{row.host}</td>
-										<td>
+										<td data-label="Host">{row.host}</td>
+										<td data-label="Progress">
 											<strong>{row.progress}</strong>
 											<span>{row.detail}</span>
 										</td>
-										<td>{row.scheduler}</td>
-										<td>
+										<td data-label="Scheduler">{row.scheduler}</td>
+										<td data-label="Recovery">
 											{#if row.action}
 												{@const action = row.action}
 												<button
@@ -482,7 +484,7 @@
 							<span>Past sample/proof issues are not blocking current encoding.</span>
 						</summary>
 						<div class="table-wrap table-wrap--history">
-							<table>
+							<table class="ops-table ops-table--history">
 								<thead>
 									<tr>
 										<th>State</th>
@@ -495,8 +497,10 @@
 								<tbody>
 									{#each historyRows as row (row.key)}
 										<tr class="job-row--history">
-											<td><StateBadge compact tone={row.tone} label={row.status} /></td>
-											<td>
+											<td data-label="State"
+												><StateBadge compact tone={row.tone} label={row.status} /></td
+											>
+											<td data-label="Work">
 												{#if canOpenFolder(row)}
 													<a class="work-link" href={resolve(folderRoutePath(row.prefix))}>
 														<strong>{row.prefix}</strong>
@@ -509,12 +513,12 @@
 													</div>
 												{/if}
 											</td>
-											<td>{row.host}</td>
-											<td>
+											<td data-label="Host">{row.host}</td>
+											<td data-label="Last note">
 												<strong>{row.progress}</strong>
 												<span>{row.detail}</span>
 											</td>
-											<td>{row.scheduler}</td>
+											<td data-label="When">{row.scheduler}</td>
 										</tr>
 									{/each}
 								</tbody>
@@ -1073,6 +1077,70 @@
 		color: var(--mf-fg-tertiary);
 		font-size: var(--mf-text-sm);
 		padding: var(--mf-space-5);
+	}
+
+	@media (max-width: 720px) {
+		.table-wrap {
+			overflow: visible;
+		}
+
+		.ops-table {
+			border-collapse: separate;
+			border-spacing: 0;
+			min-width: 0;
+		}
+
+		.ops-table thead {
+			display: none;
+		}
+
+		.ops-table tbody,
+		.ops-table tr,
+		.ops-table td {
+			display: block;
+			width: 100%;
+		}
+
+		.ops-table tr {
+			background: var(--mf-bg-panel-2);
+			border: var(--mf-border-muted);
+			display: grid;
+			margin-bottom: var(--mf-space-3);
+		}
+
+		.ops-table td {
+			align-items: start;
+			border-bottom: var(--mf-border-muted);
+			display: grid;
+			gap: var(--mf-space-3);
+			grid-template-columns: minmax(72px, 0.32fr) minmax(0, 1fr);
+			height: auto;
+			min-height: var(--mf-control-md);
+			padding: var(--mf-space-3);
+		}
+
+		.ops-table td:last-child {
+			border-bottom: 0;
+		}
+
+		.ops-table td::before {
+			color: var(--mf-fg-tertiary);
+			content: attr(data-label);
+			font-family: var(--mf-font-sans), sans-serif;
+			font-size: var(--mf-text-2xs);
+			font-weight: var(--mf-weight-semibold);
+			text-transform: uppercase;
+		}
+
+		.ops-table td:nth-child(4) {
+			display: grid;
+		}
+
+		.ops-table .control {
+			justify-self: start;
+			max-width: 100%;
+			white-space: normal;
+		}
 	}
 
 	@media (max-width: 980px) {

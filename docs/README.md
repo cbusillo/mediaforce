@@ -36,3 +36,5 @@ Use this directory for guidance that should not live in `AGENTS.md`.
   legacy-bridge notes, and migration validation commands
 - `docs/development/browser-review-guidance.md`: browser-review subagent launch
   contract for UI exploration and critique
+- `docs/development/browser-qa-matrix.md`: repeatable browser route, fixture,
+  and narrow-layout validation matrix
