@@ -125,6 +125,30 @@
 	const recommendedFolder = $derived(cleanupReadyFolders[0] ?? null);
 	const cleanupWorkAvailable = $derived(archive.has_cleanup || cleanupReadyFolders.length > 0);
 	const cleanupReviewCount = $derived(counts.blocked + counts.unknown);
+	const cleanupStatusTone = $derived(
+		cleanupReadyFolders.length > 0 ? 'ready' : cleanupReviewCount > 0 ? 'wait' : 'idle'
+	);
+	const cleanupStatusLabel = $derived(
+		cleanupReadyFolders.length > 0
+			? 'Cleanup ready'
+			: cleanupReviewCount > 0
+				? 'Review needed'
+				: 'No cleanup needed'
+	);
+	const cleanupStatusTitle = $derived(
+		cleanupReadyFolders.length > 0
+			? `${cleanupReadyFolders.length.toLocaleString('en-US')} completed folders have originals waiting.`
+			: cleanupReviewCount > 0
+				? `${cleanupReviewCount.toLocaleString('en-US')} completed folders need review.`
+				: 'No cleanup action is needed right now.'
+	);
+	const cleanupStatusDetail = $derived(
+		cleanupReadyFolders.length > 0
+			? 'Review the folders below before removing originals from the waiting folder.'
+			: cleanupReviewCount > 0
+				? 'Check the new files, then mark the already-removed originals as handled.'
+				: `${folders.length.toLocaleString('en-US')} completed folders are handled; history is available without asking for action.`
+	);
 	const historyRows = $derived([
 		...localHistory.map((event) => ({ ...event, source: 'api' as const })),
 		...(completed ? buildCompletedHistoryRows(completed) : [])
@@ -156,9 +180,14 @@
 			? `${reviewFolders.length.toLocaleString('en-US')} folders · ${reviewItemCount.toLocaleString('en-US')} originals already gone`
 			: 'No folders selected for review'
 	);
-	const globalSummary = $derived(
-		`${archive.file_count.toLocaleString('en-US')} waiting originals · ${formatBytes(archive.total_size_bytes)} in ${archive.archive_root || 'the missing cleanup folder'}`
+	const globalRemovalSummary = $derived(
+		`This removes ${archive.file_count.toLocaleString('en-US')} originals from ${archive.archive_root || 'the cleanup folder'} and reclaims ${formatBytes(archive.total_size_bytes)}.`
 	);
+
+	function selectedRemovalSummary(): string {
+		if (!selectedFolders.length) return selectedSummary;
+		return `This removes originals for ${selectedFolders.length.toLocaleString('en-US')} selected folders from ${archive.archive_root || 'the cleanup folder'} and reclaims ${formatBytes(selectedBackupSize)}.`;
+	}
 
 	function libraryKey(label: string): string {
 		return label.trim().toLowerCase() || 'library';
@@ -388,10 +417,10 @@
 			<header class="completed-header">
 				<div>
 					<span class="mf-eyebrow">Completed</span>
-					<h1>Review completed encodes</h1>
+					<h1>Clean up completed work</h1>
 					<p>
-						Remove originals that are still waiting, mark originals already removed, and keep
-						finished work out of the active queue.
+						Decide whether any originals still need removal, confirm already-handled folders, and
+						keep finished work separate from active queues.
 					</p>
 				</div>
 				<div class="completed-header__facts" aria-label="Completed cleanup totals">
@@ -420,14 +449,14 @@
 					role="tab"
 					aria-selected={mode === 'completed'}
 					class:active={mode === 'completed'}
-					onclick={() => (mode = 'completed')}>Cleanup</button
+					onclick={() => (mode = 'completed')}>Cleanup work</button
 				>
 				<button
 					type="button"
 					role="tab"
 					aria-selected={mode === 'history'}
 					class:active={mode === 'history'}
-					onclick={() => (mode = 'history')}>History</button
+					onclick={() => (mode = 'history')}>Handled history</button
 				>
 			</div>
 
@@ -438,6 +467,16 @@
 					</div>
 				</WorkstationPanel>
 			{:else if mode === 'completed'}
+				<WorkstationPanel eyebrow="Cleanup status" title={cleanupStatusLabel}>
+					<div class="cleanup-status cleanup-status--{cleanupStatusTone}">
+						<StateBadge tone={cleanupStatusTone} label={cleanupStatusLabel} />
+						<div>
+							<strong>{cleanupStatusTitle}</strong>
+							<span>{cleanupStatusDetail}</span>
+						</div>
+					</div>
+				</WorkstationPanel>
+
 				<WorkstationPanel eyebrow="Filters" title="Cleanup scope">
 					<div class="completed-filter" aria-label="Completed cleanup filters">
 						<div class="completed-filter__summary">
@@ -530,17 +569,17 @@
 						? 'Remove waiting originals'
 						: cleanupReviewCount > 0
 							? 'Review already-removed originals'
-							: 'No originals waiting'}
+							: 'No cleanup action needed'}
 				>
 					<div class="cleanup-command">
 						<div class="cleanup-command__state">
 							<StateBadge
-								tone={recommendedFolder ? 'ready' : cleanupReviewCount > 0 ? 'wait' : 'idle'}
+								tone={cleanupStatusTone}
 								label={recommendedFolder
 									? 'Originals waiting'
 									: cleanupReviewCount > 0
 										? 'Needs review'
-										: 'Handled'}
+										: 'No action'}
 							/>
 							<div>
 								<strong
@@ -548,14 +587,16 @@
 										? `Safest next cleanup: ${recommendedFolder.title}`
 										: cleanupReviewCount > 0
 											? 'Some originals were already removed'
-											: 'No originals are waiting'}</strong
+											: 'Completed work is handled'}</strong
 								>
 								<span
 									>{recommendedFolder
 										? cleanupDetail(recommendedFolder, archive)
 										: cleanupReviewCount > 0
 											? 'After checking the new files, mark these folders handled so they leave review.'
-											: archive.archive_root || 'Cleanup folder is not configured'}</span
+											: archive.archive_root
+												? `Nothing is waiting in ${archive.archive_root}.`
+												: 'Cleanup folder is not configured, and no completed folder is asking for action.'}</span
 								>
 							</div>
 						</div>
@@ -615,12 +656,12 @@
 								<strong
 									>{cleanupReviewCount > 0
 										? `${cleanupReviewCount.toLocaleString('en-US')} completed folders need review.`
-										: `${folders.length.toLocaleString('en-US')} completed folders are handled.`}</strong
+										: `${folders.length.toLocaleString('en-US')} completed folders are handled and shown only as history.`}</strong
 								>
 								<small
 									>{cleanupReviewCount > 0
 										? 'Check the new files, then mark the originals as already removed.'
-										: 'When originals are waiting, cleanup controls return here.'}</small
+										: 'When originals are waiting, scoped cleanup controls return here.'}</small
 								>
 							</div>
 						{/if}
@@ -631,10 +672,16 @@
 								<div>
 									<strong
 										>{scope === 'selected'
-											? 'Remove selected originals'
-											: 'Remove all waiting originals'}</strong
+											? 'Review selected originals before removal'
+											: 'Review entire cleanup folder before removal'}</strong
 									>
-									<span>{scope === 'selected' ? selectedSummary : globalSummary}</span>
+									<span
+										>{scope === 'selected' ? selectedRemovalSummary() : globalRemovalSummary}</span
+									>
+									<small>
+										This deletes originals from the cleanup waiting folder. It does not remove the
+										promoted encoded files.
+									</small>
 								</div>
 								<div class="confirm-panel__actions">
 									<button
@@ -642,7 +689,7 @@
 										class="control control--danger armed"
 										disabled={cleanupPending}
 										onclick={() => confirmCleanup(scope)}
-										>{cleanupPending ? 'Working' : 'Confirm removal'}</button
+										>{cleanupPending ? 'Working' : 'Delete originals'}</button
 									>
 									<button
 										type="button"
@@ -775,7 +822,7 @@
 			{:else}
 				<WorkstationPanel
 					eyebrow="History"
-					title="Recent encode and cleanup events"
+					title="Handled history"
 					meta={`${visibleHistory.length.toLocaleString('en-US')} visible`}
 				>
 					<div class="history-workspace">
@@ -849,7 +896,7 @@
 
 			<WorkstationPanel
 				eyebrow="History"
-				title="Recent signal"
+				title="Recent handled work"
 				meta={`${historyRows.length.toLocaleString('en-US')} events`}
 			>
 				<div class="history-list">
@@ -978,6 +1025,7 @@
 	}
 
 	.completed-filter,
+	.cleanup-status,
 	.cleanup-command,
 	.scope-list,
 	.history-workspace,
@@ -997,6 +1045,7 @@
 	.completed-filter__summary,
 	.completed-filter__search,
 	.completed-filter__group,
+	.cleanup-status > div,
 	.cleanup-command__state > div {
 		min-width: 0;
 	}
@@ -1009,6 +1058,7 @@
 	}
 
 	.completed-filter__summary small,
+	.cleanup-status span,
 	.cleanup-command__state span,
 	.scope-row small,
 	.folder-link span,
@@ -1111,6 +1161,30 @@
 		grid-template-columns: auto minmax(0, 1fr);
 	}
 
+	.cleanup-status {
+		align-items: center;
+		background: var(--mf-bg-strip);
+		border-left: 2px solid var(--mf-line-strong);
+		grid-template-columns: auto minmax(0, 1fr);
+		min-height: var(--mf-row-comfy);
+	}
+
+	.cleanup-status--ready {
+		background: var(--mf-ready-bg);
+		border-left-color: var(--mf-ready-fg);
+	}
+
+	.cleanup-status--wait {
+		background: var(--mf-wait-bg);
+		border-left-color: var(--mf-wait-fg);
+	}
+
+	.cleanup-status > div {
+		display: grid;
+		gap: var(--mf-space-1);
+	}
+
+	.cleanup-status strong,
 	.cleanup-command__state strong,
 	.scope-row strong,
 	.history-row strong {
@@ -1175,6 +1249,11 @@
 		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-xs);
 		overflow-wrap: anywhere;
+	}
+
+	.confirm-panel small {
+		color: var(--mf-fail-fg);
+		font-size: var(--mf-text-xs);
 	}
 
 	.control {
@@ -1436,6 +1515,7 @@
 		}
 
 		.cleanup-command__state,
+		.cleanup-status,
 		.history-row,
 		.history-list--wide .history-row {
 			align-items: start;
