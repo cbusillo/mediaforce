@@ -58,6 +58,15 @@
 	);
 	const visibleFoldersPayload = $derived({ ...foldersPayload, folders: visibleFolders });
 	const nextFolder = $derived(visibleFolders[0] ?? null);
+	let selectedPrefix = $state('');
+	const selectedFolder = $derived(
+		visibleFolders.find((folder) => folder.prefix === selectedPrefix) ?? nextFolder
+	);
+	const selectedFolderIndex = $derived(
+		selectedFolder
+			? visibleFolders.findIndex((folder) => folder.prefix === selectedFolder.prefix)
+			: -1
+	);
 	const excludedLibraryCount = $derived(
 		libraryOptions.filter((option) => !libraryIncluded(option.key)).length
 	);
@@ -87,6 +96,11 @@
 
 	function rowKey(folder: FolderCard): string {
 		return `${folder.prefix}:${folder.sort_score}`;
+	}
+
+	function rowRank(folder: FolderCard): string {
+		const index = visibleFolders.findIndex((candidate) => candidate.prefix === folder.prefix);
+		return index >= 0 ? String(index + 1) : '—';
 	}
 
 	function libraryKey(label: string): string {
@@ -178,72 +192,24 @@
 	function handleStateFilterChange(key: string, event: Event) {
 		setStateIncluded(key, (event.currentTarget as HTMLInputElement).checked);
 	}
+
+	function selectFolder(folder: FolderCard) {
+		selectedPrefix = folder.prefix;
+	}
+
+	function selectedRecommendationCopy(folder: FolderCard | null, index: number): string {
+		if (!folder) return 'No folder is selected.';
+		const rankCopy = index === 0 ? 'the highest-ranked visible folder' : `ranked #${index + 1}`;
+		const reclaim = formatBytes(folder.projected_reclaim_bytes);
+		const pending = folder.pending_count.toLocaleString('en-US');
+		return `${folder.title} is ${rankCopy} with ${pending} pending items and about ${reclaim} of projected reclaim.`;
+	}
 </script>
 
 <OperatorShell route="queue" subject="Queue" {crumb} {statusTiles} {footerSignals}>
 	<main class="home">
-		<section class="home__main" aria-label="Operational review queue">
-			<header class="queue-header">
-				<div>
-					<span class="mf-eyebrow">Queue</span>
-					<h1>Choose what to encode next</h1>
-					<p>
-						Start from the highest-ranked folder, then use filters only when you need to narrow the
-						work list.
-					</p>
-				</div>
-				<div class="queue-header__facts">
-					<div>
-						<span>Visible folders</span>
-						<strong>{visibleFolders.length.toLocaleString('en-US')}</strong>
-					</div>
-					<div>
-						<span>Pending items</span>
-						<strong>{totalPendingItems(visibleFolders).toLocaleString('en-US')}</strong>
-					</div>
-					<div>
-						<span>Projected reclaim</span>
-						<strong>{formatBytes(totalProjectedReclaim(visibleFolders))}</strong>
-					</div>
-				</div>
-			</header>
-
-			<WorkstationPanel eyebrow="Recommended" title="Next folder">
-				{#if nextFolder}
-					<div class="next-card">
-						<StateBadge tone={queueFolderTone(nextFolder)} label={queueFolderState(nextFolder)} />
-						<div>
-							<h2>{nextFolder.title}</h2>
-							<p>{nextFolder.prefix}</p>
-						</div>
-						<div class="next-card__metrics">
-							<div>
-								<span>Items</span>
-								<strong>{nextFolder.item_count.toLocaleString('en-US')}</strong>
-							</div>
-							<div>
-								<span>Pending</span>
-								<strong>{nextFolder.pending_count.toLocaleString('en-US')}</strong>
-							</div>
-							<div>
-								<span>Reclaim</span>
-								<strong>{formatBytes(nextFolder.projected_reclaim_bytes)}</strong>
-							</div>
-							<div>
-								<span>Status</span>
-								<strong>{folderStatusCopy(nextFolder)}</strong>
-							</div>
-						</div>
-						<a class="control control--primary" href={resolve(folderRoutePath(nextFolder.prefix))}
-							>Open Folder Studio</a
-						>
-					</div>
-				{:else}
-					<div class="empty-note">No folders match the current filters.</div>
-				{/if}
-			</WorkstationPanel>
-
-			<WorkstationPanel eyebrow="Filters" title="Narrow the queue">
+		<aside class="home__rail" aria-label="Queue filters and scope">
+			<WorkstationPanel eyebrow="Filters" title="Narrow queue">
 				<div class="queue-filter" aria-label="Queue filters">
 					<div class="queue-filter__summary">
 						<span>Visible queue</span>
@@ -339,67 +305,6 @@
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel
-				eyebrow="Ranked queue"
-				title="Folders needing operator attention"
-				meta={`${visibleFolders.length.toLocaleString('en-US')} visible`}
-			>
-				<div class="table-wrap">
-					<table>
-						<thead>
-							<tr>
-								<th>State</th>
-								<th>Folder</th>
-								<th>Pending</th>
-								<th>Source</th>
-								<th>Reclaim</th>
-								<th>Codec</th>
-							</tr>
-						</thead>
-						<tbody>
-							{#each visibleFolders.slice(0, 18) as folder (rowKey(folder))}
-								<tr>
-									<td>
-										<StateBadge
-											compact
-											tone={queueFolderTone(folder)}
-											label={queueFolderState(folder)}
-										/>
-									</td>
-									<td>
-										<a class="folder-link" href={resolve(folderRoutePath(folder.prefix))}>
-											<strong>{folder.title}</strong>
-											<span>{folder.prefix}</span>
-										</a>
-									</td>
-									<td>{folder.pending_count.toLocaleString('en-US')}</td>
-									<td>{formatBytes(folder.total_size_bytes)}</td>
-									<td>{formatBytes(folder.projected_reclaim_bytes)}</td>
-									<td>{codecSummary(folder.video_codecs)}</td>
-								</tr>
-							{:else}
-								<tr>
-									<td colspan="6">No folders match the current library filters.</td>
-								</tr>
-							{/each}
-						</tbody>
-					</table>
-				</div>
-			</WorkstationPanel>
-
-			<WorkstationPanel eyebrow="Completed" title="Originals cleanup">
-				<dl class="kv">
-					<dt>Route</dt>
-					<dd>Completed</dd>
-					<dt>Scope</dt>
-					<dd>Archived originals</dd>
-					<dt>Action</dt>
-					<dd><a href={resolve('/completed')}>Review cleanup</a></dd>
-				</dl>
-			</WorkstationPanel>
-		</section>
-
-		<aside class="home__rail" aria-label="Queue filters and scope">
 			<WorkstationPanel eyebrow="Scope" title="Operator queue">
 				<div class="scope-list">
 					<div class="scope-row scope-row--active">
@@ -431,7 +336,160 @@
 					</div>
 				</div>
 			</WorkstationPanel>
+
+			<WorkstationPanel eyebrow="Completed" title="Originals cleanup">
+				<dl class="kv">
+					<dt>Route</dt>
+					<dd>Completed</dd>
+					<dt>Scope</dt>
+					<dd>Archived originals</dd>
+					<dt>Action</dt>
+					<dd><a href={resolve('/completed')}>Review cleanup</a></dd>
+				</dl>
+			</WorkstationPanel>
 		</aside>
+
+		<section class="home__main" aria-label="Operational review queue">
+			<header class="queue-header">
+				<div>
+					<span class="mf-eyebrow">Queue</span>
+					<h1>Ranked folder worklist</h1>
+					<p>
+						Select a row to compare why it is in the queue, then open Folder Studio when the next
+						action looks right.
+					</p>
+				</div>
+				<div class="queue-header__facts">
+					<div>
+						<span>Visible folders</span>
+						<strong>{visibleFolders.length.toLocaleString('en-US')}</strong>
+					</div>
+					<div>
+						<span>Pending items</span>
+						<strong>{totalPendingItems(visibleFolders).toLocaleString('en-US')}</strong>
+					</div>
+					<div>
+						<span>Projected reclaim</span>
+						<strong>{formatBytes(totalProjectedReclaim(visibleFolders))}</strong>
+					</div>
+				</div>
+			</header>
+
+			<section class="queue-workspace" aria-label="Queue worklist and selected folder">
+				<WorkstationPanel
+					eyebrow={selectedFolderIndex === 0 ? 'Recommended' : 'Selected'}
+					title="Folder context"
+				>
+					{#if selectedFolder}
+						<div class="selected-folder">
+							<div class="selected-folder__identity">
+								<div class="selected-folder__head">
+									<StateBadge
+										tone={queueFolderTone(selectedFolder)}
+										label={queueFolderState(selectedFolder)}
+									/>
+									<strong>#{selectedFolderIndex + 1}</strong>
+								</div>
+								<div>
+									<h2>{selectedFolder.title}</h2>
+									<p>{selectedFolder.prefix}</p>
+								</div>
+							</div>
+							<div class="reason-block">
+								<span>Why this row</span>
+								<p>{selectedRecommendationCopy(selectedFolder, selectedFolderIndex)}</p>
+							</div>
+							<dl class="context-metrics">
+								<dt>Pending items</dt>
+								<dd>{selectedFolder.pending_count.toLocaleString('en-US')}</dd>
+								<dt>Projected reclaim</dt>
+								<dd>{formatBytes(selectedFolder.projected_reclaim_bytes)}</dd>
+								<dt>Source size</dt>
+								<dd>{formatBytes(selectedFolder.total_size_bytes)}</dd>
+								<dt>Codec mix</dt>
+								<dd>{codecSummary(selectedFolder.video_codecs)}</dd>
+								<dt>Catalog state</dt>
+								<dd>{folderStatusCopy(selectedFolder)}</dd>
+							</dl>
+							<a
+								class="control control--primary"
+								href={resolve(folderRoutePath(selectedFolder.prefix))}>Open Folder Studio</a
+							>
+						</div>
+					{:else}
+						<div class="empty-note">Select a folder from the ranked queue.</div>
+					{/if}
+				</WorkstationPanel>
+
+				<WorkstationPanel
+					eyebrow="Ranked queue"
+					title="Folders ready to start"
+					meta={`${visibleFolders.length.toLocaleString('en-US')} visible`}
+				>
+					<div class="table-wrap">
+						<table>
+							<thead>
+								<tr>
+									<th>Rank</th>
+									<th>State</th>
+									<th>Folder</th>
+									<th>Pending</th>
+									<th>Source</th>
+									<th>Reclaim</th>
+									<th>Codec</th>
+									<th>Open</th>
+								</tr>
+							</thead>
+							<tbody>
+								{#each visibleFolders.slice(0, 32) as folder (rowKey(folder))}
+									<tr class:row-selected={selectedFolder?.prefix === folder.prefix}>
+										<td>
+											<button
+												type="button"
+												class="rank-button"
+												aria-label={`Select ${folder.title}`}
+												aria-pressed={selectedFolder?.prefix === folder.prefix}
+												onclick={() => selectFolder(folder)}
+											>
+												{rowRank(folder)}
+											</button>
+										</td>
+										<td>
+											<StateBadge
+												compact
+												tone={queueFolderTone(folder)}
+												label={queueFolderState(folder)}
+											/>
+										</td>
+										<td>
+											<button
+												type="button"
+												class="folder-select"
+												onclick={() => selectFolder(folder)}
+											>
+												<strong>{folder.title}</strong>
+												<span>{folder.prefix}</span>
+											</button>
+										</td>
+										<td>{folder.pending_count.toLocaleString('en-US')}</td>
+										<td>{formatBytes(folder.total_size_bytes)}</td>
+										<td>{formatBytes(folder.projected_reclaim_bytes)}</td>
+										<td>{codecSummary(folder.video_codecs)}</td>
+										<td>
+											<a class="open-link" href={resolve(folderRoutePath(folder.prefix))}>Open</a>
+										</td>
+									</tr>
+								{:else}
+									<tr>
+										<td colspan="8">No folders match the current filters.</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				</WorkstationPanel>
+			</section>
+		</section>
 	</main>
 </OperatorShell>
 
@@ -474,6 +532,13 @@
 		padding-bottom: var(--mf-space-5);
 	}
 
+	.queue-workspace {
+		align-items: start;
+		display: grid;
+		gap: var(--mf-space-5);
+		grid-template-columns: minmax(0, 1fr);
+	}
+
 	.queue-header h1 {
 		margin-top: var(--mf-space-3);
 	}
@@ -483,22 +548,19 @@
 		margin-top: var(--mf-space-3);
 	}
 
-	.queue-header__facts,
-	.next-card__metrics {
+	.queue-header__facts {
 		display: flex;
 		gap: var(--mf-space-5);
 		flex-wrap: wrap;
 	}
 
-	.queue-header__facts div,
-	.next-card__metrics div {
+	.queue-header__facts div {
 		display: grid;
 		gap: var(--mf-space-2);
 		min-width: 96px;
 	}
 
 	.queue-header__facts span,
-	.next-card__metrics span,
 	.scope-row span,
 	.kv dt {
 		color: var(--mf-fg-tertiary);
@@ -509,7 +571,6 @@
 	}
 
 	.queue-header__facts strong,
-	.next-card__metrics strong,
 	.kv dd {
 		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-sm);
@@ -518,22 +579,42 @@
 
 	.scope-list,
 	.queue-filter,
-	.next-card {
+	.selected-folder {
 		display: grid;
 		gap: var(--mf-space-4);
 		padding: var(--mf-space-5);
 	}
 
-	.next-card {
+	.selected-folder {
+		align-items: start;
 		border-left: 2px solid var(--mf-wait-fg);
+		grid-template-columns: minmax(0, 1.1fr) minmax(260px, 0.9fr);
 	}
 
-	.next-card :global(.state-badge) {
+	.selected-folder :global(.state-badge) {
 		justify-self: start;
 	}
 
-	.next-card .control {
+	.selected-folder .control {
 		justify-self: start;
+	}
+
+	.selected-folder__head {
+		align-items: center;
+		display: flex;
+		justify-content: space-between;
+	}
+
+	.selected-folder__identity {
+		display: grid;
+		gap: var(--mf-space-3);
+		min-width: 0;
+	}
+
+	.selected-folder__head strong {
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-mono), monospace;
+		font-size: var(--mf-text-xs);
 	}
 
 	.scope-row {
@@ -554,9 +635,31 @@
 	}
 
 	.scope-row small,
-	.next-card p {
+	.selected-folder p {
 		color: var(--mf-fg-tertiary);
 		font-size: var(--mf-text-xs);
+	}
+
+	.reason-block {
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border-muted);
+		border-left: 2px solid var(--mf-active-fg);
+		display: grid;
+		gap: var(--mf-space-2);
+		padding: var(--mf-space-4);
+	}
+
+	.reason-block span {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.reason-block p {
+		color: var(--mf-fg-secondary);
+		margin: 0;
 	}
 
 	.queue-filter__summary {
@@ -606,10 +709,6 @@
 	.queue-filter__group {
 		display: grid;
 		gap: var(--mf-space-2);
-	}
-
-	.queue-filter {
-		grid-template-columns: minmax(180px, 0.8fr) minmax(240px, 1.2fr);
 	}
 
 	.queue-filter__summary,
@@ -698,7 +797,7 @@
 
 	table {
 		border-collapse: collapse;
-		min-width: 760px;
+		min-width: 840px;
 		width: 100%;
 	}
 
@@ -707,7 +806,7 @@
 		border-bottom: var(--mf-border-muted);
 		font-size: var(--mf-text-xs);
 		height: var(--mf-row-default);
-		padding: 0 var(--mf-space-5);
+		padding: 0 var(--mf-space-3);
 		text-align: left;
 		vertical-align: middle;
 	}
@@ -723,32 +822,70 @@
 		top: 0;
 	}
 
-	td:nth-child(3),
 	td:nth-child(4),
 	td:nth-child(5),
-	td:nth-child(6) {
+	td:nth-child(6),
+	td:nth-child(7) {
 		font-family: var(--mf-font-mono), monospace;
 	}
 
-	.folder-link {
+	tr.row-selected td {
+		background: var(--mf-active-bg);
+	}
+
+	.rank-button,
+	.folder-select {
+		background: transparent;
+		border: 0;
+		color: inherit;
+		cursor: pointer;
+		font: inherit;
+		padding: 0;
+		text-align: left;
+	}
+
+	.rank-button {
+		align-items: center;
+		border: var(--mf-border);
+		display: inline-flex;
+		font-family: var(--mf-font-mono), monospace;
+		height: 26px;
+		justify-content: center;
+		width: 34px;
+	}
+
+	.rank-button:hover,
+	.rank-button[aria-pressed='true'] {
+		background: var(--mf-active-solid);
+		border-color: var(--mf-active-solid-hi);
+		color: var(--mf-fg-on-accent);
+	}
+
+	.folder-select {
 		display: grid;
 		gap: var(--mf-space-1);
 		min-width: 0;
+		width: 100%;
 	}
 
-	.folder-link strong {
+	.folder-select strong {
 		font-size: var(--mf-text-sm);
 		font-weight: var(--mf-weight-semibold);
 	}
 
-	.folder-link span {
+	.folder-select span {
 		color: var(--mf-fg-tertiary);
 		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-2xs);
 		overflow-wrap: anywhere;
 	}
 
-	.next-card h2 {
+	.open-link {
+		color: var(--mf-active-fg);
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.selected-folder h2 {
 		margin-top: var(--mf-space-2);
 		overflow-wrap: anywhere;
 	}
@@ -780,6 +917,26 @@
 	}
 
 	.kv dd {
+		overflow-wrap: anywhere;
+	}
+
+	.context-metrics {
+		display: grid;
+		grid-template-columns: minmax(112px, auto) minmax(0, 1fr);
+		row-gap: var(--mf-space-3);
+	}
+
+	.context-metrics dt {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.context-metrics dd {
+		font-family: var(--mf-font-mono), monospace;
+		font-size: var(--mf-text-xs);
 		overflow-wrap: anywhere;
 	}
 
@@ -816,12 +973,15 @@
 			grid-template-columns: 1fr;
 		}
 
-		.queue-header__facts,
-		.next-card__metrics {
+		.queue-header__facts {
 			flex-wrap: wrap;
 		}
 
-		.queue-filter {
+		.queue-workspace {
+			grid-template-columns: 1fr;
+		}
+
+		.selected-folder {
 			grid-template-columns: 1fr;
 		}
 	}
