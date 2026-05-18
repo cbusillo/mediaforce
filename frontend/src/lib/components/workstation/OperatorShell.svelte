@@ -419,5 +419,20 @@
 		.routebar__crumb {
 			display: none;
 		}
+
+		.footer-strip {
+			gap: var(--mf-space-5);
+			overflow-x: auto;
+			padding: 0 var(--mf-space-4);
+			scrollbar-width: none;
+		}
+
+		.footer-strip::-webkit-scrollbar {
+			display: none;
+		}
+
+		.footer-strip__item {
+			flex: 0 0 auto;
+		}
 	}
 </style>

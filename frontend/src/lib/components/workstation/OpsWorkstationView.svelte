@@ -843,6 +843,10 @@
 		margin-top: var(--mf-space-4);
 	}
 
+	.history-disclosure:not([open]) .table-wrap {
+		display: none;
+	}
+
 	.blocker-row--fail {
 		background: var(--mf-fail-bg);
 		border-left-color: var(--mf-fail-fg);

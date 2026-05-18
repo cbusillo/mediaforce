@@ -1496,5 +1496,68 @@
 		.archive-actions .control {
 			flex: 1 1 auto;
 		}
+
+		.table-wrap {
+			overflow: visible;
+		}
+
+		.settings-table--libraries {
+			min-width: 0;
+		}
+
+		.settings-table--libraries thead {
+			display: none;
+		}
+
+		.settings-table--libraries tbody,
+		.settings-table--libraries tr,
+		.settings-table--libraries td {
+			display: block;
+			width: 100%;
+		}
+
+		.settings-table--libraries tr {
+			border-bottom: var(--mf-border-muted);
+			display: grid;
+			gap: var(--mf-space-3);
+			grid-template-columns: minmax(0, 1fr);
+			padding: var(--mf-space-4);
+		}
+
+		.settings-table--libraries td {
+			border-bottom: 0;
+			height: auto;
+			min-width: 0;
+			padding: 0;
+		}
+
+		.settings-table--libraries td:nth-child(1),
+		.settings-table--libraries td:nth-child(2),
+		.settings-table--libraries td:nth-child(3) {
+			display: grid;
+			gap: var(--mf-space-2);
+		}
+
+		.settings-table--libraries td:nth-child(1)::before,
+		.settings-table--libraries td:nth-child(2)::before,
+		.settings-table--libraries td:nth-child(3)::before {
+			color: var(--mf-fg-tertiary);
+			font-size: var(--mf-text-2xs);
+			font-weight: var(--mf-weight-semibold);
+			letter-spacing: 0.08em;
+			text-transform: uppercase;
+		}
+
+		.settings-table--libraries td:nth-child(1)::before {
+			content: 'Color';
+		}
+
+		.settings-table--libraries td:nth-child(2)::before {
+			content: 'Library';
+		}
+
+		.settings-table--libraries td:nth-child(3)::before {
+			content: 'Folder path';
+		}
 	}
 </style>
