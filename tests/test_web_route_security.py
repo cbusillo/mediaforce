@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import FastAPI
 from starlette.requests import Request
+from starlette.routing import Route
 
 from mediaforce.web.routes.completed import COMPLETED_CLEANUP_ERROR_MESSAGE, register_completed_routes
 from mediaforce.web.routes.settings import SETTINGS_SAVE_ERROR_MESSAGE, register_settings_routes
@@ -29,8 +30,7 @@ def _json_request(payload: dict[str, Any]) -> Request:
 
 def _route_endpoint(app: FastAPI, path: str, method: str) -> Any:
     for route in app.routes:
-        methods = getattr(route, "methods", set())
-        if getattr(route, "path", None) == path and method.upper() in methods:
+        if isinstance(route, Route) and route.path == path and method.upper() in route.methods:
             return route.endpoint
     raise AssertionError(f"Route not found: {method.upper()} {path}")
 
@@ -66,6 +66,7 @@ class WebRouteSecurityTests(unittest.TestCase):
             app,
             completed_payload=lambda: {},
             clear_completed_backups_action=clear_completed_backups_action,
+            confirm_originals_removed_action=lambda _prefixes: {},
         )
 
         response = asyncio.run(

@@ -15,6 +15,7 @@ def register_completed_routes(
         *,
         completed_payload: Callable[[], dict[str, Any]],
         clear_completed_backups_action: Callable[[list[str] | None], dict[str, Any]],
+        confirm_originals_removed_action: Callable[[list[str]], dict[str, Any]],
 ) -> None:
     @app.get("/api/completed")
     def api_completed() -> JSONResponse:
@@ -34,5 +35,21 @@ def register_completed_routes(
         prefixes = raw_prefixes if isinstance(raw_prefixes, list) else None
         try:
             return JSONResponse(clear_completed_backups_action(prefixes))
+        except ValueError:
+            return JSONResponse({"ok": False, "message": COMPLETED_CLEANUP_ERROR_MESSAGE}, status_code=400)
+
+    @app.post("/api/completed/originals/confirm-removed")
+    async def api_completed_originals_confirm_removed(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return JSONResponse({"ok": False, "message": "Completed review requests must be valid JSON."}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"ok": False, "message": "Completed review requests must be JSON objects."}, status_code=400)
+        raw_prefixes = body.get("prefixes")
+        if not isinstance(raw_prefixes, list):
+            return JSONResponse({"ok": False, "message": "Choose at least one completed folder first."}, status_code=400)
+        try:
+            return JSONResponse(confirm_originals_removed_action(raw_prefixes))
         except ValueError:
             return JSONResponse({"ok": False, "message": COMPLETED_CLEANUP_ERROR_MESSAGE}, status_code=400)

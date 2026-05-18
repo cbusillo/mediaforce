@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 import json
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from mediaforce.encoding.staging import safe_unlink
 from mediaforce.web.runtime.archive_cleanup import archive_cleanup_summary
 
 FolderGroup = tuple[str, str, str, str]
+ORIGINALS_REMOVED_EVENT = "originals_removed_confirmed"
 
 
 @dataclass(slots=True)
@@ -30,6 +32,7 @@ class CompletedFolder:
     cleanup_detail: str
     missing_backup_count: int
     outside_archive_root_count: int
+    originals_removed_count: int
 
 
 @dataclass(slots=True)
@@ -82,6 +85,7 @@ def list_completed_folders(
         select(
             library_items.c.rel_path,
             staged_artifacts.c.bytes_saved,
+            staged_artifacts.c.library_item_id,
             staged_artifacts.c.promoted_at,
             staged_artifacts.c.archived_source_path,
         )
@@ -96,6 +100,7 @@ def list_completed_folders(
     ).mappings().fetchall()
 
     grouped: dict[str, CompletedFolder] = {}
+    confirmed_item_ids = _confirmed_originals_removed_item_ids(connection)
     resolved_archive_root = archive_root.resolve() if archive_root is not None else None
     for row in rows:
         rel_path = str(row["rel_path"] or "")
@@ -119,6 +124,7 @@ def list_completed_folders(
                 cleanup_detail="No archived originals are waiting for cleanup.",
                 missing_backup_count=0,
                 outside_archive_root_count=0,
+                originals_removed_count=0,
             )
             grouped[prefix] = folder
         folder.promoted_item_count += 1
@@ -137,6 +143,9 @@ def list_completed_folders(
             folder.outside_archive_root_count += 1
             continue
         if not archived_path.is_file():
+            if int(row["library_item_id"]) in confirmed_item_ids:
+                folder.originals_removed_count += 1
+                continue
             folder.missing_backup_count += 1
             continue
         folder.archived_backup_count += 1
@@ -154,14 +163,110 @@ def list_completed_folders(
 
     return sorted(
         grouped.values(),
-        key=lambda folder: (
-            folder.archived_backup_count > 0,
-            folder.latest_promoted_at or "",
-            folder.total_bytes_saved,
-            folder.title,
+        key=lambda completed_folder: (
+            completed_folder.archived_backup_count > 0,
+            completed_folder.latest_promoted_at or "",
+            completed_folder.total_bytes_saved,
+            completed_folder.title,
         ),
         reverse=True,
     )
+
+
+def confirm_originals_removed_action(
+        connection: DBClient,
+        *,
+        folder_group: Callable[[str], FolderGroup | None],
+        archive_root: Path | None,
+        prefixes: list[str] | None,
+        valid_prefixes: set[str] | None = None,
+) -> dict[str, Any]:
+    normalized_prefixes = _normalized_prefixes(prefixes)
+    if not normalized_prefixes:
+        raise ValueError("At least one completed folder must be selected.")
+    if valid_prefixes is not None:
+        unknown_prefixes = sorted(prefix for prefix in normalized_prefixes if prefix not in valid_prefixes)
+        if unknown_prefixes:
+            raise ValueError(
+                "Unknown completed-folder prefix"
+                f"{'es' if len(unknown_prefixes) != 1 else ''}: {', '.join(unknown_prefixes)}"
+            )
+    if archive_root is None:
+        return {
+            "ok": True,
+            "message": "Archive settings are missing, so nothing was marked resolved.",
+            "resolved_count": 0,
+            "resolved_prefix_count": 0,
+        }
+
+    resolved_archive_root = archive_root.resolve()
+    confirmed_item_ids = _confirmed_originals_removed_item_ids(connection)
+    rows = connection.execute(
+        select(
+            library_items.c.id,
+            library_items.c.rel_path,
+            staged_artifacts.c.archived_source_path,
+        )
+        .select_from(
+            staged_artifacts.join(
+                library_items,
+                staged_artifacts.c.library_item_id == library_items.c.id,
+            )
+        )
+        .where(staged_artifacts.c.promoted_at.is_not(None))
+    ).mappings().fetchall()
+
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    resolved_count = 0
+    resolved_prefixes: set[str] = set()
+    for row in rows:
+        rel_path = str(row["rel_path"] or "")
+        group = folder_group(rel_path)
+        if group is None or group[0] not in normalized_prefixes:
+            continue
+        library_item_id = int(row["id"])
+        if library_item_id in confirmed_item_ids:
+            continue
+        archived_source_path = _clean_text(row["archived_source_path"])
+        if not archived_source_path:
+            continue
+        archived_path = Path(archived_source_path)
+        if not _path_is_within_root(archived_path, resolved_archive_root):
+            continue
+        if archived_path.is_file():
+            continue
+        connection.execute(
+            item_events.insert().values(
+                library_item_id=library_item_id,
+                created_at=now,
+                event_type=ORIGINALS_REMOVED_EVENT,
+                details_json=json.dumps(
+                    {
+                        "prefix": group[0],
+                        "archived_source_path": archived_source_path,
+                        "note": "Operator confirmed the originals were already removed after checking the promoted files.",
+                    }
+                ),
+            )
+        )
+        confirmed_item_ids.add(library_item_id)
+        resolved_count += 1
+        resolved_prefixes.add(group[0])
+
+    if resolved_count > 0:
+        connection.commit()
+    message = (
+        f"Marked {len(resolved_prefixes)} completed folder"
+        f"{'s' if len(resolved_prefixes) != 1 else ''} as already handled. No files were deleted."
+        if resolved_count > 0
+        else "No missing originals needed to be marked resolved. No files were deleted."
+    )
+    return {
+        "ok": True,
+        "message": message,
+        "resolved_count": resolved_count,
+        "resolved_prefix_count": len(resolved_prefixes),
+    }
 
 
 def list_completed_history_events(
@@ -192,6 +297,7 @@ def list_completed_history_events(
                     "encoding_failed",
                     "validation_completed",
                     "promotion_completed",
+                    ORIGINALS_REMOVED_EVENT,
                 ]
             )
         )
@@ -341,19 +447,36 @@ def _configured_archive_root(config: MediaforceConfig) -> Path | None:
 
 def _folder_cleanup_state(folder: CompletedFolder, *, archive_root_configured: bool) -> tuple[str, str]:
     if not archive_root_configured and folder.missing_backup_count > 0:
-        return "blocked", "Archive root is not configured; cleanup cannot verify archived originals."
+        return "blocked", "Mediaforce cannot check the originals because the originals folder is not set."
     if folder.outside_archive_root_count > 0:
-        return "blocked", "One or more archived originals are outside the configured archive root."
+        return "blocked", "Some originals are outside the folder Mediaforce is allowed to clean."
     if folder.missing_backup_count > 0:
-        return "unknown", "One or more archived originals are missing from the archive root."
+        return "unknown", "The originals are already gone. Check the new files, then mark this handled."
     if folder.archived_backup_count > 0:
-        return "ready", "Archived originals are present and eligible for selected cleanup."
-    return "cleaned", "No archived originals are waiting for cleanup."
+        return "ready", "Originals are waiting and can be removed when you are ready."
+    if folder.originals_removed_count > 0:
+        return "cleaned", "Originals were already removed and marked handled after review."
+    return "cleaned", "No originals are waiting to be removed."
+
+
+def _confirmed_originals_removed_item_ids(connection: DBClient) -> set[int]:
+    return {
+        int(item_id)
+        for item_id in connection.execute(
+            select(item_events.c.library_item_id).where(
+                item_events.c.event_type == ORIGINALS_REMOVED_EVENT
+            )
+        ).scalars()
+    }
 
 
 def _event_details(raw_details: object) -> dict[str, Any]:
+    if isinstance(raw_details, dict):
+        return raw_details
+    if not isinstance(raw_details, str) or not raw_details.strip():
+        return {}
     try:
-        parsed = json.loads(str(raw_details or "{}"))
+        parsed = json.loads(raw_details)
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
@@ -365,6 +488,13 @@ def _history_event_copy(event_type: str, details: dict[str, Any]) -> tuple[str, 
             "Promotion completed",
             "ready",
             _path_detail(details.get("promoted_path"), "Encoded file promoted into the source library."),
+            None,
+        )
+    if event_type == ORIGINALS_REMOVED_EVENT:
+        return (
+            "Originals marked removed",
+            "ready",
+            "No files were deleted; this completed folder was marked handled after review.",
             None,
         )
     if event_type == "encoding_completed":
@@ -388,7 +518,7 @@ def _history_event_copy(event_type: str, details: dict[str, Any]) -> tuple[str, 
             _validation_detail(details),
             None,
         )
-    return ("Encoding started", "idle", "Encode worker started processing an item.", None)
+    return "Encoding started", "idle", "Encode worker started processing an item.", None
 
 
 def _path_detail(path: object, fallback: str) -> str:
@@ -429,8 +559,12 @@ def _prune_empty_dirs(root: Path) -> None:
             continue
 
 
-def _clean_text(value: object) -> str:
-    return str(value or "").strip()
+def _clean_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return f"{value}".strip()
 
 
 def _path_is_within_root(path: Path, root: Path) -> bool:

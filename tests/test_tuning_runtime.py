@@ -85,7 +85,12 @@ from mediaforce.web.app import (
 )
 from mediaforce.web.runtime.archive_cleanup import archive_cleanup_summary, clear_archive_cleanup_action
 from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, run_calibration_job
-from mediaforce.web.runtime.completed_runtime import clear_completed_backups_action, completed_page_payload
+from mediaforce.web.runtime.completed_runtime import (
+    ORIGINALS_REMOVED_EVENT,
+    clear_completed_backups_action,
+    completed_page_payload,
+    confirm_originals_removed_action,
+)
 from mediaforce.web.runtime.folder_ai_tuning import (
     FolderAiTuneDeps,
     _proposal_can_queue,
@@ -119,8 +124,9 @@ def _runtime_settings_writer(path_text: str, ready_path_text: str, mode: str) ->
 
 
 def _fake_operator_note_parse(*, project_root: Path, payload: dict[str, object]) -> dict[str, object] | None:
-    del project_root
-    note = str(payload.get("operator_note") or "").strip()
+    project_root.as_posix()
+    note_value = payload.get("operator_note")
+    note = note_value.strip() if isinstance(note_value, str) else ""
     if not note:
         return None
     lower = note.lower()
@@ -1152,6 +1158,74 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["folders"][0]["archived_backup_count"], 0)
         self.assertEqual(payload["folders"][0]["archived_backup_size_bytes"], 0)
         self.assertEqual(payload["folders"][0]["total_bytes_saved"], 12)
+
+    def test_confirm_originals_removed_marks_missing_backups_cleaned(self) -> None:
+        from mediaforce.web import app as web_app
+
+        self._insert_promoted_artifact(
+            rel_path="tv/Example Show/Season 1/Episode 01.mkv",
+            promoted_at="2026-04-10T10:00:00+00:00",
+            archived_size_bytes=3,
+            bytes_saved=12,
+        )
+        archived_path = self.config.archive_root / "tv/Example Show/Season 1/Episode 01.mkv"
+        archived_path.unlink()
+
+        with open_db(self.config.paths.db_path) as connection:
+            before = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
+            self.assertEqual(before["folders"][0]["cleanup_state"], "unknown")
+
+            result = confirm_originals_removed_action(
+                connection,
+                folder_group=web_app._folder_group,
+                archive_root=self.config.archive_root,
+                prefixes=["tv/Example Show/Season 1"],
+                valid_prefixes={"tv/Example Show/Season 1"},
+            )
+            after = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
+            event_count = connection.execute(
+                select(func.count())
+                .select_from(item_events)
+                .where(item_events.c.event_type == ORIGINALS_REMOVED_EVENT)
+            ).scalar_one()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["resolved_count"], 1)
+        self.assertIn("No files were deleted", result["message"])
+        self.assertEqual(after["folders"][0]["cleanup_state"], "cleaned")
+        self.assertEqual(after["folders"][0]["missing_backup_count"], 0)
+        self.assertEqual(after["folders"][0]["originals_removed_count"], 1)
+        self.assertEqual(event_count, 1)
+
+    def test_confirm_originals_removed_leaves_existing_backups_ready(self) -> None:
+        from mediaforce.web import app as web_app
+
+        self._insert_promoted_artifact(
+            rel_path="tv/Example Show/Season 1/Episode 01.mkv",
+            promoted_at="2026-04-10T10:00:00+00:00",
+            archived_size_bytes=3,
+            bytes_saved=12,
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            result = confirm_originals_removed_action(
+                connection,
+                folder_group=web_app._folder_group,
+                archive_root=self.config.archive_root,
+                prefixes=["tv/Example Show/Season 1"],
+                valid_prefixes={"tv/Example Show/Season 1"},
+            )
+            payload = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
+            event_count = connection.execute(
+                select(func.count())
+                .select_from(item_events)
+                .where(item_events.c.event_type == ORIGINALS_REMOVED_EVENT)
+            ).scalar_one()
+
+        self.assertEqual(result["resolved_count"], 0)
+        self.assertEqual(payload["folders"][0]["cleanup_state"], "ready")
+        self.assertEqual(payload["folders"][0]["archived_backup_count"], 1)
+        self.assertEqual(event_count, 0)
 
     def test_clear_completed_backups_action_removes_selected_prefixes(self) -> None:
         from mediaforce.web import app as web_app
@@ -3479,8 +3553,7 @@ class TuningRuntimeTests(unittest.TestCase):
         class _StopPreview(Exception):
             pass
 
-        def _capture_operator_request(note: str, sample_item: dict[str, object], **kwargs: object) -> None:
-            del note, sample_item
+        def _capture_operator_request(_note: str, _sample_item: dict[str, object], **kwargs: object) -> None:
             current_policy = kwargs.get("current_policy")
             captured_current_policy.append(dict(current_policy) if isinstance(current_policy, dict) else {})
             raise _StopPreview
@@ -4488,7 +4561,12 @@ class TuningRuntimeTests(unittest.TestCase):
             path.write_text("clip")
 
         def create_artifact(*_args: object, **kwargs: object) -> None:
-            Path(str(kwargs["output_path"])).write_text("artifact")
+            output_path = kwargs["output_path"]
+            self.assertIsInstance(output_path, (Path, str))
+            if isinstance(output_path, Path):
+                output_path.write_text("artifact")
+            else:
+                Path(output_path).write_text("artifact")
 
         with patch("mediaforce.web.runtime.folder_tuning_runtime.render_review_timeline_strip", side_effect=create_artifact), patch(
             "mediaforce.web.runtime.folder_tuning_runtime.render_review_contact_sheet", side_effect=create_artifact
@@ -5385,7 +5463,8 @@ class TuningRuntimeTests(unittest.TestCase):
         saved_statuses: list[str] = []
 
         def _save_job_state(_connection: object, _config: object, _prefix: str, payload: dict[str, object]) -> None:
-            saved_statuses.append(str(payload.get("status") or ""))
+            status = payload.get("status")
+            saved_statuses.append(status if isinstance(status, str) else "")
 
         deps = CalibrationRunDeps(
             now_iso=lambda: "2026-04-11T00:00:00+00:00",
@@ -5439,7 +5518,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 policy={"video": {"pixel_format": "yuv420p10le", "sample_every": "8m", "sample_duration": "20s", "encoder": "libsvtav1"}},
                 job_id="job-1",
                 seed_metadata=None,
-                process_controller=type("Controller", (), {"throw_if_cancelled": lambda self: None})(),
+                process_controller=type("Controller", (), {"throw_if_cancelled": lambda _self: None})(),
                 deps=deps,
             )
 
@@ -5451,7 +5530,8 @@ class TuningRuntimeTests(unittest.TestCase):
         saved_statuses: list[str] = []
 
         def _save_job_state(_connection: object, _config: object, _prefix: str, payload: dict[str, object]) -> None:
-            saved_statuses.append(str(payload.get("status") or ""))
+            status = payload.get("status")
+            saved_statuses.append(status if isinstance(status, str) else "")
 
         saved_sample_item = {
             "library_item_id": 9,
@@ -5512,7 +5592,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 policy={"video": {"pixel_format": "yuv420p10le", "sample_every": "8m", "sample_duration": "20s", "encoder": "libsvtav1"}},
                 job_id="job-1",
                 seed_metadata=None,
-                process_controller=type("Controller", (), {"throw_if_cancelled": lambda self: None})(),
+                process_controller=type("Controller", (), {"throw_if_cancelled": lambda _self: None})(),
                 deps=deps,
             )
 
@@ -5875,13 +5955,13 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(review_media_context["moments"][0]["preview_clip_size_bytes"], 2_461_753)
         self.assertEqual(review_media_context["moments"][0]["compare_clip_path"],
                          "/review-media/run-123/item-00/compare-01.mkv")
-        audio_tradeoff_hint = toolbelt.get("audio_tradeoff_hint")
-        assert isinstance(audio_tradeoff_hint, dict)
-        self.assertEqual(audio_tradeoff_hint["leverage"], "low")
-        self.assertEqual(audio_tradeoff_hint["recommended_seed_action"], "hold")
-        self.assertEqual(audio_tradeoff_hint["review_confidence"], "low")
-        self.assertEqual(audio_tradeoff_hint["target_bitrate_kbps"], 224.0)
-        self.assertEqual(audio_tradeoff_hint["next_lower_bitrate_kbps"], 192.0)
+        toolbelt_audio_hint = toolbelt.get("audio_tradeoff_hint")
+        assert isinstance(toolbelt_audio_hint, dict)
+        self.assertEqual(toolbelt_audio_hint["leverage"], "low")
+        self.assertEqual(toolbelt_audio_hint["recommended_seed_action"], "hold")
+        self.assertEqual(toolbelt_audio_hint["review_confidence"], "low")
+        self.assertEqual(toolbelt_audio_hint["target_bitrate_kbps"], 224.0)
+        self.assertEqual(toolbelt_audio_hint["next_lower_bitrate_kbps"], 192.0)
 
     def test_build_tuning_runtime_toolbelt_includes_size_target_analysis(self) -> None:
         toolbelt = _build_tuning_runtime_toolbelt(
@@ -6045,13 +6125,13 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["preferred_metric"], "vmaf")
         self.assertEqual(payload["base_policy"]["audio"]["surround_5_1_opus_bitrate"], "256k")
         self.assertEqual(payload["base_policy"]["video"]["encoder"], "libsvtav1")
-        audio_tradeoff_hint = payload.get("audio_tradeoff_hint")
-        assert isinstance(audio_tradeoff_hint, dict)
-        self.assertEqual(audio_tradeoff_hint["leverage"], "low")
-        self.assertEqual(audio_tradeoff_hint["recommended_seed_action"], "hold")
-        self.assertEqual(audio_tradeoff_hint["review_confidence"], "low")
-        self.assertEqual(audio_tradeoff_hint["target_bitrate_kbps"], 256.0)
-        self.assertEqual(audio_tradeoff_hint["next_lower_bitrate_kbps"], 224.0)
+        payload_audio_hint = payload.get("audio_tradeoff_hint")
+        assert isinstance(payload_audio_hint, dict)
+        self.assertEqual(payload_audio_hint["leverage"], "low")
+        self.assertEqual(payload_audio_hint["recommended_seed_action"], "hold")
+        self.assertEqual(payload_audio_hint["review_confidence"], "low")
+        self.assertEqual(payload_audio_hint["target_bitrate_kbps"], 256.0)
+        self.assertEqual(payload_audio_hint["next_lower_bitrate_kbps"], 224.0)
         self.assertEqual(payload["summary"]["suggested_override"]["policy_focus"]["audio"]["surround_5_1_opus_bitrate"],
                          "224k")
         self.assertIn(
@@ -6154,7 +6234,8 @@ class TuningRuntimeTests(unittest.TestCase):
         captured_messages: list[str] = []
 
         def fake_request(**kwargs: object) -> dict[str, object]:
-            captured_messages.append(str(kwargs["message"]))
+            message = kwargs["message"]
+            captured_messages.append(message if isinstance(message, str) else "")
             return {
                 "status": "warn",
                 "summary": "ok",

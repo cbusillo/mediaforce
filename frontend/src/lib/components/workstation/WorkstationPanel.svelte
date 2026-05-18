@@ -54,7 +54,7 @@
 
 	.panel__meta {
 		color: var(--mf-fg-tertiary);
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-xs);
 		margin-left: auto;
 	}

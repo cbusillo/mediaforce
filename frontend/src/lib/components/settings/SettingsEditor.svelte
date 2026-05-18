@@ -126,7 +126,7 @@
 		{
 			label: 'Save state',
 			value: savePending ? 'Saving' : dirty ? 'Unsaved' : saveError ? 'Save error' : 'Saved',
-			detail: saveError || saveMessage || 'Runtime settings draft',
+			detail: saveError || saveMessage || 'Local settings draft',
 			tone: (saveError ? 'fail' : dirty ? 'wait' : savePending ? 'active' : 'ready') as BadgeTone
 		},
 		{
@@ -141,7 +141,7 @@
 		{
 			label: 'Hosts',
 			value: `${readyHostCount}/${configuredHosts.length}`,
-			detail: loadError || 'Ready hosts from runtime probe',
+			detail: loadError || 'Ready hosts from latest status check',
 			tone: (loadError ? 'fail' : readyHostCount > 0 ? 'ready' : 'idle') as BadgeTone,
 			mono: true
 		},
@@ -201,7 +201,7 @@
 	}
 
 	function runtimeCopy(runtime: HostRuntime | null): string {
-		if (!runtime) return 'Not probed';
+		if (!runtime) return 'Not checked';
 		if (runtime.available && runtime.issues.length === 0) return 'Ready';
 		if (runtime.available) return 'Needs setup';
 		return 'Offline';
@@ -255,7 +255,7 @@
 		if (!savedSettings) return;
 		draft = draftFromSettings(savedSettings);
 		saveError = '';
-		saveMessage = 'Draft reset to saved runtime settings.';
+		saveMessage = 'Draft reset to saved settings.';
 		clearArchiveArmed = false;
 	}
 
@@ -271,15 +271,16 @@
 				buildSettingsSavePayload(draft, savedSettings)
 			);
 			if (!response.ok) {
-				throw new Error(response.message || 'Settings could not be saved.');
+				saveError = response.message || 'Settings could not be saved.';
+			} else {
+				if (response.settings) {
+					savedSettings = response.settings;
+					lastSettingsKey = settingsKey(response.settings);
+					draft = draftFromSettings(response.settings);
+				}
+				saveMessage = response.message || 'Settings saved.';
+				await invalidateAll();
 			}
-			if (response.settings) {
-				savedSettings = response.settings;
-				lastSettingsKey = settingsKey(response.settings);
-				draft = draftFromSettings(response.settings);
-			}
-			saveMessage = response.message || 'Settings saved.';
-			await invalidateAll();
 		} catch (error) {
 			saveError = error instanceof Error ? error.message : 'Settings could not be saved.';
 		} finally {
@@ -293,7 +294,7 @@
 		archiveError = '';
 		if (!clearArchiveArmed) {
 			clearArchiveArmed = true;
-			archiveMessage = `Confirm archive cleanup for ${savedArchiveRootCopy} with a second click.`;
+			archiveMessage = `Confirm removal of waiting originals in ${savedArchiveRootCopy} with a second click.`;
 			return;
 		}
 		clearArchivePending = true;
@@ -303,16 +304,17 @@
 				buildArchiveCleanupClearPayload(savedSettings)
 			);
 			if (!response.ok) {
-				throw new Error(response.message || 'Archive cleanup failed.');
+				archiveError = response.message || 'Original removal failed.';
+			} else {
+				if (response.archive_cleanup) {
+					savedSettings = { ...savedSettings, archive_cleanup: response.archive_cleanup };
+				}
+				archiveMessage = response.message || 'Waiting originals removed.';
+				clearArchiveArmed = false;
+				await invalidateAll();
 			}
-			if (response.archive_cleanup) {
-				savedSettings = { ...savedSettings, archive_cleanup: response.archive_cleanup };
-			}
-			archiveMessage = response.message || 'Archive cleanup complete.';
-			clearArchiveArmed = false;
-			await invalidateAll();
 		} catch (error) {
-			archiveError = error instanceof Error ? error.message : 'Archive cleanup failed.';
+			archiveError = error instanceof Error ? error.message : 'Original removal failed.';
 		} finally {
 			clearArchivePending = false;
 		}
@@ -323,9 +325,9 @@
 	<main class="settings-console">
 		{#if !savedSettings}
 			<section class="settings-console__main">
-				<WorkstationPanel eyebrow="Settings" title="Runtime settings unavailable">
+				<WorkstationPanel eyebrow="Settings" title="Settings unavailable">
 					<p class="empty-note">
-						{loadError || 'The settings API did not return a payload.'}
+						{loadError || 'Mediaforce could not load settings.'}
 					</p>
 				</WorkstationPanel>
 			</section>
@@ -333,17 +335,17 @@
 			<section class="settings-console__main" aria-label="Settings workstation">
 				<header class="settings-header">
 					<div>
-						<span class="mf-eyebrow">Runtime config</span>
-						<h1>Settings console</h1>
+						<span class="mf-eyebrow">Settings</span>
+						<h1>Local media setup</h1>
 						<p>
-							Edit machine-local library roots, storage paths, host workers, and queue schedule
-							profiles from the runtime payload.
+							Edit library folders, working storage, encoding hosts, and the windows when Mediaforce
+							is allowed to run.
 						</p>
 					</div>
 					<div class="settings-header__actions" aria-label="Settings actions">
 						<StateBadge
 							tone={saveError ? 'fail' : dirty ? 'wait' : 'ready'}
-							label={saveError ? 'Error' : dirty ? 'Dirty' : 'Saved'}
+							label={saveError ? 'Error' : dirty ? 'Unsaved' : 'Saved'}
 						/>
 						<button
 							type="button"
@@ -380,7 +382,7 @@
 
 				<WorkstationPanel
 					eyebrow="Libraries"
-					title="Mounted roots"
+					title="Media folders"
 					meta={`${configuredLibraries.length.toLocaleString('en-US')} configured`}
 				>
 					<div class="table-wrap">
@@ -388,8 +390,8 @@
 							<thead>
 								<tr>
 									<th>Color</th>
-									<th>Key</th>
-									<th>Mounted path</th>
+									<th>Library</th>
+									<th>Folder path</th>
 									<th>Action</th>
 								</tr>
 							</thead>
@@ -410,7 +412,7 @@
 											</label>
 										</td>
 										<td>
-											<label class="sr-label" for={`library-key-${index}`}>Library key</label>
+											<label class="sr-label" for={`library-key-${index}`}>Library</label>
 											<input
 												id={`library-key-${index}`}
 												class="field"
@@ -420,7 +422,7 @@
 											/>
 										</td>
 										<td>
-											<label class="sr-label" for={`library-path-${index}`}>Mounted path</label>
+											<label class="sr-label" for={`library-path-${index}`}>Folder path</label>
 											<input
 												id={`library-path-${index}`}
 												class="field field--path"
@@ -454,10 +456,10 @@
 					</div>
 				</WorkstationPanel>
 
-				<WorkstationPanel eyebrow="Storage" title="Transcode, review, and archive roots">
+				<WorkstationPanel eyebrow="Storage" title="Working and cleanup folders">
 					<div class="storage-grid">
 						<label class="stacked-field">
-							<span>Transcode root</span>
+							<span>Working folder</span>
 							<input
 								class="field field--path"
 								value={draft.transcode_root}
@@ -466,21 +468,21 @@
 							/>
 						</label>
 						<div class="storage-readout">
-							<span>Archive cleanup root</span>
+							<span>Originals waiting folder</span>
 							<strong class="mf-path">{savedArchiveRootCopy}</strong>
 							{#if cleanupTargetDirty}
 								<small>Save settings before clearing a changed archive target.</small>
 							{/if}
 						</div>
 						<div class="storage-readout">
-							<span>Archived originals</span>
+							<span>Originals waiting</span>
 							<strong>{archiveCleanup?.file_count.toLocaleString('en-US') ?? '0'} files</strong>
 							<small>{formatGiB(archiveCleanup?.total_size_bytes ?? 0)}</small>
 						</div>
 						<div class="archive-actions">
 							<StateBadge
 								tone={archiveCleanup?.has_cleanup ? 'wait' : 'ready'}
-								label={archiveCleanup?.has_cleanup ? 'Cleanup' : 'Clear'}
+								label={archiveCleanup?.has_cleanup ? 'Waiting' : 'Handled'}
 							/>
 							<button
 								type="button"
@@ -492,7 +494,11 @@
 									? 'Save the changed transcode root before clearing archived originals.'
 									: undefined}
 							>
-								{clearArchivePending ? 'Clearing' : clearArchiveArmed ? 'Confirm' : 'Clear archive'}
+								{clearArchivePending
+									? 'Removing'
+									: clearArchiveArmed
+										? 'Confirm'
+										: 'Remove waiting originals'}
 							</button>
 						</div>
 					</div>
@@ -624,7 +630,7 @@
 					title="Remote workers"
 					meta={`${configuredHosts.length.toLocaleString('en-US')} configured`}
 				>
-					<div class="host-runtime-board" aria-label="Host runtime probe">
+					<div class="host-runtime-board" aria-label="Host status check">
 						{#each configuredHosts as host, index (`probe-host-${host.index}-${index}`)}
 							{@const runtime = hostRuntime(host)}
 							<div class="host-runtime-card host-runtime-card--{runtimeTone(runtime)}">
@@ -635,9 +641,10 @@
 								<span
 									>{runtime?.schedule_detail ||
 										runtime?.schedule_profile_label ||
-										'No runtime data'}</span
+										'No host status yet'}</span
 								>
-								<small>{runtime?.message || runtime?.active_reason || 'Probe pending'}</small>
+								<small>{runtime?.message || runtime?.active_reason || 'Status check pending'}</small
+								>
 							</div>
 						{:else}
 							<p class="empty-note">No remote hosts are configured.</p>
@@ -652,7 +659,7 @@
 										<StateBadge compact tone={runtimeTone(runtime)} label={runtimeCopy(runtime)} />
 										<strong>{host.label || host.host || `Remote worker ${index + 1}`}</strong>
 										<span
-											>{runtime?.message || runtime?.active_reason || 'Runtime probe pending'}</span
+											>{runtime?.message || runtime?.active_reason || 'Status check pending'}</span
 										>
 									</div>
 									<button
@@ -695,7 +702,7 @@
 										<span>Media access</span>
 										<select
 											class="field"
-											value={host.media_access}
+											bind:value={draft.remote_hosts[index].media_access}
 											onchange={(event) => updateHost(index, { media_access: selectValue(event) })}
 										>
 											<option value="mounted">Mounted</option>
@@ -726,7 +733,7 @@
 										<span>Schedule</span>
 										<select
 											class="field"
-											value={host.schedule_profile}
+											bind:value={draft.remote_hosts[index].schedule_profile}
 											onchange={(event) =>
 												updateHost(index, { schedule_profile: selectValue(event) })}
 										>
@@ -821,7 +828,7 @@
 									<span>Source root overrides JSON</span>
 									<textarea
 										class="field field--textarea"
-										value={host.source_roots_json}
+										bind:value={draft.remote_hosts[index].source_roots_json}
 										placeholder={'{"tv": "/Volumes/TV"}'}
 										oninput={(event) => updateHost(index, { source_roots_json: inputValue(event) })}
 									></textarea>
@@ -842,19 +849,19 @@
 				</WorkstationPanel>
 			</section>
 
-			<aside class="settings-console__rail" aria-label="Settings runtime summary">
-				<WorkstationPanel eyebrow="Scope" title="Machine-local config">
+			<aside class="settings-console__rail" aria-label="Settings file summary">
+				<WorkstationPanel eyebrow="Scope" title="Machine-local settings">
 					<div class="rail-list">
 						<div class="rail-row">
-							<span>Runtime settings</span>
+							<span>Settings file</span>
 							<strong class="mf-path">{savedSettings.runtime_settings_path}</strong>
 						</div>
 						<div class="rail-row">
-							<span>Repo defaults</span>
+							<span>Default file</span>
 							<strong class="mf-path">{savedSettings.repo_config_path}</strong>
 						</div>
 						<div class="rail-row">
-							<span>Review/archive output</span>
+							<span>Cleanup folder</span>
 							<strong class="mf-path">{savedArchiveRootCopy}</strong>
 						</div>
 					</div>
@@ -991,12 +998,12 @@
 
 	.field--path,
 	.field--textarea {
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-xs);
 	}
 
 	.field--number {
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		max-width: 92px;
 	}
 

@@ -20,7 +20,7 @@ export function queueFolderTone(folder: FolderCard): ShellTone {
 
 export function queueFolderState(folder: FolderCard): string {
 	if (folder.review_badge_label) return folder.review_badge_label;
-	if (folder.pending_count > 0) return 'Needs sample';
+	if (folder.pending_count > 0) return 'Needs check';
 	if (folder.known_saved_bytes > 0) return 'Completed';
 	return 'Cataloged';
 }
@@ -56,7 +56,7 @@ export function buildQueueStatusTiles(
 	const scanStatus = dashboard.scan_job?.status ?? 'idle';
 	return [
 		{
-			label: 'Review queue',
+			label: 'Next work',
 			value: `${folders.length} folders`,
 			detail: `${totalPendingItems(folders).toLocaleString('en-US')} pending items`,
 			tone: folders.length ? 'wait' : 'idle'
@@ -70,7 +70,14 @@ export function buildQueueStatusTiles(
 		},
 		{
 			label: 'Scan',
-			value: scanStatus,
+			value:
+				scanStatus === 'running'
+					? 'running'
+					: scanStatus === 'queued'
+						? 'queued'
+						: scanStatus === 'failed'
+							? 'needs attention'
+							: 'idle',
 			detail: dashboard.scan_job?.prefix ?? dashboard.scan_job?.scope ?? 'catalog scope',
 			tone: ['queued', 'running'].includes(scanStatus)
 				? 'active'
@@ -82,7 +89,9 @@ export function buildQueueStatusTiles(
 			label: 'Encode queue',
 			value: `${encodeQueue.running_count} running · ${encodeQueue.queued_count} queued`,
 			detail:
-				encodeQueue.telemetry?.eta_copy ?? encodeQueue.state.scheduler_summary ?? 'scheduler state',
+				encodeQueue.telemetry?.eta_copy ??
+				encodeQueue.state.scheduler_summary ??
+				'work window state',
 			tone: encodeQueue.state.stop_requested
 				? 'fail'
 				: encodeQueue.state.is_paused
@@ -94,7 +103,7 @@ export function buildQueueStatusTiles(
 		{
 			label: 'Hosts',
 			value: `${readyHosts} ready / ${hosts.hosts.length}`,
-			detail: hosts.hosts.length ? 'runtime probe complete' : 'no host payload',
+			detail: hosts.hosts.length ? 'capacity check complete' : 'host status unavailable',
 			tone: readyHosts > 0 ? 'ready' : hosts.hosts.length > 0 ? 'wait' : 'idle'
 		}
 	];

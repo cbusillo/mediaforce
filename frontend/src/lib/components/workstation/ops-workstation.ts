@@ -72,7 +72,7 @@ function calibrationHostCopy(job: CalibrationJob): string {
 }
 
 function calibrationPrefix(job: CalibrationJob): string {
-	return compactText(job.prefix) || compactText(job.folder_prefix) || 'runtime scope';
+	return compactText(job.prefix) || compactText(job.folder_prefix) || 'system scope';
 }
 
 function calibrationDetail(job: CalibrationJob): string {
@@ -82,14 +82,24 @@ function calibrationDetail(job: CalibrationJob): string {
 		compactText(job.operator_note) ||
 		compactText(job.created_at) ||
 		'waiting for worker update';
-	return (
+	const detail =
 		raw
 			.split('\n')
 			.map((line) => line.trim())
 			.filter(Boolean)
 			.at(-1)
-			?.slice(0, 180) ?? 'waiting for worker update'
-	);
+			?.slice(0, 180) ?? 'waiting for worker update';
+	const normalized = detail.toLowerCase();
+	if (normalized.includes('failed to find a suitable crf')) {
+		return 'Sample check did not find a usable quality setting.';
+	}
+	if (normalized.includes('interrupted by a web process restart')) {
+		return 'Sample check was interrupted before it finished.';
+	}
+	if (normalized.includes('queue job was stopped')) {
+		return 'Sample check was stopped and cleaned up.';
+	}
+	return detail.replace(/^error:\s*/i, '');
 }
 
 function statusTone(status: string): ShellTone {
@@ -101,12 +111,19 @@ function statusTone(status: string): ShellTone {
 }
 
 function statusCopy(status: string): string {
-	return status.replaceAll('_', ' ');
+	const normalized = status.toLowerCase();
+	if (normalized === 'needs_attention' || normalized === 'failed' || normalized === 'stopped') {
+		return 'Retry available';
+	}
+	if (normalized === 'retry_backoff') return 'Retry waiting';
+	if (normalized === 'pending_review') return 'Needs review';
+	return normalized.replaceAll('_', ' ');
 }
 
 export function encodeJobTone(job: EncodeQueueJob): ShellTone {
-	if (job.status === 'retry_backoff') return 'wait';
-	return statusTone(String(job.status ?? '').toLowerCase());
+	const status = String(job.status ?? '').toLowerCase();
+	if (['failed', 'needs_attention', 'stopped', 'retry_backoff'].includes(status)) return 'wait';
+	return statusTone(status);
 }
 
 export function encodeJobProgress(job: EncodeQueueJob): string {
@@ -181,7 +198,7 @@ export function buildEncodeRows(
 			kind: 'encode',
 			tone: encodeJobTone(job),
 			status: statusCopy(job.status || 'unknown'),
-			prefix: job.prefix || 'runtime scope',
+			prefix: job.prefix || 'system scope',
 			host: job.active_hosts?.map(hostCopy).filter(Boolean).join(', ') || hostCopy(job.host),
 			phase: job.running_shard_count ? `${job.running_shard_count} active shards` : 'encode queue',
 			progress: encodeJobProgress(job),
@@ -196,16 +213,23 @@ export function buildEncodeRows(
 function buildCalibrationLaneRows(
 	laneName: OpsQueueKind,
 	jobs: CalibrationJob[] | undefined,
-	status: string
+	status: string,
+	options: { historical?: boolean } = {}
 ): OpsQueueRow[] {
 	return (jobs ?? []).map((job, index) => ({
 		key: `${laneName}:${compactText(job.job_id) || compactText(job.prefix) || `${status}:${index}`}`,
 		kind: laneName,
-		tone: statusTone(status),
-		status: statusCopy(status),
+		tone: options.historical ? 'idle' : statusTone(status),
+		status: options.historical ? 'History' : statusCopy(status),
 		prefix: calibrationPrefix(job),
 		host: calibrationHostCopy(job),
-		phase: laneName === 'sample' ? 'sample calibration' : 'proof encode',
+		phase: options.historical
+			? laneName === 'sample'
+				? 'sample check history'
+				: 'proof encode history'
+			: laneName === 'sample'
+				? 'sample check'
+				: 'proof encode',
 		progress: compactText(job.progress) || compactText(job.stage) || '—',
 		scheduler:
 			compactText(job.scheduler_status_copy) || compactText(job.created_at) || 'queued order',
@@ -222,12 +246,12 @@ export function rowRecoveryLabel(row: OpsQueueRow): string {
 }
 
 export function rowRecoveryTitle(row: OpsQueueRow): string {
-	if (!row.action) return 'No runtime action is available for this row.';
+	if (!row.action) return 'No action is available for this row.';
 	if (row.action === 'retry-encode-prefix') {
-		return 'Retry the failed encode for this folder prefix only.';
+		return 'Retry the encode for this folder only.';
 	}
 	if (row.action === 'retry-failed-encode') {
-		return 'Runs the global retry for all approved failed folder encodes.';
+		return 'Retry every approved folder that has retry available.';
 	}
 	return row.actionScope === 'global'
 		? 'Runs a global queue action; this is not scoped to one row.'
@@ -247,26 +271,45 @@ export function hostPrepareTitle(host: HostRuntime): string {
 }
 
 export function buildCalibrationRows(
+	dashboard: DashboardSummaryPayload | null | undefined,
+	{ includeHistory = true }: { includeHistory?: boolean } = {}
+): OpsQueueRow[] {
+	const queue = dashboard?.calibration_queue;
+	if (!queue) return [];
+	const currentRows = [
+		...buildCalibrationLaneRows('sample', queue.sample.running, 'running'),
+		...buildCalibrationLaneRows('sample', queue.sample.queued, 'queued'),
+		...buildCalibrationLaneRows('sample', queue.sample.pending_review, 'pending_review'),
+		...buildCalibrationLaneRows('proof', queue.full.running, 'running'),
+		...buildCalibrationLaneRows('proof', queue.full.queued, 'queued'),
+		...buildCalibrationLaneRows('proof', queue.full.pending_review, 'pending_review')
+	];
+	if (!includeHistory) return currentRows;
+	return [...currentRows, ...buildOpsHistoryRows(dashboard)];
+}
+
+export function buildOpsHistoryRows(
 	dashboard: DashboardSummaryPayload | null | undefined
 ): OpsQueueRow[] {
 	const queue = dashboard?.calibration_queue;
 	if (!queue) return [];
 	return [
-		...buildCalibrationLaneRows('sample', queue.sample.running, 'running'),
-		...buildCalibrationLaneRows('sample', queue.sample.queued, 'queued'),
-		...buildCalibrationLaneRows('sample', queue.sample.pending_review, 'pending_review'),
-		...buildCalibrationLaneRows('sample', queue.sample.recent_failed, 'failed'),
-		...buildCalibrationLaneRows('proof', queue.full.running, 'running'),
-		...buildCalibrationLaneRows('proof', queue.full.queued, 'queued'),
-		...buildCalibrationLaneRows('proof', queue.full.pending_review, 'pending_review'),
-		...buildCalibrationLaneRows('proof', queue.full.recent_failed, 'failed')
+		...buildCalibrationLaneRows('sample', queue.sample.recent_failed, 'failed', {
+			historical: true
+		}),
+		...buildCalibrationLaneRows('proof', queue.full.recent_failed, 'failed', {
+			historical: true
+		})
 	];
 }
 
 export function buildOpsQueueRows(
 	dashboard: DashboardSummaryPayload | null | undefined
 ): OpsQueueRow[] {
-	return [...buildEncodeRows(dashboard), ...buildCalibrationRows(dashboard)];
+	return [
+		...buildEncodeRows(dashboard),
+		...buildCalibrationRows(dashboard, { includeHistory: false })
+	];
 }
 
 export function buildOpsBlockers(
@@ -277,11 +320,15 @@ export function buildOpsBlockers(
 	const blockers: OpsBlocker[] = [];
 	const queue = dashboard?.encode_queue;
 	const attentionCount = queue?.needs_attention_count ?? 0;
+	const readyHosts = hosts?.hosts.filter((host) => host.available).length ?? 0;
+	const totalHosts = hosts?.hosts.length ?? 0;
+	const queuedWork = (queue?.queued_count ?? 0) + (queue?.running_count ?? 0);
+	const scheduleWaiting = queue?.queued_waiting_count ?? 0;
 	if (loadError) {
 		blockers.push({
 			key: 'runtime-load',
 			tone: 'fail',
-			title: 'Runtime data partial',
+			title: 'Mediaforce data unavailable',
 			detail: loadError
 		});
 	}
@@ -289,8 +336,8 @@ export function buildOpsBlockers(
 		blockers.push({
 			key: 'stop-requested',
 			tone: 'fail',
-			title: 'Encode stop requested',
-			detail: 'Workers are draining current encode work before the queue can resume.',
+			title: 'Encoding is stopping',
+			detail: 'Workers are finishing current items before the queue can start more work.',
 			action: 'resume-encode'
 		});
 	}
@@ -298,31 +345,36 @@ export function buildOpsBlockers(
 		blockers.push({
 			key: 'paused',
 			tone: 'wait',
-			title: 'Encode scheduler paused',
-			detail: queue.state.scheduler_summary ?? 'No new encode jobs will start.',
+			title: 'Encoding is paused',
+			detail: queue.state.scheduler_summary ?? 'No new encode jobs will start until resumed.',
 			action: 'resume-encode'
 		});
 	}
 	if (attentionCount > 0) {
 		blockers.push({
 			key: 'needs-attention',
-			tone: 'fail',
-			title: `${attentionCount} encode ${attentionCount === 1 ? 'job needs' : 'jobs need'} attention`,
-			detail: 'Retry after reviewing the failed rows in the queue table.',
+			tone: 'wait',
+			title: `${attentionCount} encode ${attentionCount === 1 ? 'job has' : 'jobs have'} retry available`,
+			detail: 'Review the row, then retry approved folders from this page.',
 			action: 'retry-failed-encode'
 		});
 	}
-	for (const host of hosts?.hosts ?? []) {
-		if (!host.available || host.schedule_open === false || host.queue_active === false) {
-			blockers.push({
-				key: `host:${host.key}`,
-				tone: host.available ? 'wait' : 'fail',
-				title: `${host.label} not ready`,
-				detail:
-					host.schedule_open === false ? host.schedule_detail : host.message || host.active_reason,
-				action: !host.available && host.setup_supported !== false ? 'start-host' : undefined
-			});
-		}
+	if (totalHosts > 0 && readyHosts === 0 && queuedWork > 0) {
+		blockers.push({
+			key: 'no-hosts-ready',
+			tone: 'fail',
+			title: 'No hosts can encode right now',
+			detail:
+				'Queued work exists, but every configured host is unavailable or outside its work window.'
+		});
+	} else if (scheduleWaiting > 0) {
+		blockers.push({
+			key: 'schedule-waiting',
+			tone: 'wait',
+			title: `${scheduleWaiting} queued ${scheduleWaiting === 1 ? 'folder is' : 'folders are'} waiting for schedule`,
+			detail:
+				queue?.state.scheduler_summary ?? 'Work will start when an allowed encode window opens.'
+		});
 	}
 	return blockers;
 }
@@ -343,9 +395,9 @@ export function buildOpsStatusTiles(
 				? 'paused'
 				: encode?.state.stop_requested
 					? 'stopping'
-					: 'open',
+					: 'ready',
 			detail:
-				encode?.state.scheduler_summary ?? (loadError ? 'runtime partial' : 'scheduler state'),
+				encode?.state.scheduler_summary ?? (loadError ? 'data unavailable' : 'work window state'),
 			tone: loadError
 				? 'fail'
 				: encode?.state.stop_requested
@@ -357,10 +409,11 @@ export function buildOpsStatusTiles(
 		{
 			label: 'Encode jobs',
 			value: `${encode?.running_count ?? 0} running · ${encode?.queued_count ?? 0} queued`,
-			detail: encode?.telemetry?.eta_copy ?? `${encode?.needs_attention_count ?? 0} need attention`,
+			detail:
+				encode?.telemetry?.eta_copy ?? `${encode?.needs_attention_count ?? 0} retry available`,
 			tone:
 				(encode?.needs_attention_count ?? 0) > 0
-					? 'fail'
+					? 'wait'
 					: (encode?.running_count ?? 0) > 0
 						? 'active'
 						: (encode?.queued_count ?? 0) > 0
@@ -368,7 +421,7 @@ export function buildOpsStatusTiles(
 							: 'idle'
 		},
 		{
-			label: 'Samples',
+			label: 'Sample checks',
 			value: `${calibration?.sample.running_count ?? 0} running · ${calibration?.sample.queued_count ?? 0} queued`,
 			detail: `${calibration?.sample.pending_review_count ?? 0} waiting for review`,
 			tone: (calibration?.active_count ?? 0) > 0 ? 'active' : 'idle'
@@ -376,8 +429,12 @@ export function buildOpsStatusTiles(
 		{
 			label: 'Hosts',
 			value: `${readyHosts} ready / ${totalHosts}`,
-			detail: totalHosts ? 'compact runtime probe' : 'no host payload',
-			tone: readyHosts > 0 ? 'ready' : totalHosts > 0 ? 'wait' : 'idle'
+			detail: totalHosts
+				? readyHosts > 0
+					? 'capacity available'
+					: 'no host can start work'
+				: 'host status unavailable',
+			tone: readyHosts > 0 ? 'ready' : totalHosts > 0 ? 'fail' : 'idle'
 		}
 	];
 }
@@ -402,10 +459,10 @@ export function buildOpsFooterSignals(
 		{
 			label: 'Attention',
 			value: String(encode?.needs_attention_count ?? 0),
-			tone: (encode?.needs_attention_count ?? 0) > 0 ? 'fail' : 'idle'
+			tone: (encode?.needs_attention_count ?? 0) > 0 ? 'wait' : 'idle'
 		},
 		{
-			label: 'Samples',
+			label: 'Checks',
 			value: String(calibration?.active_count ?? 0),
 			tone: (calibration?.active_count ?? 0) > 0 ? 'active' : 'idle'
 		},
@@ -416,17 +473,17 @@ export function buildOpsFooterSignals(
 	];
 }
 
-export function hostTone(host: HostRuntime): ShellTone {
-	if (!host.available) return 'fail';
-	if (host.schedule_open === false || host.queue_active === false) return 'wait';
+export function hostTone(host: HostRuntime, fleetHasReadyCapacity = false): ShellTone {
+	if (!host.available) return fleetHasReadyCapacity ? 'wait' : 'fail';
+	if (host.schedule_open === false || host.queue_active === false) return 'idle';
 	if (host.active_encode_count > 0) return 'active';
 	return 'ready';
 }
 
 export function hostStateCopy(host: HostRuntime): string {
 	if (!host.available) return 'Unavailable';
-	if (host.schedule_open === false) return 'Off window';
-	if (host.queue_active === false) return 'Idle';
+	if (host.schedule_open === false) return 'Scheduled off';
+	if (host.queue_active === false) return 'Not accepting';
 	if (host.active_encode_count > 0) return 'Encoding';
 	return 'Ready';
 }

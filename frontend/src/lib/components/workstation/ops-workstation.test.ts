@@ -3,6 +3,7 @@ import type { DashboardSummaryPayload, HostsPayload } from '$lib/api/types';
 import {
 	buildOpsBlockers,
 	buildOpsQueueRows,
+	buildOpsHistoryRows,
 	buildOpsStatusTiles,
 	hostPrepareDisabled,
 	hostPrepareTitle,
@@ -156,15 +157,14 @@ function hostsFixture(): HostsPayload {
 }
 
 describe('Ops workstation mapping', () => {
-	it('prioritizes running, queued, retryable encode, and sample rows', () => {
+	it('prioritizes current running, queued, retryable encode, and sample rows', () => {
 		const rows = buildOpsQueueRows(dashboardFixture());
 
 		expect(rows.map((row) => row.key)).toEqual([
 			'encode:encode-1',
 			'encode:encode-2',
 			'encode:encode-3',
-			'sample:sample-1',
-			'sample:sample-failed-1'
+			'sample:sample-1'
 		]);
 		expect(rows[1]).toMatchObject({
 			tone: 'wait',
@@ -173,36 +173,42 @@ describe('Ops workstation mapping', () => {
 			detail: 'transient worker fault'
 		});
 		expect(rows[2]).toMatchObject({
-			tone: 'fail',
+			tone: 'wait',
 			action: 'retry-encode-prefix',
 			actionScope: 'row',
 			detail: 'quality target missed'
 		});
 		expect(rowRecoveryLabel(rows[1])).toBe('No action');
-		expect(rowRecoveryTitle(rows[1])).toBe('No runtime action is available for this row.');
+		expect(rowRecoveryTitle(rows[1])).toBe('No action is available for this row.');
 		expect(rowRecoveryLabel(rows[2])).toBe('Retry folder');
-		expect(rowRecoveryTitle(rows[2])).toContain('folder prefix only');
+		expect(rowRecoveryTitle(rows[2])).toContain('folder only');
 		expect(rowRecoveryLabel(rows[3])).toBe('No action');
-		expect(rows[4]).toMatchObject({
-			tone: 'fail',
-			status: 'failed',
+	});
+
+	it('keeps old sample failures in history instead of current work', () => {
+		const rows = buildOpsHistoryRows(dashboardFixture());
+
+		expect(rows.map((row) => row.key)).toEqual(['sample:sample-failed-1']);
+		expect(rows[0]).toMatchObject({
+			tone: 'idle',
+			status: 'History',
 			prefix: 'tv/show/season 4',
 			detail: 'could not find a viable sample'
 		});
-		expect(rowRecoveryLabel(rows[4])).toBe('No action');
+		expect(rowRecoveryLabel(rows[0])).toBe('No action');
 	});
 
-	it('surfaces runtime partials, failed encodes, and closed schedules as blockers', () => {
+	it('surfaces unavailable data, retryable encodes, and schedule waits as attention items', () => {
 		const blockers = buildOpsBlockers(dashboardFixture(), hostsFixture(), 'Dashboard unavailable');
 
 		expect(blockers.map((blocker) => blocker.key)).toEqual([
 			'runtime-load',
 			'needs-attention',
-			'host:overnight'
+			'schedule-waiting'
 		]);
-		expect(blockers[0]).toMatchObject({ tone: 'fail', title: 'Runtime data partial' });
-		expect(blockers[1]).toMatchObject({ action: 'retry-failed-encode' });
-		expect(blockers[2]).toMatchObject({ tone: 'wait', detail: 'opens at 23:00' });
+		expect(blockers[0]).toMatchObject({ tone: 'fail', title: 'Mediaforce data unavailable' });
+		expect(blockers[1]).toMatchObject({ tone: 'wait', action: 'retry-failed-encode' });
+		expect(blockers[2]).toMatchObject({ tone: 'wait' });
 	});
 
 	it('keeps scheduler, attention, sample, and host tones semantic', () => {
@@ -210,8 +216,8 @@ describe('Ops workstation mapping', () => {
 
 		expect(tiles).toMatchObject([
 			{ label: 'Scheduler', tone: 'ready' },
-			{ label: 'Encode jobs', tone: 'fail' },
-			{ label: 'Samples', tone: 'active' },
+			{ label: 'Encode jobs', tone: 'wait' },
+			{ label: 'Sample checks', tone: 'active' },
 			{ label: 'Hosts', tone: 'ready' }
 		]);
 	});
@@ -222,9 +228,10 @@ describe('Ops workstation mapping', () => {
 
 		expect(hostTone(ready)).toBe('active');
 		expect(hostStateCopy(ready)).toBe('Encoding');
-		expect(hostTone(scheduledOff)).toBe('wait');
-		expect(hostStateCopy(scheduledOff)).toBe('Off window');
+		expect(hostTone(scheduledOff)).toBe('idle');
+		expect(hostStateCopy(scheduledOff)).toBe('Scheduled off');
 		expect(hostTone(unavailable)).toBe('fail');
+		expect(hostTone(unavailable, true)).toBe('wait');
 		expect(hostStateCopy(unavailable)).toBe('Unavailable');
 	});
 

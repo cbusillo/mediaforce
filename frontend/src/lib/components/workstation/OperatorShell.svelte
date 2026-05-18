@@ -136,7 +136,7 @@
 
 	.brand__mark {
 		color: var(--mf-fg-primary);
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-sm);
 		font-weight: var(--mf-weight-bold);
 		letter-spacing: 0;
@@ -190,7 +190,7 @@
 		border-left: var(--mf-border);
 		color: var(--mf-fg-secondary);
 		display: inline-flex;
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-xs);
 		gap: var(--mf-space-4);
 		padding: 0 var(--mf-space-6);
@@ -263,14 +263,14 @@
 	}
 
 	.status-tile__value.mono {
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-sm);
 		font-weight: var(--mf-weight-medium);
 	}
 
 	.status-tile__detail {
 		color: var(--mf-fg-tertiary);
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-xs);
 		line-height: var(--mf-leading-snug);
 	}
@@ -318,7 +318,7 @@
 		align-items: center;
 		color: var(--mf-fg-tertiary);
 		display: inline-flex;
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-xs);
 		gap: var(--mf-space-3);
 		margin-left: auto;
@@ -342,7 +342,7 @@
 		bottom: 0;
 		color: var(--mf-fg-tertiary);
 		display: flex;
-		font-family: var(--mf-font-mono);
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-2xs);
 		gap: var(--mf-space-7);
 		left: 0;
@@ -363,7 +363,7 @@
 
 	.footer-strip__item b {
 		color: var(--mf-fg-primary);
-		font-family: var(--mf-font-sans);
+		font-family: var(--mf-font-sans), sans-serif;
 		font-weight: var(--mf-weight-semibold);
 		text-transform: uppercase;
 	}

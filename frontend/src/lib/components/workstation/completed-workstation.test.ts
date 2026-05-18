@@ -66,10 +66,10 @@ describe('Completed workstation mapping', () => {
 
 		expect(tiles).toMatchObject([
 			{ label: 'Completed folders', tone: 'ready' },
-			{ label: 'Backups waiting', tone: 'wait' },
+			{ label: 'Originals waiting', tone: 'wait' },
 			{ label: 'Reclaimable', tone: 'ready' },
-			{ label: 'Ready / blocked', value: '1 / 1', tone: 'fail' },
-			{ label: 'Archive root', tone: 'ready' }
+			{ label: 'Waiting / review', value: '1 / 1', tone: 'fail' },
+			{ label: 'Cleanup folder', tone: 'ready' }
 		]);
 	});
 
@@ -84,7 +84,12 @@ describe('Completed workstation mapping', () => {
 			archive
 		);
 
-		expect(options.map((option) => option.label)).toEqual(['Ready', 'Blocked', 'Risky', 'Cleaned']);
+		expect(options.map((option) => option.label)).toEqual([
+			'Originals waiting',
+			'Check settings',
+			'Originals already removed',
+			'Handled'
+		]);
 		expect(options.map((option) => option.key)).toEqual(['ready', 'blocked', 'unknown', 'cleaned']);
 	});
 
