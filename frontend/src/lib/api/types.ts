@@ -220,7 +220,6 @@ export interface DashboardSummaryPayload {
 		recent_failed_count?: number;
 	};
 	encode_queue: EncodeQueueSummary;
-	archive_cleanup?: ArchiveCleanupSummary;
 	catalog_empty: boolean;
 	folder_cache_key: string;
 	metric_support: MetricSupport;

@@ -91,6 +91,7 @@ from mediaforce.web.runtime.completed_runtime import (
     completed_page_payload,
     confirm_originals_removed_action,
 )
+from mediaforce.web.runtime.dashboard_payloads import dashboard_summary_payload
 from mediaforce.web.runtime.folder_ai_tuning import (
     FolderAiTuneDeps,
     _proposal_can_queue,
@@ -986,6 +987,18 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(summary["has_cleanup"])
         self.assertEqual(summary["file_count"], 2)
         self.assertEqual(summary["total_size_bytes"], 8)
+
+    def test_dashboard_summary_payload_does_not_scan_archive_cleanup(self) -> None:
+        payload = dashboard_summary_payload(
+            self.config,
+            folder_card_cache_key=lambda _config: ("empty", 0, 0),
+            preview_folder_cards=lambda _config, _connection: [],
+            maybe_schedule_scan=lambda _connection, _config, prefix=None: None,
+            decorate_encode_queue_for_scheduler=lambda _config, summary: summary,
+            library_color_map_for_config=lambda _config: {},
+        )
+
+        self.assertNotIn("archive_cleanup", payload)
 
     def test_clear_archive_cleanup_action_removes_files_and_prunes_directories(self) -> None:
         archive_root = self.config.archive_root

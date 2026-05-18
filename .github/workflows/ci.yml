@@ -37,6 +37,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm --prefix frontend ci
 
+      - name: Install browser smoke dependencies
+        run: npm --prefix frontend exec playwright install --with-deps chromium
+
       - name: Install media tools
         run: |
           sudo apt-get update
@@ -64,3 +67,6 @@ jobs:
 
       - name: Build frontend
         run: npm --prefix frontend run build
+
+      - name: Run web route smoke
+        run: npm --prefix frontend run smoke:web

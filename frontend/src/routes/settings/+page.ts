@@ -17,7 +17,7 @@ async function settle<T>(promise: Promise<T>): Promise<SettledPayload<T>> {
 
 export async function load({ fetch }: { fetch: typeof window.fetch }) {
 	const [settings, hosts] = await Promise.all([
-		settle(fetchJson<SettingsPayload>('/api/settings', fetch)),
+		settle(fetchJson<SettingsPayload>('/api/settings?include_archive_cleanup=0', fetch)),
 		settle(fetchJson<HostsPayload>('/api/hosts?compact=1', fetch))
 	]);
 	const loadError = [settings.error, hosts.error].filter(Boolean).join(' · ') || null;

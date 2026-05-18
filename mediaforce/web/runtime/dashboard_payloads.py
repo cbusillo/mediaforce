@@ -15,7 +15,6 @@ def dashboard_summary_payload(
         maybe_schedule_scan: Any,
         decorate_encode_queue_for_scheduler: Any,
         library_color_map_for_config: Any,
-        archive_cleanup_summary_fn: Any,
 ) -> dict[str, Any]:
     cache_key = folder_card_cache_key(config)
     with open_db(config.paths.db_path) as connection:
@@ -28,7 +27,6 @@ def dashboard_summary_payload(
         "scan_job": scan_job,
         "calibration_queue": calibration_queue,
         "encode_queue": encode_queue,
-        "archive_cleanup": archive_cleanup_summary_fn(config),
         "folders_preview": [asdict(folder) for folder in preview_folders],
         "catalog_empty": not preview_folders,
         "folder_cache_key": _serialize_cache_key(cache_key),

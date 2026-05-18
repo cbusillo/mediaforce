@@ -3622,6 +3622,35 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(card.review_badge_tone, "ok")
         self.assertEqual(card.review_badge_detail, "All staged outputs passed validation.")
 
+    def test_folder_cards_use_catalog_mtime_without_statting_source_paths(self) -> None:
+        source = self._create_source_file("episode-catalog-age.mkv")
+        age_days = Mock(side_effect=AssertionError("source path age lookup should not run"))
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source)
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_id)
+                .values(
+                    size_bytes=2 * 1024 * 1024 * 1024,
+                    rel_path=f"tv/show/Season 10/{source.name}",
+                    parent_dir="tv/show/Season 10",
+                    mtime_ns=1_700_000_000_000_000_000,
+                )
+            )
+
+            cards = folder_cards_runtime.list_folder_cards(
+                connection,
+                minimum_recommended_savings_bytes=100 * 1024 * 1024,
+                folder_group=web_app._folder_group,
+                age_days=age_days,
+                estimate_savings_bytes=Mock(return_value=200 * 1024 * 1024),
+                review_badge_for_prefix=Mock(return_value={"label": None, "tone": None}),
+            )
+
+        self.assertEqual([card.prefix for card in cards], ["tv/show/Season 10"])
+        age_days.assert_not_called()
+
     def test_folder_delivery_badge_ignores_mixed_validated_and_encoded_items(self) -> None:
         card = self._folder_card_for_delivery_badge(
             item_count=4,

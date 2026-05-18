@@ -97,12 +97,6 @@ function dashboardFixture(): DashboardSummaryPayload {
 			},
 			telemetry: { eta_copy: '24m' }
 		},
-		archive_cleanup: {
-			archive_root: '/runtime/archive',
-			file_count: 0,
-			total_size_bytes: 0,
-			has_cleanup: false
-		},
 		catalog_empty: false,
 		folder_cache_key: 'fixture',
 		metric_support: { vmaf: true, xpsnr: false, ssim: true },

@@ -1,6 +1,7 @@
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -248,6 +249,7 @@ def list_folder_cards(
         select(
             library_items.c.rel_path,
             library_items.c.source_path,
+            library_items.c.mtime_ns,
             library_items.c.size_bytes,
             library_items.c.status,
             library_items.c.video_codec,
@@ -292,7 +294,9 @@ def list_folder_cards(
         card.item_count += 1
         size_bytes = int(row["size_bytes"])
         card.total_size_bytes += size_bytes
-        path_age_days = age_days(str(row["source_path"]))
+        path_age_days = _age_days_from_mtime_ns(row["mtime_ns"])
+        if path_age_days is None:
+            path_age_days = age_days(str(row["source_path"]))
         card.average_age_days += path_age_days
         status = str(row["status"] or "unknown")
         codec = str(row["video_codec"] or "unknown")
@@ -527,3 +531,19 @@ def _age_multiplier(age_days: float) -> float:
     if age_days >= 730:
         return 1.15
     return 1.0
+
+
+def _age_days_from_mtime_ns(value: object) -> float | None:
+    if isinstance(value, int):
+        mtime_ns = value
+    elif isinstance(value, str):
+        try:
+            mtime_ns = int(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    if mtime_ns <= 0:
+        return None
+    age_seconds = max(datetime.now(tz=UTC).timestamp() - (mtime_ns / 1_000_000_000), 0.0)
+    return age_seconds / 86400.0
