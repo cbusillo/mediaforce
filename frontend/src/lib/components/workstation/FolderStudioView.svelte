@@ -488,7 +488,7 @@
 				meta={proposalRows.length ? `${proposalRows.length} rows` : 'No draft'}
 			>
 				<div class="table-wrap">
-					<table>
+					<table class="policy-table">
 						<thead>
 							<tr>
 								<th>Area</th>
@@ -1158,6 +1158,72 @@
 		.sample-facts,
 		.decision__actions {
 			flex-wrap: wrap;
+		}
+	}
+
+	@media (max-width: 680px) {
+		.table-wrap {
+			overflow: visible;
+		}
+
+		.policy-table {
+			min-width: 0;
+		}
+
+		.policy-table thead {
+			display: none;
+		}
+
+		.policy-table tbody,
+		.policy-table tr,
+		.policy-table td {
+			display: block;
+			width: 100%;
+		}
+
+		.policy-table tr {
+			border-bottom: var(--mf-border-muted);
+			display: grid;
+			gap: var(--mf-space-3);
+			grid-template-columns: minmax(0, 1fr);
+			padding: var(--mf-space-4);
+		}
+
+		.policy-table td {
+			border-bottom: 0;
+			height: auto;
+			min-width: 0;
+			padding: 0;
+		}
+
+		.policy-table td:not(:only-child) {
+			display: grid;
+			gap: var(--mf-space-2);
+		}
+
+		.policy-table td:not(:only-child)::before {
+			color: var(--mf-fg-tertiary);
+			font-family: var(--mf-font-sans), sans-serif;
+			font-size: var(--mf-text-2xs);
+			font-weight: var(--mf-weight-semibold);
+			letter-spacing: 0.08em;
+			text-transform: uppercase;
+		}
+
+		.policy-table td:nth-child(1)::before {
+			content: 'Area';
+		}
+
+		.policy-table td:nth-child(2)::before {
+			content: 'Setting';
+		}
+
+		.policy-table td:nth-child(3)::before {
+			content: 'Current';
+		}
+
+		.policy-table td:nth-child(4)::before {
+			content: 'Draft';
 		}
 	}
 </style>
