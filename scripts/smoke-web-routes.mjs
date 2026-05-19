@@ -29,7 +29,7 @@ const endpointChecks = [
 
 const routeChecks = [
 	['Queue', '/', 'Queue'],
-	['Folders', '/folders', 'Queue'],
+	['Folders', '/folders', 'Folders'],
 	['Ops', '/ops', 'Ops'],
 	['Settings', '/settings', 'Settings'],
 	['Completed', '/completed', 'Completed']

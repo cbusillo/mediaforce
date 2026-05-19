@@ -26,12 +26,14 @@
 		dashboard,
 		foldersPayload,
 		hosts,
-		crumb = '/'
+		crumb = '/',
+		mode = 'queue'
 	}: {
 		dashboard: DashboardSummaryPayload;
 		foldersPayload: DashboardFoldersPayload;
 		hosts: HostsPayload;
 		crumb?: string;
+		mode?: 'queue' | 'folders';
 	} = $props();
 
 	const folders = $derived(foldersPayload.folders);
@@ -78,6 +80,29 @@
 	const runningSamples = $derived(dashboard.calibration_queue.sample.running_count);
 	const queuedSamples = $derived(dashboard.calibration_queue.sample.queued_count);
 	const pendingReviews = $derived(dashboard.calibration_queue.sample.pending_review_count);
+	const isFolderIndex = $derived(mode === 'folders');
+	const shellSubject = $derived(isFolderIndex ? 'Folders' : 'Queue');
+	const shellRoute = $derived(isFolderIndex ? 'folders' : 'queue');
+	const filterTitle = $derived(isFolderIndex ? 'Find folders' : 'Queue filters');
+	const visibleSummaryLabel = $derived(isFolderIndex ? 'Visible folders' : 'Visible work');
+	const filterEmptyCopy = $derived(
+		isFolderIndex ? 'all folders included' : 'all queue items included'
+	);
+	const scopeTitle = $derived(isFolderIndex ? 'Index status' : 'Work status');
+	const primaryScopeTitle = $derived(isFolderIndex ? 'Searchable folders' : 'Review candidates');
+	const headerEyebrow = $derived(isFolderIndex ? 'Folder index' : 'Queue');
+	const headerTitle = $derived(isFolderIndex ? 'Find a folder' : 'Choose next folder');
+	const headerCopy = $derived(
+		isFolderIndex
+			? 'Search or filter discovered folders, then open Folder Studio when you know which folder needs attention.'
+			: 'Use the ranked list to pick the next folder worth reviewing, then open Folder Studio when the action looks right.'
+	);
+	const workspaceLabel = $derived(
+		isFolderIndex ? 'Folder index and selected folder' : 'Queue worklist and selected folder'
+	);
+	const selectedPanelTitle = $derived(isFolderIndex ? 'Folder details' : 'Next action');
+	const tableEyebrow = $derived(isFolderIndex ? 'Folder index' : 'Ranked queue');
+	const tableTitle = $derived(isFolderIndex ? 'Matching folders' : 'Next folders to review');
 
 	type LibraryOption = {
 		key: string;
@@ -199,20 +224,23 @@
 
 	function selectedRecommendationCopy(folder: FolderCard | null, index: number): string {
 		if (!folder) return 'No folder is selected.';
-		const rankCopy = index === 0 ? 'the highest-ranked visible folder' : `ranked #${index + 1}`;
 		const reclaim = formatBytes(folder.projected_reclaim_bytes);
 		const pending = folder.pending_count.toLocaleString('en-US');
+		if (isFolderIndex) {
+			return `${folder.title} has ${pending} pending items and about ${reclaim} of projected reclaim.`;
+		}
+		const rankCopy = index === 0 ? 'the highest-ranked visible folder' : `ranked #${index + 1}`;
 		return `${folder.title} is ${rankCopy} with ${pending} pending items and about ${reclaim} of projected reclaim.`;
 	}
 </script>
 
-<OperatorShell route="queue" subject="Queue" {crumb} {statusTiles} {footerSignals}>
+<OperatorShell route={shellRoute} subject={shellSubject} {crumb} {statusTiles} {footerSignals}>
 	<main class="home">
 		<aside class="home__rail" aria-label="Queue filters and scope">
-			<WorkstationPanel eyebrow="Filters" title="Narrow queue">
+			<WorkstationPanel eyebrow="Filters" title={filterTitle}>
 				<div class="queue-filter" aria-label="Queue filters">
 					<div class="queue-filter__summary">
-						<span>Visible queue</span>
+						<span>{visibleSummaryLabel}</span>
 						<strong
 							>{visibleFolders.length.toLocaleString('en-US')} / {folders.length.toLocaleString(
 								'en-US'
@@ -226,7 +254,7 @@
 								searchQuery.trim() ? 'search active' : ''
 							]
 								.filter(Boolean)
-								.join(' · ') || 'all queue items included'}</small
+								.join(' · ') || filterEmptyCopy}</small
 						>
 					</div>
 
@@ -305,11 +333,11 @@
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="Scope" title="Operator queue">
+			<WorkstationPanel eyebrow="Scope" title={scopeTitle}>
 				<div class="scope-list">
 					<div class="scope-row scope-row--active">
 						<span>Primary</span>
-						<strong>Review candidates</strong>
+						<strong>{primaryScopeTitle}</strong>
 						<small
 							>{visibleFolders.length.toLocaleString('en-US')} / {folders.length.toLocaleString(
 								'en-US'
@@ -337,7 +365,7 @@
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="Completed" title="Originals cleanup">
+			<WorkstationPanel eyebrow="Completed" title="Cleanup review">
 				<dl class="kv">
 					<dt>Route</dt>
 					<dd>Completed</dd>
@@ -349,15 +377,15 @@
 			</WorkstationPanel>
 		</aside>
 
-		<section class="home__main" aria-label="Operational review queue">
+		<section
+			class="home__main"
+			aria-label={isFolderIndex ? 'Folder index' : 'Operational review queue'}
+		>
 			<header class="queue-header">
 				<div>
-					<span class="mf-eyebrow">Queue</span>
-					<h1>Ranked folder worklist</h1>
-					<p>
-						Select a row to compare why it is in the queue, then open Folder Studio when the next
-						action looks right.
-					</p>
+					<span class="mf-eyebrow">{headerEyebrow}</span>
+					<h1>{headerTitle}</h1>
+					<p>{headerCopy}</p>
 				</div>
 				<div class="queue-header__facts">
 					<div>
@@ -375,10 +403,10 @@
 				</div>
 			</header>
 
-			<section class="queue-workspace" aria-label="Queue worklist and selected folder">
+			<section class="queue-workspace" aria-label={workspaceLabel}>
 				<WorkstationPanel
 					eyebrow={selectedFolderIndex === 0 ? 'Recommended' : 'Selected'}
-					title="Folder context"
+					title={selectedPanelTitle}
 				>
 					{#if selectedFolder}
 						<div class="selected-folder">
@@ -422,8 +450,8 @@
 				</WorkstationPanel>
 
 				<WorkstationPanel
-					eyebrow="Ranked queue"
-					title="Folders ready to start"
+					eyebrow={tableEyebrow}
+					title={tableTitle}
 					meta={`${visibleFolders.length.toLocaleString('en-US')} visible`}
 				>
 					<div class="table-wrap">

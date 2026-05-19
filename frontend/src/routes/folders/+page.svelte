@@ -5,7 +5,7 @@
 </script>
 
 <svelte:head>
-	<title>Mediaforce Queue</title>
+	<title>Mediaforce Folders</title>
 </svelte:head>
 
 <HomeWorkbenchView
@@ -13,4 +13,5 @@
 	dashboard={data.dashboard}
 	foldersPayload={data.foldersPayload}
 	hosts={data.hosts}
+	mode="folders"
 />
