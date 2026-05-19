@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { CompletedFolderRow, CompletedPayload } from '$lib/api/types';
 import {
 	buildCompletedHistoryRows,
+	buildCompletedReadinessSummary,
 	buildCompletedStatusTiles,
 	cleanupState,
 	completedStateOptions,
@@ -71,6 +72,27 @@ describe('Completed workstation mapping', () => {
 			{ label: 'Waiting / review', value: '1 / 1', tone: 'fail' },
 			{ label: 'Cleanup folder', tone: 'ready' }
 		]);
+	});
+
+	it('summarizes completed cleanup state for the page headline', () => {
+		expect(
+			buildCompletedReadinessSummary(
+				payload([folder({ archived_backup_count: 1, archived_backup_size_bytes: 1024 })]),
+				null
+			)
+		).toMatchObject({
+			tone: 'ready',
+			title: 'Originals are waiting',
+			metricLabel: 'Waiting',
+			metricValue: '1'
+		});
+
+		expect(buildCompletedReadinessSummary(payload([folder({})]), null)).toMatchObject({
+			tone: 'idle',
+			title: 'Completed work is handled',
+			metricLabel: 'Handled',
+			metricValue: '1'
+		});
 	});
 
 	it('orders cleanup state filter options by operator risk sequence', () => {

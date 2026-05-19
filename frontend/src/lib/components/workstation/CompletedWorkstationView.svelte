@@ -16,6 +16,7 @@
 	import {
 		buildCompletedFooterSignals,
 		buildCompletedHistoryRows,
+		buildCompletedReadinessSummary,
 		buildCompletedStatusTiles,
 		cleanupDetail,
 		cleanupLabel,
@@ -79,6 +80,7 @@
 	);
 	const statusTiles = $derived(buildCompletedStatusTiles(completed, actionError || loadError));
 	const footerSignals = $derived(buildCompletedFooterSignals(completed));
+	const readiness = $derived(buildCompletedReadinessSummary(completed, actionError || loadError));
 	const libraryOptions = $derived(completedLibraryOptions(folders));
 	const stateOptions = $derived(completedStateOptions(folders, archive));
 	const normalizedSearchQuery = $derived(searchQuery.trim().toLowerCase());
@@ -125,6 +127,7 @@
 	const recommendedFolder = $derived(cleanupReadyFolders[0] ?? null);
 	const cleanupWorkAvailable = $derived(archive.has_cleanup || cleanupReadyFolders.length > 0);
 	const cleanupReviewCount = $derived(counts.blocked + counts.unknown);
+	const cleanupNeedsAction = $derived(cleanupWorkAvailable || cleanupReviewCount > 0);
 	const cleanupStatusTone = $derived(
 		cleanupReadyFolders.length > 0 ? 'ready' : cleanupReviewCount > 0 ? 'wait' : 'idle'
 	);
@@ -133,21 +136,21 @@
 			? 'Cleanup ready'
 			: cleanupReviewCount > 0
 				? 'Review needed'
-				: 'No cleanup needed'
+				: 'Handled'
 	);
 	const cleanupStatusTitle = $derived(
 		cleanupReadyFolders.length > 0
 			? `${cleanupReadyFolders.length.toLocaleString('en-US')} completed folders have originals waiting.`
 			: cleanupReviewCount > 0
 				? `${cleanupReviewCount.toLocaleString('en-US')} completed folders need review.`
-				: 'No cleanup action is needed right now.'
+				: 'Completed work is handled.'
 	);
 	const cleanupStatusDetail = $derived(
 		cleanupReadyFolders.length > 0
 			? 'Review the folders below before removing originals from the waiting folder.'
 			: cleanupReviewCount > 0
 				? 'Check the new files, then mark the already-removed originals as handled.'
-				: `${folders.length.toLocaleString('en-US')} completed folders are handled; history is available without asking for action.`
+				: 'No originals are waiting. History stays available for audit.'
 	);
 	const historyRows = $derived([
 		...localHistory.map((event) => ({ ...event, source: 'api' as const })),
@@ -417,11 +420,8 @@
 			<header class="completed-header">
 				<div>
 					<span class="mf-eyebrow">Completed</span>
-					<h1>Clean up completed work</h1>
-					<p>
-						Decide whether any originals still need removal, confirm already-handled folders, and
-						keep finished work separate from active queues.
-					</p>
+					<h1>{readiness.title}</h1>
+					<p>{readiness.detail}</p>
 				</div>
 				<div class="completed-header__facts" aria-label="Completed cleanup totals">
 					<div>
@@ -467,7 +467,7 @@
 					</div>
 				</WorkstationPanel>
 			{:else if mode === 'completed'}
-				<WorkstationPanel eyebrow="Cleanup status" title={cleanupStatusLabel}>
+				<WorkstationPanel eyebrow="Current state" title="Cleanup state">
 					<div class="cleanup-status cleanup-status--{cleanupStatusTone}">
 						<StateBadge tone={cleanupStatusTone} label={cleanupStatusLabel} />
 						<div>
@@ -477,7 +477,32 @@
 					</div>
 				</WorkstationPanel>
 
-				<WorkstationPanel eyebrow="Filters" title="Cleanup scope">
+				{#if !cleanupNeedsAction && historyRows.length > 0}
+					<WorkstationPanel
+						eyebrow="History"
+						title="Recent handled work"
+						meta={`${historyRows.length.toLocaleString('en-US')} events`}
+					>
+						<div class="history-list history-list--summary">
+							{#each historyRows.slice(0, 5) as event (`summary:${event.source}:${event.id}:${event.created_at}`)}
+								<div class="history-row">
+									<StateBadge compact tone={eventTone(event.tone)} label={event.label} />
+									<div>
+										<strong>{event.title}</strong>
+										<span>{event.prefix}</span>
+									</div>
+									<p>{event.detail}</p>
+									<time>{formatTimestamp(event.created_at)}</time>
+								</div>
+							{/each}
+						</div>
+					</WorkstationPanel>
+				{/if}
+
+				<WorkstationPanel
+					eyebrow={cleanupNeedsAction ? 'Filters' : 'Archive'}
+					title={cleanupNeedsAction ? 'Cleanup scope' : 'Completed folders and filters'}
+				>
 					<div class="completed-filter" aria-label="Completed cleanup filters">
 						<div class="completed-filter__summary">
 							<span>Visible cleanup</span>
@@ -563,195 +588,201 @@
 					</div>
 				</WorkstationPanel>
 
-				<WorkstationPanel
-					eyebrow="Action"
-					title={cleanupWorkAvailable
-						? 'Remove waiting originals'
-						: cleanupReviewCount > 0
-							? 'Review already-removed originals'
-							: 'No cleanup action needed'}
-				>
-					<div class="cleanup-command">
-						<div class="cleanup-command__state">
-							<StateBadge
-								tone={cleanupStatusTone}
-								label={recommendedFolder
-									? 'Originals waiting'
-									: cleanupReviewCount > 0
-										? 'Needs review'
-										: 'No action'}
-							/>
-							<div>
-								<strong
-									>{recommendedFolder
-										? `Safest next cleanup: ${recommendedFolder.title}`
+				{#if cleanupNeedsAction}
+					<WorkstationPanel
+						eyebrow="Action"
+						title={cleanupWorkAvailable
+							? 'Remove waiting originals'
+							: cleanupReviewCount > 0
+								? 'Review already-removed originals'
+								: 'No cleanup action needed'}
+					>
+						<div class="cleanup-command">
+							<div class="cleanup-command__state">
+								<StateBadge
+									tone={cleanupStatusTone}
+									label={recommendedFolder
+										? 'Originals waiting'
 										: cleanupReviewCount > 0
-											? 'Some originals were already removed'
-											: 'Completed work is handled'}</strong
-								>
-								<span
-									>{recommendedFolder
-										? cleanupDetail(recommendedFolder, archive)
-										: cleanupReviewCount > 0
-											? 'After checking the new files, mark these folders handled so they leave review.'
-											: archive.archive_root
-												? `Nothing is waiting in ${archive.archive_root}.`
-												: 'Cleanup folder is not configured, and no completed folder is asking for action.'}</span
-								>
-							</div>
-						</div>
-
-						{#if cleanupWorkAvailable || cleanupReviewCount > 0}
-							<div class="cleanup-command__actions" aria-label="Cleanup actions">
-								<button
-									type="button"
-									class="control"
-									disabled={filteredReadyFolders.length === 0}
-									onclick={selectVisibleReady}>Select waiting originals</button
-								>
-								<button
-									type="button"
-									class="control"
-									disabled={filteredReviewFolders.length === 0}
-									onclick={selectVisibleReview}>Select needs review</button
-								>
-								<button
-									type="button"
-									class="control"
-									disabled={selectedFolders.length === 0 && reviewFolders.length === 0}
-									onclick={clearSelection}>Clear selection</button
-								>
-								<button
-									type="button"
-									class="control control--danger"
-									class:armed={armedScope === 'selected'}
-									disabled={cleanupDisabled('selected')}
-									onclick={() => armCleanup('selected')}
-									>{armedScope === 'selected'
-										? 'Selected armed'
-										: 'Remove selected originals'}</button
-								>
-								<button
-									type="button"
-									class="control control--danger"
-									class:armed={armedScope === 'global'}
-									disabled={cleanupDisabled('global')}
-									onclick={() => armCleanup('global')}
-									>{armedScope === 'global' ? 'Global armed' : 'Clear entire archive'}</button
-								>
-								<button
-									type="button"
-									class="control control--primary"
-									class:armed={armedReview === 'already-removed'}
-									disabled={reviewFolders.length === 0 || reviewPending}
-									onclick={() => armReview('already-removed')}
-									>{armedReview === 'already-removed'
-										? 'Ready to mark handled'
-										: 'Mark originals already removed'}</button
-								>
-							</div>
-						{:else}
-							<div class="cleanup-standby" aria-label="Cleanup standby state">
-								<span>No action needed</span>
-								<strong
-									>{cleanupReviewCount > 0
-										? `${cleanupReviewCount.toLocaleString('en-US')} completed folders need review.`
-										: `${folders.length.toLocaleString('en-US')} completed folders are handled and shown only as history.`}</strong
-								>
-								<small
-									>{cleanupReviewCount > 0
-										? 'Check the new files, then mark the originals as already removed.'
-										: 'When originals are waiting, scoped cleanup controls return here.'}</small
-								>
-							</div>
-						{/if}
-
-						{#if armedScope}
-							{@const scope = armedScope}
-							<div class="confirm-panel" role="alertdialog" aria-label="Confirm original removal">
+											? 'Needs review'
+											: 'No action'}
+								/>
 								<div>
 									<strong
-										>{scope === 'selected'
-											? 'Review selected originals before removal'
-											: 'Review entire cleanup folder before removal'}</strong
+										>{recommendedFolder
+											? `Safest next cleanup: ${recommendedFolder.title}`
+											: cleanupReviewCount > 0
+												? 'Some originals were already removed'
+												: 'Completed work is handled'}</strong
 									>
 									<span
-										>{scope === 'selected' ? selectedRemovalSummary() : globalRemovalSummary}</span
+										>{recommendedFolder
+											? cleanupDetail(recommendedFolder, archive)
+											: cleanupReviewCount > 0
+												? 'After checking the new files, mark these folders handled so they leave review.'
+												: archive.archive_root
+													? `Nothing is waiting in ${archive.archive_root}.`
+													: 'Cleanup folder is not configured, and no completed folder is asking for action.'}</span
 									>
-									<small>
-										This deletes originals from the cleanup waiting folder. It does not remove the
-										promoted encoded files.
-									</small>
 								</div>
-								<div class="confirm-panel__actions">
+							</div>
+
+							{#if cleanupWorkAvailable || cleanupReviewCount > 0}
+								<div class="cleanup-command__actions" aria-label="Cleanup actions">
 									<button
 										type="button"
-										class="control control--danger armed"
-										disabled={cleanupPending}
-										onclick={() => confirmCleanup(scope)}
-										>{cleanupPending ? 'Working' : 'Delete originals'}</button
+										class="control"
+										disabled={filteredReadyFolders.length === 0}
+										onclick={selectVisibleReady}>Select waiting originals</button
 									>
 									<button
 										type="button"
 										class="control"
-										disabled={cleanupPending}
-										onclick={() => (armedScope = null)}>Cancel</button
-									>
-								</div>
-							</div>
-						{/if}
-
-						{#if armedReview === 'already-removed'}
-							<div
-								class="confirm-panel confirm-panel--review"
-								role="alertdialog"
-								aria-label="Confirm originals already removed"
-							>
-								<div>
-									<strong>Mark originals as already removed</strong>
-									<span
-										>{reviewSummary}. This does not delete files; it only clears the review state.</span
-									>
-								</div>
-								<div class="confirm-panel__actions">
-									<button
-										type="button"
-										class="control control--primary armed"
-										disabled={reviewPending}
-										onclick={confirmAlreadyRemoved}
-										>{reviewPending ? 'Working' : 'Confirm reviewed'}</button
+										disabled={filteredReviewFolders.length === 0}
+										onclick={selectVisibleReview}>Select needs review</button
 									>
 									<button
 										type="button"
 										class="control"
-										disabled={reviewPending}
-										onclick={() => (armedReview = null)}>Cancel</button
+										disabled={selectedFolders.length === 0 && reviewFolders.length === 0}
+										onclick={clearSelection}>Clear selection</button
+									>
+									<button
+										type="button"
+										class="control control--danger"
+										class:armed={armedScope === 'selected'}
+										disabled={cleanupDisabled('selected')}
+										onclick={() => armCleanup('selected')}
+										>{armedScope === 'selected'
+											? 'Selected armed'
+											: 'Remove selected originals'}</button
+									>
+									<button
+										type="button"
+										class="control control--danger"
+										class:armed={armedScope === 'global'}
+										disabled={cleanupDisabled('global')}
+										onclick={() => armCleanup('global')}
+										>{armedScope === 'global' ? 'Global armed' : 'Clear entire archive'}</button
+									>
+									<button
+										type="button"
+										class="control control--primary"
+										class:armed={armedReview === 'already-removed'}
+										disabled={reviewFolders.length === 0 || reviewPending}
+										onclick={() => armReview('already-removed')}
+										>{armedReview === 'already-removed'
+											? 'Ready to mark handled'
+											: 'Mark originals already removed'}</button
 									>
 								</div>
-							</div>
-						{/if}
+							{:else}
+								<div class="cleanup-standby" aria-label="Cleanup standby state">
+									<span>No action needed</span>
+									<strong
+										>{cleanupReviewCount > 0
+											? `${cleanupReviewCount.toLocaleString('en-US')} completed folders need review.`
+											: `${folders.length.toLocaleString('en-US')} completed folders are handled and shown only as history.`}</strong
+									>
+									<small
+										>{cleanupReviewCount > 0
+											? 'Check the new files, then mark the originals as already removed.'
+											: 'When originals are waiting, scoped cleanup controls return here.'}</small
+									>
+								</div>
+							{/if}
 
-						{#if actionMessage}
-							<p class="action-message">{actionMessage}</p>
-						{/if}
-						{#if actionError}
-							<p class="action-error">{actionError}</p>
-						{/if}
-						{#if lastCleanupResult}
-							<div class="result-strip">
-								<span>{lastCleanupResult.removed_count.toLocaleString('en-US')} files removed</span>
-								<span>{formatBytes(lastCleanupResult.removed_size_bytes)}</span>
-								<span
-									>{lastCleanupResult.removed_prefix_count.toLocaleString('en-US')} folders affected</span
+							{#if armedScope}
+								{@const scope = armedScope}
+								<div class="confirm-panel" role="alertdialog" aria-label="Confirm original removal">
+									<div>
+										<strong
+											>{scope === 'selected'
+												? 'Review selected originals before removal'
+												: 'Review entire cleanup folder before removal'}</strong
+										>
+										<span
+											>{scope === 'selected'
+												? selectedRemovalSummary()
+												: globalRemovalSummary}</span
+										>
+										<small>
+											This deletes originals from the cleanup waiting folder. It does not remove the
+											promoted encoded files.
+										</small>
+									</div>
+									<div class="confirm-panel__actions">
+										<button
+											type="button"
+											class="control control--danger armed"
+											disabled={cleanupPending}
+											onclick={() => confirmCleanup(scope)}
+											>{cleanupPending ? 'Working' : 'Delete originals'}</button
+										>
+										<button
+											type="button"
+											class="control"
+											disabled={cleanupPending}
+											onclick={() => (armedScope = null)}>Cancel</button
+										>
+									</div>
+								</div>
+							{/if}
+
+							{#if armedReview === 'already-removed'}
+								<div
+									class="confirm-panel confirm-panel--review"
+									role="alertdialog"
+									aria-label="Confirm originals already removed"
 								>
-							</div>
-						{/if}
-					</div>
-				</WorkstationPanel>
+									<div>
+										<strong>Mark originals as already removed</strong>
+										<span
+											>{reviewSummary}. This does not delete files; it only clears the review state.</span
+										>
+									</div>
+									<div class="confirm-panel__actions">
+										<button
+											type="button"
+											class="control control--primary armed"
+											disabled={reviewPending}
+											onclick={confirmAlreadyRemoved}
+											>{reviewPending ? 'Working' : 'Confirm reviewed'}</button
+										>
+										<button
+											type="button"
+											class="control"
+											disabled={reviewPending}
+											onclick={() => (armedReview = null)}>Cancel</button
+										>
+									</div>
+								</div>
+							{/if}
+
+							{#if actionMessage}
+								<p class="action-message">{actionMessage}</p>
+							{/if}
+							{#if actionError}
+								<p class="action-error">{actionError}</p>
+							{/if}
+							{#if lastCleanupResult}
+								<div class="result-strip">
+									<span
+										>{lastCleanupResult.removed_count.toLocaleString('en-US')} files removed</span
+									>
+									<span>{formatBytes(lastCleanupResult.removed_size_bytes)}</span>
+									<span
+										>{lastCleanupResult.removed_prefix_count.toLocaleString('en-US')} folders affected</span
+									>
+								</div>
+							{/if}
+						</div>
+					</WorkstationPanel>
+				{/if}
 
 				<WorkstationPanel
 					eyebrow="Folders"
-					title="Completed folder groups"
+					title={cleanupNeedsAction ? 'Completed folder groups' : 'Completed archive'}
 					meta={`${filteredFolders.length.toLocaleString('en-US')} visible`}
 				>
 					<div class="table-wrap">
@@ -1436,6 +1467,10 @@
 	.history-list--wide {
 		max-height: none;
 		padding: 0;
+	}
+
+	.history-list--summary {
+		padding: var(--mf-space-5);
 	}
 
 	.history-row {
