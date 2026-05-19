@@ -109,6 +109,12 @@
 		)
 	);
 	const workflowSteps = $derived(buildWorkflowSteps(workflow));
+	const currentStepIndex = $derived(
+		Math.max(
+			workflowSteps.findIndex((step) => step.current),
+			0
+		)
+	);
 	const proposalRows = $derived(buildProposalRows(studioFolder, pendingProposal));
 	const statusTiles = $derived(buildStatusTiles(studioFolder, status, hosts, workflow));
 	const footerSignals = $derived(buildFooterSignals(studioFolder, status, hosts));
@@ -203,8 +209,11 @@
 		<section class="studio__main" aria-label="Folder decision surface">
 			<header class="folder-header">
 				<div>
-					<div class="mf-path">{prefix}</div>
 					<h1>{title}</h1>
+					<div class="folder-header__path">
+						<span>Folder path</span>
+						<strong class="mf-path">{prefix}</strong>
+					</div>
 				</div>
 				<div class="folder-header__facts">
 					<div>
@@ -222,6 +231,21 @@
 				</div>
 			</header>
 
+			<nav class="workflow-strip" aria-label="Folder workflow">
+				{#each workflowSteps as step, index (step.label)}
+					<div
+						class:workflow-strip__step--current={step.current}
+						class="workflow-strip__step workflow-strip__step--{step.tone}"
+					>
+						<span>{index + 1}</span>
+						<div>
+							<strong>{step.label}</strong>
+							<small>{step.detail}</small>
+						</div>
+					</div>
+				{/each}
+			</nav>
+
 			<section class="decision decision--{workflow.tone}" aria-labelledby="decision-title">
 				<div>
 					<StateBadge tone={workflow.tone} label={workflow.label} />
@@ -229,7 +253,7 @@
 					<p>{workflow.copy}</p>
 				</div>
 				<div class="decision__next">
-					<span>Next action</span>
+					<span>Step {currentStepIndex + 1} next action</span>
 					<strong>{workflow.primary}</strong>
 					<small>{primaryActionState.disabled ? primaryActionState.title : 'Ready now'}</small>
 				</div>
@@ -483,37 +507,45 @@
 				</WorkstationPanel>
 			</div>
 
-			<WorkstationPanel
-				title="Current policy vs. draft"
-				meta={proposalRows.length ? `${proposalRows.length} rows` : 'No draft'}
-			>
-				<div class="table-wrap">
-					<table class="policy-table">
-						<thead>
-							<tr>
-								<th>Area</th>
-								<th>Setting</th>
-								<th>Current</th>
-								<th>Draft</th>
-							</tr>
-						</thead>
-						<tbody>
-							{#each proposalRows as row (row.section + row.label)}
-								<tr class:changed={row.changed}>
-									<td>{row.section}</td>
-									<td>{row.label}</td>
-									<td>{row.current}</td>
-									<td>{row.draft}</td>
-								</tr>
-							{:else}
+			<details class="technical-details">
+				<summary>
+					<strong>Policy details</strong>
+					<span
+						>{proposalRows.length ? `${proposalRows.length} draft differences` : 'No draft'}</span
+					>
+				</summary>
+				<WorkstationPanel
+					title="Current policy vs. draft"
+					meta={proposalRows.length ? `${proposalRows.length} rows` : 'No draft'}
+				>
+					<div class="table-wrap">
+						<table class="policy-table">
+							<thead>
 								<tr>
-									<td colspan="4">No pending proposal was returned for this folder.</td>
+									<th>Area</th>
+									<th>Setting</th>
+									<th>Current</th>
+									<th>Draft</th>
 								</tr>
-							{/each}
-						</tbody>
-					</table>
-				</div>
-			</WorkstationPanel>
+							</thead>
+							<tbody>
+								{#each proposalRows as row (row.section + row.label)}
+									<tr class:changed={row.changed}>
+										<td>{row.section}</td>
+										<td>{row.label}</td>
+										<td>{row.current}</td>
+										<td>{row.draft}</td>
+									</tr>
+								{:else}
+									<tr>
+										<td colspan="4">No pending proposal was returned for this folder.</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				</WorkstationPanel>
+			</details>
 		</section>
 
 		<aside class="studio__left" aria-label="Folder workflow context">
@@ -553,18 +585,6 @@
 					{#if hosts.hosts.length === 0}
 						<div class="empty-note">Host status is unavailable.</div>
 					{/if}
-				</div>
-			</WorkstationPanel>
-
-			<WorkstationPanel eyebrow="Flow" title="Folder steps">
-				<div class="step-list">
-					{#each workflowSteps as step (step.label)}
-						<div class:step-row--current={step.current} class="step-row step-row--{step.tone}">
-							<span>{step.label}</span>
-							<strong>{step.current ? 'Current' : 'Pending'}</strong>
-							<small>{step.detail}</small>
-						</div>
-					{/each}
 				</div>
 			</WorkstationPanel>
 		</aside>
@@ -615,6 +635,13 @@
 		margin-top: var(--mf-space-3);
 	}
 
+	.folder-header__path {
+		display: grid;
+		gap: var(--mf-space-2);
+		margin-top: var(--mf-space-4);
+		max-width: 92ch;
+	}
+
 	.folder-header__facts,
 	.decision__next,
 	.decision__metrics,
@@ -652,6 +679,7 @@
 	}
 
 	.folder-header__facts span,
+	.folder-header__path span,
 	.decision__next span,
 	.decision__metrics span,
 	.sample-facts span,
@@ -664,6 +692,7 @@
 	}
 
 	.folder-header__facts strong,
+	.folder-header__path strong,
 	.decision__next strong,
 	.decision__metrics strong,
 	.sample-facts strong,
@@ -677,6 +706,79 @@
 	.decision__next small {
 		color: var(--mf-fg-tertiary);
 		font-size: var(--mf-text-xs);
+	}
+
+	.workflow-strip {
+		background: var(--mf-bg-strip);
+		border: var(--mf-border);
+		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+	}
+
+	.workflow-strip__step {
+		align-items: start;
+		border-right: var(--mf-border-muted);
+		border-top: 2px solid var(--mf-line-strong);
+		display: grid;
+		gap: var(--mf-space-3);
+		grid-template-columns: auto minmax(0, 1fr);
+		min-width: 0;
+		padding: var(--mf-space-4);
+	}
+
+	.workflow-strip__step:last-child {
+		border-right: 0;
+	}
+
+	.workflow-strip__step > span {
+		align-items: center;
+		background: var(--mf-bg-input);
+		border: var(--mf-border);
+		color: var(--mf-fg-tertiary);
+		display: inline-flex;
+		font-family: var(--mf-font-mono), monospace;
+		font-size: var(--mf-text-xs);
+		height: 24px;
+		justify-content: center;
+		width: 24px;
+	}
+
+	.workflow-strip__step div {
+		display: grid;
+		gap: var(--mf-space-1);
+		min-width: 0;
+	}
+
+	.workflow-strip__step strong {
+		font-size: var(--mf-text-sm);
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.workflow-strip__step small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+		line-height: var(--mf-leading-snug);
+		overflow-wrap: anywhere;
+	}
+
+	.workflow-strip__step--current {
+		background: var(--mf-active-bg);
+	}
+
+	.workflow-strip__step--active {
+		border-top-color: var(--mf-active-fg);
+	}
+
+	.workflow-strip__step--ready {
+		border-top-color: var(--mf-ready-fg);
+	}
+
+	.workflow-strip__step--wait {
+		border-top-color: var(--mf-wait-fg);
+	}
+
+	.workflow-strip__step--fail {
+		border-top-color: var(--mf-fail-fg);
 	}
 
 	.decision {
@@ -1114,6 +1216,39 @@
 		padding: var(--mf-space-5);
 	}
 
+	.technical-details {
+		background: var(--mf-bg-panel);
+		border: var(--mf-border);
+	}
+
+	.technical-details summary {
+		align-items: center;
+		cursor: pointer;
+		display: flex;
+		gap: var(--mf-space-4);
+		list-style-position: inside;
+		min-height: var(--mf-row-comfy);
+		padding: 0 var(--mf-space-5);
+	}
+
+	.technical-details summary strong {
+		font-size: var(--mf-text-sm);
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.technical-details summary span {
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-mono), monospace;
+		font-size: var(--mf-text-xs);
+		margin-left: auto;
+	}
+
+	.technical-details :global(.panel) {
+		border-left: 0;
+		border-right: 0;
+		border-bottom: 0;
+	}
+
 	@media (max-width: 1180px) {
 		.studio {
 			grid-template-columns: minmax(190px, 240px) minmax(0, 1fr);
@@ -1145,6 +1280,7 @@
 		}
 
 		.folder-header,
+		.workflow-strip,
 		.decision,
 		.bench,
 		.support-grid,
