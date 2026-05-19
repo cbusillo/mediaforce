@@ -35,7 +35,6 @@
 		line-height: 1;
 		min-height: 22px;
 		padding: 0 var(--mf-space-4);
-		text-transform: uppercase;
 		white-space: nowrap;
 	}
 

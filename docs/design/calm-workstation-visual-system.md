@@ -19,15 +19,14 @@ is calmer because hierarchy is clearer, not because it is softer or emptier.
 1. Adjust shared tokens and shell primitives first: `tokens.css`,
    `OperatorShell.svelte`, `WorkstationPanel.svelte`, `StateBadge.svelte`, and
    common button/table patterns.
-2. Apply the system in Folder Studio while redesigning the core workflow in
-   GitHub issue `#55`; it is the best stress test because it contains chat,
-   evidence, proposal, actions, worker state, and post-approval processing.
-3. Carry the same rules through Queue, Ops, Completed, and Settings in their
-   route issues.
+2. Keep route-level changes in their issue-backed lanes: Settings `#75`,
+   Queue/Folders `#76`, Folder Studio `#77`, Ops `#78`, and Completed `#79`.
+3. Use GitHub issue `#80` for the final cross-page visual rhythm, vocabulary,
+   browser evidence, and stale-brief reconciliation pass.
 
-This answers the planning question for `#54`: define shared shell/tokens first,
-then ground them immediately in Folder Studio rather than doing a purely
-abstract polish pass.
+This supersedes older route-reset planning notes that referenced `#54` or
+`#55`. Those older notes remain useful background, but `#74` and its child
+issues are the current implementation record.
 
 ## Surface Hierarchy
 
@@ -65,9 +64,10 @@ hard on repeated dark panels and bright borders. Future token work should:
 
 ## Typography
 
-- Use sentence case for most labels and headings.
-- Reserve uppercase for compact machine labels, route/system telemetry, and
-  very small table metadata where it materially improves scanning.
+- Use sentence case for most labels, badges, and headings.
+- Reserve uppercase for compact machine labels, route/system telemetry,
+  eyebrows, and very small table metadata where it materially improves
+  scanning.
 - Route `h1` should be direct and short; avoid product-marketing scale.
 - Panel headings should stay compact. If a panel title needs a full sentence,
   the panel likely needs a clearer purpose.

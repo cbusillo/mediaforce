@@ -159,16 +159,16 @@ Disabled action titles and inline blockers should use this pattern:
 Do not expose raw state names such as `missing_sample`, `polling`, `can_queue`,
 or `archive_cleanup.has_cleanup` in visible UI.
 
-## Known Current Leaks To Reconcile
+## Reconciliation Status
 
-- Folder Studio still uses `Bench`, `calibration`, `draft`, and `host` in
-  visible copy and helper text.
-- Ops still mixes `host`, `worker`, `sample/proof`, `scheduler`, and `encode`
-  labels in first-level surfaces.
-- Completed uses `cleanup` heavily where the user's decision is deleting
-  archived originals.
-- Settings exposes `transcode root`, `archive cleanup`, `SSH host`, `staging
-  root`, and similar setup terms before a basic user has a working mental model.
+- The route-level cleanup issues `#75` through `#79` moved the primary pages
+  toward this vocabulary. Do not use the older leak list as a reason to revert
+  those route decisions.
+- GitHub issue `#80` owns the final cross-page sweep for remaining visible copy
+  and shared component polish.
+- Keep technical terms when they are the clearest table column, advanced
+  setting, or diagnostic value. Replace them in first-glance headings,
+  empty-state copy, and primary action labels.
 
 Track route-specific copy replacement in the active GitHub route issues rather
 than editing this reference to explain one-off exceptions.

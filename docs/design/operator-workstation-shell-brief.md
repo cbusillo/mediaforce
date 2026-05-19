@@ -46,12 +46,12 @@ completed, settings, and folder studio.
 
 - Home: the main workbench. The ranked queue is the primary surface, with a
   compact system strip above and an adjacent operational rail.
-- Ops: the fleet console. Lead with queue, workers, calibration, and cleanup
-  state in one scan-friendly strip, then keep queue lanes and host readiness in
+- Ops: the fleet console. Lead with readiness, workers, sample work, and retry
+  state in one scan-friendly strip, then keep queue lanes and worker readiness in
   list/table-first control surfaces rather than separate dashboard cards.
-- Completed: the archive cleanup and history surface. Keep cleanup readiness,
+- Completed: the archived-originals and history surface. Keep cleanup readiness,
   selected versus global destructive scope, archive-root health, and recent
-  encode/cleanup events visible in one route so the operator can remove
+  processing/deletion events visible in one route so the operator can delete
   archived originals without treating it like another active queue.
 - Settings: the runtime configuration surface. It may stay more utilitarian and
   form-heavy than the other routes, but it should still inherit the same shell,
@@ -63,9 +63,9 @@ completed, settings, and folder studio.
 
 - Folder studio is the canonical operator route because it contains the core
   loop: run a representative sample, inspect the evidence, and approve the
-  folder draft.
+  folder proposal.
 - The first viewport should make the folder, library, parent context, current
-  sample or draft state, review readiness, main next action, proposed settings
+  sample or proposal state, review readiness, main next action, proposed settings
   or important deltas, and any block or waiting reason clear without scrolling.
 - Before approval, keep the request thread as a persistent left column and keep
   the main pane focused on evidence and decision support.

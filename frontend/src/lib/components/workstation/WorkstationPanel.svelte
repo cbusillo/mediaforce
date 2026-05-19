@@ -34,14 +34,15 @@
 <style>
 	.panel {
 		background: var(--mf-bg-panel);
-		border: var(--mf-border);
+		border: var(--mf-border-muted);
 		min-width: 0;
 		overflow: hidden;
 	}
 
 	.panel__header {
 		align-items: center;
-		border-bottom: var(--mf-border);
+		background: var(--mf-bg-strip);
+		border-bottom: var(--mf-border-muted);
 		display: flex;
 		gap: var(--mf-space-4);
 		min-height: 38px;
@@ -49,7 +50,8 @@
 	}
 
 	.panel__header h3 {
-		font-size: var(--mf-text-md);
+		font-size: var(--mf-text-sm);
+		letter-spacing: 0;
 	}
 
 	.panel__meta {
