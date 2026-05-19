@@ -9,7 +9,7 @@
 	<title
 		>{data.mode === 'studio'
 			? `${data.folder.prefix} · Mediaforce Folder Studio`
-			: 'Mediaforce Queue'}</title
+			: 'Mediaforce Folders'}</title
 	>
 </svelte:head>
 
@@ -21,5 +21,6 @@
 		dashboard={data.dashboard}
 		foldersPayload={data.foldersPayload}
 		hosts={data.hosts}
+		mode="folders"
 	/>
 {/if}
