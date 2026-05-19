@@ -336,10 +336,10 @@
 				<header class="settings-header">
 					<div>
 						<span class="mf-eyebrow">Settings</span>
-						<h1>Local media setup</h1>
+						<h1>Configure Mediaforce</h1>
 						<p>
-							Edit library folders, working storage, encoding hosts, and the windows when Mediaforce
-							is allowed to run.
+							Set the media libraries, working storage, worker machines, and run windows used by
+							this workstation.
 						</p>
 					</div>
 					<div class="settings-header__actions" aria-label="Settings actions">
@@ -380,522 +380,612 @@
 					</div>
 				{/if}
 
-				<div class="settings-band">
-					<strong>Basic setup</strong>
-					<span>Library folders and working storage used by normal Mediaforce runs.</span>
+				<div class="settings-overview" aria-label="Settings sections">
+					<a href="#settings-libraries">
+						<span>Libraries</span>
+						<strong>{configuredLibraries.length.toLocaleString('en-US')}</strong>
+					</a>
+					<a href="#settings-storage">
+						<span>Storage</span>
+						<strong>{draft.transcode_root.trim() ? 'Set' : 'Missing'}</strong>
+					</a>
+					<a href="#settings-schedules">
+						<span>Schedules</span>
+						<strong>{(configuredProfiles.length + 2).toLocaleString('en-US')}</strong>
+					</a>
+					<a href="#settings-workers">
+						<span>Workers</span>
+						<strong>{configuredHosts.length.toLocaleString('en-US')}</strong>
+					</a>
+					<a href="#settings-danger">
+						<span>Cleanup</span>
+						<strong>{archiveCleanup?.has_cleanup ? 'Waiting' : 'Clear'}</strong>
+					</a>
 				</div>
 
-				<WorkstationPanel
-					eyebrow="Libraries"
-					title="Media folders"
-					meta={`${configuredLibraries.length.toLocaleString('en-US')} configured`}
-				>
-					<div class="table-wrap">
-						<table class="settings-table settings-table--libraries">
-							<thead>
-								<tr>
-									<th>Color</th>
-									<th>Library</th>
-									<th>Folder path</th>
-									<th>Action</th>
-								</tr>
-							</thead>
-							<tbody>
-								{#each draft.libraries as library, index (`library-${library.index}-${index}`)}
-									<tr>
-										<td>
-											<label
-												class="swatch-field"
-												aria-label={`Color for ${library.key || 'library'}`}
-											>
+				<section class="settings-section" aria-labelledby="settings-basic-title">
+					<header class="settings-section__head">
+						<div>
+							<span class="mf-eyebrow">Basic setup</span>
+							<h2 id="settings-basic-title">Libraries and storage</h2>
+						</div>
+						<p>These are the only settings most setup sessions need.</p>
+					</header>
+
+					<div id="settings-libraries" class="settings-anchor">
+						<WorkstationPanel
+							eyebrow="Libraries"
+							title="Libraries"
+							meta={`${configuredLibraries.length.toLocaleString('en-US')} configured`}
+						>
+							<div class="table-wrap">
+								<table class="settings-table settings-table--libraries">
+									<thead>
+										<tr>
+											<th>Library</th>
+											<th>Folder</th>
+											<th>Action</th>
+										</tr>
+									</thead>
+									<tbody>
+										{#each draft.libraries as library, index (`library-${library.index}-${index}`)}
+											<tr>
+												<td>
+													<div class="library-cell">
+														<label
+															class="swatch-field"
+															aria-label={`Color for ${library.key || 'library'}`}
+														>
+															<input
+																type="color"
+																value={library.color}
+																oninput={(event) =>
+																	updateLibrary(index, { color: inputValue(event) })}
+															/>
+															<span class="mf-mono">{library.color || 'unset'}</span>
+														</label>
+														<label class="library-key-field">
+															<span>Library name</span>
+															<input
+																id={`library-key-${index}`}
+																class="field"
+																value={library.key}
+																placeholder="tv"
+																oninput={(event) =>
+																	updateLibrary(index, { key: inputValue(event) })}
+															/>
+														</label>
+													</div>
+												</td>
+												<td>
+													<label class="sr-label" for={`library-path-${index}`}>Folder path</label>
+													<input
+														id={`library-path-${index}`}
+														class="field field--path"
+														value={library.path}
+														placeholder="/Volumes/Media/TV"
+														oninput={(event) => updateLibrary(index, { path: inputValue(event) })}
+													/>
+												</td>
+												<td>
+													<button
+														type="button"
+														class="control control--compact control--danger"
+														onclick={() =>
+															(draft.libraries = removeAtIndex(draft.libraries, index))}
+													>
+														Remove
+													</button>
+												</td>
+											</tr>
+										{/each}
+									</tbody>
+								</table>
+							</div>
+							<div class="panel-actions">
+								<button
+									type="button"
+									class="control"
+									onclick={() => (draft.libraries = addLibraryDraft(draft.libraries))}
+								>
+									Add library
+								</button>
+							</div>
+						</WorkstationPanel>
+					</div>
+
+					<div id="settings-storage" class="settings-anchor">
+						<WorkstationPanel eyebrow="Storage" title="Working storage">
+							<div class="storage-grid">
+								<label class="stacked-field">
+									<span>Working folder</span>
+									<input
+										class="field field--path"
+										value={draft.transcode_root}
+										placeholder="/Volumes/Mediaforce/Transcode"
+										oninput={(event) => (draft.transcode_root = inputValue(event))}
+									/>
+								</label>
+								<div class="storage-readout">
+									<span>Originals waiting folder</span>
+									<strong class="mf-path">{savedArchiveRootCopy}</strong>
+									{#if cleanupTargetDirty}
+										<small>Save settings before clearing a changed archive target.</small>
+									{/if}
+								</div>
+								<div class="storage-readout">
+									<span>Originals waiting</span>
+									<strong>{archiveCleanup?.file_count.toLocaleString('en-US') ?? '0'} files</strong>
+									<small>{formatGiB(archiveCleanup?.total_size_bytes ?? 0)}</small>
+								</div>
+								<div class="storage-readout">
+									<span>Cleanup state</span>
+									<StateBadge
+										tone={archiveCleanup?.has_cleanup ? 'wait' : 'ready'}
+										label={archiveCleanup?.has_cleanup ? 'Waiting' : 'Clear'}
+									/>
+									<small>Deletes are grouped in the danger section.</small>
+								</div>
+							</div>
+						</WorkstationPanel>
+					</div>
+				</section>
+
+				<section class="settings-section" aria-labelledby="settings-advanced-title">
+					<header class="settings-section__head">
+						<div>
+							<span class="mf-eyebrow">Advanced setup</span>
+							<h2 id="settings-advanced-title">Workers and run windows</h2>
+						</div>
+						<p>Use these when adding machines or changing when encode work may run.</p>
+					</header>
+
+					<div id="settings-schedules" class="settings-anchor">
+						<WorkstationPanel
+							eyebrow="Schedules"
+							title="Queue profiles"
+							meta={`${configuredProfiles.length.toLocaleString('en-US')} custom`}
+						>
+							<div class="schedule-list">
+								<div class="schedule-row schedule-row--builtin">
+									<StateBadge compact tone="ready" label="Built in" />
+									<strong>Always</strong>
+									<span>Runs anytime</span>
+								</div>
+								<div class="schedule-row schedule-row--builtin">
+									<StateBadge compact tone="idle" label="Built in" />
+									<strong>Never</strong>
+									<span>Never accepts queued encodes</span>
+								</div>
+								{#each draft.schedule_profiles as profile, index (`schedule-${profile.index}-${index}`)}
+									<div class="schedule-row">
+										<div class="schedule-row__fields">
+											<label>
+												<span>Key</span>
 												<input
-													type="color"
-													value={library.color}
-													oninput={(event) => updateLibrary(index, { color: inputValue(event) })}
+													class="field"
+													value={profile.key}
+													placeholder="overnight"
+													oninput={(event) => updateSchedule(index, { key: inputValue(event) })}
 												/>
-												<span class="mf-mono">{library.color || 'unset'}</span>
 											</label>
-										</td>
-										<td>
-											<label class="sr-label" for={`library-key-${index}`}>Library</label>
-											<input
-												id={`library-key-${index}`}
-												class="field"
-												value={library.key}
-												placeholder="tv"
-												oninput={(event) => updateLibrary(index, { key: inputValue(event) })}
-											/>
-										</td>
-										<td>
-											<label class="sr-label" for={`library-path-${index}`}>Folder path</label>
-											<input
-												id={`library-path-${index}`}
-												class="field field--path"
-												value={library.path}
-												placeholder="/Volumes/Media/TV"
-												oninput={(event) => updateLibrary(index, { path: inputValue(event) })}
-											/>
-										</td>
-										<td>
+											<label>
+												<span>Label</span>
+												<input
+													class="field"
+													value={profile.label}
+													placeholder="Overnight"
+													oninput={(event) => updateSchedule(index, { label: inputValue(event) })}
+												/>
+											</label>
+											<label>
+												<span>Start</span>
+												<input
+													class="field field--number"
+													type="number"
+													min="0"
+													max="23"
+													value={profile.start_hour}
+													oninput={(event) =>
+														updateSchedule(index, { start_hour: inputValue(event) })}
+												/>
+											</label>
+											<label>
+												<span>End</span>
+												<input
+													class="field field--number"
+													type="number"
+													min="0"
+													max="23"
+													value={profile.end_hour}
+													oninput={(event) =>
+														updateSchedule(index, { end_hour: inputValue(event) })}
+												/>
+											</label>
 											<button
 												type="button"
 												class="control control--compact control--danger"
-												onclick={() => (draft.libraries = removeAtIndex(draft.libraries, index))}
+												onclick={() =>
+													(draft.schedule_profiles = removeAtIndex(draft.schedule_profiles, index))}
 											>
-												Remove library
+												Remove schedule
 											</button>
-										</td>
-									</tr>
+										</div>
+										<div
+											class="day-grid"
+											aria-label={`${profile.label || profile.key || 'Schedule'} days`}
+										>
+											<span>Window</span>
+											{#each SCHEDULE_DAY_OPTIONS as day (day.key)}
+												<button
+													type="button"
+													class:day-pill--active={scheduleDayActive(
+														profile,
+														day.key,
+														'days_of_week'
+													)}
+													class="day-pill"
+													aria-pressed={scheduleDayActive(profile, day.key, 'days_of_week')}
+													onclick={() => toggleScheduleDay(index, day.key, 'days_of_week')}
+												>
+													{day.shortLabel}
+												</button>
+											{/each}
+											<span>All day</span>
+											{#each SCHEDULE_DAY_OPTIONS as day (day.key)}
+												<button
+													type="button"
+													class:day-pill--active={scheduleDayActive(
+														profile,
+														day.key,
+														'all_day_days_of_week'
+													)}
+													class="day-pill"
+													aria-pressed={scheduleDayActive(profile, day.key, 'all_day_days_of_week')}
+													onclick={() => toggleScheduleDay(index, day.key, 'all_day_days_of_week')}
+												>
+													{day.shortLabel}
+												</button>
+											{/each}
+										</div>
+										<p class="schedule-summary">{scheduleWindowSummaryCopy(profile)}</p>
+									</div>
 								{/each}
-							</tbody>
-						</table>
-					</div>
-					<div class="panel-actions">
-						<button
-							type="button"
-							class="control"
-							onclick={() => (draft.libraries = addLibraryDraft(draft.libraries))}
-						>
-							Add library
-						</button>
-					</div>
-				</WorkstationPanel>
-
-				<WorkstationPanel eyebrow="Storage" title="Working and cleanup folders">
-					<div class="storage-grid">
-						<label class="stacked-field">
-							<span>Working folder</span>
-							<input
-								class="field field--path"
-								value={draft.transcode_root}
-								placeholder="/Volumes/Mediaforce/Transcode"
-								oninput={(event) => (draft.transcode_root = inputValue(event))}
-							/>
-						</label>
-						<div class="storage-readout">
-							<span>Originals waiting folder</span>
-							<strong class="mf-path">{savedArchiveRootCopy}</strong>
-							{#if cleanupTargetDirty}
-								<small>Save settings before clearing a changed archive target.</small>
-							{/if}
-						</div>
-						<div class="storage-readout">
-							<span>Originals waiting</span>
-							<strong>{archiveCleanup?.file_count.toLocaleString('en-US') ?? '0'} files</strong>
-							<small>{formatGiB(archiveCleanup?.total_size_bytes ?? 0)}</small>
-						</div>
-						<div class="storage-readout">
-							<span>Cleanup action</span>
-							<StateBadge
-								tone={archiveCleanup?.has_cleanup ? 'wait' : 'ready'}
-								label={archiveCleanup?.has_cleanup ? 'Waiting' : 'Handled'}
-							/>
-							<small>Destructive cleanup lives in the danger zone below.</small>
-						</div>
-					</div>
-				</WorkstationPanel>
-
-				<div class="settings-band">
-					<strong>Advanced operation</strong>
-					<span>Schedule windows, worker routing, commands, and source overrides.</span>
-				</div>
-
-				<WorkstationPanel
-					eyebrow="Schedules"
-					title="Queue profiles"
-					meta={`${configuredProfiles.length.toLocaleString('en-US')} custom`}
-				>
-					<div class="schedule-list">
-						<div class="schedule-row schedule-row--builtin">
-							<StateBadge compact tone="ready" label="Built in" />
-							<strong>Always</strong>
-							<span>Runs anytime</span>
-						</div>
-						<div class="schedule-row schedule-row--builtin">
-							<StateBadge compact tone="idle" label="Built in" />
-							<strong>Never</strong>
-							<span>Never accepts queued encodes</span>
-						</div>
-						{#each draft.schedule_profiles as profile, index (`schedule-${profile.index}-${index}`)}
-							<div class="schedule-row">
-								<div class="schedule-row__fields">
-									<label>
-										<span>Key</span>
-										<input
-											class="field"
-											value={profile.key}
-											placeholder="overnight"
-											oninput={(event) => updateSchedule(index, { key: inputValue(event) })}
-										/>
-									</label>
-									<label>
-										<span>Label</span>
-										<input
-											class="field"
-											value={profile.label}
-											placeholder="Overnight"
-											oninput={(event) => updateSchedule(index, { label: inputValue(event) })}
-										/>
-									</label>
-									<label>
-										<span>Start</span>
-										<input
-											class="field field--number"
-											type="number"
-											min="0"
-											max="23"
-											value={profile.start_hour}
-											oninput={(event) => updateSchedule(index, { start_hour: inputValue(event) })}
-										/>
-									</label>
-									<label>
-										<span>End</span>
-										<input
-											class="field field--number"
-											type="number"
-											min="0"
-											max="23"
-											value={profile.end_hour}
-											oninput={(event) => updateSchedule(index, { end_hour: inputValue(event) })}
-										/>
-									</label>
-									<button
-										type="button"
-										class="control control--compact control--danger"
-										onclick={() =>
-											(draft.schedule_profiles = removeAtIndex(draft.schedule_profiles, index))}
-									>
-										Remove schedule
-									</button>
-								</div>
-								<div
-									class="day-grid"
-									aria-label={`${profile.label || profile.key || 'Schedule'} days`}
-								>
-									<span>Window</span>
-									{#each SCHEDULE_DAY_OPTIONS as day (day.key)}
-										<button
-											type="button"
-											class:day-pill--active={scheduleDayActive(profile, day.key, 'days_of_week')}
-											class="day-pill"
-											aria-pressed={scheduleDayActive(profile, day.key, 'days_of_week')}
-											onclick={() => toggleScheduleDay(index, day.key, 'days_of_week')}
-										>
-											{day.shortLabel}
-										</button>
-									{/each}
-									<span>All day</span>
-									{#each SCHEDULE_DAY_OPTIONS as day (day.key)}
-										<button
-											type="button"
-											class:day-pill--active={scheduleDayActive(
-												profile,
-												day.key,
-												'all_day_days_of_week'
-											)}
-											class="day-pill"
-											aria-pressed={scheduleDayActive(profile, day.key, 'all_day_days_of_week')}
-											onclick={() => toggleScheduleDay(index, day.key, 'all_day_days_of_week')}
-										>
-											{day.shortLabel}
-										</button>
-									{/each}
-								</div>
-								<p class="schedule-summary">{scheduleWindowSummaryCopy(profile)}</p>
 							</div>
-						{/each}
-					</div>
-					<div class="panel-actions">
-						<button
-							type="button"
-							class="control"
-							onclick={() => (draft.schedule_profiles = addScheduleDraft(draft.schedule_profiles))}
-						>
-							Add schedule
-						</button>
-					</div>
-				</WorkstationPanel>
-
-				<WorkstationPanel
-					eyebrow="Hosts"
-					title="Remote workers"
-					meta={`${configuredHosts.length.toLocaleString('en-US')} configured`}
-				>
-					<div class="host-runtime-board" aria-label="Host status check">
-						{#each configuredHosts as host, index (`probe-host-${host.index}-${index}`)}
-							{@const runtime = hostRuntime(host)}
-							<div class="host-runtime-card host-runtime-card--{runtimeTone(runtime)}">
-								<div class="host-runtime-card__head">
-									<StateBadge compact tone={runtimeTone(runtime)} label={runtimeCopy(runtime)} />
-									<strong>{host.label || host.host || `Remote worker ${index + 1}`}</strong>
-								</div>
-								<span
-									>{runtime?.schedule_detail ||
-										runtime?.schedule_profile_label ||
-										'No host status yet'}</span
+							<div class="panel-actions">
+								<button
+									type="button"
+									class="control"
+									onclick={() =>
+										(draft.schedule_profiles = addScheduleDraft(draft.schedule_profiles))}
 								>
-								<small>{runtime?.message || runtime?.active_reason || 'Status check pending'}</small
-								>
+									Add schedule
+								</button>
 							</div>
-						{:else}
-							<p class="empty-note">No remote hosts are configured.</p>
-						{/each}
+						</WorkstationPanel>
 					</div>
-					<div class="host-editor-list">
-						{#each draft.remote_hosts as host, index (`host-${host.index}-${index}`)}
-							{@const runtime = hostRuntime(host)}
-							<section class="host-editor" id={`remote-worker-${index}`}>
-								<header class="host-editor__head">
-									<div>
-										<StateBadge compact tone={runtimeTone(runtime)} label={runtimeCopy(runtime)} />
-										<strong>{host.label || host.host || `Remote worker ${index + 1}`}</strong>
+
+					<div id="settings-workers" class="settings-anchor">
+						<WorkstationPanel
+							eyebrow="Workers"
+							title="Remote workers"
+							meta={`${configuredHosts.length.toLocaleString('en-US')} configured`}
+						>
+							<div class="host-runtime-board" aria-label="Host status check">
+								{#each configuredHosts as host, index (`probe-host-${host.index}-${index}`)}
+									{@const runtime = hostRuntime(host)}
+									<div class="host-runtime-card host-runtime-card--{runtimeTone(runtime)}">
+										<div class="host-runtime-card__head">
+											<StateBadge
+												compact
+												tone={runtimeTone(runtime)}
+												label={runtimeCopy(runtime)}
+											/>
+											<strong>{host.label || host.host || `Remote worker ${index + 1}`}</strong>
+										</div>
 										<span
-											>{runtime?.message || runtime?.active_reason || 'Status check pending'}</span
+											>{runtime?.schedule_detail ||
+												runtime?.schedule_profile_label ||
+												'No host status yet'}</span
+										>
+										<small
+											>{runtime?.message || runtime?.active_reason || 'Status check pending'}</small
 										>
 									</div>
+								{:else}
+									<p class="empty-note">No remote hosts are configured.</p>
+								{/each}
+							</div>
+							<div class="host-editor-list">
+								{#each draft.remote_hosts as host, index (`host-${host.index}-${index}`)}
+									{@const runtime = hostRuntime(host)}
+									<section class="host-editor" id={`remote-worker-${index}`}>
+										<header class="host-editor__head">
+											<div>
+												<StateBadge
+													compact
+													tone={runtimeTone(runtime)}
+													label={runtimeCopy(runtime)}
+												/>
+												<strong>{host.label || host.host || `Remote worker ${index + 1}`}</strong>
+												<span
+													>{runtime?.message ||
+														runtime?.active_reason ||
+														'Status check pending'}</span
+												>
+											</div>
+											<button
+												type="button"
+												class="control control--compact control--danger"
+												onclick={() =>
+													(draft.remote_hosts = removeAtIndex(draft.remote_hosts, index))}
+											>
+												Remove worker
+											</button>
+										</header>
+										<div class="host-grid">
+											<label>
+												<span>Label</span>
+												<input
+													class="field"
+													value={host.label}
+													placeholder="Studio Mac"
+													oninput={(event) => updateHost(index, { label: inputValue(event) })}
+												/>
+											</label>
+											<label>
+												<span>SSH host</span>
+												<input
+													class="field"
+													value={host.host}
+													placeholder="studio.local"
+													oninput={(event) => updateHost(index, { host: inputValue(event) })}
+												/>
+											</label>
+											<label>
+												<span>Repo path</span>
+												<input
+													class="field field--path"
+													value={host.repo_path}
+													placeholder="/Users/operator/mediaforce"
+													oninput={(event) => updateHost(index, { repo_path: inputValue(event) })}
+												/>
+											</label>
+											<label>
+												<span>Media access</span>
+												<select
+													class="field"
+													bind:value={draft.remote_hosts[index].media_access}
+													onchange={(event) =>
+														updateHost(index, { media_access: selectValue(event) })}
+												>
+													<option value="mounted">Mounted</option>
+													<option value="stream">Stream</option>
+												</select>
+											</label>
+											<label>
+												<span>Priority</span>
+												<input
+													class="field field--number"
+													type="number"
+													value={host.priority}
+													oninput={(event) => updateHost(index, { priority: inputValue(event) })}
+												/>
+											</label>
+											<label>
+												<span>Parallel encodes</span>
+												<input
+													class="field field--number"
+													type="number"
+													min="1"
+													value={host.max_parallel_encodes}
+													oninput={(event) =>
+														updateHost(index, { max_parallel_encodes: inputValue(event) })}
+												/>
+											</label>
+											<label>
+												<span>Schedule</span>
+												<select
+													class="field"
+													bind:value={draft.remote_hosts[index].schedule_profile}
+													onchange={(event) =>
+														updateHost(index, { schedule_profile: selectValue(event) })}
+												>
+													{#each draftScheduleOptions as option (option.key)}
+														<option value={option.key}>{option.label}</option>
+													{/each}
+												</select>
+											</label>
+											<label>
+												<span>Staging root</span>
+												<input
+													class="field field--path"
+													value={host.staging_root}
+													placeholder="Uses transcode root"
+													oninput={(event) =>
+														updateHost(index, { staging_root: inputValue(event) })}
+												/>
+											</label>
+										</div>
+										<details class="host-advanced">
+											<summary>
+												<strong>Advanced worker internals</strong>
+												<span
+													>Start/stop commands, wake settings, timeout, and source overrides.</span
+												>
+											</summary>
+											<div class="host-grid host-grid--advanced">
+												<label>
+													<span>Start command</span>
+													<input
+														class="field field--path"
+														value={host.start_command}
+														placeholder="Optional wake/start command"
+														oninput={(event) =>
+															updateHost(index, { start_command: inputValue(event) })}
+													/>
+												</label>
+												<label>
+													<span>Stop command</span>
+													<input
+														class="field field--path"
+														value={host.stop_command}
+														placeholder="Optional stop command"
+														oninput={(event) =>
+															updateHost(index, { stop_command: inputValue(event) })}
+													/>
+												</label>
+												<label>
+													<span>Wake MAC</span>
+													<input
+														class="field"
+														value={host.wake_mac}
+														placeholder="Optional"
+														oninput={(event) => updateHost(index, { wake_mac: inputValue(event) })}
+													/>
+												</label>
+												<label>
+													<span>Start timeout</span>
+													<input
+														class="field field--number"
+														type="number"
+														min="1"
+														value={host.start_timeout_seconds}
+														oninput={(event) =>
+															updateHost(index, { start_timeout_seconds: inputValue(event) })}
+													/>
+												</label>
+											</div>
+											<label class="stacked-field">
+												<span>Source root overrides JSON</span>
+												<textarea
+													class="field field--textarea"
+													bind:value={draft.remote_hosts[index].source_roots_json}
+													placeholder={'{"tv": "/Volumes/TV"}'}
+													oninput={(event) =>
+														updateHost(index, { source_roots_json: inputValue(event) })}
+												></textarea>
+											</label>
+										</details>
+										<div class="host-options">
+											<div>
+												<span class="option-label">Capabilities</span>
+												<div class="toggle-grid">
+													{#each savedSettings.host_capability_options as option (option.key)}
+														<label class="toggle-chip">
+															<input
+																type="checkbox"
+																checked={host.capabilities.includes(option.key)}
+																onchange={() => toggleCapability(index, option.key)}
+															/>
+															<span>{option.label}</span>
+														</label>
+													{/each}
+												</div>
+											</div>
+											<div>
+												<span class="option-label">Allowed libraries</span>
+												<div class="toggle-grid">
+													{#each activeLibraryKeys as libraryKey (libraryKey)}
+														<label class="toggle-chip">
+															<input
+																type="checkbox"
+																checked={host.allowed_libraries.includes(libraryKey)}
+																onchange={() => toggleLibraryAccess(index, libraryKey)}
+															/>
+															<span>{libraryKey}</span>
+														</label>
+													{:else}
+														<span class="muted-copy">Add library keys before assigning hosts.</span>
+													{/each}
+												</div>
+											</div>
+										</div>
+									</section>
+								{/each}
+							</div>
+							<div class="panel-actions">
+								<button
+									type="button"
+									class="control"
+									onclick={() =>
+										(draft.remote_hosts = addHostDraft(draft.remote_hosts, draftScheduleOptions))}
+								>
+									Add host
+								</button>
+							</div>
+						</WorkstationPanel>
+					</div>
+				</section>
+
+				<section
+					class="settings-section settings-section--danger"
+					aria-labelledby="settings-danger-title"
+				>
+					<header class="settings-section__head">
+						<div>
+							<span class="mf-eyebrow">Danger zone</span>
+							<h2 id="settings-danger-title">Originals cleanup</h2>
+						</div>
+						<p>Deletes waiting originals from the cleanup folder after a second confirmation.</p>
+					</header>
+
+					<div id="settings-danger" class="settings-anchor">
+						<WorkstationPanel eyebrow="Danger zone" title="Clear originals waiting folder">
+							<div class="danger-zone">
+								<div>
+									<span>Target</span>
+									<strong class="mf-path">{savedArchiveRootCopy}</strong>
+									<small
+										>{archiveCleanup?.file_count.toLocaleString('en-US') ?? '0'} files · {formatGiB(
+											archiveCleanup?.total_size_bytes ?? 0
+										)}</small
+									>
+								</div>
+								<div class="archive-actions">
+									<StateBadge
+										tone={archiveCleanup?.has_cleanup ? 'wait' : 'ready'}
+										label={archiveCleanup?.has_cleanup ? 'Originals waiting' : 'Nothing waiting'}
+									/>
 									<button
 										type="button"
-										class="control control--compact control--danger"
-										onclick={() => (draft.remote_hosts = removeAtIndex(draft.remote_hosts, index))}
+										class="control control--danger"
+										class:control--armed={clearArchiveArmed}
+										disabled={!archiveCleanup?.has_cleanup ||
+											clearArchivePending ||
+											cleanupTargetDirty}
+										onclick={clearArchiveCleanup}
+										title={cleanupTargetDirty
+											? 'Save the changed transcode root before clearing archived originals.'
+											: undefined}
 									>
-										Remove worker
+										{clearArchivePending
+											? 'Removing originals'
+											: clearArchiveArmed
+												? 'Confirm delete originals'
+												: 'Delete waiting originals'}
 									</button>
-								</header>
-								<div class="host-grid">
-									<label>
-										<span>Label</span>
-										<input
-											class="field"
-											value={host.label}
-											placeholder="Studio Mac"
-											oninput={(event) => updateHost(index, { label: inputValue(event) })}
-										/>
-									</label>
-									<label>
-										<span>SSH host</span>
-										<input
-											class="field"
-											value={host.host}
-											placeholder="studio.local"
-											oninput={(event) => updateHost(index, { host: inputValue(event) })}
-										/>
-									</label>
-									<label>
-										<span>Repo path</span>
-										<input
-											class="field field--path"
-											value={host.repo_path}
-											placeholder="/Users/operator/mediaforce"
-											oninput={(event) => updateHost(index, { repo_path: inputValue(event) })}
-										/>
-									</label>
-									<label>
-										<span>Media access</span>
-										<select
-											class="field"
-											bind:value={draft.remote_hosts[index].media_access}
-											onchange={(event) => updateHost(index, { media_access: selectValue(event) })}
-										>
-											<option value="mounted">Mounted</option>
-											<option value="stream">Stream</option>
-										</select>
-									</label>
-									<label>
-										<span>Priority</span>
-										<input
-											class="field field--number"
-											type="number"
-											value={host.priority}
-											oninput={(event) => updateHost(index, { priority: inputValue(event) })}
-										/>
-									</label>
-									<label>
-										<span>Parallel encodes</span>
-										<input
-											class="field field--number"
-											type="number"
-											min="1"
-											value={host.max_parallel_encodes}
-											oninput={(event) =>
-												updateHost(index, { max_parallel_encodes: inputValue(event) })}
-										/>
-									</label>
-									<label>
-										<span>Schedule</span>
-										<select
-											class="field"
-											bind:value={draft.remote_hosts[index].schedule_profile}
-											onchange={(event) =>
-												updateHost(index, { schedule_profile: selectValue(event) })}
-										>
-											{#each draftScheduleOptions as option (option.key)}
-												<option value={option.key}>{option.label}</option>
-											{/each}
-										</select>
-									</label>
-									<label>
-										<span>Staging root</span>
-										<input
-											class="field field--path"
-											value={host.staging_root}
-											placeholder="Uses transcode root"
-											oninput={(event) => updateHost(index, { staging_root: inputValue(event) })}
-										/>
-									</label>
 								</div>
-								<details class="host-advanced">
-									<summary>
-										<strong>Advanced worker internals</strong>
-										<span>Start/stop commands, wake settings, timeout, and source overrides.</span>
-									</summary>
-									<div class="host-grid host-grid--advanced">
-										<label>
-											<span>Start command</span>
-											<input
-												class="field field--path"
-												value={host.start_command}
-												placeholder="Optional wake/start command"
-												oninput={(event) => updateHost(index, { start_command: inputValue(event) })}
-											/>
-										</label>
-										<label>
-											<span>Stop command</span>
-											<input
-												class="field field--path"
-												value={host.stop_command}
-												placeholder="Optional stop command"
-												oninput={(event) => updateHost(index, { stop_command: inputValue(event) })}
-											/>
-										</label>
-										<label>
-											<span>Wake MAC</span>
-											<input
-												class="field"
-												value={host.wake_mac}
-												placeholder="Optional"
-												oninput={(event) => updateHost(index, { wake_mac: inputValue(event) })}
-											/>
-										</label>
-										<label>
-											<span>Start timeout</span>
-											<input
-												class="field field--number"
-												type="number"
-												min="1"
-												value={host.start_timeout_seconds}
-												oninput={(event) =>
-													updateHost(index, { start_timeout_seconds: inputValue(event) })}
-											/>
-										</label>
-									</div>
-									<label class="stacked-field">
-										<span>Source root overrides JSON</span>
-										<textarea
-											class="field field--textarea"
-											bind:value={draft.remote_hosts[index].source_roots_json}
-											placeholder={'{"tv": "/Volumes/TV"}'}
-											oninput={(event) =>
-												updateHost(index, { source_roots_json: inputValue(event) })}
-										></textarea>
-									</label>
-								</details>
-								<div class="host-options">
-									<div>
-										<span class="option-label">Capabilities</span>
-										<div class="toggle-grid">
-											{#each savedSettings.host_capability_options as option (option.key)}
-												<label class="toggle-chip">
-													<input
-														type="checkbox"
-														checked={host.capabilities.includes(option.key)}
-														onchange={() => toggleCapability(index, option.key)}
-													/>
-													<span>{option.label}</span>
-												</label>
-											{/each}
-										</div>
-									</div>
-									<div>
-										<span class="option-label">Allowed libraries</span>
-										<div class="toggle-grid">
-											{#each activeLibraryKeys as libraryKey (libraryKey)}
-												<label class="toggle-chip">
-													<input
-														type="checkbox"
-														checked={host.allowed_libraries.includes(libraryKey)}
-														onchange={() => toggleLibraryAccess(index, libraryKey)}
-													/>
-													<span>{libraryKey}</span>
-												</label>
-											{:else}
-												<span class="muted-copy">Add library keys before assigning hosts.</span>
-											{/each}
-										</div>
-									</div>
-								</div>
-							</section>
-						{/each}
+							</div>
+							{#if archiveError}
+								<p class="action-error">{archiveError}</p>
+							{:else if archiveMessage}
+								<p class="action-message">{archiveMessage}</p>
+							{/if}
+						</WorkstationPanel>
 					</div>
-					<div class="panel-actions">
-						<button
-							type="button"
-							class="control"
-							onclick={() =>
-								(draft.remote_hosts = addHostDraft(draft.remote_hosts, draftScheduleOptions))}
-						>
-							Add host
-						</button>
-					</div>
-				</WorkstationPanel>
-
-				<div class="settings-band settings-band--danger">
-					<strong>Danger zone</strong>
-					<span>Actions here delete waiting originals from the cleanup folder.</span>
-				</div>
-
-				<WorkstationPanel eyebrow="Danger zone" title="Clear originals waiting folder">
-					<div class="danger-zone">
-						<div>
-							<span>Target</span>
-							<strong class="mf-path">{savedArchiveRootCopy}</strong>
-							<small
-								>{archiveCleanup?.file_count.toLocaleString('en-US') ?? '0'} files · {formatGiB(
-									archiveCleanup?.total_size_bytes ?? 0
-								)}</small
-							>
-						</div>
-						<div class="archive-actions">
-							<StateBadge
-								tone={archiveCleanup?.has_cleanup ? 'wait' : 'ready'}
-								label={archiveCleanup?.has_cleanup ? 'Originals waiting' : 'Nothing waiting'}
-							/>
-							<button
-								type="button"
-								class="control control--danger"
-								class:control--armed={clearArchiveArmed}
-								disabled={!archiveCleanup?.has_cleanup || clearArchivePending || cleanupTargetDirty}
-								onclick={clearArchiveCleanup}
-								title={cleanupTargetDirty
-									? 'Save the changed transcode root before clearing archived originals.'
-									: undefined}
-							>
-								{clearArchivePending
-									? 'Removing originals'
-									: clearArchiveArmed
-										? 'Confirm delete originals'
-										: 'Delete waiting originals'}
-							</button>
-						</div>
-					</div>
-					{#if archiveError}
-						<p class="action-error">{archiveError}</p>
-					{:else if archiveMessage}
-						<p class="action-message">{archiveMessage}</p>
-					{/if}
-				</WorkstationPanel>
+				</section>
 			</section>
 
-			<aside class="settings-console__rail" aria-label="Settings file summary">
+			<aside class="settings-console__rail" aria-label="Settings navigation and files">
+				<nav class="settings-rail-nav" aria-label="Settings sections">
+					<span class="mf-eyebrow">Sections</span>
+					<a href="#settings-libraries">Libraries</a>
+					<a href="#settings-storage">Storage</a>
+					<a href="#settings-schedules">Schedules</a>
+					<a href="#settings-workers">Workers</a>
+					<a href="#settings-danger">Cleanup</a>
+				</nav>
 				<WorkstationPanel eyebrow="Scope" title="Machine-local settings">
 					<div class="rail-list">
 						<div class="rail-row">
@@ -995,27 +1085,99 @@
 		color: var(--mf-fail-fg);
 	}
 
-	.settings-band {
-		background: var(--mf-bg-strip);
-		border-left: 2px solid var(--mf-active-fg);
+	.settings-overview {
 		display: grid;
-		gap: var(--mf-space-1);
-		padding: var(--mf-space-4) var(--mf-space-5);
+		gap: var(--mf-space-3);
+		grid-template-columns: repeat(5, minmax(0, 1fr));
 	}
 
-	.settings-band strong {
+	.settings-overview a {
+		background: var(--mf-bg-strip);
+		border: var(--mf-border-muted);
+		border-top: 2px solid var(--mf-line-strong);
+		display: grid;
+		gap: var(--mf-space-2);
+		min-width: 0;
+		padding: var(--mf-space-4);
+	}
+
+	.settings-overview a:hover,
+	.settings-rail-nav a:hover {
+		background: var(--mf-bg-panel-2);
+		color: var(--mf-fg-primary);
+	}
+
+	.settings-overview span,
+	.settings-rail-nav a {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.settings-overview strong {
+		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-sm);
 		font-weight: var(--mf-weight-semibold);
+		overflow-wrap: anywhere;
 	}
 
-	.settings-band span {
+	.settings-section {
+		display: grid;
+		gap: var(--mf-space-5);
+		scroll-margin-top: 150px;
+	}
+
+	.settings-section__head {
+		align-items: end;
+		border-bottom: var(--mf-border-muted);
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-template-columns: minmax(0, 1fr) minmax(220px, 0.45fr);
+		padding-bottom: var(--mf-space-3);
+	}
+
+	.settings-section__head h2 {
+		font-size: var(--mf-text-lg);
+		margin-top: var(--mf-space-2);
+	}
+
+	.settings-section__head p {
 		color: var(--mf-fg-tertiary);
 		font-size: var(--mf-text-xs);
+		line-height: var(--mf-leading-snug);
 	}
 
-	.settings-band--danger {
-		background: var(--mf-fail-bg);
-		border-left-color: var(--mf-fail-fg);
+	.settings-section--danger .settings-section__head {
+		border-bottom-color: var(--mf-fail-line);
+	}
+
+	.settings-anchor {
+		display: grid;
+		scroll-margin-top: 150px;
+	}
+
+	.settings-rail-nav {
+		background: var(--mf-bg-strip);
+		border: var(--mf-border);
+		display: grid;
+		gap: var(--mf-space-1);
+		padding: var(--mf-space-4);
+		position: sticky;
+		top: 160px;
+		z-index: 1;
+	}
+
+	.settings-rail-nav .mf-eyebrow {
+		margin-bottom: var(--mf-space-2);
+	}
+
+	.settings-rail-nav a {
+		border-left: 2px solid var(--mf-line-strong);
+		display: block;
+		min-height: var(--mf-control-sm);
+		padding: var(--mf-space-2) var(--mf-space-3);
 	}
 
 	.table-wrap {
@@ -1024,7 +1186,7 @@
 
 	table {
 		border-collapse: collapse;
-		min-width: 780px;
+		min-width: 700px;
 		width: 100%;
 	}
 
@@ -1049,8 +1211,11 @@
 		top: 0;
 	}
 
-	.settings-table--libraries td:nth-child(2),
-	.settings-table--libraries td:nth-child(3) {
+	.settings-table--libraries td:nth-child(1) {
+		min-width: 240px;
+	}
+
+	.settings-table--libraries td:nth-child(2) {
 		min-width: 220px;
 	}
 
@@ -1089,6 +1254,19 @@
 		gap: var(--mf-space-3);
 	}
 
+	.library-cell {
+		align-items: end;
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-template-columns: 92px minmax(120px, 1fr);
+	}
+
+	.library-key-field {
+		display: grid;
+		gap: var(--mf-space-2);
+		min-width: 0;
+	}
+
 	.swatch-field input {
 		background: transparent;
 		border: var(--mf-border);
@@ -1121,6 +1299,7 @@
 	}
 
 	.stacked-field span,
+	.library-key-field span,
 	.host-advanced label span,
 	.host-grid label span,
 	.schedule-row__fields label span,
@@ -1447,6 +1626,7 @@
 
 	@media (max-width: 1120px) {
 		.settings-console,
+		.settings-overview,
 		.storage-grid,
 		.danger-zone,
 		.host-options {
@@ -1470,6 +1650,7 @@
 		}
 
 		.settings-header,
+		.settings-section__head,
 		.schedule-row--builtin,
 		.schedule-row__fields,
 		.host-editor__head,
@@ -1532,15 +1713,13 @@
 		}
 
 		.settings-table--libraries td:nth-child(1),
-		.settings-table--libraries td:nth-child(2),
-		.settings-table--libraries td:nth-child(3) {
+		.settings-table--libraries td:nth-child(2) {
 			display: grid;
 			gap: var(--mf-space-2);
 		}
 
 		.settings-table--libraries td:nth-child(1)::before,
-		.settings-table--libraries td:nth-child(2)::before,
-		.settings-table--libraries td:nth-child(3)::before {
+		.settings-table--libraries td:nth-child(2)::before {
 			color: var(--mf-fg-tertiary);
 			font-size: var(--mf-text-2xs);
 			font-weight: var(--mf-weight-semibold);
@@ -1549,14 +1728,10 @@
 		}
 
 		.settings-table--libraries td:nth-child(1)::before {
-			content: 'Color';
-		}
-
-		.settings-table--libraries td:nth-child(2)::before {
 			content: 'Library';
 		}
 
-		.settings-table--libraries td:nth-child(3)::before {
+		.settings-table--libraries td:nth-child(2)::before {
 			content: 'Folder path';
 		}
 	}
