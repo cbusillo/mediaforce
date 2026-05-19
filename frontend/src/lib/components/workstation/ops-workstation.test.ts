@@ -2,8 +2,9 @@ import { describe, expect, it } from 'vitest';
 import type { DashboardSummaryPayload, HostsPayload } from '$lib/api/types';
 import {
 	buildOpsBlockers,
-	buildOpsQueueRows,
 	buildOpsHistoryRows,
+	buildOpsQueueRows,
+	buildOpsReadinessSummary,
 	buildOpsStatusTiles,
 	hostPrepareDisabled,
 	hostPrepareTitle,
@@ -214,6 +215,32 @@ describe('Ops workstation mapping', () => {
 			{ label: 'Sample checks', tone: 'active' },
 			{ label: 'Hosts', tone: 'ready' }
 		]);
+	});
+
+	it('summarizes the first-glance Ops readiness answer', () => {
+		const summary = buildOpsReadinessSummary(dashboardFixture(), hostsFixture(), null);
+
+		expect(summary).toMatchObject({
+			tone: 'wait',
+			title: 'Retry is available',
+			metricLabel: 'Retry',
+			metricValue: '1'
+		});
+	});
+
+	it('treats active work as the headline when nothing needs operator attention', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.needs_attention_count = 0;
+		dashboard.encode_queue.recent = [];
+
+		const summary = buildOpsReadinessSummary(dashboard, hostsFixture(), null);
+
+		expect(summary).toMatchObject({
+			tone: 'active',
+			title: 'Mediaforce is working',
+			metricLabel: 'Running',
+			metricValue: '2'
+		});
 	});
 
 	it('distinguishes available, scheduled-off, and unavailable host states', () => {

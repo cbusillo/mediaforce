@@ -41,6 +41,14 @@ export type OpsBlocker = {
 	action?: OpsActionId;
 };
 
+export type OpsReadinessSummary = {
+	tone: ShellTone;
+	title: string;
+	detail: string;
+	metricLabel: string;
+	metricValue: string;
+};
+
 type CalibrationJob = Record<string, unknown>;
 
 function compactText(value: unknown): string {
@@ -377,6 +385,107 @@ export function buildOpsBlockers(
 		});
 	}
 	return blockers;
+}
+
+export function buildOpsReadinessSummary(
+	dashboard: DashboardSummaryPayload | null | undefined,
+	hosts: HostsPayload | null | undefined,
+	loadError: string | null
+): OpsReadinessSummary {
+	const queue = dashboard?.encode_queue;
+	const calibration = dashboard?.calibration_queue;
+	const readyHosts = hosts?.hosts.filter((host) => host.available).length ?? 0;
+	const totalHosts = hosts?.hosts.length ?? 0;
+	const runningCount = queue?.running_count ?? 0;
+	const queuedCount = queue?.queued_count ?? 0;
+	const queuedWaiting = queue?.queued_waiting_count ?? 0;
+	const needsAttention = queue?.needs_attention_count ?? 0;
+	const activeChecks = calibration?.active_count ?? 0;
+	const queuedWork = runningCount + queuedCount;
+
+	if (loadError) {
+		return {
+			tone: 'fail',
+			title: 'Ops data is unavailable',
+			detail: loadError,
+			metricLabel: 'Data',
+			metricValue: 'offline'
+		};
+	}
+	if (queue?.state.stop_requested) {
+		return {
+			tone: 'fail',
+			title: 'Encoding is stopping',
+			detail: 'Workers are finishing current items before Mediaforce can start more work.',
+			metricLabel: 'Active work',
+			metricValue: String(runningCount)
+		};
+	}
+	if (queue?.state.is_paused) {
+		return {
+			tone: 'wait',
+			title: 'Encoding is paused',
+			detail: queue.state.scheduler_summary ?? 'Resume the queue when encoding should continue.',
+			metricLabel: 'Queued',
+			metricValue: String(queuedCount)
+		};
+	}
+	if (needsAttention > 0) {
+		return {
+			tone: 'wait',
+			title: 'Retry is available',
+			detail: `${needsAttention} approved encode ${needsAttention === 1 ? 'job needs' : 'jobs need'} operator review before retry.`,
+			metricLabel: 'Retry',
+			metricValue: String(needsAttention)
+		};
+	}
+	if (totalHosts > 0 && readyHosts === 0 && queuedWork > 0) {
+		return {
+			tone: 'fail',
+			title: 'No host can work right now',
+			detail:
+				'Queued work exists, but every configured host is unavailable or outside its work window.',
+			metricLabel: 'Hosts ready',
+			metricValue: '0'
+		};
+	}
+	if (runningCount > 0 || activeChecks > 0) {
+		return {
+			tone: 'active',
+			title: 'Mediaforce is working',
+			detail:
+				queue?.telemetry?.eta_copy ??
+				`${runningCount} encode ${runningCount === 1 ? 'job' : 'jobs'} and ${activeChecks} sample/proof ${activeChecks === 1 ? 'job' : 'jobs'} active.`,
+			metricLabel: 'Running',
+			metricValue: String(runningCount + activeChecks)
+		};
+	}
+	if (queuedWaiting > 0) {
+		return {
+			tone: 'wait',
+			title: 'Waiting for the encode window',
+			detail:
+				queue?.state.scheduler_summary ?? 'Queued work will start when an allowed window opens.',
+			metricLabel: 'Waiting',
+			metricValue: String(queuedWaiting)
+		};
+	}
+	if (readyHosts > 0) {
+		return {
+			tone: 'ready',
+			title: 'Ready for work',
+			detail: 'Hosts are available and Mediaforce can start eligible encode work.',
+			metricLabel: 'Hosts ready',
+			metricValue: String(readyHosts)
+		};
+	}
+	return {
+		tone: 'idle',
+		title: 'Standing by',
+		detail: totalHosts > 0 ? 'No current work is waiting on Ops.' : 'Host status is unavailable.',
+		metricLabel: 'Queued',
+		metricValue: String(queuedCount)
+	};
 }
 
 export function buildOpsStatusTiles(

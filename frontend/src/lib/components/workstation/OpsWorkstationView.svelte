@@ -13,6 +13,7 @@
 		buildOpsFooterSignals,
 		buildOpsHistoryRows,
 		buildOpsQueueRows,
+		buildOpsReadinessSummary,
 		buildOpsStatusTiles,
 		hostPrepareDisabled,
 		hostPrepareTitle,
@@ -39,17 +40,16 @@
 	const queueRows = $derived(buildOpsQueueRows(dashboard));
 	const historyRows = $derived(buildOpsHistoryRows(dashboard));
 	const blockers = $derived(buildOpsBlockers(dashboard, hosts, loadError));
+	const readiness = $derived(buildOpsReadinessSummary(dashboard, hosts, loadError));
 	const statusTiles = $derived(buildOpsStatusTiles(dashboard, hosts, loadError));
 	const footerSignals = $derived(buildOpsFooterSignals(dashboard, hosts));
 	const encodeQueue = $derived(dashboard?.encode_queue ?? null);
 	const calibrationQueue = $derived(dashboard?.calibration_queue ?? null);
-	const activeJobCount = $derived(
-		(encodeQueue?.running_count ?? 0) +
-			(encodeQueue?.queued_count ?? 0) +
-			(calibrationQueue?.active_count ?? 0)
-	);
 	const queuedWaitingCount = $derived(encodeQueue?.queued_waiting_count ?? 0);
 	const needsAttentionCount = $derived(encodeQueue?.needs_attention_count ?? 0);
+	const encodeWorkCount = $derived(
+		(encodeQueue?.running_count ?? 0) + (encodeQueue?.queued_count ?? 0)
+	);
 	const readyHosts = $derived(hosts?.hosts.filter((host) => host.available).length ?? 0);
 	const fleetHasReadyCapacity = $derived(readyHosts > 0);
 	const closedHosts = $derived(hosts?.hosts.filter((host) => host.schedule_open === false) ?? []);
@@ -63,6 +63,61 @@
 	let lastRefreshAt = $state<Date | null>(null);
 	let hostPasswords = $state<Record<string, string>>({});
 	let refreshTimer: ReturnType<typeof setInterval> | null = null;
+
+	const globalCommands = $derived([
+		{
+			id: 'pause-encode' as const,
+			tone: 'default',
+			enabled:
+				Boolean(encodeQueue) &&
+				!encodeQueue?.state.is_paused &&
+				!encodeQueue?.state.stop_requested &&
+				encodeWorkCount > 0 &&
+				actionPending === null,
+			unavailable: 'No encode work is running or queued.'
+		},
+		{
+			id: 'resume-encode' as const,
+			tone: 'ready',
+			enabled:
+				Boolean(encodeQueue) &&
+				Boolean(encodeQueue?.state.is_paused || encodeQueue?.state.stop_requested) &&
+				actionPending === null,
+			unavailable: 'Queue is already accepting eligible work.'
+		},
+		{
+			id: 'retry-failed-encode' as const,
+			tone: 'warn',
+			enabled: Boolean(encodeQueue) && needsAttentionCount > 0 && actionPending === null,
+			unavailable: 'No approved encode retries are waiting.'
+		},
+		{
+			id: 'stop-encode' as const,
+			tone: 'danger',
+			enabled:
+				Boolean(encodeQueue) &&
+				Boolean(
+					(encodeQueue?.running_count ?? 0) > 0 ||
+					(encodeQueue?.queued_count ?? 0) > 0 ||
+					encodeQueue?.state.is_paused
+				) &&
+				actionPending === null,
+			unavailable: 'No encode work is running, queued, or paused.'
+		},
+		{
+			id: 'stop-calibration' as const,
+			tone: 'danger',
+			enabled:
+				Boolean(calibrationQueue) &&
+				(calibrationQueue?.active_count ?? 0) > 0 &&
+				actionPending === null,
+			unavailable: 'No sample or proof jobs are running.'
+		}
+	]);
+	const availableGlobalCommands = $derived(globalCommands.filter((command) => command.enabled));
+	const unavailableGlobalCommands = $derived(
+		globalCommands.filter((command) => !command.enabled && actionPending === null)
+	);
 
 	const actionEndpoints: Record<OpsActionId, string> = {
 		'pause-encode': '/api/encode-queue/pause',
@@ -182,6 +237,15 @@
 		return false;
 	}
 
+	function hostHasVisibleActions(host: HostRuntime): boolean {
+		return (
+			!hostActionDisabled('start-host', host) ||
+			!hostActionDisabled('prepare-host', host) ||
+			!hostActionDisabled('reset-host-trust', host) ||
+			Boolean(host.setup_supported && host.setup_requires_password)
+		);
+	}
+
 	function hostReadinessReason(host: HostRuntime): string {
 		if (host.available && host.schedule_open === false) {
 			return host.schedule_detail || 'Scheduled off; this is a normal wait, not a failure.';
@@ -240,24 +304,14 @@
 			<header class="ops-header">
 				<div>
 					<span class="mf-eyebrow">Ops</span>
-					<h1>Can Mediaforce work right now?</h1>
-					<p>
-						Check whether encoding can run, what needs attention, and which hosts are available
-						without treating normal schedule waits as failures.
-					</p>
+					<h1>{readiness.title}</h1>
+					<p>{readiness.detail}</p>
 				</div>
-				<div class="ops-header__facts">
+				<div class="ops-header__status ops-header__status--{readiness.tone}">
+					<StateBadge tone={readiness.tone} label={readiness.title} />
 					<div>
-						<span>Active work</span>
-						<strong>{activeJobCount.toLocaleString('en-US')}</strong>
-					</div>
-					<div>
-						<span>Needs attention</span>
-						<strong>{needsAttentionCount.toLocaleString('en-US')}</strong>
-					</div>
-					<div>
-						<span>Hosts ready</span>
-						<strong>{readyHosts.toLocaleString('en-US')}</strong>
+						<span>{readiness.metricLabel}</span>
+						<strong>{readiness.metricValue}</strong>
 					</div>
 					<button
 						type="button"
@@ -332,60 +386,44 @@
 					</div>
 					<div class="scheduler-console__scope">
 						<strong>Global queue controls</strong>
-						<span>Pause, resume, retry, and stop actions affect the queue, not one folder.</span>
+						<span
+							>{availableGlobalCommands.length > 0
+								? 'Only actions that can run now are shown in the command lane.'
+								: 'No global queue command is needed in the current state.'}</span
+						>
 					</div>
 					<div class="scheduler-console__actions" aria-label="Scheduler controls">
-						<button
-							type="button"
-							class="control"
-							disabled={!encodeQueue ||
-								encodeQueue.state.is_paused ||
-								encodeQueue.state.stop_requested ||
-								actionPending !== null}
-							title={actionTitle('pause-encode')}
-							onclick={() => runAction('pause-encode')}>{queueActionLabel('pause-encode')}</button
-						>
-						<button
-							type="button"
-							class="control control--ready"
-							disabled={!encodeQueue ||
-								(!encodeQueue.state.is_paused && !encodeQueue.state.stop_requested) ||
-								actionPending !== null}
-							title={actionTitle('resume-encode')}
-							onclick={() => runAction('resume-encode')}>{queueActionLabel('resume-encode')}</button
-						>
-						<button
-							type="button"
-							class="control control--warn"
-							disabled={!encodeQueue || needsAttentionCount === 0 || actionPending !== null}
-							title={actionTitle('retry-failed-encode')}
-							onclick={() => runAction('retry-failed-encode')}
-							>{queueActionLabel('retry-failed-encode')}</button
-						>
-						<button
-							type="button"
-							class="control control--danger"
-							class:control--armed={confirmationAction === 'stop-encode'}
-							disabled={!encodeQueue ||
-								(encodeQueue.running_count === 0 &&
-									encodeQueue.queued_count === 0 &&
-									!encodeQueue.state.is_paused) ||
-								actionPending !== null}
-							title={actionTitle('stop-encode')}
-							onclick={() => runAction('stop-encode')}>{queueActionLabel('stop-encode')}</button
-						>
-						<button
-							type="button"
-							class="control control--danger"
-							class:control--armed={confirmationAction === 'stop-calibration'}
-							disabled={!calibrationQueue ||
-								calibrationQueue.active_count === 0 ||
-								actionPending !== null}
-							title={actionTitle('stop-calibration')}
-							onclick={() => runAction('stop-calibration')}
-							>{queueActionLabel('stop-calibration')}</button
-						>
+						{#each availableGlobalCommands as command (command.id)}
+							<button
+								type="button"
+								class="control"
+								class:control--ready={command.tone === 'ready'}
+								class:control--warn={command.tone === 'warn'}
+								class:control--danger={command.tone === 'danger'}
+								class:control--armed={confirmationAction === command.id}
+								title={actionTitle(command.id)}
+								onclick={() => runAction(command.id)}>{queueActionLabel(command.id)}</button
+							>
+						{:else}
+							<div class="command-standby">
+								<StateBadge compact tone="ready" label="No command" />
+								<span>Mediaforce does not need an operator command right now.</span>
+							</div>
+						{/each}
 					</div>
+					{#if unavailableGlobalCommands.length > 0}
+						<details class="command-details">
+							<summary>{unavailableGlobalCommands.length} unavailable controls</summary>
+							<ul>
+								{#each unavailableGlobalCommands as command (command.id)}
+									<li>
+										<strong>{queueActionLabel(command.id)}</strong>
+										<span>{command.unavailable}</span>
+									</li>
+								{/each}
+							</ul>
+						</details>
+					{/if}
 					{#if actionMessage}
 						<p class="action-message">{actionMessage}</p>
 					{/if}
@@ -547,14 +585,12 @@
 								<strong>{host.label}</strong>
 							</div>
 							<dl>
-								<dt>Capability</dt>
-								<dd>{host.capabilities.join(' · ') || 'none'}</dd>
-								<dt>Schedule</dt>
+								<dt>Window</dt>
 								<dd>{host.schedule_detail || host.schedule_profile_label}</dd>
-								<dt>Active</dt>
+								<dt>Work</dt>
 								<dd>{host.active_encode_count.toLocaleString('en-US')} encodes</dd>
-								<dt>Reason</dt>
-								<dd>{host.message || host.active_reason || 'ready'}</dd>
+								<dt>Can run</dt>
+								<dd>{host.capabilities.join(' · ') || 'none'}</dd>
 							</dl>
 							{#if host.setup_requires_password && host.setup_supported}
 								<label class="host-password">
@@ -568,33 +604,35 @@
 									/>
 								</label>
 							{/if}
-							<div class="host-row__actions" aria-label={`${host.label} controls`}>
-								<button
-									type="button"
-									class="control control--compact"
-									disabled={hostActionDisabled('start-host', host)}
-									title={hostActionDisabled('start-host', host)
-										? 'Start is unavailable for this host state.'
-										: actionTitle('start-host')}
-									onclick={() => runAction('start-host', host)}>Start</button
-								>
-								<button
-									type="button"
-									class="control control--compact"
-									disabled={hostActionDisabled('prepare-host', host)}
-									title={hostPrepareTitle(host)}
-									onclick={() => runAction('prepare-host', host)}>Prepare</button
-								>
-								<button
-									type="button"
-									class="control control--compact"
-									disabled={hostActionDisabled('reset-host-trust', host)}
-									title={host.trust_reset_supported
-										? actionTitle('reset-host-trust')
-										: 'Trust reset is unavailable for this host.'}
-									onclick={() => runAction('reset-host-trust', host)}>Trust</button
-								>
-							</div>
+							{#if hostHasVisibleActions(host)}
+								<div class="host-row__actions" aria-label={`${host.label} controls`}>
+									{#if !hostActionDisabled('start-host', host)}
+										<button
+											type="button"
+											class="control control--compact"
+											title={actionTitle('start-host')}
+											onclick={() => runAction('start-host', host)}>Start</button
+										>
+									{/if}
+									{#if !hostActionDisabled('prepare-host', host) || (host.setup_supported && host.setup_requires_password)}
+										<button
+											type="button"
+											class="control control--compact"
+											disabled={hostActionDisabled('prepare-host', host)}
+											title={hostPrepareTitle(host)}
+											onclick={() => runAction('prepare-host', host)}>Prepare</button
+										>
+									{/if}
+									{#if !hostActionDisabled('reset-host-trust', host)}
+										<button
+											type="button"
+											class="control control--compact"
+											title={actionTitle('reset-host-trust')}
+											onclick={() => runAction('reset-host-trust', host)}>Reset trust</button
+										>
+									{/if}
+								</div>
+							{/if}
 							<p class="host-row__reason">{hostReadinessReason(host)}</p>
 						</div>
 					{:else}
@@ -676,19 +714,45 @@
 		max-width: 74ch;
 	}
 
-	.ops-header__facts {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--mf-space-5);
+	.ops-header__status {
+		align-items: center;
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border-strong);
+		border-left: 3px solid var(--mf-line-strong);
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-template-columns: auto minmax(88px, 1fr) auto;
+		min-width: min(100%, 360px);
+		padding: var(--mf-space-4);
 	}
 
-	.ops-header__facts div {
+	.ops-header__status--active {
+		background: var(--mf-active-bg);
+		border-left-color: var(--mf-active-fg);
+	}
+
+	.ops-header__status--fail {
+		background: var(--mf-fail-bg);
+		border-left-color: var(--mf-fail-fg);
+	}
+
+	.ops-header__status--ready {
+		background: var(--mf-ready-bg);
+		border-left-color: var(--mf-ready-fg);
+	}
+
+	.ops-header__status--wait {
+		background: var(--mf-wait-bg);
+		border-left-color: var(--mf-wait-fg);
+	}
+
+	.ops-header__status div {
 		display: grid;
 		gap: var(--mf-space-2);
-		min-width: 88px;
+		min-width: 0;
 	}
 
-	.ops-header__facts span,
+	.ops-header__status span,
 	.scope-row span,
 	.host-row dt {
 		color: var(--mf-fg-tertiary);
@@ -698,10 +762,10 @@
 		text-transform: uppercase;
 	}
 
-	.ops-header__facts strong,
+	.ops-header__status strong,
 	.host-row dd {
 		font-family: var(--mf-font-mono), monospace;
-		font-size: var(--mf-text-sm);
+		font-size: var(--mf-text-lg);
 		font-weight: var(--mf-weight-medium);
 	}
 
@@ -759,6 +823,55 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: var(--mf-space-3);
+	}
+
+	.command-standby {
+		align-items: center;
+		background: var(--mf-ready-bg);
+		border-left: 2px solid var(--mf-ready-fg);
+		display: grid;
+		gap: var(--mf-space-3);
+		grid-template-columns: auto minmax(0, 1fr);
+		padding: var(--mf-space-3) var(--mf-space-4);
+	}
+
+	.command-standby span {
+		color: var(--mf-fg-secondary);
+		font-size: var(--mf-text-xs);
+	}
+
+	.command-details {
+		border-top: var(--mf-border-muted);
+		padding-top: var(--mf-space-3);
+	}
+
+	.command-details summary {
+		color: var(--mf-fg-tertiary);
+		cursor: pointer;
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.command-details ul {
+		display: grid;
+		gap: var(--mf-space-2);
+		list-style: none;
+		margin: var(--mf-space-3) 0 0;
+		padding: 0;
+	}
+
+	.command-details li {
+		display: grid;
+		gap: var(--mf-space-1);
+		grid-template-columns: minmax(112px, 0.32fr) minmax(0, 1fr);
+	}
+
+	.command-details li strong,
+	.command-details li span {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
 	}
 
 	.action-message,
@@ -1156,14 +1269,23 @@
 		.ops-header {
 			grid-template-columns: 1fr;
 		}
+
+		.ops-header__status {
+			width: 100%;
+		}
 	}
 
 	@media (max-width: 680px) {
 		.scheduler-console__state,
 		.blocker-row,
 		.current-standby,
-		.empty-note--ready {
+		.empty-note--ready,
+		.ops-header__status {
 			align-items: start;
+			grid-template-columns: 1fr;
+		}
+
+		.command-details li {
 			grid-template-columns: 1fr;
 		}
 	}
