@@ -12,6 +12,8 @@ Read this file first before using any design brief as implementation guidance.
   reference for route copy.
 - `docs/design/calm-workstation-visual-system.md`: visual-system reference for
   calmer hierarchy, tokens, surfaces, actions, and route-level browser review.
+- `docs/design/final-love-pass-qa.md`: final issue `#87` QA record for the
+  route sweep, basic-user walkthrough, and last vocabulary polish.
 - `docs/design/operator-workstation-shell-brief.md`: current cross-route shell,
   route-role, state-color, and copy posture reference.
 - GitHub issue `#74`: current parent plan for the basic-user workstation UI/UX

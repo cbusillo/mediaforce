@@ -273,9 +273,9 @@ export function hostPrepareDisabled(host: HostRuntime, password: string): boolea
 }
 
 export function hostPrepareTitle(host: HostRuntime): string {
-	if (host.setup_supported === false) return 'Prepare is unavailable for this host.';
-	if (host.setup_requires_password) return 'Enter the prepare password for this host.';
-	return 'Prepare this host for Mediaforce work';
+	if (host.setup_supported === false) return 'Prepare is unavailable for this worker.';
+	if (host.setup_requires_password) return 'Enter the prepare password for this worker.';
+	return 'Prepare this worker for Mediaforce work';
 }
 
 export function buildCalibrationRows(
@@ -371,9 +371,9 @@ export function buildOpsBlockers(
 		blockers.push({
 			key: 'no-hosts-ready',
 			tone: 'fail',
-			title: 'No hosts can encode right now',
+			title: 'No workers can encode right now',
 			detail:
-				'Queued work exists, but every configured host is unavailable or outside its work window.'
+				'Queued work exists, but every configured worker is unavailable or outside its work window.'
 		});
 	} else if (scheduleWaiting > 0) {
 		blockers.push({
@@ -442,10 +442,10 @@ export function buildOpsReadinessSummary(
 	if (totalHosts > 0 && readyHosts === 0 && queuedWork > 0) {
 		return {
 			tone: 'fail',
-			title: 'No host can work right now',
+			title: 'No worker can work right now',
 			detail:
-				'Queued work exists, but every configured host is unavailable or outside its work window.',
-			metricLabel: 'Hosts ready',
+				'Queued work exists, but every configured worker is unavailable or outside its work window.',
+			metricLabel: 'Workers ready',
 			metricValue: '0'
 		};
 	}
@@ -474,15 +474,15 @@ export function buildOpsReadinessSummary(
 		return {
 			tone: 'ready',
 			title: 'Ready for work',
-			detail: 'Hosts are available and Mediaforce can start eligible encode work.',
-			metricLabel: 'Hosts ready',
+			detail: 'Workers are available and Mediaforce can start eligible encode work.',
+			metricLabel: 'Workers ready',
 			metricValue: String(readyHosts)
 		};
 	}
 	return {
 		tone: 'idle',
 		title: 'Standing by',
-		detail: totalHosts > 0 ? 'No current work is waiting on Ops.' : 'Host status is unavailable.',
+		detail: totalHosts > 0 ? 'No current work is waiting on Ops.' : 'Worker status is unavailable.',
 		metricLabel: 'Queued',
 		metricValue: String(queuedCount)
 	};
@@ -536,13 +536,13 @@ export function buildOpsStatusTiles(
 			tone: (calibration?.active_count ?? 0) > 0 ? 'active' : 'idle'
 		},
 		{
-			label: 'Hosts',
+			label: 'Workers',
 			value: `${readyHosts} ready / ${totalHosts}`,
 			detail: totalHosts
 				? readyHosts > 0
 					? 'capacity available'
-					: 'no host can start work'
-				: 'host status unavailable',
+					: 'no worker can start work'
+				: 'worker status unavailable',
 			tone: readyHosts > 0 ? 'ready' : totalHosts > 0 ? 'fail' : 'idle'
 		}
 	];
@@ -576,7 +576,7 @@ export function buildOpsFooterSignals(
 			tone: (calibration?.active_count ?? 0) > 0 ? 'active' : 'idle'
 		},
 		{
-			label: 'Hosts',
+			label: 'Workers',
 			value: `${hosts?.hosts.filter((host) => host.available).length ?? 0}/${hosts?.hosts.length ?? 0}`
 		}
 	];

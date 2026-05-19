@@ -708,7 +708,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             {
                 "label": "Ops unavailable host fixture",
                 "route": "/ops",
-                "marker": "No hosts can encode right now",
+                "marker": "No workers can encode right now",
             },
             {
                 "label": "Folder Studio review-ready fixture",

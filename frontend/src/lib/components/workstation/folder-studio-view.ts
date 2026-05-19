@@ -130,19 +130,19 @@ export function resolveBenchRequestState(
 	const activeCalibrationJob = activeCalibrationStatus(calibrationJob?.status);
 	let blocker = '';
 	if (!note.trim()) {
-		blocker = 'Describe the Bench request before sending.';
+		blocker = 'Describe the review request before sending.';
 	} else if (!selectedHostKey) {
-		blocker = 'Choose an available host before sending.';
+		blocker = 'Choose an available worker before sending.';
 	} else if (!selectedHost) {
-		blocker = 'Selected host is no longer available for this folder.';
+		blocker = 'Selected worker is no longer available for this folder.';
 	} else if (!selectedHost.available) {
-		blocker = 'Selected host is not available right now.';
+		blocker = 'Selected worker is not available right now.';
 	} else if (activeCalibrationJob) {
 		blocker = 'A sample job is already active for this folder.';
 	}
 	return {
 		disabled: pending || Boolean(blocker),
-		blocker: pending ? 'Sending request to Bench.' : blocker,
+		blocker: pending ? 'Sending request to the review assistant.' : blocker,
 		selectedHost,
 		activeCalibrationJob
 	};
@@ -181,12 +181,15 @@ export function resolveWorkflowActionState(
 		}
 		if (action === 'retry-sample') return { disabled: false, title: '' };
 		if (!pendingProposal?.proposal_id) {
-			return { disabled: true, title: 'Ask Bench for a draft before starting the sample.' };
+			return {
+				disabled: true,
+				title: 'Ask the review assistant for a draft before starting the sample.'
+			};
 		}
 		if (pendingProposal.can_queue === false) {
 			return {
 				disabled: true,
-				title: pendingProposal.message || 'The current bench draft is not ready to queue.'
+				title: pendingProposal.message || 'The current draft is not ready to queue.'
 			};
 		}
 		return { disabled: false, title: '' };
@@ -240,7 +243,7 @@ export function buildBenchMessages(
 			role: 'operator',
 			label: 'Operator',
 			title: 'No request sent',
-			body: 'Use the composer to ask Bench for a representative sample, a revision, or a validation pass.',
+			body: 'Use the composer to request a representative sample, a revision, or a validation pass.',
 			tone: 'neutral'
 		});
 	}
@@ -253,14 +256,14 @@ export function buildBenchMessages(
 	pushMessage(messages, {
 		id: 'bench-response',
 		role: 'bench',
-		label: 'Bench',
+		label: 'Review assistant',
 		title:
 			pendingProposal?.request_disposition ??
 			calibration?.advice?.request_disposition ??
 			'Response',
 		body:
 			responseBody ||
-			'Waiting for a request. Bench responses will appear here with the resulting proposal context.',
+			'Waiting for a request. Review guidance will appear here with the resulting proposal context.',
 		meta: pendingProposal?.confidence ?? calibration?.advice?.confidence ?? undefined,
 		tone: responseBody ? 'active' : 'neutral'
 	});
@@ -270,7 +273,7 @@ export function buildBenchMessages(
 	pushMessage(messages, {
 		id: 'bench-diagnosis',
 		role: 'bench',
-		label: 'Bench',
+		label: 'Review assistant',
 		title: 'Diagnosis',
 		body: diagnosis,
 		tone: 'active'
@@ -282,7 +285,7 @@ export function buildBenchMessages(
 	pushMessage(messages, {
 		id: 'bench-follow-up',
 		role: 'bench',
-		label: 'Bench',
+		label: 'Review assistant',
 		title: 'Suggested next step',
 		body: followUp,
 		tone: 'active'
@@ -464,7 +467,7 @@ export function resolveWorkflow(
 			copy: String(
 				calibrationJob?.error ??
 					calibrationJob?.notes ??
-					'The latest representative sample did not complete. Retry when the host state is valid.'
+					'The latest representative sample did not complete. Retry when worker state is valid.'
 			),
 			primary: 'Retry sample',
 			primaryAction: 'retry-sample',
@@ -477,7 +480,7 @@ export function resolveWorkflow(
 			tone: 'active',
 			label: 'Sampling',
 			title: 'Representative sample is running',
-			copy: 'The operator is waiting for review evidence. Keep host, elapsed time, and queue state visible until the pack is ready.',
+			copy: 'The operator is waiting for review evidence. Keep worker, elapsed time, and queue state visible until the pack is ready.',
 			primary: 'Open Ops',
 			primaryAction: 'open-ops',
 			secondary: 'Stop sample',
@@ -502,10 +505,10 @@ export function resolveWorkflow(
 		return {
 			tone: 'ready',
 			label: 'Draft ready',
-			title: 'Bench draft is ready to sample',
+			title: 'Review draft is ready to sample',
 			copy:
 				pendingProposal.message ??
-				'Review the Bench draft, then queue the representative sample when it looks right.',
+				'Review the draft, then queue the representative sample when it looks right.',
 			primary: 'Start sample',
 			primaryAction: 'start-sample',
 			secondary: 'Revise',
@@ -531,8 +534,8 @@ export function resolveWorkflow(
 			tone: 'idle',
 			label: 'Not sampled',
 			title: 'No representative sample yet',
-			copy: 'Ask Bench for a sample draft before approving folder-wide settings. Host readiness and policy context stay visible while the sample is queued.',
-			primary: 'Ask Bench for draft',
+			copy: 'Ask the review assistant for a sample draft before approving folder-wide settings. Worker readiness and policy context stay visible while the sample is queued.',
+			primary: 'Ask for draft',
 			primaryAction: 'focus-bench',
 			secondary: 'Open Ops',
 			secondaryAction: 'open-ops'
@@ -543,7 +546,7 @@ export function resolveWorkflow(
 		label: 'Waiting',
 		title: 'Folder is waiting for review evidence',
 		copy: 'A representative item exists, but the current review state is incomplete. Refresh status or rerun the sample if the evidence is stale.',
-		primary: 'Ask Bench to refresh',
+		primary: 'Refresh draft',
 		primaryAction: 'focus-bench',
 		secondary: 'Open Ops',
 		secondaryAction: 'open-ops'
@@ -656,9 +659,9 @@ export function buildStatusTiles(
 						: 'idle'
 		},
 		{
-			label: 'Hosts',
+			label: 'Workers',
 			value: `${readyHosts} ready / ${totalHosts}`,
-			detail: totalHosts ? 'capacity check complete' : 'host status unavailable',
+			detail: totalHosts ? 'capacity check complete' : 'worker status unavailable',
 			tone: readyHosts > 0 ? 'ready' : totalHosts > 0 ? 'wait' : 'idle'
 		}
 	];
@@ -673,7 +676,7 @@ export function buildFooterSignals(
 		{ label: 'Review', value: status.calibration_status || 'unknown', tone: 'active' },
 		{ label: 'Metric', value: resolvedMetricCopy(folder), tone: 'ready' },
 		{
-			label: 'Hosts',
+			label: 'Workers',
 			value: `${hosts.hosts.filter((host) => host.available).length}/${hosts.hosts.length}`
 		},
 		{ label: 'API', value: status.polling_active ? 'polling' : 'idle' }

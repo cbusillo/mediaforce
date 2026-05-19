@@ -164,11 +164,10 @@
 			);
 			localPendingProposal = response.proposal ?? studioFolder.pending_proposal ?? null;
 			localProposalPrefix = prefix;
-			benchMessage =
-				response.message || 'Bench draft ready. Nothing is queued until you confirm it.';
+			benchMessage = response.message || 'Draft ready. Nothing is queued until you confirm it.';
 			benchNote = '';
 		} catch (error) {
-			benchError = error instanceof Error ? error.message : 'Bench request failed.';
+			benchError = error instanceof Error ? error.message : 'Review request failed.';
 		} finally {
 			benchPending = false;
 		}
@@ -188,7 +187,7 @@
 			);
 			localPendingProposal = null;
 			localProposalPrefix = prefix;
-			benchMessage = response.message || 'Queued the sample run from the bench draft.';
+			benchMessage = response.message || 'Queued the sample run from the draft.';
 			await invalidateAll();
 		} catch (error) {
 			benchError = error instanceof Error ? error.message : 'Sample could not be queued.';
@@ -361,9 +360,9 @@
 				</div>
 			</section>
 
-			<WorkstationPanel title="Bench">
+			<WorkstationPanel title="Review assistant">
 				<div class="bench">
-					<div class="bench__thread" aria-label="Bench conversation">
+					<div class="bench__thread" aria-label="Review assistant conversation">
 						{#each benchMessages as message (message.id)}
 							<div
 								class="bench-message bench-message--{message.role} bench-message--tone-{message.tone ??
@@ -381,19 +380,19 @@
 						{/each}
 					</div>
 
-					<div class="bench__composer" aria-label="Bench request composer">
+					<div class="bench__composer" aria-label="Review request composer">
 						<label>
 							<span>Request</span>
 							<textarea
 								rows="5"
-								placeholder="Ask Bench what to sample, revise, or validate for this folder."
+								placeholder="Ask what to sample, revise, or validate for this folder."
 								bind:this={benchTextarea}
 								bind:value={benchNote}
 							></textarea>
 						</label>
 						<div class="bench__controls">
 							<label>
-								<span>Host</span>
+								<span>Worker</span>
 								<select bind:value={selectedHostKey}>
 									{#each sampleHostOptions as host (host.key)}
 										<option value={host.key}
@@ -409,7 +408,7 @@
 								title={benchRequestDisabled ? benchRequestState.blocker : ''}
 								onclick={sendBenchRequest}
 								data-mf-action="bench-request"
-								data-mf-wire="live">{benchPending ? 'Sending' : 'Send to Bench'}</button
+								data-mf-wire="live">{benchPending ? 'Sending' : 'Send request'}</button
 							>
 						</div>
 						{#if benchError}
@@ -570,7 +569,7 @@
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="Hosts" title="Sample readiness">
+			<WorkstationPanel eyebrow="Workers" title="Sample readiness">
 				<div class="host-list">
 					{#each hosts.hosts.slice(0, 6) as host (host.key)}
 						<div class="host-row">
@@ -583,7 +582,7 @@
 						</div>
 					{/each}
 					{#if hosts.hosts.length === 0}
-						<div class="empty-note">Host status is unavailable.</div>
+						<div class="empty-note">Worker status is unavailable.</div>
 					{/if}
 				</div>
 			</WorkstationPanel>
