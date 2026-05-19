@@ -21,6 +21,14 @@ export type CompletedFilterOption = {
 	size: number;
 };
 
+export type CompletedReadinessSummary = {
+	tone: ShellTone;
+	title: string;
+	detail: string;
+	metricLabel: string;
+	metricValue: string;
+};
+
 export function cleanupState(
 	folder: CompletedFolderRow,
 	archive: ArchiveCleanupSummary
@@ -106,6 +114,50 @@ export function cleanupStateCounts(folders: CompletedFolderRow[], archive: Archi
 		},
 		{ ready: 0, blocked: 0, unknown: 0, cleaned: 0 } satisfies Record<CleanupState, number>
 	);
+}
+
+export function buildCompletedReadinessSummary(
+	payload: CompletedPayload | null,
+	loadError: string | null
+): CompletedReadinessSummary {
+	if (!payload) {
+		return {
+			tone: loadError ? 'fail' : 'idle',
+			title: loadError ? 'Completed work is unavailable' : 'Completed work is loading',
+			detail: loadError ?? 'Waiting for completed work and cleanup state.',
+			metricLabel: 'Completed',
+			metricValue: loadError ? 'offline' : 'loading'
+		};
+	}
+	const folders = payload.folders;
+	const archive = payload.archive_cleanup;
+	const counts = cleanupStateCounts(folders, archive);
+	const reviewCount = counts.blocked + counts.unknown;
+	if (counts.ready > 0) {
+		return {
+			tone: 'ready',
+			title: 'Originals are waiting',
+			detail: `${counts.ready.toLocaleString('en-US')} completed ${counts.ready === 1 ? 'folder has' : 'folders have'} originals staged for removal.`,
+			metricLabel: 'Waiting',
+			metricValue: String(counts.ready)
+		};
+	}
+	if (reviewCount > 0) {
+		return {
+			tone: counts.blocked > 0 ? 'fail' : 'wait',
+			title: 'Cleanup review is needed',
+			detail: `${reviewCount.toLocaleString('en-US')} completed ${reviewCount === 1 ? 'folder needs' : 'folders need'} review before leaving cleanup.`,
+			metricLabel: 'Review',
+			metricValue: String(reviewCount)
+		};
+	}
+	return {
+		tone: 'idle',
+		title: 'Completed work is handled',
+		detail: `${folders.length.toLocaleString('en-US')} completed ${folders.length === 1 ? 'folder is' : 'folders are'} clean. Recent handled work is available for audit.`,
+		metricLabel: 'Handled',
+		metricValue: String(counts.cleaned)
+	};
 }
 
 export function buildCompletedStatusTiles(
