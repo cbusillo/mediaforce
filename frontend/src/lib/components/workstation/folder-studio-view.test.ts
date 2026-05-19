@@ -42,7 +42,7 @@ function folderStatusPayload(overrides: Partial<FolderStatusPayload> = {}): Fold
 	};
 }
 
-describe('Folder Studio Bench request mapping', () => {
+describe('Folder Studio review request mapping', () => {
 	it('uses only folder-scoped host options and removes empty keys', () => {
 		const options = buildBenchHostOptions([
 			{ key: 'sample-host', label: 'Sample host', detail: 'folder match', available: true },
@@ -65,13 +65,13 @@ describe('Folder Studio Bench request mapping', () => {
 
 		expect(resolveBenchRequestState('', 'studio-mini', options, null, false)).toMatchObject({
 			disabled: true,
-			blocker: 'Describe the Bench request before sending.'
+			blocker: 'Describe the review request before sending.'
 		});
 		expect(
 			resolveBenchRequestState('try a smaller sample', 'offline', options, null, false)
 		).toMatchObject({
 			disabled: true,
-			blocker: 'Selected host is not available right now.'
+			blocker: 'Selected worker is not available right now.'
 		});
 		expect(
 			resolveBenchRequestState(
@@ -97,7 +97,7 @@ describe('Folder Studio Bench request mapping', () => {
 		).toMatchObject({ disabled: false, blocker: '', activeCalibrationJob: false });
 	});
 
-	it('enables sample confirmation only for queueable Bench drafts', () => {
+	it('enables sample confirmation only for queueable review drafts', () => {
 		expect(
 			resolveWorkflowActionState('focus-bench', {
 				reviewPackReady: false,
@@ -114,7 +114,7 @@ describe('Folder Studio Bench request mapping', () => {
 			})
 		).toMatchObject({
 			disabled: true,
-			title: 'Ask Bench for a draft before starting the sample.'
+			title: 'Ask the review assistant for a draft before starting the sample.'
 		});
 
 		expect(
@@ -149,7 +149,7 @@ describe('Folder Studio Bench request mapping', () => {
 		});
 	});
 
-	it('keeps Bench drafts on the sample confirmation action', () => {
+	it('keeps review drafts on the sample confirmation action', () => {
 		const workflow = resolveWorkflow(
 			folderPayload({
 				pending_proposal: {
@@ -177,7 +177,7 @@ describe('Folder Studio Bench request mapping', () => {
 		});
 	});
 
-	it('makes unsampled folders start with Bench instead of a disabled sample action', () => {
+	it('makes unsampled folders start with the review assistant instead of a disabled sample action', () => {
 		const workflow = resolveWorkflow(
 			folderPayload(),
 			folderStatusPayload(),
@@ -190,7 +190,7 @@ describe('Folder Studio Bench request mapping', () => {
 
 		expect(workflow).toMatchObject({
 			label: 'Not sampled',
-			primary: 'Ask Bench for draft',
+			primary: 'Ask for draft',
 			primaryAction: 'focus-bench'
 		});
 	});
@@ -199,7 +199,7 @@ describe('Folder Studio Bench request mapping', () => {
 		const steps = buildWorkflowSteps({
 			tone: 'ready',
 			label: 'Draft ready',
-			title: 'Bench draft is ready to sample',
+			title: 'Review draft is ready to sample',
 			copy: 'Review the draft.',
 			primary: 'Start sample',
 			primaryAction: 'start-sample',

@@ -206,14 +206,14 @@ describe('Ops workstation mapping', () => {
 		expect(blockers[2]).toMatchObject({ tone: 'wait' });
 	});
 
-	it('keeps scheduler, attention, sample, and host tones semantic', () => {
+	it('keeps scheduler, attention, sample, and worker tones semantic', () => {
 		const tiles = buildOpsStatusTiles(dashboardFixture(), hostsFixture(), null);
 
 		expect(tiles).toMatchObject([
 			{ label: 'Scheduler', tone: 'ready' },
 			{ label: 'Encode jobs', tone: 'wait' },
 			{ label: 'Sample checks', tone: 'active' },
-			{ label: 'Hosts', tone: 'ready' }
+			{ label: 'Workers', tone: 'ready' }
 		]);
 	});
 
@@ -271,9 +271,9 @@ describe('Ops workstation mapping', () => {
 
 		expect(hostPrepareDisabled(passwordHost, '')).toBe(true);
 		expect(hostPrepareDisabled(passwordHost, 'secret')).toBe(false);
-		expect(hostPrepareTitle(passwordHost)).toBe('Enter the prepare password for this host.');
+		expect(hostPrepareTitle(passwordHost)).toBe('Enter the prepare password for this worker.');
 		expect(hostPrepareDisabled(unsupportedHost, 'secret')).toBe(true);
-		expect(hostPrepareTitle(unsupportedHost)).toBe('Prepare is unavailable for this host.');
+		expect(hostPrepareTitle(unsupportedHost)).toBe('Prepare is unavailable for this worker.');
 	});
 
 	it('does not expose prefix retry for stale historical encode rows', () => {

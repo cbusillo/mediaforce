@@ -143,9 +143,9 @@
 		if (action === 'retry-encode-prefix') return 'Retry this folder encode';
 		if (action === 'pause-encode') return 'Pause the encode scheduler';
 		if (action === 'resume-encode') return 'Resume the encode scheduler and clear stop request';
-		if (action === 'start-host') return 'Start or wake this host';
-		if (action === 'prepare-host') return 'Prepare this host for Mediaforce work';
-		return 'Reset stored trust for this host';
+		if (action === 'start-host') return 'Start or wake this worker';
+		if (action === 'prepare-host') return 'Prepare this worker for Mediaforce work';
+		return 'Reset stored trust for this worker';
 	}
 
 	function actionBody(
@@ -259,7 +259,7 @@
 		if (host.setup_supported === false) {
 			return host.message || 'Unavailable and cannot be prepared from this screen.';
 		}
-		return host.message || 'Unavailable; start or prepare this host when it should be working.';
+		return host.message || 'Unavailable; start or prepare this worker when it should be working.';
 	}
 
 	function handleHostPasswordInput(host: HostRuntime, event: Event) {
@@ -351,7 +351,7 @@
 							<StateBadge compact tone="ready" label="Clear" />
 							<div>
 								<strong>No operator action is needed right now.</strong>
-								<span>Schedule waits and covered host issues stay in the readiness rail.</span>
+								<span>Schedule waits and covered worker issues stay in the readiness rail.</span>
 							</div>
 						</div>
 					{/each}
@@ -567,9 +567,9 @@
 			{/if}
 		</section>
 
-		<aside class="ops__rail" aria-label="Host readiness">
+		<aside class="ops__rail" aria-label="Worker readiness">
 			<WorkstationPanel
-				eyebrow="Hosts"
+				eyebrow="Workers"
 				title="Readiness"
 				meta={`${readyHosts.toLocaleString('en-US')}/${hosts?.hosts.length ?? 0}`}
 			>
@@ -636,7 +636,7 @@
 							<p class="host-row__reason">{hostReadinessReason(host)}</p>
 						</div>
 					{:else}
-						<div class="empty-note">Host status is unavailable.</div>
+						<div class="empty-note">Worker status is unavailable.</div>
 					{/each}
 				</div>
 			</WorkstationPanel>
@@ -659,9 +659,9 @@
 						</div>
 					{:else}
 						<div class="scope-row">
-							<span>Host windows</span>
+							<span>Worker windows</span>
 							<strong>Open or not reported</strong>
-							<small>No host is currently scheduled off</small>
+							<small>No worker is currently scheduled off</small>
 						</div>
 					{/each}
 				</div>

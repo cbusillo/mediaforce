@@ -101,9 +101,9 @@ export function buildQueueStatusTiles(
 						: 'idle'
 		},
 		{
-			label: 'Hosts',
+			label: 'Workers',
 			value: `${readyHosts} ready / ${hosts.hosts.length}`,
-			detail: hosts.hosts.length ? 'capacity check complete' : 'host status unavailable',
+			detail: hosts.hosts.length ? 'capacity check complete' : 'worker status unavailable',
 			tone: readyHosts > 0 ? 'ready' : hosts.hosts.length > 0 ? 'wait' : 'idle'
 		}
 	];
@@ -127,7 +127,7 @@ export function buildQueueFooterSignals(
 			tone: dashboard.calibration_queue.active_count > 0 ? 'active' : 'idle'
 		},
 		{
-			label: 'Hosts',
+			label: 'Workers',
 			value: `${hosts.hosts.filter((host) => host.available).length}/${hosts.hosts.length}`
 		}
 	];

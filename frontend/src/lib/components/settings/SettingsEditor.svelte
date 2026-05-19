@@ -139,9 +139,9 @@
 			mono: true
 		},
 		{
-			label: 'Hosts',
+			label: 'Workers',
 			value: `${readyHostCount}/${configuredHosts.length}`,
-			detail: loadError || 'Ready hosts from latest status check',
+			detail: loadError || 'Ready workers from latest status check',
 			tone: (loadError ? 'fail' : readyHostCount > 0 ? 'ready' : 'idle') as BadgeTone,
 			mono: true
 		},
@@ -671,7 +671,7 @@
 							title="Remote workers"
 							meta={`${configuredHosts.length.toLocaleString('en-US')} configured`}
 						>
-							<div class="host-runtime-board" aria-label="Host status check">
+							<div class="host-runtime-board" aria-label="Worker status check">
 								{#each configuredHosts as host, index (`probe-host-${host.index}-${index}`)}
 									{@const runtime = hostRuntime(host)}
 									<div class="host-runtime-card host-runtime-card--{runtimeTone(runtime)}">
@@ -686,14 +686,14 @@
 										<span
 											>{runtime?.schedule_detail ||
 												runtime?.schedule_profile_label ||
-												'No host status yet'}</span
+												'No worker status yet'}</span
 										>
 										<small
 											>{runtime?.message || runtime?.active_reason || 'Status check pending'}</small
 										>
 									</div>
 								{:else}
-									<p class="empty-note">No remote hosts are configured.</p>
+									<p class="empty-note">No remote workers are configured.</p>
 								{/each}
 							</div>
 							<div class="host-editor-list">
@@ -734,7 +734,7 @@
 												/>
 											</label>
 											<label>
-												<span>SSH host</span>
+												<span>SSH address</span>
 												<input
 													class="field"
 													value={host.host}
@@ -911,7 +911,7 @@
 									onclick={() =>
 										(draft.remote_hosts = addHostDraft(draft.remote_hosts, draftScheduleOptions))}
 								>
-									Add host
+									Add worker
 								</button>
 							</div>
 						</WorkstationPanel>
