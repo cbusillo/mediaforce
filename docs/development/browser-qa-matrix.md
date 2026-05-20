@@ -35,10 +35,10 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   job that exposes retry copy.
 - Review-ready state: `/folders/tv/Review%20Ready/Season%201`, with retained
   review media and visible review-pack artifacts.
-- Active encode state: `/folders/tv/Encoding%20Show/Season%201`, with a running
-  folder encode row.
-- Retryable encode state: `/folders/tv/Failed%20Encode/Season%201`, with a
-  needs-attention encode row that exposes recovery copy.
+- Active processing state: `/folders/tv/Encoding%20Show/Season%201`, with a
+  running folder processing row.
+- Retryable processing state: `/folders/tv/Failed%20Encode/Season%201`, with a
+  needs-attention processing row that exposes recovery copy.
 - Unavailable worker state: `config/web-smoke.toml` includes a smoke-only remote
   host that is unavailable, so `/ops` can expose the no-ready-host blocker while
   queued encode work exists.
@@ -64,8 +64,8 @@ Every browser QA pass should cover these routes:
 - `/folders/tv/Sampling%20Show/Season%201`: active sample queue state.
 - `/folders/tv/Retry%20Show/Season%201`: retryable sample state.
 - `/folders/tv/Review%20Ready/Season%201`: review-pack-ready sample state.
-- `/folders/tv/Encoding%20Show/Season%201`: running encode state.
-- `/folders/tv/Failed%20Encode/Season%201`: retryable encode state.
+- `/folders/tv/Encoding%20Show/Season%201`: running processing state.
+- `/folders/tv/Failed%20Encode/Season%201`: retryable processing state.
 - `/ops`: blockers, worker readiness, queues, and collapsed history.
 - `/completed`: no-action history and cleanup-ready work.
 - `/settings`: basic, advanced, and danger-zone settings sections.
@@ -88,6 +88,6 @@ state, and narrow layout.
 
 The current fixture covers non-empty queue, empty queue, waiting Folder Studio,
 queued sample, retryable sample, review-pack-ready sample, active encode,
-retryable encode, cleanup-ready Completed, blocked Completed, unavailable host
+retryable processing, cleanup-ready Completed, blocked Completed, unavailable host
 Ops, idle Ops, and narrow layout. Future UI work should extend this fixture or
 add dedicated fixture modes when it introduces new workflow states.

@@ -156,6 +156,7 @@
 		...localHistory.map((event) => ({ ...event, source: 'api' as const })),
 		...(completed ? buildCompletedHistoryRows(completed) : [])
 	]);
+	const showMainHistorySummary = $derived(!cleanupNeedsAction && historyRows.length > 0);
 	const normalizedHistoryQuery = $derived(historyQuery.trim().toLowerCase());
 	const visibleHistory = $derived(
 		historyRows.filter((event) => {
@@ -477,7 +478,7 @@
 					</div>
 				</WorkstationPanel>
 
-				{#if !cleanupNeedsAction && historyRows.length > 0}
+				{#if showMainHistorySummary}
 					<WorkstationPanel
 						eyebrow="History"
 						title="Recent handled work"
@@ -505,7 +506,7 @@
 				>
 					<div class="completed-filter" aria-label="Completed cleanup filters">
 						<div class="completed-filter__summary">
-							<span>Visible cleanup</span>
+							<span>{cleanupNeedsAction ? 'Visible cleanup' : 'Visible completed work'}</span>
 							<strong
 								>{filteredFolders.length.toLocaleString('en-US')} / {folders.length.toLocaleString(
 									'en-US'
@@ -655,7 +656,7 @@
 										onclick={() => armCleanup('selected')}
 										>{armedScope === 'selected'
 											? 'Selected armed'
-											: 'Remove selected originals'}</button
+											: 'Delete selected originals'}</button
 									>
 									<button
 										type="button"
@@ -663,7 +664,9 @@
 										class:armed={armedScope === 'global'}
 										disabled={cleanupDisabled('global')}
 										onclick={() => armCleanup('global')}
-										>{armedScope === 'global' ? 'Global armed' : 'Clear entire archive'}</button
+										>{armedScope === 'global'
+											? 'Global armed'
+											: 'Delete all archived originals'}</button
 									>
 									<button
 										type="button"
@@ -707,8 +710,8 @@
 												: globalRemovalSummary}</span
 										>
 										<small>
-											This deletes originals from the cleanup waiting folder. It does not remove the
-											promoted encoded files.
+											This deletes originals from the cleanup folder. It does not remove the new
+											processed files.
 										</small>
 									</div>
 									<div class="confirm-panel__actions">
@@ -887,9 +890,9 @@
 		</section>
 
 		<aside class="completed__rail" aria-label="Completed cleanup context">
-			<WorkstationPanel eyebrow="Cleanup" title="Originals waiting folder">
+			<WorkstationPanel eyebrow="Cleanup" title="Cleanup folder">
 				<dl class="kv">
-					<dt>Root</dt>
+					<dt>Folder</dt>
 					<dd>{archive.archive_root || 'not configured'}</dd>
 					<dt>Files</dt>
 					<dd>{archive.file_count.toLocaleString('en-US')}</dd>
@@ -900,7 +903,7 @@
 				</dl>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="State" title="Originals review">
+			<WorkstationPanel eyebrow="State" title="Cleanup state">
 				<div class="scope-list">
 					<div class="scope-row scope-row--ready">
 						<span>Waiting originals</span>
@@ -913,7 +916,7 @@
 						<small>Mediaforce cannot check these originals</small>
 					</div>
 					<div class="scope-row" class:scope-row--wait={counts.unknown > 0}>
-						<span>Needs review</span>
+						<span>Already removed</span>
 						<strong>{counts.unknown.toLocaleString('en-US')} folders</strong>
 						<small>originals already gone; confirm after review</small>
 					</div>
@@ -925,26 +928,35 @@
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel
-				eyebrow="History"
-				title="Recent handled work"
-				meta={`${historyRows.length.toLocaleString('en-US')} events`}
-			>
-				<div class="history-list">
-					{#each historyRows.slice(0, 8) as event (`rail:${event.source}:${event.id}:${event.created_at}`)}
-						<div class="history-row history-row--rail">
-							<StateBadge compact tone={eventTone(event.tone)} label={event.label} />
-							<div>
-								<strong>{event.title}</strong>
-								<span>{event.prefix}</span>
+			{#if cleanupNeedsAction || mode === 'history'}
+				<WorkstationPanel
+					eyebrow="History"
+					title="Recent handled work"
+					meta={`${historyRows.length.toLocaleString('en-US')} events`}
+				>
+					<div class="history-list">
+						{#each historyRows.slice(0, 8) as event (`rail:${event.source}:${event.id}:${event.created_at}`)}
+							<div class="history-row history-row--rail">
+								<StateBadge compact tone={eventTone(event.tone)} label={event.label} />
+								<div>
+									<strong>{event.title}</strong>
+									<span>{event.prefix}</span>
+								</div>
+								<time>{formatTimestamp(event.created_at)}</time>
 							</div>
-							<time>{formatTimestamp(event.created_at)}</time>
-						</div>
-					{:else}
-						<div class="empty-note">No completed-history events are available yet.</div>
-					{/each}
-				</div>
-			</WorkstationPanel>
+						{:else}
+							<div class="empty-note">No completed-history events are available yet.</div>
+						{/each}
+					</div>
+				</WorkstationPanel>
+			{:else}
+				<WorkstationPanel eyebrow="History" title="Audit trail">
+					<div class="audit-note">
+						<strong>Handled history is available in the History tab.</strong>
+						<span>No cleanup action is waiting.</span>
+					</div>
+				</WorkstationPanel>
+			{/if}
 		</aside>
 	</main>
 </OperatorShell>
@@ -1060,7 +1072,8 @@
 	.cleanup-command,
 	.scope-list,
 	.history-workspace,
-	.history-list {
+	.history-list,
+	.audit-note {
 		display: grid;
 		gap: var(--mf-space-4);
 		padding: var(--mf-space-5);
@@ -1096,7 +1109,8 @@
 	.folder-link + small,
 	.state-detail,
 	.history-row span,
-	.history-row p {
+	.history-row p,
+	.audit-note span {
 		color: var(--mf-fg-tertiary);
 		font-size: var(--mf-text-xs);
 	}
@@ -1218,10 +1232,17 @@
 	.cleanup-status strong,
 	.cleanup-command__state strong,
 	.scope-row strong,
-	.history-row strong {
+	.history-row strong,
+	.audit-note strong {
 		font-size: var(--mf-text-sm);
 		font-weight: var(--mf-weight-semibold);
 		overflow-wrap: anywhere;
+	}
+
+	.audit-note {
+		background: var(--mf-bg-strip);
+		border-left: 2px solid var(--mf-line-strong);
+		gap: var(--mf-space-1);
 	}
 
 	.cleanup-command__actions,

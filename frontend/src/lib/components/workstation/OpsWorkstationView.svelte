@@ -21,6 +21,7 @@
 		hostTone,
 		rowRecoveryLabel,
 		rowRecoveryTitle,
+		workerCapabilitiesSummary,
 		type OpsActionId,
 		type OpsQueueRow
 	} from './ops-workstation';
@@ -74,7 +75,7 @@
 				!encodeQueue?.state.stop_requested &&
 				encodeWorkCount > 0 &&
 				actionPending === null,
-			unavailable: 'No encode work is running or queued.'
+			unavailable: 'No processing work is running or queued.'
 		},
 		{
 			id: 'resume-encode' as const,
@@ -83,13 +84,13 @@
 				Boolean(encodeQueue) &&
 				Boolean(encodeQueue?.state.is_paused || encodeQueue?.state.stop_requested) &&
 				actionPending === null,
-			unavailable: 'Queue is already accepting eligible work.'
+			unavailable: 'Work is already accepting eligible folders.'
 		},
 		{
 			id: 'retry-failed-encode' as const,
 			tone: 'warn',
 			enabled: Boolean(encodeQueue) && needsAttentionCount > 0 && actionPending === null,
-			unavailable: 'No approved encode retries are waiting.'
+			unavailable: 'No approved processing retries are waiting.'
 		},
 		{
 			id: 'stop-encode' as const,
@@ -102,7 +103,7 @@
 					encodeQueue?.state.is_paused
 				) &&
 				actionPending === null,
-			unavailable: 'No encode work is running, queued, or paused.'
+			unavailable: 'No processing work is running, queued, or paused.'
 		},
 		{
 			id: 'stop-calibration' as const,
@@ -111,7 +112,7 @@
 				Boolean(calibrationQueue) &&
 				(calibrationQueue?.active_count ?? 0) > 0 &&
 				actionPending === null,
-			unavailable: 'No sample or proof jobs are running.'
+			unavailable: 'No sample or review jobs are running.'
 		}
 	]);
 	const availableGlobalCommands = $derived(globalCommands.filter((command) => command.enabled));
@@ -136,13 +137,13 @@
 	}
 
 	function actionTitle(action: OpsActionId): string {
-		if (action === 'stop-encode') return 'Stop running encode workers and pause the queue';
-		if (action === 'stop-calibration') return 'Stop running and queued sample/proof jobs';
+		if (action === 'stop-encode') return 'Stop running processing workers and pause the queue';
+		if (action === 'stop-calibration') return 'Stop running and queued sample/review jobs';
 		if (action === 'retry-failed-encode')
-			return 'Retry approved folder encodes that are ready to try again';
-		if (action === 'retry-encode-prefix') return 'Retry this folder encode';
-		if (action === 'pause-encode') return 'Pause the encode scheduler';
-		if (action === 'resume-encode') return 'Resume the encode scheduler and clear stop request';
+			return 'Retry approved folders that are ready to process again';
+		if (action === 'retry-encode-prefix') return 'Retry processing for this folder';
+		if (action === 'pause-encode') return 'Pause processing';
+		if (action === 'resume-encode') return 'Resume processing and clear stop request';
 		if (action === 'start-host') return 'Start or wake this worker';
 		if (action === 'prepare-host') return 'Prepare this worker for Mediaforce work';
 		return 'Reset stored trust for this worker';
@@ -248,10 +249,10 @@
 
 	function hostReadinessReason(host: HostRuntime): string {
 		if (host.available && host.schedule_open === false) {
-			return host.schedule_detail || 'Scheduled off; this is a normal wait, not a failure.';
+			return host.schedule_detail || 'Off schedule; this is a normal wait, not a failure.';
 		}
 		if (host.available && host.queue_active === false) {
-			return host.message || 'Host is reachable but not accepting Mediaforce work.';
+			return host.message || 'Worker is reachable but not accepting Mediaforce work.';
 		}
 		if (host.available) {
 			return host.message || host.active_reason || 'Ready for assigned work.';
@@ -276,7 +277,7 @@
 		if (action === 'resume-encode') return 'Resume';
 		if (action === 'retry-failed-encode') return 'Retry available';
 		if (action === 'retry-encode-prefix') return 'Retry folder';
-		if (action === 'stop-encode') return 'Stop encode';
+		if (action === 'stop-encode') return 'Stop processing';
 		if (action === 'stop-calibration') return 'Stop samples';
 		if (action === 'start-host') return 'Start';
 		if (action === 'prepare-host') return 'Prepare';
@@ -286,6 +287,12 @@
 
 	function canOpenFolder(row: OpsQueueRow): boolean {
 		return row.prefix !== 'system scope';
+	}
+
+	function queueKindLabel(row: OpsQueueRow): string {
+		if (row.kind === 'encode') return 'Processing';
+		if (row.kind === 'proof') return 'Review';
+		return 'Sample';
 	}
 
 	onMount(() => {
@@ -358,7 +365,7 @@
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="Global controls" title="Encode and sample queues">
+			<WorkstationPanel eyebrow="Global controls" title="Processing and sample queues">
 				<div class="scheduler-console">
 					<div class="scheduler-console__state">
 						<StateBadge
@@ -374,8 +381,7 @@
 									: 'Ready'}
 						/>
 						<div>
-							<strong>{encodeQueue?.state.scheduler_summary ?? 'Scheduler data unavailable'}</strong
-							>
+							<strong>{encodeQueue?.state.scheduler_summary ?? 'Work schedule unavailable'}</strong>
 							<span
 								>{queuedWaitingCount.toLocaleString('en-US')} waiting · {needsAttentionCount.toLocaleString(
 									'en-US'
@@ -385,14 +391,14 @@
 						</div>
 					</div>
 					<div class="scheduler-console__scope">
-						<strong>Global queue controls</strong>
+						<strong>Global work controls</strong>
 						<span
 							>{availableGlobalCommands.length > 0
 								? 'Only actions that can run now are shown in the command lane.'
 								: 'No global queue command is needed in the current state.'}</span
 						>
 					</div>
-					<div class="scheduler-console__actions" aria-label="Scheduler controls">
+					<div class="scheduler-console__actions" aria-label="Work controls">
 						{#each availableGlobalCommands as command (command.id)}
 							<button
 								type="button"
@@ -448,9 +454,9 @@
 								<tr>
 									<th>State</th>
 									<th>Work</th>
-									<th>Host</th>
+									<th>Worker</th>
 									<th>Progress</th>
-									<th>Scheduler</th>
+									<th>Work window</th>
 									<th>Recovery</th>
 								</tr>
 							</thead>
@@ -464,21 +470,21 @@
 											{#if canOpenFolder(row)}
 												<a class="work-link" href={resolve(folderRoutePath(row.prefix))}>
 													<strong>{row.prefix}</strong>
-													<span>{row.kind} · {row.phase}</span>
+													<span>{queueKindLabel(row)} · {row.phase}</span>
 												</a>
 											{:else}
 												<div class="work-link">
 													<strong>{row.prefix}</strong>
-													<span>{row.kind} · {row.phase}</span>
+													<span>{queueKindLabel(row)} · {row.phase}</span>
 												</div>
 											{/if}
 										</td>
-										<td data-label="Host">{row.host}</td>
+										<td data-label="Worker">{row.host}</td>
 										<td data-label="Progress">
 											<strong>{row.progress}</strong>
 											<span>{row.detail}</span>
 										</td>
-										<td data-label="Scheduler">{row.scheduler}</td>
+										<td data-label="Work window">{row.scheduler}</td>
 										<td data-label="Recovery">
 											{#if row.action}
 												{@const action = row.action}
@@ -503,8 +509,8 @@
 					<div class="current-standby">
 						<StateBadge tone="ready" label="No current work" />
 						<div>
-							<strong>Encoding is idle and ready.</strong>
-							<span>Queued folders, active samples, and retry-ready encodes will appear here.</span>
+							<strong>Processing is idle and ready.</strong>
+							<span>Queued folders, active samples, and retry-ready folders will appear here.</span>
 						</div>
 					</div>
 				{/if}
@@ -513,13 +519,13 @@
 			{#if historyRows.length > 0}
 				<WorkstationPanel
 					eyebrow="History"
-					title="Recent sample and proof history"
+					title="Recent sample and review history"
 					meta={`${historyRows.length.toLocaleString('en-US')} visible`}
 				>
 					<details class="history-disclosure">
 						<summary>
 							<StateBadge compact tone="idle" label="History" />
-							<span>Past sample/proof issues are not blocking current encoding.</span>
+							<span>Past sample/review issues are not blocking current processing.</span>
 						</summary>
 						<div class="table-wrap table-wrap--history">
 							<table class="ops-table ops-table--history">
@@ -527,7 +533,7 @@
 									<tr>
 										<th>State</th>
 										<th>Work</th>
-										<th>Host</th>
+										<th>Worker</th>
 										<th>Last note</th>
 										<th>When</th>
 									</tr>
@@ -542,16 +548,16 @@
 												{#if canOpenFolder(row)}
 													<a class="work-link" href={resolve(folderRoutePath(row.prefix))}>
 														<strong>{row.prefix}</strong>
-														<span>{row.kind} · {row.phase}</span>
+														<span>{queueKindLabel(row)} · {row.phase}</span>
 													</a>
 												{:else}
 													<div class="work-link">
 														<strong>{row.prefix}</strong>
-														<span>{row.kind} · {row.phase}</span>
+														<span>{queueKindLabel(row)} · {row.phase}</span>
 													</div>
 												{/if}
 											</td>
-											<td data-label="Host">{row.host}</td>
+											<td data-label="Worker">{row.host}</td>
 											<td data-label="Last note">
 												<strong>{row.progress}</strong>
 												<span>{row.detail}</span>
@@ -575,7 +581,7 @@
 			>
 				<div class="host-list">
 					{#each hosts?.hosts ?? [] as host (host.key)}
-						<div class="host-row">
+						<div class="host-row host-row--{hostTone(host, fleetHasReadyCapacity)}">
 							<div class="host-row__head">
 								<StateBadge
 									compact
@@ -588,9 +594,9 @@
 								<dt>Window</dt>
 								<dd>{host.schedule_detail || host.schedule_profile_label}</dd>
 								<dt>Work</dt>
-								<dd>{host.active_encode_count.toLocaleString('en-US')} encodes</dd>
+								<dd>{host.active_encode_count.toLocaleString('en-US')} processing</dd>
 								<dt>Can run</dt>
-								<dd>{host.capabilities.join(' · ') || 'none'}</dd>
+								<dd>{workerCapabilitiesSummary(host.capabilities)}</dd>
 							</dl>
 							{#if host.setup_requires_password && host.setup_supported}
 								<label class="host-password">
@@ -641,20 +647,20 @@
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="Schedule" title="Encode windows">
+			<WorkstationPanel eyebrow="Work schedule" title="Work windows">
 				<div class="schedule-list">
 					<div class="scope-row scope-row--active">
-						<span>Policy</span>
+						<span>Work window</span>
 						<strong>{encodeQueue?.state.scheduler_summary ?? 'unknown'}</strong>
 						<small
-							>{queuedWaitingCount.toLocaleString('en-US')} encode jobs waiting on schedule</small
+							>{queuedWaitingCount.toLocaleString('en-US')} folders waiting for a work window</small
 						>
-						<a class="inline-link" href={resolve('/settings')}>Edit schedule</a>
+						<a class="inline-link" href={resolve('/settings')}>Edit work windows</a>
 					</div>
 					{#each closedHosts as host (host.key)}
 						<div class="scope-row scope-row--wait">
 							<span>{host.label}</span>
-							<strong>Scheduled off</strong>
+							<strong>Off schedule</strong>
 							<small>{host.schedule_detail}</small>
 						</div>
 					{:else}
@@ -762,11 +768,17 @@
 		text-transform: uppercase;
 	}
 
-	.ops-header__status strong,
-	.host-row dd {
+	.ops-header__status strong {
 		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-lg);
 		font-weight: var(--mf-weight-medium);
+	}
+
+	.host-row dd {
+		color: var(--mf-fg-secondary);
+		font-size: var(--mf-text-xs);
+		font-weight: var(--mf-weight-medium);
+		line-height: var(--mf-leading-snug);
 	}
 
 	.scheduler-console,
@@ -1113,9 +1125,35 @@
 	.host-row {
 		background: var(--mf-bg-panel-2);
 		border: var(--mf-border-muted);
+		border-left: 2px solid var(--mf-line-strong);
 		display: grid;
 		gap: var(--mf-space-4);
 		padding: var(--mf-space-4);
+	}
+
+	.host-row--active {
+		background: var(--mf-active-bg);
+		border-left-color: var(--mf-active-fg);
+	}
+
+	.host-row--ready {
+		background: var(--mf-ready-bg);
+		border-left-color: var(--mf-ready-fg);
+	}
+
+	.host-row--fail {
+		background: var(--mf-fail-bg);
+		border-left-color: var(--mf-fail-fg);
+	}
+
+	.host-row--wait {
+		background: var(--mf-bg-strip);
+		border-left-color: var(--mf-wait-fg);
+	}
+
+	.host-row--idle {
+		background: var(--mf-bg-strip);
+		opacity: 0.86;
 	}
 
 	.host-row__head {

@@ -111,7 +111,6 @@
 		color: var(--mf-fg-primary);
 		display: grid;
 		min-height: 100vh;
-		padding-bottom: 28px;
 	}
 
 	.masthead {
@@ -350,7 +349,7 @@
 		min-height: 28px;
 		overflow: hidden;
 		padding: 0 var(--mf-space-6);
-		position: fixed;
+		position: sticky;
 		right: 0;
 		white-space: nowrap;
 		z-index: 20;

@@ -431,7 +431,7 @@
 						<dd>{status.folder_scan_status || '—'}</dd>
 						<dt>Approval</dt>
 						<dd>{reviewGate?.status ?? '—'}</dd>
-						<dt>Encode</dt>
+						<dt>Processing</dt>
 						<dd>{encodeJob?.status ?? studioFolder.encode_queue_summary ?? '—'}</dd>
 					</dl>
 				</WorkstationPanel>
@@ -508,13 +508,13 @@
 
 			<details class="technical-details">
 				<summary>
-					<strong>Policy details</strong>
+					<strong>Proposed settings details</strong>
 					<span
 						>{proposalRows.length ? `${proposalRows.length} draft differences` : 'No draft'}</span
 					>
 				</summary>
 				<WorkstationPanel
-					title="Current policy vs. draft"
+					title="Current settings vs. proposal"
 					meta={proposalRows.length ? `${proposalRows.length} rows` : 'No draft'}
 				>
 					<div class="table-wrap">
