@@ -145,9 +145,15 @@ export function buildCompletedReadinessSummary(
 	if (reviewCount > 0) {
 		return {
 			tone: counts.blocked > 0 ? 'fail' : 'wait',
-			title: 'Cleanup review is needed',
-			detail: `${reviewCount.toLocaleString('en-US')} completed ${reviewCount === 1 ? 'folder needs' : 'folders need'} review before leaving cleanup.`,
-			metricLabel: 'Review',
+			title:
+				counts.blocked > 0
+					? 'Check before deleting'
+					: 'Already removed originals need confirmation',
+			detail:
+				counts.blocked > 0
+					? `${counts.blocked.toLocaleString('en-US')} completed ${counts.blocked === 1 ? 'folder needs' : 'folders need'} settings checked before deleting originals.`
+					: `${counts.unknown.toLocaleString('en-US')} completed ${counts.unknown === 1 ? 'folder has' : 'folders have'} originals already gone; confirm after checking the new files.`,
+			metricLabel: counts.blocked > 0 ? 'Check' : 'Confirm',
 			metricValue: String(reviewCount)
 		};
 	}
@@ -185,22 +191,22 @@ export function buildCompletedStatusTiles(
 			tone: payload.completed_count > 0 ? 'ready' : 'idle'
 		},
 		{
-			label: 'Originals waiting',
+			label: 'Delete queue',
 			value: payload.folders_with_backups_count.toLocaleString('en-US'),
 			detail: `${archive.file_count.toLocaleString('en-US')} files ready to remove`,
 			tone: payload.folders_with_backups_count > 0 ? 'wait' : 'idle'
 		},
 		{
-			label: 'Reclaimable',
+			label: 'Space ready',
 			value: formatBytes(archive.total_size_bytes),
 			detail: archive.has_cleanup ? 'cleanup available' : 'no cleanup files',
 			tone: archive.has_cleanup ? 'ready' : 'idle',
 			mono: true
 		},
 		{
-			label: 'Waiting / review',
+			label: 'Review needed',
 			value: `${counts.ready} / ${counts.blocked + counts.unknown}`,
-			detail: 'folders with originals waiting versus folders needing review',
+			detail: 'ready to delete versus needing review',
 			tone:
 				counts.blocked > 0
 					? 'fail'

@@ -12,7 +12,8 @@ import {
 	hostTone,
 	rowRecoveryLabel,
 	rowRecoveryTitle,
-	retryableEncodeJobIds
+	retryableEncodeJobIds,
+	workerCapabilitiesSummary
 } from './ops-workstation';
 
 function dashboardFixture(): DashboardSummaryPayload {
@@ -206,12 +207,12 @@ describe('Ops workstation mapping', () => {
 		expect(blockers[2]).toMatchObject({ tone: 'wait' });
 	});
 
-	it('keeps scheduler, attention, sample, and worker tones semantic', () => {
+	it('keeps work schedule, attention, sample, and worker tones semantic', () => {
 		const tiles = buildOpsStatusTiles(dashboardFixture(), hostsFixture(), null);
 
 		expect(tiles).toMatchObject([
-			{ label: 'Scheduler', tone: 'ready' },
-			{ label: 'Encode jobs', tone: 'wait' },
+			{ label: 'Work schedule', tone: 'ready' },
+			{ label: 'Processing', tone: 'wait' },
 			{ label: 'Sample checks', tone: 'active' },
 			{ label: 'Workers', tone: 'ready' }
 		]);
@@ -248,12 +249,19 @@ describe('Ops workstation mapping', () => {
 		const unavailable = { ...ready, available: false, active_encode_count: 0 };
 
 		expect(hostTone(ready)).toBe('active');
-		expect(hostStateCopy(ready)).toBe('Encoding');
+		expect(hostStateCopy(ready)).toBe('Processing');
 		expect(hostTone(scheduledOff)).toBe('idle');
-		expect(hostStateCopy(scheduledOff)).toBe('Scheduled off');
+		expect(hostStateCopy(scheduledOff)).toBe('Off schedule');
 		expect(hostTone(unavailable)).toBe('fail');
 		expect(hostTone(unavailable, true)).toBe('wait');
 		expect(hostStateCopy(unavailable)).toBe('Unavailable');
+	});
+
+	it('maps worker capabilities to user-facing labels', () => {
+		expect(workerCapabilitiesSummary(['encode_queue', 'sample_calibration', 'proof_encode'])).toBe(
+			'Process folders · Run samples · Run review evidence'
+		);
+		expect(workerCapabilitiesSummary([])).toBe('No work assigned');
 	});
 
 	it('keeps password-gated host prepare disabled until a password is present', () => {

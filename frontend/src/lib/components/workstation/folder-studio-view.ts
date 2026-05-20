@@ -416,11 +416,11 @@ export function resolveWorkflow(
 		return {
 			tone: 'wait',
 			label: 'Retry available',
-			title: 'Encode needs recovery',
+			title: 'Processing needs recovery',
 			copy:
 				encodeJob?.error ??
 				encodeJob?.attempt_summary ??
-				'The approved encode needs review before it runs again. Retry from Ops when the folder is still safe to process.',
+				'The approved folder needs review before it runs again. Retry from Ops when the folder is still safe to process.',
 			primary: 'Open Ops',
 			primaryAction: 'open-ops',
 			secondary: 'Retry',
@@ -431,11 +431,11 @@ export function resolveWorkflow(
 		return {
 			tone: 'active',
 			label: 'Processing',
-			title: 'Approved encode is in the queue',
+			title: 'Approved folder is processing',
 			copy:
 				encodeJob?.telemetry_summary ??
 				folder.encode_queue_summary ??
-				'Folder policy is approved. Monitor progress here or open Ops for deeper fleet state.',
+				'Folder settings are approved. Monitor progress here or open Ops for deeper worker state.',
 			primary: 'Download review pack',
 			primaryAction: 'download-review-pack',
 			secondary: 'Open Ops',
@@ -534,7 +534,7 @@ export function resolveWorkflow(
 			tone: 'idle',
 			label: 'Not sampled',
 			title: 'No representative sample yet',
-			copy: 'Ask the review assistant for a sample draft before approving folder-wide settings. Worker readiness and policy context stay visible while the sample is queued.',
+			copy: 'Ask the review assistant for a sample proposal before approving folder-wide settings. Worker readiness and settings context stay visible while the sample is queued.',
 			primary: 'Ask for draft',
 			primaryAction: 'focus-bench',
 			secondary: 'Open Ops',
@@ -581,12 +581,12 @@ export function buildWorkflowSteps(workflow: WorkflowState): WorkflowStep[] {
 		},
 		{
 			label: 'Approve',
-			detail: approveCurrent ? workflow.title : 'Accept or revise policy',
+			detail: approveCurrent ? workflow.title : 'Accept or revise settings',
 			tone: approveCurrent ? workflow.tone : 'idle',
 			current: approveCurrent
 		},
 		{
-			label: 'Encode',
+			label: 'Process',
 			detail: encodeCurrent ? workflow.title : 'Run approved folder work',
 			tone: encodeCurrent ? workflow.tone : 'idle',
 			current: encodeCurrent
@@ -645,7 +645,7 @@ export function buildStatusTiles(
 				status.calibration_status === 'failed' ? 'fail' : status.polling_active ? 'active' : 'idle'
 		},
 		{
-			label: 'Encode queue',
+			label: 'Processing',
 			value: encodeQueue
 				? `${encodeQueue.running_count} running · ${encodeQueue.queued_count} queued`
 				: '—',

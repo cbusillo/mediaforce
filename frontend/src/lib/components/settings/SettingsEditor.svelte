@@ -34,6 +34,7 @@
 	import OperatorShell from '../workstation/OperatorShell.svelte';
 	import StateBadge from '../workstation/StateBadge.svelte';
 	import WorkstationPanel from '../workstation/WorkstationPanel.svelte';
+	import { workerCapabilityLabel } from '../workstation/ops-workstation';
 
 	type SaveResponse = {
 		ok: boolean;
@@ -115,7 +116,7 @@
 	);
 	const draftScheduleOptions = $derived([
 		{ key: 'always', label: 'Always', summary: 'Runs anytime.' },
-		{ key: 'never', label: 'Never', summary: 'Never accepts queued encodes.' },
+		{ key: 'never', label: 'Never', summary: 'Never starts queued processing.' },
 		...configuredProfiles.map((profile) => ({
 			key: profile.key.trim(),
 			label: profile.label.trim() || profile.key.trim(),
@@ -132,7 +133,7 @@
 		{
 			label: 'Libraries',
 			value: configuredLibraries.length.toLocaleString('en-US'),
-			detail: draft.transcode_root.trim() || 'Transcode root missing',
+			detail: draft.transcode_root.trim() || 'Working folder missing',
 			tone: (draft.transcode_root.trim() && configuredLibraries.length
 				? 'ready'
 				: 'wait') as BadgeTone,
@@ -146,7 +147,7 @@
 			mono: true
 		},
 		{
-			label: 'Schedules',
+			label: 'Work windows',
 			value: (configuredProfiles.length + 2).toLocaleString('en-US'),
 			detail: 'Includes Always and Never',
 			tone: 'idle' as BadgeTone,
@@ -390,7 +391,7 @@
 						<strong>{draft.transcode_root.trim() ? 'Set' : 'Missing'}</strong>
 					</a>
 					<a href="#settings-schedules">
-						<span>Schedules</span>
+						<span>Work windows</span>
 						<strong>{(configuredProfiles.length + 2).toLocaleString('en-US')}</strong>
 					</a>
 					<a href="#settings-workers">
@@ -510,7 +511,7 @@
 									<span>Originals waiting folder</span>
 									<strong class="mf-path">{savedArchiveRootCopy}</strong>
 									{#if cleanupTargetDirty}
-										<small>Save settings before clearing a changed archive target.</small>
+										<small>Save settings before deleting from a changed cleanup folder.</small>
 									{/if}
 								</div>
 								<div class="storage-readout">
@@ -537,13 +538,13 @@
 							<span class="mf-eyebrow">Advanced setup</span>
 							<h2 id="settings-advanced-title">Workers and run windows</h2>
 						</div>
-						<p>Use these when adding machines or changing when encode work may run.</p>
+						<p>Use these when adding machines or changing when processing work may run.</p>
 					</header>
 
 					<div id="settings-schedules" class="settings-anchor">
 						<WorkstationPanel
-							eyebrow="Schedules"
-							title="Queue profiles"
+							eyebrow="Work windows"
+							title="Work windows"
 							meta={`${configuredProfiles.length.toLocaleString('en-US')} custom`}
 						>
 							<div class="schedule-list">
@@ -555,13 +556,13 @@
 								<div class="schedule-row schedule-row--builtin">
 									<StateBadge compact tone="idle" label="Built in" />
 									<strong>Never</strong>
-									<span>Never accepts queued encodes</span>
+									<span>Never starts queued processing</span>
 								</div>
 								{#each draft.schedule_profiles as profile, index (`schedule-${profile.index}-${index}`)}
 									<div class="schedule-row">
 										<div class="schedule-row__fields">
 											<label>
-												<span>Key</span>
+												<span>Window key</span>
 												<input
 													class="field"
 													value={profile.key}
@@ -570,7 +571,7 @@
 												/>
 											</label>
 											<label>
-												<span>Label</span>
+												<span>Name</span>
 												<input
 													class="field"
 													value={profile.label}
@@ -608,14 +609,14 @@
 												onclick={() =>
 													(draft.schedule_profiles = removeAtIndex(draft.schedule_profiles, index))}
 											>
-												Remove schedule
+												Remove window
 											</button>
 										</div>
 										<div
 											class="day-grid"
 											aria-label={`${profile.label || profile.key || 'Schedule'} days`}
 										>
-											<span>Window</span>
+											<span>Runs</span>
 											{#each SCHEDULE_DAY_OPTIONS as day (day.key)}
 												<button
 													type="button"
@@ -659,7 +660,7 @@
 									onclick={() =>
 										(draft.schedule_profiles = addScheduleDraft(draft.schedule_profiles))}
 								>
-									Add schedule
+									Add work window
 								</button>
 							</div>
 						</WorkstationPanel>
@@ -725,30 +726,12 @@
 										</header>
 										<div class="host-grid">
 											<label>
-												<span>Label</span>
+												<span>Worker name</span>
 												<input
 													class="field"
 													value={host.label}
 													placeholder="Studio Mac"
 													oninput={(event) => updateHost(index, { label: inputValue(event) })}
-												/>
-											</label>
-											<label>
-												<span>SSH address</span>
-												<input
-													class="field"
-													value={host.host}
-													placeholder="studio.local"
-													oninput={(event) => updateHost(index, { host: inputValue(event) })}
-												/>
-											</label>
-											<label>
-												<span>Repo path</span>
-												<input
-													class="field field--path"
-													value={host.repo_path}
-													placeholder="/Users/operator/mediaforce"
-													oninput={(event) => updateHost(index, { repo_path: inputValue(event) })}
 												/>
 											</label>
 											<label>
@@ -764,27 +747,7 @@
 												</select>
 											</label>
 											<label>
-												<span>Priority</span>
-												<input
-													class="field field--number"
-													type="number"
-													value={host.priority}
-													oninput={(event) => updateHost(index, { priority: inputValue(event) })}
-												/>
-											</label>
-											<label>
-												<span>Parallel encodes</span>
-												<input
-													class="field field--number"
-													type="number"
-													min="1"
-													value={host.max_parallel_encodes}
-													oninput={(event) =>
-														updateHost(index, { max_parallel_encodes: inputValue(event) })}
-												/>
-											</label>
-											<label>
-												<span>Schedule</span>
+												<span>Work window</span>
 												<select
 													class="field"
 													bind:value={draft.remote_hosts[index].schedule_profile}
@@ -796,25 +759,85 @@
 													{/each}
 												</select>
 											</label>
-											<label>
-												<span>Staging root</span>
-												<input
-													class="field field--path"
-													value={host.staging_root}
-													placeholder="Uses transcode root"
-													oninput={(event) =>
-														updateHost(index, { staging_root: inputValue(event) })}
-												/>
-											</label>
+										</div>
+										<div class="host-options host-options--primary">
+											<div>
+												<span class="option-label">Allowed libraries</span>
+												<div class="toggle-grid">
+													{#each activeLibraryKeys as libraryKey (libraryKey)}
+														<label class="toggle-chip">
+															<input
+																type="checkbox"
+																checked={host.allowed_libraries.includes(libraryKey)}
+																onchange={() => toggleLibraryAccess(index, libraryKey)}
+															/>
+															<span>{libraryKey}</span>
+														</label>
+													{:else}
+														<span class="muted-copy"
+															>Add library keys before assigning workers.</span
+														>
+													{/each}
+												</div>
+											</div>
 										</div>
 										<details class="host-advanced">
 											<summary>
-												<strong>Advanced worker internals</strong>
+												<strong>Connection and advanced settings</strong>
 												<span
-													>Start/stop commands, wake settings, timeout, and source overrides.</span
+													>SSH address, repo path, staging folder, command hooks, and source
+													overrides.</span
 												>
 											</summary>
 											<div class="host-grid host-grid--advanced">
+												<label>
+													<span>SSH address</span>
+													<input
+														class="field"
+														value={host.host}
+														placeholder="studio.local"
+														oninput={(event) => updateHost(index, { host: inputValue(event) })}
+													/>
+												</label>
+												<label>
+													<span>Repo path</span>
+													<input
+														class="field field--path"
+														value={host.repo_path}
+														placeholder="/Users/operator/mediaforce"
+														oninput={(event) => updateHost(index, { repo_path: inputValue(event) })}
+													/>
+												</label>
+												<label>
+													<span>Priority</span>
+													<input
+														class="field field--number"
+														type="number"
+														value={host.priority}
+														oninput={(event) => updateHost(index, { priority: inputValue(event) })}
+													/>
+												</label>
+												<label>
+													<span>Parallel processing</span>
+													<input
+														class="field field--number"
+														type="number"
+														min="1"
+														value={host.max_parallel_encodes}
+														oninput={(event) =>
+															updateHost(index, { max_parallel_encodes: inputValue(event) })}
+													/>
+												</label>
+												<label>
+													<span>Worker staging folder</span>
+													<input
+														class="field field--path"
+														value={host.staging_root}
+														placeholder="Uses working folder"
+														oninput={(event) =>
+															updateHost(index, { staging_root: inputValue(event) })}
+													/>
+												</label>
 												<label>
 													<span>Start command</span>
 													<input
@@ -856,6 +879,23 @@
 													/>
 												</label>
 											</div>
+											<div class="host-options">
+												<div>
+													<span class="option-label">Worker abilities</span>
+													<div class="toggle-grid">
+														{#each savedSettings.host_capability_options as option (option.key)}
+															<label class="toggle-chip">
+																<input
+																	type="checkbox"
+																	checked={host.capabilities.includes(option.key)}
+																	onchange={() => toggleCapability(index, option.key)}
+																/>
+																<span>{workerCapabilityLabel(option.key)}</span>
+															</label>
+														{/each}
+													</div>
+												</div>
+											</div>
 											<label class="stacked-field">
 												<span>Source root overrides JSON</span>
 												<textarea
@@ -867,40 +907,6 @@
 												></textarea>
 											</label>
 										</details>
-										<div class="host-options">
-											<div>
-												<span class="option-label">Capabilities</span>
-												<div class="toggle-grid">
-													{#each savedSettings.host_capability_options as option (option.key)}
-														<label class="toggle-chip">
-															<input
-																type="checkbox"
-																checked={host.capabilities.includes(option.key)}
-																onchange={() => toggleCapability(index, option.key)}
-															/>
-															<span>{option.label}</span>
-														</label>
-													{/each}
-												</div>
-											</div>
-											<div>
-												<span class="option-label">Allowed libraries</span>
-												<div class="toggle-grid">
-													{#each activeLibraryKeys as libraryKey (libraryKey)}
-														<label class="toggle-chip">
-															<input
-																type="checkbox"
-																checked={host.allowed_libraries.includes(libraryKey)}
-																onchange={() => toggleLibraryAccess(index, libraryKey)}
-															/>
-															<span>{libraryKey}</span>
-														</label>
-													{:else}
-														<span class="muted-copy">Add library keys before assigning hosts.</span>
-													{/each}
-												</div>
-											</div>
-										</div>
 									</section>
 								{/each}
 							</div>
@@ -931,10 +937,10 @@
 					</header>
 
 					<div id="settings-danger" class="settings-anchor">
-						<WorkstationPanel eyebrow="Danger zone" title="Clear originals waiting folder">
+						<WorkstationPanel eyebrow="Danger zone" title="Delete archived originals">
 							<div class="danger-zone">
 								<div>
-									<span>Target</span>
+									<span>Cleanup folder</span>
 									<strong class="mf-path">{savedArchiveRootCopy}</strong>
 									<small
 										>{archiveCleanup?.file_count.toLocaleString('en-US') ?? '0'} files · {formatGiB(
@@ -956,7 +962,7 @@
 											cleanupTargetDirty}
 										onclick={clearArchiveCleanup}
 										title={cleanupTargetDirty
-											? 'Save the changed transcode root before clearing archived originals.'
+											? 'Save the changed cleanup folder before deleting archived originals.'
 											: undefined}
 									>
 										{clearArchivePending
@@ -982,7 +988,7 @@
 					<span class="mf-eyebrow">Sections</span>
 					<a href="#settings-libraries">Libraries</a>
 					<a href="#settings-storage">Storage</a>
-					<a href="#settings-schedules">Schedules</a>
+					<a href="#settings-schedules">Work windows</a>
 					<a href="#settings-workers">Workers</a>
 					<a href="#settings-danger">Cleanup</a>
 				</nav>
@@ -1486,12 +1492,7 @@
 	.host-grid {
 		display: grid;
 		gap: var(--mf-space-4);
-		grid-template-columns: repeat(4, minmax(130px, 1fr));
-	}
-
-	.host-grid label:nth-child(3),
-	.host-grid label:nth-child(8) {
-		grid-column: span 2;
+		grid-template-columns: repeat(3, minmax(150px, 1fr));
 	}
 
 	.host-advanced {
@@ -1524,7 +1525,10 @@
 	}
 
 	.host-grid--advanced label:nth-child(1),
-	.host-grid--advanced label:nth-child(2) {
+	.host-grid--advanced label:nth-child(2),
+	.host-grid--advanced label:nth-child(5),
+	.host-grid--advanced label:nth-child(6),
+	.host-grid--advanced label:nth-child(7) {
 		grid-column: span 2;
 	}
 

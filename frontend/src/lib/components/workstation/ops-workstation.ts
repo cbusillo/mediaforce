@@ -128,6 +128,19 @@ function statusCopy(status: string): string {
 	return normalized.replaceAll('_', ' ');
 }
 
+export function workerCapabilityLabel(capability: string): string {
+	const normalized = capability.trim().toLowerCase();
+	if (normalized === 'encode_queue') return 'Process folders';
+	if (normalized === 'sample_calibration') return 'Run samples';
+	if (normalized === 'proof_encode') return 'Run review evidence';
+	return capability.trim().replaceAll('_', ' ') || 'Mediaforce work';
+}
+
+export function workerCapabilitiesSummary(capabilities: string[]): string {
+	const labels = capabilities.map(workerCapabilityLabel).filter(Boolean);
+	return labels.length ? labels.join(' · ') : 'No work assigned';
+}
+
 export function encodeJobTone(job: EncodeQueueJob): ShellTone {
 	const status = String(job.status ?? '').toLowerCase();
 	if (['failed', 'needs_attention', 'stopped', 'retry_backoff'].includes(status)) return 'wait';
@@ -208,9 +221,12 @@ export function buildEncodeRows(
 			status: statusCopy(job.status || 'unknown'),
 			prefix: job.prefix || 'system scope',
 			host: job.active_hosts?.map(hostCopy).filter(Boolean).join(', ') || hostCopy(job.host),
-			phase: job.running_shard_count ? `${job.running_shard_count} active shards` : 'encode queue',
+			phase: job.running_shard_count
+				? `${job.running_shard_count} active parts`
+				: 'processing queue',
 			progress: encodeJobProgress(job),
-			scheduler: job.scheduler_status_copy || (job.schedule_waiting ? 'schedule waiting' : 'ready'),
+			scheduler:
+				job.scheduler_status_copy || (job.schedule_waiting ? 'waiting for window' : 'ready'),
 			detail: encodeJobDetail(job),
 			action: canRetryPrefix ? 'retry-encode-prefix' : undefined,
 			actionScope: canRetryPrefix ? 'row' : undefined
@@ -234,10 +250,10 @@ function buildCalibrationLaneRows(
 		phase: options.historical
 			? laneName === 'sample'
 				? 'sample check history'
-				: 'proof encode history'
+				: 'review evidence history'
 			: laneName === 'sample'
 				? 'sample check'
-				: 'proof encode',
+				: 'review evidence',
 		progress: compactText(job.progress) || compactText(job.stage) || '—',
 		scheduler:
 			compactText(job.scheduler_status_copy) || compactText(job.created_at) || 'queued order',
@@ -256,7 +272,7 @@ export function rowRecoveryLabel(row: OpsQueueRow): string {
 export function rowRecoveryTitle(row: OpsQueueRow): string {
 	if (!row.action) return 'No action is available for this row.';
 	if (row.action === 'retry-encode-prefix') {
-		return 'Retry the encode for this folder only.';
+		return 'Retry processing for this folder only.';
 	}
 	if (row.action === 'retry-failed-encode') {
 		return 'Retry every approved folder that has retry available.';
@@ -344,7 +360,7 @@ export function buildOpsBlockers(
 		blockers.push({
 			key: 'stop-requested',
 			tone: 'fail',
-			title: 'Encoding is stopping',
+			title: 'Processing is stopping',
 			detail: 'Workers are finishing current items before the queue can start more work.',
 			action: 'resume-encode'
 		});
@@ -353,8 +369,8 @@ export function buildOpsBlockers(
 		blockers.push({
 			key: 'paused',
 			tone: 'wait',
-			title: 'Encoding is paused',
-			detail: queue.state.scheduler_summary ?? 'No new encode jobs will start until resumed.',
+			title: 'Processing is paused',
+			detail: queue.state.scheduler_summary ?? 'No new processing will start until resumed.',
 			action: 'resume-encode'
 		});
 	}
@@ -362,7 +378,7 @@ export function buildOpsBlockers(
 		blockers.push({
 			key: 'needs-attention',
 			tone: 'wait',
-			title: `${attentionCount} encode ${attentionCount === 1 ? 'job has' : 'jobs have'} retry available`,
+			title: `${attentionCount} ${attentionCount === 1 ? 'folder has' : 'folders have'} retry available`,
 			detail: 'Review the row, then retry approved folders from this page.',
 			action: 'retry-failed-encode'
 		});
@@ -371,7 +387,7 @@ export function buildOpsBlockers(
 		blockers.push({
 			key: 'no-hosts-ready',
 			tone: 'fail',
-			title: 'No workers can encode right now',
+			title: 'No workers can process right now',
 			detail:
 				'Queued work exists, but every configured worker is unavailable or outside its work window.'
 		});
@@ -379,9 +395,8 @@ export function buildOpsBlockers(
 		blockers.push({
 			key: 'schedule-waiting',
 			tone: 'wait',
-			title: `${scheduleWaiting} queued ${scheduleWaiting === 1 ? 'folder is' : 'folders are'} waiting for schedule`,
-			detail:
-				queue?.state.scheduler_summary ?? 'Work will start when an allowed encode window opens.'
+			title: `${scheduleWaiting} queued ${scheduleWaiting === 1 ? 'folder is' : 'folders are'} waiting for a work window`,
+			detail: queue?.state.scheduler_summary ?? 'Work will start when an allowed window opens.'
 		});
 	}
 	return blockers;
@@ -415,7 +430,7 @@ export function buildOpsReadinessSummary(
 	if (queue?.state.stop_requested) {
 		return {
 			tone: 'fail',
-			title: 'Encoding is stopping',
+			title: 'Processing is stopping',
 			detail: 'Workers are finishing current items before Mediaforce can start more work.',
 			metricLabel: 'Active work',
 			metricValue: String(runningCount)
@@ -424,8 +439,8 @@ export function buildOpsReadinessSummary(
 	if (queue?.state.is_paused) {
 		return {
 			tone: 'wait',
-			title: 'Encoding is paused',
-			detail: queue.state.scheduler_summary ?? 'Resume the queue when encoding should continue.',
+			title: 'Processing is paused',
+			detail: queue.state.scheduler_summary ?? 'Resume the queue when processing should continue.',
 			metricLabel: 'Queued',
 			metricValue: String(queuedCount)
 		};
@@ -434,7 +449,7 @@ export function buildOpsReadinessSummary(
 		return {
 			tone: 'wait',
 			title: 'Retry is available',
-			detail: `${needsAttention} approved encode ${needsAttention === 1 ? 'job needs' : 'jobs need'} operator review before retry.`,
+			detail: `${needsAttention} approved ${needsAttention === 1 ? 'folder needs' : 'folders need'} operator review before retry.`,
 			metricLabel: 'Retry',
 			metricValue: String(needsAttention)
 		};
@@ -455,7 +470,7 @@ export function buildOpsReadinessSummary(
 			title: 'Mediaforce is working',
 			detail:
 				queue?.telemetry?.eta_copy ??
-				`${runningCount} encode ${runningCount === 1 ? 'job' : 'jobs'} and ${activeChecks} sample/proof ${activeChecks === 1 ? 'job' : 'jobs'} active.`,
+				`${runningCount} processing ${runningCount === 1 ? 'job' : 'jobs'} and ${activeChecks} sample/review ${activeChecks === 1 ? 'job' : 'jobs'} active.`,
 			metricLabel: 'Running',
 			metricValue: String(runningCount + activeChecks)
 		};
@@ -463,7 +478,7 @@ export function buildOpsReadinessSummary(
 	if (queuedWaiting > 0) {
 		return {
 			tone: 'wait',
-			title: 'Waiting for the encode window',
+			title: 'Waiting for the work window',
 			detail:
 				queue?.state.scheduler_summary ?? 'Queued work will start when an allowed window opens.',
 			metricLabel: 'Waiting',
@@ -474,7 +489,7 @@ export function buildOpsReadinessSummary(
 		return {
 			tone: 'ready',
 			title: 'Ready for work',
-			detail: 'Workers are available and Mediaforce can start eligible encode work.',
+			detail: 'Workers are available and Mediaforce can start eligible processing work.',
 			metricLabel: 'Workers ready',
 			metricValue: String(readyHosts)
 		};
@@ -499,7 +514,7 @@ export function buildOpsStatusTiles(
 	const totalHosts = hosts?.hosts.length ?? 0;
 	return [
 		{
-			label: 'Scheduler',
+			label: 'Work schedule',
 			value: encode?.state.is_paused
 				? 'paused'
 				: encode?.state.stop_requested
@@ -516,7 +531,7 @@ export function buildOpsStatusTiles(
 						: 'ready'
 		},
 		{
-			label: 'Encode jobs',
+			label: 'Processing',
 			value: `${encode?.running_count ?? 0} running · ${encode?.queued_count ?? 0} queued`,
 			detail:
 				encode?.telemetry?.eta_copy ?? `${encode?.needs_attention_count ?? 0} retry available`,
@@ -556,7 +571,7 @@ export function buildOpsFooterSignals(
 	const calibration = dashboard?.calibration_queue;
 	return [
 		{
-			label: 'Encode',
+			label: 'Processing',
 			value: `${encode?.running_count ?? 0}/${encode?.queued_count ?? 0}`,
 			tone:
 				(encode?.running_count ?? 0) > 0
@@ -591,8 +606,8 @@ export function hostTone(host: HostRuntime, fleetHasReadyCapacity = false): Shel
 
 export function hostStateCopy(host: HostRuntime): string {
 	if (!host.available) return 'Unavailable';
-	if (host.schedule_open === false) return 'Scheduled off';
+	if (host.schedule_open === false) return 'Off schedule';
 	if (host.queue_active === false) return 'Not accepting';
-	if (host.active_encode_count > 0) return 'Encoding';
+	if (host.active_encode_count > 0) return 'Processing';
 	return 'Ready';
 }

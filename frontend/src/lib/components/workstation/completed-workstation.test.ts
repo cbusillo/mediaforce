@@ -67,9 +67,9 @@ describe('Completed workstation mapping', () => {
 
 		expect(tiles).toMatchObject([
 			{ label: 'Completed folders', tone: 'ready' },
-			{ label: 'Originals waiting', tone: 'wait' },
-			{ label: 'Reclaimable', tone: 'ready' },
-			{ label: 'Waiting / review', value: '1 / 1', tone: 'fail' },
+			{ label: 'Delete queue', tone: 'wait' },
+			{ label: 'Space ready', tone: 'ready' },
+			{ label: 'Review needed', value: '1 / 1', tone: 'fail' },
 			{ label: 'Cleanup folder', tone: 'ready' }
 		]);
 	});

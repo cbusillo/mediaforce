@@ -95,7 +95,7 @@
 	const headerCopy = $derived(
 		isFolderIndex
 			? 'Search or filter discovered folders, then open Folder Studio when you know which folder needs attention.'
-			: 'Use the ranked list to pick the next folder worth reviewing, then open Folder Studio when the action looks right.'
+			: 'Use the worklist to pick the next folder that needs review, then open Folder Studio when the action looks right.'
 	);
 	const workspaceLabel = $derived(
 		isFolderIndex ? 'Folder index and selected folder' : 'Queue worklist and selected folder'
@@ -229,7 +229,7 @@
 		if (isFolderIndex) {
 			return `${folder.title} has ${pending} pending items and about ${reclaim} of projected reclaim.`;
 		}
-		const rankCopy = index === 0 ? 'the highest-ranked visible folder' : `ranked #${index + 1}`;
+		const rankCopy = index === 0 ? 'the first visible folder' : `#${index + 1} in the visible list`;
 		return `${folder.title} is ${rankCopy} with ${pending} pending items and about ${reclaim} of projected reclaim.`;
 	}
 </script>
@@ -351,7 +351,7 @@
 						<small>{pendingReviews} waiting for review</small>
 					</div>
 					<div class="scope-row">
-						<span>Encode</span>
+						<span>Processing</span>
 						<strong
 							>{dashboard.encode_queue.running_count} running · {dashboard.encode_queue
 								.queued_count}
@@ -359,7 +359,7 @@
 						>
 						<small
 							>{dashboard.encode_queue.state.scheduler_summary ??
-								'scheduler state unavailable'}</small
+								'work schedule unavailable'}</small
 						>
 					</div>
 				</div>
@@ -450,7 +450,7 @@
 				</WorkstationPanel>
 
 				<WorkstationPanel
-					eyebrow={tableEyebrow}
+					eyebrow={isFolderIndex ? tableEyebrow : 'Worklist'}
 					title={tableTitle}
 					meta={`${visibleFolders.length.toLocaleString('en-US')} visible`}
 				>

@@ -211,7 +211,7 @@ describe('Folder Studio review request mapping', () => {
 			['Sample', true],
 			['Review', false],
 			['Approve', false],
-			['Encode', false]
+			['Process', false]
 		]);
 	});
 });

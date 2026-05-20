@@ -708,7 +708,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             {
                 "label": "Ops unavailable host fixture",
                 "route": "/ops",
-                "marker": "No workers can encode right now",
+                "marker": "No workers can process right now",
             },
             {
                 "label": "Folder Studio review-ready fixture",
@@ -716,14 +716,14 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "marker": "Review the sample pack",
             },
             {
-                "label": "Folder Studio active encode fixture",
+                "label": "Folder Studio active processing fixture",
                 "route": "/folders/tv/Encoding%20Show/Season%201",
-                "marker": "Approved encode is in the queue",
+                "marker": "Approved folder is processing",
             },
             {
-                "label": "Folder Studio retryable encode fixture",
+                "label": "Folder Studio retryable processing fixture",
                 "route": "/folders/tv/Failed%20Encode/Season%201",
-                "marker": "Encode needs recovery",
+                "marker": "Processing needs recovery",
             },
         ],
         "completedPrefix": COMPLETED_PREFIX,

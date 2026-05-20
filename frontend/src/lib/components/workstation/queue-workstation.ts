@@ -19,10 +19,28 @@ export function queueFolderTone(folder: FolderCard): ShellTone {
 }
 
 export function queueFolderState(folder: FolderCard): string {
-	if (folder.review_badge_label) return folder.review_badge_label;
-	if (folder.pending_count > 0) return 'Ready to start';
+	const label = folder.review_badge_label?.trim();
+	if (label) return queueStateLabel(label);
+	if (folder.pending_count > 0) return 'Needs sample';
 	if (folder.known_saved_bytes > 0) return 'Completed';
 	return 'Cataloged';
+}
+
+export function queueStateLabel(label: string): string {
+	const normalized = label.trim().toLowerCase();
+	if (normalized === 'ready to start') return 'Needs sample';
+	if (normalized === 'no sample' || normalized === 'missing sample') return 'Needs sample';
+	if (normalized === 'sample queued') return 'Sample waiting';
+	if (normalized === 'sample running') return 'Sampling';
+	if (normalized === 'sample failed retry') return 'Sample needs retry';
+	if (normalized === 'review media') return 'Ready to review';
+	if (normalized === 'proposal warning') return 'Review warning';
+	if (normalized === 'proposal accepted') return 'Approved';
+	if (normalized === 'encode queued' || normalized === 'encode running') return 'Processing';
+	if (normalized === 'encode failed' || normalized === 'encode stopped') {
+		return 'Processing needs attention';
+	}
+	return label.trim();
 }
 
 export function codecSummary(codecs: Record<string, number>): string {
@@ -64,7 +82,7 @@ export function buildQueueStatusTiles(
 		{
 			label: 'Projected reclaim',
 			value: formatBytes(totalProjectedReclaim(folders)),
-			detail: 'ranked by current scoring',
+			detail: 'estimated from visible folders',
 			tone: totalProjectedReclaim(folders) > 0 ? 'ready' : 'idle',
 			mono: true
 		},
@@ -86,7 +104,7 @@ export function buildQueueStatusTiles(
 					: 'idle'
 		},
 		{
-			label: 'Encode queue',
+			label: 'Processing',
 			value: `${encodeQueue.running_count} running · ${encodeQueue.queued_count} queued`,
 			detail:
 				encodeQueue.telemetry?.eta_copy ??
