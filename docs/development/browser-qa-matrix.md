@@ -6,15 +6,24 @@ that a single live machine state happens to render.
 
 ## Commands
 
-- Full route and fixture smoke: `npm --prefix frontend run smoke:web`
-- Existing live app smoke: `npm --prefix frontend run smoke:web -- --base-url http://127.0.0.1:5555`
-- Skip narrow checks only for non-UI diagnostics: `npm --prefix frontend run smoke:web -- --skip-narrow`
+- Full route and fixture smoke:
+  `npm --prefix frontend run smoke:web`
+- Existing live app smoke:
+  `npm --prefix frontend run smoke:web -- --base-url http://127.0.0.1:5555`
+- Skip narrow checks only for non-UI diagnostics:
+  `npm --prefix frontend run smoke:web -- --skip-narrow`
 
 The default managed smoke uses `config/web-smoke.toml`, seeds deterministic
 fixture state, starts `mediaforce-web` on a temporary port, checks API endpoints,
 loads route shells in a desktop browser, then repeats route loading at a 390px
 narrow viewport. When `--base-url` is provided, the script does not seed data or
 mutate the target app.
+
+For quick manual health checks, prefer browser or `GET` requests against the app
+shell and startup endpoints. A `HEAD /` probe can return `405` even when the
+server is healthy and the app loads normally. If an embedded browser tab looks
+stuck, open a fresh tab against the same base URL before treating the local
+server as down.
 
 After the non-empty fixture pass, the managed smoke reseeds the same runtime with
 the `empty` profile and reloads the main route family. This proves the UI does
