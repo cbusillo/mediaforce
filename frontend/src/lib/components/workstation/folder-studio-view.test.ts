@@ -3,12 +3,16 @@ import type { FolderPayload, FolderStatusPayload } from '$lib/api/types';
 import type { FolderCalibrationJob } from '$lib/folders/studio';
 import {
 	buildBenchHostOptions,
+	buildBudgetEnforcementView,
+	buildSampleVerdict,
 	buildWorkflowSteps,
+	predictedFolderSizeBytes,
+	projectedReclaimBytes,
 	resolveBenchRequestState,
 	resolveWorkflow,
 	resolveWorkflowActionState
 } from './folder-studio-view';
-import type { PendingSampleProposal } from '$lib/folders/studio';
+import type { FolderCalibrationState, PendingSampleProposal } from '$lib/folders/studio';
 
 function folderPayload(overrides: Partial<FolderPayload> = {}): FolderPayload {
 	return {
@@ -38,6 +42,20 @@ function folderStatusPayload(overrides: Partial<FolderStatusPayload> = {}): Fold
 		folder_scan_status: 'idle',
 		calibration_job: null,
 		folder_scan_job: null,
+		...overrides
+	};
+}
+
+function folderSummary(overrides: Partial<NonNullable<FolderPayload['summary']>> = {}) {
+	return {
+		prefix: 'tv/Example/Season 1',
+		item_count: 1,
+		total_size_bytes: 1,
+		statuses: {},
+		video_codecs: {},
+		audio_codecs: {},
+		seasons: {},
+		resolved_policy: {},
 		...overrides
 	};
 }
@@ -107,6 +125,14 @@ describe('Folder Studio review request mapping', () => {
 		).toEqual({ disabled: false, title: '' });
 
 		expect(
+			resolveWorkflowActionState('queue-encode', {
+				reviewPackReady: true,
+				pendingProposal: null,
+				calibrationJob: null
+			})
+		).toEqual({ disabled: false, title: '' });
+
+		expect(
 			resolveWorkflowActionState('start-sample', {
 				reviewPackReady: false,
 				pendingProposal: null,
@@ -149,6 +175,161 @@ describe('Folder Studio review request mapping', () => {
 		});
 	});
 
+	it('projects sample output across the whole folder', () => {
+		const folder = folderPayload({
+			summary: folderSummary({
+				item_count: 22,
+				total_size_bytes: 80_158_807_611
+			}),
+			calibration: {
+				sample_result: {
+					predicted_total_size_bytes: 803_322_876,
+					quality_metric: 'VMAF',
+					quality_score: 95.0448
+				}
+			}
+		});
+
+		expect(predictedFolderSizeBytes(folder)).toBe(17_673_103_272);
+		expect(projectedReclaimBytes(folder)).toBe(62_485_704_339);
+	});
+
+	it('turns an over-budget sample into a revise-first verdict and workflow', () => {
+		const calibration = {
+			browser_review_ready: true,
+			review_media_ready: true,
+			sample_result: {
+				predicted_total_size_bytes: 803_322_876,
+				quality_metric: 'VMAF',
+				quality_score: 95.0448
+			},
+			advice: {
+				operator_request: {
+					budget_bytes: 314_572_800,
+					budget_label: '300 MB per episode',
+					request_text: 'Aim for 200-300 MB per episode.'
+				},
+				run_verdict: {
+					outcome: 'poor_fit',
+					next_step: 'Run another sample with a much lower video budget or a downscale.'
+				}
+			}
+		} as FolderCalibrationState;
+		const folder = folderPayload({
+			summary: folderSummary({
+				item_count: 22,
+				total_size_bytes: 80_158_807_611
+			}),
+			calibration
+		});
+
+		expect(buildSampleVerdict(folder, calibration)).toMatchObject({
+			label: 'Target missed',
+			title: '766 MiB per episode misses 300 MB per episode.',
+			predictedPerItem: '766 MiB',
+			predictedFolderTotal: '16.5 GiB',
+			reclaim: '58.2 GiB',
+			targetDelta: '2.6x target',
+			missesTarget: true
+		});
+
+		expect(
+			resolveWorkflow(folder, folderStatusPayload(), calibration, null, null, null, null)
+		).toMatchObject({
+			label: 'Target missed',
+			primary: 'Revise sample',
+			primaryAction: 'focus-bench',
+			secondary: 'Download review pack'
+		});
+	});
+
+	it('keeps an over-budget sample revise-first when a stale warning draft exists', () => {
+		const calibration = {
+			browser_review_ready: true,
+			review_media_ready: true,
+			sample_result: {
+				predicted_total_size_bytes: 803_322_876,
+				quality_metric: 'VMAF',
+				quality_score: 95.0448
+			},
+			advice: {
+				operator_request: {
+					budget_bytes: 314_572_800,
+					budget_label: '300 MB per episode'
+				}
+			}
+		} as FolderCalibrationState;
+		const pendingProposal = {
+			proposal_id: 'stale-draft',
+			can_queue: true,
+			message: 'Download review pack.',
+			self_check: {
+				status: 'warning',
+				summary: 'Usable with caution.'
+			}
+		} as PendingSampleProposal;
+
+		expect(
+			resolveWorkflow(
+				folderPayload({
+					summary: folderSummary({
+						item_count: 22,
+						total_size_bytes: 80_158_807_611
+					}),
+					calibration,
+					pending_proposal: pendingProposal
+				}),
+				folderStatusPayload(),
+				calibration,
+				pendingProposal,
+				null,
+				null,
+				null
+			)
+		).toMatchObject({
+			label: 'Target missed',
+			primary: 'Revise sample',
+			primaryAction: 'focus-bench',
+			secondary: 'Download review pack'
+		});
+	});
+
+	it('makes acceptable review evidence approve-first', () => {
+		const calibration = {
+			browser_review_ready: true,
+			review_media_ready: true,
+			sample_result: {
+				predicted_total_size_bytes: 250_000_000,
+				quality_metric: 'VMAF',
+				quality_score: 95.1
+			},
+			advice: {
+				operator_request: {
+					budget_bytes: 314_572_800,
+					budget_label: '300 MB per episode'
+				},
+				run_verdict: { outcome: 'good_fit' }
+			}
+		} as FolderCalibrationState;
+
+		expect(
+			resolveWorkflow(
+				folderPayload({ calibration }),
+				folderStatusPayload(),
+				calibration,
+				null,
+				null,
+				null,
+				null
+			)
+		).toMatchObject({
+			label: 'Review ready',
+			primary: 'Approve and queue',
+			primaryAction: 'queue-encode',
+			secondary: 'Download pack'
+		});
+	});
+
 	it('keeps review drafts on the sample confirmation action', () => {
 		const workflow = resolveWorkflow(
 			folderPayload({
@@ -172,6 +353,44 @@ describe('Folder Studio review request mapping', () => {
 
 		expect(workflow).toMatchObject({
 			label: 'Draft ready',
+			primary: 'Start sample',
+			primaryAction: 'start-sample'
+		});
+	});
+
+	it('names measured budget enforcement as the next sample action', () => {
+		const pendingProposal = {
+			proposal_id: 'draft-3',
+			can_queue: true,
+			message: 'Queue this representative sample.',
+			operator_request: { budget_label: '300 MB per episode' },
+			budget_enforcement: {
+				status: 'enforced_after_miss',
+				size_target_analysis: { predicted_to_budget_ratio: 2.55 },
+				applied_policy: { video: { max_encoded_percent: 7 } }
+			}
+		} as PendingSampleProposal;
+
+		expect(buildBudgetEnforcementView(pendingProposal)).toEqual({
+			active: true,
+			cap: '7%',
+			reason: 'Applied after 2.6x target miss against 300 MB per episode.'
+		});
+
+		const workflow = resolveWorkflow(
+			folderPayload({ pending_proposal: pendingProposal }),
+			folderStatusPayload(),
+			null,
+			pendingProposal,
+			null,
+			null,
+			null
+		);
+
+		expect(workflow).toMatchObject({
+			label: 'Budget enforced',
+			title: 'Next sample has a 7% size ceiling',
+			copy: 'Applied after 2.6x target miss against 300 MB per episode.',
 			primary: 'Start sample',
 			primaryAction: 'start-sample'
 		});

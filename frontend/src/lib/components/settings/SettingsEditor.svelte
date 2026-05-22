@@ -21,6 +21,8 @@
 		buildArchiveCleanupClearPayload,
 		buildSettingsSavePayload,
 		draftFromSettings,
+		hostLibraryAccessChecked,
+		hostLibraryAccessCopy,
 		hostDraftRuntimeKey,
 		removeAtIndex,
 		scheduleWindowSummaryCopy,
@@ -249,7 +251,12 @@
 	}
 
 	function toggleLibraryAccess(index: number, libraryKey: string) {
-		draft.remote_hosts = toggleHostAllowedLibrary(draft.remote_hosts, index, libraryKey);
+		draft.remote_hosts = toggleHostAllowedLibrary(
+			draft.remote_hosts,
+			index,
+			libraryKey,
+			activeLibraryKeys
+		);
 	}
 
 	function resetDraft() {
@@ -763,12 +770,13 @@
 										<div class="host-options host-options--primary">
 											<div>
 												<span class="option-label">Allowed libraries</span>
+												<small class="option-hint">{hostLibraryAccessCopy(host)}</small>
 												<div class="toggle-grid">
 													{#each activeLibraryKeys as libraryKey (libraryKey)}
 														<label class="toggle-chip">
 															<input
 																type="checkbox"
-																checked={host.allowed_libraries.includes(libraryKey)}
+																checked={hostLibraryAccessChecked(host, libraryKey)}
 																onchange={() => toggleLibraryAccess(index, libraryKey)}
 															/>
 															<span>{libraryKey}</span>
@@ -984,6 +992,33 @@
 			</section>
 
 			<aside class="settings-console__rail" aria-label="Settings navigation and files">
+				<WorkstationPanel eyebrow="Save state" title="Settings draft">
+					<div class="rail-save">
+						<StateBadge
+							tone={saveError ? 'fail' : dirty ? 'wait' : 'ready'}
+							label={saveError ? 'Error' : dirty ? 'Unsaved' : 'Saved'}
+						/>
+						<p>{saveError || saveMessage || 'Changes stay local until you save.'}</p>
+						<div class="rail-save__actions" aria-label="Settings save actions">
+							<button
+								type="button"
+								class="control control--compact"
+								disabled={!dirty || savePending}
+								onclick={resetDraft}
+							>
+								Reset
+							</button>
+							<button
+								type="button"
+								class="control control--compact control--ready"
+								disabled={!dirty || savePending}
+								onclick={saveSettings}
+							>
+								{savePending ? 'Saving' : 'Save'}
+							</button>
+						</div>
+					</div>
+				</WorkstationPanel>
 				<nav class="settings-rail-nav" aria-label="Settings sections">
 					<span class="mf-eyebrow">Sections</span>
 					<a href="#settings-libraries">Libraries</a>
@@ -1009,6 +1044,32 @@
 					</div>
 				</WorkstationPanel>
 			</aside>
+
+			{#if dirty || savePending || saveError}
+				<div class="settings-save-dock" role="status" aria-live="polite">
+					<StateBadge
+						tone={saveError ? 'fail' : dirty ? 'wait' : 'ready'}
+						label={saveError ? 'Error' : savePending ? 'Saving' : 'Unsaved'}
+					/>
+					<span>{saveError || 'Settings changes are not saved yet.'}</span>
+					<button
+						type="button"
+						class="control control--compact"
+						disabled={!dirty || savePending}
+						onclick={resetDraft}
+					>
+						Reset
+					</button>
+					<button
+						type="button"
+						class="control control--compact control--ready"
+						disabled={!dirty || savePending}
+						onclick={saveSettings}
+					>
+						{savePending ? 'Saving' : 'Save'}
+					</button>
+				</div>
+			{/if}
 		{/if}
 	</main>
 </OperatorShell>
@@ -1059,7 +1120,8 @@
 
 	.settings-header__actions,
 	.panel-actions,
-	.archive-actions {
+	.archive-actions,
+	.settings-save-dock {
 		align-items: center;
 		display: flex;
 		flex-wrap: wrap;
@@ -1184,6 +1246,27 @@
 		display: block;
 		min-height: var(--mf-control-sm);
 		padding: var(--mf-space-2) var(--mf-space-3);
+	}
+
+	.settings-save-dock {
+		background: var(--mf-bg-strip);
+		border: var(--mf-border-strong);
+		border-left: 2px solid var(--mf-wait-fg);
+		bottom: var(--mf-space-5);
+		box-shadow: var(--mf-shadow-2);
+		grid-column: 1 / -1;
+		justify-content: flex-end;
+		left: var(--mf-space-5);
+		padding: var(--mf-space-3);
+		position: fixed;
+		right: var(--mf-space-5);
+		z-index: 30;
+	}
+
+	.settings-save-dock span:not(:global(.state-badge span)) {
+		color: var(--mf-fg-secondary);
+		font-size: var(--mf-text-xs);
+		margin-right: auto;
 	}
 
 	.table-wrap {
@@ -1348,6 +1431,7 @@
 	.storage-readout small,
 	.danger-zone small,
 	.rail-row small,
+	.option-hint,
 	.muted-copy,
 	.schedule-summary,
 	.host-editor__head span {
@@ -1358,10 +1442,32 @@
 	.schedule-list,
 	.host-editor-list,
 	.host-runtime-board,
+	.rail-save,
 	.rail-list {
 		display: grid;
 		gap: var(--mf-space-4);
 		padding: var(--mf-space-5);
+	}
+
+	.rail-save {
+		gap: var(--mf-space-3);
+	}
+
+	.rail-save p {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+		line-height: var(--mf-leading-snug);
+		margin: 0;
+	}
+
+	.rail-save__actions {
+		display: grid;
+		gap: var(--mf-space-3);
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.rail-save__actions .control {
+		width: 100%;
 	}
 
 	.host-runtime-board {
@@ -1672,13 +1778,24 @@
 
 		.settings-header__actions,
 		.panel-actions,
-		.archive-actions {
+		.archive-actions,
+		.settings-save-dock {
 			align-items: stretch;
+		}
+
+		.settings-save-dock {
+			left: var(--mf-space-3);
+			right: var(--mf-space-3);
+		}
+
+		.settings-save-dock span:not(:global(.state-badge span)) {
+			flex-basis: 100%;
 		}
 
 		.settings-header__actions .control,
 		.panel-actions .control,
-		.archive-actions .control {
+		.archive-actions .control,
+		.settings-save-dock .control {
 			flex: 1 1 auto;
 		}
 

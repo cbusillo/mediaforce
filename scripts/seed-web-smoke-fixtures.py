@@ -713,7 +713,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             {
                 "label": "Folder Studio review-ready fixture",
                 "route": "/folders/tv/Review%20Ready/Season%201",
-                "marker": "Review the sample pack",
+                "marker": "Approve and queue",
             },
             {
                 "label": "Folder Studio active processing fixture",

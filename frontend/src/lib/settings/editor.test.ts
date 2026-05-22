@@ -8,6 +8,8 @@ import {
 	buildSettingsSavePayload,
 	cloneScheduleProfile,
 	draftFromSettings,
+	hostLibraryAccessChecked,
+	hostLibraryAccessCopy,
 	scheduleDaysSummaryCopy,
 	scheduleWindowSummaryCopy,
 	settingsDraftIsDirty,
@@ -202,5 +204,42 @@ describe('settings draft helpers', () => {
 		expect(hosts[0]?.allowed_libraries).toEqual(['tv', 'movies']);
 		expect(toggleHostAllowedLibrary(hosts, 0, 'movies')[0]?.allowed_libraries).toEqual(['tv']);
 		expect(toggleHostAllowedLibrary(hosts, 0, '')).toBe(hosts);
+	});
+
+	it('collapses a fully selected allowlist back to the canonical empty state', () => {
+		const allLibrariesHost = { ...payload.remote_hosts[0], allowed_libraries: [] };
+		const libraryKeys = ['movies', 'tv'];
+
+		const hostsAfterOff = toggleHostAllowedLibrary(
+			[{ ...allLibrariesHost }],
+			0,
+			'movies',
+			libraryKeys
+		);
+		expect(hostsAfterOff[0]?.allowed_libraries).toEqual(['tv']);
+
+		const hostsAfterOn = toggleHostAllowedLibrary(hostsAfterOff, 0, 'movies', libraryKeys);
+		expect(hostsAfterOn[0]?.allowed_libraries).toEqual([]);
+	});
+
+	it('normalizes trimmed and duplicate library keys when toggling', () => {
+		const host = { ...payload.remote_hosts[0], allowed_libraries: [] };
+		const hosts = toggleHostAllowedLibrary([{ ...host }], 0, ' movies ', [' movies ', 'tv', 'tv']);
+
+		expect(hosts[0]?.allowed_libraries).toEqual(['tv']);
+	});
+
+	it('treats an empty host library list as all libraries allowed in the editor', () => {
+		const allLibrariesHost = { ...payload.remote_hosts[0], allowed_libraries: [] };
+
+		expect(hostLibraryAccessChecked(allLibrariesHost, 'tv')).toBe(true);
+		expect(hostLibraryAccessCopy(allLibrariesHost)).toBe('All libraries allowed');
+
+		const hosts = toggleHostAllowedLibrary([{ ...allLibrariesHost }], 0, 'movies', [
+			'movies',
+			'tv'
+		]);
+
+		expect(hosts[0]?.allowed_libraries).toEqual(['tv']);
 	});
 });

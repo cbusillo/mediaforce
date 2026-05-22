@@ -277,6 +277,7 @@ def pending_proposal_public_view(deps: FolderStateDeps, payload: dict[str, Any] 
             "summary": self_check.get("summary"),
             "issues": object_list(self_check.get("issues")),
         },
+        "budget_enforcement": object_dict(payload.get("budget_enforcement")) or None,
         "operator_signal": payload.get("operator_signal"),
         "evidence_checked": object_list(payload.get("evidence_checked")),
         "multimodal_review_pack": object_dict(payload.get("multimodal_review_pack")) or None,

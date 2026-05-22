@@ -106,6 +106,29 @@ def _number_or_none(value: JSONValue) -> float | None:
     return parsed
 
 
+def measured_size_budget_policy_fragment(
+        *,
+        operator_request: dict[str, Any] | None,
+        size_target_analysis: dict[str, Any] | None,
+) -> dict[str, Any]:
+    request = object_dict(operator_request)
+    analysis = object_dict(size_target_analysis)
+    if str(request.get("request_type") or "").strip().lower() not in {"size_budget", "combined_experiment"}:
+        return {}
+    if str(analysis.get("status") or "").strip().lower() != "over_target":
+        return {}
+    requested_cap = _number_or_none(request.get("requested_max_encoded_percent"))
+    if requested_cap is None:
+        requested_cap = _number_or_none(request.get("target_encoded_percent"))
+    if requested_cap is None:
+        size_budget_request = object_dict(request.get("size_budget_request"))
+        requested_cap = _number_or_none(size_budget_request.get("requested_max_encoded_percent"))
+    if requested_cap is None or requested_cap <= 0:
+        return {}
+    cap = max(1, min(100, int(round(requested_cap))))
+    return {"video": {"max_encoded_percent": cap}}
+
+
 def proposal_alignment_issue(
         *,
         operator_request: dict[str, Any] | None,
@@ -329,6 +352,10 @@ def proposal_alignment_issue(
         return None
 
     if request_type == "size_budget":
+        if _float_or_none(operator_request.get("applied_max_encoded_percent")) is not None:
+            return _size_budget_cap_alignment_issue()
+        if object_dict(operator_request.get("applied_policy")):
+            return _size_budget_cap_alignment_issue()
         return _size_budget_alignment_issue()
     if request_type == "metric_target":
         return _metric_alignment_issue()
