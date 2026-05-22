@@ -494,6 +494,47 @@ describe('Folder Studio review request mapping', () => {
 		});
 	});
 
+	it('keeps acceptable evidence approve-first when its queueable draft is still present', () => {
+		const calibration = {
+			browser_review_ready: true,
+			review_media_ready: true,
+			sample_result: {
+				predicted_total_size_bytes: 250_000_000,
+				quality_metric: 'VMAF',
+				quality_score: 95.1
+			},
+			advice: {
+				operator_request: {
+					budget_bytes: 314_572_800,
+					budget_label: '300 MB per episode'
+				},
+				run_verdict: { outcome: 'good_fit' }
+			}
+		} as FolderCalibrationState;
+		const pendingProposal = {
+			proposal_id: 'draft-with-evidence',
+			can_queue: true,
+			message: 'Queue this representative sample.'
+		} as PendingSampleProposal;
+
+		expect(
+			resolveWorkflow(
+				folderPayload({ calibration, pending_proposal: pendingProposal }),
+				folderStatusPayload(),
+				calibration,
+				pendingProposal,
+				null,
+				null,
+				null
+			)
+		).toMatchObject({
+			label: 'Review ready',
+			primary: 'Approve and queue',
+			primaryAction: 'queue-encode',
+			secondary: 'Download pack'
+		});
+	});
+
 	it('does not approve stale non-queueable drafts without review evidence', () => {
 		const workflow = resolveWorkflow(
 			folderPayload({

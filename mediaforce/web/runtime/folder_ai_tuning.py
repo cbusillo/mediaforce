@@ -112,6 +112,29 @@ def _latest_failed_sample_job_payload(job: dict[str, Any] | None) -> dict[str, A
     }
 
 
+def _positive_number(value: Any) -> float | None:
+    if not isinstance(value, str | int | float):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _measured_budget_fragment_preserving_stricter_cap(
+        existing_fragment: dict[str, Any], measured_fragment: dict[str, Any]
+) -> dict[str, Any]:
+    existing_cap = _positive_number(object_dict(existing_fragment.get("video")).get("max_encoded_percent"))
+    measured_cap = _positive_number(object_dict(measured_fragment.get("video")).get("max_encoded_percent"))
+    if existing_cap is None or measured_cap is None or existing_cap >= measured_cap:
+        return measured_fragment
+    return merge_policy_fragments(
+        measured_fragment,
+        {"video": {"max_encoded_percent": int(round(existing_cap))}},
+    )
+
+
 def _proposal_can_queue(
         *,
         applied_fragment: dict[str, Any],
@@ -712,6 +735,9 @@ def _tuned_preview_action(
         size_target_analysis=size_target_analysis,
     )
     if measured_budget_fragment:
+        measured_budget_fragment = _measured_budget_fragment_preserving_stricter_cap(
+            combined_fragment, measured_budget_fragment
+        )
         combined_fragment = merge_policy_fragments(combined_fragment, measured_budget_fragment)
         tuned_policy = deps.apply_policy_fragment(current_policy, combined_fragment)
         advice_payload["applied_policy"] = combined_fragment

@@ -899,6 +899,22 @@ export function resolveWorkflow(
 			secondaryAction: 'revise-proposal'
 		};
 	}
+	if (calibration?.browser_review_ready || calibration?.review_media_ready) {
+		return {
+			tone: 'ready',
+			label: 'Review ready',
+			title: 'Approve this sample or revise it',
+			copy:
+				verdict === null
+					? (pendingProposal?.message ??
+						'Evidence is ready. Review the sample clips, then approve the draft or revise it.')
+					: `${verdict.predictedPerItem} per episode, ${verdict.predictedFolderTotal} for the folder. Review the clips, then approve and queue if this is acceptable.`,
+			primary: 'Approve and queue',
+			primaryAction: 'queue-encode',
+			secondary: 'Download pack',
+			secondaryAction: 'download-review-pack'
+		};
+	}
 	if (pendingProposal?.proposal_id && pendingProposal.can_queue !== false) {
 		const budgetEnforcement = buildBudgetEnforcementView(pendingProposal);
 		return {
@@ -915,22 +931,6 @@ export function resolveWorkflow(
 			primaryAction: 'start-sample',
 			secondary: 'Revise',
 			secondaryAction: 'revise-proposal'
-		};
-	}
-	if (calibration?.browser_review_ready || calibration?.review_media_ready) {
-		return {
-			tone: 'ready',
-			label: 'Review ready',
-			title: 'Approve this sample or revise it',
-			copy:
-				verdict === null
-					? (pendingProposal?.message ??
-						'Evidence is ready. Review the sample clips, then approve the draft or revise it.')
-					: `${verdict.predictedPerItem} per episode, ${verdict.predictedFolderTotal} for the folder. Review the clips, then approve and queue if this is acceptable.`,
-			primary: 'Approve and queue',
-			primaryAction: 'queue-encode',
-			secondary: 'Download pack',
-			secondaryAction: 'download-review-pack'
 		};
 	}
 	if (!folder.sample_item) {
