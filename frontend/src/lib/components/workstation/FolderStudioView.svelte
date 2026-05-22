@@ -4,10 +4,7 @@
 	import { postJson } from '$lib/api/client';
 	import { folderRoutePrefix } from '$lib/folder-display';
 	import {
-		codecLabel,
-		formatBitrateCopy,
 		formatDateTimeCopy,
-		formatResolutionCopy,
 		pathFilename,
 		type FolderCalibrationJob,
 		type FolderCalibrationState,
@@ -31,6 +28,7 @@
 		buildWorkflowSteps,
 		buildFooterSignals,
 		buildProposalRows,
+		buildOutputReviewRows,
 		buildSampleFacts,
 		buildStatusTiles,
 		formatBytes,
@@ -124,6 +122,25 @@
 	const footerSignals = $derived(buildFooterSignals(studioFolder, status, hosts));
 	const sampleFacts = $derived(buildSampleFacts(sampleItem, summary));
 	const sampleVerdict = $derived(buildSampleVerdict(studioFolder, calibration));
+	const outputReviewRows = $derived(
+		buildOutputReviewRows(studioFolder, calibration, pendingProposal)
+	);
+	const sampleResultRow = $derived(
+		outputReviewRows.find((row) => row.label === 'Sample result') ?? null
+	);
+	const draftReviewRow = $derived(
+		outputReviewRows.find(
+			(row) => row.label === 'Next sample draft' || row.label === 'Video output'
+		) ?? null
+	);
+	const visualReviewArtifacts = $derived(
+		[...reviewArtifacts.filter((artifact) => artifact.category === 'visual')]
+			.sort((left, right) => reviewArtifactPriority(left.kind) - reviewArtifactPriority(right.kind))
+			.slice(0, 6)
+	);
+	const audioReviewArtifacts = $derived(
+		reviewArtifacts.filter((artifact) => artifact.category === 'audio').slice(0, 2)
+	);
 	const benchMessages = $derived(
 		buildBenchMessages(calibration, pendingProposal, retryableSampleJob)
 	);
@@ -150,6 +167,20 @@
 			calibrationJob,
 			pendingAction: workflowPending
 		});
+	}
+
+	function reviewArtifactPriority(kind: string) {
+		if (/contact_sheet/i.test(kind)) return 0;
+		if (/timeline/i.test(kind)) return 1;
+		return 2;
+	}
+
+	function mediaAssetHref(url: string) {
+		return url;
+	}
+
+	function openReviewMedia(url: string) {
+		window.open(mediaAssetHref(url), '_blank', 'noreferrer');
 	}
 
 	function focusBenchComposer() {
@@ -221,6 +252,27 @@
 		} catch (error) {
 			profileError =
 				error instanceof Error ? error.message : 'Folder profile could not be approved.';
+		} finally {
+			workflowPending = null;
+		}
+	}
+
+	async function stopSample() {
+		const action = 'stop-sample';
+		const actionState = workflowActionState(action);
+		if (actionState.disabled) return;
+		workflowPending = action;
+		benchMessage = '';
+		benchError = '';
+		try {
+			const response = await postJson<{ ok?: boolean; message?: string }>(
+				`${resolve('/')}api/calibration-queue/stop`,
+				{}
+			);
+			benchMessage = response.message || 'Stopped running and queued sample work.';
+			await invalidateAll();
+		} catch (error) {
+			benchError = error instanceof Error ? error.message : 'Sample work could not be stopped.';
 		} finally {
 			workflowPending = null;
 		}
@@ -323,6 +375,16 @@
 					{/if}
 				</div>
 				<div class="decision__actions">
+					{#if reviewPackReady && workflow.primaryAction !== 'download-review-pack' && workflow.secondaryAction !== 'download-review-pack'}
+						<form
+							class="action-form"
+							method="get"
+							action={`${resolve('/')}api/folders/${encodedPrefix}/review-compare/download`}
+							data-mf-action="download-review-pack"
+						>
+							<button class="control" type="submit">Download side-by-side video</button>
+						</form>
+					{/if}
 					{#if workflow.primaryAction === 'focus-bench'}
 						<button
 							class="control control--primary"
@@ -377,7 +439,7 @@
 							data-mf-wire="pending">{workflow.primary}</button
 						>
 					{/if}
-					{#if workflow.secondaryAction === 'focus-bench'}
+					{#if workflow.secondaryAction === 'focus-bench' || workflow.secondaryAction === 'revise-proposal'}
 						<button
 							class="control"
 							type="button"
@@ -410,6 +472,19 @@
 								? 'Queueing'
 								: workflow.secondary}</button
 						>
+					{:else if workflow.secondaryAction === 'stop-sample'}
+						<button
+							class="control"
+							type="button"
+							disabled={workflowActionState(workflow.secondaryAction).disabled}
+							title={workflowActionState(workflow.secondaryAction).title}
+							onclick={stopSample}
+							data-mf-action={workflow.secondaryAction}
+							data-mf-wire="live"
+							>{workflowPending === workflow.secondaryAction
+								? 'Stopping'
+								: workflow.secondary}</button
+						>
 					{:else if workflow.secondaryAction === 'queue-encode'}
 						<button
 							class="control"
@@ -438,6 +513,62 @@
 					{:else if profileMessage}
 						<p class="decision__status decision__status--ready">{profileMessage}</p>
 					{/if}
+				</div>
+			</section>
+
+			<section class="review-workspace" aria-labelledby="review-workspace-title">
+				<header class="review-workspace__header">
+					<div>
+						<StateBadge
+							tone={reviewPackReady ? 'ready' : 'idle'}
+							label={reviewPackReady ? 'Review media' : 'No review media'}
+						/>
+						<h2 id="review-workspace-title">Previous sample evidence</h2>
+					</div>
+				</header>
+
+				<div class="output-review-table" aria-label="Output review facts">
+					<div class="output-review-table__head">
+						<span>Area</span>
+						<span>Source</span>
+						<span>Output / draft</span>
+						<span>Why it matters</span>
+					</div>
+					{#each outputReviewRows as row (row.label)}
+						<div class:output-review-row--wait={row.tone === 'wait'} class="output-review-row">
+							<strong>{row.label}</strong>
+							<span>{row.source}</span>
+							<span>{row.output}</span>
+							<small>{row.detail}</small>
+						</div>
+					{/each}
+				</div>
+
+				<div class="review-media-grid" aria-label="Sample review media">
+					{#each visualReviewArtifacts as artifact (artifact.imageUrl || artifact.label)}
+						<button
+							class="review-media-tile"
+							type="button"
+							onclick={() => openReviewMedia(artifact.imageUrl)}
+						>
+							<img src={artifact.imageUrl} alt={artifact.label || artifact.kind} loading="lazy" />
+							<span>{artifact.label || artifact.kind}</span>
+						</button>
+					{:else}
+						<div class="empty-note">
+							Run a sample to generate source-versus-draft review images.
+						</div>
+					{/each}
+					{#each audioReviewArtifacts as artifact (artifact.imageUrl || artifact.label)}
+						<button
+							class="review-media-tile review-media-tile--audio"
+							type="button"
+							onclick={() => openReviewMedia(artifact.imageUrl)}
+						>
+							<img src={artifact.imageUrl} alt={artifact.label || artifact.kind} loading="lazy" />
+							<span>{artifact.label || artifact.kind}</span>
+						</button>
+					{/each}
 				</div>
 			</section>
 
@@ -527,14 +658,16 @@
 					</dl>
 				</WorkstationPanel>
 
-				<WorkstationPanel title="Target">
+				<WorkstationPanel title={pendingProposal?.proposal_id ? 'Active draft' : 'Sample target'}>
 					<dl class="kv kv--compact">
-						<dt>Codec</dt>
-						<dd>{codecLabel(sampleItem?.video_codec) || '—'}</dd>
-						<dt>Resolution</dt>
-						<dd>{formatResolutionCopy(sampleItem?.width, sampleItem?.height) ?? '—'}</dd>
-						<dt>Bitrate</dt>
-						<dd>{formatBitrateCopy(sampleItem?.video_bitrate) ?? '—'}</dd>
+						<dt>{pendingProposal?.proposal_id ? 'Draft' : 'Source'}</dt>
+						<dd>{draftReviewRow?.output ?? '—'}</dd>
+						<dt>Reason</dt>
+						<dd>{draftReviewRow?.detail ?? '—'}</dd>
+						<dt>Sample</dt>
+						<dd>
+							{sampleResultRow ? `${sampleResultRow.output} from ${sampleResultRow.source}` : '—'}
+						</dd>
 						<dt>Metric</dt>
 						<dd>{resolvedMetricCopy(studioFolder)}</dd>
 					</dl>
@@ -554,7 +687,7 @@
 				</WorkstationPanel>
 			</div>
 
-			<div class="evidence-grid">
+			<div class="evidence-grid evidence-grid--sample-only">
 				<WorkstationPanel title="Representative sample">
 					<div class="sample-card">
 						<div class="sample-frame">
@@ -573,26 +706,6 @@
 								</div>
 							{/each}
 						</div>
-					</div>
-				</WorkstationPanel>
-
-				<WorkstationPanel title="Evidence artifacts">
-					<div class="artifact-list">
-						{#each reviewArtifacts.slice(0, 4) as artifact (artifact.label + artifact.detail)}
-							<div class="artifact-row">
-								<StateBadge
-									compact
-									tone={artifact.category === 'audio' ? 'wait' : 'active'}
-									label={artifact.kind || artifact.category}
-								/>
-								<div>
-									<strong>{artifact.label || 'Review artifact'}</strong>
-									<span>{artifact.detail || artifact.imageUrl || 'No detail returned'}</span>
-								</div>
-							</div>
-						{:else}
-							<div class="empty-note">Review pack artifacts are not available yet.</div>
-						{/each}
 					</div>
 				</WorkstationPanel>
 			</div>
@@ -933,6 +1046,133 @@
 		color: var(--mf-fail-fg);
 	}
 
+	.review-workspace {
+		background: var(--mf-bg-panel);
+		border: var(--mf-border);
+		border-left: 3px solid var(--mf-ready-fg);
+		display: grid;
+		gap: var(--mf-space-5);
+		padding: var(--mf-space-5);
+	}
+
+	.review-workspace__header {
+		align-items: start;
+		display: grid;
+		gap: var(--mf-space-5);
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.review-workspace h2 {
+		font-size: var(--mf-text-lg);
+		margin-top: var(--mf-space-3);
+	}
+
+	.output-review-table__head span {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.output-review-table {
+		border: var(--mf-border-muted);
+		display: grid;
+		overflow: hidden;
+	}
+
+	.output-review-table__head,
+	.output-review-row {
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-template-columns: minmax(110px, 0.8fr) minmax(130px, 1fr) minmax(150px, 1.1fr) minmax(
+				180px,
+				1.4fr
+			);
+		min-width: 0;
+	}
+
+	.output-review-table__head {
+		background: var(--mf-bg-strip);
+		border-bottom: var(--mf-border-muted);
+		padding: var(--mf-space-3) var(--mf-space-4);
+	}
+
+	.output-review-row {
+		background: var(--mf-bg-panel-2);
+		border-bottom: var(--mf-border-muted);
+		padding: var(--mf-space-4);
+	}
+
+	.output-review-row:last-child {
+		border-bottom: 0;
+	}
+
+	.output-review-row--wait {
+		box-shadow: inset 3px 0 0 var(--mf-wait-fg);
+	}
+
+	.output-review-row strong,
+	.output-review-row span {
+		font-family: var(--mf-font-mono), monospace;
+		font-size: var(--mf-text-xs);
+		overflow-wrap: anywhere;
+	}
+
+	.output-review-row strong {
+		font-family: inherit;
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.output-review-row small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+		line-height: var(--mf-leading-snug);
+		overflow-wrap: anywhere;
+	}
+
+	.review-media-grid {
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.review-media-tile {
+		background: var(--mf-bg-input);
+		border: var(--mf-border-muted);
+		color: var(--mf-fg-primary);
+		cursor: pointer;
+		display: grid;
+		gap: var(--mf-space-3);
+		font: inherit;
+		min-width: 0;
+		padding: var(--mf-space-3);
+		text-align: left;
+		text-decoration: none;
+	}
+
+	.review-media-tile:hover {
+		border-color: var(--mf-active-line);
+	}
+
+	.review-media-tile img {
+		aspect-ratio: 16 / 9;
+		background: var(--mf-bg-base);
+		border: var(--mf-border-muted);
+		object-fit: contain;
+		width: 100%;
+	}
+
+	.review-media-tile span {
+		font-size: var(--mf-text-xs);
+		font-weight: var(--mf-weight-semibold);
+		overflow-wrap: anywhere;
+	}
+
+	.review-media-tile--audio {
+		grid-column: 1 / -1;
+	}
+
 	.action-form {
 		margin: 0;
 	}
@@ -1158,6 +1398,10 @@
 		grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
 	}
 
+	.evidence-grid--sample-only {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
 	.sample-card {
 		display: grid;
 		gap: var(--mf-space-5);
@@ -1188,7 +1432,6 @@
 		overflow-wrap: anywhere;
 	}
 
-	.artifact-list,
 	.host-list,
 	.history-list,
 	.step-list {
@@ -1197,7 +1440,6 @@
 		padding: var(--mf-space-5);
 	}
 
-	.artifact-row,
 	.host-row {
 		align-items: start;
 		border-bottom: var(--mf-border-muted);
@@ -1207,7 +1449,6 @@
 		padding-bottom: var(--mf-space-4);
 	}
 
-	.artifact-row strong,
 	.history-list strong {
 		display: block;
 		font-size: var(--mf-text-sm);
@@ -1215,7 +1456,6 @@
 		overflow-wrap: anywhere;
 	}
 
-	.artifact-row span,
 	.host-row span,
 	.history-list span {
 		color: var(--mf-fg-tertiary);
@@ -1422,8 +1662,22 @@
 		.workflow-strip,
 		.decision,
 		.bench,
+		.review-workspace__header,
 		.support-grid,
 		.evidence-grid {
+			grid-template-columns: 1fr;
+		}
+
+		.output-review-table__head {
+			display: none;
+		}
+
+		.output-review-row {
+			grid-template-columns: 1fr;
+			gap: var(--mf-space-2);
+		}
+
+		.review-media-grid {
 			grid-template-columns: 1fr;
 		}
 

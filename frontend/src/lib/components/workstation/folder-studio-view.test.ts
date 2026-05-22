@@ -4,6 +4,7 @@ import type { FolderCalibrationJob } from '$lib/folders/studio';
 import {
 	buildBenchHostOptions,
 	buildBudgetEnforcementView,
+	buildOutputReviewRows,
 	buildSampleVerdict,
 	buildWorkflowSteps,
 	predictedFolderSizeBytes,
@@ -123,6 +124,27 @@ describe('Folder Studio review request mapping', () => {
 				calibrationJob: null
 			})
 		).toEqual({ disabled: false, title: '' });
+		expect(
+			resolveWorkflowActionState('revise-proposal', {
+				reviewPackReady: false,
+				pendingProposal: null,
+				calibrationJob: null
+			})
+		).toEqual({ disabled: false, title: '' });
+		expect(
+			resolveWorkflowActionState('stop-sample', {
+				reviewPackReady: false,
+				pendingProposal: null,
+				calibrationJob: { status: 'running' } as FolderCalibrationJob
+			})
+		).toEqual({ disabled: false, title: '' });
+		expect(
+			resolveWorkflowActionState('stop-sample', {
+				reviewPackReady: false,
+				pendingProposal: null,
+				calibrationJob: null
+			})
+		).toEqual({ disabled: true, title: 'No sample job is running.' });
 
 		expect(
 			resolveWorkflowActionState('queue-encode', {
@@ -203,6 +225,137 @@ describe('Folder Studio review request mapping', () => {
 
 		expect(predictedFolderSizeBytes(folder)).toBe(17_673_103_272);
 		expect(projectedReclaimBytes(folder)).toBe(62_485_704_339);
+	});
+
+	it('surfaces concrete output, audio, subtitle, and review evidence facts', () => {
+		const calibration = {
+			browser_review_ready: true,
+			review_media_ready: true,
+			sample_result: {
+				predicted_total_size_bytes: 803_322_876,
+				quality_metric: 'VMAF',
+				quality_score: 95.0448
+			},
+			advice: {
+				operator_request: {
+					budget_bytes: 314_572_800,
+					budget_label: '300 MB per episode'
+				},
+				multimodal_review_pack: {
+					artifacts: [
+						{
+							kind: 'video_contact_sheet',
+							label: 'Review moment 1',
+							image_url: '/review-media/moment-1.png'
+						},
+						{
+							kind: 'audio_spectrogram_compare',
+							label: 'Primary audio compare',
+							image_url: '/review-media/audio.png'
+						}
+					],
+					audio_plan: {
+						summary: 'Primary track ac3 is planned for Opus at 256k.'
+					}
+				}
+			}
+		} as FolderCalibrationState;
+		const pendingProposal = {
+			proposal_id: 'draft-hard-cap',
+			can_queue: true,
+			operator_request: {
+				request_text:
+					'I am okay lowering quality or downscaling if needed to actually hit the target.'
+			},
+			preview_policy: {
+				video: {
+					encoder: 'libsvtav1',
+					max_height: 720,
+					max_encoded_percent: 7,
+					quality_metric: 'vmaf',
+					target_vmaf: 89,
+					min_target_vmaf: 87,
+					default_grain: 0
+				},
+				audio: {
+					convert_to_opus_codecs: ['ac3'],
+					keep_languages: ['eng'],
+					surround_5_1_opus_bitrate: '256k'
+				},
+				subtitle: { keep_languages: ['eng'], prefer_text: true, keep_forced: true }
+			}
+		} as PendingSampleProposal;
+		const rows = buildOutputReviewRows(
+			folderPayload({
+				summary: folderSummary({ item_count: 22, total_size_bytes: 80_158_807_611 }),
+				sample_item: {
+					rel_path: 'tv/Example/Season 1/Example.S01E01.mkv',
+					source_size_bytes: 4_349_049_136,
+					video_codec: 'hevc',
+					width: 1920,
+					height: 1080,
+					audio_summary: [
+						{ codec_name: 'ac3', channels: 6, language: 'eng', bit_rate: '640000', default: 1 }
+					],
+					subtitle_summary: [{ codec_name: 'hdmv_pgs_subtitle', language: 'eng' }]
+				},
+				item_plan: {
+					video: { source_codec: 'hevc', output_codec: 'av1' },
+					audio: {
+						source_codec: 'ac3',
+						output_codec: 'opus',
+						output_bitrate: '256k',
+						channels: 6,
+						language: 'eng',
+						action: 'convert',
+						source_track_count: 1,
+						kept_track_count: 1
+					},
+					subtitles: {
+						source_track_count: 1,
+						kept_track_count: 1,
+						languages: ['eng'],
+						codecs: ['hdmv_pgs_subtitle']
+					}
+				},
+				calibration,
+				pending_proposal: pendingProposal
+			}),
+			calibration,
+			pendingProposal
+		);
+
+		expect(rows).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					label: 'Sample result',
+					source: '4.1 GiB',
+					output: '766 MiB',
+					detail: 'target 300 MB per episode · 2.6x target · folder 16.5 GiB',
+					tone: 'wait'
+				}),
+				expect.objectContaining({
+					label: 'Next sample draft',
+					output: 'AV1 · max 720p · 7% cap',
+					detail: 'VMAF target 89 · floor 87 · downscale allowed by the size request · grain off'
+				}),
+				expect.objectContaining({
+					label: 'Audio',
+					source: 'AC-3 · 640 kbps · 5.1 · ENG · default',
+					output: 'Primary track ac3 is planned for Opus at 256k.'
+				}),
+				expect.objectContaining({
+					label: 'Subtitles',
+					source: '1 subtitle track · ENG PGS',
+					output: 'Keep 1 subtitle track'
+				}),
+				expect.objectContaining({
+					label: 'Review media',
+					source: '2 artifacts ready',
+					output: 'Visible below'
+				})
+			])
+		);
 	});
 
 	it('turns an over-budget sample into a revise-first verdict and workflow', () => {

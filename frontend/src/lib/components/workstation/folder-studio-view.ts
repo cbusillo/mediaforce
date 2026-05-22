@@ -1,14 +1,22 @@
 import {
 	codecLabel,
 	flattenPolicy,
+	formatBitrateCopy,
+	formatLanguageCopy,
 	formatPolicyValue,
+	formatPercentCopy,
 	formatResolutionCopy,
 	normalizeReviewArtifacts,
 	pathFilename,
 	policyRowLabel,
+	summarizeAudioPlan,
+	summarizeAudioTrack,
+	summarizeSubtitlePlan,
+	summarizeSubtitleSource,
 	workbenchSection,
 	type FolderCalibrationJob,
 	type FolderCalibrationState,
+	type FolderItemPlan,
 	type FolderPolicy,
 	type FolderSampleItem,
 	type FolderOperatorRequest,
@@ -68,6 +76,14 @@ export type ProposalRow = {
 	current: string;
 	draft: string;
 	changed: boolean;
+};
+
+export type OutputReviewRow = {
+	label: string;
+	source: string;
+	output: string;
+	detail: string;
+	tone?: ShellTone;
 };
 
 export type BudgetEnforcementView = {
@@ -141,12 +157,24 @@ function policyVideo(value: unknown): Record<string, unknown> | null {
 	return record<Record<string, unknown>>(record<Record<string, unknown>>(value)?.video);
 }
 
+function policyAudio(value: unknown): Record<string, unknown> | null {
+	return record<Record<string, unknown>>(record<Record<string, unknown>>(value)?.audio);
+}
+
+function policySubtitle(value: unknown): Record<string, unknown> | null {
+	return record<Record<string, unknown>>(record<Record<string, unknown>>(value)?.subtitle);
+}
+
 export function record<T extends Record<string, unknown>>(value: unknown): T | null {
 	return value && typeof value === 'object' ? (value as T) : null;
 }
 
 function compactText(value: unknown): string {
 	return typeof value === 'string' ? value.trim() : '';
+}
+
+function compactParts(parts: Array<string | null | undefined>): string {
+	return parts.filter((part) => part && part.trim()).join(' · ');
 }
 
 function activeCalibrationStatus(value: unknown): boolean {
@@ -219,7 +247,12 @@ export function resolveWorkflowActionState(
 		};
 	}
 	if (action === 'focus-bench') return { disabled: false, title: '' };
+	if (action === 'revise-proposal') return { disabled: false, title: '' };
 	if (action === 'open-ops') return { disabled: false, title: '' };
+	if (action === 'stop-sample') {
+		if (activeCalibrationStatus(calibrationJob?.status)) return { disabled: false, title: '' };
+		return { disabled: true, title: 'No sample job is running.' };
+	}
 	if (action === 'queue-encode') {
 		if (pendingProposal?.proposal_id && pendingProposal.can_queue === false) {
 			return {
@@ -543,6 +576,181 @@ export function buildSampleFacts(
 		{
 			label: 'Size',
 			value: formatBytes(sampleItem?.source_size_bytes ?? summary?.total_size_bytes)
+		}
+	];
+}
+
+function itemPlan(folder: FolderPayload): FolderItemPlan | null {
+	const plan = record<Record<string, unknown>>(folder.item_plan);
+	return plan ? (plan as FolderItemPlan) : null;
+}
+
+function reviewPackAudioSummary(
+	calibration: FolderCalibrationState | null,
+	pendingProposal: PendingSampleProposal | null
+): string {
+	const reviewPack =
+		pendingProposal?.multimodal_review_pack ?? calibration?.advice?.multimodal_review_pack;
+	return compactText(reviewPack?.audio_plan?.summary);
+}
+
+function draftDownscaleReason(
+	pendingProposal: PendingSampleProposal | null,
+	maxHeight: number | null
+): string | null {
+	if (maxHeight === null || maxHeight <= 0) return null;
+	const requestText = compactParts([
+		pendingProposal?.operator_request?.request_text ?? null,
+		pendingProposal?.operator_note ?? null
+	]).toLowerCase();
+	if (requestText.includes('downscal')) {
+		return 'downscale allowed by the size request';
+	}
+	if (buildBudgetEnforcementView(pendingProposal)?.active) {
+		return 'downscale added to hit the enforced size ceiling';
+	}
+	return 'draft changes output resolution';
+}
+
+function videoPolicySummary(
+	policy: FolderPolicy | null | undefined,
+	pendingProposal: PendingSampleProposal | null
+): {
+	output: string;
+	detail: string;
+} {
+	const video = policyVideo(policy);
+	if (!video) return { output: 'No draft video policy', detail: '' };
+	const encoder = compactText(video.encoder);
+	const maxHeight = numberValue(video.max_height);
+	const cap = numberValue(video.max_encoded_percent);
+	const metric = compactText(video.quality_metric).toUpperCase();
+	const target = numberValue(metric === 'XPSNR' ? video.target_xpsnr : video.target_vmaf);
+	const floor = numberValue(metric === 'XPSNR' ? video.min_target_xpsnr : video.min_target_vmaf);
+	const output = compactParts([
+		encoder.includes('av1') ? 'AV1' : encoder || null,
+		maxHeight !== null && maxHeight > 0 ? `max ${maxHeight}p` : 'source resolution',
+		cap !== null && cap > 0 ? `${formatPercentCopy(cap)} cap` : null
+	]);
+	const detail = compactParts([
+		metric ? `${metric}${target !== null ? ` target ${target}` : ''}` : null,
+		floor !== null ? `floor ${floor}` : null,
+		draftDownscaleReason(pendingProposal, maxHeight),
+		numberValue(video.default_grain) === 0 ? 'grain off' : null,
+		compactText(video.crop) ? `crop ${compactText(video.crop)}` : null
+	]);
+	return { output: output || 'Draft video policy', detail };
+}
+
+function audioPolicySummary(
+	policy: FolderPolicy | null | undefined,
+	sampleItem: FolderSampleItem | null
+): string {
+	const audio = policyAudio(policy);
+	const primary = sampleItem?.audio_summary?.[0] ?? null;
+	if (!audio) return 'No draft audio policy';
+	const codec = String(primary?.codec_name ?? '').toLowerCase();
+	const channels = Number(primary?.channels ?? 0);
+	const convertCodecs = Array.isArray(audio.convert_to_opus_codecs)
+		? audio.convert_to_opus_codecs.map((value) => String(value).toLowerCase())
+		: [];
+	const copyCodecs = Array.isArray(audio.copy_codecs)
+		? audio.copy_codecs.map((value) => String(value).toLowerCase())
+		: [];
+	const bitrate =
+		channels >= 8
+			? compactText(audio.surround_7_1_opus_bitrate)
+			: channels >= 6
+				? compactText(audio.surround_5_1_opus_bitrate)
+				: compactText(audio.stereo_opus_bitrate);
+	if (convertCodecs.includes(codec)) return compactParts(['Opus', bitrate]);
+	if (copyCodecs.includes(codec)) return `Copy ${codecLabel(codec)}`;
+	return bitrate ? `Opus ${formatBitrateCopy(bitrate) ?? bitrate}` : 'Keep selected audio';
+}
+
+function subtitlePolicySummary(policy: FolderPolicy | null | undefined): string {
+	const subtitle = policySubtitle(policy);
+	if (!subtitle) return 'No subtitle policy';
+	const languages = Array.isArray(subtitle.keep_languages)
+		? subtitle.keep_languages.map((value) => formatLanguageCopy(String(value))).filter(Boolean)
+		: [];
+	return compactParts([
+		languages.length ? `Keep ${languages.join(', ')}` : 'Keep selected subtitles',
+		subtitle.prefer_text ? 'prefer text' : null,
+		subtitle.keep_forced ? 'forced kept' : null,
+		compactText(subtitle.default_mode).replaceAll('_', ' ')
+	]);
+}
+
+export function buildOutputReviewRows(
+	folder: FolderPayload,
+	calibration: FolderCalibrationState | null,
+	pendingProposal: PendingSampleProposal | null
+): OutputReviewRow[] {
+	const sampleItem = record<FolderSampleItem>(folder.sample_item);
+	const plan = itemPlan(folder);
+	const verdict = buildSampleVerdict(folder, calibration);
+	const draftPolicy = (pendingProposal?.preview_policy ??
+		folder.policy ??
+		folder.summary?.resolved_policy) as FolderPolicy | null | undefined;
+	const video = videoPolicySummary(draftPolicy, pendingProposal);
+	const audioSource = summarizeAudioTrack(sampleItem?.audio_summary?.[0] ?? null);
+	const audioPlan = summarizeAudioPlan(plan?.audio);
+	const subtitleSource = summarizeSubtitleSource(sampleItem?.subtitle_summary ?? []);
+	const subtitlePlan = summarizeSubtitlePlan(
+		plan?.subtitles,
+		Boolean(draftPolicy?.subtitle?.prefer_text)
+	);
+	const reviewCount = resolveReviewArtifacts(calibration, pendingProposal).length;
+	return [
+		{
+			label: 'Sample result',
+			source: sampleItem ? formatBytes(sampleItem.source_size_bytes) : 'No sample selected',
+			output: verdict?.predictedPerItem ?? 'No measured output yet',
+			detail: verdict
+				? compactParts([
+						`target ${verdict.target}`,
+						verdict.targetDelta || null,
+						`folder ${verdict.predictedFolderTotal}`
+					])
+				: 'Run a representative sample before approving the folder.',
+			tone: verdict?.missesTarget ? 'wait' : verdict ? 'ready' : 'idle'
+		},
+		{
+			label: pendingProposal?.proposal_id ? 'Next sample draft' : 'Video output',
+			source: compactParts([
+				codecLabel(sampleItem?.video_codec),
+				formatResolutionCopy(sampleItem?.width, sampleItem?.height)
+			]),
+			output: video.output,
+			detail: video.detail || 'Uses the current folder video policy.',
+			tone: pendingProposal?.proposal_id ? 'active' : 'idle'
+		},
+		{
+			label: 'Audio',
+			source: compactParts([audioSource.headline, audioSource.detail]),
+			output:
+				reviewPackAudioSummary(calibration, pendingProposal) ||
+				audioPlan.headline ||
+				audioPolicySummary(draftPolicy, sampleItem),
+			detail: audioPlan.detail || audioPolicySummary(draftPolicy, sampleItem),
+			tone: 'idle'
+		},
+		{
+			label: 'Subtitles',
+			source: compactParts([subtitleSource.headline, subtitleSource.detail]),
+			output: subtitlePlan.headline || subtitlePolicySummary(draftPolicy),
+			detail: subtitlePlan.detail || subtitlePolicySummary(draftPolicy),
+			tone: 'idle'
+		},
+		{
+			label: 'Review media',
+			source: reviewCount ? `${reviewCount} artifacts ready` : 'No review media yet',
+			output: reviewCount ? 'Visible below' : 'Run sample',
+			detail: reviewCount
+				? 'Use the source/draft contact sheets and compare timelines before approving.'
+				: 'A sample run creates visual and audio review evidence.',
+			tone: reviewCount ? 'ready' : 'idle'
 		}
 	];
 }
