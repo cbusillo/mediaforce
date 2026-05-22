@@ -350,6 +350,11 @@ export type ProposalSelfCheck = {
 	summary?: string;
 	issues?: string[];
 };
+export type BudgetEnforcement = {
+	status?: string;
+	size_target_analysis?: Record<string, unknown>;
+	applied_policy?: FolderPolicy;
+};
 export type PendingSampleProposal = {
 	proposal_id?: string;
 	status?: string;
@@ -373,6 +378,7 @@ export type PendingSampleProposal = {
 	host?: { key?: string; label?: string };
 	latest_failed_sample_job?: Record<string, unknown> | null;
 	self_check?: ProposalSelfCheck;
+	budget_enforcement?: BudgetEnforcement | null;
 	operator_signal?: string | null;
 	evidence_checked?: string[];
 	multimodal_review_pack?: FolderMultimodalReviewPack | null;

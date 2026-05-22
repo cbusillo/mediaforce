@@ -264,16 +264,21 @@ export function toggleHostAllowedLibrary(
 ): SettingsHost[] {
 	const normalizedKey = libraryKey.trim();
 	if (!normalizedKey) return remoteHosts;
+	const normalizedLibraryKeys = [...new Set(libraryKeys.map((key) => key.trim()).filter(Boolean))];
 	return remoteHosts.map((host, candidate) => {
 		if (candidate !== index) return host;
 		const explicitAllowedLibraries =
-			host.allowed_libraries.length > 0
-				? host.allowed_libraries
-				: libraryKeys.map((key) => key.trim()).filter(Boolean);
+			host.allowed_libraries.length > 0 ? host.allowed_libraries : normalizedLibraryKeys;
 		const allowed_libraries = explicitAllowedLibraries.includes(normalizedKey)
 			? explicitAllowedLibraries.filter((value) => value !== normalizedKey)
 			: [...explicitAllowedLibraries, normalizedKey];
-		return { ...host, allowed_libraries };
+		const canonicalAllowedLibraries =
+			normalizedLibraryKeys.length > 0 &&
+			allowed_libraries.length === normalizedLibraryKeys.length &&
+			normalizedLibraryKeys.every((key) => allowed_libraries.includes(key))
+				? []
+				: allowed_libraries;
+		return { ...host, allowed_libraries: canonicalAllowedLibraries };
 	});
 }
 

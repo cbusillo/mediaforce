@@ -21,7 +21,11 @@
 		totalPendingItems,
 		totalProjectedReclaim
 	} from './queue-workstation';
-	import { WORKBENCH_FILTER_STORAGE_KEY, parseStoredWorkbenchFilters } from './home-workbench';
+	import {
+		clearStoredWorkbenchFilters,
+		readStoredWorkbenchFilters,
+		writeStoredWorkbenchFilters
+	} from './home-workbench';
 	import { formatBytes } from './folder-studio-view';
 
 	let {
@@ -188,11 +192,9 @@
 	function restoreFilters() {
 		if (!browser || filtersLoaded) return;
 		filtersLoaded = true;
-		const filters = parseStoredWorkbenchFilters(
-			window.localStorage.getItem(WORKBENCH_FILTER_STORAGE_KEY)
-		);
+		const filters = readStoredWorkbenchFilters(mode);
 		if (!filters) {
-			window.localStorage.removeItem(WORKBENCH_FILTER_STORAGE_KEY);
+			clearStoredWorkbenchFilters(mode);
 			return;
 		}
 		searchQuery = filters.searchQuery;
@@ -202,10 +204,7 @@
 
 	function persistFilters() {
 		if (!browser || !filtersLoaded) return;
-		window.localStorage.setItem(
-			WORKBENCH_FILTER_STORAGE_KEY,
-			JSON.stringify({ searchQuery, libraryFilters, stateFilters })
-		);
+		writeStoredWorkbenchFilters(mode, { searchQuery, libraryFilters, stateFilters });
 	}
 
 	function libraryIncluded(key: string): boolean {

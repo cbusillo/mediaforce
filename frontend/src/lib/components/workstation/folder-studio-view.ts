@@ -70,6 +70,12 @@ export type ProposalRow = {
 	changed: boolean;
 };
 
+export type BudgetEnforcementView = {
+	active: boolean;
+	cap: string;
+	reason: string;
+};
+
 export type BenchMessage = {
 	id: string;
 	role: 'operator' | 'bench' | 'system';
@@ -129,6 +135,10 @@ function operatorRequest(
 
 function runVerdict(calibration: FolderCalibrationState | null): Record<string, unknown> | null {
 	return record<Record<string, unknown>>(calibrationAdvice(calibration)?.run_verdict);
+}
+
+function policyVideo(value: unknown): Record<string, unknown> | null {
+	return record<Record<string, unknown>>(record<Record<string, unknown>>(value)?.video);
 }
 
 export function record<T extends Record<string, unknown>>(value: unknown): T | null {
@@ -492,6 +502,25 @@ export function buildSampleVerdict(
 	};
 }
 
+export function buildBudgetEnforcementView(
+	pendingProposal: PendingSampleProposal | null
+): BudgetEnforcementView | null {
+	if (!pendingProposal) return null;
+	const enforcement = record<Record<string, unknown>>(pendingProposal.budget_enforcement);
+	const cap = numberValue(policyVideo(enforcement?.applied_policy)?.max_encoded_percent);
+	if (cap === null || cap <= 0) return null;
+	const analysis = record<Record<string, unknown>>(enforcement?.size_target_analysis);
+	const ratio = numberValue(analysis?.predicted_to_budget_ratio);
+	const target =
+		compactText(pendingProposal.operator_request?.budget_label) || 'requested size target';
+	const ratioCopy = ratio && ratio > 0 ? `${formatRatio(ratio)} miss` : 'measured miss';
+	return {
+		active: enforcement?.status === 'enforced_after_miss',
+		cap: `${cap.toLocaleString('en-US', { maximumFractionDigits: 1 })}%`,
+		reason: `Applied after ${ratioCopy} against ${target}.`
+	};
+}
+
 export function buildSampleFacts(
 	sampleItem: FolderSampleItem | null,
 	summary: FolderPayload['summary']
@@ -610,6 +639,36 @@ export function resolveWorkflow(
 			secondaryAction: 'stop-sample'
 		};
 	}
+	const verdict = buildSampleVerdict(folder, calibration);
+	if (verdict?.missesTarget) {
+		const budgetEnforcement = buildBudgetEnforcementView(pendingProposal);
+		if (
+			pendingProposal?.proposal_id &&
+			pendingProposal.can_queue !== false &&
+			budgetEnforcement?.active
+		) {
+			return {
+				tone: 'ready',
+				label: 'Budget enforced',
+				title: `Next sample has a ${budgetEnforcement.cap} size ceiling`,
+				copy: budgetEnforcement.reason,
+				primary: 'Start sample',
+				primaryAction: 'start-sample',
+				secondary: 'Revise',
+				secondaryAction: 'revise-proposal'
+			};
+		}
+		return {
+			tone: 'wait',
+			label: 'Target missed',
+			title: 'Sample is too large for the requested target',
+			copy: `${verdict.predictedPerItem} per episode against ${verdict.target}. ${verdict.recommendation}`,
+			primary: 'Revise sample',
+			primaryAction: 'focus-bench',
+			secondary: 'Download review pack',
+			secondaryAction: 'download-review-pack'
+		};
+	}
 	if (pendingProposal?.self_check?.status && pendingProposal.self_check.status !== 'passed') {
 		return {
 			tone: 'wait',
@@ -625,11 +684,15 @@ export function resolveWorkflow(
 		};
 	}
 	if (pendingProposal?.proposal_id && pendingProposal.can_queue !== false) {
+		const budgetEnforcement = buildBudgetEnforcementView(pendingProposal);
 		return {
 			tone: 'ready',
-			label: 'Draft ready',
-			title: 'Review draft is ready to sample',
+			label: budgetEnforcement?.active ? 'Budget enforced' : 'Draft ready',
+			title: budgetEnforcement?.active
+				? `Next sample has a ${budgetEnforcement.cap} size ceiling`
+				: 'Review draft is ready to sample',
 			copy:
+				budgetEnforcement?.reason ??
 				pendingProposal.message ??
 				'Review the draft, then queue the representative sample when it looks right.',
 			primary: 'Start sample',
@@ -639,19 +702,6 @@ export function resolveWorkflow(
 		};
 	}
 	if (pendingProposal || calibration?.browser_review_ready || calibration?.review_media_ready) {
-		const verdict = buildSampleVerdict(folder, calibration);
-		if (verdict?.missesTarget) {
-			return {
-				tone: 'wait',
-				label: 'Target missed',
-				title: 'Sample is too large for the requested target',
-				copy: `${verdict.predictedPerItem} per episode against ${verdict.target}. ${verdict.recommendation}`,
-				primary: 'Revise sample',
-				primaryAction: 'focus-bench',
-				secondary: 'Download review pack',
-				secondaryAction: 'download-review-pack'
-			};
-		}
 		return {
 			tone: 'ready',
 			label: 'Review ready',

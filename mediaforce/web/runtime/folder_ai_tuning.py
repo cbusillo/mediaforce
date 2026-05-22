@@ -5,9 +5,11 @@ from typing import Any
 from fastapi import HTTPException
 
 from mediaforce.advisor import apply_seed_policy, request_note_tuning, request_review_artifact_critique
+from mediaforce.advising.policy import merge_policy_fragments
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.type_defs import object_dict, object_list
+from mediaforce.web.runtime.folder_tuning_helpers import measured_size_budget_policy_fragment
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.tuning.tuning_memory import promote_learning_artifact, retrieve_learning_context
 
@@ -705,6 +707,30 @@ def _tuned_preview_action(
         "under_target",
         "over_target",
     }
+    measured_budget_fragment = measured_size_budget_policy_fragment(
+        operator_request=operator_request,
+        size_target_analysis=size_target_analysis,
+    )
+    if measured_budget_fragment:
+        combined_fragment = merge_policy_fragments(combined_fragment, measured_budget_fragment)
+        tuned_policy = deps.apply_policy_fragment(current_policy, combined_fragment)
+        advice_payload["applied_policy"] = combined_fragment
+        advice_payload["budget_enforcement"] = {
+            "status": "enforced_after_miss",
+            "size_target_analysis": size_target_analysis,
+            "applied_policy": measured_budget_fragment,
+        }
+        if operator_request:
+            operator_request = {
+                **operator_request,
+                "applied_max_encoded_percent": object_dict(measured_budget_fragment.get("video")).get(
+                    "max_encoded_percent"
+                ),
+                "applied_policy": merge_policy_fragments(
+                    object_dict(operator_request.get("applied_policy")), measured_budget_fragment
+                ),
+            }
+            advice_payload["operator_request"] = operator_request
     alignment_issue = deps.proposal_alignment_issue(
         operator_request=operator_request,
         request_disposition=tuning.request_disposition,
@@ -766,6 +792,7 @@ def _tuned_preview_action(
         "self_check": tuning.self_check,
         "evidence_checked": tuning.evidence_checked,
         "advice_payload": advice_payload,
+        "budget_enforcement": object_dict(advice_payload.get("budget_enforcement")) or None,
         "latest_failed_sample_job": latest_failed_sample_job,
         "trace": {
             "prompt_version": tuning.prompt_version,
