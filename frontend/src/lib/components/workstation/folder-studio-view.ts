@@ -220,7 +220,15 @@ export function resolveWorkflowActionState(
 	}
 	if (action === 'focus-bench') return { disabled: false, title: '' };
 	if (action === 'open-ops') return { disabled: false, title: '' };
-	if (action === 'queue-encode') return { disabled: false, title: '' };
+	if (action === 'queue-encode') {
+		if (pendingProposal?.proposal_id && pendingProposal.can_queue === false) {
+			return {
+				disabled: true,
+				title: pendingProposal.message || 'The current draft is not ready to queue.'
+			};
+		}
+		return { disabled: false, title: '' };
+	}
 	if (action === 'download-review-pack') {
 		return reviewPackReady
 			? { disabled: false, title: '' }
@@ -701,7 +709,7 @@ export function resolveWorkflow(
 			secondaryAction: 'revise-proposal'
 		};
 	}
-	if (pendingProposal || calibration?.browser_review_ready || calibration?.review_media_ready) {
+	if (calibration?.browser_review_ready || calibration?.review_media_ready) {
 		return {
 			tone: 'ready',
 			label: 'Review ready',

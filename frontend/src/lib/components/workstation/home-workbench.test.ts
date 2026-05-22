@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	clearStoredWorkbenchFilters,
+	LEGACY_WORKBENCH_FILTER_STORAGE_KEY,
 	parseStoredWorkbenchFilters,
 	readStoredWorkbenchFilters,
 	workbenchFilterStorageKey,
@@ -33,6 +34,54 @@ describe('home workbench filter storage', () => {
 	it('scopes persisted filter keys by route mode', () => {
 		expect(workbenchFilterStorageKey('queue')).toBe('mediaforce.workbench.filters.v1.queue');
 		expect(workbenchFilterStorageKey('folders')).toBe('mediaforce.workbench.filters.v1.folders');
+	});
+
+	it('migrates legacy queue filters to the scoped queue key', () => {
+		const originalWindow = globalThis.window;
+		const values = new Map<string, string>();
+		values.set(
+			LEGACY_WORKBENCH_FILTER_STORAGE_KEY,
+			JSON.stringify({
+				searchQuery: 'terminator',
+				libraryFilters: { tv: false },
+				stateFilters: { ready: true }
+			})
+		);
+		const storage = {
+			getItem(key: string) {
+				return values.get(key) ?? null;
+			},
+			setItem(key: string, value: string) {
+				values.set(key, value);
+			},
+			removeItem(key: string) {
+				values.delete(key);
+			}
+		} as unknown as Storage;
+
+		Object.defineProperty(globalThis, 'window', {
+			configurable: true,
+			value: { localStorage: storage }
+		});
+
+		expect(readStoredWorkbenchFilters('queue')).toEqual({
+			searchQuery: 'terminator',
+			libraryFilters: { tv: false },
+			stateFilters: { ready: true }
+		});
+		expect(values.has(LEGACY_WORKBENCH_FILTER_STORAGE_KEY)).toBe(false);
+		expect(
+			parseStoredWorkbenchFilters(values.get(workbenchFilterStorageKey('queue')) ?? null)
+		).toEqual({
+			searchQuery: 'terminator',
+			libraryFilters: { tv: false },
+			stateFilters: { ready: true }
+		});
+
+		Object.defineProperty(globalThis, 'window', {
+			configurable: true,
+			value: originalWindow
+		});
 	});
 
 	it('skips storage errors when reading or writing persisted filters', () => {
