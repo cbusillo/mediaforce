@@ -259,17 +259,34 @@ export function toggleHostCapability(
 export function toggleHostAllowedLibrary(
 	remoteHosts: SettingsHost[],
 	index: number,
-	libraryKey: string
+	libraryKey: string,
+	libraryKeys: string[] = []
 ): SettingsHost[] {
 	const normalizedKey = libraryKey.trim();
 	if (!normalizedKey) return remoteHosts;
 	return remoteHosts.map((host, candidate) => {
 		if (candidate !== index) return host;
-		const allowed_libraries = host.allowed_libraries.includes(normalizedKey)
-			? host.allowed_libraries.filter((value) => value !== normalizedKey)
-			: [...host.allowed_libraries, normalizedKey];
+		const explicitAllowedLibraries =
+			host.allowed_libraries.length > 0
+				? host.allowed_libraries
+				: libraryKeys.map((key) => key.trim()).filter(Boolean);
+		const allowed_libraries = explicitAllowedLibraries.includes(normalizedKey)
+			? explicitAllowedLibraries.filter((value) => value !== normalizedKey)
+			: [...explicitAllowedLibraries, normalizedKey];
 		return { ...host, allowed_libraries };
 	});
+}
+
+export function hostLibraryAccessChecked(host: SettingsHost, libraryKey: string): boolean {
+	const normalizedKey = libraryKey.trim();
+	if (!normalizedKey) return false;
+	return host.allowed_libraries.length === 0 || host.allowed_libraries.includes(normalizedKey);
+}
+
+export function hostLibraryAccessCopy(host: SettingsHost): string {
+	return host.allowed_libraries.length === 0
+		? 'All libraries allowed'
+		: `${host.allowed_libraries.length.toLocaleString('en-US')} libraries allowed`;
 }
 
 export function hostActionKey(

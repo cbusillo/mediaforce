@@ -20,10 +20,9 @@
 	const navItems: Array<{
 		id: ShellRouteId;
 		label: string;
-		href: '/' | '/folders' | '/ops' | '/completed' | '/settings';
+		href: '/' | '/ops' | '/completed' | '/settings';
 	}> = [
 		{ id: 'queue', label: 'Queue', href: '/' },
-		{ id: 'folders', label: 'Folders', href: '/folders' },
 		{ id: 'ops', label: 'Ops', href: '/ops' },
 		{ id: 'completed', label: 'Completed', href: '/completed' },
 		{ id: 'settings', label: 'Settings', href: '/settings' }

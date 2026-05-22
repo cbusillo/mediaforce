@@ -8,6 +8,8 @@ import {
 	buildSettingsSavePayload,
 	cloneScheduleProfile,
 	draftFromSettings,
+	hostLibraryAccessChecked,
+	hostLibraryAccessCopy,
 	scheduleDaysSummaryCopy,
 	scheduleWindowSummaryCopy,
 	settingsDraftIsDirty,
@@ -202,5 +204,19 @@ describe('settings draft helpers', () => {
 		expect(hosts[0]?.allowed_libraries).toEqual(['tv', 'movies']);
 		expect(toggleHostAllowedLibrary(hosts, 0, 'movies')[0]?.allowed_libraries).toEqual(['tv']);
 		expect(toggleHostAllowedLibrary(hosts, 0, '')).toBe(hosts);
+	});
+
+	it('treats an empty host library list as all libraries allowed in the editor', () => {
+		const allLibrariesHost = { ...payload.remote_hosts[0], allowed_libraries: [] };
+
+		expect(hostLibraryAccessChecked(allLibrariesHost, 'tv')).toBe(true);
+		expect(hostLibraryAccessCopy(allLibrariesHost)).toBe('All libraries allowed');
+
+		const hosts = toggleHostAllowedLibrary([{ ...allLibrariesHost }], 0, 'movies', [
+			'movies',
+			'tv'
+		]);
+
+		expect(hosts[0]?.allowed_libraries).toEqual(['tv']);
 	});
 });

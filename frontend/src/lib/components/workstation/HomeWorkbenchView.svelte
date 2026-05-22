@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
+	import { browser } from '$app/environment';
 	import { folderRoutePath } from '$lib/folder-display';
 	import type {
 		DashboardFoldersPayload,
@@ -20,6 +21,7 @@
 		totalPendingItems,
 		totalProjectedReclaim
 	} from './queue-workstation';
+	import { WORKBENCH_FILTER_STORAGE_KEY, parseStoredWorkbenchFilters } from './home-workbench';
 	import { formatBytes } from './folder-studio-view';
 
 	let {
@@ -40,6 +42,7 @@
 	let searchQuery = $state('');
 	let libraryFilters = $state<Record<string, boolean>>({});
 	let stateFilters = $state<Record<string, boolean>>({});
+	let filtersLoaded = $state(false);
 	const libraryOptions = $derived(buildLibraryOptions(folders));
 	const stateOptions = $derived(buildStateOptions(folders));
 	const normalizedSearchQuery = $derived(searchQuery.trim().toLowerCase());
@@ -182,6 +185,29 @@
 		return Object.values(byState).sort((left, right) => right.pending - left.pending);
 	}
 
+	function restoreFilters() {
+		if (!browser || filtersLoaded) return;
+		filtersLoaded = true;
+		const filters = parseStoredWorkbenchFilters(
+			window.localStorage.getItem(WORKBENCH_FILTER_STORAGE_KEY)
+		);
+		if (!filters) {
+			window.localStorage.removeItem(WORKBENCH_FILTER_STORAGE_KEY);
+			return;
+		}
+		searchQuery = filters.searchQuery;
+		libraryFilters = filters.libraryFilters;
+		stateFilters = filters.stateFilters;
+	}
+
+	function persistFilters() {
+		if (!browser || !filtersLoaded) return;
+		window.localStorage.setItem(
+			WORKBENCH_FILTER_STORAGE_KEY,
+			JSON.stringify({ searchQuery, libraryFilters, stateFilters })
+		);
+	}
+
 	function libraryIncluded(key: string): boolean {
 		return libraryFilters[key] ?? true;
 	}
@@ -232,6 +258,9 @@
 		const rankCopy = index === 0 ? 'the first visible folder' : `#${index + 1} in the visible list`;
 		return `${folder.title} is ${rankCopy} with ${pending} pending items and about ${reclaim} of projected reclaim.`;
 	}
+
+	$effect(restoreFilters);
+	$effect(persistFilters);
 </script>
 
 <OperatorShell route={shellRoute} subject={shellSubject} {crumb} {statusTiles} {footerSignals}>
