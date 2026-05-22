@@ -1,4 +1,5 @@
 export const WORKBENCH_FILTER_STORAGE_KEY = 'mediaforce.workbench.filters.v1';
+export const LEGACY_WORKBENCH_FILTER_STORAGE_KEY = 'mediaforce.queue.filters.v1';
 
 export type WorkbenchFilterState = {
 	searchQuery: string;
@@ -46,9 +47,18 @@ export function workbenchFilterStorageKey(mode: WorkbenchFilterMode): string {
 export function readStoredWorkbenchFilters(mode: WorkbenchFilterMode): WorkbenchFilterState | null {
 	if (typeof window === 'undefined') return null;
 	try {
-		return parseStoredWorkbenchFilters(
+		const storedFilters = parseStoredWorkbenchFilters(
 			window.localStorage.getItem(workbenchFilterStorageKey(mode))
 		);
+		if (storedFilters || mode !== 'queue') return storedFilters;
+		const legacyFilters = parseStoredWorkbenchFilters(
+			window.localStorage.getItem(LEGACY_WORKBENCH_FILTER_STORAGE_KEY)
+		);
+		if (legacyFilters) {
+			writeStoredWorkbenchFilters(mode, legacyFilters);
+			window.localStorage.removeItem(LEGACY_WORKBENCH_FILTER_STORAGE_KEY);
+		}
+		return legacyFilters;
 	} catch {
 		return null;
 	}

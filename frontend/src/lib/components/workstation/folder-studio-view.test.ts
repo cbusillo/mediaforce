@@ -131,6 +131,17 @@ describe('Folder Studio review request mapping', () => {
 				calibrationJob: null
 			})
 		).toEqual({ disabled: false, title: '' });
+		expect(
+			resolveWorkflowActionState('queue-encode', {
+				reviewPackReady: true,
+				pendingProposal: {
+					proposal_id: 'draft-blocked',
+					can_queue: false,
+					message: 'The draft needs revision before queueing.'
+				} as PendingSampleProposal,
+				calibrationJob: null
+			})
+		).toEqual({ disabled: true, title: 'The draft needs revision before queueing.' });
 
 		expect(
 			resolveWorkflowActionState('start-sample', {
@@ -327,6 +338,34 @@ describe('Folder Studio review request mapping', () => {
 			primary: 'Approve and queue',
 			primaryAction: 'queue-encode',
 			secondary: 'Download pack'
+		});
+	});
+
+	it('does not approve stale non-queueable drafts without review evidence', () => {
+		const workflow = resolveWorkflow(
+			folderPayload({
+				pending_proposal: {
+					proposal_id: 'blocked-draft',
+					can_queue: false,
+					message: 'The draft needs revision before queueing.'
+				}
+			}),
+			folderStatusPayload(),
+			null,
+			{
+				proposal_id: 'blocked-draft',
+				can_queue: false,
+				message: 'The draft needs revision before queueing.'
+			} as PendingSampleProposal,
+			null,
+			null,
+			null
+		);
+
+		expect(workflow).toMatchObject({
+			label: 'Not sampled',
+			primary: 'Ask for draft',
+			primaryAction: 'focus-bench'
 		});
 	});
 
