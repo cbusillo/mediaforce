@@ -34,6 +34,8 @@
 		buildSampleFacts,
 		buildStatusTiles,
 		formatBytes,
+		buildSampleVerdict,
+		predictedFolderSizeBytes,
 		projectedReclaimBytes,
 		record,
 		resolveBenchRequestState,
@@ -63,6 +65,8 @@
 	let workflowPending = $state<WorkflowAction | null>(null);
 	let benchMessage = $state('');
 	let benchError = $state('');
+	let profileMessage = $state('');
+	let profileError = $state('');
 	let benchTextarea = $state<HTMLTextAreaElement | null>(null);
 	let localPendingProposal = $state<Record<string, unknown> | null | undefined>(undefined);
 	let localProposalPrefix = $state('');
@@ -119,6 +123,7 @@
 	const statusTiles = $derived(buildStatusTiles(studioFolder, status, hosts, workflow));
 	const footerSignals = $derived(buildFooterSignals(studioFolder, status, hosts));
 	const sampleFacts = $derived(buildSampleFacts(sampleItem, summary));
+	const sampleVerdict = $derived(buildSampleVerdict(studioFolder, calibration));
 	const benchMessages = $derived(
 		buildBenchMessages(calibration, pendingProposal, retryableSampleJob)
 	);
@@ -195,6 +200,31 @@
 			workflowPending = null;
 		}
 	}
+
+	async function saveProfileAndQueue(action: WorkflowAction) {
+		if (action !== 'queue-encode') return;
+		const actionState = workflowActionState(action);
+		if (actionState.disabled) return;
+		workflowPending = action;
+		profileMessage = '';
+		profileError = '';
+		try {
+			const response = await postJson<{ ok: boolean; message?: string }>(
+				`${resolve('/')}api/folders/${encodedPrefix}/save-profile`,
+				{
+					confirm_high_impact: true,
+					reviewed_draft_hash: calibration?.draft_hash ?? ''
+				}
+			);
+			profileMessage = response.message || 'Approved the draft and queued the folder encode.';
+			await invalidateAll();
+		} catch (error) {
+			profileError =
+				error instanceof Error ? error.message : 'Folder profile could not be approved.';
+		} finally {
+			workflowPending = null;
+		}
+	}
 </script>
 
 <OperatorShell
@@ -222,6 +252,10 @@
 					<div>
 						<span>Projected reclaim</span>
 						<strong>{formatBytes(projectedReclaimBytes(studioFolder))}</strong>
+					</div>
+					<div>
+						<span>Projected output</span>
+						<strong>{formatBytes(predictedFolderSizeBytes(studioFolder))}</strong>
 					</div>
 					<div>
 						<span>Metric</span>
@@ -257,18 +291,36 @@
 					<small>{primaryActionState.disabled ? primaryActionState.title : 'Ready now'}</small>
 				</div>
 				<div class="decision__metrics">
-					<div>
-						<span>Review pack</span>
-						<strong
-							>{reviewArtifacts.length
-								? `${reviewArtifacts.length} artifacts`
-								: reviewReadyCopy(calibration)}</strong
-						>
-					</div>
-					<div>
-						<span>Sample</span>
-						<strong>{sampleItem ? pathFilename(sampleItem.rel_path) : '—'}</strong>
-					</div>
+					{#if sampleVerdict}
+						<div>
+							<span>Per episode</span>
+							<strong>{sampleVerdict.predictedPerItem}</strong>
+							<small>{sampleVerdict.targetDelta || `Target ${sampleVerdict.target}`}</small>
+						</div>
+						<div>
+							<span>Folder output</span>
+							<strong>{sampleVerdict.predictedFolderTotal}</strong>
+							<small>Projected total</small>
+						</div>
+						<div>
+							<span>Reclaim</span>
+							<strong>{sampleVerdict.reclaim}</strong>
+							<small>{sampleVerdict.quality}</small>
+						</div>
+					{:else}
+						<div>
+							<span>Review pack</span>
+							<strong
+								>{reviewArtifacts.length
+									? `${reviewArtifacts.length} artifacts`
+									: reviewReadyCopy(calibration)}</strong
+							>
+						</div>
+						<div>
+							<span>Sample</span>
+							<strong>{sampleItem ? pathFilename(sampleItem.rel_path) : '—'}</strong>
+						</div>
+					{/if}
 				</div>
 				<div class="decision__actions">
 					{#if workflow.primaryAction === 'focus-bench'}
@@ -303,6 +355,17 @@
 							data-mf-action={workflow.primaryAction}
 							data-mf-wire="live"
 							>{workflowPending === workflow.primaryAction ? 'Queueing' : workflow.primary}</button
+						>
+					{:else if workflow.primaryAction === 'queue-encode'}
+						<button
+							class="control control--primary"
+							type="button"
+							disabled={workflowActionState(workflow.primaryAction).disabled}
+							title={workflowActionState(workflow.primaryAction).title}
+							onclick={() => saveProfileAndQueue(workflow.primaryAction)}
+							data-mf-action={workflow.primaryAction}
+							data-mf-wire="live"
+							>{workflowPending === workflow.primaryAction ? 'Approving' : workflow.primary}</button
 						>
 					{:else}
 						<button
@@ -347,6 +410,19 @@
 								? 'Queueing'
 								: workflow.secondary}</button
 						>
+					{:else if workflow.secondaryAction === 'queue-encode'}
+						<button
+							class="control"
+							type="button"
+							disabled={workflowActionState(workflow.secondaryAction).disabled}
+							title={workflowActionState(workflow.secondaryAction).title}
+							onclick={() => saveProfileAndQueue(workflow.secondaryAction)}
+							data-mf-action={workflow.secondaryAction}
+							data-mf-wire="live"
+							>{workflowPending === workflow.secondaryAction
+								? 'Approving'
+								: workflow.secondary}</button
+						>
 					{:else}
 						<button
 							class="control"
@@ -357,28 +433,43 @@
 							data-mf-wire="pending">{workflow.secondary}</button
 						>
 					{/if}
+					{#if profileError}
+						<p class="decision__status decision__status--fail">{profileError}</p>
+					{:else if profileMessage}
+						<p class="decision__status decision__status--ready">{profileMessage}</p>
+					{/if}
 				</div>
 			</section>
 
 			<WorkstationPanel title="Review assistant">
 				<div class="bench">
-					<div class="bench__thread" aria-label="Review assistant conversation">
-						{#each benchMessages as message (message.id)}
-							<div
-								class="bench-message bench-message--{message.role} bench-message--tone-{message.tone ??
-									'neutral'}"
-							>
-								<header>
-									<span>{message.label}</span>
-									{#if message.meta}
-										<small>{message.meta}</small>
-									{/if}
-								</header>
-								<strong>{message.title}</strong>
-								<p>{message.body}</p>
-							</div>
-						{/each}
-					</div>
+					<details
+						class="bench__thread"
+						open={!sampleVerdict}
+						aria-label="Review assistant conversation"
+					>
+						<summary>
+							<strong>Assistant transcript</strong>
+							<span>{benchMessages.length} notes</span>
+						</summary>
+						<div class="bench__messages">
+							{#each benchMessages as message (message.id)}
+								<div
+									class="bench-message bench-message--{message.role} bench-message--tone-{message.tone ??
+										'neutral'}"
+								>
+									<header>
+										<span>{message.label}</span>
+										{#if message.meta}
+											<small>{message.meta}</small>
+										{/if}
+									</header>
+									<strong>{message.title}</strong>
+									<p>{message.body}</p>
+								</div>
+							{/each}
+						</div>
+					</details>
 
 					<div class="bench__composer" aria-label="Review request composer">
 						<label>
@@ -820,7 +911,26 @@
 		align-items: center;
 		display: flex;
 		gap: var(--mf-space-4);
+		flex-wrap: wrap;
 		min-width: 0;
+	}
+
+	.decision__status {
+		border-left: 2px solid var(--mf-idle-fg);
+		flex-basis: 100%;
+		font-size: var(--mf-text-xs);
+		line-height: var(--mf-leading-normal);
+		padding-left: var(--mf-space-3);
+	}
+
+	.decision__status--ready {
+		border-left-color: var(--mf-ready-fg);
+		color: var(--mf-ready-fg);
+	}
+
+	.decision__status--fail {
+		border-left-color: var(--mf-fail-fg);
+		color: var(--mf-fail-fg);
 	}
 
 	.action-form {
@@ -871,9 +981,39 @@
 	}
 
 	.bench__thread {
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border-muted);
+		display: grid;
+		min-width: 0;
+	}
+
+	.bench__thread summary {
+		align-items: center;
+		cursor: pointer;
+		display: flex;
+		gap: var(--mf-space-4);
+		list-style-position: inside;
+		min-height: var(--mf-row-comfy);
+		padding: 0 var(--mf-space-5);
+	}
+
+	.bench__thread summary strong {
+		font-size: var(--mf-text-sm);
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.bench__thread summary span {
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-mono), monospace;
+		font-size: var(--mf-text-xs);
+		margin-left: auto;
+	}
+
+	.bench__messages {
 		display: grid;
 		gap: var(--mf-space-4);
-		min-width: 0;
+		padding: var(--mf-space-5);
+		padding-top: 0;
 	}
 
 	.bench-message {

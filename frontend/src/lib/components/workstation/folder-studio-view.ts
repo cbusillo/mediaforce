@@ -35,6 +35,21 @@ export type WorkflowState = {
 	secondaryAction: WorkflowAction;
 };
 
+export type SampleVerdict = {
+	tone: ShellTone;
+	label: string;
+	title: string;
+	recommendation: string;
+	predictedPerItem: string;
+	predictedFolderTotal: string;
+	reclaim: string;
+	quality: string;
+	target: string;
+	targetDelta: string;
+	missRatio: number | null;
+	missesTarget: boolean;
+};
+
 export type WorkflowAction =
 	| 'download-review-pack'
 	| 'focus-bench'
@@ -90,6 +105,31 @@ export type WorkflowStep = {
 	tone: ShellTone;
 	current: boolean;
 };
+
+function numberValue(value: unknown): number | null {
+	const parsed = Number(value);
+	return Number.isFinite(parsed) ? parsed : null;
+}
+
+function sampleResult(calibration: FolderCalibrationState | null): Record<string, unknown> | null {
+	return record<Record<string, unknown>>(calibration?.sample_result);
+}
+
+function calibrationAdvice(
+	calibration: FolderCalibrationState | null
+): Record<string, unknown> | null {
+	return record<Record<string, unknown>>(calibration?.advice);
+}
+
+function operatorRequest(
+	calibration: FolderCalibrationState | null
+): Record<string, unknown> | null {
+	return record<Record<string, unknown>>(calibrationAdvice(calibration)?.operator_request);
+}
+
+function runVerdict(calibration: FolderCalibrationState | null): Record<string, unknown> | null {
+	return record<Record<string, unknown>>(calibrationAdvice(calibration)?.run_verdict);
+}
 
 export function record<T extends Record<string, unknown>>(value: unknown): T | null {
 	return value && typeof value === 'object' ? (value as T) : null;
@@ -170,6 +210,7 @@ export function resolveWorkflowActionState(
 	}
 	if (action === 'focus-bench') return { disabled: false, title: '' };
 	if (action === 'open-ops') return { disabled: false, title: '' };
+	if (action === 'queue-encode') return { disabled: false, title: '' };
 	if (action === 'download-review-pack') {
 		return reviewPackReady
 			? { disabled: false, title: '' }
@@ -336,9 +377,29 @@ export function resolveFolderTitle(prefix: string): string {
 export function formatBytes(value: number | null | undefined): string {
 	if (value == null) return '—';
 	if (!Number.isFinite(value)) return '—';
-	return `${(value / 1024 ** 3).toLocaleString('en-US', {
-		maximumFractionDigits: value >= 1024 ** 3 ? 1 : 2
-	})} GiB`;
+	const absValue = Math.abs(value);
+	if (absValue >= 1024 ** 3) {
+		return `${(value / 1024 ** 3).toLocaleString('en-US', {
+			maximumFractionDigits: 1
+		})} GiB`;
+	}
+	if (absValue >= 1024 ** 2) {
+		return `${(value / 1024 ** 2).toLocaleString('en-US', {
+			maximumFractionDigits: absValue >= 100 * 1024 ** 2 ? 0 : 1
+		})} MiB`;
+	}
+	if (absValue >= 1024) {
+		return `${(value / 1024).toLocaleString('en-US', { maximumFractionDigits: 0 })} KiB`;
+	}
+	return `${value.toLocaleString('en-US', { maximumFractionDigits: 0 })} B`;
+}
+
+function formatRatio(value: number | null): string {
+	if (value === null || !Number.isFinite(value) || value <= 0) return '';
+	return `${value.toLocaleString('en-US', {
+		maximumFractionDigits: value >= 10 ? 0 : 1,
+		minimumFractionDigits: value >= 10 ? 0 : 1
+	})}x target`;
 }
 
 export function summarizeStatuses(statuses: Record<string, number>): string {
@@ -359,14 +420,76 @@ export function resolvedMetricCopy(folder: FolderPayload): string {
 }
 
 export function projectedReclaimBytes(folder: FolderPayload): number | null {
-	const sampleResult = record<Record<string, unknown>>(folder.calibration)?.sample_result;
-	const predictedSize = Number(
-		record<Record<string, unknown>>(sampleResult)?.predicted_total_size_bytes
-	);
+	const calibration = record<FolderCalibrationState>(folder.calibration);
+	const result = sampleResult(calibration);
+	const predictedSize = Number(result?.predicted_total_size_bytes);
 	const sourceSize = Number(folder.summary?.total_size_bytes);
+	const itemCount = Number(folder.summary?.item_count);
 	if (!Number.isFinite(sourceSize) || sourceSize <= 0) return null;
 	if (!Number.isFinite(predictedSize) || predictedSize <= 0) return null;
-	return Math.max(sourceSize - predictedSize, 0);
+	const predictedFolderSize =
+		Number.isFinite(itemCount) && itemCount > 0 ? predictedSize * itemCount : predictedSize;
+	return Math.max(sourceSize - predictedFolderSize, 0);
+}
+
+export function predictedFolderSizeBytes(folder: FolderPayload): number | null {
+	const calibration = record<FolderCalibrationState>(folder.calibration);
+	const predictedSize = Number(sampleResult(calibration)?.predicted_total_size_bytes);
+	const itemCount = Number(folder.summary?.item_count);
+	if (!Number.isFinite(predictedSize) || predictedSize <= 0) return null;
+	return Number.isFinite(itemCount) && itemCount > 0 ? predictedSize * itemCount : predictedSize;
+}
+
+export function buildSampleVerdict(
+	folder: FolderPayload,
+	calibration: FolderCalibrationState | null
+): SampleVerdict | null {
+	const result = sampleResult(calibration);
+	if (!result) return null;
+	const predictedSize = numberValue(result.predicted_total_size_bytes);
+	if (predictedSize === null || predictedSize <= 0) return null;
+	const request = operatorRequest(calibration);
+	const verdict = runVerdict(calibration);
+	const itemCount = numberValue(folder.summary?.item_count);
+	const sourceSize = numberValue(folder.summary?.total_size_bytes);
+	const folderTotal =
+		itemCount !== null && itemCount > 0 ? predictedSize * itemCount : predictedSize;
+	const reclaim =
+		sourceSize !== null && sourceSize > 0 ? Math.max(sourceSize - folderTotal, 0) : null;
+	const budget = numberValue(request?.budget_bytes);
+	const target =
+		compactText(request?.budget_label) || (budget ? formatBytes(budget) : 'No size target');
+	const missRatio = budget && budget > 0 ? predictedSize / budget : null;
+	const outcome = compactText(verdict?.outcome).toLowerCase();
+	const missesTarget =
+		outcome === 'poor_fit' || outcome === 'over_target' || (missRatio !== null && missRatio > 1.15);
+	const qualityMetric =
+		compactText(result.quality_metric) || compactText(request?.metric).toUpperCase() || 'Quality';
+	const qualityScore = numberValue(result.quality_score);
+	const quality = qualityScore === null ? '—' : `${qualityMetric} ${qualityScore.toFixed(1)}`;
+	const predictedPerItem = formatBytes(predictedSize);
+	const recommendation =
+		compactText(verdict?.next_step) ||
+		(missesTarget
+			? 'Run another sample with a smaller-size target.'
+			: 'Review the sample clips, then approve or revise.');
+	return {
+		tone: missesTarget ? 'wait' : 'ready',
+		label: missesTarget ? 'Target missed' : 'Sample result',
+		title:
+			missesTarget && target !== 'No size target'
+				? `${predictedPerItem} per episode misses ${target}.`
+				: `${predictedPerItem} per episode sample is ready.`,
+		recommendation,
+		predictedPerItem,
+		predictedFolderTotal: formatBytes(folderTotal),
+		reclaim: reclaim === null ? '—' : formatBytes(reclaim),
+		quality,
+		target,
+		targetDelta: formatRatio(missRatio),
+		missRatio,
+		missesTarget
+	};
 }
 
 export function buildSampleFacts(
@@ -516,17 +639,32 @@ export function resolveWorkflow(
 		};
 	}
 	if (pendingProposal || calibration?.browser_review_ready || calibration?.review_media_ready) {
+		const verdict = buildSampleVerdict(folder, calibration);
+		if (verdict?.missesTarget) {
+			return {
+				tone: 'wait',
+				label: 'Target missed',
+				title: 'Sample is too large for the requested target',
+				copy: `${verdict.predictedPerItem} per episode against ${verdict.target}. ${verdict.recommendation}`,
+				primary: 'Revise sample',
+				primaryAction: 'focus-bench',
+				secondary: 'Download review pack',
+				secondaryAction: 'download-review-pack'
+			};
+		}
 		return {
 			tone: 'ready',
 			label: 'Review ready',
-			title: 'Review the sample pack, then approve or revise',
+			title: 'Approve this sample or revise it',
 			copy:
-				pendingProposal?.message ??
-				'Evidence is ready. Download the review pack, inspect the sample clips, then narrow the decision to approve or revise.',
-			primary: 'Download review pack',
-			primaryAction: 'download-review-pack',
-			secondary: 'Revise',
-			secondaryAction: 'revise-proposal'
+				verdict === null
+					? (pendingProposal?.message ??
+						'Evidence is ready. Review the sample clips, then approve the draft or revise it.')
+					: `${verdict.predictedPerItem} per episode, ${verdict.predictedFolderTotal} for the folder. Review the clips, then approve and queue if this is acceptable.`,
+			primary: 'Approve and queue',
+			primaryAction: 'queue-encode',
+			secondary: 'Download pack',
+			secondaryAction: 'download-review-pack'
 		};
 	}
 	if (!folder.sample_item) {

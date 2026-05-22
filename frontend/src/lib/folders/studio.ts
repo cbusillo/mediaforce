@@ -265,6 +265,7 @@ export type FolderOperatorRequest = {
 	request_type?: string;
 	metric?: string;
 	target?: number;
+	budget_bytes?: number;
 	budget_label?: string;
 	scale_height?: number;
 	scale_label?: string;
