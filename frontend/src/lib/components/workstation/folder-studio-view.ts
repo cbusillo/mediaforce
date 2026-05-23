@@ -89,7 +89,14 @@ export type OutputReviewRow = {
 export type BudgetEnforcementView = {
 	active: boolean;
 	cap: string;
+	capBytes: string | null;
 	reason: string;
+};
+
+export type DecisionFact = {
+	label: string;
+	value: string;
+	detail: string;
 };
 
 export type BenchMessage = {
@@ -544,12 +551,15 @@ export function buildSampleVerdict(
 }
 
 export function buildBudgetEnforcementView(
-	pendingProposal: PendingSampleProposal | null
+	pendingProposal: PendingSampleProposal | null,
+	sampleItem: FolderSampleItem | null = null
 ): BudgetEnforcementView | null {
 	if (!pendingProposal) return null;
 	const enforcement = record<Record<string, unknown>>(pendingProposal.budget_enforcement);
 	const cap = numberValue(policyVideo(enforcement?.applied_policy)?.max_encoded_percent);
 	if (cap === null || cap <= 0) return null;
+	const sourceSize = numberValue(sampleItem?.source_size_bytes);
+	const capBytes = sourceSize !== null && sourceSize > 0 ? (sourceSize * cap) / 100 : null;
 	const analysis = record<Record<string, unknown>>(enforcement?.size_target_analysis);
 	const ratio = numberValue(analysis?.predicted_to_budget_ratio);
 	const target =
@@ -558,8 +568,78 @@ export function buildBudgetEnforcementView(
 	return {
 		active: enforcement?.status === 'enforced_after_miss',
 		cap: `${cap.toLocaleString('en-US', { maximumFractionDigits: 1 })}%`,
+		capBytes: capBytes === null ? null : formatBytes(capBytes),
 		reason: `Applied after ${ratioCopy} against ${target}.`
 	};
+}
+
+export function buildDecisionFacts(
+	folder: FolderPayload,
+	calibration: FolderCalibrationState | null,
+	pendingProposal: PendingSampleProposal | null
+): DecisionFact[] {
+	const verdict = buildSampleVerdict(folder, calibration);
+	const sampleItem = record<FolderSampleItem>(folder.sample_item);
+	const enforcement = buildBudgetEnforcementView(pendingProposal, sampleItem);
+	const draftPolicy = (pendingProposal?.preview_policy ??
+		folder.policy ??
+		folder.summary?.resolved_policy) as FolderPolicy | null | undefined;
+	const video = videoPolicySummary(draftPolicy, pendingProposal);
+	if (enforcement?.active) {
+		return [
+			{
+				label: 'Last sample',
+				value: verdict?.predictedPerItem ?? 'Measured miss',
+				detail: compactParts([
+					verdict?.targetDelta || null,
+					verdict?.target ? `target ${verdict.target}` : null
+				])
+			},
+			{
+				label: 'Next size ceiling',
+				value: enforcement.capBytes ? `${enforcement.capBytes} max` : `${enforcement.cap} cap`,
+				detail: compactParts([
+					enforcement.capBytes ? `${enforcement.cap} of selected source` : null,
+					pendingProposal?.operator_request?.budget_label ?? null
+				])
+			},
+			{
+				label: 'Next video plan',
+				value: video.output,
+				detail: video.detail || 'Uses the current folder video policy.'
+			}
+		];
+	}
+	if (verdict) {
+		return [
+			{
+				label: 'Per episode',
+				value: verdict.predictedPerItem,
+				detail: verdict.targetDelta || `Target ${verdict.target}`
+			},
+			{ label: 'Folder output', value: verdict.predictedFolderTotal, detail: 'Projected total' },
+			{ label: 'Reclaim', value: verdict.reclaim, detail: verdict.quality }
+		];
+	}
+	return [
+		{
+			label: 'Review pack',
+			value: resolveReviewArtifacts(calibration, pendingProposal).length
+				? `${resolveReviewArtifacts(calibration, pendingProposal).length} artifacts`
+				: reviewReadyCopy(calibration),
+			detail: 'Evidence state'
+		},
+		{
+			label: 'Sample',
+			value: sampleItem ? pathFilename(sampleItem.rel_path) : 'No sample selected',
+			detail: 'Representative file'
+		},
+		{
+			label: 'Next action',
+			value: 'Use the decision buttons',
+			detail: 'Draft, sample, review, or approve from here'
+		}
+	];
 }
 
 export function buildSampleFacts(
@@ -603,11 +683,11 @@ function draftDownscaleReason(
 		pendingProposal?.operator_request?.request_text ?? null,
 		pendingProposal?.operator_note ?? null
 	]).toLowerCase();
+	if (buildBudgetEnforcementView(pendingProposal)?.active) {
+		return 'downscale enforced after the measured miss';
+	}
 	if (requestText.includes('downscal')) {
 		return 'downscale allowed by the size request';
-	}
-	if (buildBudgetEnforcementView(pendingProposal)?.active) {
-		return 'downscale added to hit the enforced size ceiling';
 	}
 	return 'draft changes output resolution';
 }
@@ -704,8 +784,8 @@ export function buildOutputReviewRows(
 	const reviewCount = resolveReviewArtifacts(calibration, pendingProposal).length;
 	return [
 		{
-			label: 'Sample result',
-			source: sampleItem ? formatBytes(sampleItem.source_size_bytes) : 'No sample selected',
+			label: 'Measured sample',
+			source: sampleItem ? `source ${formatBytes(sampleItem.source_size_bytes)}` : 'No sample selected',
 			output: verdict?.predictedPerItem ?? 'No measured output yet',
 			detail: verdict
 				? compactParts([

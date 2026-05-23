@@ -29,10 +29,11 @@
 		buildFooterSignals,
 		buildProposalRows,
 		buildOutputReviewRows,
+		buildDecisionFacts,
 		buildSampleFacts,
+		buildSampleVerdict,
 		buildStatusTiles,
 		formatBytes,
-		buildSampleVerdict,
 		predictedFolderSizeBytes,
 		projectedReclaimBytes,
 		record,
@@ -42,7 +43,6 @@
 		resolveReviewArtifacts,
 		resolveWorkflowActionState,
 		resolveWorkflow,
-		reviewReadyCopy,
 		summarizeStatuses,
 		type WorkflowAction
 	} from './folder-studio-view';
@@ -111,12 +111,6 @@
 		)
 	);
 	const workflowSteps = $derived(buildWorkflowSteps(workflow));
-	const currentStepIndex = $derived(
-		Math.max(
-			workflowSteps.findIndex((step) => step.current),
-			0
-		)
-	);
 	const proposalRows = $derived(buildProposalRows(studioFolder, pendingProposal));
 	const statusTiles = $derived(buildStatusTiles(studioFolder, status, hosts, workflow));
 	const footerSignals = $derived(buildFooterSignals(studioFolder, status, hosts));
@@ -125,6 +119,7 @@
 	const outputReviewRows = $derived(
 		buildOutputReviewRows(studioFolder, calibration, pendingProposal)
 	);
+	const decisionFacts = $derived(buildDecisionFacts(studioFolder, calibration, pendingProposal));
 	const sampleResultRow = $derived(
 		outputReviewRows.find((row) => row.label === 'Sample result') ?? null
 	);
@@ -156,9 +151,12 @@
 	);
 	const benchRequestDisabled = $derived(benchRequestState.disabled);
 	const reviewPackReady = $derived(
-		reviewArtifacts.length > 0 || reviewReadyCopy(calibration) === 'Ready'
+		Boolean(
+			reviewArtifacts.length > 0 ||
+			calibration?.browser_review_ready ||
+			calibration?.review_media_ready
+		)
 	);
-	const primaryActionState = $derived(workflowActionState(workflow.primaryAction));
 
 	function workflowActionState(action: WorkflowAction) {
 		return resolveWorkflowActionState(action, {
@@ -337,42 +335,14 @@
 					<h2 id="decision-title">{workflow.title}</h2>
 					<p>{workflow.copy}</p>
 				</div>
-				<div class="decision__next">
-					<span>Step {currentStepIndex + 1} next action</span>
-					<strong>{workflow.primary}</strong>
-					<small>{primaryActionState.disabled ? primaryActionState.title : 'Ready now'}</small>
-				</div>
-				<div class="decision__metrics">
-					{#if sampleVerdict}
-						<div>
-							<span>Per episode</span>
-							<strong>{sampleVerdict.predictedPerItem}</strong>
-							<small>{sampleVerdict.targetDelta || `Target ${sampleVerdict.target}`}</small>
+				<div class="decision__facts" aria-label="Decision facts">
+					{#each decisionFacts as fact (fact.label)}
+						<div class="decision-fact">
+							<span>{fact.label}</span>
+							<strong>{fact.value}</strong>
+							<small>{fact.detail}</small>
 						</div>
-						<div>
-							<span>Folder output</span>
-							<strong>{sampleVerdict.predictedFolderTotal}</strong>
-							<small>Projected total</small>
-						</div>
-						<div>
-							<span>Reclaim</span>
-							<strong>{sampleVerdict.reclaim}</strong>
-							<small>{sampleVerdict.quality}</small>
-						</div>
-					{:else}
-						<div>
-							<span>Review pack</span>
-							<strong
-								>{reviewArtifacts.length
-									? `${reviewArtifacts.length} artifacts`
-									: reviewReadyCopy(calibration)}</strong
-							>
-						</div>
-						<div>
-							<span>Sample</span>
-							<strong>{sampleItem ? pathFilename(sampleItem.rel_path) : '—'}</strong>
-						</div>
-					{/if}
+					{/each}
 				</div>
 				<div class="decision__actions">
 					{#if reviewPackReady && workflow.primaryAction !== 'download-review-pack' && workflow.secondaryAction !== 'download-review-pack'}
@@ -846,8 +816,7 @@
 	}
 
 	.folder-header__facts,
-	.decision__next,
-	.decision__metrics,
+	.decision__facts,
 	.sample-facts {
 		display: flex;
 		gap: var(--mf-space-5);
@@ -859,12 +828,10 @@
 		grid-template-columns: repeat(3, minmax(0, 1fr));
 	}
 
-	.decision__next {
+	.decision__facts {
 		background: var(--mf-bg-panel-2);
 		border: var(--mf-border-muted);
 		border-left: 2px solid var(--decision-line);
-		display: grid;
-		gap: var(--mf-space-2);
 		padding: var(--mf-space-4);
 	}
 
@@ -873,7 +840,7 @@
 	}
 
 	.folder-header__facts div,
-	.decision__metrics div,
+	.decision-fact,
 	.sample-facts div,
 	.context-list div {
 		display: grid;
@@ -883,8 +850,7 @@
 
 	.folder-header__facts span,
 	.folder-header__path span,
-	.decision__next span,
-	.decision__metrics span,
+	.decision-fact span,
 	.sample-facts span,
 	.context-list span {
 		color: var(--mf-fg-tertiary);
@@ -896,8 +862,7 @@
 
 	.folder-header__facts strong,
 	.folder-header__path strong,
-	.decision__next strong,
-	.decision__metrics strong,
+	.decision-fact strong,
 	.sample-facts strong,
 	.context-list strong {
 		font-family: var(--mf-font-mono), monospace;
@@ -906,7 +871,7 @@
 		overflow-wrap: anywhere;
 	}
 
-	.decision__next small {
+	.decision-fact small {
 		color: var(--mf-fg-tertiary);
 		font-size: var(--mf-text-xs);
 	}
@@ -996,8 +961,7 @@
 	}
 
 	.decision__summary,
-	.decision__next,
-	.decision__metrics,
+	.decision__facts,
 	.decision__actions {
 		min-width: 0;
 	}
@@ -1027,8 +991,12 @@
 		max-width: 68ch;
 	}
 
-	.decision__metrics {
+	.decision__facts {
 		grid-column: 1 / -1;
+	}
+
+	.decision-fact {
+		flex: 1 1 0;
 	}
 
 	.decision__actions {
@@ -1650,7 +1618,7 @@
 			grid-template-columns: minmax(0, 1fr);
 		}
 
-		.decision__metrics {
+		.decision__facts {
 			display: grid;
 			grid-template-columns: repeat(3, minmax(0, 1fr));
 		}
@@ -1700,8 +1668,7 @@
 		}
 
 		.folder-header__facts,
-		.decision__next,
-		.decision__metrics,
+		.decision__facts,
 		.sample-facts,
 		.decision__actions {
 			flex-wrap: wrap;

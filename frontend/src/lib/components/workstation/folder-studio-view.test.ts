@@ -4,6 +4,7 @@ import type { FolderCalibrationJob } from '$lib/folders/studio';
 import {
 	buildBenchHostOptions,
 	buildBudgetEnforcementView,
+	buildDecisionFacts,
 	buildOutputReviewRows,
 	buildSampleVerdict,
 	buildWorkflowSteps,
@@ -328,8 +329,8 @@ describe('Folder Studio review request mapping', () => {
 		expect(rows).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({
-					label: 'Sample result',
-					source: '4.1 GiB',
+					label: 'Measured sample',
+					source: 'source 4.1 GiB',
 					output: '766 MiB',
 					detail: 'target 300 MB per episode · 2.6x target · folder 16.5 GiB',
 					tone: 'wait'
@@ -661,6 +662,7 @@ describe('Folder Studio review request mapping', () => {
 		expect(buildBudgetEnforcementView(pendingProposal)).toEqual({
 			active: true,
 			cap: '7%',
+			capBytes: null,
 			reason: 'Applied after 2.6x target miss against 300 MB per episode.'
 		});
 
@@ -681,6 +683,67 @@ describe('Folder Studio review request mapping', () => {
 			primary: 'Start sample',
 			primaryAction: 'start-sample'
 		});
+	});
+
+	it('summarizes the capped retry facts in the decision panel', () => {
+		const calibration = {
+			sample_result: {
+				predicted_total_size_bytes: 803_322_876,
+				quality_metric: 'VMAF',
+				quality_score: 95.0448
+			},
+			advice: {
+				operator_request: {
+					budget_bytes: 314_572_800,
+					budget_label: '300 MB per episode'
+				}
+			}
+		} as FolderCalibrationState;
+		const pendingProposal = {
+			proposal_id: 'capped-retry-draft',
+			can_queue: true,
+			operator_request: { budget_label: '300 MB per episode' },
+			preview_policy: {
+				video: {
+					encoder: 'libsvtav1',
+					max_height: 720,
+					max_encoded_percent: 7,
+					quality_metric: 'vmaf',
+					target_vmaf: 89,
+					min_target_vmaf: 87,
+					default_grain: 0
+				}
+			},
+			budget_enforcement: {
+				status: 'enforced_after_miss',
+				size_target_analysis: { predicted_to_budget_ratio: 2.55 },
+				applied_policy: { video: { max_encoded_percent: 7 } }
+			}
+		} as PendingSampleProposal;
+		const folder = folderPayload({
+			calibration,
+			pending_proposal: pendingProposal,
+			sample_item: {
+				rel_path: 'tv/Example/Season 1/Episode.mkv',
+				source_size_bytes: 4_388_646_674,
+				video_codec: 'h264'
+			},
+			summary: folderSummary({ item_count: 22, total_size_bytes: 80_158_807_611 })
+		});
+
+		expect(buildDecisionFacts(folder, calibration, pendingProposal)).toEqual([
+			{ label: 'Last sample', value: '766 MiB', detail: '2.6x target · target 300 MB per episode' },
+			{
+				label: 'Next size ceiling',
+				value: '293 MiB max',
+				detail: '7% of selected source · 300 MB per episode'
+			},
+			{
+				label: 'Next video plan',
+				value: 'AV1 · max 720p · 7% cap',
+				detail: 'VMAF target 89 · floor 87 · downscale enforced after the measured miss · grain off'
+			}
+		]);
 	});
 
 	it('makes unsampled folders start with the review assistant instead of a disabled sample action', () => {

@@ -333,8 +333,11 @@ def create_app(config_path: Path | None = None) -> FastAPI:
 
     app = FastAPI(title="Mediaforce Calibration Bench", lifespan=_app_lifespan)
     review_dir = config.paths.review_dir
+    project_frontend_build_dir = config.paths.project_root / "frontend" / "build"
     packaged_frontend_build_dir = Path(__file__).resolve().parent / "frontend_build"
-    frontend_build_dir = packaged_frontend_build_dir if packaged_frontend_build_dir.exists() else config.paths.project_root / "frontend" / "build"
+    frontend_build_dir = (
+        project_frontend_build_dir if project_frontend_build_dir.exists() else packaged_frontend_build_dir
+    )
     review_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/review-media", StaticFiles(directory=str(review_dir)), name="review_media")
     frontend_app_dir = frontend_build_dir / "_app"
