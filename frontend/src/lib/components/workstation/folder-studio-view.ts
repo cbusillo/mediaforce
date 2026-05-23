@@ -58,6 +58,7 @@ export type SampleVerdict = {
 	targetDelta: string;
 	missRatio: number | null;
 	missesTarget: boolean;
+	stalePolicy: boolean;
 };
 
 export type WorkflowAction =
@@ -172,6 +173,24 @@ function policyAudio(value: unknown): Record<string, unknown> | null {
 
 function policySubtitle(value: unknown): Record<string, unknown> | null {
 	return record<Record<string, unknown>>(record<Record<string, unknown>>(value)?.subtitle);
+}
+
+function activePolicy(
+	folder: FolderPayload,
+	pendingProposal: PendingSampleProposal | null
+): FolderPolicy | null {
+	return (pendingProposal?.preview_policy ??
+		pendingProposal?.applied_policy ??
+		folder.summary?.resolved_policy ??
+		folder.policy ??
+		null) as FolderPolicy | null;
+}
+
+function activeVideoPolicy(
+	folder: FolderPayload,
+	pendingProposal: PendingSampleProposal | null
+): Record<string, unknown> | null {
+	return policyVideo(activePolicy(folder, pendingProposal));
 }
 
 export function record<T extends Record<string, unknown>>(value: unknown): T | null {
@@ -532,7 +551,8 @@ export function predictedFolderSizeBytes(folder: FolderPayload): number | null {
 
 export function buildSampleVerdict(
 	folder: FolderPayload,
-	calibration: FolderCalibrationState | null
+	calibration: FolderCalibrationState | null,
+	pendingProposal: PendingSampleProposal | null = null
 ): SampleVerdict | null {
 	const result = sampleResult(calibration);
 	if (!result) return null;
@@ -557,6 +577,14 @@ export function buildSampleVerdict(
 	const qualityMetric =
 		compactText(result.quality_metric) || compactText(request?.metric).toUpperCase() || 'Quality';
 	const qualityScore = numberValue(result.quality_score);
+	const resultTarget = numberValue(result.quality_target);
+	const activeVideo = activeVideoPolicy(folder, pendingProposal);
+	const activeMetric = compactText(activeVideo?.quality_metric).toUpperCase();
+	const activeTarget = numberValue(
+		activeMetric === 'XPSNR' ? activeVideo?.target_xpsnr : activeVideo?.target_vmaf
+	);
+	const stalePolicy =
+		activeTarget !== null && resultTarget !== null && Math.abs(activeTarget - resultTarget) >= 0.1;
 	const quality = qualityScore === null ? '—' : `${qualityMetric} ${qualityScore.toFixed(1)}`;
 	const predictedPerItem = formatBytes(predictedSize);
 	const recommendation =
@@ -567,8 +595,9 @@ export function buildSampleVerdict(
 	return {
 		tone: missesTarget ? 'wait' : 'ready',
 		label: missesTarget ? 'Target missed' : 'Sample result',
-		title:
-			missesTarget && target !== 'No size target'
+		title: stalePolicy
+			? `${predictedPerItem} per episode came from older settings.`
+			: missesTarget && target !== 'No size target'
 				? `${predictedPerItem} per episode misses ${target}.`
 				: `${predictedPerItem} per episode sample is ready.`,
 		recommendation,
@@ -581,7 +610,8 @@ export function buildSampleVerdict(
 		targetBitrate: formatAverageBitrate(budget, durationSeconds),
 		targetDelta: formatRatio(missRatio),
 		missRatio,
-		missesTarget
+		missesTarget,
+		stalePolicy
 	};
 }
 
@@ -613,14 +643,38 @@ export function buildDecisionFacts(
 	calibration: FolderCalibrationState | null,
 	pendingProposal: PendingSampleProposal | null
 ): DecisionFact[] {
-	const verdict = buildSampleVerdict(folder, calibration);
+	const verdict = buildSampleVerdict(folder, calibration, pendingProposal);
 	const sampleItem = record<FolderSampleItem>(folder.sample_item);
 	const enforcement = buildBudgetEnforcementView(pendingProposal, sampleItem);
-	const draftPolicy = (pendingProposal?.preview_policy ??
-		folder.policy ??
-		folder.summary?.resolved_policy) as FolderPolicy | null | undefined;
+	const draftPolicy = activePolicy(folder, pendingProposal);
 	const video = videoPolicySummary(draftPolicy, pendingProposal);
 	const targetVideoRate = formatKbps(pendingProposal?.operator_request?.target_video_bitrate_kbps);
+	if (verdict?.stalePolicy && !pendingProposal?.proposal_id) {
+		return [
+			{
+				label: 'Old sample',
+				value: compactParts([
+					verdict.predictedPerItem,
+					verdict.predictedBitrate !== '—' ? verdict.predictedBitrate : null
+				]),
+				detail: compactParts([
+					verdict.quality,
+					verdict.targetDelta || null,
+					verdict.target ? `old target ${verdict.target}` : null
+				])
+			},
+			{
+				label: 'Current target',
+				value: video.output,
+				detail: video.detail || 'Uses the current folder video policy.'
+			},
+			{
+				label: 'Next action',
+				value: 'Run fresh sample',
+				detail: 'The old evidence does not match the current defaults.'
+			}
+		];
+	}
 	if (enforcement?.active) {
 		return [
 			{
@@ -761,6 +815,7 @@ function videoPolicySummary(
 	const encoder = compactText(video.encoder);
 	const maxHeight = numberValue(video.max_height);
 	const cap = numberValue(video.max_encoded_percent);
+	const enforcedCap = buildBudgetEnforcementView(pendingProposal)?.active === true;
 	const metric = compactText(video.quality_metric).toUpperCase();
 	const target = numberValue(metric === 'XPSNR' ? video.target_xpsnr : video.target_vmaf);
 	const floor = numberValue(metric === 'XPSNR' ? video.min_target_xpsnr : video.min_target_vmaf);
@@ -769,7 +824,7 @@ function videoPolicySummary(
 	const output = compactParts([
 		encoder.includes('av1') ? 'AV1' : encoder || null,
 		maxHeight !== null && maxHeight > 0 ? `max ${maxHeight}p` : 'source resolution',
-		cap !== null && cap > 0 ? `${formatPercentCopy(cap)} cap` : null
+		enforcedCap && cap !== null && cap > 0 ? `${formatPercentCopy(cap)} cap` : null
 	]);
 	const detail = compactParts([
 		metricCopy ? `${metricCopy}${target !== null ? ` target ${target}` : ''}` : null,
@@ -828,10 +883,8 @@ export function buildOutputReviewRows(
 ): OutputReviewRow[] {
 	const sampleItem = record<FolderSampleItem>(folder.sample_item);
 	const plan = itemPlan(folder);
-	const verdict = buildSampleVerdict(folder, calibration);
-	const draftPolicy = (pendingProposal?.preview_policy ??
-		folder.policy ??
-		folder.summary?.resolved_policy) as FolderPolicy | null | undefined;
+	const verdict = buildSampleVerdict(folder, calibration, pendingProposal);
+	const draftPolicy = activePolicy(folder, pendingProposal);
 	const video = videoPolicySummary(draftPolicy, pendingProposal);
 	const audioSource = summarizeAudioTrack(sampleItem?.audio_summary?.[0] ?? null);
 	const audioPlan = summarizeAudioPlan(plan?.audio);
@@ -850,6 +903,7 @@ export function buildOutputReviewRows(
 			output: verdict?.predictedPerItem ?? 'No measured output yet',
 			detail: verdict
 				? compactParts([
+						verdict.stalePolicy ? 'older settings' : null,
 						`target ${verdict.target}`,
 						verdict.targetDelta || null,
 						`folder ${verdict.predictedFolderTotal}`
@@ -996,7 +1050,19 @@ export function resolveWorkflow(
 			secondaryAction: 'stop-sample'
 		};
 	}
-	const verdict = buildSampleVerdict(folder, calibration);
+	const verdict = buildSampleVerdict(folder, calibration, pendingProposal);
+	if (verdict?.stalePolicy && !pendingProposal?.proposal_id) {
+		return {
+			tone: 'wait',
+			label: 'New sample needed',
+			title: 'Previous sample used older settings',
+			copy: `${verdict.predictedPerItem} per episode was measured against older quality targets. Run a fresh sample using the current source-resolution, low-bitrate defaults before approving this folder.`,
+			primary: 'Ask for sample',
+			primaryAction: 'focus-bench',
+			secondary: 'Download old pack',
+			secondaryAction: 'download-review-pack'
+		};
+	}
 	if (verdict?.missesTarget) {
 		const budgetEnforcement = buildBudgetEnforcementView(pendingProposal);
 		if (

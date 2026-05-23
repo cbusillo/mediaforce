@@ -339,7 +339,7 @@ describe('Folder Studio review request mapping', () => {
 				}),
 				expect.objectContaining({
 					label: 'Next sample draft',
-					output: 'AV1 · max 720p · 7% cap',
+					output: 'AV1 · max 720p',
 					detail: 'VMAF target 89 · floor 87 · downscale allowed by the size request · grain off'
 				}),
 				expect.objectContaining({
@@ -467,6 +467,76 @@ describe('Folder Studio review request mapping', () => {
 			primaryAction: 'focus-bench',
 			secondary: 'Download review pack'
 		});
+	});
+
+	it('asks for a new sample when old evidence used older quality defaults', () => {
+		const calibration = {
+			browser_review_ready: true,
+			review_media_ready: true,
+			sample_result: {
+				predicted_total_size_bytes: 803_322_876,
+				quality_metric: 'VMAF',
+				quality_target: 95,
+				quality_score: 95.0448
+			},
+			advice: {
+				operator_request: {
+					budget_bytes: 314_572_800,
+					budget_label: '300 MB per episode',
+					request_text: 'Aim for 200-300 MB per episode.'
+				},
+				run_verdict: {
+					outcome: 'poor_fit'
+				}
+			}
+		} as FolderCalibrationState;
+		const folder = folderPayload({
+			summary: folderSummary({
+				item_count: 22,
+				total_size_bytes: 80_158_807_611,
+				resolved_policy: {
+					video: { quality_metric: 'vmaf', target_vmaf: 85, min_target_vmaf: 80, max_height: 0 }
+				}
+			}),
+			sample_item: {
+				rel_path: 'tv/Example/Season 1/Episode.mkv',
+				source_size_bytes: 4_349_049_136,
+				duration_seconds: 3161.376,
+				video_codec: 'hevc'
+			},
+			calibration
+		});
+
+		expect(buildSampleVerdict(folder, calibration)).toMatchObject({
+			stalePolicy: true,
+			title: '766 MiB per episode came from older settings.'
+		});
+		expect(
+			resolveWorkflow(folder, folderStatusPayload(), calibration, null, null, null, null)
+		).toMatchObject({
+			label: 'New sample needed',
+			title: 'Previous sample used older settings',
+			primary: 'Ask for sample',
+			primaryAction: 'focus-bench',
+			secondary: 'Download old pack'
+		});
+		expect(buildDecisionFacts(folder, calibration, null)).toEqual([
+			{
+				label: 'Old sample',
+				value: '766 MiB · 2 Mbps',
+				detail: 'VMAF 95.0 · 2.6x target · old target 300 MB per episode'
+			},
+			{
+				label: 'Current target',
+				value: 'source resolution',
+				detail: 'VMAF low-bitrate target 85 · floor 80'
+			},
+			{
+				label: 'Next action',
+				value: 'Run fresh sample',
+				detail: 'The old evidence does not match the current defaults.'
+			}
+		]);
 	});
 
 	it('shows a missed measured sample separately from the next capped sample', () => {
