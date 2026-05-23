@@ -864,10 +864,10 @@ export function resolveWorkflow(
 			budgetEnforcement?.active
 		) {
 			return {
-				tone: 'ready',
-				label: 'Budget enforced',
-				title: `Next sample has a ${budgetEnforcement.cap} size ceiling`,
-				copy: budgetEnforcement.reason,
+				tone: 'wait',
+				label: 'Target missed',
+				title: `${verdict.predictedPerItem} sample missed; run capped sample next`,
+				copy: `${verdict.predictedPerItem} per episode against ${verdict.target}. Next sample will use a ${budgetEnforcement.cap} size ceiling. ${budgetEnforcement.reason}`,
 				primary: 'Start sample',
 				primaryAction: 'start-sample',
 				secondary: 'Revise',
@@ -919,9 +919,9 @@ export function resolveWorkflow(
 		const budgetEnforcement = buildBudgetEnforcementView(pendingProposal);
 		return {
 			tone: 'ready',
-			label: budgetEnforcement?.active ? 'Budget enforced' : 'Draft ready',
+			label: budgetEnforcement?.active ? 'Capped draft ready' : 'Draft ready',
 			title: budgetEnforcement?.active
-				? `Next sample has a ${budgetEnforcement.cap} size ceiling`
+				? `Run a sample with a ${budgetEnforcement.cap} size ceiling`
 				: 'Review draft is ready to sample',
 			copy:
 				budgetEnforcement?.reason ??

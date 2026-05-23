@@ -458,6 +458,60 @@ describe('Folder Studio review request mapping', () => {
 		});
 	});
 
+	it('shows a missed measured sample separately from the next capped sample', () => {
+		const calibration = {
+			browser_review_ready: true,
+			review_media_ready: true,
+			sample_result: {
+				predicted_total_size_bytes: 803_322_876,
+				quality_metric: 'VMAF',
+				quality_score: 95.0448
+			},
+			advice: {
+				operator_request: {
+					budget_bytes: 314_572_800,
+					budget_label: '300 MB per episode'
+				}
+			}
+		} as FolderCalibrationState;
+		const pendingProposal = {
+			proposal_id: 'capped-retry-draft',
+			can_queue: true,
+			message: 'Queue this representative sample.',
+			operator_request: { budget_label: '300 MB per episode' },
+			budget_enforcement: {
+				status: 'enforced_after_miss',
+				size_target_analysis: { predicted_to_budget_ratio: 2.55 },
+				applied_policy: { video: { max_encoded_percent: 7 } }
+			}
+		} as PendingSampleProposal;
+
+		expect(
+			resolveWorkflow(
+				folderPayload({
+					summary: folderSummary({
+						item_count: 22,
+						total_size_bytes: 80_158_807_611
+					}),
+					calibration,
+					pending_proposal: pendingProposal
+				}),
+				folderStatusPayload(),
+				calibration,
+				pendingProposal,
+				null,
+				null,
+				null
+			)
+		).toMatchObject({
+			label: 'Target missed',
+			title: '766 MiB sample missed; run capped sample next',
+			copy: '766 MiB per episode against 300 MB per episode. Next sample will use a 7% size ceiling. Applied after 2.6x target miss against 300 MB per episode.',
+			primary: 'Start sample',
+			primaryAction: 'start-sample'
+		});
+	});
+
 	it('makes acceptable review evidence approve-first', () => {
 		const calibration = {
 			browser_review_ready: true,
@@ -621,8 +675,8 @@ describe('Folder Studio review request mapping', () => {
 		);
 
 		expect(workflow).toMatchObject({
-			label: 'Budget enforced',
-			title: 'Next sample has a 7% size ceiling',
+			label: 'Capped draft ready',
+			title: 'Run a sample with a 7% size ceiling',
 			copy: 'Applied after 2.6x target miss against 300 MB per episode.',
 			primary: 'Start sample',
 			primaryAction: 'start-sample'
