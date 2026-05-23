@@ -158,7 +158,13 @@ def _fake_operator_note_parse(*, project_root: Path, payload: dict[str, object])
             r"\b(?P<height>480|540|576|720|900|1080|1440|2160)p\b.{0,40}\b(?:downsample|downscale|scale|resize|cap|limit)\b",
             lower,
         )
+    source_resolution_requested = bool(re.search(
+        r"\b(?:source|original|native)\s+resolution\b|\b(?:do\s+not|don't|dont|no)\s+(?:downsample|downscale|scale\s+down)\b|\bkeep\s+max_height\s+(?:unset|at\s+0|0)\b|\bmax_height\s+(?:unset|0)\b",
+        lower,
+    ))
     scale_height = int(scale_match.group("height")) if scale_match else None
+    if source_resolution_requested:
+        scale_height = 0
     black_bar_handling = "smart" if re.search(r"\b(?:smart|auto(?:matic)?)\b.{0,24}\bblack[- ]?bar", lower) or re.search(
         r"\bblack[- ]?bar.{0,24}\b(?:smart|auto(?:matic)?)\b", lower
     ) else None
@@ -3476,6 +3482,18 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(request["scale_height"], 1080)
         self.assertEqual(request["applied_policy"]["video"]["max_height"], 1080)
 
+    def test_operator_requested_experiment_detects_source_resolution_request(self) -> None:
+        request = _operator_requested_experiment(
+            "Keep source resolution at 1080p. Do not downscale and keep max_height unset or 0."
+        )
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "scale_target")
+        self.assertTrue(request["operator_confirmed"])
+        self.assertEqual(request["scale_height"], 0)
+        self.assertEqual(request["scale_label"], "source resolution")
+        self.assertEqual(request["applied_policy"]["video"]["max_height"], 0)
+
     def test_operator_requested_experiment_detects_smart_black_bar_request(self) -> None:
         request = _operator_requested_experiment("Use smart black-bar detection for this letterboxed season.")
 
@@ -3505,6 +3523,30 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(request["scale_height"], 1080)
         self.assertEqual(request["applied_policy"]["video"]["target_vmaf"], 88.0)
         self.assertEqual(request["applied_policy"]["video"]["max_height"], 1080)
+
+    def test_operator_requested_experiment_combines_source_resolution_with_budget(self) -> None:
+        request = _operator_requested_experiment(
+            "Keep source resolution, do not downscale, and target 300MB per episode if possible.",
+            {
+                "source_size_bytes": 4_349_049_136,
+                "duration_seconds": 3161.376,
+                "audio_summary": [{"codec_name": "ac3", "channels": 6}],
+                "resolved_policy": {
+                    "video": {"encoder": "libsvtav1"},
+                    "audio": {
+                        "convert_to_opus_codecs": ["ac3"],
+                        "surround_5_1_opus_bitrate": "256k",
+                    },
+                },
+            },
+        )
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "combined_experiment")
+        self.assertEqual(request["budget_label"], "300 MB per episode")
+        self.assertEqual(request["scale_height"], 0)
+        self.assertEqual(request["applied_policy"]["video"]["max_height"], 0)
+        self.assertAlmostEqual(request["estimated_video_bitrate_kbps"], 540.0, places=1)
 
     def test_size_budget_feasibility_treats_old_codec_style_low_bitrates_as_aggressive_first(self) -> None:
         feasibility, requires_confirmation = size_budget_feasibility(
@@ -5730,6 +5772,34 @@ class TuningRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(issue, "The draft uses 720p instead of the requested 1080p height cap.")
+
+    def test_proposal_alignment_issue_validates_source_resolution_target(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "scale_target",
+                "scale_height": 0,
+                "applied_policy": {"video": {"max_height": 0}},
+            },
+            request_disposition="honored",
+            current_policy={"video": {"max_height": 0}},
+            preview_policy={"video": {"max_height": 1080}},
+        )
+
+        self.assertEqual(issue, "The draft sets a height cap even though the operator requested source resolution.")
+
+    def test_proposal_alignment_issue_allows_source_resolution_target(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "scale_target",
+                "scale_height": 0,
+                "applied_policy": {"video": {"max_height": 0}},
+            },
+            request_disposition="honored",
+            current_policy={"video": {"max_height": 720}},
+            preview_policy={"video": {"max_height": 0}},
+        )
+
+        self.assertIsNone(issue)
 
     def test_proposal_alignment_issue_validates_smart_black_bar_target(self) -> None:
         issue = proposal_alignment_issue(

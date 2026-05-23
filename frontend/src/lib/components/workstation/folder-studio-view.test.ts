@@ -6,6 +6,7 @@ import {
 	buildBudgetEnforcementView,
 	buildDecisionFacts,
 	buildOutputReviewRows,
+	buildSampleFacts,
 	buildSampleVerdict,
 	buildWorkflowSteps,
 	predictedFolderSizeBytes,
@@ -292,6 +293,7 @@ describe('Folder Studio review request mapping', () => {
 				sample_item: {
 					rel_path: 'tv/Example/Season 1/Example.S01E01.mkv',
 					source_size_bytes: 4_349_049_136,
+					duration_seconds: 3161.376,
 					video_codec: 'hevc',
 					width: 1920,
 					height: 1080,
@@ -385,6 +387,12 @@ describe('Folder Studio review request mapping', () => {
 				item_count: 22,
 				total_size_bytes: 80_158_807_611
 			}),
+			sample_item: {
+				rel_path: 'tv/Example/Season 1/Episode.mkv',
+				source_size_bytes: 4_349_049_136,
+				duration_seconds: 3161.376,
+				video_codec: 'hevc'
+			},
 			calibration
 		});
 
@@ -394,6 +402,8 @@ describe('Folder Studio review request mapping', () => {
 			predictedPerItem: '766 MiB',
 			predictedFolderTotal: '16.5 GiB',
 			reclaim: '58.2 GiB',
+			predictedBitrate: '2 Mbps',
+			targetBitrate: '796 kbps',
 			targetDelta: '2.6x target',
 			missesTarget: true
 		});
@@ -726,13 +736,18 @@ describe('Folder Studio review request mapping', () => {
 			sample_item: {
 				rel_path: 'tv/Example/Season 1/Episode.mkv',
 				source_size_bytes: 4_388_646_674,
+				duration_seconds: 3161.376,
 				video_codec: 'h264'
 			},
 			summary: folderSummary({ item_count: 22, total_size_bytes: 80_158_807_611 })
 		});
 
 		expect(buildDecisionFacts(folder, calibration, pendingProposal)).toEqual([
-			{ label: 'Last sample', value: '766 MiB', detail: '2.6x target · target 300 MB per episode' },
+			{
+				label: 'Last sample',
+				value: '766 MiB · 2 Mbps',
+				detail: '2.6x target · target 300 MB per episode · target 796 kbps'
+			},
 			{
 				label: 'Next size ceiling',
 				value: '293 MiB max',
@@ -743,6 +758,29 @@ describe('Folder Studio review request mapping', () => {
 				value: 'AV1 · max 720p · 7% cap',
 				detail: 'VMAF target 89 · floor 87 · downscale enforced after the measured miss · grain off'
 			}
+		]);
+	});
+
+	it('surfaces duration and bitrate in representative sample facts', () => {
+		const facts = buildSampleFacts(
+			{
+				rel_path: 'tv/Example/Season 1/Episode.mkv',
+				source_size_bytes: 4_349_049_136,
+				duration_seconds: 3161.376,
+				width: 1920,
+				height: 1080,
+				video_codec: 'hevc'
+			},
+			folderSummary({ total_size_bytes: 4_349_049_136 })
+		);
+
+		expect(facts).toEqual([
+			{ label: 'File', value: 'Episode.mkv' },
+			{ label: 'Runtime', value: '52m 41s' },
+			{ label: 'Resolution', value: '1,920x1,080' },
+			{ label: 'Source rate', value: '11 Mbps' },
+			{ label: 'Codec', value: 'HEVC' },
+			{ label: 'Size', value: '4.1 GiB' }
 		]);
 	});
 

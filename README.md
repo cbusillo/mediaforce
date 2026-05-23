@@ -290,6 +290,13 @@ This first version intentionally does **not** silently skip codecs or folders.
 It ranks and labels items, but leaves the final decision in the manifest and
 review loop.
 
+The checked-in video defaults are intentionally operator-taste defaults, not a
+near-transparent archival preset. The baseline AV1 policy targets VMAF 85 with
+an 80 floor and source resolution (`max_height = 0`) so measured samples pursue
+small, visually acceptable TV encodes first. Raise the VMAF targets or add a
+folder override when a class needs a more conservative pass; use an explicit
+scale request when downsampling is desired.
+
 `report`, `encode`, and `validate` all surface source-vs-staged size deltas so
 you can see the storage win before promotion.
 

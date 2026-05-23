@@ -328,6 +328,10 @@ def proposal_alignment_issue(
         if requested_height is None:
             return None
         preview_height = _policy_height(preview_video)
+        if requested_height <= 0:
+            if preview_height is not None and preview_height > 0:
+                return "The draft sets a height cap even though the operator requested source resolution."
+            return None
         if preview_height is None:
             return f"The draft does not apply the requested {requested_height:.0f}p height cap."
         if abs(preview_height - requested_height) > 0.01:

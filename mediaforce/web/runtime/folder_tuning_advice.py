@@ -46,6 +46,10 @@ _NOTE_PARSE_METRICS = {"vmaf", "xpsnr"}
 _CROP_VALUE_RE = re.compile(r"\d+:\d+:\d+:\d+")
 _SIZE_BUDGET_RE = re.compile(r"(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>kb|mb|gb|tb)\b", re.IGNORECASE)
 _SCALE_HEIGHT_RE = re.compile(r"(?<!\d)(?P<height>240|360|480|540|720|1080|1440|2160|4320)p\b", re.IGNORECASE)
+_SOURCE_RESOLUTION_RE = re.compile(
+    r"\b(?:source|original|native)\s+resolution\b|\b(?:do\s+not|don't|dont|no)\s+(?:downsample|downscale|scale\s+down)\b|\bkeep\s+max_height\s+(?:unset|at\s+0|0)\b|\bmax_height\s+(?:unset|0)\b",
+    re.IGNORECASE,
+)
 _METRIC_TARGET_RE = re.compile(r"\b(?P<metric>vmaf|xpsnr)\s*(?:of\s*)?(?:around\s*)?(?P<target>\d+(?:\.\d+)?)\b", re.IGNORECASE)
 _METRIC_DIRECTIVE_RE = re.compile(
     r"\b(?:use|using|with|evaluate(?:\s+with)?|measure(?:\s+with)?|run(?:\s+with)?|metric(?:\s+is)?)\s+"
@@ -96,6 +100,8 @@ def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, A
         raw_scale_height = int_value(parsed_object.get("scale_height"))
         if raw_scale_height > 0:
             scale_height = max(240, min(raw_scale_height, 4320))
+        elif parsed_object.get("scale_height") is not None and raw_scale_height == 0:
+            scale_height = 0
         raw_black_bar_handling = str(parsed_object.get("black_bar_handling") or "").strip().lower()
         if raw_black_bar_handling in {"auto", "smart"}:
             black_bar_handling = raw_black_bar_handling
@@ -148,7 +154,10 @@ def _heuristic_operator_note_parse(note: str) -> dict[str, Any] | None:
         if any(token in lowered for token in ("smart", "auto", "automatic")):
             black_bar_handling = "smart"
 
+    source_resolution_requested = bool(_SOURCE_RESOLUTION_RE.search(trimmed))
     scale_height = int(scale_match.group("height")) if scale_match is not None else None
+    if source_resolution_requested:
+        scale_height = 0
     crop = crop_match.group(0) if crop_match is not None else None
     size_budget_value = float(size_budget_match.group("amount")) if size_budget_match is not None else None
     size_budget_unit = size_budget_match.group("unit").lower() if size_budget_match is not None else None
@@ -190,7 +199,7 @@ def _heuristic_operator_note_parse(note: str) -> dict[str, Any] | None:
 
     summary_parts: list[str] = []
     if scale_height is not None:
-        summary_parts.append(f"drop to {scale_height}p")
+        summary_parts.append("keep source resolution" if scale_height == 0 else f"drop to {scale_height}p")
     if size_budget_value is not None and size_budget_unit is not None:
         summary_parts.append(f"target about {size_budget_value:g}{size_budget_unit.upper()}")
     if metric is not None:
@@ -257,7 +266,7 @@ def _merge_operator_note_parse(
             "black_bar_handling",
             "crop",
     ):
-        if merged.get(key) in {None, ""} and heuristic.get(key) not in {None, ""}:
+        if merged.get(key) in {None, ""} and heuristic.get(key) is not None and heuristic.get(key) != "":
             merged[key] = heuristic.get(key)
     if not merged.get("operator_confirmed") and heuristic.get("operator_confirmed"):
         merged["operator_confirmed"] = True
@@ -580,6 +589,9 @@ def scale_target_request(trimmed: str, parsed_note: dict[str, Any]) -> dict[str,
         height = max(240, min(height, 4320))
         video_policy["max_height"] = height
         labels.append(f"{height}p max height")
+    elif parsed_note.get("scale_height") is not None and height == 0:
+        video_policy["max_height"] = 0
+        labels.append("source resolution")
     if black_bar_handling in {"auto", "smart"}:
         video_policy["black_bar_handling"] = black_bar_handling
         video_policy["crop"] = ""
@@ -594,7 +606,7 @@ def scale_target_request(trimmed: str, parsed_note: dict[str, Any]) -> dict[str,
         "operator_note_parse": parsed_note,
         "honor_mode": "literal_experiment",
         "request_type": "scale_target",
-        "scale_height": height if height > 0 else None,
+        "scale_height": height if height > 0 or parsed_note.get("scale_height") is not None else None,
         "scale_label": " + ".join(labels),
         "black_bar_handling": black_bar_handling if black_bar_handling in {"auto", "smart"} else None,
         "crop": crop if _CROP_VALUE_RE.fullmatch(crop) else None,
@@ -677,6 +689,22 @@ def apply_policy_fragment(policy: dict[str, Any], fragment: dict[str, Any] | Non
     for section, values in merge_policy_fragments(fragment).items():
         updated_policy.setdefault(section, {}).update(values)
     return updated_policy
+
+
+def operator_preserves_source_resolution(operator_request: dict[str, Any] | None) -> bool:
+    request = object_dict(operator_request)
+    if not request:
+        return False
+    if int_value(request.get("scale_height")) == 0 and request.get("scale_height") is not None:
+        return True
+    scale_request = object_dict(request.get("scale_request"))
+    if int_value(scale_request.get("scale_height")) == 0 and scale_request.get("scale_height") is not None:
+        return True
+    video = object_dict(object_dict(request.get("applied_policy")).get("video"))
+    if int_value(video.get("max_height")) == 0 and video.get("max_height") is not None:
+        return True
+    text = str(request.get("request_text") or "")
+    return bool(_SOURCE_RESOLUTION_RE.search(text))
 
 
 def operator_request_signature(operator_request: dict[str, Any] | None) -> tuple[Any, ...] | None:

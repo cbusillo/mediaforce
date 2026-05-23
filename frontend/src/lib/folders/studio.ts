@@ -275,6 +275,7 @@ export type FolderOperatorRequest = {
 	requires_confirmation?: boolean;
 	estimated_source_percent?: number;
 	estimated_video_bitrate_kbps?: number;
+	target_video_bitrate_kbps?: number;
 	request_text?: string;
 };
 export type FolderRunVerdict = {

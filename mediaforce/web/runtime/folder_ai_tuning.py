@@ -9,6 +9,7 @@ from mediaforce.advising.policy import merge_policy_fragments
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.type_defs import object_dict, object_list
+from mediaforce.web.runtime.folder_tuning_advice import operator_preserves_source_resolution
 from mediaforce.web.runtime.folder_tuning_helpers import measured_size_budget_policy_fragment
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.tuning.tuning_memory import promote_learning_artifact, retrieve_learning_context
@@ -133,6 +134,39 @@ def _measured_budget_fragment_preserving_stricter_cap(
         measured_fragment,
         {"video": {"max_encoded_percent": int(round(existing_cap))}},
     )
+
+
+def _operator_forbids_hard_budget_cap(operator_request: dict[str, Any] | None) -> bool:
+    request = object_dict(operator_request)
+    text = str(request.get("request_text") or "").strip().lower()
+    if not text:
+        return False
+    hard_cap_terms = ("hard cap", "hard size", "ceiling", "max_encoded_percent", "must hit")
+    priority_terms = (
+        "prioritize preserving",
+        "prioritize resolution",
+        "prioritize 1080",
+        "preserve 1080",
+        "preserve source",
+        "source resolution",
+        "do not downscale",
+        "don't downscale",
+        "dont downscale",
+    )
+    conditional_terms = ("only if", "if it does not require", "if it doesn't require", "if it doesnt require")
+    return any(term in text for term in hard_cap_terms) and any(
+        term in text for term in priority_terms
+    ) and any(term in text for term in conditional_terms)
+
+
+def _honor_operator_source_resolution(
+        *,
+        operator_request: dict[str, Any] | None,
+        combined_fragment: dict[str, Any],
+) -> dict[str, Any]:
+    if not operator_preserves_source_resolution(operator_request):
+        return combined_fragment
+    return merge_policy_fragments(combined_fragment, {"video": {"max_height": 0}})
 
 
 def _proposal_can_queue(
@@ -714,8 +748,13 @@ def _tuned_preview_action(
         tuning_payload["review_artifact_critique"] = review_artifact_critique
     tuning = request_note_tuning(project_root=config.paths.project_root, payload=tuning_payload)
     tuned_policy, applied_fragment = apply_seed_policy(current_policy, object_dict(tuning.proposed_policy), mode="tune")
-    combined_fragment = applied_fragment
-    advice_payload = object_dict(deps.tuning_advice_payload(tuning=tuning, note=trimmed_note, applied_fragment=applied_fragment))
+    combined_fragment = _honor_operator_source_resolution(
+        operator_request=operator_request,
+        combined_fragment=applied_fragment,
+    )
+    if combined_fragment != applied_fragment:
+        tuned_policy = deps.apply_policy_fragment(current_policy, combined_fragment)
+    advice_payload = object_dict(deps.tuning_advice_payload(tuning=tuning, note=trimmed_note, applied_fragment=combined_fragment))
     if public_review_pack is not None:
         advice_payload["multimodal_review_pack"] = public_review_pack
     if review_artifact_critique is not None:
@@ -734,11 +773,22 @@ def _tuned_preview_action(
         operator_request=operator_request,
         size_target_analysis=size_target_analysis,
     )
+    if measured_budget_fragment and _operator_forbids_hard_budget_cap(operator_request):
+        measured_budget_fragment = {}
+        advice_payload["budget_enforcement"] = {
+            "status": "skipped_operator_priority",
+            "size_target_analysis": size_target_analysis,
+            "reason": "The operator prioritized source resolution over a conditional hard size ceiling.",
+        }
     if measured_budget_fragment:
         measured_budget_fragment = _measured_budget_fragment_preserving_stricter_cap(
             combined_fragment, measured_budget_fragment
         )
         combined_fragment = merge_policy_fragments(combined_fragment, measured_budget_fragment)
+        combined_fragment = _honor_operator_source_resolution(
+            operator_request=operator_request,
+            combined_fragment=combined_fragment,
+        )
         tuned_policy = deps.apply_policy_fragment(current_policy, combined_fragment)
         advice_payload["applied_policy"] = combined_fragment
         advice_payload["budget_enforcement"] = {

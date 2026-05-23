@@ -50,9 +50,11 @@ export type SampleVerdict = {
 	recommendation: string;
 	predictedPerItem: string;
 	predictedFolderTotal: string;
+	predictedBitrate: string;
 	reclaim: string;
 	quality: string;
 	target: string;
+	targetBitrate: string;
 	targetDelta: string;
 	missRatio: number | null;
 	missesTarget: boolean;
@@ -452,6 +454,36 @@ export function formatBytes(value: number | null | undefined): string {
 	return `${value.toLocaleString('en-US', { maximumFractionDigits: 0 })} B`;
 }
 
+function formatDuration(value: number | null | undefined): string {
+	if (value == null || !Number.isFinite(value) || value <= 0) return '—';
+	const totalSeconds = Math.round(value);
+	const hours = Math.floor(totalSeconds / 3600);
+	const minutes = Math.floor((totalSeconds % 3600) / 60);
+	const seconds = totalSeconds % 60;
+	if (hours > 0) return `${hours}h ${minutes}m`;
+	return `${minutes}m ${seconds.toString().padStart(2, '0')}s`;
+}
+
+function formatAverageBitrate(bytes: number | null, durationSeconds: number | null): string {
+	if (bytes === null || durationSeconds === null || bytes <= 0 || durationSeconds <= 0) return '—';
+	const kbps = (bytes * 8) / durationSeconds / 1000;
+	if (!Number.isFinite(kbps) || kbps <= 0) return '—';
+	if (kbps >= 1000) {
+		return `${(kbps / 1000).toLocaleString('en-US', {
+			maximumFractionDigits: kbps >= 10_000 ? 0 : 1
+		})} Mbps`;
+	}
+	return `${kbps.toLocaleString('en-US', { maximumFractionDigits: 0 })} kbps`;
+}
+
+function formatKbps(value: number | null | undefined): string {
+	if (value == null || !Number.isFinite(value) || value <= 0) return '—';
+	if (value >= 1000) {
+		return `${(value / 1000).toLocaleString('en-US', { maximumFractionDigits: value >= 10_000 ? 0 : 1 })} Mbps`;
+	}
+	return `${value.toLocaleString('en-US', { maximumFractionDigits: 0 })} kbps`;
+}
+
 function formatRatio(value: number | null): string {
 	if (value === null || !Number.isFinite(value) || value <= 0) return '';
 	return `${value.toLocaleString('en-US', {
@@ -515,6 +547,7 @@ export function buildSampleVerdict(
 	const reclaim =
 		sourceSize !== null && sourceSize > 0 ? Math.max(sourceSize - folderTotal, 0) : null;
 	const budget = numberValue(request?.budget_bytes);
+	const durationSeconds = numberValue(folder.sample_item?.duration_seconds);
 	const target =
 		compactText(request?.budget_label) || (budget ? formatBytes(budget) : 'No size target');
 	const missRatio = budget && budget > 0 ? predictedSize / budget : null;
@@ -541,9 +574,11 @@ export function buildSampleVerdict(
 		recommendation,
 		predictedPerItem,
 		predictedFolderTotal: formatBytes(folderTotal),
+		predictedBitrate: formatAverageBitrate(predictedSize, durationSeconds),
 		reclaim: reclaim === null ? '—' : formatBytes(reclaim),
 		quality,
 		target,
+		targetBitrate: formatAverageBitrate(budget, durationSeconds),
 		targetDelta: formatRatio(missRatio),
 		missRatio,
 		missesTarget
@@ -585,14 +620,21 @@ export function buildDecisionFacts(
 		folder.policy ??
 		folder.summary?.resolved_policy) as FolderPolicy | null | undefined;
 	const video = videoPolicySummary(draftPolicy, pendingProposal);
+	const targetVideoRate = formatKbps(pendingProposal?.operator_request?.target_video_bitrate_kbps);
 	if (enforcement?.active) {
 		return [
 			{
 				label: 'Last sample',
-				value: verdict?.predictedPerItem ?? 'Measured miss',
+				value: verdict
+					? compactParts([
+							verdict.predictedPerItem,
+							verdict.predictedBitrate !== '—' ? verdict.predictedBitrate : null
+						])
+					: 'Measured miss',
 				detail: compactParts([
 					verdict?.targetDelta || null,
-					verdict?.target ? `target ${verdict.target}` : null
+					verdict?.target ? `target ${verdict.target}` : null,
+					verdict && verdict.targetBitrate !== '—' ? `target ${verdict.targetBitrate}` : null
 				])
 			},
 			{
@@ -606,7 +648,10 @@ export function buildDecisionFacts(
 			{
 				label: 'Next video plan',
 				value: video.output,
-				detail: video.detail || 'Uses the current folder video policy.'
+				detail: compactParts([
+					video.detail || 'Uses the current folder video policy.',
+					targetVideoRate !== '—' ? `target video ${targetVideoRate}` : null
+				])
 			}
 		];
 	}
@@ -615,7 +660,11 @@ export function buildDecisionFacts(
 			{
 				label: 'Per episode',
 				value: verdict.predictedPerItem,
-				detail: verdict.targetDelta || `Target ${verdict.target}`
+				detail: compactParts([
+					verdict.predictedBitrate !== '—' ? verdict.predictedBitrate : null,
+					verdict.targetDelta || `Target ${verdict.target}`,
+					verdict.targetBitrate !== '—' ? `target ${verdict.targetBitrate}` : null
+				])
 			},
 			{ label: 'Folder output', value: verdict.predictedFolderTotal, detail: 'Projected total' },
 			{ label: 'Reclaim', value: verdict.reclaim, detail: verdict.quality }
@@ -648,9 +697,17 @@ export function buildSampleFacts(
 ): Array<{ label: string; value: string }> {
 	return [
 		{ label: 'File', value: sampleItem ? pathFilename(sampleItem.rel_path) : '—' },
+		{ label: 'Runtime', value: formatDuration(sampleItem?.duration_seconds) },
 		{
 			label: 'Resolution',
 			value: formatResolutionCopy(sampleItem?.width, sampleItem?.height) ?? '—'
+		},
+		{
+			label: 'Source rate',
+			value: formatAverageBitrate(
+				numberValue(sampleItem?.source_size_bytes),
+				numberValue(sampleItem?.duration_seconds)
+			)
 		},
 		{ label: 'Codec', value: codecLabel(sampleItem?.video_codec) },
 		{
@@ -707,13 +764,15 @@ function videoPolicySummary(
 	const metric = compactText(video.quality_metric).toUpperCase();
 	const target = numberValue(metric === 'XPSNR' ? video.target_xpsnr : video.target_vmaf);
 	const floor = numberValue(metric === 'XPSNR' ? video.min_target_xpsnr : video.min_target_vmaf);
+	const metricCopy =
+		metric === 'VMAF' && target !== null && target <= 88 ? 'VMAF low-bitrate' : metric;
 	const output = compactParts([
 		encoder.includes('av1') ? 'AV1' : encoder || null,
 		maxHeight !== null && maxHeight > 0 ? `max ${maxHeight}p` : 'source resolution',
 		cap !== null && cap > 0 ? `${formatPercentCopy(cap)} cap` : null
 	]);
 	const detail = compactParts([
-		metric ? `${metric}${target !== null ? ` target ${target}` : ''}` : null,
+		metricCopy ? `${metricCopy}${target !== null ? ` target ${target}` : ''}` : null,
 		floor !== null ? `floor ${floor}` : null,
 		draftDownscaleReason(pendingProposal, maxHeight),
 		numberValue(video.default_grain) === 0 ? 'grain off' : null,
