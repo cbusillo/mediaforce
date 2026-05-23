@@ -785,7 +785,9 @@ export function buildOutputReviewRows(
 	return [
 		{
 			label: 'Measured sample',
-			source: sampleItem ? `source ${formatBytes(sampleItem.source_size_bytes)}` : 'No sample selected',
+			source: sampleItem
+				? `source ${formatBytes(sampleItem.source_size_bytes)}`
+				: 'No sample selected',
 			output: verdict?.predictedPerItem ?? 'No measured output yet',
 			detail: verdict
 				? compactParts([
