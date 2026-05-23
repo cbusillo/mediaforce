@@ -362,6 +362,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             libraries: list[dict[str, Any]] | None = None,
             remote_hosts: list[dict[str, str]] | None = None,
             transcode_root: str | None = None,
+            video_defaults: dict[str, Any] | None = None,
             encode_queue_scheduler: dict[str, Any] | None = None,
             schedule_profiles: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
@@ -378,6 +379,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             libraries=libraries,
             remote_hosts=remote_hosts,
             transcode_root=transcode_root,
+            video_defaults=video_defaults,
             encode_queue_scheduler=encode_queue_scheduler,
             schedule_profiles=schedule_profiles,
         )
@@ -422,6 +424,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             libraries: list[dict[str, str]],
             remote_hosts: list[dict[str, Any]],
             transcode_root: str,
+            video_defaults: dict[str, Any],
             encode_queue_scheduler: dict[str, Any],
             schedule_profiles: list[dict[str, Any]],
     ) -> dict[str, Any]:
@@ -432,6 +435,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             libraries=libraries,
             remote_hosts=remote_hosts,
             transcode_root=transcode_root,
+            video_defaults=video_defaults,
             encode_queue_scheduler=encode_queue_scheduler,
             schedule_profiles=schedule_profiles,
         )

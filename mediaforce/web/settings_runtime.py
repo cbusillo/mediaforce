@@ -33,6 +33,14 @@ LEGACY_QUEUE_WINDOW_SCHEDULE_PROFILE = "queue_window"
 LEGACY_DEFAULT_SCHEDULE_PROFILE = "default"
 DEFAULT_HOST_SCHEDULE_PROFILE = ALWAYS_SCHEDULE_PROFILE
 DEFAULT_HOST_MAX_PARALLEL_ENCODES = 1
+DEFAULT_VIDEO_DEFAULTS = {
+    "quality_metric": "vmaf",
+    "target_vmaf": "85",
+    "min_target_vmaf": "80",
+    "max_height": "0",
+    "default_grain": "8",
+    "max_encoded_percent": "80",
+}
 HOST_CAPABILITY_OPTIONS = (
     {"key": "encode_queue", "label": "Queue encodes", "help": "Allow this host to run queued folder encodes."},
     {
@@ -292,6 +300,22 @@ def settings_transcode_root_value(config: MediaforceConfig) -> str:
     return stringify_pathlike(media.get("staging_root") if isinstance(media, dict) else None)
 
 
+def settings_video_defaults_for_config(config: MediaforceConfig) -> dict[str, str]:
+    video = config.raw.get("video")
+    if not isinstance(video, dict):
+        return dict(DEFAULT_VIDEO_DEFAULTS)
+    return {
+        "quality_metric": str(video.get("quality_metric") or DEFAULT_VIDEO_DEFAULTS["quality_metric"]).strip().lower(),
+        "target_vmaf": _settings_number_text(video.get("target_vmaf"), DEFAULT_VIDEO_DEFAULTS["target_vmaf"]),
+        "min_target_vmaf": _settings_number_text(video.get("min_target_vmaf"), DEFAULT_VIDEO_DEFAULTS["min_target_vmaf"]),
+        "max_height": _settings_number_text(video.get("max_height"), DEFAULT_VIDEO_DEFAULTS["max_height"]),
+        "default_grain": _settings_number_text(video.get("default_grain"), DEFAULT_VIDEO_DEFAULTS["default_grain"]),
+        "max_encoded_percent": _settings_number_text(
+            video.get("max_encoded_percent"), DEFAULT_VIDEO_DEFAULTS["max_encoded_percent"]
+        ),
+    }
+
+
 def settings_archive_root(transcode_root: str) -> str:
     cleaned_root = transcode_root.strip()
     if not cleaned_root:
@@ -305,6 +329,16 @@ def stringify_pathlike(value: JSONValue | Path) -> str:
     if isinstance(value, str):
         return str(Path(value).expanduser()) if value.strip() else ""
     return ""
+
+
+def _settings_number_text(value: JSONValue, default: str) -> str:
+    try:
+        parsed = float(str(value))
+    except (TypeError, ValueError):
+        return default
+    if parsed.is_integer():
+        return str(int(parsed))
+    return f"{parsed:g}"
 
 
 def settings_form_indexes(form_data: dict[str, str], prefix: str) -> list[int]:
@@ -429,6 +463,7 @@ def build_runtime_settings_payload(
         libraries: list[dict[str, Any]],
         remote_hosts: list[dict[str, Any]],
         transcode_root: str,
+        video_defaults: dict[str, Any] | None = None,
         encode_queue_scheduler: dict[str, Any],
         schedule_profiles: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -590,6 +625,7 @@ def build_runtime_settings_payload(
     if invalid_host_profiles:
         raise ValueError("Unknown schedule profile for host assignment: " + ", ".join(invalid_host_profiles))
 
+    normalized_video_defaults = normalize_video_defaults(video_defaults)
     staging_root = Path(transcode_root).expanduser()
     return {
         "media": {
@@ -598,11 +634,50 @@ def build_runtime_settings_payload(
             "staging_root": str(staging_root),
             "archive_root": str(staging_root / "_replaced"),
         },
+        "video": normalized_video_defaults,
         "remote_hosts": normalized_remotes,
         "encode_queue": {
             "scheduler": normalize_encode_queue_scheduler(encode_queue_scheduler),
             "schedule_profiles": normalized_profiles,
         },
+    }
+
+
+def normalize_video_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
+    payload = dict(DEFAULT_VIDEO_DEFAULTS)
+    if isinstance(raw, dict):
+        payload.update(raw)
+    metric = str(payload.get("quality_metric") or DEFAULT_VIDEO_DEFAULTS["quality_metric"]).strip().lower()
+    if metric not in {"auto", "vmaf", "xpsnr", "ssim"}:
+        metric = DEFAULT_VIDEO_DEFAULTS["quality_metric"]
+
+    def _float_field(key: str, *, minimum: float, maximum: float) -> float:
+        try:
+            value = float(str(payload.get(key, DEFAULT_VIDEO_DEFAULTS[key])))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Video default {key} must be a number.") from exc
+        if value < minimum or value > maximum:
+            raise ValueError(f"Video default {key} must be between {minimum:g} and {maximum:g}.")
+        return value
+
+    def _int_field(key: str, *, minimum: int, maximum: int) -> int:
+        value = _float_field(key, minimum=minimum, maximum=maximum)
+        if not value.is_integer():
+            raise ValueError(f"Video default {key} must be a whole number.")
+        return int(value)
+
+    target_vmaf = _float_field("target_vmaf", minimum=1, maximum=100)
+    min_target_vmaf = _float_field("min_target_vmaf", minimum=1, maximum=100)
+    if min_target_vmaf > target_vmaf:
+        raise ValueError("Video default min_target_vmaf must be less than or equal to target_vmaf.")
+
+    return {
+        "quality_metric": metric,
+        "target_vmaf": target_vmaf,
+        "min_target_vmaf": min_target_vmaf,
+        "max_height": _int_field("max_height", minimum=0, maximum=4320),
+        "default_grain": _int_field("default_grain", minimum=0, maximum=50),
+        "max_encoded_percent": _float_field("max_encoded_percent", minimum=1, maximum=100),
     }
 
 

@@ -2009,6 +2009,35 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(payload["remote_hosts"][0]["schedule_profile"], "always")
 
+    def test_runtime_settings_payload_persists_video_defaults(self) -> None:
+        payload = web_app._build_runtime_settings_payload(
+            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
+            remote_hosts=[],
+            transcode_root=str(self.root / "staging"),
+            video_defaults={
+                "quality_metric": "VMAF",
+                "target_vmaf": "85",
+                "min_target_vmaf": "80",
+                "max_height": "0",
+                "default_grain": "8",
+                "max_encoded_percent": "80",
+            },
+            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
+            schedule_profiles=[],
+        )
+
+        self.assertEqual(
+            payload["video"],
+            {
+                "quality_metric": "vmaf",
+                "target_vmaf": 85.0,
+                "min_target_vmaf": 80.0,
+                "max_height": 0,
+                "default_grain": 8,
+                "max_encoded_percent": 80.0,
+            },
+        )
+
     def test_runtime_settings_payload_normalizes_media_access(self) -> None:
         payload = web_app._build_runtime_settings_payload(
             libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],

@@ -312,6 +312,14 @@ export interface SettingsPayload {
 	libraries: SettingsLibrary[];
 	remote_hosts: SettingsHost[];
 	transcode_root: string;
+	video_defaults: {
+		quality_metric: string;
+		target_vmaf: string;
+		min_target_vmaf: string;
+		max_height: string;
+		default_grain: string;
+		max_encoded_percent: string;
+	};
 	encode_queue_scheduler: {
 		mode: string;
 		start_hour: number;

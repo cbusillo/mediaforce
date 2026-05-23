@@ -64,6 +64,14 @@
 		libraries: [],
 		remote_hosts: [],
 		transcode_root: '',
+		video_defaults: {
+			quality_metric: 'vmaf',
+			target_vmaf: '85',
+			min_target_vmaf: '80',
+			max_height: '0',
+			default_grain: '8',
+			max_encoded_percent: '80'
+		},
 		schedule_profiles: []
 	};
 
@@ -158,6 +166,11 @@
 	]);
 	const footerSignals = $derived([
 		{
+			label: 'Assistant defaults',
+			value: `VMAF ${draft.video_defaults.target_vmaf} / floor ${draft.video_defaults.min_target_vmaf}`,
+			tone: 'ready' as BadgeTone
+		},
+		{
 			label: 'Runtime',
 			value: savedSettings?.runtime_settings_path ?? 'unavailable',
 			tone: (loadError ? 'fail' : 'idle') as BadgeTone
@@ -226,6 +239,10 @@
 		draft.schedule_profiles = draft.schedule_profiles.map((profile, candidate) =>
 			candidate === index ? { ...profile, ...patch } : profile
 		);
+	}
+
+	function updateVideoDefault(key: keyof SettingsPayload['video_defaults'], value: string) {
+		draft.video_defaults = { ...draft.video_defaults, [key]: value };
 	}
 
 	function toggleScheduleDay(
@@ -397,6 +414,10 @@
 						<span>Storage</span>
 						<strong>{draft.transcode_root.trim() ? 'Set' : 'Missing'}</strong>
 					</a>
+					<a href="#settings-assistant-defaults">
+						<span>Assistant defaults</span>
+						<strong>VMAF {draft.video_defaults.target_vmaf}</strong>
+					</a>
 					<a href="#settings-schedules">
 						<span>Work windows</span>
 						<strong>{(configuredProfiles.length + 2).toLocaleString('en-US')}</strong>
@@ -533,6 +554,96 @@
 										label={archiveCleanup?.has_cleanup ? 'Waiting' : 'Clear'}
 									/>
 									<small>Deletes are grouped in the danger section.</small>
+								</div>
+							</div>
+						</WorkstationPanel>
+					</div>
+
+					<div id="settings-assistant-defaults" class="settings-anchor">
+						<WorkstationPanel eyebrow="Assistant defaults" title="Encode defaults">
+							<div class="encode-defaults-grid">
+								<label class="stacked-field">
+									<span>Quality metric</span>
+									<select
+										class="field"
+										bind:value={draft.video_defaults.quality_metric}
+										onchange={(event) => updateVideoDefault('quality_metric', selectValue(event))}
+									>
+										<option value="vmaf">VMAF</option>
+										<option value="auto">Auto</option>
+										<option value="xpsnr">XPSNR</option>
+										<option value="ssim">SSIM</option>
+									</select>
+								</label>
+								<label class="stacked-field">
+									<span>VMAF target</span>
+									<input
+										class="field field--number"
+										type="number"
+										min="1"
+										max="100"
+										step="0.1"
+										value={draft.video_defaults.target_vmaf}
+										oninput={(event) => updateVideoDefault('target_vmaf', inputValue(event))}
+									/>
+								</label>
+								<label class="stacked-field">
+									<span>VMAF floor</span>
+									<input
+										class="field field--number"
+										type="number"
+										min="1"
+										max="100"
+										step="0.1"
+										value={draft.video_defaults.min_target_vmaf}
+										oninput={(event) => updateVideoDefault('min_target_vmaf', inputValue(event))}
+									/>
+								</label>
+								<label class="stacked-field">
+									<span>Max height</span>
+									<input
+										class="field field--number"
+										type="number"
+										min="0"
+										max="4320"
+										step="1"
+										value={draft.video_defaults.max_height}
+										oninput={(event) => updateVideoDefault('max_height', inputValue(event))}
+									/>
+								</label>
+								<label class="stacked-field">
+									<span>Grain</span>
+									<input
+										class="field field--number"
+										type="number"
+										min="0"
+										max="50"
+										step="1"
+										value={draft.video_defaults.default_grain}
+										oninput={(event) => updateVideoDefault('default_grain', inputValue(event))}
+									/>
+								</label>
+								<label class="stacked-field">
+									<span>Safety ceiling %</span>
+									<input
+										class="field field--number"
+										type="number"
+										min="1"
+										max="100"
+										step="0.1"
+										value={draft.video_defaults.max_encoded_percent}
+										oninput={(event) =>
+											updateVideoDefault('max_encoded_percent', inputValue(event))}
+									/>
+								</label>
+								<div class="encode-defaults-readout">
+									<span>Resolution</span>
+									<strong
+										>{Number(draft.video_defaults.max_height) > 0
+											? `max ${draft.video_defaults.max_height}p`
+											: 'source resolution'}</strong
+									>
+									<small>Used when the assistant note does not request a resolution change.</small>
 								</div>
 							</div>
 						</WorkstationPanel>
@@ -1023,6 +1134,7 @@
 					<span class="mf-eyebrow">Sections</span>
 					<a href="#settings-libraries">Libraries</a>
 					<a href="#settings-storage">Storage</a>
+					<a href="#settings-assistant-defaults">Assistant defaults</a>
 					<a href="#settings-schedules">Work windows</a>
 					<a href="#settings-workers">Workers</a>
 					<a href="#settings-danger">Cleanup</a>
@@ -1156,7 +1268,7 @@
 	.settings-overview {
 		display: grid;
 		gap: var(--mf-space-3);
-		grid-template-columns: repeat(5, minmax(0, 1fr));
+		grid-template-columns: repeat(6, minmax(0, 1fr));
 	}
 
 	.settings-overview a {
@@ -1393,6 +1505,7 @@
 	.host-grid label span,
 	.schedule-row__fields label span,
 	.storage-readout span,
+	.encode-defaults-readout span,
 	.danger-zone > div > span,
 	.option-label,
 	.rail-row span {
@@ -1410,7 +1523,20 @@
 		padding: var(--mf-space-5);
 	}
 
+	.encode-defaults-grid {
+		align-items: end;
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-template-columns: minmax(150px, 1.1fr) repeat(5, minmax(88px, 0.65fr)) minmax(170px, 1.2fr);
+		padding: var(--mf-space-5);
+	}
+
+	.encode-defaults-grid .field--number {
+		max-width: none;
+	}
+
 	.storage-readout,
+	.encode-defaults-readout,
 	.danger-zone > div,
 	.rail-row {
 		display: grid;
@@ -1419,6 +1545,7 @@
 	}
 
 	.storage-readout strong,
+	.encode-defaults-readout strong,
 	.danger-zone strong,
 	.rail-row strong,
 	.host-editor__head strong,
@@ -1429,6 +1556,7 @@
 	}
 
 	.storage-readout small,
+	.encode-defaults-readout small,
 	.danger-zone small,
 	.rail-row small,
 	.option-hint,
