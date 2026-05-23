@@ -539,6 +539,33 @@ describe('Folder Studio review request mapping', () => {
 		]);
 	});
 
+	it('compares sample evidence against the live folder policy before cached summary policy', () => {
+		const calibration = {
+			sample_result: {
+				predicted_total_size_bytes: 803_322_876,
+				quality_metric: 'VMAF',
+				quality_target: 95,
+				quality_score: 95.0448
+			}
+		} as FolderCalibrationState;
+		const folder = folderPayload({
+			summary: folderSummary({
+				resolved_policy: {
+					video: { quality_metric: 'vmaf', target_vmaf: 95, min_target_vmaf: 93 }
+				}
+			}),
+			policy: {
+				video: { quality_metric: 'vmaf', target_vmaf: 85, min_target_vmaf: 80, max_height: 0 }
+			},
+			calibration
+		});
+
+		expect(buildSampleVerdict(folder, calibration)).toMatchObject({
+			stalePolicy: true,
+			title: '766 MiB per episode came from older settings.'
+		});
+	});
+
 	it('shows a missed measured sample separately from the next capped sample', () => {
 		const calibration = {
 			browser_review_ready: true,

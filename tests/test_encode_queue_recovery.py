@@ -2038,6 +2038,17 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             },
         )
 
+    def test_runtime_settings_payload_defaults_video_metric_to_auto(self) -> None:
+        payload = web_app._build_runtime_settings_payload(
+            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
+            remote_hosts=[],
+            transcode_root=str(self.root / "staging"),
+            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
+            schedule_profiles=[],
+        )
+
+        self.assertEqual(payload["video"]["quality_metric"], "auto")
+
     def test_runtime_settings_payload_normalizes_media_access(self) -> None:
         payload = web_app._build_runtime_settings_payload(
             libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],

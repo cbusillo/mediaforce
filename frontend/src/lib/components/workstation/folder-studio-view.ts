@@ -181,8 +181,8 @@ function activePolicy(
 ): FolderPolicy | null {
 	return (pendingProposal?.preview_policy ??
 		pendingProposal?.applied_policy ??
-		folder.summary?.resolved_policy ??
 		folder.policy ??
+		folder.summary?.resolved_policy ??
 		null) as FolderPolicy | null;
 }
 

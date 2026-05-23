@@ -34,7 +34,7 @@ LEGACY_DEFAULT_SCHEDULE_PROFILE = "default"
 DEFAULT_HOST_SCHEDULE_PROFILE = ALWAYS_SCHEDULE_PROFILE
 DEFAULT_HOST_MAX_PARALLEL_ENCODES = 1
 DEFAULT_VIDEO_DEFAULTS = {
-    "quality_metric": "vmaf",
+    "quality_metric": "auto",
     "target_vmaf": "85",
     "min_target_vmaf": "80",
     "max_height": "0",
