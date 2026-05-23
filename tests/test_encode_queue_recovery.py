@@ -4079,13 +4079,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "--host",
                 "127.0.0.9",
                 "--port",
-                "5555",
+                "8777",
                 "--no-reload",
             ])
             settings = web_app._web_startup_settings(args)
 
         self.assertEqual(settings.host, "127.0.0.9")
-        self.assertEqual(settings.port, 5555)
+        self.assertEqual(settings.port, 8777)
         self.assertFalse(settings.reload_enabled)
 
     def test_web_startup_shell_env_overrides_project_env_file(self) -> None:
@@ -4118,11 +4118,11 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ), patch("mediaforce.web.app.load_config", return_value=config), patch(
                 "mediaforce.web.app.create_app", return_value=object()
         ), patch("mediaforce.web.app.uvicorn.run") as uvicorn_run_mock:
-            web_app.main(["--host", "127.0.0.9", "--port", "5555", "--no-reload"])
+            web_app.main(["--host", "127.0.0.9", "--port", "8777", "--no-reload"])
 
         uvicorn_run_mock.assert_called_once()
         self.assertEqual(uvicorn_run_mock.call_args.kwargs["host"], "127.0.0.9")
-        self.assertEqual(uvicorn_run_mock.call_args.kwargs["port"], 5555)
+        self.assertEqual(uvicorn_run_mock.call_args.kwargs["port"], 8777)
         self.assertNotIn("reload", uvicorn_run_mock.call_args.kwargs)
 
     def test_main_uses_cli_config_path_for_reload_app(self) -> None:
