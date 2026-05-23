@@ -332,7 +332,7 @@
 			</nav>
 
 			<section class="decision decision--{workflow.tone}" aria-labelledby="decision-title">
-				<div>
+				<div class="decision__summary">
 					<StateBadge tone={workflow.tone} label={workflow.label} />
 					<h2 id="decision-title">{workflow.title}</h2>
 					<p>{workflow.copy}</p>
@@ -991,8 +991,15 @@
 		border-left: 3px solid var(--decision-line);
 		display: grid;
 		gap: var(--mf-space-6);
-		grid-template-columns: minmax(0, 1fr) minmax(180px, 240px) minmax(160px, 240px) auto;
+		grid-template-columns: minmax(24rem, 1.25fr) minmax(14rem, 0.75fr);
 		padding: var(--mf-space-6);
+	}
+
+	.decision__summary,
+	.decision__next,
+	.decision__metrics,
+	.decision__actions {
+		min-width: 0;
 	}
 
 	.decision--active {
@@ -1020,11 +1027,17 @@
 		max-width: 68ch;
 	}
 
+	.decision__metrics {
+		grid-column: 1 / -1;
+	}
+
 	.decision__actions {
 		align-items: center;
 		display: flex;
 		gap: var(--mf-space-4);
 		flex-wrap: wrap;
+		grid-column: 1 / -1;
+		justify-content: flex-end;
 		min-width: 0;
 	}
 
@@ -1634,11 +1647,16 @@
 		}
 
 		.decision {
-			grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.decision__metrics {
+			display: grid;
+			grid-template-columns: repeat(3, minmax(0, 1fr));
 		}
 
 		.decision__actions {
-			grid-column: 1 / -1;
+			justify-content: flex-start;
 		}
 	}
 
