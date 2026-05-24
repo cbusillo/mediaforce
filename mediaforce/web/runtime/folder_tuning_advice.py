@@ -50,6 +50,10 @@ _SOURCE_RESOLUTION_RE = re.compile(
     r"\b(?:source|original|native)\s+resolution\b|\b(?:do\s+not|don't|dont|no)\s+(?:downsample|downscale|scale\s+down)\b|\bkeep\s+max_height\s+(?:unset|at\s+0|0)\b|\bmax_height\s+(?:unset|0)\b",
     re.IGNORECASE,
 )
+_HARD_SIZE_CAP_RE = re.compile(
+    r"\b(?:hard\s+(?:cap|ceiling|limit|size)|strict\s+(?:cap|ceiling|limit)|size\s+ceiling|max(?:imum)?\s+size|must\s+(?:hit|be|stay|remain)\s+(?:under|below|at)|do\s+not\s+exceed|max_encoded_percent)\b",
+    re.IGNORECASE,
+)
 _METRIC_TARGET_RE = re.compile(r"\b(?P<metric>vmaf|xpsnr)\s*(?:of\s*)?(?:around\s*)?(?P<target>\d+(?:\.\d+)?)\b", re.IGNORECASE)
 _METRIC_DIRECTIVE_RE = re.compile(
     r"\b(?:use|using|with|evaluate(?:\s+with)?|measure(?:\s+with)?|run(?:\s+with)?|metric(?:\s+is)?)\s+"
@@ -121,6 +125,7 @@ def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, A
         operator_confirmed = False
     summary = str(parsed_object.get("summary") or "").strip() or "Parsed operator note."
     reasoning_note = str(parsed_object.get("reasoning_note") or "").strip() or "Structured operator note parse."
+    hard_size_cap = bool(parsed_object.get("hard_size_cap"))
     return {
         "summary": summary,
         "intent_type": intent_type,
@@ -133,6 +138,7 @@ def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, A
         "scale_height": scale_height,
         "black_bar_handling": black_bar_handling,
         "crop": crop,
+        "hard_size_cap": hard_size_cap,
         "reasoning_note": reasoning_note,
     }
 
@@ -161,6 +167,7 @@ def _heuristic_operator_note_parse(note: str) -> dict[str, Any] | None:
     crop = crop_match.group(0) if crop_match is not None else None
     size_budget_value = float(size_budget_match.group("amount")) if size_budget_match is not None else None
     size_budget_unit = size_budget_match.group("unit").lower() if size_budget_match is not None else None
+    hard_size_cap = bool(_HARD_SIZE_CAP_RE.search(trimmed))
     metric = (
         metric_match.group("metric").lower()
         if metric_match is not None
@@ -224,6 +231,7 @@ def _heuristic_operator_note_parse(note: str) -> dict[str, Any] | None:
         "scale_height": scale_height,
         "black_bar_handling": black_bar_handling,
         "crop": crop,
+        "hard_size_cap": hard_size_cap,
         "reasoning_note": "Local heuristic recovered the explicit operator request from the note text.",
     }
 
@@ -479,6 +487,7 @@ def size_budget_request(
     amount = float_value(parsed_note.get("size_budget_value"))
     if multiplier is None or amount <= 0:
         return None
+    hard_size_cap = bool(parsed_note.get("hard_size_cap")) or bool(_HARD_SIZE_CAP_RE.search(trimmed))
     budget_bytes = int(round(amount * multiplier))
     source_size_bytes = None
     duration_seconds = None
@@ -508,9 +517,11 @@ def size_budget_request(
     )
     requested_max_encoded_percent = None
     target_encoded_percent = None
-    if estimated_source_percent is not None:
+    if hard_size_cap and estimated_source_percent is not None:
         requested_max_encoded_percent = round(estimated_source_percent, 2)
         target_encoded_percent = requested_max_encoded_percent
+    elif estimated_source_percent is not None:
+        target_encoded_percent = round(estimated_source_percent, 2)
     tradeoff_hint = None
     if isinstance(effective_sample_item, dict):
         tradeoff_hint = audio_tradeoff_hint(
@@ -532,6 +543,7 @@ def size_budget_request(
         "target_video_bitrate_kbps": estimated_video_bitrate_kbps,
         "target_encoded_percent": target_encoded_percent,
         "target_tolerance_percent": SIZE_BUDGET_TARGET_TOLERANCE,
+        "hard_size_cap": hard_size_cap,
         "feasibility": feasibility,
         "requires_confirmation": requires_confirmation,
         "requested_max_encoded_percent": requested_max_encoded_percent,
@@ -660,6 +672,7 @@ def operator_requested_experiment(
             "estimated_video_bitrate_kbps": object_dict(requested_size_budget).get("estimated_video_bitrate_kbps"),
             "feasibility": object_dict(requested_size_budget).get("feasibility"),
             "requires_confirmation": object_dict(requested_size_budget).get("requires_confirmation"),
+            "hard_size_cap": object_dict(requested_size_budget).get("hard_size_cap"),
             "requested_max_encoded_percent": object_dict(requested_size_budget).get("requested_max_encoded_percent"),
             "applied_max_encoded_percent": object_dict(requested_size_budget).get("applied_max_encoded_percent"),
             "operator_confirmed": operator_confirmed,

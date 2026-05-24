@@ -1063,35 +1063,6 @@ export function resolveWorkflow(
 			secondaryAction: 'download-review-pack'
 		};
 	}
-	if (verdict?.missesTarget) {
-		const budgetEnforcement = buildBudgetEnforcementView(pendingProposal);
-		if (
-			pendingProposal?.proposal_id &&
-			pendingProposal.can_queue !== false &&
-			budgetEnforcement?.active
-		) {
-			return {
-				tone: 'wait',
-				label: 'Target missed',
-				title: `${verdict.predictedPerItem} sample missed; run capped sample next`,
-				copy: `${verdict.predictedPerItem} per episode against ${verdict.target}. Next sample will use a ${budgetEnforcement.cap} size ceiling. ${budgetEnforcement.reason}`,
-				primary: 'Start sample',
-				primaryAction: 'start-sample',
-				secondary: 'Revise',
-				secondaryAction: 'revise-proposal'
-			};
-		}
-		return {
-			tone: 'wait',
-			label: 'Target missed',
-			title: 'Sample is too large for the requested target',
-			copy: `${verdict.predictedPerItem} per episode against ${verdict.target}. ${verdict.recommendation}`,
-			primary: 'Revise sample',
-			primaryAction: 'focus-bench',
-			secondary: 'Download review pack',
-			secondaryAction: 'download-review-pack'
-		};
-	}
 	if (pendingProposal?.self_check?.status && pendingProposal.self_check.status !== 'passed') {
 		return {
 			tone: 'wait',
@@ -1104,6 +1075,56 @@ export function resolveWorkflow(
 			primaryAction: 'download-review-pack',
 			secondary: 'Revise',
 			secondaryAction: 'revise-proposal'
+		};
+	}
+	if (pendingProposal?.proposal_id && pendingProposal.can_queue !== false) {
+		const budgetEnforcement = buildBudgetEnforcementView(pendingProposal);
+		if (budgetEnforcement?.active || !calibration?.browser_review_ready) {
+			return {
+				tone: 'ready',
+				label: budgetEnforcement?.active ? 'Capped draft ready' : 'Draft ready',
+				title: budgetEnforcement?.active
+					? `Run a sample with a ${budgetEnforcement.cap} size ceiling`
+					: 'Review draft is ready to sample',
+				copy:
+					budgetEnforcement?.reason ??
+					pendingProposal.message ??
+					'Review the draft, then queue the representative sample when it looks right.',
+				primary: 'Start sample',
+				primaryAction: 'start-sample',
+				secondary: 'Revise',
+				secondaryAction: 'revise-proposal'
+			};
+		}
+	}
+	if (
+		pendingProposal?.proposal_id &&
+		pendingProposal.can_queue === false &&
+		(folder.sample_item || verdict)
+	) {
+		return {
+			tone: 'wait',
+			label: 'Draft blocked',
+			title: 'The draft does not match your request yet',
+			copy:
+				pendingProposal.message ??
+				'The bench draft changed something outside your request. Revise it before starting another sample.',
+			primary: 'Revise draft',
+			primaryAction: 'revise-proposal',
+			secondary: 'Download pack',
+			secondaryAction: 'download-review-pack'
+		};
+	}
+	if (verdict?.missesTarget) {
+		return {
+			tone: 'wait',
+			label: 'Target missed',
+			title: 'Sample is too large for the requested target',
+			copy: `${verdict.predictedPerItem} per episode against ${verdict.target}. ${verdict.recommendation}`,
+			primary: 'Revise sample',
+			primaryAction: 'focus-bench',
+			secondary: 'Download review pack',
+			secondaryAction: 'download-review-pack'
 		};
 	}
 	if (calibration?.browser_review_ready || calibration?.review_media_ready) {
@@ -1120,24 +1141,6 @@ export function resolveWorkflow(
 			primaryAction: 'queue-encode',
 			secondary: 'Download pack',
 			secondaryAction: 'download-review-pack'
-		};
-	}
-	if (pendingProposal?.proposal_id && pendingProposal.can_queue !== false) {
-		const budgetEnforcement = buildBudgetEnforcementView(pendingProposal);
-		return {
-			tone: 'ready',
-			label: budgetEnforcement?.active ? 'Capped draft ready' : 'Draft ready',
-			title: budgetEnforcement?.active
-				? `Run a sample with a ${budgetEnforcement.cap} size ceiling`
-				: 'Review draft is ready to sample',
-			copy:
-				budgetEnforcement?.reason ??
-				pendingProposal.message ??
-				'Review the draft, then queue the representative sample when it looks right.',
-			primary: 'Start sample',
-			primaryAction: 'start-sample',
-			secondary: 'Revise',
-			secondaryAction: 'revise-proposal'
 		};
 	}
 	if (!folder.sample_item) {

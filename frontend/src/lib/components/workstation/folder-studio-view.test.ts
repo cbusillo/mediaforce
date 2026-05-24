@@ -418,7 +418,7 @@ describe('Folder Studio review request mapping', () => {
 		});
 	});
 
-	it('keeps an over-budget sample revise-first when a stale warning draft exists', () => {
+	it('surfaces a draft warning before over-budget review evidence', () => {
 		const calibration = {
 			browser_review_ready: true,
 			review_media_ready: true,
@@ -462,10 +462,10 @@ describe('Folder Studio review request mapping', () => {
 				null
 			)
 		).toMatchObject({
-			label: 'Target missed',
-			primary: 'Revise sample',
-			primaryAction: 'focus-bench',
-			secondary: 'Download review pack'
+			label: 'Check draft',
+			primary: 'Download review pack',
+			primaryAction: 'download-review-pack',
+			secondary: 'Revise'
 		});
 	});
 
@@ -612,11 +612,50 @@ describe('Folder Studio review request mapping', () => {
 				null
 			)
 		).toMatchObject({
-			label: 'Target missed',
-			title: '766 MiB sample missed; run capped sample next',
-			copy: '766 MiB per episode against 300 MB per episode. Next sample will use a 7% size ceiling. Applied after 2.6x target miss against 300 MB per episode.',
+			label: 'Capped draft ready',
+			title: 'Run a sample with a 7% size ceiling',
+			copy: 'Applied after 2.6x target miss against 300 MB per episode.',
 			primary: 'Start sample',
 			primaryAction: 'start-sample'
+		});
+	});
+
+	it('surfaces blocked drafts before stale target-missed sample copy', () => {
+		const calibration = {
+			sample_result: {
+				predicted_total_size_bytes: 803_322_876,
+				quality_metric: 'VMAF',
+				quality_score: 95.0448
+			},
+			advice: {
+				operator_request: {
+					budget_bytes: 314_572_800,
+					budget_label: '300 MB per episode'
+				}
+			}
+		} as FolderCalibrationState;
+		const pendingProposal = {
+			proposal_id: 'blocked-draft',
+			can_queue: false,
+			message: 'The draft lowers VMAF based only on a soft size target.'
+		} as PendingSampleProposal;
+
+		expect(
+			resolveWorkflow(
+				folderPayload({ calibration, pending_proposal: pendingProposal }),
+				folderStatusPayload(),
+				calibration,
+				pendingProposal,
+				null,
+				null,
+				null
+			)
+		).toMatchObject({
+			label: 'Draft blocked',
+			title: 'The draft does not match your request yet',
+			copy: 'The draft lowers VMAF based only on a soft size target.',
+			primary: 'Revise draft',
+			primaryAction: 'revise-proposal'
 		});
 	});
 

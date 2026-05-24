@@ -68,7 +68,7 @@
 			quality_metric: 'vmaf',
 			target_vmaf: '85',
 			min_target_vmaf: '80',
-			max_height: '0',
+			max_height: '1080',
 			default_grain: '8',
 			max_encoded_percent: '80'
 		},
