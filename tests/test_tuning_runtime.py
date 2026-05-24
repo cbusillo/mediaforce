@@ -394,6 +394,36 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(policy["video"]["quality_metric"], "xpsnr")
         self.assertEqual(policy["video"]["target_xpsnr"], 35.5)
 
+    def test_folder_display_policy_prefers_live_summary_over_sample_snapshot(self) -> None:
+        sample_item = {
+            "resolved_policy": {
+                "video": {
+                    "quality_metric": "vmaf",
+                    "target_vmaf": 95.0,
+                    "max_height": 720,
+                }
+            }
+        }
+        summary = {
+            "resolved_policy": {
+                "video": {
+                    "quality_metric": "vmaf",
+                    "target_vmaf": 85.0,
+                    "max_height": 1080,
+                }
+            }
+        }
+
+        policy = _folder_display_policy(
+            sample_item=sample_item,
+            calibration=None,
+            pending_proposal=None,
+            summary=summary,
+        )
+
+        self.assertEqual(policy["video"]["target_vmaf"], 85.0)
+        self.assertEqual(policy["video"]["max_height"], 1080)
+
     def test_folder_ai_tune_confirm_retries_latest_stopped_sample_without_pending_proposal(self) -> None:
         saved_jobs: list[dict[str, object]] = []
         host = HostStatus(

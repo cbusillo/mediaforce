@@ -596,6 +596,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             sample_item=sample_item,
             calibration=calibration,
             pending_proposal=pending_proposal_raw,
+            summary=summary,
         )
         advice_state = _backfill_multimodal_review_pack(
             config,
@@ -970,6 +971,7 @@ def _folder_display_policy(
         sample_item: dict[str, Any],
         calibration: dict[str, Any] | None,
         pending_proposal: dict[str, Any] | None,
+        summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if calibration:
         calibration_policy = object_dict(calibration.get("policy"))
@@ -982,6 +984,9 @@ def _folder_display_policy(
     current_policy = object_dict(proposal.get("current_policy"))
     if current_policy:
         return current_policy
+    live_policy = object_dict(object_dict(summary).get("resolved_policy"))
+    if live_policy:
+        return live_policy
     return object_dict(sample_item.get("resolved_policy"))
 
 
