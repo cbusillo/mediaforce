@@ -231,7 +231,7 @@
 	}
 
 	async function saveProfileAndQueue(action: WorkflowAction) {
-		if (action !== 'queue-encode') return;
+		if (action !== 'queue-encode' && action !== 'approve-size-tradeoff') return;
 		const actionState = workflowActionState(action);
 		if (actionState.disabled) return;
 		workflowPending = action;
@@ -242,6 +242,7 @@
 				`${resolve('/')}api/folders/${encodedPrefix}/save-profile`,
 				{
 					confirm_high_impact: true,
+					confirm_size_tradeoff: action === 'approve-size-tradeoff',
 					reviewed_draft_hash: calibration?.draft_hash ?? ''
 				}
 			);
@@ -388,7 +389,7 @@
 							data-mf-wire="live"
 							>{workflowPending === workflow.primaryAction ? 'Queueing' : workflow.primary}</button
 						>
-					{:else if workflow.primaryAction === 'queue-encode'}
+					{:else if workflow.primaryAction === 'queue-encode' || workflow.primaryAction === 'approve-size-tradeoff'}
 						<button
 							class="control control--primary"
 							type="button"
@@ -455,7 +456,7 @@
 								? 'Stopping'
 								: workflow.secondary}</button
 						>
-					{:else if workflow.secondaryAction === 'queue-encode'}
+					{:else if workflow.secondaryAction === 'queue-encode' || workflow.secondaryAction === 'approve-size-tradeoff'}
 						<button
 							class="control"
 							type="button"

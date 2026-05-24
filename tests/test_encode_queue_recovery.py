@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unittest
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, cast
@@ -4833,6 +4834,52 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(exc.exception.status_code, 409)
         self.assertIn("does not apply the requested 1080p height cap", str(exc.exception.detail))
 
+    def test_save_profile_action_allows_explicit_size_tradeoff_approval(self) -> None:
+        saved_payloads: list[folder_actions_runtime.ActionPayload] = []
+        merged_advice: list[folder_actions_runtime.ActionPayload] = []
+        calibration_payload: folder_actions_runtime.ActionPayload = {
+            "mode": "sample",
+            "job_id": "sample-1",
+            "review_media_ready": True,
+            "policy": {"video": {"target_vmaf": 85.0, "max_encoded_percent": 80}},
+            "sample_item": {
+                "library_item_id": 1,
+                "resolved_policy": {"video": {"target_vmaf": 85.0, "max_encoded_percent": 80}},
+            },
+            "sample_result": {"predicted_total_size_bytes": 376 * 1024 * 1024},
+        }
+
+        result = folder_actions_runtime.save_profile_action(
+            self.config,
+            "tv/show",
+            now_iso=lambda: "2026-05-24T04:40:00+00:00",
+            load_sample_item=lambda *_args, **_kwargs: None,
+            load_calibration_state=lambda *_args, **_kwargs: dict(calibration_payload),
+            calibration_draft_hash=web_app._calibration_draft_hash,
+            save_calibration_state=lambda _config, _prefix, payload: saved_payloads.append(dict(payload)),
+            load_advice_state=lambda *_args, **_kwargs: {
+                "request_disposition": "honored",
+                "operator_request": {
+                    "operator_confirmed": True,
+                    "request_type": "size_budget",
+                    "budget_bytes": 300 * 1024 * 1024,
+                    "budget_label": "300 MB per episode",
+                    "applied_policy": None,
+                },
+            },
+            record_visual_approval_artifact=lambda *_args, **_kwargs: {"artifact_id": "approval-1"},
+            merge_advice_state=lambda _config, _prefix, payload: merged_advice.append(dict(payload)),
+            upsert_override=lambda *_args, **_kwargs: None,
+            auto_queue_folder_encode=lambda *_args, **_kwargs: {"ok": True, "message": "Queued folder encode."},
+            confirm_size_tradeoff=True,
+            reviewed_draft_hash=web_app._calibration_draft_hash(calibration_payload),
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["queued"])
+        self.assertEqual(saved_payloads[0]["accepted_at"], "2026-05-24T04:40:00+00:00")
+        self.assertTrue(merged_advice[0]["operator_approved_size_tradeoff"])
+
     def test_run_sampled_calibration_keeps_review_directory_for_approval(self) -> None:
         source_path = self._create_source_file("episode-review.mkv")
         preview_dir = self.config.paths.review_dir / "run-123" / "item-00"
@@ -5296,6 +5343,58 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with patch("mediaforce.web.app._safe_collect_host_statuses", return_value=statuses):
             host = web_app._resolve_sample_host(self.config, "cbusillo@m1-mini")
         self.assertEqual(host.key, "cbusillo@m1-mini")
+
+    def test_resolve_sample_host_rejects_closed_schedule(self) -> None:
+        config = replace(
+            self.config,
+            raw={
+                **self.config.raw,
+                "remote_hosts": [
+                    {
+                        "label": "M4 Studio",
+                        "host": "cbusillo@localhost",
+                        "capabilities": ["encode_queue", "sample_calibration"],
+                        "schedule_profile": "tou_vb",
+                    }
+                ],
+                "encode_queue": {
+                    "schedule_profiles": [
+                        {
+                            "key": "tou_vb",
+                            "label": "Time of Use VB Super off Peak",
+                            "mode": "night",
+                            "timezone": "host_local",
+                            "start_hour": 0,
+                            "end_hour": 5,
+                            "days_of_week": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+                        }
+                    ]
+                },
+            },
+        )
+        statuses = [
+            HostStatus(
+                key="cbusillo@localhost",
+                label="M4 Studio",
+                mode="ssh",
+                priority=100,
+                capabilities=["encode_queue", "sample_calibration"],
+                available=True,
+                message="Mounted and ready",
+                missing_paths=[],
+                repo_path=str(self.root),
+                utc_offset_minutes=-240,
+            )
+        ]
+
+        with patch("mediaforce.web.app._safe_collect_host_statuses", return_value=statuses):
+            with patch("mediaforce.web.app.datetime") as fake_datetime:
+                fake_datetime.now.return_value = web_app._parse_iso("2026-05-24T16:30:00+00:00")
+                with self.assertRaises(HTTPException) as exc_info:
+                    web_app._resolve_sample_host(config, "cbusillo@localhost")
+
+        self.assertEqual(exc_info.exception.status_code, 409)
+        self.assertIn("outside its schedule", str(exc_info.exception.detail))
 
     def test_resolve_sample_host_rejects_non_sample_host(self) -> None:
         statuses = [

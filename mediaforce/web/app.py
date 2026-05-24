@@ -11,7 +11,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -834,6 +834,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     def _save_profile_action(
             normalized_prefix: str,
             confirm_high_impact: bool,
+            confirm_size_tradeoff: bool,
             reviewed_draft_hash: str,
     ) -> ActionPayload:
         return save_profile_action(
@@ -850,6 +851,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             upsert_override=_upsert_override,
             auto_queue_folder_encode=_queue_folder_encode_action,
             confirm_high_impact=confirm_high_impact,
+            confirm_size_tradeoff=confirm_size_tradeoff,
             reviewed_draft_hash=reviewed_draft_hash,
         )
 
@@ -1645,6 +1647,11 @@ def _resolve_sample_host(config: MediaforceConfig, host_key: str) -> HostStatus:
         raise HTTPException(status_code=400, detail="Unknown sampled calibration host")
     if not host.available:
         raise HTTPException(status_code=400, detail=host.message)
+    host_payload = {**_host_config_for_key(config, host.key), **asdict(host)}
+    policy = _schedule_profile_policy_for_host(config, host_payload)
+    if not _scheduler_allows_encode_run(policy, host_payload=host_payload):
+        summary = str(policy.get("summary") or "the configured schedule").strip()
+        raise HTTPException(status_code=409, detail=f"{host.label} is outside its schedule ({summary}).")
     return host
 
 

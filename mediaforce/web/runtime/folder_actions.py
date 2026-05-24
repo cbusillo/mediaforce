@@ -746,6 +746,7 @@ def save_profile_action(
         upsert_override: UpsertOverrideFn,
         auto_queue_folder_encode: AutoQueueApprovedFolderEncodeFn | None = None,
         confirm_high_impact: bool = False,
+        confirm_size_tradeoff: bool = False,
         reviewed_draft_hash: str = "",
 ) -> ActionPayload:
     calibration = load_calibration_state(config, normalized_prefix)
@@ -804,7 +805,7 @@ def save_profile_action(
         operator_request=operator_request or None,
         calibration_payload=calibration_payload,
     )
-    if size_issue is not None:
+    if size_issue is not None and not confirm_size_tradeoff:
         raise HTTPException(status_code=409, detail=size_issue)
     if str(calibration_payload.get("mode") or "sample") == "sample":
         if not calibration_payload.get("review_media_ready"):
@@ -838,6 +839,7 @@ def save_profile_action(
                     {
                         "approval_artifact": approval_artifact,
                         "operator_approved_at": calibration_payload["accepted_at"],
+                        "operator_approved_size_tradeoff": bool(size_issue),
                     },
                 )
     upsert_override(

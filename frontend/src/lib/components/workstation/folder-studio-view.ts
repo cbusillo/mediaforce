@@ -62,6 +62,7 @@ export type SampleVerdict = {
 };
 
 export type WorkflowAction =
+	| 'approve-size-tradeoff'
 	| 'download-review-pack'
 	| 'focus-bench'
 	| 'open-ops'
@@ -275,6 +276,7 @@ export function resolveWorkflowActionState(
 		};
 	}
 	if (action === 'focus-bench') return { disabled: false, title: '' };
+	if (action === 'approve-size-tradeoff') return { disabled: false, title: '' };
 	if (action === 'revise-proposal') return { disabled: false, title: '' };
 	if (action === 'open-ops') return { disabled: false, title: '' };
 	if (action === 'stop-sample') {
@@ -1117,14 +1119,14 @@ export function resolveWorkflow(
 	}
 	if (verdict?.missesTarget) {
 		return {
-			tone: 'wait',
+			tone: 'ready',
 			label: 'Target missed',
-			title: 'Sample is too large for the requested target',
-			copy: `${verdict.predictedPerItem} per episode against ${verdict.target}. ${verdict.recommendation}`,
-			primary: 'Revise sample',
-			primaryAction: 'focus-bench',
-			secondary: 'Download review pack',
-			secondaryAction: 'download-review-pack'
+			title: 'Approve this size or revise smaller',
+			copy: `${verdict.predictedPerItem} per episode against ${verdict.target}. If the comparison preview looks good, approve this larger result; otherwise revise and sample again.`,
+			primary: 'Approve anyway and queue',
+			primaryAction: 'approve-size-tradeoff',
+			secondary: 'Revise smaller',
+			secondaryAction: 'focus-bench'
 		};
 	}
 	if (calibration?.browser_review_ready || calibration?.review_media_ready) {

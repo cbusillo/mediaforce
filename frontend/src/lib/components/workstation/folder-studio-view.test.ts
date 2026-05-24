@@ -361,7 +361,7 @@ describe('Folder Studio review request mapping', () => {
 		);
 	});
 
-	it('turns an over-budget sample into a revise-first verdict and workflow', () => {
+	it('lets the operator approve an over-budget sample when the preview looks good', () => {
 		const calibration = {
 			browser_review_ready: true,
 			review_media_ready: true,
@@ -412,9 +412,10 @@ describe('Folder Studio review request mapping', () => {
 			resolveWorkflow(folder, folderStatusPayload(), calibration, null, null, null, null)
 		).toMatchObject({
 			label: 'Target missed',
-			primary: 'Revise sample',
-			primaryAction: 'focus-bench',
-			secondary: 'Download review pack'
+			title: 'Approve this size or revise smaller',
+			primary: 'Approve anyway and queue',
+			primaryAction: 'approve-size-tradeoff',
+			secondary: 'Revise smaller'
 		});
 	});
 
