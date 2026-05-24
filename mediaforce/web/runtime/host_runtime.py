@@ -180,7 +180,7 @@ def _running_encode_counts_by_host(
         .group_by(_running_job_host_key_sql())
     ).mappings().fetchall()
     for row in rows:
-        host_key = str(row["host_key"] or "").strip()
+        host_key = f"{row['host_key'] or ''}".strip()
         if not host_key:
             continue
         counts[host_key] = int(row["job_count"] or 0)
@@ -220,12 +220,15 @@ def _running_encode_jobs_for_hosts(connection: DBClient, *, format_eta_seconds: 
 
 
 def _running_job_host_key_sql() -> Any:
-    current_key = func.nullif(func.trim(func.json_extract(encode_jobs.c.host_json, "$.key")), "")
-    current_host = func.nullif(func.trim(func.json_extract(encode_jobs.c.host_json, "$.host")), "")
-    current_label = func.nullif(func.trim(func.json_extract(encode_jobs.c.host_json, "$.label")), "")
-    last_key = func.nullif(func.trim(func.json_extract(encode_jobs.c.last_host_json, "$.key")), "")
-    last_host = func.nullif(func.trim(func.json_extract(encode_jobs.c.last_host_json, "$.host")), "")
-    last_label = func.nullif(func.trim(func.json_extract(encode_jobs.c.last_host_json, "$.label")), "")
+    def json_text_value(column: Any, key: str) -> Any:
+        return func.nullif(func.trim(func.json_extract(column, key)), "")
+
+    current_key = json_text_value(encode_jobs.c.host_json, "$.key")
+    current_host = json_text_value(encode_jobs.c.host_json, "$.host")
+    current_label = json_text_value(encode_jobs.c.host_json, "$.label")
+    last_key = json_text_value(encode_jobs.c.last_host_json, "$.key")
+    last_host = json_text_value(encode_jobs.c.last_host_json, "$.host")
+    last_label = json_text_value(encode_jobs.c.last_host_json, "$.label")
     return func.coalesce(
         current_key,
         current_host,
@@ -407,14 +410,26 @@ def sample_calibration_host_statuses(config: MediaforceConfig, *, safe_collect_s
     return hosts
 
 
-def sample_host_options(config: MediaforceConfig, *, safe_collect_statuses: Any) -> list[dict[str, Any]]:
+def sample_host_options(
+        config: MediaforceConfig,
+        *,
+        safe_collect_statuses: Any,
+        schedule_fields_for_host: Any | None = None,
+) -> list[dict[str, Any]]:
     return sample_host_options_from_statuses(
-        sample_calibration_host_statuses(config, safe_collect_statuses=safe_collect_statuses))
+        sample_calibration_host_statuses(config, safe_collect_statuses=safe_collect_statuses),
+        schedule_fields_for_host=schedule_fields_for_host,
+    )
 
 
-def sample_host_options_from_statuses(statuses: list[HostStatus]) -> list[dict[str, Any]]:
+def sample_host_options_from_statuses(
+        statuses: list[HostStatus],
+        *,
+        schedule_fields_for_host: Any | None = None,
+) -> list[dict[str, Any]]:
     options: list[dict[str, Any]] = []
     for status in statuses:
+        schedule_fields = object_dict(schedule_fields_for_host(status)) if schedule_fields_for_host else {}
         options.append(
             {
                 "key": status.key,
@@ -422,6 +437,7 @@ def sample_host_options_from_statuses(statuses: list[HostStatus]) -> list[dict[s
                 "detail": status.message if not status.available else (
                     "This machine" if host_status_targets_current_machine(status) else "Remote host"),
                 "available": status.available,
+                **schedule_fields,
             }
         )
     return options

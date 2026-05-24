@@ -99,6 +99,13 @@
 	const retryableSampleJob = $derived(record<FolderCalibrationJob>(status.retryable_sample_job));
 	const encodeJob = $derived(studioFolder.encode_job ?? null);
 	const reviewArtifacts = $derived(resolveReviewArtifacts(calibration, pendingProposal));
+	const reviewPackReady = $derived(
+		Boolean(
+			reviewArtifacts.length > 0 ||
+			calibration?.browser_review_ready ||
+			calibration?.review_media_ready
+		)
+	);
 	const workflow = $derived(
 		resolveWorkflow(
 			studioFolder,
@@ -107,7 +114,8 @@
 			pendingProposal,
 			reviewGate,
 			calibrationJob,
-			encodeJob
+			encodeJob,
+			reviewPackReady
 		)
 	);
 	const workflowSteps = $derived(buildWorkflowSteps(workflow));
@@ -150,14 +158,6 @@
 		)
 	);
 	const benchRequestDisabled = $derived(benchRequestState.disabled);
-	const reviewPackReady = $derived(
-		Boolean(
-			reviewArtifacts.length > 0 ||
-			calibration?.browser_review_ready ||
-			calibration?.review_media_ready
-		)
-	);
-
 	function workflowActionState(action: WorkflowAction) {
 		return resolveWorkflowActionState(action, {
 			reviewPackReady,
@@ -746,17 +746,17 @@
 
 			<WorkstationPanel eyebrow="Workers" title="Sample readiness">
 				<div class="host-list">
-					{#each hosts.hosts.slice(0, 6) as host (host.key)}
+					{#each sampleHostOptions.slice(0, 6) as host (host.key)}
 						<div class="host-row">
 							<StateBadge
 								compact
-								tone={host.available ? 'ready' : host.schedule_open === false ? 'wait' : 'fail'}
-								label={host.label}
+								tone={host.available ? (host.scheduleOpen === false ? 'wait' : 'ready') : 'fail'}
+								label={host.state}
 							/>
-							<span>{host.message || host.schedule_detail || 'No detail'}</span>
+							<span>{host.label}{host.detail ? ` · ${host.detail}` : ''}</span>
 						</div>
 					{/each}
-					{#if hosts.hosts.length === 0}
+					{#if sampleHostOptions.length === 0}
 						<div class="empty-note">Worker status is unavailable.</div>
 					{/if}
 				</div>

@@ -5344,7 +5344,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             host = web_app._resolve_sample_host(self.config, "cbusillo@m1-mini")
         self.assertEqual(host.key, "cbusillo@m1-mini")
 
-    def test_resolve_sample_host_rejects_closed_schedule(self) -> None:
+    def test_resolve_sample_host_allows_closed_encode_schedule_for_manual_samples(self) -> None:
         config = replace(
             self.config,
             raw={
@@ -5390,11 +5390,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with patch("mediaforce.web.app._safe_collect_host_statuses", return_value=statuses):
             with patch("mediaforce.web.app.datetime") as fake_datetime:
                 fake_datetime.now.return_value = web_app._parse_iso("2026-05-24T16:30:00+00:00")
-                with self.assertRaises(HTTPException) as exc_info:
-                    web_app._resolve_sample_host(config, "cbusillo@localhost")
+                host = web_app._resolve_sample_host(config, "cbusillo@localhost")
 
-        self.assertEqual(exc_info.exception.status_code, 409)
-        self.assertIn("outside its schedule", str(exc_info.exception.detail))
+        self.assertEqual(host.key, "cbusillo@localhost")
 
     def test_resolve_sample_host_rejects_non_sample_host(self) -> None:
         statuses = [

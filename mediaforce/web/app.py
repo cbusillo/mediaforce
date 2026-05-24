@@ -609,7 +609,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         resolved_metric, _ = select_quality_metric(str(video_policy.get("quality_metric", "auto")))
         sample_host_statuses = _sample_calibration_host_statuses(config)
         sample_host_key = _default_sample_host_key_from_statuses(sample_host_statuses)
-        sample_host_choices = _sample_host_options_from_statuses(sample_host_statuses)
+        sample_host_choices = _sample_host_options_from_statuses(config, sample_host_statuses)
         return (
             {
                 **base_context,
@@ -1621,11 +1621,33 @@ def _sample_calibration_host_statuses(config: MediaforceConfig) -> list[HostStat
 
 
 def _sample_host_options(config: MediaforceConfig) -> list[dict[str, Any]]:
-    return sample_host_options(config, safe_collect_statuses=_safe_collect_host_statuses)
+    return sample_host_options(
+        config,
+        safe_collect_statuses=_safe_collect_host_statuses,
+        schedule_fields_for_host=lambda status: _sample_host_schedule_fields(config, status),
+    )
 
 
-def _sample_host_options_from_statuses(statuses: list[HostStatus]) -> list[dict[str, Any]]:
-    return sample_host_options_from_statuses(statuses)
+def _sample_host_options_from_statuses(
+        config: MediaforceConfig,
+        statuses: list[HostStatus],
+) -> list[dict[str, Any]]:
+    return sample_host_options_from_statuses(
+        statuses,
+        schedule_fields_for_host=lambda status: _sample_host_schedule_fields(config, status),
+    )
+
+
+def _sample_host_schedule_fields(config: MediaforceConfig, status: HostStatus) -> dict[str, Any]:
+    host_payload = {**_host_config_for_key(config, status.key), **asdict(status)}
+    policy = _schedule_profile_policy_for_host(config, host_payload)
+    schedule_open = _scheduler_allows_encode_run(policy, host_payload=host_payload)
+    summary = str(policy.get("summary") or "").strip()
+    return {
+        "schedule_open": schedule_open,
+        "schedule_detail": summary,
+        "schedule_profile_label": str(policy.get("label") or "Always"),
+    }
 
 
 def _sample_host_help_text(sample_host_choices: list[dict[str, Any]], selected_key: str) -> str:
@@ -1652,11 +1674,6 @@ def _resolve_sample_host(config: MediaforceConfig, host_key: str) -> HostStatus:
         raise HTTPException(status_code=400, detail="Unknown sampled calibration host")
     if not host.available:
         raise HTTPException(status_code=400, detail=host.message)
-    host_payload = {**_host_config_for_key(config, host.key), **asdict(host)}
-    policy = _schedule_profile_policy_for_host(config, host_payload)
-    if not _scheduler_allows_encode_run(policy, host_payload=host_payload):
-        summary = str(policy.get("summary") or "the configured schedule").strip()
-        raise HTTPException(status_code=409, detail=f"{host.label} is outside its schedule ({summary}).")
     return host
 
 

@@ -72,10 +72,45 @@ describe('Folder Studio review request mapping', () => {
 		]);
 
 		expect(options).toEqual([
-			{ key: 'sample-host', label: 'Sample host', detail: 'folder match', available: true },
-			{ key: 'offline', label: 'Offline host', detail: 'missing media', available: false }
+			{
+				key: 'sample-host',
+				label: 'Sample host',
+				detail: 'folder match',
+				available: true,
+				scheduleOpen: null,
+				state: 'Ready for samples'
+			},
+			{
+				key: 'offline',
+				label: 'Offline host',
+				detail: 'missing media',
+				available: false,
+				scheduleOpen: null,
+				state: 'Unavailable'
+			}
 		]);
 		expect(buildBenchHostOptions(undefined)).toEqual([]);
+	});
+
+	it('marks off-schedule workers as usable for samples but not encode-ready', () => {
+		const options = buildBenchHostOptions([
+			{ key: 'm4', label: 'M4', available: true, schedule_open: false }
+		]);
+
+		expect(options).toEqual([
+			{
+				key: 'm4',
+				label: 'M4',
+				detail: '',
+				available: true,
+				scheduleOpen: false,
+				state: 'Sample ok, encode later'
+			}
+		]);
+		expect(resolveBenchRequestState('try 300MB', 'm4', options, null, false)).toMatchObject({
+			disabled: false,
+			blocker: ''
+		});
 	});
 
 	it('enables send only for a note, available host, and inactive sample job', () => {
@@ -409,7 +444,7 @@ describe('Folder Studio review request mapping', () => {
 		});
 
 		expect(
-			resolveWorkflow(folder, folderStatusPayload(), calibration, null, null, null, null)
+			resolveWorkflow(folder, folderStatusPayload(), calibration, null, null, null, null, true)
 		).toMatchObject({
 			label: 'Target missed',
 			title: 'Approve this size or revise smaller',
@@ -417,6 +452,47 @@ describe('Folder Studio review request mapping', () => {
 			primaryAction: 'approve-size-tradeoff',
 			secondary: 'Revise smaller'
 		});
+	});
+
+	it('waits for review media before allowing an over-budget approval', () => {
+		const calibration = {
+			sample_result: {
+				predicted_total_size_bytes: 803_322_876,
+				quality_metric: 'VMAF',
+				quality_score: 95.0448
+			},
+			advice: {
+				operator_request: {
+					budget_bytes: 314_572_800,
+					budget_label: '300 MB per episode'
+				},
+				run_verdict: { outcome: 'poor_fit' }
+			}
+		} as FolderCalibrationState;
+
+		expect(
+			resolveWorkflow(
+				folderPayload({ calibration, sample_item: { rel_path: 'tv/show/e01.mkv' } }),
+				folderStatusPayload(),
+				calibration,
+				null,
+				null,
+				null,
+				null,
+				false
+			)
+		).toMatchObject({
+			label: 'Review pending',
+			primary: 'Open Ops',
+			secondary: 'Revise smaller'
+		});
+		expect(
+			resolveWorkflowActionState('approve-size-tradeoff', {
+				reviewPackReady: false,
+				pendingProposal: null,
+				calibrationJob: null
+			})
+		).toEqual({ disabled: true, title: 'Review media is not ready yet.' });
 	});
 
 	it('surfaces a draft warning before over-budget review evidence', () => {
@@ -955,6 +1031,26 @@ describe('Folder Studio review request mapping', () => {
 			['Sample', true],
 			['Review', false],
 			['Approve', false],
+			['Process', false]
+		]);
+	});
+
+	it('marks size tradeoff approvals as the approve step', () => {
+		const steps = buildWorkflowSteps({
+			tone: 'ready',
+			label: 'Target missed',
+			title: 'Approve this size or revise smaller',
+			copy: 'Review the tradeoff.',
+			primary: 'Approve anyway and queue',
+			primaryAction: 'approve-size-tradeoff',
+			secondary: 'Revise smaller',
+			secondaryAction: 'focus-bench'
+		});
+
+		expect(steps.map((step) => [step.label, step.current])).toEqual([
+			['Sample', false],
+			['Review', false],
+			['Approve', true],
 			['Process', false]
 		]);
 	});

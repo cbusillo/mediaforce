@@ -118,6 +118,8 @@ export type BenchHostOption = {
 	label: string;
 	detail: string;
 	available: boolean;
+	scheduleOpen: boolean | null;
+	state: string;
 };
 
 export type BenchRequestState = {
@@ -216,11 +218,19 @@ export function buildBenchHostOptions(
 	return (folderOptions ?? [])
 		.map((host) => {
 			const key = compactText(host.key);
+			const available = host.available !== false;
+			const scheduleOpen = typeof host.schedule_open === 'boolean' ? host.schedule_open : null;
 			return {
 				key,
 				label: compactText(host.label) || key || 'Host',
 				detail: compactText(host.detail) || compactText(host.message),
-				available: host.available !== false
+				available,
+				scheduleOpen,
+				state: !available
+					? 'Unavailable'
+					: scheduleOpen === false
+						? 'Sample ok, encode later'
+						: 'Ready for samples'
 			};
 		})
 		.filter((host) => host.key);
@@ -276,7 +286,11 @@ export function resolveWorkflowActionState(
 		};
 	}
 	if (action === 'focus-bench') return { disabled: false, title: '' };
-	if (action === 'approve-size-tradeoff') return { disabled: false, title: '' };
+	if (action === 'approve-size-tradeoff') {
+		return reviewPackReady
+			? { disabled: false, title: '' }
+			: { disabled: true, title: 'Review media is not ready yet.' };
+	}
 	if (action === 'revise-proposal') return { disabled: false, title: '' };
 	if (action === 'open-ops') return { disabled: false, title: '' };
 	if (action === 'stop-sample') {
@@ -974,7 +988,8 @@ export function resolveWorkflow(
 	pendingProposal: PendingSampleProposal | null,
 	reviewGate: ReviewGate | null,
 	calibrationJob: FolderCalibrationJob | null,
-	encodeJob: EncodeQueueJob | null
+	encodeJob: EncodeQueueJob | null,
+	reviewPackReady = false
 ): WorkflowState {
 	const encodeStatus = String(encodeJob?.status ?? '').toLowerCase();
 	if (['failed', 'needs_attention', 'stopped'].includes(encodeStatus)) {
@@ -1117,7 +1132,7 @@ export function resolveWorkflow(
 			secondaryAction: 'download-review-pack'
 		};
 	}
-	if (verdict?.missesTarget) {
+	if (verdict?.missesTarget && reviewPackReady) {
 		return {
 			tone: 'ready',
 			label: 'Target missed',
@@ -1125,6 +1140,18 @@ export function resolveWorkflow(
 			copy: `${verdict.predictedPerItem} per episode against ${verdict.target}. If the comparison preview looks good, approve this larger result; otherwise revise and sample again.`,
 			primary: 'Approve anyway and queue',
 			primaryAction: 'approve-size-tradeoff',
+			secondary: 'Revise smaller',
+			secondaryAction: 'focus-bench'
+		};
+	}
+	if (verdict?.missesTarget) {
+		return {
+			tone: 'wait',
+			label: 'Review pending',
+			title: 'Target missed, waiting for review media',
+			copy: `${verdict.predictedPerItem} per episode against ${verdict.target}. Wait for the comparison preview before approving this larger result.`,
+			primary: 'Open Ops',
+			primaryAction: 'open-ops',
 			secondary: 'Revise smaller',
 			secondaryAction: 'focus-bench'
 		};
@@ -1178,7 +1205,8 @@ export function buildWorkflowSteps(workflow: WorkflowState): WorkflowStep[] {
 	const reviewCurrent =
 		['download-review-pack', 'revise-proposal'].includes(activeAction) ||
 		['review ready', 'check draft'].includes(activeLabel);
-	const approveCurrent = ['queue-encode'].includes(activeAction) || activeLabel === 'approved';
+	const approveCurrent =
+		['queue-encode', 'approve-size-tradeoff'].includes(activeAction) || activeLabel === 'approved';
 	const encodeCurrent =
 		['open-ops', 'retry-encode'].includes(activeAction) ||
 		['processing', 'retry available'].includes(activeLabel);

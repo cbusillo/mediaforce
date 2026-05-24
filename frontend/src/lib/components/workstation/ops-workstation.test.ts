@@ -214,8 +214,22 @@ describe('Ops workstation mapping', () => {
 			{ label: 'Work schedule', tone: 'ready' },
 			{ label: 'Processing', tone: 'wait' },
 			{ label: 'Sample checks', tone: 'active' },
-			{ label: 'Workers', tone: 'ready' }
+			{ label: 'Workers', tone: 'ready', value: '1 encode-ready / 2' }
 		]);
+	});
+
+	it('counts busy and off-schedule workers separately from encode-ready capacity', () => {
+		const hosts = hostsFixture();
+		hosts.hosts[0].active_encode_count = 2;
+
+		const tiles = buildOpsStatusTiles(dashboardFixture(), hosts, null);
+
+		expect(tiles.at(-1)).toMatchObject({
+			label: 'Workers',
+			tone: 'wait',
+			value: '0 encode-ready / 2',
+			detail: '2 reachable · waiting or busy'
+		});
 	});
 
 	it('summarizes the first-glance Ops readiness answer', () => {
@@ -249,12 +263,25 @@ describe('Ops workstation mapping', () => {
 		const unavailable = { ...ready, available: false, active_encode_count: 0 };
 
 		expect(hostTone(ready)).toBe('active');
-		expect(hostStateCopy(ready)).toBe('Processing');
-		expect(hostTone(scheduledOff)).toBe('idle');
-		expect(hostStateCopy(scheduledOff)).toBe('Off schedule');
+		expect(hostStateCopy(ready)).toBe('Busy');
+		expect(hostTone(scheduledOff)).toBe('wait');
+		expect(hostStateCopy(scheduledOff)).toBe('Off encode schedule');
 		expect(hostTone(unavailable)).toBe('fail');
 		expect(hostTone(unavailable, true)).toBe('wait');
 		expect(hostStateCopy(unavailable)).toBe('Unavailable');
+	});
+
+	it('shows running encode telemetry instead of stale restart errors', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.running[0] = {
+			...dashboard.encode_queue.running[0],
+			error: 'Encode queue job was interrupted by a web process restart.',
+			telemetry_summary: '1% · 0.36x · 8.7 fps · Est. ETA 11h 4m'
+		};
+
+		expect(buildOpsQueueRows(dashboard)[0]).toMatchObject({
+			detail: '1% · 0.36x · 8.7 fps · Est. ETA 11h 4m'
+		});
 	});
 
 	it('maps worker capabilities to user-facing labels', () => {
