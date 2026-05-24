@@ -37,6 +37,8 @@ DEFAULT_VIDEO_DEFAULTS = {
     "quality_metric": "auto",
     "target_vmaf": "85",
     "min_target_vmaf": "80",
+    "target_xpsnr": "41",
+    "min_target_xpsnr": "35",
     "max_height": "1080",
     "default_grain": "8",
     "max_encoded_percent": "80",
@@ -308,6 +310,10 @@ def settings_video_defaults_for_config(config: MediaforceConfig) -> dict[str, st
         "quality_metric": str(video.get("quality_metric") or DEFAULT_VIDEO_DEFAULTS["quality_metric"]).strip().lower(),
         "target_vmaf": _settings_number_text(video.get("target_vmaf"), DEFAULT_VIDEO_DEFAULTS["target_vmaf"]),
         "min_target_vmaf": _settings_number_text(video.get("min_target_vmaf"), DEFAULT_VIDEO_DEFAULTS["min_target_vmaf"]),
+        "target_xpsnr": _settings_number_text(video.get("target_xpsnr"), DEFAULT_VIDEO_DEFAULTS["target_xpsnr"]),
+        "min_target_xpsnr": _settings_number_text(
+            video.get("min_target_xpsnr"), DEFAULT_VIDEO_DEFAULTS["min_target_xpsnr"]
+        ),
         "max_height": _settings_number_text(video.get("max_height"), DEFAULT_VIDEO_DEFAULTS["max_height"]),
         "default_grain": _settings_number_text(video.get("default_grain"), DEFAULT_VIDEO_DEFAULTS["default_grain"]),
         "max_encoded_percent": _settings_number_text(
@@ -648,7 +654,7 @@ def normalize_video_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
     if isinstance(raw, dict):
         payload.update(raw)
     metric = str(payload.get("quality_metric") or DEFAULT_VIDEO_DEFAULTS["quality_metric"]).strip().lower()
-    if metric not in {"auto", "vmaf", "xpsnr", "ssim"}:
+    if metric not in {"auto", "vmaf", "xpsnr"}:
         metric = DEFAULT_VIDEO_DEFAULTS["quality_metric"]
 
     def _float_field(key: str, *, minimum: float, maximum: float) -> float:
@@ -670,11 +676,17 @@ def normalize_video_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
     min_target_vmaf = _float_field("min_target_vmaf", minimum=1, maximum=100)
     if min_target_vmaf > target_vmaf:
         raise ValueError("Video default min_target_vmaf must be less than or equal to target_vmaf.")
+    target_xpsnr = _float_field("target_xpsnr", minimum=1, maximum=100)
+    min_target_xpsnr = _float_field("min_target_xpsnr", minimum=1, maximum=100)
+    if min_target_xpsnr > target_xpsnr:
+        raise ValueError("Video default min_target_xpsnr must be less than or equal to target_xpsnr.")
 
     return {
         "quality_metric": metric,
         "target_vmaf": target_vmaf,
         "min_target_vmaf": min_target_vmaf,
+        "target_xpsnr": target_xpsnr,
+        "min_target_xpsnr": min_target_xpsnr,
         "max_height": _int_field("max_height", minimum=0, maximum=4320),
         "default_grain": _int_field("default_grain", minimum=0, maximum=50),
         "max_encoded_percent": _float_field("max_encoded_percent", minimum=1, maximum=100),

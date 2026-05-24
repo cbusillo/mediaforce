@@ -2018,6 +2018,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "quality_metric": "VMAF",
                 "target_vmaf": "85",
                 "min_target_vmaf": "80",
+                "target_xpsnr": "41",
+                "min_target_xpsnr": "35",
                 "max_height": "1080",
                 "default_grain": "8",
                 "max_encoded_percent": "80",
@@ -2032,11 +2034,48 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "quality_metric": "vmaf",
                 "target_vmaf": 85.0,
                 "min_target_vmaf": 80.0,
+                "target_xpsnr": 41.0,
+                "min_target_xpsnr": 35.0,
                 "max_height": 1080,
                 "default_grain": 8,
                 "max_encoded_percent": 80.0,
             },
         )
+
+    def test_runtime_settings_payload_persists_xpsnr_video_defaults(self) -> None:
+        payload = web_app._build_runtime_settings_payload(
+            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
+            remote_hosts=[],
+            transcode_root=str(self.root / "staging"),
+            video_defaults={
+                "quality_metric": "XPSNR",
+                "target_vmaf": "85",
+                "min_target_vmaf": "80",
+                "target_xpsnr": "39.5",
+                "min_target_xpsnr": "34.5",
+                "max_height": "1080",
+                "default_grain": "8",
+                "max_encoded_percent": "80",
+            },
+            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
+            schedule_profiles=[],
+        )
+
+        self.assertEqual(payload["video"]["quality_metric"], "xpsnr")
+        self.assertEqual(payload["video"]["target_xpsnr"], 39.5)
+        self.assertEqual(payload["video"]["min_target_xpsnr"], 34.5)
+
+    def test_runtime_settings_payload_rejects_unsupported_video_metric(self) -> None:
+        payload = web_app._build_runtime_settings_payload(
+            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
+            remote_hosts=[],
+            transcode_root=str(self.root / "staging"),
+            video_defaults={"quality_metric": "ssim"},
+            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
+            schedule_profiles=[],
+        )
+
+        self.assertEqual(payload["video"]["quality_metric"], "auto")
 
     def test_runtime_settings_payload_defaults_video_metric_to_auto(self) -> None:
         payload = web_app._build_runtime_settings_payload(

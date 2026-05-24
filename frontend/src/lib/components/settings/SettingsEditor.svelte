@@ -68,6 +68,8 @@
 			quality_metric: 'vmaf',
 			target_vmaf: '85',
 			min_target_vmaf: '80',
+			target_xpsnr: '41',
+			min_target_xpsnr: '35',
 			max_height: '1080',
 			default_grain: '8',
 			max_encoded_percent: '80'
@@ -121,6 +123,7 @@
 	const archiveCleanup = $derived(savedSettings?.archive_cleanup ?? null);
 	const dirty = $derived(savedSettings ? settingsDraftIsDirty(draft, savedSettings) : false);
 	const savedArchiveRootCopy = $derived(savedSettings?.archive_root || 'unset');
+	const defaultMetricCopy = $derived(metricDefaultsCopy(draft.video_defaults));
 	const cleanupTargetDirty = $derived(
 		savedSettings ? archiveCleanupTargetDirty(draft, savedSettings) : false
 	);
@@ -165,11 +168,7 @@
 		}
 	]);
 	const footerSignals = $derived([
-		{
-			label: 'Assistant defaults',
-			value: `VMAF ${draft.video_defaults.target_vmaf} / floor ${draft.video_defaults.min_target_vmaf}`,
-			tone: 'ready' as BadgeTone
-		},
+		{ label: 'Assistant defaults', value: defaultMetricCopy, tone: 'ready' as BadgeTone },
 		{
 			label: 'Runtime',
 			value: savedSettings?.runtime_settings_path ?? 'unavailable',
@@ -243,6 +242,15 @@
 
 	function updateVideoDefault(key: keyof SettingsPayload['video_defaults'], value: string) {
 		draft.video_defaults = { ...draft.video_defaults, [key]: value };
+	}
+
+	function metricDefaultsCopy(defaults: SettingsPayload['video_defaults']) {
+		const metric = defaults.quality_metric.trim().toLowerCase();
+		if (metric === 'xpsnr')
+			return `XPSNR ${defaults.target_xpsnr} / floor ${defaults.min_target_xpsnr}`;
+		if (metric === 'auto')
+			return `Auto · VMAF ${defaults.target_vmaf} · XPSNR ${defaults.target_xpsnr}`;
+		return `VMAF ${defaults.target_vmaf} / floor ${defaults.min_target_vmaf}`;
 	}
 
 	function toggleScheduleDay(
@@ -416,7 +424,7 @@
 					</a>
 					<a href="#settings-assistant-defaults">
 						<span>Assistant defaults</span>
-						<strong>VMAF {draft.video_defaults.target_vmaf}</strong>
+						<strong>{defaultMetricCopy}</strong>
 					</a>
 					<a href="#settings-schedules">
 						<span>Work windows</span>
@@ -572,7 +580,6 @@
 										<option value="vmaf">VMAF</option>
 										<option value="auto">Auto</option>
 										<option value="xpsnr">XPSNR</option>
-										<option value="ssim">SSIM</option>
 									</select>
 								</label>
 								<label class="stacked-field">
@@ -597,6 +604,30 @@
 										step="0.1"
 										value={draft.video_defaults.min_target_vmaf}
 										oninput={(event) => updateVideoDefault('min_target_vmaf', inputValue(event))}
+									/>
+								</label>
+								<label class="stacked-field">
+									<span>XPSNR target</span>
+									<input
+										class="field field--number"
+										type="number"
+										min="1"
+										max="100"
+										step="0.1"
+										value={draft.video_defaults.target_xpsnr}
+										oninput={(event) => updateVideoDefault('target_xpsnr', inputValue(event))}
+									/>
+								</label>
+								<label class="stacked-field">
+									<span>XPSNR floor</span>
+									<input
+										class="field field--number"
+										type="number"
+										min="1"
+										max="100"
+										step="0.1"
+										value={draft.video_defaults.min_target_xpsnr}
+										oninput={(event) => updateVideoDefault('min_target_xpsnr', inputValue(event))}
 									/>
 								</label>
 								<label class="stacked-field">
