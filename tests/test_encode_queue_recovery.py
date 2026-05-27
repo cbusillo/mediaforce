@@ -407,10 +407,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self._insert_staged_artifact(connection, first_id, first_staging)
             self._insert_staged_artifact(connection, second_id, second_staging)
 
-            def _unlink_with_one_failure(path: Path) -> None:
-                if path == first_staging:
+            def _unlink_with_one_failure(target_path: Path) -> None:
+                if target_path == first_staging:
                     raise OSError("blocked")
-                path.unlink(missing_ok=True)
+                target_path.unlink(missing_ok=True)
 
             with patch("mediaforce.web.runtime.encode_runtime.safe_unlink", side_effect=_unlink_with_one_failure):
                 web_app._reconcile_encode_jobs(connection, self.config)
@@ -2021,6 +2021,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "min_target_vmaf": "80",
                 "target_xpsnr": "41",
                 "min_target_xpsnr": "35",
+                "target_size_mb": "300",
+                "target_runtime_minutes": "45",
+                "decision_model": "size_first_review",
+                "quality_engine": "ab_av1_fast_sample",
                 "max_height": "1080",
                 "default_grain": "8",
                 "max_encoded_percent": "80",
@@ -2037,6 +2041,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "min_target_vmaf": 80.0,
                 "target_xpsnr": 41.0,
                 "min_target_xpsnr": 35.0,
+                "target_size_mb": 300.0,
+                "target_runtime_minutes": 45.0,
+                "decision_model": "size_first_review",
+                "quality_engine": "ab_av1_fast_sample",
                 "max_height": 1080,
                 "default_grain": 8,
                 "max_encoded_percent": 80.0,
@@ -2054,6 +2062,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "min_target_vmaf": "80",
                 "target_xpsnr": "39.5",
                 "min_target_xpsnr": "34.5",
+                "target_size_mb": "300",
+                "target_runtime_minutes": "45",
+                "decision_model": "size_first_review",
+                "quality_engine": "ab_av1_fast_sample",
                 "max_height": "1080",
                 "default_grain": "8",
                 "max_encoded_percent": "80",
@@ -2088,6 +2100,26 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["video"]["quality_metric"], "auto")
+
+    def test_runtime_settings_payload_defaults_to_size_first_review_model(self) -> None:
+        payload = web_app._build_runtime_settings_payload(
+            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
+            remote_hosts=[],
+            transcode_root=str(self.root / "staging"),
+            video_defaults={
+                "target_size_mb": "300",
+                "target_runtime_minutes": "45",
+                "decision_model": "size_first_review",
+                "quality_engine": "ab_av1_fast_sample",
+            },
+            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
+            schedule_profiles=[],
+        )
+
+        self.assertEqual(payload["video"]["target_size_mb"], 300.0)
+        self.assertEqual(payload["video"]["target_runtime_minutes"], 45.0)
+        self.assertEqual(payload["video"]["decision_model"], "size_first_review")
+        self.assertEqual(payload["video"]["quality_engine"], "ab_av1_fast_sample")
 
     def test_runtime_settings_payload_normalizes_media_access(self) -> None:
         payload = web_app._build_runtime_settings_payload(

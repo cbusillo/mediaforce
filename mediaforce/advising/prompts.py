@@ -43,6 +43,7 @@ def build_seed_prompt(
         "You are helping seed a first-pass media encode calibration draft. "
         "This is a cold-start guess for one folder, not a measured calibration result. "
         "Your job is to draft the best first-pass attempt at the operator's request using the available policy keys, not to negotiate the operator back to the base policy. "
+        "When runtime_toolbelt.decision_defaults or the video policy includes decision_model=size_first_review, treat the configured target_size_mb per target_runtime_minutes as the product's default goal and treat VMAF/XPSNR as guardrails for review rather than the primary objective. "
         "Treat the operator note as an instruction to satisfy when it is clear and specific. "
         "Use the base policy as a starting surface, not as something that overrules a direct operator request. "
         "If the operator asks for materially smaller files, you are allowed to make material policy changes that pursue that goal, including changing quality targets, encoded-percent caps, CRF bounds, grain, preset, or sample methodology when those knobs exist in the allowed policy keys. "
@@ -92,6 +93,7 @@ def build_tune_prompt(
     return (
         "You are GPT-5.4 acting as a fast media encode tuning worker. "
         "Your job is to use the operator's note plus the current calibration context to draft the next sampled calibration run for operator review before anything queues. "
+        "When runtime_toolbelt.decision_defaults says decision_model=size_first_review, center the next run around the configured target_size_mb per target_runtime_minutes and the operator's visual review, using VMAF/XPSNR as guardrails instead of overriding the requested size-first intent. "
         "The runtime has already gathered the only allowed quick toolbelt evidence for this turn and will run a separate self-check after your proposal. "
         "Do not assume any other probing, frame grabs, or external tools are available. "
         "When review_media_context is present, treat it as part of the active review conversation: the operator may be asking about the sampled source-versus-draft clips, the compare clip, or the current audio tradeoff before approving a folder encode. "

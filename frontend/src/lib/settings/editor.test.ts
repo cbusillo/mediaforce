@@ -137,6 +137,10 @@ describe('settings draft helpers', () => {
 			min_target_vmaf: '80',
 			target_xpsnr: '41',
 			min_target_xpsnr: '35',
+			target_size_mb: '300',
+			target_runtime_minutes: '45',
+			decision_model: 'size_first_review',
+			quality_engine: 'ab_av1_fast_sample',
 			max_height: '1080',
 			default_grain: '8',
 			max_encoded_percent: '80'

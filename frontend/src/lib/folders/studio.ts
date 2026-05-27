@@ -1,4 +1,4 @@
-import type { FolderPayload, HostRuntime } from '$lib/api/types';
+import type { FolderPayload } from '$lib/api/types';
 import { titleCase } from '$lib/format';
 
 export type FolderActionHost = { key?: string; label?: string };
@@ -24,6 +24,10 @@ export type FolderPolicy = {
 		target_xpsnr?: number;
 		min_target_vmaf?: number;
 		min_target_xpsnr?: number;
+		target_size_mb?: number;
+		target_runtime_minutes?: number;
+		decision_model?: string;
+		quality_engine?: string;
 		target_relax_step_vmaf?: number;
 		target_relax_step_xpsnr?: number;
 		sample_every?: string;
@@ -404,18 +408,6 @@ export type ProposalTrace = {
 		latest_failed_sample_job?: Record<string, unknown> | null;
 	} | null;
 };
-export type TuningSessionSummary = {
-	session_id?: string;
-	note?: string;
-	summary?: string;
-	diagnosis?: string | null;
-	confidence?: string | null;
-	suggested_follow_up?: string | null;
-	request_disposition?: string | null;
-	request_response?: string | null;
-	feasibility_note?: string | null;
-	created_at?: string | null;
-};
 export type CalibrationThreadSession = {
 	key: string;
 	note: string;
@@ -432,12 +424,6 @@ export type CalibrationThreadSession = {
 	runConfidence?: string | null;
 	isCurrent: boolean;
 };
-export type SampleHostOption = {
-	key?: string;
-	label?: string;
-	detail?: string;
-	available?: boolean;
-};
 export type ReviewGate = {
 	can_confirm_full?: boolean;
 	message?: string;
@@ -445,16 +431,6 @@ export type ReviewGate = {
 	accepted_at?: string;
 	next_action_label?: string;
 };
-export type ApprovedSeasonShortcut = {
-	root_prefix?: string;
-	root_label?: string;
-	count?: number;
-	season_labels?: string[];
-	season_prefixes?: string[];
-	suggested_note?: string;
-};
-export type BreadcrumbHref = '/' | `/folders/${string}`;
-export type BreadcrumbItem = { label: string; href: BreadcrumbHref | null };
 export type SampleAudioTrack = {
 	codec_name?: string;
 	channels?: number;
@@ -481,7 +457,6 @@ export type FolderSampleItem = {
 	subtitle_summary?: SampleSubtitleTrack[];
 	resolved_policy?: FolderPolicy;
 };
-export type SnapshotItem = { label: string; value: string; detail?: string };
 export type ComparisonValue = {
 	headline: string;
 	detail?: string;
@@ -492,47 +467,6 @@ export type ComparisonRow = {
 	draft: ComparisonValue;
 	changed: boolean;
 };
-export type PolicyWorkbenchRow = {
-	path: string;
-	section: string;
-	label: string;
-	current: string;
-	draft: string;
-	changed: boolean;
-};
-export type PolicyWorkbenchSection = { title: string; rows: PolicyWorkbenchRow[] };
-export type WorkbenchStat = { label: string; value: string; detail?: string };
-export type SteadyComparisonRow = { label: string; value: string };
-export type SampleHostCard = {
-	key: string;
-	label: string;
-	detail: string;
-	available: boolean;
-	runtime: HostRuntime | null;
-	searchSummary?: {
-		label: string;
-		detail: string;
-	} | null;
-	preferred: boolean;
-};
-
-export function formatStatusCountCopy(mapping: Record<string, number> | null | undefined): string {
-	if (!mapping) return 'None';
-	const entries = Object.entries(mapping);
-	if (entries.length === 0) return 'None';
-	return entries
-		.map(([key, value]) => {
-			const label =
-				key === 'discovered'
-					? 'discovered only'
-					: key === 'promoted'
-						? 'complete'
-						: titleCase(key).toLowerCase();
-			return `${value} ${label}`;
-		})
-		.join(' · ');
-}
-
 export function codecLabel(codec: string | null | undefined): string {
 	const key = String(codec ?? '')
 		.trim()
@@ -622,13 +556,6 @@ export function formatResolutionCopy(
 	if (!Number.isFinite(parsedWidth) || !Number.isFinite(parsedHeight)) return null;
 	if (parsedWidth <= 0 || parsedHeight <= 0) return null;
 	return `${parsedWidth.toLocaleString('en-US')}x${parsedHeight.toLocaleString('en-US')}`;
-}
-
-export function inferResolutionFromPath(value: string | null | undefined): string | null {
-	const match = String(value ?? '').match(
-		/(?:^|[.\s_-])(4320p|2160p|1440p|1080p|720p|576p|480p)(?:$|[.\s_-])/i
-	);
-	return match ? match[1].toLowerCase() : null;
 }
 
 export function formatLanguageCopy(value: string | null | undefined): string | null {
@@ -733,34 +660,6 @@ export function resolveMetricLabel(
 	return raw.toUpperCase();
 }
 
-export function summarizeMetricPolicy(
-	policyValue: FolderPolicy | undefined,
-	metricSupport: FolderPayload['metric_support']
-): ComparisonValue {
-	const video = policyValue?.video ?? {};
-	const resolved = resolveMetricLabel(video.quality_metric, metricSupport);
-	const target = resolved === 'VMAF' ? video.target_vmaf : video.target_xpsnr;
-	const floor = resolved === 'VMAF' ? video.min_target_vmaf : video.min_target_xpsnr;
-	return comparisonValue(
-		resolved,
-		compactCopy([
-			target != null ? `target ${target}` : null,
-			floor != null ? `floor ${floor}` : null
-		])
-	);
-}
-
-export function summarizeMetricPlan(plan: FolderItemPlan['video'] | undefined): ComparisonValue {
-	if (!plan) return comparisonValue('No draft video metric yet');
-	return comparisonValue(
-		String(plan.quality_metric ?? '').toUpperCase() || 'n/a',
-		compactCopy([
-			plan.target != null ? `target ${plan.target}` : null,
-			plan.min_target != null ? `floor ${plan.min_target}` : null
-		])
-	);
-}
-
 function summarizeBlackBarHandling(value: string | null | undefined): string | null {
 	const handling = String(value ?? '')
 		.trim()
@@ -791,16 +690,6 @@ export function summarizeVideoTransformPolicy(
 		headlineParts.length ? headlineParts.join(' + ') : 'No crop or scale',
 		detail
 	);
-}
-
-export function compareValues(
-	current: ComparisonValue | string,
-	draft: ComparisonValue | string
-): boolean {
-	const left =
-		typeof current === 'string' ? current : `${current.headline} ${current.detail ?? ''}`;
-	const right = typeof draft === 'string' ? draft : `${draft.headline} ${draft.detail ?? ''}`;
-	return left.trim() !== right.trim();
 }
 
 export function flattenPolicy(
@@ -913,57 +802,6 @@ export function pathFilename(value: string | null | undefined): string {
 	const trimmed = String(value ?? '').trim();
 	if (!trimmed) return 'No representative file yet';
 	return trimmed.split('/').at(-1) ?? trimmed;
-}
-
-export function pathStem(value: string | null | undefined): string {
-	const filename = pathFilename(value);
-	const lastDot = filename.lastIndexOf('.');
-	if (lastDot <= 0) return filename;
-	return filename.slice(0, lastDot);
-}
-
-export function pathExtension(value: string | null | undefined): string | null {
-	const filename = pathFilename(value);
-	const lastDot = filename.lastIndexOf('.');
-	if (lastDot <= 0 || lastDot === filename.length - 1) return null;
-	return filename.slice(lastDot + 1).toUpperCase();
-}
-
-export function softWrapTokens(value: string): string[] {
-	return value.split(/([._\-[\]()\s]+)/).filter(Boolean);
-}
-
-export function formatCodecCountKey(key: string): string {
-	const [codec, channelCount] = key.split(':');
-	const channelCopy = channelCount ? channelLabel(Number(channelCount)) : null;
-	return [codecLabel(codec), channelCopy].filter(Boolean).join(' ');
-}
-
-export function formatCodecCountsCopy(mapping: Record<string, number> | null | undefined): string {
-	if (!mapping) return 'None';
-	const entries = Object.entries(mapping);
-	if (entries.length === 0) return 'None';
-	return entries.map(([key, value]) => `${value} ${formatCodecCountKey(key)}`).join(' · ');
-}
-
-export function compactScheduleCopy(runtime: HostRuntime | null): string | null {
-	if (!runtime) return null;
-	if (!runtime.schedule_profile_label || runtime.schedule_profile_label === 'Always') {
-		return 'Always';
-	}
-	const detail = runtime.schedule_detail.trim();
-	const rangeMatch = detail.match(/(\d{2}:\d{2}).*?(\d{2}:\d{2})(.*)$/i);
-	if (rangeMatch) {
-		const suffix = String(rangeMatch[3] ?? '').trim();
-		if (!suffix) {
-			return `Window ${rangeMatch[1]}-${rangeMatch[2]}`;
-		}
-		if (/^in\s+host local time$/i.test(suffix)) {
-			return `Window ${rangeMatch[1]}-${rangeMatch[2]} local`;
-		}
-		return `Window ${rangeMatch[1]}-${rangeMatch[2]} ${suffix}`;
-	}
-	return detail.replace(/^window\s+/i, '');
 }
 
 export function encodeStatusTone(status: string): EncodeStatusTone {

@@ -340,6 +340,15 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     )
     review_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/review-media", StaticFiles(directory=str(review_dir)), name="review_media")
+
+    @app.middleware("http")
+    async def ensure_review_media_root(
+            request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        if request.url.path.startswith("/review-media/"):
+            review_dir.mkdir(parents=True, exist_ok=True)
+        return await call_next(request)
+
     frontend_app_dir = frontend_build_dir / "_app"
     if frontend_app_dir.exists():
         app.mount("/_app", StaticFiles(directory=str(frontend_app_dir)), name="frontend_app")
