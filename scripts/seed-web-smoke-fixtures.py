@@ -19,6 +19,10 @@ from mediaforce.core.db_tables import (
     library_items,
     staged_artifacts,
 )
+from mediaforce.web.runtime.folder_tuning_advice import (
+    calibration_draft_hash,
+    calibration_policy_hash,
+)
 
 FIXTURE_SCAN_ID = "web-smoke-fixtures"
 LEGACY_FIXTURE_SCAN_IDS = ("fixture-scan",)
@@ -28,6 +32,8 @@ RETRY_PREFIX = "tv/Retry Show/Season 1"
 COMPLETED_PREFIX = "movies/Archive Ready"
 BLOCKED_COMPLETED_PREFIX = "movies/Blocked Cleanup"
 REVIEW_READY_PREFIX = "tv/Review Ready/Season 1"
+APPROVED_PREFIX = "tv/Approved Show/Season 1"
+MISSED_TARGET_PREFIX = "tv/Overshoot Show/Season 1"
 ENCODE_RUNNING_PREFIX = "tv/Encoding Show/Season 1"
 ENCODE_RETRY_PREFIX = "tv/Failed Encode/Season 1"
 ENCODE_WAITING_PREFIX = "movies/Waiting Encode"
@@ -38,6 +44,8 @@ FIXTURE_PREFIXES = (
     COMPLETED_PREFIX,
     BLOCKED_COMPLETED_PREFIX,
     REVIEW_READY_PREFIX,
+    APPROVED_PREFIX,
+    MISSED_TARGET_PREFIX,
     ENCODE_RUNNING_PREFIX,
     ENCODE_RETRY_PREFIX,
     ENCODE_WAITING_PREFIX,
@@ -236,13 +244,22 @@ def _encode_job(
     }
 
 
-def _write_review_ready_state(
-    config: Any, rows_by_prefix: dict[str, dict[str, Any]]
+def _write_review_sample_state(
+    config: Any,
+    rows_by_prefix: dict[str, dict[str, Any]],
+    *,
+    prefix: str,
+    job_id: str,
+    review_slug: str,
+    predicted_total_size_bytes: int,
+    quality_score: float,
+    outcome: str = "good_fit",
+    accepted: bool = False,
+    size_target: bool = False,
 ) -> None:
-    prefix = REVIEW_READY_PREFIX
     row = rows_by_prefix[prefix]
     policy = config.resolve_policy(row["rel_path"])
-    review_dir = config.paths.review_dir / "web-smoke-review-ready"
+    review_dir = config.paths.review_dir / review_slug
     review_dir.mkdir(parents=True, exist_ok=True)
     source_clip = review_dir / "source.mov"
     preview_clip = review_dir / "preview.mov"
@@ -256,42 +273,62 @@ def _write_review_ready_state(
         "source_size_bytes": row["size_bytes"],
         "resolved_policy": policy,
     }
+    operator_request = (
+        {
+            "budget_bytes": 314_572_800,
+            "budget_label": "300 MB per episode",
+        }
+        if size_target
+        else None
+    )
+    run_verdict = {"outcome": outcome}
     calibration_payload = {
-        "job_id": "web-smoke-review-ready",
+        "job_id": job_id,
         "mode": "sample",
         "action": "ai_tune",
         "sample_item": sample_item,
         "policy": policy,
         "sample_result": {
-            "predicted_total_size_bytes": int(row["size_bytes"] * 0.58),
+            "predicted_total_size_bytes": predicted_total_size_bytes,
             "quality_metric": "vmaf",
-            "quality_score": 96.2,
+            "quality_score": quality_score,
         },
+        "advice": {"run_verdict": run_verdict},
         "review_pairs": [
             {
                 "timestamp_seconds": 60,
                 "duration_seconds": 12,
                 "source_clip": {
-                    "path": "/review-media/web-smoke-review-ready/source.mov"
+                    "path": f"/review-media/{review_slug}/source.mov"
                 },
                 "preview_clip": {
-                    "path": "/review-media/web-smoke-review-ready/preview.mov"
+                    "path": f"/review-media/{review_slug}/preview.mov"
                 },
             }
         ],
         "review_media_ready": True,
         "browser_review_ready": True,
     }
+    if accepted:
+        calibration_payload["accepted_at"] = _now()
+        calibration_payload["accepted_sample_job_id"] = job_id
+        calibration_payload["accepted_policy_hash"] = calibration_policy_hash(
+            calibration_payload
+        )
+        calibration_payload["accepted_draft_hash"] = calibration_draft_hash(
+            calibration_payload
+        )
     advice_payload = {
         "summary": "Fixture review pack is ready for operator inspection.",
         "confidence": "high",
+        "run_verdict": run_verdict,
         "multimodal_review_pack": {
             "artifacts": [
                 {
                     "kind": "video_contact_sheet",
                     "label": "Fixture contact sheet",
                     "detail": "Representative before/after review stills.",
-                    "image_url": "/review-media/web-smoke-review-ready/contact-sheet.png",
+                    "image_url": f"/review-media/{review_slug}/contact-sheet.png",
                 },
                 {
                     "kind": "audio_spectrogram_compare",
@@ -301,6 +338,9 @@ def _write_review_ready_state(
             ]
         },
     }
+    if operator_request:
+        calibration_payload["advice"]["operator_request"] = operator_request
+        advice_payload["operator_request"] = operator_request
     web_dir = config.paths.web_state_dir
     web_dir.mkdir(parents=True, exist_ok=True)
     slug = _slug(prefix)
@@ -309,6 +349,39 @@ def _write_review_ready_state(
     )
     (web_dir / f"{slug}.advice.json").write_text(
         json.dumps(advice_payload, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def _write_review_states(config: Any, rows_by_prefix: dict[str, dict[str, Any]]) -> None:
+    _write_review_sample_state(
+        config,
+        rows_by_prefix,
+        prefix=REVIEW_READY_PREFIX,
+        job_id="web-smoke-review-ready",
+        review_slug="web-smoke-review-ready",
+        predicted_total_size_bytes=int(rows_by_prefix[REVIEW_READY_PREFIX]["size_bytes"] * 0.58),
+        quality_score=96.2,
+    )
+    _write_review_sample_state(
+        config,
+        rows_by_prefix,
+        prefix=APPROVED_PREFIX,
+        job_id="web-smoke-approved",
+        review_slug="web-smoke-approved",
+        predicted_total_size_bytes=int(rows_by_prefix[APPROVED_PREFIX]["size_bytes"] * 0.52),
+        quality_score=94.8,
+        accepted=True,
+    )
+    _write_review_sample_state(
+        config,
+        rows_by_prefix,
+        prefix=MISSED_TARGET_PREFIX,
+        job_id="web-smoke-overshoot",
+        review_slug="web-smoke-overshoot",
+        predicted_total_size_bytes=803_322_876,
+        quality_score=92.0,
+        outcome="poor_fit",
+        size_target=True,
     )
 
 
@@ -474,6 +547,28 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 priority_score=84,
                 recommendation="priority_encode",
                 recommendation_reason="Fixture review-pack-ready state for browser QA.",
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
+                rel_path="tv/Approved Show/Season 1/Episode 01.mkv",
+                size_bytes=7 * 1024**3,
+                status="approved",
+                video_codec="h264",
+                priority_score=83,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture approved sample state for browser QA.",
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
+                rel_path="tv/Overshoot Show/Season 1/Episode 01.mkv",
+                size_bytes=7 * 1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=82,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture target-missed review state for browser QA.",
             ),
             _library_item(
                 project_root=project_root,
@@ -678,7 +773,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             )
         )
 
-    _write_review_ready_state(config, rows_by_prefix)
+    _write_review_states(config, rows_by_prefix)
 
     return {
         "profile": profile,
@@ -714,6 +809,16 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Folder Studio review-ready fixture",
                 "route": "/folders/tv/Review%20Ready/Season%201",
                 "marker": "Approve and queue",
+            },
+            {
+                "label": "Folder Studio approved fixture",
+                "route": "/folders/tv/Approved%20Show/Season%201",
+                "marker": "Queue encode",
+            },
+            {
+                "label": "Folder Studio missed-target fixture",
+                "route": "/folders/tv/Overshoot%20Show/Season%201",
+                "marker": "Approve anyway and queue",
             },
             {
                 "label": "Folder Studio active processing fixture",
