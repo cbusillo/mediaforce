@@ -70,6 +70,10 @@
 			min_target_vmaf: '80',
 			target_xpsnr: '41',
 			min_target_xpsnr: '35',
+			target_size_mb: '300',
+			target_runtime_minutes: '45',
+			decision_model: 'size_first_review',
+			quality_engine: 'ab_av1_fast_sample',
 			max_height: '1080',
 			default_grain: '8',
 			max_encoded_percent: '80'
@@ -245,12 +249,11 @@
 	}
 
 	function metricDefaultsCopy(defaults: SettingsPayload['video_defaults']) {
+		const target = `${defaults.target_size_mb} MB / ${defaults.target_runtime_minutes} min`;
 		const metric = defaults.quality_metric.trim().toLowerCase();
-		if (metric === 'xpsnr')
-			return `XPSNR ${defaults.target_xpsnr} / floor ${defaults.min_target_xpsnr}`;
-		if (metric === 'auto')
-			return `Auto · VMAF ${defaults.target_vmaf} · XPSNR ${defaults.target_xpsnr}`;
-		return `VMAF ${defaults.target_vmaf} / floor ${defaults.min_target_vmaf}`;
+		if (metric === 'xpsnr') return `${target} · XPSNR floor ${defaults.min_target_xpsnr}`;
+		if (metric === 'auto') return `${target} · Auto metric guardrails`;
+		return `${target} · VMAF floor ${defaults.min_target_vmaf}`;
 	}
 
 	function toggleScheduleDay(
@@ -571,6 +574,52 @@
 						<WorkstationPanel eyebrow="Assistant defaults" title="Encode defaults">
 							<div class="encode-defaults-grid">
 								<label class="stacked-field">
+									<span>Target size MB</span>
+									<input
+										class="field field--number"
+										type="number"
+										min="1"
+										max="100000"
+										step="1"
+										value={draft.video_defaults.target_size_mb}
+										oninput={(event) => updateVideoDefault('target_size_mb', inputValue(event))}
+									/>
+								</label>
+								<label class="stacked-field">
+									<span>Runtime minutes</span>
+									<input
+										class="field field--number"
+										type="number"
+										min="1"
+										max="1440"
+										step="1"
+										value={draft.video_defaults.target_runtime_minutes}
+										oninput={(event) =>
+											updateVideoDefault('target_runtime_minutes', inputValue(event))}
+									/>
+								</label>
+								<label class="stacked-field">
+									<span>Decision model</span>
+									<select
+										class="field"
+										bind:value={draft.video_defaults.decision_model}
+										onchange={(event) => updateVideoDefault('decision_model', selectValue(event))}
+									>
+										<option value="size_first_review">Size-first review</option>
+										<option value="quality_first_sample">Quality-first sample</option>
+									</select>
+								</label>
+								<label class="stacked-field">
+									<span>Sample engine</span>
+									<select
+										class="field"
+										bind:value={draft.video_defaults.quality_engine}
+										onchange={(event) => updateVideoDefault('quality_engine', selectValue(event))}
+									>
+										<option value="ab_av1_fast_sample">ab-av1 fast sample</option>
+									</select>
+								</label>
+								<label class="stacked-field">
 									<span>Quality metric</span>
 									<select
 										class="field"
@@ -668,13 +717,21 @@
 									/>
 								</label>
 								<div class="encode-defaults-readout">
-									<span>Resolution</span>
+									<span>Default goal</span>
+									<strong
+										>{draft.video_defaults.target_size_mb} MB / {draft.video_defaults
+											.target_runtime_minutes} min</strong
+									>
+									<small>Size-first target before visual review.</small>
+								</div>
+								<div class="encode-defaults-readout">
+									<span>Resolution guardrail</span>
 									<strong
 										>{Number(draft.video_defaults.max_height) > 0
 											? `max ${draft.video_defaults.max_height}p`
 											: 'source resolution'}</strong
 									>
-									<small>Used when the assistant note does not request a resolution change.</small>
+									<small>Used unless the operator explicitly asks for a resolution change.</small>
 								</div>
 							</div>
 						</WorkstationPanel>
@@ -1558,7 +1615,7 @@
 		align-items: end;
 		display: grid;
 		gap: var(--mf-space-4);
-		grid-template-columns: minmax(150px, 1.1fr) repeat(5, minmax(88px, 0.65fr)) minmax(170px, 1.2fr);
+		grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 		padding: var(--mf-space-5);
 	}
 

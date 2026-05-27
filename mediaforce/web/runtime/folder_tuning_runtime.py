@@ -102,10 +102,34 @@ def build_tuning_runtime_toolbelt(
         item_plan = {}
         overhead = {}
     sample_result = object_dict(object_dict(calibration).get("sample_result"))
+    video_policy = object_dict(current_policy.get("video"))
+    target_size_mb = float_value(video_policy.get("target_size_mb"))
+    target_runtime_minutes = float_value(video_policy.get("target_runtime_minutes"))
+    target_runtime_seconds = target_runtime_minutes * 60.0 if target_runtime_minutes > 0 else 0.0
+    target_size_bytes = int(round(target_size_mb * 1024 * 1024)) if target_size_mb > 0 else None
+    sample_duration_seconds = float_value(sample_item.get("duration_seconds"))
+    sample_target_size_bytes = None
+    if target_size_bytes and target_runtime_seconds > 0 and sample_duration_seconds > 0:
+        sample_target_size_bytes = int(round(target_size_bytes * sample_duration_seconds / target_runtime_seconds))
     toolbelt = {
         "allowed_policy_keys": deps.tuning_policy_key_paths(current_policy),
         "metric_support": metric_support,
         "current_policy_focus": deps.tuning_policy_focus(current_policy),
+        "decision_defaults": {
+            "decision_model": str(video_policy.get("decision_model") or "size_first_review"),
+            "quality_engine": str(video_policy.get("quality_engine") or "ab_av1_fast_sample"),
+            "target_size_mb": target_size_mb or None,
+            "target_runtime_minutes": target_runtime_minutes or None,
+            "target_size_bytes": target_size_bytes,
+            "sample_runtime_seconds": sample_duration_seconds or None,
+            "sample_target_size_bytes": sample_target_size_bytes,
+            "max_height": video_policy.get("max_height"),
+            "quality_metric": video_policy.get("quality_metric"),
+            "target_vmaf": video_policy.get("target_vmaf"),
+            "min_target_vmaf": video_policy.get("min_target_vmaf"),
+            "target_xpsnr": video_policy.get("target_xpsnr"),
+            "min_target_xpsnr": video_policy.get("min_target_xpsnr"),
+        },
         "item_plan": item_plan,
         "estimated_overhead_bytes": overhead,
         "recent_sample_result": {

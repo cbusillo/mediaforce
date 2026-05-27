@@ -318,6 +318,10 @@ export interface SettingsPayload {
 		min_target_vmaf: string;
 		target_xpsnr: string;
 		min_target_xpsnr: string;
+		target_size_mb: string;
+		target_runtime_minutes: string;
+		decision_model: string;
+		quality_engine: string;
 		max_height: string;
 		default_grain: string;
 		max_encoded_percent: string;

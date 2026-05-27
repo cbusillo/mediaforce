@@ -6494,6 +6494,39 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(size_target_analysis["status"], "over_target")
         self.assertEqual(size_target_analysis["budget_bytes"], 300 * 1024 * 1024)
 
+    def test_build_tuning_runtime_toolbelt_includes_decision_defaults(self) -> None:
+        toolbelt = _build_tuning_runtime_toolbelt(
+            sample_item={
+                "rel_path": "tv/Suits/Season 5/Suits.S05E01.mkv",
+                "source_size_bytes": 4_815_446_620,
+                "duration_seconds": 2700.0,
+                "audio_summary": [],
+                "resolved_policy": {},
+            },
+            current_policy={
+                "video": {
+                    "decision_model": "size_first_review",
+                    "quality_engine": "ab_av1_fast_sample",
+                    "target_size_mb": 300,
+                    "target_runtime_minutes": 45,
+                    "max_height": 1080,
+                    "quality_metric": "vmaf",
+                    "target_vmaf": 85.0,
+                    "min_target_vmaf": 80.0,
+                }
+            },
+            calibration=None,
+            metric_support={"vmaf": True, "xpsnr": True},
+        )
+
+        decision_defaults = toolbelt.get("decision_defaults")
+        assert isinstance(decision_defaults, dict)
+        self.assertEqual(decision_defaults["decision_model"], "size_first_review")
+        self.assertEqual(decision_defaults["quality_engine"], "ab_av1_fast_sample")
+        self.assertEqual(decision_defaults["target_size_bytes"], 300 * 1024 * 1024)
+        self.assertEqual(decision_defaults["sample_target_size_bytes"], 300 * 1024 * 1024)
+        self.assertEqual(decision_defaults["max_height"], 1080)
+
     def test_planned_audio_review_context_uses_planner_primary_audio_track(self) -> None:
         context = _planned_audio_review_context(
             sample_item={

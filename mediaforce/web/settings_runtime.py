@@ -39,10 +39,16 @@ DEFAULT_VIDEO_DEFAULTS = {
     "min_target_vmaf": "80",
     "target_xpsnr": "41",
     "min_target_xpsnr": "35",
+    "target_size_mb": "300",
+    "target_runtime_minutes": "45",
+    "decision_model": "size_first_review",
+    "quality_engine": "ab_av1_fast_sample",
     "max_height": "1080",
     "default_grain": "8",
     "max_encoded_percent": "80",
 }
+SUPPORTED_DECISION_MODELS = {"size_first_review", "quality_first_sample"}
+SUPPORTED_QUALITY_ENGINES = {"ab_av1_fast_sample"}
 HOST_CAPABILITY_OPTIONS = (
     {"key": "encode_queue", "label": "Queue encodes", "help": "Allow this host to run queued folder encodes."},
     {
@@ -314,6 +320,20 @@ def settings_video_defaults_for_config(config: MediaforceConfig) -> dict[str, st
         "min_target_xpsnr": _settings_number_text(
             video.get("min_target_xpsnr"), DEFAULT_VIDEO_DEFAULTS["min_target_xpsnr"]
         ),
+        "target_size_mb": _settings_number_text(video.get("target_size_mb"), DEFAULT_VIDEO_DEFAULTS["target_size_mb"]),
+        "target_runtime_minutes": _settings_number_text(
+            video.get("target_runtime_minutes"), DEFAULT_VIDEO_DEFAULTS["target_runtime_minutes"]
+        ),
+        "decision_model": _settings_choice_text(
+            video.get("decision_model"),
+            default=DEFAULT_VIDEO_DEFAULTS["decision_model"],
+            supported=SUPPORTED_DECISION_MODELS,
+        ),
+        "quality_engine": _settings_choice_text(
+            video.get("quality_engine"),
+            default=DEFAULT_VIDEO_DEFAULTS["quality_engine"],
+            supported=SUPPORTED_QUALITY_ENGINES,
+        ),
         "max_height": _settings_number_text(video.get("max_height"), DEFAULT_VIDEO_DEFAULTS["max_height"]),
         "default_grain": _settings_number_text(video.get("default_grain"), DEFAULT_VIDEO_DEFAULTS["default_grain"]),
         "max_encoded_percent": _settings_number_text(
@@ -345,6 +365,11 @@ def _settings_number_text(value: JSONValue, default: str) -> str:
     if parsed.is_integer():
         return str(int(parsed))
     return f"{parsed:g}"
+
+
+def _settings_choice_text(value: JSONValue, *, default: str, supported: set[str]) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in supported else default
 
 
 def settings_form_indexes(form_data: dict[str, str], prefix: str) -> list[int]:
@@ -656,6 +681,12 @@ def normalize_video_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
     metric = str(payload.get("quality_metric") or DEFAULT_VIDEO_DEFAULTS["quality_metric"]).strip().lower()
     if metric not in {"auto", "vmaf", "xpsnr"}:
         metric = DEFAULT_VIDEO_DEFAULTS["quality_metric"]
+    decision_model = str(payload.get("decision_model") or DEFAULT_VIDEO_DEFAULTS["decision_model"]).strip().lower()
+    if decision_model not in SUPPORTED_DECISION_MODELS:
+        decision_model = DEFAULT_VIDEO_DEFAULTS["decision_model"]
+    quality_engine = str(payload.get("quality_engine") or DEFAULT_VIDEO_DEFAULTS["quality_engine"]).strip().lower()
+    if quality_engine not in SUPPORTED_QUALITY_ENGINES:
+        quality_engine = DEFAULT_VIDEO_DEFAULTS["quality_engine"]
 
     def _float_field(key: str, *, minimum: float, maximum: float) -> float:
         try:
@@ -687,6 +718,10 @@ def normalize_video_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
         "min_target_vmaf": min_target_vmaf,
         "target_xpsnr": target_xpsnr,
         "min_target_xpsnr": min_target_xpsnr,
+        "target_size_mb": _float_field("target_size_mb", minimum=1, maximum=100_000),
+        "target_runtime_minutes": _float_field("target_runtime_minutes", minimum=1, maximum=1440),
+        "decision_model": decision_model,
+        "quality_engine": quality_engine,
         "max_height": _int_field("max_height", minimum=0, maximum=4320),
         "default_grain": _int_field("default_grain", minimum=0, maximum=50),
         "max_encoded_percent": _float_field("max_encoded_percent", minimum=1, maximum=100),

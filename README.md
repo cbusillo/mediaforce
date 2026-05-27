@@ -102,12 +102,15 @@ The web UI also auto-starts background catalog refreshes when the full library
 view is empty or stale, and it auto-refreshes the current folder before
 showing calibration actions when that folder's scan data is stale.
 
-Folder calibration now uses a simple operator flow by default: sampled
-calibrations use `ab-av1` file-wide samples for fast full-size estimates plus
-short hotspot preview clips for visual review. Once the current sampled draft
-has been explicitly saved to the folder profile, `Queue Folder Encode` is
-unlocked so the real folder job can enter the encode queue without letting a
-stale unsaved preview slip into production work.
+Folder calibration now uses a size-first review flow by default. The checked-in
+defaults aim for roughly 300 MB per 45-minute episode at up to 1080p, then use
+sampled metrics as guardrails and visual review clips as the operator decision
+point. The current fast sample engine is still `ab-av1`; scene-aware engine work
+is tracked separately so host orchestration and review workflow can stay stable
+while that bakeoff happens. Once the current sampled draft has been explicitly
+saved to the folder profile, `Queue Folder Encode` is unlocked so the real
+folder job can enter the encode queue without letting a stale unsaved preview
+slip into production work.
 
 You can run Mediaforce either directly with `python3` or through `uv`:
 
@@ -291,11 +294,12 @@ It ranks and labels items, but leaves the final decision in the manifest and
 review loop.
 
 The checked-in video defaults are intentionally operator-taste defaults, not a
-near-transparent archival preset. The baseline AV1 policy targets VMAF 85 with
-an 80 floor and source resolution (`max_height = 0`) so measured samples pursue
-small, visually acceptable TV encodes first. Raise the VMAF targets or add a
-folder override when a class needs a more conservative pass; use an explicit
-scale request when downsampling is desired.
+near-transparent archival preset. The baseline AV1 policy uses a size-first
+review model: 300 MB per 45-minute episode, VMAF 85 with an 80 floor as a
+guardrail, and max 1080p output unless the operator explicitly asks for another
+resolution. Raise the metric floors or add a folder override when a class needs
+a more conservative pass; use an explicit scale request when downsampling is
+desired.
 
 `report`, `encode`, and `validate` all surface source-vs-staged size deltas so
 you can see the storage win before promotion.
