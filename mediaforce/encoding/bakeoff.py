@@ -245,7 +245,7 @@ def _engine_candidate(
             category="scene-aware-candidate",
             maturity="research-candidate",
             required_tools=("Auto-Boost-Essential script", "SVT-AV1-Essential or compatible SVT-AV1"),
-            metric_support=("script-defined"),
+            metric_support=("script-defined",),
             command=tuple(command),
             command_status="research-template-needs-script-validation",
             sources=("https://github.com/nekotrix/auto-boost-algorithm/tree/main/Auto-Boost-Essential",),
