@@ -723,7 +723,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             {
                 "label": "Folder Studio retryable processing fixture",
                 "route": "/folders/tv/Failed%20Encode/Season%201",
-                "marker": "Processing needs recovery",
+                "marker": "Retry processing",
             },
         ],
         "completedPrefix": COMPLETED_PREFIX,

@@ -299,6 +299,7 @@ export function resolveWorkflowActionState(
 	}
 	if (action === 'revise-proposal') return { disabled: false, title: '' };
 	if (action === 'open-ops') return { disabled: false, title: '' };
+	if (action === 'retry-encode') return { disabled: false, title: '' };
 	if (action === 'stop-sample') {
 		if (activeCalibrationStatus(calibrationJob?.status)) return { disabled: false, title: '' };
 		return { disabled: true, title: 'No sample job is running.' };
@@ -1010,18 +1011,21 @@ export function resolveWorkflow(
 ): WorkflowState {
 	const encodeStatus = String(encodeJob?.status ?? '').toLowerCase();
 	if (['failed', 'needs_attention', 'stopped'].includes(encodeStatus)) {
+		const label = encodeStatus === 'failed' ? 'Processing failed' : 'Processing stopped';
+		const title =
+			encodeStatus === 'failed' ? 'Retry the failed folder job' : 'Retry the stopped folder job';
 		return {
 			tone: 'wait',
-			label: 'Retry available',
-			title: 'Processing needs recovery',
+			label,
+			title,
 			copy:
 				encodeJob?.error ??
 				encodeJob?.attempt_summary ??
-				'The approved folder needs review before it runs again. Retry from Ops when the folder is still safe to process.',
-			primary: 'Open Ops',
-			primaryAction: 'open-ops',
-			secondary: 'Retry',
-			secondaryAction: 'retry-encode'
+				'The folder already has approved settings. Retry processing when it is safe to run the approved work again.',
+			primary: 'Retry processing',
+			primaryAction: 'retry-encode',
+			secondary: 'Open Ops',
+			secondaryAction: 'open-ops'
 		};
 	}
 	if (['running', 'queued', 'retry_backoff'].includes(encodeStatus)) {
@@ -1238,7 +1242,7 @@ export function buildWorkflowSteps(workflow: WorkflowState): WorkflowStep[] {
 		['queue-encode', 'approve-size-tradeoff'].includes(activeAction) || activeLabel === 'approved';
 	const encodeCurrent =
 		['open-ops', 'retry-encode'].includes(activeAction) ||
-		['processing', 'retry available'].includes(activeLabel);
+		['processing', 'processing failed', 'processing stopped'].includes(activeLabel);
 	return [
 		{
 			label: 'Sample',
