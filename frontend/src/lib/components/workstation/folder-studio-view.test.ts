@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { FolderPayload, FolderStatusPayload } from '$lib/api/types';
+import type { EncodeQueueJob, FolderPayload, FolderStatusPayload } from '$lib/api/types';
 import type { FolderCalibrationJob } from '$lib/folders/studio';
 import {
 	buildBenchHostOptions,
@@ -484,7 +484,7 @@ describe('Folder Studio review request mapping', () => {
 			)
 		).toMatchObject({
 			label: 'Review pending',
-			primary: 'Open Ops',
+			primary: 'Wait for review media',
 			secondary: 'Revise smaller'
 		});
 		expect(
@@ -531,8 +531,8 @@ describe('Folder Studio review request mapping', () => {
 			resolveWorkflow(folder, folderStatusPayload(), calibration, null, null, null, null, true)
 		).toMatchObject({
 			label: 'Review pending',
-			primary: 'Open Ops',
-			primaryAction: 'open-ops',
+			primary: 'Wait for review media',
+			primaryAction: 'monitor-review',
 			secondary: 'Revise smaller'
 		});
 		expect(
@@ -549,7 +549,7 @@ describe('Folder Studio review request mapping', () => {
 			)
 		).toMatchObject({
 			label: 'Review pending',
-			primaryAction: 'open-ops'
+			primaryAction: 'monitor-review'
 		});
 		expect(
 			resolveWorkflowActionState('approve-size-tradeoff', {
@@ -588,6 +588,80 @@ describe('Folder Studio review request mapping', () => {
 		expect(resolveQueueSubmissionMode('queue-encode', null)).toBe('approve-profile');
 		expect(resolveQueueSubmissionMode('approve-size-tradeoff', null)).toBe('approve-profile');
 		expect(resolveQueueSubmissionMode('open-ops', null)).toBeNull();
+	});
+
+	it('makes approved folders queue-first and keeps review media secondary', () => {
+		const workflow = resolveWorkflow(
+			folderPayload(),
+			folderStatusPayload(),
+			null,
+			null,
+			{ status: 'accepted', message: 'Sample accepted.' },
+			null,
+			null,
+			true,
+			false
+		);
+
+		expect(workflow).toMatchObject({
+			label: 'Approved',
+			title: 'Queue the approved folder',
+			primary: 'Queue encode',
+			primaryAction: 'queue-encode',
+			secondary: 'Download pack',
+			secondaryAction: 'download-review-pack'
+		});
+	});
+
+	it('makes processing folders monitor-first and keeps review media secondary', () => {
+		const workflow = resolveWorkflow(
+			folderPayload({ encode_queue_summary: '1 folder is running.' }),
+			folderStatusPayload(),
+			null,
+			null,
+			null,
+			null,
+			{
+				job_id: 'encode-1',
+				prefix: 'tv/Example/Season 1',
+				status: 'running',
+				telemetry_summary: '2 workers active.'
+			} as EncodeQueueJob,
+			true
+		);
+
+		expect(workflow).toMatchObject({
+			label: 'Processing',
+			title: 'Approved folder is processing',
+			primary: 'Monitor processing',
+			primaryAction: 'monitor-processing',
+			secondary: 'Download pack',
+			secondaryAction: 'download-review-pack'
+		});
+	});
+
+	it('makes active sampling a sample-state action with an explicit review-media prerequisite', () => {
+		const workflow = resolveWorkflow(
+			folderPayload(),
+			folderStatusPayload({ calibration_status: 'running' }),
+			null,
+			null,
+			null,
+			{ status: 'running' } as FolderCalibrationJob,
+			null
+		);
+
+		expect(workflow).toMatchObject({
+			label: 'Sampling',
+			primary: 'Monitor sample',
+			primaryAction: 'monitor-sample',
+			secondary: 'Stop sample'
+		});
+		expect(workflow.copy).toMatch(/Review media is the missing prerequisite/);
+		expect(buildWorkflowSteps(workflow).find((step) => step.label === 'Sample')).toMatchObject({
+			current: true,
+			detail: 'Representative sample is running'
+		});
 	});
 
 	it('surfaces a draft warning before over-budget review evidence', () => {
