@@ -964,6 +964,42 @@ describe('Folder Studio review request mapping', () => {
 		});
 	});
 
+	it('makes retry processing the primary action for stopped folder jobs', () => {
+		const workflow = resolveWorkflow(
+			folderPayload(),
+			folderStatusPayload(),
+			null,
+			null,
+			null,
+			null,
+			{
+				status: 'stopped',
+				attempt_summary: 'Processing was stopped while pending.'
+			} as never
+		);
+
+		expect(workflow).toMatchObject({
+			label: 'Processing stopped',
+			title: 'Retry the stopped folder job',
+			copy: 'Processing was stopped while pending.',
+			primary: 'Retry processing',
+			primaryAction: 'retry-encode',
+			secondary: 'Open Ops',
+			secondaryAction: 'open-ops'
+		});
+		expect(
+			resolveWorkflowActionState('retry-encode', {
+				reviewPackReady: false,
+				pendingProposal: null,
+				calibrationJob: null
+			})
+		).toEqual({ disabled: false, title: '' });
+		expect(buildWorkflowSteps(workflow).find((step) => step.label === 'Process')).toMatchObject({
+			current: true,
+			detail: 'Retry the stopped folder job'
+		});
+	});
+
 	it('names measured budget enforcement as the next sample action', () => {
 		const pendingProposal = {
 			proposal_id: 'draft-3',

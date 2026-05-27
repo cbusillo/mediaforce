@@ -270,6 +270,28 @@
 		}
 	}
 
+	async function retryEncode() {
+		const action = 'retry-encode';
+		const actionState = workflowActionState(action);
+		if (actionState.disabled) return;
+		workflowPending = action;
+		profileMessage = '';
+		profileError = '';
+		try {
+			const response = await postJson<{ ok: boolean; message?: string }>(
+				`${resolve('/')}api/encode-queue/retry-prefix`,
+				{ prefix }
+			);
+			profileMessage = response.message || 'Queued retry for this folder.';
+			await invalidateAll();
+		} catch (error) {
+			profileError =
+				error instanceof Error ? error.message : 'Folder processing could not be retried.';
+		} finally {
+			workflowPending = null;
+		}
+	}
+
 	async function stopSample() {
 		const action = 'stop-sample';
 		const actionState = workflowActionState(action);
@@ -360,16 +382,6 @@
 					{/each}
 				</div>
 				<div class="decision__actions">
-					{#if reviewPackReady && workflow.primaryAction !== 'download-review-pack' && workflow.secondaryAction !== 'download-review-pack'}
-						<form
-							class="action-form"
-							method="get"
-							action={`${resolve('/')}api/folders/${encodedPrefix}/review-compare/download`}
-							data-mf-action="download-review-pack"
-						>
-							<button class="control" type="submit">Download side-by-side video</button>
-						</form>
-					{/if}
 					{#if workflow.primaryAction === 'focus-bench'}
 						<button
 							class="control control--primary"
@@ -413,6 +425,17 @@
 							data-mf-action={workflow.primaryAction}
 							data-mf-wire="live"
 							>{workflowPending === workflow.primaryAction ? 'Approving' : workflow.primary}</button
+						>
+					{:else if workflow.primaryAction === 'retry-encode'}
+						<button
+							class="control control--primary"
+							type="button"
+							disabled={workflowActionState(workflow.primaryAction).disabled}
+							title={workflowActionState(workflow.primaryAction).title}
+							onclick={retryEncode}
+							data-mf-action={workflow.primaryAction}
+							data-mf-wire="live"
+							>{workflowPending === workflow.primaryAction ? 'Retrying' : workflow.primary}</button
 						>
 					{:else}
 						<button
@@ -483,6 +506,19 @@
 								? 'Approving'
 								: workflow.secondary}</button
 						>
+					{:else if workflow.secondaryAction === 'retry-encode'}
+						<button
+							class="control"
+							type="button"
+							disabled={workflowActionState(workflow.secondaryAction).disabled}
+							title={workflowActionState(workflow.secondaryAction).title}
+							onclick={retryEncode}
+							data-mf-action={workflow.secondaryAction}
+							data-mf-wire="live"
+							>{workflowPending === workflow.secondaryAction
+								? 'Retrying'
+								: workflow.secondary}</button
+						>
 					{:else}
 						<button
 							class="control"
@@ -492,6 +528,16 @@
 							data-mf-action={workflow.secondaryAction}
 							data-mf-wire="pending">{workflow.secondary}</button
 						>
+					{/if}
+					{#if reviewPackReady && workflow.primaryAction !== 'download-review-pack' && workflow.secondaryAction !== 'download-review-pack'}
+						<form
+							class="action-form"
+							method="get"
+							action={`${resolve('/')}api/folders/${encodedPrefix}/review-compare/download`}
+							data-mf-action="download-review-pack"
+						>
+							<button class="control" type="submit">Download side-by-side video</button>
+						</form>
 					{/if}
 					{#if profileError}
 						<p class="decision__status decision__status--fail">{profileError}</p>
@@ -810,12 +856,17 @@
 		padding: var(--mf-space-6);
 	}
 
+	.studio__main > :global(*) {
+		order: 5;
+	}
+
 	.folder-header {
 		align-items: start;
 		border-bottom: var(--mf-border);
 		display: grid;
 		gap: var(--mf-space-6);
 		grid-template-columns: minmax(0, 1fr);
+		order: 2;
 		padding-bottom: var(--mf-space-5);
 	}
 
@@ -896,6 +947,7 @@
 		border: var(--mf-border);
 		display: grid;
 		grid-template-columns: repeat(4, minmax(0, 1fr));
+		order: 3;
 	}
 
 	.workflow-strip__step {
@@ -972,6 +1024,7 @@
 		display: grid;
 		gap: var(--mf-space-6);
 		grid-template-columns: minmax(24rem, 1.25fr) minmax(14rem, 0.75fr);
+		order: 1;
 		padding: var(--mf-space-6);
 	}
 
@@ -1048,6 +1101,7 @@
 		border-left: 3px solid var(--mf-ready-fg);
 		display: grid;
 		gap: var(--mf-space-5);
+		order: 4;
 		padding: var(--mf-space-5);
 	}
 
