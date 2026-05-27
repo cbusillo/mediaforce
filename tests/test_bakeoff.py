@@ -77,6 +77,8 @@ class BakeoffPlanTests(unittest.TestCase):
         self.assertIn("ssimulacra2", av1an["command"])
         self.assertEqual(av1an["command_status"], "template-needs-host-validation")
         self.assertIn("https://rust-av.github.io/Av1an/Features/TargetQuality", av1an["sources"])
+        auto_boost = item["engines"][3]
+        self.assertEqual(auto_boost["metric_support"], ["script-defined"])
 
     def test_build_bakeoff_plan_can_limit_engines(self) -> None:
         config = load_config(Path("config/defaults.toml"))
