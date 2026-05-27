@@ -489,6 +489,90 @@ describe('Folder Studio review request mapping', () => {
 		expect(
 			resolveWorkflowActionState('approve-size-tradeoff', {
 				reviewPackReady: false,
+				approvalReviewReady: false,
+				pendingProposal: null,
+				calibrationJob: null
+			})
+		).toEqual({ disabled: true, title: 'Review media is not ready yet.' });
+	});
+
+	it('keeps stale review packs downloadable without enabling approval', () => {
+		const calibration = {
+			browser_review_ready: true,
+			review_media_ready: false,
+			sample_result: {
+				predicted_total_size_bytes: 803_322_876,
+				quality_metric: 'VMAF',
+				quality_score: 95.0448
+			},
+			advice: {
+				operator_request: {
+					budget_bytes: 314_572_800,
+					budget_label: '300 MB per episode'
+				},
+				multimodal_review_pack: {
+					artifacts: [
+						{
+							kind: 'video_contact_sheet',
+							label: 'Old contact sheet',
+							image_url: '/review-media/old.png'
+						}
+					]
+				}
+			}
+		} as FolderCalibrationState;
+		const folder = folderPayload({
+			calibration,
+			sample_item: { rel_path: 'tv/show/e01.mkv' }
+		});
+
+		expect(
+			resolveWorkflow(folder, folderStatusPayload(), calibration, null, null, null, null, true)
+		).toMatchObject({
+			label: 'Review pending',
+			primary: 'Open Ops',
+			primaryAction: 'open-ops',
+			secondary: 'Revise smaller'
+		});
+		expect(
+			resolveWorkflow(
+				folder,
+				folderStatusPayload(),
+				calibration,
+				null,
+				null,
+				null,
+				null,
+				true,
+				false
+			)
+		).toMatchObject({
+			label: 'Review pending',
+			primaryAction: 'open-ops'
+		});
+		expect(
+			resolveWorkflowActionState('approve-size-tradeoff', {
+				reviewPackReady: true,
+				approvalReviewReady: false,
+				pendingProposal: null,
+				calibrationJob: null
+			})
+		).toEqual({ disabled: true, title: 'Review media is not ready yet.' });
+		expect(
+			resolveWorkflowActionState('download-review-pack', {
+				reviewPackReady: true,
+				approvalReviewReady: false,
+				pendingProposal: null,
+				calibrationJob: null
+			})
+		).toEqual({ disabled: false, title: '' });
+	});
+
+	it('disables normal queue approval when backend review media is not ready', () => {
+		expect(
+			resolveWorkflowActionState('queue-encode', {
+				reviewPackReady: true,
+				approvalReviewReady: false,
 				pendingProposal: null,
 				calibrationJob: null
 			})

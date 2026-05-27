@@ -106,6 +106,7 @@
 			calibration?.review_media_ready
 		)
 	);
+	const approvalReviewReady = $derived(Boolean(calibration?.review_media_ready));
 	const workflow = $derived(
 		resolveWorkflow(
 			studioFolder,
@@ -115,7 +116,8 @@
 			reviewGate,
 			calibrationJob,
 			encodeJob,
-			reviewPackReady
+			reviewPackReady,
+			approvalReviewReady
 		)
 	);
 	const workflowSteps = $derived(buildWorkflowSteps(workflow));
@@ -161,6 +163,7 @@
 	function workflowActionState(action: WorkflowAction) {
 		return resolveWorkflowActionState(action, {
 			reviewPackReady,
+			approvalReviewReady,
 			pendingProposal,
 			calibrationJob,
 			pendingAction: workflowPending

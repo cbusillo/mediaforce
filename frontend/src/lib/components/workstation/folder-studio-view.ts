@@ -269,11 +269,13 @@ export function resolveWorkflowActionState(
 	action: WorkflowAction,
 	{
 		reviewPackReady,
+		approvalReviewReady,
 		pendingProposal,
 		calibrationJob,
 		pendingAction
 	}: {
 		reviewPackReady: boolean;
+		approvalReviewReady?: boolean;
 		pendingProposal: PendingSampleProposal | null;
 		calibrationJob: FolderCalibrationJob | null;
 		pendingAction?: WorkflowAction | null;
@@ -287,7 +289,7 @@ export function resolveWorkflowActionState(
 	}
 	if (action === 'focus-bench') return { disabled: false, title: '' };
 	if (action === 'approve-size-tradeoff') {
-		return reviewPackReady
+		return approvalReviewReady
 			? { disabled: false, title: '' }
 			: { disabled: true, title: 'Review media is not ready yet.' };
 	}
@@ -298,6 +300,9 @@ export function resolveWorkflowActionState(
 		return { disabled: true, title: 'No sample job is running.' };
 	}
 	if (action === 'queue-encode') {
+		if (approvalReviewReady === false) {
+			return { disabled: true, title: 'Review media is not ready yet.' };
+		}
 		if (pendingProposal?.proposal_id && pendingProposal.can_queue === false) {
 			return {
 				disabled: true,
@@ -989,7 +994,8 @@ export function resolveWorkflow(
 	reviewGate: ReviewGate | null,
 	calibrationJob: FolderCalibrationJob | null,
 	encodeJob: EncodeQueueJob | null,
-	reviewPackReady = false
+	reviewPackReady = false,
+	approvalReviewReady = Boolean(calibration?.review_media_ready)
 ): WorkflowState {
 	const encodeStatus = String(encodeJob?.status ?? '').toLowerCase();
 	if (['failed', 'needs_attention', 'stopped'].includes(encodeStatus)) {
@@ -1132,7 +1138,7 @@ export function resolveWorkflow(
 			secondaryAction: 'download-review-pack'
 		};
 	}
-	if (verdict?.missesTarget && reviewPackReady) {
+	if (verdict?.missesTarget && approvalReviewReady) {
 		return {
 			tone: 'ready',
 			label: 'Target missed',
@@ -1156,7 +1162,7 @@ export function resolveWorkflow(
 			secondaryAction: 'focus-bench'
 		};
 	}
-	if (calibration?.browser_review_ready || calibration?.review_media_ready) {
+	if (approvalReviewReady) {
 		return {
 			tone: 'ready',
 			label: 'Review ready',
@@ -1169,6 +1175,18 @@ export function resolveWorkflow(
 			primary: 'Approve and queue',
 			primaryAction: 'queue-encode',
 			secondary: 'Download pack',
+			secondaryAction: 'download-review-pack'
+		};
+	}
+	if (calibration?.browser_review_ready || reviewPackReady) {
+		return {
+			tone: 'wait',
+			label: 'Review pending',
+			title: 'Review media is stale or incomplete',
+			copy: 'The old review pack can still be opened for reference, but approval needs a fresh sample with review media ready.',
+			primary: 'Ask for sample',
+			primaryAction: 'focus-bench',
+			secondary: 'Download old pack',
 			secondaryAction: 'download-review-pack'
 		};
 	}
