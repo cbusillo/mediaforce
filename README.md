@@ -112,6 +112,20 @@ saved to the folder profile, `Queue Folder Encode` is unlocked so the real
 folder job can enter the encode queue without letting a stale unsaved preview
 slip into production work.
 
+For scene-aware engine research, generate a repeatable bakeoff plan from an
+existing manifest instead of replacing the production engine path directly:
+
+```bash
+uv run mediaforce bakeoff path/to/run-manifest.json --all \
+  --output ~/Desktop/mediaforce-bakeoff.json
+```
+
+The bakeoff plan carries the same size-first defaults and per-item resolved
+policy used by Folder Studio, then lays out candidate commands and tool
+requirements for the current `ab-av1` path plus Av1an, Xav, and Auto-Boost. Use
+the plan to collect output size, runtime, selected CRF or quantizer, metric
+score, and review artifacts before choosing a production engine migration.
+
 You can run Mediaforce either directly with `python3` or through `uv`:
 
 ```bash

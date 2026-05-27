@@ -10,6 +10,7 @@ from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import run_manifests as run_manifests_table
 from mediaforce.execution import describe_item_plan, encode_manifest_items, promote_manifest_items, \
     validate_manifest_items
+from mediaforce.encoding.bakeoff import DEFAULT_BAKEOFF_ENGINES, build_bakeoff_plan, write_bakeoff_plan
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.planner import recommend_item
 from mediaforce.library.run_manifests import build_run_manifest as build_db_run_manifest, \
@@ -97,6 +98,32 @@ def build_parser() -> argparse.ArgumentParser:
     compare_parser = subparsers.add_parser("compare", help="Generate side-by-side approval clips for staged items")
     _add_manifest_selection_args(compare_parser, require_manifest=False)
     _add_compare_clip_args(compare_parser)
+
+    bakeoff_parser = subparsers.add_parser("bakeoff", help="Write a scene-aware engine bakeoff plan")
+    _add_manifest_selection_args(bakeoff_parser, require_manifest=False)
+    bakeoff_parser.add_argument(
+        "--engine",
+        action="append",
+        choices=DEFAULT_BAKEOFF_ENGINES,
+        default=[],
+        help="Candidate engine to include; defaults to all candidates",
+    )
+    bakeoff_parser.add_argument(
+        "--output",
+        type=Path,
+        help="Write the bakeoff plan JSON to an explicit path",
+    )
+    bakeoff_parser.add_argument(
+        "--artifact-dir",
+        type=Path,
+        help="Directory where bakeoff artifacts should be written by the candidate commands",
+    )
+    bakeoff_parser.add_argument(
+        "--clip-duration",
+        type=float,
+        default=20.0,
+        help="Review clip duration expected from each candidate engine",
+    )
 
     return parser
 
@@ -290,6 +317,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(
                     f"compare {clip.output_path} start={clip.timestamp_seconds:.2f}s "
                     f"duration={clip.duration_seconds:.2f}s"
+                )
+            return 0
+
+        if args.command == "bakeoff":
+            manifest_path = _resolve_manifest_path(connection, args.manifest)
+            manifest = _load_manifest(manifest_path)
+            indexes = _resolve_indexes(manifest, args)
+            artifact_dir = args.artifact_dir or config.paths.review_dir / "engine-bakeoff"
+            plan = build_bakeoff_plan(
+                config,
+                manifest,
+                indexes=indexes,
+                engines=args.engine or None,
+                output_dir=artifact_dir,
+                clip_duration_seconds=args.clip_duration,
+            )
+            output_path = args.output or config.paths.run_manifest_dir / f"bakeoff-{manifest.get('run_id', 'latest')}.json"
+            write_bakeoff_plan(plan, output_path)
+            print(f"bakeoff plan {output_path}")
+            for item in plan["items"]:
+                print(
+                    f"  item {item['index']}: target={_format_optional_size(item['target_size_bytes'])} "
+                    f"runtime={item['duration_seconds']:.0f}s engines={len(item['engines'])}"
                 )
             return 0
 
@@ -584,6 +634,12 @@ def _format_size(size_bytes: int) -> str:
             return f"{value:.2f}{unit}"
         value /= 1024
     return f"{size_bytes}B"
+
+
+def _format_optional_size(size_bytes: int | None) -> str:
+    if size_bytes is None:
+        return "unset"
+    return _format_size(size_bytes)
 
 
 def _format_signed_bytes(size_bytes: int) -> str:
