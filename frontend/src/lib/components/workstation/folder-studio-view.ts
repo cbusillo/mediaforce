@@ -134,6 +134,8 @@ export type WorkflowActionState = {
 	title: string;
 };
 
+export type QueueSubmissionMode = 'approve-profile' | 'queue-approved';
+
 export type WorkflowStep = {
 	label: string;
 	detail: string;
@@ -270,12 +272,14 @@ export function resolveWorkflowActionState(
 	{
 		reviewPackReady,
 		approvalReviewReady,
+		approvedProfileReady,
 		pendingProposal,
 		calibrationJob,
 		pendingAction
 	}: {
 		reviewPackReady: boolean;
 		approvalReviewReady?: boolean;
+		approvedProfileReady?: boolean;
 		pendingProposal: PendingSampleProposal | null;
 		calibrationJob: FolderCalibrationJob | null;
 		pendingAction?: WorkflowAction | null;
@@ -300,9 +304,7 @@ export function resolveWorkflowActionState(
 		return { disabled: true, title: 'No sample job is running.' };
 	}
 	if (action === 'queue-encode') {
-		if (approvalReviewReady === false) {
-			return { disabled: true, title: 'Review media is not ready yet.' };
-		}
+		if (approvedProfileReady) return { disabled: false, title: '' };
 		if (pendingProposal?.proposal_id && pendingProposal.can_queue === false) {
 			return {
 				disabled: true,
@@ -336,6 +338,15 @@ export function resolveWorkflowActionState(
 		return { disabled: false, title: '' };
 	}
 	return { disabled: true, title: 'Wiring handoff pending for this workflow action.' };
+}
+
+export function resolveQueueSubmissionMode(
+	action: WorkflowAction,
+	reviewGate: ReviewGate | null
+): QueueSubmissionMode | null {
+	if (action === 'approve-size-tradeoff') return 'approve-profile';
+	if (action !== 'queue-encode') return null;
+	return reviewGate?.status === 'accepted' ? 'queue-approved' : 'approve-profile';
 }
 
 function requestSummary(request: FolderOperatorRequest | null | undefined): string {

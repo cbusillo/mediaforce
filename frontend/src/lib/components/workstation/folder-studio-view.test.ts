@@ -12,6 +12,7 @@ import {
 	predictedFolderSizeBytes,
 	projectedReclaimBytes,
 	resolveBenchRequestState,
+	resolveQueueSubmissionMode,
 	resolveWorkflow,
 	resolveWorkflowActionState
 } from './folder-studio-view';
@@ -568,15 +569,25 @@ describe('Folder Studio review request mapping', () => {
 		).toEqual({ disabled: false, title: '' });
 	});
 
-	it('disables normal queue approval when backend review media is not ready', () => {
+	it('queues already approved folders even after review media goes stale', () => {
 		expect(
 			resolveWorkflowActionState('queue-encode', {
 				reviewPackReady: true,
 				approvalReviewReady: false,
+				approvedProfileReady: true,
 				pendingProposal: null,
 				calibrationJob: null
 			})
-		).toEqual({ disabled: true, title: 'Review media is not ready yet.' });
+		).toEqual({ disabled: false, title: '' });
+		expect(resolveQueueSubmissionMode('queue-encode', { status: 'accepted' })).toBe(
+			'queue-approved'
+		);
+	});
+
+	it('routes first-time queue actions through profile approval', () => {
+		expect(resolveQueueSubmissionMode('queue-encode', null)).toBe('approve-profile');
+		expect(resolveQueueSubmissionMode('approve-size-tradeoff', null)).toBe('approve-profile');
+		expect(resolveQueueSubmissionMode('open-ops', null)).toBeNull();
 	});
 
 	it('surfaces a draft warning before over-budget review evidence', () => {

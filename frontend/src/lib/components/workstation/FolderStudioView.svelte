@@ -41,6 +41,7 @@
 		resolvedMetricCopy,
 		resolveFolderTitle,
 		resolveReviewArtifacts,
+		resolveQueueSubmissionMode,
 		resolveWorkflowActionState,
 		resolveWorkflow,
 		summarizeStatuses,
@@ -107,6 +108,7 @@
 		)
 	);
 	const approvalReviewReady = $derived(Boolean(calibration?.review_media_ready));
+	const approvedProfileReady = $derived(reviewGate?.status === 'accepted');
 	const workflow = $derived(
 		resolveWorkflow(
 			studioFolder,
@@ -164,6 +166,7 @@
 		return resolveWorkflowActionState(action, {
 			reviewPackReady,
 			approvalReviewReady,
+			approvedProfileReady,
 			pendingProposal,
 			calibrationJob,
 			pendingAction: workflowPending
@@ -237,18 +240,26 @@
 		if (action !== 'queue-encode' && action !== 'approve-size-tradeoff') return;
 		const actionState = workflowActionState(action);
 		if (actionState.disabled) return;
+		const submissionMode = resolveQueueSubmissionMode(action, reviewGate);
+		if (!submissionMode) return;
 		workflowPending = action;
 		profileMessage = '';
 		profileError = '';
 		try {
-			const response = await postJson<{ ok: boolean; message?: string }>(
-				`${resolve('/')}api/folders/${encodedPrefix}/save-profile`,
-				{
-					confirm_high_impact: true,
-					confirm_size_tradeoff: action === 'approve-size-tradeoff',
-					reviewed_draft_hash: calibration?.draft_hash ?? ''
-				}
-			);
+			const response =
+				submissionMode === 'queue-approved'
+					? await postJson<{ ok: boolean; message?: string }>(
+							`${resolve('/')}api/folders/${encodedPrefix}/queue-encode`,
+							{ notes: '', bypass_schedule: false }
+						)
+					: await postJson<{ ok: boolean; message?: string }>(
+							`${resolve('/')}api/folders/${encodedPrefix}/save-profile`,
+							{
+								confirm_high_impact: true,
+								confirm_size_tradeoff: action === 'approve-size-tradeoff',
+								reviewed_draft_hash: calibration?.draft_hash ?? ''
+							}
+						);
 			profileMessage = response.message || 'Approved the draft and queued the folder encode.';
 			await invalidateAll();
 		} catch (error) {
