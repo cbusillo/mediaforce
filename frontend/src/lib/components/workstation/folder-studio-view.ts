@@ -65,6 +65,9 @@ export type WorkflowAction =
 	| 'approve-size-tradeoff'
 	| 'download-review-pack'
 	| 'focus-bench'
+	| 'monitor-processing'
+	| 'monitor-review'
+	| 'monitor-sample'
 	| 'open-ops'
 	| 'queue-encode'
 	| 'retry-encode'
@@ -298,6 +301,9 @@ export function resolveWorkflowActionState(
 			: { disabled: true, title: 'Review media is not ready yet.' };
 	}
 	if (action === 'revise-proposal') return { disabled: false, title: '' };
+	if (['monitor-processing', 'monitor-review', 'monitor-sample'].includes(action)) {
+		return { disabled: false, title: '' };
+	}
 	if (action === 'open-ops') return { disabled: false, title: '' };
 	if (action === 'retry-encode') return { disabled: false, title: '' };
 	if (action === 'stop-sample') {
@@ -1037,24 +1043,24 @@ export function resolveWorkflow(
 				encodeJob?.telemetry_summary ??
 				folder.encode_queue_summary ??
 				'Folder settings are approved. Monitor progress here or open Ops for deeper worker state.',
-			primary: 'Download review pack',
-			primaryAction: 'download-review-pack',
-			secondary: 'Open Ops',
-			secondaryAction: 'open-ops'
+			primary: 'Monitor processing',
+			primaryAction: 'monitor-processing',
+			secondary: 'Download pack',
+			secondaryAction: 'download-review-pack'
 		};
 	}
 	if (reviewGate?.status === 'accepted') {
 		return {
 			tone: 'ready',
 			label: 'Approved',
-			title: 'Folder proposal is approved',
+			title: 'Queue the approved folder',
 			copy:
 				reviewGate.message ??
-				'The proposal has been accepted. Queue or monitor full-folder work from this context.',
-			primary: 'Download review pack',
-			primaryAction: 'download-review-pack',
-			secondary: 'Queue encode',
-			secondaryAction: 'queue-encode'
+				'The sample was accepted. Queue full-folder processing when you are ready.',
+			primary: 'Queue encode',
+			primaryAction: 'queue-encode',
+			secondary: 'Download pack',
+			secondaryAction: 'download-review-pack'
 		};
 	}
 	if (
@@ -1081,9 +1087,9 @@ export function resolveWorkflow(
 			tone: 'active',
 			label: 'Sampling',
 			title: 'Representative sample is running',
-			copy: 'The operator is waiting for review evidence. Keep worker, elapsed time, and queue state visible until the pack is ready.',
-			primary: 'Open Ops',
-			primaryAction: 'open-ops',
+			copy: 'The sample job is running. Review media is the missing prerequisite; approval appears once the comparison preview is ready.',
+			primary: 'Monitor sample',
+			primaryAction: 'monitor-sample',
 			secondary: 'Stop sample',
 			secondaryAction: 'stop-sample'
 		};
@@ -1171,8 +1177,8 @@ export function resolveWorkflow(
 			label: 'Review pending',
 			title: 'Target missed, waiting for review media',
 			copy: `${verdict.predictedPerItem} per episode against ${verdict.target}. Wait for the comparison preview before approving this larger result.`,
-			primary: 'Open Ops',
-			primaryAction: 'open-ops',
+			primary: 'Wait for review media',
+			primaryAction: 'monitor-review',
 			secondary: 'Revise smaller',
 			secondaryAction: 'focus-bench'
 		};
@@ -1233,15 +1239,16 @@ export function buildWorkflowSteps(workflow: WorkflowState): WorkflowStep[] {
 	const activeAction = workflow.primaryAction;
 	const activeLabel = workflow.label.toLowerCase();
 	const sampleCurrent =
-		['focus-bench', 'start-sample', 'retry-sample', 'stop-sample'].includes(activeAction) ||
-		['not sampled', 'sampling', 'retryable', 'draft ready'].includes(activeLabel);
+		['focus-bench', 'monitor-sample', 'start-sample', 'retry-sample', 'stop-sample'].includes(
+			activeAction
+		) || ['not sampled', 'sampling', 'retryable', 'draft ready'].includes(activeLabel);
 	const reviewCurrent =
-		['download-review-pack', 'revise-proposal'].includes(activeAction) ||
+		['download-review-pack', 'monitor-review', 'revise-proposal'].includes(activeAction) ||
 		['review ready', 'check draft'].includes(activeLabel);
 	const approveCurrent =
 		['queue-encode', 'approve-size-tradeoff'].includes(activeAction) || activeLabel === 'approved';
 	const encodeCurrent =
-		['open-ops', 'retry-encode'].includes(activeAction) ||
+		['monitor-processing', 'open-ops', 'retry-encode'].includes(activeAction) ||
 		['processing', 'processing failed', 'processing stopped'].includes(activeLabel);
 	return [
 		{

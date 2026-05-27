@@ -344,7 +344,7 @@
 						<span>Projected output</span>
 						<strong>{formatBytes(predictedFolderSizeBytes(studioFolder))}</strong>
 					</div>
-					<div>
+					<div class="folder-header__metric">
 						<span>Metric</span>
 						<strong>{resolvedMetricCopy(studioFolder)}</strong>
 					</div>
@@ -389,7 +389,7 @@
 							onclick={focusBenchComposer}
 							data-mf-action={workflow.primaryAction}>{workflow.primary}</button
 						>
-					{:else if workflow.primaryAction === 'open-ops'}
+					{:else if workflow.primaryAction === 'open-ops' || workflow.primaryAction.startsWith('monitor-')}
 						<a
 							class="control control--primary"
 							href={resolve('/ops')}
@@ -455,6 +455,10 @@
 							data-mf-action={workflow.secondaryAction}>{workflow.secondary}</button
 						>
 					{:else if workflow.secondaryAction === 'open-ops'}
+						<a class="control" href={resolve('/ops')} data-mf-action={workflow.secondaryAction}
+							>{workflow.secondary}</a
+						>
+					{:else if workflow.secondaryAction.startsWith('monitor-')}
 						<a class="control" href={resolve('/ops')} data-mf-action={workflow.secondaryAction}
 							>{workflow.secondary}</a
 						>
@@ -912,6 +916,17 @@
 		display: grid;
 		gap: var(--mf-space-2);
 		min-width: 88px;
+	}
+
+	.folder-header__metric {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+		justify-content: end;
+	}
+
+	.folder-header__metric strong {
+		color: var(--mf-fg-secondary);
+		font-size: var(--mf-text-xs);
 	}
 
 	.folder-header__facts span,
