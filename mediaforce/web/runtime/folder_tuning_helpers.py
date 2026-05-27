@@ -115,13 +115,15 @@ def measured_size_budget_policy_fragment(
     analysis = object_dict(size_target_analysis)
     if str(request.get("request_type") or "").strip().lower() not in {"size_budget", "combined_experiment"}:
         return {}
+    size_budget_request = object_dict(request.get("size_budget_request"))
+    if not bool(request.get("hard_size_cap") or size_budget_request.get("hard_size_cap")):
+        return {}
     if str(analysis.get("status") or "").strip().lower() != "over_target":
         return {}
     requested_cap = _number_or_none(request.get("requested_max_encoded_percent"))
     if requested_cap is None:
         requested_cap = _number_or_none(request.get("target_encoded_percent"))
     if requested_cap is None:
-        size_budget_request = object_dict(request.get("size_budget_request"))
         requested_cap = _number_or_none(size_budget_request.get("requested_max_encoded_percent"))
     if requested_cap is None or requested_cap <= 0:
         return {}
@@ -179,8 +181,8 @@ def proposal_alignment_issue(
                     current_height is None or abs(preview_height - current_height) > 0.01
             ):
                 return (
-                    "The draft changes resolution based only on a size budget. Ask for that resolution or run a "
-                    "measured follow-up before changing the height cap."
+                    "The draft changes resolution based only on a size budget. Ask for that resolution "
+                    "explicitly before changing the height cap."
                 )
         for key in ("stereo_opus_bitrate", "surround_5_1_opus_bitrate", "surround_7_1_opus_bitrate"):
             if key in requested_audio:
@@ -240,10 +242,10 @@ def proposal_alignment_issue(
                 "The draft turns the size budget into a max_encoded_percent change. Size budgets are planning "
                 "targets for measured comparison unless the operator explicitly asks for a hard cap."
             )
+        tradeoff_issue = _unrequested_size_tradeoff_issue()
+        if tradeoff_issue is not None:
+            return tradeoff_issue
         if not allow_measured_size_quality_tradeoff:
-            tradeoff_issue = _unrequested_size_tradeoff_issue()
-            if tradeoff_issue is not None:
-                return tradeoff_issue
             for key in ("default_grain", "grain_denoise", "min_crf", "max_crf", "preset"):
                 if key in requested_video:
                     continue
@@ -271,10 +273,10 @@ def proposal_alignment_issue(
                     "The draft turns the size budget into a max_encoded_percent change. Size budgets are planning "
                     "targets for measured comparison unless the operator explicitly asks for a hard cap."
                 )
+            tradeoff_issue = _unrequested_size_tradeoff_issue()
+            if tradeoff_issue is not None:
+                return tradeoff_issue
             if not allow_measured_size_quality_tradeoff:
-                tradeoff_issue = _unrequested_size_tradeoff_issue()
-                if tradeoff_issue is not None:
-                    return tradeoff_issue
                 for key in ("default_grain", "grain_denoise", "min_crf", "max_crf", "preset"):
                     if key in requested_video:
                         continue
@@ -291,6 +293,9 @@ def proposal_alignment_issue(
             return f"The draft does not apply the requested {requested_cap:.0f}% size ceiling."
         if preview_cap > requested_cap + 0.01:
             return f"The draft uses a {preview_cap:.0f}% size ceiling instead of the requested {requested_cap:.0f}% ceiling."
+        tradeoff_issue = _unrequested_size_tradeoff_issue()
+        if tradeoff_issue is not None:
+            return tradeoff_issue
         return None
 
     def _metric_alignment_issue() -> str | None:
@@ -328,6 +333,10 @@ def proposal_alignment_issue(
         if requested_height is None:
             return None
         preview_height = _policy_height(preview_video)
+        if requested_height <= 0:
+            if preview_height is not None and preview_height > 0:
+                return "The draft sets a height cap even though the operator requested source resolution."
+            return None
         if preview_height is None:
             return f"The draft does not apply the requested {requested_height:.0f}p height cap."
         if abs(preview_height - requested_height) > 0.01:

@@ -9,7 +9,7 @@ that a single live machine state happens to render.
 - Full route and fixture smoke:
   `npm --prefix frontend run smoke:web`
 - Existing live app smoke:
-  `npm --prefix frontend run smoke:web -- --base-url http://127.0.0.1:5555`
+  `npm --prefix frontend run smoke:web -- --base-url http://127.0.0.1:8777`
 - Skip narrow checks only for non-UI diagnostics:
   `npm --prefix frontend run smoke:web -- --skip-narrow`
 

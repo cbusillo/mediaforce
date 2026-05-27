@@ -158,7 +158,13 @@ def _fake_operator_note_parse(*, project_root: Path, payload: dict[str, object])
             r"\b(?P<height>480|540|576|720|900|1080|1440|2160)p\b.{0,40}\b(?:downsample|downscale|scale|resize|cap|limit)\b",
             lower,
         )
+    source_resolution_requested = bool(re.search(
+        r"\b(?:source|original|native)\s+resolution\b|\b(?:do\s+not|don't|dont|no)\s+(?:downsample|downscale|scale\s+down)\b|\bkeep\s+max_height\s+(?:unset|at\s+0|0)\b|\bmax_height\s+(?:unset|0)\b",
+        lower,
+    ))
     scale_height = int(scale_match.group("height")) if scale_match else None
+    if source_resolution_requested:
+        scale_height = 0
     black_bar_handling = "smart" if re.search(r"\b(?:smart|auto(?:matic)?)\b.{0,24}\bblack[- ]?bar", lower) or re.search(
         r"\bblack[- ]?bar.{0,24}\b(?:smart|auto(?:matic)?)\b", lower
     ) else None
@@ -387,6 +393,36 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertEqual(policy["video"]["quality_metric"], "xpsnr")
         self.assertEqual(policy["video"]["target_xpsnr"], 35.5)
+
+    def test_folder_display_policy_prefers_live_summary_over_sample_snapshot(self) -> None:
+        sample_item = {
+            "resolved_policy": {
+                "video": {
+                    "quality_metric": "vmaf",
+                    "target_vmaf": 95.0,
+                    "max_height": 720,
+                }
+            }
+        }
+        summary = {
+            "resolved_policy": {
+                "video": {
+                    "quality_metric": "vmaf",
+                    "target_vmaf": 85.0,
+                    "max_height": 1080,
+                }
+            }
+        }
+
+        policy = _folder_display_policy(
+            sample_item=sample_item,
+            calibration=None,
+            pending_proposal=None,
+            summary=summary,
+        )
+
+        self.assertEqual(policy["video"]["target_vmaf"], 85.0)
+        self.assertEqual(policy["video"]["max_height"], 1080)
 
     def test_folder_ai_tune_confirm_retries_latest_stopped_sample_without_pending_proposal(self) -> None:
         saved_jobs: list[dict[str, object]] = []
@@ -3462,9 +3498,35 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(request["budget_label"], "200 MB per episode")
         self.assertEqual(request["feasibility"], "aggressive")
         self.assertFalse(request["requires_confirmation"])
+        self.assertFalse(request["hard_size_cap"])
         self.assertAlmostEqual(request["estimated_source_percent"], 4.36, places=2)
         self.assertAlmostEqual(request["target_encoded_percent"], 4.36, places=2)
+        self.assertIsNone(request["requested_max_encoded_percent"])
         self.assertIsNone(request["applied_max_encoded_percent"])
+        self.assertIsNone(request["applied_policy"])
+
+    def test_operator_requested_experiment_detects_explicit_hard_size_cap(self) -> None:
+        request = _operator_requested_experiment(
+            "Hard cap this at 300MB per episode.",
+            {
+                "source_size_bytes": 4_349_049_136,
+                "duration_seconds": 3161.376,
+                "audio_summary": [{"codec_name": "ac3", "channels": 6}],
+                "resolved_policy": {
+                    "video": {"encoder": "libsvtav1"},
+                    "audio": {
+                        "convert_to_opus_codecs": ["ac3"],
+                        "surround_5_1_opus_bitrate": "256k",
+                    },
+                },
+            },
+        )
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "size_budget")
+        self.assertTrue(request["hard_size_cap"])
+        self.assertEqual(request["budget_label"], "300 MB per episode")
+        self.assertAlmostEqual(request["requested_max_encoded_percent"], 7.23, places=2)
         self.assertIsNone(request["applied_policy"])
 
     def test_operator_requested_experiment_detects_scale_target_request(self) -> None:
@@ -3475,6 +3537,18 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(request["operator_confirmed"])
         self.assertEqual(request["scale_height"], 1080)
         self.assertEqual(request["applied_policy"]["video"]["max_height"], 1080)
+
+    def test_operator_requested_experiment_detects_source_resolution_request(self) -> None:
+        request = _operator_requested_experiment(
+            "Keep source resolution at 1080p. Do not downscale and keep max_height unset or 0."
+        )
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "scale_target")
+        self.assertTrue(request["operator_confirmed"])
+        self.assertEqual(request["scale_height"], 0)
+        self.assertEqual(request["scale_label"], "source resolution")
+        self.assertEqual(request["applied_policy"]["video"]["max_height"], 0)
 
     def test_operator_requested_experiment_detects_smart_black_bar_request(self) -> None:
         request = _operator_requested_experiment("Use smart black-bar detection for this letterboxed season.")
@@ -3505,6 +3579,30 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(request["scale_height"], 1080)
         self.assertEqual(request["applied_policy"]["video"]["target_vmaf"], 88.0)
         self.assertEqual(request["applied_policy"]["video"]["max_height"], 1080)
+
+    def test_operator_requested_experiment_combines_source_resolution_with_budget(self) -> None:
+        request = _operator_requested_experiment(
+            "Keep source resolution, do not downscale, and target 300MB per episode if possible.",
+            {
+                "source_size_bytes": 4_349_049_136,
+                "duration_seconds": 3161.376,
+                "audio_summary": [{"codec_name": "ac3", "channels": 6}],
+                "resolved_policy": {
+                    "video": {"encoder": "libsvtav1"},
+                    "audio": {
+                        "convert_to_opus_codecs": ["ac3"],
+                        "surround_5_1_opus_bitrate": "256k",
+                    },
+                },
+            },
+        )
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "combined_experiment")
+        self.assertEqual(request["budget_label"], "300 MB per episode")
+        self.assertEqual(request["scale_height"], 0)
+        self.assertEqual(request["applied_policy"]["video"]["max_height"], 0)
+        self.assertAlmostEqual(request["estimated_video_bitrate_kbps"], 540.0, places=1)
 
     def test_size_budget_feasibility_treats_old_codec_style_low_bitrates_as_aggressive_first(self) -> None:
         feasibility, requires_confirmation = size_budget_feasibility(
@@ -3724,7 +3822,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIsNone(proposal["job_fields"]["seed_applied_policy"])
         self.assertEqual(proposal["request_disposition"], "honored")
 
-    def test_folder_ai_tune_preview_enforces_size_cap_after_measured_miss(self) -> None:
+    def test_folder_ai_tune_preview_keeps_soft_size_target_from_becoming_cap_after_measured_miss(self) -> None:
         saved_proposals: list[dict[str, Any]] = []
         base_policy = {"video": {"target_vmaf": 95.0, "max_encoded_percent": 80}}
         host = HostStatus(
@@ -3742,8 +3840,8 @@ class TuningRuntimeTests(unittest.TestCase):
             "operator_confirmed": True,
             "budget_label": "300 MB per episode",
             "budget_bytes": 314_572_800,
-            "requested_max_encoded_percent": 7.23,
             "target_encoded_percent": 7.23,
+            "hard_size_cap": False,
             "applied_policy": None,
         }
         size_target_analysis = {
@@ -3849,16 +3947,145 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         proposal = saved_proposals[0]
         self.assertTrue(proposal["can_queue"])
-        self.assertEqual(proposal["preview_policy"]["video"]["max_encoded_percent"], 7)
+        self.assertEqual(proposal["preview_policy"]["video"]["max_encoded_percent"], 80)
         self.assertEqual(proposal["preview_policy"]["video"]["target_vmaf"], 88.0)
-        self.assertEqual(proposal["applied_policy"]["video"]["max_encoded_percent"], 7)
-        self.assertEqual(proposal["operator_request"]["applied_max_encoded_percent"], 7)
-        self.assertEqual(proposal["operator_request"]["applied_policy"]["video"]["max_encoded_percent"], 7)
-        self.assertEqual(proposal["budget_enforcement"]["status"], "enforced_after_miss")
-        self.assertEqual(proposal["advice_payload"]["budget_enforcement"]["status"], "enforced_after_miss")
+        self.assertEqual(proposal["applied_policy"], {"video": {"target_vmaf": 88.0, "min_target_vmaf": 88.0}})
+        self.assertNotIn("applied_max_encoded_percent", proposal["operator_request"])
+        self.assertIsNone(proposal["budget_enforcement"])
+        self.assertNotIn("budget_enforcement", proposal["advice_payload"])
+
+    def test_folder_ai_tune_preview_keeps_stricter_ai_size_cap_for_hard_cap_after_measured_miss(self) -> None:
+        saved_proposals: list[dict[str, Any]] = []
+        base_policy = {"video": {"target_vmaf": 95.0, "max_encoded_percent": 80}}
+        host = HostStatus(
+            key="host-1",
+            label="M4 Studio",
+            mode="ssh",
+            priority=10,
+            capabilities=["sample_calibration"],
+            available=True,
+            message="Mounted and ready",
+            missing_paths=[],
+        )
+        operator_request = {
+            "request_type": "size_budget",
+            "operator_confirmed": True,
+            "budget_label": "300 MB per episode",
+            "budget_bytes": 314_572_800,
+            "requested_max_encoded_percent": 7.23,
+            "target_encoded_percent": 7.23,
+            "hard_size_cap": True,
+            "applied_policy": None,
+        }
+        size_target_analysis = {
+            "status": "over_target",
+            "predicted_total_size_bytes": 803_322_876,
+            "budget_bytes": 314_572_800,
+            "predicted_to_budget_ratio": 2.55,
+        }
+
+        def apply_fragment(current: dict[str, Any], fragment: dict[str, Any]) -> dict[str, Any]:
+            merged = dict(current)
+            for section, values in fragment.items():
+                if isinstance(values, dict) and isinstance(merged.get(section), dict):
+                    merged[section] = {**merged[section], **values}
+                else:
+                    merged[section] = values
+            return merged
+
+        def fake_request_note_tuning(*, project_root: Path, payload: dict[str, object]) -> TuningPolicyResponse:
+            self.assertEqual(project_root, self.config.paths.project_root)
+            self.assertEqual(payload["requested_experiment"], operator_request)
+            return TuningPolicyResponse(
+                ok=True,
+                summary="Use a tighter cap for the next measured sample.",
+                raw="{}",
+                prompt_version="test",
+                diagnosis="The last sample missed the requested size target.",
+                confidence="high",
+                evidence_checked=["runtime_toolbelt.size_target_analysis"],
+                suggested_follow_up=None,
+                request_disposition="honored",
+                request_response="I tightened the next sample against the measured miss.",
+                feasibility_note=None,
+                proposed_policy={"video": {"target_vmaf": 88.0, "max_encoded_percent": 5}},
+                toolbelt_used=["size_target_analysis"],
+                self_check={"status": "pass", "summary": "ok", "issues": []},
+            )
+
+        deps = FolderAiTuneDeps(
+            resolve_sample_host=lambda _config, _host_key: host,
+            load_job_state=lambda *_args, **_kwargs: None,
+            load_retryable_sample_job_state=lambda *_args, **_kwargs: None,
+            sample_item=lambda *_args, **_kwargs: {
+                "rel_path": "tv/show/episode.mkv",
+                "source_path": str(self.root / "source" / "tv" / "show" / "episode.mkv"),
+                "source_size_bytes": 4_000_000_000,
+                "video_codec": "h264",
+                "duration_seconds": 2500.0,
+                "audio_summary": [],
+                "subtitle_summary": [],
+                "resolved_policy": dict(base_policy),
+            },
+            operator_requested_experiment=lambda *_args, **_kwargs: dict(operator_request),
+            load_calibration_state=lambda *_args, **_kwargs: {
+                "policy": dict(base_policy),
+                "sample_result": {
+                    "predicted_total_size_bytes": 803_322_876,
+                    "predicted_encode_percent": 18.47,
+                    "quality_metric": "VMAF",
+                    "quality_score": 95.04,
+                },
+            },
+            recent_tuning_sessions=lambda *_args, **_kwargs: [],
+            matching_request_history=lambda *_args, **_kwargs: None,
+            metric_support=lambda: {"vmaf": True},
+            maybe_seed_baseline_policy=lambda *_args, **_kwargs: None,
+            seed_advice_payload=lambda *_args, **_kwargs: None,
+            proposal_alignment_issue=proposal_alignment_issue,
+            now_iso=lambda: "2026-04-25T18:30:00+00:00",
+            proposal_signal_copy=lambda *_args, **_kwargs: "signal",
+            proposal_context_snapshot=lambda **kwargs: dict(kwargs),
+            save_pending_proposal=lambda _config, _prefix, payload: saved_proposals.append(dict(payload)),
+            pending_proposal_public_view=lambda payload: payload,
+            build_tuning_runtime_toolbelt=lambda *_args, **_kwargs: {
+                "size_target_analysis": dict(size_target_analysis),
+                "recent_sample_result": {"quality_score": 95.04},
+            },
+            review_pack_dir=lambda *_args, **_kwargs: self.root / "review-pack",
+            remove_path_if_exists=lambda *_args, **_kwargs: None,
+            build_multimodal_review_pack=lambda *_args, **_kwargs: None,
+            multimodal_review_pack_public_view=lambda *_args, **_kwargs: None,
+            tuning_advice_payload=lambda **kwargs: {"summary": kwargs["tuning"].summary},
+            load_pending_proposal=lambda *_args, **_kwargs: None,
+            apply_policy_fragment=apply_fragment,
+            save_advice_state=lambda *_args, **_kwargs: None,
+            save_job_state=lambda *_args, **_kwargs: None,
+            clear_pending_proposal=lambda *_args, **_kwargs: None,
+            record_tuning_session=lambda *_args, **_kwargs: "session-1",
+        )
+
+        with patch("mediaforce.web.runtime.folder_ai_tuning.inspect_prefix", return_value={"item_count": 1}), patch(
+                "mediaforce.web.runtime.folder_ai_tuning.request_note_tuning",
+                side_effect=fake_request_note_tuning,
+        ):
+            result = folder_ai_tune_preview_action(
+                self.config,
+                deps,
+                "tv/show",
+                "Hard cap at 200-300 MB per episode.",
+                "host-1",
+            )
+
+        self.assertTrue(result["ok"])
+        proposal = saved_proposals[0]
+        self.assertEqual(proposal["preview_policy"]["video"]["max_encoded_percent"], 5)
+        self.assertEqual(proposal["applied_policy"]["video"]["max_encoded_percent"], 5)
+        self.assertEqual(proposal["operator_request"]["applied_max_encoded_percent"], 5)
+        self.assertEqual(proposal["operator_request"]["applied_policy"]["video"]["max_encoded_percent"], 5)
         self.assertEqual(
             proposal["advice_payload"]["budget_enforcement"]["applied_policy"],
-            {"video": {"max_encoded_percent": 7}},
+            {"video": {"max_encoded_percent": 5}},
         )
 
     def test_folder_ai_tune_preview_exposes_latest_failed_sample_job_to_bench(self) -> None:
@@ -4074,11 +4301,24 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(request["applied_policy"]["video"]["target_vmaf"], 85.0)
         self.assertNotIn("max_encoded_percent", request["applied_policy"]["video"])
 
-    def test_measured_size_budget_policy_fragment_enforces_cap_after_miss(self) -> None:
+    def test_measured_size_budget_policy_fragment_ignores_soft_target_after_miss(self) -> None:
         fragment = measured_size_budget_policy_fragment(
             operator_request={
                 "request_type": "size_budget",
                 "requested_max_encoded_percent": 7.23,
+                "hard_size_cap": False,
+            },
+            size_target_analysis={"status": "over_target"},
+        )
+
+        self.assertEqual(fragment, {})
+
+    def test_measured_size_budget_policy_fragment_enforces_explicit_hard_cap_after_miss(self) -> None:
+        fragment = measured_size_budget_policy_fragment(
+            operator_request={
+                "request_type": "size_budget",
+                "requested_max_encoded_percent": 7.23,
+                "hard_size_cap": True,
             },
             size_target_analysis={"status": "over_target"},
         )
@@ -5364,8 +5604,8 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertEqual(
             issue,
-            "The draft changes resolution based only on a size budget. Ask for that resolution or run a "
-            "measured follow-up before changing the height cap.",
+            "The draft changes resolution based only on a size budget. Ask for that resolution "
+            "explicitly before changing the height cap.",
         )
 
     def test_proposal_alignment_issue_rejects_size_budget_new_resolution_cap(self) -> None:
@@ -5383,8 +5623,54 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertEqual(
             issue,
-            "The draft changes resolution based only on a size budget. Ask for that resolution or run a "
-            "measured follow-up before changing the height cap.",
+            "The draft changes resolution based only on a size budget. Ask for that resolution "
+            "explicitly before changing the height cap.",
+        )
+
+    def test_proposal_alignment_issue_rejects_measured_size_budget_resolution_drop(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "size_budget",
+                "budget_label": "300 MB per episode",
+                "budget_bytes": 300 * 1024 * 1024,
+                "applied_policy": None,
+            },
+            request_disposition="honored",
+            current_policy={"video": {"target_vmaf": 85.0, "max_height": 1080, "max_encoded_percent": 80}},
+            preview_policy={"video": {"target_vmaf": 82.0, "max_height": 720, "max_encoded_percent": 80}},
+            allow_measured_size_quality_tradeoff=True,
+        )
+
+        self.assertEqual(
+            issue,
+            "The draft changes resolution based only on a size budget. Ask for that resolution "
+            "explicitly before changing the height cap.",
+        )
+
+    def test_proposal_alignment_issue_rejects_measured_size_budget_audio_drop(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "size_budget",
+                "budget_label": "300 MB per episode",
+                "budget_bytes": 300 * 1024 * 1024,
+                "applied_policy": None,
+            },
+            request_disposition="honored",
+            current_policy={
+                "video": {"target_vmaf": 85.0, "max_encoded_percent": 80},
+                "audio": {"surround_5_1_opus_bitrate": "256k"},
+            },
+            preview_policy={
+                "video": {"target_vmaf": 82.0, "max_encoded_percent": 80},
+                "audio": {"surround_5_1_opus_bitrate": "160k"},
+            },
+            allow_measured_size_quality_tradeoff=True,
+        )
+
+        self.assertEqual(
+            issue,
+            "The draft changes audio.surround_5_1_opus_bitrate based only on a size budget. Ask for that audio "
+            "tradeoff or measure it explicitly before changing audio quality.",
         )
 
     def test_proposal_alignment_issue_rejects_size_budget_audio_drop(self) -> None:
@@ -5597,6 +5883,34 @@ class TuningRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(issue, "The draft uses 720p instead of the requested 1080p height cap.")
+
+    def test_proposal_alignment_issue_validates_source_resolution_target(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "scale_target",
+                "scale_height": 0,
+                "applied_policy": {"video": {"max_height": 0}},
+            },
+            request_disposition="honored",
+            current_policy={"video": {"max_height": 0}},
+            preview_policy={"video": {"max_height": 1080}},
+        )
+
+        self.assertEqual(issue, "The draft sets a height cap even though the operator requested source resolution.")
+
+    def test_proposal_alignment_issue_allows_source_resolution_target(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "scale_target",
+                "scale_height": 0,
+                "applied_policy": {"video": {"max_height": 0}},
+            },
+            request_disposition="honored",
+            current_policy={"video": {"max_height": 720}},
+            preview_policy={"video": {"max_height": 0}},
+        )
+
+        self.assertIsNone(issue)
 
     def test_proposal_alignment_issue_validates_smart_black_bar_target(self) -> None:
         issue = proposal_alignment_issue(

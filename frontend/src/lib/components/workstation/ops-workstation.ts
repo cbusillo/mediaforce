@@ -68,6 +68,29 @@ function record(value: unknown): Record<string, unknown> | null {
 	return value && typeof value === 'object' ? (value as Record<string, unknown>) : null;
 }
 
+function activeJobStatus(status: unknown): boolean {
+	return ['running', 'processing', 'active', 'queued'].includes(String(status ?? '').toLowerCase());
+}
+
+function hostEncodeReady(host: HostRuntime): boolean {
+	return (
+		host.available &&
+		host.schedule_open !== false &&
+		host.queue_active !== false &&
+		numberValue(host.active_encode_count) < numberValue(host.max_parallel_encodes)
+	);
+}
+
+function hostCapacityCounts(hosts: HostsPayload | null | undefined) {
+	const rows = hosts?.hosts ?? [];
+	return {
+		available: rows.filter((host) => host.available).length,
+		encodeReady: rows.filter(hostEncodeReady).length,
+		scheduledOff: rows.filter((host) => host.available && host.schedule_open === false).length,
+		total: rows.length
+	};
+}
+
 function hostCopy(value: unknown): string {
 	const host = record(value);
 	if (!host) return 'unassigned';
@@ -84,8 +107,9 @@ function calibrationPrefix(job: CalibrationJob): string {
 }
 
 function calibrationDetail(job: CalibrationJob): string {
+	const status = String(job.status ?? '').toLowerCase();
 	const raw =
-		compactText(job.error) ||
+		(activeJobStatus(status) ? '' : compactText(job.error)) ||
 		compactText(job.notes) ||
 		compactText(job.operator_note) ||
 		compactText(job.created_at) ||
@@ -164,10 +188,10 @@ export function encodeJobProgress(job: EncodeQueueJob): string {
 
 export function encodeJobDetail(job: EncodeQueueJob): string {
 	return (
-		job.error ||
-		job.attempt_summary ||
+		(activeJobStatus(job.status) ? '' : job.error) ||
 		job.telemetry_summary ||
 		job.progress?.current_item_rel_path ||
+		job.attempt_summary ||
 		job.progress?.failure_analysis?.summary ||
 		'waiting for queue telemetry'
 	);
@@ -344,8 +368,7 @@ export function buildOpsBlockers(
 	const blockers: OpsBlocker[] = [];
 	const queue = dashboard?.encode_queue;
 	const attentionCount = queue?.needs_attention_count ?? 0;
-	const readyHosts = hosts?.hosts.filter((host) => host.available).length ?? 0;
-	const totalHosts = hosts?.hosts.length ?? 0;
+	const capacity = hostCapacityCounts(hosts);
 	const queuedWork = (queue?.queued_count ?? 0) + (queue?.running_count ?? 0);
 	const scheduleWaiting = queue?.queued_waiting_count ?? 0;
 	if (loadError) {
@@ -383,13 +406,23 @@ export function buildOpsBlockers(
 			action: 'retry-failed-encode'
 		});
 	}
-	if (totalHosts > 0 && readyHosts === 0 && queuedWork > 0) {
+	if (capacity.total > 0 && capacity.encodeReady === 0 && queuedWork > 0) {
+		const allAvailableHostsScheduledOff =
+			capacity.available > 0 && capacity.scheduledOff === capacity.available;
+		const workersReachable = capacity.available > 0;
 		blockers.push({
 			key: 'no-hosts-ready',
-			tone: 'fail',
-			title: 'No workers can process right now',
-			detail:
-				'Queued work exists, but every configured worker is unavailable or outside its work window.'
+			tone: workersReachable ? 'wait' : 'fail',
+			title: allAvailableHostsScheduledOff
+				? 'Workers are outside encode windows'
+				: workersReachable
+					? 'Workers are busy or waiting'
+					: 'No workers can process right now',
+			detail: allAvailableHostsScheduledOff
+				? 'Queued processing will wait for the next allowed encode window. Manual samples can still be prepared from Folder Studio.'
+				: workersReachable
+					? 'Workers are reachable but cannot claim another encode right now. Manual samples can still be prepared from Folder Studio.'
+					: 'Queued work exists, but every configured worker is unavailable or outside its work window.'
 		});
 	} else if (scheduleWaiting > 0) {
 		blockers.push({
@@ -409,8 +442,7 @@ export function buildOpsReadinessSummary(
 ): OpsReadinessSummary {
 	const queue = dashboard?.encode_queue;
 	const calibration = dashboard?.calibration_queue;
-	const readyHosts = hosts?.hosts.filter((host) => host.available).length ?? 0;
-	const totalHosts = hosts?.hosts.length ?? 0;
+	const capacity = hostCapacityCounts(hosts);
 	const runningCount = queue?.running_count ?? 0;
 	const queuedCount = queue?.queued_count ?? 0;
 	const queuedWaiting = queue?.queued_waiting_count ?? 0;
@@ -454,13 +486,23 @@ export function buildOpsReadinessSummary(
 			metricValue: String(needsAttention)
 		};
 	}
-	if (totalHosts > 0 && readyHosts === 0 && queuedWork > 0) {
+	if (capacity.total > 0 && capacity.encodeReady === 0 && queuedWork > 0) {
+		const allAvailableHostsScheduledOff =
+			capacity.available > 0 && capacity.scheduledOff === capacity.available;
+		const workersReachable = capacity.available > 0;
 		return {
-			tone: 'fail',
-			title: 'No worker can work right now',
-			detail:
-				'Queued work exists, but every configured worker is unavailable or outside its work window.',
-			metricLabel: 'Workers ready',
+			tone: workersReachable ? 'wait' : 'fail',
+			title: allAvailableHostsScheduledOff
+				? 'Waiting for encode windows'
+				: workersReachable
+					? 'Workers are busy or waiting'
+					: 'No worker can work right now',
+			detail: allAvailableHostsScheduledOff
+				? 'Workers are reachable but outside production encode windows; manual sample setup is still allowed.'
+				: workersReachable
+					? 'Workers are reachable but cannot claim another encode right now; manual sample setup is still allowed.'
+					: 'Queued work exists, but every configured worker is unavailable or outside its work window.',
+			metricLabel: 'Encode-ready',
 			metricValue: '0'
 		};
 	}
@@ -485,19 +527,20 @@ export function buildOpsReadinessSummary(
 			metricValue: String(queuedWaiting)
 		};
 	}
-	if (readyHosts > 0) {
+	if (capacity.encodeReady > 0) {
 		return {
 			tone: 'ready',
 			title: 'Ready for work',
-			detail: 'Workers are available and Mediaforce can start eligible processing work.',
-			metricLabel: 'Workers ready',
-			metricValue: String(readyHosts)
+			detail: 'Workers can claim eligible processing work now.',
+			metricLabel: 'Encode-ready',
+			metricValue: String(capacity.encodeReady)
 		};
 	}
 	return {
 		tone: 'idle',
 		title: 'Standing by',
-		detail: totalHosts > 0 ? 'No current work is waiting on Ops.' : 'Worker status is unavailable.',
+		detail:
+			capacity.total > 0 ? 'No current work is waiting on Ops.' : 'Worker status is unavailable.',
 		metricLabel: 'Queued',
 		metricValue: String(queuedCount)
 	};
@@ -510,8 +553,7 @@ export function buildOpsStatusTiles(
 ): StatusTile[] {
 	const encode = dashboard?.encode_queue;
 	const calibration = dashboard?.calibration_queue;
-	const readyHosts = hosts?.hosts.filter((host) => host.available).length ?? 0;
-	const totalHosts = hosts?.hosts.length ?? 0;
+	const capacity = hostCapacityCounts(hosts);
 	return [
 		{
 			label: 'Work schedule',
@@ -552,13 +594,22 @@ export function buildOpsStatusTiles(
 		},
 		{
 			label: 'Workers',
-			value: `${readyHosts} ready / ${totalHosts}`,
-			detail: totalHosts
-				? readyHosts > 0
-					? 'capacity available'
-					: 'no worker can start work'
+			value: `${capacity.encodeReady} encode-ready / ${capacity.total}`,
+			detail: capacity.total
+				? capacity.encodeReady > 0
+					? `${capacity.available} reachable`
+					: capacity.available > 0
+						? `${capacity.available} reachable · waiting or busy`
+						: 'no worker can start work'
 				: 'worker status unavailable',
-			tone: readyHosts > 0 ? 'ready' : totalHosts > 0 ? 'fail' : 'idle'
+			tone:
+				capacity.encodeReady > 0
+					? 'ready'
+					: capacity.available > 0
+						? 'wait'
+						: capacity.total > 0
+							? 'fail'
+							: 'idle'
 		}
 	];
 }
@@ -599,15 +650,16 @@ export function buildOpsFooterSignals(
 
 export function hostTone(host: HostRuntime, fleetHasReadyCapacity = false): ShellTone {
 	if (!host.available) return fleetHasReadyCapacity ? 'wait' : 'fail';
-	if (host.schedule_open === false || host.queue_active === false) return 'idle';
 	if (host.active_encode_count > 0) return 'active';
+	if (host.schedule_open === false) return 'wait';
+	if (host.queue_active === false) return 'idle';
 	return 'ready';
 }
 
 export function hostStateCopy(host: HostRuntime): string {
 	if (!host.available) return 'Unavailable';
-	if (host.schedule_open === false) return 'Off schedule';
+	if (host.active_encode_count > 0) return 'Busy';
+	if (host.schedule_open === false) return 'Off encode schedule';
 	if (host.queue_active === false) return 'Not accepting';
-	if (host.active_encode_count > 0) return 'Processing';
 	return 'Ready';
 }

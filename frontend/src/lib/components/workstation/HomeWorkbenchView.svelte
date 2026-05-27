@@ -46,7 +46,7 @@
 	let searchQuery = $state('');
 	let libraryFilters = $state<Record<string, boolean>>({});
 	let stateFilters = $state<Record<string, boolean>>({});
-	let filtersLoaded = $state(false);
+	let loadedFilterMode = $state<'queue' | 'folders' | null>(null);
 	const libraryOptions = $derived(buildLibraryOptions(folders));
 	const stateOptions = $derived(buildStateOptions(folders));
 	const normalizedSearchQuery = $derived(searchQuery.trim().toLowerCase());
@@ -190,10 +190,13 @@
 	}
 
 	function restoreFilters() {
-		if (!browser || filtersLoaded) return;
-		filtersLoaded = true;
+		if (!browser || loadedFilterMode === mode) return;
+		loadedFilterMode = mode;
 		const filters = readStoredWorkbenchFilters(mode);
 		if (!filters) {
+			searchQuery = '';
+			libraryFilters = {};
+			stateFilters = {};
 			clearStoredWorkbenchFilters(mode);
 			return;
 		}
@@ -203,7 +206,7 @@
 	}
 
 	function persistFilters() {
-		if (!browser || !filtersLoaded) return;
+		if (!browser || loadedFilterMode !== mode) return;
 		writeStoredWorkbenchFilters(mode, { searchQuery, libraryFilters, stateFilters });
 	}
 

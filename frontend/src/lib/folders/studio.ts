@@ -249,6 +249,7 @@ export type FolderCalibrationState = {
 	sample_result?: {
 		chosen_crf?: number;
 		quality_metric?: string;
+		quality_target?: number;
 		quality_score?: number;
 		predicted_total_size_bytes?: number;
 		predicted_encode_percent?: number;
@@ -275,6 +276,7 @@ export type FolderOperatorRequest = {
 	requires_confirmation?: boolean;
 	estimated_source_percent?: number;
 	estimated_video_bitrate_kbps?: number;
+	target_video_bitrate_kbps?: number;
 	request_text?: string;
 };
 export type FolderRunVerdict = {

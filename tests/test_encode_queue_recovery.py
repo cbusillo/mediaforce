@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unittest
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, cast
@@ -2008,6 +2009,85 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             schedule_profiles=[],
         )
         self.assertEqual(payload["remote_hosts"][0]["schedule_profile"], "always")
+
+    def test_runtime_settings_payload_persists_video_defaults(self) -> None:
+        payload = web_app._build_runtime_settings_payload(
+            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
+            remote_hosts=[],
+            transcode_root=str(self.root / "staging"),
+            video_defaults={
+                "quality_metric": "VMAF",
+                "target_vmaf": "85",
+                "min_target_vmaf": "80",
+                "target_xpsnr": "41",
+                "min_target_xpsnr": "35",
+                "max_height": "1080",
+                "default_grain": "8",
+                "max_encoded_percent": "80",
+            },
+            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
+            schedule_profiles=[],
+        )
+
+        self.assertEqual(
+            payload["video"],
+            {
+                "quality_metric": "vmaf",
+                "target_vmaf": 85.0,
+                "min_target_vmaf": 80.0,
+                "target_xpsnr": 41.0,
+                "min_target_xpsnr": 35.0,
+                "max_height": 1080,
+                "default_grain": 8,
+                "max_encoded_percent": 80.0,
+            },
+        )
+
+    def test_runtime_settings_payload_persists_xpsnr_video_defaults(self) -> None:
+        payload = web_app._build_runtime_settings_payload(
+            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
+            remote_hosts=[],
+            transcode_root=str(self.root / "staging"),
+            video_defaults={
+                "quality_metric": "XPSNR",
+                "target_vmaf": "85",
+                "min_target_vmaf": "80",
+                "target_xpsnr": "39.5",
+                "min_target_xpsnr": "34.5",
+                "max_height": "1080",
+                "default_grain": "8",
+                "max_encoded_percent": "80",
+            },
+            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
+            schedule_profiles=[],
+        )
+
+        self.assertEqual(payload["video"]["quality_metric"], "xpsnr")
+        self.assertEqual(payload["video"]["target_xpsnr"], 39.5)
+        self.assertEqual(payload["video"]["min_target_xpsnr"], 34.5)
+
+    def test_runtime_settings_payload_rejects_unsupported_video_metric(self) -> None:
+        payload = web_app._build_runtime_settings_payload(
+            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
+            remote_hosts=[],
+            transcode_root=str(self.root / "staging"),
+            video_defaults={"quality_metric": "ssim"},
+            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
+            schedule_profiles=[],
+        )
+
+        self.assertEqual(payload["video"]["quality_metric"], "auto")
+
+    def test_runtime_settings_payload_defaults_video_metric_to_auto(self) -> None:
+        payload = web_app._build_runtime_settings_payload(
+            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
+            remote_hosts=[],
+            transcode_root=str(self.root / "staging"),
+            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
+            schedule_profiles=[],
+        )
+
+        self.assertEqual(payload["video"]["quality_metric"], "auto")
 
     def test_runtime_settings_payload_normalizes_media_access(self) -> None:
         payload = web_app._build_runtime_settings_payload(
@@ -4079,13 +4159,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "--host",
                 "127.0.0.9",
                 "--port",
-                "5555",
+                "8777",
                 "--no-reload",
             ])
             settings = web_app._web_startup_settings(args)
 
         self.assertEqual(settings.host, "127.0.0.9")
-        self.assertEqual(settings.port, 5555)
+        self.assertEqual(settings.port, 8777)
         self.assertFalse(settings.reload_enabled)
 
     def test_web_startup_shell_env_overrides_project_env_file(self) -> None:
@@ -4118,11 +4198,11 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ), patch("mediaforce.web.app.load_config", return_value=config), patch(
                 "mediaforce.web.app.create_app", return_value=object()
         ), patch("mediaforce.web.app.uvicorn.run") as uvicorn_run_mock:
-            web_app.main(["--host", "127.0.0.9", "--port", "5555", "--no-reload"])
+            web_app.main(["--host", "127.0.0.9", "--port", "8777", "--no-reload"])
 
         uvicorn_run_mock.assert_called_once()
         self.assertEqual(uvicorn_run_mock.call_args.kwargs["host"], "127.0.0.9")
-        self.assertEqual(uvicorn_run_mock.call_args.kwargs["port"], 5555)
+        self.assertEqual(uvicorn_run_mock.call_args.kwargs["port"], 8777)
         self.assertNotIn("reload", uvicorn_run_mock.call_args.kwargs)
 
     def test_main_uses_cli_config_path_for_reload_app(self) -> None:
@@ -4754,6 +4834,52 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(exc.exception.status_code, 409)
         self.assertIn("does not apply the requested 1080p height cap", str(exc.exception.detail))
 
+    def test_save_profile_action_allows_explicit_size_tradeoff_approval(self) -> None:
+        saved_payloads: list[folder_actions_runtime.ActionPayload] = []
+        merged_advice: list[folder_actions_runtime.ActionPayload] = []
+        calibration_payload: folder_actions_runtime.ActionPayload = {
+            "mode": "sample",
+            "job_id": "sample-1",
+            "review_media_ready": True,
+            "policy": {"video": {"target_vmaf": 85.0, "max_encoded_percent": 80}},
+            "sample_item": {
+                "library_item_id": 1,
+                "resolved_policy": {"video": {"target_vmaf": 85.0, "max_encoded_percent": 80}},
+            },
+            "sample_result": {"predicted_total_size_bytes": 376 * 1024 * 1024},
+        }
+
+        result = folder_actions_runtime.save_profile_action(
+            self.config,
+            "tv/show",
+            now_iso=lambda: "2026-05-24T04:40:00+00:00",
+            load_sample_item=lambda *_args, **_kwargs: None,
+            load_calibration_state=lambda *_args, **_kwargs: dict(calibration_payload),
+            calibration_draft_hash=web_app._calibration_draft_hash,
+            save_calibration_state=lambda _config, _prefix, payload: saved_payloads.append(dict(payload)),
+            load_advice_state=lambda *_args, **_kwargs: {
+                "request_disposition": "honored",
+                "operator_request": {
+                    "operator_confirmed": True,
+                    "request_type": "size_budget",
+                    "budget_bytes": 300 * 1024 * 1024,
+                    "budget_label": "300 MB per episode",
+                    "applied_policy": None,
+                },
+            },
+            record_visual_approval_artifact=lambda *_args, **_kwargs: {"artifact_id": "approval-1"},
+            merge_advice_state=lambda _config, _prefix, payload: merged_advice.append(dict(payload)),
+            upsert_override=lambda *_args, **_kwargs: None,
+            auto_queue_folder_encode=lambda *_args, **_kwargs: {"ok": True, "message": "Queued folder encode."},
+            confirm_size_tradeoff=True,
+            reviewed_draft_hash=web_app._calibration_draft_hash(calibration_payload),
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["queued"])
+        self.assertEqual(saved_payloads[0]["accepted_at"], "2026-05-24T04:40:00+00:00")
+        self.assertTrue(merged_advice[0]["operator_approved_size_tradeoff"])
+
     def test_run_sampled_calibration_keeps_review_directory_for_approval(self) -> None:
         source_path = self._create_source_file("episode-review.mkv")
         preview_dir = self.config.paths.review_dir / "run-123" / "item-00"
@@ -5217,6 +5343,56 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with patch("mediaforce.web.app._safe_collect_host_statuses", return_value=statuses):
             host = web_app._resolve_sample_host(self.config, "cbusillo@m1-mini")
         self.assertEqual(host.key, "cbusillo@m1-mini")
+
+    def test_resolve_sample_host_allows_closed_encode_schedule_for_manual_samples(self) -> None:
+        config = replace(
+            self.config,
+            raw={
+                **self.config.raw,
+                "remote_hosts": [
+                    {
+                        "label": "M4 Studio",
+                        "host": "cbusillo@localhost",
+                        "capabilities": ["encode_queue", "sample_calibration"],
+                        "schedule_profile": "tou_vb",
+                    }
+                ],
+                "encode_queue": {
+                    "schedule_profiles": [
+                        {
+                            "key": "tou_vb",
+                            "label": "Time of Use VB Super off Peak",
+                            "mode": "night",
+                            "timezone": "host_local",
+                            "start_hour": 0,
+                            "end_hour": 5,
+                            "days_of_week": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+                        }
+                    ]
+                },
+            },
+        )
+        statuses = [
+            HostStatus(
+                key="cbusillo@localhost",
+                label="M4 Studio",
+                mode="ssh",
+                priority=100,
+                capabilities=["encode_queue", "sample_calibration"],
+                available=True,
+                message="Mounted and ready",
+                missing_paths=[],
+                repo_path=str(self.root),
+                utc_offset_minutes=-240,
+            )
+        ]
+
+        with patch("mediaforce.web.app._safe_collect_host_statuses", return_value=statuses):
+            with patch("mediaforce.web.app.datetime") as fake_datetime:
+                fake_datetime.now.return_value = web_app._parse_iso("2026-05-24T16:30:00+00:00")
+                host = web_app._resolve_sample_host(config, "cbusillo@localhost")
+
+        self.assertEqual(host.key, "cbusillo@localhost")
 
     def test_resolve_sample_host_rejects_non_sample_host(self) -> None:
         statuses = [

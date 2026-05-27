@@ -1,14 +1,22 @@
 import {
 	codecLabel,
 	flattenPolicy,
+	formatBitrateCopy,
+	formatLanguageCopy,
 	formatPolicyValue,
+	formatPercentCopy,
 	formatResolutionCopy,
 	normalizeReviewArtifacts,
 	pathFilename,
 	policyRowLabel,
+	summarizeAudioPlan,
+	summarizeAudioTrack,
+	summarizeSubtitlePlan,
+	summarizeSubtitleSource,
 	workbenchSection,
 	type FolderCalibrationJob,
 	type FolderCalibrationState,
+	type FolderItemPlan,
 	type FolderPolicy,
 	type FolderSampleItem,
 	type FolderOperatorRequest,
@@ -42,15 +50,19 @@ export type SampleVerdict = {
 	recommendation: string;
 	predictedPerItem: string;
 	predictedFolderTotal: string;
+	predictedBitrate: string;
 	reclaim: string;
 	quality: string;
 	target: string;
+	targetBitrate: string;
 	targetDelta: string;
 	missRatio: number | null;
 	missesTarget: boolean;
+	stalePolicy: boolean;
 };
 
 export type WorkflowAction =
+	| 'approve-size-tradeoff'
 	| 'download-review-pack'
 	| 'focus-bench'
 	| 'open-ops'
@@ -70,10 +82,25 @@ export type ProposalRow = {
 	changed: boolean;
 };
 
+export type OutputReviewRow = {
+	label: string;
+	source: string;
+	output: string;
+	detail: string;
+	tone?: ShellTone;
+};
+
 export type BudgetEnforcementView = {
 	active: boolean;
 	cap: string;
+	capBytes: string | null;
 	reason: string;
+};
+
+export type DecisionFact = {
+	label: string;
+	value: string;
+	detail: string;
 };
 
 export type BenchMessage = {
@@ -91,6 +118,8 @@ export type BenchHostOption = {
 	label: string;
 	detail: string;
 	available: boolean;
+	scheduleOpen: boolean | null;
+	state: string;
 };
 
 export type BenchRequestState = {
@@ -141,12 +170,42 @@ function policyVideo(value: unknown): Record<string, unknown> | null {
 	return record<Record<string, unknown>>(record<Record<string, unknown>>(value)?.video);
 }
 
+function policyAudio(value: unknown): Record<string, unknown> | null {
+	return record<Record<string, unknown>>(record<Record<string, unknown>>(value)?.audio);
+}
+
+function policySubtitle(value: unknown): Record<string, unknown> | null {
+	return record<Record<string, unknown>>(record<Record<string, unknown>>(value)?.subtitle);
+}
+
+function activePolicy(
+	folder: FolderPayload,
+	pendingProposal: PendingSampleProposal | null
+): FolderPolicy | null {
+	return (pendingProposal?.preview_policy ??
+		pendingProposal?.applied_policy ??
+		folder.policy ??
+		folder.summary?.resolved_policy ??
+		null) as FolderPolicy | null;
+}
+
+function activeVideoPolicy(
+	folder: FolderPayload,
+	pendingProposal: PendingSampleProposal | null
+): Record<string, unknown> | null {
+	return policyVideo(activePolicy(folder, pendingProposal));
+}
+
 export function record<T extends Record<string, unknown>>(value: unknown): T | null {
 	return value && typeof value === 'object' ? (value as T) : null;
 }
 
 function compactText(value: unknown): string {
 	return typeof value === 'string' ? value.trim() : '';
+}
+
+function compactParts(parts: Array<string | null | undefined>): string {
+	return parts.filter((part) => part && part.trim()).join(' · ');
 }
 
 function activeCalibrationStatus(value: unknown): boolean {
@@ -159,11 +218,19 @@ export function buildBenchHostOptions(
 	return (folderOptions ?? [])
 		.map((host) => {
 			const key = compactText(host.key);
+			const available = host.available !== false;
+			const scheduleOpen = typeof host.schedule_open === 'boolean' ? host.schedule_open : null;
 			return {
 				key,
 				label: compactText(host.label) || key || 'Host',
 				detail: compactText(host.detail) || compactText(host.message),
-				available: host.available !== false
+				available,
+				scheduleOpen,
+				state: !available
+					? 'Unavailable'
+					: scheduleOpen === false
+						? 'Sample ok, encode later'
+						: 'Ready for samples'
 			};
 		})
 		.filter((host) => host.key);
@@ -219,7 +286,17 @@ export function resolveWorkflowActionState(
 		};
 	}
 	if (action === 'focus-bench') return { disabled: false, title: '' };
+	if (action === 'approve-size-tradeoff') {
+		return reviewPackReady
+			? { disabled: false, title: '' }
+			: { disabled: true, title: 'Review media is not ready yet.' };
+	}
+	if (action === 'revise-proposal') return { disabled: false, title: '' };
 	if (action === 'open-ops') return { disabled: false, title: '' };
+	if (action === 'stop-sample') {
+		if (activeCalibrationStatus(calibrationJob?.status)) return { disabled: false, title: '' };
+		return { disabled: true, title: 'No sample job is running.' };
+	}
 	if (action === 'queue-encode') {
 		if (pendingProposal?.proposal_id && pendingProposal.can_queue === false) {
 			return {
@@ -412,6 +489,36 @@ export function formatBytes(value: number | null | undefined): string {
 	return `${value.toLocaleString('en-US', { maximumFractionDigits: 0 })} B`;
 }
 
+function formatDuration(value: number | null | undefined): string {
+	if (value == null || !Number.isFinite(value) || value <= 0) return '—';
+	const totalSeconds = Math.round(value);
+	const hours = Math.floor(totalSeconds / 3600);
+	const minutes = Math.floor((totalSeconds % 3600) / 60);
+	const seconds = totalSeconds % 60;
+	if (hours > 0) return `${hours}h ${minutes}m`;
+	return `${minutes}m ${seconds.toString().padStart(2, '0')}s`;
+}
+
+function formatAverageBitrate(bytes: number | null, durationSeconds: number | null): string {
+	if (bytes === null || durationSeconds === null || bytes <= 0 || durationSeconds <= 0) return '—';
+	const kbps = (bytes * 8) / durationSeconds / 1000;
+	if (!Number.isFinite(kbps) || kbps <= 0) return '—';
+	if (kbps >= 1000) {
+		return `${(kbps / 1000).toLocaleString('en-US', {
+			maximumFractionDigits: kbps >= 10_000 ? 0 : 1
+		})} Mbps`;
+	}
+	return `${kbps.toLocaleString('en-US', { maximumFractionDigits: 0 })} kbps`;
+}
+
+function formatKbps(value: number | null | undefined): string {
+	if (value == null || !Number.isFinite(value) || value <= 0) return '—';
+	if (value >= 1000) {
+		return `${(value / 1000).toLocaleString('en-US', { maximumFractionDigits: value >= 10_000 ? 0 : 1 })} Mbps`;
+	}
+	return `${value.toLocaleString('en-US', { maximumFractionDigits: 0 })} kbps`;
+}
+
 function formatRatio(value: number | null): string {
 	if (value === null || !Number.isFinite(value) || value <= 0) return '';
 	return `${value.toLocaleString('en-US', {
@@ -460,7 +567,8 @@ export function predictedFolderSizeBytes(folder: FolderPayload): number | null {
 
 export function buildSampleVerdict(
 	folder: FolderPayload,
-	calibration: FolderCalibrationState | null
+	calibration: FolderCalibrationState | null,
+	pendingProposal: PendingSampleProposal | null = null
 ): SampleVerdict | null {
 	const result = sampleResult(calibration);
 	if (!result) return null;
@@ -475,6 +583,7 @@ export function buildSampleVerdict(
 	const reclaim =
 		sourceSize !== null && sourceSize > 0 ? Math.max(sourceSize - folderTotal, 0) : null;
 	const budget = numberValue(request?.budget_bytes);
+	const durationSeconds = numberValue(folder.sample_item?.duration_seconds);
 	const target =
 		compactText(request?.budget_label) || (budget ? formatBytes(budget) : 'No size target');
 	const missRatio = budget && budget > 0 ? predictedSize / budget : null;
@@ -484,6 +593,14 @@ export function buildSampleVerdict(
 	const qualityMetric =
 		compactText(result.quality_metric) || compactText(request?.metric).toUpperCase() || 'Quality';
 	const qualityScore = numberValue(result.quality_score);
+	const resultTarget = numberValue(result.quality_target);
+	const activeVideo = activeVideoPolicy(folder, pendingProposal);
+	const activeMetric = compactText(activeVideo?.quality_metric).toUpperCase();
+	const activeTarget = numberValue(
+		activeMetric === 'XPSNR' ? activeVideo?.target_xpsnr : activeVideo?.target_vmaf
+	);
+	const stalePolicy =
+		activeTarget !== null && resultTarget !== null && Math.abs(activeTarget - resultTarget) >= 0.1;
 	const quality = qualityScore === null ? '—' : `${qualityMetric} ${qualityScore.toFixed(1)}`;
 	const predictedPerItem = formatBytes(predictedSize);
 	const recommendation =
@@ -494,29 +611,36 @@ export function buildSampleVerdict(
 	return {
 		tone: missesTarget ? 'wait' : 'ready',
 		label: missesTarget ? 'Target missed' : 'Sample result',
-		title:
-			missesTarget && target !== 'No size target'
+		title: stalePolicy
+			? `${predictedPerItem} per episode came from older settings.`
+			: missesTarget && target !== 'No size target'
 				? `${predictedPerItem} per episode misses ${target}.`
 				: `${predictedPerItem} per episode sample is ready.`,
 		recommendation,
 		predictedPerItem,
 		predictedFolderTotal: formatBytes(folderTotal),
+		predictedBitrate: formatAverageBitrate(predictedSize, durationSeconds),
 		reclaim: reclaim === null ? '—' : formatBytes(reclaim),
 		quality,
 		target,
+		targetBitrate: formatAverageBitrate(budget, durationSeconds),
 		targetDelta: formatRatio(missRatio),
 		missRatio,
-		missesTarget
+		missesTarget,
+		stalePolicy
 	};
 }
 
 export function buildBudgetEnforcementView(
-	pendingProposal: PendingSampleProposal | null
+	pendingProposal: PendingSampleProposal | null,
+	sampleItem: FolderSampleItem | null = null
 ): BudgetEnforcementView | null {
 	if (!pendingProposal) return null;
 	const enforcement = record<Record<string, unknown>>(pendingProposal.budget_enforcement);
 	const cap = numberValue(policyVideo(enforcement?.applied_policy)?.max_encoded_percent);
 	if (cap === null || cap <= 0) return null;
+	const sourceSize = numberValue(sampleItem?.source_size_bytes);
+	const capBytes = sourceSize !== null && sourceSize > 0 ? (sourceSize * cap) / 100 : null;
 	const analysis = record<Record<string, unknown>>(enforcement?.size_target_analysis);
 	const ratio = numberValue(analysis?.predicted_to_budget_ratio);
 	const target =
@@ -525,8 +649,116 @@ export function buildBudgetEnforcementView(
 	return {
 		active: enforcement?.status === 'enforced_after_miss',
 		cap: `${cap.toLocaleString('en-US', { maximumFractionDigits: 1 })}%`,
+		capBytes: capBytes === null ? null : formatBytes(capBytes),
 		reason: `Applied after ${ratioCopy} against ${target}.`
 	};
+}
+
+export function buildDecisionFacts(
+	folder: FolderPayload,
+	calibration: FolderCalibrationState | null,
+	pendingProposal: PendingSampleProposal | null
+): DecisionFact[] {
+	const verdict = buildSampleVerdict(folder, calibration, pendingProposal);
+	const sampleItem = record<FolderSampleItem>(folder.sample_item);
+	const enforcement = buildBudgetEnforcementView(pendingProposal, sampleItem);
+	const draftPolicy = activePolicy(folder, pendingProposal);
+	const video = videoPolicySummary(draftPolicy, pendingProposal);
+	const targetVideoRate = formatKbps(pendingProposal?.operator_request?.target_video_bitrate_kbps);
+	if (verdict?.stalePolicy && !pendingProposal?.proposal_id) {
+		return [
+			{
+				label: 'Old sample',
+				value: compactParts([
+					verdict.predictedPerItem,
+					verdict.predictedBitrate !== '—' ? verdict.predictedBitrate : null
+				]),
+				detail: compactParts([
+					verdict.quality,
+					verdict.targetDelta || null,
+					verdict.target ? `old target ${verdict.target}` : null
+				])
+			},
+			{
+				label: 'Current target',
+				value: video.output,
+				detail: video.detail || 'Uses the current folder video policy.'
+			},
+			{
+				label: 'Next action',
+				value: 'Run fresh sample',
+				detail: 'The old evidence does not match the current defaults.'
+			}
+		];
+	}
+	if (enforcement?.active) {
+		return [
+			{
+				label: 'Last sample',
+				value: verdict
+					? compactParts([
+							verdict.predictedPerItem,
+							verdict.predictedBitrate !== '—' ? verdict.predictedBitrate : null
+						])
+					: 'Measured miss',
+				detail: compactParts([
+					verdict?.targetDelta || null,
+					verdict?.target ? `target ${verdict.target}` : null,
+					verdict && verdict.targetBitrate !== '—' ? `target ${verdict.targetBitrate}` : null
+				])
+			},
+			{
+				label: 'Next size ceiling',
+				value: enforcement.capBytes ? `${enforcement.capBytes} max` : `${enforcement.cap} cap`,
+				detail: compactParts([
+					enforcement.capBytes ? `${enforcement.cap} of selected source` : null,
+					pendingProposal?.operator_request?.budget_label ?? null
+				])
+			},
+			{
+				label: 'Next video plan',
+				value: video.output,
+				detail: compactParts([
+					video.detail || 'Uses the current folder video policy.',
+					targetVideoRate !== '—' ? `target video ${targetVideoRate}` : null
+				])
+			}
+		];
+	}
+	if (verdict) {
+		return [
+			{
+				label: 'Per episode',
+				value: verdict.predictedPerItem,
+				detail: compactParts([
+					verdict.predictedBitrate !== '—' ? verdict.predictedBitrate : null,
+					verdict.targetDelta || `Target ${verdict.target}`,
+					verdict.targetBitrate !== '—' ? `target ${verdict.targetBitrate}` : null
+				])
+			},
+			{ label: 'Folder output', value: verdict.predictedFolderTotal, detail: 'Projected total' },
+			{ label: 'Reclaim', value: verdict.reclaim, detail: verdict.quality }
+		];
+	}
+	return [
+		{
+			label: 'Review pack',
+			value: resolveReviewArtifacts(calibration, pendingProposal).length
+				? `${resolveReviewArtifacts(calibration, pendingProposal).length} artifacts`
+				: reviewReadyCopy(calibration),
+			detail: 'Evidence state'
+		},
+		{
+			label: 'Sample',
+			value: sampleItem ? pathFilename(sampleItem.rel_path) : 'No sample selected',
+			detail: 'Representative file'
+		},
+		{
+			label: 'Next action',
+			value: 'Use the decision buttons',
+			detail: 'Draft, sample, review, or approve from here'
+		}
+	];
 }
 
 export function buildSampleFacts(
@@ -535,14 +767,201 @@ export function buildSampleFacts(
 ): Array<{ label: string; value: string }> {
 	return [
 		{ label: 'File', value: sampleItem ? pathFilename(sampleItem.rel_path) : '—' },
+		{ label: 'Runtime', value: formatDuration(sampleItem?.duration_seconds) },
 		{
 			label: 'Resolution',
 			value: formatResolutionCopy(sampleItem?.width, sampleItem?.height) ?? '—'
+		},
+		{
+			label: 'Source rate',
+			value: formatAverageBitrate(
+				numberValue(sampleItem?.source_size_bytes),
+				numberValue(sampleItem?.duration_seconds)
+			)
 		},
 		{ label: 'Codec', value: codecLabel(sampleItem?.video_codec) },
 		{
 			label: 'Size',
 			value: formatBytes(sampleItem?.source_size_bytes ?? summary?.total_size_bytes)
+		}
+	];
+}
+
+function itemPlan(folder: FolderPayload): FolderItemPlan | null {
+	const plan = record<Record<string, unknown>>(folder.item_plan);
+	return plan ? (plan as FolderItemPlan) : null;
+}
+
+function reviewPackAudioSummary(
+	calibration: FolderCalibrationState | null,
+	pendingProposal: PendingSampleProposal | null
+): string {
+	const reviewPack =
+		pendingProposal?.multimodal_review_pack ?? calibration?.advice?.multimodal_review_pack;
+	return compactText(reviewPack?.audio_plan?.summary);
+}
+
+function draftDownscaleReason(
+	pendingProposal: PendingSampleProposal | null,
+	maxHeight: number | null
+): string | null {
+	if (maxHeight === null || maxHeight <= 0) return null;
+	const requestText = compactParts([
+		pendingProposal?.operator_request?.request_text ?? null,
+		pendingProposal?.operator_note ?? null
+	]).toLowerCase();
+	if (buildBudgetEnforcementView(pendingProposal)?.active) {
+		return 'downscale enforced after the measured miss';
+	}
+	if (requestText.includes('downscal')) {
+		return 'downscale allowed by the size request';
+	}
+	return 'draft changes output resolution';
+}
+
+function videoPolicySummary(
+	policy: FolderPolicy | null | undefined,
+	pendingProposal: PendingSampleProposal | null
+): {
+	output: string;
+	detail: string;
+} {
+	const video = policyVideo(policy);
+	if (!video) return { output: 'No draft video policy', detail: '' };
+	const encoder = compactText(video.encoder);
+	const maxHeight = numberValue(video.max_height);
+	const cap = numberValue(video.max_encoded_percent);
+	const enforcedCap = buildBudgetEnforcementView(pendingProposal)?.active === true;
+	const metric = compactText(video.quality_metric).toUpperCase();
+	const target = numberValue(metric === 'XPSNR' ? video.target_xpsnr : video.target_vmaf);
+	const floor = numberValue(metric === 'XPSNR' ? video.min_target_xpsnr : video.min_target_vmaf);
+	const metricCopy =
+		metric === 'VMAF' && target !== null && target <= 88 ? 'VMAF low-bitrate' : metric;
+	const output = compactParts([
+		encoder.includes('av1') ? 'AV1' : encoder || null,
+		maxHeight !== null && maxHeight > 0 ? `max ${maxHeight}p` : 'source resolution',
+		enforcedCap && cap !== null && cap > 0 ? `${formatPercentCopy(cap)} cap` : null
+	]);
+	const detail = compactParts([
+		metricCopy ? `${metricCopy}${target !== null ? ` target ${target}` : ''}` : null,
+		floor !== null ? `floor ${floor}` : null,
+		draftDownscaleReason(pendingProposal, maxHeight),
+		numberValue(video.default_grain) === 0 ? 'grain off' : null,
+		compactText(video.crop) ? `crop ${compactText(video.crop)}` : null
+	]);
+	return { output: output || 'Draft video policy', detail };
+}
+
+function audioPolicySummary(
+	policy: FolderPolicy | null | undefined,
+	sampleItem: FolderSampleItem | null
+): string {
+	const audio = policyAudio(policy);
+	const primary = sampleItem?.audio_summary?.[0] ?? null;
+	if (!audio) return 'No draft audio policy';
+	const codec = String(primary?.codec_name ?? '').toLowerCase();
+	const channels = Number(primary?.channels ?? 0);
+	const convertCodecs = Array.isArray(audio.convert_to_opus_codecs)
+		? audio.convert_to_opus_codecs.map((value) => String(value).toLowerCase())
+		: [];
+	const copyCodecs = Array.isArray(audio.copy_codecs)
+		? audio.copy_codecs.map((value) => String(value).toLowerCase())
+		: [];
+	const bitrate =
+		channels >= 8
+			? compactText(audio.surround_7_1_opus_bitrate)
+			: channels >= 6
+				? compactText(audio.surround_5_1_opus_bitrate)
+				: compactText(audio.stereo_opus_bitrate);
+	if (convertCodecs.includes(codec)) return compactParts(['Opus', bitrate]);
+	if (copyCodecs.includes(codec)) return `Copy ${codecLabel(codec)}`;
+	return bitrate ? `Opus ${formatBitrateCopy(bitrate) ?? bitrate}` : 'Keep selected audio';
+}
+
+function subtitlePolicySummary(policy: FolderPolicy | null | undefined): string {
+	const subtitle = policySubtitle(policy);
+	if (!subtitle) return 'No subtitle policy';
+	const languages = Array.isArray(subtitle.keep_languages)
+		? subtitle.keep_languages.map((value) => formatLanguageCopy(String(value))).filter(Boolean)
+		: [];
+	return compactParts([
+		languages.length ? `Keep ${languages.join(', ')}` : 'Keep selected subtitles',
+		subtitle.prefer_text ? 'prefer text' : null,
+		subtitle.keep_forced ? 'forced kept' : null,
+		compactText(subtitle.default_mode).replaceAll('_', ' ')
+	]);
+}
+
+export function buildOutputReviewRows(
+	folder: FolderPayload,
+	calibration: FolderCalibrationState | null,
+	pendingProposal: PendingSampleProposal | null
+): OutputReviewRow[] {
+	const sampleItem = record<FolderSampleItem>(folder.sample_item);
+	const plan = itemPlan(folder);
+	const verdict = buildSampleVerdict(folder, calibration, pendingProposal);
+	const draftPolicy = activePolicy(folder, pendingProposal);
+	const video = videoPolicySummary(draftPolicy, pendingProposal);
+	const audioSource = summarizeAudioTrack(sampleItem?.audio_summary?.[0] ?? null);
+	const audioPlan = summarizeAudioPlan(plan?.audio);
+	const subtitleSource = summarizeSubtitleSource(sampleItem?.subtitle_summary ?? []);
+	const subtitlePlan = summarizeSubtitlePlan(
+		plan?.subtitles,
+		Boolean(draftPolicy?.subtitle?.prefer_text)
+	);
+	const reviewCount = resolveReviewArtifacts(calibration, pendingProposal).length;
+	return [
+		{
+			label: 'Measured sample',
+			source: sampleItem
+				? `source ${formatBytes(sampleItem.source_size_bytes)}`
+				: 'No sample selected',
+			output: verdict?.predictedPerItem ?? 'No measured output yet',
+			detail: verdict
+				? compactParts([
+						verdict.stalePolicy ? 'older settings' : null,
+						`target ${verdict.target}`,
+						verdict.targetDelta || null,
+						`folder ${verdict.predictedFolderTotal}`
+					])
+				: 'Run a representative sample before approving the folder.',
+			tone: verdict?.missesTarget ? 'wait' : verdict ? 'ready' : 'idle'
+		},
+		{
+			label: pendingProposal?.proposal_id ? 'Next sample draft' : 'Video output',
+			source: compactParts([
+				codecLabel(sampleItem?.video_codec),
+				formatResolutionCopy(sampleItem?.width, sampleItem?.height)
+			]),
+			output: video.output,
+			detail: video.detail || 'Uses the current folder video policy.',
+			tone: pendingProposal?.proposal_id ? 'active' : 'idle'
+		},
+		{
+			label: 'Audio',
+			source: compactParts([audioSource.headline, audioSource.detail]),
+			output:
+				reviewPackAudioSummary(calibration, pendingProposal) ||
+				audioPlan.headline ||
+				audioPolicySummary(draftPolicy, sampleItem),
+			detail: audioPlan.detail || audioPolicySummary(draftPolicy, sampleItem),
+			tone: 'idle'
+		},
+		{
+			label: 'Subtitles',
+			source: compactParts([subtitleSource.headline, subtitleSource.detail]),
+			output: subtitlePlan.headline || subtitlePolicySummary(draftPolicy),
+			detail: subtitlePlan.detail || subtitlePolicySummary(draftPolicy),
+			tone: 'idle'
+		},
+		{
+			label: 'Review media',
+			source: reviewCount ? `${reviewCount} artifacts ready` : 'No review media yet',
+			output: reviewCount ? 'Visible below' : 'Run sample',
+			detail: reviewCount
+				? 'Use the source/draft contact sheets and compare timelines before approving.'
+				: 'A sample run creates visual and audio review evidence.',
+			tone: reviewCount ? 'ready' : 'idle'
 		}
 	];
 }
@@ -569,7 +988,8 @@ export function resolveWorkflow(
 	pendingProposal: PendingSampleProposal | null,
 	reviewGate: ReviewGate | null,
 	calibrationJob: FolderCalibrationJob | null,
-	encodeJob: EncodeQueueJob | null
+	encodeJob: EncodeQueueJob | null,
+	reviewPackReady = false
 ): WorkflowState {
 	const encodeStatus = String(encodeJob?.status ?? '').toLowerCase();
 	if (['failed', 'needs_attention', 'stopped'].includes(encodeStatus)) {
@@ -647,33 +1067,16 @@ export function resolveWorkflow(
 			secondaryAction: 'stop-sample'
 		};
 	}
-	const verdict = buildSampleVerdict(folder, calibration);
-	if (verdict?.missesTarget) {
-		const budgetEnforcement = buildBudgetEnforcementView(pendingProposal);
-		if (
-			pendingProposal?.proposal_id &&
-			pendingProposal.can_queue !== false &&
-			budgetEnforcement?.active
-		) {
-			return {
-				tone: 'ready',
-				label: 'Budget enforced',
-				title: `Next sample has a ${budgetEnforcement.cap} size ceiling`,
-				copy: budgetEnforcement.reason,
-				primary: 'Start sample',
-				primaryAction: 'start-sample',
-				secondary: 'Revise',
-				secondaryAction: 'revise-proposal'
-			};
-		}
+	const verdict = buildSampleVerdict(folder, calibration, pendingProposal);
+	if (verdict?.stalePolicy && !pendingProposal?.proposal_id) {
 		return {
 			tone: 'wait',
-			label: 'Target missed',
-			title: 'Sample is too large for the requested target',
-			copy: `${verdict.predictedPerItem} per episode against ${verdict.target}. ${verdict.recommendation}`,
-			primary: 'Revise sample',
+			label: 'New sample needed',
+			title: 'Previous sample used older settings',
+			copy: `${verdict.predictedPerItem} per episode was measured against older quality targets. Run a fresh sample using the current source-resolution, low-bitrate defaults before approving this folder.`,
+			primary: 'Ask for sample',
 			primaryAction: 'focus-bench',
-			secondary: 'Download review pack',
+			secondary: 'Download old pack',
 			secondaryAction: 'download-review-pack'
 		};
 	}
@@ -693,20 +1096,64 @@ export function resolveWorkflow(
 	}
 	if (pendingProposal?.proposal_id && pendingProposal.can_queue !== false) {
 		const budgetEnforcement = buildBudgetEnforcementView(pendingProposal);
+		if (budgetEnforcement?.active || !calibration?.browser_review_ready) {
+			return {
+				tone: 'ready',
+				label: budgetEnforcement?.active ? 'Capped draft ready' : 'Draft ready',
+				title: budgetEnforcement?.active
+					? `Run a sample with a ${budgetEnforcement.cap} size ceiling`
+					: 'Review draft is ready to sample',
+				copy:
+					budgetEnforcement?.reason ??
+					pendingProposal.message ??
+					'Review the draft, then queue the representative sample when it looks right.',
+				primary: 'Start sample',
+				primaryAction: 'start-sample',
+				secondary: 'Revise',
+				secondaryAction: 'revise-proposal'
+			};
+		}
+	}
+	if (
+		pendingProposal?.proposal_id &&
+		pendingProposal.can_queue === false &&
+		(folder.sample_item || verdict)
+	) {
+		return {
+			tone: 'wait',
+			label: 'Draft blocked',
+			title: 'The draft does not match your request yet',
+			copy:
+				pendingProposal.message ??
+				'The bench draft changed something outside your request. Revise it before starting another sample.',
+			primary: 'Revise draft',
+			primaryAction: 'revise-proposal',
+			secondary: 'Download pack',
+			secondaryAction: 'download-review-pack'
+		};
+	}
+	if (verdict?.missesTarget && reviewPackReady) {
 		return {
 			tone: 'ready',
-			label: budgetEnforcement?.active ? 'Budget enforced' : 'Draft ready',
-			title: budgetEnforcement?.active
-				? `Next sample has a ${budgetEnforcement.cap} size ceiling`
-				: 'Review draft is ready to sample',
-			copy:
-				budgetEnforcement?.reason ??
-				pendingProposal.message ??
-				'Review the draft, then queue the representative sample when it looks right.',
-			primary: 'Start sample',
-			primaryAction: 'start-sample',
-			secondary: 'Revise',
-			secondaryAction: 'revise-proposal'
+			label: 'Target missed',
+			title: 'Approve this size or revise smaller',
+			copy: `${verdict.predictedPerItem} per episode against ${verdict.target}. If the comparison preview looks good, approve this larger result; otherwise revise and sample again.`,
+			primary: 'Approve anyway and queue',
+			primaryAction: 'approve-size-tradeoff',
+			secondary: 'Revise smaller',
+			secondaryAction: 'focus-bench'
+		};
+	}
+	if (verdict?.missesTarget) {
+		return {
+			tone: 'wait',
+			label: 'Review pending',
+			title: 'Target missed, waiting for review media',
+			copy: `${verdict.predictedPerItem} per episode against ${verdict.target}. Wait for the comparison preview before approving this larger result.`,
+			primary: 'Open Ops',
+			primaryAction: 'open-ops',
+			secondary: 'Revise smaller',
+			secondaryAction: 'focus-bench'
 		};
 	}
 	if (calibration?.browser_review_ready || calibration?.review_media_ready) {
@@ -758,7 +1205,8 @@ export function buildWorkflowSteps(workflow: WorkflowState): WorkflowStep[] {
 	const reviewCurrent =
 		['download-review-pack', 'revise-proposal'].includes(activeAction) ||
 		['review ready', 'check draft'].includes(activeLabel);
-	const approveCurrent = ['queue-encode'].includes(activeAction) || activeLabel === 'approved';
+	const approveCurrent =
+		['queue-encode', 'approve-size-tradeoff'].includes(activeAction) || activeLabel === 'approved';
 	const encodeCurrent =
 		['open-ops', 'retry-encode'].includes(activeAction) ||
 		['processing', 'retry available'].includes(activeLabel);

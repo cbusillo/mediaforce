@@ -11,7 +11,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -333,8 +333,11 @@ def create_app(config_path: Path | None = None) -> FastAPI:
 
     app = FastAPI(title="Mediaforce Calibration Bench", lifespan=_app_lifespan)
     review_dir = config.paths.review_dir
+    project_frontend_build_dir = config.paths.project_root / "frontend" / "build"
     packaged_frontend_build_dir = Path(__file__).resolve().parent / "frontend_build"
-    frontend_build_dir = packaged_frontend_build_dir if packaged_frontend_build_dir.exists() else config.paths.project_root / "frontend" / "build"
+    frontend_build_dir = (
+        project_frontend_build_dir if project_frontend_build_dir.exists() else packaged_frontend_build_dir
+    )
     review_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/review-media", StaticFiles(directory=str(review_dir)), name="review_media")
     frontend_app_dir = frontend_build_dir / "_app"
@@ -359,6 +362,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             libraries: list[dict[str, Any]] | None = None,
             remote_hosts: list[dict[str, str]] | None = None,
             transcode_root: str | None = None,
+            video_defaults: dict[str, Any] | None = None,
             encode_queue_scheduler: dict[str, Any] | None = None,
             schedule_profiles: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
@@ -375,6 +379,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             libraries=libraries,
             remote_hosts=remote_hosts,
             transcode_root=transcode_root,
+            video_defaults=video_defaults,
             encode_queue_scheduler=encode_queue_scheduler,
             schedule_profiles=schedule_profiles,
         )
@@ -419,6 +424,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             libraries: list[dict[str, str]],
             remote_hosts: list[dict[str, Any]],
             transcode_root: str,
+            video_defaults: dict[str, Any],
             encode_queue_scheduler: dict[str, Any],
             schedule_profiles: list[dict[str, Any]],
     ) -> dict[str, Any]:
@@ -429,6 +435,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             libraries=libraries,
             remote_hosts=remote_hosts,
             transcode_root=transcode_root,
+            video_defaults=video_defaults,
             encode_queue_scheduler=encode_queue_scheduler,
             schedule_profiles=schedule_profiles,
         )
@@ -589,6 +596,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             sample_item=sample_item,
             calibration=calibration,
             pending_proposal=pending_proposal_raw,
+            summary=summary,
         )
         advice_state = _backfill_multimodal_review_pack(
             config,
@@ -601,7 +609,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         resolved_metric, _ = select_quality_metric(str(video_policy.get("quality_metric", "auto")))
         sample_host_statuses = _sample_calibration_host_statuses(config)
         sample_host_key = _default_sample_host_key_from_statuses(sample_host_statuses)
-        sample_host_choices = _sample_host_options_from_statuses(sample_host_statuses)
+        sample_host_choices = _sample_host_options_from_statuses(config, sample_host_statuses)
         return (
             {
                 **base_context,
@@ -827,6 +835,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     def _save_profile_action(
             normalized_prefix: str,
             confirm_high_impact: bool,
+            confirm_size_tradeoff: bool,
             reviewed_draft_hash: str,
     ) -> ActionPayload:
         return save_profile_action(
@@ -843,6 +852,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             upsert_override=_upsert_override,
             auto_queue_folder_encode=_queue_folder_encode_action,
             confirm_high_impact=confirm_high_impact,
+            confirm_size_tradeoff=confirm_size_tradeoff,
             reviewed_draft_hash=reviewed_draft_hash,
         )
 
@@ -961,6 +971,7 @@ def _folder_display_policy(
         sample_item: dict[str, Any],
         calibration: dict[str, Any] | None,
         pending_proposal: dict[str, Any] | None,
+        summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if calibration:
         calibration_policy = object_dict(calibration.get("policy"))
@@ -973,6 +984,9 @@ def _folder_display_policy(
     current_policy = object_dict(proposal.get("current_policy"))
     if current_policy:
         return current_policy
+    live_policy = object_dict(object_dict(summary).get("resolved_policy"))
+    if live_policy:
+        return live_policy
     return object_dict(sample_item.get("resolved_policy"))
 
 
@@ -1607,11 +1621,33 @@ def _sample_calibration_host_statuses(config: MediaforceConfig) -> list[HostStat
 
 
 def _sample_host_options(config: MediaforceConfig) -> list[dict[str, Any]]:
-    return sample_host_options(config, safe_collect_statuses=_safe_collect_host_statuses)
+    return sample_host_options(
+        config,
+        safe_collect_statuses=_safe_collect_host_statuses,
+        schedule_fields_for_host=lambda status: _sample_host_schedule_fields(config, status),
+    )
 
 
-def _sample_host_options_from_statuses(statuses: list[HostStatus]) -> list[dict[str, Any]]:
-    return sample_host_options_from_statuses(statuses)
+def _sample_host_options_from_statuses(
+        config: MediaforceConfig,
+        statuses: list[HostStatus],
+) -> list[dict[str, Any]]:
+    return sample_host_options_from_statuses(
+        statuses,
+        schedule_fields_for_host=lambda status: _sample_host_schedule_fields(config, status),
+    )
+
+
+def _sample_host_schedule_fields(config: MediaforceConfig, status: HostStatus) -> dict[str, Any]:
+    host_payload = {**_host_config_for_key(config, status.key), **asdict(status)}
+    policy = _schedule_profile_policy_for_host(config, host_payload)
+    schedule_open = _scheduler_allows_encode_run(policy, host_payload=host_payload)
+    summary = str(policy.get("summary") or "").strip()
+    return {
+        "schedule_open": schedule_open,
+        "schedule_detail": summary,
+        "schedule_profile_label": str(policy.get("label") or "Always"),
+    }
 
 
 def _sample_host_help_text(sample_host_choices: list[dict[str, Any]], selected_key: str) -> str:
