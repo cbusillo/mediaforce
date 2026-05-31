@@ -9,6 +9,24 @@ from mediaforce.core.type_defs import object_dict
 from mediaforce.core.type_defs import JSONValue
 
 
+def video_quality_improvement_change(current_video: dict[str, Any], preview_video: dict[str, Any]) -> bool:
+    current = object_dict(current_video)
+    preview = object_dict(preview_video)
+    for key in ("target_vmaf", "target_xpsnr"):
+        current_value = _number_or_none(current.get(key))
+        preview_value = _number_or_none(preview.get(key))
+        if current_value is not None and preview_value is not None and preview_value > current_value + 0.01:
+            return True
+    for key in ("min_crf", "max_crf", "grain_denoise", "preset"):
+        current_value = _number_or_none(current.get(key))
+        preview_value = _number_or_none(preview.get(key))
+        if current_value is not None and preview_value is not None and preview_value < current_value - 0.01:
+            return True
+    current_grain = _number_or_none(current.get("default_grain"))
+    preview_grain = _number_or_none(preview.get("default_grain"))
+    return bool(current_grain is not None and preview_grain is not None and preview_grain > current_grain + 0.01)
+
+
 def recent_tuning_sessions(
         connection: DBClient,
         prefix: str,
@@ -97,7 +115,7 @@ def load_json_object(raw: str) -> dict[str, Any]:
 
 
 def _number_or_none(value: JSONValue) -> float | None:
-    if not isinstance(value, str | int | float):
+    if not isinstance(value, str | int | float) or isinstance(value, bool):
         return None
     try:
         parsed = float(value)
@@ -293,6 +311,10 @@ def proposal_alignment_issue(
                     continue
                 current_value = current_video.get(key)
                 preview_value = preview_video.get(key)
+                if allow_measured_size_quality_increase and video_quality_improvement_change(
+                        {key: current_value}, {key: preview_value}
+                ):
+                    continue
                 if current_value is not None and preview_value is not None and preview_value != current_value:
                     return (
                         f"The draft changes video.{key} based only on a size budget. Run a measured sample or "
@@ -324,6 +346,10 @@ def proposal_alignment_issue(
                         continue
                     current_value = current_video.get(key)
                     preview_value = preview_video.get(key)
+                    if allow_measured_size_quality_increase and video_quality_improvement_change(
+                            {key: current_value}, {key: preview_value}
+                    ):
+                        continue
                     if current_value is not None and preview_value is not None and preview_value != current_value:
                         return (
                             f"The draft changes video.{key} based only on a size budget. Run a measured sample or "

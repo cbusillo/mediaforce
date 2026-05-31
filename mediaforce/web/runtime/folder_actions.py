@@ -21,6 +21,7 @@ from mediaforce.web.runtime.folder_tuning_helpers import (
     proposal_alignment_issue,
     size_budget_sample_analysis,
     size_budget_sample_issue,
+    video_quality_improvement_change,
 )
 
 ActionPayload: TypeAlias = dict[str, Any]
@@ -91,17 +92,6 @@ def _high_impact_policy_change(current_policy: ActionPayload, draft_policy: Acti
         return True
     if _normalized_number(current_video.get("default_grain")) != _normalized_number(draft_video.get("default_grain")):
         return True
-    return False
-
-
-def _draft_raises_quality_target(current_policy: ActionPayload, draft_policy: ActionPayload) -> bool:
-    current_video = object_dict(current_policy.get("video"))
-    draft_video = object_dict(draft_policy.get("video"))
-    for key in ("target_vmaf", "target_xpsnr"):
-        current_value = _normalized_number(current_video.get(key))
-        draft_value = _normalized_number(draft_video.get(key))
-        if current_value is not None and draft_value is not None and draft_value > current_value + 0.01:
-            return True
     return False
 
 
@@ -824,7 +814,10 @@ def save_profile_action(
     if (
             allow_measured_size_quality_increase
             and str(size_target_analysis.get("status") or "").strip() == "under_target"
-            and _draft_raises_quality_target(baseline_policy, object_dict(calibration_payload.get("policy")))
+            and video_quality_improvement_change(
+                object_dict(baseline_policy.get("video")),
+                object_dict(object_dict(calibration_payload.get("policy")).get("video")),
+            )
     ):
         size_issue = None
     if size_issue is not None and not confirm_size_tradeoff:

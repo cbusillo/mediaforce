@@ -6077,6 +6077,22 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertIsNone(issue)
 
+    def test_proposal_alignment_issue_allows_under_target_size_budget_quality_knob_increase(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "size_budget",
+                "budget_label": "300 MB per episode",
+                "budget_bytes": 300 * 1024 * 1024,
+                "applied_policy": None,
+            },
+            request_disposition="honored",
+            current_policy={"video": {"target_vmaf": 92.0, "default_grain": 0, "max_encoded_percent": 80}},
+            preview_policy={"video": {"target_vmaf": 92.0, "default_grain": 8, "max_encoded_percent": 80}},
+            allow_measured_size_quality_increase=True,
+        )
+
+        self.assertIsNone(issue)
+
     def test_proposal_alignment_issue_rejects_under_target_size_budget_quality_drop(self) -> None:
         issue = proposal_alignment_issue(
             operator_request={

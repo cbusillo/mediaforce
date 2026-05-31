@@ -4959,6 +4959,53 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(saved_payloads[0]["accepted_at"], "2026-05-24T04:40:00+00:00")
         self.assertFalse(merged_advice[0]["operator_approved_size_tradeoff"])
 
+    def test_save_profile_action_allows_under_target_quality_knob_without_tradeoff_confirmation(self) -> None:
+        saved_payloads: list[folder_actions_runtime.ActionPayload] = []
+        merged_advice: list[folder_actions_runtime.ActionPayload] = []
+        calibration_payload: folder_actions_runtime.ActionPayload = {
+            "mode": "sample",
+            "job_id": "sample-1",
+            "action": "ai_tune",
+            "review_media_ready": True,
+            "policy": {"video": {"target_vmaf": 92.0, "default_grain": 8, "max_encoded_percent": 80}},
+            "sample_item": {
+                "library_item_id": 1,
+                "resolved_policy": {"video": {"target_vmaf": 92.0, "default_grain": 0, "max_encoded_percent": 80}},
+            },
+            "sample_result": {"predicted_total_size_bytes": 250 * 1024 * 1024},
+        }
+
+        result = folder_actions_runtime.save_profile_action(
+            self.config,
+            "tv/show",
+            now_iso=lambda: "2026-05-24T04:40:00+00:00",
+            load_sample_item=lambda *_args, **_kwargs: None,
+            load_calibration_state=lambda *_args, **_kwargs: dict(calibration_payload),
+            calibration_draft_hash=web_app._calibration_draft_hash,
+            save_calibration_state=lambda _config, _prefix, payload: saved_payloads.append(dict(payload)),
+            load_advice_state=lambda *_args, **_kwargs: {
+                "request_disposition": "honored",
+                "operator_request": {
+                    "operator_confirmed": True,
+                    "request_type": "size_budget",
+                    "budget_bytes": 300 * 1024 * 1024,
+                    "budget_label": "300 MB per episode",
+                    "applied_policy": None,
+                },
+            },
+            record_visual_approval_artifact=lambda *_args, **_kwargs: {"artifact_id": "approval-1"},
+            merge_advice_state=lambda _config, _prefix, payload: merged_advice.append(dict(payload)),
+            upsert_override=lambda *_args, **_kwargs: None,
+            auto_queue_folder_encode=lambda *_args, **_kwargs: {"ok": True, "message": "Queued folder encode."},
+            confirm_high_impact=True,
+            reviewed_draft_hash=web_app._calibration_draft_hash(calibration_payload),
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["queued"])
+        self.assertEqual(saved_payloads[0]["accepted_at"], "2026-05-24T04:40:00+00:00")
+        self.assertFalse(merged_advice[0]["operator_approved_size_tradeoff"])
+
     def test_run_sampled_calibration_keeps_review_directory_for_approval(self) -> None:
         source_path = self._create_source_file("episode-review.mkv")
         preview_dir = self.config.paths.review_dir / "run-123" / "item-00"
