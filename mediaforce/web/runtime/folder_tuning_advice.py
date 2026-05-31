@@ -55,9 +55,10 @@ _HARD_SIZE_CAP_RE = re.compile(
     re.IGNORECASE,
 )
 _MEASURED_SIZE_FOLLOWUP_RE = re.compile(
-    r"\b(?:revise|retry|rerun|run\s+another|next\s+sample|sample\s+again)\b.*\b(?:smaller|size|target|budget)|"
+    r"\b(?:revise|retry|rerun)\s+(?:this\s+)?(?:sample|run|draft)\b.*\b(?:smaller|closer)\b|"
+    r"\b(?:run\s+another|next\s+sample|sample\s+again)\b.*\b(?:smaller|closer)\b|"
     r"\b(?:last|previous|measured|sampled)\s+(?:sample|run|draft)\b.*\b(?:larger|over|miss(?:ed|es)?|target|budget|size)|"
-    r"\b(?:miss(?:ed|es)?|over)\s+(?:the\s+)?(?:size\s+)?(?:target|budget)\b",
+    r"\b(?:miss(?:ed|es)?|over)\s+(?:the\s+)?(?:size\s+)?(?:target|budget)\b.*\b(?:sample|run|draft)\b",
     re.IGNORECASE,
 )
 _METRIC_TARGET_RE = re.compile(r"\b(?P<metric>vmaf|xpsnr)\s*(?:of\s*)?(?:around\s*)?(?P<target>\d+(?:\.\d+)?)\b", re.IGNORECASE)

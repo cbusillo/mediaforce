@@ -792,12 +792,17 @@ def save_profile_action(
             str(calibration_payload.get("action") or "").strip() == "ai_tune"
             and str(size_target_analysis.get("status") or "").strip() == "inside_target_band"
     )
+    allow_measured_size_quality_increase = (
+            str(calibration_payload.get("action") or "").strip() == "ai_tune"
+            and str(size_target_analysis.get("status") or "").strip() == "under_target"
+    )
     alignment_issue = proposal_alignment_issue(
         operator_request=operator_request or None,
         request_disposition=request_disposition or None,
         current_policy=baseline_policy,
         preview_policy=object_dict(calibration_payload.get("policy")),
         allow_measured_size_quality_tradeoff=allow_measured_size_quality_tradeoff,
+        allow_measured_size_quality_increase=allow_measured_size_quality_increase,
     )
     if alignment_issue is not None:
         raise HTTPException(status_code=409, detail=alignment_issue)

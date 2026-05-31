@@ -771,6 +771,12 @@ def _tuned_preview_action(
     allow_measured_size_quality_tradeoff = allows_measured_size_quality_tradeoff(
         operator_request=operator_request,
         size_target_analysis=size_target_analysis,
+        direction="smaller",
+    )
+    allow_measured_size_quality_increase = allows_measured_size_quality_tradeoff(
+        operator_request=operator_request,
+        size_target_analysis=size_target_analysis,
+        direction="larger",
     )
     measured_budget_fragment = measured_size_budget_policy_fragment(
         operator_request=operator_request,
@@ -829,6 +835,7 @@ def _tuned_preview_action(
         current_policy=current_policy,
         preview_policy=tuned_policy,
         allow_measured_size_quality_tradeoff=allow_measured_size_quality_tradeoff,
+        allow_measured_size_quality_increase=allow_measured_size_quality_increase,
     )
     can_queue = _proposal_can_queue(
         applied_fragment=combined_fragment,
