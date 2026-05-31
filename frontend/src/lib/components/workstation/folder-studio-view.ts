@@ -41,6 +41,7 @@ export type WorkflowState = {
 	primaryAction: WorkflowAction;
 	secondary: string;
 	secondaryAction: WorkflowAction;
+	revisionPrompt?: string;
 };
 
 export type SampleVerdict = {
@@ -61,6 +62,11 @@ export type SampleVerdict = {
 	stalePolicy: boolean;
 };
 
+function reviseSmallerPrompt(verdict: SampleVerdict): string {
+	const measured = [verdict.predictedPerItem, verdict.targetDelta].filter(Boolean).join(' · ');
+	return `Revise this sample smaller toward ${verdict.target}. The last sample was ${measured}; keep the review quality as high as possible, but make the next sample materially smaller.`;
+}
+
 export type WorkflowAction =
 	| 'approve-size-tradeoff'
 	| 'download-review-pack'
@@ -70,6 +76,7 @@ export type WorkflowAction =
 	| 'monitor-sample'
 	| 'open-ops'
 	| 'queue-encode'
+	| 'revise-smaller'
 	| 'retry-encode'
 	| 'retry-sample'
 	| 'revise-proposal'
@@ -1159,7 +1166,8 @@ export function resolveWorkflow(
 			secondaryAction: 'download-review-pack'
 		};
 	}
-	if (verdict?.missesTarget && approvalReviewReady) {
+	const canReviseTowardSizeTarget = verdict?.missesTarget && verdict.target !== 'No size target';
+	if (canReviseTowardSizeTarget && approvalReviewReady) {
 		return {
 			tone: 'ready',
 			label: 'Target missed',
@@ -1168,19 +1176,21 @@ export function resolveWorkflow(
 			primary: 'Approve anyway and queue',
 			primaryAction: 'approve-size-tradeoff',
 			secondary: 'Revise smaller',
-			secondaryAction: 'focus-bench'
+			secondaryAction: 'revise-smaller',
+			revisionPrompt: reviseSmallerPrompt(verdict)
 		};
 	}
-	if (verdict?.missesTarget) {
+	if (canReviseTowardSizeTarget) {
 		return {
 			tone: 'wait',
 			label: 'Review pending',
 			title: 'Target missed, waiting for review media',
-			copy: `${verdict.predictedPerItem} per episode against ${verdict.target}. Wait for the comparison preview before approving this larger result.`,
+			copy: `${verdict.predictedPerItem} per episode against ${verdict.target}. Wait for the comparison preview before approving this larger result, or revise smaller now and sample again.`,
 			primary: 'Wait for review media',
 			primaryAction: 'monitor-review',
 			secondary: 'Revise smaller',
-			secondaryAction: 'focus-bench'
+			secondaryAction: 'revise-smaller',
+			revisionPrompt: reviseSmallerPrompt(verdict)
 		};
 	}
 	if (approvalReviewReady) {

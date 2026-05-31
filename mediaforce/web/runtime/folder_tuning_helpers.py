@@ -116,7 +116,12 @@ def measured_size_budget_policy_fragment(
     if str(request.get("request_type") or "").strip().lower() not in {"size_budget", "combined_experiment"}:
         return {}
     size_budget_request = object_dict(request.get("size_budget_request"))
-    if not bool(request.get("hard_size_cap") or size_budget_request.get("hard_size_cap")):
+    hard_size_cap = bool(request.get("hard_size_cap") or size_budget_request.get("hard_size_cap"))
+    measured_size_followup = bool(
+        request.get("operator_confirmed")
+        and (request.get("measured_size_followup") or size_budget_request.get("measured_size_followup"))
+    )
+    if not hard_size_cap and not measured_size_followup:
         return {}
     if str(analysis.get("status") or "").strip().lower() != "over_target":
         return {}
@@ -125,10 +130,34 @@ def measured_size_budget_policy_fragment(
         requested_cap = _number_or_none(request.get("target_encoded_percent"))
     if requested_cap is None:
         requested_cap = _number_or_none(size_budget_request.get("requested_max_encoded_percent"))
+    if requested_cap is None:
+        requested_cap = _number_or_none(size_budget_request.get("target_encoded_percent"))
     if requested_cap is None or requested_cap <= 0:
         return {}
     cap = max(1, min(100, int(round(requested_cap))))
     return {"video": {"max_encoded_percent": cap}}
+
+
+def allows_measured_size_quality_tradeoff(
+        *,
+        operator_request: dict[str, Any] | None,
+        size_target_analysis: dict[str, Any] | None,
+) -> bool:
+    request = object_dict(operator_request)
+    analysis = object_dict(size_target_analysis)
+    if str(request.get("request_type") or "").strip().lower() not in {"size_budget", "combined_experiment"}:
+        return False
+    if str(analysis.get("status") or "").strip().lower() != "over_target":
+        return False
+    size_budget_request = object_dict(request.get("size_budget_request"))
+    return bool(
+        request.get("hard_size_cap")
+        or size_budget_request.get("hard_size_cap")
+        or (
+            request.get("operator_confirmed")
+            and (request.get("measured_size_followup") or size_budget_request.get("measured_size_followup"))
+        )
+    )
 
 
 def proposal_alignment_issue(

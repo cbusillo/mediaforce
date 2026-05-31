@@ -10,7 +10,10 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.web.runtime.folder_tuning_advice import operator_preserves_source_resolution
-from mediaforce.web.runtime.folder_tuning_helpers import measured_size_budget_policy_fragment
+from mediaforce.web.runtime.folder_tuning_helpers import (
+    allows_measured_size_quality_tradeoff,
+    measured_size_budget_policy_fragment,
+)
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.tuning.tuning_memory import promote_learning_artifact, retrieve_learning_context
 
@@ -765,10 +768,10 @@ def _tuned_preview_action(
     if combined_fragment:
         advice_payload["applied_policy"] = combined_fragment
     size_target_analysis = object_dict(runtime_toolbelt.get("size_target_analysis"))
-    allow_measured_size_quality_tradeoff = str(size_target_analysis.get("status") or "").strip() in {
-        "under_target",
-        "over_target",
-    }
+    allow_measured_size_quality_tradeoff = allows_measured_size_quality_tradeoff(
+        operator_request=operator_request,
+        size_target_analysis=size_target_analysis,
+    )
     measured_budget_fragment = measured_size_budget_policy_fragment(
         operator_request=operator_request,
         size_target_analysis=size_target_analysis,
@@ -797,6 +800,17 @@ def _tuned_preview_action(
             "applied_policy": measured_budget_fragment,
         }
         if operator_request:
+            size_budget_request = object_dict(operator_request.get("size_budget_request"))
+            if size_budget_request:
+                size_budget_request = {
+                    **size_budget_request,
+                    "applied_max_encoded_percent": object_dict(measured_budget_fragment.get("video")).get(
+                        "max_encoded_percent"
+                    ),
+                    "applied_policy": merge_policy_fragments(
+                        object_dict(size_budget_request.get("applied_policy")), measured_budget_fragment
+                    ),
+                }
             operator_request = {
                 **operator_request,
                 "applied_max_encoded_percent": object_dict(measured_budget_fragment.get("video")).get(
@@ -806,6 +820,8 @@ def _tuned_preview_action(
                     object_dict(operator_request.get("applied_policy")), measured_budget_fragment
                 ),
             }
+            if size_budget_request:
+                operator_request["size_budget_request"] = size_budget_request
             advice_payload["operator_request"] = operator_request
     alignment_issue = deps.proposal_alignment_issue(
         operator_request=operator_request,

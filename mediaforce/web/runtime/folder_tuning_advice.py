@@ -54,6 +54,12 @@ _HARD_SIZE_CAP_RE = re.compile(
     r"\b(?:hard\s+(?:cap|ceiling|limit|size)|strict\s+(?:cap|ceiling|limit)|size\s+ceiling|max(?:imum)?\s+size|must\s+(?:hit|be|stay|remain)\s+(?:under|below|at)|do\s+not\s+exceed|max_encoded_percent)\b",
     re.IGNORECASE,
 )
+_MEASURED_SIZE_FOLLOWUP_RE = re.compile(
+    r"\b(?:revise|retry|rerun|run\s+another|next\s+sample|sample\s+again)\b.*\b(?:smaller|size|target|budget)|"
+    r"\b(?:last|previous|measured|sampled)\s+(?:sample|run|draft)\b.*\b(?:larger|over|miss(?:ed|es)?|target|budget|size)|"
+    r"\b(?:miss(?:ed|es)?|over)\s+(?:the\s+)?(?:size\s+)?(?:target|budget)\b",
+    re.IGNORECASE,
+)
 _METRIC_TARGET_RE = re.compile(r"\b(?P<metric>vmaf|xpsnr)\s*(?:of\s*)?(?:around\s*)?(?P<target>\d+(?:\.\d+)?)\b", re.IGNORECASE)
 _METRIC_DIRECTIVE_RE = re.compile(
     r"\b(?:use|using|with|evaluate(?:\s+with)?|measure(?:\s+with)?|run(?:\s+with)?|metric(?:\s+is)?)\s+"
@@ -126,6 +132,7 @@ def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, A
     summary = str(parsed_object.get("summary") or "").strip() or "Parsed operator note."
     reasoning_note = str(parsed_object.get("reasoning_note") or "").strip() or "Structured operator note parse."
     hard_size_cap = bool(parsed_object.get("hard_size_cap"))
+    measured_size_followup = bool(parsed_object.get("measured_size_followup"))
     return {
         "summary": summary,
         "intent_type": intent_type,
@@ -139,6 +146,7 @@ def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, A
         "black_bar_handling": black_bar_handling,
         "crop": crop,
         "hard_size_cap": hard_size_cap,
+        "measured_size_followup": measured_size_followup,
         "reasoning_note": reasoning_note,
     }
 
@@ -168,6 +176,7 @@ def _heuristic_operator_note_parse(note: str) -> dict[str, Any] | None:
     size_budget_value = float(size_budget_match.group("amount")) if size_budget_match is not None else None
     size_budget_unit = size_budget_match.group("unit").lower() if size_budget_match is not None else None
     hard_size_cap = bool(_HARD_SIZE_CAP_RE.search(trimmed))
+    measured_size_followup = bool(_MEASURED_SIZE_FOLLOWUP_RE.search(trimmed))
     metric = (
         metric_match.group("metric").lower()
         if metric_match is not None
@@ -232,6 +241,7 @@ def _heuristic_operator_note_parse(note: str) -> dict[str, Any] | None:
         "black_bar_handling": black_bar_handling,
         "crop": crop,
         "hard_size_cap": hard_size_cap,
+        "measured_size_followup": measured_size_followup,
         "reasoning_note": "Local heuristic recovered the explicit operator request from the note text.",
     }
 
@@ -488,6 +498,9 @@ def size_budget_request(
     if multiplier is None or amount <= 0:
         return None
     hard_size_cap = bool(parsed_note.get("hard_size_cap")) or bool(_HARD_SIZE_CAP_RE.search(trimmed))
+    measured_size_followup = bool(parsed_note.get("measured_size_followup")) or bool(
+        _MEASURED_SIZE_FOLLOWUP_RE.search(trimmed)
+    )
     budget_bytes = int(round(amount * multiplier))
     source_size_bytes = None
     duration_seconds = None
@@ -544,6 +557,7 @@ def size_budget_request(
         "target_encoded_percent": target_encoded_percent,
         "target_tolerance_percent": SIZE_BUDGET_TARGET_TOLERANCE,
         "hard_size_cap": hard_size_cap,
+        "measured_size_followup": measured_size_followup,
         "feasibility": feasibility,
         "requires_confirmation": requires_confirmation,
         "requested_max_encoded_percent": requested_max_encoded_percent,
@@ -673,6 +687,7 @@ def operator_requested_experiment(
             "feasibility": object_dict(requested_size_budget).get("feasibility"),
             "requires_confirmation": object_dict(requested_size_budget).get("requires_confirmation"),
             "hard_size_cap": object_dict(requested_size_budget).get("hard_size_cap"),
+            "measured_size_followup": object_dict(requested_size_budget).get("measured_size_followup"),
             "requested_max_encoded_percent": object_dict(requested_size_budget).get("requested_max_encoded_percent"),
             "applied_max_encoded_percent": object_dict(requested_size_budget).get("applied_max_encoded_percent"),
             "operator_confirmed": operator_confirmed,

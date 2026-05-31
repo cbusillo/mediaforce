@@ -105,12 +105,14 @@ showing calibration actions when that folder's scan data is stale.
 Folder calibration now uses a size-first review flow by default. The checked-in
 defaults aim for roughly 300 MB per 45-minute episode at up to 1080p, then use
 sampled metrics as guardrails and visual review clips as the operator decision
-point. The current fast sample engine is still `ab-av1`; scene-aware engine work
-is tracked separately so host orchestration and review workflow can stay stable
-while that bakeoff happens. Once the current sampled draft has been explicitly
-saved to the folder profile, `Queue Folder Encode` is unlocked so the real
-folder job can enter the encode queue without letting a stale unsaved preview
-slip into production work.
+point. The first size note is measured before it becomes a ceiling; once a
+follow-up target lands above the band, the next sample draft carries the learned
+size ceiling forward instead of repeating the oversized run. The current fast
+sample engine is still `ab-av1`; scene-aware engine work is tracked separately so
+host orchestration and review workflow can stay stable while that bakeoff happens.
+Once the current sampled draft has been explicitly saved to the folder profile,
+`Queue Folder Encode` is unlocked so the real folder job can enter the encode
+queue without letting a stale unsaved preview slip into production work.
 
 For scene-aware engine research, generate a repeatable bakeoff plan from an
 existing manifest instead of replacing the production engine path directly:
