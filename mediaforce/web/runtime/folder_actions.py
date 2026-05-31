@@ -94,6 +94,17 @@ def _high_impact_policy_change(current_policy: ActionPayload, draft_policy: Acti
     return False
 
 
+def _draft_raises_quality_target(current_policy: ActionPayload, draft_policy: ActionPayload) -> bool:
+    current_video = object_dict(current_policy.get("video"))
+    draft_video = object_dict(draft_policy.get("video"))
+    for key in ("target_vmaf", "target_xpsnr"):
+        current_value = _normalized_number(current_video.get(key))
+        draft_value = _normalized_number(draft_video.get(key))
+        if current_value is not None and draft_value is not None and draft_value > current_value + 0.01:
+            return True
+    return False
+
+
 class LoadFolderStagedItemsFn(Protocol):
     def __call__(
             self,
@@ -810,6 +821,12 @@ def save_profile_action(
         operator_request=operator_request or None,
         calibration_payload=calibration_payload,
     )
+    if (
+            allow_measured_size_quality_increase
+            and str(size_target_analysis.get("status") or "").strip() == "under_target"
+            and _draft_raises_quality_target(baseline_policy, object_dict(calibration_payload.get("policy")))
+    ):
+        size_issue = None
     if size_issue is not None and not confirm_size_tradeoff:
         raise HTTPException(status_code=409, detail=size_issue)
     if str(calibration_payload.get("mode") or "sample") == "sample":
