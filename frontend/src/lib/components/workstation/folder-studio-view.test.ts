@@ -451,7 +451,10 @@ describe('Folder Studio review request mapping', () => {
 			title: 'Approve this size or revise smaller',
 			primary: 'Approve anyway and queue',
 			primaryAction: 'approve-size-tradeoff',
-			secondary: 'Revise smaller'
+			secondary: 'Revise smaller',
+			secondaryAction: 'revise-smaller',
+			revisionPrompt:
+				'Revise this sample smaller toward 300 MB per episode. The last sample was 766 MiB · 2.6x target; keep the review quality as high as possible, but make the next sample materially smaller.'
 		});
 	});
 
@@ -485,7 +488,10 @@ describe('Folder Studio review request mapping', () => {
 		).toMatchObject({
 			label: 'Review pending',
 			primary: 'Wait for review media',
-			secondary: 'Revise smaller'
+			secondary: 'Revise smaller',
+			secondaryAction: 'revise-smaller',
+			revisionPrompt:
+				'Revise this sample smaller toward 300 MB per episode. The last sample was 766 MiB · 2.6x target; keep the review quality as high as possible, but make the next sample materially smaller.'
 		});
 		expect(
 			resolveWorkflowActionState('approve-size-tradeoff', {
@@ -1249,7 +1255,7 @@ describe('Folder Studio review request mapping', () => {
 			primary: 'Approve anyway and queue',
 			primaryAction: 'approve-size-tradeoff',
 			secondary: 'Revise smaller',
-			secondaryAction: 'focus-bench'
+			secondaryAction: 'revise-smaller'
 		});
 
 		expect(steps.map((step) => [step.label, step.current])).toEqual([

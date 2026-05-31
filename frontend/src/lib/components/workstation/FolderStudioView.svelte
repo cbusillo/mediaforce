@@ -192,6 +192,15 @@
 		benchTextarea?.scrollIntoView({ block: 'center' });
 	}
 
+	function reviseSmaller() {
+		const revisionPrompt = workflow.revisionPrompt?.trim();
+		if (revisionPrompt) {
+			const currentNote = benchNote.trim();
+			benchNote = currentNote ? `${currentNote}\n\n${revisionPrompt}` : revisionPrompt;
+		}
+		focusBenchComposer();
+	}
+
 	async function sendBenchRequest() {
 		if (benchRequestDisabled) return;
 		benchPending = true;
@@ -452,6 +461,13 @@
 							class="control"
 							type="button"
 							onclick={focusBenchComposer}
+							data-mf-action={workflow.secondaryAction}>{workflow.secondary}</button
+						>
+					{:else if workflow.secondaryAction === 'revise-smaller'}
+						<button
+							class="control"
+							type="button"
+							onclick={reviseSmaller}
 							data-mf-action={workflow.secondaryAction}>{workflow.secondary}</button
 						>
 					{:else if workflow.secondaryAction === 'open-ops'}
