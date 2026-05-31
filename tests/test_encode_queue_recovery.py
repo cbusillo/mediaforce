@@ -4152,7 +4152,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(matching_cards[0].estimated_savings_bytes, 1024 * 1024 * 1024)
 
     def test_project_env_loader_sets_defaults_without_overriding_shell_env(self) -> None:
-        env_path = Path.home() / "Developer" / "claude-local-machine" / "projects" / "media-encoding" / ".env"
+        env_path = self.root / "projects" / "media-encoding" / ".env"
         with patch.object(web_app, "DEFAULT_CONFIG_PATH", env_path.parent / "config" / "defaults.toml"):
             with patch.object(Path, "exists", autospec=True) as exists_mock:
                 exists_mock.side_effect = lambda path: path == env_path

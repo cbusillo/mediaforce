@@ -6,7 +6,7 @@ review_dir = "state/web-smoke/review"
 runtime_settings_path = "state/web-smoke/runtime.json"
 
 [state.cleanup]
-transient_artifact_retention_days = 1
+transient_artifact_retention_days = 14
 orphan_temp_retention_minutes = 10
 periodic_sweep_minutes = 60
 
