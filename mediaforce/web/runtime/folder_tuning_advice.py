@@ -290,6 +290,8 @@ def _merge_operator_note_parse(
         merged["operator_confirmed"] = True
         if str(merged.get("intent_type") or "").strip().lower() in {"unclear", "other"}:
             merged["intent_type"] = "direct_request"
+    if heuristic.get("measured_size_followup"):
+        merged["measured_size_followup"] = True
     merged = _normalize_operator_note_parse(merged)
     if merged is None:
         return heuristic
