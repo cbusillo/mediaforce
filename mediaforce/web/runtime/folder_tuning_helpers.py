@@ -116,7 +116,10 @@ def measured_size_budget_policy_fragment(
     if str(request.get("request_type") or "").strip().lower() not in {"size_budget", "combined_experiment"}:
         return {}
     size_budget_request = object_dict(request.get("size_budget_request"))
-    hard_size_cap = bool(request.get("hard_size_cap") or size_budget_request.get("hard_size_cap"))
+    hard_size_cap = bool(
+        request.get("operator_confirmed")
+        and (request.get("hard_size_cap") or size_budget_request.get("hard_size_cap"))
+    )
     measured_size_followup = bool(
         request.get("operator_confirmed")
         and (request.get("measured_size_followup") or size_budget_request.get("measured_size_followup"))
@@ -151,8 +154,10 @@ def allows_measured_size_quality_tradeoff(
         return False
     size_budget_request = object_dict(request.get("size_budget_request"))
     return bool(
-        request.get("hard_size_cap")
-        or size_budget_request.get("hard_size_cap")
+        (
+            request.get("operator_confirmed")
+            and (request.get("hard_size_cap") or size_budget_request.get("hard_size_cap"))
+        )
         or (
             request.get("operator_confirmed")
             and (request.get("measured_size_followup") or size_budget_request.get("measured_size_followup"))

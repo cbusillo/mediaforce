@@ -3555,6 +3555,47 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(request["measured_size_followup"])
         self.assertFalse(request["hard_size_cap"])
 
+    def test_operator_requested_experiment_keeps_heuristic_followup_when_structured_parse_misses_it(self) -> None:
+        structured_parse = {
+            "summary": "Size follow-up request.",
+            "intent_type": "direct_request",
+            "request_type": "size_budget",
+            "operator_confirmed": True,
+            "measured_size_followup": False,
+            "metric": None,
+            "metric_target": None,
+            "size_budget_value": 300,
+            "size_budget_unit": "mb",
+            "scale_height": None,
+            "black_bar_handling": None,
+            "crop": None,
+            "hard_size_cap": False,
+            "reasoning_note": "Structured parse missed the measured follow-up wording.",
+        }
+
+        with patch(
+            "mediaforce.web.runtime.folder_tuning_advice.request_operator_note_parse",
+            return_value=structured_parse,
+        ):
+            request = _operator_requested_experiment(
+                "Revise this sample smaller toward 300 MB per episode. The last sample was 766 MiB, 2.6x target.",
+                {
+                    "source_size_bytes": 4_349_049_136,
+                    "duration_seconds": 3161.376,
+                    "audio_summary": [{"codec_name": "ac3", "channels": 6}],
+                    "resolved_policy": {
+                        "video": {"encoder": "libsvtav1"},
+                        "audio": {
+                            "convert_to_opus_codecs": ["ac3"],
+                            "surround_5_1_opus_bitrate": "256k",
+                        },
+                    },
+                },
+            )
+
+        assert request is not None
+        self.assertTrue(request["measured_size_followup"])
+
     def test_operator_requested_experiment_detects_scale_target_request(self) -> None:
         request = _operator_requested_experiment("Downsample the 4K files to 1080p for this folder.")
 
@@ -4514,11 +4555,25 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertEqual(fragment, {})
 
+    def test_measured_size_budget_policy_fragment_ignores_unconfirmed_hard_cap_after_miss(self) -> None:
+        fragment = measured_size_budget_policy_fragment(
+            operator_request={
+                "request_type": "size_budget",
+                "requested_max_encoded_percent": 7.23,
+                "operator_confirmed": False,
+                "hard_size_cap": True,
+            },
+            size_target_analysis={"status": "over_target"},
+        )
+
+        self.assertEqual(fragment, {})
+
     def test_measured_size_budget_policy_fragment_enforces_explicit_hard_cap_after_miss(self) -> None:
         fragment = measured_size_budget_policy_fragment(
             operator_request={
                 "request_type": "size_budget",
                 "requested_max_encoded_percent": 7.23,
+                "operator_confirmed": True,
                 "hard_size_cap": True,
             },
             size_target_analysis={"status": "over_target"},
