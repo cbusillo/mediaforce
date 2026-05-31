@@ -1354,6 +1354,52 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(json.loads(response.body), expected_payload)
 
+    def test_app_proposal_alignment_wrapper_accepts_quality_increase_flag(self) -> None:
+        from mediaforce.web import app as web_app
+
+        captured: list[dict[str, object]] = []
+
+        def fake_proposal_alignment_issue(**kwargs: object) -> None:
+            captured.append(dict(kwargs))
+            return None
+
+        def fake_preview_action(_config: MediaforceConfig, deps: FolderAiTuneDeps, *_args: object) -> dict[str, object]:
+            deps.proposal_alignment_issue(
+                operator_request={"request_type": "size_budget"},
+                request_disposition="honored",
+                current_policy={"video": {"target_vmaf": 92.0}},
+                preview_policy={"video": {"target_vmaf": 95.0}},
+                allow_measured_size_quality_increase=True,
+            )
+            return {"ok": True}
+
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.purge_transient_artifacts"
+        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
+            "mediaforce.web.app._start_encode_queue_worker"
+        ), patch("mediaforce.web.app._refresh_host_status_cache", return_value=[]), patch(
+            "mediaforce.web.app.proposal_alignment_issue",
+            side_effect=fake_proposal_alignment_issue,
+        ), patch(
+            "mediaforce.web.app.folder_ai_tune_preview_action",
+            side_effect=fake_preview_action,
+        ):
+            app = web_app.create_app(self.root / "config.toml")
+            preview_route = next(
+                route
+                for route in app.routes
+                if isinstance(route, APIRoute) and route.path == "/api/folders/{prefix:path}/ai-tune/preview"
+            )
+
+            class _FakeRequest:
+                async def json(self) -> dict[str, str]:
+                    return {"note": "raise quality", "host_key": "host-1"}
+
+            response = asyncio.run(preview_route.endpoint("tv/show", _FakeRequest()))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(captured[0]["allow_measured_size_quality_increase"])
+
     def test_completed_cleanup_route_passes_selected_prefixes(self) -> None:
         from mediaforce.web import app as web_app
 

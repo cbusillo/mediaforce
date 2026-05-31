@@ -720,6 +720,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             current_policy: dict[str, Any],
             preview_policy: dict[str, Any],
             allow_measured_size_quality_tradeoff: bool = False,
+            allow_measured_size_quality_increase: bool = False,
     ) -> str | None:
         return proposal_alignment_issue(
             operator_request=operator_request,
@@ -727,6 +728,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             current_policy=current_policy,
             preview_policy=preview_policy,
             allow_measured_size_quality_tradeoff=allow_measured_size_quality_tradeoff,
+            allow_measured_size_quality_increase=allow_measured_size_quality_increase,
         )
 
     def _folder_ai_tune_deps() -> FolderAiTuneDeps:
