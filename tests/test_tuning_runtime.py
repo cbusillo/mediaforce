@@ -3555,6 +3555,29 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(request["measured_size_followup"])
         self.assertFalse(request["hard_size_cap"])
 
+    def test_operator_requested_experiment_does_not_mark_plain_size_sample_as_followup(self) -> None:
+        request = _operator_requested_experiment(
+            "Run another sample targeting about 300 MB per episode.",
+            {
+                "source_size_bytes": 4_349_049_136,
+                "duration_seconds": 3161.376,
+                "audio_summary": [{"codec_name": "ac3", "channels": 6}],
+                "resolved_policy": {
+                    "video": {"encoder": "libsvtav1"},
+                    "audio": {
+                        "convert_to_opus_codecs": ["ac3"],
+                        "surround_5_1_opus_bitrate": "256k",
+                    },
+                },
+            },
+        )
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "size_budget")
+        self.assertTrue(request["operator_confirmed"])
+        self.assertFalse(request["measured_size_followup"])
+        self.assertFalse(request["hard_size_cap"])
+
     def test_operator_requested_experiment_keeps_heuristic_followup_when_structured_parse_misses_it(self) -> None:
         structured_parse = {
             "summary": "Size follow-up request.",
@@ -5988,6 +6011,22 @@ class TuningRuntimeTests(unittest.TestCase):
             current_policy={"video": {"target_vmaf": 95.0, "max_encoded_percent": 80}},
             preview_policy={"video": {"target_vmaf": 92.0, "max_encoded_percent": 80}},
             allow_measured_size_quality_tradeoff=True,
+        )
+
+        self.assertIsNone(issue)
+
+    def test_proposal_alignment_issue_allows_under_target_size_budget_quality_increase(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "size_budget",
+                "budget_label": "300 MB per episode",
+                "budget_bytes": 300 * 1024 * 1024,
+                "applied_policy": None,
+            },
+            request_disposition="honored",
+            current_policy={"video": {"target_vmaf": 92.0, "max_encoded_percent": 80}},
+            preview_policy={"video": {"target_vmaf": 95.0, "max_encoded_percent": 80}},
+            allow_measured_size_quality_increase=True,
         )
 
         self.assertIsNone(issue)

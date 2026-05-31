@@ -145,12 +145,19 @@ def allows_measured_size_quality_tradeoff(
         *,
         operator_request: dict[str, Any] | None,
         size_target_analysis: dict[str, Any] | None,
+        direction: str = "smaller",
 ) -> bool:
     request = object_dict(operator_request)
     analysis = object_dict(size_target_analysis)
     if str(request.get("request_type") or "").strip().lower() not in {"size_budget", "combined_experiment"}:
         return False
-    if str(analysis.get("status") or "").strip().lower() != "over_target":
+    status = str(analysis.get("status") or "").strip().lower()
+    tradeoff_direction = str(direction or "smaller").strip().lower()
+    if tradeoff_direction == "larger":
+        if status != "under_target":
+            return False
+        return bool(request.get("operator_confirmed"))
+    elif status != "over_target":
         return False
     size_budget_request = object_dict(request.get("size_budget_request"))
     return bool(
@@ -172,6 +179,7 @@ def proposal_alignment_issue(
         current_policy: dict[str, Any],
         preview_policy: dict[str, Any],
         allow_measured_size_quality_tradeoff: bool = False,
+        allow_measured_size_quality_increase: bool = False,
 ) -> str | None:
     if not operator_request:
         return None
@@ -236,7 +244,7 @@ def proposal_alignment_issue(
         current_xpsnr = _float_or_none(current_video.get("target_xpsnr"))
         preview_xpsnr = _float_or_none(preview_video.get("target_xpsnr"))
         if (
-                not allow_measured_size_quality_tradeoff
+                not allow_measured_size_quality_increase
                 and current_vmaf is not None
                 and preview_vmaf is not None
                 and preview_vmaf > current_vmaf + 0.01
@@ -253,7 +261,7 @@ def proposal_alignment_issue(
                 "a specific quality tradeoff before changing quality targets."
             )
         if (
-                not allow_measured_size_quality_tradeoff
+                not allow_measured_size_quality_increase
                 and current_xpsnr is not None
                 and preview_xpsnr is not None
                 and preview_xpsnr > current_xpsnr + 0.01
