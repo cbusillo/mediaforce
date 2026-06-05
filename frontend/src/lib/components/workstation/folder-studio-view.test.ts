@@ -50,6 +50,38 @@ function folderStatusPayload(overrides: Partial<FolderStatusPayload> = {}): Fold
 	};
 }
 
+function workflowState(
+	overrides: Partial<NonNullable<FolderPayload['workflow_state']>> = {}
+): NonNullable<FolderPayload['workflow_state']> {
+	return {
+		prefix: 'tv/Example/Season 1',
+		state: 'ready_to_validate',
+		primary_lane: 'validate',
+		label: 'Ready to validate',
+		tone: 'ready',
+		detail: '2 encoded output(s) need validation.',
+		counts: {
+			items: 2,
+			encode_candidates: 0,
+			ready_to_validate: 2,
+			ready_to_promote: 0,
+			processing: 0,
+			complete: 0,
+			blocked: 0
+		},
+		lane_counts: {},
+		state_counts: {},
+		next_action: {
+			kind: 'validate_outputs',
+			label: 'Validate outputs',
+			enabled: true,
+			target_prefix: 'tv/Example/Season 1'
+		},
+		blockers: [],
+		...overrides
+	};
+}
+
 function folderSummary(overrides: Partial<NonNullable<FolderPayload['summary']>> = {}) {
 	return {
 		prefix: 'tv/Example/Season 1',
@@ -643,6 +675,85 @@ describe('Folder Studio review request mapping', () => {
 			secondary: 'Download pack',
 			secondaryAction: 'download-review-pack'
 		});
+	});
+
+	it('prefers backend workflow state for validation-ready folders', () => {
+		const workflow = resolveWorkflow(
+			folderPayload({ workflow_state: workflowState(), encode_candidate_count: 0 }),
+			folderStatusPayload(),
+			null,
+			null,
+			{ status: 'accepted', message: 'Sample accepted.' },
+			null,
+			null,
+			true,
+			false
+		);
+
+		expect(workflow).toMatchObject({
+			label: 'Ready to validate',
+			title: 'Validate outputs',
+			primary: 'Validate outputs',
+			primaryAction: 'validate-outputs',
+			copy: '2 encoded output(s) need validation.'
+		});
+		expect(
+			resolveWorkflowActionState('validate-outputs', {
+				reviewPackReady: false,
+				pendingProposal: null,
+				calibrationJob: null
+			})
+		).toEqual({ disabled: false, title: '' });
+	});
+
+	it('prefers backend workflow state for promotion-ready folders', () => {
+		const workflow = resolveWorkflow(
+			folderPayload({
+				workflow_state: workflowState({
+					state: 'ready_to_promote',
+					primary_lane: 'promote',
+					label: 'Ready to promote',
+					detail: '1 validated output is ready to promote.',
+					next_action: {
+						kind: 'promote_outputs',
+						label: 'Promote outputs',
+						enabled: true,
+						target_prefix: 'tv/Example/Season 1'
+					}
+				})
+			}),
+			folderStatusPayload(),
+			null,
+			null,
+			{ status: 'accepted', message: 'Sample accepted.' },
+			null,
+			null,
+			true,
+			false
+		);
+
+		expect(workflow).toMatchObject({
+			label: 'Ready to promote',
+			title: 'Promote outputs',
+			primaryAction: 'promote-outputs',
+			copy: '1 validated output is ready to promote.'
+		});
+	});
+
+	it('uses backend status polling workflow state when the folder payload is stale', () => {
+		const workflow = resolveWorkflow(
+			folderPayload({ encode_candidate_count: 0 }),
+			folderStatusPayload({ workflow_state: workflowState() }),
+			null,
+			null,
+			{ status: 'accepted', message: 'Sample accepted.' },
+			null,
+			null,
+			true,
+			false
+		);
+
+		expect(workflow.primaryAction).toBe('validate-outputs');
 	});
 
 	it('makes processing folders monitor-first and keeps review media secondary', () => {

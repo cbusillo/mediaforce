@@ -315,6 +315,28 @@
 		}
 	}
 
+	async function runFolderWorkflowAction(action: WorkflowAction) {
+		if (action !== 'validate-outputs' && action !== 'promote-outputs') return;
+		const actionState = workflowActionState(action);
+		if (actionState.disabled) return;
+		workflowPending = action;
+		profileMessage = '';
+		profileError = '';
+		try {
+			const endpoint = action === 'validate-outputs' ? 'validate-outputs' : 'promote-outputs';
+			const response = await postJson<{ ok: boolean; message?: string }>(
+				`${resolve('/')}api/folders/${encodedPrefix}/${endpoint}`,
+				{}
+			);
+			profileMessage = response.message || workflow.primary;
+			await invalidateAll();
+		} catch (error) {
+			profileError = error instanceof Error ? error.message : 'Folder action could not run.';
+		} finally {
+			workflowPending = null;
+		}
+	}
+
 	async function stopSample() {
 		const action = 'stop-sample';
 		const actionState = workflowActionState(action);
@@ -470,6 +492,17 @@
 							data-mf-wire="live"
 							>{workflowPending === workflow.primaryAction ? 'Retrying' : workflow.primary}</button
 						>
+					{:else if workflow.primaryAction === 'validate-outputs' || workflow.primaryAction === 'promote-outputs'}
+						<button
+							class="control control--primary"
+							type="button"
+							disabled={workflowActionState(workflow.primaryAction).disabled}
+							title={workflowActionState(workflow.primaryAction).title}
+							onclick={() => runFolderWorkflowAction(workflow.primaryAction)}
+							data-mf-action={workflow.primaryAction}
+							data-mf-wire="live"
+							>{workflowPending === workflow.primaryAction ? 'Running' : workflow.primary}</button
+						>
 					{:else}
 						<button
 							class="control control--primary"
@@ -565,6 +598,19 @@
 							data-mf-wire="live"
 							>{workflowPending === workflow.secondaryAction
 								? 'Retrying'
+								: workflow.secondary}</button
+						>
+					{:else if workflow.secondaryAction === 'validate-outputs' || workflow.secondaryAction === 'promote-outputs'}
+						<button
+							class="control"
+							type="button"
+							disabled={workflowActionState(workflow.secondaryAction).disabled}
+							title={workflowActionState(workflow.secondaryAction).title}
+							onclick={() => runFolderWorkflowAction(workflow.secondaryAction)}
+							data-mf-action={workflow.secondaryAction}
+							data-mf-wire="live"
+							>{workflowPending === workflow.secondaryAction
+								? 'Running'
 								: workflow.secondary}</button
 						>
 					{:else}

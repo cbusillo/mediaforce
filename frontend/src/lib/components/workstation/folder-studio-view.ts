@@ -28,6 +28,7 @@ import type {
 	EncodeQueueJob,
 	FolderPayload,
 	FolderStatusPayload,
+	FolderWorkflowState,
 	HostsPayload
 } from '$lib/api/types';
 import type { FooterSignal, ShellTone, StatusTile } from './OperatorShell.svelte';
@@ -77,6 +78,7 @@ export type WorkflowAction =
 	| 'open-folders'
 	| 'open-ops'
 	| 'open-series'
+	| 'promote-outputs'
 	| 'queue-encode'
 	| 'revise-smaller'
 	| 'retry-encode'
@@ -84,6 +86,7 @@ export type WorkflowAction =
 	| 'revise-proposal'
 	| 'start-sample'
 	| 'stop-sample'
+	| 'validate-outputs'
 	| 'resample';
 
 export type ProposalRow = {
@@ -315,6 +318,8 @@ export function resolveWorkflowActionState(
 	}
 	if (action === 'open-folders' || action === 'open-series') return { disabled: false, title: '' };
 	if (action === 'open-ops') return { disabled: false, title: '' };
+	if (action === 'validate-outputs' || action === 'promote-outputs')
+		return { disabled: false, title: '' };
 	if (action === 'retry-encode') return { disabled: false, title: '' };
 	if (action === 'stop-sample') {
 		if (activeCalibrationStatus(calibrationJob?.status)) return { disabled: false, title: '' };
@@ -1014,6 +1019,67 @@ export function reviewReadyCopy(calibration: FolderCalibrationState | null): str
 	return '—';
 }
 
+function workflowToneToShellTone(tone: FolderWorkflowState['tone']): ShellTone {
+	if (tone === 'active') return 'active';
+	if (tone === 'ready' || tone === 'success') return 'ready';
+	if (tone === 'attention') return 'fail';
+	return 'idle';
+}
+
+function actionFromBackendWorkflow(
+	kind: FolderWorkflowState['next_action']['kind']
+): WorkflowAction {
+	if (kind === 'validate_outputs') return 'validate-outputs';
+	if (kind === 'promote_outputs') return 'promote-outputs';
+	if (kind === 'monitor_encode') return 'monitor-processing';
+	if (kind === 'open_ops') return 'open-ops';
+	if (kind === 'review_scope') return 'open-folders';
+	if (kind === 'queue_encode') return 'queue-encode';
+	return 'open-folders';
+}
+
+function resolveBackendWorkflow(
+	folder: FolderPayload,
+	workflow: FolderWorkflowState
+): WorkflowState | null {
+	const action = actionFromBackendWorkflow(workflow.next_action.kind);
+	if (
+		![
+			'processing',
+			'needs_attention',
+			'blocked',
+			'mixed',
+			'ready_to_validate',
+			'ready_to_promote',
+			'complete'
+		].includes(workflow.state)
+	) {
+		return null;
+	}
+	if (workflow.state === 'complete') {
+		return {
+			tone: 'ready',
+			label: workflow.label,
+			title: 'This scope is complete',
+			copy: workflow.detail,
+			primary: folder.series_context ? 'Open series scope' : 'Open Folders',
+			primaryAction: folder.series_context ? 'open-series' : 'open-folders',
+			secondary: 'Open Ops',
+			secondaryAction: 'open-ops'
+		};
+	}
+	return {
+		tone: workflowToneToShellTone(workflow.tone),
+		label: workflow.label,
+		title: workflow.next_action.label,
+		copy: workflow.detail,
+		primary: workflow.next_action.label,
+		primaryAction: action,
+		secondary: folder.series_context ? 'Open series scope' : 'Open Ops',
+		secondaryAction: folder.series_context ? 'open-series' : 'open-ops'
+	};
+}
+
 export function resolveWorkflow(
 	folder: FolderPayload,
 	status: FolderStatusPayload,
@@ -1025,6 +1091,11 @@ export function resolveWorkflow(
 	reviewPackReady = false,
 	approvalReviewReady = Boolean(calibration?.review_media_ready)
 ): WorkflowState {
+	const backendWorkflow = folder.workflow_state ?? status.workflow_state ?? null;
+	if (backendWorkflow) {
+		const resolvedBackendWorkflow = resolveBackendWorkflow(folder, backendWorkflow);
+		if (resolvedBackendWorkflow) return resolvedBackendWorkflow;
+	}
 	const encodeStatus = String(encodeJob?.status ?? '').toLowerCase();
 	if (['failed', 'needs_attention', 'stopped'].includes(encodeStatus)) {
 		const label = encodeStatus === 'failed' ? 'Processing failed' : 'Processing stopped';
@@ -1274,7 +1345,13 @@ export function buildWorkflowSteps(workflow: WorkflowState): WorkflowStep[] {
 	const approveCurrent =
 		['queue-encode', 'approve-size-tradeoff'].includes(activeAction) || activeLabel === 'approved';
 	const encodeCurrent =
-		['monitor-processing', 'open-ops', 'retry-encode'].includes(activeAction) ||
+		[
+			'monitor-processing',
+			'open-ops',
+			'retry-encode',
+			'validate-outputs',
+			'promote-outputs'
+		].includes(activeAction) ||
 		['processing', 'processing failed', 'processing stopped'].includes(activeLabel);
 	return [
 		{
