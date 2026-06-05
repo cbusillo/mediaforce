@@ -47,6 +47,7 @@ ENCODE_CANDIDATE_STATUSES = frozenset({"discovered", "planned", "validated"})
 PROCESSING_JOB_STATUSES = frozenset({"queued", "running", "retry_backoff"})
 ATTENTION_JOB_STATUSES = frozenset({"failed", "stopped", "needs_attention"})
 JOB_STATUSES_FOR_WORKFLOW = PROCESSING_JOB_STATUSES | ATTENTION_JOB_STATUSES | {"completed"}
+PREFIX_QUERY_BATCH_SIZE = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,26 +217,34 @@ def _load_item_rows(connection: DBClient, prefix: str) -> list[DBRow]:
 
 
 def _load_item_rows_for_prefixes(connection: DBClient, prefixes: list[str]) -> list[DBRow]:
-    query = (
-        select(
-            library_items.c.id.label("item_id"),
-            library_items.c.rel_path,
-            library_items.c.status,
-            staged_artifacts.c.library_item_id.label("staged_library_item_id"),
-            staged_artifacts.c.staging_path,
-            staged_artifacts.c.validated_at,
-            staged_artifacts.c.promoted_at,
-        )
-        .select_from(
-            library_items.outerjoin(
-                staged_artifacts,
-                staged_artifacts.c.library_item_id == library_items.c.id,
+    rows_by_key: dict[tuple[int, str | None], DBRow] = {}
+    for prefix_batch in _chunks(prefixes, PREFIX_QUERY_BATCH_SIZE):
+        query = (
+            select(
+                library_items.c.id.label("item_id"),
+                library_items.c.rel_path,
+                library_items.c.status,
+                staged_artifacts.c.library_item_id.label("staged_library_item_id"),
+                staged_artifacts.c.staging_path,
+                staged_artifacts.c.validated_at,
+                staged_artifacts.c.promoted_at,
             )
+            .select_from(
+                library_items.outerjoin(
+                    staged_artifacts,
+                    staged_artifacts.c.library_item_id == library_items.c.id,
+                )
+            )
+            .where(or_(*(_prefix_filter(library_items.c.rel_path, prefix) for prefix in prefix_batch)))
+            .order_by(library_items.c.rel_path)
         )
-        .where(or_(*(_prefix_filter(library_items.c.rel_path, prefix) for prefix in prefixes)))
-        .order_by(library_items.c.rel_path)
-    )
-    return connection.execute(query).mappings().fetchall()
+        for row in connection.execute(query).mappings().fetchall():
+            rows_by_key[(int(row["item_id"]), row["staging_path"])] = row
+    return sorted(rows_by_key.values(), key=lambda row: str(row["rel_path"]))
+
+
+def _chunks(values: list[str], size: int) -> list[list[str]]:
+    return [values[index:index + size] for index in range(0, len(values), size)]
 
 
 def _build_folder_state(
