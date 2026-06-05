@@ -2,12 +2,14 @@ import type {
 	DashboardFoldersPayload,
 	DashboardSummaryPayload,
 	FolderCard,
+	WorkflowTone,
 	HostsPayload
 } from '$lib/api/types';
 import type { FooterSignal, ShellTone, StatusTile } from './OperatorShell.svelte';
 import { formatBytes, summarizeStatuses } from './folder-studio-view';
 
 export function queueFolderTone(folder: FolderCard): ShellTone {
+	if (folder.workflow_state?.tone) return workflowToneToShellTone(folder.workflow_state.tone);
 	const explicit = String(folder.review_badge_tone ?? '').toLowerCase();
 	if (explicit === 'fail' || explicit === 'blocked' || explicit === 'error') return 'fail';
 	if (explicit === 'ready' || explicit === 'success') return 'ready';
@@ -19,11 +21,20 @@ export function queueFolderTone(folder: FolderCard): ShellTone {
 }
 
 export function queueFolderState(folder: FolderCard): string {
+	const workflowLabel = folder.workflow_state?.label?.trim();
+	if (workflowLabel) return workflowLabel;
 	const label = folder.review_badge_label?.trim();
 	if (label) return queueStateLabel(label);
 	if (folder.pending_count > 0) return 'Needs sample';
 	if (folder.known_saved_bytes > 0) return 'Completed';
 	return 'Cataloged';
+}
+
+export function workflowToneToShellTone(tone: WorkflowTone): ShellTone {
+	if (tone === 'active') return 'active';
+	if (tone === 'ready' || tone === 'success') return 'ready';
+	if (tone === 'attention') return 'fail';
+	return 'idle';
 }
 
 export function queueStateLabel(label: string): string {
@@ -60,7 +71,19 @@ export function totalProjectedReclaim(folders: FolderCard[]): number {
 }
 
 export function totalPendingItems(folders: FolderCard[]): number {
-	return folders.reduce((total, folder) => total + Math.max(folder.pending_count ?? 0, 0), 0);
+	return folders.reduce((total, folder) => total + workflowOpenItemCount(folder), 0);
+}
+
+export function workflowOpenItemCount(folder: FolderCard): number {
+	const counts = folder.workflow_state?.counts;
+	if (!counts) return Math.max(folder.pending_count ?? 0, 0);
+	return (
+		Math.max(counts.encode_candidates ?? 0, 0) +
+		Math.max(counts.ready_to_validate ?? 0, 0) +
+		Math.max(counts.ready_to_promote ?? 0, 0) +
+		Math.max(counts.processing ?? 0, 0) +
+		Math.max(counts.blocked ?? 0, 0)
+	);
 }
 
 export function buildQueueStatusTiles(
@@ -152,5 +175,7 @@ export function buildQueueFooterSignals(
 }
 
 export function folderStatusCopy(folder: FolderCard): string {
+	const workflowDetail = folder.workflow_state?.detail?.trim();
+	if (workflowDetail) return workflowDetail;
 	return folder.review_badge_detail || summarizeStatuses(folder.statuses);
 }

@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { FolderCard } from '$lib/api/types';
-import { queueFolderState, queueStateLabel } from './queue-workstation';
+import {
+	folderStatusCopy,
+	queueFolderState,
+	queueFolderTone,
+	queueStateLabel,
+	totalPendingItems
+} from './queue-workstation';
 
 function folder(overrides: Partial<FolderCard>): FolderCard {
 	return {
@@ -23,6 +29,36 @@ function folder(overrides: Partial<FolderCard>): FolderCard {
 	};
 }
 
+function workflowState(overrides: Partial<NonNullable<FolderCard['workflow_state']>> = {}) {
+	return {
+		prefix: 'tv/show',
+		state: 'ready_to_validate',
+		primary_lane: 'validate' as const,
+		label: 'Ready to validate',
+		tone: 'ready' as const,
+		detail: '2 encoded output(s) need validation.',
+		counts: {
+			items: 4,
+			encode_candidates: 0,
+			ready_to_validate: 2,
+			ready_to_promote: 0,
+			processing: 0,
+			complete: 2,
+			blocked: 0
+		},
+		lane_counts: {},
+		state_counts: {},
+		next_action: {
+			kind: 'validate_outputs' as const,
+			label: 'Validate outputs',
+			enabled: true,
+			target_prefix: 'tv/show'
+		},
+		blockers: [],
+		...overrides
+	};
+}
+
 describe('Queue workstation labels', () => {
 	it('normalizes workflow state labels into basic-user actions', () => {
 		expect(queueStateLabel('Ready to start')).toBe('Needs sample');
@@ -35,5 +71,20 @@ describe('Queue workstation labels', () => {
 		expect(queueFolderState(folder({ pending_count: 3 }))).toBe('Needs sample');
 		expect(queueFolderState(folder({ known_saved_bytes: 2048 }))).toBe('Completed');
 		expect(queueFolderState(folder({}))).toBe('Cataloged');
+	});
+
+	it('prefers canonical workflow state over pending-count fallbacks', () => {
+		const readyToValidate = folder({ pending_count: 3, workflow_state: workflowState() });
+
+		expect(queueFolderState(readyToValidate)).toBe('Ready to validate');
+		expect(queueFolderTone(readyToValidate)).toBe('ready');
+		expect(folderStatusCopy(readyToValidate)).toBe('2 encoded output(s) need validation.');
+		expect(totalPendingItems([readyToValidate])).toBe(2);
+	});
+
+	it('maps workflow attention to a fail tone for workbench scanning', () => {
+		expect(queueFolderTone(folder({ workflow_state: workflowState({ tone: 'attention' }) }))).toBe(
+			'fail'
+		);
 	});
 });
