@@ -4,6 +4,47 @@ export interface MetricSupport {
 	ssim: boolean;
 }
 
+export type WorkflowTone = 'idle' | 'ready' | 'active' | 'attention' | 'success';
+export type WorkflowActionKind =
+	| 'none'
+	| 'queue_encode'
+	| 'validate_outputs'
+	| 'promote_outputs'
+	| 'monitor_encode'
+	| 'open_ops'
+	| 'review_scope';
+export type WorkflowLane =
+	| 'none'
+	| 'encode'
+	| 'validate'
+	| 'promote'
+	| 'processing'
+	| 'attention'
+	| 'complete'
+	| 'blocked'
+	| 'mixed';
+
+export interface WorkflowNextAction {
+	kind: WorkflowActionKind;
+	label: string;
+	enabled: boolean;
+	target_prefix: string;
+}
+
+export interface FolderWorkflowState {
+	prefix: string;
+	state: string;
+	primary_lane: WorkflowLane;
+	label: string;
+	tone: WorkflowTone;
+	detail: string;
+	counts: Record<string, number>;
+	lane_counts: Record<string, number>;
+	state_counts: Record<string, number>;
+	next_action: WorkflowNextAction;
+	blockers: string[];
+}
+
 export interface FolderCard {
 	prefix: string;
 	title: string;
@@ -22,6 +63,7 @@ export interface FolderCard {
 	review_badge_label?: string | null;
 	review_badge_tone?: string | null;
 	review_badge_detail?: string | null;
+	workflow_state?: FolderWorkflowState | null;
 	details_loading: boolean;
 }
 
@@ -228,6 +270,7 @@ export interface DashboardSummaryPayload {
 
 export interface DashboardFoldersPayload {
 	folders: FolderCard[];
+	series_folders?: FolderCard[];
 	catalog_empty: boolean;
 	folder_cache_key: string;
 }
@@ -379,6 +422,7 @@ export interface FolderPayload {
 	calibration?: Record<string, unknown> | null;
 	advice?: Record<string, unknown> | null;
 	approved_season_shortcut?: Record<string, unknown> | null;
+	series_context?: { prefix: string; title: string } | null;
 	pending_proposal?: Record<string, unknown> | null;
 	review_gate?: Record<string, unknown>;
 	calibration_queue?: Record<string, unknown>;
@@ -396,6 +440,8 @@ export interface FolderPayload {
 	encode_queue_state?: EncodeQueueSummary['state'];
 	encode_queue_summary?: string;
 	encode_queue_scheduler?: Record<string, unknown>;
+	encode_candidate_count?: number;
+	workflow_state?: FolderWorkflowState | null;
 }
 
 export interface FolderBenchPreviewResponse {

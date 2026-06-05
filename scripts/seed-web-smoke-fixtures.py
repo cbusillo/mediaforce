@@ -813,7 +813,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             {
                 "label": "Folder Studio approved fixture",
                 "route": "/folders/tv/Approved%20Show/Season%201",
-                "marker": "Queue encode",
+                "marker": "Approved folder has no queueable items",
             },
             {
                 "label": "Folder Studio missed-target fixture",

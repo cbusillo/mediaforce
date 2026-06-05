@@ -102,6 +102,10 @@ The web UI also auto-starts background catalog refreshes when the full library
 view is empty or stale, and it auto-refreshes the current folder before
 showing calibration actions when that folder's scan data is stale.
 
+The `/folders` index can browse either season folders or whole TV series
+prefixes. Use the Scope control there when an operation should cover an entire
+series instead of one season.
+
 Folder calibration now uses a size-first review flow by default. The checked-in
 defaults aim for roughly 300 MB per 45-minute episode at up to 1080p, then use
 sampled metrics as guardrails and visual review clips as the operator decision

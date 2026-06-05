@@ -15,6 +15,8 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import run_manifests
 from mediaforce.core.db_tables import staged_artifacts
+from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES
+from mediaforce.library.workflow_state import derive_item_workflow_state
 from mediaforce.core.type_defs import object_dict
 from mediaforce.library.planner import build_manifest_item, recommend_item
 from mediaforce.library.scanner import scan_library
@@ -28,6 +30,7 @@ def select_candidates(
         prefixes: list[str],
         limit: int | None,
         buckets: list[str] | None = None,
+        require_encode_lane: bool = False,
 ) -> list[dict[str, Any]]:
     joined_tables = outerjoin(
         library_items,
@@ -37,8 +40,12 @@ def select_candidates(
     query = (
         select(
             library_items,
+            library_items.c.id.label("item_id"),
             staged_artifacts.c.staging_size_bytes,
             staged_artifacts.c.staging_path,
+            staged_artifacts.c.library_item_id.label("staged_library_item_id"),
+            staged_artifacts.c.promoted_at,
+            staged_artifacts.c.validated_at,
             staged_artifacts.c.quality_metric,
             staged_artifacts.c.quality_score,
             staged_artifacts.c.validation_json,
@@ -49,12 +56,35 @@ def select_candidates(
     if prefixes:
         query = query.where(or_(*(library_items.c.rel_path.like(f"{prefix}%") for prefix in prefixes)))
     query = query.order_by(library_items.c.priority_score.desc(), library_items.c.size_bytes.desc())
-    if limit is not None:
+    if limit is not None and not require_encode_lane:
         query = query.limit(limit)
     rows = [object_dict(row) for row in connection.execute(query).mappings().fetchall()]
+    if require_encode_lane:
+        rows = [row for row in rows if derive_item_workflow_state(row).lane == "encode"]
+        if limit is not None:
+            rows = rows[:limit]
     if buckets:
         rows = [row for row in rows if recommend_item(row, config).bucket in buckets]
     return rows
+
+
+def select_encode_candidates(
+        connection: DBClient,
+        config: MediaforceConfig,
+        *,
+        prefixes: list[str],
+        limit: int | None,
+        buckets: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    return select_candidates(
+        connection,
+        config,
+        statuses=sorted(ENCODE_CANDIDATE_STATUSES),
+        prefixes=prefixes,
+        limit=limit,
+        buckets=buckets,
+        require_encode_lane=True,
+    )
 
 
 def build_run_manifest(rows: list[dict[str, Any]], config: MediaforceConfig) -> dict[str, Any]:
@@ -124,8 +154,7 @@ def create_folder_manifest(
 ) -> tuple[dict[str, Any], Path]:
     if scan_first:
         scan_library(connection, config, prefixes=[prefix])
-    rows = select_candidates(connection, config, statuses=["discovered", "planned", "validated"], prefixes=[prefix],
-                             limit=limit)
+    rows = select_encode_candidates(connection, config, prefixes=[prefix], limit=limit)
     manifest = build_run_manifest(rows, config)
     manifest_path = write_manifest(connection, config, manifest)
     return manifest, manifest_path

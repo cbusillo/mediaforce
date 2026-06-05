@@ -74,7 +74,9 @@ export type WorkflowAction =
 	| 'monitor-processing'
 	| 'monitor-review'
 	| 'monitor-sample'
+	| 'open-folders'
 	| 'open-ops'
+	| 'open-series'
 	| 'queue-encode'
 	| 'revise-smaller'
 	| 'retry-encode'
@@ -311,6 +313,7 @@ export function resolveWorkflowActionState(
 	if (['monitor-processing', 'monitor-review', 'monitor-sample'].includes(action)) {
 		return { disabled: false, title: '' };
 	}
+	if (action === 'open-folders' || action === 'open-series') return { disabled: false, title: '' };
 	if (action === 'open-ops') return { disabled: false, title: '' };
 	if (action === 'retry-encode') return { disabled: false, title: '' };
 	if (action === 'stop-sample') {
@@ -1057,6 +1060,19 @@ export function resolveWorkflow(
 		};
 	}
 	if (reviewGate?.status === 'accepted') {
+		const candidateCount = numberValue(folder.encode_candidate_count);
+		if (candidateCount === 0) {
+			return {
+				tone: 'ready',
+				label: 'Approved',
+				title: 'Approved folder has no queueable items',
+				copy: 'Approved settings are saved, but every item in this folder is already past the pending encode states. Open the series scope to queue broader work.',
+				primary: folder.series_context ? 'Open series scope' : 'Open Folders',
+				primaryAction: folder.series_context ? 'open-series' : 'open-folders',
+				secondary: 'Download pack',
+				secondaryAction: 'download-review-pack'
+			};
+		}
 		return {
 			tone: 'ready',
 			label: 'Approved',

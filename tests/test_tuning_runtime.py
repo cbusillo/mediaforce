@@ -3,6 +3,7 @@ import multiprocessing
 import json
 import re
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -3491,6 +3492,24 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("aggressive experiment directly", response.request_response)
         self._assert_structured_subprocess_call(commands)
 
+    def test_request_seed_policy_keeps_structured_worker_failure_diagnostics(self) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            timeout = kwargs.get("timeout")
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=float(timeout or 0), stderr="model timed out")
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+            response = request_seed_policy(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/lucifer/season-2",
+                    "base_policy": {"video": {"target_size_mb": 300.0}},
+                },
+            )
+
+        self.assertFalse(response.ok)
+        self.assertIn("attempt 1: timed out", response.raw)
+        self.assertIn("model timed out", response.raw)
+
     def test_operator_requested_experiment_detects_literal_vmaf_target(self) -> None:
         request = _operator_requested_experiment("I want to try 85 VMAF on this show.")
 
@@ -3957,6 +3976,231 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(proposal["applied_policy"], {})
         self.assertIsNone(proposal["job_fields"]["seed_applied_policy"])
         self.assertEqual(proposal["request_disposition"], "honored")
+
+    def test_folder_ai_tune_preview_keeps_current_policy_when_seed_worker_fails_for_first_size_budget(self) -> None:
+        saved_proposals: list[dict[str, Any]] = []
+        base_policy = {"video": {"target_size_mb": 300.0, "target_vmaf": 85.0, "max_encoded_percent": 80}}
+        host = HostStatus(
+            key="host-1",
+            label="M4 Studio",
+            mode="ssh",
+            priority=10,
+            capabilities=["sample_calibration"],
+            available=True,
+            message="Mounted and ready",
+            missing_paths=[],
+        )
+        operator_request = {
+            "request_type": "size_budget",
+            "operator_confirmed": True,
+            "budget_label": "300 MB per episode",
+            "budget_bytes": 300 * 1024 * 1024,
+            "feasibility": "aggressive",
+            "applied_policy": None,
+        }
+        failed_seed = {
+            "policy": dict(base_policy),
+            "job_fields": {
+                "seed_source": "default",
+                "seed_summary": "The seed worker did not return valid structured JSON.",
+                "seed_diagnosis": "The seed worker did not complete cleanly.",
+                "seed_confidence": "low",
+                "seed_evidence_checked": [],
+                "seed_suggested_follow_up": "Ask again with a concrete experiment or artifact concern.",
+                "seed_request_disposition": "unclear",
+                "seed_request_response": "I could not turn that note into a trustworthy first draft.",
+                "seed_feasibility_note": None,
+                "seed_prompt_version": "seed-v8",
+                "seed_raw_response": "attempt 1: timed out after 90s",
+                "seed_proposed_policy": None,
+                "seed_applied_policy": None,
+            },
+        }
+
+        deps = FolderAiTuneDeps(
+            resolve_sample_host=lambda _config, _host_key: host,
+            load_job_state=lambda *_args, **_kwargs: None,
+            load_retryable_sample_job_state=lambda *_args, **_kwargs: None,
+            sample_item=lambda *_args, **_kwargs: {
+                "rel_path": "tv/Lucifer/Season 2/Lucifer.S02E10.mkv",
+                "source_path": str(self.root / "source" / "tv" / "Lucifer" / "Season 2" / "Lucifer.S02E10.mkv"),
+                "source_size_bytes": 3_913_541_003,
+                "video_codec": "hevc",
+                "duration_seconds": 2686.464,
+                "audio_summary": [{"channels": 6, "codec_name": "aac"}],
+                "subtitle_summary": [],
+                "resolved_policy": dict(base_policy),
+            },
+            operator_requested_experiment=lambda *_args, **_kwargs: dict(operator_request),
+            load_calibration_state=lambda *_args, **_kwargs: None,
+            recent_tuning_sessions=lambda *_args, **_kwargs: [],
+            matching_request_history=lambda *_args, **_kwargs: None,
+            metric_support=lambda: {"vmaf": True, "xpsnr": True},
+            maybe_seed_baseline_policy=lambda *_args, **_kwargs: dict(failed_seed),
+            seed_advice_payload=lambda _note, seed_metadata: {
+                "ok": True,
+                "summary": seed_metadata["job_fields"]["seed_summary"],
+                "raw": seed_metadata["job_fields"]["seed_raw_response"],
+                "kind": "seed_baseline",
+                "operator_note": "Target 300MB per episode",
+                "prompt_version": seed_metadata["job_fields"]["seed_prompt_version"],
+                "request_disposition": seed_metadata["job_fields"]["seed_request_disposition"],
+                "request_response": seed_metadata["job_fields"]["seed_request_response"],
+                "feasibility_note": seed_metadata["job_fields"]["seed_feasibility_note"],
+                "diagnosis": seed_metadata["job_fields"]["seed_diagnosis"],
+                "confidence": seed_metadata["job_fields"]["seed_confidence"],
+                "evidence_checked": [],
+                "suggested_follow_up": seed_metadata["job_fields"]["seed_suggested_follow_up"],
+                "applied_policy": seed_metadata["job_fields"]["seed_applied_policy"],
+            },
+            proposal_alignment_issue=proposal_alignment_issue,
+            now_iso=lambda: "2026-06-04T23:54:18+00:00",
+            proposal_signal_copy=lambda *_args, **_kwargs: "signal",
+            proposal_context_snapshot=lambda **kwargs: dict(kwargs),
+            save_pending_proposal=lambda _config, _prefix, payload: saved_proposals.append(dict(payload)),
+            pending_proposal_public_view=lambda payload: payload,
+            build_tuning_runtime_toolbelt=lambda *_args, **_kwargs: {},
+            review_pack_dir=lambda *_args, **_kwargs: self.root / "review-pack",
+            remove_path_if_exists=lambda *_args, **_kwargs: None,
+            build_multimodal_review_pack=lambda *_args, **_kwargs: None,
+            multimodal_review_pack_public_view=lambda *_args, **_kwargs: None,
+            tuning_advice_payload=lambda *_args, **_kwargs: {},
+            load_pending_proposal=lambda *_args, **_kwargs: None,
+            apply_policy_fragment=lambda current, fragment: {**current, **fragment},
+            save_advice_state=lambda *_args, **_kwargs: None,
+            save_job_state=lambda *_args, **_kwargs: None,
+            clear_pending_proposal=lambda *_args, **_kwargs: None,
+            record_tuning_session=lambda *_args, **_kwargs: "session-1",
+        )
+
+        with patch("mediaforce.web.runtime.folder_ai_tuning.inspect_prefix", return_value={"item_count": 18}):
+            result = folder_ai_tune_preview_action(
+                self.config,
+                deps,
+                "tv/Lucifer/Season 2",
+                "Target 300MB per episode",
+                "host-1",
+            )
+
+        self.assertTrue(result["ok"])
+        proposal = saved_proposals[0]
+        self.assertTrue(proposal["can_queue"])
+        self.assertEqual(proposal["preview_policy"], base_policy)
+        self.assertEqual(proposal["applied_policy"], {})
+        self.assertEqual(proposal["request_disposition"], "honored")
+        self.assertIn("current policy", proposal["request_response"])
+        self.assertEqual(proposal["trace"]["raw_response"], "attempt 1: timed out after 90s")
+
+    def test_folder_ai_tune_preview_preserves_seed_refusal_for_first_size_budget(self) -> None:
+        saved_proposals: list[dict[str, Any]] = []
+        base_policy = {"video": {"target_size_mb": 300.0, "target_vmaf": 85.0, "max_encoded_percent": 80}}
+        host = HostStatus(
+            key="host-1",
+            label="M4 Studio",
+            mode="ssh",
+            priority=10,
+            capabilities=["sample_calibration"],
+            available=True,
+            message="Mounted and ready",
+            missing_paths=[],
+        )
+        operator_request = {
+            "request_type": "size_budget",
+            "operator_confirmed": True,
+            "budget_label": "300 MB per episode",
+            "budget_bytes": 300 * 1024 * 1024,
+            "feasibility": "infeasible",
+            "applied_policy": None,
+        }
+        refused_seed = {
+            "policy": dict(base_policy),
+            "job_fields": {
+                "seed_source": "default",
+                "seed_summary": "The requested size budget is not feasible as written.",
+                "seed_diagnosis": "The worker refused the draft because the budget cannot be met cleanly.",
+                "seed_confidence": "high",
+                "seed_evidence_checked": [],
+                "seed_suggested_follow_up": "Relax the budget or ask for a measured follow-up.",
+                "seed_request_disposition": "rejected",
+                "seed_request_response": "I cannot make this first sample queueable as written.",
+                "seed_feasibility_note": "infeasible",
+                "seed_prompt_version": "seed-v8",
+                "seed_raw_response": "{\"request_disposition\":\"rejected\"}",
+                "seed_proposed_policy": None,
+                "seed_applied_policy": None,
+            },
+        }
+
+        deps = FolderAiTuneDeps(
+            resolve_sample_host=lambda _config, _host_key: host,
+            load_job_state=lambda *_args, **_kwargs: None,
+            load_retryable_sample_job_state=lambda *_args, **_kwargs: None,
+            sample_item=lambda *_args, **_kwargs: {
+                "rel_path": "tv/Lucifer/Season 2/Lucifer.S02E10.mkv",
+                "source_path": str(self.root / "source" / "tv" / "Lucifer" / "Season 2" / "Lucifer.S02E10.mkv"),
+                "source_size_bytes": 3_913_541_003,
+                "video_codec": "hevc",
+                "duration_seconds": 2686.464,
+                "audio_summary": [{"channels": 6, "codec_name": "aac"}],
+                "subtitle_summary": [],
+                "resolved_policy": dict(base_policy),
+            },
+            operator_requested_experiment=lambda *_args, **_kwargs: dict(operator_request),
+            load_calibration_state=lambda *_args, **_kwargs: None,
+            recent_tuning_sessions=lambda *_args, **_kwargs: [],
+            matching_request_history=lambda *_args, **_kwargs: None,
+            metric_support=lambda: {"vmaf": True, "xpsnr": True},
+            maybe_seed_baseline_policy=lambda *_args, **_kwargs: dict(refused_seed),
+            seed_advice_payload=lambda _note, seed_metadata: {
+                "ok": True,
+                "summary": seed_metadata["job_fields"]["seed_summary"],
+                "raw": seed_metadata["job_fields"]["seed_raw_response"],
+                "kind": "seed_baseline",
+                "operator_note": "Target 300MB per episode",
+                "prompt_version": seed_metadata["job_fields"]["seed_prompt_version"],
+                "request_disposition": seed_metadata["job_fields"]["seed_request_disposition"],
+                "request_response": seed_metadata["job_fields"]["seed_request_response"],
+                "feasibility_note": seed_metadata["job_fields"]["seed_feasibility_note"],
+                "diagnosis": seed_metadata["job_fields"]["seed_diagnosis"],
+                "confidence": seed_metadata["job_fields"]["seed_confidence"],
+                "evidence_checked": [],
+                "suggested_follow_up": seed_metadata["job_fields"]["seed_suggested_follow_up"],
+                "applied_policy": seed_metadata["job_fields"]["seed_applied_policy"],
+            },
+            proposal_alignment_issue=proposal_alignment_issue,
+            now_iso=lambda: "2026-06-04T23:54:18+00:00",
+            proposal_signal_copy=lambda *_args, **_kwargs: "signal",
+            proposal_context_snapshot=lambda **kwargs: dict(kwargs),
+            save_pending_proposal=lambda _config, _prefix, payload: saved_proposals.append(dict(payload)),
+            pending_proposal_public_view=lambda payload: payload,
+            build_tuning_runtime_toolbelt=lambda *_args, **_kwargs: {},
+            review_pack_dir=lambda *_args, **_kwargs: self.root / "review-pack",
+            remove_path_if_exists=lambda *_args, **_kwargs: None,
+            build_multimodal_review_pack=lambda *_args, **_kwargs: None,
+            multimodal_review_pack_public_view=lambda *_args, **_kwargs: None,
+            tuning_advice_payload=lambda *_args, **_kwargs: {},
+            load_pending_proposal=lambda *_args, **_kwargs: None,
+            apply_policy_fragment=lambda current, fragment: {**current, **fragment},
+            save_advice_state=lambda *_args, **_kwargs: None,
+            save_job_state=lambda *_args, **_kwargs: None,
+            clear_pending_proposal=lambda *_args, **_kwargs: None,
+            record_tuning_session=lambda *_args, **_kwargs: "session-1",
+        )
+
+        with patch("mediaforce.web.runtime.folder_ai_tuning.inspect_prefix", return_value={"item_count": 18}):
+            result = folder_ai_tune_preview_action(
+                self.config,
+                deps,
+                "tv/Lucifer/Season 2",
+                "Target 300MB per episode",
+                "host-1",
+            )
+
+        self.assertTrue(result["ok"])
+        proposal = saved_proposals[0]
+        self.assertFalse(proposal["can_queue"])
+        self.assertEqual(proposal["request_disposition"], "rejected")
+        self.assertEqual(proposal["request_response"], "I cannot make this first sample queueable as written.")
 
     def test_folder_ai_tune_preview_enforces_followup_size_target_after_measured_miss(self) -> None:
         saved_proposals: list[dict[str, Any]] = []
@@ -5657,6 +5901,39 @@ class TuningRuntimeTests(unittest.TestCase):
 
         assert shortcut is not None
         self.assertEqual(shortcut["season_prefixes"], ["tv/100%_Real/Season 1"])
+
+    def test_sibling_approved_season_memory_supports_show_root_prefix(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            season_session = record_tuning_session(
+                connection,
+                prefix="tv/Suits/Season 2",
+                note="season note",
+                response={"summary": "season", "confidence": "high", "raw": "{}"},
+                applied_policy={"video": {"target_xpsnr": 35.0}},
+                toolbelt={},
+                created_at="2026-03-20T00:00:00+00:00",
+            )
+            connection.execute(
+                learning_artifacts.insert().values(
+                    artifact_id="artifact-show-root",
+                    session_id=season_session,
+                    prefix="tv/Suits/Season 2",
+                    title="Season 2 approval",
+                    artifact_path=str(self.root / "learned-memory" / "season-2.md"),
+                    summary="season root",
+                    tags_json=json.dumps(["approval:visual", "decision:accepted"], sort_keys=True),
+                    created_at="2026-03-20T00:00:00+00:00",
+                    updated_at="2026-03-20T00:00:00+00:00",
+                )
+            )
+
+            shortcut = sibling_approved_season_memory(connection, prefix="tv/Suits")
+
+        assert shortcut is not None
+        self.assertEqual(shortcut["root_prefix"], "tv/Suits")
+        self.assertEqual(shortcut["season_prefixes"], ["tv/Suits/Season 2"])
+        self.assertIn("Season 2", shortcut["suggested_note"])
+        self.assertIn("remaining episodes", shortcut["suggested_note"])
 
     def test_sibling_approved_season_memory_ignores_episode_level_prefixes(self) -> None:
         with open_db(self.config.paths.db_path) as connection:

@@ -42,6 +42,7 @@ from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_pref
     load_latest_terminal_encode_job_for_prefix, load_queue_state, repair_persisted_encode_job_hosts, \
     save_encode_job, save_queue_state
 from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
+from mediaforce.library.run_manifests import select_encode_candidates
 from mediaforce.hosts import status_runtime as host_status_runtime
 from mediaforce.remote import HostStatus
 from mediaforce.tuning.calibration_jobs import list_queue_summary
@@ -52,6 +53,7 @@ from mediaforce.web.runtime import dashboard_payloads, encode_runtime, folder_ac
     host_runtime as host_runtime_module, job_runtime, queue_actions as queue_actions_runtime, \
     calibration_runtime
 from mediaforce.web.runtime import folder_cards as folder_cards_runtime
+from mediaforce.library import workflow_state as workflow_state_runtime
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 
 
@@ -3178,6 +3180,158 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(card.statuses["validated"], 1)
         self.assertEqual(card.statuses["promoted"], 1)
 
+    def test_series_folder_cards_group_tv_items_by_show(self) -> None:
+        first = self._create_source_file("season-one.mkv")
+        second = self._create_source_file("season-two.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            first_id = self._insert_library_item(connection, first)
+            second_id = self._insert_library_item(connection, second)
+            for item_id, rel_path in (
+                    (first_id, "tv/show/Season 1/episode-1.mkv"),
+                    (second_id, "tv/show/Season 2/episode-1.mkv"),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(rel_path=rel_path, parent_dir=rel_path.rsplit("/", 1)[0], size_bytes=2 * 1024 ** 3)
+                )
+
+            web_app._reset_folder_card_cache()
+            season_cards = web_app._list_folder_cards(self.config, connection)
+            series_cards = web_app._list_series_folder_cards(self.config, connection)
+
+        self.assertEqual({card.prefix for card in season_cards}, {"tv/show/Season 1", "tv/show/Season 2"})
+        matching_series = [card for card in series_cards if card.prefix == "tv/show"]
+        self.assertEqual(len(matching_series), 1)
+        self.assertEqual(matching_series[0].title, "show")
+        self.assertEqual(matching_series[0].scope_label, "Series")
+        self.assertEqual(matching_series[0].item_count, 2)
+        self.assertEqual(matching_series[0].pending_count, 2)
+
+    def test_series_folder_cards_aggregate_descendant_encode_attention_badges(self) -> None:
+        source = self._create_source_file("episode-series-attention.mkv")
+        manifest_path = self._write_manifest("manifest-series-attention.json", [{"library_item_id": 1}])
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source)
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_id)
+                .values(
+                    size_bytes=2 * 1024 * 1024 * 1024,
+                    rel_path="tv/show/Season 2/episode-series-attention.mkv",
+                    parent_dir="tv/show/Season 2",
+                )
+            )
+            self._save_job(
+                connection,
+                job_id="series-child-attention",
+                manifest_name=manifest_path.name,
+                host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                status="needs_attention",
+                attempt_count=1,
+            )
+            connection.execute(
+                update(encode_jobs)
+                .where(encode_jobs.c.job_id == "series-child-attention")
+                .values(prefix="tv/show/Season 2", error="Error: child season failed")
+            )
+
+            series_cards = web_app._list_series_folder_cards(self.config, connection)
+
+        series_card = next(card for card in series_cards if card.prefix == "tv/show")
+        self.assertEqual(series_card.review_badge_label, "Needs attention")
+        self.assertEqual(series_card.review_badge_tone, "warning")
+        self.assertEqual(series_card.review_badge_detail, "Error: child season failed")
+
+    def test_series_folder_cards_aggregate_descendant_calibration_badges(self) -> None:
+        source = self._create_source_file("episode-series-calibration.mkv")
+        now = web_app._now_iso()
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source)
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_id)
+                .values(
+                    size_bytes=2 * 1024 * 1024 * 1024,
+                    rel_path="tv/show/Season 2/episode-series-calibration.mkv",
+                    parent_dir="tv/show/Season 2",
+                )
+            )
+            connection.execute(
+                calibration_jobs.insert().values(
+                    job_id="series-child-calibration",
+                    prefix="tv/show/Season 2",
+                    status="running",
+                    lane="sample",
+                    action="sample",
+                    host_json="{}",
+                    policy_json="{}",
+                    sample_item_json="{}",
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                )
+            )
+
+            series_cards = web_app._list_series_folder_cards(self.config, connection)
+
+        series_card = next(card for card in series_cards if card.prefix == "tv/show")
+        self.assertEqual(series_card.review_badge_label, "Sample running")
+        self.assertEqual(series_card.review_badge_tone, "attention")
+
+    def test_dashboard_folders_payload_exposes_series_folders(self) -> None:
+        season_card = folder_cards_runtime.FolderCard(
+            prefix="tv/show/Season 1",
+            title="show · Season 1",
+            subtitle="show",
+            scope_label="Season",
+            item_count=1,
+            pending_count=1,
+            total_size_bytes=1024,
+            estimated_savings_bytes=512,
+            known_saved_bytes=0,
+            projected_reclaim_bytes=512,
+            average_age_days=0.0,
+            sort_score=1.0,
+            statuses={"planned": 1},
+            video_codecs={"h264": 1},
+        )
+        series_card = replace(season_card, prefix="tv/show", title="show", scope_label="Series", item_count=2)
+
+        payload = dashboard_payloads.dashboard_folders_payload(
+            self.config,
+            folder_card_cache_key=lambda _config: ("cache", 1, 2),
+            list_folder_cards=lambda _config, _connection: [season_card],
+            list_series_folder_cards=lambda _config, _connection: [series_card],
+        )
+
+        self.assertEqual(payload["folders"][0]["prefix"], "tv/show/Season 1")
+        self.assertEqual(payload["series_folders"][0]["prefix"], "tv/show")
+        self.assertEqual(payload["series_folders"][0]["scope_label"], "Series")
+
+    def test_folder_studio_series_context_and_encode_candidate_count_follow_manifest_selection(self) -> None:
+        pending = self._create_source_file("pending.mkv")
+        encoded = self._create_source_file("encoded.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            pending_id = self._insert_library_item(connection, pending, status="discovered")
+            encoded_id = self._insert_library_item(connection, encoded, status="encoded")
+            for item_id, rel_path in (
+                    (pending_id, "tv/show/Season 1/episode-1.mkv"),
+                    (encoded_id, "tv/show/Season 2/episode-1.mkv"),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(rel_path=rel_path, parent_dir=rel_path.rsplit("/", 1)[0])
+                )
+
+            self.assertEqual(web_app._folder_series_context("tv/show/Season 2"), {"prefix": "tv/show", "title": "show"})
+            self.assertIsNone(web_app._folder_series_context("tv/show"))
+            self.assertEqual(web_app._folder_encode_candidate_count(connection, self.config, "tv/show/Season 2"), 0)
+            self.assertEqual(web_app._folder_encode_candidate_count(connection, self.config, "tv/show"), 1)
+
     def test_folder_cards_projected_reclaim_uses_known_validated_savings(self) -> None:
         validated = self._create_source_file("episode-validated.mkv")
 
@@ -3734,6 +3888,45 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(card.review_badge_tone, "ok")
         self.assertEqual(card.review_badge_detail, "All staged outputs passed validation.")
 
+    def test_folder_cards_include_canonical_workflow_state(self) -> None:
+        encoded = self._create_source_file("episode-workflow-card.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, encoded, status="encoded")
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_id)
+                .values(
+                    size_bytes=2 * 1024 * 1024 * 1024,
+                    rel_path=f"tv/show/Season 9/{encoded.name}",
+                    parent_dir="tv/show/Season 9",
+                    video_codec="h264",
+                )
+            )
+            self._insert_staged_artifact(connection, item_id, self._staging_path(encoded.name))
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(bytes_saved=2 * 1024 * 1024 * 1024)
+            )
+
+            cards = folder_cards_runtime.list_folder_cards(
+                connection,
+                minimum_recommended_savings_bytes=100 * 1024 * 1024,
+                folder_group=web_app._folder_group,
+                age_days=lambda _path: 1.0,
+                estimate_savings_bytes=Mock(return_value=2 * 1024 * 1024 * 1024),
+                review_badge_for_prefix=Mock(return_value={"label": "Approved draft", "tone": "ok"}),
+            )
+
+        card = next(card for card in cards if card.prefix == "tv/show/Season 9")
+        self.assertEqual(card.review_badge_label, "Ready to validate")
+        self.assertIsNotNone(card.workflow_state)
+        self.assertEqual(card.workflow_state["state"], "ready_to_validate")
+        self.assertEqual(card.workflow_state["primary_lane"], "validate")
+        self.assertEqual(card.workflow_state["next_action"]["kind"], "validate_outputs")
+        self.assertEqual(card.workflow_state["counts"]["encode_candidates"], 0)
+
     def test_folder_cards_use_catalog_mtime_without_statting_source_paths(self) -> None:
         source = self._create_source_file("episode-catalog-age.mkv")
         age_days = Mock(side_effect=AssertionError("source path age lookup should not run"))
@@ -3783,6 +3976,168 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             folder_cards_runtime._folder_delivery_badge(card),
             {"label": "Ready to validate", "tone": "attention", "detail": "All pending outputs are encoded."},
         )
+
+    def test_folder_workflow_marks_all_encoded_season_ready_to_validate(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            for index in range(1, 4):
+                source = self._create_source_file(f"Season 2/episode-{index}.mkv")
+                item_id = self._insert_library_item(connection, source, status="encoded")
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(
+                        rel_path=f"tv/show/Season 2/episode-{index}.mkv",
+                        parent_dir="tv/show/Season 2",
+                    )
+                )
+                self._insert_staged_artifact(connection, item_id, self._staging_path(f"Season 2/episode-{index}.mkv"))
+
+            workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+
+        self.assertEqual(workflow.state, "ready_to_validate")
+        self.assertEqual(workflow.primary_lane, "validate")
+        self.assertEqual(workflow.counts["ready_to_validate"], 3)
+        self.assertEqual(workflow.counts["encode_candidates"], 0)
+        self.assertEqual(workflow.next_action.kind, "validate_outputs")
+
+    def test_folder_workflow_marks_validated_staged_outputs_ready_to_promote(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            for index in range(1, 3):
+                source = self._create_source_file(f"Season 2/promote-{index}.mkv")
+                item_id = self._insert_library_item(connection, source, status="validated")
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(
+                        rel_path=f"tv/show/Season 2/promote-{index}.mkv",
+                        parent_dir="tv/show/Season 2",
+                    )
+                )
+                self._insert_staged_artifact(connection, item_id, self._staging_path(f"Season 2/promote-{index}.mkv"))
+
+            workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+
+        self.assertEqual(workflow.state, "ready_to_promote")
+        self.assertEqual(workflow.primary_lane, "promote")
+        self.assertEqual(workflow.counts["ready_to_promote"], 2)
+        self.assertEqual(workflow.counts["encode_candidates"], 0)
+        self.assertEqual(workflow.next_action.kind, "promote_outputs")
+
+    def test_encode_candidate_selection_excludes_validated_staged_outputs(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            planned = self._create_source_file("Season 2/planned-for-manifest.mkv")
+            staged = self._create_source_file("Season 2/validated-staged-for-manifest.mkv")
+            planned_id = self._insert_library_item(connection, planned, status="planned")
+            staged_id = self._insert_library_item(connection, staged, status="validated")
+            for item_id, rel_path in (
+                    (planned_id, "tv/show/Season 2/planned-for-manifest.mkv"),
+                    (staged_id, "tv/show/Season 2/validated-staged-for-manifest.mkv"),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(rel_path=rel_path, parent_dir="tv/show/Season 2")
+                )
+            self._insert_staged_artifact(connection, staged_id, self._staging_path("Season 2/staged-for-manifest.mkv"))
+
+            rows = select_encode_candidates(connection, self.config, prefixes=["tv/show/Season 2"], limit=None)
+
+        self.assertEqual([row["rel_path"] for row in rows], ["tv/show/Season 2/planned-for-manifest.mkv"])
+
+    def test_encode_candidate_selection_applies_limit_after_lane_filtering(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            staged = self._create_source_file("Season 2/high-priority-staged.mkv")
+            planned = self._create_source_file("Season 2/lower-priority-planned.mkv")
+            staged_id = self._insert_library_item(connection, staged, status="validated")
+            planned_id = self._insert_library_item(connection, planned, status="planned")
+            for item_id, rel_path, priority in (
+                    (staged_id, "tv/show/Season 2/high-priority-staged.mkv", 100.0),
+                    (planned_id, "tv/show/Season 2/lower-priority-planned.mkv", 1.0),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(rel_path=rel_path, parent_dir="tv/show/Season 2", priority_score=priority)
+                )
+            self._insert_staged_artifact(connection, staged_id, self._staging_path("Season 2/high-priority-staged.mkv"))
+
+            rows = select_encode_candidates(connection, self.config, prefixes=["tv/show/Season 2"], limit=1)
+
+        self.assertEqual([row["rel_path"] for row in rows], ["tv/show/Season 2/lower-priority-planned.mkv"])
+
+    def test_encode_candidate_selection_keeps_validated_items_without_staged_outputs(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            validated = self._create_source_file("Season 2/validated-without-stage.mkv")
+            item_id = self._insert_library_item(connection, validated, status="validated")
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_id)
+                .values(rel_path="tv/show/Season 2/validated-without-stage.mkv", parent_dir="tv/show/Season 2")
+            )
+
+            rows = select_encode_candidates(connection, self.config, prefixes=["tv/show/Season 2"], limit=None)
+
+        self.assertEqual([row["rel_path"] for row in rows], ["tv/show/Season 2/validated-without-stage.mkv"])
+
+    def test_folder_workflow_marks_mixed_season_without_hiding_counts(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            encoded = self._create_source_file("Season 2/encoded.mkv")
+            encoded_id = self._insert_library_item(connection, encoded, status="encoded")
+            planned = self._create_source_file("Season 2/planned.mkv")
+            planned_id = self._insert_library_item(connection, planned, status="planned")
+            for item_id, rel_path in (
+                    (encoded_id, "tv/show/Season 2/encoded.mkv"),
+                    (planned_id, "tv/show/Season 2/planned.mkv"),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(rel_path=rel_path, parent_dir="tv/show/Season 2")
+                )
+            self._insert_staged_artifact(connection, encoded_id, self._staging_path("Season 2/encoded.mkv"))
+
+            workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+            series_workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show")
+
+        self.assertEqual(workflow.state, "mixed")
+        self.assertEqual(workflow.lane_counts["validate"], 1)
+        self.assertEqual(workflow.lane_counts["encode"], 1)
+        self.assertEqual(workflow.counts["ready_to_validate"], 1)
+        self.assertEqual(workflow.counts["encode_candidates"], 1)
+        self.assertEqual(series_workflow.state, "mixed")
+        self.assertEqual(series_workflow.lane_counts["validate"], 1)
+        self.assertEqual(series_workflow.lane_counts["encode"], 1)
+
+    def test_folder_workflow_active_encode_job_takes_precedence(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            source = self._create_source_file("Season 2/episode.mkv")
+            item_id = self._insert_library_item(connection, source, status="encoded")
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_id)
+                .values(rel_path="tv/show/Season 2/episode.mkv", parent_dir="tv/show/Season 2")
+            )
+            self._insert_staged_artifact(connection, item_id, self._staging_path("Season 2/episode.mkv"))
+            self._save_job(
+                connection,
+                job_id="season-processing",
+                manifest_name="season-processing.json",
+                host={"key": "local", "label": "Local"},
+                status="running",
+                attempt_count=1,
+            )
+            connection.execute(
+                update(encode_jobs)
+                .where(encode_jobs.c.job_id == "season-processing")
+                .values(prefix="tv/show/Season 2")
+            )
+
+            workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+
+        self.assertEqual(workflow.state, "processing")
+        self.assertEqual(workflow.primary_lane, "processing")
+        self.assertEqual(workflow.counts["ready_to_validate"], 1)
+        self.assertEqual(workflow.next_action.kind, "monitor_encode")
 
     def test_folder_delivery_badge_ignores_fully_promoted_folders(self) -> None:
         card = self._folder_card_for_delivery_badge(
@@ -3923,6 +4278,63 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(third_cards[0].review_badge_label, "Third badge")
         self.assertEqual(third_cards[0].review_badge_tone, "attention")
         self.assertIsNone(third_cards[0].review_badge_detail)
+        folder_cards_runtime.reset_folder_card_cache()
+
+    def test_cached_folder_cards_copies_workflow_state_without_shared_mutation(self) -> None:
+        folder_cards_runtime.reset_folder_card_cache()
+
+        cached_source_card = folder_cards_runtime.FolderCard(
+            prefix="tv/show/Season 10",
+            title="Season 10",
+            subtitle="TV",
+            scope_label="Season",
+            item_count=1,
+            pending_count=1,
+            total_size_bytes=2 * 1024 * 1024 * 1024,
+            estimated_savings_bytes=200 * 1024 * 1024,
+            known_saved_bytes=0,
+            projected_reclaim_bytes=200 * 1024 * 1024,
+            average_age_days=10.0,
+            sort_score=0.2,
+            statuses={"encoded": 1},
+            video_codecs={"h264": 1},
+            workflow_state={
+                "state": "ready_to_validate",
+                "counts": {"ready_to_validate": 1},
+                "next_action": {"kind": "validate_outputs"},
+            },
+        )
+        list_folder_cards = Mock(return_value=[cached_source_card])
+
+        with patch.object(folder_cards_runtime, "folder_card_cache_key", return_value=("cache", 1, 1)):
+            with patch.object(folder_cards_runtime, "list_folder_cards", list_folder_cards):
+                first_cards = folder_cards_runtime.cached_folder_cards(
+                    self.config,
+                    Mock(),
+                    minimum_recommended_savings_bytes=100 * 1024 * 1024,
+                    folder_group=Mock(),
+                    age_days=Mock(),
+                    estimate_savings_bytes=Mock(),
+                    review_badge_for_prefix=Mock(return_value={"label": None, "tone": None}),
+                )
+
+        first_cards[0].workflow_state["counts"]["ready_to_validate"] = 99
+        first_cards[0].workflow_state["next_action"]["kind"] = "mutated"
+
+        with patch.object(folder_cards_runtime, "folder_card_cache_key", return_value=("cache", 1, 1)):
+            with patch.object(folder_cards_runtime, "list_folder_cards", list_folder_cards):
+                second_cards = folder_cards_runtime.cached_folder_cards(
+                    self.config,
+                    Mock(),
+                    minimum_recommended_savings_bytes=100 * 1024 * 1024,
+                    folder_group=Mock(),
+                    age_days=Mock(),
+                    estimate_savings_bytes=Mock(),
+                    review_badge_for_prefix=Mock(return_value={"label": None, "tone": None}),
+                )
+
+        self.assertEqual(second_cards[0].workflow_state["counts"]["ready_to_validate"], 1)
+        self.assertEqual(second_cards[0].workflow_state["next_action"]["kind"], "validate_outputs")
         folder_cards_runtime.reset_folder_card_cache()
 
     def test_folder_cards_require_multiple_labeled_samples_before_using_folder_history(self) -> None:
@@ -4507,7 +4919,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["queued"])
         self.assertEqual(result["auto_queue_status"], "no_pending")
-        self.assertIn("no pending items left to queue", result["message"])
+        self.assertIn("no encode candidates left to queue", result["message"])
+        self.assertIn("Next action:", result["queue_message"])
 
     def test_retry_failed_encode_queue_action_retries_latest_approved_failures_only(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
@@ -12094,8 +12507,47 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 connection.execute(
                     select(func.count()).select_from(encode_jobs).where(encode_jobs.c.prefix == "tv/show")
                 ).scalar_one()
-            )
+        )
         self.assertEqual(row_count, 1)
+
+    def test_queue_folder_encode_reports_validate_next_action_when_no_encode_candidates(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            source = self._create_source_file("Season 2/encoded-no-queue.mkv")
+            item_id = self._insert_library_item(connection, source, status="encoded")
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_id)
+                .values(rel_path="tv/show/Season 2/encoded-no-queue.mkv", parent_dir="tv/show/Season 2")
+            )
+            self._insert_staged_artifact(connection, item_id, self._staging_path("Season 2/encoded-no-queue.mkv"))
+
+        manifest_path = self._write_manifest("manifest-no-encode-candidates.json", [])
+        with patch("mediaforce.web.runtime.folder_actions.load_config", return_value=self.config), patch(
+                "mediaforce.web.runtime.folder_actions.create_folder_manifest",
+                return_value=({"items": []}, manifest_path),
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                folder_actions_runtime.queue_folder_encode_action(
+                    self.config,
+                    "tv/show/Season 2",
+                    "",
+                    False,
+                    now_iso=web_app._now_iso,
+                    load_job_state=self._noop_load_job_state,
+                    load_calibration_state=self._accepted_calibration_state,
+                    review_gate=self._accepted_review_gate,
+                    upsert_override=self._noop_upsert_override,
+                    load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
+                    clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
+                    prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
+                    save_encode_job=save_encode_job,
+                )
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertEqual(
+            raised.exception.detail,
+            "No encode candidates were found for this folder. Next action: Validate outputs.",
+        )
 
     def test_build_manifest_shards_creates_one_file_per_shard(self) -> None:
         manifest: folder_actions_runtime.ManifestPayload = {

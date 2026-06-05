@@ -42,7 +42,20 @@
 		mode?: 'queue' | 'folders';
 	} = $props();
 
-	const folders = $derived(foldersPayload.folders);
+	type FolderScope = 'season' | 'series';
+
+	let folderScope = $state<FolderScope>('season');
+	const isFolderIndex = $derived(mode === 'folders');
+	const seriesFolders = $derived(foldersPayload.series_folders ?? []);
+	const canSelectSeriesScope = $derived(isFolderIndex && seriesFolders.length > 0);
+	const folders = $derived(
+		isFolderIndex && folderScope === 'series' ? seriesFolders : foldersPayload.folders
+	);
+	$effect(() => {
+		if (folderScope === 'series' && !canSelectSeriesScope) {
+			folderScope = 'season';
+		}
+	});
 	let searchQuery = $state('');
 	let libraryFilters = $state<Record<string, boolean>>({});
 	let stateFilters = $state<Record<string, boolean>>({});
@@ -87,7 +100,14 @@
 	const runningSamples = $derived(dashboard.calibration_queue.sample.running_count);
 	const queuedSamples = $derived(dashboard.calibration_queue.sample.queued_count);
 	const pendingReviews = $derived(dashboard.calibration_queue.sample.pending_review_count);
-	const isFolderIndex = $derived(mode === 'folders');
+	const folderScopeLabel = $derived(folderScope === 'series' ? 'Series' : 'Seasons');
+	const folderScopeDetail = $derived(
+		folderScope === 'series'
+			? 'whole-series prefixes'
+			: isFolderIndex
+				? 'season folders'
+				: 'review folders'
+	);
 	const shellSubject = $derived(isFolderIndex ? 'Folders' : 'Queue');
 	const shellRoute = $derived(isFolderIndex ? 'folders' : 'queue');
 	const filterTitle = $derived(isFolderIndex ? 'Find folders' : 'Queue filters');
@@ -110,6 +130,11 @@
 	const selectedPanelTitle = $derived(isFolderIndex ? 'Folder details' : 'Next action');
 	const tableEyebrow = $derived(isFolderIndex ? 'Folder index' : 'Ranked queue');
 	const tableTitle = $derived(isFolderIndex ? 'Matching folders' : 'Next folders to review');
+	const visibleScopeSummary = $derived(
+		`${visibleFolders.length.toLocaleString('en-US')} / ${folders.length.toLocaleString(
+			'en-US'
+		)} ${isFolderIndex ? folderScopeLabel.toLowerCase() : 'folders'}`
+	);
 
 	type LibraryOption = {
 		key: string;
@@ -246,6 +271,12 @@
 		setStateIncluded(key, (event.currentTarget as HTMLInputElement).checked);
 	}
 
+	function setFolderScope(scope: FolderScope) {
+		if (scope === folderScope) return;
+		folderScope = scope;
+		selectedPrefix = '';
+	}
+
 	function selectFolder(folder: FolderCard) {
 		selectedPrefix = folder.prefix;
 	}
@@ -254,6 +285,9 @@
 		if (!folder) return 'No folder is selected.';
 		const reclaim = formatBytes(folder.projected_reclaim_bytes);
 		const pending = folder.pending_count.toLocaleString('en-US');
+		if (isFolderIndex && folderScope === 'series') {
+			return `${folder.title} spans ${pending} pending items across its series prefix with about ${reclaim} of projected reclaim.`;
+		}
 		if (isFolderIndex) {
 			return `${folder.title} has ${pending} pending items and about ${reclaim} of projected reclaim.`;
 		}
@@ -272,12 +306,7 @@
 				<div class="queue-filter" aria-label="Queue filters">
 					<div class="queue-filter__summary">
 						<span>{visibleSummaryLabel}</span>
-						<strong
-							>{visibleFolders.length.toLocaleString('en-US')} / {folders.length.toLocaleString(
-								'en-US'
-							)}
-							folders</strong
-						>
+						<strong>{visibleScopeSummary}</strong>
 						<small
 							>{[
 								excludedLibraryCount ? `${excludedLibraryCount} libraries excluded` : '',
@@ -288,6 +317,36 @@
 								.join(' · ') || filterEmptyCopy}</small
 						>
 					</div>
+
+					{#if isFolderIndex}
+						<div class="queue-filter__scope" aria-label="Folder scope">
+							<span>Scope</span>
+							<div class="scope-toggle" role="group" aria-label="Folder scope">
+								<button
+									type="button"
+									class:scope-toggle__button--active={folderScope === 'season'}
+									aria-pressed={folderScope === 'season'}
+									aria-current={folderScope === 'season' ? 'true' : undefined}
+									onclick={() => setFolderScope('season')}
+								>
+									<span>Seasons</span>
+									<small>{foldersPayload.folders.length.toLocaleString('en-US')}</small>
+								</button>
+								<button
+									type="button"
+									disabled={!canSelectSeriesScope}
+									class:scope-toggle__button--active={folderScope === 'series'}
+									aria-pressed={folderScope === 'series'}
+									aria-current={folderScope === 'series' ? 'true' : undefined}
+									onclick={() => setFolderScope('series')}
+								>
+									<span>Series</span>
+									<small>{seriesFolders.length.toLocaleString('en-US')}</small>
+								</button>
+							</div>
+							<small>{folderScopeDetail}</small>
+						</div>
+					{/if}
 
 					<label class="queue-filter__search">
 						<span>Search</span>
@@ -368,12 +427,16 @@
 				<div class="scope-list">
 					<div class="scope-row scope-row--active">
 						<span>Primary</span>
-						<strong>{primaryScopeTitle}</strong>
+						<strong
+							>{isFolderIndex
+								? `${primaryScopeTitle} · ${folderScopeLabel}`
+								: primaryScopeTitle}</strong
+						>
 						<small
 							>{visibleFolders.length.toLocaleString('en-US')} / {folders.length.toLocaleString(
 								'en-US'
 							)}
-							folders</small
+							{folderScopeLabel.toLowerCase()}</small
 						>
 					</div>
 					<div class="scope-row">
@@ -420,7 +483,7 @@
 				</div>
 				<div class="queue-header__facts">
 					<div>
-						<span>Visible folders</span>
+						<span>{isFolderIndex ? `Visible ${folderScopeLabel}` : 'Visible folders'}</span>
 						<strong>{visibleFolders.length.toLocaleString('en-US')}</strong>
 					</div>
 					<div>
@@ -752,6 +815,71 @@
 	.queue-filter__search {
 		display: grid;
 		gap: var(--mf-space-2);
+	}
+
+	.queue-filter__scope {
+		display: grid;
+		gap: var(--mf-space-2);
+	}
+
+	.queue-filter__scope > span,
+	.queue-filter__scope > small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.scope-toggle {
+		display: grid;
+		gap: var(--mf-space-2);
+		grid-template-columns: 1fr 1fr;
+	}
+
+	.scope-toggle button {
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border);
+		border-radius: var(--mf-radius-1);
+		color: var(--mf-fg-secondary);
+		display: grid;
+		font: inherit;
+		gap: var(--mf-space-1);
+		min-height: 48px;
+		padding: var(--mf-space-2) var(--mf-space-3);
+		text-align: left;
+	}
+
+	.scope-toggle button:hover:not(:disabled),
+	.scope-toggle button.scope-toggle__button--active {
+		background: var(--mf-active-bg);
+		border-color: var(--mf-active-solid-hi);
+		color: var(--mf-fg-primary);
+	}
+
+	.scope-toggle button.scope-toggle__button--active {
+		box-shadow: inset 3px 0 0 var(--mf-active-fg);
+	}
+
+	.scope-toggle button.scope-toggle__button--active small,
+	.scope-toggle button.scope-toggle__button--active span {
+		color: var(--mf-active-fg-bright);
+	}
+
+	.scope-toggle button:disabled {
+		cursor: not-allowed;
+		opacity: 0.48;
+	}
+
+	.scope-toggle span {
+		font-size: var(--mf-text-xs);
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.scope-toggle small {
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-mono), monospace;
+		font-size: var(--mf-text-2xs);
 	}
 
 	.queue-filter__search input {

@@ -619,6 +619,32 @@ describe('Folder Studio review request mapping', () => {
 		});
 	});
 
+	it('routes approved folders with no encode candidates to the series scope', () => {
+		const workflow = resolveWorkflow(
+			folderPayload({
+				encode_candidate_count: 0,
+				series_context: { prefix: 'tv/Example', title: 'Example' }
+			}),
+			folderStatusPayload(),
+			null,
+			null,
+			{ status: 'accepted', message: 'Sample accepted.' },
+			null,
+			null,
+			true,
+			false
+		);
+
+		expect(workflow).toMatchObject({
+			label: 'Approved',
+			title: 'Approved folder has no queueable items',
+			primary: 'Open series scope',
+			primaryAction: 'open-series',
+			secondary: 'Download pack',
+			secondaryAction: 'download-review-pack'
+		});
+	});
+
 	it('makes processing folders monitor-first and keeps review media secondary', () => {
 		const workflow = resolveWorkflow(
 			folderPayload({ encode_queue_summary: '1 folder is running.' }),

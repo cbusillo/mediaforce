@@ -26,7 +26,7 @@ from mediaforce.advising.policy import compact_policy_payload as _compact_policy
 from mediaforce.advising.prompts import build_prompt as _build_prompt_impl, \
     build_review_artifact_critique_prompt as _build_review_artifact_critique_prompt_impl, build_run_verdict_prompt as _build_run_verdict_prompt_impl, build_seed_prompt as _build_seed_prompt_impl, \
     build_tune_prompt as _build_tune_prompt_impl, build_operator_note_parse_prompt as _build_operator_note_parse_prompt_impl
-from mediaforce.advising.runtime import run_code_prompt as _run_code_prompt_impl, \
+from mediaforce.advising.runtime import StructuredLLMFailure, run_code_prompt as _run_code_prompt_impl, \
     run_multimodal_tune_request as _run_multimodal_tune_request_impl, \
     run_structured_llm_request as _run_structured_llm_request_impl
 
@@ -97,6 +97,12 @@ def _should_force_repeated_experiment(repeat_signal: dict[str, Any] | None) -> b
 
 def _should_force_operator_confirmed_experiment(requested_experiment: dict[str, Any] | None) -> bool:
     return bool(object_dict(requested_experiment).get("operator_confirmed"))
+
+
+def _raw_failure_payload(parsed: Any) -> str:
+    if isinstance(parsed, StructuredLLMFailure):
+        return parsed.raw
+    return json.dumps(parsed) if parsed is not None else ""
 
 
 def _force_operator_confirmed_experiment(
@@ -274,7 +280,7 @@ def request_seed_policy(*, project_root: Path, payload: dict[str, Any]) -> SeedP
         return SeedPolicyResponse(
             ok=False,
             summary="The seed worker did not return valid structured JSON.",
-            raw=json.dumps(parsed) if parsed is not None else "",
+            raw=_raw_failure_payload(parsed),
             prompt_version=SEED_PROMPT_VERSION,
             diagnosis="The seed worker did not complete cleanly.",
             confidence="low",
@@ -377,7 +383,7 @@ def request_note_tuning(*, project_root: Path, payload: dict[str, Any]) -> Tunin
         return TuningPolicyResponse(
             ok=False,
             summary="The tuning worker did not return valid structured JSON.",
-            raw=json.dumps(parsed) if parsed is not None else "",
+            raw=_raw_failure_payload(parsed),
             prompt_version=TUNE_PROMPT_VERSION,
             diagnosis="The tuning worker did not complete cleanly.",
             confidence="low",
@@ -543,7 +549,7 @@ def request_review_artifact_critique(*, project_root: Path, payload: dict[str, A
         return ReviewArtifactCritiqueResponse(
             ok=False,
             summary="The artifact critic did not return valid structured JSON.",
-            raw=json.dumps(parsed) if parsed is not None else "",
+            raw=_raw_failure_payload(parsed),
             prompt_version=REVIEW_ARTIFACT_CRITIQUE_PROMPT_VERSION,
             confidence="low",
             weakest_moments=[],
@@ -585,7 +591,7 @@ def request_run_verdict(*, project_root: Path, payload: dict[str, Any]) -> RunVe
         return RunVerdictResponse(
             ok=False,
             summary="Measured calibration finished, but no model verdict was returned.",
-            raw=json.dumps(parsed) if parsed is not None else "",
+            raw=_raw_failure_payload(parsed),
             prompt_version=RUN_VERDICT_PROMPT_VERSION,
             outcome="unknown",
             confidence="low",
@@ -663,7 +669,7 @@ def _run_structured_llm_request(
         message: str,
         schema: dict[str, Any],
         max_seconds: int,
-) -> dict[str, Any] | None:
+) -> dict[str, Any] | StructuredLLMFailure | None:
     return _run_structured_llm_request_impl(
         project_root=project_root,
         developer=developer,

@@ -2,7 +2,7 @@
 	import { invalidateAll } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { postJson } from '$lib/api/client';
-	import { folderRoutePrefix } from '$lib/folder-display';
+	import { folderRoutePath, folderRoutePrefix } from '$lib/folder-display';
 	import {
 		formatDateTimeCopy,
 		pathFilename,
@@ -78,6 +78,8 @@
 	});
 	const prefix = $derived(studioFolder.prefix);
 	const encodedPrefix = $derived(folderRoutePrefix(prefix));
+	const seriesContext = $derived(studioFolder.series_context ?? null);
+	const seriesRoute = $derived(seriesContext ? folderRoutePath(seriesContext.prefix) : '/folders');
 	const sampleHostOptions = $derived(buildBenchHostOptions(studioFolder.sample_host_options));
 	const folderSampleHostKey = $derived(String(folder.sample_host_key ?? '').trim());
 	const fallbackHostKey = $derived(folderSampleHostKey || sampleHostOptions[0]?.key || '');
@@ -109,6 +111,12 @@
 	);
 	const approvalReviewReady = $derived(Boolean(calibration?.review_media_ready));
 	const approvedProfileReady = $derived(reviewGate?.status === 'accepted');
+	const approvedSeasonShortcut = $derived(studioFolder.approved_season_shortcut ?? null);
+	const approvedSeasonNote = $derived(
+		typeof approvedSeasonShortcut?.suggested_note === 'string'
+			? approvedSeasonShortcut.suggested_note.trim()
+			: ''
+	);
 	const workflow = $derived(
 		resolveWorkflow(
 			studioFolder,
@@ -198,6 +206,12 @@
 			const currentNote = benchNote.trim();
 			benchNote = currentNote ? `${currentNote}\n\n${revisionPrompt}` : revisionPrompt;
 		}
+		focusBenchComposer();
+	}
+
+	function useApprovedSeasonNote() {
+		if (!approvedSeasonNote) return;
+		benchNote = approvedSeasonNote;
 		focusBenchComposer();
 	}
 
@@ -338,6 +352,10 @@
 					<div class="folder-header__path">
 						<span>Folder path</span>
 						<strong class="mf-path">{prefix}</strong>
+						{#if seriesContext}
+							<a class="scope-link" href={resolve(seriesRoute)}>Open {seriesContext.title} series</a
+							>
+						{/if}
 					</div>
 				</div>
 				<div class="folder-header__facts">
@@ -397,6 +415,12 @@
 							type="button"
 							onclick={focusBenchComposer}
 							data-mf-action={workflow.primaryAction}>{workflow.primary}</button
+						>
+					{:else if workflow.primaryAction === 'open-series' || workflow.primaryAction === 'open-folders'}
+						<a
+							class="control control--primary"
+							href={resolve(seriesRoute)}
+							data-mf-action={workflow.primaryAction}>{workflow.primary}</a
 						>
 					{:else if workflow.primaryAction === 'open-ops' || workflow.primaryAction.startsWith('monitor-')}
 						<a
@@ -469,6 +493,10 @@
 							type="button"
 							onclick={reviseSmaller}
 							data-mf-action={workflow.secondaryAction}>{workflow.secondary}</button
+						>
+					{:else if workflow.secondaryAction === 'open-series' || workflow.secondaryAction === 'open-folders'}
+						<a class="control" href={resolve(seriesRoute)} data-mf-action={workflow.secondaryAction}
+							>{workflow.secondary}</a
 						>
 					{:else if workflow.secondaryAction === 'open-ops'}
 						<a class="control" href={resolve('/ops')} data-mf-action={workflow.secondaryAction}
@@ -565,6 +593,18 @@
 						<p class="decision__status decision__status--ready">{profileMessage}</p>
 					{/if}
 				</div>
+				{#if approvedSeasonNote}
+					<div class="season-shortcut">
+						<div>
+							<span>Approved season reference</span>
+							<strong>{approvedSeasonShortcut?.root_label ?? title}</strong>
+							<small>{approvedSeasonShortcut?.count ?? 1} approved season policy available</small>
+						</div>
+						<button class="control" type="button" onclick={useApprovedSeasonNote}
+							>Use approved season note</button
+						>
+					</div>
+				{/if}
 			</section>
 
 			<section class="review-workspace" aria-labelledby="review-workspace-title">
@@ -805,6 +845,12 @@
 		<aside class="studio__left" aria-label="Folder workflow context">
 			<WorkstationPanel eyebrow="Folder" title="Active context">
 				<div class="context-list">
+					{#if seriesContext}
+						<div class="context-list__wide">
+							<span>Series scope</span>
+							<a class="scope-link" href={resolve(seriesRoute)}>{seriesContext.prefix}</a>
+						</div>
+					{/if}
 					<div>
 						<span>Library</span>
 						<strong>{library}</strong>
@@ -901,6 +947,27 @@
 		max-width: 92ch;
 	}
 
+	.scope-link {
+		align-items: center;
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border-muted);
+		border-left: 2px solid var(--mf-active-fg);
+		color: var(--mf-active-fg-bright);
+		display: inline-flex;
+		font-size: var(--mf-text-xs);
+		font-weight: var(--mf-weight-semibold);
+		justify-self: start;
+		min-height: var(--mf-control-md);
+		padding: 0 var(--mf-space-3);
+	}
+
+	.scope-link:hover {
+		background: var(--mf-active-bg);
+		border-color: var(--mf-active-line);
+		border-left-color: var(--mf-active-fg);
+		color: var(--mf-fg-primary);
+	}
+
 	.folder-header__facts,
 	.decision__facts,
 	.sample-facts {
@@ -932,6 +999,10 @@
 		display: grid;
 		gap: var(--mf-space-2);
 		min-width: 88px;
+	}
+
+	.context-list__wide {
+		grid-column: 1 / -1;
 	}
 
 	.folder-header__metric {
@@ -1106,6 +1177,39 @@
 		grid-column: 1 / -1;
 		justify-content: flex-end;
 		min-width: 0;
+	}
+
+	.season-shortcut {
+		align-items: center;
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border-muted);
+		border-left: 2px solid var(--mf-wait-fg);
+		display: flex;
+		gap: var(--mf-space-4);
+		grid-column: 1 / -1;
+		justify-content: space-between;
+		padding: var(--mf-space-4);
+	}
+
+	.season-shortcut div {
+		display: grid;
+		gap: var(--mf-space-1);
+		min-width: 0;
+	}
+
+	.season-shortcut span,
+	.season-shortcut small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.season-shortcut strong {
+		font-size: var(--mf-text-sm);
+		font-weight: var(--mf-weight-semibold);
+		overflow-wrap: anywhere;
 	}
 
 	.decision__status {
