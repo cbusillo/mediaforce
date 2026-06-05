@@ -194,9 +194,10 @@ def queue_folder_encode_action(
             if recovered is not None:
                 return recovered
             active_status = str(active_encode_job.get("status") or "queued").replace("_", " ")
+            active_prefix = str(active_encode_job.get("prefix") or normalized_prefix)
             return {
                 "ok": False,
-                "message": f"A folder encode is already {active_status} for this folder.",
+                "message": f"A folder encode is already {active_status} for {active_prefix}.",
             }
         latest_encode_job = load_latest_terminal_encode_job_for_prefix(connection, normalized_prefix)
         if latest_encode_job is not None and str(latest_encode_job.get("status") or "") in {

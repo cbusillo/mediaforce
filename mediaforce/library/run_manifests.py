@@ -8,6 +8,7 @@ from sqlalchemy import bindparam
 from sqlalchemy import or_
 from sqlalchemy import outerjoin
 from sqlalchemy import select
+from sqlalchemy import true
 from sqlalchemy import update
 
 from mediaforce.core.config import MediaforceConfig
@@ -54,7 +55,7 @@ def select_candidates(
         .where(library_items.c.status.in_(statuses))
     )
     if prefixes:
-        query = query.where(or_(*(library_items.c.rel_path.like(f"{prefix}%") for prefix in prefixes)))
+        query = query.where(or_(*(_prefix_filter(prefix) for prefix in prefixes)))
     query = query.order_by(library_items.c.priority_score.desc(), library_items.c.size_bytes.desc())
     if limit is not None and not require_encode_lane:
         query = query.limit(limit)
@@ -66,6 +67,13 @@ def select_candidates(
     if buckets:
         rows = [row for row in rows if recommend_item(row, config).bucket in buckets]
     return rows
+
+
+def _prefix_filter(prefix: str) -> Any:
+    normalized_prefix = prefix.strip().strip("/")
+    if not normalized_prefix:
+        return true()
+    return or_(library_items.c.rel_path == normalized_prefix, library_items.c.rel_path.like(f"{normalized_prefix}/%"))
 
 
 def select_encode_candidates(

@@ -4079,6 +4079,26 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual([row["rel_path"] for row in rows], ["tv/show/Season 2/validated-without-stage.mkv"])
 
+    def test_encode_candidate_selection_uses_folder_boundary_prefix_matching(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            matching = self._create_source_file("matched-boundary.mkv")
+            sibling = self._create_source_file("sibling-boundary.mkv")
+            matching_id = self._insert_library_item(connection, matching, status="planned")
+            sibling_id = self._insert_library_item(connection, sibling, status="planned")
+            for item_id, rel_path, parent_dir in (
+                    (matching_id, "tv/show/matched-boundary.mkv", "tv/show"),
+                    (sibling_id, "tv/show-special/sibling-boundary.mkv", "tv/show-special"),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(rel_path=rel_path, parent_dir=parent_dir)
+                )
+
+            rows = select_encode_candidates(connection, self.config, prefixes=["tv/show"], limit=None)
+
+        self.assertEqual([row["rel_path"] for row in rows], ["tv/show/matched-boundary.mkv"])
+
     def test_folder_workflow_marks_mixed_season_without_hiding_counts(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             encoded = self._create_source_file("Season 2/encoded.mkv")
@@ -12890,6 +12910,82 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertTrue(payload["polling_active"])
 
+    def test_folder_status_payload_includes_canonical_workflow_state(self) -> None:
+        source_path = self._create_source_file("status-ready-to-validate.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoded")
+            self._insert_staged_artifact(
+                connection,
+                item_id,
+                self._staging_path("status-ready-to-validate.mkv"),
+            )
+
+        payload = dashboard_payloads.folder_status_payload(
+            self.config,
+            "tv/show",
+            load_job_state=web_app._load_job_state,
+            load_retryable_sample_job_state=web_app._load_retryable_sample_job_state,
+            load_scan_job_state=web_app._load_scan_job_state,
+            load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
+        )
+
+        workflow_state = payload["workflow_state"]
+        self.assertEqual(workflow_state["state"], "ready_to_validate")
+        self.assertEqual(workflow_state["primary_lane"], "validate")
+        self.assertEqual(workflow_state["next_action"]["kind"], "validate_outputs")
+        self.assertEqual(workflow_state["counts"]["encode_candidates"], 0)
+
+    def test_active_encode_job_lookup_matches_overlapping_series_and_season_scopes(self) -> None:
+        def save_active_job(connection: DBClient, *, job_id: str, prefix: str, offset_seconds: int) -> None:
+            timestamp = (datetime.now(tz=UTC) + timedelta(seconds=offset_seconds)).isoformat(timespec="seconds")
+            save_encode_job(
+                connection,
+                {
+                    "job_id": job_id,
+                    "prefix": prefix,
+                    "job_kind": "folder",
+                    "parent_job_id": None,
+                    "status": "running",
+                    "manifest_path": str(self._write_manifest(f"{job_id}.json", [{"library_item_id": 1}])),
+                    "manifest_indexes": None,
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "host": {},
+                    "last_host": {},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": None,
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": None,
+                    "last_failure_at": None,
+                    "host_cooldown_until": None,
+                    "created_at": timestamp,
+                    "started_at": timestamp,
+                    "finished_at": None,
+                    "updated_at": timestamp,
+                },
+            )
+
+        with open_db(self.config.paths.db_path) as connection:
+            save_active_job(connection, job_id="series-active", prefix="tv/show", offset_seconds=0)
+            child_match = load_active_encode_job_for_prefix(connection, "tv/show/Season 2")
+            sibling_miss = load_active_encode_job_for_prefix(connection, "tv/show-special")
+
+            save_active_job(connection, job_id="season-active", prefix="tv/show/Season 3", offset_seconds=1)
+            parent_match = load_active_encode_job_for_prefix(connection, "tv/show")
+
+        self.assertEqual(child_match["job_id"], "series-active")
+        self.assertIsNone(sibling_miss)
+        self.assertEqual(parent_match["job_id"], "season-active")
+
     def test_queue_folder_encode_recovers_failed_files_into_active_parent(self) -> None:
         source_a = self._create_source_file("recover-active-a.mkv")
         source_b = self._create_source_file("recover-active-b.mkv")
@@ -13622,7 +13718,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             item_row = self._library_item_value(connection, item_id, library_items.c.status)
         self.assertEqual(item_row["status"], "planned")
 
-    def test_queue_folder_encode_retry_does_not_reset_active_descendant_prefix_items(self) -> None:
+    def test_queue_folder_encode_retry_rejects_active_descendant_prefix_items(self) -> None:
         source = self._create_source_file("retry-active-nested.mkv")
         other_source = self._create_source_file("retry-active-parent.mkv")
         staging_path = self.root / "staging" / "tv" / "show" / "season-1" / "retry-active-nested.mkv"
@@ -13740,7 +13836,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 save_encode_job=save_encode_job,
             )
 
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
+        self.assertIn("A folder encode is already running for tv/show/season-1", result["message"])
         self.assertTrue(staging_path.exists())
         self.assertTrue(partial_path.exists())
         with open_db(self.config.paths.db_path) as connection:

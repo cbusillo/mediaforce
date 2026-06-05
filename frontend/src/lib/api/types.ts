@@ -465,4 +465,5 @@ export interface FolderStatusPayload {
 	calibration_job: Record<string, unknown> | null;
 	retryable_sample_job?: Record<string, unknown> | null;
 	folder_scan_job: Record<string, unknown> | null;
+	workflow_state?: FolderWorkflowState | null;
 }
