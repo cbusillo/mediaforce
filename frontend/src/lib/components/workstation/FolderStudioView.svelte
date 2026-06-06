@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { invalidateAll } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { postJson } from '$lib/api/client';
 	import { folderRoutePath, folderRoutePrefix } from '$lib/folder-display';
@@ -57,11 +56,17 @@
 	let {
 		folder,
 		status,
-		hosts
+		hosts,
+		folderPending = false,
+		onMutate = async () => {},
+		loadError = null
 	}: {
 		folder: FolderPayload;
 		status: FolderStatusPayload;
 		hosts: HostsPayload;
+		folderPending?: boolean;
+		onMutate?: () => Promise<void>;
+		loadError?: string | null;
 	} = $props();
 
 	let benchNote = $state('');
@@ -136,7 +141,8 @@
 			calibrationJob,
 			encodeJob,
 			reviewPackReady,
-			approvalReviewReady
+			approvalReviewReady,
+			folderPending
 		)
 	);
 	const workflowSteps = $derived(buildWorkflowSteps(workflow));
@@ -269,7 +275,7 @@
 			localPendingProposal = null;
 			localProposalPrefix = prefix;
 			benchMessage = response.message || 'Queued the sample run from the draft.';
-			await invalidateAll();
+			await onMutate();
 		} catch (error) {
 			benchError = error instanceof Error ? error.message : 'Sample could not be queued.';
 		} finally {
@@ -302,7 +308,7 @@
 							}
 						);
 			profileMessage = response.message || 'Approved the draft and queued the folder encode.';
-			await invalidateAll();
+			await onMutate();
 		} catch (error) {
 			profileError =
 				error instanceof Error ? error.message : 'Folder profile could not be approved.';
@@ -324,7 +330,7 @@
 				{ prefix }
 			);
 			profileMessage = response.message || 'Queued retry for this folder.';
-			await invalidateAll();
+			await onMutate();
 		} catch (error) {
 			profileError =
 				error instanceof Error ? error.message : 'Folder processing could not be retried.';
@@ -347,7 +353,7 @@
 				{}
 			);
 			profileMessage = response.message || workflow.primary;
-			await invalidateAll();
+			await onMutate();
 		} catch (error) {
 			profileError = error instanceof Error ? error.message : 'Folder action could not run.';
 		} finally {
@@ -368,7 +374,7 @@
 				{}
 			);
 			benchMessage = response.message || 'Stopped running and queued sample work.';
-			await invalidateAll();
+			await onMutate();
 		} catch (error) {
 			benchError = error instanceof Error ? error.message : 'Sample work could not be stopped.';
 		} finally {
@@ -435,6 +441,12 @@
 			</nav>
 
 			<section class="decision decision--{workflow.tone}" aria-labelledby="decision-title">
+				{#if loadError}
+					<div class="route-error" role="status">
+						<strong>Folder state could not be refreshed.</strong>
+						<span>{loadError}</span>
+					</div>
+				{/if}
 				<div class="decision__summary">
 					<StateBadge tone={workflow.tone} label={workflow.label} />
 					<h2 id="decision-title">{workflow.title}</h2>

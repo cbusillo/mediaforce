@@ -118,6 +118,31 @@ function folderSummary(overrides: Partial<NonNullable<FolderPayload['summary']>>
 }
 
 describe('Folder Studio review request mapping', () => {
+	it('keeps pending route placeholders in a loading workflow state', () => {
+		const workflow = resolveWorkflow(
+			folderPayload({ pending: true, summary: undefined }),
+			folderStatusPayload({ calibration_status: 'loading', folder_scan_status: 'loading' }),
+			null,
+			null,
+			null,
+			null,
+			null,
+			false,
+			false,
+			true
+		);
+
+		expect(workflow).toMatchObject({
+			tone: 'active',
+			label: 'Loading',
+			title: 'Loading folder state',
+			primary: 'Open Folders',
+			primaryAction: 'open-folders',
+			secondary: 'Open Ops',
+			secondaryAction: 'open-ops'
+		});
+	});
+
 	it('uses only folder-scoped host options and removes empty keys', () => {
 		const options = buildBenchHostOptions([
 			{ key: 'sample-host', label: 'Sample host', detail: 'folder match', available: true },
