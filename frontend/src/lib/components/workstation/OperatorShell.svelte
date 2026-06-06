@@ -22,7 +22,7 @@
 		label: string;
 		href: '/' | '/folders' | '/ops' | '/completed' | '/settings';
 	}> = [
-		{ id: 'queue', label: 'Queue', href: '/' },
+		{ id: 'queue', label: 'Work', href: '/' },
 		{ id: 'folders', label: 'Folders', href: '/folders' },
 		{ id: 'ops', label: 'Ops', href: '/ops' },
 		{ id: 'completed', label: 'Completed', href: '/completed' },

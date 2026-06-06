@@ -44,7 +44,7 @@ const endpointChecks = [
 ];
 
 const routeChecks = [
-  ["Queue", "/", "Queue"],
+  ["Work", "/", "Work"],
   ["Folders", "/folders", "Folders"],
   ["Ops", "/ops", "Ops"],
   ["Settings", "/settings", "Settings"],
@@ -420,7 +420,7 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
 async function checkEmptyFixtureRoutes(baseUrl, configPath, timeoutMs, narrow) {
   await seedSmokeFixtures(configPath, "empty");
   const emptyRouteChecks = [
-    ["Empty Queue", "/", "No folders match the current filters"],
+    ["Empty Work", "/", "No folders match the current filters"],
     ["Empty Folders", "/folders", "No folders match the current filters"],
     ["Empty Ops", "/ops", "Processing is idle and ready"],
     [

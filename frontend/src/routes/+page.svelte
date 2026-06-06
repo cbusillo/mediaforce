@@ -5,7 +5,7 @@
 </script>
 
 <svelte:head>
-	<title>Mediaforce Queue</title>
+	<title>Mediaforce Work</title>
 </svelte:head>
 
 <HomeWorkbenchView

@@ -126,9 +126,9 @@
 	const runningSamples = $derived(dashboard.calibration_queue.sample.running_count);
 	const queuedSamples = $derived(dashboard.calibration_queue.sample.queued_count);
 	const pendingReviews = $derived(dashboard.calibration_queue.sample.pending_review_count);
-	const shellSubject = $derived(isFolderIndex ? 'Folders' : 'Queue');
+	const shellSubject = $derived(isFolderIndex ? 'Folders' : 'Work');
 	const shellRoute = $derived(isFolderIndex ? 'folders' : 'queue');
-	const filterTitle = $derived(isFolderIndex ? 'Find folders' : 'Queue filters');
+	const filterTitle = $derived(isFolderIndex ? 'Find folders' : 'Work filters');
 	const visibleSummaryLabel = $derived(
 		isFolderIndex ? `Visible ${folderScopeLabel.toLowerCase()}` : 'Visible work'
 	);
@@ -139,15 +139,15 @@
 	const primaryScopeTitle = $derived(
 		isFolderIndex ? `Searchable ${folderScopeLabel.toLowerCase()}` : 'Review candidates'
 	);
-	const headerEyebrow = $derived(isFolderIndex ? 'Folder index' : 'Queue');
-	const headerTitle = $derived(isFolderIndex ? 'Find media' : 'Choose next folder');
+	const headerEyebrow = $derived(isFolderIndex ? 'Folder index' : 'Worklist');
+	const headerTitle = $derived(isFolderIndex ? 'Find media' : 'Choose next work');
 	const headerCopy = $derived(
 		isFolderIndex
 			? 'Choose season folders or whole shows, then search or filter the scope you want to inspect.'
 			: 'Use the worklist to pick the next folder that needs review, then open Folder Studio when the action looks right.'
 	);
 	const workspaceLabel = $derived(
-		isFolderIndex ? 'Folder index and selected folder' : 'Queue worklist and selected folder'
+		isFolderIndex ? 'Folder index and selected folder' : 'Worklist and selected folder'
 	);
 	const activeEntityLabel = $derived(isFolderIndex && folderScope === 'series' ? 'Show' : 'Folder');
 	const selectedPanelTitle = $derived(
@@ -158,7 +158,7 @@
 			? 'Show index'
 			: isFolderIndex
 				? 'Folder index'
-				: 'Ranked queue'
+				: 'Ranked work'
 	);
 	const tableTitle = $derived(
 		isFolderIndex ? `Matching ${folderScopeLabel.toLowerCase()}` : 'Next folders to review'
@@ -335,9 +335,9 @@
 
 <OperatorShell route={shellRoute} subject={shellSubject} {crumb} {statusTiles} {footerSignals}>
 	<main class="home">
-		<aside class="home__rail" aria-label="Queue filters and scope">
+		<aside class="home__rail" aria-label="Work filters and scope">
 			<WorkstationPanel eyebrow="Filters" title={filterTitle}>
-				<div class="queue-filter" aria-label="Queue filters">
+				<div class="queue-filter" aria-label="Work filters">
 					<div class="queue-filter__summary">
 						<span>{visibleSummaryLabel}</span>
 						<strong>{visibleScopeSummary}</strong>
@@ -477,7 +477,7 @@
 
 		<section
 			class="home__main"
-			aria-label={isFolderIndex ? 'Folder index' : 'Operational review queue'}
+			aria-label={isFolderIndex ? 'Folder index' : 'Operational worklist'}
 		>
 			<header class="queue-header">
 				<div>
@@ -577,7 +577,7 @@
 							>
 						</div>
 					{:else}
-						<div class="empty-note">Select a folder from the ranked queue.</div>
+						<div class="empty-note">Select a folder from the ranked worklist.</div>
 					{/if}
 				</WorkstationPanel>
 
