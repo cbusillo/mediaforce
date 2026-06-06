@@ -1068,6 +1068,49 @@ function resolveBackendWorkflow(
 			secondaryAction: 'open-ops'
 		};
 	}
+	if (workflow.state === 'mixed') {
+		const toValidate = workflow.counts?.ready_to_validate ?? 0;
+		const toPromote = workflow.counts?.ready_to_promote ?? 0;
+		const toEncode = workflow.counts?.encode_candidates ?? 0;
+
+		let primaryAct: WorkflowAction = 'open-folders';
+		let primaryLabel = 'Review scope';
+		let secondaryAct: WorkflowAction = folder.series_context ? 'open-series' : 'open-ops';
+		let secondaryLabel = folder.series_context ? 'Open series scope' : 'Open Ops';
+
+		if (toValidate > 0) {
+			primaryAct = 'validate-outputs';
+			primaryLabel = `Validate ${toValidate} output${toValidate === 1 ? '' : 's'}`;
+			if (toEncode > 0) {
+				secondaryAct = 'queue-encode';
+				secondaryLabel = `Queue ${toEncode} encode${toEncode === 1 ? '' : 's'}`;
+			} else if (toPromote > 0) {
+				secondaryAct = 'promote-outputs';
+				secondaryLabel = `Promote ${toPromote} output${toPromote === 1 ? '' : 's'}`;
+			}
+		} else if (toPromote > 0) {
+			primaryAct = 'promote-outputs';
+			primaryLabel = `Promote ${toPromote} output${toPromote === 1 ? '' : 's'}`;
+			if (toEncode > 0) {
+				secondaryAct = 'queue-encode';
+				secondaryLabel = `Queue ${toEncode} encode${toEncode === 1 ? '' : 's'}`;
+			}
+		} else if (toEncode > 0) {
+			primaryAct = 'queue-encode';
+			primaryLabel = `Queue ${toEncode} encode${toEncode === 1 ? '' : 's'}`;
+		}
+
+		return {
+			tone: 'ready',
+			label: 'Mixed work',
+			title: 'Multiple tasks pending',
+			copy: workflow.detail,
+			primary: primaryLabel,
+			primaryAction: primaryAct,
+			secondary: secondaryLabel,
+			secondaryAction: secondaryAct
+		};
+	}
 	return {
 		tone: workflowToneToShellTone(workflow.tone),
 		label: workflow.label,

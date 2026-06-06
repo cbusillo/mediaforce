@@ -4167,9 +4167,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(workflow.lane_counts["encode"], 1)
         self.assertEqual(workflow.counts["ready_to_validate"], 1)
         self.assertEqual(workflow.counts["encode_candidates"], 1)
+        self.assertEqual(workflow.next_action.kind, "validate_outputs")
+        self.assertEqual(workflow.next_action.label, "Validate ready outputs")
         self.assertEqual(series_workflow.state, "mixed")
         self.assertEqual(series_workflow.lane_counts["validate"], 1)
         self.assertEqual(series_workflow.lane_counts["encode"], 1)
+        self.assertEqual(series_workflow.next_action.kind, "validate_outputs")
+        self.assertEqual(series_workflow.next_action.label, "Validate ready outputs")
 
     def test_folder_workflow_active_encode_job_takes_precedence(self) -> None:
         with open_db(self.config.paths.db_path) as connection:

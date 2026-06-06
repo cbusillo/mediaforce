@@ -1402,4 +1402,54 @@ describe('Folder Studio review request mapping', () => {
 			['Process', false]
 		]);
 	});
+
+	it('maps mixed work workflow state to prioritized validate and encode actions', () => {
+		const workflow = resolveWorkflow(
+			folderPayload({
+				workflow_state: workflowState({
+					prefix: 'tv/Terminator',
+					state: 'mixed',
+					primary_lane: 'validate',
+					label: 'Mixed work',
+					tone: 'ready',
+					detail: '22 to validate, 9 to encode',
+					counts: {
+						items: 31,
+						ready_to_validate: 22,
+						encode_candidates: 9,
+						ready_to_promote: 0,
+						processing: 0,
+						complete: 0,
+						blocked: 0
+					},
+					lane_counts: { validate: 22, encode: 9, promote: 0 },
+					state_counts: { ready_to_validate: 22, encode_candidate: 9, ready_to_promote: 0 },
+					blockers: [],
+					next_action: {
+						kind: 'validate_outputs',
+						label: 'Validate ready outputs',
+						enabled: true,
+						target_prefix: 'tv/Terminator'
+					}
+				})
+			}),
+			folderStatusPayload(),
+			null,
+			null,
+			null,
+			null,
+			null
+		);
+
+		expect(workflow).toMatchObject({
+			tone: 'ready',
+			label: 'Mixed work',
+			title: 'Multiple tasks pending',
+			copy: '22 to validate, 9 to encode',
+			primary: 'Validate 22 outputs',
+			primaryAction: 'validate-outputs',
+			secondary: 'Queue 9 encodes',
+			secondaryAction: 'queue-encode'
+		});
+	});
 });

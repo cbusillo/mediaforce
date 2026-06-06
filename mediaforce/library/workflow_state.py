@@ -355,7 +355,7 @@ def _folder_summary(
             "Mixed work",
             "ready",
             _mixed_detail(counts),
-            WorkflowNextAction("review_scope", "Review scope", True, prefix),
+            _mixed_next_action(prefix, actionable_lanes[0]),
         )
     if lane_counts.get("validate", 0) > 0:
         return (
@@ -403,6 +403,16 @@ def _mixed_detail(counts: dict[str, int]) -> str:
     if counts["encode_candidates"]:
         parts.append(f"{counts['encode_candidates']} to encode")
     return ", ".join(parts) if parts else "Multiple workflow states are present."
+
+
+def _mixed_next_action(prefix: str, lane: WorkflowLane) -> WorkflowNextAction:
+    if lane == "validate":
+        return WorkflowNextAction("validate_outputs", "Validate ready outputs", True, prefix)
+    if lane == "promote":
+        return WorkflowNextAction("promote_outputs", "Promote ready outputs", True, prefix)
+    if lane == "encode":
+        return WorkflowNextAction("queue_encode", "Queue remaining encodes", True, prefix)
+    return WorkflowNextAction("review_scope", "Review scope", True, prefix)
 
 
 def _load_encode_job_state(connection: DBClient, prefix: str) -> tuple[WorkflowLane, str] | None:
