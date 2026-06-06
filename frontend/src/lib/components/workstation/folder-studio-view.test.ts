@@ -651,7 +651,7 @@ describe('Folder Studio review request mapping', () => {
 		});
 	});
 
-	it('routes approved folders with no encode candidates to the series scope', () => {
+	it('routes approved folders with no encode candidates to the whole show', () => {
 		const workflow = resolveWorkflow(
 			folderPayload({
 				encode_candidate_count: 0,
@@ -670,7 +670,7 @@ describe('Folder Studio review request mapping', () => {
 		expect(workflow).toMatchObject({
 			label: 'Approved',
 			title: 'Approved folder has no queueable items',
-			primary: 'Open series scope',
+			primary: 'Open whole show',
 			primaryAction: 'open-series',
 			secondary: 'Download pack',
 			secondaryAction: 'download-review-pack'

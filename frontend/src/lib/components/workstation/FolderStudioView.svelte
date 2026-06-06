@@ -375,7 +375,8 @@
 						<span>Folder path</span>
 						<strong class="mf-path">{prefix}</strong>
 						{#if seriesContext}
-							<a class="scope-link" href={resolve(seriesRoute)}>Open {seriesContext.title} series</a
+							<a class="scope-link" href={resolve(seriesRoute)}
+								>Open {seriesContext.title} whole show</a
 							>
 						{/if}
 					</div>

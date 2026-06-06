@@ -1062,7 +1062,7 @@ function resolveBackendWorkflow(
 			label: workflow.label,
 			title: 'This scope is complete',
 			copy: workflow.detail,
-			primary: folder.series_context ? 'Open series scope' : 'Open Folders',
+			primary: folder.series_context ? 'Open whole show' : 'Open Folders',
 			primaryAction: folder.series_context ? 'open-series' : 'open-folders',
 			secondary: 'Open Ops',
 			secondaryAction: 'open-ops'
@@ -1076,7 +1076,7 @@ function resolveBackendWorkflow(
 		let primaryAct: WorkflowAction = 'open-folders';
 		let primaryLabel = 'Review scope';
 		let secondaryAct: WorkflowAction = folder.series_context ? 'open-series' : 'open-ops';
-		let secondaryLabel = folder.series_context ? 'Open series scope' : 'Open Ops';
+		let secondaryLabel = folder.series_context ? 'Open whole show' : 'Open Ops';
 
 		if (toValidate > 0) {
 			primaryAct = 'validate-outputs';
@@ -1118,7 +1118,7 @@ function resolveBackendWorkflow(
 		copy: workflow.detail,
 		primary: workflow.next_action.label,
 		primaryAction: action,
-		secondary: folder.series_context ? 'Open series scope' : 'Open Ops',
+		secondary: folder.series_context ? 'Open whole show' : 'Open Ops',
 		secondaryAction: folder.series_context ? 'open-series' : 'open-ops'
 	};
 }
@@ -1180,8 +1180,8 @@ export function resolveWorkflow(
 				tone: 'ready',
 				label: 'Approved',
 				title: 'Approved folder has no queueable items',
-				copy: 'Approved settings are saved, but every item in this folder is already past the pending encode states. Open the series scope to queue broader work.',
-				primary: folder.series_context ? 'Open series scope' : 'Open Folders',
+				copy: 'Approved settings are saved, but every item in this folder is already past the pending encode states. Open the whole show to queue broader work.',
+				primary: folder.series_context ? 'Open whole show' : 'Open Folders',
 				primaryAction: folder.series_context ? 'open-series' : 'open-folders',
 				secondary: 'Download pack',
 				secondaryAction: 'download-review-pack'
