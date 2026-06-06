@@ -783,11 +783,7 @@ export function buildDecisionFacts(
 	if (outputFact) {
 		return [
 			outputFact,
-			{
-				label: 'Sample',
-				value: sampleItem ? pathFilename(sampleItem.rel_path) : 'No sample selected',
-				detail: 'Representative file'
-			},
+			buildOutputScopeFact(folder),
 			{
 				label: 'Next action',
 				value: workflow?.primary ?? 'Use the decision buttons',
@@ -832,6 +828,24 @@ function buildOutputDecisionFact(
 		label: 'Outputs',
 		value: `${count} ready`,
 		detail: action === 'validate-outputs' ? 'Ready to validate' : 'Ready to promote'
+	};
+}
+
+function buildOutputScopeFact(folder: FolderPayload): {
+	label: string;
+	value: string;
+	detail: string;
+} {
+	const count = numberValue(folder.summary?.item_count);
+	const seasonCount = Object.keys(folder.summary?.seasons ?? {}).length;
+	const scope = folder.series_context || seasonCount > 1 ? 'Whole show' : 'Folder';
+	return {
+		label: 'Scope',
+		value: scope,
+		detail:
+			count && count > 0
+				? `${count.toLocaleString('en-US')} item${count === 1 ? '' : 's'}`
+				: folder.prefix
 	};
 }
 
