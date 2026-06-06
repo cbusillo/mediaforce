@@ -17,6 +17,7 @@
 		codecSummary,
 		folderStatusCopy,
 		isQueueActionableFolder,
+		queuePrimaryActionLabel,
 		queueFolderState,
 		queueFolderTone,
 		totalPendingItems,
@@ -569,7 +570,10 @@
 							</dl>
 							<a
 								class="control control--primary"
-								href={resolve(folderRoutePath(selectedFolder.prefix))}>Open Folder Studio</a
+								href={resolve(folderRoutePath(selectedFolder.prefix))}
+								>{isFolderIndex
+									? `Open ${activeEntityLabel} Studio`
+									: queuePrimaryActionLabel(selectedFolder)}</a
 							>
 						</div>
 					{:else}

@@ -81,6 +81,33 @@ export function isQueueActionableFolder(folder: FolderCard): boolean {
 	return workflowOpenItemCount(folder) > 0 || workflow.next_action.enabled;
 }
 
+export function queuePrimaryActionLabel(folder: FolderCard): string {
+	const workflow = folder.workflow_state;
+	if (!workflow) return 'Open Folder Studio';
+	const counts = workflow.counts ?? {};
+	if (workflow.next_action.kind === 'queue_encode') {
+		const count = Math.max(counts.encode_candidates ?? 0, 0);
+		return count > 0
+			? `Queue ${count} encode${count === 1 ? '' : 's'}`
+			: workflow.next_action.label;
+	}
+	if (workflow.next_action.kind === 'validate_outputs') {
+		const count = Math.max(counts.ready_to_validate ?? 0, 0);
+		return count > 0
+			? `Validate ${count} output${count === 1 ? '' : 's'}`
+			: workflow.next_action.label;
+	}
+	if (workflow.next_action.kind === 'promote_outputs') {
+		const count = Math.max(counts.ready_to_promote ?? 0, 0);
+		return count > 0
+			? `Promote ${count} output${count === 1 ? '' : 's'}`
+			: workflow.next_action.label;
+	}
+	if (workflow.next_action.enabled) return workflow.next_action.label;
+	if (workflow.state === 'complete') return 'Review completed scope';
+	return 'Open Folder Studio';
+}
+
 export function workflowOpenItemCount(folder: FolderCard): number {
 	const counts = folder.workflow_state?.counts;
 	if (!counts) return Math.max(folder.pending_count ?? 0, 0);

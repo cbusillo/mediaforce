@@ -3,6 +3,7 @@ import type { FolderCard } from '$lib/api/types';
 import {
 	folderStatusCopy,
 	isQueueActionableFolder,
+	queuePrimaryActionLabel,
 	queueFolderState,
 	queueFolderTone,
 	queueStateLabel,
@@ -118,7 +119,10 @@ describe('Queue workstation labels', () => {
 	});
 
 	it('keeps the queue limited to folders with actionable workflow', () => {
-		expect(isQueueActionableFolder(folder({ workflow_state: workflowState() }))).toBe(true);
+		const readyToValidate = folder({ workflow_state: workflowState() });
+
+		expect(isQueueActionableFolder(readyToValidate)).toBe(true);
+		expect(queuePrimaryActionLabel(readyToValidate)).toBe('Validate 2 outputs');
 		expect(
 			isQueueActionableFolder(
 				folder({
@@ -149,6 +153,28 @@ describe('Queue workstation labels', () => {
 		).toBe(false);
 		expect(isQueueActionableFolder(folder({ pending_count: 3 }))).toBe(true);
 		expect(isQueueActionableFolder(folder({ pending_count: 0 }))).toBe(false);
+	});
+
+	it('uses safe queue action labels when no workflow action is enabled', () => {
+		expect(queuePrimaryActionLabel(folder({ pending_count: 3 }))).toBe('Open Folder Studio');
+		expect(
+			queuePrimaryActionLabel(
+				folder({
+					workflow_state: workflowState({
+						state: 'complete',
+						primary_lane: 'complete',
+						label: 'Complete',
+						tone: 'success',
+						next_action: {
+							kind: 'none',
+							label: 'No action',
+							enabled: false,
+							target_prefix: 'tv/show'
+						}
+					})
+				})
+			)
+		).toBe('Review completed scope');
 	});
 
 	it('maps workflow attention to a fail tone for workbench scanning', () => {
