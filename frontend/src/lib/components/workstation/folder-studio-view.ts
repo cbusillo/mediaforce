@@ -779,6 +779,22 @@ export function buildDecisionFacts(
 			{ label: 'Reclaim', value: verdict.reclaim, detail: verdict.quality }
 		];
 	}
+	const outputFact = buildOutputDecisionFact(folder.workflow_state ?? undefined, workflow);
+	if (outputFact) {
+		return [
+			outputFact,
+			{
+				label: 'Sample',
+				value: sampleItem ? pathFilename(sampleItem.rel_path) : 'No sample selected',
+				detail: 'Representative file'
+			},
+			{
+				label: 'Next action',
+				value: workflow?.primary ?? 'Use the decision buttons',
+				detail: workflowActionDetail(workflow)
+			}
+		];
+	}
 	return [
 		{
 			label: 'Review pack',
@@ -798,6 +814,25 @@ export function buildDecisionFacts(
 			detail: workflowActionDetail(workflow)
 		}
 	];
+}
+
+function buildOutputDecisionFact(
+	workflowPayload: FolderWorkflowState | undefined,
+	workflow: WorkflowState | undefined
+): { label: string; value: string; detail: string } | null {
+	const action = workflow?.primaryAction;
+	if (action !== 'validate-outputs' && action !== 'promote-outputs') return null;
+	const counts = workflowPayload?.counts;
+	const count =
+		action === 'validate-outputs'
+			? (counts?.ready_to_validate ?? 0)
+			: (counts?.ready_to_promote ?? 0);
+	if (count <= 0) return null;
+	return {
+		label: 'Outputs',
+		value: `${count} ready`,
+		detail: action === 'validate-outputs' ? 'Ready to validate' : 'Ready to promote'
+	};
 }
 
 function workflowActionDetail(workflow: WorkflowState | undefined): string {

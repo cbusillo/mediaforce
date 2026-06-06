@@ -1451,6 +1451,45 @@ describe('Folder Studio review request mapping', () => {
 			secondary: 'Queue 9 encodes',
 			secondaryAction: 'queue-encode'
 		});
+		expect(
+			buildDecisionFacts(
+				folderPayload({
+					workflow_state: {
+						prefix: 'tv/Terminator',
+						state: 'mixed',
+						primary_lane: 'validate',
+						label: 'Mixed work',
+						tone: 'ready',
+						detail: '22 to validate, 9 to encode',
+						counts: {
+							items: 31,
+							ready_to_validate: 22,
+							encode_candidates: 9,
+							ready_to_promote: 0,
+							processing: 0,
+							complete: 0,
+							blocked: 0
+						},
+						lane_counts: { validate: 22, encode: 9, promote: 0 },
+						state_counts: { ready_to_validate: 22, encode_candidate: 9, ready_to_promote: 0 },
+						blockers: [],
+						next_action: {
+							kind: 'validate_outputs',
+							label: 'Validate ready outputs',
+							enabled: true,
+							target_prefix: 'tv/Terminator'
+						}
+					}
+				}),
+				null,
+				null,
+				workflow
+			)[0]
+		).toEqual({
+			label: 'Outputs',
+			value: '22 ready',
+			detail: 'Ready to validate'
+		});
 		expect(buildDecisionFacts(folderPayload(), null, null, workflow)[2]).toEqual({
 			label: 'Next action',
 			value: 'Validate 22 outputs',
