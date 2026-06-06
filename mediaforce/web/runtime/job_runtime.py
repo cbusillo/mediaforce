@@ -12,7 +12,9 @@ from typing import Any
 
 from sqlalchemy import func
 from sqlalchemy import literal_column
+from sqlalchemy import or_
 from sqlalchemy import select
+from sqlalchemy import true
 from sqlalchemy import update
 
 from mediaforce.tuning.calibration_jobs import claim_next_queued_calibration_job, load_latest_failed_sample_job, \
@@ -443,7 +445,7 @@ def scan_is_stale(
         connection.execute(
             select(func.count())
             .select_from(library_items)
-            .where(library_items.c.rel_path.like(f"{prefix}%"))
+            .where(_prefix_filter(prefix))
         ).scalar_one()
     )
     if item_count == 0:
@@ -452,6 +454,20 @@ def scan_is_stale(
     if latest is None:
         return True
     return datetime.now(tz=UTC) - latest > deps.prefix_scan_stale_after
+
+
+def _prefix_filter(prefix: str) -> Any:
+    normalized_prefix = prefix.strip().strip("/")
+    if not normalized_prefix:
+        return true()
+    return or_(
+        library_items.c.rel_path == normalized_prefix,
+        library_items.c.rel_path.like(f"{_sql_like_escape(normalized_prefix)}/%", escape="\\"),
+    )
+
+
+def _sql_like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def latest_scan_completed_at(connection: DBClient, prefix: str | None) -> datetime | None:

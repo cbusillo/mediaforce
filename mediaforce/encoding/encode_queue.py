@@ -247,9 +247,17 @@ def _prefix_overlap_filter(prefix: str) -> Any:
         return true()
     return or_(
         encode_jobs.c.prefix == prefix,
-        encode_jobs.c.prefix.like(f"{prefix}/%"),
-        literal(prefix).like(encode_jobs.c.prefix + "/%"),
+        encode_jobs.c.prefix.like(f"{_sql_like_escape(prefix)}/%", escape="\\"),
+        literal(prefix).like(_escaped_prefix_column(encode_jobs.c.prefix) + "/%", escape="\\"),
     )
+
+
+def _escaped_prefix_column(column: Any) -> Any:
+    return func.replace(func.replace(func.replace(column, "\\", "\\\\"), "%", "\\%"), "_", "\\_")
+
+
+def _sql_like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def clear_terminal_encode_jobs_for_prefix(connection: DBClient, prefix: str) -> None:

@@ -447,7 +447,11 @@ def _load_encode_job_states(connection: DBClient, prefixes: list[str]) -> dict[s
 def _prefix_filter(column: Any, prefix: str) -> Any:
     if not prefix:
         return true()
-    return or_(column == prefix, column.like(f"{prefix}/%"))
+    return or_(column == prefix, column.like(f"{_sql_like_escape(prefix)}/%", escape="\\"))
+
+
+def _sql_like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _path_matches_prefix(path: str, prefix: str) -> bool:

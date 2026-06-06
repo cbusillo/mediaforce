@@ -42,6 +42,7 @@ from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_pref
     load_latest_terminal_encode_job_for_prefix, load_queue_state, repair_persisted_encode_job_hosts, \
     save_encode_job, save_queue_state
 from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
+from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.run_manifests import select_encode_candidates
 from mediaforce.hosts import status_runtime as host_status_runtime
 from mediaforce.remote import HostStatus
@@ -4098,6 +4099,48 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             rows = select_encode_candidates(connection, self.config, prefixes=["tv/show"], limit=None)
 
         self.assertEqual([row["rel_path"] for row in rows], ["tv/show/matched-boundary.mkv"])
+
+    def test_prefix_matching_treats_sql_wildcards_as_literal_folder_names(self) -> None:
+        config = replace(
+            self.config,
+            raw={
+                **self.config.raw,
+                "media": {**self.config.raw["media"], "output_container": "mkv"},
+                "video": {"target_vmaf": 95.0},
+                "audio": {},
+                "subtitle": {},
+                "planning": {},
+            },
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            underscore_match = self._create_source_file("underscore-match.mkv")
+            underscore_sibling = self._create_source_file("underscore-sibling.mkv")
+            percent_match = self._create_source_file("percent-match.mkv")
+            percent_sibling = self._create_source_file("percent-sibling.mkv")
+            rows = (
+                (self._insert_library_item(connection, underscore_match, status="planned"), "tv/show_1/Episode 01.mkv"),
+                (self._insert_library_item(connection, underscore_sibling, status="planned"), "tv/showA1/Episode 01.mkv"),
+                (self._insert_library_item(connection, percent_match, status="planned"), "tv/show%pilot/Episode 01.mkv"),
+                (self._insert_library_item(connection, percent_sibling, status="planned"), "tv/showXYZpilot/Episode 01.mkv"),
+            )
+            for item_id, rel_path in rows:
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(rel_path=rel_path, parent_dir=str(Path(rel_path).parent))
+                )
+
+            underscore_candidates = select_encode_candidates(connection, self.config, prefixes=["tv/show_1"], limit=None)
+            percent_candidates = select_encode_candidates(connection, self.config, prefixes=["tv/show%pilot"], limit=None)
+            underscore_workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show_1")
+            percent_summary = inspect_prefix(connection, config, "tv/show%pilot")
+            wildcard_sample = web_app._sample_item(connection, config, "tv/show_1")
+
+        self.assertEqual([row["rel_path"] for row in underscore_candidates], ["tv/show_1/Episode 01.mkv"])
+        self.assertEqual([row["rel_path"] for row in percent_candidates], ["tv/show%pilot/Episode 01.mkv"])
+        self.assertEqual(underscore_workflow.counts["items"], 1)
+        self.assertEqual(percent_summary["item_count"], 1)
+        self.assertEqual(wildcard_sample["rel_path"], "tv/show_1/Episode 01.mkv")
 
     def test_folder_workflow_marks_mixed_season_without_hiding_counts(self) -> None:
         with open_db(self.config.paths.db_path) as connection:

@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy import or_
+from sqlalchemy import true
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
@@ -16,7 +18,7 @@ def inspect_prefix(connection: DBClient, config: MediaforceConfig, prefix: str) 
         mapping_dict(row)
         for row in connection.execute(
             select(library_items)
-            .where(library_items.c.rel_path.like(f"{prefix}%"))
+            .where(_prefix_filter(prefix))
             .order_by(library_items.c.rel_path)
         ).mappings().fetchall()
     ]
@@ -52,6 +54,20 @@ def inspect_prefix(connection: DBClient, config: MediaforceConfig, prefix: str) 
         "resolved_policy": policy,
         "suggested_override": recommendation,
     }
+
+
+def _prefix_filter(prefix: str) -> Any:
+    normalized_prefix = prefix.strip().strip("/")
+    if not normalized_prefix:
+        return true()
+    return or_(
+        library_items.c.rel_path == normalized_prefix,
+        library_items.c.rel_path.like(f"{_sql_like_escape(normalized_prefix)}/%", escape="\\"),
+    )
+
+
+def _sql_like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def recommend_folder_profile(prefix: str, rows: list[dict[str, Any]], resolved_policy: dict[str, Any]) -> dict[

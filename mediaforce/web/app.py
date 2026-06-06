@@ -1936,9 +1936,15 @@ def _folder_review_badge(
 
 
 def _sample_item(connection: DBClient, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+    normalized_prefix = prefix.strip().strip("/")
     base_query = (
         select(library_items)
-        .where(library_items.c.rel_path.like(f"{prefix}%"))
+        .where(
+            or_(
+                library_items.c.rel_path == normalized_prefix,
+                library_items.c.rel_path.like(_prefix_descendant_like_pattern(normalized_prefix), escape="\\"),
+            )
+        )
         .order_by(library_items.c.priority_score.desc(), library_items.c.size_bytes.desc())
         .limit(1)
     )

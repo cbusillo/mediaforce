@@ -73,7 +73,14 @@ def _prefix_filter(prefix: str) -> Any:
     normalized_prefix = prefix.strip().strip("/")
     if not normalized_prefix:
         return true()
-    return or_(library_items.c.rel_path == normalized_prefix, library_items.c.rel_path.like(f"{normalized_prefix}/%"))
+    return or_(
+        library_items.c.rel_path == normalized_prefix,
+        library_items.c.rel_path.like(f"{_sql_like_escape(normalized_prefix)}/%", escape="\\"),
+    )
+
+
+def _sql_like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def select_encode_candidates(
