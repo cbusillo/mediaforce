@@ -28,6 +28,7 @@ import type {
 	EncodeQueueJob,
 	FolderPayload,
 	FolderStatusPayload,
+	HostRuntime,
 	FolderWorkflowState,
 	HostsPayload
 } from '$lib/api/types';
@@ -152,6 +153,14 @@ export type BenchHostOption = {
 	state: string;
 };
 
+export type ProcessingHostOption = {
+	key: string;
+	label: string;
+	detail: string;
+	state: string;
+	tone: ShellTone;
+};
+
 export type BenchRequestState = {
 	disabled: boolean;
 	blocker: string;
@@ -266,6 +275,62 @@ export function buildBenchHostOptions(
 			};
 		})
 		.filter((host) => host.key);
+}
+
+export function buildProcessingHostOptions(hosts: HostsPayload): ProcessingHostOption[] {
+	return hosts.hosts
+		.map((host) => {
+			const key = compactText(host.key);
+			if (!key) return null;
+			const active = numberValue(host.active_encode_count) ?? 0;
+			const capacity = numberValue(host.max_parallel_encodes) ?? 0;
+			return {
+				key,
+				label: compactText(host.label) || key,
+				...processingHostState(host, active, capacity)
+			};
+		})
+		.filter((host): host is ProcessingHostOption => Boolean(host));
+}
+
+function processingHostState(
+	host: HostRuntime,
+	active: number,
+	capacity: number
+): Omit<ProcessingHostOption, 'key' | 'label'> {
+	const capacityCopy = capacity
+		? `${active}/${capacity} encoding`
+		: active
+			? `${active} encoding`
+			: '';
+	if (!host.available) {
+		return {
+			state: 'Unavailable',
+			tone: 'fail',
+			detail: compactText(host.detail) || compactText(host.message) || host.active_reason
+		};
+	}
+	if (host.schedule_open === false) {
+		return {
+			state: 'Off schedule',
+			tone: 'wait',
+			detail: compactText(host.schedule_detail) || compactText(host.message) || capacityCopy
+		};
+	}
+	if (active > 0) {
+		return {
+			state: 'Busy',
+			tone: 'active',
+			detail: capacityCopy || compactText(host.detail) || compactText(host.message)
+		};
+	}
+	return {
+		state: 'Ready',
+		tone: 'ready',
+		detail: capacity
+			? `${capacity} encode slot${capacity === 1 ? '' : 's'}`
+			: compactText(host.message)
+	};
 }
 
 export function resolveBenchRequestState(
@@ -1346,7 +1411,8 @@ export function resolveWorkflow(
 			primary: 'Retry processing',
 			primaryAction: 'retry-encode',
 			secondary: 'Open Ops',
-			secondaryAction: 'open-ops'
+			secondaryAction: 'open-ops',
+			isOutputWorkflow: true
 		};
 	}
 	if (['running', 'queued', 'retry_backoff'].includes(encodeStatus)) {
@@ -1361,7 +1427,8 @@ export function resolveWorkflow(
 			primary: 'Monitor processing',
 			primaryAction: 'monitor-processing',
 			secondary: 'Download pack',
-			secondaryAction: 'download-review-pack'
+			secondaryAction: 'download-review-pack',
+			isOutputWorkflow: true
 		};
 	}
 	if (reviewGate?.status === 'accepted') {

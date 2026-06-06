@@ -25,6 +25,7 @@
 	import {
 		buildBenchMessages,
 		buildBenchHostOptions,
+		buildProcessingHostOptions,
 		buildWorkflowSteps,
 		buildFooterSignals,
 		buildProposalRows,
@@ -82,6 +83,7 @@
 	const seriesContext = $derived(studioFolder.series_context ?? null);
 	const seriesRoute = $derived(seriesContext ? folderRoutePath(seriesContext.prefix) : '/folders');
 	const sampleHostOptions = $derived(buildBenchHostOptions(studioFolder.sample_host_options));
+	const processingHostOptions = $derived(buildProcessingHostOptions(hosts));
 	const folderSampleHostKey = $derived(String(folder.sample_host_key ?? '').trim());
 	const fallbackHostKey = $derived(folderSampleHostKey || sampleHostOptions[0]?.key || '');
 
@@ -952,20 +954,35 @@
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="Workers" title="Sample readiness">
+			<WorkstationPanel
+				eyebrow="Workers"
+				title={workflow.isOutputWorkflow ? 'Processing capacity' : 'Sample readiness'}
+			>
 				<div class="host-list">
-					{#each sampleHostOptions.slice(0, 6) as host (host.key)}
-						<div class="host-row">
-							<StateBadge
-								compact
-								tone={host.available ? (host.scheduleOpen === false ? 'wait' : 'ready') : 'fail'}
-								label={host.state}
-							/>
-							<span>{host.label}{host.detail ? ` · ${host.detail}` : ''}</span>
-						</div>
-					{/each}
-					{#if sampleHostOptions.length === 0}
-						<div class="empty-note">Worker status is unavailable.</div>
+					{#if workflow.isOutputWorkflow}
+						{#each processingHostOptions.slice(0, 6) as host (host.key)}
+							<div class="host-row">
+								<StateBadge compact tone={host.tone} label={host.state} />
+								<span>{host.label}{host.detail ? ` · ${host.detail}` : ''}</span>
+							</div>
+						{/each}
+						{#if processingHostOptions.length === 0}
+							<div class="empty-note">Worker status is unavailable.</div>
+						{/if}
+					{:else}
+						{#each sampleHostOptions.slice(0, 6) as host (host.key)}
+							<div class="host-row">
+								<StateBadge
+									compact
+									tone={host.available ? (host.scheduleOpen === false ? 'wait' : 'ready') : 'fail'}
+									label={host.state}
+								/>
+								<span>{host.label}{host.detail ? ` · ${host.detail}` : ''}</span>
+							</div>
+						{/each}
+						{#if sampleHostOptions.length === 0}
+							<div class="empty-note">Worker status is unavailable.</div>
+						{/if}
 					{/if}
 				</div>
 			</WorkstationPanel>

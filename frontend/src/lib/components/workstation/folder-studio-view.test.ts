@@ -6,6 +6,7 @@ import {
 	buildBudgetEnforcementView,
 	buildDecisionFacts,
 	buildOutputReviewRows,
+	buildProcessingHostOptions,
 	buildReviewWorkspaceView,
 	buildRuntimeFacts,
 	buildSampleFacts,
@@ -146,6 +147,95 @@ describe('Folder Studio review request mapping', () => {
 			disabled: false,
 			blocker: ''
 		});
+	});
+
+	it('maps worker states for output processing capacity', () => {
+		const options = buildProcessingHostOptions({
+			compact: true,
+			hosts: [
+				{
+					key: 'm4',
+					label: 'M4 Studio',
+					available: true,
+					message: 'ready',
+					missing_paths: [],
+					issues: [],
+					detail: null,
+					capabilities: ['encode_queue'],
+					priority: 1,
+					max_parallel_encodes: 2,
+					active_encode_count: 1,
+					schedule_profile_label: 'day shift',
+					schedule_detail: 'open',
+					schedule_open: true,
+					active_flag: 'ready',
+					active_reason: 'ready',
+					queue_active: true
+				},
+				{
+					key: 'night',
+					label: 'Night host',
+					available: true,
+					message: 'scheduled',
+					missing_paths: [],
+					issues: [],
+					detail: null,
+					capabilities: ['encode_queue'],
+					priority: 2,
+					max_parallel_encodes: 1,
+					active_encode_count: 0,
+					schedule_profile_label: 'night',
+					schedule_detail: 'opens at 23:00',
+					schedule_open: false,
+					active_flag: 'scheduled',
+					active_reason: 'outside schedule',
+					queue_active: true
+				},
+				{
+					key: 'offline',
+					label: 'Offline',
+					available: false,
+					message: 'ssh failed',
+					missing_paths: [],
+					issues: [],
+					detail: null,
+					capabilities: ['encode_queue'],
+					priority: 3,
+					max_parallel_encodes: 1,
+					active_encode_count: 0,
+					schedule_profile_label: 'always',
+					schedule_detail: 'always',
+					schedule_open: true,
+					active_flag: 'unavailable',
+					active_reason: 'ssh failed',
+					queue_active: false
+				}
+			]
+		});
+
+		expect(options).toEqual([
+			{
+				key: 'm4',
+				label: 'M4 Studio',
+				state: 'Busy',
+				tone: 'active',
+				detail: '1/2 encoding'
+			},
+			{
+				key: 'night',
+				label: 'Night host',
+				state: 'Off schedule',
+				tone: 'wait',
+				detail: 'opens at 23:00'
+			},
+			{
+				key: 'offline',
+				label: 'Offline',
+				state: 'Unavailable',
+				tone: 'fail',
+				detail: 'ssh failed'
+			}
+		]);
 	});
 
 	it('enables send only for a note, available host, and inactive sample job', () => {
@@ -1454,7 +1544,7 @@ describe('Folder Studio review request mapping', () => {
 				calibrationJob: null
 			})
 		).toEqual({ disabled: false, title: '' });
-		expect(buildWorkflowSteps(workflow).find((step) => step.label === 'Process')).toMatchObject({
+		expect(buildWorkflowSteps(workflow).find((step) => step.label === 'Encode')).toMatchObject({
 			current: true,
 			detail: 'Retry the stopped folder job'
 		});
