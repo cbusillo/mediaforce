@@ -7,6 +7,7 @@ import {
 	buildDecisionFacts,
 	buildOutputReviewRows,
 	buildReviewWorkspaceView,
+	buildRuntimeFacts,
 	buildSampleFacts,
 	buildSampleVerdict,
 	buildWorkflowSteps,
@@ -564,6 +565,84 @@ describe('Folder Studio review request mapping', () => {
 			['Validate', 'Validation complete'],
 			['Promote', 'Promotion complete'],
 			['Complete', '2 of 2']
+		]);
+	});
+
+	it('uses output workflow runtime facts instead of sample approval state', () => {
+		const folder = folderPayload({
+			summary: folderSummary({ item_count: 31 }),
+			workflow_state: workflowState({
+				state: 'mixed',
+				label: 'Mixed work',
+				detail: '22 to validate, 9 to encode',
+				counts: {
+					items: 31,
+					ready_to_validate: 22,
+					encode_candidates: 9,
+					ready_to_promote: 0,
+					processing: 0,
+					complete: 0,
+					blocked: 0
+				},
+				next_action: {
+					kind: 'validate_outputs',
+					label: 'Validate ready outputs',
+					enabled: true,
+					target_prefix: 'tv/Example/Season 1'
+				}
+			}),
+			encode_queue_summary: '0 running · 0 queued'
+		});
+		const workflow = resolveWorkflow(
+			folder,
+			folderStatusPayload({ folder_scan_status: 'completed' }),
+			null,
+			null,
+			null,
+			null,
+			null
+		);
+
+		expect(
+			buildRuntimeFacts(
+				folder,
+				folderStatusPayload({ folder_scan_status: 'completed' }),
+				{ status: 'missing_sample' } as never,
+				null,
+				workflow
+			)
+		).toEqual([
+			{ label: 'Workflow', value: 'Mixed work' },
+			{ label: 'Scan', value: 'completed' },
+			{ label: 'Outputs', value: '22 validate · 9 encode' },
+			{ label: 'Processing', value: '0 running · 0 queued' }
+		]);
+	});
+
+	it('keeps sample workflow runtime facts focused on calibration and approval', () => {
+		const workflow = resolveWorkflow(
+			folderPayload({ encode_queue_summary: 'No folder job queued' }),
+			folderStatusPayload({ calibration_status: 'idle', folder_scan_status: 'idle' }),
+			null,
+			null,
+			{ status: 'missing_sample' } as never,
+			null,
+			null
+		);
+
+		expect(
+			buildRuntimeFacts(
+				folderPayload({ encode_queue_summary: 'No folder job queued' }),
+				folderStatusPayload({ calibration_status: 'idle', folder_scan_status: 'idle' }),
+				{ status: 'missing_sample' } as never,
+				null,
+				workflow
+			)
+		).toEqual([
+			{ label: 'Calibration', value: 'idle' },
+			{ label: 'Scan', value: 'idle' },
+			{ label: 'Approval', value: 'missing_sample' },
+			{ label: 'Processing', value: 'No folder job queued' }
 		]);
 	});
 

@@ -128,6 +128,11 @@ export type DecisionFact = {
 	detail: string;
 };
 
+export type RuntimeFact = {
+	label: string;
+	value: string;
+};
+
 export type BenchMessage = {
 	id: string;
 	role: 'operator' | 'bench' | 'system';
@@ -1727,6 +1732,44 @@ export function buildStatusTiles(
 			detail: totalHosts ? 'capacity check complete' : 'worker status unavailable',
 			tone: readyHosts > 0 ? 'ready' : totalHosts > 0 ? 'wait' : 'idle'
 		}
+	];
+}
+
+export function buildRuntimeFacts(
+	folder: FolderPayload,
+	status: FolderStatusPayload,
+	reviewGate: ReviewGate | null,
+	encodeJob: EncodeQueueJob | null,
+	workflow: WorkflowState
+): RuntimeFact[] {
+	const queueSummary = encodeJob?.status ?? folder.encode_queue_summary ?? '—';
+	if (workflow.isOutputWorkflow) {
+		const counts = folder.workflow_state?.counts;
+		const readyToValidate = counts?.ready_to_validate ?? 0;
+		const readyToPromote = counts?.ready_to_promote ?? 0;
+		const encodeCandidates = counts?.encode_candidates ?? 0;
+		const complete = counts?.complete ?? 0;
+		return [
+			{ label: 'Workflow', value: workflow.label },
+			{ label: 'Scan', value: status.folder_scan_status || '—' },
+			{
+				label: 'Outputs',
+				value:
+					compactParts([
+						readyToValidate ? `${readyToValidate} validate` : null,
+						readyToPromote ? `${readyToPromote} promote` : null,
+						encodeCandidates ? `${encodeCandidates} encode` : null,
+						complete ? `${complete} complete` : null
+					]) || '—'
+			},
+			{ label: 'Processing', value: queueSummary }
+		];
+	}
+	return [
+		{ label: 'Calibration', value: status.calibration_status || '—' },
+		{ label: 'Scan', value: status.folder_scan_status || '—' },
+		{ label: 'Approval', value: reviewGate?.status ?? '—' },
+		{ label: 'Processing', value: queueSummary }
 	];
 }
 

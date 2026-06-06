@@ -30,6 +30,7 @@
 		buildProposalRows,
 		buildReviewWorkspaceView,
 		buildDecisionFacts,
+		buildRuntimeFacts,
 		buildSampleFacts,
 		buildSampleVerdict,
 		buildStatusTiles,
@@ -134,6 +135,9 @@
 	const proposalRows = $derived(buildProposalRows(studioFolder, pendingProposal));
 	const statusTiles = $derived(buildStatusTiles(studioFolder, status, hosts, workflow));
 	const footerSignals = $derived(buildFooterSignals(studioFolder, status, hosts));
+	const runtimeFacts = $derived(
+		buildRuntimeFacts(studioFolder, status, reviewGate, encodeJob, workflow)
+	);
 	const sampleFacts = $derived(buildSampleFacts(sampleItem, summary));
 	const sampleVerdict = $derived(buildSampleVerdict(studioFolder, calibration));
 	const reviewWorkspace = $derived(
@@ -812,14 +816,10 @@
 			>
 				<WorkstationPanel title="Runtime">
 					<dl class="kv kv--compact">
-						<dt>Calibration</dt>
-						<dd>{status.calibration_status || '—'}</dd>
-						<dt>Scan</dt>
-						<dd>{status.folder_scan_status || '—'}</dd>
-						<dt>Approval</dt>
-						<dd>{reviewGate?.status ?? '—'}</dd>
-						<dt>Processing</dt>
-						<dd>{encodeJob?.status ?? studioFolder.encode_queue_summary ?? '—'}</dd>
+						{#each runtimeFacts as fact (fact.label)}
+							<dt>{fact.label}</dt>
+							<dd>{fact.value}</dd>
+						{/each}
 					</dl>
 				</WorkstationPanel>
 
