@@ -151,6 +151,9 @@
 	const reviewWorkspace = $derived(
 		buildReviewWorkspaceView(studioFolder, calibration, pendingProposal, workflow, reviewPackReady)
 	);
+	const reviewWorkspaceTone = $derived(
+		reviewWorkspace.badgeTone ?? (reviewPackReady ? 'ready' : 'idle')
+	);
 	const outputReviewRows = $derived(reviewWorkspace.rows);
 	const decisionFacts = $derived(
 		buildDecisionFacts(studioFolder, calibration, pendingProposal, workflow)
@@ -669,13 +672,13 @@
 				{/if}
 			</section>
 
-			<section class="review-workspace" aria-labelledby="review-workspace-title">
+			<section
+				class="review-workspace review-workspace--{reviewWorkspaceTone}"
+				aria-labelledby="review-workspace-title"
+			>
 				<header class="review-workspace__header">
 					<div>
-						<StateBadge
-							tone={reviewWorkspace.badgeTone ?? (reviewPackReady ? 'ready' : 'idle')}
-							label={reviewWorkspace.badge}
-						/>
+						<StateBadge tone={reviewWorkspaceTone} label={reviewWorkspace.badge} />
 						<h2 id="review-workspace-title">{reviewWorkspace.title}</h2>
 					</div>
 				</header>
@@ -1061,7 +1064,7 @@
 		border-bottom: var(--mf-border);
 		display: grid;
 		gap: var(--mf-space-6);
-		grid-template-columns: minmax(0, 1fr);
+		grid-template-columns: minmax(0, 1fr) auto;
 		order: 2;
 		padding-bottom: var(--mf-space-5);
 	}
@@ -1104,6 +1107,10 @@
 		display: flex;
 		gap: var(--mf-space-5);
 		min-width: 0;
+	}
+
+	.folder-header__facts {
+		align-self: start;
 	}
 
 	.sample-facts {
@@ -1295,7 +1302,7 @@
 		border-left: 3px solid var(--decision-line);
 		display: grid;
 		gap: var(--mf-space-6);
-		grid-template-columns: minmax(24rem, 1.25fr) minmax(14rem, 0.75fr);
+		grid-template-columns: minmax(0, 1fr);
 		order: 1;
 		padding: var(--mf-space-6);
 	}
@@ -1345,7 +1352,7 @@
 		gap: var(--mf-space-4);
 		flex-wrap: wrap;
 		grid-column: 1 / -1;
-		justify-content: flex-end;
+		justify-content: flex-start;
 		min-width: 0;
 	}
 
@@ -1403,11 +1410,31 @@
 	.review-workspace {
 		background: var(--mf-bg-panel);
 		border: var(--mf-border);
-		border-left: 3px solid var(--mf-ready-fg);
+		border-left: 3px solid var(--review-workspace-tone, var(--mf-ready-fg));
 		display: grid;
 		gap: var(--mf-space-5);
 		order: 4;
 		padding: var(--mf-space-5);
+	}
+
+	.review-workspace--active {
+		--review-workspace-tone: var(--mf-active-fg);
+	}
+
+	.review-workspace--fail {
+		--review-workspace-tone: var(--mf-fail-fg);
+	}
+
+	.review-workspace--idle {
+		--review-workspace-tone: var(--mf-idle-fg);
+	}
+
+	.review-workspace--ready {
+		--review-workspace-tone: var(--mf-ready-fg);
+	}
+
+	.review-workspace--wait {
+		--review-workspace-tone: var(--mf-wait-fg);
 	}
 
 	.review-workspace__header {
@@ -2052,17 +2079,9 @@
 			grid-template-columns: minmax(190px, 240px) minmax(0, 1fr);
 		}
 
-		.decision {
-			grid-template-columns: minmax(0, 1fr);
-		}
-
 		.decision__facts {
 			display: grid;
 			grid-template-columns: repeat(3, minmax(0, 1fr));
-		}
-
-		.decision__actions {
-			justify-content: flex-start;
 		}
 	}
 
@@ -2110,6 +2129,11 @@
 		.sample-facts,
 		.decision__actions {
 			flex-wrap: wrap;
+		}
+
+		.decision .decision__facts {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr);
 		}
 	}
 

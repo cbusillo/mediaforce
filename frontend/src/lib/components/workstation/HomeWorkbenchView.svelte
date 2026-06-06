@@ -552,7 +552,7 @@
 						title={selectedPanelTitle}
 					>
 						{#if selectedFolder}
-							<div class="selected-folder">
+							<div class="selected-folder selected-folder--{queueFolderTone(selectedFolder)}">
 								<div class="selected-folder__identity">
 									<div class="selected-folder__head">
 										<StateBadge
@@ -837,8 +837,28 @@
 
 	.selected-folder {
 		align-items: start;
-		border-left: 2px solid var(--mf-wait-fg);
+		border-left: 2px solid var(--selected-folder-tone, var(--mf-wait-fg));
 		grid-template-columns: minmax(0, 1.1fr) minmax(260px, 0.9fr);
+	}
+
+	.selected-folder--active {
+		--selected-folder-tone: var(--mf-active-fg);
+	}
+
+	.selected-folder--fail {
+		--selected-folder-tone: var(--mf-fail-fg);
+	}
+
+	.selected-folder--idle {
+		--selected-folder-tone: var(--mf-idle-fg);
+	}
+
+	.selected-folder--ready {
+		--selected-folder-tone: var(--mf-ready-fg);
+	}
+
+	.selected-folder--wait {
+		--selected-folder-tone: var(--mf-wait-fg);
 	}
 
 	.selected-folder :global(.state-badge) {
