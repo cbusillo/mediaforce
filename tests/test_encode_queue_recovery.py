@@ -12729,7 +12729,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     *,
                     statuses: set[str],
             ) -> list[folder_actions_runtime.FolderItem]:
-                self_test.assertEqual(statuses, {"encoded", "validated"})
+                self_test.assertEqual(statuses, {"encoded"})
                 return [{"library_item_id": 1}, {"library_item_id": 2}]
 
         class _ValidateManifestItems(folder_actions_runtime.ValidateManifestItemsFn):
@@ -12768,7 +12768,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     *,
                     statuses: set[str],
             ) -> list[folder_actions_runtime.FolderItem]:
-                self_test.assertEqual(statuses, {"encoded", "validated"})
+                self_test.assertEqual(statuses, {"encoded"})
                 return [{"library_item_id": 1}]
 
         class _PassedValidation(folder_actions_runtime.ValidateManifestItemsFn):
@@ -12996,6 +12996,52 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 )
 
         self.assertEqual([item["library_item_id"] for item in items], [encoded_id, validated_id])
+
+    def test_validate_folder_outputs_action_uses_only_validate_lane_outputs(self) -> None:
+        encoded_source = self._create_source_file("episode-encoded-validate.mkv")
+        validated_source = self._create_source_file("episode-validated-promote.mkv")
+        encoded_stage = self._staging_path("episode-encoded-validate.mp4")
+        validated_stage = self._staging_path("episode-validated-promote.mp4")
+        encoded_stage.parent.mkdir(parents=True, exist_ok=True)
+        encoded_stage.write_text("encoded")
+        validated_stage.write_text("validated")
+
+        with open_db(self.config.paths.db_path) as connection:
+            encoded_id = self._insert_library_item(connection, encoded_source, status="encoded")
+            validated_id = self._insert_library_item(connection, validated_source, status="validated")
+            self._insert_staged_artifact(connection, encoded_id, encoded_stage)
+            self._insert_staged_artifact(connection, validated_id, validated_stage)
+
+        validated_item_ids: list[int] = []
+
+        class _ValidateManifestItems(folder_actions_runtime.ValidateManifestItemsFn):
+            def __call__(
+                    self,
+                    _connection: DBClient,
+                    _config: MediaforceConfig,
+                    manifest: folder_actions_runtime.ManifestPayload,
+                    indexes: list[int],
+            ) -> list[folder_actions_runtime.ActionPayload]:
+                validated_item_ids.extend(
+                    int(manifest["items"][index]["library_item_id"])
+                    for index in indexes
+                )
+                return [{"passed": True}]
+
+        with patch(
+                "mediaforce.web.app.build_manifest_item",
+                side_effect=lambda row, _config: {"library_item_id": row["id"]},
+        ):
+            result = folder_actions_runtime.validate_folder_outputs_action(
+                self.config,
+                "tv/show",
+                load_folder_staged_items_fn=web_app._load_folder_staged_items,
+                validate_manifest_items_fn=_ValidateManifestItems(),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(validated_item_ids, [encoded_id])
+        self.assertNotIn(validated_id, validated_item_ids)
 
     def test_folder_status_payload_polls_while_encode_is_active(self) -> None:
         manifest_path = self._write_manifest("manifest-folder-status-active.json", [{"library_item_id": 1}])
