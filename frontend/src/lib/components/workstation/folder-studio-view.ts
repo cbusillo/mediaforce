@@ -1515,8 +1515,21 @@ export function resolveWorkflow(
 	calibrationJob: FolderCalibrationJob | null,
 	encodeJob: EncodeQueueJob | null,
 	reviewPackReady = false,
-	approvalReviewReady = Boolean(calibration?.review_media_ready)
+	approvalReviewReady = Boolean(calibration?.review_media_ready),
+	folderPending = false
 ): WorkflowState {
+	if (folderPending) {
+		return {
+			tone: 'active',
+			label: 'Loading',
+			title: 'Loading folder state',
+			copy: 'Folder metadata, worker readiness, and workflow status are loading. The workspace will hydrate in place when the route data returns.',
+			primary: 'Open Folders',
+			primaryAction: 'open-folders',
+			secondary: 'Open Ops',
+			secondaryAction: 'open-ops'
+		};
+	}
 	const backendWorkflow = folder.workflow_state ?? status.workflow_state ?? null;
 	if (backendWorkflow) {
 		const resolvedBackendWorkflow = resolveBackendWorkflow(folder, backendWorkflow);

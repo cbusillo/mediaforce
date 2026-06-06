@@ -2,6 +2,8 @@ import type {
 	CompletedPayload,
 	DashboardFoldersPayload,
 	DashboardSummaryPayload,
+	FolderPayload,
+	FolderStatusPayload,
 	HostsPayload,
 	QueueLane
 } from './types';
@@ -45,6 +47,62 @@ export const initialFoldersPayload: DashboardFoldersPayload = {
 };
 
 export const initialHosts: HostsPayload = { compact: true, hosts: [] };
+
+export function initialFolderPayload(prefix: string): FolderPayload {
+	return {
+		prefix,
+		pending: true,
+		metric_support: { vmaf: false, xpsnr: false, ssim: false },
+		metric_status_copy: 'loading',
+		workflow_state: {
+			prefix,
+			state: 'loading',
+			primary_lane: 'none',
+			label: 'Loading',
+			tone: 'active',
+			detail: 'Fetching folder state, worker readiness, and workflow status.',
+			counts: {},
+			lane_counts: {},
+			state_counts: {},
+			next_action: {
+				kind: 'review_scope',
+				label: 'Open folders',
+				enabled: true,
+				target_prefix: prefix
+			},
+			blockers: []
+		}
+	};
+}
+
+export function initialFolderStatusPayload(prefix: string): FolderStatusPayload {
+	return {
+		prefix,
+		polling_active: false,
+		calibration_status: 'loading',
+		folder_scan_status: 'loading',
+		calibration_job: null,
+		folder_scan_job: null,
+		workflow_state: {
+			prefix,
+			state: 'loading',
+			primary_lane: 'none',
+			label: 'Loading',
+			tone: 'active',
+			detail: 'Fetching folder state, worker readiness, and workflow status.',
+			counts: {},
+			lane_counts: {},
+			state_counts: {},
+			next_action: {
+				kind: 'review_scope',
+				label: 'Open folders',
+				enabled: true,
+				target_prefix: prefix
+			},
+			blockers: []
+		}
+	};
+}
 
 export const initialCompleted: CompletedPayload = {
 	folders: [],
