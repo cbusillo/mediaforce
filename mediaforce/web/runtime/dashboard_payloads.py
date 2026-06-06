@@ -1,9 +1,12 @@
 from dataclasses import asdict
 from typing import Any
 
+from sqlalchemy import func, select
+
 from mediaforce.tuning.calibration_jobs import list_queue_summary
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import open_db
+from mediaforce.core.db_tables import library_items
 from mediaforce.encoding.encode_queue import summarize_encode_queue
 from mediaforce.library.workflow_state import build_folder_workflow_state
 
@@ -16,11 +19,26 @@ def dashboard_summary_payload(
         maybe_schedule_scan: Any,
         decorate_encode_queue_for_scheduler: Any,
         library_color_map_for_config: Any,
+        preview_limit: int | None = None,
 ) -> dict[str, Any]:
+    if preview_limit is not None and preview_limit < 0:
+        raise ValueError("preview_limit must be non-negative")
+
     cache_key = folder_card_cache_key(config)
     with open_db(config.paths.db_path) as connection:
         scan_job = maybe_schedule_scan(connection, config, prefix=None)
-        preview_folders = preview_folder_cards(config, connection)
+        preview_folders = [] if preview_limit == 0 else preview_folder_cards(config, connection)
+        if preview_limit is not None and preview_limit > 0:
+            preview_folders = preview_folders[:preview_limit]
+        catalog_empty = not preview_folders
+        if preview_limit == 0:
+            catalog_empty = int(
+                connection.execute(
+                    select(func.count())
+                    .select_from(library_items)
+                    .where(library_items.c.status != "missing")
+                ).scalar_one()
+            ) == 0
         calibration_queue = list_queue_summary(connection)
         encode_queue = decorate_encode_queue_for_scheduler(config, summarize_encode_queue(connection))
     return {
@@ -29,7 +47,7 @@ def dashboard_summary_payload(
         "calibration_queue": calibration_queue,
         "encode_queue": encode_queue,
         "folders_preview": [asdict(folder) for folder in preview_folders],
-        "catalog_empty": not preview_folders,
+        "catalog_empty": catalog_empty,
         "folder_cache_key": _serialize_cache_key(cache_key),
     }
 
@@ -40,11 +58,16 @@ def dashboard_folders_payload(
         folder_card_cache_key: Any,
         list_folder_cards: Any,
         list_series_folder_cards: Any | None = None,
+        include_series_folders: bool = True,
 ) -> dict[str, Any]:
     cache_key = folder_card_cache_key(config)
     with open_db(config.paths.db_path) as connection:
         folders = list_folder_cards(config, connection)
-        series_folders = list_series_folder_cards(config, connection) if list_series_folder_cards is not None else []
+        series_folders = (
+            list_series_folder_cards(config, connection)
+            if include_series_folders and list_series_folder_cards is not None
+            else []
+        )
     return {
         "folders": [asdict(folder) for folder in folders],
         "series_folders": [asdict(folder) for folder in series_folders],
