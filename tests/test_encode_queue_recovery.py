@@ -39,7 +39,7 @@ from mediaforce.encoding import quality_search
 from mediaforce.encoding import staging as staging_runtime
 from mediaforce.encoding import video_filters
 from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_prefix, list_child_encode_jobs, \
-    load_active_encode_job_for_prefix, load_encode_job, \
+    load_active_encode_job_for_prefix, load_encode_job, load_latest_encode_job, \
     load_latest_terminal_encode_job_for_prefix, load_queue_state, repair_persisted_encode_job_hosts, \
     save_encode_job, save_queue_state
 from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
@@ -47,7 +47,10 @@ from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.run_manifests import select_encode_candidates
 from mediaforce.hosts import status_runtime as host_status_runtime
 from mediaforce.remote import HostStatus
-from mediaforce.tuning.calibration_jobs import list_queue_summary
+from mediaforce.tuning.calibration_jobs import list_queue_summary, \
+    load_active_overlapping_job as load_active_overlapping_calibration_job, \
+    load_latest_job as load_latest_calibration_job, \
+    load_latest_overlapping_job as load_latest_overlapping_calibration_job
 from mediaforce.review import BrowserReviewClip, CompareClip, EncodedPreviewClip
 from mediaforce.web import app as web_app
 from mediaforce.web import settings_runtime
@@ -13036,13 +13039,127 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         payload = dashboard_payloads.folder_status_payload(
             self.config,
             "tv/show",
-            load_job_state=web_app._load_job_state,
+            load_job_state=web_app._load_overlapping_job_state,
             load_retryable_sample_job_state=web_app._load_retryable_sample_job_state,
             load_scan_job_state=web_app._load_scan_job_state,
             load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
         )
 
         self.assertTrue(payload["polling_active"])
+
+    def test_folder_status_payload_polls_while_descendant_calibration_is_active(self) -> None:
+        now = web_app._now_iso()
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                calibration_jobs.insert().values(
+                    job_id="descendant-calibration-active",
+                    prefix="tv/show/Season 1",
+                    status="running",
+                    lane="sample",
+                    action="ai_tune",
+                    host_json="{}",
+                    notes="",
+                    policy_json="{}",
+                    sample_item_json="{}",
+                    owner_pid=os.getpid(),
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                )
+            )
+
+        payload = dashboard_payloads.folder_status_payload(
+            self.config,
+            "tv/show",
+            load_job_state=web_app._load_overlapping_job_state,
+            load_retryable_sample_job_state=web_app._load_retryable_sample_job_state,
+            load_scan_job_state=web_app._load_scan_job_state,
+            load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
+        )
+
+        self.assertTrue(payload["polling_active"])
+        self.assertEqual(payload["calibration_status"], "running")
+        self.assertEqual(payload["calibration_job"]["job_id"], "descendant-calibration-active")
+
+    def test_latest_calibration_lookup_matches_overlapping_series_and_season_scopes(self) -> None:
+        older = (datetime.now(tz=UTC) - timedelta(seconds=5)).isoformat(timespec="seconds")
+        newer = datetime.now(tz=UTC).isoformat(timespec="seconds")
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                calibration_jobs.insert().values(
+                    job_id="series-calibration",
+                    prefix="tv/show",
+                    status="completed",
+                    lane="sample",
+                    action="ai_tune",
+                    host_json="{}",
+                    notes="",
+                    policy_json="{}",
+                    sample_item_json="{}",
+                    created_at=older,
+                    updated_at=older,
+                )
+            )
+            connection.execute(
+                calibration_jobs.insert().values(
+                    job_id="season-calibration",
+                    prefix="tv/show/Season 2",
+                    status="running",
+                    lane="sample",
+                    action="ai_tune",
+                    host_json="{}",
+                    notes="",
+                    policy_json="{}",
+                    sample_item_json="{}",
+                    created_at=newer,
+                    started_at=newer,
+                    updated_at=newer,
+                )
+            )
+
+            exact_parent_match = load_latest_calibration_job(connection, "tv/show")
+            parent_match = load_latest_overlapping_calibration_job(connection, "tv/show")
+            child_match = load_latest_overlapping_calibration_job(connection, "tv/show/Season 2/Episode 1")
+            active_match = load_active_overlapping_calibration_job(connection, "tv/show")
+            sibling_miss = load_latest_overlapping_calibration_job(connection, "tv/show-special")
+
+        self.assertEqual(exact_parent_match["job_id"], "series-calibration")
+        self.assertEqual(parent_match["job_id"], "season-calibration")
+        self.assertEqual(child_match["job_id"], "season-calibration")
+        self.assertEqual(active_match["job_id"], "season-calibration")
+        self.assertIsNone(sibling_miss)
+
+    def test_overlapping_calibration_status_expires_descendant_without_reparenting(self) -> None:
+        now = web_app._now_iso()
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                calibration_jobs.insert().values(
+                    job_id="stale-descendant-calibration",
+                    prefix="tv/show/Season 2",
+                    status="running",
+                    lane="sample",
+                    action="ai_tune",
+                    host_json="{}",
+                    notes="",
+                    policy_json="{}",
+                    sample_item_json="{}",
+                    owner_pid=999_999_999,
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                )
+            )
+
+            payload = web_app._load_overlapping_job_state(connection, self.config, "tv/show")
+            stored = connection.execute(
+                select(calibration_jobs.c.prefix, calibration_jobs.c.status)
+                .where(calibration_jobs.c.job_id == "stale-descendant-calibration")
+            ).mappings().one()
+
+        self.assertEqual(payload["job_id"], "stale-descendant-calibration")
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(stored["prefix"], "tv/show/Season 2")
+        self.assertEqual(stored["status"], "failed")
 
     def test_folder_status_payload_includes_canonical_workflow_state(self) -> None:
         source_path = self._create_source_file("status-ready-to-validate.mkv")
@@ -13119,6 +13236,124 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(child_match["job_id"], "series-active")
         self.assertIsNone(sibling_miss)
         self.assertEqual(parent_match["job_id"], "season-active")
+
+    def test_latest_encode_job_lookup_matches_overlapping_series_and_season_scopes(self) -> None:
+        def save_display_job(connection: DBClient, *, job_id: str, prefix: str, offset_seconds: int) -> None:
+            timestamp = (datetime.now(tz=UTC) + timedelta(seconds=offset_seconds)).isoformat(timespec="seconds")
+            save_encode_job(
+                connection,
+                {
+                    "job_id": job_id,
+                    "prefix": prefix,
+                    "job_kind": "folder",
+                    "parent_job_id": None,
+                    "status": "needs_attention",
+                    "manifest_path": str(self._write_manifest(f"{job_id}.json", [{"library_item_id": 1}])),
+                    "manifest_indexes": None,
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "host": {},
+                    "last_host": {},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": f"{job_id} failed",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": None,
+                    "last_failure_at": None,
+                    "host_cooldown_until": None,
+                    "created_at": timestamp,
+                    "started_at": timestamp,
+                    "finished_at": timestamp,
+                    "updated_at": timestamp,
+                },
+            )
+
+        with open_db(self.config.paths.db_path) as connection:
+            save_display_job(connection, job_id="series-latest", prefix="tv/show", offset_seconds=0)
+            child_match = load_latest_encode_job(connection, "tv/show/Season 2")
+            sibling_miss = load_latest_encode_job(connection, "tv/show-special")
+
+            save_display_job(connection, job_id="season-latest", prefix="tv/show/Season 3", offset_seconds=1)
+            parent_match = load_latest_encode_job(connection, "tv/show")
+
+        self.assertEqual(child_match["job_id"], "series-latest")
+        self.assertIsNone(sibling_miss)
+        self.assertEqual(parent_match["job_id"], "season-latest")
+
+    def test_prefix_overlap_escapes_sql_wildcard_characters(self) -> None:
+        now = web_app._now_iso()
+        manifest_path = self._write_manifest("manifest-wildcard-prefix.json", [{"library_item_id": 1}])
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                calibration_jobs.insert().values(
+                    job_id="literal-underscore-calibration",
+                    prefix="tv/show_1/Season 1",
+                    status="running",
+                    lane="sample",
+                    action="ai_tune",
+                    host_json="{}",
+                    notes="",
+                    policy_json="{}",
+                    sample_item_json="{}",
+                    owner_pid=os.getpid(),
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                )
+            )
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "literal-percent-encode",
+                    "prefix": "tv/show%1/Season 1",
+                    "job_kind": "folder",
+                    "parent_job_id": None,
+                    "status": "running",
+                    "manifest_path": str(manifest_path),
+                    "manifest_indexes": None,
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "host": {},
+                    "last_host": {},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": None,
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": None,
+                    "last_failure_at": None,
+                    "host_cooldown_until": None,
+                    "created_at": now,
+                    "started_at": now,
+                    "finished_at": None,
+                    "updated_at": now,
+                },
+            )
+
+            underscore_match = load_latest_overlapping_calibration_job(connection, "tv/show_1")
+            underscore_miss = load_latest_overlapping_calibration_job(connection, "tv/showA1")
+            percent_match = load_active_encode_job_for_prefix(connection, "tv/show%1")
+            percent_miss = load_active_encode_job_for_prefix(connection, "tv/showZZ1")
+
+        self.assertEqual(underscore_match["job_id"], "literal-underscore-calibration")
+        self.assertIsNone(underscore_miss)
+        self.assertEqual(percent_match["job_id"], "literal-percent-encode")
+        self.assertIsNone(percent_miss)
 
     def test_queue_folder_encode_recovers_failed_files_into_active_parent(self) -> None:
         source_a = self._create_source_file("recover-active-a.mkv")

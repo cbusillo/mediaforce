@@ -215,9 +215,10 @@ def load_encode_job(connection: DBClient, job_id: str) -> dict[str, Any] | None:
 
 
 def load_latest_encode_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
+    normalized_prefix = _normalize_prefix(prefix)
     row = connection.execute(
         _encode_job_select()
-        .where(encode_jobs.c.prefix == prefix)
+        .where(_prefix_overlap_filter(normalized_prefix))
         .where(encode_jobs.c.job_kind.in_(DISPLAY_ENCODE_JOB_KINDS))
         .order_by(encode_jobs.c.created_at.desc(), _rowid_column().desc())
         .limit(1)

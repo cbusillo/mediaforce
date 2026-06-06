@@ -179,7 +179,9 @@ from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_
     dispatch_calibration_job as runtime_dispatch_calibration_job, \
     expire_calibration_job as runtime_expire_calibration_job, \
     latest_scan_completed_at as runtime_latest_scan_completed_at, \
-    load_job_state as runtime_load_job_state, load_scan_job_state as runtime_load_scan_job_state, \
+    load_job_state as runtime_load_job_state, \
+    load_overlapping_job_state as runtime_load_overlapping_job_state, \
+    load_scan_job_state as runtime_load_scan_job_state, \
     maybe_schedule_scan as runtime_maybe_schedule_scan, \
     process_calibration_queue_once as runtime_process_calibration_queue_once, \
     run_scan_job as runtime_run_scan_job, save_job_state as runtime_save_job_state, \
@@ -432,7 +434,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         return folder_status_payload(
             config,
             normalized_prefix,
-            load_job_state=_load_job_state,
+            load_job_state=_load_overlapping_job_state,
             load_retryable_sample_job_state=_load_retryable_sample_job_state,
             load_scan_job_state=_load_scan_job_state,
             load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
@@ -2486,6 +2488,10 @@ def _calibration_run_deps() -> CalibrationRunDeps:
 
 def _load_job_state(connection: DBClient, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
     return runtime_load_job_state(connection, config, prefix, _job_runtime_deps())
+
+
+def _load_overlapping_job_state(connection: DBClient, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+    return runtime_load_overlapping_job_state(connection, config, prefix, _job_runtime_deps())
 
 
 def _load_retryable_sample_job_state(connection: DBClient, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
