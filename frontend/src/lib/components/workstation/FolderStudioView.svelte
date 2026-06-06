@@ -46,6 +46,7 @@
 		resolveQueueSubmissionMode,
 		resolveWorkflowActionState,
 		resolveWorkflow,
+		summarizeOutputWorkflowPending,
 		summarizeStatuses,
 		type WorkflowAction
 	} from './folder-studio-view';
@@ -136,7 +137,7 @@
 	const workflowSteps = $derived(buildWorkflowSteps(workflow));
 	const proposalRows = $derived(buildProposalRows(studioFolder, pendingProposal));
 	const statusTiles = $derived(buildStatusTiles(studioFolder, status, hosts, workflow));
-	const footerSignals = $derived(buildFooterSignals(studioFolder, status, hosts));
+	const footerSignals = $derived(buildFooterSignals(studioFolder, status, hosts, workflow));
 	const runtimeFacts = $derived(
 		buildRuntimeFacts(studioFolder, status, reviewGate, encodeJob, workflow)
 	);
@@ -945,7 +946,15 @@
 					</div>
 					<div>
 						<span>Pending</span>
-						<strong>{summary?.statuses ? summarizeStatuses(summary.statuses) : '—'}</strong>
+						<strong>
+							{#if workflow.isOutputWorkflow}
+								{summarizeOutputWorkflowPending(
+									studioFolder.workflow_state?.counts ?? status.workflow_state?.counts
+								)}
+							{:else}
+								{summary?.statuses ? summarizeStatuses(summary.statuses) : '—'}
+							{/if}
+						</strong>
 					</div>
 					<div>
 						<span>Source size</span>

@@ -10,6 +10,7 @@ import {
 	buildBenchHostOptions,
 	buildBudgetEnforcementView,
 	buildDecisionFacts,
+	buildFooterSignals,
 	buildOutputReviewRows,
 	buildProcessingHostOptions,
 	buildReviewWorkspaceView,
@@ -23,7 +24,8 @@ import {
 	resolveBenchRequestState,
 	resolveQueueSubmissionMode,
 	resolveWorkflow,
-	resolveWorkflowActionState
+	resolveWorkflowActionState,
+	summarizeOutputWorkflowPending
 } from './folder-studio-view';
 import type { FolderCalibrationState, PendingSampleProposal } from '$lib/folders/studio';
 
@@ -731,6 +733,14 @@ describe('Folder Studio review request mapping', () => {
 			detail: '22 to validate · 9 to encode',
 			tone: 'ready'
 		});
+		expect(summarizeOutputWorkflowPending(folder.workflow_state?.counts)).toBe(
+			'22 validate · 9 encode'
+		);
+		expect(buildFooterSignals(folder, folderStatusPayload(), hostsPayload(), workflow)[0]).toEqual({
+			label: 'Pipeline',
+			value: 'mixed work',
+			tone: 'ready'
+		});
 	});
 
 	it('uses fresher status workflow counts for output shell and runtime facts', () => {
@@ -776,6 +786,9 @@ describe('Folder Studio review request mapping', () => {
 			label: 'Outputs',
 			value: '5 encode · 22 complete'
 		});
+		expect(summarizeOutputWorkflowPending(status.workflow_state?.counts)).toBe(
+			'5 encode · 4 processing'
+		);
 	});
 
 	it('keeps sample workflow runtime facts focused on calibration and approval', () => {
@@ -815,6 +828,18 @@ describe('Folder Studio review request mapping', () => {
 			value: 'idle',
 			detail: 'polling idle',
 			tone: 'idle'
+		});
+		expect(
+			buildFooterSignals(
+				folderPayload(),
+				folderStatusPayload({ calibration_status: 'idle' }),
+				hostsPayload(),
+				workflow
+			)[0]
+		).toEqual({
+			label: 'Review',
+			value: 'idle',
+			tone: 'active'
 		});
 	});
 

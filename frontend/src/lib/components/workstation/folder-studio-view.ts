@@ -654,6 +654,18 @@ export function summarizeStatuses(statuses: Record<string, number>): string {
 		.join(' · ');
 }
 
+export function summarizeOutputWorkflowPending(counts: Record<string, number> | undefined): string {
+	if (!counts) return '—';
+	return (
+		compactParts([
+			counts.ready_to_validate ? `${counts.ready_to_validate} validate` : null,
+			counts.ready_to_promote ? `${counts.ready_to_promote} promote` : null,
+			counts.encode_candidates ? `${counts.encode_candidates} encode` : null,
+			counts.processing ? `${counts.processing} processing` : null
+		]) || '0 pending'
+	);
+}
+
 export function resolvedMetricCopy(folder: FolderPayload): string {
 	const supported = [];
 	if (folder.metric_support.vmaf) supported.push('VMAF');
@@ -1935,10 +1947,14 @@ export function buildRuntimeFacts(
 export function buildFooterSignals(
 	folder: FolderPayload,
 	status: FolderStatusPayload,
-	hosts: HostsPayload
+	hosts: HostsPayload,
+	workflow: WorkflowState
 ): FooterSignal[] {
+	const firstSignal: FooterSignal = workflow.isOutputWorkflow
+		? { label: 'Pipeline', value: workflow.label.toLowerCase(), tone: workflow.tone }
+		: { label: 'Review', value: status.calibration_status || 'unknown', tone: 'active' };
 	return [
-		{ label: 'Review', value: status.calibration_status || 'unknown', tone: 'active' },
+		firstSignal,
 		{ label: 'Metric', value: resolvedMetricCopy(folder), tone: 'ready' },
 		{
 			label: 'Workers',
