@@ -695,7 +695,8 @@ export function buildBudgetEnforcementView(
 export function buildDecisionFacts(
 	folder: FolderPayload,
 	calibration: FolderCalibrationState | null,
-	pendingProposal: PendingSampleProposal | null
+	pendingProposal: PendingSampleProposal | null,
+	workflow?: WorkflowState
 ): DecisionFact[] {
 	const verdict = buildSampleVerdict(folder, calibration, pendingProposal);
 	const sampleItem = record<FolderSampleItem>(folder.sample_item);
@@ -793,10 +794,18 @@ export function buildDecisionFacts(
 		},
 		{
 			label: 'Next action',
-			value: 'Use the decision buttons',
-			detail: 'Draft, sample, review, or approve from here'
+			value: workflow?.primary ?? 'Use the decision buttons',
+			detail: workflowActionDetail(workflow)
 		}
 	];
+}
+
+function workflowActionDetail(workflow: WorkflowState | undefined): string {
+	if (!workflow) return 'Draft, sample, review, or approve from here';
+	if (workflow.secondaryAction !== 'open-ops' && workflow.secondary !== workflow.primary) {
+		return `${workflow.secondary} also available`;
+	}
+	return workflow.copy;
 }
 
 export function buildSampleFacts(

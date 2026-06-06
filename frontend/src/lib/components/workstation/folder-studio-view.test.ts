@@ -1451,5 +1451,10 @@ describe('Folder Studio review request mapping', () => {
 			secondary: 'Queue 9 encodes',
 			secondaryAction: 'queue-encode'
 		});
+		expect(buildDecisionFacts(folderPayload(), null, null, workflow)[2]).toEqual({
+			label: 'Next action',
+			value: 'Validate 22 outputs',
+			detail: 'Queue 9 encodes also available'
+		});
 	});
 });

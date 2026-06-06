@@ -139,7 +139,9 @@
 	const outputReviewRows = $derived(
 		buildOutputReviewRows(studioFolder, calibration, pendingProposal)
 	);
-	const decisionFacts = $derived(buildDecisionFacts(studioFolder, calibration, pendingProposal));
+	const decisionFacts = $derived(
+		buildDecisionFacts(studioFolder, calibration, pendingProposal, workflow)
+	);
 	const sampleResultRow = $derived(
 		outputReviewRows.find((row) => row.label === 'Sample result') ?? null
 	);
