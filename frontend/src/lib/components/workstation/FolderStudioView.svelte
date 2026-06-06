@@ -211,7 +211,7 @@
 		focusBenchComposer();
 	}
 
-	function useApprovedSeasonNote() {
+	function fillDraftFromApprovedPolicy() {
 		if (!approvedSeasonNote) return;
 		benchNote = approvedSeasonNote;
 		focusBenchComposer();
@@ -645,12 +645,12 @@
 				{#if approvedSeasonNote}
 					<div class="season-shortcut">
 						<div>
-							<span>Approved season reference</span>
+							<span>Approved policy reference</span>
 							<strong>{approvedSeasonShortcut?.root_label ?? title}</strong>
 							<small>{approvedSeasonShortcut?.count ?? 1} approved season policy available</small>
 						</div>
-						<button class="control" type="button" onclick={useApprovedSeasonNote}
-							>Use approved season note</button
+						<button class="control" type="button" onclick={fillDraftFromApprovedPolicy}
+							>Fill draft from policy</button
 						>
 					</div>
 				{/if}
