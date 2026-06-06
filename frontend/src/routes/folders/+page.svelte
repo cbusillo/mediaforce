@@ -17,12 +17,12 @@
 	onMount(async () => {
 		try {
 			const [dashboardPayload, foldersPayloadResult, hostsPayload] = await Promise.all([
-				fetchJson<DashboardSummaryPayload>('/api/dashboard'),
+				fetchJson<DashboardSummaryPayload>('/api/dashboard?preview_limit=0'),
 				fetchJson<DashboardFoldersPayload>('/api/dashboard/folders'),
 				fetchJson<HostsPayload>('/api/hosts?compact=1')
 			]);
-			dashboard = dashboardPayload;
 			foldersPayload = foldersPayloadResult;
+			dashboard = { ...dashboardPayload, folders_preview: foldersPayloadResult.folders };
 			hosts = hostsPayload;
 		} catch (error) {
 			loadError = error instanceof Error ? error.message : 'Folders route failed to load.';

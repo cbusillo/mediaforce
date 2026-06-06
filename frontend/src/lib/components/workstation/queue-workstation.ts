@@ -222,7 +222,8 @@ export function buildQueueStatusTiles(
 	dashboard: DashboardSummaryPayload,
 	foldersPayload: DashboardFoldersPayload,
 	hosts: HostsPayload,
-	scopeLabel = 'folders'
+	scopeLabel = 'folders',
+	foldersPending = false
 ): StatusTile[] {
 	const folders = foldersPayload.folders;
 	const visibleScopeLabel = scopeLabel.trim().toLowerCase() || 'folders';
@@ -233,15 +234,19 @@ export function buildQueueStatusTiles(
 	return [
 		{
 			label: 'Next work',
-			value: `${folders.length} ${visibleScopeLabel}`,
-			detail: `${totalPendingItems(folders).toLocaleString('en-US')} open work`,
-			tone: folders.length ? 'wait' : 'idle'
+			value: foldersPending ? 'loading worklist' : `${folders.length} ${visibleScopeLabel}`,
+			detail: foldersPending
+				? 'folder rows hydrating'
+				: `${totalPendingItems(folders).toLocaleString('en-US')} open work`,
+			tone: foldersPending ? 'active' : folders.length ? 'wait' : 'idle'
 		},
 		{
 			label: 'Projected reclaim',
-			value: formatBytes(projectedReclaim),
-			detail: `estimated from visible ${visibleScopeLabel}`,
-			tone: projectedReclaim > 0 ? 'ready' : 'idle',
+			value: foldersPending ? 'loading' : formatBytes(projectedReclaim),
+			detail: foldersPending
+				? `estimated after ${visibleScopeLabel} load`
+				: `estimated from visible ${visibleScopeLabel}`,
+			tone: foldersPending ? 'active' : projectedReclaim > 0 ? 'ready' : 'idle',
 			mono: true
 		},
 		{

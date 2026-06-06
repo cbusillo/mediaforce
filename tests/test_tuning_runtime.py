@@ -312,6 +312,35 @@ class TuningRuntimeTests(unittest.TestCase):
             )
             connection.commit()
 
+    def _insert_library_item(self, *, rel_path: str, status: str = "discovered") -> None:
+        source_path = self.root / "source" / rel_path
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_text("source")
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                library_items.insert().values(
+                    source_path=str(source_path),
+                    rel_path=rel_path,
+                    media_root="tv",
+                    parent_dir=str(Path(rel_path).parent),
+                    file_name=Path(rel_path).name,
+                    container=Path(rel_path).suffix or ".mkv",
+                    size_bytes=1024,
+                    mtime_ns=1,
+                    fingerprint=f"fp-{rel_path}",
+                    duration_seconds=1800.0,
+                    video_codec="h264",
+                    audio_summary_json="[]",
+                    subtitle_summary_json="[]",
+                    status=status,
+                    last_scan_id="scan-1",
+                    discovered_at="2025-01-01T00:00:00Z",
+                    last_seen_at="2025-01-01T00:00:00Z",
+                    updated_at="2025-01-01T00:00:00Z",
+                )
+            )
+            connection.commit()
+
     def test_request_operator_note_parse_uses_structured_runtime_path(self) -> None:
         commands, fake_run = self._capture_subprocess_commands(
             json.dumps(
@@ -1041,6 +1070,37 @@ class TuningRuntimeTests(unittest.TestCase):
         )
 
         self.assertNotIn("archive_cleanup", payload)
+
+    def test_dashboard_summary_payload_preview_limit_zero_skips_folder_cards(self) -> None:
+        self._insert_library_item(rel_path="tv/show/episode-1.mkv")
+
+        def fail_preview_cards(_config: MediaforceConfig, _connection: Any) -> list[Any]:
+            raise AssertionError("folder cards should not be built for preview_limit=0")
+
+        payload = dashboard_summary_payload(
+            self.config,
+            folder_card_cache_key=lambda _config: ("one-item", 0, 0),
+            preview_folder_cards=fail_preview_cards,
+            maybe_schedule_scan=lambda _connection, _config, prefix=None: None,
+            decorate_encode_queue_for_scheduler=lambda _config, summary: summary,
+            library_color_map_for_config=lambda _config: {},
+            preview_limit=0,
+        )
+
+        self.assertEqual(payload["folders_preview"], [])
+        self.assertFalse(payload["catalog_empty"])
+
+    def test_dashboard_summary_payload_rejects_negative_preview_limit(self) -> None:
+        with self.assertRaises(ValueError):
+            dashboard_summary_payload(
+                self.config,
+                folder_card_cache_key=lambda _config: ("empty", 0, 0),
+                preview_folder_cards=lambda _config, _connection: [],
+                maybe_schedule_scan=lambda _connection, _config, prefix=None: None,
+                decorate_encode_queue_for_scheduler=lambda _config, summary: summary,
+                library_color_map_for_config=lambda _config: {},
+                preview_limit=-1,
+            )
 
     def test_clear_archive_cleanup_action_removes_files_and_prunes_directories(self) -> None:
         archive_root = self.config.archive_root

@@ -36,12 +36,16 @@
 		dashboard,
 		foldersPayload,
 		hosts,
+		foldersPending = false,
+		loadError = '',
 		crumb = '/',
 		mode = 'queue'
 	}: {
 		dashboard: DashboardSummaryPayload;
 		foldersPayload: DashboardFoldersPayload;
 		hosts: HostsPayload;
+		foldersPending?: boolean;
+		loadError?: string;
 		crumb?: string;
 		mode?: 'queue' | 'folders';
 	} = $props();
@@ -133,10 +137,12 @@
 			dashboard,
 			visibleFoldersPayload,
 			hosts,
-			isFolderIndex ? folderScopeLabel : 'Work folders'
+			isFolderIndex ? folderScopeLabel : 'Work folders',
+			foldersPending
 		)
 	);
 	const footerSignals = $derived(buildQueueFooterSignals(dashboard, visibleFoldersPayload, hosts));
+	const hasLoadError = $derived(loadError.trim().length > 0);
 	const runningSamples = $derived(dashboard.calibration_queue.sample.running_count);
 	const queuedSamples = $derived(dashboard.calibration_queue.sample.queued_count);
 	const pendingReviews = $derived(dashboard.calibration_queue.sample.pending_review_count);
@@ -178,9 +184,20 @@
 		isFolderIndex ? `Matching ${folderScopeLabel.toLowerCase()}` : 'Workflow lanes'
 	);
 	const visibleScopeSummary = $derived(
-		`${visibleFolders.length.toLocaleString('en-US')} / ${folders.length.toLocaleString(
-			'en-US'
-		)} ${isFolderIndex ? folderScopeLabel.toLowerCase() : 'folders'}`
+		foldersPending && !isFolderIndex
+			? 'Loading work folders'
+			: `${visibleFolders.length.toLocaleString('en-US')} / ${folders.length.toLocaleString(
+					'en-US'
+				)} ${isFolderIndex ? folderScopeLabel.toLowerCase() : 'folders'}`
+	);
+	const visibleFoldersCopy = $derived(
+		foldersPending && !isFolderIndex ? 'loading' : visibleFolders.length.toLocaleString('en-US')
+	);
+	const visiblePendingCopy = $derived(
+		foldersPending && !isFolderIndex ? 'loading' : visiblePendingItems.toLocaleString('en-US')
+	);
+	const visibleReclaimCopy = $derived(
+		foldersPending && !isFolderIndex ? 'loading' : formatBytes(visibleProjectedReclaim)
 	);
 
 	type LibraryOption = {
@@ -499,6 +516,9 @@
 					<p>{headerCopy}</p>
 				</div>
 				<div class="queue-header__tools">
+					{#if hasLoadError}
+						<div class="load-error" role="status">{loadError}</div>
+					{/if}
 					{#if isFolderIndex}
 						<div class="scope-switch" aria-label="Folder scope">
 							<span>Scope</span>
@@ -531,15 +551,15 @@
 					<div class="queue-header__facts">
 						<div>
 							<span>{isFolderIndex ? `Visible ${folderScopeLabel}` : 'Visible folders'}</span>
-							<strong>{visibleFolders.length.toLocaleString('en-US')}</strong>
+							<strong>{visibleFoldersCopy}</strong>
 						</div>
 						<div>
 							<span>Open work</span>
-							<strong>{visiblePendingItems.toLocaleString('en-US')}</strong>
+							<strong>{visiblePendingCopy}</strong>
 						</div>
 						<div>
 							<span>Projected reclaim</span>
-							<strong>{formatBytes(visibleProjectedReclaim)}</strong>
+							<strong>{visibleReclaimCopy}</strong>
 						</div>
 					</div>
 				</div>
@@ -720,6 +740,10 @@
 												</td>
 											</tr>
 										{/each}
+									{:else if foldersPending}
+										<tr>
+											<td colspan="8">Loading folder worklist...</td>
+										</tr>
 									{:else}
 										<tr>
 											<td colspan="8">No folders match the current filters.</td>
@@ -800,6 +824,14 @@
 		gap: var(--mf-space-4);
 		justify-self: stretch;
 		min-width: 0;
+	}
+
+	.load-error {
+		background: var(--mf-fail-bg);
+		border-left: 2px solid var(--mf-fail-fg);
+		color: var(--mf-fail-fg);
+		font-size: var(--mf-text-sm);
+		padding: var(--mf-space-3) var(--mf-space-4);
 	}
 
 	.queue-header__facts {

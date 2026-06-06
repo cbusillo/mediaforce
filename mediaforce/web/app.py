@@ -404,7 +404,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             schedule_profiles=schedule_profiles,
         )
 
-    def _dashboard_summary_payload() -> dict[str, Any]:
+    def _dashboard_summary_payload(preview_limit: int | None = None) -> dict[str, Any]:
         return dashboard_summary_payload(
             config,
             folder_card_cache_key=_folder_card_cache_key,
@@ -412,20 +412,22 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             maybe_schedule_scan=_maybe_schedule_scan,
             decorate_encode_queue_for_scheduler=_decorate_encode_queue_for_scheduler,
             library_color_map_for_config=_library_color_map_for_config,
+            preview_limit=preview_limit,
         )
 
-    def _dashboard_folders_payload() -> dict[str, Any]:
+    def _dashboard_folders_payload(include_series_folders: bool = True) -> dict[str, Any]:
         return dashboard_folders_payload(
             config,
             folder_card_cache_key=_folder_card_cache_key,
             list_folder_cards=_list_folder_cards,
             list_series_folder_cards=_list_series_folder_cards,
+            include_series_folders=include_series_folders,
         )
 
-    def _dashboard_api_payload() -> dict[str, Any]:
+    def _dashboard_api_payload(preview_limit: int | None = None) -> dict[str, Any]:
         metric_support = _metric_support()
         return {
-            **_dashboard_summary_payload(),
+            **_dashboard_summary_payload(preview_limit),
             "metric_support": dict(metric_support),
             "metric_status_copy": _metric_status_copy(metric_support),
         }

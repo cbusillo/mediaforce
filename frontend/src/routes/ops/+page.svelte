@@ -12,7 +12,7 @@
 	onMount(async () => {
 		try {
 			const [dashboardPayload, hostsPayload] = await Promise.all([
-				fetchJson<DashboardSummaryPayload>('/api/dashboard'),
+				fetchJson<DashboardSummaryPayload>('/api/dashboard?preview_limit=0'),
 				fetchJson<HostsPayload>('/api/hosts?compact=1')
 			]);
 			dashboard = dashboardPayload;

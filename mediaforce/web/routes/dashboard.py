@@ -1,20 +1,22 @@
 from collections.abc import Callable
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
+
+PreviewLimit = Annotated[int | None, Query(ge=0)]
 
 
 def register_dashboard_routes(
         app: FastAPI,
         *,
-        dashboard_payload: Callable[[], dict[str, Any]],
-        dashboard_folders_payload: Callable[[], dict[str, Any]],
+        dashboard_payload: Callable[[int | None], dict[str, Any]],
+        dashboard_folders_payload: Callable[[bool], dict[str, Any]],
 ) -> None:
     @app.get("/api/dashboard")
-    def api_dashboard() -> JSONResponse:
-        return JSONResponse(dashboard_payload())
+    def api_dashboard(preview_limit: PreviewLimit = None) -> JSONResponse:
+        return JSONResponse(dashboard_payload(preview_limit))
 
     @app.get("/api/dashboard/folders")
-    def api_dashboard_folders() -> JSONResponse:
-        return JSONResponse(dashboard_folders_payload())
+    def api_dashboard_folders(include_series: int = 1) -> JSONResponse:
+        return JSONResponse(dashboard_folders_payload(bool(include_series)))
