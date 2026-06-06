@@ -6,6 +6,7 @@ import {
 	buildBudgetEnforcementView,
 	buildDecisionFacts,
 	buildOutputReviewRows,
+	buildReviewWorkspaceView,
 	buildSampleFacts,
 	buildSampleVerdict,
 	buildWorkflowSteps,
@@ -426,6 +427,93 @@ describe('Folder Studio review request mapping', () => {
 					output: 'Visible below'
 				})
 			])
+		);
+	});
+
+	it('uses output validation workspace copy for validate workflows', () => {
+		const workflow = resolveWorkflow(
+			folderPayload({
+				workflow_state: {
+					prefix: 'tv/Terminator',
+					state: 'mixed',
+					primary_lane: 'validate',
+					label: 'Mixed work',
+					tone: 'ready',
+					detail: '22 to validate, 9 to encode',
+					counts: {
+						items: 31,
+						ready_to_validate: 22,
+						encode_candidates: 9,
+						ready_to_promote: 0,
+						processing: 0,
+						complete: 0,
+						blocked: 0
+					},
+					lane_counts: { validate: 22, encode: 9, promote: 0 },
+					state_counts: { ready_to_validate: 22, encode_candidate: 9, ready_to_promote: 0 },
+					blockers: [],
+					next_action: {
+						kind: 'validate_outputs',
+						label: 'Validate ready outputs',
+						enabled: true,
+						target_prefix: 'tv/Terminator'
+					}
+				}
+			}),
+			folderStatusPayload(),
+			null,
+			null,
+			null,
+			null,
+			null
+		);
+		const workspace = buildReviewWorkspaceView(
+			folderPayload({
+				summary: folderSummary({ item_count: 31 }),
+				workflow_state: {
+					prefix: 'tv/Terminator',
+					state: 'mixed',
+					primary_lane: 'validate',
+					label: 'Mixed work',
+					tone: 'ready',
+					detail: '22 to validate, 9 to encode',
+					counts: {
+						items: 31,
+						ready_to_validate: 22,
+						encode_candidates: 9,
+						ready_to_promote: 0,
+						processing: 0,
+						complete: 0,
+						blocked: 0
+					},
+					lane_counts: { validate: 22, encode: 9, promote: 0 },
+					state_counts: { ready_to_validate: 22, encode_candidate: 9, ready_to_promote: 0 },
+					blockers: [],
+					next_action: {
+						kind: 'validate_outputs',
+						label: 'Validate ready outputs',
+						enabled: true,
+						target_prefix: 'tv/Terminator'
+					}
+				}
+			}),
+			null,
+			null,
+			workflow,
+			false
+		);
+
+		expect(workspace).toMatchObject({
+			badge: 'Validation review',
+			title: 'Output validation'
+		});
+		expect(workspace.rows[0]).toMatchObject({
+			label: 'Ready outputs',
+			source: '22 to validate',
+			output: 'Validate 22 outputs'
+		});
+		expect(workspace.rows.map((row) => row.detail).join(' ')).not.toContain(
+			'representative sample'
 		);
 	});
 

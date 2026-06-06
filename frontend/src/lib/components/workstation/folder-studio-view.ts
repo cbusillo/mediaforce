@@ -105,6 +105,12 @@ export type OutputReviewRow = {
 	tone?: ShellTone;
 };
 
+export type ReviewWorkspaceView = {
+	badge: string;
+	title: string;
+	rows: OutputReviewRow[];
+};
+
 export type BudgetEnforcementView = {
 	active: boolean;
 	cap: string;
@@ -1060,6 +1066,71 @@ export function buildOutputReviewRows(
 			tone: reviewCount ? 'ready' : 'idle'
 		}
 	];
+}
+
+export function buildReviewWorkspaceView(
+	folder: FolderPayload,
+	calibration: FolderCalibrationState | null,
+	pendingProposal: PendingSampleProposal | null,
+	workflow: WorkflowState,
+	reviewPackReady: boolean
+): ReviewWorkspaceView {
+	if (isOutputWorkflowAction(workflow.primaryAction)) {
+		const counts = folder.workflow_state?.counts;
+		const readyToValidate = counts?.ready_to_validate ?? 0;
+		const readyToPromote = counts?.ready_to_promote ?? 0;
+		const encodeCandidates = counts?.encode_candidates ?? 0;
+		const itemCount = numberValue(folder.summary?.item_count);
+		return {
+			badge:
+				workflow.primaryAction === 'promote-outputs' ? 'Promotion review' : 'Validation review',
+			title:
+				workflow.primaryAction === 'promote-outputs' ? 'Output promotion' : 'Output validation',
+			rows: [
+				{
+					label: 'Ready outputs',
+					source: compactParts([
+						readyToValidate ? `${readyToValidate} to validate` : null,
+						readyToPromote ? `${readyToPromote} to promote` : null
+					]),
+					output: workflow.primary,
+					detail: 'Run the current workflow action for the encoded outputs in this scope.',
+					tone: 'ready'
+				},
+				{
+					label: 'Scope',
+					source:
+						itemCount && itemCount > 0
+							? `${itemCount.toLocaleString('en-US')} item${itemCount === 1 ? '' : 's'}`
+							: folder.prefix,
+					output: buildOutputScopeFact(folder).value,
+					detail: 'This action applies to the current Folder Studio scope.',
+					tone: 'idle'
+				},
+				{
+					label: 'Remaining work',
+					source: encodeCandidates
+						? `${encodeCandidates} encode${encodeCandidates === 1 ? '' : 's'}`
+						: 'No encode backlog',
+					output:
+						workflow.secondaryAction === 'queue-encode'
+							? workflow.secondary
+							: 'No secondary output action',
+					detail: workflowActionDetail(workflow),
+					tone: encodeCandidates ? 'wait' : 'idle'
+				}
+			]
+		};
+	}
+	return {
+		badge: reviewPackReady ? 'Review media' : 'No review media',
+		title: 'Previous sample evidence',
+		rows: buildOutputReviewRows(folder, calibration, pendingProposal)
+	};
+}
+
+function isOutputWorkflowAction(action: WorkflowAction): boolean {
+	return action === 'validate-outputs' || action === 'promote-outputs';
 }
 
 export function resolveReviewArtifacts(

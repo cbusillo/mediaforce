@@ -28,7 +28,7 @@
 		buildWorkflowSteps,
 		buildFooterSignals,
 		buildProposalRows,
-		buildOutputReviewRows,
+		buildReviewWorkspaceView,
 		buildDecisionFacts,
 		buildSampleFacts,
 		buildSampleVerdict,
@@ -136,9 +136,10 @@
 	const footerSignals = $derived(buildFooterSignals(studioFolder, status, hosts));
 	const sampleFacts = $derived(buildSampleFacts(sampleItem, summary));
 	const sampleVerdict = $derived(buildSampleVerdict(studioFolder, calibration));
-	const outputReviewRows = $derived(
-		buildOutputReviewRows(studioFolder, calibration, pendingProposal)
+	const reviewWorkspace = $derived(
+		buildReviewWorkspaceView(studioFolder, calibration, pendingProposal, workflow, reviewPackReady)
 	);
+	const outputReviewRows = $derived(reviewWorkspace.rows);
 	const decisionFacts = $derived(
 		buildDecisionFacts(studioFolder, calibration, pendingProposal, workflow)
 	);
@@ -659,11 +660,8 @@
 			<section class="review-workspace" aria-labelledby="review-workspace-title">
 				<header class="review-workspace__header">
 					<div>
-						<StateBadge
-							tone={reviewPackReady ? 'ready' : 'idle'}
-							label={reviewPackReady ? 'Review media' : 'No review media'}
-						/>
-						<h2 id="review-workspace-title">Previous sample evidence</h2>
+						<StateBadge tone={reviewPackReady ? 'ready' : 'idle'} label={reviewWorkspace.badge} />
+						<h2 id="review-workspace-title">{reviewWorkspace.title}</h2>
 					</div>
 				</header>
 
