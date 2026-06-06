@@ -31,6 +31,7 @@
 		buildProposalRows,
 		buildReviewWorkspaceView,
 		buildDecisionFacts,
+		buildBasicEncodeGuide,
 		buildRuntimeFacts,
 		buildSampleFacts,
 		buildSampleVerdict,
@@ -146,6 +147,7 @@
 		)
 	);
 	const workflowSteps = $derived(buildWorkflowSteps(workflow));
+	const basicEncodeGuide = $derived(buildBasicEncodeGuide(workflow));
 	const proposalRows = $derived(buildProposalRows(studioFolder, pendingProposal));
 	const statusTiles = $derived(buildStatusTiles(studioFolder, status, hosts, workflow));
 	const footerSignals = $derived(buildFooterSignals(studioFolder, status, hosts, workflow));
@@ -169,9 +171,13 @@
 	);
 	const draftReviewRow = $derived(
 		outputReviewRows.find(
-			(row) => row.label === 'Next sample draft' || row.label === 'Video output'
+			(row) =>
+				row.label === 'Next sample plan' ||
+				row.label === 'Next sample draft' ||
+				row.label === 'Video output'
 		) ?? null
 	);
+	const guideActionState = $derived(workflowActionState(basicEncodeGuide.action));
 	const visualReviewArtifacts = $derived(
 		[...reviewArtifacts.filter((artifact) => artifact.category === 'visual')]
 			.sort((left, right) => reviewArtifactPriority(left.kind) - reviewArtifactPriority(right.kind))
@@ -251,7 +257,8 @@
 			);
 			localPendingProposal = response.proposal ?? studioFolder.pending_proposal ?? null;
 			localProposalPrefix = prefix;
-			benchMessage = response.message || 'Draft ready. Nothing is queued until you confirm it.';
+			benchMessage =
+				response.message || 'Sample plan ready. Nothing is queued until you confirm it.';
 			benchNote = '';
 		} catch (error) {
 			benchError = error instanceof Error ? error.message : 'Review request failed.';
@@ -274,7 +281,7 @@
 			);
 			localPendingProposal = null;
 			localProposalPrefix = prefix;
-			benchMessage = response.message || 'Queued the sample run from the draft.';
+			benchMessage = response.message || 'Queued the sample run from the plan.';
 			await onMutate();
 		} catch (error) {
 			benchError = error instanceof Error ? error.message : 'Sample could not be queued.';
@@ -307,7 +314,8 @@
 								reviewed_draft_hash: calibration?.draft_hash ?? ''
 							}
 						);
-			profileMessage = response.message || 'Approved the draft and queued the folder encode.';
+			profileMessage =
+				response.message || 'Approved the sample plan and queued the folder process.';
 			await onMutate();
 		} catch (error) {
 			profileError =
@@ -440,6 +448,123 @@
 				{/each}
 			</nav>
 
+			<section class="basic-run" aria-labelledby="basic-run-title">
+				<header class="basic-run__header">
+					<div>
+						<span>{basicEncodeGuide.label}</span>
+						<h2 id="basic-run-title">{basicEncodeGuide.title}</h2>
+						<p>{basicEncodeGuide.detail}</p>
+					</div>
+					{#if basicEncodeGuide.action === 'focus-bench'}
+						<button
+							class="basic-run__action"
+							type="button"
+							onclick={focusBenchComposer}
+							data-mf-action={`guide-${basicEncodeGuide.action}`}>{basicEncodeGuide.primary}</button
+						>
+					{:else if basicEncodeGuide.action === 'open-series' || basicEncodeGuide.action === 'open-folders'}
+						<a
+							class="basic-run__action"
+							href={resolve(seriesRoute)}
+							data-mf-action={`guide-${basicEncodeGuide.action}`}>{basicEncodeGuide.primary}</a
+						>
+					{:else if basicEncodeGuide.action === 'open-completed'}
+						<a
+							class="basic-run__action"
+							href={resolve('/completed')}
+							data-mf-action={`guide-${basicEncodeGuide.action}`}>{basicEncodeGuide.primary}</a
+						>
+					{:else if basicEncodeGuide.action === 'open-ops' || basicEncodeGuide.action.startsWith('monitor-')}
+						<a
+							class="basic-run__action"
+							href={resolve('/ops')}
+							data-mf-action={`guide-${basicEncodeGuide.action}`}>{basicEncodeGuide.primary}</a
+						>
+					{:else if basicEncodeGuide.action === 'download-review-pack' && !guideActionState.disabled}
+						<form
+							class="action-form"
+							method="get"
+							action={`${resolve('/')}api/folders/${encodedPrefix}/review-compare/download`}
+							data-mf-action={`guide-${basicEncodeGuide.action}`}
+						>
+							<button class="basic-run__action" type="submit">{basicEncodeGuide.primary}</button>
+						</form>
+					{:else if basicEncodeGuide.action === 'start-sample' || basicEncodeGuide.action === 'retry-sample'}
+						<button
+							class="basic-run__action"
+							type="button"
+							disabled={guideActionState.disabled}
+							title={guideActionState.title}
+							onclick={() => confirmBenchProposal(basicEncodeGuide.action)}
+							data-mf-action={`guide-${basicEncodeGuide.action}`}
+							data-mf-wire="live"
+							>{workflowPending === basicEncodeGuide.action
+								? 'Queueing'
+								: basicEncodeGuide.primary}</button
+						>
+					{:else if basicEncodeGuide.action === 'queue-encode' || basicEncodeGuide.action === 'approve-size-tradeoff'}
+						<button
+							class="basic-run__action"
+							type="button"
+							disabled={guideActionState.disabled}
+							title={guideActionState.title}
+							onclick={() => saveProfileAndQueue(basicEncodeGuide.action)}
+							data-mf-action={`guide-${basicEncodeGuide.action}`}
+							data-mf-wire="live"
+							>{workflowPending === basicEncodeGuide.action
+								? 'Approving'
+								: basicEncodeGuide.primary}</button
+						>
+					{:else if basicEncodeGuide.action === 'retry-encode'}
+						<button
+							class="basic-run__action"
+							type="button"
+							disabled={guideActionState.disabled}
+							title={guideActionState.title}
+							onclick={retryEncode}
+							data-mf-action={`guide-${basicEncodeGuide.action}`}
+							data-mf-wire="live"
+							>{workflowPending === basicEncodeGuide.action
+								? 'Retrying'
+								: basicEncodeGuide.primary}</button
+						>
+					{:else if basicEncodeGuide.action === 'validate-outputs' || basicEncodeGuide.action === 'promote-outputs'}
+						<button
+							class="basic-run__action"
+							type="button"
+							disabled={guideActionState.disabled}
+							title={guideActionState.title}
+							onclick={() => runFolderWorkflowAction(basicEncodeGuide.action)}
+							data-mf-action={`guide-${basicEncodeGuide.action}`}
+							data-mf-wire="live"
+							>{workflowPending === basicEncodeGuide.action
+								? 'Running'
+								: basicEncodeGuide.primary}</button
+						>
+					{:else}
+						<button
+							class="basic-run__action"
+							type="button"
+							disabled={guideActionState.disabled}
+							title={guideActionState.title}
+							data-mf-action={`guide-${basicEncodeGuide.action}`}
+							data-mf-wire="pending">{basicEncodeGuide.primary}</button
+						>
+					{/if}
+				</header>
+				<ol class="basic-run__steps" aria-label="Single folder encode steps">
+					{#each basicEncodeGuide.steps as step, index (step.label)}
+						<li class="basic-run__step basic-run__step--{step.state}">
+							<span>{index + 1}</span>
+							<div>
+								<strong>{step.label}</strong>
+								<small>{step.detail}</small>
+							</div>
+						</li>
+					{/each}
+				</ol>
+			</section>
+
 			<section class="decision decision--{workflow.tone}" aria-labelledby="decision-title">
 				{#if loadError}
 					<div class="route-error" role="status">
@@ -473,6 +598,12 @@
 						<a
 							class="control control--primary"
 							href={resolve(seriesRoute)}
+							data-mf-action={workflow.primaryAction}>{workflow.primary}</a
+						>
+					{:else if workflow.primaryAction === 'open-completed'}
+						<a
+							class="control control--primary"
+							href={resolve('/completed')}
 							data-mf-action={workflow.primaryAction}>{workflow.primary}</a
 						>
 					{:else if workflow.primaryAction === 'open-ops' || workflow.primaryAction.startsWith('monitor-')}
@@ -561,6 +692,12 @@
 					{:else if workflow.secondaryAction === 'open-series' || workflow.secondaryAction === 'open-folders'}
 						<a class="control" href={resolve(seriesRoute)} data-mf-action={workflow.secondaryAction}
 							>{workflow.secondary}</a
+						>
+					{:else if workflow.secondaryAction === 'open-completed'}
+						<a
+							class="control"
+							href={resolve('/completed')}
+							data-mf-action={workflow.secondaryAction}>{workflow.secondary}</a
 						>
 					{:else if workflow.secondaryAction === 'open-ops'}
 						<a class="control" href={resolve('/ops')} data-mf-action={workflow.secondaryAction}
@@ -678,7 +815,7 @@
 							<small>{approvedSeasonShortcut?.count ?? 1} approved season policy available</small>
 						</div>
 						<button class="control" type="button" onclick={fillDraftFromApprovedPolicy}
-							>Fill draft from policy</button
+							>Use policy as sample plan</button
 						>
 					</div>
 				{/if}
@@ -716,7 +853,7 @@
 						<div class="output-review-table__head">
 							<span>Area</span>
 							<span>Source</span>
-							<span>Output / draft</span>
+							<span>Planned output</span>
 							<span>Why it matters</span>
 						</div>
 						{#each outputReviewRows as row (row.label)}
@@ -741,7 +878,7 @@
 							</button>
 						{:else}
 							<div class="empty-note">
-								Run a sample to generate source-versus-draft review images.
+								Run a sample to generate source-versus-output review images.
 							</div>
 						{/each}
 						{#each audioReviewArtifacts as artifact (artifact.imageUrl || artifact.label)}
@@ -794,7 +931,7 @@
 								<span>Request</span>
 								<textarea
 									rows="5"
-									placeholder="Ask what to sample, revise, or validate for this folder."
+									placeholder="Describe the content and your quality or size goal, or ask for a standard sample to get started."
 									bind:this={benchTextarea}
 									bind:value={benchNote}
 								></textarea>
@@ -847,9 +984,11 @@
 				</WorkstationPanel>
 
 				{#if !workflow.isOutputWorkflow}
-					<WorkstationPanel title={pendingProposal?.proposal_id ? 'Active draft' : 'Sample target'}>
+					<WorkstationPanel
+						title={pendingProposal?.proposal_id ? 'Active sample plan' : 'Sample target'}
+					>
 						<dl class="kv kv--compact">
-							<dt>{pendingProposal?.proposal_id ? 'Draft' : 'Source'}</dt>
+							<dt>{pendingProposal?.proposal_id ? 'Plan' : 'Source'}</dt>
 							<dd>{draftReviewRow?.output ?? '—'}</dd>
 							<dt>Reason</dt>
 							<dd>{draftReviewRow?.detail ?? '—'}</dd>
@@ -909,12 +1048,12 @@
 					<summary>
 						<strong>Proposed settings details</strong>
 						<span
-							>{proposalRows.length ? `${proposalRows.length} draft differences` : 'No draft'}</span
+							>{proposalRows.length ? `${proposalRows.length} plan differences` : 'No plan'}</span
 						>
 					</summary>
 					<WorkstationPanel
 						title="Current settings vs. proposal"
-						meta={proposalRows.length ? `${proposalRows.length} rows` : 'No draft'}
+						meta={proposalRows.length ? `${proposalRows.length} rows` : 'No plan'}
 					>
 						<div class="table-wrap">
 							<table class="policy-table">
@@ -923,7 +1062,7 @@
 										<th>Area</th>
 										<th>Setting</th>
 										<th>Current</th>
-										<th>Draft</th>
+										<th>Plan</th>
 									</tr>
 								</thead>
 								<tbody>
@@ -1238,7 +1377,7 @@
 		border: var(--mf-border);
 		display: grid;
 		grid-template-columns: repeat(4, minmax(0, 1fr));
-		order: 3;
+		order: 4;
 	}
 
 	.workflow-strip__step {
@@ -1246,10 +1385,10 @@
 		border-right: var(--mf-border-muted);
 		border-top: 2px solid var(--mf-line-strong);
 		display: grid;
-		gap: var(--mf-space-3);
+		gap: var(--mf-space-2);
 		grid-template-columns: auto minmax(0, 1fr);
 		min-width: 0;
-		padding: var(--mf-space-4);
+		padding: var(--mf-space-3);
 	}
 
 	.workflow-strip__step:last-child {
@@ -1263,10 +1402,10 @@
 		color: var(--mf-fg-tertiary);
 		display: inline-flex;
 		font-family: var(--mf-font-mono), monospace;
-		font-size: var(--mf-text-xs);
-		height: 24px;
+		font-size: var(--mf-text-2xs);
+		height: 20px;
 		justify-content: center;
-		width: 24px;
+		width: 20px;
 	}
 
 	.workflow-strip__step div {
@@ -1276,13 +1415,13 @@
 	}
 
 	.workflow-strip__step strong {
-		font-size: var(--mf-text-sm);
+		font-size: var(--mf-text-xs);
 		font-weight: var(--mf-weight-semibold);
 	}
 
 	.workflow-strip__step small {
 		color: var(--mf-fg-tertiary);
-		font-size: var(--mf-text-xs);
+		font-size: var(--mf-text-2xs);
 		line-height: var(--mf-leading-snug);
 		overflow-wrap: anywhere;
 	}
@@ -1307,6 +1446,132 @@
 		border-top-color: var(--mf-fail-fg);
 	}
 
+	.basic-run {
+		background: var(--mf-bg-panel);
+		border: var(--mf-border);
+		display: grid;
+		gap: var(--mf-space-3);
+		order: 3;
+		padding: var(--mf-space-4);
+	}
+
+	.basic-run__header {
+		align-items: center;
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-template-columns: minmax(0, 1fr) auto;
+	}
+
+	.basic-run__header div {
+		display: grid;
+		gap: var(--mf-space-1);
+		min-width: 0;
+	}
+
+	.basic-run__header span {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0;
+		text-transform: uppercase;
+	}
+
+	.basic-run__header h2 {
+		font-size: var(--mf-text-base);
+		font-weight: var(--mf-weight-semibold);
+		margin: 0;
+	}
+
+	.basic-run__header p {
+		color: var(--mf-fg-muted);
+		font-size: var(--mf-text-xs);
+		line-height: var(--mf-leading-snug);
+		margin: 0;
+	}
+
+	.basic-run__action,
+	.basic-run__next {
+		background: var(--mf-ready-bg);
+		border: 1px solid var(--mf-ready-line);
+		color: var(--mf-ready-fg);
+		display: inline-flex;
+		font-size: var(--mf-text-xs);
+		font-weight: var(--mf-weight-semibold);
+		justify-content: center;
+		min-width: 140px;
+		padding: var(--mf-space-2) var(--mf-space-3);
+		text-decoration: none;
+		white-space: nowrap;
+	}
+
+	.basic-run__action {
+		cursor: pointer;
+	}
+
+	button.basic-run__action {
+		font: inherit;
+	}
+
+	.basic-run__steps {
+		display: grid;
+		gap: var(--mf-space-2);
+		grid-template-columns: repeat(7, minmax(0, 1fr));
+		list-style: none;
+		margin: 0;
+		padding: 0;
+	}
+
+	.basic-run__step {
+		background: var(--mf-bg-strip);
+		border: var(--mf-border-muted);
+		border-top: 2px solid var(--mf-line-strong);
+		display: grid;
+		gap: var(--mf-space-1);
+		grid-template-columns: minmax(0, 1fr);
+		min-width: 0;
+		padding: var(--mf-space-2);
+	}
+
+	.basic-run__step > span {
+		align-items: center;
+		background: var(--mf-bg-input);
+		border: var(--mf-border-muted);
+		color: var(--mf-fg-tertiary);
+		display: inline-flex;
+		font-family: var(--mf-font-mono), monospace;
+		font-size: var(--mf-text-2xs);
+		height: 18px;
+		justify-content: center;
+		width: 18px;
+	}
+
+	.basic-run__step div {
+		display: grid;
+		gap: var(--mf-space-1);
+		min-width: 0;
+	}
+
+	.basic-run__step strong {
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.basic-run__step small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		line-height: var(--mf-leading-snug);
+		overflow-wrap: anywhere;
+	}
+
+	.basic-run__step--done {
+		border-top-color: var(--mf-ready-fg);
+	}
+
+	.basic-run__step--current {
+		background: var(--mf-active-bg);
+		border-top-color: var(--mf-active-fg);
+	}
+
 	.decision {
 		--decision-line: var(--mf-idle-line);
 		background: var(--mf-bg-panel);
@@ -1315,7 +1580,7 @@
 		display: grid;
 		gap: var(--mf-space-6);
 		grid-template-columns: minmax(0, 1fr);
-		order: 1;
+		order: 5;
 		padding: var(--mf-space-6);
 	}
 
@@ -2032,7 +2297,7 @@
 		color: var(--mf-fg-tertiary);
 		font-size: var(--mf-text-2xs);
 		font-weight: var(--mf-weight-semibold);
-		letter-spacing: 0.08em;
+		letter-spacing: 0;
 		text-transform: uppercase;
 	}
 
@@ -2044,9 +2309,14 @@
 	}
 
 	.kv--compact {
-		grid-template-columns: minmax(74px, auto) minmax(0, 1fr);
+		grid-template-columns: minmax(64px, auto) minmax(0, 1fr);
 		padding: var(--mf-space-5);
 		row-gap: var(--mf-space-3);
+	}
+
+	.kv--compact dd {
+		min-width: 0;
+		white-space: normal;
 	}
 
 	.history-list--compact {
@@ -2091,6 +2361,14 @@
 			grid-template-columns: minmax(190px, 240px) minmax(0, 1fr);
 		}
 
+		.basic-run__steps {
+			grid-template-columns: repeat(7, minmax(0, 1fr));
+		}
+
+		.basic-run__step small {
+			display: none;
+		}
+
 		.decision__facts {
 			display: grid;
 			grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2115,12 +2393,18 @@
 
 		.folder-header,
 		.workflow-strip,
+		.basic-run__header,
 		.decision,
 		.bench,
 		.review-workspace__header,
 		.support-grid,
 		.evidence-grid {
 			grid-template-columns: 1fr;
+		}
+
+		.basic-run__steps {
+			grid-template-columns: repeat(7, minmax(84px, 1fr));
+			overflow-x: auto;
 		}
 
 		.output-review-table__head {
@@ -2211,7 +2495,7 @@
 		}
 
 		.policy-table td:nth-child(4)::before {
-			content: 'Draft';
+			content: 'Plan';
 		}
 	}
 </style>

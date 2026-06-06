@@ -8,6 +8,7 @@ import type {
 import type { FolderCalibrationJob } from '$lib/folders/studio';
 import {
 	buildBenchHostOptions,
+	buildBasicEncodeGuide,
 	buildBudgetEnforcementView,
 	buildDecisionFacts,
 	buildFooterSignals,
@@ -15,6 +16,7 @@ import {
 	buildProcessingHostOptions,
 	buildReviewWorkspaceView,
 	buildRuntimeFacts,
+	approvalStatusCopy,
 	buildSampleFacts,
 	buildSeasonScopeRows,
 	buildSampleVerdict,
@@ -27,6 +29,7 @@ import {
 	resolveQueueSubmissionMode,
 	resolveWorkflow,
 	resolveWorkflowActionState,
+	sampleStatusCopy,
 	summarizeOutputWorkflowPending
 } from './folder-studio-view';
 import type { FolderCalibrationState, PendingSampleProposal } from '$lib/folders/studio';
@@ -378,7 +381,7 @@ describe('Folder Studio review request mapping', () => {
 			})
 		).toMatchObject({
 			disabled: true,
-			title: 'Ask the review assistant for a draft before starting the sample.'
+			title: 'Ask the review assistant for a sample plan before starting the sample.'
 		});
 
 		expect(
@@ -410,6 +413,116 @@ describe('Folder Studio review request mapping', () => {
 		).toMatchObject({
 			disabled: true,
 			title: 'A sample job is already active for this folder.'
+		});
+	});
+
+	it('maps sample status into basic user copy', () => {
+		expect(sampleStatusCopy('queued')).toBe('Sample waiting');
+		expect(sampleStatusCopy('running')).toBe('Sampling');
+		expect(sampleStatusCopy('pending_review')).toBe('Ready to review');
+		expect(sampleStatusCopy('failed')).toBe('Sample needs retry');
+		expect(sampleStatusCopy('idle')).toBe('Needs sample');
+	});
+
+	it('maps approval status into basic user copy', () => {
+		expect(approvalStatusCopy('missing_sample')).toBe('Needs sample');
+		expect(approvalStatusCopy('accepted')).toBe('Approved');
+		expect(approvalStatusCopy('blocked')).toBe('Blocked');
+		expect(approvalStatusCopy('needs_review')).toBe('Needs review');
+		expect(approvalStatusCopy('pending_review')).toBe('Ready to review');
+		expect(approvalStatusCopy(null)).toBe('Not reviewed');
+	});
+
+	it('builds a single-folder guide around the current next step', () => {
+		const sampleWorkflow = resolveWorkflow(
+			folderPayload(),
+			folderStatusPayload(),
+			null,
+			null,
+			null,
+			null,
+			null
+		);
+		expect(buildBasicEncodeGuide(sampleWorkflow)).toMatchObject({
+			label: 'Single folder run',
+			title: 'Run sample',
+			primary: 'Ask review assistant',
+			action: 'focus-bench'
+		});
+		expect(buildBasicEncodeGuide(sampleWorkflow).steps.map((step) => step.state)).toEqual([
+			'done',
+			'current',
+			'upcoming',
+			'upcoming',
+			'upcoming',
+			'upcoming',
+			'upcoming'
+		]);
+
+		const validateWorkflow = resolveWorkflow(
+			folderPayload({ workflow_state: workflowState() }),
+			folderStatusPayload(),
+			null,
+			null,
+			null,
+			null,
+			null
+		);
+		expect(buildBasicEncodeGuide(validateWorkflow)).toMatchObject({
+			title: 'Validate output',
+			primary: 'Validate outputs',
+			action: 'validate-outputs'
+		});
+		expect(buildBasicEncodeGuide(validateWorkflow).steps[4]).toMatchObject({
+			label: 'Validate output',
+			state: 'current'
+		});
+
+		const reviewWorkflow = {
+			tone: 'ready',
+			label: 'Review ready',
+			title: 'Approve this sample or revise it',
+			copy: 'Review the clips, then approve and queue if this is acceptable.',
+			primary: 'Approve and queue',
+			primaryAction: 'queue-encode',
+			secondary: 'Download pack',
+			secondaryAction: 'download-review-pack'
+		} as const;
+		expect(buildBasicEncodeGuide(reviewWorkflow)).toMatchObject({
+			title: 'Review sample',
+			primary: 'Approve and queue',
+			action: 'queue-encode'
+		});
+		expect(buildBasicEncodeGuide(reviewWorkflow).steps[2]).toMatchObject({
+			label: 'Review sample',
+			state: 'current'
+		});
+
+		const completeWorkflow = resolveWorkflow(
+			folderPayload({
+				workflow_state: workflowState({
+					state: 'complete',
+					label: 'Complete',
+					detail: 'All folder outputs are promoted.',
+					next_action: {
+						kind: 'review_scope',
+						label: 'Review scope',
+						enabled: true,
+						target_prefix: 'tv/Example/Season 1'
+					}
+				})
+			}),
+			folderStatusPayload(),
+			null,
+			null,
+			null,
+			null,
+			null
+		);
+		expect(buildBasicEncodeGuide(completeWorkflow)).toMatchObject({
+			title: 'Clean up',
+			primary: 'Review cleanup',
+			action: 'open-completed'
 		});
 	});
 
@@ -541,7 +654,7 @@ describe('Folder Studio review request mapping', () => {
 					tone: 'wait'
 				}),
 				expect.objectContaining({
-					label: 'Next sample draft',
+					label: 'Next sample plan',
 					output: 'AV1 · max 720p',
 					detail: 'VMAF target 89 · floor 87 · downscale allowed by the size request · grain off'
 				}),
@@ -838,9 +951,9 @@ describe('Folder Studio review request mapping', () => {
 				workflow
 			)
 		).toEqual([
-			{ label: 'Calibration', value: 'idle' },
+			{ label: 'Sample', value: 'Needs sample' },
 			{ label: 'Scan', value: 'idle' },
-			{ label: 'Approval', value: 'missing_sample' },
+			{ label: 'Approval', value: 'Needs sample' },
 			{ label: 'Processing', value: 'No folder job queued' }
 		]);
 		expect(
@@ -852,7 +965,7 @@ describe('Folder Studio review request mapping', () => {
 			)[1]
 		).toEqual({
 			label: 'Sample',
-			value: 'idle',
+			value: 'Needs sample',
 			detail: 'polling idle',
 			tone: 'idle'
 		});
@@ -864,9 +977,9 @@ describe('Folder Studio review request mapping', () => {
 				workflow
 			)[0]
 		).toEqual({
-			label: 'Review',
-			value: 'idle',
-			tone: 'active'
+			label: 'Sample',
+			value: 'Needs sample',
+			tone: 'idle'
 		});
 	});
 
@@ -1392,7 +1505,7 @@ describe('Folder Studio review request mapping', () => {
 				null
 			)
 		).toMatchObject({
-			label: 'Check draft',
+			label: 'Check sample plan',
 			primary: 'Download review pack',
 			primaryAction: 'download-review-pack',
 			secondary: 'Revise'
@@ -1542,7 +1655,7 @@ describe('Folder Studio review request mapping', () => {
 				null
 			)
 		).toMatchObject({
-			label: 'Capped draft ready',
+			label: 'Capped sample plan ready',
 			title: 'Run a sample with a 7% size ceiling',
 			copy: 'Applied after 2.6x target miss against 300 MB per episode.',
 			primary: 'Start sample',
@@ -1581,10 +1694,10 @@ describe('Folder Studio review request mapping', () => {
 				null
 			)
 		).toMatchObject({
-			label: 'Draft blocked',
-			title: 'The draft does not match your request yet',
+			label: 'Sample plan blocked',
+			title: 'The sample plan does not match your request yet',
 			copy: 'The draft lowers VMAF based only on a soft size target.',
-			primary: 'Revise draft',
+			primary: 'Revise sample plan',
 			primaryAction: 'revise-proposal'
 		});
 	});
@@ -1693,7 +1806,7 @@ describe('Folder Studio review request mapping', () => {
 
 		expect(workflow).toMatchObject({
 			label: 'Not sampled',
-			primary: 'Ask for draft',
+			primary: 'Ask review assistant',
 			primaryAction: 'focus-bench'
 		});
 	});
@@ -1720,7 +1833,7 @@ describe('Folder Studio review request mapping', () => {
 		);
 
 		expect(workflow).toMatchObject({
-			label: 'Draft ready',
+			label: 'Sample plan ready',
 			primary: 'Start sample',
 			primaryAction: 'start-sample'
 		});
@@ -1793,7 +1906,7 @@ describe('Folder Studio review request mapping', () => {
 		);
 
 		expect(workflow).toMatchObject({
-			label: 'Capped draft ready',
+			label: 'Capped sample plan ready',
 			title: 'Run a sample with a 7% size ceiling',
 			copy: 'Applied after 2.6x target miss against 300 MB per episode.',
 			primary: 'Start sample',
@@ -1903,7 +2016,7 @@ describe('Folder Studio review request mapping', () => {
 
 		expect(workflow).toMatchObject({
 			label: 'Not sampled',
-			primary: 'Ask for draft',
+			primary: 'Ask review assistant',
 			primaryAction: 'focus-bench'
 		});
 	});

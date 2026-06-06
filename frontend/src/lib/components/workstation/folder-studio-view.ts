@@ -74,6 +74,7 @@ export type WorkflowAction =
 	| 'approve-size-tradeoff'
 	| 'download-review-pack'
 	| 'focus-bench'
+	| 'open-completed'
 	| 'monitor-processing'
 	| 'monitor-review'
 	| 'monitor-sample'
@@ -188,6 +189,21 @@ export type WorkflowStep = {
 	detail: string;
 	tone: ShellTone;
 	current: boolean;
+};
+
+export type BasicEncodeGuideStep = {
+	label: string;
+	detail: string;
+	state: 'done' | 'current' | 'upcoming';
+};
+
+export type BasicEncodeGuide = {
+	label: string;
+	title: string;
+	detail: string;
+	primary: string;
+	action: WorkflowAction;
+	steps: BasicEncodeGuideStep[];
 };
 
 function numberValue(value: unknown): number | null {
@@ -438,6 +454,7 @@ export function resolveWorkflowActionState(
 		};
 	}
 	if (action === 'focus-bench') return { disabled: false, title: '' };
+	if (action === 'open-completed') return { disabled: false, title: '' };
 	if (action === 'approve-size-tradeoff') {
 		return approvalReviewReady
 			? { disabled: false, title: '' }
@@ -461,7 +478,7 @@ export function resolveWorkflowActionState(
 		if (pendingProposal?.proposal_id && pendingProposal.can_queue === false) {
 			return {
 				disabled: true,
-				title: pendingProposal.message || 'The current draft is not ready to queue.'
+				title: pendingProposal.message || 'The current sample plan is not ready to queue.'
 			};
 		}
 		return { disabled: false, title: '' };
@@ -479,13 +496,13 @@ export function resolveWorkflowActionState(
 		if (!pendingProposal?.proposal_id) {
 			return {
 				disabled: true,
-				title: 'Ask the review assistant for a draft before starting the sample.'
+				title: 'Ask the review assistant for a sample plan before starting the sample.'
 			};
 		}
 		if (pendingProposal.can_queue === false) {
 			return {
 				disabled: true,
-				title: pendingProposal.message || 'The current draft is not ready to queue.'
+				title: pendingProposal.message || 'The current sample plan is not ready to queue.'
 			};
 		}
 		return { disabled: false, title: '' };
@@ -548,7 +565,7 @@ export function buildBenchMessages(
 			role: 'operator',
 			label: 'Operator',
 			title: 'No request sent',
-			body: 'Use the composer to request a representative sample, a revision, or a validation pass.',
+			body: 'Use the composer to request a sample. Describe your quality or size goal, then click Send request.',
 			tone: 'neutral'
 		});
 	}
@@ -1035,8 +1052,12 @@ function buildOutputScopeFact(folder: FolderPayload): {
 }
 
 function workflowActionDetail(workflow: WorkflowState | undefined): string {
-	if (!workflow) return 'Draft, sample, review, or approve from here';
-	if (workflow.secondaryAction !== 'open-ops' && workflow.secondary !== workflow.primary) {
+	if (!workflow) return 'Plan, sample, review, or approve from here';
+	if (
+		workflow.secondaryAction !== 'open-ops' &&
+		workflow.secondaryAction !== 'open-completed' &&
+		workflow.secondary !== workflow.primary
+	) {
 		return `${workflow.secondary} also available`;
 	}
 	return workflow.copy;
@@ -1209,7 +1230,7 @@ export function buildOutputReviewRows(
 			tone: verdict?.missesTarget ? 'wait' : verdict ? 'ready' : 'idle'
 		},
 		{
-			label: pendingProposal?.proposal_id ? 'Next sample draft' : 'Video output',
+			label: pendingProposal?.proposal_id ? 'Next sample plan' : 'Video output',
 			source: compactParts([
 				codecLabel(sampleItem?.video_codec),
 				formatResolutionCopy(sampleItem?.width, sampleItem?.height)
@@ -1399,6 +1420,31 @@ export function reviewReadyCopy(calibration: FolderCalibrationState | null): str
 	return '—';
 }
 
+export function sampleStatusCopy(value: string | null | undefined): string {
+	const status = String(value ?? '')
+		.trim()
+		.toLowerCase();
+	if (status === 'queued') return 'Sample waiting';
+	if (status === 'running') return 'Sampling';
+	if (status === 'pending_review') return 'Ready to review';
+	if (status === 'failed' || status === 'stopped') return 'Sample needs retry';
+	if (status === 'idle' || !status) return 'Needs sample';
+	return status.replaceAll('_', ' ');
+}
+
+export function approvalStatusCopy(value: string | null | undefined): string {
+	const status = String(value ?? '')
+		.trim()
+		.toLowerCase();
+	if (!status) return 'Not reviewed';
+	if (status === 'missing_sample') return 'Needs sample';
+	if (status === 'accepted') return 'Approved';
+	if (status === 'blocked') return 'Blocked';
+	if (status === 'needs_review') return 'Needs review';
+	if (status === 'pending_review') return 'Ready to review';
+	return status.replaceAll('_', ' ');
+}
+
 function workflowToneToShellTone(tone: FolderWorkflowState['tone']): ShellTone {
 	if (tone === 'active') return 'active';
 	if (tone === 'ready' || tone === 'success') return 'ready';
@@ -1444,8 +1490,8 @@ function resolveBackendWorkflow(
 			copy: workflow.detail,
 			primary: folder.series_context ? 'Open whole show' : 'Open Folders',
 			primaryAction: folder.series_context ? 'open-series' : 'open-folders',
-			secondary: 'Open Ops',
-			secondaryAction: 'open-ops',
+			secondary: 'Review cleanup',
+			secondaryAction: 'open-completed',
 			isOutputWorkflow: true
 		};
 	}
@@ -1604,7 +1650,7 @@ export function resolveWorkflow(
 	) {
 		return {
 			tone: 'fail',
-			label: 'Retryable',
+			label: 'Sample needs retry',
 			title: 'Sample run needs recovery',
 			copy: String(
 				calibrationJob?.error ??
@@ -1645,11 +1691,11 @@ export function resolveWorkflow(
 	if (pendingProposal?.self_check?.status && pendingProposal.self_check.status !== 'passed') {
 		return {
 			tone: 'wait',
-			label: 'Check draft',
+			label: 'Check sample plan',
 			title: 'Proposal needs review before approval',
 			copy:
 				pendingProposal.self_check.summary ??
-				'The proposal self-check returned a warning. Inspect the draft and revise before approving.',
+				'The proposal self-check returned a warning. Inspect the sample plan and revise before approving.',
 			primary: 'Download review pack',
 			primaryAction: 'download-review-pack',
 			secondary: 'Revise',
@@ -1661,14 +1707,14 @@ export function resolveWorkflow(
 		if (budgetEnforcement?.active || !calibration?.browser_review_ready) {
 			return {
 				tone: 'ready',
-				label: budgetEnforcement?.active ? 'Capped draft ready' : 'Draft ready',
+				label: budgetEnforcement?.active ? 'Capped sample plan ready' : 'Sample plan ready',
 				title: budgetEnforcement?.active
 					? `Run a sample with a ${budgetEnforcement.cap} size ceiling`
-					: 'Review draft is ready to sample',
+					: 'Sample plan is ready to run',
 				copy:
 					budgetEnforcement?.reason ??
 					pendingProposal.message ??
-					'Review the draft, then queue the representative sample when it looks right.',
+					'Review the sample plan, then queue the representative sample when it looks right.',
 				primary: 'Start sample',
 				primaryAction: 'start-sample',
 				secondary: 'Revise',
@@ -1683,12 +1729,12 @@ export function resolveWorkflow(
 	) {
 		return {
 			tone: 'wait',
-			label: 'Draft blocked',
-			title: 'The draft does not match your request yet',
+			label: 'Sample plan blocked',
+			title: 'The sample plan does not match your request yet',
 			copy:
 				pendingProposal.message ??
-				'The bench draft changed something outside your request. Revise it before starting another sample.',
-			primary: 'Revise draft',
+				'The sample plan changed something outside your request. Revise it before starting another sample.',
+			primary: 'Revise sample plan',
 			primaryAction: 'revise-proposal',
 			secondary: 'Download pack',
 			secondaryAction: 'download-review-pack'
@@ -1729,7 +1775,7 @@ export function resolveWorkflow(
 			copy:
 				verdict === null
 					? (pendingProposal?.message ??
-						'Evidence is ready. Review the sample clips, then approve the draft or revise it.')
+						'Evidence is ready. Review the sample clips, then approve the sample plan or revise it.')
 					: `${verdict.predictedPerItem} per episode, ${verdict.predictedFolderTotal} for the folder. Review the clips, then approve and queue if this is acceptable.`,
 			primary: 'Approve and queue',
 			primaryAction: 'queue-encode',
@@ -1755,7 +1801,7 @@ export function resolveWorkflow(
 			label: 'Not sampled',
 			title: 'No representative sample yet',
 			copy: 'Ask the review assistant for a sample proposal before approving folder-wide settings. Worker readiness and settings context stay visible while the sample is queued.',
-			primary: 'Ask for draft',
+			primary: 'Ask review assistant',
 			primaryAction: 'focus-bench',
 			secondary: 'Open Ops',
 			secondaryAction: 'open-ops'
@@ -1765,8 +1811,8 @@ export function resolveWorkflow(
 		tone: 'wait',
 		label: 'Waiting',
 		title: 'Folder is waiting for review evidence',
-		copy: 'A representative item exists, but the current review state is incomplete. Refresh status or rerun the sample if the evidence is stale.',
-		primary: 'Refresh draft',
+		copy: 'A representative item exists, but the current review state is incomplete. Ask the review assistant for the next sample plan.',
+		primary: 'Ask review assistant',
 		primaryAction: 'focus-bench',
 		secondary: 'Open Ops',
 		secondaryAction: 'open-ops'
@@ -1826,10 +1872,11 @@ export function buildWorkflowSteps(workflow: WorkflowState): WorkflowStep[] {
 	const sampleCurrent =
 		['focus-bench', 'monitor-sample', 'start-sample', 'retry-sample', 'stop-sample'].includes(
 			activeAction
-		) || ['not sampled', 'sampling', 'retryable', 'draft ready'].includes(activeLabel);
+		) ||
+		['not sampled', 'sampling', 'sample needs retry', 'sample plan ready'].includes(activeLabel);
 	const reviewCurrent =
 		['download-review-pack', 'monitor-review', 'revise-proposal'].includes(activeAction) ||
-		['review ready', 'check draft'].includes(activeLabel);
+		['review ready', 'check sample plan'].includes(activeLabel);
 	const approveCurrent =
 		['queue-encode', 'approve-size-tradeoff'].includes(activeAction) || activeLabel === 'approved';
 	const encodeCurrent =
@@ -1867,6 +1914,123 @@ export function buildWorkflowSteps(workflow: WorkflowState): WorkflowStep[] {
 			current: encodeCurrent
 		}
 	];
+}
+
+const BASIC_ENCODE_STEPS = [
+	{
+		label: 'Pick folder',
+		detail: 'Choose one folder from Work or Folders.'
+	},
+	{
+		label: 'Run sample',
+		detail: 'Create review evidence from one representative item.'
+	},
+	{
+		label: 'Review sample',
+		detail: 'Compare quality and size before approving.'
+	},
+	{
+		label: 'Process folder',
+		detail: 'Queue the approved settings and let workers run.'
+	},
+	{
+		label: 'Validate output',
+		detail: 'Check finished files before publishing.'
+	},
+	{
+		label: 'Promote',
+		detail: 'Move validated files into the library.'
+	},
+	{
+		label: 'Clean up',
+		detail: 'Delete archived originals from Completed.'
+	}
+] as const;
+
+function basicEncodeStepIndex(workflow: WorkflowState): number {
+	const action = workflow.primaryAction;
+	const label = workflow.label.toLowerCase();
+	if (label === 'complete') return 6;
+	if (action === 'promote-outputs' || label === 'ready to promote') return 5;
+	if (action === 'validate-outputs' || label === 'ready to validate') return 4;
+	if (
+		workflow.isOutputWorkflow ||
+		['monitor-processing', 'retry-encode'].includes(action) ||
+		['approved', 'processing', 'processing failed', 'processing stopped'].includes(label)
+	) {
+		return 3;
+	}
+	if (
+		['download-review-pack', 'monitor-review', 'queue-encode', 'approve-size-tradeoff'].includes(
+			action
+		) ||
+		['review ready', 'review pending', 'target missed', 'check sample plan'].includes(label)
+	) {
+		return 2;
+	}
+	if (
+		['start-sample', 'retry-sample', 'monitor-sample', 'stop-sample'].includes(action) ||
+		['sample plan ready', 'capped sample plan ready', 'sampling', 'sample needs retry'].includes(
+			label
+		)
+	) {
+		return 1;
+	}
+	return 1;
+}
+
+function basicEncodeDetail(workflow: WorkflowState, currentStep: number): string {
+	if (currentStep === 1) {
+		return 'Start by making one representative sample. Do not approve the full folder until review evidence is ready.';
+	}
+	if (currentStep === 2) {
+		return 'Look at the review evidence. If it looks good, approve and queue the folder; if not, revise and sample again.';
+	}
+	if (currentStep === 3) {
+		if (workflow.primaryAction === 'queue-encode') {
+			return 'The sample is accepted. Queue folder processing when you are ready to run the real work.';
+		}
+		return 'Folder processing is underway or needs attention. Ops shows worker and queue details.';
+	}
+	if (currentStep === 4) return 'Processing finished. Validate the outputs before publishing them.';
+	if (currentStep === 5) return 'Outputs are validated. Promote them into the library.';
+	if (currentStep === 6) {
+		return 'This folder is processed. Go to Completed when you are ready to delete archived originals.';
+	}
+	return 'Choose one folder, then follow the highlighted step until the folder is complete.';
+}
+
+export function buildBasicEncodeGuide(workflow: WorkflowState): BasicEncodeGuide {
+	const currentStep = basicEncodeStepIndex(workflow);
+	const primary =
+		currentStep === 6 && workflow.secondaryAction === 'open-completed'
+			? workflow.secondary
+			: workflow.primary;
+	const action =
+		currentStep === 6 && workflow.secondaryAction === 'open-completed'
+			? workflow.secondaryAction
+			: workflow.primaryAction;
+	return {
+		label: 'Single folder run',
+		title: BASIC_ENCODE_STEPS[currentStep]?.label ?? 'Follow the next step',
+		detail: basicEncodeDetail(workflow, currentStep),
+		primary,
+		action,
+		steps: BASIC_ENCODE_STEPS.map((step, index) => ({
+			...step,
+			state: index < currentStep ? 'done' : index === currentStep ? 'current' : 'upcoming'
+		}))
+	};
+}
+
+function sampleFooterTone(status: string | null | undefined): FooterSignal['tone'] {
+	const normalized = String(status ?? '')
+		.trim()
+		.toLowerCase();
+	if (normalized === 'failed' || normalized === 'stopped') return 'fail';
+	if (normalized === 'queued' || normalized === 'running') return 'active';
+	if (normalized === 'pending_review') return 'ready';
+	return 'idle';
 }
 
 export function buildProposalRows(
@@ -1929,7 +2093,7 @@ export function buildStatusTiles(
 			}
 		: {
 				label: 'Sample',
-				value: status.calibration_status || 'Unknown',
+				value: sampleStatusCopy(status.calibration_status),
 				detail: status.polling_active ? 'polling active' : 'polling idle',
 				tone:
 					status.calibration_status === 'failed'
@@ -2000,9 +2164,9 @@ export function buildRuntimeFacts(
 		];
 	}
 	return [
-		{ label: 'Calibration', value: status.calibration_status || '—' },
+		{ label: 'Sample', value: sampleStatusCopy(status.calibration_status) },
 		{ label: 'Scan', value: status.folder_scan_status || '—' },
-		{ label: 'Approval', value: reviewGate?.status ?? '—' },
+		{ label: 'Approval', value: approvalStatusCopy(reviewGate?.status) },
 		{ label: 'Processing', value: queueSummary }
 	];
 }
@@ -2015,7 +2179,11 @@ export function buildFooterSignals(
 ): FooterSignal[] {
 	const firstSignal: FooterSignal = workflow.isOutputWorkflow
 		? { label: 'Pipeline', value: workflow.label.toLowerCase(), tone: workflow.tone }
-		: { label: 'Review', value: status.calibration_status || 'unknown', tone: 'active' };
+		: {
+				label: 'Sample',
+				value: sampleStatusCopy(status.calibration_status),
+				tone: sampleFooterTone(status.calibration_status)
+			};
 	return [
 		firstSignal,
 		{ label: 'Metric', value: resolvedMetricCopy(folder), tone: 'ready' },

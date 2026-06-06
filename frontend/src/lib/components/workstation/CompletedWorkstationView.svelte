@@ -772,7 +772,7 @@
 											class="control control--primary armed"
 											disabled={reviewPending}
 											onclick={confirmAlreadyRemoved}
-											>{reviewPending ? 'Working' : 'Confirm reviewed'}</button
+											>{reviewPending ? 'Working' : 'Mark handled'}</button
 										>
 										<button
 											type="button"
