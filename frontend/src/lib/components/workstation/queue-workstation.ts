@@ -89,23 +89,25 @@ export function workflowOpenItemCount(folder: FolderCard): number {
 export function buildQueueStatusTiles(
 	dashboard: DashboardSummaryPayload,
 	foldersPayload: DashboardFoldersPayload,
-	hosts: HostsPayload
+	hosts: HostsPayload,
+	scopeLabel = 'folders'
 ): StatusTile[] {
 	const folders = foldersPayload.folders;
+	const visibleScopeLabel = scopeLabel.trim().toLowerCase() || 'folders';
 	const readyHosts = hosts.hosts.filter((host) => host.available).length;
 	const encodeQueue = dashboard.encode_queue;
 	const scanStatus = dashboard.scan_job?.status ?? 'idle';
 	return [
 		{
 			label: 'Next work',
-			value: `${folders.length} folders`,
-			detail: `${totalPendingItems(folders).toLocaleString('en-US')} pending items`,
+			value: `${folders.length} ${visibleScopeLabel}`,
+			detail: `${totalPendingItems(folders).toLocaleString('en-US')} open work`,
 			tone: folders.length ? 'wait' : 'idle'
 		},
 		{
 			label: 'Projected reclaim',
 			value: formatBytes(totalProjectedReclaim(folders)),
-			detail: 'estimated from visible folders',
+			detail: `estimated from visible ${visibleScopeLabel}`,
 			tone: totalProjectedReclaim(folders) > 0 ? 'ready' : 'idle',
 			mono: true
 		},

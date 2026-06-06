@@ -19,7 +19,8 @@
 		queueFolderState,
 		queueFolderTone,
 		totalPendingItems,
-		totalProjectedReclaim
+		totalProjectedReclaim,
+		workflowOpenItemCount
 	} from './queue-workstation';
 	import {
 		clearStoredWorkbenchFilters,
@@ -95,41 +96,58 @@
 	const excludedStateCount = $derived(
 		stateOptions.filter((option) => !stateIncluded(option.key)).length
 	);
-	const statusTiles = $derived(buildQueueStatusTiles(dashboard, visibleFoldersPayload, hosts));
+	const folderScopeLabel = $derived(folderScope === 'series' ? 'Whole shows' : 'Season folders');
+	const folderScopeDetail = $derived(
+		folderScope === 'series'
+			? 'queue or inspect every season in a show together'
+			: isFolderIndex
+				? 'queue or inspect one season at a time'
+				: 'review folders'
+	);
+	const statusTiles = $derived(
+		buildQueueStatusTiles(dashboard, visibleFoldersPayload, hosts, folderScopeLabel)
+	);
 	const footerSignals = $derived(buildQueueFooterSignals(dashboard, visibleFoldersPayload, hosts));
 	const runningSamples = $derived(dashboard.calibration_queue.sample.running_count);
 	const queuedSamples = $derived(dashboard.calibration_queue.sample.queued_count);
 	const pendingReviews = $derived(dashboard.calibration_queue.sample.pending_review_count);
-	const folderScopeLabel = $derived(folderScope === 'series' ? 'Series' : 'Seasons');
-	const folderScopeDetail = $derived(
-		folderScope === 'series'
-			? 'whole-series prefixes'
-			: isFolderIndex
-				? 'season folders'
-				: 'review folders'
-	);
 	const shellSubject = $derived(isFolderIndex ? 'Folders' : 'Queue');
 	const shellRoute = $derived(isFolderIndex ? 'folders' : 'queue');
 	const filterTitle = $derived(isFolderIndex ? 'Find folders' : 'Queue filters');
-	const visibleSummaryLabel = $derived(isFolderIndex ? 'Visible folders' : 'Visible work');
+	const visibleSummaryLabel = $derived(
+		isFolderIndex ? `Visible ${folderScopeLabel.toLowerCase()}` : 'Visible work'
+	);
 	const filterEmptyCopy = $derived(
 		isFolderIndex ? 'all folders included' : 'all queue items included'
 	);
 	const scopeTitle = $derived(isFolderIndex ? 'Index status' : 'Work status');
-	const primaryScopeTitle = $derived(isFolderIndex ? 'Searchable folders' : 'Review candidates');
+	const primaryScopeTitle = $derived(
+		isFolderIndex ? `Searchable ${folderScopeLabel.toLowerCase()}` : 'Review candidates'
+	);
 	const headerEyebrow = $derived(isFolderIndex ? 'Folder index' : 'Queue');
-	const headerTitle = $derived(isFolderIndex ? 'Find a folder' : 'Choose next folder');
+	const headerTitle = $derived(isFolderIndex ? 'Find media' : 'Choose next folder');
 	const headerCopy = $derived(
 		isFolderIndex
-			? 'Search or filter discovered folders, then open Folder Studio when you know which folder needs attention.'
+			? 'Choose season folders or whole shows, then search or filter the scope you want to inspect.'
 			: 'Use the worklist to pick the next folder that needs review, then open Folder Studio when the action looks right.'
 	);
 	const workspaceLabel = $derived(
 		isFolderIndex ? 'Folder index and selected folder' : 'Queue worklist and selected folder'
 	);
-	const selectedPanelTitle = $derived(isFolderIndex ? 'Folder details' : 'Next action');
-	const tableEyebrow = $derived(isFolderIndex ? 'Folder index' : 'Ranked queue');
-	const tableTitle = $derived(isFolderIndex ? 'Matching folders' : 'Next folders to review');
+	const activeEntityLabel = $derived(isFolderIndex && folderScope === 'series' ? 'Show' : 'Folder');
+	const selectedPanelTitle = $derived(
+		isFolderIndex ? `${activeEntityLabel} details` : 'Next action'
+	);
+	const tableEyebrow = $derived(
+		isFolderIndex && folderScope === 'series'
+			? 'Show index'
+			: isFolderIndex
+				? 'Folder index'
+				: 'Ranked queue'
+	);
+	const tableTitle = $derived(
+		isFolderIndex ? `Matching ${folderScopeLabel.toLowerCase()}` : 'Next folders to review'
+	);
 	const visibleScopeSummary = $derived(
 		`${visibleFolders.length.toLocaleString('en-US')} / ${folders.length.toLocaleString(
 			'en-US'
@@ -189,7 +207,7 @@
 				reclaim: 0
 			};
 			existing.folders += 1;
-			existing.pending += Math.max(folder.pending_count ?? 0, 0);
+			existing.pending += workflowOpenItemCount(folder);
 			existing.reclaim += Math.max(folder.projected_reclaim_bytes ?? 0, 0);
 			byLibrary[key] = existing;
 		}
@@ -208,7 +226,7 @@
 				pending: 0
 			};
 			existing.folders += 1;
-			existing.pending += Math.max(folder.pending_count ?? 0, 0);
+			existing.pending += workflowOpenItemCount(folder);
 			byState[key] = existing;
 		}
 		return Object.values(byState).sort((left, right) => right.pending - left.pending);
@@ -284,15 +302,15 @@
 	function selectedRecommendationCopy(folder: FolderCard | null, index: number): string {
 		if (!folder) return 'No folder is selected.';
 		const reclaim = formatBytes(folder.projected_reclaim_bytes);
-		const pending = folder.pending_count.toLocaleString('en-US');
+		const openWork = workflowOpenItemCount(folder).toLocaleString('en-US');
 		if (isFolderIndex && folderScope === 'series') {
-			return `${folder.title} spans ${pending} pending items across its series prefix with about ${reclaim} of projected reclaim.`;
+			return `${folder.title} spans ${openWork} open workflow items across the whole show with about ${reclaim} of projected reclaim.`;
 		}
 		if (isFolderIndex) {
-			return `${folder.title} has ${pending} pending items and about ${reclaim} of projected reclaim.`;
+			return `${folder.title} has ${openWork} open workflow items and about ${reclaim} of projected reclaim.`;
 		}
 		const rankCopy = index === 0 ? 'the first visible folder' : `#${index + 1} in the visible list`;
-		return `${folder.title} is ${rankCopy} with ${pending} pending items and about ${reclaim} of projected reclaim.`;
+		return `${folder.title} is ${rankCopy} with ${openWork} open workflow items and about ${reclaim} of projected reclaim.`;
 	}
 
 	$effect(restoreFilters);
@@ -317,36 +335,6 @@
 								.join(' · ') || filterEmptyCopy}</small
 						>
 					</div>
-
-					{#if isFolderIndex}
-						<div class="queue-filter__scope" aria-label="Folder scope">
-							<span>Scope</span>
-							<div class="scope-toggle" role="group" aria-label="Folder scope">
-								<button
-									type="button"
-									class:scope-toggle__button--active={folderScope === 'season'}
-									aria-pressed={folderScope === 'season'}
-									aria-current={folderScope === 'season' ? 'true' : undefined}
-									onclick={() => setFolderScope('season')}
-								>
-									<span>Seasons</span>
-									<small>{foldersPayload.folders.length.toLocaleString('en-US')}</small>
-								</button>
-								<button
-									type="button"
-									disabled={!canSelectSeriesScope}
-									class:scope-toggle__button--active={folderScope === 'series'}
-									aria-pressed={folderScope === 'series'}
-									aria-current={folderScope === 'series' ? 'true' : undefined}
-									onclick={() => setFolderScope('series')}
-								>
-									<span>Series</span>
-									<small>{seriesFolders.length.toLocaleString('en-US')}</small>
-								</button>
-							</div>
-							<small>{folderScopeDetail}</small>
-						</div>
-					{/if}
 
 					<label class="queue-filter__search">
 						<span>Search</span>
@@ -382,7 +370,7 @@
 										>{option.folders.toLocaleString('en-US')} folders · {option.pending.toLocaleString(
 											'en-US'
 										)}
-										pending</small
+										open</small
 									>
 								</span>
 								<em>{formatBytes(option.reclaim)}</em>
@@ -414,7 +402,7 @@
 										>{option.folders.toLocaleString('en-US')} folders · {option.pending.toLocaleString(
 											'en-US'
 										)}
-										pending</small
+										open</small
 									>
 								</span>
 							</label>
@@ -481,18 +469,49 @@
 					<h1>{headerTitle}</h1>
 					<p>{headerCopy}</p>
 				</div>
-				<div class="queue-header__facts">
-					<div>
-						<span>{isFolderIndex ? `Visible ${folderScopeLabel}` : 'Visible folders'}</span>
-						<strong>{visibleFolders.length.toLocaleString('en-US')}</strong>
-					</div>
-					<div>
-						<span>Pending items</span>
-						<strong>{totalPendingItems(visibleFolders).toLocaleString('en-US')}</strong>
-					</div>
-					<div>
-						<span>Projected reclaim</span>
-						<strong>{formatBytes(totalProjectedReclaim(visibleFolders))}</strong>
+				<div class="queue-header__tools">
+					{#if isFolderIndex}
+						<div class="scope-switch" aria-label="Folder scope">
+							<span>Scope</span>
+							<div class="scope-toggle" role="group" aria-label="Folder scope">
+								<button
+									type="button"
+									class:scope-toggle__button--active={folderScope === 'season'}
+									aria-pressed={folderScope === 'season'}
+									aria-current={folderScope === 'season' ? 'true' : undefined}
+									onclick={() => setFolderScope('season')}
+								>
+									<span>Season folders</span>
+									<small>{foldersPayload.folders.length.toLocaleString('en-US')}</small>
+								</button>
+								<button
+									type="button"
+									disabled={!canSelectSeriesScope}
+									class:scope-toggle__button--active={folderScope === 'series'}
+									aria-pressed={folderScope === 'series'}
+									aria-current={folderScope === 'series' ? 'true' : undefined}
+									onclick={() => setFolderScope('series')}
+								>
+									<span>Whole shows</span>
+									<small>{seriesFolders.length.toLocaleString('en-US')}</small>
+								</button>
+							</div>
+							<small>{folderScopeDetail}</small>
+						</div>
+					{/if}
+					<div class="queue-header__facts">
+						<div>
+							<span>{isFolderIndex ? `Visible ${folderScopeLabel}` : 'Visible folders'}</span>
+							<strong>{visibleFolders.length.toLocaleString('en-US')}</strong>
+						</div>
+						<div>
+							<span>Open work</span>
+							<strong>{totalPendingItems(visibleFolders).toLocaleString('en-US')}</strong>
+						</div>
+						<div>
+							<span>Projected reclaim</span>
+							<strong>{formatBytes(totalProjectedReclaim(visibleFolders))}</strong>
+						</div>
 					</div>
 				</div>
 			</header>
@@ -522,8 +541,8 @@
 								<p>{selectedRecommendationCopy(selectedFolder, selectedFolderIndex)}</p>
 							</div>
 							<dl class="context-metrics">
-								<dt>Pending items</dt>
-								<dd>{selectedFolder.pending_count.toLocaleString('en-US')}</dd>
+								<dt>Open work</dt>
+								<dd>{workflowOpenItemCount(selectedFolder).toLocaleString('en-US')}</dd>
 								<dt>Projected reclaim</dt>
 								<dd>{formatBytes(selectedFolder.projected_reclaim_bytes)}</dd>
 								<dt>Source size</dt>
@@ -554,8 +573,8 @@
 								<tr>
 									<th>Rank</th>
 									<th>State</th>
-									<th>Folder</th>
-									<th>Pending</th>
+									<th>{activeEntityLabel}</th>
+									<th>Open work</th>
 									<th>Source</th>
 									<th>Reclaim</th>
 									<th>Codec</th>
@@ -593,7 +612,7 @@
 												<span>{folder.prefix}</span>
 											</button>
 										</td>
-										<td>{folder.pending_count.toLocaleString('en-US')}</td>
+										<td>{workflowOpenItemCount(folder).toLocaleString('en-US')}</td>
 										<td>{formatBytes(folder.total_size_bytes)}</td>
 										<td>{formatBytes(folder.projected_reclaim_bytes)}</td>
 										<td>{codecSummary(folder.video_codecs)}</td>
@@ -646,11 +665,11 @@
 	}
 
 	.queue-header {
-		align-items: end;
+		align-items: start;
 		border-bottom: var(--mf-border);
 		display: grid;
 		gap: var(--mf-space-6);
-		grid-template-columns: minmax(0, 1fr) auto;
+		grid-template-columns: minmax(320px, 0.95fr) minmax(360px, 1fr);
 		padding-bottom: var(--mf-space-5);
 	}
 
@@ -670,16 +689,23 @@
 		margin-top: var(--mf-space-3);
 	}
 
+	.queue-header__tools {
+		display: grid;
+		gap: var(--mf-space-4);
+		justify-self: stretch;
+		min-width: 0;
+	}
+
 	.queue-header__facts {
-		display: flex;
-		gap: var(--mf-space-5);
-		flex-wrap: wrap;
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-template-columns: repeat(3, minmax(0, 1fr));
 	}
 
 	.queue-header__facts div {
 		display: grid;
 		gap: var(--mf-space-2);
-		min-width: 96px;
+		min-width: 0;
 	}
 
 	.queue-header__facts span,
@@ -817,13 +843,13 @@
 		gap: var(--mf-space-2);
 	}
 
-	.queue-filter__scope {
+	.scope-switch {
 		display: grid;
 		gap: var(--mf-space-2);
 	}
 
-	.queue-filter__scope > span,
-	.queue-filter__scope > small {
+	.scope-switch > span,
+	.scope-switch > small {
 		color: var(--mf-fg-tertiary);
 		font-size: var(--mf-text-2xs);
 		font-weight: var(--mf-weight-semibold);
@@ -846,6 +872,7 @@
 		font: inherit;
 		gap: var(--mf-space-1);
 		min-height: 48px;
+		min-width: 0;
 		padding: var(--mf-space-2) var(--mf-space-3);
 		text-align: left;
 	}
@@ -874,6 +901,7 @@
 	.scope-toggle span {
 		font-size: var(--mf-text-xs);
 		font-weight: var(--mf-weight-semibold);
+		overflow-wrap: anywhere;
 	}
 
 	.scope-toggle small {
@@ -1146,14 +1174,14 @@
 
 		.home__main {
 			grid-column: auto;
-			grid-row: auto;
+			grid-row: 1;
 		}
 
 		.home__rail {
 			border-left: 0;
 			border-right: 0;
 			grid-column: auto;
-			grid-row: auto;
+			grid-row: 2;
 		}
 
 		.queue-header {
@@ -1161,7 +1189,11 @@
 		}
 
 		.queue-header__facts {
-			flex-wrap: wrap;
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+		}
+
+		.queue-header__facts strong {
+			overflow-wrap: anywhere;
 		}
 
 		.queue-workspace {
@@ -1246,7 +1278,7 @@
 		}
 
 		td:nth-child(4)::before {
-			content: 'Pending';
+			content: 'Open work';
 		}
 
 		td:nth-child(5)::before {

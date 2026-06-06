@@ -5,8 +5,18 @@ import {
 	queueFolderState,
 	queueFolderTone,
 	queueStateLabel,
+	buildQueueStatusTiles,
 	totalPendingItems
 } from './queue-workstation';
+
+const emptyQueueLane = {
+	running: [],
+	queued: [],
+	pending_review: [],
+	running_count: 0,
+	queued_count: 0,
+	pending_review_count: 0
+};
 
 function folder(overrides: Partial<FolderCard>): FolderCard {
 	return {
@@ -60,6 +70,30 @@ function workflowState(overrides: Partial<NonNullable<FolderCard['workflow_state
 }
 
 describe('Queue workstation labels', () => {
+	const dashboard = {
+		folders_preview: [],
+		library_colors: {},
+		scan_job: null,
+		calibration_queue: {
+			folders_preview: [],
+			sample: emptyQueueLane,
+			full: emptyQueueLane,
+			active_count: 0
+		},
+		encode_queue: {
+			running_count: 0,
+			queued_count: 0,
+			running: [],
+			queued: [],
+			state: { stop_requested: false, is_paused: false, scheduler_summary: 'idle' }
+		},
+		catalog_empty: false,
+		folder_cache_key: 'test',
+		metric_support: { vmaf: true, xpsnr: false, ssim: false },
+		metric_status_copy: 'vmaf'
+	};
+	const hosts = { compact: true, hosts: [] };
+
 	it('normalizes workflow state labels into basic-user actions', () => {
 		expect(queueStateLabel('Ready to start')).toBe('Needs sample');
 		expect(queueStateLabel('Sample queued')).toBe('Sample waiting');
@@ -86,5 +120,22 @@ describe('Queue workstation labels', () => {
 		expect(queueFolderTone(folder({ workflow_state: workflowState({ tone: 'attention' }) }))).toBe(
 			'fail'
 		);
+	});
+
+	it('describes status tiles with the active folder scope', () => {
+		const tiles = buildQueueStatusTiles(
+			dashboard,
+			{
+				folders: [folder({ workflow_state: workflowState() })],
+				catalog_empty: false,
+				folder_cache_key: 'test'
+			},
+			hosts,
+			'Whole shows'
+		);
+
+		expect(tiles[0].value).toBe('1 whole shows');
+		expect(tiles[0].detail).toBe('2 open work');
+		expect(tiles[1].detail).toBe('estimated from visible whole shows');
 	});
 });
