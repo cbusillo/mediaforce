@@ -26,6 +26,7 @@
 		buildBenchMessages,
 		buildBenchHostOptions,
 		buildProcessingHostOptions,
+		buildSeasonScopeRows,
 		buildWorkflowSteps,
 		buildFooterSignals,
 		buildProposalRows,
@@ -46,6 +47,8 @@
 		resolveQueueSubmissionMode,
 		resolveWorkflowActionState,
 		resolveWorkflow,
+		outputScopeDisplayLabel,
+		outputScopeLabel,
 		summarizeOutputWorkflowPending,
 		summarizeStatuses,
 		type WorkflowAction
@@ -98,6 +101,8 @@
 	const summary = $derived(studioFolder.summary);
 	const title = $derived(resolveFolderTitle(prefix));
 	const library = $derived(prefix.split('/')[0] || 'Library');
+	const seasonScopeRows = $derived(buildSeasonScopeRows(studioFolder));
+	const activeScopeLabel = $derived(outputScopeLabel(studioFolder));
 	const sampleItem = $derived(record<FolderSampleItem>(studioFolder.sample_item));
 	const calibration = $derived(record<FolderCalibrationState>(studioFolder.calibration));
 	const pendingProposal = $derived(record<PendingSampleProposal>(studioFolder.pending_proposal));
@@ -937,6 +942,10 @@
 						</div>
 					{/if}
 					<div>
+						<span>Scope</span>
+						<strong>{outputScopeDisplayLabel(activeScopeLabel)}</strong>
+					</div>
+					<div>
 						<span>Library</span>
 						<strong>{library}</strong>
 					</div>
@@ -960,6 +969,19 @@
 						<span>Source size</span>
 						<strong>{formatBytes(summary?.total_size_bytes)}</strong>
 					</div>
+					{#if activeScopeLabel === 'whole show' && seasonScopeRows.length > 0}
+						<div class="context-list__wide season-nav" aria-label="Season scopes">
+							<span>Seasons</span>
+							<div class="season-nav__rows">
+								{#each seasonScopeRows as season (season.href)}
+									<a class="season-nav__row" href={resolve(folderRoutePath(season.href))}>
+										<strong>{season.label}</strong>
+										<small>{season.count}</small>
+									</a>
+								{/each}
+							</div>
+						</div>
+					{/if}
 				</div>
 			</WorkstationPanel>
 
@@ -1111,6 +1133,46 @@
 
 	.context-list__wide {
 		grid-column: 1 / -1;
+	}
+
+	.season-nav {
+		border-top: var(--mf-border-muted);
+		padding-top: var(--mf-space-3);
+	}
+
+	.season-nav__rows {
+		display: grid;
+		gap: var(--mf-space-2);
+		min-width: 0;
+	}
+
+	.season-nav__row {
+		align-items: center;
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border-muted);
+		display: flex;
+		gap: var(--mf-space-3);
+		justify-content: space-between;
+		min-height: var(--mf-control-md);
+		padding: 0 var(--mf-space-3);
+	}
+
+	.season-nav__row:hover {
+		background: var(--mf-active-bg);
+		border-color: var(--mf-active-line);
+	}
+
+	.season-nav__row strong {
+		color: var(--mf-fg-primary);
+		font-size: var(--mf-text-xs);
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.season-nav__row small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		text-transform: uppercase;
 	}
 
 	.folder-header__metric {

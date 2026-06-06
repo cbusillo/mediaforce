@@ -16,9 +16,11 @@ import {
 	buildReviewWorkspaceView,
 	buildRuntimeFacts,
 	buildSampleFacts,
+	buildSeasonScopeRows,
 	buildSampleVerdict,
 	buildStatusTiles,
 	buildWorkflowSteps,
+	outputScopeLabel,
 	predictedFolderSizeBytes,
 	projectedReclaimBytes,
 	resolveBenchRequestState,
@@ -1965,35 +1967,42 @@ describe('Folder Studio review request mapping', () => {
 	});
 
 	it('maps mixed work workflow state to prioritized validate and encode actions', () => {
-		const workflow = resolveWorkflow(
-			folderPayload({
-				workflow_state: workflowState({
-					prefix: 'tv/Terminator',
-					state: 'mixed',
-					primary_lane: 'validate',
-					label: 'Mixed work',
-					tone: 'ready',
-					detail: '22 to validate, 9 to encode',
-					counts: {
-						items: 31,
-						ready_to_validate: 22,
-						encode_candidates: 9,
-						ready_to_promote: 0,
-						processing: 0,
-						complete: 0,
-						blocked: 0
-					},
-					lane_counts: { validate: 22, encode: 9, promote: 0 },
-					state_counts: { ready_to_validate: 22, encode_candidate: 9, ready_to_promote: 0 },
-					blockers: [],
-					next_action: {
-						kind: 'validate_outputs',
-						label: 'Validate ready outputs',
-						enabled: true,
-						target_prefix: 'tv/Terminator'
-					}
-				})
+		const showFolder = folderPayload({
+			prefix: 'tv/Terminator',
+			summary: folderSummary({
+				prefix: 'tv/Terminator',
+				item_count: 31,
+				seasons: { 'Season 2': 22, 'Season 1': 9 }
 			}),
+			workflow_state: workflowState({
+				prefix: 'tv/Terminator',
+				state: 'mixed',
+				primary_lane: 'validate',
+				label: 'Mixed work',
+				tone: 'ready',
+				detail: '22 to validate, 9 to encode',
+				counts: {
+					items: 31,
+					ready_to_validate: 22,
+					encode_candidates: 9,
+					ready_to_promote: 0,
+					processing: 0,
+					complete: 0,
+					blocked: 0
+				},
+				lane_counts: { validate: 22, encode: 9, promote: 0 },
+				state_counts: { ready_to_validate: 22, encode_candidate: 9, ready_to_promote: 0 },
+				blockers: [],
+				next_action: {
+					kind: 'validate_outputs',
+					label: 'Validate ready outputs',
+					enabled: true,
+					target_prefix: 'tv/Terminator'
+				}
+			})
+		});
+		const workflow = resolveWorkflow(
+			showFolder,
 			folderStatusPayload(),
 			null,
 			null,
@@ -2007,46 +2016,12 @@ describe('Folder Studio review request mapping', () => {
 			label: 'Mixed work',
 			title: 'Multiple tasks pending',
 			copy: '22 to validate, 9 to encode',
-			primary: 'Validate 22 outputs',
+			primary: 'Validate show outputs (22)',
 			primaryAction: 'validate-outputs',
-			secondary: 'Queue 9 encodes',
+			secondary: 'Queue show encodes (9)',
 			secondaryAction: 'queue-encode'
 		});
-		const mixedFacts = buildDecisionFacts(
-			folderPayload({
-				summary: folderSummary({ item_count: 31 }),
-				series_context: { prefix: 'tv/Terminator', title: 'Terminator' },
-				workflow_state: {
-					prefix: 'tv/Terminator',
-					state: 'mixed',
-					primary_lane: 'validate',
-					label: 'Mixed work',
-					tone: 'ready',
-					detail: '22 to validate, 9 to encode',
-					counts: {
-						items: 31,
-						ready_to_validate: 22,
-						encode_candidates: 9,
-						ready_to_promote: 0,
-						processing: 0,
-						complete: 0,
-						blocked: 0
-					},
-					lane_counts: { validate: 22, encode: 9, promote: 0 },
-					state_counts: { ready_to_validate: 22, encode_candidate: 9, ready_to_promote: 0 },
-					blockers: [],
-					next_action: {
-						kind: 'validate_outputs',
-						label: 'Validate ready outputs',
-						enabled: true,
-						target_prefix: 'tv/Terminator'
-					}
-				}
-			}),
-			null,
-			null,
-			workflow
-		);
+		const mixedFacts = buildDecisionFacts(showFolder, null, null, workflow);
 		expect(mixedFacts[0]).toEqual({
 			label: 'Outputs',
 			value: '22 ready',
@@ -2059,13 +2034,24 @@ describe('Folder Studio review request mapping', () => {
 		});
 		expect(mixedFacts[2]).toEqual({
 			label: 'Next action',
-			value: 'Validate 22 outputs',
-			detail: 'Queue 9 encodes also available'
+			value: 'Validate show outputs (22)',
+			detail: 'Queue show encodes (9) also available'
 		});
 		expect(buildDecisionFacts(folderPayload(), null, null, workflow)[2]).toEqual({
 			label: 'Next action',
-			value: 'Validate 22 outputs',
-			detail: 'Queue 9 encodes also available'
+			value: 'Validate show outputs (22)',
+			detail: 'Queue show encodes (9) also available'
 		});
+		expect(outputScopeLabel(showFolder)).toBe('whole show');
+		expect(buildSeasonScopeRows(showFolder)).toEqual([
+			{ label: 'Season 1', count: '9 items', href: 'tv/Terminator/Season 1' },
+			{ label: 'Season 2', count: '22 items', href: 'tv/Terminator/Season 2' }
+		]);
+		expect(
+			outputScopeLabel(
+				folderPayload({ series_context: { prefix: 'tv/Terminator', title: 'Terminator' } })
+			)
+		).toBe('season');
+		expect(outputScopeLabel(folderPayload())).toBe('folder');
 	});
 });

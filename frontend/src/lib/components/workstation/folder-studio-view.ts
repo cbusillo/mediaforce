@@ -134,6 +134,14 @@ export type RuntimeFact = {
 	value: string;
 };
 
+export type OutputScopeLabel = 'whole show' | 'season' | 'folder';
+
+export type SeasonScopeRow = {
+	label: string;
+	count: string;
+	href: string;
+};
+
 export type BenchMessage = {
 	id: string;
 	role: 'operator' | 'bench' | 'system';
@@ -247,6 +255,49 @@ function compactText(value: unknown): string {
 
 function compactParts(parts: Array<string | null | undefined>): string {
 	return parts.filter((part) => part && part.trim()).join(' · ');
+}
+
+function hasMultipleSeasons(folder: FolderPayload): boolean {
+	return Object.keys(folder.summary?.seasons ?? {}).length > 1;
+}
+
+export function outputScopeLabel(folder: FolderPayload): OutputScopeLabel {
+	if (hasMultipleSeasons(folder)) return 'whole show';
+	if (folder.series_context) return 'season';
+	return 'folder';
+}
+
+export function outputScopeDisplayLabel(scope: OutputScopeLabel): string {
+	if (scope === 'whole show') return 'Whole show';
+	if (scope === 'season') return 'Season';
+	return 'Folder';
+}
+
+export function scopedWorkflowActionLabel(label: string, folder: FolderPayload): string {
+	if (!label || !folder.workflow_state) return label;
+	const scope = outputScopeLabel(folder);
+	if (scope !== 'whole show') return label;
+	if (/whole show/i.test(label)) return label;
+	const countedAction = label.match(/^(\D+?)\s+(\d+)\s+(outputs?|encodes?)$/i);
+	if (countedAction) {
+		return `${countedAction[1].trim()} show ${countedAction[3].toLowerCase()} (${countedAction[2]})`;
+	}
+	return label.replace(/\b(outputs?|encodes?)\b/i, 'show $1');
+}
+
+export function buildSeasonScopeRows(folder: FolderPayload): SeasonScopeRow[] {
+	return Object.entries(folder.summary?.seasons ?? {})
+		.sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true }))
+		.map(([label, count]) => {
+			const itemCount = Number(count);
+			return {
+				label,
+				count: Number.isFinite(itemCount)
+					? `${itemCount.toLocaleString('en-US')} item${itemCount === 1 ? '' : 's'}`
+					: '—',
+				href: `${folder.prefix}/${label}`
+			};
+		});
 }
 
 function activeCalibrationStatus(value: unknown): boolean {
@@ -972,11 +1023,10 @@ function buildOutputScopeFact(folder: FolderPayload): {
 	detail: string;
 } {
 	const count = numberValue(folder.summary?.item_count);
-	const seasonCount = Object.keys(folder.summary?.seasons ?? {}).length;
-	const scope = folder.series_context || seasonCount > 1 ? 'Whole show' : 'Folder';
+	const scope = outputScopeLabel(folder);
 	return {
 		label: 'Scope',
-		value: scope,
+		value: outputScopeDisplayLabel(scope),
 		detail:
 			count && count > 0
 				? `${count.toLocaleString('en-US')} item${count === 1 ? '' : 's'}`
@@ -1436,9 +1486,9 @@ function resolveBackendWorkflow(
 			label: 'Mixed work',
 			title: 'Multiple tasks pending',
 			copy: workflow.detail,
-			primary: primaryLabel,
+			primary: scopedWorkflowActionLabel(primaryLabel, folder),
 			primaryAction: primaryAct,
-			secondary: secondaryLabel,
+			secondary: scopedWorkflowActionLabel(secondaryLabel, folder),
 			secondaryAction: secondaryAct,
 			isOutputWorkflow: true
 		};
@@ -1448,7 +1498,7 @@ function resolveBackendWorkflow(
 		label: workflow.label,
 		title: workflow.next_action.label,
 		copy: workflow.detail,
-		primary: workflow.next_action.label,
+		primary: scopedWorkflowActionLabel(workflow.next_action.label, folder),
 		primaryAction: action,
 		secondary: folder.series_context ? 'Open whole show' : 'Open Ops',
 		secondaryAction: folder.series_context ? 'open-series' : 'open-ops',
