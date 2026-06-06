@@ -10142,6 +10142,25 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertIn("estimated queue finish in 12m 0s", summary)
 
+    def test_encode_queue_summary_copy_labels_attention_as_queue_wide(self) -> None:
+        encode_queue = {
+            "running_count": 0,
+            "queued_count": 0,
+            "queued_waiting_count": 0,
+            "needs_attention_count": 1,
+        }
+        encode_job = {"status": "completed"}
+
+        summary = web_app._encode_queue_summary_copy(
+            encode_queue,
+            {"is_paused": False},
+            encode_job,
+        )
+
+        self.assertIn("latest folder job completed", summary)
+        self.assertIn("1 queue item needs attention", summary)
+        self.assertNotIn("1 need attention", summary)
+
     def test_host_runtime_rows_include_running_job_telemetry(self) -> None:
         status = HostStatus(
             key="cbusillo@studio",

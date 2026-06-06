@@ -403,7 +403,10 @@ def encode_queue_summary_copy(
 
     attention_count = int_value(encode_queue.get("needs_attention_count"))
     if attention_count:
-        parts.append(f"{attention_count} need attention")
+        parts.append(
+            f"{attention_count} queue item{'s' if attention_count != 1 else ''} "
+            f"need{'s' if attention_count == 1 else ''} attention"
+        )
 
     if encode_job and encode_job.get("scheduler_status_copy") and status in {"queued", "retry_backoff", "running", "needs_attention"}:
         parts.append(str(encode_job["scheduler_status_copy"]))
