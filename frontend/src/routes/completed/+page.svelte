@@ -3,7 +3,6 @@
 	import { fetchJson } from '$lib/api/client';
 	import type { CompletedPayload } from '$lib/api/types';
 	import CompletedWorkstationView from '$lib/components/workstation/CompletedWorkstationView.svelte';
-	import RouteLoadingView from '$lib/components/workstation/RouteLoadingView.svelte';
 
 	let completed = $state<CompletedPayload | null>(null);
 	let loadError = $state('');
@@ -21,8 +20,4 @@
 	<title>Mediaforce Completed</title>
 </svelte:head>
 
-{#if completed}
-	<CompletedWorkstationView {completed} loadError={null} />
-{:else}
-	<RouteLoadingView route="completed" subject="Completed" crumb="/completed" error={loadError} />
-{/if}
+<CompletedWorkstationView {completed} loadError={loadError || null} />

@@ -1,18 +1,19 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { fetchJson } from '$lib/api/client';
+	import { initialDashboard, initialFoldersPayload, initialHosts } from '$lib/api/placeholders';
 	import type {
 		DashboardFoldersPayload,
 		DashboardSummaryPayload,
 		HostsPayload
 	} from '$lib/api/types';
 	import HomeWorkbenchView from '$lib/components/workstation/HomeWorkbenchView.svelte';
-	import RouteLoadingView from '$lib/components/workstation/RouteLoadingView.svelte';
 
-	let dashboard = $state<DashboardSummaryPayload | null>(null);
-	let foldersPayload = $state<DashboardFoldersPayload | null>(null);
-	let hosts = $state<HostsPayload | null>(null);
+	let dashboard = $state<DashboardSummaryPayload>(initialDashboard);
+	let foldersPayload = $state<DashboardFoldersPayload>(initialFoldersPayload);
+	let hosts = $state<HostsPayload>(initialHosts);
 	let loadError = $state('');
+	let foldersPending = $state(true);
 
 	onMount(async () => {
 		try {
@@ -26,6 +27,8 @@
 			hosts = hostsPayload;
 		} catch (error) {
 			loadError = error instanceof Error ? error.message : 'Folders route failed to load.';
+		} finally {
+			foldersPending = false;
 		}
 	});
 </script>
@@ -34,8 +37,12 @@
 	<title>Mediaforce Folders</title>
 </svelte:head>
 
-{#if dashboard && foldersPayload && hosts}
-	<HomeWorkbenchView crumb="/folders" {dashboard} {foldersPayload} {hosts} mode="folders" />
-{:else}
-	<RouteLoadingView route="folders" subject="Folders" crumb="/folders" error={loadError} />
-{/if}
+<HomeWorkbenchView
+	crumb="/folders"
+	{dashboard}
+	{foldersPayload}
+	{hosts}
+	{foldersPending}
+	{loadError}
+	mode="folders"
+/>
