@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import delete
-from sqlalchemy import func
+from sqlalchemy import and_, func
 from sqlalchemy import literal_column
 from sqlalchemy import or_
 from sqlalchemy import select
@@ -2620,13 +2620,31 @@ def _folder_series_context(prefix: str) -> dict[str, str] | None:
 
 
 def _folder_encode_candidate_count(connection: DBClient, config: MediaforceConfig, prefix: str) -> int:
-    return len(
-        select_encode_candidates(
-            connection,
-            config,
-            prefixes=[prefix],
-            limit=None,
-        )
+    _ = config
+    normalized_prefix = prefix.strip().strip("/")
+    prefix_filter = or_(
+        library_items.c.rel_path == normalized_prefix,
+        library_items.c.rel_path.like(_prefix_descendant_like_pattern(normalized_prefix), escape="\\"),
+    )
+    candidate_filter = or_(
+        library_items.c.status.in_(("discovered", "planned")),
+        and_(
+            library_items.c.status == "validated",
+            staged_artifacts.c.library_item_id.is_(None),
+        ),
+    )
+    return int(
+        connection.execute(
+            select(func.count())
+            .select_from(
+                library_items.outerjoin(
+                    staged_artifacts,
+                    staged_artifacts.c.library_item_id == library_items.c.id,
+                )
+            )
+            .where(prefix_filter)
+            .where(candidate_filter)
+        ).scalar_one()
     )
 
 

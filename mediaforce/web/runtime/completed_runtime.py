@@ -11,10 +11,10 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import item_events, library_items, staged_artifacts
 from mediaforce.encoding.staging import safe_unlink
-from mediaforce.web.runtime.archive_cleanup import archive_cleanup_summary
 
 FolderGroup = tuple[str, str, str, str]
 ORIGINALS_REMOVED_EVENT = "originals_removed_confirmed"
+HISTORY_DETAIL_MAX_CHARS = 320
 
 
 @dataclass(slots=True)
@@ -67,11 +67,22 @@ def completed_page_payload(
         "folders": [asdict(folder) for folder in folders],
         "completed_count": len(folders),
         "folders_with_backups_count": folders_with_backups_count,
-        "archive_cleanup": archive_cleanup_summary(config),
+        "archive_cleanup": completed_archive_cleanup_summary(archive_root, folders),
         "history": [
             asdict(event)
             for event in list_completed_history_events(connection, folder_group=folder_group)
         ],
+    }
+
+
+def completed_archive_cleanup_summary(archive_root: Path | None, folders: list[CompletedFolder]) -> dict[str, Any]:
+    file_count = sum(folder.archived_backup_count for folder in folders)
+    total_size_bytes = sum(folder.archived_backup_size_bytes for folder in folders)
+    return {
+        "archive_root": str(archive_root) if archive_root is not None else "",
+        "file_count": file_count,
+        "total_size_bytes": total_size_bytes,
+        "has_cleanup": file_count > 0,
     }
 
 
@@ -508,7 +519,7 @@ def _history_event_copy(event_type: str, details: dict[str, Any]) -> tuple[str, 
         return (
             "Encoding failed",
             "fail",
-            _clean_text(details.get("error")) or "Encode failed before promotion.",
+            _history_detail_summary(details.get("error")) or "Encode failed before promotion.",
             None,
         )
     if event_type == "validation_completed":
@@ -524,6 +535,14 @@ def _history_event_copy(event_type: str, details: dict[str, Any]) -> tuple[str, 
 def _path_detail(path: object, fallback: str) -> str:
     cleaned = _clean_text(path)
     return cleaned or fallback
+
+
+def _history_detail_summary(value: object, max_chars: int = HISTORY_DETAIL_MAX_CHARS) -> str:
+    cleaned = _clean_text(value)
+    if len(cleaned) <= max_chars:
+        return cleaned
+    omitted = len(cleaned) - max_chars
+    return f"{cleaned[:max_chars].rstrip()} ... [{omitted:,} characters omitted]"
 
 
 def _bytes_detail(value: object, fallback: str) -> str:

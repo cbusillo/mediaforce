@@ -89,9 +89,14 @@
 	);
 	const visibleFoldersPayload = $derived({ ...foldersPayload, folders: visibleFolders });
 	const visibleTableFolders = $derived(visibleFolders.slice(0, 32));
+	const visibleFolderRanks = $derived(
+		new Map(visibleFolders.map((folder, index) => [folder.prefix, String(index + 1)]))
+	);
 	const visibleWorkLaneGroups = $derived(
 		isFolderIndex ? [] : buildWorkLaneGroups(visibleTableFolders)
 	);
+	const visiblePendingItems = $derived(totalPendingItems(visibleFolders));
+	const visibleProjectedReclaim = $derived(totalProjectedReclaim(visibleFolders));
 	const nextFolder = $derived(
 		isFolderIndex
 			? (visibleFolders[0] ?? null)
@@ -198,8 +203,7 @@
 	}
 
 	function rowRank(folder: FolderCard): string {
-		const index = visibleFolders.findIndex((candidate) => candidate.prefix === folder.prefix);
-		return index >= 0 ? String(index + 1) : '—';
+		return visibleFolderRanks.get(folder.prefix) ?? '—';
 	}
 
 	function libraryKey(label: string): string {
@@ -531,11 +535,11 @@
 						</div>
 						<div>
 							<span>Open work</span>
-							<strong>{totalPendingItems(visibleFolders).toLocaleString('en-US')}</strong>
+							<strong>{visiblePendingItems.toLocaleString('en-US')}</strong>
 						</div>
 						<div>
 							<span>Projected reclaim</span>
-							<strong>{formatBytes(totalProjectedReclaim(visibleFolders))}</strong>
+							<strong>{formatBytes(visibleProjectedReclaim)}</strong>
 						</div>
 					</div>
 				</div>

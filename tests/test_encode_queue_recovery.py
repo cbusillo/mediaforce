@@ -3337,6 +3337,29 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(web_app._folder_encode_candidate_count(connection, self.config, "tv/show/Season 2"), 0)
             self.assertEqual(web_app._folder_encode_candidate_count(connection, self.config, "tv/show"), 1)
 
+    def test_folder_encode_candidate_count_counts_sql_eligible_items_only(self) -> None:
+        candidate = self._create_source_file("candidate.mkv")
+        staged = self._create_source_file("staged.mkv")
+        sibling = self._create_source_file("sibling.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            candidate_id = self._insert_library_item(connection, candidate, status="validated")
+            staged_id = self._insert_library_item(connection, staged, status="validated")
+            sibling_id = self._insert_library_item(connection, sibling, status="planned")
+            for item_id, rel_path, parent_dir in (
+                    (candidate_id, "tv/show_1/Season 1/candidate.mkv", "tv/show_1/Season 1"),
+                    (staged_id, "tv/show_1/Season 1/staged.mkv", "tv/show_1/Season 1"),
+                    (sibling_id, "tv/show-special/Season 1/sibling.mkv", "tv/show-special/Season 1"),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(rel_path=rel_path, parent_dir=parent_dir)
+                )
+            self._insert_staged_artifact(connection, staged_id, self._staging_path("staged.mkv"))
+
+            self.assertEqual(web_app._folder_encode_candidate_count(connection, self.config, "tv/show_1"), 1)
+
     def test_folder_cards_projected_reclaim_uses_known_validated_savings(self) -> None:
         validated = self._create_source_file("episode-validated.mkv")
 

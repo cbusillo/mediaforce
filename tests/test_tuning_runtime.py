@@ -1120,6 +1120,26 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(second_folder["cleanup_state"], "unknown")
         self.assertEqual(second_folder["missing_backup_count"], 1)
 
+    def test_completed_page_payload_uses_folder_backup_counts_for_archive_summary(self) -> None:
+        from mediaforce.web import app as web_app
+
+        self._insert_promoted_artifact(
+            rel_path="tv/Example Show/Season 1/Episode 01.mkv",
+            promoted_at="2026-04-10T10:00:00+00:00",
+            archived_size_bytes=3,
+            bytes_saved=12,
+        )
+        unrelated_archive = self.config.archive_root / "unrelated" / "orphan.mkv"
+        unrelated_archive.parent.mkdir(parents=True, exist_ok=True)
+        unrelated_archive.write_text("not part of promoted state")
+
+        with open_db(self.config.paths.db_path) as connection:
+            payload = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
+
+        self.assertEqual(payload["archive_cleanup"]["file_count"], 1)
+        self.assertEqual(payload["archive_cleanup"]["total_size_bytes"], 3)
+        self.assertTrue(payload["archive_cleanup"]["has_cleanup"])
+
     def test_completed_page_payload_ignores_archived_paths_outside_active_archive_root(self) -> None:
         from mediaforce.web import app as web_app
 
@@ -1141,7 +1161,7 @@ class TuningRuntimeTests(unittest.TestCase):
             connection.commit()
             payload = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
 
-        self.assertEqual(payload["archive_cleanup"]["file_count"], 1)
+        self.assertEqual(payload["archive_cleanup"]["file_count"], 0)
         self.assertEqual(payload["folders"][0]["archived_backup_count"], 0)
         self.assertEqual(payload["folders"][0]["cleanup_state"], "blocked")
         self.assertEqual(payload["folders"][0]["outside_archive_root_count"], 1)
@@ -1171,6 +1191,31 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["history"][0]["event_type"], "promotion_completed")
         self.assertEqual(payload["history"][0]["prefix"], "tv/Example Show/Season 1")
         self.assertEqual(payload["history"][0]["tone"], "ready")
+
+    def test_completed_page_payload_truncates_large_failed_history_details(self) -> None:
+        from mediaforce.web import app as web_app
+
+        self._insert_promoted_artifact(
+            rel_path="tv/Example Show/Season 1/Episode 01.mkv",
+            promoted_at="2026-04-10T10:00:00+00:00",
+            archived_size_bytes=3,
+            bytes_saved=12,
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            library_item_id = connection.execute(select(library_items.c.id)).scalar_one()
+            connection.execute(
+                item_events.insert().values(
+                    library_item_id=library_item_id,
+                    created_at="2026-04-10T10:01:00+00:00",
+                    event_type="encoding_failed",
+                    details_json=json.dumps({"error": "x" * 1200}),
+                )
+            )
+            connection.commit()
+            payload = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
+
+        self.assertLessEqual(len(payload["history"][0]["detail"]), 380)
+        self.assertIn("characters omitted", payload["history"][0]["detail"])
 
     def test_completed_page_payload_tolerates_missing_archive_root(self) -> None:
         from mediaforce.web import app as web_app
