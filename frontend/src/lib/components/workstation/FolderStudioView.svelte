@@ -785,7 +785,7 @@
 			</WorkstationPanel>
 
 			<div class="support-grid" aria-label="Folder supporting signals">
-				<WorkstationPanel title="Queue">
+				<WorkstationPanel title="Runtime">
 					<dl class="kv kv--compact">
 						<dt>Calibration</dt>
 						<dd>{status.calibration_status || '—'}</dd>
