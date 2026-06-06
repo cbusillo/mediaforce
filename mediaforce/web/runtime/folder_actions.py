@@ -431,7 +431,7 @@ def validate_folder_outputs_action(
             connection,
             config,
             normalized_prefix,
-            statuses={"encoded", "validated"},
+            statuses={"encoded"},
         )
         if not items:
             return {
