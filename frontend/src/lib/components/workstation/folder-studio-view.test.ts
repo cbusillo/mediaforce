@@ -1491,6 +1491,49 @@ describe('Folder Studio review request mapping', () => {
 		]);
 	});
 
+	it('uses output workflow steps for validation-ready folders', () => {
+		const steps = buildWorkflowSteps({
+			tone: 'ready',
+			label: 'Mixed work',
+			title: 'Multiple tasks pending',
+			copy: '22 to validate, 9 to encode',
+			primary: 'Validate 22 outputs',
+			primaryAction: 'validate-outputs',
+			secondary: 'Queue 9 encodes',
+			secondaryAction: 'queue-encode'
+		});
+
+		expect(steps.map((step) => [step.label, step.current, step.tone])).toEqual([
+			['Encode', false, 'ready'],
+			['Validate', true, 'ready'],
+			['Promote', false, 'idle'],
+			['Complete', false, 'idle']
+		]);
+		expect(steps[1].detail).toBe('Multiple tasks pending');
+	});
+
+	it('keeps output processing on the encode step when backend workflow is active', () => {
+		const steps = buildWorkflowSteps({
+			tone: 'active',
+			label: 'Processing',
+			title: 'Encoding approved outputs',
+			copy: '3 running',
+			primary: 'Monitor encode',
+			primaryAction: 'monitor-processing',
+			secondary: 'Open Ops',
+			secondaryAction: 'open-ops',
+			isOutputWorkflow: true
+		});
+
+		expect(steps.map((step) => [step.label, step.current, step.tone])).toEqual([
+			['Encode', true, 'active'],
+			['Validate', false, 'idle'],
+			['Promote', false, 'idle'],
+			['Complete', false, 'idle']
+		]);
+		expect(steps[0].detail).toBe('Encoding approved outputs');
+	});
+
 	it('maps mixed work workflow state to prioritized validate and encode actions', () => {
 		const workflow = resolveWorkflow(
 			folderPayload({

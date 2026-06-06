@@ -43,6 +43,7 @@ export type WorkflowState = {
 	secondary: string;
 	secondaryAction: WorkflowAction;
 	revisionPrompt?: string;
+	isOutputWorkflow?: boolean;
 };
 
 export type SampleVerdict = {
@@ -1194,7 +1195,8 @@ function resolveBackendWorkflow(
 			primary: folder.series_context ? 'Open whole show' : 'Open Folders',
 			primaryAction: folder.series_context ? 'open-series' : 'open-folders',
 			secondary: 'Open Ops',
-			secondaryAction: 'open-ops'
+			secondaryAction: 'open-ops',
+			isOutputWorkflow: true
 		};
 	}
 	if (workflow.state === 'mixed') {
@@ -1237,7 +1239,8 @@ function resolveBackendWorkflow(
 			primary: primaryLabel,
 			primaryAction: primaryAct,
 			secondary: secondaryLabel,
-			secondaryAction: secondaryAct
+			secondaryAction: secondaryAct,
+			isOutputWorkflow: true
 		};
 	}
 	return {
@@ -1248,7 +1251,8 @@ function resolveBackendWorkflow(
 		primary: workflow.next_action.label,
 		primaryAction: action,
 		secondary: folder.series_context ? 'Open whole show' : 'Open Ops',
-		secondaryAction: folder.series_context ? 'open-series' : 'open-ops'
+		secondaryAction: folder.series_context ? 'open-series' : 'open-ops',
+		isOutputWorkflow: true
 	};
 }
 
@@ -1507,6 +1511,53 @@ export function resolveWorkflow(
 export function buildWorkflowSteps(workflow: WorkflowState): WorkflowStep[] {
 	const activeAction = workflow.primaryAction;
 	const activeLabel = workflow.label.toLowerCase();
+	const outputWorkflow =
+		workflow.isOutputWorkflow ||
+		isOutputWorkflowAction(activeAction) ||
+		['mixed work', 'ready to validate', 'ready to promote', 'complete'].includes(activeLabel);
+	if (outputWorkflow) {
+		const encodeCurrent =
+			['monitor-processing', 'retry-encode'].includes(activeAction) ||
+			['processing', 'processing failed', 'processing stopped'].includes(activeLabel);
+		const validateCurrent =
+			activeAction === 'validate-outputs' || activeLabel === 'ready to validate';
+		const promoteCurrent = activeAction === 'promote-outputs' || activeLabel === 'ready to promote';
+		const completeCurrent = activeLabel === 'complete';
+		return [
+			{
+				label: 'Encode',
+				detail: encodeCurrent ? workflow.title : 'Process approved folder items',
+				tone: encodeCurrent
+					? workflow.tone
+					: validateCurrent || promoteCurrent || completeCurrent
+						? 'ready'
+						: 'idle',
+				current: encodeCurrent
+			},
+			{
+				label: 'Validate',
+				detail: validateCurrent ? workflow.title : 'Review and validate output quality',
+				tone: validateCurrent
+					? workflow.tone
+					: promoteCurrent || completeCurrent
+						? 'ready'
+						: 'idle',
+				current: validateCurrent
+			},
+			{
+				label: 'Promote',
+				detail: promoteCurrent ? workflow.title : 'Publish validated files',
+				tone: promoteCurrent ? workflow.tone : completeCurrent ? 'ready' : 'idle',
+				current: promoteCurrent
+			},
+			{
+				label: 'Complete',
+				detail: completeCurrent ? workflow.title : 'All items fully processed',
+				tone: completeCurrent ? workflow.tone : 'idle',
+				current: completeCurrent
+			}
+		];
+	}
 	const sampleCurrent =
 		['focus-bench', 'monitor-sample', 'start-sample', 'retry-sample', 'stop-sample'].includes(
 			activeAction
