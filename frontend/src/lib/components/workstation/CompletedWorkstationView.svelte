@@ -2,6 +2,7 @@
 	import { resolve } from '$app/paths';
 	import { postJson } from '$lib/api/client';
 	import type {
+		ArchiveCleanupSummary,
 		CompletedCleanupResult,
 		CompletedFolderRow,
 		CompletedHistoryEvent,
@@ -41,10 +42,14 @@
 
 	let {
 		completed: loadedCompleted,
-		loadError
+		loadError,
+		onArchiveRefresh = async () => null,
+		onCompletedUpdate = () => {}
 	}: {
 		completed: CompletedPayload | null;
 		loadError: string | null;
+		onArchiveRefresh?: () => Promise<ArchiveCleanupSummary | null>;
+		onCompletedUpdate?: (completed: CompletedPayload) => void;
 	} = $props();
 
 	let completed = $state<CompletedPayload | null>(null);
@@ -305,6 +310,18 @@
 		armedReview = armedReview === scope ? null : scope;
 	}
 
+	function applyCompleted(nextCompleted: CompletedPayload) {
+		completed = nextCompleted;
+		onCompletedUpdate(nextCompleted);
+	}
+
+	async function refreshArchiveSummary() {
+		if (!completed) return;
+		const archiveCleanup = await onArchiveRefresh();
+		if (!archiveCleanup) return;
+		applyCompleted({ ...completed, archive_cleanup: archiveCleanup });
+	}
+
 	async function confirmAlreadyRemoved() {
 		if (!completed || reviewFolders.length === 0 || reviewPending) return;
 		reviewPending = true;
@@ -318,7 +335,7 @@
 			);
 			actionMessage = result.message || 'Marked as already handled.';
 			if (result.completed) {
-				completed = result.completed;
+				applyCompleted(result.completed);
 			}
 			localHistory = [
 				{
@@ -361,7 +378,12 @@
 			lastCleanupResult = result;
 			actionMessage = result.message || 'Cleanup completed.';
 			if (result.completed) {
-				completed = result.completed;
+				applyCompleted(result.completed);
+			}
+			try {
+				await refreshArchiveSummary();
+			} catch {
+				// Cleanup already completed; keep that result visible if the follow-up scan fails.
 			}
 			localHistory = [
 				{

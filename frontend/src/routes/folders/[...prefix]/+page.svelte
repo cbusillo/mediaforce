@@ -76,11 +76,12 @@
 			folder = folderPayload;
 			status = statusPayload;
 			hosts = hostsPayload;
-			folderPending = false;
 		} catch (error) {
 			if (generation === hydrationGeneration) {
 				loadError = error instanceof Error ? error.message : 'Unable to load folder state.';
 			}
+		} finally {
+			if (generation === hydrationGeneration) folderPending = false;
 		}
 	}
 
