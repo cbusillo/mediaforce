@@ -20,9 +20,10 @@
 	const navItems: Array<{
 		id: ShellRouteId;
 		label: string;
-		href: '/' | '/ops' | '/completed' | '/settings';
+		href: '/' | '/folders' | '/ops' | '/completed' | '/settings';
 	}> = [
 		{ id: 'queue', label: 'Queue', href: '/' },
+		{ id: 'folders', label: 'Folders', href: '/folders' },
 		{ id: 'ops', label: 'Ops', href: '/ops' },
 		{ id: 'completed', label: 'Completed', href: '/completed' },
 		{ id: 'settings', label: 'Settings', href: '/settings' }
@@ -43,6 +44,10 @@
 		footerSignals?: FooterSignal[];
 		children: Snippet;
 	} = $props();
+
+	function navItemActive(id: ShellRouteId): boolean {
+		return id === route || (id === 'folders' && route === 'studio');
+	}
 </script>
 
 <div class="operator-shell">
@@ -53,7 +58,7 @@
 		</a>
 		<nav class="nav" aria-label="Primary">
 			{#each navItems as item (item.id)}
-				<a class:active={item.id === route} href={resolve(item.href)}>{item.label}</a>
+				<a class:active={navItemActive(item.id)} href={resolve(item.href)}>{item.label}</a>
 			{/each}
 		</nav>
 		<div class="operator-context">
@@ -151,6 +156,7 @@
 		align-items: stretch;
 		display: flex;
 		min-width: 0;
+		overflow-x: auto;
 	}
 
 	.nav a {
@@ -159,8 +165,9 @@
 		color: var(--mf-fg-secondary);
 		display: inline-flex;
 		font-size: var(--mf-text-sm);
+		flex: 0 0 auto;
 		min-height: 44px;
-		padding: 0 var(--mf-space-7);
+		padding: 0 clamp(var(--mf-space-4), 1.5vw, var(--mf-space-7));
 		position: relative;
 	}
 
