@@ -1180,7 +1180,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(second_folder["cleanup_state"], "unknown")
         self.assertEqual(second_folder["missing_backup_count"], 1)
 
-    def test_completed_page_payload_counts_archive_files_for_cleanup_summary(self) -> None:
+    def test_completed_page_payload_uses_folder_backup_counts_for_archive_summary(self) -> None:
         from mediaforce.web import app as web_app
 
         self._insert_promoted_artifact(
@@ -1196,9 +1196,25 @@ class TuningRuntimeTests(unittest.TestCase):
         with open_db(self.config.paths.db_path) as connection:
             payload = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
 
-        self.assertEqual(payload["archive_cleanup"]["file_count"], 2)
-        self.assertEqual(payload["archive_cleanup"]["total_size_bytes"], 29)
+        self.assertEqual(payload["archive_cleanup"]["file_count"], 1)
+        self.assertEqual(payload["archive_cleanup"]["total_size_bytes"], 3)
         self.assertTrue(payload["archive_cleanup"]["has_cleanup"])
+
+    def test_completed_page_payload_does_not_scan_archive_cleanup(self) -> None:
+        from mediaforce.web import app as web_app
+
+        self._insert_promoted_artifact(
+            rel_path="tv/Example Show/Season 1/Episode 01.mkv",
+            promoted_at="2026-04-10T10:00:00+00:00",
+            archived_size_bytes=3,
+            bytes_saved=12,
+        )
+        with patch("mediaforce.web.runtime.archive_cleanup.Path.rglob") as rglob:
+            with open_db(self.config.paths.db_path) as connection:
+                payload = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
+
+        rglob.assert_not_called()
+        self.assertEqual(payload["archive_cleanup"]["file_count"], 1)
 
     def test_completed_page_payload_ignores_archived_paths_outside_active_archive_root(self) -> None:
         from mediaforce.web import app as web_app
