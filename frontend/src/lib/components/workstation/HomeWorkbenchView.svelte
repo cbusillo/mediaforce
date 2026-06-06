@@ -184,20 +184,22 @@
 		isFolderIndex ? `Matching ${folderScopeLabel.toLowerCase()}` : 'Workflow lanes'
 	);
 	const visibleScopeSummary = $derived(
-		foldersPending && !isFolderIndex
-			? 'Loading work folders'
+		foldersPending
+			? isFolderIndex
+				? `Loading ${folderScopeLabel.toLowerCase()}`
+				: 'Loading work folders'
 			: `${visibleFolders.length.toLocaleString('en-US')} / ${folders.length.toLocaleString(
 					'en-US'
 				)} ${isFolderIndex ? folderScopeLabel.toLowerCase() : 'folders'}`
 	);
 	const visibleFoldersCopy = $derived(
-		foldersPending && !isFolderIndex ? 'loading' : visibleFolders.length.toLocaleString('en-US')
+		foldersPending ? 'loading' : visibleFolders.length.toLocaleString('en-US')
 	);
 	const visiblePendingCopy = $derived(
-		foldersPending && !isFolderIndex ? 'loading' : visiblePendingItems.toLocaleString('en-US')
+		foldersPending ? 'loading' : visiblePendingItems.toLocaleString('en-US')
 	);
 	const visibleReclaimCopy = $derived(
-		foldersPending && !isFolderIndex ? 'loading' : formatBytes(visibleProjectedReclaim)
+		foldersPending ? 'loading' : formatBytes(visibleProjectedReclaim)
 	);
 
 	type LibraryOption = {
@@ -742,7 +744,9 @@
 										{/each}
 									{:else if foldersPending}
 										<tr>
-											<td colspan="8">Loading folder worklist...</td>
+											<td colspan="8">
+												{isFolderIndex ? 'Loading folder index...' : 'Loading folder worklist...'}
+											</td>
 										</tr>
 									{:else}
 										<tr>

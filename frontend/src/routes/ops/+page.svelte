@@ -1,12 +1,12 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { fetchJson } from '$lib/api/client';
+	import { initialDashboard, initialHosts } from '$lib/api/placeholders';
 	import type { DashboardSummaryPayload, HostsPayload } from '$lib/api/types';
 	import OpsWorkstationView from '$lib/components/workstation/OpsWorkstationView.svelte';
-	import RouteLoadingView from '$lib/components/workstation/RouteLoadingView.svelte';
 
-	let dashboard = $state<DashboardSummaryPayload | null>(null);
-	let hosts = $state<HostsPayload | null>(null);
+	let dashboard = $state<DashboardSummaryPayload | null>(initialDashboard);
+	let hosts = $state<HostsPayload | null>(initialHosts);
 	let loadError = $state('');
 
 	onMount(async () => {
@@ -27,8 +27,4 @@
 	<title>Mediaforce Ops</title>
 </svelte:head>
 
-{#if dashboard && hosts}
-	<OpsWorkstationView {dashboard} {hosts} loadError={null} />
-{:else}
-	<RouteLoadingView route="ops" subject="Ops" crumb="/ops" error={loadError} />
-{/if}
+<OpsWorkstationView {dashboard} {hosts} loadError={loadError || null} />
