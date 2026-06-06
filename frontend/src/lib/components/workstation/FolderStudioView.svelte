@@ -731,79 +731,85 @@
 				{/if}
 			</section>
 
-			<WorkstationPanel title="Review assistant">
-				<div class="bench">
-					<details
-						class="bench__thread"
-						open={!sampleVerdict}
-						aria-label="Review assistant conversation"
-					>
-						<summary>
-							<strong>Assistant transcript</strong>
-							<span>{benchMessages.length} notes</span>
-						</summary>
-						<div class="bench__messages">
-							{#each benchMessages as message (message.id)}
-								<div
-									class="bench-message bench-message--{message.role} bench-message--tone-{message.tone ??
-										'neutral'}"
-								>
-									<header>
-										<span>{message.label}</span>
-										{#if message.meta}
-											<small>{message.meta}</small>
-										{/if}
-									</header>
-									<strong>{message.title}</strong>
-									<p>{message.body}</p>
-								</div>
-							{/each}
-						</div>
-					</details>
+			{#if !workflow.isOutputWorkflow}
+				<WorkstationPanel title="Review assistant">
+					<div class="bench">
+						<details
+							class="bench__thread"
+							open={!sampleVerdict}
+							aria-label="Review assistant conversation"
+						>
+							<summary>
+								<strong>Assistant transcript</strong>
+								<span>{benchMessages.length} notes</span>
+							</summary>
+							<div class="bench__messages">
+								{#each benchMessages as message (message.id)}
+									<div
+										class="bench-message bench-message--{message.role} bench-message--tone-{message.tone ??
+											'neutral'}"
+									>
+										<header>
+											<span>{message.label}</span>
+											{#if message.meta}
+												<small>{message.meta}</small>
+											{/if}
+										</header>
+										<strong>{message.title}</strong>
+										<p>{message.body}</p>
+									</div>
+								{/each}
+							</div>
+						</details>
 
-					<div class="bench__composer" aria-label="Review request composer">
-						<label>
-							<span>Request</span>
-							<textarea
-								rows="5"
-								placeholder="Ask what to sample, revise, or validate for this folder."
-								bind:this={benchTextarea}
-								bind:value={benchNote}
-							></textarea>
-						</label>
-						<div class="bench__controls">
+						<div class="bench__composer" aria-label="Review request composer">
 							<label>
-								<span>Worker</span>
-								<select bind:value={selectedHostKey}>
-									{#each sampleHostOptions as host (host.key)}
-										<option value={host.key}
-											>{host.label}{host.available ? '' : ' · unavailable'}</option
-										>
-									{/each}
-								</select>
+								<span>Request</span>
+								<textarea
+									rows="5"
+									placeholder="Ask what to sample, revise, or validate for this folder."
+									bind:this={benchTextarea}
+									bind:value={benchNote}
+								></textarea>
 							</label>
-							<button
-								class="control control--primary"
-								type="button"
-								disabled={benchRequestDisabled}
-								title={benchRequestDisabled ? benchRequestState.blocker : ''}
-								onclick={sendBenchRequest}
-								data-mf-action="bench-request"
-								data-mf-wire="live">{benchPending ? 'Sending' : 'Send request'}</button
-							>
+							<div class="bench__controls">
+								<label>
+									<span>Worker</span>
+									<select bind:value={selectedHostKey}>
+										{#each sampleHostOptions as host (host.key)}
+											<option value={host.key}
+												>{host.label}{host.available ? '' : ' · unavailable'}</option
+											>
+										{/each}
+									</select>
+								</label>
+								<button
+									class="control control--primary"
+									type="button"
+									disabled={benchRequestDisabled}
+									title={benchRequestDisabled ? benchRequestState.blocker : ''}
+									onclick={sendBenchRequest}
+									data-mf-action="bench-request"
+									data-mf-wire="live">{benchPending ? 'Sending' : 'Send request'}</button
+								>
+							</div>
+							{#if benchError}
+								<p class="bench__status bench__status--fail">{benchError}</p>
+							{:else if benchMessage}
+								<p class="bench__status bench__status--ready">{benchMessage}</p>
+							{:else if benchRequestState.blocker}
+								<p class="bench__status">{benchRequestState.blocker}</p>
+							{/if}
 						</div>
-						{#if benchError}
-							<p class="bench__status bench__status--fail">{benchError}</p>
-						{:else if benchMessage}
-							<p class="bench__status bench__status--ready">{benchMessage}</p>
-						{:else if benchRequestState.blocker}
-							<p class="bench__status">{benchRequestState.blocker}</p>
-						{/if}
 					</div>
-				</div>
-			</WorkstationPanel>
+				</WorkstationPanel>
+			{/if}
 
-			<div class="support-grid" aria-label="Folder supporting signals">
+			<div
+				class:support-grid--single={workflow.isOutputWorkflow}
+				class="support-grid"
+				aria-label="Folder supporting signals"
+			>
 				<WorkstationPanel title="Runtime">
 					<dl class="kv kv--compact">
 						<dt>Calibration</dt>
@@ -817,97 +823,105 @@
 					</dl>
 				</WorkstationPanel>
 
-				<WorkstationPanel title={pendingProposal?.proposal_id ? 'Active draft' : 'Sample target'}>
-					<dl class="kv kv--compact">
-						<dt>{pendingProposal?.proposal_id ? 'Draft' : 'Source'}</dt>
-						<dd>{draftReviewRow?.output ?? '—'}</dd>
-						<dt>Reason</dt>
-						<dd>{draftReviewRow?.detail ?? '—'}</dd>
-						<dt>Sample</dt>
-						<dd>
-							{sampleResultRow ? `${sampleResultRow.output} from ${sampleResultRow.source}` : '—'}
-						</dd>
-						<dt>Metric</dt>
-						<dd>{resolvedMetricCopy(studioFolder)}</dd>
-					</dl>
-				</WorkstationPanel>
+				{#if !workflow.isOutputWorkflow}
+					<WorkstationPanel title={pendingProposal?.proposal_id ? 'Active draft' : 'Sample target'}>
+						<dl class="kv kv--compact">
+							<dt>{pendingProposal?.proposal_id ? 'Draft' : 'Source'}</dt>
+							<dd>{draftReviewRow?.output ?? '—'}</dd>
+							<dt>Reason</dt>
+							<dd>{draftReviewRow?.detail ?? '—'}</dd>
+							<dt>Sample</dt>
+							<dd>
+								{sampleResultRow ? `${sampleResultRow.output} from ${sampleResultRow.source}` : '—'}
+							</dd>
+							<dt>Metric</dt>
+							<dd>{resolvedMetricCopy(studioFolder)}</dd>
+						</dl>
+					</WorkstationPanel>
 
-				<WorkstationPanel title="Recent">
-					<div class="history-list history-list--compact">
-						{#each (studioFolder.recent_tuning_sessions ?? []).slice(0, 3) as session, index (`${session.session_id ?? session.created_at ?? index}`)}
-							<div>
-								<span>{formatDateTimeCopy(String(session.created_at ?? '')) || '—'}</span>
-								<strong>{String(session.summary ?? session.note ?? 'Tuning session')}</strong>
-							</div>
-						{:else}
-							<div class="empty-note empty-note--compact">No recent tuning sessions returned.</div>
-						{/each}
-					</div>
-				</WorkstationPanel>
-			</div>
-
-			<div class="evidence-grid evidence-grid--sample-only">
-				<WorkstationPanel title="Representative sample">
-					<div class="sample-card">
-						<div class="sample-frame">
-							<span>{sampleItem ? 'Representative sample' : 'No sample selected'}</span>
-							<strong
-								>{sampleItem
-									? pathFilename(sampleItem.rel_path)
-									: 'Run a sample to populate review evidence.'}</strong
-							>
-						</div>
-						<div class="sample-facts">
-							{#each sampleFacts as fact (fact.label)}
+					<WorkstationPanel title="Recent">
+						<div class="history-list history-list--compact">
+							{#each (studioFolder.recent_tuning_sessions ?? []).slice(0, 3) as session, index (`${session.session_id ?? session.created_at ?? index}`)}
 								<div>
-									<span>{fact.label}</span>
-									<strong>{fact.value}</strong>
+									<span>{formatDateTimeCopy(String(session.created_at ?? '')) || '—'}</span>
+									<strong>{String(session.summary ?? session.note ?? 'Tuning session')}</strong>
+								</div>
+							{:else}
+								<div class="empty-note empty-note--compact">
+									No recent tuning sessions returned.
 								</div>
 							{/each}
 						</div>
-					</div>
-				</WorkstationPanel>
+					</WorkstationPanel>
+				{/if}
 			</div>
 
-			<details class="technical-details">
-				<summary>
-					<strong>Proposed settings details</strong>
-					<span
-						>{proposalRows.length ? `${proposalRows.length} draft differences` : 'No draft'}</span
-					>
-				</summary>
-				<WorkstationPanel
-					title="Current settings vs. proposal"
-					meta={proposalRows.length ? `${proposalRows.length} rows` : 'No draft'}
-				>
-					<div class="table-wrap">
-						<table class="policy-table">
-							<thead>
-								<tr>
-									<th>Area</th>
-									<th>Setting</th>
-									<th>Current</th>
-									<th>Draft</th>
-								</tr>
-							</thead>
-							<tbody>
-								{#each proposalRows as row (row.section + row.label)}
-									<tr class:changed={row.changed}>
-										<td>{row.section}</td>
-										<td>{row.label}</td>
-										<td>{row.current}</td>
-										<td>{row.draft}</td>
-									</tr>
-								{:else}
-									<tr>
-										<td colspan="4">No pending proposal was returned for this folder.</td>
-									</tr>
+			{#if !workflow.isOutputWorkflow}
+				<div class="evidence-grid evidence-grid--sample-only">
+					<WorkstationPanel title="Representative sample">
+						<div class="sample-card">
+							<div class="sample-frame">
+								<span>{sampleItem ? 'Representative sample' : 'No sample selected'}</span>
+								<strong
+									>{sampleItem
+										? pathFilename(sampleItem.rel_path)
+										: 'Run a sample to populate review evidence.'}</strong
+								>
+							</div>
+							<div class="sample-facts">
+								{#each sampleFacts as fact (fact.label)}
+									<div>
+										<span>{fact.label}</span>
+										<strong>{fact.value}</strong>
+									</div>
 								{/each}
-							</tbody>
-						</table>
-					</div>
-				</WorkstationPanel>
-			</details>
+							</div>
+						</div>
+					</WorkstationPanel>
+				</div>
+			{/if}
+
+			{#if !workflow.isOutputWorkflow}
+				<details class="technical-details">
+					<summary>
+						<strong>Proposed settings details</strong>
+						<span
+							>{proposalRows.length ? `${proposalRows.length} draft differences` : 'No draft'}</span
+						>
+					</summary>
+					<WorkstationPanel
+						title="Current settings vs. proposal"
+						meta={proposalRows.length ? `${proposalRows.length} rows` : 'No draft'}
+					>
+						<div class="table-wrap">
+							<table class="policy-table">
+								<thead>
+									<tr>
+										<th>Area</th>
+										<th>Setting</th>
+										<th>Current</th>
+										<th>Draft</th>
+									</tr>
+								</thead>
+								<tbody>
+									{#each proposalRows as row (row.section + row.label)}
+										<tr class:changed={row.changed}>
+											<td>{row.section}</td>
+											<td>{row.label}</td>
+											<td>{row.current}</td>
+											<td>{row.draft}</td>
+										</tr>
+									{:else}
+										<tr>
+											<td colspan="4">No pending proposal was returned for this folder.</td>
+										</tr>
+									{/each}
+								</tbody>
+							</table>
+						</div>
+					</WorkstationPanel>
+				</details>
+			{/if}
 		</section>
 
 		<aside class="studio__left" aria-label="Folder workflow context">
@@ -1703,6 +1717,10 @@
 		display: grid;
 		gap: var(--mf-space-5);
 		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+
+	.support-grid--single {
+		grid-template-columns: minmax(0, 1fr);
 	}
 
 	.evidence-grid {
