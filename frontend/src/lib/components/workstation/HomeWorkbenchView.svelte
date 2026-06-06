@@ -809,6 +809,14 @@
 		grid-template-columns: minmax(0, 1fr);
 	}
 
+	.queue-workspace .queue-lanes {
+		grid-row: 1;
+	}
+
+	.queue-workspace .queue-inspector {
+		grid-row: 2;
+	}
+
 	.queue-lanes,
 	.queue-inspector {
 		min-width: 0;
@@ -1426,7 +1434,7 @@
 		}
 	}
 
-	@media (min-width: 760px) {
+	@media (min-width: 1080px) {
 		.queue-workspace--work {
 			grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
 		}
