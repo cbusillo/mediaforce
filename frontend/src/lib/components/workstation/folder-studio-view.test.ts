@@ -505,16 +505,92 @@ describe('Folder Studio review request mapping', () => {
 
 		expect(workspace).toMatchObject({
 			badge: 'Validation review',
-			title: 'Output validation'
+			title: 'Output validation',
+			layout: 'pipeline'
 		});
+		expect(workspace.rows.map((row) => [row.label, row.current, row.tone])).toEqual([
+			['Encode', false, 'ready'],
+			['Validate', true, 'ready'],
+			['Promote', false, 'idle'],
+			['Complete', false, 'idle']
+		]);
 		expect(workspace.rows[0]).toMatchObject({
-			label: 'Ready outputs',
-			source: '22 to validate',
+			label: 'Encode',
+			source: '9 not encoded · 31 items',
+			output: 'Queue 9 encodes'
+		});
+		expect(workspace.rows[1]).toMatchObject({
+			label: 'Validate',
+			source: '22 ready outputs',
 			output: 'Validate 22 outputs'
 		});
 		expect(workspace.rows.map((row) => row.detail).join(' ')).not.toContain(
 			'representative sample'
 		);
+	});
+
+	it('uses completed output copy when every pipeline step is done', () => {
+		const folder = folderPayload({
+			summary: folderSummary({ item_count: 2 }),
+			workflow_state: workflowState({
+				state: 'complete',
+				primary_lane: 'complete',
+				label: 'Complete',
+				tone: 'success',
+				detail: '2 complete',
+				counts: {
+					items: 2,
+					ready_to_validate: 0,
+					encode_candidates: 0,
+					ready_to_promote: 0,
+					processing: 0,
+					complete: 2,
+					blocked: 0
+				},
+				next_action: {
+					kind: 'none',
+					label: 'Complete',
+					enabled: false,
+					target_prefix: 'tv/Example/Season 1'
+				}
+			})
+		});
+		const workflow = resolveWorkflow(folder, folderStatusPayload(), null, null, null, null, null);
+		const workspace = buildReviewWorkspaceView(folder, null, null, workflow, false);
+
+		expect(workspace.layout).toBe('pipeline');
+		expect(workspace.rows.map((row) => [row.label, row.output])).toEqual([
+			['Encode', 'No encode backlog'],
+			['Validate', 'Validation complete'],
+			['Promote', 'Promotion complete'],
+			['Complete', '2 of 2']
+		]);
+	});
+
+	it('keeps sample review evidence on the evidence workspace layout', () => {
+		const workspace = buildReviewWorkspaceView(
+			folderPayload(),
+			null,
+			null,
+			{
+				tone: 'idle',
+				label: 'Not sampled',
+				title: 'No representative sample yet',
+				copy: 'Ask for a sample.',
+				primary: 'Ask for draft',
+				primaryAction: 'focus-bench',
+				secondary: 'Open Ops',
+				secondaryAction: 'open-ops'
+			},
+			false
+		);
+
+		expect(workspace).toMatchObject({
+			badge: 'No review media',
+			title: 'Previous sample evidence',
+			layout: 'evidence'
+		});
+		expect(workspace.rows.map((row) => row.label)).toContain('Measured sample');
 	});
 
 	it('lets the operator approve an over-budget sample when the preview looks good', () => {

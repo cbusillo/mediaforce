@@ -104,12 +104,15 @@ export type OutputReviewRow = {
 	output: string;
 	detail: string;
 	tone?: ShellTone;
+	current?: boolean;
 };
 
 export type ReviewWorkspaceView = {
 	badge: string;
+	badgeTone?: ShellTone;
 	title: string;
 	rows: OutputReviewRow[];
+	layout?: 'evidence' | 'pipeline';
 };
 
 export type BudgetEnforcementView = {
@@ -1076,49 +1079,98 @@ export function buildReviewWorkspaceView(
 	workflow: WorkflowState,
 	reviewPackReady: boolean
 ): ReviewWorkspaceView {
-	if (isOutputWorkflowAction(workflow.primaryAction)) {
+	if (workflow.isOutputWorkflow || isOutputWorkflowAction(workflow.primaryAction)) {
 		const counts = folder.workflow_state?.counts;
 		const readyToValidate = counts?.ready_to_validate ?? 0;
 		const readyToPromote = counts?.ready_to_promote ?? 0;
 		const encodeCandidates = counts?.encode_candidates ?? 0;
+		const processing = counts?.processing ?? 0;
+		const complete = counts?.complete ?? 0;
 		const itemCount = numberValue(folder.summary?.item_count);
+		const outputSteps = buildWorkflowSteps(workflow);
+		const stepByLabel = new Map(outputSteps.map((step) => [step.label, step]));
+		const encodeStep = stepByLabel.get('Encode');
+		const validateStep = stepByLabel.get('Validate');
+		const promoteStep = stepByLabel.get('Promote');
+		const completeStep = stepByLabel.get('Complete');
+		const outputComplete = workflow.label.toLowerCase() === 'complete';
+		const validateOutput =
+			workflow.primaryAction === 'validate-outputs'
+				? workflow.primary
+				: readyToValidate
+					? `${readyToValidate} ready to validate`
+					: outputComplete
+						? 'Validation complete'
+						: 'Waiting for encoded outputs';
+		const promoteOutput =
+			workflow.primaryAction === 'promote-outputs'
+				? workflow.primary
+				: readyToPromote
+					? `${readyToPromote} ready to promote`
+					: outputComplete
+						? 'Promotion complete'
+						: 'Waiting for validated outputs';
 		return {
 			badge:
 				workflow.primaryAction === 'promote-outputs' ? 'Promotion review' : 'Validation review',
+			badgeTone: workflow.tone,
 			title:
 				workflow.primaryAction === 'promote-outputs' ? 'Output promotion' : 'Output validation',
+			layout: 'pipeline',
 			rows: [
 				{
-					label: 'Ready outputs',
+					label: 'Encode',
 					source: compactParts([
-						readyToValidate ? `${readyToValidate} to validate` : null,
-						readyToPromote ? `${readyToPromote} to promote` : null
-					]),
-					output: workflow.primary,
-					detail: 'Run the current workflow action for the encoded outputs in this scope.',
-					tone: 'ready'
-				},
-				{
-					label: 'Scope',
-					source:
-						itemCount && itemCount > 0
+						encodeCandidates ? `${encodeCandidates} not encoded` : null,
+						processing ? `${processing} processing` : null,
+						itemCount
 							? `${itemCount.toLocaleString('en-US')} item${itemCount === 1 ? '' : 's'}`
-							: folder.prefix,
-					output: buildOutputScopeFact(folder).value,
-					detail: 'This action applies to the current Folder Studio scope.',
-					tone: 'idle'
+							: null
+					]),
+					output:
+						workflow.primaryAction === 'queue-encode'
+							? workflow.primary
+							: workflow.secondaryAction === 'queue-encode'
+								? workflow.secondary
+								: encodeCandidates
+									? `${encodeCandidates} can be queued`
+									: 'No encode backlog',
+					detail:
+						encodeCandidates || processing
+							? 'Approved source items that still need an encoded output.'
+							: 'Everything in this scope has left the encode stage.',
+					tone: encodeStep?.tone ?? 'idle',
+					current: encodeStep?.current ?? false
 				},
 				{
-					label: 'Remaining work',
-					source: encodeCandidates
-						? `${encodeCandidates} encode${encodeCandidates === 1 ? '' : 's'}`
-						: 'No encode backlog',
-					output:
-						workflow.secondaryAction === 'queue-encode'
-							? workflow.secondary
-							: 'No secondary output action',
-					detail: workflowActionDetail(workflow),
-					tone: encodeCandidates ? 'wait' : 'idle'
+					label: 'Validate',
+					source: readyToValidate
+						? `${readyToValidate} ready output${readyToValidate === 1 ? '' : 's'}`
+						: 'No outputs waiting',
+					output: validateOutput,
+					detail: 'Inspect encoded outputs and mark the ones that are good enough to publish.',
+					tone: validateStep?.tone ?? 'idle',
+					current: validateStep?.current ?? false
+				},
+				{
+					label: 'Promote',
+					source: readyToPromote
+						? `${readyToPromote} validated output${readyToPromote === 1 ? '' : 's'}`
+						: 'No outputs waiting',
+					output: promoteOutput,
+					detail: 'Move validated outputs into the library after review passes.',
+					tone: promoteStep?.tone ?? 'idle',
+					current: promoteStep?.current ?? false
+				},
+				{
+					label: 'Complete',
+					source: complete
+						? `${complete} complete item${complete === 1 ? '' : 's'}`
+						: 'Not complete yet',
+					output: itemCount ? `${complete} of ${itemCount.toLocaleString('en-US')}` : 'Waiting',
+					detail: 'Items land here after encode, validation, and promotion are all done.',
+					tone: completeStep?.tone ?? 'idle',
+					current: completeStep?.current ?? false
 				}
 			]
 		};
@@ -1126,6 +1178,7 @@ export function buildReviewWorkspaceView(
 	return {
 		badge: reviewPackReady ? 'Review media' : 'No review media',
 		title: 'Previous sample evidence',
+		layout: 'evidence',
 		rows: buildOutputReviewRows(folder, calibration, pendingProposal)
 	};
 }

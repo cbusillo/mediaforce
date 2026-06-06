@@ -144,7 +144,7 @@
 		buildDecisionFacts(studioFolder, calibration, pendingProposal, workflow)
 	);
 	const sampleResultRow = $derived(
-		outputReviewRows.find((row) => row.label === 'Sample result') ?? null
+		outputReviewRows.find((row) => row.label === 'Measured sample') ?? null
 	);
 	const draftReviewRow = $derived(
 		outputReviewRows.find(
@@ -660,54 +660,75 @@
 			<section class="review-workspace" aria-labelledby="review-workspace-title">
 				<header class="review-workspace__header">
 					<div>
-						<StateBadge tone={reviewPackReady ? 'ready' : 'idle'} label={reviewWorkspace.badge} />
+						<StateBadge
+							tone={reviewWorkspace.badgeTone ?? (reviewPackReady ? 'ready' : 'idle')}
+							label={reviewWorkspace.badge}
+						/>
 						<h2 id="review-workspace-title">{reviewWorkspace.title}</h2>
 					</div>
 				</header>
 
-				<div class="output-review-table" aria-label="Output review facts">
-					<div class="output-review-table__head">
-						<span>Area</span>
-						<span>Source</span>
-						<span>Output / draft</span>
-						<span>Why it matters</span>
+				{#if reviewWorkspace.layout === 'pipeline'}
+					<div class="output-pipeline" aria-label="Output pipeline status">
+						{#each outputReviewRows as row (row.label)}
+							<div
+								class:output-pipeline__lane--current={row.current}
+								class="output-pipeline__lane output-pipeline__lane--{row.tone ?? 'idle'}"
+							>
+								<div class="output-pipeline__lane-head">
+									<strong>{row.label}</strong>
+									<span>{row.source}</span>
+								</div>
+								<p>{row.output}</p>
+								<small>{row.detail}</small>
+							</div>
+						{/each}
 					</div>
-					{#each outputReviewRows as row (row.label)}
-						<div class:output-review-row--wait={row.tone === 'wait'} class="output-review-row">
-							<strong>{row.label}</strong>
-							<span>{row.source}</span>
-							<span>{row.output}</span>
-							<small>{row.detail}</small>
+				{:else}
+					<div class="output-review-table" aria-label="Output review facts">
+						<div class="output-review-table__head">
+							<span>Area</span>
+							<span>Source</span>
+							<span>Output / draft</span>
+							<span>Why it matters</span>
 						</div>
-					{/each}
-				</div>
+						{#each outputReviewRows as row (row.label)}
+							<div class:output-review-row--wait={row.tone === 'wait'} class="output-review-row">
+								<strong>{row.label}</strong>
+								<span>{row.source}</span>
+								<span>{row.output}</span>
+								<small>{row.detail}</small>
+							</div>
+						{/each}
+					</div>
 
-				<div class="review-media-grid" aria-label="Sample review media">
-					{#each visualReviewArtifacts as artifact (artifact.imageUrl || artifact.label)}
-						<button
-							class="review-media-tile"
-							type="button"
-							onclick={() => openReviewMedia(artifact.imageUrl)}
-						>
-							<img src={artifact.imageUrl} alt={artifact.label || artifact.kind} loading="lazy" />
-							<span>{artifact.label || artifact.kind}</span>
-						</button>
-					{:else}
-						<div class="empty-note">
-							Run a sample to generate source-versus-draft review images.
-						</div>
-					{/each}
-					{#each audioReviewArtifacts as artifact (artifact.imageUrl || artifact.label)}
-						<button
-							class="review-media-tile review-media-tile--audio"
-							type="button"
-							onclick={() => openReviewMedia(artifact.imageUrl)}
-						>
-							<img src={artifact.imageUrl} alt={artifact.label || artifact.kind} loading="lazy" />
-							<span>{artifact.label || artifact.kind}</span>
-						</button>
-					{/each}
-				</div>
+					<div class="review-media-grid" aria-label="Sample review media">
+						{#each visualReviewArtifacts as artifact (artifact.imageUrl || artifact.label)}
+							<button
+								class="review-media-tile"
+								type="button"
+								onclick={() => openReviewMedia(artifact.imageUrl)}
+							>
+								<img src={artifact.imageUrl} alt={artifact.label || artifact.kind} loading="lazy" />
+								<span>{artifact.label || artifact.kind}</span>
+							</button>
+						{:else}
+							<div class="empty-note">
+								Run a sample to generate source-versus-draft review images.
+							</div>
+						{/each}
+						{#each audioReviewArtifacts as artifact (artifact.imageUrl || artifact.label)}
+							<button
+								class="review-media-tile review-media-tile--audio"
+								type="button"
+								onclick={() => openReviewMedia(artifact.imageUrl)}
+							>
+								<img src={artifact.imageUrl} alt={artifact.label || artifact.kind} loading="lazy" />
+								<span>{artifact.label || artifact.kind}</span>
+							</button>
+						{/each}
+					</div>
+				{/if}
 			</section>
 
 			<WorkstationPanel title="Review assistant">
@@ -1361,6 +1382,66 @@
 		font-size: var(--mf-text-xs);
 		line-height: var(--mf-leading-snug);
 		overflow-wrap: anywhere;
+	}
+
+	.output-pipeline {
+		display: grid;
+		gap: var(--mf-space-3);
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+	}
+
+	.output-pipeline__lane {
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border-muted);
+		display: grid;
+		gap: var(--mf-space-3);
+		min-width: 0;
+		padding: var(--mf-space-4);
+	}
+
+	.output-pipeline__lane--current {
+		border-color: color-mix(in srgb, var(--mf-ready-fg) 80%, transparent);
+		box-shadow: inset 3px 0 0 var(--mf-ready-fg);
+	}
+
+	.output-pipeline__lane--active {
+		border-color: color-mix(in srgb, var(--mf-active-fg) 70%, transparent);
+		box-shadow: inset 3px 0 0 var(--mf-active-fg);
+	}
+
+	.output-pipeline__lane--fail {
+		border-color: color-mix(in srgb, var(--mf-fail-fg) 70%, transparent);
+		box-shadow: inset 3px 0 0 var(--mf-fail-fg);
+	}
+
+	.output-pipeline__lane--wait {
+		border-color: color-mix(in srgb, var(--mf-wait-fg) 70%, transparent);
+		box-shadow: inset 3px 0 0 var(--mf-wait-fg);
+	}
+
+	.output-pipeline__lane-head {
+		display: grid;
+		gap: var(--mf-space-1);
+		min-width: 0;
+	}
+
+	.output-pipeline__lane-head strong,
+	.output-pipeline__lane p {
+		font-size: var(--mf-text-sm);
+		overflow-wrap: anywhere;
+	}
+
+	.output-pipeline__lane-head span,
+	.output-pipeline__lane small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+		line-height: var(--mf-leading-snug);
+		overflow-wrap: anywhere;
+	}
+
+	.output-pipeline__lane p {
+		font-family: var(--mf-font-mono), monospace;
+		margin: 0;
 	}
 
 	.review-media-grid {
