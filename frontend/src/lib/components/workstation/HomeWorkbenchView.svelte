@@ -16,6 +16,7 @@
 		buildQueueStatusTiles,
 		codecSummary,
 		folderStatusCopy,
+		isQueueActionableFolder,
 		queueFolderState,
 		queueFolderTone,
 		totalPendingItems,
@@ -49,8 +50,13 @@
 	const isFolderIndex = $derived(mode === 'folders');
 	const seriesFolders = $derived(foldersPayload.series_folders ?? []);
 	const canSelectSeriesScope = $derived(isFolderIndex && seriesFolders.length > 0);
+	const queueFolders = $derived(foldersPayload.folders.filter(isQueueActionableFolder));
 	const folders = $derived(
-		isFolderIndex && folderScope === 'series' ? seriesFolders : foldersPayload.folders
+		isFolderIndex && folderScope === 'series'
+			? seriesFolders
+			: isFolderIndex
+				? foldersPayload.folders
+				: queueFolders
 	);
 	$effect(() => {
 		if (folderScope === 'series' && !canSelectSeriesScope) {
@@ -97,6 +103,9 @@
 		stateOptions.filter((option) => !stateIncluded(option.key)).length
 	);
 	const folderScopeLabel = $derived(folderScope === 'series' ? 'Whole shows' : 'Season folders');
+	const primaryScopeUnit = $derived(
+		isFolderIndex ? folderScopeLabel.toLowerCase() : 'work folders'
+	);
 	const folderScopeDetail = $derived(
 		folderScope === 'series'
 			? 'queue or inspect every season in a show together'
@@ -105,7 +114,12 @@
 				: 'review folders'
 	);
 	const statusTiles = $derived(
-		buildQueueStatusTiles(dashboard, visibleFoldersPayload, hosts, folderScopeLabel)
+		buildQueueStatusTiles(
+			dashboard,
+			visibleFoldersPayload,
+			hosts,
+			isFolderIndex ? folderScopeLabel : 'Work folders'
+		)
 	);
 	const footerSignals = $derived(buildQueueFooterSignals(dashboard, visibleFoldersPayload, hosts));
 	const runningSamples = $derived(dashboard.calibration_queue.sample.running_count);
@@ -309,7 +323,8 @@
 		if (isFolderIndex) {
 			return `${folder.title} has ${openWork} open workflow items and about ${reclaim} of projected reclaim.`;
 		}
-		const rankCopy = index === 0 ? 'the first visible folder' : `#${index + 1} in the visible list`;
+		const rankCopy =
+			index === 0 ? 'the first visible work item' : `#${index + 1} in the visible worklist`;
 		return `${folder.title} is ${rankCopy} with ${openWork} open workflow items and about ${reclaim} of projected reclaim.`;
 	}
 
@@ -424,7 +439,7 @@
 							>{visibleFolders.length.toLocaleString('en-US')} / {folders.length.toLocaleString(
 								'en-US'
 							)}
-							{folderScopeLabel.toLowerCase()}</small
+							{primaryScopeUnit}</small
 						>
 					</div>
 					<div class="scope-row">

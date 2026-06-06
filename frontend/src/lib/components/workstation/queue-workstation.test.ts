@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { FolderCard } from '$lib/api/types';
 import {
 	folderStatusCopy,
+	isQueueActionableFolder,
 	queueFolderState,
 	queueFolderTone,
 	queueStateLabel,
@@ -114,6 +115,40 @@ describe('Queue workstation labels', () => {
 		expect(queueFolderTone(readyToValidate)).toBe('ready');
 		expect(folderStatusCopy(readyToValidate)).toBe('2 encoded output(s) need validation.');
 		expect(totalPendingItems([readyToValidate])).toBe(2);
+	});
+
+	it('keeps the queue limited to folders with actionable workflow', () => {
+		expect(isQueueActionableFolder(folder({ workflow_state: workflowState() }))).toBe(true);
+		expect(
+			isQueueActionableFolder(
+				folder({
+					workflow_state: workflowState({
+						state: 'complete',
+						primary_lane: 'complete',
+						label: 'Complete',
+						tone: 'success',
+						detail: 'No remaining workflow action is available for this scope.',
+						counts: {
+							items: 4,
+							encode_candidates: 0,
+							ready_to_validate: 0,
+							ready_to_promote: 0,
+							processing: 0,
+							complete: 4,
+							blocked: 0
+						},
+						next_action: {
+							kind: 'none',
+							label: 'No action',
+							enabled: false,
+							target_prefix: 'tv/show'
+						}
+					})
+				})
+			)
+		).toBe(false);
+		expect(isQueueActionableFolder(folder({ pending_count: 3 }))).toBe(true);
+		expect(isQueueActionableFolder(folder({ pending_count: 0 }))).toBe(false);
 	});
 
 	it('maps workflow attention to a fail tone for workbench scanning', () => {

@@ -74,6 +74,13 @@ export function totalPendingItems(folders: FolderCard[]): number {
 	return folders.reduce((total, folder) => total + workflowOpenItemCount(folder), 0);
 }
 
+export function isQueueActionableFolder(folder: FolderCard): boolean {
+	const workflow = folder.workflow_state;
+	if (!workflow) return Math.max(folder.pending_count ?? 0, 0) > 0;
+	if (workflow.state === 'complete' || workflow.state === 'idle') return false;
+	return workflowOpenItemCount(folder) > 0 || workflow.next_action.enabled;
+}
+
 export function workflowOpenItemCount(folder: FolderCard): number {
 	const counts = folder.workflow_state?.counts;
 	if (!counts) return Math.max(folder.pending_count ?? 0, 0);
