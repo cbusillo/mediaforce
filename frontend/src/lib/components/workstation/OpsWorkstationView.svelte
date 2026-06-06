@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { invalidateAll } from '$app/navigation';
 	import { onDestroy, onMount } from 'svelte';
 	import { resolve } from '$app/paths';
 	import { postJson } from '$lib/api/client';
@@ -31,11 +30,13 @@
 	let {
 		dashboard,
 		hosts,
-		loadError
+		loadError,
+		onRefresh = async () => {}
 	}: {
 		dashboard: DashboardSummaryPayload | null;
 		hosts: HostsPayload | null;
 		loadError: string | null;
+		onRefresh?: () => Promise<void>;
 	} = $props();
 
 	const queueRows = $derived(buildOpsQueueRows(dashboard));
@@ -186,7 +187,7 @@
 			if (action === 'prepare-host' && host) {
 				hostPasswords = { ...hostPasswords, [host.key]: '' };
 			}
-			await invalidateAll();
+			await onRefresh();
 		} catch (error) {
 			actionError = error instanceof Error ? error.message : 'Action failed.';
 		} finally {
@@ -203,7 +204,7 @@
 		}
 		refreshError = '';
 		try {
-			await invalidateAll();
+			await onRefresh();
 			lastRefreshAt = new Date();
 			if (!quiet) actionMessage = 'Ops state refreshed.';
 		} catch (error) {
