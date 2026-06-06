@@ -813,7 +813,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             {
                 "label": "Folder Studio approved fixture",
                 "route": "/folders/tv/Approved%20Show/Season%201",
-                "marker": "Queue encode",
+                "marker": "This scope is complete",
             },
             {
                 "label": "Folder Studio missed-target fixture",
@@ -823,12 +823,12 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             {
                 "label": "Folder Studio active processing fixture",
                 "route": "/folders/tv/Encoding%20Show/Season%201",
-                "marker": "Approved folder is processing",
+                "marker": "Monitor encode",
             },
             {
                 "label": "Folder Studio retryable processing fixture",
                 "route": "/folders/tv/Failed%20Encode/Season%201",
-                "marker": "Retry processing",
+                "marker": "Needs attention",
             },
         ],
         "completedPrefix": COMPLETED_PREFIX,

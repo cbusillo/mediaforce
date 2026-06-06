@@ -2,7 +2,7 @@
 	import { invalidateAll } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { postJson } from '$lib/api/client';
-	import { folderRoutePrefix } from '$lib/folder-display';
+	import { folderRoutePath, folderRoutePrefix } from '$lib/folder-display';
 	import {
 		formatDateTimeCopy,
 		pathFilename,
@@ -25,11 +25,14 @@
 	import {
 		buildBenchMessages,
 		buildBenchHostOptions,
+		buildProcessingHostOptions,
+		buildSeasonScopeRows,
 		buildWorkflowSteps,
 		buildFooterSignals,
 		buildProposalRows,
-		buildOutputReviewRows,
+		buildReviewWorkspaceView,
 		buildDecisionFacts,
+		buildRuntimeFacts,
 		buildSampleFacts,
 		buildSampleVerdict,
 		buildStatusTiles,
@@ -44,6 +47,9 @@
 		resolveQueueSubmissionMode,
 		resolveWorkflowActionState,
 		resolveWorkflow,
+		outputScopeDisplayLabel,
+		outputScopeLabel,
+		summarizeOutputWorkflowPending,
 		summarizeStatuses,
 		type WorkflowAction
 	} from './folder-studio-view';
@@ -78,7 +84,10 @@
 	});
 	const prefix = $derived(studioFolder.prefix);
 	const encodedPrefix = $derived(folderRoutePrefix(prefix));
+	const seriesContext = $derived(studioFolder.series_context ?? null);
+	const seriesRoute = $derived(seriesContext ? folderRoutePath(seriesContext.prefix) : '/folders');
 	const sampleHostOptions = $derived(buildBenchHostOptions(studioFolder.sample_host_options));
+	const processingHostOptions = $derived(buildProcessingHostOptions(hosts));
 	const folderSampleHostKey = $derived(String(folder.sample_host_key ?? '').trim());
 	const fallbackHostKey = $derived(folderSampleHostKey || sampleHostOptions[0]?.key || '');
 
@@ -92,6 +101,8 @@
 	const summary = $derived(studioFolder.summary);
 	const title = $derived(resolveFolderTitle(prefix));
 	const library = $derived(prefix.split('/')[0] || 'Library');
+	const seasonScopeRows = $derived(buildSeasonScopeRows(studioFolder));
+	const activeScopeLabel = $derived(outputScopeLabel(studioFolder));
 	const sampleItem = $derived(record<FolderSampleItem>(studioFolder.sample_item));
 	const calibration = $derived(record<FolderCalibrationState>(studioFolder.calibration));
 	const pendingProposal = $derived(record<PendingSampleProposal>(studioFolder.pending_proposal));
@@ -109,6 +120,12 @@
 	);
 	const approvalReviewReady = $derived(Boolean(calibration?.review_media_ready));
 	const approvedProfileReady = $derived(reviewGate?.status === 'accepted');
+	const approvedSeasonShortcut = $derived(studioFolder.approved_season_shortcut ?? null);
+	const approvedSeasonNote = $derived(
+		typeof approvedSeasonShortcut?.suggested_note === 'string'
+			? approvedSeasonShortcut.suggested_note.trim()
+			: ''
+	);
 	const workflow = $derived(
 		resolveWorkflow(
 			studioFolder,
@@ -125,15 +142,21 @@
 	const workflowSteps = $derived(buildWorkflowSteps(workflow));
 	const proposalRows = $derived(buildProposalRows(studioFolder, pendingProposal));
 	const statusTiles = $derived(buildStatusTiles(studioFolder, status, hosts, workflow));
-	const footerSignals = $derived(buildFooterSignals(studioFolder, status, hosts));
+	const footerSignals = $derived(buildFooterSignals(studioFolder, status, hosts, workflow));
+	const runtimeFacts = $derived(
+		buildRuntimeFacts(studioFolder, status, reviewGate, encodeJob, workflow)
+	);
 	const sampleFacts = $derived(buildSampleFacts(sampleItem, summary));
 	const sampleVerdict = $derived(buildSampleVerdict(studioFolder, calibration));
-	const outputReviewRows = $derived(
-		buildOutputReviewRows(studioFolder, calibration, pendingProposal)
+	const reviewWorkspace = $derived(
+		buildReviewWorkspaceView(studioFolder, calibration, pendingProposal, workflow, reviewPackReady)
 	);
-	const decisionFacts = $derived(buildDecisionFacts(studioFolder, calibration, pendingProposal));
+	const outputReviewRows = $derived(reviewWorkspace.rows);
+	const decisionFacts = $derived(
+		buildDecisionFacts(studioFolder, calibration, pendingProposal, workflow)
+	);
 	const sampleResultRow = $derived(
-		outputReviewRows.find((row) => row.label === 'Sample result') ?? null
+		outputReviewRows.find((row) => row.label === 'Measured sample') ?? null
 	);
 	const draftReviewRow = $derived(
 		outputReviewRows.find(
@@ -198,6 +221,12 @@
 			const currentNote = benchNote.trim();
 			benchNote = currentNote ? `${currentNote}\n\n${revisionPrompt}` : revisionPrompt;
 		}
+		focusBenchComposer();
+	}
+
+	function fillDraftFromApprovedPolicy() {
+		if (!approvedSeasonNote) return;
+		benchNote = approvedSeasonNote;
 		focusBenchComposer();
 	}
 
@@ -301,6 +330,28 @@
 		}
 	}
 
+	async function runFolderWorkflowAction(action: WorkflowAction) {
+		if (action !== 'validate-outputs' && action !== 'promote-outputs') return;
+		const actionState = workflowActionState(action);
+		if (actionState.disabled) return;
+		workflowPending = action;
+		profileMessage = '';
+		profileError = '';
+		try {
+			const endpoint = action === 'validate-outputs' ? 'validate-outputs' : 'promote-outputs';
+			const response = await postJson<{ ok: boolean; message?: string }>(
+				`${resolve('/')}api/folders/${encodedPrefix}/${endpoint}`,
+				{}
+			);
+			profileMessage = response.message || workflow.primary;
+			await invalidateAll();
+		} catch (error) {
+			profileError = error instanceof Error ? error.message : 'Folder action could not run.';
+		} finally {
+			workflowPending = null;
+		}
+	}
+
 	async function stopSample() {
 		const action = 'stop-sample';
 		const actionState = workflowActionState(action);
@@ -338,6 +389,11 @@
 					<div class="folder-header__path">
 						<span>Folder path</span>
 						<strong class="mf-path">{prefix}</strong>
+						{#if seriesContext}
+							<a class="scope-link" href={resolve(seriesRoute)}
+								>Open {seriesContext.title} whole show</a
+							>
+						{/if}
 					</div>
 				</div>
 				<div class="folder-header__facts">
@@ -398,6 +454,12 @@
 							onclick={focusBenchComposer}
 							data-mf-action={workflow.primaryAction}>{workflow.primary}</button
 						>
+					{:else if workflow.primaryAction === 'open-series' || workflow.primaryAction === 'open-folders'}
+						<a
+							class="control control--primary"
+							href={resolve(seriesRoute)}
+							data-mf-action={workflow.primaryAction}>{workflow.primary}</a
+						>
 					{:else if workflow.primaryAction === 'open-ops' || workflow.primaryAction.startsWith('monitor-')}
 						<a
 							class="control control--primary"
@@ -446,6 +508,17 @@
 							data-mf-wire="live"
 							>{workflowPending === workflow.primaryAction ? 'Retrying' : workflow.primary}</button
 						>
+					{:else if workflow.primaryAction === 'validate-outputs' || workflow.primaryAction === 'promote-outputs'}
+						<button
+							class="control control--primary"
+							type="button"
+							disabled={workflowActionState(workflow.primaryAction).disabled}
+							title={workflowActionState(workflow.primaryAction).title}
+							onclick={() => runFolderWorkflowAction(workflow.primaryAction)}
+							data-mf-action={workflow.primaryAction}
+							data-mf-wire="live"
+							>{workflowPending === workflow.primaryAction ? 'Running' : workflow.primary}</button
+						>
 					{:else}
 						<button
 							class="control control--primary"
@@ -469,6 +542,10 @@
 							type="button"
 							onclick={reviseSmaller}
 							data-mf-action={workflow.secondaryAction}>{workflow.secondary}</button
+						>
+					{:else if workflow.secondaryAction === 'open-series' || workflow.secondaryAction === 'open-folders'}
+						<a class="control" href={resolve(seriesRoute)} data-mf-action={workflow.secondaryAction}
+							>{workflow.secondary}</a
 						>
 					{:else if workflow.secondaryAction === 'open-ops'}
 						<a class="control" href={resolve('/ops')} data-mf-action={workflow.secondaryAction}
@@ -539,6 +616,19 @@
 								? 'Retrying'
 								: workflow.secondary}</button
 						>
+					{:else if workflow.secondaryAction === 'validate-outputs' || workflow.secondaryAction === 'promote-outputs'}
+						<button
+							class="control"
+							type="button"
+							disabled={workflowActionState(workflow.secondaryAction).disabled}
+							title={workflowActionState(workflow.secondaryAction).title}
+							onclick={() => runFolderWorkflowAction(workflow.secondaryAction)}
+							data-mf-action={workflow.secondaryAction}
+							data-mf-wire="live"
+							>{workflowPending === workflow.secondaryAction
+								? 'Running'
+								: workflow.secondary}</button
+						>
 					{:else}
 						<button
 							class="control"
@@ -565,246 +655,296 @@
 						<p class="decision__status decision__status--ready">{profileMessage}</p>
 					{/if}
 				</div>
+				{#if approvedSeasonNote}
+					<div class="season-shortcut">
+						<div>
+							<span>Approved policy reference</span>
+							<strong>{approvedSeasonShortcut?.root_label ?? title}</strong>
+							<small>{approvedSeasonShortcut?.count ?? 1} approved season policy available</small>
+						</div>
+						<button class="control" type="button" onclick={fillDraftFromApprovedPolicy}
+							>Fill draft from policy</button
+						>
+					</div>
+				{/if}
 			</section>
 
 			<section class="review-workspace" aria-labelledby="review-workspace-title">
 				<header class="review-workspace__header">
 					<div>
 						<StateBadge
-							tone={reviewPackReady ? 'ready' : 'idle'}
-							label={reviewPackReady ? 'Review media' : 'No review media'}
+							tone={reviewWorkspace.badgeTone ?? (reviewPackReady ? 'ready' : 'idle')}
+							label={reviewWorkspace.badge}
 						/>
-						<h2 id="review-workspace-title">Previous sample evidence</h2>
+						<h2 id="review-workspace-title">{reviewWorkspace.title}</h2>
 					</div>
 				</header>
 
-				<div class="output-review-table" aria-label="Output review facts">
-					<div class="output-review-table__head">
-						<span>Area</span>
-						<span>Source</span>
-						<span>Output / draft</span>
-						<span>Why it matters</span>
-					</div>
-					{#each outputReviewRows as row (row.label)}
-						<div class:output-review-row--wait={row.tone === 'wait'} class="output-review-row">
-							<strong>{row.label}</strong>
-							<span>{row.source}</span>
-							<span>{row.output}</span>
-							<small>{row.detail}</small>
-						</div>
-					{/each}
-				</div>
-
-				<div class="review-media-grid" aria-label="Sample review media">
-					{#each visualReviewArtifacts as artifact (artifact.imageUrl || artifact.label)}
-						<button
-							class="review-media-tile"
-							type="button"
-							onclick={() => openReviewMedia(artifact.imageUrl)}
-						>
-							<img src={artifact.imageUrl} alt={artifact.label || artifact.kind} loading="lazy" />
-							<span>{artifact.label || artifact.kind}</span>
-						</button>
-					{:else}
-						<div class="empty-note">
-							Run a sample to generate source-versus-draft review images.
-						</div>
-					{/each}
-					{#each audioReviewArtifacts as artifact (artifact.imageUrl || artifact.label)}
-						<button
-							class="review-media-tile review-media-tile--audio"
-							type="button"
-							onclick={() => openReviewMedia(artifact.imageUrl)}
-						>
-							<img src={artifact.imageUrl} alt={artifact.label || artifact.kind} loading="lazy" />
-							<span>{artifact.label || artifact.kind}</span>
-						</button>
-					{/each}
-				</div>
-			</section>
-
-			<WorkstationPanel title="Review assistant">
-				<div class="bench">
-					<details
-						class="bench__thread"
-						open={!sampleVerdict}
-						aria-label="Review assistant conversation"
-					>
-						<summary>
-							<strong>Assistant transcript</strong>
-							<span>{benchMessages.length} notes</span>
-						</summary>
-						<div class="bench__messages">
-							{#each benchMessages as message (message.id)}
-								<div
-									class="bench-message bench-message--{message.role} bench-message--tone-{message.tone ??
-										'neutral'}"
-								>
-									<header>
-										<span>{message.label}</span>
-										{#if message.meta}
-											<small>{message.meta}</small>
-										{/if}
-									</header>
-									<strong>{message.title}</strong>
-									<p>{message.body}</p>
-								</div>
-							{/each}
-						</div>
-					</details>
-
-					<div class="bench__composer" aria-label="Review request composer">
-						<label>
-							<span>Request</span>
-							<textarea
-								rows="5"
-								placeholder="Ask what to sample, revise, or validate for this folder."
-								bind:this={benchTextarea}
-								bind:value={benchNote}
-							></textarea>
-						</label>
-						<div class="bench__controls">
-							<label>
-								<span>Worker</span>
-								<select bind:value={selectedHostKey}>
-									{#each sampleHostOptions as host (host.key)}
-										<option value={host.key}
-											>{host.label}{host.available ? '' : ' · unavailable'}</option
-										>
-									{/each}
-								</select>
-							</label>
-							<button
-								class="control control--primary"
-								type="button"
-								disabled={benchRequestDisabled}
-								title={benchRequestDisabled ? benchRequestState.blocker : ''}
-								onclick={sendBenchRequest}
-								data-mf-action="bench-request"
-								data-mf-wire="live">{benchPending ? 'Sending' : 'Send request'}</button
+				{#if reviewWorkspace.layout === 'pipeline'}
+					<div class="output-pipeline" aria-label="Output pipeline status">
+						{#each outputReviewRows as row (row.label)}
+							<div
+								class:output-pipeline__lane--current={row.current}
+								class="output-pipeline__lane output-pipeline__lane--{row.tone ?? 'idle'}"
 							>
-						</div>
-						{#if benchError}
-							<p class="bench__status bench__status--fail">{benchError}</p>
-						{:else if benchMessage}
-							<p class="bench__status bench__status--ready">{benchMessage}</p>
-						{:else if benchRequestState.blocker}
-							<p class="bench__status">{benchRequestState.blocker}</p>
-						{/if}
-					</div>
-				</div>
-			</WorkstationPanel>
-
-			<div class="support-grid" aria-label="Folder supporting signals">
-				<WorkstationPanel title="Queue">
-					<dl class="kv kv--compact">
-						<dt>Calibration</dt>
-						<dd>{status.calibration_status || '—'}</dd>
-						<dt>Scan</dt>
-						<dd>{status.folder_scan_status || '—'}</dd>
-						<dt>Approval</dt>
-						<dd>{reviewGate?.status ?? '—'}</dd>
-						<dt>Processing</dt>
-						<dd>{encodeJob?.status ?? studioFolder.encode_queue_summary ?? '—'}</dd>
-					</dl>
-				</WorkstationPanel>
-
-				<WorkstationPanel title={pendingProposal?.proposal_id ? 'Active draft' : 'Sample target'}>
-					<dl class="kv kv--compact">
-						<dt>{pendingProposal?.proposal_id ? 'Draft' : 'Source'}</dt>
-						<dd>{draftReviewRow?.output ?? '—'}</dd>
-						<dt>Reason</dt>
-						<dd>{draftReviewRow?.detail ?? '—'}</dd>
-						<dt>Sample</dt>
-						<dd>
-							{sampleResultRow ? `${sampleResultRow.output} from ${sampleResultRow.source}` : '—'}
-						</dd>
-						<dt>Metric</dt>
-						<dd>{resolvedMetricCopy(studioFolder)}</dd>
-					</dl>
-				</WorkstationPanel>
-
-				<WorkstationPanel title="Recent">
-					<div class="history-list history-list--compact">
-						{#each (studioFolder.recent_tuning_sessions ?? []).slice(0, 3) as session, index (`${session.session_id ?? session.created_at ?? index}`)}
-							<div>
-								<span>{formatDateTimeCopy(String(session.created_at ?? '')) || '—'}</span>
-								<strong>{String(session.summary ?? session.note ?? 'Tuning session')}</strong>
+								<div class="output-pipeline__lane-head">
+									<strong>{row.label}</strong>
+									<span>{row.source}</span>
+								</div>
+								<p>{row.output}</p>
+								<small>{row.detail}</small>
 							</div>
-						{:else}
-							<div class="empty-note empty-note--compact">No recent tuning sessions returned.</div>
 						{/each}
 					</div>
-				</WorkstationPanel>
-			</div>
-
-			<div class="evidence-grid evidence-grid--sample-only">
-				<WorkstationPanel title="Representative sample">
-					<div class="sample-card">
-						<div class="sample-frame">
-							<span>{sampleItem ? 'Representative sample' : 'No sample selected'}</span>
-							<strong
-								>{sampleItem
-									? pathFilename(sampleItem.rel_path)
-									: 'Run a sample to populate review evidence.'}</strong
-							>
+				{:else}
+					<div class="output-review-table" aria-label="Output review facts">
+						<div class="output-review-table__head">
+							<span>Area</span>
+							<span>Source</span>
+							<span>Output / draft</span>
+							<span>Why it matters</span>
 						</div>
-						<div class="sample-facts">
-							{#each sampleFacts as fact (fact.label)}
+						{#each outputReviewRows as row (row.label)}
+							<div class:output-review-row--wait={row.tone === 'wait'} class="output-review-row">
+								<strong>{row.label}</strong>
+								<span>{row.source}</span>
+								<span>{row.output}</span>
+								<small>{row.detail}</small>
+							</div>
+						{/each}
+					</div>
+
+					<div class="review-media-grid" aria-label="Sample review media">
+						{#each visualReviewArtifacts as artifact (artifact.imageUrl || artifact.label)}
+							<button
+								class="review-media-tile"
+								type="button"
+								onclick={() => openReviewMedia(artifact.imageUrl)}
+							>
+								<img src={artifact.imageUrl} alt={artifact.label || artifact.kind} loading="lazy" />
+								<span>{artifact.label || artifact.kind}</span>
+							</button>
+						{:else}
+							<div class="empty-note">
+								Run a sample to generate source-versus-draft review images.
+							</div>
+						{/each}
+						{#each audioReviewArtifacts as artifact (artifact.imageUrl || artifact.label)}
+							<button
+								class="review-media-tile review-media-tile--audio"
+								type="button"
+								onclick={() => openReviewMedia(artifact.imageUrl)}
+							>
+								<img src={artifact.imageUrl} alt={artifact.label || artifact.kind} loading="lazy" />
+								<span>{artifact.label || artifact.kind}</span>
+							</button>
+						{/each}
+					</div>
+				{/if}
+			</section>
+
+			{#if !workflow.isOutputWorkflow}
+				<WorkstationPanel title="Review assistant">
+					<div class="bench">
+						<details
+							class="bench__thread"
+							open={!sampleVerdict}
+							aria-label="Review assistant conversation"
+						>
+							<summary>
+								<strong>Assistant transcript</strong>
+								<span>{benchMessages.length} notes</span>
+							</summary>
+							<div class="bench__messages">
+								{#each benchMessages as message (message.id)}
+									<div
+										class="bench-message bench-message--{message.role} bench-message--tone-{message.tone ??
+											'neutral'}"
+									>
+										<header>
+											<span>{message.label}</span>
+											{#if message.meta}
+												<small>{message.meta}</small>
+											{/if}
+										</header>
+										<strong>{message.title}</strong>
+										<p>{message.body}</p>
+									</div>
+								{/each}
+							</div>
+						</details>
+
+						<div class="bench__composer" aria-label="Review request composer">
+							<label>
+								<span>Request</span>
+								<textarea
+									rows="5"
+									placeholder="Ask what to sample, revise, or validate for this folder."
+									bind:this={benchTextarea}
+									bind:value={benchNote}
+								></textarea>
+							</label>
+							<div class="bench__controls">
+								<label>
+									<span>Worker</span>
+									<select bind:value={selectedHostKey}>
+										{#each sampleHostOptions as host (host.key)}
+											<option value={host.key}
+												>{host.label}{host.available ? '' : ' · unavailable'}</option
+											>
+										{/each}
+									</select>
+								</label>
+								<button
+									class="control control--primary"
+									type="button"
+									disabled={benchRequestDisabled}
+									title={benchRequestDisabled ? benchRequestState.blocker : ''}
+									onclick={sendBenchRequest}
+									data-mf-action="bench-request"
+									data-mf-wire="live">{benchPending ? 'Sending' : 'Send request'}</button
+								>
+							</div>
+							{#if benchError}
+								<p class="bench__status bench__status--fail">{benchError}</p>
+							{:else if benchMessage}
+								<p class="bench__status bench__status--ready">{benchMessage}</p>
+							{:else if benchRequestState.blocker}
+								<p class="bench__status">{benchRequestState.blocker}</p>
+							{/if}
+						</div>
+					</div>
+				</WorkstationPanel>
+			{/if}
+
+			<div
+				class:support-grid--single={workflow.isOutputWorkflow}
+				class="support-grid"
+				aria-label="Folder supporting signals"
+			>
+				<WorkstationPanel title="Runtime">
+					<dl class="kv kv--compact">
+						{#each runtimeFacts as fact (fact.label)}
+							<dt>{fact.label}</dt>
+							<dd>{fact.value}</dd>
+						{/each}
+					</dl>
+				</WorkstationPanel>
+
+				{#if !workflow.isOutputWorkflow}
+					<WorkstationPanel title={pendingProposal?.proposal_id ? 'Active draft' : 'Sample target'}>
+						<dl class="kv kv--compact">
+							<dt>{pendingProposal?.proposal_id ? 'Draft' : 'Source'}</dt>
+							<dd>{draftReviewRow?.output ?? '—'}</dd>
+							<dt>Reason</dt>
+							<dd>{draftReviewRow?.detail ?? '—'}</dd>
+							<dt>Sample</dt>
+							<dd>
+								{sampleResultRow ? `${sampleResultRow.output} from ${sampleResultRow.source}` : '—'}
+							</dd>
+							<dt>Metric</dt>
+							<dd>{resolvedMetricCopy(studioFolder)}</dd>
+						</dl>
+					</WorkstationPanel>
+
+					<WorkstationPanel title="Recent">
+						<div class="history-list history-list--compact">
+							{#each (studioFolder.recent_tuning_sessions ?? []).slice(0, 3) as session, index (`${session.session_id ?? session.created_at ?? index}`)}
 								<div>
-									<span>{fact.label}</span>
-									<strong>{fact.value}</strong>
+									<span>{formatDateTimeCopy(String(session.created_at ?? '')) || '—'}</span>
+									<strong>{String(session.summary ?? session.note ?? 'Tuning session')}</strong>
+								</div>
+							{:else}
+								<div class="empty-note empty-note--compact">
+									No recent tuning sessions returned.
 								</div>
 							{/each}
 						</div>
-					</div>
-				</WorkstationPanel>
+					</WorkstationPanel>
+				{/if}
 			</div>
 
-			<details class="technical-details">
-				<summary>
-					<strong>Proposed settings details</strong>
-					<span
-						>{proposalRows.length ? `${proposalRows.length} draft differences` : 'No draft'}</span
-					>
-				</summary>
-				<WorkstationPanel
-					title="Current settings vs. proposal"
-					meta={proposalRows.length ? `${proposalRows.length} rows` : 'No draft'}
-				>
-					<div class="table-wrap">
-						<table class="policy-table">
-							<thead>
-								<tr>
-									<th>Area</th>
-									<th>Setting</th>
-									<th>Current</th>
-									<th>Draft</th>
-								</tr>
-							</thead>
-							<tbody>
-								{#each proposalRows as row (row.section + row.label)}
-									<tr class:changed={row.changed}>
-										<td>{row.section}</td>
-										<td>{row.label}</td>
-										<td>{row.current}</td>
-										<td>{row.draft}</td>
-									</tr>
-								{:else}
-									<tr>
-										<td colspan="4">No pending proposal was returned for this folder.</td>
-									</tr>
+			{#if !workflow.isOutputWorkflow}
+				<div class="evidence-grid evidence-grid--sample-only">
+					<WorkstationPanel title="Representative sample">
+						<div class="sample-card">
+							<div class="sample-frame">
+								<span>{sampleItem ? 'Representative sample' : 'No sample selected'}</span>
+								<strong
+									>{sampleItem
+										? pathFilename(sampleItem.rel_path)
+										: 'Run a sample to populate review evidence.'}</strong
+								>
+							</div>
+							<div class="sample-facts">
+								{#each sampleFacts as fact (fact.label)}
+									<div>
+										<span>{fact.label}</span>
+										<strong>{fact.value}</strong>
+									</div>
 								{/each}
-							</tbody>
-						</table>
-					</div>
-				</WorkstationPanel>
-			</details>
+							</div>
+						</div>
+					</WorkstationPanel>
+				</div>
+			{/if}
+
+			{#if !workflow.isOutputWorkflow}
+				<details class="technical-details">
+					<summary>
+						<strong>Proposed settings details</strong>
+						<span
+							>{proposalRows.length ? `${proposalRows.length} draft differences` : 'No draft'}</span
+						>
+					</summary>
+					<WorkstationPanel
+						title="Current settings vs. proposal"
+						meta={proposalRows.length ? `${proposalRows.length} rows` : 'No draft'}
+					>
+						<div class="table-wrap">
+							<table class="policy-table">
+								<thead>
+									<tr>
+										<th>Area</th>
+										<th>Setting</th>
+										<th>Current</th>
+										<th>Draft</th>
+									</tr>
+								</thead>
+								<tbody>
+									{#each proposalRows as row (row.section + row.label)}
+										<tr class:changed={row.changed}>
+											<td>{row.section}</td>
+											<td>{row.label}</td>
+											<td>{row.current}</td>
+											<td>{row.draft}</td>
+										</tr>
+									{:else}
+										<tr>
+											<td colspan="4">No pending proposal was returned for this folder.</td>
+										</tr>
+									{/each}
+								</tbody>
+							</table>
+						</div>
+					</WorkstationPanel>
+				</details>
+			{/if}
 		</section>
 
 		<aside class="studio__left" aria-label="Folder workflow context">
 			<WorkstationPanel eyebrow="Folder" title="Active context">
 				<div class="context-list">
+					{#if seriesContext}
+						<div class="context-list__wide">
+							<span>Series scope</span>
+							<a class="scope-link" href={resolve(seriesRoute)}>{seriesContext.prefix}</a>
+						</div>
+					{/if}
+					<div>
+						<span>Scope</span>
+						<strong>{outputScopeDisplayLabel(activeScopeLabel)}</strong>
+					</div>
 					<div>
 						<span>Library</span>
 						<strong>{library}</strong>
@@ -815,29 +955,65 @@
 					</div>
 					<div>
 						<span>Pending</span>
-						<strong>{summary?.statuses ? summarizeStatuses(summary.statuses) : '—'}</strong>
+						<strong>
+							{#if workflow.isOutputWorkflow}
+								{summarizeOutputWorkflowPending(
+									studioFolder.workflow_state?.counts ?? status.workflow_state?.counts
+								)}
+							{:else}
+								{summary?.statuses ? summarizeStatuses(summary.statuses) : '—'}
+							{/if}
+						</strong>
 					</div>
 					<div>
 						<span>Source size</span>
 						<strong>{formatBytes(summary?.total_size_bytes)}</strong>
 					</div>
+					{#if activeScopeLabel === 'whole show' && seasonScopeRows.length > 0}
+						<div class="context-list__wide season-nav" aria-label="Season scopes">
+							<span>Seasons</span>
+							<div class="season-nav__rows">
+								{#each seasonScopeRows as season (season.href)}
+									<a class="season-nav__row" href={resolve(folderRoutePath(season.href))}>
+										<strong>{season.label}</strong>
+										<small>{season.count}</small>
+									</a>
+								{/each}
+							</div>
+						</div>
+					{/if}
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="Workers" title="Sample readiness">
+			<WorkstationPanel
+				eyebrow="Workers"
+				title={workflow.isOutputWorkflow ? 'Processing capacity' : 'Sample readiness'}
+			>
 				<div class="host-list">
-					{#each sampleHostOptions.slice(0, 6) as host (host.key)}
-						<div class="host-row">
-							<StateBadge
-								compact
-								tone={host.available ? (host.scheduleOpen === false ? 'wait' : 'ready') : 'fail'}
-								label={host.state}
-							/>
-							<span>{host.label}{host.detail ? ` · ${host.detail}` : ''}</span>
-						</div>
-					{/each}
-					{#if sampleHostOptions.length === 0}
-						<div class="empty-note">Worker status is unavailable.</div>
+					{#if workflow.isOutputWorkflow}
+						{#each processingHostOptions.slice(0, 6) as host (host.key)}
+							<div class="host-row">
+								<StateBadge compact tone={host.tone} label={host.state} />
+								<span>{host.label}{host.detail ? ` · ${host.detail}` : ''}</span>
+							</div>
+						{/each}
+						{#if processingHostOptions.length === 0}
+							<div class="empty-note">Worker status is unavailable.</div>
+						{/if}
+					{:else}
+						{#each sampleHostOptions.slice(0, 6) as host (host.key)}
+							<div class="host-row">
+								<StateBadge
+									compact
+									tone={host.available ? (host.scheduleOpen === false ? 'wait' : 'ready') : 'fail'}
+									label={host.state}
+								/>
+								<span>{host.label}{host.detail ? ` · ${host.detail}` : ''}</span>
+							</div>
+						{/each}
+						{#if sampleHostOptions.length === 0}
+							<div class="empty-note">Worker status is unavailable.</div>
+						{/if}
 					{/if}
 				</div>
 			</WorkstationPanel>
@@ -901,6 +1077,27 @@
 		max-width: 92ch;
 	}
 
+	.scope-link {
+		align-items: center;
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border-muted);
+		border-left: 2px solid var(--mf-active-fg);
+		color: var(--mf-active-fg-bright);
+		display: inline-flex;
+		font-size: var(--mf-text-xs);
+		font-weight: var(--mf-weight-semibold);
+		justify-self: start;
+		min-height: var(--mf-control-md);
+		padding: 0 var(--mf-space-3);
+	}
+
+	.scope-link:hover {
+		background: var(--mf-active-bg);
+		border-color: var(--mf-active-line);
+		border-left-color: var(--mf-active-fg);
+		color: var(--mf-fg-primary);
+	}
+
 	.folder-header__facts,
 	.decision__facts,
 	.sample-facts {
@@ -932,6 +1129,50 @@
 		display: grid;
 		gap: var(--mf-space-2);
 		min-width: 88px;
+	}
+
+	.context-list__wide {
+		grid-column: 1 / -1;
+	}
+
+	.season-nav {
+		border-top: var(--mf-border-muted);
+		padding-top: var(--mf-space-3);
+	}
+
+	.season-nav__rows {
+		display: grid;
+		gap: var(--mf-space-2);
+		min-width: 0;
+	}
+
+	.season-nav__row {
+		align-items: center;
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border-muted);
+		display: flex;
+		gap: var(--mf-space-3);
+		justify-content: space-between;
+		min-height: var(--mf-control-md);
+		padding: 0 var(--mf-space-3);
+	}
+
+	.season-nav__row:hover {
+		background: var(--mf-active-bg);
+		border-color: var(--mf-active-line);
+	}
+
+	.season-nav__row strong {
+		color: var(--mf-fg-primary);
+		font-size: var(--mf-text-xs);
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.season-nav__row small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		text-transform: uppercase;
 	}
 
 	.folder-header__metric {
@@ -1108,6 +1349,39 @@
 		min-width: 0;
 	}
 
+	.season-shortcut {
+		align-items: center;
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border-muted);
+		border-left: 2px solid var(--mf-wait-fg);
+		display: flex;
+		gap: var(--mf-space-4);
+		grid-column: 1 / -1;
+		justify-content: space-between;
+		padding: var(--mf-space-4);
+	}
+
+	.season-shortcut div {
+		display: grid;
+		gap: var(--mf-space-1);
+		min-width: 0;
+	}
+
+	.season-shortcut span,
+	.season-shortcut small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.season-shortcut strong {
+		font-size: var(--mf-text-sm);
+		font-weight: var(--mf-weight-semibold);
+		overflow-wrap: anywhere;
+	}
+
 	.decision__status {
 		border-left: 2px solid var(--mf-idle-fg);
 		flex-basis: 100%;
@@ -1210,6 +1484,66 @@
 		font-size: var(--mf-text-xs);
 		line-height: var(--mf-leading-snug);
 		overflow-wrap: anywhere;
+	}
+
+	.output-pipeline {
+		display: grid;
+		gap: var(--mf-space-3);
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+	}
+
+	.output-pipeline__lane {
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border-muted);
+		display: grid;
+		gap: var(--mf-space-3);
+		min-width: 0;
+		padding: var(--mf-space-4);
+	}
+
+	.output-pipeline__lane--current {
+		border-color: color-mix(in srgb, var(--mf-ready-fg) 80%, transparent);
+		box-shadow: inset 3px 0 0 var(--mf-ready-fg);
+	}
+
+	.output-pipeline__lane--active {
+		border-color: color-mix(in srgb, var(--mf-active-fg) 70%, transparent);
+		box-shadow: inset 3px 0 0 var(--mf-active-fg);
+	}
+
+	.output-pipeline__lane--fail {
+		border-color: color-mix(in srgb, var(--mf-fail-fg) 70%, transparent);
+		box-shadow: inset 3px 0 0 var(--mf-fail-fg);
+	}
+
+	.output-pipeline__lane--wait {
+		border-color: color-mix(in srgb, var(--mf-wait-fg) 70%, transparent);
+		box-shadow: inset 3px 0 0 var(--mf-wait-fg);
+	}
+
+	.output-pipeline__lane-head {
+		display: grid;
+		gap: var(--mf-space-1);
+		min-width: 0;
+	}
+
+	.output-pipeline__lane-head strong,
+	.output-pipeline__lane p {
+		font-size: var(--mf-text-sm);
+		overflow-wrap: anywhere;
+	}
+
+	.output-pipeline__lane-head span,
+	.output-pipeline__lane small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+		line-height: var(--mf-leading-snug);
+		overflow-wrap: anywhere;
+	}
+
+	.output-pipeline__lane p {
+		font-family: var(--mf-font-mono), monospace;
+		margin: 0;
 	}
 
 	.review-media-grid {
@@ -1471,6 +1805,10 @@
 		display: grid;
 		gap: var(--mf-space-5);
 		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+
+	.support-grid--single {
+		grid-template-columns: minmax(0, 1fr);
 	}
 
 	.evidence-grid {

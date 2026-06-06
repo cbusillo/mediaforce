@@ -1,8 +1,33 @@
 import subprocess
 import tempfile
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+
+
+@dataclass(slots=True)
+class StructuredLLMFailure:
+    attempts: list[str]
+
+    @property
+    def raw(self) -> str:
+        return "\n".join(self.attempts)
+
+
+def _trim_diagnostic(value: Any, *, limit: int = 1200) -> str:
+    text = value.decode(errors="replace") if isinstance(value, bytes) else str(value or "")
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit].rstrip()}..."
+
+
+def _attempt_diagnostic(attempt: int, message: str, detail: Any = None) -> str:
+    detail_text = _trim_diagnostic(detail)
+    if detail_text:
+        return f"attempt {attempt}: {message}: {detail_text}"
+    return f"attempt {attempt}: {message}"
 
 
 def run_code_prompt(
@@ -66,7 +91,7 @@ def run_structured_llm_request(
         subprocess_run: Callable[..., Any],
         try_load_json: Callable[[str], Any],
         try_load_first_json_object: Callable[[str], Any],
-) -> dict[str, Any] | None:
+) -> dict[str, Any] | StructuredLLMFailure | None:
     cmd = [
         "code",
         *memory_disabled_code_args(),
@@ -84,20 +109,32 @@ def run_structured_llm_request(
         __import__("json").dumps(schema, sort_keys=True),
         "--format-strict",
     ]
-    for _attempt in range(2):
+    failures: list[str] = []
+    for attempt in range(1, 3):
         try:
             result = subprocess_run(cmd, capture_output=True, text=True, timeout=max_seconds + 15, cwd=project_root)
-        except (OSError, subprocess.SubprocessError):
+        except subprocess.TimeoutExpired as exc:
+            diagnostic = _trim_diagnostic(exc.stderr) or _trim_diagnostic(exc.stdout)
+            failures.append(_attempt_diagnostic(attempt, f"timed out after {exc.timeout}s", diagnostic))
+            continue
+        except FileNotFoundError as exc:
+            failures.append(_attempt_diagnostic(attempt, "`code` is required but was not found", exc))
+            continue
+        except (OSError, subprocess.SubprocessError) as exc:
+            failures.append(_attempt_diagnostic(attempt, "`code llm request` failed to run", exc))
             continue
         raw = result.stdout.strip() or result.stderr.strip()
         if result.returncode != 0 or not raw:
+            detail = result.stderr.strip() or result.stdout.strip() or "no output"
+            failures.append(_attempt_diagnostic(attempt, f"returned {result.returncode}", detail))
             continue
         parsed = try_load_json(raw)
         if parsed is None:
             parsed = try_load_first_json_object(raw)
         if isinstance(parsed, dict):
             return parsed
-    return None
+        failures.append(_attempt_diagnostic(attempt, "returned unparseable structured JSON", raw))
+    return StructuredLLMFailure(failures) if failures else None
 
 
 def run_multimodal_tune_request(

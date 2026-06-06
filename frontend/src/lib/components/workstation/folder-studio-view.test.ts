@@ -1,20 +1,33 @@
 import { describe, expect, it } from 'vitest';
-import type { EncodeQueueJob, FolderPayload, FolderStatusPayload } from '$lib/api/types';
+import type {
+	EncodeQueueJob,
+	FolderPayload,
+	FolderStatusPayload,
+	HostsPayload
+} from '$lib/api/types';
 import type { FolderCalibrationJob } from '$lib/folders/studio';
 import {
 	buildBenchHostOptions,
 	buildBudgetEnforcementView,
 	buildDecisionFacts,
+	buildFooterSignals,
 	buildOutputReviewRows,
+	buildProcessingHostOptions,
+	buildReviewWorkspaceView,
+	buildRuntimeFacts,
 	buildSampleFacts,
+	buildSeasonScopeRows,
 	buildSampleVerdict,
+	buildStatusTiles,
 	buildWorkflowSteps,
+	outputScopeLabel,
 	predictedFolderSizeBytes,
 	projectedReclaimBytes,
 	resolveBenchRequestState,
 	resolveQueueSubmissionMode,
 	resolveWorkflow,
-	resolveWorkflowActionState
+	resolveWorkflowActionState,
+	summarizeOutputWorkflowPending
 } from './folder-studio-view';
 import type { FolderCalibrationState, PendingSampleProposal } from '$lib/folders/studio';
 
@@ -46,6 +59,46 @@ function folderStatusPayload(overrides: Partial<FolderStatusPayload> = {}): Fold
 		folder_scan_status: 'idle',
 		calibration_job: null,
 		folder_scan_job: null,
+		...overrides
+	};
+}
+
+function hostsPayload(overrides: Partial<HostsPayload> = {}): HostsPayload {
+	return {
+		compact: true,
+		hosts: [],
+		...overrides
+	};
+}
+
+function workflowState(
+	overrides: Partial<NonNullable<FolderPayload['workflow_state']>> = {}
+): NonNullable<FolderPayload['workflow_state']> {
+	return {
+		prefix: 'tv/Example/Season 1',
+		state: 'ready_to_validate',
+		primary_lane: 'validate',
+		label: 'Ready to validate',
+		tone: 'ready',
+		detail: '2 encoded output(s) need validation.',
+		counts: {
+			items: 2,
+			encode_candidates: 0,
+			ready_to_validate: 2,
+			ready_to_promote: 0,
+			processing: 0,
+			complete: 0,
+			blocked: 0
+		},
+		lane_counts: {},
+		state_counts: {},
+		next_action: {
+			kind: 'validate_outputs',
+			label: 'Validate outputs',
+			enabled: true,
+			target_prefix: 'tv/Example/Season 1'
+		},
+		blockers: [],
 		...overrides
 	};
 }
@@ -112,6 +165,95 @@ describe('Folder Studio review request mapping', () => {
 			disabled: false,
 			blocker: ''
 		});
+	});
+
+	it('maps worker states for output processing capacity', () => {
+		const options = buildProcessingHostOptions({
+			compact: true,
+			hosts: [
+				{
+					key: 'm4',
+					label: 'M4 Studio',
+					available: true,
+					message: 'ready',
+					missing_paths: [],
+					issues: [],
+					detail: null,
+					capabilities: ['encode_queue'],
+					priority: 1,
+					max_parallel_encodes: 2,
+					active_encode_count: 1,
+					schedule_profile_label: 'day shift',
+					schedule_detail: 'open',
+					schedule_open: true,
+					active_flag: 'ready',
+					active_reason: 'ready',
+					queue_active: true
+				},
+				{
+					key: 'night',
+					label: 'Night host',
+					available: true,
+					message: 'scheduled',
+					missing_paths: [],
+					issues: [],
+					detail: null,
+					capabilities: ['encode_queue'],
+					priority: 2,
+					max_parallel_encodes: 1,
+					active_encode_count: 0,
+					schedule_profile_label: 'night',
+					schedule_detail: 'opens at 23:00',
+					schedule_open: false,
+					active_flag: 'scheduled',
+					active_reason: 'outside schedule',
+					queue_active: true
+				},
+				{
+					key: 'offline',
+					label: 'Offline',
+					available: false,
+					message: 'ssh failed',
+					missing_paths: [],
+					issues: [],
+					detail: null,
+					capabilities: ['encode_queue'],
+					priority: 3,
+					max_parallel_encodes: 1,
+					active_encode_count: 0,
+					schedule_profile_label: 'always',
+					schedule_detail: 'always',
+					schedule_open: true,
+					active_flag: 'unavailable',
+					active_reason: 'ssh failed',
+					queue_active: false
+				}
+			]
+		});
+
+		expect(options).toEqual([
+			{
+				key: 'm4',
+				label: 'M4 Studio',
+				state: 'Busy',
+				tone: 'active',
+				detail: '1/2 encoding'
+			},
+			{
+				key: 'night',
+				label: 'Night host',
+				state: 'Off schedule',
+				tone: 'wait',
+				detail: 'opens at 23:00'
+			},
+			{
+				key: 'offline',
+				label: 'Offline',
+				state: 'Unavailable',
+				tone: 'fail',
+				detail: 'ssh failed'
+			}
+		]);
 	});
 
 	it('enables send only for a note, available host, and inactive sample job', () => {
@@ -397,6 +539,338 @@ describe('Folder Studio review request mapping', () => {
 		);
 	});
 
+	it('uses output validation workspace copy for validate workflows', () => {
+		const workflow = resolveWorkflow(
+			folderPayload({
+				workflow_state: {
+					prefix: 'tv/Terminator',
+					state: 'mixed',
+					primary_lane: 'validate',
+					label: 'Mixed work',
+					tone: 'ready',
+					detail: '22 to validate, 9 to encode',
+					counts: {
+						items: 31,
+						ready_to_validate: 22,
+						encode_candidates: 9,
+						ready_to_promote: 0,
+						processing: 0,
+						complete: 0,
+						blocked: 0
+					},
+					lane_counts: { validate: 22, encode: 9, promote: 0 },
+					state_counts: { ready_to_validate: 22, encode_candidate: 9, ready_to_promote: 0 },
+					blockers: [],
+					next_action: {
+						kind: 'validate_outputs',
+						label: 'Validate ready outputs',
+						enabled: true,
+						target_prefix: 'tv/Terminator'
+					}
+				}
+			}),
+			folderStatusPayload(),
+			null,
+			null,
+			null,
+			null,
+			null
+		);
+		const workspace = buildReviewWorkspaceView(
+			folderPayload({
+				summary: folderSummary({ item_count: 31 }),
+				workflow_state: {
+					prefix: 'tv/Terminator',
+					state: 'mixed',
+					primary_lane: 'validate',
+					label: 'Mixed work',
+					tone: 'ready',
+					detail: '22 to validate, 9 to encode',
+					counts: {
+						items: 31,
+						ready_to_validate: 22,
+						encode_candidates: 9,
+						ready_to_promote: 0,
+						processing: 0,
+						complete: 0,
+						blocked: 0
+					},
+					lane_counts: { validate: 22, encode: 9, promote: 0 },
+					state_counts: { ready_to_validate: 22, encode_candidate: 9, ready_to_promote: 0 },
+					blockers: [],
+					next_action: {
+						kind: 'validate_outputs',
+						label: 'Validate ready outputs',
+						enabled: true,
+						target_prefix: 'tv/Terminator'
+					}
+				}
+			}),
+			null,
+			null,
+			workflow,
+			false
+		);
+
+		expect(workspace).toMatchObject({
+			badge: 'Validation review',
+			title: 'Output validation',
+			layout: 'pipeline'
+		});
+		expect(workspace.rows.map((row) => [row.label, row.current, row.tone])).toEqual([
+			['Encode', false, 'ready'],
+			['Validate', true, 'ready'],
+			['Promote', false, 'idle'],
+			['Complete', false, 'idle']
+		]);
+		expect(workspace.rows[0]).toMatchObject({
+			label: 'Encode',
+			source: '9 not encoded · 31 items',
+			output: 'Queue 9 encodes'
+		});
+		expect(workspace.rows[1]).toMatchObject({
+			label: 'Validate',
+			source: '22 ready outputs',
+			output: 'Validate 22 outputs'
+		});
+		expect(workspace.rows.map((row) => row.detail).join(' ')).not.toContain(
+			'representative sample'
+		);
+	});
+
+	it('uses completed output copy when every pipeline step is done', () => {
+		const folder = folderPayload({
+			summary: folderSummary({ item_count: 2 }),
+			workflow_state: workflowState({
+				state: 'complete',
+				primary_lane: 'complete',
+				label: 'Complete',
+				tone: 'success',
+				detail: '2 complete',
+				counts: {
+					items: 2,
+					ready_to_validate: 0,
+					encode_candidates: 0,
+					ready_to_promote: 0,
+					processing: 0,
+					complete: 2,
+					blocked: 0
+				},
+				next_action: {
+					kind: 'none',
+					label: 'Complete',
+					enabled: false,
+					target_prefix: 'tv/Example/Season 1'
+				}
+			})
+		});
+		const workflow = resolveWorkflow(folder, folderStatusPayload(), null, null, null, null, null);
+		const workspace = buildReviewWorkspaceView(folder, null, null, workflow, false);
+
+		expect(workspace.layout).toBe('pipeline');
+		expect(workspace).toMatchObject({
+			badge: 'Completed outputs',
+			title: 'Pipeline complete'
+		});
+		expect(workspace.rows.map((row) => [row.label, row.output])).toEqual([
+			['Encode', 'No encode backlog'],
+			['Validate', 'Validation complete'],
+			['Promote', 'Promotion complete'],
+			['Complete', '2 of 2']
+		]);
+	});
+
+	it('uses output workflow runtime facts instead of sample approval state', () => {
+		const folder = folderPayload({
+			summary: folderSummary({ item_count: 31 }),
+			workflow_state: workflowState({
+				state: 'mixed',
+				label: 'Mixed work',
+				detail: '22 to validate, 9 to encode',
+				counts: {
+					items: 31,
+					ready_to_validate: 22,
+					encode_candidates: 9,
+					ready_to_promote: 0,
+					processing: 0,
+					complete: 0,
+					blocked: 0
+				},
+				next_action: {
+					kind: 'validate_outputs',
+					label: 'Validate ready outputs',
+					enabled: true,
+					target_prefix: 'tv/Example/Season 1'
+				}
+			}),
+			encode_queue_summary: '0 running · 0 queued'
+		});
+		const workflow = resolveWorkflow(
+			folder,
+			folderStatusPayload({ folder_scan_status: 'completed' }),
+			null,
+			null,
+			null,
+			null,
+			null
+		);
+
+		expect(
+			buildRuntimeFacts(
+				folder,
+				folderStatusPayload({ folder_scan_status: 'completed' }),
+				{ status: 'missing_sample' } as never,
+				null,
+				workflow
+			)
+		).toEqual([
+			{ label: 'Workflow', value: 'Mixed work' },
+			{ label: 'Scan', value: 'completed' },
+			{ label: 'Outputs', value: '22 validate · 9 encode' },
+			{ label: 'Processing', value: '0 running · 0 queued' }
+		]);
+		expect(buildStatusTiles(folder, folderStatusPayload(), hostsPayload(), workflow)[1]).toEqual({
+			label: 'Outputs',
+			value: '0 / 31 complete',
+			detail: '22 to validate · 9 to encode',
+			tone: 'ready'
+		});
+		expect(summarizeOutputWorkflowPending(folder.workflow_state?.counts)).toBe(
+			'22 validate · 9 encode'
+		);
+		expect(buildFooterSignals(folder, folderStatusPayload(), hostsPayload(), workflow)[0]).toEqual({
+			label: 'Pipeline',
+			value: 'mixed work',
+			tone: 'ready'
+		});
+	});
+
+	it('uses fresher status workflow counts for output shell and runtime facts', () => {
+		const statusWorkflow = workflowState({
+			state: 'processing',
+			primary_lane: 'encode',
+			label: 'Processing',
+			tone: 'active',
+			detail: '4 outputs are processing.',
+			counts: {
+				items: 31,
+				ready_to_validate: 0,
+				encode_candidates: 5,
+				ready_to_promote: 0,
+				processing: 4,
+				complete: 22,
+				blocked: 0
+			},
+			next_action: {
+				kind: 'monitor_encode',
+				label: 'Monitor processing',
+				enabled: true,
+				target_prefix: 'tv/Example/Season 1'
+			}
+		});
+		const folder = folderPayload({
+			summary: folderSummary({ item_count: 31 }),
+			encode_queue_summary: '4 running · 5 queued'
+		});
+		const status = folderStatusPayload({
+			folder_scan_status: 'completed',
+			workflow_state: statusWorkflow
+		});
+		const workflow = resolveWorkflow(folder, status, null, null, null, null, null);
+
+		expect(buildStatusTiles(folder, status, hostsPayload(), workflow)[1]).toEqual({
+			label: 'Outputs',
+			value: '22 / 31 complete',
+			detail: '5 to encode · 4 processing',
+			tone: 'active'
+		});
+		expect(buildRuntimeFacts(folder, status, null, null, workflow)[2]).toEqual({
+			label: 'Outputs',
+			value: '5 encode · 22 complete'
+		});
+		expect(summarizeOutputWorkflowPending(status.workflow_state?.counts)).toBe(
+			'5 encode · 4 processing'
+		);
+	});
+
+	it('keeps sample workflow runtime facts focused on calibration and approval', () => {
+		const workflow = resolveWorkflow(
+			folderPayload({ encode_queue_summary: 'No folder job queued' }),
+			folderStatusPayload({ calibration_status: 'idle', folder_scan_status: 'idle' }),
+			null,
+			null,
+			{ status: 'missing_sample' } as never,
+			null,
+			null
+		);
+
+		expect(
+			buildRuntimeFacts(
+				folderPayload({ encode_queue_summary: 'No folder job queued' }),
+				folderStatusPayload({ calibration_status: 'idle', folder_scan_status: 'idle' }),
+				{ status: 'missing_sample' } as never,
+				null,
+				workflow
+			)
+		).toEqual([
+			{ label: 'Calibration', value: 'idle' },
+			{ label: 'Scan', value: 'idle' },
+			{ label: 'Approval', value: 'missing_sample' },
+			{ label: 'Processing', value: 'No folder job queued' }
+		]);
+		expect(
+			buildStatusTiles(
+				folderPayload(),
+				folderStatusPayload({ calibration_status: 'idle' }),
+				hostsPayload(),
+				workflow
+			)[1]
+		).toEqual({
+			label: 'Sample',
+			value: 'idle',
+			detail: 'polling idle',
+			tone: 'idle'
+		});
+		expect(
+			buildFooterSignals(
+				folderPayload(),
+				folderStatusPayload({ calibration_status: 'idle' }),
+				hostsPayload(),
+				workflow
+			)[0]
+		).toEqual({
+			label: 'Review',
+			value: 'idle',
+			tone: 'active'
+		});
+	});
+
+	it('keeps sample review evidence on the evidence workspace layout', () => {
+		const workspace = buildReviewWorkspaceView(
+			folderPayload(),
+			null,
+			null,
+			{
+				tone: 'idle',
+				label: 'Not sampled',
+				title: 'No representative sample yet',
+				copy: 'Ask for a sample.',
+				primary: 'Ask for draft',
+				primaryAction: 'focus-bench',
+				secondary: 'Open Ops',
+				secondaryAction: 'open-ops'
+			},
+			false
+		);
+
+		expect(workspace).toMatchObject({
+			badge: 'No review media',
+			title: 'Previous sample evidence',
+			layout: 'evidence'
+		});
+		expect(workspace.rows.map((row) => row.label)).toContain('Measured sample');
+	});
+
 	it('lets the operator approve an over-budget sample when the preview looks good', () => {
 		const calibration = {
 			browser_review_ready: true,
@@ -619,9 +1093,115 @@ describe('Folder Studio review request mapping', () => {
 		});
 	});
 
-	it('makes processing folders monitor-first and keeps review media secondary', () => {
+	it('routes approved folders with no encode candidates to the whole show', () => {
 		const workflow = resolveWorkflow(
-			folderPayload({ encode_queue_summary: '1 folder is running.' }),
+			folderPayload({
+				encode_candidate_count: 0,
+				series_context: { prefix: 'tv/Example', title: 'Example' }
+			}),
+			folderStatusPayload(),
+			null,
+			null,
+			{ status: 'accepted', message: 'Sample accepted.' },
+			null,
+			null,
+			true,
+			false
+		);
+
+		expect(workflow).toMatchObject({
+			label: 'Approved',
+			title: 'Approved folder has no queueable items',
+			primary: 'Open whole show',
+			primaryAction: 'open-series',
+			secondary: 'Download pack',
+			secondaryAction: 'download-review-pack'
+		});
+	});
+
+	it('prefers backend workflow state for validation-ready folders', () => {
+		const workflow = resolveWorkflow(
+			folderPayload({ workflow_state: workflowState(), encode_candidate_count: 0 }),
+			folderStatusPayload(),
+			null,
+			null,
+			{ status: 'accepted', message: 'Sample accepted.' },
+			null,
+			null,
+			true,
+			false
+		);
+
+		expect(workflow).toMatchObject({
+			label: 'Ready to validate',
+			title: 'Validate outputs',
+			primary: 'Validate outputs',
+			primaryAction: 'validate-outputs',
+			copy: '2 encoded output(s) need validation.'
+		});
+		expect(
+			resolveWorkflowActionState('validate-outputs', {
+				reviewPackReady: false,
+				pendingProposal: null,
+				calibrationJob: null
+			})
+		).toEqual({ disabled: false, title: '' });
+	});
+
+	it('prefers backend workflow state for promotion-ready folders', () => {
+		const workflow = resolveWorkflow(
+			folderPayload({
+				workflow_state: workflowState({
+					state: 'ready_to_promote',
+					primary_lane: 'promote',
+					label: 'Ready to promote',
+					detail: '1 validated output is ready to promote.',
+					next_action: {
+						kind: 'promote_outputs',
+						label: 'Promote outputs',
+						enabled: true,
+						target_prefix: 'tv/Example/Season 1'
+					}
+				})
+			}),
+			folderStatusPayload(),
+			null,
+			null,
+			{ status: 'accepted', message: 'Sample accepted.' },
+			null,
+			null,
+			true,
+			false
+		);
+
+		expect(workflow).toMatchObject({
+			label: 'Ready to promote',
+			title: 'Promote outputs',
+			primaryAction: 'promote-outputs',
+			copy: '1 validated output is ready to promote.'
+		});
+	});
+
+	it('uses backend status polling workflow state when the folder payload is stale', () => {
+		const workflow = resolveWorkflow(
+			folderPayload({ encode_candidate_count: 0 }),
+			folderStatusPayload({ workflow_state: workflowState() }),
+			null,
+			null,
+			{ status: 'accepted', message: 'Sample accepted.' },
+			null,
+			null,
+			true,
+			false
+		);
+
+		expect(workflow.primaryAction).toBe('validate-outputs');
+	});
+
+	it('makes processing folders monitor-first and keeps review media secondary', () => {
+		const folder = folderPayload({ encode_queue_summary: '1 folder is running.' });
+		const workflow = resolveWorkflow(
+			folder,
 			folderStatusPayload(),
 			null,
 			null,
@@ -643,6 +1223,79 @@ describe('Folder Studio review request mapping', () => {
 			primaryAction: 'monitor-processing',
 			secondary: 'Download pack',
 			secondaryAction: 'download-review-pack'
+		});
+
+		expect(buildDecisionFacts(folder, null, null, workflow)).toEqual([
+			{
+				label: 'Processing',
+				value: 'Active',
+				detail: '2 workers active.'
+			},
+			{
+				label: 'Scope',
+				value: 'Folder',
+				detail: '1 item'
+			},
+			{
+				label: 'Next action',
+				value: 'Monitor processing',
+				detail: 'Download pack also available'
+			}
+		]);
+
+		const workspace = buildReviewWorkspaceView(folder, null, null, workflow, true);
+		expect(workspace).toMatchObject({
+			badge: 'Processing run',
+			title: 'Output encoding',
+			layout: 'pipeline'
+		});
+		expect(workspace.rows.find((row) => row.label === 'Encode')).toMatchObject({
+			current: true,
+			tone: 'active'
+		});
+	});
+
+	it('keeps retry processing on the output encoding facts and workspace', () => {
+		const folder = folderPayload({
+			summary: folderSummary({ item_count: 2 }),
+			sample_item: { rel_path: 'tv/Example/Season 1/sample.mkv', source_size_bytes: 1 },
+			calibration: {
+				browser_review_ready: true,
+				review_media_ready: true,
+				sample_result: { predicted_total_size_bytes: 250_000_000 }
+			} as FolderCalibrationState
+		});
+		const workflow = resolveWorkflow(
+			folder,
+			folderStatusPayload(),
+			folder.calibration as FolderCalibrationState,
+			null,
+			null,
+			null,
+			{
+				job_id: 'encode-retry',
+				prefix: 'tv/Example/Season 1',
+				status: 'failed',
+				error: 'Worker stopped before output was written.'
+			} as EncodeQueueJob,
+			true
+		);
+
+		expect(workflow).toMatchObject({
+			primaryAction: 'retry-encode',
+			isOutputWorkflow: true
+		});
+		expect(
+			buildDecisionFacts(folder, folder.calibration as FolderCalibrationState, null, workflow)[0]
+		).toEqual({
+			label: 'Processing',
+			value: 'Needs retry',
+			detail: 'Worker stopped before output was written.'
+		});
+		expect(buildReviewWorkspaceView(folder, null, null, workflow, true)).toMatchObject({
+			badge: 'Processing run',
+			title: 'Output encoding',
+			layout: 'pipeline'
 		});
 	});
 
@@ -928,22 +1581,26 @@ describe('Folder Studio review request mapping', () => {
 				run_verdict: { outcome: 'good_fit' }
 			}
 		} as FolderCalibrationState;
+		const folder = folderPayload({ calibration });
+		const workflow = resolveWorkflow(
+			folder,
+			folderStatusPayload(),
+			calibration,
+			null,
+			null,
+			null,
+			null
+		);
 
-		expect(
-			resolveWorkflow(
-				folderPayload({ calibration }),
-				folderStatusPayload(),
-				calibration,
-				null,
-				null,
-				null,
-				null
-			)
-		).toMatchObject({
+		expect(workflow).toMatchObject({
 			label: 'Review ready',
 			primary: 'Approve and queue',
 			primaryAction: 'queue-encode',
 			secondary: 'Download pack'
+		});
+		expect(buildDecisionFacts(folder, calibration, null, workflow)[0]).toMatchObject({
+			label: 'Per episode',
+			value: '238 MiB'
 		});
 	});
 
@@ -1074,7 +1731,7 @@ describe('Folder Studio review request mapping', () => {
 				calibrationJob: null
 			})
 		).toEqual({ disabled: false, title: '' });
-		expect(buildWorkflowSteps(workflow).find((step) => step.label === 'Process')).toMatchObject({
+		expect(buildWorkflowSteps(workflow).find((step) => step.label === 'Encode')).toMatchObject({
 			current: true,
 			detail: 'Retry the stopped folder job'
 		});
@@ -1264,5 +1921,137 @@ describe('Folder Studio review request mapping', () => {
 			['Approve', true],
 			['Process', false]
 		]);
+	});
+
+	it('uses output workflow steps for validation-ready folders', () => {
+		const steps = buildWorkflowSteps({
+			tone: 'ready',
+			label: 'Mixed work',
+			title: 'Multiple tasks pending',
+			copy: '22 to validate, 9 to encode',
+			primary: 'Validate 22 outputs',
+			primaryAction: 'validate-outputs',
+			secondary: 'Queue 9 encodes',
+			secondaryAction: 'queue-encode'
+		});
+
+		expect(steps.map((step) => [step.label, step.current, step.tone])).toEqual([
+			['Encode', false, 'ready'],
+			['Validate', true, 'ready'],
+			['Promote', false, 'idle'],
+			['Complete', false, 'idle']
+		]);
+		expect(steps[1].detail).toBe('Multiple tasks pending');
+	});
+
+	it('keeps output processing on the encode step when backend workflow is active', () => {
+		const steps = buildWorkflowSteps({
+			tone: 'active',
+			label: 'Processing',
+			title: 'Encoding approved outputs',
+			copy: '3 running',
+			primary: 'Monitor encode',
+			primaryAction: 'monitor-processing',
+			secondary: 'Open Ops',
+			secondaryAction: 'open-ops',
+			isOutputWorkflow: true
+		});
+
+		expect(steps.map((step) => [step.label, step.current, step.tone])).toEqual([
+			['Encode', true, 'active'],
+			['Validate', false, 'idle'],
+			['Promote', false, 'idle'],
+			['Complete', false, 'idle']
+		]);
+		expect(steps[0].detail).toBe('Encoding approved outputs');
+	});
+
+	it('maps mixed work workflow state to prioritized validate and encode actions', () => {
+		const showFolder = folderPayload({
+			prefix: 'tv/Terminator',
+			summary: folderSummary({
+				prefix: 'tv/Terminator',
+				item_count: 31,
+				seasons: { 'Season 2': 22, 'Season 1': 9 }
+			}),
+			workflow_state: workflowState({
+				prefix: 'tv/Terminator',
+				state: 'mixed',
+				primary_lane: 'validate',
+				label: 'Mixed work',
+				tone: 'ready',
+				detail: '22 to validate, 9 to encode',
+				counts: {
+					items: 31,
+					ready_to_validate: 22,
+					encode_candidates: 9,
+					ready_to_promote: 0,
+					processing: 0,
+					complete: 0,
+					blocked: 0
+				},
+				lane_counts: { validate: 22, encode: 9, promote: 0 },
+				state_counts: { ready_to_validate: 22, encode_candidate: 9, ready_to_promote: 0 },
+				blockers: [],
+				next_action: {
+					kind: 'validate_outputs',
+					label: 'Validate ready outputs',
+					enabled: true,
+					target_prefix: 'tv/Terminator'
+				}
+			})
+		});
+		const workflow = resolveWorkflow(
+			showFolder,
+			folderStatusPayload(),
+			null,
+			null,
+			null,
+			null,
+			null
+		);
+
+		expect(workflow).toMatchObject({
+			tone: 'ready',
+			label: 'Mixed work',
+			title: 'Multiple tasks pending',
+			copy: '22 to validate, 9 to encode',
+			primary: 'Validate show outputs (22)',
+			primaryAction: 'validate-outputs',
+			secondary: 'Queue show encodes (9)',
+			secondaryAction: 'queue-encode'
+		});
+		const mixedFacts = buildDecisionFacts(showFolder, null, null, workflow);
+		expect(mixedFacts[0]).toEqual({
+			label: 'Outputs',
+			value: '22 ready',
+			detail: 'Ready to validate'
+		});
+		expect(mixedFacts[1]).toEqual({
+			label: 'Scope',
+			value: 'Whole show',
+			detail: '31 items'
+		});
+		expect(mixedFacts[2]).toEqual({
+			label: 'Next action',
+			value: 'Validate show outputs (22)',
+			detail: 'Queue show encodes (9) also available'
+		});
+		expect(buildDecisionFacts(folderPayload(), null, null, workflow)[2]).toEqual({
+			label: 'Next action',
+			value: 'Validate show outputs (22)',
+			detail: 'Queue show encodes (9) also available'
+		});
+		expect(outputScopeLabel(showFolder)).toBe('whole show');
+		expect(buildSeasonScopeRows(showFolder)).toEqual([
+			{ label: 'Season 1', count: '9 items', href: 'tv/Terminator/Season 1' },
+			{ label: 'Season 2', count: '22 items', href: 'tv/Terminator/Season 2' }
+		]);
+		expect(
+			outputScopeLabel(
+				folderPayload({ series_context: { prefix: 'tv/Terminator', title: 'Terminator' } })
+			)
+		).toBe('season');
+		expect(outputScopeLabel(folderPayload())).toBe('folder');
 	});
 });

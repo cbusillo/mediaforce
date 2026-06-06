@@ -64,6 +64,7 @@ from mediaforce.execution import (
 )
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.planner import build_manifest_item
+from mediaforce.library.run_manifests import select_encode_candidates
 from mediaforce.hosts.types import HostSetupResult
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.core.process_control import ManagedProcessController
@@ -120,6 +121,8 @@ from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_fo
     build_multimodal_review_pack, build_tuning_runtime_toolbelt, load_latest_failed_sample_job_state, \
     load_retryable_sample_job_state
 from mediaforce.web.runtime.folder_actions import ActionPayload, FolderItem
+from mediaforce.web.runtime.folder_cards import list_folder_cards
+from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
     restore_staged_artifact as runtime_restore_staged_artifact, \
     run_calibration_job as runtime_run_calibration_job, \
@@ -176,7 +179,9 @@ from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_
     dispatch_calibration_job as runtime_dispatch_calibration_job, \
     expire_calibration_job as runtime_expire_calibration_job, \
     latest_scan_completed_at as runtime_latest_scan_completed_at, \
-    load_job_state as runtime_load_job_state, load_scan_job_state as runtime_load_scan_job_state, \
+    load_job_state as runtime_load_job_state, \
+    load_overlapping_job_state as runtime_load_overlapping_job_state, \
+    load_scan_job_state as runtime_load_scan_job_state, \
     maybe_schedule_scan as runtime_maybe_schedule_scan, \
     process_calibration_queue_once as runtime_process_calibration_queue_once, \
     run_scan_job as runtime_run_scan_job, save_job_state as runtime_save_job_state, \
@@ -314,7 +319,13 @@ def create_app(config_path: Path | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def _app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        purge_transient_artifacts(config, force=True)
+        threading.Thread(
+            target=purge_transient_artifacts,
+            args=(config,),
+            kwargs={"force": True},
+            name="transient-cleanup",
+            daemon=True,
+        ).start()
         with open_db(config.paths.db_path) as connection:
             repaired_host_rows = repair_persisted_encode_job_hosts(connection)
             if repaired_host_rows:
@@ -323,7 +334,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             _recover_calibration_jobs(connection, config)
             _recover_encode_queue(connection, config)
         _start_background_workers(config)
-        _refresh_host_status_cache(config)
+        _safe_collect_host_statuses(config)
         try:
             yield
         finally:
@@ -408,6 +419,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             config,
             folder_card_cache_key=_folder_card_cache_key,
             list_folder_cards=_list_folder_cards,
+            list_series_folder_cards=_list_series_folder_cards,
         )
 
     def _dashboard_api_payload() -> dict[str, Any]:
@@ -422,7 +434,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         return folder_status_payload(
             config,
             normalized_prefix,
-            load_job_state=_load_job_state,
+            load_job_state=_load_overlapping_job_state,
             load_retryable_sample_job_state=_load_retryable_sample_job_state,
             load_scan_job_state=_load_scan_job_state,
             load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
@@ -601,6 +613,9 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             scheduler_policy = object_dict(encode_queue_state.get("scheduler"))
             encode_job = _decorate_encode_job_for_scheduler(config, encode_job)
             encode_queue_summary = _encode_queue_summary_copy(encode_queue, encode_queue_state, encode_job)
+            encode_candidate_count = _folder_encode_candidate_count(connection, config, normalized_prefix)
+            workflow_state = build_folder_workflow_state(connection, normalized_prefix).to_payload()
+            series_context = _folder_series_context(normalized_prefix)
         policy = _folder_display_policy(
             sample_item=sample_item,
             calibration=calibration,
@@ -640,6 +655,9 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 "encode_queue_state": encode_queue_state,
                 "encode_queue_summary": encode_queue_summary,
                 "encode_queue_scheduler": scheduler_policy,
+                "encode_candidate_count": encode_candidate_count,
+                "workflow_state": workflow_state,
+                "series_context": series_context,
                 "resolved_metric": resolved_metric.upper(),
                 "sample_host_key": sample_host_key,
                 "sample_host_options": sample_host_choices,
@@ -1522,6 +1540,51 @@ def _list_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[F
     )
 
 
+def _list_series_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
+    return _folder_cards_for_group(config, connection, folder_group=_tv_series_folder_group, aggregate_badges=True)
+
+
+def _folder_cards_for_group(
+        config: MediaforceConfig,
+        connection: DBClient,
+        *,
+        folder_group: Any,
+        aggregate_badges: bool = False,
+) -> list[FolderCard]:
+    needs_attention_badges: dict[str, dict[str, str | None]] | None = None
+    calibration_job_badges: dict[str, dict[str, str | None]] | None = None
+
+    def review_badge_for_prefix(prefix: str) -> dict[str, str | None]:
+        nonlocal calibration_job_badges, needs_attention_badges
+        if needs_attention_badges is None:
+            needs_attention_badges = _folder_needs_attention_badges(connection)
+        if calibration_job_badges is None:
+            calibration_job_badges = _folder_calibration_job_badges(connection)
+        if aggregate_badges:
+            aggregated_badge = _aggregated_folder_review_badge(
+                prefix,
+                needs_attention_badges=needs_attention_badges,
+                calibration_job_badges=calibration_job_badges,
+            )
+            if aggregated_badge is not None:
+                return aggregated_badge
+        return _folder_review_badge(
+            config,
+            prefix,
+            needs_attention_badges=needs_attention_badges,
+            calibration_job_badges=calibration_job_badges,
+        )
+
+    return list_folder_cards(
+        connection,
+        minimum_recommended_savings_bytes=MIN_RECOMMENDED_SAVINGS_BYTES,
+        folder_group=folder_group,
+        age_days=_age_days,
+        estimate_savings_bytes=_estimate_savings_bytes,
+        review_badge_for_prefix=review_badge_for_prefix,
+    )
+
+
 def _preview_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
     needs_attention_badges = _folder_needs_attention_badges(connection)
     calibration_job_badges = _folder_calibration_job_badges(connection)
@@ -1740,6 +1803,26 @@ def _folder_needs_attention_badges(connection: DBClient) -> dict[str, dict[str, 
     return badges
 
 
+def _aggregated_folder_review_badge(
+        prefix: str,
+        *,
+        needs_attention_badges: dict[str, dict[str, str | None]],
+        calibration_job_badges: dict[str, dict[str, str | None]],
+) -> dict[str, str | None] | None:
+    for badges in (needs_attention_badges, calibration_job_badges):
+        exact_badge = badges.get(prefix)
+        if exact_badge is not None:
+            return exact_badge
+        descendant_badges = [
+            badge
+            for badge_prefix, badge in badges.items()
+            if badge_prefix.startswith(f"{prefix}/")
+        ]
+        if descendant_badges:
+            return descendant_badges[0]
+    return None
+
+
 def _folder_calibration_job_badges(connection: DBClient) -> dict[str, dict[str, str | None]]:
     rows = connection.execute(
         select(
@@ -1861,9 +1944,15 @@ def _folder_review_badge(
 
 
 def _sample_item(connection: DBClient, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+    normalized_prefix = prefix.strip().strip("/")
     base_query = (
         select(library_items)
-        .where(library_items.c.rel_path.like(f"{prefix}%"))
+        .where(
+            or_(
+                library_items.c.rel_path == normalized_prefix,
+                library_items.c.rel_path.like(_prefix_descendant_like_pattern(normalized_prefix), escape="\\"),
+            )
+        )
         .order_by(library_items.c.priority_score.desc(), library_items.c.size_bytes.desc())
         .limit(1)
     )
@@ -2401,6 +2490,10 @@ def _load_job_state(connection: DBClient, config: MediaforceConfig, prefix: str)
     return runtime_load_job_state(connection, config, prefix, _job_runtime_deps())
 
 
+def _load_overlapping_job_state(connection: DBClient, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+    return runtime_load_overlapping_job_state(connection, config, prefix, _job_runtime_deps())
+
+
 def _load_retryable_sample_job_state(connection: DBClient, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
     return load_retryable_sample_job_state(connection, config, prefix, _job_runtime_deps())
 
@@ -2507,6 +2600,34 @@ def _folder_group(rel_path: str) -> tuple[str, str, str, str] | None:
     if parts[0] == "tv" and len(parts) >= 3:
         return "/".join(parts[:3]), f"{parts[1]} · {parts[2]}", parts[1], "Season"
     return "/".join(parts[:2]), parts[1], parts[0].title(), "Folder"
+
+
+def _tv_series_folder_group(rel_path: str) -> tuple[str, str, str, str] | None:
+    parts = Path(rel_path).parts
+    if len(parts) < 3 or parts[0] != "tv":
+        return None
+    return "/".join(parts[:2]), parts[1], "TV series", "Series"
+
+
+def _folder_series_context(prefix: str) -> dict[str, str] | None:
+    parts = Path(prefix).parts
+    if len(parts) < 3 or parts[0] != "tv":
+        return None
+    series_prefix = "/".join(parts[:2])
+    if series_prefix == prefix:
+        return None
+    return {"prefix": series_prefix, "title": parts[1]}
+
+
+def _folder_encode_candidate_count(connection: DBClient, config: MediaforceConfig, prefix: str) -> int:
+    return len(
+        select_encode_candidates(
+            connection,
+            config,
+            prefixes=[prefix],
+            limit=None,
+        )
+    )
 
 
 def _estimate_savings_bytes(*, size_bytes: int, video_codec: str, audio_summary_json: str) -> int:

@@ -388,7 +388,9 @@ def encode_queue_summary_copy(
         parts.append(f"this folder is {queue_position} of {queue_depth}")
     elif status == "running":
         parts.append("this folder is active now")
-    elif status in {"completed", "failed", "stopped", "needs_attention"}:
+    elif status == "needs_attention":
+        parts.append("latest folder job needs attention")
+    elif status in {"completed", "failed", "stopped"}:
         parts.append(f"latest folder job {status}")
     else:
         parts.append("no folder job queued yet")
@@ -400,10 +402,6 @@ def encode_queue_summary_copy(
     queue_eta_copy = str(object_dict(encode_queue.get("telemetry")).get("eta_copy") or "").strip()
     if queue_eta_copy:
         parts.append(f"estimated queue finish in {queue_eta_copy}")
-
-    attention_count = int_value(encode_queue.get("needs_attention_count"))
-    if attention_count:
-        parts.append(f"{attention_count} need attention")
 
     if encode_job and encode_job.get("scheduler_status_copy") and status in {"queued", "retry_backoff", "running", "needs_attention"}:
         parts.append(str(encode_job["scheduler_status_copy"]))

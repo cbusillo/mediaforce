@@ -12,14 +12,18 @@
 	import StateBadge from './StateBadge.svelte';
 	import WorkstationPanel from './WorkstationPanel.svelte';
 	import {
+		buildWorkLaneGroups,
 		buildQueueFooterSignals,
 		buildQueueStatusTiles,
 		codecSummary,
 		folderStatusCopy,
+		isQueueActionableFolder,
+		queuePrimaryActionLabel,
 		queueFolderState,
 		queueFolderTone,
 		totalPendingItems,
-		totalProjectedReclaim
+		totalProjectedReclaim,
+		workflowOpenItemCount
 	} from './queue-workstation';
 	import {
 		clearStoredWorkbenchFilters,
@@ -42,7 +46,25 @@
 		mode?: 'queue' | 'folders';
 	} = $props();
 
-	const folders = $derived(foldersPayload.folders);
+	type FolderScope = 'season' | 'series';
+
+	let folderScope = $state<FolderScope>('season');
+	const isFolderIndex = $derived(mode === 'folders');
+	const seriesFolders = $derived(foldersPayload.series_folders ?? []);
+	const canSelectSeriesScope = $derived(isFolderIndex && seriesFolders.length > 0);
+	const queueFolders = $derived(foldersPayload.folders.filter(isQueueActionableFolder));
+	const folders = $derived(
+		isFolderIndex && folderScope === 'series'
+			? seriesFolders
+			: isFolderIndex
+				? foldersPayload.folders
+				: queueFolders
+	);
+	$effect(() => {
+		if (folderScope === 'series' && !canSelectSeriesScope) {
+			folderScope = 'season';
+		}
+	});
 	let searchQuery = $state('');
 	let libraryFilters = $state<Record<string, boolean>>({});
 	let stateFilters = $state<Record<string, boolean>>({});
@@ -66,7 +88,15 @@
 		})
 	);
 	const visibleFoldersPayload = $derived({ ...foldersPayload, folders: visibleFolders });
-	const nextFolder = $derived(visibleFolders[0] ?? null);
+	const visibleTableFolders = $derived(visibleFolders.slice(0, 32));
+	const visibleWorkLaneGroups = $derived(
+		isFolderIndex ? [] : buildWorkLaneGroups(visibleTableFolders)
+	);
+	const nextFolder = $derived(
+		isFolderIndex
+			? (visibleFolders[0] ?? null)
+			: (visibleWorkLaneGroups[0]?.folders[0] ?? visibleFolders[0] ?? null)
+	);
 	let selectedPrefix = $state('');
 	const selectedFolder = $derived(
 		visibleFolders.find((folder) => folder.prefix === selectedPrefix) ?? nextFolder
@@ -82,34 +112,71 @@
 	const excludedStateCount = $derived(
 		stateOptions.filter((option) => !stateIncluded(option.key)).length
 	);
-	const statusTiles = $derived(buildQueueStatusTiles(dashboard, visibleFoldersPayload, hosts));
+	const folderScopeLabel = $derived(folderScope === 'series' ? 'Whole shows' : 'Season folders');
+	const primaryScopeUnit = $derived(
+		isFolderIndex ? folderScopeLabel.toLowerCase() : 'work folders'
+	);
+	const folderScopeDetail = $derived(
+		folderScope === 'series'
+			? 'queue or inspect every season in a show together'
+			: isFolderIndex
+				? 'queue or inspect one season at a time'
+				: 'review folders'
+	);
+	const statusTiles = $derived(
+		buildQueueStatusTiles(
+			dashboard,
+			visibleFoldersPayload,
+			hosts,
+			isFolderIndex ? folderScopeLabel : 'Work folders'
+		)
+	);
 	const footerSignals = $derived(buildQueueFooterSignals(dashboard, visibleFoldersPayload, hosts));
 	const runningSamples = $derived(dashboard.calibration_queue.sample.running_count);
 	const queuedSamples = $derived(dashboard.calibration_queue.sample.queued_count);
 	const pendingReviews = $derived(dashboard.calibration_queue.sample.pending_review_count);
-	const isFolderIndex = $derived(mode === 'folders');
-	const shellSubject = $derived(isFolderIndex ? 'Folders' : 'Queue');
+	const shellSubject = $derived(isFolderIndex ? 'Folders' : 'Work');
 	const shellRoute = $derived(isFolderIndex ? 'folders' : 'queue');
-	const filterTitle = $derived(isFolderIndex ? 'Find folders' : 'Queue filters');
-	const visibleSummaryLabel = $derived(isFolderIndex ? 'Visible folders' : 'Visible work');
+	const filterTitle = $derived(isFolderIndex ? 'Find folders' : 'Work filters');
+	const visibleSummaryLabel = $derived(
+		isFolderIndex ? `Visible ${folderScopeLabel.toLowerCase()}` : 'Visible work'
+	);
 	const filterEmptyCopy = $derived(
 		isFolderIndex ? 'all folders included' : 'all queue items included'
 	);
 	const scopeTitle = $derived(isFolderIndex ? 'Index status' : 'Work status');
-	const primaryScopeTitle = $derived(isFolderIndex ? 'Searchable folders' : 'Review candidates');
-	const headerEyebrow = $derived(isFolderIndex ? 'Folder index' : 'Queue');
-	const headerTitle = $derived(isFolderIndex ? 'Find a folder' : 'Choose next folder');
+	const primaryScopeTitle = $derived(
+		isFolderIndex ? `Searchable ${folderScopeLabel.toLowerCase()}` : 'Review candidates'
+	);
+	const headerEyebrow = $derived(isFolderIndex ? 'Folder index' : 'Worklist');
+	const headerTitle = $derived(isFolderIndex ? 'Find media' : 'Choose next work');
 	const headerCopy = $derived(
 		isFolderIndex
-			? 'Search or filter discovered folders, then open Folder Studio when you know which folder needs attention.'
+			? 'Choose season folders or whole shows, then search or filter the scope you want to inspect.'
 			: 'Use the worklist to pick the next folder that needs review, then open Folder Studio when the action looks right.'
 	);
 	const workspaceLabel = $derived(
-		isFolderIndex ? 'Folder index and selected folder' : 'Queue worklist and selected folder'
+		isFolderIndex ? 'Folder index and selected folder' : 'Worklist and selected folder'
 	);
-	const selectedPanelTitle = $derived(isFolderIndex ? 'Folder details' : 'Next action');
-	const tableEyebrow = $derived(isFolderIndex ? 'Folder index' : 'Ranked queue');
-	const tableTitle = $derived(isFolderIndex ? 'Matching folders' : 'Next folders to review');
+	const activeEntityLabel = $derived(isFolderIndex && folderScope === 'series' ? 'Show' : 'Folder');
+	const selectedPanelTitle = $derived(
+		isFolderIndex ? `${activeEntityLabel} details` : 'Selected work'
+	);
+	const tableEyebrow = $derived(
+		isFolderIndex && folderScope === 'series'
+			? 'Show index'
+			: isFolderIndex
+				? 'Folder index'
+				: 'Ranked work'
+	);
+	const tableTitle = $derived(
+		isFolderIndex ? `Matching ${folderScopeLabel.toLowerCase()}` : 'Workflow lanes'
+	);
+	const visibleScopeSummary = $derived(
+		`${visibleFolders.length.toLocaleString('en-US')} / ${folders.length.toLocaleString(
+			'en-US'
+		)} ${isFolderIndex ? folderScopeLabel.toLowerCase() : 'folders'}`
+	);
 
 	type LibraryOption = {
 		key: string;
@@ -164,7 +231,7 @@
 				reclaim: 0
 			};
 			existing.folders += 1;
-			existing.pending += Math.max(folder.pending_count ?? 0, 0);
+			existing.pending += workflowOpenItemCount(folder);
 			existing.reclaim += Math.max(folder.projected_reclaim_bytes ?? 0, 0);
 			byLibrary[key] = existing;
 		}
@@ -183,7 +250,7 @@
 				pending: 0
 			};
 			existing.folders += 1;
-			existing.pending += Math.max(folder.pending_count ?? 0, 0);
+			existing.pending += workflowOpenItemCount(folder);
 			byState[key] = existing;
 		}
 		return Object.values(byState).sort((left, right) => right.pending - left.pending);
@@ -246,6 +313,12 @@
 		setStateIncluded(key, (event.currentTarget as HTMLInputElement).checked);
 	}
 
+	function setFolderScope(scope: FolderScope) {
+		if (scope === folderScope) return;
+		folderScope = scope;
+		selectedPrefix = '';
+	}
+
 	function selectFolder(folder: FolderCard) {
 		selectedPrefix = folder.prefix;
 	}
@@ -253,12 +326,16 @@
 	function selectedRecommendationCopy(folder: FolderCard | null, index: number): string {
 		if (!folder) return 'No folder is selected.';
 		const reclaim = formatBytes(folder.projected_reclaim_bytes);
-		const pending = folder.pending_count.toLocaleString('en-US');
-		if (isFolderIndex) {
-			return `${folder.title} has ${pending} pending items and about ${reclaim} of projected reclaim.`;
+		const openWork = workflowOpenItemCount(folder).toLocaleString('en-US');
+		if (isFolderIndex && folderScope === 'series') {
+			return `${folder.title} spans ${openWork} open workflow items across the whole show with about ${reclaim} of projected reclaim.`;
 		}
-		const rankCopy = index === 0 ? 'the first visible folder' : `#${index + 1} in the visible list`;
-		return `${folder.title} is ${rankCopy} with ${pending} pending items and about ${reclaim} of projected reclaim.`;
+		if (isFolderIndex) {
+			return `${folder.title} has ${openWork} open workflow items and about ${reclaim} of projected reclaim.`;
+		}
+		const rankCopy =
+			index === 0 ? 'the first visible work item' : `#${index + 1} in the visible worklist`;
+		return `${folder.title} is ${rankCopy} with ${openWork} open workflow items and about ${reclaim} of projected reclaim.`;
 	}
 
 	$effect(restoreFilters);
@@ -267,17 +344,12 @@
 
 <OperatorShell route={shellRoute} subject={shellSubject} {crumb} {statusTiles} {footerSignals}>
 	<main class="home">
-		<aside class="home__rail" aria-label="Queue filters and scope">
+		<aside class="home__rail" aria-label="Work filters and scope">
 			<WorkstationPanel eyebrow="Filters" title={filterTitle}>
-				<div class="queue-filter" aria-label="Queue filters">
+				<div class="queue-filter" aria-label="Work filters">
 					<div class="queue-filter__summary">
 						<span>{visibleSummaryLabel}</span>
-						<strong
-							>{visibleFolders.length.toLocaleString('en-US')} / {folders.length.toLocaleString(
-								'en-US'
-							)}
-							folders</strong
-						>
+						<strong>{visibleScopeSummary}</strong>
 						<small
 							>{[
 								excludedLibraryCount ? `${excludedLibraryCount} libraries excluded` : '',
@@ -323,7 +395,7 @@
 										>{option.folders.toLocaleString('en-US')} folders · {option.pending.toLocaleString(
 											'en-US'
 										)}
-										pending</small
+										open</small
 									>
 								</span>
 								<em>{formatBytes(option.reclaim)}</em>
@@ -355,7 +427,7 @@
 										>{option.folders.toLocaleString('en-US')} folders · {option.pending.toLocaleString(
 											'en-US'
 										)}
-										pending</small
+										open</small
 									>
 								</span>
 							</label>
@@ -368,12 +440,16 @@
 				<div class="scope-list">
 					<div class="scope-row scope-row--active">
 						<span>Primary</span>
-						<strong>{primaryScopeTitle}</strong>
+						<strong
+							>{isFolderIndex
+								? `${primaryScopeTitle} · ${folderScopeLabel}`
+								: primaryScopeTitle}</strong
+						>
 						<small
 							>{visibleFolders.length.toLocaleString('en-US')} / {folders.length.toLocaleString(
 								'en-US'
 							)}
-							folders</small
+							{primaryScopeUnit}</small
 						>
 					</div>
 					<div class="scope-row">
@@ -410,7 +486,7 @@
 
 		<section
 			class="home__main"
-			aria-label={isFolderIndex ? 'Folder index' : 'Operational review queue'}
+			aria-label={isFolderIndex ? 'Folder index' : 'Operational worklist'}
 		>
 			<header class="queue-header">
 				<div>
@@ -418,135 +494,238 @@
 					<h1>{headerTitle}</h1>
 					<p>{headerCopy}</p>
 				</div>
-				<div class="queue-header__facts">
-					<div>
-						<span>Visible folders</span>
-						<strong>{visibleFolders.length.toLocaleString('en-US')}</strong>
-					</div>
-					<div>
-						<span>Pending items</span>
-						<strong>{totalPendingItems(visibleFolders).toLocaleString('en-US')}</strong>
-					</div>
-					<div>
-						<span>Projected reclaim</span>
-						<strong>{formatBytes(totalProjectedReclaim(visibleFolders))}</strong>
+				<div class="queue-header__tools">
+					{#if isFolderIndex}
+						<div class="scope-switch" aria-label="Folder scope">
+							<span>Scope</span>
+							<div class="scope-toggle" role="group" aria-label="Folder scope">
+								<button
+									type="button"
+									class:scope-toggle__button--active={folderScope === 'season'}
+									aria-pressed={folderScope === 'season'}
+									aria-current={folderScope === 'season' ? 'true' : undefined}
+									onclick={() => setFolderScope('season')}
+								>
+									<span>Season folders</span>
+									<small>{foldersPayload.folders.length.toLocaleString('en-US')}</small>
+								</button>
+								<button
+									type="button"
+									disabled={!canSelectSeriesScope}
+									class:scope-toggle__button--active={folderScope === 'series'}
+									aria-pressed={folderScope === 'series'}
+									aria-current={folderScope === 'series' ? 'true' : undefined}
+									onclick={() => setFolderScope('series')}
+								>
+									<span>Whole shows</span>
+									<small>{seriesFolders.length.toLocaleString('en-US')}</small>
+								</button>
+							</div>
+							<small>{folderScopeDetail}</small>
+						</div>
+					{/if}
+					<div class="queue-header__facts">
+						<div>
+							<span>{isFolderIndex ? `Visible ${folderScopeLabel}` : 'Visible folders'}</span>
+							<strong>{visibleFolders.length.toLocaleString('en-US')}</strong>
+						</div>
+						<div>
+							<span>Open work</span>
+							<strong>{totalPendingItems(visibleFolders).toLocaleString('en-US')}</strong>
+						</div>
+						<div>
+							<span>Projected reclaim</span>
+							<strong>{formatBytes(totalProjectedReclaim(visibleFolders))}</strong>
+						</div>
 					</div>
 				</div>
 			</header>
 
-			<section class="queue-workspace" aria-label={workspaceLabel}>
-				<WorkstationPanel
-					eyebrow={selectedFolderIndex === 0 ? 'Recommended' : 'Selected'}
-					title={selectedPanelTitle}
-				>
-					{#if selectedFolder}
-						<div class="selected-folder">
-							<div class="selected-folder__identity">
-								<div class="selected-folder__head">
-									<StateBadge
-										tone={queueFolderTone(selectedFolder)}
-										label={queueFolderState(selectedFolder)}
-									/>
-									<strong>#{selectedFolderIndex + 1}</strong>
+			<section
+				class:queue-workspace--work={!isFolderIndex}
+				class="queue-workspace"
+				aria-label={workspaceLabel}
+			>
+				<div class="queue-inspector">
+					<WorkstationPanel
+						eyebrow={selectedFolderIndex === 0 ? 'Recommended' : 'Selected'}
+						title={selectedPanelTitle}
+					>
+						{#if selectedFolder}
+							<div class="selected-folder">
+								<div class="selected-folder__identity">
+									<div class="selected-folder__head">
+										<StateBadge
+											tone={queueFolderTone(selectedFolder)}
+											label={queueFolderState(selectedFolder)}
+										/>
+										<strong>#{selectedFolderIndex + 1}</strong>
+									</div>
+									<div>
+										<h2>{selectedFolder.title}</h2>
+										<p>{selectedFolder.prefix}</p>
+									</div>
 								</div>
-								<div>
-									<h2>{selectedFolder.title}</h2>
-									<p>{selectedFolder.prefix}</p>
+								<div class="reason-block">
+									<span>Why this row</span>
+									<p>{selectedRecommendationCopy(selectedFolder, selectedFolderIndex)}</p>
 								</div>
+								<dl class="context-metrics">
+									<dt>Open work</dt>
+									<dd>{workflowOpenItemCount(selectedFolder).toLocaleString('en-US')}</dd>
+									<dt>Projected reclaim</dt>
+									<dd>{formatBytes(selectedFolder.projected_reclaim_bytes)}</dd>
+									<dt>Source size</dt>
+									<dd>{formatBytes(selectedFolder.total_size_bytes)}</dd>
+									<dt>Codec mix</dt>
+									<dd>{codecSummary(selectedFolder.video_codecs)}</dd>
+									<dt>Catalog state</dt>
+									<dd>{folderStatusCopy(selectedFolder)}</dd>
+								</dl>
+								<a
+									class="control control--primary"
+									href={resolve(folderRoutePath(selectedFolder.prefix))}
+									>{isFolderIndex
+										? `Open ${activeEntityLabel} Studio`
+										: queuePrimaryActionLabel(selectedFolder)}</a
+								>
 							</div>
-							<div class="reason-block">
-								<span>Why this row</span>
-								<p>{selectedRecommendationCopy(selectedFolder, selectedFolderIndex)}</p>
-							</div>
-							<dl class="context-metrics">
-								<dt>Pending items</dt>
-								<dd>{selectedFolder.pending_count.toLocaleString('en-US')}</dd>
-								<dt>Projected reclaim</dt>
-								<dd>{formatBytes(selectedFolder.projected_reclaim_bytes)}</dd>
-								<dt>Source size</dt>
-								<dd>{formatBytes(selectedFolder.total_size_bytes)}</dd>
-								<dt>Codec mix</dt>
-								<dd>{codecSummary(selectedFolder.video_codecs)}</dd>
-								<dt>Catalog state</dt>
-								<dd>{folderStatusCopy(selectedFolder)}</dd>
-							</dl>
-							<a
-								class="control control--primary"
-								href={resolve(folderRoutePath(selectedFolder.prefix))}>Open Folder Studio</a
-							>
-						</div>
-					{:else}
-						<div class="empty-note">Select a folder from the ranked queue.</div>
-					{/if}
-				</WorkstationPanel>
+						{:else}
+							<div class="empty-note">Select a folder from the ranked worklist.</div>
+						{/if}
+					</WorkstationPanel>
+				</div>
 
-				<WorkstationPanel
-					eyebrow={isFolderIndex ? tableEyebrow : 'Worklist'}
-					title={tableTitle}
-					meta={`${visibleFolders.length.toLocaleString('en-US')} visible`}
-				>
-					<div class="table-wrap">
-						<table>
-							<thead>
-								<tr>
-									<th>Rank</th>
-									<th>State</th>
-									<th>Folder</th>
-									<th>Pending</th>
-									<th>Source</th>
-									<th>Reclaim</th>
-									<th>Codec</th>
-									<th>Open</th>
-								</tr>
-							</thead>
-							<tbody>
-								{#each visibleFolders.slice(0, 32) as folder (rowKey(folder))}
-									<tr class:row-selected={selectedFolder?.prefix === folder.prefix}>
-										<td>
-											<button
-												type="button"
-												class="rank-button"
-												aria-label={`Select ${folder.title}`}
-												aria-pressed={selectedFolder?.prefix === folder.prefix}
-												onclick={() => selectFolder(folder)}
-											>
-												{rowRank(folder)}
-											</button>
-										</td>
-										<td>
-											<StateBadge
-												compact
-												tone={queueFolderTone(folder)}
-												label={queueFolderState(folder)}
-											/>
-										</td>
-										<td>
-											<button
-												type="button"
-												class="folder-select"
-												onclick={() => selectFolder(folder)}
-											>
-												<strong>{folder.title}</strong>
-												<span>{folder.prefix}</span>
-											</button>
-										</td>
-										<td>{folder.pending_count.toLocaleString('en-US')}</td>
-										<td>{formatBytes(folder.total_size_bytes)}</td>
-										<td>{formatBytes(folder.projected_reclaim_bytes)}</td>
-										<td>{codecSummary(folder.video_codecs)}</td>
-										<td>
-											<a class="open-link" href={resolve(folderRoutePath(folder.prefix))}>Open</a>
-										</td>
-									</tr>
-								{:else}
+				<div class="queue-lanes">
+					<WorkstationPanel
+						eyebrow={isFolderIndex ? tableEyebrow : 'Workflow lanes'}
+						title={tableTitle}
+						meta={`${visibleFolders.length.toLocaleString('en-US')} visible`}
+					>
+						<div class="table-wrap">
+							<table>
+								<thead>
 									<tr>
-										<td colspan="8">No folders match the current filters.</td>
+										<th>Rank</th>
+										<th>State</th>
+										<th>{activeEntityLabel}</th>
+										<th>Open work</th>
+										<th>Source</th>
+										<th>Reclaim</th>
+										<th>Codec</th>
+										<th>Open</th>
 									</tr>
-								{/each}
-							</tbody>
-						</table>
-					</div>
-				</WorkstationPanel>
+								</thead>
+								<tbody>
+									{#if !isFolderIndex && visibleWorkLaneGroups.length > 0}
+										{#each visibleWorkLaneGroups as group (group.key)}
+											<tr class="lane-row lane-row--{group.tone}">
+												<td colspan="8">
+													<div class="lane-row__content">
+														<strong>{group.label}</strong>
+														<span>{group.detail}</span>
+														<small
+															>{group.folders.length.toLocaleString('en-US')} folders · {group.openWork.toLocaleString(
+																'en-US'
+															)} open</small
+														>
+													</div>
+												</td>
+											</tr>
+											{#each group.folders as folder (rowKey(folder))}
+												<tr class:row-selected={selectedFolder?.prefix === folder.prefix}>
+													<td>
+														<button
+															type="button"
+															class="rank-button"
+															aria-label={`Select ${folder.title}`}
+															aria-pressed={selectedFolder?.prefix === folder.prefix}
+															onclick={() => selectFolder(folder)}
+														>
+															{rowRank(folder)}
+														</button>
+													</td>
+													<td>
+														<StateBadge
+															compact
+															tone={queueFolderTone(folder)}
+															label={queueFolderState(folder)}
+														/>
+													</td>
+													<td>
+														<button
+															type="button"
+															class="folder-select"
+															onclick={() => selectFolder(folder)}
+														>
+															<strong>{folder.title}</strong>
+															<span>{folder.prefix}</span>
+														</button>
+													</td>
+													<td>{workflowOpenItemCount(folder).toLocaleString('en-US')}</td>
+													<td>{formatBytes(folder.total_size_bytes)}</td>
+													<td>{formatBytes(folder.projected_reclaim_bytes)}</td>
+													<td>{codecSummary(folder.video_codecs)}</td>
+													<td>
+														<a class="open-link" href={resolve(folderRoutePath(folder.prefix))}
+															>Open</a
+														>
+													</td>
+												</tr>
+											{/each}
+										{/each}
+									{:else if visibleTableFolders.length > 0}
+										{#each visibleTableFolders as folder (rowKey(folder))}
+											<tr class:row-selected={selectedFolder?.prefix === folder.prefix}>
+												<td>
+													<button
+														type="button"
+														class="rank-button"
+														aria-label={`Select ${folder.title}`}
+														aria-pressed={selectedFolder?.prefix === folder.prefix}
+														onclick={() => selectFolder(folder)}
+													>
+														{rowRank(folder)}
+													</button>
+												</td>
+												<td>
+													<StateBadge
+														compact
+														tone={queueFolderTone(folder)}
+														label={queueFolderState(folder)}
+													/>
+												</td>
+												<td>
+													<button
+														type="button"
+														class="folder-select"
+														onclick={() => selectFolder(folder)}
+													>
+														<strong>{folder.title}</strong>
+														<span>{folder.prefix}</span>
+													</button>
+												</td>
+												<td>{workflowOpenItemCount(folder).toLocaleString('en-US')}</td>
+												<td>{formatBytes(folder.total_size_bytes)}</td>
+												<td>{formatBytes(folder.projected_reclaim_bytes)}</td>
+												<td>{codecSummary(folder.video_codecs)}</td>
+												<td>
+													<a class="open-link" href={resolve(folderRoutePath(folder.prefix))}
+														>Open</a
+													>
+												</td>
+											</tr>
+										{/each}
+									{:else}
+										<tr>
+											<td colspan="8">No folders match the current filters.</td>
+										</tr>
+									{/if}
+								</tbody>
+							</table>
+						</div>
+					</WorkstationPanel>
+				</div>
 			</section>
 		</section>
 	</main>
@@ -583,11 +762,11 @@
 	}
 
 	.queue-header {
-		align-items: end;
+		align-items: start;
 		border-bottom: var(--mf-border);
 		display: grid;
 		gap: var(--mf-space-6);
-		grid-template-columns: minmax(0, 1fr) auto;
+		grid-template-columns: minmax(320px, 0.95fr) minmax(360px, 1fr);
 		padding-bottom: var(--mf-space-5);
 	}
 
@@ -596,6 +775,11 @@
 		display: grid;
 		gap: var(--mf-space-5);
 		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.queue-lanes,
+	.queue-inspector {
+		min-width: 0;
 	}
 
 	.queue-header h1 {
@@ -607,16 +791,23 @@
 		margin-top: var(--mf-space-3);
 	}
 
+	.queue-header__tools {
+		display: grid;
+		gap: var(--mf-space-4);
+		justify-self: stretch;
+		min-width: 0;
+	}
+
 	.queue-header__facts {
-		display: flex;
-		gap: var(--mf-space-5);
-		flex-wrap: wrap;
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-template-columns: repeat(3, minmax(0, 1fr));
 	}
 
 	.queue-header__facts div {
 		display: grid;
 		gap: var(--mf-space-2);
-		min-width: 96px;
+		min-width: 0;
 	}
 
 	.queue-header__facts span,
@@ -752,6 +943,73 @@
 	.queue-filter__search {
 		display: grid;
 		gap: var(--mf-space-2);
+	}
+
+	.scope-switch {
+		display: grid;
+		gap: var(--mf-space-2);
+	}
+
+	.scope-switch > span,
+	.scope-switch > small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.scope-toggle {
+		display: grid;
+		gap: var(--mf-space-2);
+		grid-template-columns: 1fr 1fr;
+	}
+
+	.scope-toggle button {
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border);
+		border-radius: var(--mf-radius-1);
+		color: var(--mf-fg-secondary);
+		display: grid;
+		font: inherit;
+		gap: var(--mf-space-1);
+		min-height: 48px;
+		min-width: 0;
+		padding: var(--mf-space-2) var(--mf-space-3);
+		text-align: left;
+	}
+
+	.scope-toggle button:hover:not(:disabled),
+	.scope-toggle button.scope-toggle__button--active {
+		background: var(--mf-active-bg);
+		border-color: var(--mf-active-solid-hi);
+		color: var(--mf-fg-primary);
+	}
+
+	.scope-toggle button.scope-toggle__button--active {
+		box-shadow: inset 3px 0 0 var(--mf-active-fg);
+	}
+
+	.scope-toggle button.scope-toggle__button--active small,
+	.scope-toggle button.scope-toggle__button--active span {
+		color: var(--mf-active-fg-bright);
+	}
+
+	.scope-toggle button:disabled {
+		cursor: not-allowed;
+		opacity: 0.48;
+	}
+
+	.scope-toggle span {
+		font-size: var(--mf-text-xs);
+		font-weight: var(--mf-weight-semibold);
+		overflow-wrap: anywhere;
+	}
+
+	.scope-toggle small {
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-mono), monospace;
+		font-size: var(--mf-text-2xs);
 	}
 
 	.queue-filter__search input {
@@ -892,6 +1150,54 @@
 		background: var(--mf-active-bg);
 	}
 
+	.lane-row td {
+		background: var(--mf-bg-panel-2);
+		border-bottom: 0;
+		border-top: var(--mf-border);
+		height: auto;
+		padding: var(--mf-space-3);
+	}
+
+	.lane-row__content {
+		align-items: center;
+		display: grid;
+		gap: var(--mf-space-3);
+		grid-template-columns: minmax(140px, 0.4fr) minmax(220px, 1fr) auto;
+		min-width: 0;
+	}
+
+	.lane-row__content strong {
+		font-size: var(--mf-text-sm);
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.lane-row__content span,
+	.lane-row__content small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+	}
+
+	.lane-row__content small {
+		font-family: var(--mf-font-mono), monospace;
+		justify-self: end;
+	}
+
+	.lane-row--ready td {
+		box-shadow: inset 3px 0 0 var(--mf-ready-fg);
+	}
+
+	.lane-row--wait td {
+		box-shadow: inset 3px 0 0 var(--mf-wait-fg);
+	}
+
+	.lane-row--active td {
+		box-shadow: inset 3px 0 0 var(--mf-active-fg);
+	}
+
+	.lane-row--fail td {
+		box-shadow: inset 3px 0 0 var(--mf-fail-fg);
+	}
+
 	.rank-button,
 	.folder-select {
 		background: transparent;
@@ -1005,6 +1311,17 @@
 		padding: var(--mf-space-5);
 	}
 
+	@media (max-height: 800px) {
+		.queue-header {
+			gap: var(--mf-space-3);
+			padding-bottom: var(--mf-space-3);
+		}
+
+		.queue-header p {
+			display: none;
+		}
+	}
+
 	@media (max-width: 1180px) {
 		.home {
 			grid-template-columns: var(--mf-workstation-rail-width) minmax(0, 1fr);
@@ -1018,14 +1335,14 @@
 
 		.home__main {
 			grid-column: auto;
-			grid-row: auto;
+			grid-row: 1;
 		}
 
 		.home__rail {
 			border-left: 0;
 			border-right: 0;
 			grid-column: auto;
-			grid-row: auto;
+			grid-row: 2;
 		}
 
 		.queue-header {
@@ -1033,7 +1350,11 @@
 		}
 
 		.queue-header__facts {
-			flex-wrap: wrap;
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+		}
+
+		.queue-header__facts strong {
+			overflow-wrap: anywhere;
 		}
 
 		.queue-workspace {
@@ -1042,6 +1363,30 @@
 
 		.selected-folder {
 			grid-template-columns: 1fr;
+		}
+	}
+
+	@media (min-width: 760px) {
+		.queue-workspace--work {
+			grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+		}
+
+		.queue-workspace--work .queue-lanes {
+			grid-column: 1;
+			grid-row: 1;
+		}
+
+		.queue-workspace--work .queue-inspector {
+			grid-column: 2;
+			grid-row: 1;
+			max-height: calc(100vh - 190px);
+			overflow-y: auto;
+			position: sticky;
+			top: var(--mf-space-5);
+		}
+
+		.queue-workspace--work .selected-folder {
+			grid-template-columns: minmax(0, 1fr);
 		}
 	}
 
@@ -1118,7 +1463,7 @@
 		}
 
 		td:nth-child(4)::before {
-			content: 'Pending';
+			content: 'Open work';
 		}
 
 		td:nth-child(5)::before {

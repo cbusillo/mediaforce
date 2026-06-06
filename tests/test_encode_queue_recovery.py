@@ -1,3 +1,4 @@
+import asyncio
 import errno
 import io
 import json
@@ -38,13 +39,18 @@ from mediaforce.encoding import quality_search
 from mediaforce.encoding import staging as staging_runtime
 from mediaforce.encoding import video_filters
 from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_prefix, list_child_encode_jobs, \
-    load_active_encode_job_for_prefix, load_encode_job, \
+    load_active_encode_job_for_prefix, load_encode_job, load_latest_encode_job, \
     load_latest_terminal_encode_job_for_prefix, load_queue_state, repair_persisted_encode_job_hosts, \
     save_encode_job, save_queue_state
 from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
+from mediaforce.library.folder_profiles import inspect_prefix
+from mediaforce.library.run_manifests import select_encode_candidates
 from mediaforce.hosts import status_runtime as host_status_runtime
 from mediaforce.remote import HostStatus
-from mediaforce.tuning.calibration_jobs import list_queue_summary
+from mediaforce.tuning.calibration_jobs import list_queue_summary, \
+    load_active_overlapping_job as load_active_overlapping_calibration_job, \
+    load_latest_job as load_latest_calibration_job, \
+    load_latest_overlapping_job as load_latest_overlapping_calibration_job
 from mediaforce.review import BrowserReviewClip, CompareClip, EncodedPreviewClip
 from mediaforce.web import app as web_app
 from mediaforce.web import settings_runtime
@@ -52,6 +58,7 @@ from mediaforce.web.runtime import dashboard_payloads, encode_runtime, folder_ac
     host_runtime as host_runtime_module, job_runtime, queue_actions as queue_actions_runtime, \
     calibration_runtime
 from mediaforce.web.runtime import folder_cards as folder_cards_runtime
+from mediaforce.library import workflow_state as workflow_state_runtime
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 
 
@@ -3178,6 +3185,158 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(card.statuses["validated"], 1)
         self.assertEqual(card.statuses["promoted"], 1)
 
+    def test_series_folder_cards_group_tv_items_by_show(self) -> None:
+        first = self._create_source_file("season-one.mkv")
+        second = self._create_source_file("season-two.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            first_id = self._insert_library_item(connection, first)
+            second_id = self._insert_library_item(connection, second)
+            for item_id, rel_path in (
+                    (first_id, "tv/show/Season 1/episode-1.mkv"),
+                    (second_id, "tv/show/Season 2/episode-1.mkv"),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(rel_path=rel_path, parent_dir=rel_path.rsplit("/", 1)[0], size_bytes=2 * 1024 ** 3)
+                )
+
+            web_app._reset_folder_card_cache()
+            season_cards = web_app._list_folder_cards(self.config, connection)
+            series_cards = web_app._list_series_folder_cards(self.config, connection)
+
+        self.assertEqual({card.prefix for card in season_cards}, {"tv/show/Season 1", "tv/show/Season 2"})
+        matching_series = [card for card in series_cards if card.prefix == "tv/show"]
+        self.assertEqual(len(matching_series), 1)
+        self.assertEqual(matching_series[0].title, "show")
+        self.assertEqual(matching_series[0].scope_label, "Series")
+        self.assertEqual(matching_series[0].item_count, 2)
+        self.assertEqual(matching_series[0].pending_count, 2)
+
+    def test_series_folder_cards_aggregate_descendant_encode_attention_badges(self) -> None:
+        source = self._create_source_file("episode-series-attention.mkv")
+        manifest_path = self._write_manifest("manifest-series-attention.json", [{"library_item_id": 1}])
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source)
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_id)
+                .values(
+                    size_bytes=2 * 1024 * 1024 * 1024,
+                    rel_path="tv/show/Season 2/episode-series-attention.mkv",
+                    parent_dir="tv/show/Season 2",
+                )
+            )
+            self._save_job(
+                connection,
+                job_id="series-child-attention",
+                manifest_name=manifest_path.name,
+                host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                status="needs_attention",
+                attempt_count=1,
+            )
+            connection.execute(
+                update(encode_jobs)
+                .where(encode_jobs.c.job_id == "series-child-attention")
+                .values(prefix="tv/show/Season 2", error="Error: child season failed")
+            )
+
+            series_cards = web_app._list_series_folder_cards(self.config, connection)
+
+        series_card = next(card for card in series_cards if card.prefix == "tv/show")
+        self.assertEqual(series_card.review_badge_label, "Needs attention")
+        self.assertEqual(series_card.review_badge_tone, "warning")
+        self.assertEqual(series_card.review_badge_detail, "Error: child season failed")
+
+    def test_series_folder_cards_aggregate_descendant_calibration_badges(self) -> None:
+        source = self._create_source_file("episode-series-calibration.mkv")
+        now = web_app._now_iso()
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source)
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_id)
+                .values(
+                    size_bytes=2 * 1024 * 1024 * 1024,
+                    rel_path="tv/show/Season 2/episode-series-calibration.mkv",
+                    parent_dir="tv/show/Season 2",
+                )
+            )
+            connection.execute(
+                calibration_jobs.insert().values(
+                    job_id="series-child-calibration",
+                    prefix="tv/show/Season 2",
+                    status="running",
+                    lane="sample",
+                    action="sample",
+                    host_json="{}",
+                    policy_json="{}",
+                    sample_item_json="{}",
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                )
+            )
+
+            series_cards = web_app._list_series_folder_cards(self.config, connection)
+
+        series_card = next(card for card in series_cards if card.prefix == "tv/show")
+        self.assertEqual(series_card.review_badge_label, "Sample running")
+        self.assertEqual(series_card.review_badge_tone, "attention")
+
+    def test_dashboard_folders_payload_exposes_series_folders(self) -> None:
+        season_card = folder_cards_runtime.FolderCard(
+            prefix="tv/show/Season 1",
+            title="show · Season 1",
+            subtitle="show",
+            scope_label="Season",
+            item_count=1,
+            pending_count=1,
+            total_size_bytes=1024,
+            estimated_savings_bytes=512,
+            known_saved_bytes=0,
+            projected_reclaim_bytes=512,
+            average_age_days=0.0,
+            sort_score=1.0,
+            statuses={"planned": 1},
+            video_codecs={"h264": 1},
+        )
+        series_card = replace(season_card, prefix="tv/show", title="show", scope_label="Series", item_count=2)
+
+        payload = dashboard_payloads.dashboard_folders_payload(
+            self.config,
+            folder_card_cache_key=lambda _config: ("cache", 1, 2),
+            list_folder_cards=lambda _config, _connection: [season_card],
+            list_series_folder_cards=lambda _config, _connection: [series_card],
+        )
+
+        self.assertEqual(payload["folders"][0]["prefix"], "tv/show/Season 1")
+        self.assertEqual(payload["series_folders"][0]["prefix"], "tv/show")
+        self.assertEqual(payload["series_folders"][0]["scope_label"], "Series")
+
+    def test_folder_studio_series_context_and_encode_candidate_count_follow_manifest_selection(self) -> None:
+        pending = self._create_source_file("pending.mkv")
+        encoded = self._create_source_file("encoded.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            pending_id = self._insert_library_item(connection, pending, status="discovered")
+            encoded_id = self._insert_library_item(connection, encoded, status="encoded")
+            for item_id, rel_path in (
+                    (pending_id, "tv/show/Season 1/episode-1.mkv"),
+                    (encoded_id, "tv/show/Season 2/episode-1.mkv"),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(rel_path=rel_path, parent_dir=rel_path.rsplit("/", 1)[0])
+                )
+
+            self.assertEqual(web_app._folder_series_context("tv/show/Season 2"), {"prefix": "tv/show", "title": "show"})
+            self.assertIsNone(web_app._folder_series_context("tv/show"))
+            self.assertEqual(web_app._folder_encode_candidate_count(connection, self.config, "tv/show/Season 2"), 0)
+            self.assertEqual(web_app._folder_encode_candidate_count(connection, self.config, "tv/show"), 1)
+
     def test_folder_cards_projected_reclaim_uses_known_validated_savings(self) -> None:
         validated = self._create_source_file("episode-validated.mkv")
 
@@ -3734,6 +3893,45 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(card.review_badge_tone, "ok")
         self.assertEqual(card.review_badge_detail, "All staged outputs passed validation.")
 
+    def test_folder_cards_include_canonical_workflow_state(self) -> None:
+        encoded = self._create_source_file("episode-workflow-card.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, encoded, status="encoded")
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_id)
+                .values(
+                    size_bytes=2 * 1024 * 1024 * 1024,
+                    rel_path=f"tv/show/Season 9/{encoded.name}",
+                    parent_dir="tv/show/Season 9",
+                    video_codec="h264",
+                )
+            )
+            self._insert_staged_artifact(connection, item_id, self._staging_path(encoded.name))
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(bytes_saved=2 * 1024 * 1024 * 1024)
+            )
+
+            cards = folder_cards_runtime.list_folder_cards(
+                connection,
+                minimum_recommended_savings_bytes=100 * 1024 * 1024,
+                folder_group=web_app._folder_group,
+                age_days=lambda _path: 1.0,
+                estimate_savings_bytes=Mock(return_value=2 * 1024 * 1024 * 1024),
+                review_badge_for_prefix=Mock(return_value={"label": "Approved draft", "tone": "ok"}),
+            )
+
+        card = next(card for card in cards if card.prefix == "tv/show/Season 9")
+        self.assertEqual(card.review_badge_label, "Ready to validate")
+        self.assertIsNotNone(card.workflow_state)
+        self.assertEqual(card.workflow_state["state"], "ready_to_validate")
+        self.assertEqual(card.workflow_state["primary_lane"], "validate")
+        self.assertEqual(card.workflow_state["next_action"]["kind"], "validate_outputs")
+        self.assertEqual(card.workflow_state["counts"]["encode_candidates"], 0)
+
     def test_folder_cards_use_catalog_mtime_without_statting_source_paths(self) -> None:
         source = self._create_source_file("episode-catalog-age.mkv")
         age_days = Mock(side_effect=AssertionError("source path age lookup should not run"))
@@ -3783,6 +3981,234 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             folder_cards_runtime._folder_delivery_badge(card),
             {"label": "Ready to validate", "tone": "attention", "detail": "All pending outputs are encoded."},
         )
+
+    def test_folder_workflow_marks_all_encoded_season_ready_to_validate(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            for index in range(1, 4):
+                source = self._create_source_file(f"Season 2/episode-{index}.mkv")
+                item_id = self._insert_library_item(connection, source, status="encoded")
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(
+                        rel_path=f"tv/show/Season 2/episode-{index}.mkv",
+                        parent_dir="tv/show/Season 2",
+                    )
+                )
+                self._insert_staged_artifact(connection, item_id, self._staging_path(f"Season 2/episode-{index}.mkv"))
+
+            workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+
+        self.assertEqual(workflow.state, "ready_to_validate")
+        self.assertEqual(workflow.primary_lane, "validate")
+        self.assertEqual(workflow.counts["ready_to_validate"], 3)
+        self.assertEqual(workflow.counts["encode_candidates"], 0)
+        self.assertEqual(workflow.next_action.kind, "validate_outputs")
+
+    def test_folder_workflow_marks_validated_staged_outputs_ready_to_promote(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            for index in range(1, 3):
+                source = self._create_source_file(f"Season 2/promote-{index}.mkv")
+                item_id = self._insert_library_item(connection, source, status="validated")
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(
+                        rel_path=f"tv/show/Season 2/promote-{index}.mkv",
+                        parent_dir="tv/show/Season 2",
+                    )
+                )
+                self._insert_staged_artifact(connection, item_id, self._staging_path(f"Season 2/promote-{index}.mkv"))
+
+            workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+
+        self.assertEqual(workflow.state, "ready_to_promote")
+        self.assertEqual(workflow.primary_lane, "promote")
+        self.assertEqual(workflow.counts["ready_to_promote"], 2)
+        self.assertEqual(workflow.counts["encode_candidates"], 0)
+        self.assertEqual(workflow.next_action.kind, "promote_outputs")
+
+    def test_encode_candidate_selection_excludes_validated_staged_outputs(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            planned = self._create_source_file("Season 2/planned-for-manifest.mkv")
+            staged = self._create_source_file("Season 2/validated-staged-for-manifest.mkv")
+            planned_id = self._insert_library_item(connection, planned, status="planned")
+            staged_id = self._insert_library_item(connection, staged, status="validated")
+            for item_id, rel_path in (
+                    (planned_id, "tv/show/Season 2/planned-for-manifest.mkv"),
+                    (staged_id, "tv/show/Season 2/validated-staged-for-manifest.mkv"),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(rel_path=rel_path, parent_dir="tv/show/Season 2")
+                )
+            self._insert_staged_artifact(connection, staged_id, self._staging_path("Season 2/staged-for-manifest.mkv"))
+
+            rows = select_encode_candidates(connection, self.config, prefixes=["tv/show/Season 2"], limit=None)
+
+        self.assertEqual([row["rel_path"] for row in rows], ["tv/show/Season 2/planned-for-manifest.mkv"])
+
+    def test_encode_candidate_selection_applies_limit_after_lane_filtering(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            staged = self._create_source_file("Season 2/high-priority-staged.mkv")
+            planned = self._create_source_file("Season 2/lower-priority-planned.mkv")
+            staged_id = self._insert_library_item(connection, staged, status="validated")
+            planned_id = self._insert_library_item(connection, planned, status="planned")
+            for item_id, rel_path, priority in (
+                    (staged_id, "tv/show/Season 2/high-priority-staged.mkv", 100.0),
+                    (planned_id, "tv/show/Season 2/lower-priority-planned.mkv", 1.0),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(rel_path=rel_path, parent_dir="tv/show/Season 2", priority_score=priority)
+                )
+            self._insert_staged_artifact(connection, staged_id, self._staging_path("Season 2/high-priority-staged.mkv"))
+
+            rows = select_encode_candidates(connection, self.config, prefixes=["tv/show/Season 2"], limit=1)
+
+        self.assertEqual([row["rel_path"] for row in rows], ["tv/show/Season 2/lower-priority-planned.mkv"])
+
+    def test_encode_candidate_selection_keeps_validated_items_without_staged_outputs(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            validated = self._create_source_file("Season 2/validated-without-stage.mkv")
+            item_id = self._insert_library_item(connection, validated, status="validated")
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_id)
+                .values(rel_path="tv/show/Season 2/validated-without-stage.mkv", parent_dir="tv/show/Season 2")
+            )
+
+            rows = select_encode_candidates(connection, self.config, prefixes=["tv/show/Season 2"], limit=None)
+
+        self.assertEqual([row["rel_path"] for row in rows], ["tv/show/Season 2/validated-without-stage.mkv"])
+
+    def test_encode_candidate_selection_uses_folder_boundary_prefix_matching(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            matching = self._create_source_file("matched-boundary.mkv")
+            sibling = self._create_source_file("sibling-boundary.mkv")
+            matching_id = self._insert_library_item(connection, matching, status="planned")
+            sibling_id = self._insert_library_item(connection, sibling, status="planned")
+            for item_id, rel_path, parent_dir in (
+                    (matching_id, "tv/show/matched-boundary.mkv", "tv/show"),
+                    (sibling_id, "tv/show-special/sibling-boundary.mkv", "tv/show-special"),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(rel_path=rel_path, parent_dir=parent_dir)
+                )
+
+            rows = select_encode_candidates(connection, self.config, prefixes=["tv/show"], limit=None)
+
+        self.assertEqual([row["rel_path"] for row in rows], ["tv/show/matched-boundary.mkv"])
+
+    def test_prefix_matching_treats_sql_wildcards_as_literal_folder_names(self) -> None:
+        config = replace(
+            self.config,
+            raw={
+                **self.config.raw,
+                "media": {**self.config.raw["media"], "output_container": "mkv"},
+                "video": {"target_vmaf": 95.0},
+                "audio": {},
+                "subtitle": {},
+                "planning": {},
+            },
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            underscore_match = self._create_source_file("underscore-match.mkv")
+            underscore_sibling = self._create_source_file("underscore-sibling.mkv")
+            percent_match = self._create_source_file("percent-match.mkv")
+            percent_sibling = self._create_source_file("percent-sibling.mkv")
+            rows = (
+                (self._insert_library_item(connection, underscore_match, status="planned"), "tv/show_1/Episode 01.mkv"),
+                (self._insert_library_item(connection, underscore_sibling, status="planned"), "tv/showA1/Episode 01.mkv"),
+                (self._insert_library_item(connection, percent_match, status="planned"), "tv/show%pilot/Episode 01.mkv"),
+                (self._insert_library_item(connection, percent_sibling, status="planned"), "tv/showXYZpilot/Episode 01.mkv"),
+            )
+            for item_id, rel_path in rows:
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(rel_path=rel_path, parent_dir=str(Path(rel_path).parent))
+                )
+
+            underscore_candidates = select_encode_candidates(connection, self.config, prefixes=["tv/show_1"], limit=None)
+            percent_candidates = select_encode_candidates(connection, self.config, prefixes=["tv/show%pilot"], limit=None)
+            underscore_workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show_1")
+            percent_summary = inspect_prefix(connection, config, "tv/show%pilot")
+            wildcard_sample = web_app._sample_item(connection, config, "tv/show_1")
+
+        self.assertEqual([row["rel_path"] for row in underscore_candidates], ["tv/show_1/Episode 01.mkv"])
+        self.assertEqual([row["rel_path"] for row in percent_candidates], ["tv/show%pilot/Episode 01.mkv"])
+        self.assertEqual(underscore_workflow.counts["items"], 1)
+        self.assertEqual(percent_summary["item_count"], 1)
+        self.assertEqual(wildcard_sample["rel_path"], "tv/show_1/Episode 01.mkv")
+
+    def test_folder_workflow_marks_mixed_season_without_hiding_counts(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            encoded = self._create_source_file("Season 2/encoded.mkv")
+            encoded_id = self._insert_library_item(connection, encoded, status="encoded")
+            planned = self._create_source_file("Season 2/planned.mkv")
+            planned_id = self._insert_library_item(connection, planned, status="planned")
+            for item_id, rel_path in (
+                    (encoded_id, "tv/show/Season 2/encoded.mkv"),
+                    (planned_id, "tv/show/Season 2/planned.mkv"),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(rel_path=rel_path, parent_dir="tv/show/Season 2")
+                )
+            self._insert_staged_artifact(connection, encoded_id, self._staging_path("Season 2/encoded.mkv"))
+
+            workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+            series_workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show")
+
+        self.assertEqual(workflow.state, "mixed")
+        self.assertEqual(workflow.lane_counts["validate"], 1)
+        self.assertEqual(workflow.lane_counts["encode"], 1)
+        self.assertEqual(workflow.counts["ready_to_validate"], 1)
+        self.assertEqual(workflow.counts["encode_candidates"], 1)
+        self.assertEqual(workflow.next_action.kind, "validate_outputs")
+        self.assertEqual(workflow.next_action.label, "Validate ready outputs")
+        self.assertEqual(series_workflow.state, "mixed")
+        self.assertEqual(series_workflow.lane_counts["validate"], 1)
+        self.assertEqual(series_workflow.lane_counts["encode"], 1)
+        self.assertEqual(series_workflow.next_action.kind, "validate_outputs")
+        self.assertEqual(series_workflow.next_action.label, "Validate ready outputs")
+
+    def test_folder_workflow_active_encode_job_takes_precedence(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            source = self._create_source_file("Season 2/episode.mkv")
+            item_id = self._insert_library_item(connection, source, status="encoded")
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_id)
+                .values(rel_path="tv/show/Season 2/episode.mkv", parent_dir="tv/show/Season 2")
+            )
+            self._insert_staged_artifact(connection, item_id, self._staging_path("Season 2/episode.mkv"))
+            self._save_job(
+                connection,
+                job_id="season-processing",
+                manifest_name="season-processing.json",
+                host={"key": "local", "label": "Local"},
+                status="running",
+                attempt_count=1,
+            )
+            connection.execute(
+                update(encode_jobs)
+                .where(encode_jobs.c.job_id == "season-processing")
+                .values(prefix="tv/show/Season 2")
+            )
+
+            workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+
+        self.assertEqual(workflow.state, "processing")
+        self.assertEqual(workflow.primary_lane, "processing")
+        self.assertEqual(workflow.counts["ready_to_validate"], 1)
+        self.assertEqual(workflow.next_action.kind, "monitor_encode")
 
     def test_folder_delivery_badge_ignores_fully_promoted_folders(self) -> None:
         card = self._folder_card_for_delivery_badge(
@@ -3923,6 +4349,63 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(third_cards[0].review_badge_label, "Third badge")
         self.assertEqual(third_cards[0].review_badge_tone, "attention")
         self.assertIsNone(third_cards[0].review_badge_detail)
+        folder_cards_runtime.reset_folder_card_cache()
+
+    def test_cached_folder_cards_copies_workflow_state_without_shared_mutation(self) -> None:
+        folder_cards_runtime.reset_folder_card_cache()
+
+        cached_source_card = folder_cards_runtime.FolderCard(
+            prefix="tv/show/Season 10",
+            title="Season 10",
+            subtitle="TV",
+            scope_label="Season",
+            item_count=1,
+            pending_count=1,
+            total_size_bytes=2 * 1024 * 1024 * 1024,
+            estimated_savings_bytes=200 * 1024 * 1024,
+            known_saved_bytes=0,
+            projected_reclaim_bytes=200 * 1024 * 1024,
+            average_age_days=10.0,
+            sort_score=0.2,
+            statuses={"encoded": 1},
+            video_codecs={"h264": 1},
+            workflow_state={
+                "state": "ready_to_validate",
+                "counts": {"ready_to_validate": 1},
+                "next_action": {"kind": "validate_outputs"},
+            },
+        )
+        list_folder_cards = Mock(return_value=[cached_source_card])
+
+        with patch.object(folder_cards_runtime, "folder_card_cache_key", return_value=("cache", 1, 1)):
+            with patch.object(folder_cards_runtime, "list_folder_cards", list_folder_cards):
+                first_cards = folder_cards_runtime.cached_folder_cards(
+                    self.config,
+                    Mock(),
+                    minimum_recommended_savings_bytes=100 * 1024 * 1024,
+                    folder_group=Mock(),
+                    age_days=Mock(),
+                    estimate_savings_bytes=Mock(),
+                    review_badge_for_prefix=Mock(return_value={"label": None, "tone": None}),
+                )
+
+        first_cards[0].workflow_state["counts"]["ready_to_validate"] = 99
+        first_cards[0].workflow_state["next_action"]["kind"] = "mutated"
+
+        with patch.object(folder_cards_runtime, "folder_card_cache_key", return_value=("cache", 1, 1)):
+            with patch.object(folder_cards_runtime, "list_folder_cards", list_folder_cards):
+                second_cards = folder_cards_runtime.cached_folder_cards(
+                    self.config,
+                    Mock(),
+                    minimum_recommended_savings_bytes=100 * 1024 * 1024,
+                    folder_group=Mock(),
+                    age_days=Mock(),
+                    estimate_savings_bytes=Mock(),
+                    review_badge_for_prefix=Mock(return_value={"label": None, "tone": None}),
+                )
+
+        self.assertEqual(second_cards[0].workflow_state["counts"]["ready_to_validate"], 1)
+        self.assertEqual(second_cards[0].workflow_state["next_action"]["kind"], "validate_outputs")
         folder_cards_runtime.reset_folder_card_cache()
 
     def test_folder_cards_require_multiple_labeled_samples_before_using_folder_history(self) -> None:
@@ -4507,7 +4990,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["queued"])
         self.assertEqual(result["auto_queue_status"], "no_pending")
-        self.assertIn("no pending items left to queue", result["message"])
+        self.assertIn("no encode candidates left to queue", result["message"])
+        self.assertIn("Next action:", result["queue_message"])
 
     def test_retry_failed_encode_queue_action_retries_latest_approved_failures_only(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
@@ -9662,6 +10146,43 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertIn("estimated queue finish in 12m 0s", summary)
 
+    def test_encode_queue_summary_copy_omits_queue_wide_attention_for_other_folders(self) -> None:
+        encode_queue = {
+            "running_count": 0,
+            "queued_count": 0,
+            "queued_waiting_count": 0,
+            "needs_attention_count": 1,
+        }
+        encode_job = {"status": "completed"}
+
+        summary = web_app._encode_queue_summary_copy(
+            encode_queue,
+            {"is_paused": False},
+            encode_job,
+        )
+
+        self.assertIn("latest folder job completed", summary)
+        self.assertNotIn("queue item", summary)
+        self.assertNotIn("needs attention", summary)
+
+    def test_encode_queue_summary_copy_labels_current_folder_attention(self) -> None:
+        encode_queue = {
+            "running_count": 0,
+            "queued_count": 0,
+            "queued_waiting_count": 0,
+            "needs_attention_count": 1,
+        }
+        encode_job = {"status": "needs_attention"}
+
+        summary = web_app._encode_queue_summary_copy(
+            encode_queue,
+            {"is_paused": False},
+            encode_job,
+        )
+
+        self.assertIn("latest folder job needs attention", summary)
+        self.assertNotIn("queue item", summary)
+
     def test_host_runtime_rows_include_running_job_telemetry(self) -> None:
         status = HostStatus(
             key="cbusillo@studio",
@@ -10801,6 +11322,55 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             folder_route_paths.index("/api/folders/{prefix:path}/status"),
             folder_route_paths.index("/api/folders/{prefix:path}"),
         )
+
+    def test_app_lifespan_does_not_wait_for_transient_cleanup(self) -> None:
+        cleanup_threads: list[Any] = []
+
+        class FakeCleanupThread:
+            def __init__(
+                    self,
+                    *,
+                    target: Callable[..., Any],
+                    args: tuple[Any, ...] = (),
+                    kwargs: dict[str, Any] | None = None,
+                    name: str | None = None,
+                    daemon: bool | None = None,
+            ) -> None:
+                self.target = target
+                self.args = args
+                self.kwargs = kwargs or {}
+                self.name = name
+                self.daemon = daemon
+
+            def start(self) -> None:
+                cleanup_threads.append(self)
+
+        cleanup_mock = Mock(side_effect=AssertionError("cleanup should not run synchronously"))
+        safe_collect_mock = Mock(return_value=[])
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.purge_transient_artifacts", cleanup_mock
+        ), patch("mediaforce.web.app.threading.Thread", FakeCleanupThread), patch(
+                "mediaforce.web.app._start_calibration_queue_worker"
+        ), patch("mediaforce.web.app._start_encode_queue_worker"), patch(
+                "mediaforce.web.app._safe_collect_host_statuses", safe_collect_mock
+        ):
+            app = web_app.create_app(self.config.paths.config_path)
+
+            async def exercise_lifespan() -> None:
+                async with app.router.lifespan_context(app):
+                    return None
+
+            asyncio.run(exercise_lifespan())
+
+        cleanup_mock.assert_not_called()
+        safe_collect_mock.assert_called_once_with(self.config)
+        self.assertEqual(len(cleanup_threads), 1)
+        cleanup_thread = cleanup_threads[0]
+        self.assertIs(cleanup_thread.target, cleanup_mock)
+        self.assertEqual(cleanup_thread.args, (self.config,))
+        self.assertEqual(cleanup_thread.kwargs, {"force": True})
+        self.assertEqual(cleanup_thread.name, "transient-cleanup")
+        self.assertTrue(cleanup_thread.daemon)
 
     def test_folder_api_route_returns_payload_for_seeded_prefix(self) -> None:
         source_path = self._create_source_file("episode-folder.mkv")
@@ -12094,8 +12664,47 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 connection.execute(
                     select(func.count()).select_from(encode_jobs).where(encode_jobs.c.prefix == "tv/show")
                 ).scalar_one()
-            )
+        )
         self.assertEqual(row_count, 1)
+
+    def test_queue_folder_encode_reports_validate_next_action_when_no_encode_candidates(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            source = self._create_source_file("Season 2/encoded-no-queue.mkv")
+            item_id = self._insert_library_item(connection, source, status="encoded")
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_id)
+                .values(rel_path="tv/show/Season 2/encoded-no-queue.mkv", parent_dir="tv/show/Season 2")
+            )
+            self._insert_staged_artifact(connection, item_id, self._staging_path("Season 2/encoded-no-queue.mkv"))
+
+        manifest_path = self._write_manifest("manifest-no-encode-candidates.json", [])
+        with patch("mediaforce.web.runtime.folder_actions.load_config", return_value=self.config), patch(
+                "mediaforce.web.runtime.folder_actions.create_folder_manifest",
+                return_value=({"items": []}, manifest_path),
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                folder_actions_runtime.queue_folder_encode_action(
+                    self.config,
+                    "tv/show/Season 2",
+                    "",
+                    False,
+                    now_iso=web_app._now_iso,
+                    load_job_state=self._noop_load_job_state,
+                    load_calibration_state=self._accepted_calibration_state,
+                    review_gate=self._accepted_review_gate,
+                    upsert_override=self._noop_upsert_override,
+                    load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
+                    clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
+                    prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
+                    save_encode_job=save_encode_job,
+                )
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertEqual(
+            raised.exception.detail,
+            "No encode candidates were found for this folder. Next action: Validate outputs.",
+        )
 
     def test_build_manifest_shards_creates_one_file_per_shard(self) -> None:
         manifest: folder_actions_runtime.ManifestPayload = {
@@ -12430,13 +13039,321 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         payload = dashboard_payloads.folder_status_payload(
             self.config,
             "tv/show",
-            load_job_state=web_app._load_job_state,
+            load_job_state=web_app._load_overlapping_job_state,
             load_retryable_sample_job_state=web_app._load_retryable_sample_job_state,
             load_scan_job_state=web_app._load_scan_job_state,
             load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
         )
 
         self.assertTrue(payload["polling_active"])
+
+    def test_folder_status_payload_polls_while_descendant_calibration_is_active(self) -> None:
+        now = web_app._now_iso()
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                calibration_jobs.insert().values(
+                    job_id="descendant-calibration-active",
+                    prefix="tv/show/Season 1",
+                    status="running",
+                    lane="sample",
+                    action="ai_tune",
+                    host_json="{}",
+                    notes="",
+                    policy_json="{}",
+                    sample_item_json="{}",
+                    owner_pid=os.getpid(),
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                )
+            )
+
+        payload = dashboard_payloads.folder_status_payload(
+            self.config,
+            "tv/show",
+            load_job_state=web_app._load_overlapping_job_state,
+            load_retryable_sample_job_state=web_app._load_retryable_sample_job_state,
+            load_scan_job_state=web_app._load_scan_job_state,
+            load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
+        )
+
+        self.assertTrue(payload["polling_active"])
+        self.assertEqual(payload["calibration_status"], "running")
+        self.assertEqual(payload["calibration_job"]["job_id"], "descendant-calibration-active")
+
+    def test_latest_calibration_lookup_matches_overlapping_series_and_season_scopes(self) -> None:
+        older = (datetime.now(tz=UTC) - timedelta(seconds=5)).isoformat(timespec="seconds")
+        newer = datetime.now(tz=UTC).isoformat(timespec="seconds")
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                calibration_jobs.insert().values(
+                    job_id="series-calibration",
+                    prefix="tv/show",
+                    status="completed",
+                    lane="sample",
+                    action="ai_tune",
+                    host_json="{}",
+                    notes="",
+                    policy_json="{}",
+                    sample_item_json="{}",
+                    created_at=older,
+                    updated_at=older,
+                )
+            )
+            connection.execute(
+                calibration_jobs.insert().values(
+                    job_id="season-calibration",
+                    prefix="tv/show/Season 2",
+                    status="running",
+                    lane="sample",
+                    action="ai_tune",
+                    host_json="{}",
+                    notes="",
+                    policy_json="{}",
+                    sample_item_json="{}",
+                    created_at=newer,
+                    started_at=newer,
+                    updated_at=newer,
+                )
+            )
+
+            exact_parent_match = load_latest_calibration_job(connection, "tv/show")
+            parent_match = load_latest_overlapping_calibration_job(connection, "tv/show")
+            child_match = load_latest_overlapping_calibration_job(connection, "tv/show/Season 2/Episode 1")
+            active_match = load_active_overlapping_calibration_job(connection, "tv/show")
+            sibling_miss = load_latest_overlapping_calibration_job(connection, "tv/show-special")
+
+        self.assertEqual(exact_parent_match["job_id"], "series-calibration")
+        self.assertEqual(parent_match["job_id"], "season-calibration")
+        self.assertEqual(child_match["job_id"], "season-calibration")
+        self.assertEqual(active_match["job_id"], "season-calibration")
+        self.assertIsNone(sibling_miss)
+
+    def test_overlapping_calibration_status_expires_descendant_without_reparenting(self) -> None:
+        now = web_app._now_iso()
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                calibration_jobs.insert().values(
+                    job_id="stale-descendant-calibration",
+                    prefix="tv/show/Season 2",
+                    status="running",
+                    lane="sample",
+                    action="ai_tune",
+                    host_json="{}",
+                    notes="",
+                    policy_json="{}",
+                    sample_item_json="{}",
+                    owner_pid=999_999_999,
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                )
+            )
+
+            payload = web_app._load_overlapping_job_state(connection, self.config, "tv/show")
+            stored = connection.execute(
+                select(calibration_jobs.c.prefix, calibration_jobs.c.status)
+                .where(calibration_jobs.c.job_id == "stale-descendant-calibration")
+            ).mappings().one()
+
+        self.assertEqual(payload["job_id"], "stale-descendant-calibration")
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(stored["prefix"], "tv/show/Season 2")
+        self.assertEqual(stored["status"], "failed")
+
+    def test_folder_status_payload_includes_canonical_workflow_state(self) -> None:
+        source_path = self._create_source_file("status-ready-to-validate.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoded")
+            self._insert_staged_artifact(
+                connection,
+                item_id,
+                self._staging_path("status-ready-to-validate.mkv"),
+            )
+
+        payload = dashboard_payloads.folder_status_payload(
+            self.config,
+            "tv/show",
+            load_job_state=web_app._load_job_state,
+            load_retryable_sample_job_state=web_app._load_retryable_sample_job_state,
+            load_scan_job_state=web_app._load_scan_job_state,
+            load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
+        )
+
+        workflow_state = payload["workflow_state"]
+        self.assertEqual(workflow_state["state"], "ready_to_validate")
+        self.assertEqual(workflow_state["primary_lane"], "validate")
+        self.assertEqual(workflow_state["next_action"]["kind"], "validate_outputs")
+        self.assertEqual(workflow_state["counts"]["encode_candidates"], 0)
+
+    def test_active_encode_job_lookup_matches_overlapping_series_and_season_scopes(self) -> None:
+        def save_active_job(connection: DBClient, *, job_id: str, prefix: str, offset_seconds: int) -> None:
+            timestamp = (datetime.now(tz=UTC) + timedelta(seconds=offset_seconds)).isoformat(timespec="seconds")
+            save_encode_job(
+                connection,
+                {
+                    "job_id": job_id,
+                    "prefix": prefix,
+                    "job_kind": "folder",
+                    "parent_job_id": None,
+                    "status": "running",
+                    "manifest_path": str(self._write_manifest(f"{job_id}.json", [{"library_item_id": 1}])),
+                    "manifest_indexes": None,
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "host": {},
+                    "last_host": {},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": None,
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": None,
+                    "last_failure_at": None,
+                    "host_cooldown_until": None,
+                    "created_at": timestamp,
+                    "started_at": timestamp,
+                    "finished_at": None,
+                    "updated_at": timestamp,
+                },
+            )
+
+        with open_db(self.config.paths.db_path) as connection:
+            save_active_job(connection, job_id="series-active", prefix="tv/show", offset_seconds=0)
+            child_match = load_active_encode_job_for_prefix(connection, "tv/show/Season 2")
+            sibling_miss = load_active_encode_job_for_prefix(connection, "tv/show-special")
+
+            save_active_job(connection, job_id="season-active", prefix="tv/show/Season 3", offset_seconds=1)
+            parent_match = load_active_encode_job_for_prefix(connection, "tv/show")
+
+        self.assertEqual(child_match["job_id"], "series-active")
+        self.assertIsNone(sibling_miss)
+        self.assertEqual(parent_match["job_id"], "season-active")
+
+    def test_latest_encode_job_lookup_matches_overlapping_series_and_season_scopes(self) -> None:
+        def save_display_job(connection: DBClient, *, job_id: str, prefix: str, offset_seconds: int) -> None:
+            timestamp = (datetime.now(tz=UTC) + timedelta(seconds=offset_seconds)).isoformat(timespec="seconds")
+            save_encode_job(
+                connection,
+                {
+                    "job_id": job_id,
+                    "prefix": prefix,
+                    "job_kind": "folder",
+                    "parent_job_id": None,
+                    "status": "needs_attention",
+                    "manifest_path": str(self._write_manifest(f"{job_id}.json", [{"library_item_id": 1}])),
+                    "manifest_indexes": None,
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "host": {},
+                    "last_host": {},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": f"{job_id} failed",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": None,
+                    "last_failure_at": None,
+                    "host_cooldown_until": None,
+                    "created_at": timestamp,
+                    "started_at": timestamp,
+                    "finished_at": timestamp,
+                    "updated_at": timestamp,
+                },
+            )
+
+        with open_db(self.config.paths.db_path) as connection:
+            save_display_job(connection, job_id="series-latest", prefix="tv/show", offset_seconds=0)
+            child_match = load_latest_encode_job(connection, "tv/show/Season 2")
+            sibling_miss = load_latest_encode_job(connection, "tv/show-special")
+
+            save_display_job(connection, job_id="season-latest", prefix="tv/show/Season 3", offset_seconds=1)
+            parent_match = load_latest_encode_job(connection, "tv/show")
+
+        self.assertEqual(child_match["job_id"], "series-latest")
+        self.assertIsNone(sibling_miss)
+        self.assertEqual(parent_match["job_id"], "season-latest")
+
+    def test_prefix_overlap_escapes_sql_wildcard_characters(self) -> None:
+        now = web_app._now_iso()
+        manifest_path = self._write_manifest("manifest-wildcard-prefix.json", [{"library_item_id": 1}])
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                calibration_jobs.insert().values(
+                    job_id="literal-underscore-calibration",
+                    prefix="tv/show_1/Season 1",
+                    status="running",
+                    lane="sample",
+                    action="ai_tune",
+                    host_json="{}",
+                    notes="",
+                    policy_json="{}",
+                    sample_item_json="{}",
+                    owner_pid=os.getpid(),
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                )
+            )
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "literal-percent-encode",
+                    "prefix": "tv/show%1/Season 1",
+                    "job_kind": "folder",
+                    "parent_job_id": None,
+                    "status": "running",
+                    "manifest_path": str(manifest_path),
+                    "manifest_indexes": None,
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "host": {},
+                    "last_host": {},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": None,
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": None,
+                    "last_failure_at": None,
+                    "host_cooldown_until": None,
+                    "created_at": now,
+                    "started_at": now,
+                    "finished_at": None,
+                    "updated_at": now,
+                },
+            )
+
+            underscore_match = load_latest_overlapping_calibration_job(connection, "tv/show_1")
+            underscore_miss = load_latest_overlapping_calibration_job(connection, "tv/showA1")
+            percent_match = load_active_encode_job_for_prefix(connection, "tv/show%1")
+            percent_miss = load_active_encode_job_for_prefix(connection, "tv/showZZ1")
+
+        self.assertEqual(underscore_match["job_id"], "literal-underscore-calibration")
+        self.assertIsNone(underscore_miss)
+        self.assertEqual(percent_match["job_id"], "literal-percent-encode")
+        self.assertIsNone(percent_miss)
 
     def test_queue_folder_encode_recovers_failed_files_into_active_parent(self) -> None:
         source_a = self._create_source_file("recover-active-a.mkv")
@@ -13170,7 +14087,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             item_row = self._library_item_value(connection, item_id, library_items.c.status)
         self.assertEqual(item_row["status"], "planned")
 
-    def test_queue_folder_encode_retry_does_not_reset_active_descendant_prefix_items(self) -> None:
+    def test_queue_folder_encode_retry_rejects_active_descendant_prefix_items(self) -> None:
         source = self._create_source_file("retry-active-nested.mkv")
         other_source = self._create_source_file("retry-active-parent.mkv")
         staging_path = self.root / "staging" / "tv" / "show" / "season-1" / "retry-active-nested.mkv"
@@ -13288,7 +14205,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 save_encode_job=save_encode_job,
             )
 
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
+        self.assertIn("A folder encode is already running for tv/show/season-1", result["message"])
         self.assertTrue(staging_path.exists())
         self.assertTrue(partial_path.exists())
         with open_db(self.config.paths.db_path) as connection:

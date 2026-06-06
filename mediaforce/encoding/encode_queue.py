@@ -3,9 +3,11 @@ from typing import Any
 
 from sqlalchemy import delete
 from sqlalchemy import func
+from sqlalchemy import literal
 from sqlalchemy import literal_column
 from sqlalchemy import or_
 from sqlalchemy import select
+from sqlalchemy import true
 from sqlalchemy import update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -213,9 +215,10 @@ def load_encode_job(connection: DBClient, job_id: str) -> dict[str, Any] | None:
 
 
 def load_latest_encode_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
+    normalized_prefix = _normalize_prefix(prefix)
     row = connection.execute(
         _encode_job_select()
-        .where(encode_jobs.c.prefix == prefix)
+        .where(_prefix_overlap_filter(normalized_prefix))
         .where(encode_jobs.c.job_kind.in_(DISPLAY_ENCODE_JOB_KINDS))
         .order_by(encode_jobs.c.created_at.desc(), _rowid_column().desc())
         .limit(1)
@@ -224,15 +227,38 @@ def load_latest_encode_job(connection: DBClient, prefix: str) -> dict[str, Any] 
 
 
 def load_active_encode_job_for_prefix(connection: DBClient, prefix: str) -> dict[str, Any] | None:
+    normalized_prefix = _normalize_prefix(prefix)
     row = connection.execute(
         _encode_job_select()
-        .where(encode_jobs.c.prefix == prefix)
+        .where(_prefix_overlap_filter(normalized_prefix))
         .where(encode_jobs.c.job_kind.in_(DISPLAY_ENCODE_JOB_KINDS))
         .where(encode_jobs.c.status.in_(ACTIVE_ENCODE_JOB_STATUSES))
         .order_by(encode_jobs.c.created_at.desc(), _rowid_column().desc())
         .limit(1)
     ).mappings().fetchone()
     return _hydrate_job(row) if row is not None else None
+
+
+def _normalize_prefix(prefix: str) -> str:
+    return prefix.strip().strip("/")
+
+
+def _prefix_overlap_filter(prefix: str) -> Any:
+    if not prefix:
+        return true()
+    return or_(
+        encode_jobs.c.prefix == prefix,
+        encode_jobs.c.prefix.like(f"{_sql_like_escape(prefix)}/%", escape="\\"),
+        literal(prefix).like(_escaped_prefix_column(encode_jobs.c.prefix) + "/%", escape="\\"),
+    )
+
+
+def _escaped_prefix_column(column: Any) -> Any:
+    return func.replace(func.replace(func.replace(column, "\\", "\\\\"), "%", "\\%"), "_", "\\_")
+
+
+def _sql_like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def clear_terminal_encode_jobs_for_prefix(connection: DBClient, prefix: str) -> None:

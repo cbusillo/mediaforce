@@ -16,6 +16,7 @@ from mediaforce.core.type_defs import float_value, object_dict, object_list
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, list_child_encode_jobs, \
     load_latest_terminal_encode_job_for_prefix
 from mediaforce.encoding.staging import safe_unlink
+from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.run_manifests import create_folder_manifest
 from mediaforce.web.runtime.folder_tuning_helpers import (
     proposal_alignment_issue,
@@ -193,9 +194,10 @@ def queue_folder_encode_action(
             if recovered is not None:
                 return recovered
             active_status = str(active_encode_job.get("status") or "queued").replace("_", " ")
+            active_prefix = str(active_encode_job.get("prefix") or normalized_prefix)
             return {
                 "ok": False,
-                "message": f"A folder encode is already {active_status} for this folder.",
+                "message": f"A folder encode is already {active_status} for {active_prefix}.",
             }
         latest_encode_job = load_latest_terminal_encode_job_for_prefix(connection, normalized_prefix)
         if latest_encode_job is not None and str(latest_encode_job.get("status") or "") in {
@@ -208,7 +210,13 @@ def queue_folder_encode_action(
         refreshed_config = load_config(config.paths.config_path)
         manifest, manifest_path = create_folder_manifest(connection, refreshed_config, prefix=normalized_prefix)
         if not manifest["items"]:
-            raise HTTPException(status_code=400, detail="No pending items were found to enqueue for this folder.")
+            workflow_state = build_folder_workflow_state(connection, normalized_prefix).to_payload()
+            next_action = object_dict(workflow_state.get("next_action"))
+            action_label = str(next_action.get("label") or "No action")
+            raise HTTPException(
+                status_code=400,
+                detail=f"No encode candidates were found for this folder. Next action: {action_label}.",
+            )
         clear_terminal_encode_jobs_for_prefix_fn(connection, normalized_prefix)
         created_at = now_iso()
         parent_job_id = uuid.uuid4().hex[:12]
@@ -875,12 +883,15 @@ def save_profile_action(
         queue_result = auto_queue_folder_encode(normalized_prefix, "", False)
     except HTTPException as exc:
         detail = str(exc.detail)
-        if detail == "No pending items were found to enqueue for this folder.":
+        if detail == "No pending items were found to enqueue for this folder." or detail.startswith(
+                "No encode candidates were found for this folder."
+        ):
             response["auto_queue_status"] = "no_pending"
             response["message"] = (
                 "Approved the current draft and saved it as the folder profile. "
-                "There were no pending items left to queue for this folder."
+                "There were no encode candidates left to queue for this folder."
             )
+            response["queue_message"] = detail
             return response
         response["auto_queue_status"] = "blocked"
         response["queue_message"] = detail

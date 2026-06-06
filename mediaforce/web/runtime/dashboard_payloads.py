@@ -5,6 +5,7 @@ from mediaforce.tuning.calibration_jobs import list_queue_summary
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import open_db
 from mediaforce.encoding.encode_queue import summarize_encode_queue
+from mediaforce.library.workflow_state import build_folder_workflow_state
 
 
 def dashboard_summary_payload(
@@ -38,12 +39,15 @@ def dashboard_folders_payload(
         *,
         folder_card_cache_key: Any,
         list_folder_cards: Any,
+        list_series_folder_cards: Any | None = None,
 ) -> dict[str, Any]:
     cache_key = folder_card_cache_key(config)
     with open_db(config.paths.db_path) as connection:
         folders = list_folder_cards(config, connection)
+        series_folders = list_series_folder_cards(config, connection) if list_series_folder_cards is not None else []
     return {
         "folders": [asdict(folder) for folder in folders],
+        "series_folders": [asdict(folder) for folder in series_folders],
         "catalog_empty": not folders,
         "folder_cache_key": _serialize_cache_key(cache_key),
     }
@@ -63,6 +67,7 @@ def folder_status_payload(
         retryable_sample_job = load_retryable_sample_job_state(connection, config, normalized_prefix)
         active_encode_job = load_active_encode_job_for_prefix(connection, normalized_prefix)
         folder_scan_job = load_scan_job_state(config, normalized_prefix)
+        workflow_state = build_folder_workflow_state(connection, normalized_prefix).to_payload()
     polling_active = bool(
         (calibration_job and calibration_job.get("status") in {"queued", "running"})
         or (active_encode_job and active_encode_job.get("status") in {"queued", "retry_backoff", "running"})
@@ -76,6 +81,7 @@ def folder_status_payload(
         "calibration_job": calibration_job,
         "retryable_sample_job": retryable_sample_job,
         "folder_scan_job": folder_scan_job,
+        "workflow_state": workflow_state,
     }
 
 

@@ -1,4 +1,5 @@
 import threading
+from copy import deepcopy
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -10,6 +11,8 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, staged_artifacts
+from mediaforce.library.workflow_state import build_folder_workflow_states
+from mediaforce.library.workflow_state import WorkflowPayload
 
 FolderGroup = tuple[str, str, str, str]
 FolderBadge = dict[str, str | None]
@@ -34,6 +37,7 @@ class FolderCard:
     review_badge_label: str | None = None
     review_badge_tone: str | None = None
     review_badge_detail: str | None = None
+    workflow_state: WorkflowPayload | None = None
     details_loading: bool = False
 
 
@@ -224,6 +228,7 @@ def preview_folder_cards(
         for card in grouped.values()
         if card.pending_count > 0 and card.projected_reclaim_bytes >= minimum_recommended_savings_bytes
     ]
+    _apply_folder_workflow_states(connection, cards)
     _apply_folder_review_badges(cards, review_badge_for_prefix)
     return sorted(
         cards,
@@ -330,6 +335,7 @@ def list_folder_cards(
         for card in cards
         if card.pending_count > 0 and card.projected_reclaim_bytes >= minimum_recommended_savings_bytes
     ]
+    _apply_folder_workflow_states(connection, cards)
     _apply_folder_review_badges(cards, review_badge_for_prefix)
     return sorted(
         cards,
@@ -378,6 +384,15 @@ def _apply_folder_review_badges(cards: list[FolderCard], review_badge_for_prefix
         card.review_badge_detail = badge.get("detail")
 
 
+def _apply_folder_workflow_states(connection: DBClient, cards: list[FolderCard]) -> None:
+    if not cards:
+        return
+    workflow_by_prefix = build_folder_workflow_states(connection, [card.prefix for card in cards])
+    for card in cards:
+        workflow = workflow_by_prefix.get(card.prefix)
+        card.workflow_state = workflow.to_payload() if workflow is not None else None
+
+
 def _folder_delivery_badge(card: FolderCard) -> FolderBadge | None:
     if card.item_count <= 0:
         return None
@@ -413,6 +428,7 @@ def _copy_folder_card(card: FolderCard, *, include_review_badges: bool = True) -
         review_badge_label=card.review_badge_label if include_review_badges else None,
         review_badge_tone=card.review_badge_tone if include_review_badges else None,
         review_badge_detail=card.review_badge_detail if include_review_badges else None,
+        workflow_state=deepcopy(card.workflow_state),
         details_loading=card.details_loading,
     )
 

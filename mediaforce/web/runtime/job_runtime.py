@@ -12,11 +12,14 @@ from typing import Any
 
 from sqlalchemy import func
 from sqlalchemy import literal_column
+from sqlalchemy import or_
 from sqlalchemy import select
+from sqlalchemy import true
 from sqlalchemy import update
 
 from mediaforce.tuning.calibration_jobs import claim_next_queued_calibration_job, load_latest_failed_sample_job, \
-    load_latest_job, load_latest_retryable_sample_job, load_latest_sample_job, queue_position, save_job
+    load_latest_job, load_latest_overlapping_job, load_latest_retryable_sample_job, load_latest_sample_job, \
+    queue_position, save_job
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, DBRow, open_db
 from mediaforce.core.db_tables import calibration_jobs
@@ -75,11 +78,32 @@ def load_job_state(
         deps: JobRuntimeDeps,
 ) -> dict[str, Any] | None:
     payload = load_latest_job(connection, prefix)
+    return _job_state_from_payload(connection, config, prefix, payload, deps)
+
+
+def load_overlapping_job_state(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+        deps: JobRuntimeDeps,
+) -> dict[str, Any] | None:
+    payload = load_latest_overlapping_job(connection, prefix)
+    save_prefix = str(payload.get("prefix") or prefix) if payload is not None else prefix
+    return _job_state_from_payload(connection, config, save_prefix, payload, deps)
+
+
+def _job_state_from_payload(
+        connection: DBClient,
+        config: MediaforceConfig,
+        save_prefix: str,
+        payload: dict[str, Any] | None,
+        deps: JobRuntimeDeps,
+) -> dict[str, Any] | None:
     if payload is None:
         return None
     status = str(payload.get("status") or "")
     if status == "running" and not calibration_job_belongs_to_current_process(payload):
-        payload = expire_calibration_job(connection, config, prefix, payload, deps)
+        payload = expire_calibration_job(connection, config, save_prefix, payload, deps)
         status = str(payload.get("status") or "")
     if status == "queued":
         position = queue_position(connection, str(payload["job_id"]))
@@ -443,7 +467,7 @@ def scan_is_stale(
         connection.execute(
             select(func.count())
             .select_from(library_items)
-            .where(library_items.c.rel_path.like(f"{prefix}%"))
+            .where(_prefix_filter(prefix))
         ).scalar_one()
     )
     if item_count == 0:
@@ -452,6 +476,20 @@ def scan_is_stale(
     if latest is None:
         return True
     return datetime.now(tz=UTC) - latest > deps.prefix_scan_stale_after
+
+
+def _prefix_filter(prefix: str) -> Any:
+    normalized_prefix = prefix.strip().strip("/")
+    if not normalized_prefix:
+        return true()
+    return or_(
+        library_items.c.rel_path == normalized_prefix,
+        library_items.c.rel_path.like(f"{_sql_like_escape(normalized_prefix)}/%", escape="\\"),
+    )
+
+
+def _sql_like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def latest_scan_completed_at(connection: DBClient, prefix: str | None) -> datetime | None:

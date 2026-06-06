@@ -19,6 +19,7 @@ from mediaforce.tuning.tuning_memory import promote_learning_artifact, retrieve_
 
 
 QUEUEABLE_NO_CHANGE_DISPOSITIONS = {"honored", "honored_with_risk"}
+SEED_REQUEST_REFUSAL_DISPOSITIONS = {"softened", "rejected"}
 
 
 @dataclass(slots=True)
@@ -211,6 +212,63 @@ def _size_budget_measurement_fragment(operator_request: dict[str, Any] | None) -
     if request_type == "combined_experiment" and object_dict(request.get("size_budget_request")):
         return object_dict(request.get("applied_policy"))
     return None
+
+
+def _can_keep_first_size_budget_sample(operator_request: dict[str, Any] | None) -> bool:
+    request = object_dict(operator_request)
+    if str(request.get("request_type") or "").strip().lower() != "size_budget":
+        return False
+    if request.get("measured_size_followup") or request.get("hard_size_cap"):
+        return False
+    return bool(request.get("operator_confirmed")) and not object_dict(request.get("applied_policy"))
+
+
+def _keep_first_size_budget_sample(
+        *,
+        advice_payload: dict[str, Any] | None,
+        seed_job_fields: dict[str, Any],
+        trimmed_note: str,
+        operator_request: dict[str, Any],
+) -> dict[str, Any]:
+    request = object_dict(operator_request)
+    existing_disposition = str(
+        seed_job_fields.get("seed_request_disposition")
+        or object_dict(advice_payload).get("request_disposition")
+        or ""
+    ).strip().lower()
+    if existing_disposition in SEED_REQUEST_REFUSAL_DISPOSITIONS:
+        return advice_payload if advice_payload is not None else {}
+    summary = "Kept the first sample at the current policy so the size target can be measured."
+    diagnosis = (
+        "A first size-budget request is a planning target, so the bench can measure the current policy "
+        "before trading quality, audio, or hard caps for size."
+    )
+    request_response = (
+        "I kept this first sample at the current policy so we can compare the measured result to "
+        f"{request.get('budget_label') or 'your size target'} before making riskier changes."
+    )
+    seed_job_fields["seed_source"] = "operator_request"
+    seed_job_fields["seed_summary"] = summary
+    seed_job_fields["seed_diagnosis"] = diagnosis
+    seed_job_fields["seed_request_disposition"] = "honored"
+    seed_job_fields["seed_request_response"] = request_response
+    seed_job_fields["seed_feasibility_note"] = request.get("feasibility")
+    seed_job_fields["seed_applied_policy"] = None
+    payload = advice_payload if advice_payload is not None else {}
+    payload.update(
+        {
+            "ok": True,
+            "summary": summary,
+            "kind": "seed_baseline",
+            "operator_note": trimmed_note or None,
+            "request_disposition": "honored",
+            "request_response": request_response,
+            "feasibility_note": request.get("feasibility"),
+            "diagnosis": diagnosis,
+            "applied_policy": None,
+        }
+    )
+    return payload
 
 
 def folder_ai_tune_preview_action(
@@ -509,6 +567,14 @@ def _seed_preview_action(
     if advice_payload is not None and combined_fragment:
         advice_payload["applied_policy"] = combined_fragment
     advice_details = object_dict(advice_payload)
+    if not combined_fragment and _can_keep_first_size_budget_sample(operator_request):
+        advice_payload = _keep_first_size_budget_sample(
+            advice_payload=advice_payload,
+            seed_job_fields=seed_job_fields,
+            trimmed_note=trimmed_note,
+            operator_request=object_dict(operator_request),
+        )
+        advice_details = object_dict(advice_payload)
     alignment_issue = deps.proposal_alignment_issue(
         operator_request=operator_request,
         request_disposition=advice_details.get("request_disposition"),

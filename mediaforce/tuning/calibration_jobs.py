@@ -3,8 +3,11 @@ from typing import Any
 from typing import TypeVar
 
 from sqlalchemy import func
+from sqlalchemy import literal
 from sqlalchemy import literal_column
+from sqlalchemy import or_
 from sqlalchemy import select
+from sqlalchemy import true
 from sqlalchemy import update
 from sqlalchemy import distinct
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -23,6 +26,17 @@ def load_latest_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
     row = connection.execute(
         _calibration_job_select()
         .where(calibration_jobs.c.prefix == prefix)
+        .order_by(calibration_jobs.c.created_at.desc(), _rowid_column().desc())
+        .limit(1)
+    ).mappings().fetchone()
+    return _hydrate_job(row) if row is not None else None
+
+
+def load_latest_overlapping_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
+    normalized_prefix = _normalize_prefix(prefix)
+    row = connection.execute(
+        _calibration_job_select()
+        .where(_prefix_overlap_filter(normalized_prefix))
         .order_by(calibration_jobs.c.created_at.desc(), _rowid_column().desc())
         .limit(1)
     ).mappings().fetchone()
@@ -71,6 +85,40 @@ def load_active_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
         .limit(1)
     ).mappings().fetchone()
     return _hydrate_job(row) if row is not None else None
+
+
+def load_active_overlapping_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
+    normalized_prefix = _normalize_prefix(prefix)
+    row = connection.execute(
+        _calibration_job_select()
+        .where(_prefix_overlap_filter(normalized_prefix))
+        .where(calibration_jobs.c.status.in_(tuple(ACTIVE_JOB_STATUSES)))
+        .order_by(calibration_jobs.c.created_at.desc(), _rowid_column().desc())
+        .limit(1)
+    ).mappings().fetchone()
+    return _hydrate_job(row) if row is not None else None
+
+
+def _normalize_prefix(prefix: str) -> str:
+    return prefix.strip().strip("/")
+
+
+def _prefix_overlap_filter(prefix: str) -> Any:
+    if not prefix:
+        return true()
+    return or_(
+        calibration_jobs.c.prefix == prefix,
+        calibration_jobs.c.prefix.like(f"{_sql_like_escape(prefix)}/%", escape="\\"),
+        literal(prefix).like(_escaped_prefix_column(calibration_jobs.c.prefix) + "/%", escape="\\"),
+    )
+
+
+def _escaped_prefix_column(column: Any) -> Any:
+    return func.replace(func.replace(func.replace(column, "\\", "\\\\"), "%", "\\%"), "_", "\\_")
+
+
+def _sql_like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def list_queued_jobs(connection: DBClient) -> list[dict[str, Any]]:

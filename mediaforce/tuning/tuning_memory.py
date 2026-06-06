@@ -167,7 +167,11 @@ def sibling_approved_season_memory(
         *,
         prefix: str,
 ) -> dict[str, Any] | None:
-    root_prefix = _season_root_prefix(prefix)
+    normalized_prefix = str(prefix).strip().strip("/")
+    root_prefix = _season_root_prefix(normalized_prefix)
+    series_root_scope = root_prefix is None
+    if root_prefix is None:
+        root_prefix = _series_root_prefix(normalized_prefix)
     if root_prefix is None:
         return None
 
@@ -184,7 +188,7 @@ def sibling_approved_season_memory(
     sibling_rows: dict[str, dict[str, Any]] = {}
     for row in rows:
         artifact_prefix = str(row["prefix"] or "").strip().strip("/")
-        if not artifact_prefix or artifact_prefix == prefix:
+        if not artifact_prefix or artifact_prefix == normalized_prefix:
             continue
         if not _is_season_prefix(artifact_prefix):
             continue
@@ -214,7 +218,11 @@ def sibling_approved_season_memory(
         "count": len(siblings),
         "season_labels": season_labels,
         "season_prefixes": [str(entry["prefix"]) for entry in siblings],
-        "suggested_note": _approved_season_shortcut_note(show_label=show_label, season_labels=season_labels),
+        "suggested_note": _approved_season_shortcut_note(
+            show_label=show_label,
+            season_labels=season_labels,
+            series_scope=series_root_scope,
+        ),
     }
 
 
@@ -337,6 +345,15 @@ def _season_root_prefix(prefix: str) -> str | None:
     return str(Path(parts[0]) / parts[1])
 
 
+def _series_root_prefix(prefix: str) -> str | None:
+    parts = Path(str(prefix).strip().strip("/")).parts
+    if len(parts) != 2:
+        return None
+    if parts[0].lower() != "tv":
+        return None
+    return str(Path(parts[0]) / parts[1])
+
+
 def _is_season_prefix(prefix: str) -> bool:
     parts = Path(str(prefix).strip().strip("/")).parts
     return len(parts) == 3 and parts[0].lower() == "tv" and parts[2].lower().startswith("season")
@@ -356,16 +373,17 @@ def _season_sort_key(label: str) -> tuple[int, str]:
     return 10 ** 9, label.lower()
 
 
-def _approved_season_shortcut_note(*, show_label: str, season_labels: list[str]) -> str:
+def _approved_season_shortcut_note(*, show_label: str, season_labels: list[str], series_scope: bool = False) -> str:
     reference_labels = _human_join(season_labels[:3])
     if len(season_labels) > 3:
         reference_labels = f"{reference_labels}, and the other approved seasons"
+    target = "the remaining episodes" if series_scope else "this season"
     if reference_labels:
         return (
-            f"Match the approved {show_label} seasons unless this season clearly needs a different tradeoff. "
+            f"Match the approved {show_label} seasons unless {target} clearly need a different tradeoff. "
             f"Keep this draft aligned with {reference_labels}."
         )
-    return f"Match the approved {show_label} seasons unless this season clearly needs a different tradeoff."
+    return f"Match the approved {show_label} seasons unless {target} clearly need a different tradeoff."
 
 
 def _human_join(values: list[str]) -> str:
