@@ -92,7 +92,11 @@
 	const visibleWorkLaneGroups = $derived(
 		isFolderIndex ? [] : buildWorkLaneGroups(visibleTableFolders)
 	);
-	const nextFolder = $derived(visibleFolders[0] ?? null);
+	const nextFolder = $derived(
+		isFolderIndex
+			? (visibleFolders[0] ?? null)
+			: (visibleWorkLaneGroups[0]?.folders[0] ?? visibleFolders[0] ?? null)
+	);
 	let selectedPrefix = $state('');
 	const selectedFolder = $derived(
 		visibleFolders.find((folder) => folder.prefix === selectedPrefix) ?? nextFolder
