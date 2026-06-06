@@ -317,7 +317,13 @@ def create_app(config_path: Path | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def _app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        purge_transient_artifacts(config, force=True)
+        threading.Thread(
+            target=purge_transient_artifacts,
+            args=(config,),
+            kwargs={"force": True},
+            name="transient-cleanup",
+            daemon=True,
+        ).start()
         with open_db(config.paths.db_path) as connection:
             repaired_host_rows = repair_persisted_encode_job_hosts(connection)
             if repaired_host_rows:
@@ -326,7 +332,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             _recover_calibration_jobs(connection, config)
             _recover_encode_queue(connection, config)
         _start_background_workers(config)
-        _refresh_host_status_cache(config)
+        _safe_collect_host_statuses(config)
         try:
             yield
         finally:

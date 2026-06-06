@@ -1,3 +1,4 @@
+import asyncio
 import errno
 import io
 import json
@@ -10142,7 +10143,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertIn("estimated queue finish in 12m 0s", summary)
 
-    def test_encode_queue_summary_copy_labels_attention_as_queue_wide(self) -> None:
+    def test_encode_queue_summary_copy_omits_queue_wide_attention_for_other_folders(self) -> None:
         encode_queue = {
             "running_count": 0,
             "queued_count": 0,
@@ -10158,8 +10159,26 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         )
 
         self.assertIn("latest folder job completed", summary)
-        self.assertIn("1 queue item needs attention", summary)
-        self.assertNotIn("1 need attention", summary)
+        self.assertNotIn("queue item", summary)
+        self.assertNotIn("needs attention", summary)
+
+    def test_encode_queue_summary_copy_labels_current_folder_attention(self) -> None:
+        encode_queue = {
+            "running_count": 0,
+            "queued_count": 0,
+            "queued_waiting_count": 0,
+            "needs_attention_count": 1,
+        }
+        encode_job = {"status": "needs_attention"}
+
+        summary = web_app._encode_queue_summary_copy(
+            encode_queue,
+            {"is_paused": False},
+            encode_job,
+        )
+
+        self.assertIn("latest folder job needs attention", summary)
+        self.assertNotIn("queue item", summary)
 
     def test_host_runtime_rows_include_running_job_telemetry(self) -> None:
         status = HostStatus(
@@ -11300,6 +11319,55 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             folder_route_paths.index("/api/folders/{prefix:path}/status"),
             folder_route_paths.index("/api/folders/{prefix:path}"),
         )
+
+    def test_app_lifespan_does_not_wait_for_transient_cleanup(self) -> None:
+        cleanup_threads: list[Any] = []
+
+        class FakeCleanupThread:
+            def __init__(
+                    self,
+                    *,
+                    target: Callable[..., Any],
+                    args: tuple[Any, ...] = (),
+                    kwargs: dict[str, Any] | None = None,
+                    name: str | None = None,
+                    daemon: bool | None = None,
+            ) -> None:
+                self.target = target
+                self.args = args
+                self.kwargs = kwargs or {}
+                self.name = name
+                self.daemon = daemon
+
+            def start(self) -> None:
+                cleanup_threads.append(self)
+
+        cleanup_mock = Mock(side_effect=AssertionError("cleanup should not run synchronously"))
+        safe_collect_mock = Mock(return_value=[])
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.purge_transient_artifacts", cleanup_mock
+        ), patch("mediaforce.web.app.threading.Thread", FakeCleanupThread), patch(
+                "mediaforce.web.app._start_calibration_queue_worker"
+        ), patch("mediaforce.web.app._start_encode_queue_worker"), patch(
+                "mediaforce.web.app._safe_collect_host_statuses", safe_collect_mock
+        ):
+            app = web_app.create_app(self.config.paths.config_path)
+
+            async def exercise_lifespan() -> None:
+                async with app.router.lifespan_context(app):
+                    return None
+
+            asyncio.run(exercise_lifespan())
+
+        cleanup_mock.assert_not_called()
+        safe_collect_mock.assert_called_once_with(self.config)
+        self.assertEqual(len(cleanup_threads), 1)
+        cleanup_thread = cleanup_threads[0]
+        self.assertIs(cleanup_thread.target, cleanup_mock)
+        self.assertEqual(cleanup_thread.args, (self.config,))
+        self.assertEqual(cleanup_thread.kwargs, {"force": True})
+        self.assertEqual(cleanup_thread.name, "transient-cleanup")
+        self.assertTrue(cleanup_thread.daemon)
 
     def test_folder_api_route_returns_payload_for_seeded_prefix(self) -> None:
         source_path = self._create_source_file("episode-folder.mkv")
