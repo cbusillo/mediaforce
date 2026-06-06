@@ -650,6 +650,10 @@ describe('Folder Studio review request mapping', () => {
 		const workspace = buildReviewWorkspaceView(folder, null, null, workflow, false);
 
 		expect(workspace.layout).toBe('pipeline');
+		expect(workspace).toMatchObject({
+			badge: 'Completed outputs',
+			title: 'Pipeline complete'
+		});
 		expect(workspace.rows.map((row) => [row.label, row.output])).toEqual([
 			['Encode', 'No encode backlog'],
 			['Validate', 'Validation complete'],
@@ -1090,8 +1094,9 @@ describe('Folder Studio review request mapping', () => {
 	});
 
 	it('makes processing folders monitor-first and keeps review media secondary', () => {
+		const folder = folderPayload({ encode_queue_summary: '1 folder is running.' });
 		const workflow = resolveWorkflow(
-			folderPayload({ encode_queue_summary: '1 folder is running.' }),
+			folder,
 			folderStatusPayload(),
 			null,
 			null,
@@ -1113,6 +1118,79 @@ describe('Folder Studio review request mapping', () => {
 			primaryAction: 'monitor-processing',
 			secondary: 'Download pack',
 			secondaryAction: 'download-review-pack'
+		});
+
+		expect(buildDecisionFacts(folder, null, null, workflow)).toEqual([
+			{
+				label: 'Processing',
+				value: 'Active',
+				detail: '2 workers active.'
+			},
+			{
+				label: 'Scope',
+				value: 'Folder',
+				detail: '1 item'
+			},
+			{
+				label: 'Next action',
+				value: 'Monitor processing',
+				detail: 'Download pack also available'
+			}
+		]);
+
+		const workspace = buildReviewWorkspaceView(folder, null, null, workflow, true);
+		expect(workspace).toMatchObject({
+			badge: 'Processing run',
+			title: 'Output encoding',
+			layout: 'pipeline'
+		});
+		expect(workspace.rows.find((row) => row.label === 'Encode')).toMatchObject({
+			current: true,
+			tone: 'active'
+		});
+	});
+
+	it('keeps retry processing on the output encoding facts and workspace', () => {
+		const folder = folderPayload({
+			summary: folderSummary({ item_count: 2 }),
+			sample_item: { rel_path: 'tv/Example/Season 1/sample.mkv', source_size_bytes: 1 },
+			calibration: {
+				browser_review_ready: true,
+				review_media_ready: true,
+				sample_result: { predicted_total_size_bytes: 250_000_000 }
+			} as FolderCalibrationState
+		});
+		const workflow = resolveWorkflow(
+			folder,
+			folderStatusPayload(),
+			folder.calibration as FolderCalibrationState,
+			null,
+			null,
+			null,
+			{
+				job_id: 'encode-retry',
+				prefix: 'tv/Example/Season 1',
+				status: 'failed',
+				error: 'Worker stopped before output was written.'
+			} as EncodeQueueJob,
+			true
+		);
+
+		expect(workflow).toMatchObject({
+			primaryAction: 'retry-encode',
+			isOutputWorkflow: true
+		});
+		expect(
+			buildDecisionFacts(folder, folder.calibration as FolderCalibrationState, null, workflow)[0]
+		).toEqual({
+			label: 'Processing',
+			value: 'Needs retry',
+			detail: 'Worker stopped before output was written.'
+		});
+		expect(buildReviewWorkspaceView(folder, null, null, workflow, true)).toMatchObject({
+			badge: 'Processing run',
+			title: 'Output encoding',
+			layout: 'pipeline'
 		});
 	});
 
@@ -1398,22 +1476,26 @@ describe('Folder Studio review request mapping', () => {
 				run_verdict: { outcome: 'good_fit' }
 			}
 		} as FolderCalibrationState;
+		const folder = folderPayload({ calibration });
+		const workflow = resolveWorkflow(
+			folder,
+			folderStatusPayload(),
+			calibration,
+			null,
+			null,
+			null,
+			null
+		);
 
-		expect(
-			resolveWorkflow(
-				folderPayload({ calibration }),
-				folderStatusPayload(),
-				calibration,
-				null,
-				null,
-				null,
-				null
-			)
-		).toMatchObject({
+		expect(workflow).toMatchObject({
 			label: 'Review ready',
 			primary: 'Approve and queue',
 			primaryAction: 'queue-encode',
 			secondary: 'Download pack'
+		});
+		expect(buildDecisionFacts(folder, calibration, null, workflow)[0]).toMatchObject({
+			label: 'Per episode',
+			value: '238 MiB'
 		});
 	});
 

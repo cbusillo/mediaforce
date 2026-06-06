@@ -778,6 +778,18 @@ export function buildDecisionFacts(
 	pendingProposal: PendingSampleProposal | null,
 	workflow?: WorkflowState
 ): DecisionFact[] {
+	const outputFact = buildOutputDecisionFact(folder.workflow_state ?? undefined, workflow);
+	if (outputFact) {
+		return [
+			outputFact,
+			buildOutputScopeFact(folder),
+			{
+				label: 'Next action',
+				value: workflow?.primary ?? 'Use the decision buttons',
+				detail: workflowActionDetail(workflow)
+			}
+		];
+	}
 	const verdict = buildSampleVerdict(folder, calibration, pendingProposal);
 	const sampleItem = record<FolderSampleItem>(folder.sample_item);
 	const enforcement = buildBudgetEnforcementView(pendingProposal, sampleItem);
@@ -859,18 +871,6 @@ export function buildDecisionFacts(
 			{ label: 'Reclaim', value: verdict.reclaim, detail: verdict.quality }
 		];
 	}
-	const outputFact = buildOutputDecisionFact(folder.workflow_state ?? undefined, workflow);
-	if (outputFact) {
-		return [
-			outputFact,
-			buildOutputScopeFact(folder),
-			{
-				label: 'Next action',
-				value: workflow?.primary ?? 'Use the decision buttons',
-				detail: workflowActionDetail(workflow)
-			}
-		];
-	}
 	return [
 		{
 			label: 'Review pack',
@@ -896,18 +896,61 @@ function buildOutputDecisionFact(
 	workflowPayload: FolderWorkflowState | undefined,
 	workflow: WorkflowState | undefined
 ): { label: string; value: string; detail: string } | null {
-	const action = workflow?.primaryAction;
-	if (action !== 'validate-outputs' && action !== 'promote-outputs') return null;
+	if (!workflow) return null;
+	const action = workflow.primaryAction;
+	if (!workflow.isOutputWorkflow && !isOutputWorkflowAction(action)) return null;
 	const counts = workflowPayload?.counts;
-	const count =
-		action === 'validate-outputs'
-			? (counts?.ready_to_validate ?? 0)
-			: (counts?.ready_to_promote ?? 0);
-	if (count <= 0) return null;
+	if (action === 'validate-outputs') {
+		const count = counts?.ready_to_validate ?? 0;
+		if (count <= 0) return null;
+		return {
+			label: 'Outputs',
+			value: `${count} ready`,
+			detail: 'Ready to validate'
+		};
+	}
+	if (action === 'promote-outputs') {
+		const count = counts?.ready_to_promote ?? 0;
+		if (count <= 0) return null;
+		return {
+			label: 'Outputs',
+			value: `${count} ready`,
+			detail: 'Ready to promote'
+		};
+	}
+	if (action === 'queue-encode') {
+		const count = counts?.encode_candidates ?? 0;
+		return {
+			label: 'Encode backlog',
+			value: count > 0 ? `${count} to encode` : 'Ready to queue',
+			detail: 'Approved items that still need encoded outputs'
+		};
+	}
+	if (action === 'monitor-processing') {
+		const processing = counts?.processing ?? 0;
+		const queued = counts?.encode_candidates ?? 0;
+		return {
+			label: 'Processing',
+			value:
+				compactParts([
+					processing ? `${processing} running` : null,
+					queued ? `${queued} waiting` : null
+				]) || 'Active',
+			detail: workflow.copy
+		};
+	}
+	if (action === 'retry-encode') {
+		return {
+			label: 'Processing',
+			value: 'Needs retry',
+			detail: workflow.copy
+		};
+	}
+	if (!workflow?.isOutputWorkflow) return null;
 	return {
 		label: 'Outputs',
-		value: `${count} ready`,
-		detail: action === 'validate-outputs' ? 'Ready to validate' : 'Ready to promote'
+		value: workflow.label,
+		detail: workflow.copy
 	};
 }
 
@@ -1164,6 +1207,7 @@ export function buildReviewWorkspaceView(
 		const promoteStep = stepByLabel.get('Promote');
 		const completeStep = stepByLabel.get('Complete');
 		const outputComplete = workflow.label.toLowerCase() === 'complete';
+		const heading = outputWorkspaceHeading(workflow, outputComplete);
 		const validateOutput =
 			workflow.primaryAction === 'validate-outputs'
 				? workflow.primary
@@ -1181,11 +1225,9 @@ export function buildReviewWorkspaceView(
 						? 'Promotion complete'
 						: 'Waiting for validated outputs';
 		return {
-			badge:
-				workflow.primaryAction === 'promote-outputs' ? 'Promotion review' : 'Validation review',
+			badge: heading.badge,
 			badgeTone: workflow.tone,
-			title:
-				workflow.primaryAction === 'promote-outputs' ? 'Output promotion' : 'Output validation',
+			title: heading.title,
 			layout: 'pipeline',
 			rows: [
 				{
@@ -1251,6 +1293,29 @@ export function buildReviewWorkspaceView(
 		layout: 'evidence',
 		rows: buildOutputReviewRows(folder, calibration, pendingProposal)
 	};
+}
+
+function outputWorkspaceHeading(
+	workflow: WorkflowState,
+	outputComplete: boolean
+): { badge: string; title: string } {
+	if (outputComplete) {
+		return { badge: 'Completed outputs', title: 'Pipeline complete' };
+	}
+	if (workflow.primaryAction === 'promote-outputs') {
+		return { badge: 'Promotion review', title: 'Output promotion' };
+	}
+	if (workflow.primaryAction === 'validate-outputs') {
+		return { badge: 'Validation review', title: 'Output validation' };
+	}
+	if (
+		workflow.primaryAction === 'queue-encode' ||
+		workflow.primaryAction === 'monitor-processing' ||
+		workflow.primaryAction === 'retry-encode'
+	) {
+		return { badge: 'Processing run', title: 'Output encoding' };
+	}
+	return { badge: 'Output workflow', title: 'Output pipeline' };
 }
 
 function isOutputWorkflowAction(action: WorkflowAction): boolean {
