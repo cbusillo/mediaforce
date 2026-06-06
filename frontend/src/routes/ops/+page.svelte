@@ -1,11 +1,34 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import { fetchJson } from '$lib/api/client';
+	import type { DashboardSummaryPayload, HostsPayload } from '$lib/api/types';
 	import OpsWorkstationView from '$lib/components/workstation/OpsWorkstationView.svelte';
+	import RouteLoadingView from '$lib/components/workstation/RouteLoadingView.svelte';
 
-	let { data } = $props();
+	let dashboard = $state<DashboardSummaryPayload | null>(null);
+	let hosts = $state<HostsPayload | null>(null);
+	let loadError = $state('');
+
+	onMount(async () => {
+		try {
+			const [dashboardPayload, hostsPayload] = await Promise.all([
+				fetchJson<DashboardSummaryPayload>('/api/dashboard'),
+				fetchJson<HostsPayload>('/api/hosts?compact=1')
+			]);
+			dashboard = dashboardPayload;
+			hosts = hostsPayload;
+		} catch (error) {
+			loadError = error instanceof Error ? error.message : 'Ops route failed to load.';
+		}
+	});
 </script>
 
 <svelte:head>
 	<title>Mediaforce Ops</title>
 </svelte:head>
 
-<OpsWorkstationView dashboard={data.dashboard} hosts={data.hosts} loadError={data.loadError} />
+{#if dashboard && hosts}
+	<OpsWorkstationView {dashboard} {hosts} loadError={null} />
+{:else}
+	<RouteLoadingView route="ops" subject="Ops" crumb="/ops" error={loadError} />
+{/if}

@@ -229,6 +229,7 @@ export function buildQueueStatusTiles(
 	const readyHosts = hosts.hosts.filter((host) => host.available).length;
 	const encodeQueue = dashboard.encode_queue;
 	const scanStatus = dashboard.scan_job?.status ?? 'idle';
+	const projectedReclaim = totalProjectedReclaim(folders);
 	return [
 		{
 			label: 'Next work',
@@ -238,9 +239,9 @@ export function buildQueueStatusTiles(
 		},
 		{
 			label: 'Projected reclaim',
-			value: formatBytes(totalProjectedReclaim(folders)),
+			value: formatBytes(projectedReclaim),
 			detail: `estimated from visible ${visibleScopeLabel}`,
-			tone: totalProjectedReclaim(folders) > 0 ? 'ready' : 'idle',
+			tone: projectedReclaim > 0 ? 'ready' : 'idle',
 			mono: true
 		},
 		{

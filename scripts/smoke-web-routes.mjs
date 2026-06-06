@@ -310,6 +310,11 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
         state: "visible",
         timeout: timeoutMs,
       });
+      await page.waitForFunction(
+        (expectedMarker) => document.body.innerText.includes(expectedMarker),
+        marker,
+        { timeout: timeoutMs },
+      );
       const state = await page.evaluate((expectedMarker) => {
         const bodyText = document.body.innerText.trim();
         return {
@@ -367,6 +372,11 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
         state: "visible",
         timeout: timeoutMs,
       });
+      await page.waitForFunction(
+        (expectedMarker) => document.body.innerText.includes(expectedMarker),
+        marker,
+        { timeout: timeoutMs },
+      );
       const state = await page.evaluate((expectedMarker) => {
         const bodyText = document.body.innerText.trim();
         const visibleWideTables = Array.from(document.querySelectorAll("table"))
