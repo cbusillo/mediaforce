@@ -541,91 +541,141 @@
 				</div>
 			</header>
 
-			<section class="queue-workspace" aria-label={workspaceLabel}>
-				<WorkstationPanel
-					eyebrow={selectedFolderIndex === 0 ? 'Recommended' : 'Selected'}
-					title={selectedPanelTitle}
-				>
-					{#if selectedFolder}
-						<div class="selected-folder">
-							<div class="selected-folder__identity">
-								<div class="selected-folder__head">
-									<StateBadge
-										tone={queueFolderTone(selectedFolder)}
-										label={queueFolderState(selectedFolder)}
-									/>
-									<strong>#{selectedFolderIndex + 1}</strong>
+			<section
+				class:queue-workspace--work={!isFolderIndex}
+				class="queue-workspace"
+				aria-label={workspaceLabel}
+			>
+				<div class="queue-inspector">
+					<WorkstationPanel
+						eyebrow={selectedFolderIndex === 0 ? 'Recommended' : 'Selected'}
+						title={selectedPanelTitle}
+					>
+						{#if selectedFolder}
+							<div class="selected-folder">
+								<div class="selected-folder__identity">
+									<div class="selected-folder__head">
+										<StateBadge
+											tone={queueFolderTone(selectedFolder)}
+											label={queueFolderState(selectedFolder)}
+										/>
+										<strong>#{selectedFolderIndex + 1}</strong>
+									</div>
+									<div>
+										<h2>{selectedFolder.title}</h2>
+										<p>{selectedFolder.prefix}</p>
+									</div>
 								</div>
-								<div>
-									<h2>{selectedFolder.title}</h2>
-									<p>{selectedFolder.prefix}</p>
+								<div class="reason-block">
+									<span>Why this row</span>
+									<p>{selectedRecommendationCopy(selectedFolder, selectedFolderIndex)}</p>
 								</div>
+								<dl class="context-metrics">
+									<dt>Open work</dt>
+									<dd>{workflowOpenItemCount(selectedFolder).toLocaleString('en-US')}</dd>
+									<dt>Projected reclaim</dt>
+									<dd>{formatBytes(selectedFolder.projected_reclaim_bytes)}</dd>
+									<dt>Source size</dt>
+									<dd>{formatBytes(selectedFolder.total_size_bytes)}</dd>
+									<dt>Codec mix</dt>
+									<dd>{codecSummary(selectedFolder.video_codecs)}</dd>
+									<dt>Catalog state</dt>
+									<dd>{folderStatusCopy(selectedFolder)}</dd>
+								</dl>
+								<a
+									class="control control--primary"
+									href={resolve(folderRoutePath(selectedFolder.prefix))}
+									>{isFolderIndex
+										? `Open ${activeEntityLabel} Studio`
+										: queuePrimaryActionLabel(selectedFolder)}</a
+								>
 							</div>
-							<div class="reason-block">
-								<span>Why this row</span>
-								<p>{selectedRecommendationCopy(selectedFolder, selectedFolderIndex)}</p>
-							</div>
-							<dl class="context-metrics">
-								<dt>Open work</dt>
-								<dd>{workflowOpenItemCount(selectedFolder).toLocaleString('en-US')}</dd>
-								<dt>Projected reclaim</dt>
-								<dd>{formatBytes(selectedFolder.projected_reclaim_bytes)}</dd>
-								<dt>Source size</dt>
-								<dd>{formatBytes(selectedFolder.total_size_bytes)}</dd>
-								<dt>Codec mix</dt>
-								<dd>{codecSummary(selectedFolder.video_codecs)}</dd>
-								<dt>Catalog state</dt>
-								<dd>{folderStatusCopy(selectedFolder)}</dd>
-							</dl>
-							<a
-								class="control control--primary"
-								href={resolve(folderRoutePath(selectedFolder.prefix))}
-								>{isFolderIndex
-									? `Open ${activeEntityLabel} Studio`
-									: queuePrimaryActionLabel(selectedFolder)}</a
-							>
-						</div>
-					{:else}
-						<div class="empty-note">Select a folder from the ranked worklist.</div>
-					{/if}
-				</WorkstationPanel>
+						{:else}
+							<div class="empty-note">Select a folder from the ranked worklist.</div>
+						{/if}
+					</WorkstationPanel>
+				</div>
 
-				<WorkstationPanel
-					eyebrow={isFolderIndex ? tableEyebrow : 'Workflow lanes'}
-					title={tableTitle}
-					meta={`${visibleFolders.length.toLocaleString('en-US')} visible`}
-				>
-					<div class="table-wrap">
-						<table>
-							<thead>
-								<tr>
-									<th>Rank</th>
-									<th>State</th>
-									<th>{activeEntityLabel}</th>
-									<th>Open work</th>
-									<th>Source</th>
-									<th>Reclaim</th>
-									<th>Codec</th>
-									<th>Open</th>
-								</tr>
-							</thead>
-							<tbody>
-								{#if !isFolderIndex && visibleWorkLaneGroups.length > 0}
-									{#each visibleWorkLaneGroups as group (group.key)}
-										<tr class="lane-row lane-row--{group.tone}">
-											<td colspan="8">
-												<div class="lane-row__content">
-													<strong>{group.label}</strong>
-													<span>{group.detail}</span>
-													<small
-														>{group.folders.length.toLocaleString('en-US')} folders · {group.openWork.toLocaleString(
-															'en-US'
-														)} open</small
-													>
-												</div>
-											</td>
-										</tr>
-										{#each group.folders as folder (rowKey(folder))}
+				<div class="queue-lanes">
+					<WorkstationPanel
+						eyebrow={isFolderIndex ? tableEyebrow : 'Workflow lanes'}
+						title={tableTitle}
+						meta={`${visibleFolders.length.toLocaleString('en-US')} visible`}
+					>
+						<div class="table-wrap">
+							<table>
+								<thead>
+									<tr>
+										<th>Rank</th>
+										<th>State</th>
+										<th>{activeEntityLabel}</th>
+										<th>Open work</th>
+										<th>Source</th>
+										<th>Reclaim</th>
+										<th>Codec</th>
+										<th>Open</th>
+									</tr>
+								</thead>
+								<tbody>
+									{#if !isFolderIndex && visibleWorkLaneGroups.length > 0}
+										{#each visibleWorkLaneGroups as group (group.key)}
+											<tr class="lane-row lane-row--{group.tone}">
+												<td colspan="8">
+													<div class="lane-row__content">
+														<strong>{group.label}</strong>
+														<span>{group.detail}</span>
+														<small
+															>{group.folders.length.toLocaleString('en-US')} folders · {group.openWork.toLocaleString(
+																'en-US'
+															)} open</small
+														>
+													</div>
+												</td>
+											</tr>
+											{#each group.folders as folder (rowKey(folder))}
+												<tr class:row-selected={selectedFolder?.prefix === folder.prefix}>
+													<td>
+														<button
+															type="button"
+															class="rank-button"
+															aria-label={`Select ${folder.title}`}
+															aria-pressed={selectedFolder?.prefix === folder.prefix}
+															onclick={() => selectFolder(folder)}
+														>
+															{rowRank(folder)}
+														</button>
+													</td>
+													<td>
+														<StateBadge
+															compact
+															tone={queueFolderTone(folder)}
+															label={queueFolderState(folder)}
+														/>
+													</td>
+													<td>
+														<button
+															type="button"
+															class="folder-select"
+															onclick={() => selectFolder(folder)}
+														>
+															<strong>{folder.title}</strong>
+															<span>{folder.prefix}</span>
+														</button>
+													</td>
+													<td>{workflowOpenItemCount(folder).toLocaleString('en-US')}</td>
+													<td>{formatBytes(folder.total_size_bytes)}</td>
+													<td>{formatBytes(folder.projected_reclaim_bytes)}</td>
+													<td>{codecSummary(folder.video_codecs)}</td>
+													<td>
+														<a class="open-link" href={resolve(folderRoutePath(folder.prefix))}
+															>Open</a
+														>
+													</td>
+												</tr>
+											{/each}
+										{/each}
+									{:else if visibleTableFolders.length > 0}
+										{#each visibleTableFolders as folder (rowKey(folder))}
 											<tr class:row-selected={selectedFolder?.prefix === folder.prefix}>
 												<td>
 													<button
@@ -666,56 +716,16 @@
 												</td>
 											</tr>
 										{/each}
-									{/each}
-								{:else if visibleTableFolders.length > 0}
-									{#each visibleTableFolders as folder (rowKey(folder))}
-										<tr class:row-selected={selectedFolder?.prefix === folder.prefix}>
-											<td>
-												<button
-													type="button"
-													class="rank-button"
-													aria-label={`Select ${folder.title}`}
-													aria-pressed={selectedFolder?.prefix === folder.prefix}
-													onclick={() => selectFolder(folder)}
-												>
-													{rowRank(folder)}
-												</button>
-											</td>
-											<td>
-												<StateBadge
-													compact
-													tone={queueFolderTone(folder)}
-													label={queueFolderState(folder)}
-												/>
-											</td>
-											<td>
-												<button
-													type="button"
-													class="folder-select"
-													onclick={() => selectFolder(folder)}
-												>
-													<strong>{folder.title}</strong>
-													<span>{folder.prefix}</span>
-												</button>
-											</td>
-											<td>{workflowOpenItemCount(folder).toLocaleString('en-US')}</td>
-											<td>{formatBytes(folder.total_size_bytes)}</td>
-											<td>{formatBytes(folder.projected_reclaim_bytes)}</td>
-											<td>{codecSummary(folder.video_codecs)}</td>
-											<td>
-												<a class="open-link" href={resolve(folderRoutePath(folder.prefix))}>Open</a>
-											</td>
+									{:else}
+										<tr>
+											<td colspan="8">No folders match the current filters.</td>
 										</tr>
-									{/each}
-								{:else}
-									<tr>
-										<td colspan="8">No folders match the current filters.</td>
-									</tr>
-								{/if}
-							</tbody>
-						</table>
-					</div>
-				</WorkstationPanel>
+									{/if}
+								</tbody>
+							</table>
+						</div>
+					</WorkstationPanel>
+				</div>
 			</section>
 		</section>
 	</main>
@@ -765,6 +775,11 @@
 		display: grid;
 		gap: var(--mf-space-5);
 		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.queue-lanes,
+	.queue-inspector {
+		min-width: 0;
 	}
 
 	.queue-header h1 {
@@ -1296,6 +1311,17 @@
 		padding: var(--mf-space-5);
 	}
 
+	@media (max-height: 800px) {
+		.queue-header {
+			gap: var(--mf-space-3);
+			padding-bottom: var(--mf-space-3);
+		}
+
+		.queue-header p {
+			display: none;
+		}
+	}
+
 	@media (max-width: 1180px) {
 		.home {
 			grid-template-columns: var(--mf-workstation-rail-width) minmax(0, 1fr);
@@ -1337,6 +1363,30 @@
 
 		.selected-folder {
 			grid-template-columns: 1fr;
+		}
+	}
+
+	@media (min-width: 760px) {
+		.queue-workspace--work {
+			grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+		}
+
+		.queue-workspace--work .queue-lanes {
+			grid-column: 1;
+			grid-row: 1;
+		}
+
+		.queue-workspace--work .queue-inspector {
+			grid-column: 2;
+			grid-row: 1;
+			max-height: calc(100vh - 190px);
+			overflow-y: auto;
+			position: sticky;
+			top: var(--mf-space-5);
+		}
+
+		.queue-workspace--work .selected-folder {
+			grid-template-columns: minmax(0, 1fr);
 		}
 	}
 
