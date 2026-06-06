@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import type { EncodeQueueJob, FolderPayload, FolderStatusPayload } from '$lib/api/types';
+import type {
+	EncodeQueueJob,
+	FolderPayload,
+	FolderStatusPayload,
+	HostsPayload
+} from '$lib/api/types';
 import type { FolderCalibrationJob } from '$lib/folders/studio';
 import {
 	buildBenchHostOptions,
@@ -11,6 +16,7 @@ import {
 	buildRuntimeFacts,
 	buildSampleFacts,
 	buildSampleVerdict,
+	buildStatusTiles,
 	buildWorkflowSteps,
 	predictedFolderSizeBytes,
 	projectedReclaimBytes,
@@ -49,6 +55,14 @@ function folderStatusPayload(overrides: Partial<FolderStatusPayload> = {}): Fold
 		folder_scan_status: 'idle',
 		calibration_job: null,
 		folder_scan_job: null,
+		...overrides
+	};
+}
+
+function hostsPayload(overrides: Partial<HostsPayload> = {}): HostsPayload {
+	return {
+		compact: true,
+		hosts: [],
 		...overrides
 	};
 }
@@ -711,6 +725,57 @@ describe('Folder Studio review request mapping', () => {
 			{ label: 'Outputs', value: '22 validate · 9 encode' },
 			{ label: 'Processing', value: '0 running · 0 queued' }
 		]);
+		expect(buildStatusTiles(folder, folderStatusPayload(), hostsPayload(), workflow)[1]).toEqual({
+			label: 'Outputs',
+			value: '0 / 31 complete',
+			detail: '22 to validate · 9 to encode',
+			tone: 'ready'
+		});
+	});
+
+	it('uses fresher status workflow counts for output shell and runtime facts', () => {
+		const statusWorkflow = workflowState({
+			state: 'processing',
+			primary_lane: 'encode',
+			label: 'Processing',
+			tone: 'active',
+			detail: '4 outputs are processing.',
+			counts: {
+				items: 31,
+				ready_to_validate: 0,
+				encode_candidates: 5,
+				ready_to_promote: 0,
+				processing: 4,
+				complete: 22,
+				blocked: 0
+			},
+			next_action: {
+				kind: 'monitor_encode',
+				label: 'Monitor processing',
+				enabled: true,
+				target_prefix: 'tv/Example/Season 1'
+			}
+		});
+		const folder = folderPayload({
+			summary: folderSummary({ item_count: 31 }),
+			encode_queue_summary: '4 running · 5 queued'
+		});
+		const status = folderStatusPayload({
+			folder_scan_status: 'completed',
+			workflow_state: statusWorkflow
+		});
+		const workflow = resolveWorkflow(folder, status, null, null, null, null, null);
+
+		expect(buildStatusTiles(folder, status, hostsPayload(), workflow)[1]).toEqual({
+			label: 'Outputs',
+			value: '22 / 31 complete',
+			detail: '5 to encode · 4 processing',
+			tone: 'active'
+		});
+		expect(buildRuntimeFacts(folder, status, null, null, workflow)[2]).toEqual({
+			label: 'Outputs',
+			value: '5 encode · 22 complete'
+		});
 	});
 
 	it('keeps sample workflow runtime facts focused on calibration and approval', () => {
@@ -738,6 +803,19 @@ describe('Folder Studio review request mapping', () => {
 			{ label: 'Approval', value: 'missing_sample' },
 			{ label: 'Processing', value: 'No folder job queued' }
 		]);
+		expect(
+			buildStatusTiles(
+				folderPayload(),
+				folderStatusPayload({ calibration_status: 'idle' }),
+				hostsPayload(),
+				workflow
+			)[1]
+		).toEqual({
+			label: 'Sample',
+			value: 'idle',
+			detail: 'polling idle',
+			tone: 'idle'
+		});
 	});
 
 	it('keeps sample review evidence on the evidence workspace layout', () => {

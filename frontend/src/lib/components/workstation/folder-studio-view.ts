@@ -1830,6 +1830,39 @@ export function buildStatusTiles(
 	const readyHosts = hosts.hosts.filter((host) => host.available).length;
 	const totalHosts = hosts.hosts.length;
 	const encodeQueue = folder.encode_queue;
+	const workflowCounts = folder.workflow_state?.counts ?? status.workflow_state?.counts;
+	const itemCount = workflowCounts?.items ?? numberValue(folder.summary?.item_count) ?? 0;
+	const complete = workflowCounts?.complete ?? 0;
+	const readyToValidate = workflowCounts?.ready_to_validate ?? 0;
+	const readyToPromote = workflowCounts?.ready_to_promote ?? 0;
+	const encodeCandidates = workflowCounts?.encode_candidates ?? 0;
+	const processing = workflowCounts?.processing ?? 0;
+	const outputDetail =
+		compactParts([
+			readyToValidate ? `${readyToValidate} to validate` : null,
+			readyToPromote ? `${readyToPromote} to promote` : null,
+			encodeCandidates ? `${encodeCandidates} to encode` : null,
+			processing ? `${processing} processing` : null
+		]) ||
+		(itemCount > 0 && complete >= itemCount ? 'all outputs complete' : 'output pipeline ready');
+	const workflowTile: StatusTile = workflow.isOutputWorkflow
+		? {
+				label: 'Outputs',
+				value: itemCount > 0 ? `${complete} / ${itemCount} complete` : workflow.label,
+				detail: outputDetail,
+				tone: itemCount > 0 && complete >= itemCount ? 'ready' : workflow.tone
+			}
+		: {
+				label: 'Sample',
+				value: status.calibration_status || 'Unknown',
+				detail: status.polling_active ? 'polling active' : 'polling idle',
+				tone:
+					status.calibration_status === 'failed'
+						? 'fail'
+						: status.polling_active
+							? 'active'
+							: 'idle'
+			};
 	return [
 		{
 			label: 'Folder state',
@@ -1837,13 +1870,7 @@ export function buildStatusTiles(
 			detail: folder.prefix,
 			tone: workflow.tone
 		},
-		{
-			label: 'Sample',
-			value: status.calibration_status || 'Unknown',
-			detail: status.polling_active ? 'polling active' : 'polling idle',
-			tone:
-				status.calibration_status === 'failed' ? 'fail' : status.polling_active ? 'active' : 'idle'
-		},
+		workflowTile,
 		{
 			label: 'Processing',
 			value: encodeQueue
@@ -1876,7 +1903,7 @@ export function buildRuntimeFacts(
 ): RuntimeFact[] {
 	const queueSummary = encodeJob?.status ?? folder.encode_queue_summary ?? '—';
 	if (workflow.isOutputWorkflow) {
-		const counts = folder.workflow_state?.counts;
+		const counts = folder.workflow_state?.counts ?? status.workflow_state?.counts;
 		const readyToValidate = counts?.ready_to_validate ?? 0;
 		const readyToPromote = counts?.ready_to_promote ?? 0;
 		const encodeCandidates = counts?.encode_candidates ?? 0;
