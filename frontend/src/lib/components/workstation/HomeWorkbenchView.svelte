@@ -12,6 +12,7 @@
 	import StateBadge from './StateBadge.svelte';
 	import WorkstationPanel from './WorkstationPanel.svelte';
 	import {
+		buildWorkLaneGroups,
 		buildQueueFooterSignals,
 		buildQueueStatusTiles,
 		codecSummary,
@@ -87,6 +88,10 @@
 		})
 	);
 	const visibleFoldersPayload = $derived({ ...foldersPayload, folders: visibleFolders });
+	const visibleTableFolders = $derived(visibleFolders.slice(0, 32));
+	const visibleWorkLaneGroups = $derived(
+		isFolderIndex ? [] : buildWorkLaneGroups(visibleTableFolders)
+	);
 	const nextFolder = $derived(visibleFolders[0] ?? null);
 	let selectedPrefix = $state('');
 	const selectedFolder = $derived(
@@ -151,7 +156,7 @@
 	);
 	const activeEntityLabel = $derived(isFolderIndex && folderScope === 'series' ? 'Show' : 'Folder');
 	const selectedPanelTitle = $derived(
-		isFolderIndex ? `${activeEntityLabel} details` : 'Next action'
+		isFolderIndex ? `${activeEntityLabel} details` : 'Selected work'
 	);
 	const tableEyebrow = $derived(
 		isFolderIndex && folderScope === 'series'
@@ -161,7 +166,7 @@
 				: 'Ranked work'
 	);
 	const tableTitle = $derived(
-		isFolderIndex ? `Matching ${folderScopeLabel.toLowerCase()}` : 'Next folders to review'
+		isFolderIndex ? `Matching ${folderScopeLabel.toLowerCase()}` : 'Workflow lanes'
 	);
 	const visibleScopeSummary = $derived(
 		`${visibleFolders.length.toLocaleString('en-US')} / ${folders.length.toLocaleString(
@@ -582,7 +587,7 @@
 				</WorkstationPanel>
 
 				<WorkstationPanel
-					eyebrow={isFolderIndex ? tableEyebrow : 'Worklist'}
+					eyebrow={isFolderIndex ? tableEyebrow : 'Workflow lanes'}
 					title={tableTitle}
 					meta={`${visibleFolders.length.toLocaleString('en-US')} visible`}
 				>
@@ -601,49 +606,108 @@
 								</tr>
 							</thead>
 							<tbody>
-								{#each visibleFolders.slice(0, 32) as folder (rowKey(folder))}
-									<tr class:row-selected={selectedFolder?.prefix === folder.prefix}>
-										<td>
-											<button
-												type="button"
-												class="rank-button"
-												aria-label={`Select ${folder.title}`}
-												aria-pressed={selectedFolder?.prefix === folder.prefix}
-												onclick={() => selectFolder(folder)}
-											>
-												{rowRank(folder)}
-											</button>
-										</td>
-										<td>
-											<StateBadge
-												compact
-												tone={queueFolderTone(folder)}
-												label={queueFolderState(folder)}
-											/>
-										</td>
-										<td>
-											<button
-												type="button"
-												class="folder-select"
-												onclick={() => selectFolder(folder)}
-											>
-												<strong>{folder.title}</strong>
-												<span>{folder.prefix}</span>
-											</button>
-										</td>
-										<td>{workflowOpenItemCount(folder).toLocaleString('en-US')}</td>
-										<td>{formatBytes(folder.total_size_bytes)}</td>
-										<td>{formatBytes(folder.projected_reclaim_bytes)}</td>
-										<td>{codecSummary(folder.video_codecs)}</td>
-										<td>
-											<a class="open-link" href={resolve(folderRoutePath(folder.prefix))}>Open</a>
-										</td>
-									</tr>
+								{#if !isFolderIndex && visibleWorkLaneGroups.length > 0}
+									{#each visibleWorkLaneGroups as group (group.key)}
+										<tr class="lane-row lane-row--{group.tone}">
+											<td colspan="8">
+												<div class="lane-row__content">
+													<strong>{group.label}</strong>
+													<span>{group.detail}</span>
+													<small
+														>{group.folders.length.toLocaleString('en-US')} folders · {group.openWork.toLocaleString(
+															'en-US'
+														)} open</small
+													>
+												</div>
+											</td>
+										</tr>
+										{#each group.folders as folder (rowKey(folder))}
+											<tr class:row-selected={selectedFolder?.prefix === folder.prefix}>
+												<td>
+													<button
+														type="button"
+														class="rank-button"
+														aria-label={`Select ${folder.title}`}
+														aria-pressed={selectedFolder?.prefix === folder.prefix}
+														onclick={() => selectFolder(folder)}
+													>
+														{rowRank(folder)}
+													</button>
+												</td>
+												<td>
+													<StateBadge
+														compact
+														tone={queueFolderTone(folder)}
+														label={queueFolderState(folder)}
+													/>
+												</td>
+												<td>
+													<button
+														type="button"
+														class="folder-select"
+														onclick={() => selectFolder(folder)}
+													>
+														<strong>{folder.title}</strong>
+														<span>{folder.prefix}</span>
+													</button>
+												</td>
+												<td>{workflowOpenItemCount(folder).toLocaleString('en-US')}</td>
+												<td>{formatBytes(folder.total_size_bytes)}</td>
+												<td>{formatBytes(folder.projected_reclaim_bytes)}</td>
+												<td>{codecSummary(folder.video_codecs)}</td>
+												<td>
+													<a class="open-link" href={resolve(folderRoutePath(folder.prefix))}
+														>Open</a
+													>
+												</td>
+											</tr>
+										{/each}
+									{/each}
+								{:else if visibleTableFolders.length > 0}
+									{#each visibleTableFolders as folder (rowKey(folder))}
+										<tr class:row-selected={selectedFolder?.prefix === folder.prefix}>
+											<td>
+												<button
+													type="button"
+													class="rank-button"
+													aria-label={`Select ${folder.title}`}
+													aria-pressed={selectedFolder?.prefix === folder.prefix}
+													onclick={() => selectFolder(folder)}
+												>
+													{rowRank(folder)}
+												</button>
+											</td>
+											<td>
+												<StateBadge
+													compact
+													tone={queueFolderTone(folder)}
+													label={queueFolderState(folder)}
+												/>
+											</td>
+											<td>
+												<button
+													type="button"
+													class="folder-select"
+													onclick={() => selectFolder(folder)}
+												>
+													<strong>{folder.title}</strong>
+													<span>{folder.prefix}</span>
+												</button>
+											</td>
+											<td>{workflowOpenItemCount(folder).toLocaleString('en-US')}</td>
+											<td>{formatBytes(folder.total_size_bytes)}</td>
+											<td>{formatBytes(folder.projected_reclaim_bytes)}</td>
+											<td>{codecSummary(folder.video_codecs)}</td>
+											<td>
+												<a class="open-link" href={resolve(folderRoutePath(folder.prefix))}>Open</a>
+											</td>
+										</tr>
+									{/each}
 								{:else}
 									<tr>
 										<td colspan="8">No folders match the current filters.</td>
 									</tr>
-								{/each}
+								{/if}
 							</tbody>
 						</table>
 					</div>
@@ -1065,6 +1129,54 @@
 
 	tr.row-selected td {
 		background: var(--mf-active-bg);
+	}
+
+	.lane-row td {
+		background: var(--mf-bg-panel-2);
+		border-bottom: 0;
+		border-top: var(--mf-border);
+		height: auto;
+		padding: var(--mf-space-3);
+	}
+
+	.lane-row__content {
+		align-items: center;
+		display: grid;
+		gap: var(--mf-space-3);
+		grid-template-columns: minmax(140px, 0.4fr) minmax(220px, 1fr) auto;
+		min-width: 0;
+	}
+
+	.lane-row__content strong {
+		font-size: var(--mf-text-sm);
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.lane-row__content span,
+	.lane-row__content small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+	}
+
+	.lane-row__content small {
+		font-family: var(--mf-font-mono), monospace;
+		justify-self: end;
+	}
+
+	.lane-row--ready td {
+		box-shadow: inset 3px 0 0 var(--mf-ready-fg);
+	}
+
+	.lane-row--wait td {
+		box-shadow: inset 3px 0 0 var(--mf-wait-fg);
+	}
+
+	.lane-row--active td {
+		box-shadow: inset 3px 0 0 var(--mf-active-fg);
+	}
+
+	.lane-row--fail td {
+		box-shadow: inset 3px 0 0 var(--mf-fail-fg);
 	}
 
 	.rank-button,

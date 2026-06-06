@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { FolderCard } from '$lib/api/types';
 import {
+	buildWorkLaneGroups,
 	folderStatusCopy,
 	isQueueActionableFolder,
 	queuePrimaryActionLabel,
@@ -198,5 +199,54 @@ describe('Queue workstation labels', () => {
 		expect(tiles[0].value).toBe('1 whole shows');
 		expect(tiles[0].detail).toBe('2 open work');
 		expect(tiles[1].detail).toBe('estimated from visible whole shows');
+	});
+
+	it('groups work folders into explicit workflow lanes', () => {
+		const groups = buildWorkLaneGroups([
+			folder({ title: 'Validate', workflow_state: workflowState() }),
+			folder({
+				title: 'Encode',
+				workflow_state: workflowState({
+					primary_lane: 'encode',
+					state: 'ready_to_encode',
+					label: 'Ready to encode',
+					counts: {
+						items: 4,
+						encode_candidates: 4,
+						ready_to_validate: 0,
+						ready_to_promote: 0,
+						processing: 0,
+						complete: 0,
+						blocked: 0
+					}
+				})
+			}),
+			folder({
+				title: 'Broken',
+				workflow_state: workflowState({
+					primary_lane: 'attention',
+					label: 'Needs attention',
+					tone: 'attention',
+					counts: {
+						items: 4,
+						encode_candidates: 0,
+						ready_to_validate: 0,
+						ready_to_promote: 0,
+						processing: 0,
+						complete: 0,
+						blocked: 4
+					}
+				})
+			}),
+			folder({ title: 'Sample', pending_count: 3 })
+		]);
+
+		expect(groups.map((group) => [group.key, group.label, group.openWork])).toEqual([
+			['attention', 'Needs attention', 4],
+			['validate', 'Ready to validate', 2],
+			['encode', 'Encode backlog', 4],
+			['sample', 'Sample and approval', 3]
+		]);
+		expect(groups.find((group) => group.key === 'validate')?.detail).toContain('not more encode');
 	});
 });

@@ -120,6 +120,104 @@ export function workflowOpenItemCount(folder: FolderCard): number {
 	);
 }
 
+export type WorkLaneKey =
+	| 'attention'
+	| 'processing'
+	| 'validate'
+	| 'promote'
+	| 'encode'
+	| 'sample'
+	| 'other';
+
+export type WorkLaneGroup = {
+	key: WorkLaneKey;
+	label: string;
+	detail: string;
+	tone: ShellTone;
+	folders: FolderCard[];
+	openWork: number;
+};
+
+const WORK_LANE_ORDER: WorkLaneKey[] = [
+	'attention',
+	'processing',
+	'validate',
+	'promote',
+	'encode',
+	'sample',
+	'other'
+];
+
+const WORK_LANE_META: Record<WorkLaneKey, { label: string; detail: string; tone: ShellTone }> = {
+	attention: {
+		label: 'Needs attention',
+		detail: 'Blocked, failed, or stopped work that needs operator action.',
+		tone: 'fail'
+	},
+	processing: {
+		label: 'Active processing',
+		detail: 'Items currently running or waiting on encode workers.',
+		tone: 'active'
+	},
+	validate: {
+		label: 'Ready to validate',
+		detail: 'Encoded outputs that need validation, not more encode queueing.',
+		tone: 'ready'
+	},
+	promote: {
+		label: 'Ready to promote',
+		detail: 'Validated outputs waiting to be published into the library.',
+		tone: 'ready'
+	},
+	encode: {
+		label: 'Encode backlog',
+		detail: 'Approved source items that still need encoded outputs.',
+		tone: 'wait'
+	},
+	sample: {
+		label: 'Sample and approval',
+		detail: 'Folders that still need sampling, review evidence, or approval.',
+		tone: 'wait'
+	},
+	other: {
+		label: 'Other work',
+		detail: 'Actionable folders that do not fit a primary pipeline lane.',
+		tone: 'idle'
+	}
+};
+
+export function workLaneKey(folder: FolderCard): WorkLaneKey {
+	const workflow = folder.workflow_state;
+	if (!workflow) return folder.pending_count > 0 ? 'sample' : 'other';
+	if (workflow.tone === 'attention' || workflow.primary_lane === 'attention') return 'attention';
+	if (workflow.primary_lane === 'blocked') return 'attention';
+	if (workflow.primary_lane === 'processing') return 'processing';
+	if (workflow.primary_lane === 'validate') return 'validate';
+	if (workflow.primary_lane === 'promote') return 'promote';
+	if (workflow.primary_lane === 'encode') return 'encode';
+	return folder.pending_count > 0 ? 'sample' : 'other';
+}
+
+export function buildWorkLaneGroups(folders: FolderCard[]): WorkLaneGroup[] {
+	const grouped = new Map<WorkLaneKey, FolderCard[]>();
+	for (const folder of folders) {
+		const key = workLaneKey(folder);
+		grouped.set(key, [...(grouped.get(key) ?? []), folder]);
+	}
+	return WORK_LANE_ORDER.map((key) => {
+		const laneFolders = grouped.get(key) ?? [];
+		const meta = WORK_LANE_META[key];
+		return {
+			key,
+			label: meta.label,
+			detail: meta.detail,
+			tone: meta.tone,
+			folders: laneFolders,
+			openWork: totalPendingItems(laneFolders)
+		};
+	}).filter((group) => group.folders.length > 0);
+}
+
 export function buildQueueStatusTiles(
 	dashboard: DashboardSummaryPayload,
 	foldersPayload: DashboardFoldersPayload,
