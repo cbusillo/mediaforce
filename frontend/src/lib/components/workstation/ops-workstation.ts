@@ -83,10 +83,13 @@ function hostEncodeReady(host: HostRuntime): boolean {
 
 function hostCapacityCounts(hosts: HostsPayload | null | undefined) {
 	const rows = hosts?.hosts ?? [];
+	const available = rows.filter((host) => host.available).length;
 	return {
-		available: rows.filter((host) => host.available).length,
+		available,
 		encodeReady: rows.filter(hostEncodeReady).length,
+		busy: rows.filter((host) => host.available && numberValue(host.active_encode_count) > 0).length,
 		scheduledOff: rows.filter((host) => host.available && host.schedule_open === false).length,
+		unavailable: Math.max(rows.length - available, 0),
 		total: rows.length
 	};
 }
@@ -369,6 +372,7 @@ export function buildOpsBlockers(
 	const queue = dashboard?.encode_queue;
 	const attentionCount = queue?.needs_attention_count ?? 0;
 	const capacity = hostCapacityCounts(hosts);
+	const runningCount = queue?.running_count ?? 0;
 	const queuedWork = (queue?.queued_count ?? 0) + (queue?.running_count ?? 0);
 	const scheduleWaiting = queue?.queued_waiting_count ?? 0;
 	if (loadError) {
@@ -406,7 +410,7 @@ export function buildOpsBlockers(
 			action: 'retry-failed-encode'
 		});
 	}
-	if (capacity.total > 0 && capacity.encodeReady === 0 && queuedWork > 0) {
+	if (capacity.total > 0 && capacity.encodeReady === 0 && queuedWork > 0 && runningCount === 0) {
 		const allAvailableHostsScheduledOff =
 			capacity.available > 0 && capacity.scheduledOff === capacity.available;
 		const workersReachable = capacity.available > 0;
@@ -424,7 +428,7 @@ export function buildOpsBlockers(
 					? 'Workers are reachable but cannot claim another encode right now. Manual samples can still be prepared from Folder Studio.'
 					: 'Queued work exists, but every configured worker is unavailable or outside its work window.'
 		});
-	} else if (scheduleWaiting > 0) {
+	} else if (scheduleWaiting > 0 && capacity.encodeReady === 0) {
 		blockers.push({
 			key: 'schedule-waiting',
 			tone: 'wait',
@@ -486,7 +490,7 @@ export function buildOpsReadinessSummary(
 			metricValue: String(needsAttention)
 		};
 	}
-	if (capacity.total > 0 && capacity.encodeReady === 0 && queuedWork > 0) {
+	if (capacity.total > 0 && capacity.encodeReady === 0 && queuedWork > 0 && runningCount === 0) {
 		const allAvailableHostsScheduledOff =
 			capacity.available > 0 && capacity.scheduledOff === capacity.available;
 		const workersReachable = capacity.available > 0;
@@ -502,7 +506,7 @@ export function buildOpsReadinessSummary(
 				: workersReachable
 					? 'Workers are reachable but cannot claim another encode right now; manual sample setup is still allowed.'
 					: 'Queued work exists, but every configured worker is unavailable or outside its work window.',
-			metricLabel: 'Encode-ready',
+			metricLabel: 'Can encode',
 			metricValue: '0'
 		};
 	}
@@ -517,7 +521,7 @@ export function buildOpsReadinessSummary(
 			metricValue: String(runningCount + activeChecks)
 		};
 	}
-	if (queuedWaiting > 0) {
+	if (queuedWaiting > 0 && capacity.encodeReady === 0) {
 		return {
 			tone: 'wait',
 			title: 'Waiting for the work window',
@@ -530,9 +534,12 @@ export function buildOpsReadinessSummary(
 	if (capacity.encodeReady > 0) {
 		return {
 			tone: 'ready',
-			title: 'Ready for work',
-			detail: 'Workers can claim eligible processing work now.',
-			metricLabel: 'Encode-ready',
+			title: queuedCount > 0 ? 'Queued and ready to start' : 'Ready for work',
+			detail:
+				queuedCount > 0
+					? 'Workers can claim the queued folder now. If it stays queued after refresh, check the job row for the specific blocker.'
+					: 'Workers can claim eligible processing work now.',
+			metricLabel: 'Can encode',
 			metricValue: String(capacity.encodeReady)
 		};
 	}
@@ -594,13 +601,12 @@ export function buildOpsStatusTiles(
 		},
 		{
 			label: 'Workers',
-			value: `${capacity.encodeReady} encode-ready / ${capacity.total}`,
+			value:
+				capacity.encodeReady === 0 && capacity.busy > 0
+					? `${capacity.busy} busy / ${capacity.total}`
+					: `${capacity.encodeReady} can encode / ${capacity.total}`,
 			detail: capacity.total
-				? capacity.encodeReady > 0
-					? `${capacity.available} reachable`
-					: capacity.available > 0
-						? `${capacity.available} reachable · waiting or busy`
-						: 'no worker can start work'
+				? `${capacity.available} reachable · ${capacity.busy} busy · ${capacity.unavailable} unavailable`
 				: 'worker status unavailable',
 			tone:
 				capacity.encodeReady > 0
@@ -659,7 +665,7 @@ export function hostTone(host: HostRuntime, fleetHasReadyCapacity = false): Shel
 export function hostStateCopy(host: HostRuntime): string {
 	if (!host.available) return 'Unavailable';
 	if (host.active_encode_count > 0) return 'Busy';
-	if (host.schedule_open === false) return 'Off encode schedule';
+	if (host.schedule_open === false) return 'Window closed';
 	if (host.queue_active === false) return 'Not accepting';
 	return 'Ready';
 }

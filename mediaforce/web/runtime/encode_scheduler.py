@@ -158,7 +158,7 @@ def scheduler_allows_encode_run(
                 return False
             if current_hour < end_hour:
                 previous_day = SCHEDULE_DAY_ORDER[(local_now.weekday() - 1) % len(SCHEDULE_DAY_ORDER)]
-                if previous_day not in allowed_days:
+                if previous_day not in allowed_days and current_day not in allowed_days:
                     return False
             if end_hour <= current_hour < start_hour:
                 return False

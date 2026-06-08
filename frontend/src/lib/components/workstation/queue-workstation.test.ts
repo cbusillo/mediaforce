@@ -119,6 +119,21 @@ describe('Queue workstation labels', () => {
 		expect(totalPendingItems([readyToValidate])).toBe(2);
 	});
 
+	it('calls queued processing a worker wait instead of active work', () => {
+		const queued = folder({
+			workflow_state: workflowState({
+				state: 'processing',
+				primary_lane: 'processing',
+				label: 'Processing',
+				tone: 'active',
+				detail: 'Encode job is queued for tv/show.'
+			})
+		});
+
+		expect(queueFolderState(queued)).toBe('Waiting for worker');
+		expect(queueFolderTone(queued)).toBe('wait');
+	});
+
 	it('keeps the queue limited to folders with actionable workflow', () => {
 		const readyToValidate = folder({ workflow_state: workflowState() });
 
@@ -248,5 +263,24 @@ describe('Queue workstation labels', () => {
 			['sample', 'Sample and approval', 3]
 		]);
 		expect(groups.find((group) => group.key === 'validate')?.detail).toContain('not more encode');
+	});
+
+	it('labels processing lanes as queued or running instead of always active', () => {
+		const groups = buildWorkLaneGroups([
+			folder({
+				workflow_state: workflowState({
+					state: 'processing',
+					primary_lane: 'processing',
+					counts: { processing: 1, blocked: 0 },
+					detail: 'Encode job is queued for tv/show.'
+				})
+			})
+		]);
+
+		expect(groups[0]).toMatchObject({
+			key: 'processing',
+			label: 'Processing and waiting',
+			tone: 'wait'
+		});
 	});
 });

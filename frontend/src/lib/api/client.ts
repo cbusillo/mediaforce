@@ -1,5 +1,16 @@
 type FetchLike = typeof fetch;
 
+export function apiDownloadHref(path: string): string {
+	if (typeof window === 'undefined') return path;
+	const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+	if (window.location.port === '4173') {
+		const backendUrl = new URL(normalizedPath, window.location.origin);
+		backendUrl.port = '8777';
+		return backendUrl.pathname + backendUrl.search + backendUrl.hash;
+	}
+	return normalizedPath;
+}
+
 function extractErrorMessage(raw: string, status: number): string {
 	const trimmed = raw.trim();
 	if (!trimmed) {

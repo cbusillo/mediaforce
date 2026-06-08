@@ -194,17 +194,27 @@ describe('Ops workstation mapping', () => {
 		expect(rowRecoveryLabel(rows[0])).toBe('No action');
 	});
 
-	it('surfaces unavailable data, retryable encodes, and schedule waits as attention items', () => {
+	it('surfaces unavailable data and retryable encodes as attention items', () => {
 		const blockers = buildOpsBlockers(dashboardFixture(), hostsFixture(), 'Dashboard unavailable');
 
-		expect(blockers.map((blocker) => blocker.key)).toEqual([
-			'runtime-load',
-			'needs-attention',
-			'schedule-waiting'
-		]);
+		expect(blockers.map((blocker) => blocker.key)).toEqual(['runtime-load', 'needs-attention']);
 		expect(blockers[0]).toMatchObject({ tone: 'fail', title: 'Mediaforce data unavailable' });
 		expect(blockers[1]).toMatchObject({ tone: 'wait', action: 'retry-failed-encode' });
-		expect(blockers[2]).toMatchObject({ tone: 'wait' });
+	});
+
+	it('surfaces no-ready-worker blockers when queued work cannot start', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.needs_attention_count = 0;
+		dashboard.encode_queue.recent = [];
+		dashboard.encode_queue.running_count = 0;
+		dashboard.encode_queue.running = [];
+		const hosts = hostsFixture();
+		hosts.hosts[0].active_encode_count = 2;
+
+		const blockers = buildOpsBlockers(dashboard, hosts, null);
+
+		expect(blockers.map((blocker) => blocker.key)).toEqual(['no-hosts-ready']);
+		expect(blockers[0]).toMatchObject({ tone: 'wait' });
 	});
 
 	it('keeps work schedule, attention, sample, and worker tones semantic', () => {
@@ -214,7 +224,7 @@ describe('Ops workstation mapping', () => {
 			{ label: 'Work schedule', tone: 'ready' },
 			{ label: 'Processing', tone: 'wait' },
 			{ label: 'Sample checks', tone: 'active' },
-			{ label: 'Workers', tone: 'ready', value: '1 encode-ready / 2' }
+			{ label: 'Workers', tone: 'ready', value: '1 can encode / 2' }
 		]);
 	});
 
@@ -227,8 +237,8 @@ describe('Ops workstation mapping', () => {
 		expect(tiles.at(-1)).toMatchObject({
 			label: 'Workers',
 			tone: 'wait',
-			value: '0 encode-ready / 2',
-			detail: '2 reachable · waiting or busy'
+			value: '1 busy / 2',
+			detail: '2 reachable · 1 busy · 0 unavailable'
 		});
 	});
 
@@ -265,7 +275,7 @@ describe('Ops workstation mapping', () => {
 		expect(hostTone(ready)).toBe('active');
 		expect(hostStateCopy(ready)).toBe('Busy');
 		expect(hostTone(scheduledOff)).toBe('wait');
-		expect(hostStateCopy(scheduledOff)).toBe('Off encode schedule');
+		expect(hostStateCopy(scheduledOff)).toBe('Window closed');
 		expect(hostTone(unavailable)).toBe('fail');
 		expect(hostTone(unavailable, true)).toBe('wait');
 		expect(hostStateCopy(unavailable)).toBe('Unavailable');

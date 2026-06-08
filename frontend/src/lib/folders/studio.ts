@@ -11,6 +11,7 @@ export type FolderCalibrationJob = {
 	notes?: string;
 	error?: string | null;
 	created_at?: string | null;
+	started_at?: string | null;
 	finished_at?: string | null;
 };
 export type FolderPolicy = {

@@ -153,6 +153,8 @@ export type BenchMessage = {
 	tone?: ShellTone | 'neutral';
 };
 
+export type RecentTuningSession = Record<string, unknown> | null | undefined;
+
 export type BenchHostOption = {
 	key: string;
 	label: string;
@@ -541,13 +543,22 @@ function pushMessage(messages: BenchMessage[], message: BenchMessage): void {
 export function buildBenchMessages(
 	calibration: FolderCalibrationState | null,
 	pendingProposal: PendingSampleProposal | null,
-	retryableSampleJob: FolderCalibrationJob | null
+	retryableSampleJob: FolderCalibrationJob | null,
+	recentSession: RecentTuningSession = null
 ): BenchMessage[] {
 	const messages: BenchMessage[] = [];
+	const recentRecord = record<Record<string, unknown>>(recentSession);
+	const recentOperatorNote =
+		compactText(recentRecord?.operator_note) || compactText(recentRecord?.note);
+	const recentResponse =
+		compactText(recentRecord?.request_response) || compactText(recentRecord?.summary);
+	const recentDisposition = compactText(recentRecord?.request_disposition);
+	const recentConfidence = compactText(recentRecord?.confidence);
 	const operatorBody =
 		compactText(pendingProposal?.operator_note) ||
 		compactText(calibration?.advice?.operator_note) ||
-		requestSummary(pendingProposal?.operator_request ?? calibration?.advice?.operator_request);
+		requestSummary(pendingProposal?.operator_request ?? calibration?.advice?.operator_request) ||
+		recentOperatorNote;
 
 	if (operatorBody) {
 		pushMessage(messages, {
@@ -574,7 +585,8 @@ export function buildBenchMessages(
 		compactText(pendingProposal?.request_response) ||
 		compactText(calibration?.advice?.request_response) ||
 		compactText(pendingProposal?.summary) ||
-		compactText(calibration?.advice?.summary);
+		compactText(calibration?.advice?.summary) ||
+		recentResponse;
 	pushMessage(messages, {
 		id: 'bench-response',
 		role: 'bench',
@@ -582,11 +594,15 @@ export function buildBenchMessages(
 		title:
 			pendingProposal?.request_disposition ??
 			calibration?.advice?.request_disposition ??
-			'Response',
+			(recentDisposition || 'Response'),
 		body:
 			responseBody ||
 			'Waiting for a request. Review guidance will appear here with the resulting proposal context.',
-		meta: pendingProposal?.confidence ?? calibration?.advice?.confidence ?? undefined,
+		meta:
+			pendingProposal?.confidence ??
+			calibration?.advice?.confidence ??
+			recentConfidence ??
+			undefined,
 		tone: responseBody ? 'active' : 'neutral'
 	});
 
@@ -683,6 +699,20 @@ function formatDuration(value: number | null | undefined): string {
 	const seconds = totalSeconds % 60;
 	if (hours > 0) return `${hours}h ${minutes}m`;
 	return `${minutes}m ${seconds.toString().padStart(2, '0')}s`;
+}
+
+function elapsedSince(value: string | null | undefined): string {
+	const timestamp = compactText(value);
+	if (!timestamp) return '';
+	const started = Date.parse(timestamp);
+	if (!Number.isFinite(started)) return '';
+	const elapsedSeconds = Math.max(0, (Date.now() - started) / 1000);
+	return formatDuration(elapsedSeconds);
+}
+
+function sampleJobElapsedCopy(job: FolderCalibrationJob | null): string {
+	const elapsed = elapsedSince(job?.started_at ?? job?.created_at);
+	return elapsed ? `running ${elapsed}` : '';
 }
 
 function formatAverageBitrate(bytes: number | null, durationSeconds: number | null): string {
@@ -1199,6 +1229,8 @@ export function buildOutputReviewRows(
 	calibration: FolderCalibrationState | null,
 	pendingProposal: PendingSampleProposal | null
 ): OutputReviewRow[] {
+	const scope = outputScopeLabel(folder);
+	const noun = basicEncodeScopeNoun(scope);
 	const sampleItem = record<FolderSampleItem>(folder.sample_item);
 	const plan = itemPlan(folder);
 	const verdict = buildSampleVerdict(folder, calibration, pendingProposal);
@@ -1224,9 +1256,9 @@ export function buildOutputReviewRows(
 						verdict.stalePolicy ? 'older settings' : null,
 						`target ${verdict.target}`,
 						verdict.targetDelta || null,
-						`folder ${verdict.predictedFolderTotal}`
+						`${noun} ${verdict.predictedFolderTotal}`
 					])
-				: 'Run a representative sample before approving the folder.',
+				: `Run a representative sample before approving the ${noun}.`,
 			tone: verdict?.missesTarget ? 'wait' : verdict ? 'ready' : 'idle'
 		},
 		{
@@ -1372,7 +1404,7 @@ export function buildReviewWorkspaceView(
 	}
 	return {
 		badge: reviewPackReady ? 'Review media' : 'No review media',
-		title: 'Previous sample evidence',
+		title: reviewPackReady ? 'Review sample evidence' : 'Previous sample evidence',
 		layout: 'evidence',
 		rows: buildOutputReviewRows(folder, calibration, pendingProposal)
 	};
@@ -1424,7 +1456,7 @@ export function sampleStatusCopy(value: string | null | undefined): string {
 	const status = String(value ?? '')
 		.trim()
 		.toLowerCase();
-	if (status === 'queued') return 'Sample waiting';
+	if (status === 'queued') return 'Sample queued';
 	if (status === 'running') return 'Sampling';
 	if (status === 'pending_review') return 'Ready to review';
 	if (status === 'failed' || status === 'stopped') return 'Sample needs retry';
@@ -1450,6 +1482,31 @@ function workflowToneToShellTone(tone: FolderWorkflowState['tone']): ShellTone {
 	if (tone === 'ready' || tone === 'success') return 'ready';
 	if (tone === 'attention') return 'fail';
 	return 'idle';
+}
+
+function encodeSchedulerWaitCopy(
+	folder: FolderPayload,
+	encodeJob: EncodeQueueJob | null | undefined = folder.encode_job
+): string {
+	const schedulerCopy = String(encodeJob?.scheduler_status_copy ?? '').trim();
+	const folderSummary = String(folder.encode_queue_summary ?? '').trim();
+	const combined = `${schedulerCopy} ${folderSummary}`.toLowerCase();
+	if (!combined.includes('waiting') && !combined.includes('schedule window')) return '';
+	return (
+		folderSummary || schedulerCopy || 'Queued processing is waiting for a worker schedule window.'
+	);
+}
+
+function encodeActiveCopy(
+	folder: FolderPayload,
+	encodeJob: EncodeQueueJob | null | undefined
+): string {
+	return (
+		encodeJob?.telemetry_summary ??
+		folder.encode_queue?.telemetry?.eta_copy ??
+		folder.encode_queue_summary ??
+		'Workers are encoding this folder now.'
+	);
 }
 
 function actionFromBackendWorkflow(
@@ -1539,6 +1596,33 @@ function resolveBackendWorkflow(
 			isOutputWorkflow: true
 		};
 	}
+	if (workflow.state === 'processing') {
+		const waitingCopy = encodeSchedulerWaitCopy(folder);
+		if (waitingCopy) {
+			return {
+				tone: 'wait',
+				label: 'Waiting for worker',
+				title: 'Queued, not encoding yet',
+				copy: waitingCopy,
+				primary: 'Open Ops',
+				primaryAction: 'open-ops',
+				secondary: 'Download pack',
+				secondaryAction: 'download-review-pack',
+				isOutputWorkflow: true
+			};
+		}
+		return {
+			tone: 'active',
+			label: 'Encoding now',
+			title: 'Encoding now',
+			copy: encodeActiveCopy(folder, folder.encode_job),
+			primary: '',
+			primaryAction: 'monitor-processing',
+			secondary: folder.series_context ? 'Open whole show' : 'Download pack',
+			secondaryAction: folder.series_context ? 'open-series' : 'download-review-pack',
+			isOutputWorkflow: true
+		};
+	}
 	return {
 		tone: workflowToneToShellTone(workflow.tone),
 		label: workflow.label,
@@ -1570,16 +1654,11 @@ export function resolveWorkflow(
 			label: 'Loading',
 			title: 'Loading folder state',
 			copy: 'Folder metadata, worker readiness, and workflow status are loading. The workspace will hydrate in place when the route data returns.',
-			primary: 'Open Folders',
-			primaryAction: 'open-folders',
+			primary: '',
+			primaryAction: 'monitor-sample',
 			secondary: 'Open Ops',
 			secondaryAction: 'open-ops'
 		};
-	}
-	const backendWorkflow = folder.workflow_state ?? status.workflow_state ?? null;
-	if (backendWorkflow) {
-		const resolvedBackendWorkflow = resolveBackendWorkflow(folder, backendWorkflow);
-		if (resolvedBackendWorkflow) return resolvedBackendWorkflow;
 	}
 	const encodeStatus = String(encodeJob?.status ?? '').toLowerCase();
 	if (['failed', 'needs_attention', 'stopped'].includes(encodeStatus)) {
@@ -1601,7 +1680,30 @@ export function resolveWorkflow(
 			isOutputWorkflow: true
 		};
 	}
+	const backendWorkflow = folder.workflow_state ?? status.workflow_state ?? null;
+	if (backendWorkflow) {
+		const resolvedBackendWorkflow = resolveBackendWorkflow(folder, backendWorkflow);
+		if (resolvedBackendWorkflow) return resolvedBackendWorkflow;
+	}
 	if (['running', 'queued', 'retry_backoff'].includes(encodeStatus)) {
+		const waitingCopy = encodeSchedulerWaitCopy(folder, encodeJob);
+		if (encodeStatus === 'queued' || waitingCopy) {
+			return {
+				tone: 'wait',
+				label: waitingCopy ? 'Waiting for worker' : 'Queued',
+				title: waitingCopy ? 'Queued, not encoding yet' : 'Queued for processing',
+				copy:
+					waitingCopy ||
+					encodeJob?.telemetry_summary ||
+					folder.encode_queue_summary ||
+					'Folder settings are approved and waiting for a worker to claim it.',
+				primary: '',
+				primaryAction: 'monitor-processing',
+				secondary: 'Download pack',
+				secondaryAction: 'download-review-pack',
+				isOutputWorkflow: true
+			};
+		}
 		return {
 			tone: 'active',
 			label: 'Processing',
@@ -1664,11 +1766,15 @@ export function resolveWorkflow(
 		};
 	}
 	if (['running', 'queued'].includes(String(status.calibration_status ?? '').toLowerCase())) {
+		const elapsed = sampleJobElapsedCopy(calibrationJob);
 		return {
 			tone: 'active',
 			label: 'Sampling',
 			title: 'Representative sample is running',
-			copy: 'The sample job is running. Review media is the missing prerequisite; approval appears once the comparison preview is ready.',
+			copy: compactParts([
+				elapsed || null,
+				'Review media is the missing prerequisite; approval appears once the comparison preview is ready.'
+			]),
 			primary: 'Monitor sample',
 			primaryAction: 'monitor-sample',
 			secondary: 'Stop sample',
@@ -1771,16 +1877,16 @@ export function resolveWorkflow(
 		return {
 			tone: 'ready',
 			label: 'Review ready',
-			title: 'Approve this sample or revise it',
+			title: 'Review the sample video',
 			copy:
 				verdict === null
 					? (pendingProposal?.message ??
 						'Evidence is ready. Review the sample clips, then approve the sample plan or revise it.')
-					: `${verdict.predictedPerItem} per episode, ${verdict.predictedFolderTotal} for the folder. Review the clips, then approve and queue if this is acceptable.`,
-			primary: 'Approve and queue',
-			primaryAction: 'queue-encode',
-			secondary: 'Download pack',
-			secondaryAction: 'download-review-pack'
+					: `${verdict.predictedPerItem} per episode, ${verdict.predictedFolderTotal} for the folder. Review the side-by-side sample before approving.`,
+			primary: 'Download side-by-side video',
+			primaryAction: 'download-review-pack',
+			secondary: 'Approve and queue',
+			secondaryAction: 'queue-encode'
 		};
 	}
 	if (calibration?.browser_review_ready || reviewPackReady) {
@@ -1796,21 +1902,25 @@ export function resolveWorkflow(
 		};
 	}
 	if (!folder.sample_item) {
+		const scope = outputScopeLabel(folder);
+		const noun = basicEncodeScopeNoun(scope);
 		return {
 			tone: 'idle',
-			label: 'Not sampled',
-			title: 'No representative sample yet',
-			copy: 'Ask the review assistant for a sample proposal before approving folder-wide settings. Worker readiness and settings context stay visible while the sample is queued.',
+			label: 'Needs sample',
+			title: 'Ask review assistant',
+			copy: `Ask the review assistant for a sample proposal before approving ${noun}-wide settings. Worker readiness and settings context stay visible while the sample is queued.`,
 			primary: 'Ask review assistant',
 			primaryAction: 'focus-bench',
 			secondary: 'Open Ops',
 			secondaryAction: 'open-ops'
 		};
 	}
+	const scope = outputScopeLabel(folder);
+	const noun = basicEncodeScopeNoun(scope);
 	return {
 		tone: 'wait',
-		label: 'Waiting',
-		title: 'Folder is waiting for review evidence',
+		label: 'Needs sample',
+		title: `${noun[0].toUpperCase()}${noun.slice(1)} is waiting for review evidence`,
 		copy: 'A representative item exists, but the current review state is incomplete. Ask the review assistant for the next sample plan.',
 		primary: 'Ask review assistant',
 		primaryAction: 'focus-bench',
@@ -1819,7 +1929,11 @@ export function resolveWorkflow(
 	};
 }
 
-export function buildWorkflowSteps(workflow: WorkflowState): WorkflowStep[] {
+export function buildWorkflowSteps(
+	workflow: WorkflowState,
+	scope: OutputScopeLabel = 'folder'
+): WorkflowStep[] {
+	const noun = basicEncodeScopeNoun(scope);
 	const activeAction = workflow.primaryAction;
 	const activeLabel = workflow.label.toLowerCase();
 	const outputWorkflow =
@@ -1837,7 +1951,7 @@ export function buildWorkflowSteps(workflow: WorkflowState): WorkflowStep[] {
 		return [
 			{
 				label: 'Encode',
-				detail: encodeCurrent ? workflow.title : 'Process approved folder items',
+				detail: encodeCurrent ? workflow.title : `Process approved ${noun} items`,
 				tone: encodeCurrent
 					? workflow.tone
 					: validateCurrent || promoteCurrent || completeCurrent
@@ -1891,7 +2005,12 @@ export function buildWorkflowSteps(workflow: WorkflowState): WorkflowStep[] {
 	return [
 		{
 			label: 'Sample',
-			detail: sampleCurrent ? workflow.title : 'Choose representative evidence',
+			detail:
+				activeAction === 'focus-bench'
+					? 'Ask for a representative sample plan'
+					: sampleCurrent
+						? workflow.title
+						: 'Choose representative evidence',
 			tone: sampleCurrent ? workflow.tone : 'idle',
 			current: sampleCurrent
 		},
@@ -1909,7 +2028,7 @@ export function buildWorkflowSteps(workflow: WorkflowState): WorkflowStep[] {
 		},
 		{
 			label: 'Process',
-			detail: encodeCurrent ? workflow.title : 'Run approved folder work',
+			detail: encodeCurrent ? workflow.title : `Run approved ${noun} work`,
 			tone: encodeCurrent ? workflow.tone : 'idle',
 			current: encodeCurrent
 		}
@@ -1922,7 +2041,7 @@ const BASIC_ENCODE_STEPS = [
 		detail: 'Choose one folder from Work or Folders.'
 	},
 	{
-		label: 'Run sample',
+		label: 'Create sample',
 		detail: 'Create review evidence from one representative item.'
 	},
 	{
@@ -1946,6 +2065,60 @@ const BASIC_ENCODE_STEPS = [
 		detail: 'Delete archived originals from Completed.'
 	}
 ] as const;
+
+function basicEncodeGuideLabel(scope: OutputScopeLabel): string {
+	if (scope === 'whole show') return 'Whole show run';
+	if (scope === 'season') return 'Season run';
+	return 'Single folder run';
+}
+
+function basicEncodeScopeNoun(scope: OutputScopeLabel): string {
+	if (scope === 'whole show') return 'show';
+	if (scope === 'season') return 'season';
+	return 'folder';
+}
+
+function scopeStateLabel(scope: OutputScopeLabel): string {
+	if (scope === 'whole show') return 'Show state';
+	if (scope === 'season') return 'Season state';
+	return 'Folder state';
+}
+
+function scopedBasicEncodeStep(
+	step: (typeof BASIC_ENCODE_STEPS)[number],
+	index: number,
+	scope: OutputScopeLabel,
+	workflow: WorkflowState
+): Omit<BasicEncodeGuideStep, 'state'> {
+	const noun = basicEncodeScopeNoun(scope);
+	if (index === 0) {
+		return {
+			label: scope === 'folder' ? step.label : `Pick ${noun}`,
+			detail:
+				scope === 'whole show'
+					? 'Choose one show from Work.'
+					: scope === 'season'
+						? 'Choose one season from Work.'
+						: step.detail
+		};
+	}
+	if (index === 3 && workflow.label === 'Encoding now') {
+		return {
+			label: 'Encoding now',
+			detail: `Workers are processing approved ${noun} items.`
+		};
+	}
+	if (index === 3) {
+		return {
+			label: scope === 'folder' ? step.label : `Process ${noun}`,
+			detail:
+				scope === 'folder'
+					? step.detail
+					: `Queue the approved settings and let workers run the ${noun}.`
+		};
+	}
+	return step;
+}
 
 function basicEncodeStepIndex(workflow: WorkflowState): number {
 	const action = workflow.primaryAction;
@@ -1979,45 +2152,74 @@ function basicEncodeStepIndex(workflow: WorkflowState): number {
 	return 1;
 }
 
-function basicEncodeDetail(workflow: WorkflowState, currentStep: number): string {
+function basicEncodeDetail(
+	workflow: WorkflowState,
+	currentStep: number,
+	scope: OutputScopeLabel
+): string {
+	const noun = basicEncodeScopeNoun(scope);
 	if (currentStep === 1) {
-		return 'Start by making one representative sample. Do not approve the full folder until review evidence is ready.';
+		if (workflow.primaryAction === 'focus-bench') {
+			return `Ask the review assistant for a representative sample plan. Nothing runs across the ${noun} until you approve review evidence.`;
+		}
+		return `Start by making one representative sample. Do not approve the ${noun} until review evidence is ready.`;
 	}
 	if (currentStep === 2) {
-		return 'Look at the review evidence. If it looks good, approve and queue the folder; if not, revise and sample again.';
+		if (workflow.primaryAction === 'download-review-pack') {
+			return `Download or inspect the side-by-side sample before approving the ${noun}.`;
+		}
+		return `Look at the review evidence. If it looks good, approve and queue the ${noun}; if not, revise and sample again.`;
 	}
 	if (currentStep === 3) {
-		if (workflow.primaryAction === 'queue-encode') {
-			return 'The sample is accepted. Queue folder processing when you are ready to run the real work.';
+		if (workflow.label === 'Encoding now') {
+			return `This ${noun} is encoding now. Ops has worker details if you need them.`;
 		}
-		return 'Folder processing is underway or needs attention. Ops shows worker and queue details.';
+		if (workflow.primaryAction === 'queue-encode') {
+			return `The sample is accepted. Queue ${noun} processing when you are ready to run the real work.`;
+		}
+		return `${noun[0].toUpperCase()}${noun.slice(1)} processing is underway or needs attention. Ops shows worker and queue details.`;
 	}
 	if (currentStep === 4) return 'Processing finished. Validate the outputs before publishing them.';
 	if (currentStep === 5) return 'Outputs are validated. Promote them into the library.';
 	if (currentStep === 6) {
-		return 'This folder is processed. Go to Completed when you are ready to delete archived originals.';
+		return `This ${noun} is processed. Go to Completed when you are ready to delete archived originals.`;
 	}
-	return 'Choose one folder, then follow the highlighted step until the folder is complete.';
+	return `Choose one ${noun}, then follow the highlighted step until the ${noun} is complete.`;
 }
 
-export function buildBasicEncodeGuide(workflow: WorkflowState): BasicEncodeGuide {
+export function buildBasicEncodeGuide(
+	workflow: WorkflowState,
+	scope: OutputScopeLabel = 'folder'
+): BasicEncodeGuide {
 	const currentStep = basicEncodeStepIndex(workflow);
+	const title =
+		currentStep === 1 && workflow.primaryAction === 'focus-bench'
+			? 'Ask review assistant'
+			: currentStep === 2 && workflow.primaryAction === 'download-review-pack'
+				? 'Review sample video'
+				: currentStep === 3 && workflow.label === 'Encoding now'
+					? 'Encoding now'
+					: (BASIC_ENCODE_STEPS[currentStep]?.label ?? 'Follow the next step');
 	const primary =
 		currentStep === 6 && workflow.secondaryAction === 'open-completed'
 			? workflow.secondary
-			: workflow.primary;
+			: workflow.label === 'Encoding now'
+				? ''
+				: workflow.primary;
 	const action =
 		currentStep === 6 && workflow.secondaryAction === 'open-completed'
 			? workflow.secondaryAction
-			: workflow.primaryAction;
+			: workflow.label === 'Encoding now'
+				? 'monitor-processing'
+				: workflow.primaryAction;
 	return {
-		label: 'Single folder run',
-		title: BASIC_ENCODE_STEPS[currentStep]?.label ?? 'Follow the next step',
-		detail: basicEncodeDetail(workflow, currentStep),
+		label: basicEncodeGuideLabel(scope),
+		title,
+		detail: basicEncodeDetail(workflow, currentStep, scope),
 		primary,
 		action,
 		steps: BASIC_ENCODE_STEPS.map((step, index) => ({
-			...step,
+			...scopedBasicEncodeStep(step, index, scope, workflow),
 			state: index < currentStep ? 'done' : index === currentStep ? 'current' : 'upcoming'
 		}))
 	};
@@ -2066,7 +2268,13 @@ export function buildStatusTiles(
 	hosts: HostsPayload,
 	workflow: WorkflowState
 ): StatusTile[] {
-	const readyHosts = hosts.hosts.filter((host) => host.available).length;
+	const scope = outputScopeLabel(folder);
+	const scopeNoun = basicEncodeScopeNoun(scope);
+	const reachableHosts = hosts.hosts.filter((host) => host.available).length;
+	const busyHosts = hosts.hosts.filter(
+		(host) => host.available && host.active_encode_count > 0
+	).length;
+	const unavailableHosts = Math.max(hosts.hosts.length - reachableHosts, 0);
 	const totalHosts = hosts.hosts.length;
 	const encodeQueue = folder.encode_queue;
 	const workflowCounts = folder.workflow_state?.counts ?? status.workflow_state?.counts;
@@ -2104,18 +2312,25 @@ export function buildStatusTiles(
 			};
 	return [
 		{
-			label: 'Folder state',
+			label: scopeStateLabel(scope),
 			value: workflow.label,
 			detail: folder.prefix,
 			tone: workflow.tone
 		},
 		workflowTile,
 		{
-			label: 'Processing',
+			label: workflow.isOutputWorkflow ? 'This processing' : 'System processing',
 			value: encodeQueue
 				? `${encodeQueue.running_count} running · ${encodeQueue.queued_count} queued`
 				: '—',
-			detail: encodeQueue?.telemetry?.eta_copy ?? folder.encode_queue_summary ?? 'No queue summary',
+			detail: workflow.isOutputWorkflow
+				? (encodeQueue?.telemetry?.eta_copy ?? folder.encode_queue_summary ?? 'No queue summary')
+				: compactParts([
+						encodeQueue && (encodeQueue.running_count > 0 || encodeQueue.queued_count > 0)
+							? `not this ${scopeNoun}`
+							: `no ${scopeNoun} processing`,
+						encodeQueue?.telemetry?.eta_copy ?? folder.encode_queue_summary
+					]) || 'No queue summary',
 			tone: encodeQueue?.state.stop_requested
 				? 'fail'
 				: encodeQueue?.state.is_paused
@@ -2126,9 +2341,11 @@ export function buildStatusTiles(
 		},
 		{
 			label: 'Workers',
-			value: `${readyHosts} ready / ${totalHosts}`,
-			detail: totalHosts ? 'capacity check complete' : 'worker status unavailable',
-			tone: readyHosts > 0 ? 'ready' : totalHosts > 0 ? 'wait' : 'idle'
+			value: `${reachableHosts} reachable / ${totalHosts}`,
+			detail: totalHosts
+				? `${busyHosts} busy · ${unavailableHosts} unavailable`
+				: 'worker status unavailable',
+			tone: reachableHosts > 0 ? 'ready' : totalHosts > 0 ? 'wait' : 'idle'
 		}
 	];
 }
@@ -2140,7 +2357,10 @@ export function buildRuntimeFacts(
 	encodeJob: EncodeQueueJob | null,
 	workflow: WorkflowState
 ): RuntimeFact[] {
-	const queueSummary = encodeJob?.status ?? folder.encode_queue_summary ?? '—';
+	const scope = outputScopeLabel(folder);
+	const noun = basicEncodeScopeNoun(scope);
+	const rawQueueSummary = encodeJob?.status ?? folder.encode_queue_summary ?? '—';
+	const queueSummary = rawQueueSummary.replace(/\bfolder\b/gi, noun);
 	if (workflow.isOutputWorkflow) {
 		const counts = folder.workflow_state?.counts ?? status.workflow_state?.counts;
 		const readyToValidate = counts?.ready_to_validate ?? 0;
