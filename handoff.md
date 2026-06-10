@@ -1,201 +1,123 @@
-# Mediaforce Workstation UX Handoff
+# Mediaforce Frontend Reset Handoff
 
-## Context
+## Current Reset Stance
 
-This handoff captures the current UX diagnosis and my opinions after working on
-the Mediaforce operator surfaces. It is intentionally candid. The goal is to
-avoid another local patch cycle that makes one symptom better while keeping the
-overall workstation model incoherent.
+Treat the current Mediaforce frontend UX as a failed architecture, not a surface
+that needs another polish pass. The reset should start from the workstation
+contract below and from durable backend/product facts. Do not let existing
+routes, component names, old design briefs, or previous browser QA conclusions
+define the new information architecture.
 
-## Facts
+This branch is `codex/mediaforce-frontend-reset`. The repo default branch is
+`main`; keep implementation work on task branches and PRs.
 
-- The frontend uses SvelteKit, Svelte, and Vite as the app framework.
-- The frontend does not currently use a mature UI component framework or design
-  system such as Carbon, PatternFly, Material UI, Bootstrap, Radix/shadcn, or a
-  comparable library.
-- The current UI is mostly custom Svelte components plus custom CSS:
-  `OperatorShell`, `WorkstationPanel`, `StateBadge`, route-specific workstation
-  views, and custom table/control styling.
-- Shared styling exists through custom tokens in
-  `frontend/src/lib/design/tokens.css`, but those tokens do not provide a full
-  interaction model for dense operator workflows.
-- The product has repeatedly drifted between these concepts:
-  - Work queue
-  - Folder/media browser
-  - Show/season/folder scope chooser
-  - Workflow launcher
-  - Review/approval workstation
-- `Work` and `Folders` have been combined and separated multiple times. They do
-  nearly the same job, but each page tends to be missing something the other has.
-- A count such as `185 whole shows` is not enough if only 32 rows feel reachable.
-  Search is not a substitute for browse/navigation when the operator does not
-  already know the target name.
-- The current custom list/table behavior has produced silent or confusing limits,
-  including a top-32 visible result pattern.
-- The review flow can be made safer locally, for example by making sample
-  evidence download-first, but that does not fix the broader information
-  architecture problem.
+## Durable Product Facts
 
-## My Opinion
+Mediaforce is an operator workstation for semi-automated media processing. The
+operator needs to:
 
-The main problem is not Svelte. The problem is that Mediaforce has an app
-framework but not a strong enough UI/product framework for this operator
-experience.
+- scan a media library and understand what changed
+- browse reachable shows, seasons, folders, and item groups
+- create representative samples
+- review evidence before approving broad work
+- revise settings when evidence or warnings say the proposal is not safe
+- queue approved processing on workers
+- monitor running or waiting work
+- validate outputs before promotion
+- promote outputs only after validation
+- archive originals
+- delete archived originals only when scope and safety are explicit
 
-SvelteKit gives us a way to build pages. It does not, by itself, prevent bad
-operator UX. It does not decide table pagination, browse semantics, toolbar
-structure, empty states, row density, filter behavior, drill-in hierarchy, or
-how counts map to reachable objects.
+Backend/API/media-processing behavior should be preserved unless a frontend
+contract cannot be expressed with the current API. Machine-local paths, runtime
+state, review media, SQLite databases, and generated frontend builds are not
+repo-level invariants and should not be checked in.
 
-I think continuing to patch this custom UI without adopting a framework or
-formal UX contract will keep recreating the same failures. The likely pattern is:
+## Failed Frontend Assumptions
 
-1. A specific pain appears.
-2. We patch that local pain.
-3. The patch introduces or reveals another inconsistency.
-4. The UI shifts between queue, browser, and workflow concepts again.
+Do not preserve these just because they exist:
 
-That is how the app keeps falling back into `Work` vs. `Folders`, hidden show
-access, misleading counts, and unclear browse paths.
+- top-level `Work`, `Folders`, `Completed`, and `Ops` structure as the primary
+  information architecture
+- parallel queue and folder-browser concepts that answer overlapping questions
+- dashboard/card composition for operational queues
+- hidden list caps, including the current top-32 visible-row pattern
+- counts that do not map to reachable rows
+- search as the only way to reach counted media objects
+- custom panels/tokens/components as if they were a complete workstation design
+  system
+- route-by-route vocabulary cleanup as a substitute for a coherent workbench
 
-## UX Contract I Think We Need
+Existing frontend code may contain useful API calls, formatting helpers, and
+domain transforms. Treat visual composition, navigation, route boundaries, and
+component hierarchy as suspect.
 
-Before more UI implementation, define a simple workstation contract:
+## Workstation Contract
 
-- Primary objects: shows, seasons, folders/items.
-- Primary view modes: needs attention, all media.
-- Primary actions: review sample, queue work, validate output, promote output,
-  clean up archive.
-- Navigation rule: every count shown in the UI must map to reachable rows.
-- List rule: never silently cap visible results. If results are paginated, show
-  the range and controls. If virtualized, make scrolling obvious and complete.
-- Review safety rule: full-scope approval should come after review evidence is
-  visible/downloadable, not before.
-- Scope rule: show/season/folder are scopes within one workbench, not separate
-  top-level products.
+The first replacement surface must prove one core workbench:
 
-## Recommended Direction
+- explicit scope: show whether the operator is browsing shows, seasons, folders,
+  or another concrete object level
+- reachable objects: every count shown must map to visible rows through browsing,
+  pagination, filtering, or complete scrolling
+- visible mechanics: the operator can see current range, total matching rows,
+  sort/filter state, loading state, and how to move through all rows
+- selected-object inspector: one selected object has durable context, state,
+  blockers, evidence status, and affected counts
+- next safe action: the primary action is derived from workflow state and says
+  why it is safe, blocked, or unavailable
+- evidence before approval: full-scope approval must require visible or
+  downloadable review evidence
+- destructive safety: archive deletion must name scope, permanence, and
+  verification state
 
-Adopt an external design system or, at minimum, an external interaction pattern
-spec before further workstation UI work.
+Search can narrow a result set, but it must never be the only path to a counted
+object.
 
-My preferred option if staying with Svelte is Carbon:
+## Documentation State
 
-- Carbon is an enterprise design system rather than only a set of primitives.
-- It has established data-table, toolbar, filtering, and pagination patterns.
-- It has a Svelte implementation through `carbon-components-svelte`.
-- Its table and pagination conventions directly address the kind of dense
-  operator UI Mediaforce needs.
+Active reset docs:
 
-PatternFly is also a useful reference for admin/operator UX, especially around
-data views, toolbars, pagination, filters, and empty states. It may be better as
-an interaction reference than as a direct dependency because its primary
-component ecosystem is not Svelte-first.
+- `handoff.md`
+- `docs/design/workstation-reset-plan.md`
+- `docs/design/basic-user-vocabulary.md`
+- `docs/style/workstation-ui.md`
+- `docs/style/frontend.md`
+- `docs/policies/acceptance-gate.md`
+- `.github/github.json`
 
-I would not rely on a purely headless component library as the main solution.
-Headless primitives can improve accessibility and mechanics, but they still
-leave us inventing the information architecture, visual hierarchy, table
-behavior, and workflow model ourselves. That is the trap we are already in.
+Quarantined historical docs live under `docs/design/archive/`. They may explain
+how the UI drifted, but they are not implementation guidance. If an archived doc
+conflicts with this handoff or the reset plan, this handoff wins.
 
-## Concrete Product Shape
+## First Implementation Slice
 
-The main surface should be one media workbench, not separate Work and Folders
-tabs:
+Start with the core workbench mechanics before rebuilding every route:
 
-```text
-Work
-  Scope: Shows | Seasons | Folders
-  View: Needs attention | All media
-  Sort: Recommended | Name | Status | Size | Reclaim
-  Search
-  Filters
-  Results: all matching rows, via real pagination or complete scrolling
-  Inspector: selected object details and next action
-```
+1. remove hidden row caps from the current workbench path
+2. add explicit pagination or complete scrolling with range and total copy
+3. preserve selection across page movement when possible
+4. make scope and filter effects visible
+5. ensure the selected-object inspector always corresponds to a reachable row
+6. add focused tests for list reachability and pagination math
+7. validate the rendered workbench in a real browser
 
-Drill-in surfaces should be scoped and explicit:
+This slice is allowed to reuse existing API payloads and helpers. It should not
+be mistaken for endorsement of the old route/component architecture.
 
-```text
-Show Studio
-  Show-level state
-  Season list
-  Representative sample/review evidence
-  Full-show approval only after evidence is reviewed
+## Next Slices
 
-Season Studio
-  Season-level state
-  Episode/item list
-  Same review workflow, scoped to season
+After the first slice proves list reachability:
 
-Folder/item detail
-  Only when a lower-level object truly needs direct handling
-```
+- define the clean workbench route contract around object scope, list mechanics,
+  inspector fields, and action derivation
+- replace old route-level composition with the new workbench shell
+- rebuild Folder Studio as the evidence/approval workspace for a selected scope
+- rebuild Ops around workers, queues, blockers, retries, and schedule state
+- rebuild Completed around validation, promotion, archived originals, and safe
+  deletion
+- only then decide whether `Work`, `Folders`, `Ops`, and `Completed` remain as
+  route names or become internal views of one workstation
 
-## Options
-
-### Option A: Adopt Carbon for Svelte
-
-Use Carbon components and Carbon interaction patterns as the binding constraint.
-This is my recommendation if Svelte remains the frontend framework.
-
-Expected benefits:
-
-- Fewer invented controls.
-- Better table/pagination discipline.
-- More consistent dense enterprise UI behavior.
-- A framework-backed reason to stop oscillating between custom concepts.
-
-Risk:
-
-- Requires a deliberate migration and some visual redesign.
-- Carbon may feel opinionated compared with the current custom look.
-
-### Option B: Keep Custom Components, Use Carbon/PatternFly as a UX Spec
-
-Do not add a component dependency, but write an explicit local workstation spec
-based on Carbon/PatternFly patterns and enforce it in reviews.
-
-Expected benefits:
-
-- Less dependency churn.
-- Can preserve more of the current visual language.
-
-Risk:
-
-- Easier to drift back into custom bad patterns because the framework is not
-  mechanically constraining implementation.
-
-### Option C: Switch to a Frontend Ecosystem with Stronger Enterprise UI Options
-
-Move away from Svelte for operator surfaces if the team wants a broader mature
-component ecosystem.
-
-Expected benefits:
-
-- More mature data-grid/admin UI choices.
-
-Risk:
-
-- Much larger migration.
-- May be overkill if Carbon for Svelte is acceptable.
-
-## What Not To Do
-
-- Do not add another top-level tab for a slightly different media view.
-- Do not keep parallel `Work` and `Folders` concepts.
-- Do not silently cap lists at 32 or any other number.
-- Do not make search the only way to reach counted objects.
-- Do not keep fixing terminology one label at a time.
-- Do not approve full-scope processing before review evidence is obvious and
-  accessible.
-- Do not treat custom CSS tokens as a full UX/design system.
-
-## Current Working Opinion
-
-The safest next step is not another UI patch. It is a design-system decision plus
-a short workstation UX contract. After that, rebuild or refactor the Work surface
-around the chosen system.
-
-My bias: choose Carbon for Svelte, define the Work page around Carbon-style
-toolbar + data table + pagination patterns, and make show/season/folder scope a
-first-class control inside one Work surface.
+Keep slices small and reviewable. Browser validation is required for every
+operator-surface change.

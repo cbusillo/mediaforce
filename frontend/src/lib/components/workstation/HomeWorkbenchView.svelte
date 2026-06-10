@@ -27,6 +27,7 @@
 	} from './queue-workstation';
 	import {
 		clearStoredWorkbenchFilters,
+		paginateWorkbenchRows,
 		readStoredWorkbenchFilters,
 		writeStoredWorkbenchFilters
 	} from './home-workbench';
@@ -94,8 +95,10 @@
 			);
 		})
 	);
+	let currentPage = $state(1);
+	const pagedFolders = $derived(paginateWorkbenchRows(visibleFolders, currentPage));
 	const visibleFoldersPayload = $derived({ ...foldersPayload, folders: visibleFolders });
-	const visibleTableFolders = $derived(visibleFolders.slice(0, 32));
+	const visibleTableFolders = $derived(pagedFolders.rows);
 	const visibleFolderRanks = $derived(
 		new Map(visibleFolders.map((folder, index) => [folder.prefix, String(index + 1)]))
 	);
@@ -106,10 +109,12 @@
 	);
 	const visiblePendingItems = $derived(totalPendingItems(visibleFolders));
 	const visibleProjectedReclaim = $derived(totalProjectedReclaim(visibleFolders));
-	const nextFolder = $derived(visibleWorkLaneGroups[0]?.folders[0] ?? visibleFolders[0] ?? null);
+	const nextFolder = $derived(
+		visibleWorkLaneGroups[0]?.folders[0] ?? visibleTableFolders[0] ?? null
+	);
 	let selectedPrefix = $state('');
 	const selectedFolder = $derived(
-		visibleFolders.find((folder) => folder.prefix === selectedPrefix) ?? nextFolder
+		visibleTableFolders.find((folder) => folder.prefix === selectedPrefix) ?? nextFolder
 	);
 	const selectedFolderIndex = $derived(
 		selectedFolder
@@ -165,6 +170,20 @@
 		workView === 'attention' && folderScope === 'season'
 			? 'Workflow lanes'
 			: `Matching ${folderScopeLabel.toLowerCase()}`
+	);
+	const tableRangeCopy = $derived(
+		foldersPending
+			? 'Loading rows'
+			: pagedFolders.totalRows === 0
+				? 'No matching rows'
+				: `${(pagedFolders.startIndex + 1).toLocaleString('en-US')}-${pagedFolders.endIndex.toLocaleString(
+						'en-US'
+					)} of ${pagedFolders.totalRows.toLocaleString('en-US')}`
+	);
+	const tableMetaCopy = $derived(
+		foldersPending
+			? 'loading reachable rows'
+			: `${tableRangeCopy} reachable ${folderScopeLabel.toLowerCase()}`
 	);
 	const visibleScopeSummary = $derived(
 		foldersPending
@@ -300,22 +319,32 @@
 
 	function setLibraryIncluded(key: string, included: boolean) {
 		libraryFilters = { ...libraryFilters, [key]: included };
+		currentPage = 1;
+		selectedPrefix = '';
 	}
 
 	function setStateIncluded(key: string, included: boolean) {
 		stateFilters = { ...stateFilters, [key]: included };
+		currentPage = 1;
+		selectedPrefix = '';
 	}
 
 	function setAllLibraries(included: boolean) {
 		libraryFilters = Object.fromEntries(libraryOptions.map((option) => [option.key, included]));
+		currentPage = 1;
+		selectedPrefix = '';
 	}
 
 	function setAllStates(included: boolean) {
 		stateFilters = Object.fromEntries(stateOptions.map((option) => [option.key, included]));
+		currentPage = 1;
+		selectedPrefix = '';
 	}
 
 	function handleSearchInput(event: Event) {
 		searchQuery = (event.currentTarget as HTMLInputElement).value;
+		currentPage = 1;
+		selectedPrefix = '';
 	}
 
 	function handleLibraryFilterChange(key: string, event: Event) {
@@ -330,17 +359,24 @@
 		if (scope === folderScope) return;
 		if (scope === 'series' && !canShowSeriesScope) return;
 		folderScope = scope;
+		currentPage = 1;
 		selectedPrefix = '';
 	}
 
 	function setWorkView(view: WorkView) {
 		if (view === workView) return;
 		workView = view;
+		currentPage = 1;
 		selectedPrefix = '';
 	}
 
 	function selectFolder(folder: FolderCard) {
 		selectedPrefix = folder.prefix;
+	}
+
+	function setPage(page: number) {
+		currentPage = page;
+		selectedPrefix = '';
 	}
 
 	function folderOpenLabel(folder: FolderCard): string {
@@ -374,6 +410,12 @@
 
 	$effect(restoreFilters);
 	$effect(persistFilters);
+	$effect(() => {
+		if (currentPage !== pagedFolders.page) {
+			currentPage = pagedFolders.page;
+			selectedPrefix = '';
+		}
+	});
 </script>
 
 <OperatorShell route={shellRoute} subject={shellSubject} {crumb} {statusTiles} {footerSignals}>
@@ -671,8 +713,50 @@
 					<WorkstationPanel
 						eyebrow={isFolderIndex ? tableEyebrow : 'Workflow lanes'}
 						title={tableTitle}
-						meta={`${visibleFolders.length.toLocaleString('en-US')} visible`}
+						meta={tableMetaCopy}
 					>
+						<div class="reachable-list-bar" aria-label="Reachable row navigation">
+							<div>
+								<span>Rows</span>
+								<strong>{tableRangeCopy}</strong>
+								<small
+									>Page {pagedFolders.page.toLocaleString('en-US')} of {pagedFolders.totalPages.toLocaleString(
+										'en-US'
+									)}
+									· {pagedFolders.pageSize.toLocaleString('en-US')} rows per page</small
+								>
+							</div>
+							<div class="reachable-list-bar__controls">
+								<button
+									type="button"
+									disabled={pagedFolders.page <= 1 || foldersPending}
+									onclick={() => setPage(1)}
+								>
+									First
+								</button>
+								<button
+									type="button"
+									disabled={pagedFolders.page <= 1 || foldersPending}
+									onclick={() => setPage(pagedFolders.page - 1)}
+								>
+									Previous
+								</button>
+								<button
+									type="button"
+									disabled={pagedFolders.page >= pagedFolders.totalPages || foldersPending}
+									onclick={() => setPage(pagedFolders.page + 1)}
+								>
+									Next
+								</button>
+								<button
+									type="button"
+									disabled={pagedFolders.page >= pagedFolders.totalPages || foldersPending}
+									onclick={() => setPage(pagedFolders.totalPages)}
+								>
+									Last
+								</button>
+							</div>
+						</div>
 						<div class="table-wrap">
 							<table>
 								<thead>
@@ -1033,6 +1117,69 @@
 	.reason-block p {
 		color: var(--mf-fg-secondary);
 		margin: 0;
+	}
+
+	.reachable-list-bar {
+		align-items: center;
+		border-bottom: var(--mf-border-muted);
+		display: flex;
+		gap: var(--mf-space-4);
+		justify-content: space-between;
+		padding: var(--mf-space-4) var(--mf-space-5);
+	}
+
+	.reachable-list-bar > div:first-child {
+		display: grid;
+		gap: var(--mf-space-1);
+		min-width: 0;
+	}
+
+	.reachable-list-bar span {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.reachable-list-bar strong {
+		font-family: var(--mf-font-mono), monospace;
+		font-size: var(--mf-text-sm);
+	}
+
+	.reachable-list-bar small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+	}
+
+	.reachable-list-bar__controls {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--mf-space-2);
+		justify-content: end;
+	}
+
+	.reachable-list-bar__controls button {
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border-muted);
+		color: var(--mf-fg-secondary);
+		cursor: pointer;
+		font-size: var(--mf-text-xs);
+		min-height: 32px;
+		padding: var(--mf-space-2) var(--mf-space-3);
+	}
+
+	.reachable-list-bar__controls button:hover:not(:disabled),
+	.reachable-list-bar__controls button:focus-visible {
+		border-color: var(--mf-active-fg);
+		color: var(--mf-fg-primary);
+		outline: none;
+	}
+
+	.reachable-list-bar__controls button:disabled {
+		color: var(--mf-fg-muted);
+		cursor: not-allowed;
+		opacity: 0.55;
 	}
 
 	.queue-filter__summary {

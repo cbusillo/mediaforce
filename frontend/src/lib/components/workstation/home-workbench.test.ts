@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
 	clearStoredWorkbenchFilters,
 	LEGACY_WORKBENCH_FILTER_STORAGE_KEY,
+	normalizeWorkbenchPage,
+	paginateWorkbenchRows,
 	parseStoredWorkbenchFilters,
 	readStoredWorkbenchFilters,
 	workbenchFilterStorageKey,
@@ -117,5 +119,49 @@ describe('home workbench filter storage', () => {
 			configurable: true,
 			value: originalWindow
 		});
+	});
+});
+
+describe('home workbench row reachability', () => {
+	it('normalizes requested pages into the reachable range', () => {
+		expect(normalizeWorkbenchPage(1, 64, 32)).toBe(1);
+		expect(normalizeWorkbenchPage(2, 64, 32)).toBe(2);
+		expect(normalizeWorkbenchPage(9, 64, 32)).toBe(2);
+		expect(normalizeWorkbenchPage(0, 64, 32)).toBe(1);
+		expect(normalizeWorkbenchPage(Number.NaN, 64, 32)).toBe(1);
+		expect(normalizeWorkbenchPage(5, 0, 32)).toBe(1);
+	});
+
+	it('returns the visible page rows with explicit range metadata', () => {
+		const rows = Array.from({ length: 85 }, (_, index) => `row-${index + 1}`);
+
+		expect(paginateWorkbenchRows(rows, 1, 32)).toEqual({
+			page: 1,
+			pageSize: 32,
+			totalRows: 85,
+			totalPages: 3,
+			startIndex: 0,
+			endIndex: 32,
+			rows: rows.slice(0, 32)
+		});
+		expect(paginateWorkbenchRows(rows, 3, 32)).toEqual({
+			page: 3,
+			pageSize: 32,
+			totalRows: 85,
+			totalPages: 3,
+			startIndex: 64,
+			endIndex: 85,
+			rows: rows.slice(64, 85)
+		});
+	});
+
+	it('clamps an out-of-range page without hiding rows from the total', () => {
+		const rows = Array.from({ length: 33 }, (_, index) => index);
+		const page = paginateWorkbenchRows(rows, 99, 32);
+
+		expect(page.page).toBe(2);
+		expect(page.totalRows).toBe(33);
+		expect(page.totalPages).toBe(2);
+		expect(page.rows).toEqual([32]);
 	});
 });

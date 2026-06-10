@@ -9,6 +9,18 @@ export type WorkbenchFilterState = {
 
 export type WorkbenchFilterMode = 'queue' | 'folders';
 
+export const WORKBENCH_PAGE_SIZE = 32;
+
+export type WorkbenchPage<T> = {
+	page: number;
+	pageSize: number;
+	totalRows: number;
+	totalPages: number;
+	startIndex: number;
+	endIndex: number;
+	rows: T[];
+};
+
 type StoredFilters = {
 	searchQuery?: unknown;
 	libraryFilters?: unknown;
@@ -83,4 +95,38 @@ export function clearStoredWorkbenchFilters(mode: WorkbenchFilterMode): void {
 	} catch {
 		// Ignore unavailable storage.
 	}
+}
+
+export function normalizeWorkbenchPage(
+	requestedPage: number,
+	totalRows: number,
+	pageSize = WORKBENCH_PAGE_SIZE
+): number {
+	const normalizedTotal = Math.max(Math.floor(totalRows), 0);
+	const normalizedPageSize = Math.max(Math.floor(pageSize), 1);
+	const totalPages = Math.max(Math.ceil(normalizedTotal / normalizedPageSize), 1);
+	if (!Number.isFinite(requestedPage)) return 1;
+	return Math.min(Math.max(Math.floor(requestedPage), 1), totalPages);
+}
+
+export function paginateWorkbenchRows<T>(
+	rows: T[],
+	requestedPage: number,
+	pageSize = WORKBENCH_PAGE_SIZE
+): WorkbenchPage<T> {
+	const normalizedPageSize = Math.max(Math.floor(pageSize), 1);
+	const totalRows = rows.length;
+	const totalPages = Math.max(Math.ceil(totalRows / normalizedPageSize), 1);
+	const page = normalizeWorkbenchPage(requestedPage, totalRows, normalizedPageSize);
+	const startIndex = totalRows === 0 ? 0 : (page - 1) * normalizedPageSize;
+	const endIndex = Math.min(startIndex + normalizedPageSize, totalRows);
+	return {
+		page,
+		pageSize: normalizedPageSize,
+		totalRows,
+		totalPages,
+		startIndex,
+		endIndex,
+		rows: rows.slice(startIndex, endIndex)
+	};
 }
