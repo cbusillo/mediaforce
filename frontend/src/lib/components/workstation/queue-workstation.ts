@@ -9,6 +9,8 @@ import type { FooterSignal, ShellTone, StatusTile } from './OperatorShell.svelte
 import { formatBytes, summarizeStatuses } from './folder-studio-view';
 
 export function queueFolderTone(folder: FolderCard): ShellTone {
+	if (folderQueuedForWorkerWindow(folder)) return 'wait';
+	if (folderEncodingNow(folder)) return 'active';
 	if (folder.workflow_state?.tone) return workflowToneToShellTone(folder.workflow_state.tone);
 	const explicit = String(folder.review_badge_tone ?? '').toLowerCase();
 	if (explicit === 'fail' || explicit === 'blocked' || explicit === 'error') return 'fail';
@@ -21,6 +23,8 @@ export function queueFolderTone(folder: FolderCard): ShellTone {
 }
 
 export function queueFolderState(folder: FolderCard): string {
+	if (folderQueuedForWorkerWindow(folder)) return 'Waiting for worker';
+	if (folderEncodingNow(folder)) return 'Encoding now';
 	const workflowLabel = folder.workflow_state?.label?.trim();
 	if (workflowLabel) return workflowLabel;
 	const label = folder.review_badge_label?.trim();
@@ -35,6 +39,20 @@ export function workflowToneToShellTone(tone: WorkflowTone): ShellTone {
 	if (tone === 'ready' || tone === 'success') return 'ready';
 	if (tone === 'attention') return 'fail';
 	return 'idle';
+}
+
+function folderQueuedForWorkerWindow(folder: FolderCard): boolean {
+	const workflow = folder.workflow_state;
+	if (workflow?.state !== 'processing') return false;
+	const detail = workflow.detail.toLowerCase();
+	return detail.includes('queued') || detail.includes('waiting') || detail.includes('schedule');
+}
+
+function folderEncodingNow(folder: FolderCard): boolean {
+	const workflow = folder.workflow_state;
+	if (workflow?.state !== 'processing') return false;
+	const detail = workflow.detail.toLowerCase();
+	return detail.includes('running') || detail.includes('encoding');
 }
 
 export function queueStateLabel(label: string): string {
@@ -155,9 +173,9 @@ const WORK_LANE_META: Record<WorkLaneKey, { label: string; detail: string; tone:
 		tone: 'fail'
 	},
 	processing: {
-		label: 'Active processing',
-		detail: 'Items currently running or waiting on encode workers.',
-		tone: 'active'
+		label: 'Processing and waiting',
+		detail: 'Folders already queued. Rows say whether they are encoding or waiting for workers.',
+		tone: 'wait'
 	},
 	validate: {
 		label: 'Ready to validate',
@@ -227,7 +245,11 @@ export function buildQueueStatusTiles(
 ): StatusTile[] {
 	const folders = foldersPayload.folders;
 	const visibleScopeLabel = scopeLabel.trim().toLowerCase() || 'folders';
-	const readyHosts = hosts.hosts.filter((host) => host.available).length;
+	const reachableHosts = hosts.hosts.filter((host) => host.available).length;
+	const busyHosts = hosts.hosts.filter(
+		(host) => host.available && host.active_encode_count > 0
+	).length;
+	const unavailableHosts = Math.max(hosts.hosts.length - reachableHosts, 0);
 	const encodeQueue = dashboard.encode_queue;
 	const scanStatus = dashboard.scan_job?.status ?? 'idle';
 	const projectedReclaim = totalProjectedReclaim(folders);
@@ -283,9 +305,11 @@ export function buildQueueStatusTiles(
 		},
 		{
 			label: 'Workers',
-			value: `${readyHosts} ready / ${hosts.hosts.length}`,
-			detail: hosts.hosts.length ? 'capacity check complete' : 'worker status unavailable',
-			tone: readyHosts > 0 ? 'ready' : hosts.hosts.length > 0 ? 'wait' : 'idle'
+			value: `${reachableHosts} reachable / ${hosts.hosts.length}`,
+			detail: hosts.hosts.length
+				? `${busyHosts} busy · ${unavailableHosts} unavailable`
+				: 'worker status unavailable',
+			tone: reachableHosts > 0 ? 'ready' : hosts.hosts.length > 0 ? 'wait' : 'idle'
 		}
 	];
 }

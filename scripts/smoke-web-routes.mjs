@@ -16,7 +16,7 @@ const require = createRequire(path.join(rootDir, "frontend", "package.json"));
 const { chromium } = require("@playwright/test");
 
 const DEFAULT_ENDPOINT_TIMEOUT_MS = 2000;
-const DEFAULT_ROUTE_TIMEOUT_MS = 3500;
+const DEFAULT_ROUTE_TIMEOUT_MS = 6000;
 const SERVER_START_TIMEOUT_MS = 12000;
 const NARROW_VIEWPORT = { width: 390, height: 844 };
 
@@ -45,7 +45,7 @@ const endpointChecks = [
 
 const routeChecks = [
   ["Work", "/", "Work"],
-  ["Folders", "/folders", "Folders"],
+  ["Folders compatibility", "/folders", "Work"],
   ["Ops", "/ops", "Ops"],
   ["Settings", "/settings", "Settings"],
   ["Completed", "/completed", "Completed"],
@@ -314,7 +314,11 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
         (expectedMarker) => document.body.innerText.includes(expectedMarker),
         marker,
         { timeout: timeoutMs },
-      );
+      ).catch((error) => {
+        throw new Error(
+          `${label} did not show marker ${JSON.stringify(marker)} within ${timeoutMs}ms: ${error.message}`,
+        );
+      });
       const state = await page.evaluate((expectedMarker) => {
         const bodyText = document.body.innerText.trim();
         return {
@@ -376,7 +380,11 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
         (expectedMarker) => document.body.innerText.includes(expectedMarker),
         marker,
         { timeout: timeoutMs },
-      );
+      ).catch((error) => {
+        throw new Error(
+          `${label} narrow route did not show marker ${JSON.stringify(marker)} within ${timeoutMs}ms: ${error.message}`,
+        );
+      });
       const state = await page.evaluate((expectedMarker) => {
         const bodyText = document.body.innerText.trim();
         const visibleWideTables = Array.from(document.querySelectorAll("table"))

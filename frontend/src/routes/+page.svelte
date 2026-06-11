@@ -38,9 +38,7 @@
 
 	async function hydrateFolders(dashboardPayload: DashboardSummaryPayload) {
 		try {
-			const hydratedFolders = await fetchJson<DashboardFoldersPayload>(
-				'/api/dashboard/folders?include_series=0'
-			);
+			const hydratedFolders = await fetchJson<DashboardFoldersPayload>('/api/dashboard/folders');
 			foldersPayload = hydratedFolders;
 			dashboard = { ...dashboardPayload, folders_preview: hydratedFolders.folders };
 		} catch (error) {

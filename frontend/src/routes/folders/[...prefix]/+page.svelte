@@ -113,7 +113,7 @@
 </script>
 
 <svelte:head>
-	<title>{mode === 'studio' ? `${prefix} · Mediaforce Folder Studio` : 'Mediaforce Folders'}</title>
+	<title>{mode === 'studio' ? `${prefix} · Mediaforce Folder Studio` : 'Mediaforce Work'}</title>
 </svelte:head>
 
 {#if mode === 'studio'}
@@ -127,12 +127,11 @@
 	/>
 {:else}
 	<HomeWorkbenchView
-		crumb="/folders"
+		crumb="/"
 		{dashboard}
 		{foldersPayload}
 		{hosts}
 		{foldersPending}
 		loadError={loadError ?? undefined}
-		mode="folders"
 	/>
 {/if}

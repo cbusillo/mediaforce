@@ -4,6 +4,10 @@ Use this guide when changing Mediaforce's primary operator surfaces: the home
 screen, folder workspace, queue views, review surfaces, and other screens where
 an operator scans state and makes repeated workflow decisions.
 
+This guide is subordinate to the current reset handoff and plan when old route
+names or previous cleanup conclusions conflict with the clean workstation
+contract.
+
 ## Core stance
 
 - Mediaforce is an operator workstation, not a polished SaaS dashboard.
@@ -36,6 +40,10 @@ an operator scans state and makes repeated workflow decisions.
   page.
 - Make the active folder or queue feel like the current workstation context,
   not one card among many.
+- Every count must map to reachable rows through visible browsing, pagination,
+  filtering, or complete scrolling.
+- Search may narrow a list, but it must never be the only route to counted
+  objects.
 
 ## Layout rules
 
@@ -49,6 +57,8 @@ an operator scans state and makes repeated workflow decisions.
   or selection instead of hiding them behind decorative containers.
 - Favor visible filtering, sorting, and status controls over collapsed or
   inferred state.
+- Show list range, total, page movement, and active filters whenever the data
+  set is larger than the visible rows.
 
 ## Visual rules
 
@@ -82,6 +92,9 @@ an operator scans state and makes repeated workflow decisions.
 - No oversized empty states when useful state, counts, or recent activity can
   be shown instead.
 - No hiding critical operational metadata that supports triage.
+- No hidden row caps.
+- No inspector state that points at an object the operator cannot reach from the
+  visible list mechanics.
 
 ## Review checklist
 
@@ -91,6 +104,9 @@ an operator scans state and makes repeated workflow decisions.
   the natural form of the data?
 - Is color carrying operational meaning rather than decoration?
 - Is the active workspace persistent and obvious?
+- Do all displayed counts map to reachable rows?
+- Can the operator move through all counted media without using search?
+- Does the next action explain why it is safe, blocked, or waiting?
 - Would this still feel credible if it were shown next to Resolve or a control
   room console?
 

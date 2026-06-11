@@ -3136,6 +3136,33 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
         )
 
+    def test_scheduler_keeps_same_day_morning_open_for_long_cross_midnight_window(self) -> None:
+        policy = web_app._normalize_encode_queue_scheduler(
+            {
+                "mode": "night",
+                "start_hour": 18,
+                "end_hour": 13,
+                "timezone": "host_local",
+                "days_of_week": ["mon", "tue", "wed", "thu", "fri"],
+                "all_day_days_of_week": ["sat", "sun"],
+            }
+        )
+
+        self.assertTrue(
+            web_app._scheduler_allows_encode_run(
+                policy,
+                now=web_app._parse_iso("2026-06-08T12:30:00+00:00"),
+                host_payload={"utc_offset_minutes": 0},
+            )
+        )
+        self.assertFalse(
+            web_app._scheduler_allows_encode_run(
+                policy,
+                now=web_app._parse_iso("2026-06-08T15:30:00+00:00"),
+                host_payload={"utc_offset_minutes": 0},
+            )
+        )
+
     def test_scheduler_summary_keeps_day_and_timezone_context(self) -> None:
         policy = web_app._normalize_encode_queue_scheduler(
             {

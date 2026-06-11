@@ -18,9 +18,7 @@
     "design": [
       "docs/design/README.md",
       "docs/design/basic-user-vocabulary.md",
-      "docs/design/calm-workstation-visual-system.md",
-      "docs/design/final-love-pass-qa.md",
-      "docs/design/operator-workstation-shell-brief.md"
+      "docs/design/workstation-reset-plan.md"
     ]
   },
   "qualityGate": {

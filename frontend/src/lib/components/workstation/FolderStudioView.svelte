@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
-	import { postJson } from '$lib/api/client';
+	import { apiDownloadHref, postJson } from '$lib/api/client';
 	import { folderRoutePath, folderRoutePrefix } from '$lib/folder-display';
 	import {
 		formatDateTimeCopy,
@@ -90,6 +90,9 @@
 	});
 	const prefix = $derived(studioFolder.prefix);
 	const encodedPrefix = $derived(folderRoutePrefix(prefix));
+	const reviewDownloadHref = $derived(
+		apiDownloadHref(`/api/folders/${encodedPrefix}/review-compare/download`)
+	);
 	const seriesContext = $derived(studioFolder.series_context ?? null);
 	const seriesRoute = $derived(seriesContext ? folderRoutePath(seriesContext.prefix) : '/folders');
 	const sampleHostOptions = $derived(buildBenchHostOptions(studioFolder.sample_host_options));
@@ -109,6 +112,13 @@
 	const library = $derived(prefix.split('/')[0] || 'Library');
 	const seasonScopeRows = $derived(buildSeasonScopeRows(studioFolder));
 	const activeScopeLabel = $derived(outputScopeLabel(studioFolder));
+	const scopePathLabel = $derived(
+		activeScopeLabel === 'whole show'
+			? 'Show path'
+			: activeScopeLabel === 'season'
+				? 'Season path'
+				: 'Folder path'
+	);
 	const sampleItem = $derived(record<FolderSampleItem>(studioFolder.sample_item));
 	const calibration = $derived(record<FolderCalibrationState>(studioFolder.calibration));
 	const pendingProposal = $derived(record<PendingSampleProposal>(studioFolder.pending_proposal));
@@ -146,8 +156,8 @@
 			folderPending
 		)
 	);
-	const workflowSteps = $derived(buildWorkflowSteps(workflow));
-	const basicEncodeGuide = $derived(buildBasicEncodeGuide(workflow));
+	const workflowSteps = $derived(buildWorkflowSteps(workflow, activeScopeLabel));
+	const basicEncodeGuide = $derived(buildBasicEncodeGuide(workflow, activeScopeLabel));
 	const proposalRows = $derived(buildProposalRows(studioFolder, pendingProposal));
 	const statusTiles = $derived(buildStatusTiles(studioFolder, status, hosts, workflow));
 	const footerSignals = $derived(buildFooterSignals(studioFolder, status, hosts, workflow));
@@ -187,7 +197,12 @@
 		reviewArtifacts.filter((artifact) => artifact.category === 'audio').slice(0, 2)
 	);
 	const benchMessages = $derived(
-		buildBenchMessages(calibration, pendingProposal, retryableSampleJob)
+		buildBenchMessages(
+			calibration,
+			pendingProposal,
+			retryableSampleJob,
+			studioFolder.recent_tuning_sessions?.[0]
+		)
 	);
 	const trimmedBenchNote = $derived(benchNote.trim());
 	const benchRequestState = $derived(
@@ -247,13 +262,17 @@
 
 	async function sendBenchRequest() {
 		if (benchRequestDisabled) return;
+		const controller = new AbortController();
+		const timeout = window.setTimeout(() => controller.abort(), 30_000);
 		benchPending = true;
 		benchMessage = '';
 		benchError = '';
 		try {
 			const response = await postJson<FolderBenchPreviewResponse>(
 				`${resolve('/')}api/folders/${encodedPrefix}/ai-tune/preview`,
-				{ note: trimmedBenchNote, host_key: selectedHostKey }
+				{ note: trimmedBenchNote, host_key: selectedHostKey },
+				fetch,
+				{ signal: controller.signal }
 			);
 			localPendingProposal = response.proposal ?? studioFolder.pending_proposal ?? null;
 			localProposalPrefix = prefix;
@@ -261,8 +280,14 @@
 				response.message || 'Sample plan ready. Nothing is queued until you confirm it.';
 			benchNote = '';
 		} catch (error) {
-			benchError = error instanceof Error ? error.message : 'Review request failed.';
+			benchError =
+				error instanceof DOMException && error.name === 'AbortError'
+					? 'Review assistant timed out after 30 seconds. Nothing was queued; try again or use the current sample source directly.'
+					: error instanceof Error
+						? error.message
+						: 'Review request failed.';
 		} finally {
+			window.clearTimeout(timeout);
 			benchPending = false;
 		}
 	}
@@ -389,6 +414,10 @@
 			workflowPending = null;
 		}
 	}
+
+	function downloadReviewPack() {
+		window.location.assign(reviewDownloadHref);
+	}
 </script>
 
 <OperatorShell
@@ -404,7 +433,7 @@
 				<div>
 					<h1>{title}</h1>
 					<div class="folder-header__path">
-						<span>Folder path</span>
+						<span>{scopePathLabel}</span>
 						<strong class="mf-path">{prefix}</strong>
 						{#if seriesContext}
 							<a class="scope-link" href={resolve(seriesRoute)}
@@ -455,7 +484,9 @@
 						<h2 id="basic-run-title">{basicEncodeGuide.title}</h2>
 						<p>{basicEncodeGuide.detail}</p>
 					</div>
-					{#if basicEncodeGuide.action === 'focus-bench'}
+					{#if !basicEncodeGuide.primary}
+						<!-- Active status only; no command belongs in this compact guide. -->
+					{:else if basicEncodeGuide.action === 'focus-bench'}
 						<button
 							class="basic-run__action"
 							type="button"
@@ -476,19 +507,17 @@
 						>
 					{:else if basicEncodeGuide.action === 'open-ops' || basicEncodeGuide.action.startsWith('monitor-')}
 						<a
-							class="basic-run__action"
+							class="basic-run__action basic-run__action--secondary"
 							href={resolve('/ops')}
 							data-mf-action={`guide-${basicEncodeGuide.action}`}>{basicEncodeGuide.primary}</a
 						>
 					{:else if basicEncodeGuide.action === 'download-review-pack' && !guideActionState.disabled}
-						<form
-							class="action-form"
-							method="get"
-							action={`${resolve('/')}api/folders/${encodedPrefix}/review-compare/download`}
-							data-mf-action={`guide-${basicEncodeGuide.action}`}
+						<button
+							class="basic-run__action"
+							type="button"
+							onclick={downloadReviewPack}
+							data-mf-action={`guide-${basicEncodeGuide.action}`}>{basicEncodeGuide.primary}</button
 						>
-							<button class="basic-run__action" type="submit">{basicEncodeGuide.primary}</button>
-						</form>
 					{:else if basicEncodeGuide.action === 'start-sample' || basicEncodeGuide.action === 'retry-sample'}
 						<button
 							class="basic-run__action"
@@ -552,7 +581,7 @@
 						>
 					{/if}
 				</header>
-				<ol class="basic-run__steps" aria-label="Single folder encode steps">
+				<ol class="basic-run__steps" aria-label={`${basicEncodeGuide.label} encode steps`}>
 					{#each basicEncodeGuide.steps as step, index (step.label)}
 						<li class="basic-run__step basic-run__step--{step.state}">
 							<span>{index + 1}</span>
@@ -613,14 +642,12 @@
 							data-mf-action={workflow.primaryAction}>{workflow.primary}</a
 						>
 					{:else if workflow.primaryAction === 'download-review-pack' && !workflowActionState(workflow.primaryAction).disabled}
-						<form
-							class="action-form"
-							method="get"
-							action={`${resolve('/')}api/folders/${encodedPrefix}/review-compare/download`}
-							data-mf-action={workflow.primaryAction}
+						<button
+							class="control control--primary"
+							type="button"
+							onclick={downloadReviewPack}
+							data-mf-action={workflow.primaryAction}>{workflow.primary}</button
 						>
-							<button class="control control--primary" type="submit">{workflow.primary}</button>
-						</form>
 					{:else if workflow.primaryAction === 'start-sample' || workflow.primaryAction === 'retry-sample'}
 						<button
 							class="control control--primary"
@@ -708,14 +735,12 @@
 							>{workflow.secondary}</a
 						>
 					{:else if workflow.secondaryAction === 'download-review-pack' && !workflowActionState(workflow.secondaryAction).disabled}
-						<form
-							class="action-form"
-							method="get"
-							action={`${resolve('/')}api/folders/${encodedPrefix}/review-compare/download`}
-							data-mf-action={workflow.secondaryAction}
+						<button
+							class="control"
+							type="button"
+							onclick={downloadReviewPack}
+							data-mf-action={workflow.secondaryAction}>{workflow.secondary}</button
 						>
-							<button class="control" type="submit">{workflow.secondary}</button>
-						</form>
 					{:else if workflow.secondaryAction === 'start-sample' || workflow.secondaryAction === 'retry-sample'}
 						<button
 							class="control"
@@ -792,14 +817,12 @@
 						>
 					{/if}
 					{#if reviewPackReady && workflow.primaryAction !== 'download-review-pack' && workflow.secondaryAction !== 'download-review-pack'}
-						<form
-							class="action-form"
-							method="get"
-							action={`${resolve('/')}api/folders/${encodedPrefix}/review-compare/download`}
-							data-mf-action="download-review-pack"
+						<button
+							class="control"
+							type="button"
+							onclick={downloadReviewPack}
+							data-mf-action="download-review-pack">Download side-by-side video</button
 						>
-							<button class="control" type="submit">Download side-by-side video</button>
-						</form>
 					{/if}
 					{#if profileError}
 						<p class="decision__status decision__status--fail">{profileError}</p>
@@ -830,6 +853,14 @@
 						<StateBadge tone={reviewWorkspaceTone} label={reviewWorkspace.badge} />
 						<h2 id="review-workspace-title">{reviewWorkspace.title}</h2>
 					</div>
+					{#if reviewPackReady}
+						<button
+							class="control control--primary review-workspace__download"
+							type="button"
+							onclick={downloadReviewPack}
+							data-mf-action="download-review-pack">Download side-by-side video</button
+						>
+					{/if}
 				</header>
 
 				{#if reviewWorkspace.layout === 'pipeline'}
@@ -924,6 +955,26 @@
 									</div>
 								{/each}
 							</div>
+							{#if basicEncodeGuide.action === 'start-sample' || basicEncodeGuide.action === 'retry-sample'}
+								<div class="bench-next-action">
+									<div>
+										<span>Sample plan ready</span>
+										<strong>Run this sample before approving the {activeScopeLabel}.</strong>
+									</div>
+									<button
+										class="control control--primary"
+										type="button"
+										disabled={guideActionState.disabled}
+										title={guideActionState.title}
+										onclick={() => confirmBenchProposal(basicEncodeGuide.action)}
+										data-mf-action={`bench-${basicEncodeGuide.action}`}
+										data-mf-wire="live"
+										>{workflowPending === basicEncodeGuide.action
+											? 'Queueing'
+											: basicEncodeGuide.primary}</button
+									>
+								</div>
+							{/if}
 						</details>
 
 						<div class="bench__composer" aria-label="Review request composer">
@@ -961,6 +1012,10 @@
 								<p class="bench__status bench__status--fail">{benchError}</p>
 							{:else if benchMessage}
 								<p class="bench__status bench__status--ready">{benchMessage}</p>
+							{:else if benchPending}
+								<p class="bench__status">
+									Sending request to the review assistant. This can take up to 30 seconds.
+								</p>
 							{:else if benchRequestState.blocker}
 								<p class="bench__status">{benchRequestState.blocker}</p>
 							{/if}
@@ -1020,15 +1075,51 @@
 
 			{#if !workflow.isOutputWorkflow}
 				<div class="evidence-grid evidence-grid--sample-only">
-					<WorkstationPanel title="Representative sample">
-						<div class="sample-card">
-							<div class="sample-frame">
-								<span>{sampleItem ? 'Representative sample' : 'No sample selected'}</span>
+					<WorkstationPanel title={reviewPackReady ? 'Review sample media' : 'Sample source'}>
+						<div class:sample-card--source-only={!reviewPackReady} class="sample-card">
+							<div class:sample-frame--source-only={!reviewPackReady} class="sample-frame">
+								<span
+									>{reviewPackReady
+										? 'Review sample'
+										: sampleItem
+											? 'Sample source'
+											: 'No sample selected'}</span
+								>
 								<strong
 									>{sampleItem
 										? pathFilename(sampleItem.rel_path)
 										: 'Run a sample to populate review evidence.'}</strong
 								>
+							</div>
+							<div class="sample-card__guidance">
+								<strong
+									>{reviewPackReady ? 'Review evidence is ready' : 'No sample video yet'}</strong
+								>
+								<p>
+									{#if reviewPackReady}
+										Download or open the side-by-side sample, review it, then approve or revise the
+										settings from the decision panel above.
+									{:else}
+										This is the source item the assistant will use. Create a sample before approving
+										anything across the {activeScopeLabel}.
+									{/if}
+								</p>
+								{#if reviewPackReady}
+									<button
+										class="control control--primary"
+										type="button"
+										onclick={downloadReviewPack}
+										data-mf-action="download-review-pack">Download side-by-side video</button
+									>
+								{:else}
+									<button
+										class="control control--primary"
+										type="button"
+										onclick={focusBenchComposer}
+									>
+										Ask review assistant
+									</button>
+								{/if}
 							</div>
 							<div class="sample-facts">
 								{#each sampleFacts as fact (fact.label)}
@@ -1456,10 +1547,10 @@
 	}
 
 	.basic-run__header {
-		align-items: center;
+		align-items: start;
 		display: grid;
 		gap: var(--mf-space-4);
-		grid-template-columns: minmax(0, 1fr) auto;
+		grid-template-columns: minmax(0, 1fr) max-content;
 	}
 
 	.basic-run__header div {
@@ -1491,6 +1582,8 @@
 
 	.basic-run__action,
 	.basic-run__next {
+		align-items: center;
+		align-self: start;
 		background: var(--mf-ready-bg);
 		border: 1px solid var(--mf-ready-line);
 		color: var(--mf-ready-fg);
@@ -1498,14 +1591,27 @@
 		font-size: var(--mf-text-xs);
 		font-weight: var(--mf-weight-semibold);
 		justify-content: center;
+		justify-self: start;
+		line-height: 1;
+		max-width: 100%;
+		min-height: var(--mf-control-md);
 		min-width: 140px;
 		padding: var(--mf-space-2) var(--mf-space-3);
 		text-decoration: none;
 		white-space: nowrap;
+		width: fit-content;
 	}
 
 	.basic-run__action {
 		cursor: pointer;
+	}
+
+	.basic-run__action--secondary {
+		background: var(--mf-bg-panel-2);
+		border-color: var(--mf-line-strong);
+		color: var(--mf-fg-primary);
+		min-width: 0;
+		padding: var(--mf-space-2) var(--mf-space-4);
 	}
 
 	button.basic-run__action {
@@ -1975,6 +2081,30 @@
 		padding-top: 0;
 	}
 
+	.bench-next-action {
+		align-items: center;
+		background: var(--mf-ready-bg);
+		border-top: var(--mf-border);
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-template-columns: minmax(0, 1fr) auto;
+		padding: var(--mf-space-4) var(--mf-space-5);
+	}
+
+	.bench-next-action span {
+		color: var(--mf-ready-fg);
+		display: block;
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.bench-next-action strong {
+		font-size: var(--mf-text-sm);
+		font-weight: var(--mf-weight-semibold);
+	}
+
 	.bench-message {
 		background: var(--mf-bg-panel-2);
 		border: var(--mf-border);
@@ -2131,6 +2261,15 @@
 		padding: var(--mf-space-5);
 	}
 
+	.sample-card--source-only {
+		align-items: start;
+		grid-template-columns: minmax(0, 1fr) minmax(320px, 0.42fr);
+	}
+
+	.sample-card--source-only .sample-facts {
+		grid-column: 1 / -1;
+	}
+
 	.sample-frame {
 		align-content: center;
 		aspect-ratio: 16 / 7;
@@ -2144,6 +2283,38 @@
 		justify-items: center;
 		padding: var(--mf-space-6);
 		text-align: center;
+	}
+
+	.sample-frame--source-only {
+		aspect-ratio: auto;
+		min-height: var(--mf-row-comfy);
+		justify-items: start;
+		text-align: left;
+	}
+
+	.sample-card__guidance {
+		align-content: start;
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border-muted);
+		display: grid;
+		gap: var(--mf-space-4);
+		min-width: 0;
+		padding: var(--mf-space-5);
+	}
+
+	.sample-card__guidance strong {
+		font-size: var(--mf-text-sm);
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.sample-card__guidance p {
+		color: var(--mf-fg-secondary);
+		font-size: var(--mf-text-sm);
+		line-height: var(--mf-leading-normal);
+	}
+
+	.sample-card__guidance .control {
+		justify-self: start;
 	}
 
 	.sample-frame strong {

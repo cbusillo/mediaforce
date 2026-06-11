@@ -34,15 +34,7 @@
 </script>
 
 <svelte:head>
-	<title>Mediaforce Folders</title>
+	<title>Mediaforce Work</title>
 </svelte:head>
 
-<HomeWorkbenchView
-	crumb="/folders"
-	{dashboard}
-	{foldersPayload}
-	{hosts}
-	{foldersPending}
-	{loadError}
-	mode="folders"
-/>
+<HomeWorkbenchView crumb="/" {dashboard} {foldersPayload} {hosts} {foldersPending} {loadError} />

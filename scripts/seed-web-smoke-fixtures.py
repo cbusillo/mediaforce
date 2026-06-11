@@ -803,12 +803,12 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             {
                 "label": "Ops unavailable host fixture",
                 "route": "/ops",
-                "marker": "No workers can process right now",
+                "marker": "Worker status",
             },
             {
                 "label": "Folder Studio review-ready fixture",
                 "route": "/folders/tv/Review%20Ready/Season%201",
-                "marker": "Approve and queue",
+                "marker": "Download side-by-side video",
             },
             {
                 "label": "Folder Studio approved fixture",
@@ -823,12 +823,12 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             {
                 "label": "Folder Studio active processing fixture",
                 "route": "/folders/tv/Encoding%20Show/Season%201",
-                "marker": "Monitor encode",
+                "marker": "Encoding now",
             },
             {
                 "label": "Folder Studio retryable processing fixture",
                 "route": "/folders/tv/Failed%20Encode/Season%201",
-                "marker": "Needs attention",
+                "marker": "Ask review assistant",
             },
         ],
         "completedPrefix": COMPLETED_PREFIX,

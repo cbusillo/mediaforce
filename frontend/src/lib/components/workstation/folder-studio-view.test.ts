@@ -139,8 +139,8 @@ describe('Folder Studio review request mapping', () => {
 			tone: 'active',
 			label: 'Loading',
 			title: 'Loading folder state',
-			primary: 'Open Folders',
-			primaryAction: 'open-folders',
+			primary: '',
+			primaryAction: 'monitor-sample',
 			secondary: 'Open Ops',
 			secondaryAction: 'open-ops'
 		});
@@ -417,7 +417,7 @@ describe('Folder Studio review request mapping', () => {
 	});
 
 	it('maps sample status into basic user copy', () => {
-		expect(sampleStatusCopy('queued')).toBe('Sample waiting');
+		expect(sampleStatusCopy('queued')).toBe('Sample queued');
 		expect(sampleStatusCopy('running')).toBe('Sampling');
 		expect(sampleStatusCopy('pending_review')).toBe('Ready to review');
 		expect(sampleStatusCopy('failed')).toBe('Sample needs retry');
@@ -445,7 +445,7 @@ describe('Folder Studio review request mapping', () => {
 		);
 		expect(buildBasicEncodeGuide(sampleWorkflow)).toMatchObject({
 			label: 'Single folder run',
-			title: 'Run sample',
+			title: 'Ask review assistant',
 			primary: 'Ask review assistant',
 			action: 'focus-bench'
 		});
@@ -458,6 +458,18 @@ describe('Folder Studio review request mapping', () => {
 			'upcoming',
 			'upcoming'
 		]);
+		expect(buildBasicEncodeGuide(sampleWorkflow, 'whole show')).toMatchObject({
+			label: 'Whole show run',
+			title: 'Ask review assistant',
+			primary: 'Ask review assistant',
+			action: 'focus-bench'
+		});
+		expect(buildBasicEncodeGuide(sampleWorkflow, 'whole show').steps).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ label: 'Pick show' }),
+				expect.objectContaining({ label: 'Process show' })
+			])
+		);
 
 		const validateWorkflow = resolveWorkflow(
 			folderPayload({ workflow_state: workflowState() }),
@@ -481,17 +493,17 @@ describe('Folder Studio review request mapping', () => {
 		const reviewWorkflow = {
 			tone: 'ready',
 			label: 'Review ready',
-			title: 'Approve this sample or revise it',
-			copy: 'Review the clips, then approve and queue if this is acceptable.',
-			primary: 'Approve and queue',
-			primaryAction: 'queue-encode',
-			secondary: 'Download pack',
-			secondaryAction: 'download-review-pack'
+			title: 'Review the sample video',
+			copy: 'Download the side-by-side sample before approving.',
+			primary: 'Download side-by-side video',
+			primaryAction: 'download-review-pack',
+			secondary: 'Approve and queue',
+			secondaryAction: 'queue-encode'
 		} as const;
 		expect(buildBasicEncodeGuide(reviewWorkflow)).toMatchObject({
-			title: 'Review sample',
-			primary: 'Approve and queue',
-			action: 'queue-encode'
+			title: 'Review sample video',
+			primary: 'Download side-by-side video',
+			action: 'download-review-pack'
 		});
 		expect(buildBasicEncodeGuide(reviewWorkflow).steps[2]).toMatchObject({
 			label: 'Review sample',
@@ -1393,6 +1405,36 @@ describe('Folder Studio review request mapping', () => {
 		});
 	});
 
+	it('shows queued processing waits before active processing copy', () => {
+		const folder = folderPayload({
+			encode_queue_summary:
+				'0 running · 1 queued · this folder is 1 of 1 · waiting for a host schedule window',
+			workflow_state: workflowState({
+				state: 'processing',
+				primary_lane: 'processing',
+				label: 'Processing',
+				tone: 'active',
+				detail: 'Encode job is queued for tv/Example/Season 1.',
+				next_action: {
+					kind: 'monitor_encode',
+					label: 'Monitor encode',
+					enabled: true,
+					target_prefix: 'tv/Example/Season 1'
+				}
+			})
+		});
+
+		const workflow = resolveWorkflow(folder, folderStatusPayload(), null, null, null, null, null);
+
+		expect(workflow).toMatchObject({
+			tone: 'wait',
+			label: 'Waiting for worker',
+			title: 'Queued, not encoding yet',
+			primary: 'Open Ops',
+			primaryAction: 'open-ops'
+		});
+	});
+
 	it('keeps retry processing on the output encoding facts and workspace', () => {
 		const folder = folderPayload({
 			summary: folderSummary({ item_count: 2 }),
@@ -1732,9 +1774,10 @@ describe('Folder Studio review request mapping', () => {
 
 		expect(workflow).toMatchObject({
 			label: 'Review ready',
-			primary: 'Approve and queue',
-			primaryAction: 'queue-encode',
-			secondary: 'Download pack'
+			primary: 'Download side-by-side video',
+			primaryAction: 'download-review-pack',
+			secondary: 'Approve and queue',
+			secondaryAction: 'queue-encode'
 		});
 		expect(buildDecisionFacts(folder, calibration, null, workflow)[0]).toMatchObject({
 			label: 'Per episode',
@@ -1742,7 +1785,7 @@ describe('Folder Studio review request mapping', () => {
 		});
 	});
 
-	it('keeps acceptable evidence approve-first when its queueable draft is still present', () => {
+	it('keeps acceptable evidence download-first when its queueable draft is still present', () => {
 		const calibration = {
 			browser_review_ready: true,
 			review_media_ready: true,
@@ -1777,9 +1820,10 @@ describe('Folder Studio review request mapping', () => {
 			)
 		).toMatchObject({
 			label: 'Review ready',
-			primary: 'Approve and queue',
-			primaryAction: 'queue-encode',
-			secondary: 'Download pack'
+			primary: 'Download side-by-side video',
+			primaryAction: 'download-review-pack',
+			secondary: 'Approve and queue',
+			secondaryAction: 'queue-encode'
 		});
 	});
 
@@ -1805,7 +1849,7 @@ describe('Folder Studio review request mapping', () => {
 		);
 
 		expect(workflow).toMatchObject({
-			label: 'Not sampled',
+			label: 'Needs sample',
 			primary: 'Ask review assistant',
 			primaryAction: 'focus-bench'
 		});
@@ -2015,7 +2059,7 @@ describe('Folder Studio review request mapping', () => {
 		);
 
 		expect(workflow).toMatchObject({
-			label: 'Not sampled',
+			label: 'Needs sample',
 			primary: 'Ask review assistant',
 			primaryAction: 'focus-bench'
 		});

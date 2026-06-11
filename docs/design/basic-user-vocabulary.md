@@ -159,16 +159,10 @@ Disabled action titles and inline blockers should use this pattern:
 Do not expose raw state names such as `missing_sample`, `polling`, `can_queue`,
 or `archive_cleanup.has_cleanup` in visible UI.
 
-## Reconciliation Status
+## Reset Usage
 
-- The route-level cleanup issues `#75` through `#79` moved the primary pages
-  toward this vocabulary. Do not use the older leak list as a reason to revert
-  those route decisions.
-- GitHub issue `#80` owns the final cross-page sweep for remaining visible copy
-  and shared component polish.
-- Keep technical terms when they are the clearest table column, advanced
-  setting, or diagnostic value. Replace them in first-glance headings,
-  empty-state copy, and primary action labels.
-
-Track route-specific copy replacement in the active GitHub route issues rather
-than editing this reference to explain one-off exceptions.
+Use this file for product language and workflow-state naming only. It does not
+validate the old route structure, old component hierarchy, or previous
+issue-backed cleanup plan. During the frontend reset, prefer these terms when
+they clarify the operator's next safe decision, and revise them when the clean
+workstation contract exposes a better product noun.

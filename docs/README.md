@@ -20,15 +20,12 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 ## Design briefs
 
 - `docs/design/README.md`: source-of-truth routing for current versus
-  historical UI design briefs
+  historical UI reset guidance
+- `docs/design/workstation-reset-plan.md`: active frontend replacement plan
 - `docs/design/basic-user-vocabulary.md`: user-facing vocabulary and workflow
   state reference for the UI/UX reset
-- `docs/design/calm-workstation-visual-system.md`: calmer workstation visual
-  system direction for shared tokens, surfaces, and route UI review
-- `docs/design/operator-workstation-shell-brief.md`: durable cross-route shell
-  brief for home, ops, completed, settings, and folder studio
-- Historical/superseded briefs live in `docs/design/`; read
-  `docs/design/README.md` before using them as guidance.
+- Historical/superseded briefs live in `docs/design/archive/`; read
+  `docs/design/README.md` before using them as evidence.
 
 ## Developer workflows
 
