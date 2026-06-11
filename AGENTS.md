@@ -23,6 +23,12 @@ Only session-start facts that are easy to miss belong here.
 
 - UI changes: validate in a real browser per
   `docs/policies/acceptance-gate.md`
+- Local macOS launch item: `~/Library/LaunchAgents/com.mediaforce.web.plist`
+  starts `mediaforce-web`, but it may be disabled at session start when
+  MediaForce is not active work. Do not assume the local web server is running;
+  check before using it and start it intentionally if needed. In Login Items,
+  this launch item may appear as `uv` because it currently runs through the uv
+  executable.
 - Before changing primary operator surfaces, read
   `docs/style/workstation-ui.md` together with `docs/style/frontend.md`
 - For browser exploration by subagents, explicitly use the `browser-ui-review`
