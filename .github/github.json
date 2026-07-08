@@ -64,7 +64,16 @@
     ]
   },
   "importantWorkflows": [
-    "CI"
+    "CI",
+    "CodeQL",
+    "Dependency Graph",
+    "Dependabot Updates"
+  ],
+  "requiredStatusChecks": [
+    "acceptance",
+    "Analyze (actions)",
+    "Analyze (python)",
+    "Analyze (javascript-typescript)"
   ],
   "qaLabels": [],
   "deployLabels": [],
