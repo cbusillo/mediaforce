@@ -118,6 +118,12 @@ Once the current sampled draft has been explicitly saved to the folder profile,
 `Queue Folder Encode` is unlocked so the real folder job can enter the encode
 queue without letting a stale unsaved preview slip into production work.
 
+For this personal workflow, source-resolution 1080p AV1 around 200–300 MB per
+40 minutes is an established operator-approved baseline, including conventional
+and dark or stylized TV material. Direct operator instructions and accepted
+visual samples outrank generic bitrate guidance; real sample evidence decides
+whether a particular folder needs adjustment.
+
 For scene-aware engine research, generate a repeatable bakeoff plan from an
 existing manifest instead of replacing the production engine path directly:
 

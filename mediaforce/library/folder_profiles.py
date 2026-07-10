@@ -97,7 +97,7 @@ def recommend_folder_profile(prefix: str, rows: list[dict[str, Any]], resolved_p
 
     if avg_size_gib >= 2.5:
         suggestion["video"]["max_encoded_percent"] = 55
-        suggestion["reason"].append("Episodes are large enough that an aggressive size target is worthwhile.")
+        suggestion["reason"].append("Episodes are large enough that a size-first AV1 target is worthwhile.")
 
     if _looks_clean_catalog_tv(prefix):
         suggestion["video"]["default_grain"] = 0

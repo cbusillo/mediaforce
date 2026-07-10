@@ -65,7 +65,8 @@ debugging a worker, or comparing logs against backend output.
   approving.
 - Proposal warning exists: `Review warning`. The user must inspect the warning
   before approving.
-- Proposal accepted: `Approved`. The folder settings are accepted.
+- Proposal accepted: `Approved`. The folder settings are accepted, and that
+  visual approval remains authoritative evidence for future tuning.
 - Encode queued or running: `Processing`. Folder-wide work is underway.
 - Encode failed or stopped: `Processing needs attention`. The user must inspect
   or retry from the route that owns recovery.
