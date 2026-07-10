@@ -1167,8 +1167,7 @@ function videoPolicySummary(
 	const metric = compactText(video.quality_metric).toUpperCase();
 	const target = numberValue(metric === 'XPSNR' ? video.target_xpsnr : video.target_vmaf);
 	const floor = numberValue(metric === 'XPSNR' ? video.min_target_xpsnr : video.min_target_vmaf);
-	const metricCopy =
-		metric === 'VMAF' && target !== null && target <= 88 ? 'VMAF low-bitrate' : metric;
+	const metricCopy = metric;
 	const output = compactParts([
 		encoder.includes('av1') ? 'AV1' : encoder || null,
 		maxHeight !== null && maxHeight > 0 ? `max ${maxHeight}p` : 'source resolution',
@@ -1787,7 +1786,7 @@ export function resolveWorkflow(
 			tone: 'wait',
 			label: 'New sample needed',
 			title: 'Previous sample used older settings',
-			copy: `${verdict.predictedPerItem} per episode was measured against older quality targets. Run a fresh sample using the current source-resolution, low-bitrate defaults before approving this folder.`,
+			copy: `${verdict.predictedPerItem} per episode was measured against older quality targets. Run a fresh sample using the current source-resolution, size-first AV1 defaults before approving this folder.`,
 			primary: 'Ask for sample',
 			primaryAction: 'focus-bench',
 			secondary: 'Download old pack',

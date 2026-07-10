@@ -128,38 +128,82 @@ def retrieve_learning_context(
 ) -> list[dict[str, Any]]:
     candidate_rows = connection.execute(
         select(
+            learning_artifacts.c.prefix,
             learning_artifacts.c.title,
             learning_artifacts.c.artifact_path,
             learning_artifacts.c.summary,
             learning_artifacts.c.tags_json,
             learning_artifacts.c.updated_at,
-        ).order_by(learning_artifacts.c.updated_at.desc())
+            tuning_sessions.c.applied_policy_json,
+            tuning_sessions.c.toolbelt_json,
+        )
+        .select_from(
+            learning_artifacts.join(
+                tuning_sessions,
+                learning_artifacts.c.session_id == tuning_sessions.c.session_id,
+                isouter=True,
+            )
+        )
+        .order_by(learning_artifacts.c.updated_at.desc())
     ).mappings().fetchall()
     desired_tags = set(_artifact_tags(prefix=prefix, sample_item=sample_item, note=note, response={}))
-    ranked: list[tuple[int, dict[str, Any]]] = []
+    normalized_prefix = str(prefix).strip().strip("/")
+    requested_series_root = _season_root_prefix(normalized_prefix) or _series_root_prefix(normalized_prefix)
+    ranked: list[tuple[int, str, dict[str, Any]]] = []
     for row in candidate_rows:
-        tags = [str(value) for value in json.loads(str(row["tags_json"] or "[]"))]
+        try:
+            tags = [str(value) for value in json.loads(str(row["tags_json"] or "[]"))]
+        except json.JSONDecodeError:
+            tags = []
+        tag_set = set(tags)
         overlap = len(desired_tags.intersection(tags))
-        same_prefix = 1 if str(row["artifact_path"]).find(_slug(prefix)) != -1 else 0
-        score = overlap + same_prefix
+        artifact_prefix = str(row["prefix"] or "").strip().strip("/")
+        same_prefix = int(artifact_prefix == normalized_prefix)
+        artifact_series_root = _season_root_prefix(artifact_prefix) or _series_root_prefix(artifact_prefix)
+        same_series = int(bool(requested_series_root and artifact_series_root == requested_series_root))
+        approved_visual = "approval:visual" in tag_set and "decision:accepted" in tag_set
+        approval_authoritative = approved_visual and bool(same_prefix or same_series)
+        if approved_visual and not approval_authoritative:
+            continue
+        score = overlap + (same_prefix * 10) + (same_series * 6) + (20 if approval_authoritative else 0)
         if score <= 0:
             continue
         artifact_path = Path(str(row["artifact_path"]))
         excerpt = _artifact_excerpt(artifact_path)
+        applied_policy = _json_object(row.get("applied_policy_json"))
+        toolbelt = _json_object(row.get("toolbelt_json"))
+        sample_result = object_dict(toolbelt.get("sample_result"))
+        run_verdict = object_dict(toolbelt.get("run_verdict"))
         ranked.append(
             (
                 score,
+                str(row["updated_at"] or ""),
                 {
+                    "prefix": artifact_prefix,
                     "title": str(row["title"]),
                     "summary": str(row["summary"] or ""),
                     "tags": tags,
                     "updated_at": str(row["updated_at"]),
                     "excerpt": excerpt,
+                    "evidence_authority": "approved_visual_result" if approval_authoritative else "none",
+                    "approved_policy": applied_policy if approval_authoritative else {},
+                    "sample_result": sample_result if approval_authoritative else {},
+                    "run_verdict": run_verdict if approval_authoritative else {},
                 },
             )
         )
-    ranked.sort(key=lambda item: (-item[0], item[1]["updated_at"]))
-    return [payload for _, payload in ranked[:limit]]
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [payload for _, _, payload in ranked[:limit]]
+
+
+def _json_object(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(str(raw or "{}"))
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def sibling_approved_season_memory(

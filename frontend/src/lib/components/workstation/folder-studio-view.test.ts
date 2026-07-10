@@ -1614,7 +1614,7 @@ describe('Folder Studio review request mapping', () => {
 			{
 				label: 'Current target',
 				value: 'source resolution',
-				detail: 'VMAF low-bitrate target 85 · floor 80'
+				detail: 'VMAF target 85 · floor 80'
 			},
 			{
 				label: 'Next action',

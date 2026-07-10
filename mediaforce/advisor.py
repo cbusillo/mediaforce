@@ -20,6 +20,7 @@ from mediaforce.advising.policy import compact_policy_payload as _compact_policy
     normalize_like_base as _normalize_like_base_impl, finalize_video_policy_updates as _finalize_video_policy_updates_impl, \
     normalize_duration_like as _normalize_duration_like_impl, normalize_string_list as _normalize_string_list_impl, \
     coerce_bool as _coerce_bool_impl, merge_policy_fragments as _merge_policy_fragments_impl, \
+    has_nonpositive_video_budget, \
     parse_bitrate_kbps as _parse_bitrate_kbps_impl, \
     clamp_float as _clamp_float_impl, clamp_int as _clamp_int_impl, \
     operator_note_parse_schema as _operator_note_parse_schema_impl
@@ -31,10 +32,10 @@ from mediaforce.advising.runtime import StructuredLLMFailure, run_code_prompt as
     run_structured_llm_request as _run_structured_llm_request_impl
 
 ADVISOR_MODEL = "gpt-5.4"
-SEED_PROMPT_VERSION = "seed-v8"
-TUNE_PROMPT_VERSION = "tune-v9"
+SEED_PROMPT_VERSION = "seed-v9"
+TUNE_PROMPT_VERSION = "tune-v10"
 TUNE_SELF_CHECK_VERSION = "tune-self-check-v1"
-RUN_VERDICT_PROMPT_VERSION = "run-verdict-v1"
+RUN_VERDICT_PROMPT_VERSION = "run-verdict-v2"
 REVIEW_ARTIFACT_CRITIQUE_PROMPT_VERSION = "review-artifact-critique-v1"
 OPERATOR_NOTE_PARSE_PROMPT_VERSION = "operator-note-parse-v2"
 REQUEST_DISPOSITIONS = ("honored", "honored_with_risk", "softened", "rejected", "unclear")
@@ -95,8 +96,48 @@ def _should_force_repeated_experiment(repeat_signal: dict[str, Any] | None) -> b
     return int_value(object_dict(repeat_signal).get("repeat_count")) >= 2
 
 
-def _should_force_operator_confirmed_experiment(requested_experiment: dict[str, Any] | None) -> bool:
-    return bool(object_dict(requested_experiment).get("operator_confirmed"))
+def _has_blocking_request_evidence(
+        requested_experiment: dict[str, Any] | None,
+        latest_failed_sample_job: dict[str, Any] | None = None,
+) -> bool:
+    request = object_dict(requested_experiment)
+    return (
+        bool(object_dict(latest_failed_sample_job))
+        or str(request.get("evidence_authority") or "none").strip().lower() == "rejected_visual_result"
+        or has_nonpositive_video_budget(request)
+    )
+
+
+def _should_force_operator_confirmed_experiment(
+        requested_experiment: dict[str, Any] | None,
+        latest_failed_sample_job: dict[str, Any] | None = None,
+) -> bool:
+    request = object_dict(requested_experiment)
+    return (
+        bool(request.get("operator_confirmed"))
+        and not _has_blocking_request_evidence(request, latest_failed_sample_job)
+    )
+
+
+def _reject_nonpositive_video_budget(
+        parsed: dict[str, Any],
+        requested_experiment: dict[str, Any] | None,
+) -> bool:
+    if not has_nonpositive_video_budget(requested_experiment):
+        return False
+    parsed["request_disposition"] = "rejected"
+    parsed["summary"] = "The requested total size leaves no positive video budget."
+    parsed["diagnosis"] = (
+        "The estimated audio allocation consumes the requested total size, so there is no positive video budget "
+        "for a safe measured sample."
+    )
+    parsed["request_response"] = (
+        "That total size cannot queue as written because it leaves no positive video budget. "
+        "Increase the total target or explicitly reduce the audio allocation first."
+    )
+    parsed["suggested_follow_up"] = "Increase the total size target or choose an explicit lower audio bitrate."
+    parsed["feasibility_note"] = "The estimated video budget is non-positive."
+    return True
 
 
 def _raw_failure_payload(parsed: Any) -> str:
@@ -110,37 +151,31 @@ def _force_operator_confirmed_experiment(
         current_policy: dict[str, Any],
         parsed: dict[str, Any],
         requested_experiment: dict[str, Any] | None,
+        latest_failed_sample_job: dict[str, Any] | None,
         mode: str,
 ) -> dict[str, Any] | None:
-    if not _should_force_operator_confirmed_experiment(requested_experiment):
+    if not _should_force_operator_confirmed_experiment(requested_experiment, latest_failed_sample_job):
         return None
     request_disposition = str(parsed.get("request_disposition") or "").strip().lower()
     if request_disposition not in {"softened", "rejected"}:
         return None
     requested_policy = object_dict(object_dict(requested_experiment).get("applied_policy"))
-    if not requested_policy:
-        return None
-    _, applied_fragment = apply_seed_policy(current_policy, requested_policy, mode=mode)
-    if not applied_fragment:
-        return None
     draft_label = "first sample" if mode == "seed" else "next sample"
-    parsed["request_disposition"] = "honored_with_risk"
-    parsed["summary"] = f"Kept the explicit requested experiment as a high-risk {draft_label} draft."
+    parsed["request_disposition"] = "honored"
+    parsed["summary"] = f"Kept the explicit operator request as the {draft_label} draft."
     parsed["diagnosis"] = (
-        "The operator gave a direct explicit experiment request, "
-        f"so this {draft_label} keeps the risky target for measurement instead of softening it away."
+        "The operator gave a direct request, so this draft preserves it for measurement instead of replacing it "
+        "with generic bitrate assumptions."
     )
     parsed["request_response"] = (
-        "You asked for this aggressive experiment directly, so I kept it as an honored high-risk draft "
-        "instead of softening it again."
+        f"You asked for this directly, so I kept it as the {draft_label}. The real sample and your review will decide."
     )
-    parsed["suggested_follow_up"] = (
-        f"Measure this risky {draft_label} and decide from the clips whether to pull it back."
-    )
+    parsed["suggested_follow_up"] = f"Measure this {draft_label} and decide from the clips."
     if not parsed.get("feasibility_note"):
-        parsed["feasibility_note"] = (
-            f"This draft is operator-confirmed and intentionally riskier than the usual {draft_label}."
-        )
+        parsed["feasibility_note"] = "The operator-confirmed target is queueable for a safe measured sample."
+    if not requested_policy:
+        return {}
+    _, applied_fragment = apply_seed_policy(current_policy, requested_policy, mode=mode)
     return applied_fragment
 
 
@@ -150,33 +185,33 @@ def _force_repeated_tune_experiment(
         parsed: dict[str, Any],
         requested_experiment: dict[str, Any] | None,
         repeat_signal: dict[str, Any] | None,
+        latest_failed_sample_job: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     if not _should_force_repeated_experiment(repeat_signal):
+        return None
+    if _has_blocking_request_evidence(requested_experiment, latest_failed_sample_job):
         return None
     request_disposition = str(parsed.get("request_disposition") or "").strip().lower()
     if request_disposition not in {"softened", "rejected"}:
         return None
     requested_policy = object_dict(object_dict(requested_experiment).get("applied_policy"))
-    if not requested_policy:
-        return None
-    _, applied_fragment = apply_seed_policy(current_policy, requested_policy, mode="tune")
-    if not applied_fragment:
-        return None
     previous_softened = int_value(object_dict(repeat_signal).get("previous_softened_count"))
-    parsed["request_disposition"] = "honored_with_risk"
-    parsed["summary"] = "Kept the repeated requested experiment as a high-risk next sample draft."
+    parsed["request_disposition"] = "honored"
+    parsed["summary"] = "Kept the repeated operator request as the next sample draft."
     parsed["diagnosis"] = (
         "The operator repeated the same explicit experiment after earlier softening, "
-        "so this draft keeps the risky target for a measured retry instead of overriding it again."
+        "so this draft preserves the target for measurement instead of overriding it again."
     )
     parsed["request_response"] = (
-        "You asked for the same aggressive experiment again, so I kept it as an honored high-risk draft "
-        "instead of softening it again."
+        "You repeated the same request, so I kept it as the next sample. The measured result and your review decide."
     )
     if previous_softened:
-        parsed["suggested_follow_up"] = "Measure this risky retry and decide from the clips whether to pull it back."
+        parsed["suggested_follow_up"] = "Measure this retry and decide from the clips."
     if not parsed.get("feasibility_note"):
-        parsed["feasibility_note"] = "This draft is operator-confirmed and intentionally riskier than the usual next sample."
+        parsed["feasibility_note"] = "The repeated operator-confirmed target is queueable for a measured sample."
+    if not requested_policy:
+        return {}
+    _, applied_fragment = apply_seed_policy(current_policy, requested_policy, mode="tune")
     return applied_fragment
 
 
@@ -295,25 +330,33 @@ def request_seed_policy(*, project_root: Path, payload: dict[str, Any]) -> SeedP
     proposed_policy = _compact_policy_payload(proposed_policy)
     evidence_checked_raw = parsed.get("evidence_checked")
     evidence_checked = evidence_checked_raw if isinstance(evidence_checked_raw, list) else []
-    summary = str(parsed.get("summary") or "No summary returned.")
     request_disposition = str(parsed.get("request_disposition") or "unclear")
     if request_disposition not in REQUEST_DISPOSITIONS:
         request_disposition = "unclear"
-    forced_confirmed_policy = _force_operator_confirmed_experiment(
-        current_policy=base_policy,
-        parsed=parsed,
-        requested_experiment=object_dict(payload.get("requested_experiment")),
-        mode="seed",
-    )
-    if forced_confirmed_policy:
-        proposed_policy = _merge_policy_fragments(proposed_policy, forced_confirmed_policy) or proposed_policy
-        request_disposition = "honored_with_risk"
+    requested_experiment = object_dict(payload.get("requested_experiment"))
+    latest_failed_sample_job = object_dict(payload.get("latest_failed_sample_job"))
+    if _reject_nonpositive_video_budget(parsed, requested_experiment):
+        proposed_policy = None
+        request_disposition = "rejected"
+    else:
+        forced_confirmed_policy = _force_operator_confirmed_experiment(
+            current_policy=base_policy,
+            parsed=parsed,
+            requested_experiment=requested_experiment,
+            latest_failed_sample_job=latest_failed_sample_job,
+            mode="seed",
+        )
+        if forced_confirmed_policy is not None:
+            if forced_confirmed_policy:
+                proposed_policy = _merge_policy_fragments(proposed_policy, forced_confirmed_policy) or proposed_policy
+            request_disposition = "honored"
     if _should_carry_requested_experiment(request_disposition):
         requested_policy = _requested_experiment_policy(payload)
         if requested_policy:
             proposed_policy = _merge_policy_fragments(proposed_policy, requested_policy) or proposed_policy
     if proposed_policy is not None and base_policy:
         _, proposed_policy = apply_seed_policy(base_policy, proposed_policy)
+    summary = str(parsed.get("summary") or "No summary returned.")
     request_response = str(parsed.get("request_response") or summary)
     if proposed_policy is None:
         return SeedPolicyResponse(
@@ -403,24 +446,34 @@ def request_note_tuning(*, project_root: Path, payload: dict[str, Any]) -> Tunin
     request_disposition = str(parsed.get("request_disposition") or "unclear")
     if request_disposition not in REQUEST_DISPOSITIONS:
         request_disposition = "unclear"
-    forced_repeated_policy = _force_repeated_tune_experiment(
-        current_policy=current_policy,
-        parsed=parsed,
-        requested_experiment=object_dict(payload.get("requested_experiment")),
-        repeat_signal=object_dict(payload.get("operator_repeat_signal")),
-    )
-    if forced_repeated_policy:
-        proposed_policy = _merge_policy_fragments(proposed_policy, forced_repeated_policy) or proposed_policy
-        request_disposition = "honored_with_risk"
-    forced_confirmed_policy = _force_operator_confirmed_experiment(
-        current_policy=current_policy,
-        parsed=parsed,
-        requested_experiment=object_dict(payload.get("requested_experiment")),
-        mode="tune",
-    )
-    if forced_confirmed_policy:
-        proposed_policy = _merge_policy_fragments(proposed_policy, forced_confirmed_policy) or proposed_policy
-        request_disposition = "honored_with_risk"
+    requested_experiment = object_dict(payload.get("requested_experiment"))
+    latest_failed_sample_job = object_dict(payload.get("latest_failed_sample_job"))
+    if _reject_nonpositive_video_budget(parsed, requested_experiment):
+        proposed_policy = None
+        request_disposition = "rejected"
+    else:
+        forced_repeated_policy = _force_repeated_tune_experiment(
+            current_policy=current_policy,
+            parsed=parsed,
+            requested_experiment=requested_experiment,
+            repeat_signal=object_dict(payload.get("operator_repeat_signal")),
+            latest_failed_sample_job=latest_failed_sample_job,
+        )
+        if forced_repeated_policy is not None:
+            if forced_repeated_policy:
+                proposed_policy = _merge_policy_fragments(proposed_policy, forced_repeated_policy) or proposed_policy
+            request_disposition = "honored"
+        forced_confirmed_policy = _force_operator_confirmed_experiment(
+            current_policy=current_policy,
+            parsed=parsed,
+            requested_experiment=requested_experiment,
+            latest_failed_sample_job=latest_failed_sample_job,
+            mode="tune",
+        )
+        if forced_confirmed_policy is not None:
+            if forced_confirmed_policy:
+                proposed_policy = _merge_policy_fragments(proposed_policy, forced_confirmed_policy) or proposed_policy
+            request_disposition = "honored"
     requested_policy = _requested_experiment_policy(payload)
     if _should_carry_requested_experiment(request_disposition) and requested_policy:
         proposed_policy = _merge_policy_fragments(proposed_policy, requested_policy) or proposed_policy

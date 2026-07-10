@@ -89,7 +89,7 @@ def proposal_signal_copy(
 ) -> str:
     disposition = str(request_disposition or "").strip().lower()
     if disposition == "honored_with_risk":
-        return "The bench kept your requested experiment, but called out the risk before anything queues."
+        return "The bench kept your requested experiment and called out the measured caveat before anything queues."
     if disposition == "softened":
         return "The bench softened part of your request and explained why in the reply below."
     if disposition == "rejected":
@@ -211,6 +211,11 @@ def proposal_alignment_issue(
     preview_audio = object_dict(preview_policy.get("audio"))
     requested_video = object_dict(object_dict(operator_request.get("applied_policy")).get("video"))
     requested_audio = object_dict(object_dict(operator_request.get("applied_policy")).get("audio"))
+    evidence_authority = str(operator_request.get("evidence_authority") or "none").strip().lower()
+    allow_evidence_backed_video_tradeoff = evidence_authority in {
+        "operator_observed",
+        "approved_visual_result",
+    }
 
     def _float_or_none(value: JSONValue) -> float | None:
         if not isinstance(value, str | int | float):
@@ -270,6 +275,7 @@ def proposal_alignment_issue(
             return "The draft raises the VMAF target even though your note asked for a smaller encode."
         if (
                 not allow_measured_size_quality_tradeoff
+                and not allow_evidence_backed_video_tradeoff
                 and current_vmaf is not None
                 and preview_vmaf is not None
                 and preview_vmaf < current_vmaf - 0.01
@@ -287,6 +293,7 @@ def proposal_alignment_issue(
             return "The draft raises the XPSNR target even though your note asked for a smaller encode."
         if (
                 not allow_measured_size_quality_tradeoff
+                and not allow_evidence_backed_video_tradeoff
                 and current_xpsnr is not None
                 and preview_xpsnr is not None
                 and preview_xpsnr < current_xpsnr - 0.01
@@ -305,7 +312,7 @@ def proposal_alignment_issue(
         tradeoff_issue = _unrequested_size_tradeoff_issue()
         if tradeoff_issue is not None:
             return tradeoff_issue
-        if not allow_measured_size_quality_tradeoff:
+        if not allow_measured_size_quality_tradeoff and not allow_evidence_backed_video_tradeoff:
             for key in ("default_grain", "grain_denoise", "min_crf", "max_crf", "preset"):
                 if key in requested_video:
                     continue
@@ -340,7 +347,7 @@ def proposal_alignment_issue(
             tradeoff_issue = _unrequested_size_tradeoff_issue()
             if tradeoff_issue is not None:
                 return tradeoff_issue
-            if not allow_measured_size_quality_tradeoff:
+            if not allow_measured_size_quality_tradeoff and not allow_evidence_backed_video_tradeoff:
                 for key in ("default_grain", "grain_denoise", "min_crf", "max_crf", "preset"):
                     if key in requested_video:
                         continue
