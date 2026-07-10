@@ -69,12 +69,14 @@
     "Dependency Graph",
     "Dependabot Updates"
   ],
-  "requiredStatusChecks": [
-    "acceptance",
-    "Analyze (actions)",
-    "Analyze (python)",
-    "Analyze (javascript-typescript)"
-  ],
+  "requiredStatusChecks": ["acceptance"],
+  "codeScanningMergeProtection": {
+    "ruleset": "Require code scanning results",
+    "tool": "CodeQL",
+    "alertsThreshold": "errors",
+    "securityAlertsThreshold": "high_or_higher",
+    "dependabotDefaultSetupException": true
+  },
   "qaLabels": [],
   "deployLabels": [],
   "healthUrls": [],
