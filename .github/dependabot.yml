@@ -1,31 +1,33 @@
 ---
 version: 2
 
-multi-ecosystem-groups:
-  dependencies:
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 2
-
 updates:
   - package-ecosystem: uv
     directory: "/"
-    patterns:
-      - "*"
-    multi-ecosystem-group: dependencies
+    open-pull-requests-limit: 5
+    schedule:
+      interval: weekly
+    cooldown:
+      semver-major-days: 30
     groups:
-      all-security-updates:
-        applies-to: security-updates
+      routine-version-updates:
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: npm
     directory: "/frontend"
-    patterns:
-      - "*"
-    multi-ecosystem-group: dependencies
+    open-pull-requests-limit: 5
+    schedule:
+      interval: weekly
+    cooldown:
+      semver-major-days: 30
     groups:
-      all-security-updates:
-        applies-to: security-updates
+      routine-version-updates:
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
