@@ -139,13 +139,7 @@ export function workflowOpenItemCount(folder: FolderCard): number {
 }
 
 export type WorkLaneKey =
-	| 'attention'
-	| 'processing'
-	| 'validate'
-	| 'promote'
-	| 'encode'
-	| 'sample'
-	| 'other';
+	'attention' | 'processing' | 'validate' | 'promote' | 'encode' | 'sample' | 'other';
 
 export type WorkLaneGroup = {
 	key: WorkLaneKey;

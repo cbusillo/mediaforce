@@ -1110,8 +1110,7 @@
 													bind:value={draft.remote_hosts[index].source_roots_json}
 													placeholder={'{"tv": "/Volumes/TV"}'}
 													oninput={(event) =>
-														updateHost(index, { source_roots_json: inputValue(event) })}
-												></textarea>
+														updateHost(index, { source_roots_json: inputValue(event) })}></textarea>
 											</label>
 										</details>
 									</section>
