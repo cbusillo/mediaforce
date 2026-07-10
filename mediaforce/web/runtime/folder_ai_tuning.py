@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from mediaforce.advisor import apply_seed_policy, request_note_tuning, request_review_artifact_critique
-from mediaforce.advising.policy import merge_policy_fragments
+from mediaforce.advising.policy import has_nonpositive_video_budget, merge_policy_fragments
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.type_defs import object_dict, object_list
@@ -19,7 +19,7 @@ from mediaforce.tuning.tuning_memory import promote_learning_artifact, retrieve_
 
 
 QUEUEABLE_NO_CHANGE_DISPOSITIONS = {"honored", "honored_with_risk"}
-SEED_REQUEST_REFUSAL_DISPOSITIONS = {"softened", "rejected"}
+NONQUEUEABLE_DISPOSITIONS = {"softened", "rejected", "unclear"}
 
 
 @dataclass(slots=True)
@@ -182,9 +182,11 @@ def _proposal_can_queue(
 ) -> bool:
     if alignment_issue is not None:
         return False
+    disposition = str(request_disposition or "").strip().lower()
+    if disposition in NONQUEUEABLE_DISPOSITIONS:
+        return False
     if applied_fragment:
         return True
-    disposition = str(request_disposition or "").strip().lower()
     return bool(preview_policy) and disposition in QUEUEABLE_NO_CHANGE_DISPOSITIONS
 
 
@@ -214,13 +216,59 @@ def _size_budget_measurement_fragment(operator_request: dict[str, Any] | None) -
     return None
 
 
-def _can_keep_first_size_budget_sample(operator_request: dict[str, Any] | None) -> bool:
+def _can_keep_first_size_budget_sample(
+        operator_request: dict[str, Any] | None,
+        *,
+        latest_failed_sample_job: dict[str, Any] | None = None,
+) -> bool:
     request = object_dict(operator_request)
     if str(request.get("request_type") or "").strip().lower() != "size_budget":
+        return False
+    if str(request.get("feasibility") or "").strip().lower() != "plausible":
+        return False
+    if str(request.get("evidence_authority") or "none").strip().lower() == "rejected_visual_result":
+        return False
+    if object_dict(latest_failed_sample_job):
         return False
     if request.get("measured_size_followup") or request.get("hard_size_cap"):
         return False
     return bool(request.get("operator_confirmed")) and not object_dict(request.get("applied_policy"))
+
+
+def _operator_request_with_retrieved_memory_authority(
+        operator_request: dict[str, Any] | None,
+        learning_context: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    request = object_dict(operator_request)
+    if not request:
+        return operator_request
+    authority = str(request.get("evidence_authority") or "none").strip().lower()
+    if authority != "none":
+        return request
+    if not any(
+            str(object_dict(memory).get("evidence_authority") or "none").strip().lower()
+            == "approved_visual_result"
+            for memory in learning_context
+    ):
+        return request
+    return {**request, "evidence_authority": "approved_visual_result"}
+
+
+def _blocking_sample_evidence_issue(
+        *,
+        operator_request: dict[str, Any] | None,
+        latest_failed_sample_job: dict[str, Any] | None,
+        current_policy: dict[str, Any],
+        preview_policy: dict[str, Any],
+) -> str | None:
+    if preview_policy != current_policy:
+        return None
+    authority = str(object_dict(operator_request).get("evidence_authority") or "none").strip().lower()
+    if authority == "rejected_visual_result":
+        return "The operator rejected the current sample. Change the draft before queueing another run."
+    if object_dict(latest_failed_sample_job):
+        return "The previous sample failed. Change the draft before queueing another run."
+    return None
 
 
 def _keep_first_size_budget_sample(
@@ -228,24 +276,49 @@ def _keep_first_size_budget_sample(
         advice_payload: dict[str, Any] | None,
         seed_job_fields: dict[str, Any],
         trimmed_note: str,
-        operator_request: dict[str, Any],
+    operator_request: dict[str, Any],
 ) -> dict[str, Any]:
     request = object_dict(operator_request)
-    existing_disposition = str(
-        seed_job_fields.get("seed_request_disposition")
-        or object_dict(advice_payload).get("request_disposition")
-        or ""
-    ).strip().lower()
-    if existing_disposition in SEED_REQUEST_REFUSAL_DISPOSITIONS:
-        return advice_payload if advice_payload is not None else {}
+    if has_nonpositive_video_budget(request):
+        summary = "The requested total size leaves no positive video budget."
+        diagnosis = (
+            "The estimated audio allocation consumes the requested total size, so this sample cannot queue "
+            "until the total target or audio allocation changes."
+        )
+        request_response = (
+            "That total size cannot queue as written because it leaves no positive video budget. "
+            "Increase the total target or explicitly reduce the audio allocation first."
+        )
+        seed_job_fields["seed_source"] = "operator_request"
+        seed_job_fields["seed_summary"] = summary
+        seed_job_fields["seed_diagnosis"] = diagnosis
+        seed_job_fields["seed_request_disposition"] = "rejected"
+        seed_job_fields["seed_request_response"] = request_response
+        seed_job_fields["seed_feasibility_note"] = "infeasible"
+        seed_job_fields["seed_applied_policy"] = None
+        payload = advice_payload if advice_payload is not None else {}
+        payload.update(
+            {
+                "ok": False,
+                "summary": summary,
+                "kind": "seed_baseline",
+                "operator_note": trimmed_note or None,
+                "request_disposition": "rejected",
+                "request_response": request_response,
+                "feasibility_note": "infeasible",
+                "diagnosis": diagnosis,
+                "applied_policy": None,
+            }
+        )
+        return payload
     summary = "Kept the first sample at the current policy so the size target can be measured."
     diagnosis = (
-        "A first size-budget request is a planning target, so the bench can measure the current policy "
-        "before trading quality, audio, or hard caps for size."
+        "A direct AV1 size target is queueable for a safe first measurement, so the bench keeps the current policy "
+        "and lets the real sample plus operator review decide the next change."
     )
     request_response = (
         "I kept this first sample at the current policy so we can compare the measured result to "
-        f"{request.get('budget_label') or 'your size target'} before making riskier changes."
+        f"{request.get('budget_label') or 'your size target'} before changing the policy."
     )
     seed_job_fields["seed_source"] = "operator_request"
     seed_job_fields["seed_summary"] = summary
@@ -549,6 +622,8 @@ def _seed_preview_action(
     )
     seed_metadata = object_dict(seed_metadata_raw)
     seed_job_fields = object_dict(seed_metadata.get("job_fields"))
+    seed_context_payload = object_dict(seed_job_fields.get("seed_context_payload"))
+    learning_context = [object_dict(item) for item in object_list(seed_context_payload.get("retrieved_memory"))]
     seeded_policy = object_dict(seed_metadata.get("policy")) if seed_metadata_raw is not None else base_policy
     seed_fragment = object_dict(seed_job_fields.get("seed_applied_policy"))
     combined_fragment = seed_fragment
@@ -567,7 +642,10 @@ def _seed_preview_action(
     if advice_payload is not None and combined_fragment:
         advice_payload["applied_policy"] = combined_fragment
     advice_details = object_dict(advice_payload)
-    if not combined_fragment and _can_keep_first_size_budget_sample(operator_request):
+    if not combined_fragment and _can_keep_first_size_budget_sample(
+            operator_request,
+            latest_failed_sample_job=latest_failed_sample_job,
+    ):
         advice_payload = _keep_first_size_budget_sample(
             advice_payload=advice_payload,
             seed_job_fields=seed_job_fields,
@@ -575,14 +653,26 @@ def _seed_preview_action(
             operator_request=object_dict(operator_request),
         )
         advice_details = object_dict(advice_payload)
+    alignment_operator_request = _operator_request_with_retrieved_memory_authority(
+        operator_request,
+        learning_context,
+    )
     alignment_issue = deps.proposal_alignment_issue(
-        operator_request=operator_request,
+        operator_request=alignment_operator_request,
         request_disposition=advice_details.get("request_disposition"),
         current_policy=base_policy,
         preview_policy=seeded_policy,
     )
+    blocking_evidence_issue = _blocking_sample_evidence_issue(
+        operator_request=operator_request,
+        latest_failed_sample_job=latest_failed_sample_job,
+        current_policy=base_policy,
+        preview_policy=seeded_policy,
+    )
+    if alignment_issue is None:
+        alignment_issue = blocking_evidence_issue
     measurement_fragment = _size_budget_measurement_fragment(operator_request)
-    if alignment_issue is not None and measurement_fragment is not None:
+    if blocking_evidence_issue is None and alignment_issue is not None and measurement_fragment is not None:
         seeded_policy = deps.apply_policy_fragment(base_policy, measurement_fragment) if measurement_fragment else base_policy
         seed_fragment = measurement_fragment
         combined_fragment = measurement_fragment
@@ -895,14 +985,25 @@ def _tuned_preview_action(
             if size_budget_request:
                 operator_request["size_budget_request"] = size_budget_request
             advice_payload["operator_request"] = operator_request
+    alignment_operator_request = _operator_request_with_retrieved_memory_authority(
+        operator_request,
+        learning_context,
+    )
     alignment_issue = deps.proposal_alignment_issue(
-        operator_request=operator_request,
+        operator_request=alignment_operator_request,
         request_disposition=tuning.request_disposition,
         current_policy=current_policy,
         preview_policy=tuned_policy,
         allow_measured_size_quality_tradeoff=allow_measured_size_quality_tradeoff,
         allow_measured_size_quality_increase=allow_measured_size_quality_increase,
     )
+    if alignment_issue is None:
+        alignment_issue = _blocking_sample_evidence_issue(
+            operator_request=operator_request,
+            latest_failed_sample_job=latest_failed_sample_job,
+            current_policy=current_policy,
+            preview_policy=tuned_policy,
+        )
     can_queue = _proposal_can_queue(
         applied_fragment=combined_fragment,
         preview_policy=tuned_policy,

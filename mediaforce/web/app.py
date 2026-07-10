@@ -2025,6 +2025,7 @@ def _build_seed_policy_payload(
         recent_sessions_payload: list[dict[str, Any]] | None = None,
         requested_experiment: dict[str, Any] | None = None,
         latest_failed_sample_job: dict[str, Any] | None = None,
+        learning_context_payload: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return runtime_build_seed_policy_payload(
         prefix=prefix,
@@ -2036,6 +2037,7 @@ def _build_seed_policy_payload(
         recent_sessions_payload=recent_sessions_payload,
         requested_experiment=requested_experiment,
         latest_failed_sample_job=latest_failed_sample_job,
+        learning_context_payload=learning_context_payload,
     )
 
 

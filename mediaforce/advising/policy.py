@@ -131,6 +131,7 @@ def operator_note_parse_schema() -> dict[str, Any]:
             "request_type",
             "operator_confirmed",
             "measured_size_followup",
+            "evidence_authority",
             "metric",
             "metric_target",
             "size_budget_value",
@@ -152,6 +153,10 @@ def operator_note_parse_schema() -> dict[str, Any]:
             },
             "operator_confirmed": {"type": "boolean"},
             "measured_size_followup": {"type": "boolean"},
+            "evidence_authority": {
+                "type": "string",
+                "enum": ["none", "operator_observed", "approved_visual_result", "rejected_visual_result"],
+            },
             "metric": {"type": ["string", "null"], "enum": ["vmaf", "xpsnr", None]},
             "metric_target": {"type": ["number", "null"]},
             "size_budget_value": {"type": ["number", "null"]},
@@ -162,6 +167,29 @@ def operator_note_parse_schema() -> dict[str, Any]:
             "reasoning_note": {"type": "string"},
         },
     }
+
+
+def has_nonpositive_video_budget(requested_experiment: dict[str, Any] | None) -> bool:
+    request = object_dict(requested_experiment)
+    for candidate in (request, object_dict(request.get("size_budget_request"))):
+        estimated_video_bitrate = candidate.get("estimated_video_bitrate_kbps")
+        if (
+                isinstance(estimated_video_bitrate, int | float)
+                and not isinstance(estimated_video_bitrate, bool)
+                and float(estimated_video_bitrate) <= 0
+        ):
+            return True
+        budget_bytes = candidate.get("budget_bytes")
+        estimated_audio_bytes = candidate.get("estimated_audio_bytes")
+        if (
+                isinstance(budget_bytes, int | float)
+                and not isinstance(budget_bytes, bool)
+                and isinstance(estimated_audio_bytes, int | float)
+                and not isinstance(estimated_audio_bytes, bool)
+                and float(budget_bytes) <= float(estimated_audio_bytes)
+        ):
+            return True
+    return False
 
 
 def extract_seed_payload(raw: str) -> JSONObject:

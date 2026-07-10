@@ -28,6 +28,7 @@ from mediaforce.advisor import (
     _build_operator_note_parse_prompt,
     _extract_seed_payload,
     _filter_audio_specific_guardrail_issues,
+    _force_repeated_tune_experiment,
     _memory_disabled_code_args,
     _policy_response_schema,
     _run_tune_self_check,
@@ -95,6 +96,10 @@ from mediaforce.web.runtime.completed_runtime import (
 from mediaforce.web.runtime.dashboard_payloads import dashboard_summary_payload
 from mediaforce.web.runtime.folder_ai_tuning import (
     FolderAiTuneDeps,
+    _blocking_sample_evidence_issue,
+    _can_keep_first_size_budget_sample,
+    _keep_first_size_budget_sample,
+    _operator_request_with_retrieved_memory_authority,
     _proposal_can_queue,
     _proposal_ready_message,
     folder_ai_tune_confirm_action,
@@ -136,7 +141,12 @@ def _fake_operator_note_parse(*, project_root: Path, payload: dict[str, object])
     if not note:
         return None
     lower = note.lower()
-    budget_match = re.search(r"(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>kb|mb|gb|tb)", lower)
+    budget_match = re.search(
+        r"(?<![\w.])(?P<sign>[+-]?)\s*(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>kb|mb|gb|tb)",
+        lower,
+    )
+    if budget_match is not None and budget_match.group("sign") == "-":
+        budget_match = None
     metric_match = re.search(
         r"\b(?P<metric>vmaf|xpsnr)\b(?:\s+(?:target|around|about|roughly|approximately|approx|at|to|of)|\s*=){0,3}\s*(?P<target>\d{2}(?:\.\d+)?)\b",
         lower,
@@ -171,6 +181,23 @@ def _fake_operator_note_parse(*, project_root: Path, payload: dict[str, object])
     ) else None
     crop_match = re.search(r"\b(?P<crop>\d{3,5}:\d{3,5}:\d{1,5}:\d{1,5})\b", lower)
     crop = crop_match.group("crop") if crop_match else None
+    evidence_authority = "none"
+    if re.search(
+            r"\b(?:reject|rejected|decline|declined)\b.*\b(?:sample|clip|encode|result|draft|quality)\b|"
+            r"\b(?:sample|clip|encode|result|draft|quality)\b.*\b(?:look(?:s|ed)?|sound(?:s|ed)?|is|was)\s+"
+            r"(?:bad|worse|unacceptable|blocky|banded|damaged)\b|"
+            r"\b(?:saw|noticed|showed|shows|had|has|with)\b.{0,48}\b"
+            r"(?:artifact(?:s|ing)?|banding|blocking|blockiness|smearing|damage|ringing|macroblocking|blur)\b",
+            lower,
+    ):
+        evidence_authority = "rejected_visual_result"
+    elif re.search(r"\b(?:approve|approved|accept|accepted)\b.*\b(?:sample|clip|encode|result|draft|quality)\b", lower):
+        evidence_authority = "approved_visual_result"
+    elif re.search(
+            r"\b(?:look(?:s|ed)?|sound(?:s|ed)?)\s+(?:good|great|excellent|fine|clean|identical|indistinguishable)\b",
+            lower,
+    ):
+        evidence_authority = "operator_observed"
     explicit_request_count = sum(
         value is not None for value in (size_budget_value, metric_target, scale_height, black_bar_handling, crop)
     )
@@ -194,13 +221,16 @@ def _fake_operator_note_parse(*, project_root: Path, payload: dict[str, object])
         )
     )
     operator_confirmed = request_type != "none" and not exploratory
-    intent_type = "exploratory_question" if exploratory else ("direct_request" if request_type != "none" else "other")
+    intent_type = "exploratory_question" if exploratory else (
+        "direct_request" if request_type != "none" else "approval_feedback" if evidence_authority != "none" else "other"
+    )
     return {
         "summary": "parsed note",
         "intent_type": intent_type,
         "request_type": request_type,
         "operator_confirmed": operator_confirmed,
         "measured_size_followup": "revise" in lower and "sample" in lower and "target" in lower,
+        "evidence_authority": evidence_authority,
         "metric": metric,
         "metric_target": metric_target,
         "size_budget_value": size_budget_value,
@@ -349,6 +379,8 @@ class TuningRuntimeTests(unittest.TestCase):
                     "intent_type": "direct_request",
                     "request_type": "size_budget",
                     "operator_confirmed": True,
+                    "measured_size_followup": False,
+                    "evidence_authority": "none",
                     "metric": None,
                     "metric_target": None,
                     "size_budget_value": 300,
@@ -369,6 +401,7 @@ class TuningRuntimeTests(unittest.TestCase):
 
         assert parsed is not None
         self.assertTrue(parsed["operator_confirmed"])
+        self.assertEqual(parsed["evidence_authority"], "none")
         self._assert_structured_subprocess_call(commands)
         self.assertIn("llm", commands[0])
         self.assertIn(_build_operator_note_parse_prompt({"operator_note": "Can you target 300MB per episode?"}), commands[0])
@@ -3507,7 +3540,7 @@ class TuningRuntimeTests(unittest.TestCase):
             )
 
         self.assertTrue(response.ok)
-        self.assertEqual(response.request_disposition, "honored_with_risk")
+        self.assertEqual(response.request_disposition, "honored")
         assert response.proposed_policy is not None
         self.assertEqual(response.proposed_policy["video"]["target_vmaf"], 88.5)
         self.assertEqual(response.proposed_policy["video"]["min_target_vmaf"], 87.0)
@@ -3608,11 +3641,112 @@ class TuningRuntimeTests(unittest.TestCase):
             )
 
         self.assertTrue(response.ok)
-        self.assertEqual(response.request_disposition, "honored_with_risk")
+        self.assertEqual(response.request_disposition, "honored")
         assert response.proposed_policy is not None
         self.assertEqual(response.proposed_policy["video"]["max_encoded_percent"], 8)
-        self.assertIn("aggressive experiment directly", response.request_response)
+        self.assertIn("real sample and your review will decide", response.request_response)
         self._assert_structured_subprocess_call(commands)
+
+    def test_request_seed_policy_rejects_nonpositive_video_budget(self) -> None:
+        response_body = json.dumps(
+            {
+                "request_response": "I kept the requested target.",
+                "request_disposition": "honored",
+                "summary": "Queue the requested sample.",
+                "diagnosis": "The request was explicit.",
+                "confidence": "medium",
+                "evidence_checked": ["requested_experiment"],
+                "suggested_follow_up": None,
+                "feasibility_note": None,
+                "policy": {"video": {"target_vmaf": 85.0}},
+            }
+        )
+        commands, fake_run = self._capture_subprocess_commands(response_body)
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+            response = request_seed_policy(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/suits/season-3",
+                    "base_policy": {"video": {"target_vmaf": 95.0}},
+                    "requested_experiment": {
+                        "request_type": "size_budget",
+                        "operator_confirmed": True,
+                        "budget_bytes": 20 * 1024 * 1024,
+                        "estimated_audio_bytes": 24 * 1024 * 1024,
+                        "estimated_video_bitrate_kbps": 0.0,
+                        "applied_policy": None,
+                    },
+                },
+            )
+
+        self.assertFalse(response.ok)
+        self.assertEqual(response.request_disposition, "rejected")
+        self.assertIsNone(response.proposed_policy)
+        self.assertIn("no positive video budget", response.request_response)
+        self._assert_structured_subprocess_call(commands)
+
+    def test_request_seed_policy_does_not_override_failed_sample_refusal(self) -> None:
+        response_body = json.dumps(
+            {
+                "request_response": "The failed sample needs a different plan.",
+                "request_disposition": "rejected",
+                "summary": "Do not repeat the failed draft.",
+                "diagnosis": "The previous sample failed with the same constraints.",
+                "confidence": "high",
+                "evidence_checked": ["latest_failed_sample_job.error"],
+                "suggested_follow_up": "Change the draft before retrying.",
+                "feasibility_note": None,
+                "policy": {"video": {"target_vmaf": 94.0}},
+            }
+        )
+        commands, fake_run = self._capture_subprocess_commands(response_body)
+
+        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+            response = request_seed_policy(
+                project_root=self.root,
+                payload={
+                    "folder": "tv/suits/season-3",
+                    "base_policy": {"video": {"target_vmaf": 95.0}},
+                    "requested_experiment": {
+                        "request_type": "size_budget",
+                        "operator_confirmed": True,
+                        "feasibility": "plausible",
+                        "applied_policy": None,
+                    },
+                    "latest_failed_sample_job": {
+                        "status": "failed",
+                        "error": "Failed to find a suitable CRF",
+                    },
+                },
+            )
+
+        self.assertTrue(response.ok)
+        self.assertEqual(response.request_disposition, "rejected")
+        assert response.proposed_policy is not None
+        self.assertEqual(response.proposed_policy["video"]["target_vmaf"], 94.0)
+        self._assert_structured_subprocess_call(commands)
+
+    def test_repeated_tune_backstop_preserves_visual_rejection(self) -> None:
+        parsed = {
+            "request_disposition": "rejected",
+            "summary": "The current sample was rejected.",
+        }
+
+        forced = _force_repeated_tune_experiment(
+            current_policy={"video": {"target_vmaf": 95.0}},
+            parsed=parsed,
+            requested_experiment={
+                "operator_confirmed": True,
+                "evidence_authority": "rejected_visual_result",
+                "applied_policy": {"video": {"target_vmaf": 85.0}},
+            },
+            repeat_signal={"repeat_count": 2, "previous_softened_count": 1},
+            latest_failed_sample_job=None,
+        )
+
+        self.assertIsNone(forced)
+        self.assertEqual(parsed["request_disposition"], "rejected")
 
     def test_request_seed_policy_keeps_structured_worker_failure_diagnostics(self) -> None:
         def fake_run(cmd: list[str], **kwargs: object) -> object:
@@ -3684,7 +3818,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(request["request_type"], "size_budget")
         self.assertTrue(request["operator_confirmed"])
         self.assertEqual(request["budget_label"], "200 MB per episode")
-        self.assertEqual(request["feasibility"], "aggressive")
+        self.assertEqual(request["feasibility"], "plausible")
         self.assertFalse(request["requires_confirmation"])
         self.assertFalse(request["hard_size_cap"])
         self.assertFalse(request["measured_size_followup"])
@@ -3693,6 +3827,109 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIsNone(request["requested_max_encoded_percent"])
         self.assertIsNone(request["applied_max_encoded_percent"])
         self.assertIsNone(request["applied_policy"])
+
+    def test_operator_requested_experiment_ignores_negative_size_budget(self) -> None:
+        with patch("mediaforce.web.runtime.folder_tuning_advice.request_operator_note_parse", return_value=None):
+            request = _operator_requested_experiment("Target -10MB per episode.")
+
+        self.assertIsNone(request)
+
+    def test_operator_requested_experiment_preserves_observed_av1_quality_authority(self) -> None:
+        request = _operator_requested_experiment(
+            "The 1080p AV1 sample looked excellent. Keep source resolution and target 250MB per episode.",
+            {
+                "source_size_bytes": 4_815_446_620,
+                "duration_seconds": 2660.352,
+                "audio_summary": [{"codec_name": "eac3", "channels": 6}],
+                "resolved_policy": {
+                    "video": {"encoder": "libsvtav1"},
+                    "audio": {
+                        "convert_to_opus_codecs": ["eac3"],
+                        "surround_5_1_opus_bitrate": "256k",
+                    },
+                },
+            },
+        )
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "combined_experiment")
+        self.assertEqual(request["evidence_authority"], "operator_observed")
+        self.assertEqual(request["feasibility"], "plausible")
+        self.assertEqual(request["scale_height"], 0)
+
+    def test_operator_requested_experiment_preserves_visual_rejection(self) -> None:
+        request = _operator_requested_experiment(
+            "I reject this sample because it looked blocky. Keep source resolution and target 250MB per episode.",
+            {
+                "source_size_bytes": 4_815_446_620,
+                "duration_seconds": 2660.352,
+                "audio_summary": [{"codec_name": "eac3", "channels": 6}],
+                "resolved_policy": {
+                    "video": {"encoder": "libsvtav1"},
+                    "audio": {
+                        "convert_to_opus_codecs": ["eac3"],
+                        "surround_5_1_opus_bitrate": "256k",
+                    },
+                },
+            },
+        )
+
+        assert request is not None
+        self.assertEqual(request["evidence_authority"], "rejected_visual_result")
+        issue = proposal_alignment_issue(
+            operator_request=request,
+            request_disposition="honored",
+            current_policy={"video": {"target_vmaf": 95.0, "max_height": 0}},
+            preview_policy={"video": {"target_vmaf": 85.0, "max_height": 0}},
+        )
+        self.assertIsNotNone(issue)
+
+    def test_operator_requested_experiment_preserves_standalone_visual_rejection(self) -> None:
+        request = _operator_requested_experiment("I reject this sample because it looked blocky.")
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "none")
+        self.assertEqual(request["evidence_authority"], "rejected_visual_result")
+        self.assertIsNone(request["applied_policy"])
+
+    def test_operator_requested_experiment_mixed_review_is_not_positive_authority(self) -> None:
+        with patch(
+                "mediaforce.web.runtime.folder_tuning_advice.request_operator_note_parse",
+                return_value={
+                    "summary": "Approved-looking structured parse.",
+                    "intent_type": "direct_request",
+                    "request_type": "size_budget",
+                    "operator_confirmed": True,
+                    "measured_size_followup": False,
+                    "evidence_authority": "approved_visual_result",
+                    "metric": None,
+                    "metric_target": None,
+                    "size_budget_value": 250,
+                    "size_budget_unit": "mb",
+                    "scale_height": None,
+                    "black_bar_handling": None,
+                    "crop": None,
+                    "reasoning_note": "Incorrectly treated the mixed review as approval.",
+                },
+        ):
+            request = _operator_requested_experiment(
+                "The sample looked good overall, but dark scenes showed banding. Target 250MB per episode.",
+                {
+                    "source_size_bytes": 4_815_446_620,
+                    "duration_seconds": 2660.352,
+                    "audio_summary": [{"codec_name": "eac3", "channels": 6}],
+                    "resolved_policy": {
+                        "video": {"encoder": "libsvtav1"},
+                        "audio": {
+                            "convert_to_opus_codecs": ["eac3"],
+                            "surround_5_1_opus_bitrate": "256k",
+                        },
+                    },
+                },
+            )
+
+        assert request is not None
+        self.assertEqual(request["evidence_authority"], "rejected_visual_result")
 
     def test_operator_requested_experiment_detects_explicit_hard_size_cap(self) -> None:
         request = _operator_requested_experiment(
@@ -3881,25 +4118,25 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(request["applied_policy"]["video"]["max_height"], 0)
         self.assertAlmostEqual(request["estimated_video_bitrate_kbps"], 540.0, places=1)
 
-    def test_size_budget_feasibility_treats_old_codec_style_low_bitrates_as_aggressive_first(self) -> None:
+    def test_size_budget_feasibility_treats_positive_av1_budget_as_plausible(self) -> None:
         feasibility, requires_confirmation = size_budget_feasibility(
             source_percent=4.36,
             video_bitrate_kbps=379.7,
             video_encoder="libsvtav1",
         )
 
-        self.assertEqual(feasibility, "aggressive")
+        self.assertEqual(feasibility, "plausible")
         self.assertFalse(requires_confirmation)
 
-    def test_size_budget_feasibility_keeps_hard_stop_for_tiny_av1_budgets(self) -> None:
+    def test_size_budget_feasibility_leaves_tiny_positive_av1_budget_to_sampling(self) -> None:
         feasibility, requires_confirmation = size_budget_feasibility(
             source_percent=2.8,
             video_bitrate_kbps=240.0,
             video_encoder="libsvtav1",
         )
 
-        self.assertEqual(feasibility, "unreasonable")
-        self.assertTrue(requires_confirmation)
+        self.assertEqual(feasibility, "plausible")
+        self.assertFalse(requires_confirmation)
 
     def test_size_budget_feasibility_keeps_legacy_encoders_on_stricter_thresholds(self) -> None:
         feasibility, requires_confirmation = size_budget_feasibility(
@@ -3936,7 +4173,7 @@ class TuningRuntimeTests(unittest.TestCase):
         )
 
         assert request is not None
-        self.assertEqual(request["feasibility"], "aggressive")
+        self.assertEqual(request["feasibility"], "plausible")
         self.assertFalse(request["requires_confirmation"])
 
     def test_folder_ai_tune_preview_uses_calibration_policy_for_operator_budget_request(self) -> None:
@@ -4117,7 +4354,7 @@ class TuningRuntimeTests(unittest.TestCase):
             "operator_confirmed": True,
             "budget_label": "300 MB per episode",
             "budget_bytes": 300 * 1024 * 1024,
-            "feasibility": "aggressive",
+            "feasibility": "plausible",
             "applied_policy": None,
         }
         failed_seed = {
@@ -4132,7 +4369,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 "seed_request_disposition": "unclear",
                 "seed_request_response": "I could not turn that note into a trustworthy first draft.",
                 "seed_feasibility_note": None,
-                "seed_prompt_version": "seed-v8",
+                "seed_prompt_version": "seed-v9",
                 "seed_raw_response": "attempt 1: timed out after 90s",
                 "seed_proposed_policy": None,
                 "seed_applied_policy": None,
@@ -4213,7 +4450,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("current policy", proposal["request_response"])
         self.assertEqual(proposal["trace"]["raw_response"], "attempt 1: timed out after 90s")
 
-    def test_folder_ai_tune_preview_preserves_seed_refusal_for_first_size_budget(self) -> None:
+    def test_folder_ai_tune_preview_overrides_seed_refusal_for_first_av1_size_budget(self) -> None:
         saved_proposals: list[dict[str, Any]] = []
         base_policy = {"video": {"target_size_mb": 300.0, "target_vmaf": 85.0, "max_encoded_percent": 80}}
         host = HostStatus(
@@ -4231,7 +4468,7 @@ class TuningRuntimeTests(unittest.TestCase):
             "operator_confirmed": True,
             "budget_label": "300 MB per episode",
             "budget_bytes": 300 * 1024 * 1024,
-            "feasibility": "infeasible",
+            "feasibility": "plausible",
             "applied_policy": None,
         }
         refused_seed = {
@@ -4246,7 +4483,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 "seed_request_disposition": "rejected",
                 "seed_request_response": "I cannot make this first sample queueable as written.",
                 "seed_feasibility_note": "infeasible",
-                "seed_prompt_version": "seed-v8",
+                "seed_prompt_version": "seed-v9",
                 "seed_raw_response": "{\"request_disposition\":\"rejected\"}",
                 "seed_proposed_policy": None,
                 "seed_applied_policy": None,
@@ -4320,10 +4557,82 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         proposal = saved_proposals[0]
-        self.assertFalse(proposal["can_queue"])
-        self.assertEqual(proposal["request_disposition"], "rejected")
-        self.assertEqual(proposal["request_response"], "I cannot make this first sample queueable as written.")
+        self.assertTrue(proposal["can_queue"])
+        self.assertEqual(proposal["request_disposition"], "honored")
+        self.assertIn("current policy", proposal["request_response"])
 
+    def test_first_size_budget_sample_rejects_nonpositive_video_budget(self) -> None:
+        seed_job_fields = {
+            "seed_request_disposition": "honored",
+            "seed_applied_policy": None,
+        }
+        advice = _keep_first_size_budget_sample(
+            advice_payload={"ok": True, "request_disposition": "honored"},
+            seed_job_fields=seed_job_fields,
+            trimmed_note="Target 20MB per episode",
+            operator_request={
+                "request_type": "size_budget",
+                "operator_confirmed": True,
+                "budget_bytes": 20 * 1024 * 1024,
+                "estimated_audio_bytes": 24 * 1024 * 1024,
+                "estimated_video_bitrate_kbps": 0.0,
+                "applied_policy": None,
+            },
+        )
+
+        self.assertFalse(advice["ok"])
+        self.assertEqual(advice["request_disposition"], "rejected")
+        self.assertEqual(seed_job_fields["seed_request_disposition"], "rejected")
+        self.assertFalse(
+            _proposal_can_queue(
+                applied_fragment={},
+                preview_policy={"video": {"target_vmaf": 85.0}},
+                request_disposition=advice["request_disposition"],
+                alignment_issue=None,
+            )
+        )
+
+    def test_first_size_budget_fallback_requires_unblocked_plausible_request(self) -> None:
+        plausible_request = {
+            "request_type": "size_budget",
+            "operator_confirmed": True,
+            "feasibility": "plausible",
+            "applied_policy": None,
+        }
+
+        self.assertTrue(_can_keep_first_size_budget_sample(plausible_request))
+        self.assertFalse(
+            _can_keep_first_size_budget_sample(
+                {**plausible_request, "evidence_authority": "rejected_visual_result"}
+            )
+        )
+        self.assertFalse(
+            _can_keep_first_size_budget_sample(
+                plausible_request,
+                latest_failed_sample_job={"status": "failed", "error": "encode failed"},
+            )
+        )
+
+    def test_blocking_sample_evidence_uses_semantic_policy_change(self) -> None:
+        current_policy = {"video": {"target_vmaf": 95.0, "min_target_vmaf": 93.0}}
+        rejected_request = {"evidence_authority": "rejected_visual_result"}
+
+        self.assertIsNotNone(
+            _blocking_sample_evidence_issue(
+                operator_request=rejected_request,
+                latest_failed_sample_job=None,
+                current_policy=current_policy,
+                preview_policy=dict(current_policy),
+            )
+        )
+        self.assertIsNone(
+            _blocking_sample_evidence_issue(
+                operator_request=rejected_request,
+                latest_failed_sample_job=None,
+                current_policy=current_policy,
+                preview_policy={"video": {"target_vmaf": 94.0, "min_target_vmaf": 92.0}},
+            )
+        )
     def test_folder_ai_tune_preview_enforces_followup_size_target_after_measured_miss(self) -> None:
         saved_proposals: list[dict[str, Any]] = []
         base_policy = {"video": {"target_vmaf": 95.0, "max_encoded_percent": 80}}
@@ -5188,12 +5497,19 @@ class TuningRuntimeTests(unittest.TestCase):
                     "created_at": "2026-04-04T01:29:02+00:00",
                 }
             ],
+            learning_context_payload=[
+                {
+                    "evidence_authority": "approved_visual_result",
+                    "summary": "A prior 1080p AV1 result was visually approved near 250 MiB.",
+                }
+            ],
         )
 
         repeat_signal = payload["operator_repeat_signal"]
         assert repeat_signal is not None
         self.assertEqual(repeat_signal["repeat_count"], 2)
         self.assertEqual(repeat_signal["previous_softened_count"], 1)
+        self.assertEqual(payload["retrieved_memory"][0]["evidence_authority"], "approved_visual_result")
 
     def test_build_seed_policy_payload_reuses_stored_operator_note_parse(self) -> None:
         sample_item = {
@@ -5308,9 +5624,14 @@ class TuningRuntimeTests(unittest.TestCase):
                         "width": 1920,
                         "height": 1080,
                         "duration_seconds": 2645.248,
-                        "audio_summary": [{"channels": 6}],
+                        "audio_summary": [{"codec_name": "eac3", "channels": 6}],
                         "subtitle_summary": [],
-                        "resolved_policy": {"audio": {"surround_5_1_opus_bitrate": "224k"}},
+                        "resolved_policy": {
+                            "audio": {
+                                "convert_to_opus_codecs": ["eac3"],
+                                "surround_5_1_opus_bitrate": "224k",
+                            }
+                        },
                     },
                     existing_calibration=None,
                     connection=connection,
@@ -5318,7 +5639,7 @@ class TuningRuntimeTests(unittest.TestCase):
 
         assert metadata is not None
         job_fields = metadata["job_fields"]
-        self.assertEqual(job_fields["seed_request_disposition"], "honored_with_risk")
+        self.assertEqual(job_fields["seed_request_disposition"], "honored")
         self.assertEqual(job_fields["seed_applied_policy"]["video"]["target_vmaf"], 85.0)
         self.assertNotIn("max_encoded_percent", job_fields["seed_applied_policy"]["video"])
 
@@ -5812,6 +6133,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(Path(artifact["artifact_path"]).exists())
         self.assertTrue(context)
         self.assertIn("Lower XPSNR slightly", context[0]["summary"])
+        self.assertEqual(context[0]["evidence_authority"], "none")
 
     def test_record_visual_approval_artifact_creates_retrievable_memory(self) -> None:
         sample_item = {
@@ -5849,6 +6171,47 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(Path(artifact["artifact_path"]).exists())
         self.assertTrue(context)
         self.assertIn("Aggressive but acceptable", context[0]["summary"])
+        self.assertEqual(context[0]["evidence_authority"], "approved_visual_result")
+        self.assertEqual(context[0]["approved_policy"], calibration["policy"])
+        self.assertEqual(context[0]["sample_result"], calibration["sample_result"])
+        self.assertEqual(context[0]["run_verdict"]["summary"], "Aggressive but acceptable for this show.")
+
+    def test_retrieve_learning_context_ignores_unrelated_visual_approval(self) -> None:
+        approved_sample_item = {
+            "rel_path": "tv/House/Season 2/Episode.mkv",
+            "video_codec": "h264",
+            "recommendation": "priority_encode",
+            "resolved_policy": {"video": {"quality_metric": "vmaf"}},
+        }
+        with open_db(self.config.paths.db_path) as connection:
+            artifact = record_visual_approval_artifact(
+                connection,
+                self.config,
+                prefix="tv/House/Season 2",
+                note="Looks good after review.",
+                sample_item=approved_sample_item,
+                calibration={
+                    "job_id": "job-house",
+                    "policy": {"video": {"target_vmaf": 88.0}},
+                    "sample_result": {"quality_metric": "VMAF", "quality_score": 89.0},
+                },
+                run_verdict={"summary": "Approved for House."},
+                created_at="2026-03-29T23:45:00+00:00",
+            )
+            context = retrieve_learning_context(
+                connection,
+                prefix="tv/Suits/Season 5",
+                sample_item={
+                    "rel_path": "tv/Suits/Season 5/Episode.mkv",
+                    "video_codec": "h264",
+                    "recommendation": "priority_encode",
+                    "resolved_policy": {"video": {"quality_metric": "vmaf"}},
+                },
+                note="Need a smaller approved draft.",
+            )
+
+        self.assertIsNotNone(artifact)
+        self.assertEqual(context, [])
 
     def test_sibling_approved_season_memory_lists_other_approved_seasons(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
@@ -6137,6 +6500,14 @@ class TuningRuntimeTests(unittest.TestCase):
                 alignment_issue=None,
             )
         )
+        self.assertFalse(
+            _proposal_can_queue(
+                applied_fragment={"video": {"target_vmaf": 87.0}},
+                preview_policy={"video": {"target_vmaf": 87.0}},
+                request_disposition="rejected",
+                alignment_issue=None,
+            )
+        )
 
     def test_proposal_alignment_issue_still_blocks_queue(self) -> None:
         self.assertFalse(
@@ -6312,6 +6683,52 @@ class TuningRuntimeTests(unittest.TestCase):
             "The draft lowers the VMAF target based only on a size budget. Run a measured sample or ask for "
             "a specific quality tradeoff before changing quality targets.",
         )
+
+    def test_proposal_alignment_issue_allows_evidence_backed_av1_video_tradeoff(self) -> None:
+        issue = proposal_alignment_issue(
+            operator_request={
+                "request_type": "size_budget",
+                "budget_label": "250 MB per episode",
+                "budget_bytes": 250 * 1024 * 1024,
+                "evidence_authority": "operator_observed",
+                "applied_policy": None,
+            },
+            request_disposition="honored",
+            current_policy={"video": {"target_vmaf": 95.0, "max_crf": 38, "max_height": 0}},
+            preview_policy={"video": {"target_vmaf": 85.0, "max_crf": 46, "max_height": 0}},
+        )
+
+        self.assertIsNone(issue)
+
+    def test_retrieved_visual_approval_authorizes_alignment_without_overriding_current_rejection(self) -> None:
+        request = {
+            "request_type": "size_budget",
+            "budget_label": "250 MB per episode",
+            "budget_bytes": 250 * 1024 * 1024,
+            "evidence_authority": "none",
+            "applied_policy": None,
+        }
+        effective_request = _operator_request_with_retrieved_memory_authority(
+            request,
+            [{"evidence_authority": "approved_visual_result", "prefix": "tv/House/Season 2"}],
+        )
+
+        assert effective_request is not None
+        self.assertEqual(effective_request["evidence_authority"], "approved_visual_result")
+        self.assertIsNone(
+            proposal_alignment_issue(
+                operator_request=effective_request,
+                request_disposition="honored",
+                current_policy={"video": {"target_vmaf": 95.0, "max_crf": 38}},
+                preview_policy={"video": {"target_vmaf": 85.0, "max_crf": 46}},
+            )
+        )
+        rejected_request = _operator_request_with_retrieved_memory_authority(
+            {**request, "evidence_authority": "rejected_visual_result"},
+            [{"evidence_authority": "approved_visual_result", "prefix": "tv/House/Season 2"}],
+        )
+        assert rejected_request is not None
+        self.assertEqual(rejected_request["evidence_authority"], "rejected_visual_result")
 
     def test_proposal_alignment_issue_rejects_size_budget_resolution_drop(self) -> None:
         issue = proposal_alignment_issue(
@@ -6991,7 +7408,7 @@ class TuningRuntimeTests(unittest.TestCase):
     def test_seed_prompt_adds_class_guardrails(self) -> None:
         prompt = _build_seed_prompt({"folder": "tv/House/Season 5"})
 
-        self.assertEqual(SEED_PROMPT_VERSION, "seed-v8")
+        self.assertEqual(SEED_PROMPT_VERSION, "seed-v9")
         self.assertIn("cold-start guess", prompt)
         self.assertIn("best first-pass attempt", prompt)
         self.assertIn("instruction to satisfy", prompt)
@@ -7002,9 +7419,13 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("Use softened only when the operator note is exploratory", prompt)
         self.assertIn("closest faithful experiment", prompt)
         self.assertIn("operator_repeat_signal", prompt)
-        self.assertIn("clean 1080p catalog TV", prompt)
+        self.assertIn("established, visually approved product baseline", prompt)
+        self.assertIn("Evidence precedence is strict", prompt)
         self.assertIn("legacy H.264 or HEVC bitrate intuition", prompt)
-        self.assertIn("high-80s VMAF", prompt)
+        self.assertIn("High-80s VMAF", prompt)
+        self.assertIn("non-positive video budget", prompt)
+        self.assertNotIn("risky draft", prompt)
+        self.assertNotIn("request looks unrealistic", prompt)
         self.assertIn("video.black_bar_handling", prompt)
         self.assertIn("Do not infer 1080p or 720p scaling from a size budget alone", prompt)
         self.assertIn("request_response", prompt)
@@ -7102,6 +7523,8 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("tv/House/Season 2", generic_prompt)
         self.assertIn("acceptable_experiment", verdict_prompt)
         self.assertIn("sample_result", verdict_prompt)
+        self.assertIn("Evidence precedence is strict", verdict_prompt)
+        self.assertIn("without implying quality damage", verdict_prompt)
 
     def test_tune_prompt_mentions_review_media_conversation(self) -> None:
         prompt = _build_tune_prompt(
@@ -7126,6 +7549,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("closest faithful experiment", prompt)
         self.assertIn("video.black_bar_handling", prompt)
         self.assertIn("operator_note_parse.scale_height", prompt)
+        self.assertIn("Evidence precedence is strict", prompt)
 
     def test_tune_prompt_summarizes_multimodal_review_pack_without_paths(self) -> None:
         prompt = _build_tune_prompt(
@@ -7181,6 +7605,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("crop", prompt)
         self.assertIn("scale_target", prompt)
         self.assertIn("do not infer a scale target", prompt)
+        self.assertIn("evidence_authority", prompt)
 
     def test_build_tuning_runtime_toolbelt_summarizes_review_media(self) -> None:
         toolbelt = _build_tuning_runtime_toolbelt(
@@ -7455,7 +7880,7 @@ class TuningRuntimeTests(unittest.TestCase):
             payload["class_signals"]["positive_signals"],
         )
         self.assertIn(
-            "This first-pass seed is only a bounded starting point; measured calibration should confirm any lean move.",
+            "This first-pass seed is only a bounded starting point; measured calibration and operator review decide.",
             payload["class_signals"]["caution_flags"],
         )
 

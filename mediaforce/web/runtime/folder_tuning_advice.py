@@ -6,13 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from mediaforce.advisor import apply_seed_policy, request_operator_note_parse, request_run_verdict, request_seed_policy
-from mediaforce.advising.policy import merge_policy_fragments, policy_key_paths
+from mediaforce.advising.policy import has_nonpositive_video_budget, merge_policy_fragments, policy_key_paths
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.type_defs import JSONValue, float_value, int_value, object_dict, object_list
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.reviewing.helpers import planned_audio_action, select_primary_audio_track
+from mediaforce.tuning.tuning_memory import retrieve_learning_context
 from mediaforce.web.runtime.folder_tuning_helpers import (
     load_json_object,
     recent_tuning_sessions,
@@ -43,8 +44,12 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _NOTE_PARSE_INTENT_TYPES = {"direct_request", "exploratory_question", "approval_feedback", "other", "unclear"}
 _NOTE_PARSE_REQUEST_TYPES = {"none", "metric_target", "size_budget", "scale_target", "combined_experiment"}
 _NOTE_PARSE_METRICS = {"vmaf", "xpsnr"}
+_EVIDENCE_AUTHORITY_VALUES = {"none", "operator_observed", "approved_visual_result", "rejected_visual_result"}
 _CROP_VALUE_RE = re.compile(r"\d+:\d+:\d+:\d+")
-_SIZE_BUDGET_RE = re.compile(r"(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>kb|mb|gb|tb)\b", re.IGNORECASE)
+_SIZE_BUDGET_RE = re.compile(
+    r"(?<![\w.])(?P<sign>[+-]?)\s*(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>kb|mb|gb|tb)\b",
+    re.IGNORECASE,
+)
 _SCALE_HEIGHT_RE = re.compile(r"(?<!\d)(?P<height>240|360|480|540|720|1080|1440|2160|4320)p\b", re.IGNORECASE)
 _SOURCE_RESOLUTION_RE = re.compile(
     r"\b(?:source|original|native)\s+resolution\b|\b(?:do\s+not|don't|dont|no)\s+(?:downsample|downscale|scale\s+down)\b|\bkeep\s+max_height\s+(?:unset|at\s+0|0)\b|\bmax_height\s+(?:unset|0)\b",
@@ -67,6 +72,38 @@ _METRIC_DIRECTIVE_RE = re.compile(
     r"(?P<metric>vmaf|xpsnr)\b",
     re.IGNORECASE,
 )
+_OPERATOR_OBSERVED_RE = re.compile(
+    r"\b(?:look(?:s|ed)?|sound(?:s|ed)?|is|was|are|were)\s+"
+    r"(?:good|great|excellent|fine|clean|identical|indistinguishable|acceptable)\b|"
+    r"\b(?:cannot|can't|could not|couldn't)\s+(?:see|hear|tell|notice)\b.*\b(?:difference|damage|artifact)\b",
+    re.IGNORECASE,
+)
+_VISUAL_APPROVAL_RE = re.compile(
+    r"\b(?:i\s+)?(?:approve|approved|accept|accepted)\b.*\b(?:sample|clip|encode|result|draft|quality)\b|"
+    r"\b(?:sample|clip|encode|result|draft|quality)\b.*\b(?:is\s+)?(?:approved|accepted)\b",
+    re.IGNORECASE,
+)
+_VISUAL_REJECTION_RE = re.compile(
+    r"\b(?:i\s+)?(?:reject|rejected|decline|declined)\b.*\b(?:sample|clip|encode|result|draft|quality)\b|"
+    r"\b(?:do\s+not|don't|dont|did\s+not|didn't|didnt)\s+(?:approve|accept)\b.*"
+    r"\b(?:sample|clip|encode|result|draft|quality)\b|"
+    r"\b(?:sample|clip|encode|result|draft|quality)\b.*\b"
+    r"(?:look(?:s|ed)?|sound(?:s|ed)?|is|was)\s+(?:bad|worse|unacceptable|blocky|banded|damaged)\b",
+    re.IGNORECASE,
+)
+_NEGATIVE_VISUAL_OBSERVATION_RE = re.compile(
+    r"\b(?:saw|noticed|showed|shows|had|has|with)\b.{0,48}\b"
+    r"(?:artifact(?:s|ing)?|banding|blocking|blockiness|smearing|damage|ringing|mosquito noise|"
+    r"color banding|macroblocking|blurring|blur)\b",
+    re.IGNORECASE,
+)
+
+
+def _positive_size_budget_match(note: str) -> re.Match[str] | None:
+    for match in _SIZE_BUDGET_RE.finditer(note):
+        if match.group("sign") != "-":
+            return match
+    return None
 
 
 def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -79,6 +116,9 @@ def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, A
     intent_type = str(parsed_object.get("intent_type") or "").strip().lower()
     if intent_type not in _NOTE_PARSE_INTENT_TYPES:
         intent_type = "unclear"
+    evidence_authority = str(parsed_object.get("evidence_authority") or "none").strip().lower()
+    if evidence_authority not in _EVIDENCE_AUTHORITY_VALUES:
+        evidence_authority = "none"
     metric = str(parsed_object.get("metric") or "").strip().lower() or None
     metric_target = None
     size_budget_value = None
@@ -139,6 +179,7 @@ def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, A
         "intent_type": intent_type,
         "request_type": request_type,
         "operator_confirmed": operator_confirmed,
+        "evidence_authority": evidence_authority,
         "metric": metric if metric_target is not None else None,
         "metric_target": metric_target,
         "size_budget_value": size_budget_value,
@@ -157,8 +198,17 @@ def _heuristic_operator_note_parse(note: str) -> dict[str, Any] | None:
     if not trimmed:
         return None
     lowered = trimmed.lower()
+    evidence_authority = "none"
+    if _VISUAL_REJECTION_RE.search(trimmed):
+        evidence_authority = "rejected_visual_result"
+    elif _VISUAL_APPROVAL_RE.search(trimmed):
+        evidence_authority = "approved_visual_result"
+    elif _NEGATIVE_VISUAL_OBSERVATION_RE.search(trimmed):
+        evidence_authority = "rejected_visual_result"
+    elif _OPERATOR_OBSERVED_RE.search(trimmed):
+        evidence_authority = "operator_observed"
 
-    size_budget_match = _SIZE_BUDGET_RE.search(trimmed)
+    size_budget_match = _positive_size_budget_match(trimmed)
     metric_match = _METRIC_TARGET_RE.search(trimmed)
     metric_directive_match = _METRIC_DIRECTIVE_RE.search(trimmed)
     scale_match = _SCALE_HEIGHT_RE.search(trimmed)
@@ -188,7 +238,7 @@ def _heuristic_operator_note_parse(note: str) -> dict[str, Any] | None:
     explicit_parts = sum(
         part is not None for part in (metric, size_budget_value, scale_height, black_bar_handling, crop)
     )
-    if explicit_parts == 0:
+    if explicit_parts == 0 and evidence_authority == "none":
         return None
 
     if explicit_parts >= 2:
@@ -197,6 +247,8 @@ def _heuristic_operator_note_parse(note: str) -> dict[str, Any] | None:
         request_type = "metric_target"
     elif size_budget_value is not None:
         request_type = "size_budget"
+    elif explicit_parts == 0:
+        request_type = "none"
     else:
         request_type = "scale_target"
 
@@ -208,8 +260,8 @@ def _heuristic_operator_note_parse(note: str) -> dict[str, Any] | None:
         "do you think",
         "what do you think",
     )
-    operator_confirmed = True
-    intent_type = "direct_request"
+    operator_confirmed = request_type != "none"
+    intent_type = "approval_feedback" if request_type == "none" and evidence_authority != "none" else "direct_request"
     if any(marker in lowered for marker in exploratory_markers):
         operator_confirmed = False
         intent_type = "exploratory_question"
@@ -234,6 +286,7 @@ def _heuristic_operator_note_parse(note: str) -> dict[str, Any] | None:
         "intent_type": intent_type,
         "request_type": request_type,
         "operator_confirmed": operator_confirmed,
+        "evidence_authority": evidence_authority,
         "metric": metric,
         "metric_target": metric_target,
         "size_budget_value": size_budget_value,
@@ -284,6 +337,7 @@ def _merge_operator_note_parse(
             "scale_height",
             "black_bar_handling",
             "crop",
+            "evidence_authority",
     ):
         if merged.get(key) in {None, ""} and heuristic.get(key) is not None and heuristic.get(key) != "":
             merged[key] = heuristic.get(key)
@@ -293,6 +347,12 @@ def _merge_operator_note_parse(
             merged["intent_type"] = "direct_request"
     if heuristic.get("measured_size_followup"):
         merged["measured_size_followup"] = True
+    structured_authority = str(merged.get("evidence_authority") or "none")
+    heuristic_authority = str(heuristic.get("evidence_authority") or "none")
+    if heuristic_authority == "rejected_visual_result":
+        merged["evidence_authority"] = heuristic_authority
+    elif structured_authority == "none" and heuristic_authority != "none":
+        merged["evidence_authority"] = heuristic_authority
     merged = _normalize_operator_note_parse(merged)
     if merged is None:
         return heuristic
@@ -453,13 +513,9 @@ def size_budget_feasibility(
     if source_percent is None or video_bitrate_kbps is None:
         return "unknown", False
     if _is_av1_encoder(video_encoder):
-        # AV1 can stay visually strong at bitrates that look "too low" through an older-codec lens,
-        # so keep the hard stop for only the smallest AV1 budgets and treat the next band as aggressive.
-        if source_percent <= 4.0 or video_bitrate_kbps <= 325.0:
-            return "unreasonable", True
-        if source_percent <= 15.0 or video_bitrate_kbps <= 650.0:
-            return "aggressive", False
-        return "reasonable", False
+        if video_bitrate_kbps <= 0:
+            return "infeasible", True
+        return "plausible", False
     if source_percent <= 10.0 or video_bitrate_kbps <= 500.0:
         return "unreasonable", True
     if source_percent <= 20.0 or video_bitrate_kbps <= 900.0:
@@ -561,6 +617,7 @@ def size_budget_request(
         "target_tolerance_percent": SIZE_BUDGET_TARGET_TOLERANCE,
         "hard_size_cap": hard_size_cap,
         "measured_size_followup": measured_size_followup,
+        "evidence_authority": str(parsed_note.get("evidence_authority") or "none"),
         "feasibility": feasibility,
         "requires_confirmation": requires_confirmation,
         "requested_max_encoded_percent": requested_max_encoded_percent,
@@ -657,7 +714,19 @@ def operator_requested_experiment(
     note_parse = object_dict(parsed_note) or object_dict(_parsed_operator_note(trimmed))
     request_type = str(note_parse.get("request_type") or "").strip().lower()
     if request_type == "none":
-        return None
+        evidence_authority = str(note_parse.get("evidence_authority") or "none").strip().lower()
+        if evidence_authority == "none":
+            return None
+        return {
+            "source": "operator_note",
+            "operator_note_parse": note_parse,
+            "honor_mode": "evidence_feedback",
+            "request_type": "none",
+            "request_text": trimmed,
+            "operator_confirmed": False,
+            "evidence_authority": evidence_authority,
+            "applied_policy": None,
+        }
     operator_confirmed = bool(note_parse.get("operator_confirmed"))
 
     requested_size_budget = size_budget_request(
@@ -694,6 +763,7 @@ def operator_requested_experiment(
             "requested_max_encoded_percent": object_dict(requested_size_budget).get("requested_max_encoded_percent"),
             "applied_max_encoded_percent": object_dict(requested_size_budget).get("applied_max_encoded_percent"),
             "operator_confirmed": operator_confirmed,
+            "evidence_authority": str(note_parse.get("evidence_authority") or "none"),
             "metric_request": requested_metric_target,
             "size_budget_request": requested_size_budget,
             "scale_request": requested_scale_target,
@@ -705,12 +775,15 @@ def operator_requested_experiment(
         }
     if requested_metric_target:
         requested_metric_target["operator_confirmed"] = operator_confirmed
+        requested_metric_target["evidence_authority"] = str(note_parse.get("evidence_authority") or "none")
         return requested_metric_target
     if requested_size_budget:
         requested_size_budget["operator_confirmed"] = operator_confirmed
+        requested_size_budget["evidence_authority"] = str(note_parse.get("evidence_authority") or "none")
         return requested_size_budget
     if requested_scale_target:
         requested_scale_target["operator_confirmed"] = operator_confirmed
+        requested_scale_target["evidence_authority"] = str(note_parse.get("evidence_authority") or "none")
         return requested_scale_target
     return None
 
@@ -821,35 +894,42 @@ def maybe_force_repeated_seed_experiment(
         seed_response: Any,
         requested_experiment: dict[str, Any] | None,
         repeat_signal: dict[str, Any] | None,
+        latest_failed_sample_job: dict[str, Any] | None = None,
 ) -> None:
     repeat_payload = object_dict(repeat_signal)
     if int_value(repeat_payload.get("repeat_count")) < 2:
         return
+    request = object_dict(requested_experiment)
+    if (
+            has_nonpositive_video_budget(request)
+            or str(request.get("evidence_authority") or "none").strip().lower() == "rejected_visual_result"
+            or bool(object_dict(latest_failed_sample_job))
+    ):
+        return
     if str(seed_response.request_disposition or "").strip().lower() not in {"softened", "rejected"}:
         return
-    requested_policy = object_dict(object_dict(requested_experiment).get("applied_policy"))
+    requested_policy = object_dict(request.get("applied_policy"))
+    previous_softened = int_value(repeat_payload.get("previous_softened_count"))
+    seed_response.request_disposition = "honored"
+    seed_response.summary = "Kept the repeated operator request as the first sample draft."
+    seed_response.diagnosis = (
+        "The operator repeated the same explicit experiment after an earlier softening, "
+        "so the seed preserves the target for measurement instead of overriding it again."
+    )
+    seed_response.request_response = (
+        "You repeated the same request, so I kept it as the first sample. The measured result and your review decide."
+    )
+    if previous_softened:
+        seed_response.suggested_follow_up = "Measure this first sample and decide from the clips."
+    if not seed_response.feasibility_note:
+        seed_response.feasibility_note = "The repeated operator-confirmed target is queueable for a measured sample."
     if not requested_policy:
         return
     _, applied_fragment = apply_seed_policy(base_policy, requested_policy)
     if not applied_fragment:
         return
-    previous_softened = int_value(repeat_payload.get("previous_softened_count"))
     seed_response.ok = True
     seed_response.proposed_policy = applied_fragment
-    seed_response.request_disposition = "honored_with_risk"
-    seed_response.summary = "Kept the repeated requested experiment as a high-risk first sample draft."
-    seed_response.diagnosis = (
-        "The operator repeated the same explicit experiment after an earlier softening, "
-        "so the seed keeps the risky target for measurement instead of overriding it again."
-    )
-    seed_response.request_response = (
-        "You asked for the same aggressive experiment again, so I kept it as an honored high-risk draft "
-        "instead of softening it again."
-    )
-    if previous_softened:
-        seed_response.suggested_follow_up = "Measure this risky first sample and decide from the clips whether to pull it back."
-    if not seed_response.feasibility_note:
-        seed_response.feasibility_note = "This draft is operator-confirmed and intentionally riskier than the usual cold-start seed."
 
 
 def build_run_verdict_payload(
@@ -1044,12 +1124,12 @@ def seed_class_signals(prefix: str, sample_item: dict[str, Any], summary: dict[s
     elif collection_shape == "movie_folder":
         positive_signals.append("Folder is movie-shaped rather than episodic TV.")
     else:
-        caution_flags.append("Folder shape is broad enough that the seed should stay close to the base policy.")
+        caution_flags.append("Folder shape is broad; choose representative samples before applying one policy broadly.")
 
     if sample_resolution_tier is not None:
         positive_signals.append(f"Sample item resolves to {sample_resolution_tier}.")
     else:
-        caution_flags.append("Sample resolution is unknown, so avoid overfitting the first-pass guess.")
+        caution_flags.append("Sample resolution is unknown; measure it rather than inferring a resolution or bitrate floor.")
 
     sample_codec = str(sample_item.get("video_codec") or "").strip().lower()
     if dominant_video_codec and sample_codec and dominant_video_codec == sample_codec:
@@ -1061,14 +1141,14 @@ def seed_class_signals(prefix: str, sample_item: dict[str, Any], summary: dict[s
 
     item_count = int_value(summary.get("item_count"))
     if item_count and item_count < 6:
-        caution_flags.append("Small folder sample size means the seed should remain conservative.")
+        caution_flags.append("Small folder size makes representative sample selection especially important.")
 
     for reason in object_list(suggested_override.get("reason"))[:2]:
         if reason:
             positive_signals.append(str(reason))
 
     caution_flags.append(
-        "This first-pass seed is only a bounded starting point; measured calibration should confirm any lean move."
+        "This first-pass seed is only a bounded starting point; measured calibration and operator review decide."
     )
     return {
         "collection_shape": collection_shape,
@@ -1090,6 +1170,7 @@ def build_seed_policy_payload(
         recent_sessions_payload: list[dict[str, Any]] | None = None,
         requested_experiment: dict[str, Any] | None = None,
         latest_failed_sample_job: dict[str, Any] | None = None,
+        learning_context_payload: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     suggested_override = object_dict(summary.get("suggested_override"))
     resolved_requested_experiment = object_dict(requested_experiment) or operator_requested_experiment(user_note, sample_item)
@@ -1103,12 +1184,12 @@ def build_seed_policy_payload(
     )
     return {
         "folder": prefix,
-        "goal": "Prefer slightly smaller files when the visual difference is hard to spot, but keep first-pass drafts conservative when the class is uncertain.",
+        "goal": "Target source-resolution 1080p AV1 around 200-300 MiB per 40 minutes and let measured samples plus operator visual review decide quality.",
         "seed_principles": [
-            "Teach media-class taste instead of optimizing one easy title in isolation.",
-            "Prefer small, reversible moves away from the base policy.",
-            "Clean, forgiving TV can lean a little smaller than default.",
-            "Dark, grainy, fast-motion, or uncertain material should stay near the base policy until measured calibration says otherwise.",
+            "The operator has already observed strong 1080p AV1 results in this size range across conventional and dark or stylized TV.",
+            "Do not infer a minimum acceptable bitrate from source size, resolution, or content-class folklore.",
+            "Use representative sample moments to discover actual weaknesses instead of preemptively enlarging the encode.",
+            "Preserve source resolution unless the operator explicitly asks to downsample.",
         ],
         "sample_item": {
             "rel_path": sample_item["rel_path"],
@@ -1148,6 +1229,7 @@ def build_seed_policy_payload(
         "operator_note": user_note or None,
         "requested_experiment": resolved_requested_experiment,
         "operator_repeat_signal": repeat_signal,
+        "retrieved_memory": list(learning_context_payload or []),
         "latest_failed_sample_job": object_dict(latest_failed_sample_job) or None,
         "metric_support": metric_support_payload,
         "preferred_metric": "vmaf" if metric_support_payload.get("vmaf") else (
@@ -1255,6 +1337,12 @@ def maybe_seed_baseline_policy(
         load_json_object_fn=load_json_object,
         limit=4,
     )
+    learning_context = retrieve_learning_context(
+        connection,
+        prefix=prefix,
+        sample_item=sample_item,
+        note=user_note,
+    )
     payload = build_seed_policy_payload(
         prefix=prefix,
         user_note=user_note,
@@ -1265,6 +1353,7 @@ def maybe_seed_baseline_policy(
         recent_sessions_payload=recent_sessions_payload,
         requested_experiment=requested_experiment,
         latest_failed_sample_job=latest_failed_sample_job,
+        learning_context_payload=learning_context,
     )
     seed_response = request_seed_policy(project_root=project_root, payload=payload)
     maybe_force_repeated_seed_experiment(
@@ -1272,6 +1361,7 @@ def maybe_seed_baseline_policy(
         seed_response=seed_response,
         requested_experiment=object_dict(payload.get("requested_experiment")),
         repeat_signal=object_dict(payload.get("operator_repeat_signal")),
+        latest_failed_sample_job=latest_failed_sample_job,
     )
     if not seed_response.ok or not seed_response.proposed_policy:
         return {
