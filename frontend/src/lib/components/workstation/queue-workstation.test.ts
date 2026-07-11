@@ -72,6 +72,31 @@ function workflowState(overrides: Partial<NonNullable<FolderCard['workflow_state
 	};
 }
 
+function encodeWorkflowState() {
+	return workflowState({
+		state: 'encode_candidates',
+		primary_lane: 'encode',
+		label: 'Ready to encode',
+		tone: 'ready',
+		detail: '4 item(s) can be queued for encoding.',
+		counts: {
+			items: 4,
+			encode_candidates: 4,
+			ready_to_validate: 0,
+			ready_to_promote: 0,
+			processing: 0,
+			complete: 0,
+			blocked: 0
+		},
+		next_action: {
+			kind: 'queue_encode',
+			label: 'Queue encode',
+			enabled: true,
+			target_prefix: 'tv/show'
+		}
+	});
+}
+
 describe('Queue workstation labels', () => {
 	const dashboard = {
 		folders_preview: [],
@@ -117,6 +142,45 @@ describe('Queue workstation labels', () => {
 		expect(queueFolderTone(readyToValidate)).toBe('ready');
 		expect(folderStatusCopy(readyToValidate)).toBe('2 encoded output(s) need validation.');
 		expect(totalPendingItems([readyToValidate])).toBe(2);
+	});
+
+	it('holds encode candidates behind sample review until the draft is approved', () => {
+		const unsampled = folder({ pending_count: 4, workflow_state: encodeWorkflowState() });
+		const approved = folder({
+			pending_count: 4,
+			review_badge_label: 'Approved draft',
+			review_badge_tone: 'ok',
+			workflow_state: encodeWorkflowState()
+		});
+
+		expect(queueFolderState(unsampled)).toBe('Needs sample');
+		expect(queueFolderTone(unsampled)).toBe('wait');
+		expect(queuePrimaryActionLabel(unsampled)).toBe('Ask review assistant');
+		expect(folderStatusCopy(unsampled)).toBe(
+			'Review one representative sample before queueing folder-wide processing.'
+		);
+		expect(buildWorkLaneGroups([unsampled])[0]?.key).toBe('sample');
+		expect(queueFolderState(approved)).toBe('Ready to encode');
+		expect(queueFolderTone(approved)).toBe('ready');
+		expect(queuePrimaryActionLabel(approved)).toBe('Queue 4 encodes');
+		expect(buildWorkLaneGroups([approved])[0]?.key).toBe('encode');
+	});
+
+	it('keeps stale sample evidence in the sample lane', () => {
+		const staleSample = folder({
+			pending_count: 4,
+			review_badge_label: 'Sample needs rerun',
+			review_badge_tone: 'warning',
+			workflow_state: encodeWorkflowState()
+		});
+
+		expect(queueFolderState(staleSample)).toBe('Sample needs rerun');
+		expect(queueFolderTone(staleSample)).toBe('wait');
+		expect(queuePrimaryActionLabel(staleSample)).toBe('Ask review assistant');
+		expect(folderStatusCopy(staleSample)).toBe(
+			'Run a fresh representative sample before queueing folder-wide processing.'
+		);
+		expect(buildWorkLaneGroups([staleSample])[0]?.key).toBe('sample');
 	});
 
 	it('calls queued processing a worker wait instead of active work', () => {
@@ -221,20 +285,8 @@ describe('Queue workstation labels', () => {
 			folder({ title: 'Validate', workflow_state: workflowState() }),
 			folder({
 				title: 'Encode',
-				workflow_state: workflowState({
-					primary_lane: 'encode',
-					state: 'ready_to_encode',
-					label: 'Ready to encode',
-					counts: {
-						items: 4,
-						encode_candidates: 4,
-						ready_to_validate: 0,
-						ready_to_promote: 0,
-						processing: 0,
-						complete: 0,
-						blocked: 0
-					}
-				})
+				review_badge_label: 'Approved draft',
+				workflow_state: encodeWorkflowState()
 			}),
 			folder({
 				title: 'Broken',

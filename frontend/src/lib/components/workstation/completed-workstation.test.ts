@@ -5,6 +5,9 @@ import {
 	buildCompletedReadinessSummary,
 	buildCompletedStatusTiles,
 	cleanupState,
+	completedHistoryDetail,
+	completedHistoryLabel,
+	completedHistorySearchText,
 	completedStateOptions,
 	folderCanBeSelected
 } from './completed-workstation';
@@ -89,8 +92,8 @@ describe('Completed workstation mapping', () => {
 
 		expect(buildCompletedReadinessSummary(payload([folder({})]), null)).toMatchObject({
 			tone: 'idle',
-			title: 'Completed work is handled',
-			metricLabel: 'Handled',
+			title: 'Everything is settled',
+			metricLabel: 'Finished',
 			metricValue: '1'
 		});
 	});
@@ -109,8 +112,8 @@ describe('Completed workstation mapping', () => {
 		expect(options.map((option) => option.label)).toEqual([
 			'Originals waiting',
 			'Check settings',
-			'Originals already removed',
-			'Handled'
+			'Originals already gone',
+			'Finished'
 		]);
 		expect(options.map((option) => option.key)).toEqual(['ready', 'blocked', 'unknown', 'cleaned']);
 	});
@@ -126,5 +129,33 @@ describe('Completed workstation mapping', () => {
 			label: 'Promotion completed',
 			title: 'Season 1'
 		});
+	});
+
+	it('keeps failed season work distinct from an operator stop', () => {
+		expect(completedHistoryLabel('Encoding failed')).toBe('Season failed');
+		expect(completedHistoryLabel('Encoding stopped')).toBe('Season stopped');
+		expect(completedHistoryLabel('Encoding started')).toBe('Season started');
+		expect(completedHistoryDetail('Encode worker failed while processing an item.')).toBe(
+			'A computer failed while making an episode.'
+		);
+	});
+
+	it('indexes the same plain-language history copy shown to operators', () => {
+		const event = {
+			id: 1,
+			event_type: 'encoding_failed',
+			label: 'Encoding failed',
+			tone: 'fail',
+			prefix: 'tv/show/season 1',
+			title: 'Season 1',
+			subtitle: 'Show',
+			scope_label: 'tv',
+			created_at: '2026-07-11T12:00:00Z',
+			detail: 'Encode worker failed while processing an item.',
+			size_bytes: null
+		};
+
+		expect(completedHistorySearchText(event)).toContain('season failed');
+		expect(completedHistorySearchText(event)).toContain('a computer failed');
 	});
 });

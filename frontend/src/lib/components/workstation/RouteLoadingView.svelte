@@ -1,5 +1,6 @@
 <script lang="ts">
-	import OperatorShell, { type ShellRouteId } from './OperatorShell.svelte';
+	import OperatorShell from './OperatorShell.svelte';
+	import type { ShellRouteId } from './shell-types';
 
 	let {
 		route,

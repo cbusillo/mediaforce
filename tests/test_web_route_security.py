@@ -1,5 +1,7 @@
 import asyncio
 import json
+import threading
+import time
 import unittest
 from typing import Any
 
@@ -8,6 +10,7 @@ from starlette.requests import Request
 from starlette.routing import Route
 
 from mediaforce.web.routes.completed import COMPLETED_CLEANUP_ERROR_MESSAGE, register_completed_routes
+from mediaforce.web.routes.folders import register_folder_routes
 from mediaforce.web.routes.settings import SETTINGS_SAVE_ERROR_MESSAGE, register_settings_routes
 
 
@@ -36,6 +39,52 @@ def _route_endpoint(app: FastAPI, path: str, method: str) -> Any:
 
 
 class WebRouteSecurityTests(unittest.TestCase):
+    def test_folder_ai_tune_preview_does_not_block_event_loop(self) -> None:
+        app = FastAPI()
+        preview_started = threading.Event()
+        release_preview = threading.Event()
+
+        def slow_preview(prefix: str, note: str, host_key: str) -> dict[str, Any]:
+            preview_started.set()
+            release_preview.wait(timeout=1.0)
+            return {"ok": True, "prefix": prefix, "note": note, "host_key": host_key}
+
+        register_folder_routes(
+            app,
+            folder_status_payload=lambda _prefix: {},
+            folder_content_payload=lambda _prefix: ({}, 200),
+            download_review_compare_action=lambda _prefix: None,
+            folder_ai_tune_action=slow_preview,
+            folder_ai_tune_preview_action=slow_preview,
+            folder_ai_tune_confirm_action=lambda _prefix, _proposal_id: {"ok": True},
+            clear_folder_tuning_action=lambda _prefix: {},
+            approve_measured_encode_recovery_action=lambda _prefix: {},
+            queue_folder_encode_action=lambda _prefix, _notes, _bypass_schedule: {},
+            validate_folder_outputs_action=lambda _prefix: {},
+            promote_folder_outputs_action=lambda _prefix: {},
+            save_profile_action=lambda _prefix, _profile, _approve, _notes: {},
+        )
+        endpoint = _route_endpoint(app, "/api/folders/{prefix:path}/ai-tune/preview", "POST")
+
+        async def exercise() -> tuple[float, Any]:
+            started_at = time.monotonic()
+            task = asyncio.create_task(
+                endpoint(
+                    "tv/show",
+                    _json_request({"note": "target 225 MB", "host_key": "host-1"}),
+                )
+            )
+            await asyncio.sleep(0.05)
+            elapsed = time.monotonic() - started_at
+            release_preview.set()
+            return elapsed, await task
+
+        elapsed, response = asyncio.run(exercise())
+
+        self.assertTrue(preview_started.is_set())
+        self.assertLess(elapsed, 0.2)
+        self.assertEqual(response.status_code, 200)
+
     def test_settings_save_hides_internal_validation_detail(self) -> None:
         app = FastAPI()
 

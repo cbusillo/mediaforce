@@ -365,7 +365,11 @@ def decorate_encode_queue_for_scheduler(
     decorated["queued_waiting_count"] = sum(
         1
         for job in decorated["queued"]
-        if bool(job.get("schedule_waiting")) or str(job.get("status") or "") == "retry_backoff"
+        if (
+            bool(job.get("schedule_waiting"))
+            or str(job.get("status") or "") == "retry_backoff"
+            or bool(str(job.get("waiting_reason") or "").strip())
+        )
     )
     decorated["telemetry"] = encode_queue_telemetry(decorated)
     return decorated

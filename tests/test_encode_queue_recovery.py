@@ -33,6 +33,7 @@ from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.models import ProbeSummary
+from mediaforce.core.process_control import ProcessCancelledError
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.encoding import manifest as manifest
 from mediaforce.encoding import quality_search
@@ -41,7 +42,7 @@ from mediaforce.encoding import video_filters
 from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_prefix, list_child_encode_jobs, \
     load_active_encode_job_for_prefix, load_encode_job, load_latest_encode_job, \
     load_latest_terminal_encode_job_for_prefix, load_queue_state, repair_persisted_encode_job_hosts, \
-    save_encode_job, save_queue_state
+    save_encode_job, save_queue_state, summarize_encode_queue
 from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.run_manifests import select_encode_candidates
@@ -54,7 +55,8 @@ from mediaforce.tuning.calibration_jobs import list_queue_summary, \
 from mediaforce.review import BrowserReviewClip, CompareClip, EncodedPreviewClip
 from mediaforce.web import app as web_app
 from mediaforce.web import settings_runtime
-from mediaforce.web.runtime import dashboard_payloads, encode_runtime, folder_actions as folder_actions_runtime, \
+from mediaforce.web.runtime import completed_runtime, dashboard_payloads, encode_runtime, \
+    folder_actions as folder_actions_runtime, \
     host_runtime as host_runtime_module, job_runtime, queue_actions as queue_actions_runtime, \
     calibration_runtime
 from mediaforce.web.runtime import folder_cards as folder_cards_runtime
@@ -1737,6 +1739,58 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "deterministic")
 
+    def test_controller_media_permission_failure_does_not_retry_as_ssh_transport(self) -> None:
+        self._write_manifest("manifest-controller-media.json", [])
+        host = {"key": "remote-a", "label": "Remote A", "mode": "ssh", "media_access": "mounted"}
+        exc = PermissionError(errno.EACCES, "Permission denied", "/Volumes/media")
+
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(
+                connection,
+                job_id="job-controller-media",
+                manifest_name="manifest-controller-media.json",
+                host=host,
+                status="running",
+                attempt_count=1,
+            )
+            job = load_encode_job(connection, "job-controller-media")
+            assert job is not None
+            failure_kind = encode_runtime._classify_encode_failure(exc, job)
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind=failure_kind,
+                error_message=str(exc),
+            )
+
+            updated = load_encode_job(connection, "job-controller-media")
+
+        self.assertEqual(failure_kind, "controller_media_access")
+        self.assertIsNotNone(updated)
+        assert updated is not None
+        self.assertEqual(updated["status"], "needs_attention")
+        self.assertEqual(updated["terminal_reason"], "controller_media_access")
+        self.assertIsNone(updated["retry_not_before"])
+        self.assertIsNone(updated["host_cooldown_until"])
+        self.assertNotIn("failure_streak", updated["last_host"])
+
+    def test_genuine_ssh_timeout_is_still_classified_as_transport_failure(self) -> None:
+        job = {
+            "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+        }
+        exc = RuntimeError("ssh: connect to host remote-a port 22: Operation timed out")
+
+        self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "ssh_transport")
+
+    def test_controller_mount_timeout_is_not_classified_as_ssh_transport(self) -> None:
+        job = {
+            "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+        }
+        exc = RuntimeError("[Errno 60] Operation timed out: '/Volumes/media'")
+
+        self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "deterministic")
+
     def test_transient_ssh_failure_stays_in_retry_backoff_after_attempt_cap(self) -> None:
         source_path = self._create_source_file("episode-host-retry.mkv")
         staging_path = self._staging_path("episode-host-retry.mkv")
@@ -1920,6 +1974,54 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         assert host_payload is not None
         self.assertEqual(host_payload["key"], "remote-b")
         self.assertIsNone(waiting_reason)
+
+    def test_host_selection_waits_when_controller_staging_storage_is_unavailable(self) -> None:
+        statuses = [
+            {
+                "key": "remote-a",
+                "label": "Remote A",
+                "host": "remote-a",
+                "mode": "ssh",
+                "media_access": "mounted",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "probe_available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            }
+        ]
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.web.app._host_runtime_rows", return_value=statuses
+        ), patch("mediaforce.web.runtime.encode_runtime.os.access", return_value=False):
+            host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, {})
+
+        self.assertIsNone(host_payload)
+        self.assertEqual(
+            waiting_reason,
+            f"Mediaforce cannot access {self.config.staging_root} on this computer. Mount the storage to continue.",
+        )
+
+    def test_encode_queue_summary_returns_newest_terminal_jobs_first(self) -> None:
+        self._write_manifest("manifest-recent-order.json", [])
+        with open_db(self.config.paths.db_path) as connection:
+            for index in range(7):
+                self._save_job(
+                    connection,
+                    job_id=f"recent-{index}",
+                    manifest_name="manifest-recent-order.json",
+                    host={},
+                    status="completed",
+                    attempt_count=1,
+                )
+
+            summary = summarize_encode_queue(connection)
+
+        self.assertEqual(
+            [job["job_id"] for job in summary["recent"]],
+            ["recent-6", "recent-5", "recent-4", "recent-3", "recent-2", "recent-1"],
+        )
 
     def test_permission_denied_ssh_failure_still_needs_attention_after_attempt_cap(self) -> None:
         source_path = self._create_source_file("episode-host-permission.mkv")
@@ -3212,6 +3314,107 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(card.statuses["validated"], 1)
         self.assertEqual(card.statuses["promoted"], 1)
 
+    def test_library_structure_cards_return_pending_seasons_without_enrichment(self) -> None:
+        planned = self._create_source_file("library-structure-planned.mkv")
+        promoted = self._create_source_file("library-structure-promoted.mkv")
+        finished = self._create_source_file("library-structure-finished.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            planned_id = self._insert_library_item(connection, planned)
+            promoted_id = self._insert_library_item(connection, promoted, status="promoted")
+            finished_id = self._insert_library_item(connection, finished, status="promoted")
+            for item_id, rel_path, size_bytes in (
+                    (planned_id, "tv/show/Season 1/planned.mkv", 3 * 1024 ** 3),
+                    (promoted_id, "tv/show/Season 1/promoted.mkv", 2 * 1024 ** 3),
+                    (finished_id, "tv/show/Season 2/finished.mkv", 4 * 1024 ** 3),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(
+                        rel_path=rel_path,
+                        parent_dir=rel_path.rsplit("/", 1)[0],
+                        size_bytes=size_bytes,
+                    )
+                )
+
+            with patch.object(
+                    web_app,
+                    "_folder_review_badge",
+                    return_value={"label": "Ready to review", "tone": "attention", "detail": None},
+            ):
+                cards = web_app._list_library_structure_cards(self.config, connection)
+
+        self.assertEqual([card.prefix for card in cards], ["tv/show/Season 1"])
+        card = cards[0]
+        self.assertEqual(card.item_count, 2)
+        self.assertEqual(card.pending_count, 1)
+        self.assertEqual(card.total_size_bytes, 5 * 1024 ** 3)
+        self.assertEqual(card.statuses, {"planned": 1, "promoted": 1})
+        self.assertEqual(card.projected_reclaim_bytes, 0)
+        self.assertIsNone(card.workflow_state)
+        self.assertTrue(card.details_loading)
+        self.assertEqual(card.review_badge_label, "Ready to review")
+
+    def test_library_detail_cards_include_seasons_below_recommendation_threshold(self) -> None:
+        source = self._create_source_file("library-detail-small.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source)
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_id)
+                .values(
+                    rel_path="tv/show/Season 1/library-detail-small.mkv",
+                    parent_dir="tv/show/Season 1",
+                    size_bytes=1024 ** 2,
+                )
+            )
+
+            web_app._reset_folder_card_cache()
+            recommended_cards = web_app._list_folder_cards(self.config, connection)
+            library_cards = web_app._list_library_detail_cards(self.config, connection)
+
+        self.assertEqual(recommended_cards, [])
+        self.assertEqual([card.prefix for card in library_cards], ["tv/show/Season 1"])
+        self.assertFalse(library_cards[0].details_loading)
+
+    def test_library_detail_cards_keep_pending_seasons_with_negative_measured_savings(self) -> None:
+        source = self._create_source_file("library-detail-larger-output.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source, status="validated")
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_id)
+                .values(
+                    rel_path="tv/show/Season 2/library-detail-larger-output.mkv",
+                    parent_dir="tv/show/Season 2",
+                    size_bytes=1024 ** 2,
+                )
+            )
+            self._insert_staged_artifact(
+                connection,
+                item_id,
+                self._staging_path("library-detail-larger-output.mkv"),
+            )
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(
+                    source_rel_path="tv/show/Season 2/library-detail-larger-output.mkv",
+                    source_video_codec="h264",
+                    source_size_bytes=1024 ** 2,
+                    bytes_saved=-1024,
+                )
+            )
+
+            cards = web_app._list_library_detail_cards(self.config, connection)
+
+        self.assertEqual([card.prefix for card in cards], ["tv/show/Season 2"])
+        self.assertEqual(cards[0].known_saved_bytes, -1024)
+        self.assertEqual(cards[0].projected_reclaim_bytes, -1024)
+
     def test_series_folder_cards_group_tv_items_by_show(self) -> None:
         first = self._create_source_file("season-one.mkv")
         second = self._create_source_file("season-two.mkv")
@@ -3341,6 +3544,35 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(payload["folders"][0]["prefix"], "tv/show/Season 1")
         self.assertEqual(payload["series_folders"][0]["prefix"], "tv/show")
         self.assertEqual(payload["series_folders"][0]["scope_label"], "Series")
+
+    def test_dashboard_library_payload_marks_structure_as_loading_details(self) -> None:
+        structure_card = folder_cards_runtime.FolderCard(
+            prefix="tv/show/Season 1",
+            title="show · Season 1",
+            subtitle="show",
+            scope_label="Season",
+            item_count=2,
+            pending_count=1,
+            total_size_bytes=2048,
+            estimated_savings_bytes=0,
+            known_saved_bytes=0,
+            projected_reclaim_bytes=0,
+            average_age_days=0.0,
+            sort_score=0.0,
+            statuses={"planned": 1, "promoted": 1},
+            video_codecs={},
+            details_loading=True,
+        )
+
+        payload = dashboard_payloads.dashboard_library_payload(
+            self.config,
+            folder_card_cache_key=lambda _config: ("cache", 1, 2),
+            list_library_structure_cards=lambda _config, _connection: [structure_card],
+        )
+
+        self.assertEqual(payload["folders"][0]["prefix"], "tv/show/Season 1")
+        self.assertTrue(payload["folders"][0]["details_loading"])
+        self.assertEqual(payload["series_folders"], [])
 
     def test_folder_studio_series_context_and_encode_candidate_count_follow_manifest_selection(self) -> None:
         pending = self._create_source_file("pending.mkv")
@@ -5445,6 +5677,98 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertTrue(result["queued"])
         self.assertEqual(saved_payloads[0]["accepted_at"], "2026-05-24T04:40:00+00:00")
         self.assertTrue(merged_advice[0]["operator_approved_size_tradeoff"])
+
+    def test_save_profile_action_rejects_stale_size_tradeoff_confirmation_hash(self) -> None:
+        calibration_payload: folder_actions_runtime.ActionPayload = {
+            "mode": "sample",
+            "job_id": "sample-1",
+            "review_media_ready": True,
+            "draft_hash": "draft-current",
+            "policy": {"video": {"target_vmaf": 85.0, "max_encoded_percent": 80}},
+            "sample_item": {
+                "library_item_id": 1,
+                "resolved_policy": {"video": {"target_vmaf": 85.0, "max_encoded_percent": 80}},
+            },
+            "sample_result": {"predicted_total_size_bytes": 376 * 1024 * 1024},
+        }
+        saved_payloads: list[folder_actions_runtime.ActionPayload] = []
+        queued_prefixes: list[str] = []
+
+        with self.assertRaises(HTTPException) as exc:
+            folder_actions_runtime.save_profile_action(
+                self.config,
+                "tv/show",
+                now_iso=web_app._now_iso,
+                load_sample_item=lambda *_args, **_kwargs: None,
+                load_calibration_state=lambda *_args, **_kwargs: dict(calibration_payload),
+                calibration_draft_hash=web_app._calibration_draft_hash,
+                save_calibration_state=lambda _config, _prefix, payload: saved_payloads.append(dict(payload)),
+                load_advice_state=lambda *_args, **_kwargs: {
+                    "request_disposition": "honored",
+                    "operator_request": {
+                        "operator_confirmed": True,
+                        "request_type": "size_budget",
+                        "budget_bytes": 300 * 1024 * 1024,
+                        "budget_label": "300 MB per episode",
+                        "applied_policy": None,
+                    },
+                },
+                record_visual_approval_artifact=lambda *_args, **_kwargs: None,
+                merge_advice_state=lambda *_args, **_kwargs: {},
+                upsert_override=lambda *_args, **_kwargs: None,
+                auto_queue_folder_encode=lambda prefix, *_args, **_kwargs: queued_prefixes.append(prefix) or {
+                    "ok": True
+                },
+                confirm_size_tradeoff=True,
+                reviewed_draft_hash="draft-old",
+            )
+
+        self.assertEqual(exc.exception.status_code, 409)
+        self.assertIn("changed after the size tradeoff review", str(exc.exception.detail))
+        self.assertEqual(saved_payloads, [])
+        self.assertEqual(queued_prefixes, [])
+
+    def test_save_profile_action_does_not_override_missing_size_prediction(self) -> None:
+        calibration_payload: folder_actions_runtime.ActionPayload = {
+            "mode": "sample",
+            "job_id": "sample-1",
+            "review_media_ready": True,
+            "policy": {"video": {"target_vmaf": 85.0, "max_encoded_percent": 80}},
+            "sample_item": {
+                "library_item_id": 1,
+                "resolved_policy": {"video": {"target_vmaf": 85.0, "max_encoded_percent": 80}},
+            },
+            "sample_result": {},
+        }
+
+        with self.assertRaises(HTTPException) as exc:
+            folder_actions_runtime.save_profile_action(
+                self.config,
+                "tv/show",
+                now_iso=web_app._now_iso,
+                load_sample_item=lambda *_args, **_kwargs: None,
+                load_calibration_state=lambda *_args, **_kwargs: dict(calibration_payload),
+                calibration_draft_hash=web_app._calibration_draft_hash,
+                save_calibration_state=lambda *_args, **_kwargs: None,
+                load_advice_state=lambda *_args, **_kwargs: {
+                    "request_disposition": "honored",
+                    "operator_request": {
+                        "operator_confirmed": True,
+                        "request_type": "size_budget",
+                        "budget_bytes": 300 * 1024 * 1024,
+                        "budget_label": "300 MB per episode",
+                        "applied_policy": None,
+                    },
+                },
+                record_visual_approval_artifact=lambda *_args, **_kwargs: None,
+                merge_advice_state=lambda *_args, **_kwargs: {},
+                upsert_override=lambda *_args, **_kwargs: None,
+                confirm_size_tradeoff=True,
+                reviewed_draft_hash=web_app._calibration_draft_hash(calibration_payload),
+            )
+
+        self.assertEqual(exc.exception.status_code, 409)
+        self.assertIn("did not report a predicted total size", str(exc.exception.detail))
 
     def test_save_profile_action_allows_under_target_quality_increase_without_tradeoff_confirmation(self) -> None:
         saved_payloads: list[folder_actions_runtime.ActionPayload] = []
@@ -8593,6 +8917,103 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(failed_details["encode_host_key"], "remote-b")
             self.assertIn("bad stdout", failed_details["error"])
 
+    def test_encode_one_item_records_operator_cancellation_as_stopped(self) -> None:
+        source_path = self._create_source_file("episode-encode-stopped.mkv")
+        staging_path = self._staging_path("episode-encode-stopped.mkv")
+        quality_result = QualitySearchResult(crf=28.0, metric="XPSNR", target=41.0, score=41.5, stdout="ok")
+        manifest = {"run_id": "run-encode-stopped", "items": []}
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path)
+            item = {
+                "library_item_id": item_id,
+                "resolved_policy": {
+                    "video": {"preset": 4, "encoder": "libsvtav1"},
+                    "audio": {},
+                    "subtitle": {},
+                },
+                "rel_path": "tv/show/episode-encode-stopped.mkv",
+                "duration_seconds": 1200.0,
+                "video_codec": "h264",
+                "width": 1920,
+                "height": 1080,
+                "source_path": str(source_path),
+                "source_fingerprint": "source-fingerprint",
+                "source_size_bytes": 1024,
+            }
+            with patch("mediaforce.execution.resolve_item_source_path", return_value=source_path), patch(
+                    "mediaforce.execution.resolve_item_staging_path", return_value=staging_path
+            ), patch("mediaforce.execution._search_quality", return_value=quality_result), patch(
+                "mediaforce.execution._select_streams", return_value={"audio_tracks": [], "subtitle_tracks": []}
+            ), patch("mediaforce.execution._build_ffmpeg_command",
+                     return_value=["ffmpeg", "-i", str(source_path), str(staging_path)]), patch(
+                "mediaforce.execution._run_encode_command",
+                side_effect=ProcessCancelledError("Operation was cancelled."),
+            ):
+                with self.assertRaisesRegex(ProcessCancelledError, "Operation was cancelled"):
+                    execution.encode_one_item(
+                        connection,
+                        self.config,
+                        self.root / "runs" / "manifest-encode-stopped.json",
+                        manifest,
+                        0,
+                        item,
+                        overwrite=False,
+                        encode_context={"origin": "queue", "encode_job_id": "job-stopped"},
+                    )
+
+            event_rows = self._item_event_rows(connection, item_id)
+            self.assertEqual([row["event_type"] for row in event_rows[-2:]], ["encoding_started", "encoding_stopped"])
+            stopped_details = json.loads(cast(str, event_rows[-1]["details_json"]))
+            self.assertEqual(stopped_details["error"], "Operation was cancelled.")
+
+    def test_completed_history_distinguishes_failures_from_operator_stops(self) -> None:
+        self.assertEqual(
+            completed_runtime._history_event_copy(
+                "encoding_failed",
+                {"error": "ffmpeg exited with status 1"},
+            )[:2],
+            ("Encoding failed", "fail"),
+        )
+        self.assertEqual(
+            completed_runtime._history_event_copy(
+                "encoding_failed",
+                {"error": "Operation was cancelled."},
+            )[:2],
+            ("Encoding stopped", "idle"),
+        )
+
+    def test_completed_history_lists_stopped_encode_events(self) -> None:
+        source_path = self._create_source_file("completed-history-stopped.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path)
+            connection.execute(
+                item_events.insert().values(
+                    library_item_id=item_id,
+                    created_at=datetime.now(UTC).isoformat(timespec="seconds"),
+                    event_type="encoding_stopped",
+                    details_json=json.dumps({"error": "Stopped by operator."}),
+                )
+            )
+            connection.commit()
+
+            history = completed_runtime.list_completed_history_events(
+                connection,
+                folder_group=lambda _rel_path: ("tv/show", "Show", "Season 1", "tv"),
+            )
+
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0].event_type, "encoding_stopped")
+        self.assertEqual(history[0].label, "Encoding stopped")
+        self.assertEqual(history[0].tone, "idle")
+        self.assertEqual(
+            completed_runtime._history_event_copy(
+                "encoding_stopped",
+                {"error": "Stopped by operator."},
+            )[:2],
+            ("Encoding stopped", "idle"),
+        )
+
     def test_encode_one_item_records_cleanup_warning_in_failure_event(self) -> None:
         source_path = self._create_source_file("episode-cleanup-warning.mkv")
         staging_path = self._staging_path("episode-cleanup-warning.mkv")
@@ -11475,6 +11896,77 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(payload["sample_item"]["rel_path"], "tv/show/episode-folder.mkv")
         self.assertIn("summary", payload)
 
+    def test_folder_api_exposes_measured_size_target_analysis(self) -> None:
+        source_path = self._create_source_file("episode-size-target.mkv")
+        self.config.raw.update(
+            {
+                "video": {"quality_metric": "auto", "target_vmaf": 94, "max_encoded_percent": 100},
+                "audio": {},
+                "subtitle": {},
+                "planning": {},
+            }
+        )
+        self.config.raw["media"]["output_container"] = "mkv"
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path)
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_id)
+                .values(audio_summary_json=json.dumps([{"index": 0, "codec": "aac", "channels": 2, "language": "eng"}]))
+            )
+
+        advice_state = {
+            "operator_request": {
+                "request_type": "size_budget",
+                "operator_confirmed": True,
+                "budget_bytes": 225 * 1024 * 1024,
+                "budget_label": "225 MB per episode",
+            }
+        }
+        calibration = {
+            "policy": {"video": {"target_size_mb": 225.0}},
+            "sample_result": {"predicted_total_size_bytes": 1_089_842_509},
+        }
+
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.purge_transient_artifacts"
+        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
+            "mediaforce.web.app._start_encode_queue_worker"
+        ):
+            app = web_app.create_app(self.config.paths.config_path)
+
+        folder_endpoint = next(
+            route.endpoint
+            for route in app.router.routes
+            if getattr(route, "path", "") == "/api/folders/{prefix:path}"
+        )
+        with patch("mediaforce.web.app._maybe_schedule_scan", return_value=None), patch(
+                "mediaforce.web.app._sample_calibration_host_statuses", return_value=[]
+        ), patch("mediaforce.web.app._load_advice_state", return_value=advice_state), patch(
+            "mediaforce.web.app._load_calibration_state", return_value=calibration
+        ), patch(
+            "mediaforce.web.app._backfill_multimodal_review_pack", return_value=advice_state
+        ), patch("mediaforce.web.app._preview_hotspots", return_value=[]), patch(
+            "mediaforce.web.app.describe_item_plan", return_value={}
+        ):
+            response = folder_endpoint("tv/show")
+        payload = json.loads(response.body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            payload["size_target_analysis"],
+            {
+                "budget_bytes": 225 * 1024 * 1024,
+                "budget_label": "225 MB per episode",
+                "tolerance": 0.15,
+                "lower_bound_bytes": 200_540_160,
+                "upper_bound_bytes": 271_319_040,
+                "predicted_total_size_bytes": 1_089_842_509,
+                "predicted_to_budget_ratio": 4.6194,
+                "status": "over_target",
+            },
+        )
+
     def test_folder_endpoint_returns_payload_for_fully_promoted_prefix(self) -> None:
         from mediaforce.web import app as folder_web_app
 
@@ -13683,7 +14175,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual({str(row["job_kind"]) for row in prefix_rows}, {"folder", "shard"})
         self.assertEqual({str(row["status"]) for row in prefix_rows}, {"queued"})
 
-    def test_load_latest_terminal_encode_job_for_prefix_prefers_latest_row_when_timestamps_tie(self) -> None:
+    def test_load_latest_terminal_encode_job_for_prefix_prefers_latest_display_row(self) -> None:
         shared_created_at = "2026-04-09T12:00:00+00:00"
         manifest_path = self._write_manifest("manifest-terminal-tie.json", [{"library_item_id": 1}])
 
@@ -13733,6 +14225,41 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     "status": "needs_attention",
                     "manifest_path": str(manifest_path),
                     "manifest_indexes": None,
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "host": {},
+                    "last_host": {},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": None,
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": None,
+                    "last_failure_at": None,
+                    "host_cooldown_until": None,
+                    "created_at": shared_created_at,
+                    "started_at": None,
+                    "finished_at": shared_created_at,
+                    "updated_at": shared_created_at,
+                },
+            )
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "newest-terminal-shard",
+                    "prefix": "tv/show",
+                    "job_kind": "shard",
+                    "parent_job_id": "newer-terminal",
+                    "status": "needs_attention",
+                    "manifest_path": str(manifest_path),
+                    "manifest_indexes": [0],
                     "item_count": 1,
                     "saved_profile_path": None,
                     "host": {},

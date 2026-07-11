@@ -4,6 +4,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 
 def register_folder_routes(
@@ -38,13 +39,19 @@ def register_folder_routes(
     @app.post("/api/folders/{prefix:path}/ai-tune")
     async def api_folder_ai_tune(prefix: str, request: Request) -> JSONResponse:
         body = await request.json()
-        result = folder_ai_tune_action(prefix.strip("/"), str(body.get("note", "")), str(body.get("host_key", "")))
+        result = await run_in_threadpool(
+            folder_ai_tune_action,
+            prefix.strip("/"),
+            str(body.get("note", "")),
+            str(body.get("host_key", "")),
+        )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     @app.post("/api/folders/{prefix:path}/ai-tune/preview")
     async def api_folder_ai_tune_preview(prefix: str, request: Request) -> JSONResponse:
         body = await request.json()
-        result = folder_ai_tune_preview_action(
+        result = await run_in_threadpool(
+            folder_ai_tune_preview_action,
             prefix.strip("/"),
             str(body.get("note", "")),
             str(body.get("host_key", "")),
@@ -54,7 +61,8 @@ def register_folder_routes(
     @app.post("/api/folders/{prefix:path}/ai-tune/confirm")
     async def api_folder_ai_tune_confirm(prefix: str, request: Request) -> JSONResponse:
         body = await request.json()
-        result = folder_ai_tune_confirm_action(
+        result = await run_in_threadpool(
+            folder_ai_tune_confirm_action,
             prefix.strip("/"),
             str(body.get("proposal_id", "")),
         )

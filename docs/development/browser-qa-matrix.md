@@ -53,6 +53,8 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   queued encode work exists.
 - Completed cleanup: one promoted `movies/Archive Ready` item with an archived
   original under the smoke archive root, so `/completed` has cleanup-ready work.
+- Completed history: the completed fixtures include earlier failed and
+  operator-stopped encode events so History must distinguish the two outcomes.
 - Blocked cleanup: one promoted `movies/Blocked Cleanup` item with an archived
   original outside the configured archive root, so `/completed` exposes a
   blocked cleanup state.
@@ -85,6 +87,7 @@ The automated narrow smoke uses a 390px viewport and fails when:
 
 - the app shell or `<main>` does not render quickly;
 - the expected route marker text is missing;
+- a folder route has not published its hydrated folder marker;
 - the document has horizontal page overflow;
 - a visible table is wider than the viewport.
 
@@ -92,6 +95,58 @@ Those checks are intentionally short and mechanical. For visual redesign or
 interaction work, add a manual browser review with screenshots under
 `scratch/ui-checks/` and inspect the actual starting viewport, post-interaction
 state, and narrow layout.
+
+On the Work screen, discovered source items without approved review evidence
+must remain in `Sample and approval` with a `Needs sample` state. Only folders
+with an approved draft may enter the `Encode backlog` lane.
+
+Review-assistant submissions may run multiple bounded inference steps. The
+browser must remain pending instead of aborting before those backend limits,
+and the pending state must explain that the request can take a few minutes and
+nothing queues until the operator reviews the plan.
+
+For a direct size request, the reviewed draft, queued sample, and technical
+details must agree on the requested total episode target. In particular, a
+request for 225 MB at source resolution must not fall back to the configured
+300 MB / 45 minute default after confirmation; the queued policy should pair
+225 MB with the representative episode runtime and preserve source resolution.
+
+When a measured sample lands outside that target band, the comparison viewport
+must say that the size goal was not met before presenting review media. It must
+distinguish review-clip byte savings from the full-episode estimate, make another
+same-target measured test the primary action, and require an explicit warning
+that accepting the tradeoff saves the profile and queues the full folder encode.
+
+While the review assistant or a representative sample is active, the first
+Folder Studio viewport must show a prominent live-operation state with the
+current action, worker, and elapsed/status copy. Operators must not need to
+scroll past old evidence to learn whether work is still running.
+
+On Activity, unresolved processing failures must appear newest first. A missing
+controller media mount must remain queued instead of dispatching futile SSH
+retries, identify storage as the blocker, and show `Selecting computer` or
+`Unassigned` rather than a placeholder host name.
+
+On Library, each show and season must expose projected space savings at the
+selection point. Verify that every sort option visibly reorders shows, that the
+desktop show and season panes keep one stable height with independent scrolling,
+and that narrow layouts replace the long show rail with a show picker. Opening a
+multi-season show must clearly state that one representative test and one size
+choice apply to all seasons before any full encode can be queued.
+
+Library structure must render before savings and workflow enrichment completes.
+With the detail request delayed, verify that show and season names, episode
+counts, current sizes, search, selection, and size/name sorting remain usable;
+savings fields must read as pending instead of zero. When details arrive, the
+selected show, scroll position, and size-sorted row order must stay stable while
+the pending metrics fill in. A detail-request failure must leave the structural
+library usable and explain that only savings and status details are unavailable.
+
+On Finished, the finished-season list must fit without horizontal scrolling at
+1024px and must become readable stacked rows at 390px. The light/dark control
+must persist across route changes and reloads, and both themes must preserve
+status contrast, media-stage darkness, focus visibility, and readable controls
+on Library, Activity, Finished, Settings, and folder review routes.
 
 ## State Gaps
 

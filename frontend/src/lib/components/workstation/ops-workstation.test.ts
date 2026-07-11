@@ -10,6 +10,8 @@ import {
 	hostPrepareTitle,
 	hostStateCopy,
 	hostTone,
+	hostWorkReason,
+	opsWorkLabel,
 	rowRecoveryLabel,
 	rowRecoveryTitle,
 	retryableEncodeJobIds,
@@ -166,19 +168,21 @@ describe('Ops workstation mapping', () => {
 			tone: 'wait',
 			action: undefined,
 			actionScope: undefined,
+			host: 'Selecting computer',
 			detail: 'transient worker fault'
 		});
 		expect(rows[2]).toMatchObject({
 			tone: 'wait',
 			action: 'retry-encode-prefix',
 			actionScope: 'row',
+			host: 'Unassigned',
 			detail: 'quality target missed'
 		});
-		expect(rowRecoveryLabel(rows[1])).toBe('No action');
+		expect(rowRecoveryLabel(rows[1])).toBe('Waiting');
 		expect(rowRecoveryTitle(rows[1])).toBe('No action is available for this row.');
 		expect(rowRecoveryLabel(rows[2])).toBe('Retry folder');
 		expect(rowRecoveryTitle(rows[2])).toContain('folder only');
-		expect(rowRecoveryLabel(rows[3])).toBe('No action');
+		expect(rowRecoveryLabel(rows[3])).toBe('Automatic');
 	});
 
 	it('keeps old sample failures in history instead of current work', () => {
@@ -198,8 +202,75 @@ describe('Ops workstation mapping', () => {
 		const blockers = buildOpsBlockers(dashboardFixture(), hostsFixture(), 'Dashboard unavailable');
 
 		expect(blockers.map((blocker) => blocker.key)).toEqual(['runtime-load', 'needs-attention']);
-		expect(blockers[0]).toMatchObject({ tone: 'fail', title: 'Mediaforce data unavailable' });
+		expect(blockers[0]).toMatchObject({ tone: 'fail', title: 'Activity is unavailable' });
 		expect(blockers[1]).toMatchObject({ tone: 'wait', action: 'retry-failed-encode' });
+	});
+
+	it('explains controller storage failures instead of exposing raw errno copy', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.recent = [
+			{
+				job_id: 'encode-storage-failure',
+				prefix: 'tv/Constellation/Season 1',
+				status: 'needs_attention',
+				error: "[Errno 13] Permission denied: '/Volumes/media'"
+			}
+		];
+
+		const row = buildOpsQueueRows(dashboard).find(
+			(candidate) => candidate.key === 'encode:encode-storage-failure'
+		);
+		const blockers = buildOpsBlockers(dashboard, hostsFixture(), null);
+
+		expect(row).toMatchObject({
+			host: 'Unassigned',
+			detail: 'Storage unavailable'
+		});
+		expect(blockers[0]).toMatchObject({
+			title: 'Constellation · Season 1 needs attention',
+			detail:
+				'Mediaforce cannot access /Volumes/media on this computer. Mount the storage, then retry.'
+		});
+	});
+
+	it('turns storage prefixes into human work labels', () => {
+		expect(opsWorkLabel('tv/Constellation/Season 1')).toBe('Constellation · Season 1');
+		expect(opsWorkLabel('movies/Arrival (2016)')).toBe('Arrival (2016)');
+	});
+
+	it('surfaces controller storage waits before claiming a computer can start', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.running = [];
+		dashboard.encode_queue.running_count = 0;
+		dashboard.encode_queue.needs_attention_count = 0;
+		dashboard.encode_queue.recent = [];
+		dashboard.encode_queue.queued = [
+			{
+				job_id: 'encode-storage-wait',
+				prefix: 'tv/Constellation/Season 1',
+				status: 'queued',
+				scheduler_status_copy:
+					'Mediaforce cannot access /Volumes/media/transcode on this computer. Mount the storage to continue.'
+			}
+		];
+		dashboard.encode_queue.queued_count = 1;
+
+		const blockers = buildOpsBlockers(dashboard, hostsFixture(), null);
+		const summary = buildOpsReadinessSummary(dashboard, hostsFixture(), null);
+
+		expect(blockers).toContainEqual({
+			key: 'controller-storage',
+			tone: 'wait',
+			title: 'Media storage is not available',
+			detail:
+				'Mediaforce cannot access /Volumes/media/transcode on this computer. Mount the storage to continue.'
+		});
+		expect(summary).toMatchObject({
+			tone: 'wait',
+			title: 'Waiting for media storage',
+			metricLabel: 'Waiting',
+			metricValue: '1'
+		});
 	});
 
 	it('surfaces no-ready-worker blockers when queued work cannot start', () => {
@@ -247,8 +318,8 @@ describe('Ops workstation mapping', () => {
 
 		expect(summary).toMatchObject({
 			tone: 'wait',
-			title: 'Retry is available',
-			metricLabel: 'Retry',
+			title: 'A season needs attention',
+			metricLabel: 'Needs you',
 			metricValue: '1'
 		});
 	});
@@ -266,6 +337,8 @@ describe('Ops workstation mapping', () => {
 			metricLabel: 'Running',
 			metricValue: '2'
 		});
+		expect(summary.detail).toContain('1 episode part across 1 computer');
+		expect(summary.detail).toContain('1 test active');
 	});
 
 	it('distinguishes available, scheduled-off, and unavailable host states', () => {
@@ -290,8 +363,55 @@ describe('Ops workstation mapping', () => {
 		};
 
 		expect(buildOpsQueueRows(dashboard)[0]).toMatchObject({
-			detail: '1% · 0.36x · 8.7 fps · Est. ETA 11h 4m'
+			detail: '0.36x · 8.7 fps · ETA 11h 4m'
 		});
+	});
+
+	it('uses aggregate progress host labels for folder jobs', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.running[0] = {
+			...dashboard.encode_queue.running[0],
+			host: {},
+			active_hosts: undefined,
+			progress: {
+				...dashboard.encode_queue.running[0].progress,
+				active_host_labels: ['M2 MBP', 'M1 MBP']
+			}
+		};
+
+		expect(buildOpsQueueRows(dashboard)[0]).toMatchObject({
+			host: 'M2 MBP, M1 MBP',
+			phase: '2 active episode parts'
+		});
+	});
+
+	it('explains why an eligible computer is idle', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.queued = [];
+		dashboard.encode_queue.queued_count = 0;
+		const hosts = hostsFixture();
+		hosts.hosts[0] = {
+			...hosts.hosts[0],
+			priority: 40,
+			active_encode_count: 1,
+			max_parallel_encodes: 1,
+			queue_active: false,
+			active_reason: 'parallel encode slots are full'
+		};
+		hosts.hosts[1] = {
+			...hosts.hosts[1],
+			key: 'mini',
+			label: 'M1 mini',
+			priority: 20,
+			schedule_open: true,
+			queue_active: true,
+			active_encode_count: 0
+		};
+
+		expect(hostWorkReason(hosts.hosts[0], hosts, dashboard)).toBe('Working at capacity.');
+		expect(hostWorkReason(hosts.hosts[1], hosts, dashboard)).toBe(
+			'Next in line; all current episode parts are already assigned.'
+		);
 	});
 
 	it('maps worker capabilities to user-facing labels', () => {

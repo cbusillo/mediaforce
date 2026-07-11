@@ -102,6 +102,7 @@ from mediaforce.web.runtime.folder_ai_tuning import (
     _operator_request_with_retrieved_memory_authority,
     _proposal_can_queue,
     _proposal_ready_message,
+    _size_budget_measurement_fragment,
     folder_ai_tune_confirm_action,
     folder_ai_tune_preview_action,
 )
@@ -3828,6 +3829,54 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIsNone(request["applied_max_encoded_percent"])
         self.assertIsNone(request["applied_policy"])
 
+    def test_operator_requested_experiment_detects_generated_measured_followup(self) -> None:
+        note = (
+            "Measured follow-up: keep the 225 MB per episode goal. The last representative test was 4.6 times over "
+            "that goal. Keep the current resolution and make the next representative test materially smaller toward "
+            "the goal while preserving as much picture and sound quality as possible."
+        )
+        with patch("mediaforce.web.runtime.folder_tuning_advice.request_operator_note_parse", return_value=None):
+            request = _operator_requested_experiment(
+                note,
+                {
+                    "source_size_bytes": 9_090_180_637,
+                    "duration_seconds": 5279.774,
+                    "audio_summary": [{"codec_name": "eac3", "channels": 2}],
+                    "resolved_policy": {
+                        "video": {"encoder": "libsvtav1"},
+                        "audio": {
+                            "convert_to_opus_codecs": ["eac3"],
+                            "stereo_opus_bitrate": "128k",
+                        },
+                    },
+                },
+            )
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "combined_experiment")
+        self.assertTrue(request["operator_confirmed"])
+        self.assertTrue(request["measured_size_followup"])
+        self.assertEqual(request["budget_bytes"], 225 * 1024 * 1024)
+        self.assertEqual(request["scale_height"], 0)
+        self.assertEqual(request["applied_policy"]["video"]["max_height"], 0)
+
+    def test_operator_requested_experiment_detects_generated_under_target_followup(self) -> None:
+        note = (
+            "Measured follow-up: keep the 225 MB per episode goal. The last representative test landed below that "
+            "goal. Keep the current resolution and make the next representative test spend more of the available "
+            "size on picture and sound quality."
+        )
+        with patch("mediaforce.web.runtime.folder_tuning_advice.request_operator_note_parse", return_value=None):
+            request = _operator_requested_experiment(note)
+
+        assert request is not None
+        self.assertEqual(request["request_type"], "combined_experiment")
+        self.assertTrue(request["operator_confirmed"])
+        self.assertTrue(request["measured_size_followup"])
+        self.assertEqual(request["budget_bytes"], 225 * 1024 * 1024)
+        self.assertEqual(request["scale_height"], 0)
+        self.assertEqual(request["applied_policy"]["video"]["max_height"], 0)
+
     def test_operator_requested_experiment_ignores_negative_size_budget(self) -> None:
         with patch("mediaforce.web.runtime.folder_tuning_advice.request_operator_note_parse", return_value=None):
             request = _operator_requested_experiment("Target -10MB per episode.")
@@ -4235,9 +4284,18 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertEqual(captured_current_policy, [{"video": {"encoder": "libsvtav1"}}])
 
-    def test_folder_ai_tune_preview_keeps_current_policy_for_first_size_budget_sample(self) -> None:
+    def test_folder_ai_tune_preview_and_confirm_preserve_combined_225_mb_request(self) -> None:
         saved_proposals: list[dict[str, Any]] = []
-        base_policy = {"video": {"target_vmaf": 95.0, "max_encoded_percent": 80}}
+        saved_jobs: list[dict[str, Any]] = []
+        base_policy = {
+            "video": {
+                "target_size_mb": 300.0,
+                "target_runtime_minutes": 45.0,
+                "target_vmaf": 95.0,
+                "max_encoded_percent": 80,
+                "max_height": 1080,
+            }
+        }
         host = HostStatus(
             key="host-1",
             label="M4 Studio",
@@ -4249,11 +4307,18 @@ class TuningRuntimeTests(unittest.TestCase):
             missing_paths=[],
         )
         operator_request = {
-            "request_type": "size_budget",
+            "request_type": "combined_experiment",
             "operator_confirmed": True,
-            "budget_label": "300 MB per episode",
-            "budget_bytes": 300 * 1024 * 1024,
-            "applied_policy": None,
+            "budget_label": "225 MB per episode",
+            "budget_bytes": 225 * 1024 * 1024,
+            "feasibility": "plausible",
+            "applied_policy": {"video": {"max_height": 0}},
+            "size_budget_request": {
+                "request_type": "size_budget",
+                "budget_bytes": 225 * 1024 * 1024,
+                "feasibility": "plausible",
+                "applied_policy": None,
+            },
         }
         bad_seed = {
             "policy": {"video": {"target_vmaf": 94.0, "max_encoded_percent": 8}},
@@ -4280,7 +4345,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 "source_path": str(self.root / "source" / "tv" / "show" / "episode.mkv"),
                 "source_size_bytes": 4_000_000_000,
                 "video_codec": "h264",
-                "duration_seconds": 2500.0,
+                "duration_seconds": 5279.774,
                 "audio_summary": [],
                 "subtitle_summary": [],
                 "resolved_policy": dict(base_policy),
@@ -4312,9 +4377,15 @@ class TuningRuntimeTests(unittest.TestCase):
             multimodal_review_pack_public_view=lambda *_args, **_kwargs: None,
             tuning_advice_payload=lambda *_args, **_kwargs: {},
             load_pending_proposal=lambda *_args, **_kwargs: None,
-            apply_policy_fragment=lambda current, fragment: {**current, **fragment},
+            apply_policy_fragment=lambda current, fragment: {
+                **current,
+                "video": {
+                    **dict(current.get("video", {})),
+                    **dict(fragment.get("video", {})),
+                },
+            },
             save_advice_state=lambda *_args, **_kwargs: None,
-            save_job_state=lambda *_args, **_kwargs: None,
+            save_job_state=lambda _connection, _config, _prefix, payload: saved_jobs.append(dict(payload)),
             clear_pending_proposal=lambda *_args, **_kwargs: None,
             record_tuning_session=lambda *_args, **_kwargs: "session-1",
         )
@@ -4324,19 +4395,255 @@ class TuningRuntimeTests(unittest.TestCase):
                 self.config,
                 deps,
                 "tv/show",
-                "Aim for around 300MB per episode.",
+                "Aim for about 225 MB per episode. Keep the current resolution and make a representative test so I can judge the picture and sound.",
                 "host-1",
             )
 
         self.assertTrue(result["ok"])
         proposal = saved_proposals[0]
         self.assertTrue(proposal["can_queue"])
-        self.assertEqual(proposal["preview_policy"], base_policy)
-        self.assertEqual(proposal["applied_policy"], {})
-        self.assertIsNone(proposal["job_fields"]["seed_applied_policy"])
+        expected_fragment = {
+            "video": {
+                "max_height": 0,
+                "target_size_mb": 225.0,
+                "target_runtime_minutes": 87.996,
+            }
+        }
+        self.assertEqual(
+            proposal["preview_policy"],
+            {
+                "video": {
+                    "target_size_mb": 225.0,
+                    "target_runtime_minutes": 87.996,
+                    "target_vmaf": 95.0,
+                    "max_encoded_percent": 80,
+                    "max_height": 0,
+                }
+            },
+        )
+        self.assertEqual(proposal["applied_policy"], expected_fragment)
+        self.assertEqual(proposal["job_fields"]["seed_applied_policy"], expected_fragment)
         self.assertEqual(proposal["request_disposition"], "honored")
 
-    def test_folder_ai_tune_preview_keeps_current_policy_when_seed_worker_fails_for_first_size_budget(self) -> None:
+        deps.load_pending_proposal = lambda *_args, **_kwargs: proposal
+        confirm_result = folder_ai_tune_confirm_action(
+            self.config,
+            deps,
+            "tv/show",
+            str(proposal["proposal_id"]),
+        )
+
+        self.assertTrue(confirm_result["ok"])
+        self.assertEqual(saved_jobs[0]["policy"], proposal["preview_policy"])
+
+    def test_size_budget_measurement_fragment_preserves_combined_source_resolution_request(self) -> None:
+        fragment = _size_budget_measurement_fragment(
+            {
+                "request_type": "combined_experiment",
+                "operator_confirmed": True,
+                "applied_policy": {"video": {"max_height": 0}},
+                "size_budget_request": {
+                    "request_type": "size_budget",
+                    "budget_bytes": 225 * 1024 * 1024,
+                },
+            },
+            {"duration_seconds": 5279.774},
+        )
+
+        self.assertEqual(
+            fragment,
+            {
+                "video": {
+                    "max_height": 0,
+                    "target_size_mb": 225.0,
+                    "target_runtime_minutes": 87.996,
+                }
+            },
+        )
+
+    def test_folder_ai_retune_and_confirm_preserve_combined_225_mb_request_when_worker_is_unclear(self) -> None:
+        saved_proposals: list[dict[str, Any]] = []
+        saved_jobs: list[dict[str, Any]] = []
+        preview_connections: list[Any] = []
+        base_policy = {
+            "video": {
+                "target_size_mb": 300.0,
+                "target_runtime_minutes": 45.0,
+                "target_vmaf": 85.0,
+                "max_encoded_percent": 80,
+                "max_height": 1080,
+            }
+        }
+        sample_item = {
+            "rel_path": "tv/show/episode.mkv",
+            "source_path": str(self.root / "source" / "tv" / "show" / "episode.mkv"),
+            "source_size_bytes": 4_000_000_000,
+            "video_codec": "h264",
+            "duration_seconds": 5279.774,
+            "audio_summary": [],
+            "subtitle_summary": [],
+            "resolved_policy": dict(base_policy),
+        }
+        operator_request = {
+            "request_type": "combined_experiment",
+            "operator_confirmed": True,
+            "budget_label": "225 MB per episode",
+            "budget_bytes": 225 * 1024 * 1024,
+            "feasibility": "plausible",
+            "applied_policy": {"video": {"max_height": 0}},
+            "size_budget_request": {
+                "request_type": "size_budget",
+                "budget_bytes": 225 * 1024 * 1024,
+                "feasibility": "plausible",
+                "applied_policy": None,
+            },
+        }
+        host = HostStatus(
+            key="host-1",
+            label="M4 Studio",
+            mode="ssh",
+            priority=10,
+            capabilities=["sample_calibration"],
+            available=True,
+            message="Mounted and ready",
+            missing_paths=[],
+        )
+
+        def load_sample_item(connection: Any, *_args: object, **_kwargs: object) -> dict[str, Any]:
+            preview_connections.append(connection)
+            return dict(sample_item)
+
+        def load_recent_sessions(connection: Any, *_args: object, **_kwargs: object) -> list[dict[str, Any]]:
+            preview_connections.append(connection)
+            return []
+
+        def apply_fragment(current: dict[str, Any], fragment: dict[str, Any]) -> dict[str, Any]:
+            merged = dict(current)
+            for section, values in fragment.items():
+                if isinstance(values, dict) and isinstance(merged.get(section), dict):
+                    merged[section] = {**merged[section], **values}
+                else:
+                    merged[section] = values
+            return merged
+
+        def unclear_tuning(*, project_root: Path, payload: dict[str, object]) -> TuningPolicyResponse:
+            self.assertEqual(project_root, self.config.paths.project_root)
+            self.assertEqual(payload["requested_experiment"], operator_request)
+            self.assertTrue(preview_connections)
+            self.assertTrue(all(connection.closed for connection in preview_connections))
+            return TuningPolicyResponse(
+                ok=False,
+                summary="The tuning worker did not return valid structured JSON.",
+                raw="attempt 1: timed out",
+                prompt_version="tune-v10",
+                diagnosis="The tuning worker did not complete cleanly.",
+                confidence="low",
+                evidence_checked=[],
+                suggested_follow_up="Ask again with a concrete experiment.",
+                request_disposition="unclear",
+                request_response="I could not turn that note into a trustworthy next draft.",
+                feasibility_note=None,
+                proposed_policy={},
+                toolbelt_used=[],
+                self_check=None,
+            )
+
+        deps = FolderAiTuneDeps(
+            resolve_sample_host=lambda _config, _host_key: host,
+            load_job_state=lambda *_args, **_kwargs: None,
+            load_retryable_sample_job_state=lambda *_args, **_kwargs: None,
+            sample_item=load_sample_item,
+            operator_requested_experiment=lambda *_args, **_kwargs: dict(operator_request),
+            load_calibration_state=lambda *_args, **_kwargs: {
+                "policy": dict(base_policy),
+                "sample_result": {"predicted_total_size_bytes": 1_000_000_000},
+            },
+            recent_tuning_sessions=load_recent_sessions,
+            matching_request_history=lambda *_args, **_kwargs: None,
+            metric_support=lambda: {"vmaf": True},
+            maybe_seed_baseline_policy=lambda *_args, **_kwargs: None,
+            seed_advice_payload=lambda *_args, **_kwargs: None,
+            proposal_alignment_issue=proposal_alignment_issue,
+            now_iso=lambda: "2026-07-10T21:46:56+00:00",
+            proposal_signal_copy=lambda *_args, **_kwargs: "signal",
+            proposal_context_snapshot=lambda **kwargs: dict(kwargs),
+            save_pending_proposal=lambda _config, _prefix, payload: saved_proposals.append(dict(payload)),
+            pending_proposal_public_view=lambda payload: payload,
+            build_tuning_runtime_toolbelt=lambda *_args, **_kwargs: {},
+            review_pack_dir=lambda *_args, **_kwargs: self.root / "review-pack",
+            remove_path_if_exists=lambda *_args, **_kwargs: None,
+            build_multimodal_review_pack=lambda *_args, **_kwargs: None,
+            multimodal_review_pack_public_view=lambda *_args, **_kwargs: None,
+            tuning_advice_payload=lambda **kwargs: {
+                "summary": kwargs["tuning"].summary,
+                "diagnosis": kwargs["tuning"].diagnosis,
+                "confidence": kwargs["tuning"].confidence,
+                "request_disposition": kwargs["tuning"].request_disposition,
+                "request_response": kwargs["tuning"].request_response,
+            },
+            load_pending_proposal=lambda *_args, **_kwargs: None,
+            apply_policy_fragment=apply_fragment,
+            save_advice_state=lambda *_args, **_kwargs: None,
+            save_job_state=lambda _connection, _config, _prefix, payload: saved_jobs.append(dict(payload)),
+            clear_pending_proposal=lambda *_args, **_kwargs: None,
+            record_tuning_session=lambda *_args, **_kwargs: "session-1",
+        )
+
+        with patch("mediaforce.web.runtime.folder_ai_tuning.inspect_prefix", return_value={"item_count": 1}), patch(
+                "mediaforce.web.runtime.folder_ai_tuning.retrieve_learning_context",
+                return_value=[],
+        ), patch(
+            "mediaforce.web.runtime.folder_ai_tuning.request_note_tuning",
+            side_effect=unclear_tuning,
+        ):
+            result = folder_ai_tune_preview_action(
+                self.config,
+                deps,
+                "tv/show",
+                "Aim for about 225 MB per episode. Keep the current resolution and make a representative test so I can judge the picture and sound.",
+                "host-1",
+            )
+
+        self.assertTrue(result["ok"])
+        proposal = saved_proposals[0]
+        expected_fragment = {
+            "video": {
+                "max_height": 0,
+                "target_size_mb": 225.0,
+                "target_runtime_minutes": 87.996,
+            }
+        }
+        self.assertTrue(proposal["can_queue"])
+        self.assertEqual(proposal["request_disposition"], "honored")
+        self.assertTrue(proposal["advice_payload"]["ok"])
+        self.assertEqual(proposal["confidence"], "low")
+        self.assertEqual(proposal["applied_policy"], expected_fragment)
+        self.assertEqual(
+            proposal["preview_policy"],
+            {
+                "video": {
+                    "target_size_mb": 225.0,
+                    "target_runtime_minutes": 87.996,
+                    "target_vmaf": 85.0,
+                    "max_encoded_percent": 80,
+                    "max_height": 0,
+                }
+            },
+        )
+
+        deps.load_pending_proposal = lambda *_args, **_kwargs: proposal
+        with patch("mediaforce.web.runtime.folder_ai_tuning.promote_learning_artifact", return_value=None):
+            confirm_result = folder_ai_tune_confirm_action(
+                self.config,
+                deps,
+                "tv/show",
+                str(proposal["proposal_id"]),
+            )
+
+        self.assertTrue(confirm_result["ok"])
+        self.assertEqual(saved_jobs[0]["policy"], proposal["preview_policy"])
+
+    def test_folder_ai_tune_preview_applies_size_target_when_seed_worker_fails(self) -> None:
         saved_proposals: list[dict[str, Any]] = []
         base_policy = {"video": {"target_size_mb": 300.0, "target_vmaf": 85.0, "max_encoded_percent": 80}}
         host = HostStatus(
@@ -4425,7 +4732,13 @@ class TuningRuntimeTests(unittest.TestCase):
             multimodal_review_pack_public_view=lambda *_args, **_kwargs: None,
             tuning_advice_payload=lambda *_args, **_kwargs: {},
             load_pending_proposal=lambda *_args, **_kwargs: None,
-            apply_policy_fragment=lambda current, fragment: {**current, **fragment},
+            apply_policy_fragment=lambda current, fragment: {
+                **current,
+                "video": {
+                    **dict(current.get("video", {})),
+                    **dict(fragment.get("video", {})),
+                },
+            },
             save_advice_state=lambda *_args, **_kwargs: None,
             save_job_state=lambda *_args, **_kwargs: None,
             clear_pending_proposal=lambda *_args, **_kwargs: None,
@@ -4444,10 +4757,26 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         proposal = saved_proposals[0]
         self.assertTrue(proposal["can_queue"])
-        self.assertEqual(proposal["preview_policy"], base_policy)
-        self.assertEqual(proposal["applied_policy"], {})
+        expected_fragment = {
+            "video": {
+                "target_size_mb": 300.0,
+                "target_runtime_minutes": 44.774,
+            }
+        }
+        self.assertEqual(
+            proposal["preview_policy"],
+            {
+                "video": {
+                    "target_size_mb": 300.0,
+                    "target_vmaf": 85.0,
+                    "max_encoded_percent": 80,
+                    "target_runtime_minutes": 44.774,
+                }
+            },
+        )
+        self.assertEqual(proposal["applied_policy"], expected_fragment)
         self.assertEqual(proposal["request_disposition"], "honored")
-        self.assertIn("current policy", proposal["request_response"])
+        self.assertIn("explicit request", proposal["request_response"])
         self.assertEqual(proposal["trace"]["raw_response"], "attempt 1: timed out after 90s")
 
     def test_folder_ai_tune_preview_overrides_seed_refusal_for_first_av1_size_budget(self) -> None:
@@ -4559,7 +4888,7 @@ class TuningRuntimeTests(unittest.TestCase):
         proposal = saved_proposals[0]
         self.assertTrue(proposal["can_queue"])
         self.assertEqual(proposal["request_disposition"], "honored")
-        self.assertIn("current policy", proposal["request_response"])
+        self.assertIn("explicit request", proposal["request_response"])
 
     def test_first_size_budget_sample_rejects_nonpositive_video_budget(self) -> None:
         seed_job_fields = {
@@ -4763,7 +5092,15 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(proposal["preview_policy"]["video"]["target_vmaf"], 88.0)
         self.assertEqual(
             proposal["applied_policy"],
-            {"video": {"target_vmaf": 88.0, "min_target_vmaf": 88.0, "max_encoded_percent": 7}},
+            {
+                "video": {
+                    "target_vmaf": 88.0,
+                    "min_target_vmaf": 88.0,
+                    "target_size_mb": 300.0,
+                    "target_runtime_minutes": 41.667,
+                    "max_encoded_percent": 7,
+                }
+            },
         )
         self.assertEqual(proposal["operator_request"]["applied_max_encoded_percent"], 7)
         self.assertEqual(proposal["operator_request"]["applied_policy"]["video"]["max_encoded_percent"], 7)
@@ -4780,7 +5117,7 @@ class TuningRuntimeTests(unittest.TestCase):
             {"video": {"max_encoded_percent": 7}},
         )
 
-    def test_folder_ai_tune_preview_does_not_enforce_first_soft_size_target_after_measured_miss(self) -> None:
+    def test_folder_ai_tune_preview_keeps_quality_policy_for_first_soft_size_target_after_measured_miss(self) -> None:
         saved_proposals: list[dict[str, Any]] = []
         base_policy = {"video": {"target_vmaf": 95.0, "max_encoded_percent": 80}}
         host = HostStatus(
@@ -4891,13 +5228,14 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         proposal = saved_proposals[0]
-        self.assertFalse(proposal["can_queue"])
+        self.assertTrue(proposal["can_queue"])
         self.assertNotIn("max_encoded_percent", proposal["applied_policy"].get("video", {}))
         self.assertEqual(
-            proposal["message"],
-            "The draft lowers the VMAF target based only on a size budget. Run a measured sample or ask for "
-            "a specific quality tradeoff before changing quality targets.",
+            proposal["applied_policy"],
+            {"video": {"target_size_mb": 300.0, "target_runtime_minutes": 41.667}},
         )
+        self.assertEqual(proposal["preview_policy"]["video"]["target_vmaf"], 95.0)
+        self.assertEqual(proposal["request_disposition"], "honored")
 
     def test_folder_ai_tune_preview_keeps_stricter_ai_size_cap_for_hard_cap_after_measured_miss(self) -> None:
         saved_proposals: list[dict[str, Any]] = []
@@ -5655,6 +5993,7 @@ class TuningRuntimeTests(unittest.TestCase):
 
         def fake_request_seed_policy(*, project_root: Path, payload: dict[str, object]) -> SeedPolicyResponse:
             self.assertEqual(project_root, self.config.paths.project_root)
+            self.assertFalse(connection.in_transaction())
             captured_payloads.append(payload)
             return SeedPolicyResponse(
                 ok=True,

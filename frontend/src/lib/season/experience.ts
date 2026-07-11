@@ -1,0 +1,680 @@
+import type {
+	DashboardSummaryPayload,
+	EncodeQueueJob,
+	FolderCard,
+	FolderPayload,
+	FolderStatusPayload
+} from '$lib/api/types';
+
+export type HumanSeasonStateKey =
+	| 'needs_test'
+	| 'making_test'
+	| 'ready_to_compare'
+	| 'ready_to_make'
+	| 'making_season'
+	| 'ready_to_check'
+	| 'ready_to_finish'
+	| 'finished'
+	| 'needs_help';
+
+export type HumanSeasonTone = 'quiet' | 'active' | 'ready' | 'success' | 'attention';
+
+export interface HumanSeasonState {
+	key: HumanSeasonStateKey;
+	label: string;
+	detail: string;
+	tone: HumanSeasonTone;
+	recoveryKind?: 'test' | 'season';
+}
+
+export interface ApprovalGuard {
+	kind: 'high_impact' | 'size_tradeoff';
+	title: string;
+	detail: string;
+	confirmHighImpact: boolean;
+	confirmSizeTradeoff: boolean;
+}
+
+export interface SeasonIdentity {
+	library: string;
+	show: string;
+	season: string;
+	showPrefix: string;
+}
+
+export interface SizeGoal {
+	key: 'recommended' | 'smaller' | 'roomier';
+	title: string;
+	megabytesPerEpisode: number;
+	detail: string;
+}
+
+export interface SizeTargetAnalysis {
+	status: 'inside_target_band' | 'over_target' | 'under_target' | 'missing_prediction' | '';
+	budgetBytes: number;
+	predictedBytes: number;
+	lowerBoundBytes: number;
+	upperBoundBytes: number;
+	predictedToBudgetRatio: number;
+}
+
+export interface ReviewClip {
+	path: string;
+	timestampSeconds: number;
+	durationSeconds: number;
+	sizeBytes: number;
+}
+
+export interface ReviewPair {
+	source: ReviewClip;
+	preview: ReviewClip;
+	comparePath: string;
+}
+
+const ACTIVE_JOB_STATUSES = new Set(['queued', 'running', 'starting', 'retry_backoff', 'stopping']);
+const FAILURE_JOB_STATUSES = new Set(['failed', 'stopped', 'needs_attention']);
+
+function record(value: unknown): Record<string, unknown> {
+	return value && typeof value === 'object' && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: {};
+}
+
+function records(value: unknown): Array<Record<string, unknown>> {
+	return Array.isArray(value) ? value.map(record) : [];
+}
+
+function text(value: unknown): string {
+	return typeof value === 'string' ? value.trim() : '';
+}
+
+function numberValue(value: unknown): number {
+	const parsed = Number(value ?? 0);
+	return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function booleanValue(value: unknown): boolean {
+	return value === true;
+}
+
+function jobStatus(job: unknown): string {
+	return text(record(job).status).toLowerCase();
+}
+
+function isActiveJob(job: unknown): boolean {
+	return ACTIVE_JOB_STATUSES.has(jobStatus(job));
+}
+
+function isFailedJob(job: unknown): boolean {
+	return FAILURE_JOB_STATUSES.has(jobStatus(job));
+}
+
+function matchesPrefix(job: Record<string, unknown>, prefix: string): boolean {
+	return text(job.prefix) === prefix;
+}
+
+function dashboardJobs(dashboard: DashboardSummaryPayload, kind: 'sample' | 'encode') {
+	if (kind === 'sample') {
+		const lane = dashboard.calibration_queue.sample;
+		return {
+			running: records(lane.running),
+			queued: records(lane.queued),
+			ready: records(lane.pending_review),
+			recent: records(lane.recent_failed)
+		};
+	}
+	return {
+		running: dashboard.encode_queue.running.map(record),
+		queued: dashboard.encode_queue.queued.map(record),
+		ready: [] as Array<Record<string, unknown>>,
+		recent: (dashboard.encode_queue.recent ?? []).map(record)
+	};
+}
+
+export function seasonIdentity(prefix: string): SeasonIdentity {
+	const segments = prefix.split('/').filter(Boolean);
+	const library = segments[0] ?? '';
+	const last = segments.at(-1) ?? prefix;
+	const hasSeasonSuffix = /^(season\b|specials?$)/i.test(last);
+	const showSegments = hasSeasonSuffix ? segments.slice(1, -1) : segments.slice(1);
+	const show = showSegments.join(' / ') || last || 'Unknown show';
+	const season = hasSeasonSuffix ? last : 'Season';
+	return {
+		library,
+		show,
+		season,
+		showPrefix: [library, ...showSegments].filter(Boolean).join('/')
+	};
+}
+
+export function isSeriesPrefix(prefix: string): boolean {
+	const segments = prefix.split('/').filter(Boolean);
+	return segments[0]?.toLowerCase() === 'tv' && segments.length === 2;
+}
+
+export function seasonNumberLabel(season: string): string {
+	const match = season.match(/(\d+)/);
+	return match?.[1] ?? (season.toLowerCase().startsWith('special') ? 'S' : season.slice(0, 2));
+}
+
+export function episodeLabel(path: string | null | undefined): string {
+	const value = text(path);
+	const seasonEpisode = value.match(/S\d{1,3}E(\d{1,3})/i);
+	if (seasonEpisode) return `Episode ${Number.parseInt(seasonEpisode[1], 10)}`;
+	const alternate = value.match(/\b\d{1,3}x(\d{1,3})\b/i);
+	if (alternate) return `Episode ${Number.parseInt(alternate[1], 10)}`;
+	const fileName = value
+		.split('/')
+		.at(-1)
+		?.replace(/\.[^.]+$/, '')
+		.replaceAll(/[._-]+/g, ' ');
+	return fileName?.trim() || 'A representative episode';
+}
+
+export function folderHref(prefix: string): `/folders/${string}` {
+	return `/folders/${prefix
+		.split('/')
+		.map((segment) => encodeURIComponent(segment))
+		.join('/')}` as `/folders/${string}`;
+}
+
+export function formatFileSize(bytes: number | null | undefined): string {
+	const value = numberValue(bytes);
+	if (value <= 0) return 'Size not available';
+	const units = [
+		{ threshold: 1024 ** 3, suffix: 'GB' },
+		{ threshold: 1024 ** 2, suffix: 'MB' },
+		{ threshold: 1024, suffix: 'KB' }
+	];
+	for (const unit of units) {
+		if (value >= unit.threshold) {
+			const scaled = value / unit.threshold;
+			const digits = scaled >= 10 ? 0 : 1;
+			return `${scaled.toFixed(digits)} ${unit.suffix}`;
+		}
+	}
+	return `${Math.round(value)} bytes`;
+}
+
+export function formatDuration(seconds: number | null | undefined): string {
+	const value = numberValue(seconds);
+	if (value <= 0) return '';
+	const minutes = Math.round(value / 60);
+	if (minutes < 60) return `${minutes} min`;
+	const hours = Math.floor(minutes / 60);
+	const remaining = minutes % 60;
+	return remaining ? `${hours} hr ${remaining} min` : `${hours} hr`;
+}
+
+export function sizeGoals(folder: FolderPayload): SizeGoal[] {
+	const policy = record(folder.policy ?? folder.summary?.resolved_policy);
+	const video = record(policy.video);
+	const rawTarget = numberValue(video.target_size_mb) || 300;
+	const base = Math.min(1500, Math.max(100, Math.round(rawTarget / 25) * 25));
+	const rounded = (value: number) => Math.max(75, Math.round(value / 25) * 25);
+	return [
+		{
+			key: 'recommended',
+			title: 'Recommended',
+			megabytesPerEpisode: base,
+			detail: 'A balanced place to start for a living-room screen.'
+		},
+		{
+			key: 'smaller',
+			title: 'Save more space',
+			megabytesPerEpisode: rounded(base * 0.75),
+			detail: 'Smaller files. The test will show whether the trade-off feels right.'
+		},
+		{
+			key: 'roomier',
+			title: 'Keep more detail',
+			megabytesPerEpisode: rounded(base * 1.5),
+			detail: 'Larger files with more room for difficult scenes.'
+		}
+	];
+}
+
+export function technicalVideoPolicy(folder: FolderPayload): Record<string, unknown> {
+	const pendingProposal = record(folder.pending_proposal);
+	const previewPolicy = record(pendingProposal.preview_policy);
+	const previewVideo = record(previewPolicy.video);
+	if (Object.keys(previewVideo).length > 0) return previewVideo;
+
+	const calibrationJob = record(folder.calibration_job);
+	const jobPolicy = record(calibrationJob.policy);
+	if (isActiveJob(calibrationJob) && Object.keys(jobPolicy).length > 0)
+		return record(jobPolicy.video);
+
+	const policy = record(folder.policy ?? folder.summary?.resolved_policy);
+	return record(policy.video);
+}
+
+export function goalRequest(goal: SizeGoal): string {
+	return `Aim for about ${goal.megabytesPerEpisode} MB per episode. Keep the current resolution and make a representative test so I can judge the picture and sound.`;
+}
+
+export function measuredFollowupRequest(analysis: SizeTargetAnalysis): string {
+	const targetMegabytes = Math.round(analysis.budgetBytes / 1024 ** 2);
+	if (targetMegabytes <= 0) return '';
+	if (analysis.status === 'over_target' && analysis.predictedBytes > 0) {
+		return `Measured follow-up: keep the ${targetMegabytes} MB per episode goal. The last representative test was ${analysis.predictedToBudgetRatio.toFixed(1)} times over that goal. Keep the current resolution and make the next representative test materially smaller toward the goal while preserving as much picture and sound quality as possible.`;
+	}
+	if (analysis.status === 'under_target' && analysis.predictedBytes > 0) {
+		return `Measured follow-up: keep the ${targetMegabytes} MB per episode goal. The last representative test landed below that goal. Keep the current resolution and make the next representative test spend more of the available size on picture and sound quality.`;
+	}
+	return `Aim for about ${targetMegabytes} MB per episode. Keep the current resolution and repeat the representative test because the previous run did not produce a usable full-episode size estimate.`;
+}
+
+export function approvalGuardFromMessage(
+	message: string,
+	confirmedHighImpact = false,
+	confirmedSizeTradeoff = false
+): ApprovalGuard | null {
+	const normalized = message.trim().toLowerCase();
+	if (normalized.includes('high-impact')) {
+		return {
+			kind: 'high_impact',
+			title: 'This test changed important picture settings.',
+			detail:
+				'The comparison you watched reflects those changes. Keep it only if the picture and sound still feel right.',
+			confirmHighImpact: true,
+			confirmSizeTradeoff: confirmedSizeTradeoff
+		};
+	}
+	if (
+		normalized.includes('target band') ||
+		normalized.includes('predicted total size') ||
+		normalized.includes('size tradeoff') ||
+		normalized.includes('quality tradeoff')
+	) {
+		return {
+			kind: 'size_tradeoff',
+			title: 'This test missed your size goal.',
+			detail:
+				'The result may be larger or smaller than the goal you chose. The expected size shown on this page is the result you would accept.',
+			confirmHighImpact: confirmedHighImpact,
+			confirmSizeTradeoff: true
+		};
+	}
+	return null;
+}
+
+export function librarySeasonState(
+	card: FolderCard,
+	dashboard: DashboardSummaryPayload
+): HumanSeasonState {
+	const sampleJobs = dashboardJobs(dashboard, 'sample');
+	const encodeJobs = dashboardJobs(dashboard, 'encode');
+	if (
+		[...encodeJobs.running, ...encodeJobs.queued].some((job) => matchesPrefix(job, card.prefix))
+	) {
+		return {
+			key: 'making_season',
+			label: 'Making the season',
+			detail: 'The smaller episodes are being made now.',
+			tone: 'active'
+		};
+	}
+	if (
+		[...sampleJobs.running, ...sampleJobs.queued].some((job) => matchesPrefix(job, card.prefix))
+	) {
+		return {
+			key: 'making_test',
+			label: 'Making a test',
+			detail: 'One episode is being tested now.',
+			tone: 'active'
+		};
+	}
+	if (sampleJobs.ready.some((job) => matchesPrefix(job, card.prefix))) {
+		return {
+			key: 'ready_to_compare',
+			label: 'Test ready',
+			detail: 'Compare the original and new version.',
+			tone: 'ready'
+		};
+	}
+
+	const badge = text(card.review_badge_label).toLowerCase();
+	if (badge.includes('ready to review')) {
+		return {
+			key: 'ready_to_compare',
+			label: 'Test ready',
+			detail: 'Compare the original and new version.',
+			tone: 'ready'
+		};
+	}
+	if (badge.includes('approved')) {
+		return {
+			key: 'ready_to_make',
+			label: 'Test approved',
+			detail: 'The rest of the season can be made.',
+			tone: 'ready'
+		};
+	}
+	if (badge.includes('validate')) {
+		return {
+			key: 'ready_to_check',
+			label: 'Ready to check',
+			detail: 'The new episodes are ready for a safety check.',
+			tone: 'ready'
+		};
+	}
+	if (badge.includes('rerun') || badge.includes('attention')) {
+		return {
+			key: 'needs_help',
+			label: 'Needs a little help',
+			detail: 'Open the season for one clear recovery step.',
+			tone: 'attention',
+			recoveryKind: badge.includes('rerun') ? 'test' : 'season'
+		};
+	}
+
+	const promoted = numberValue(card.statuses.promoted);
+	if (card.item_count > 0 && promoted >= card.item_count) {
+		return {
+			key: 'finished',
+			label: 'Finished',
+			detail: 'Every episode is in place.',
+			tone: 'success'
+		};
+	}
+	if (card.workflow_state?.primary_lane === 'attention') {
+		return {
+			key: 'needs_help',
+			label: 'Needs a little help',
+			detail: 'Open the season for one clear recovery step.',
+			tone: 'attention',
+			recoveryKind: 'season'
+		};
+	}
+	if (card.workflow_state?.primary_lane === 'validate') {
+		return {
+			key: 'ready_to_check',
+			label: 'Ready to check',
+			detail: 'The new episodes are ready for a safety check.',
+			tone: 'ready'
+		};
+	}
+	if (card.workflow_state?.primary_lane === 'promote') {
+		return {
+			key: 'ready_to_finish',
+			label: 'Ready to finish',
+			detail: 'The smaller episodes passed their checks.',
+			tone: 'ready'
+		};
+	}
+	if (card.workflow_state?.primary_lane === 'processing') {
+		return {
+			key: 'making_season',
+			label: 'Making the season',
+			detail: 'The smaller episodes are being made now.',
+			tone: 'active'
+		};
+	}
+	return {
+		key: 'needs_test',
+		label: 'Make a test',
+		detail: 'Choose a size, then compare one episode first.',
+		tone: 'quiet'
+	};
+}
+
+export function detailSeasonState(
+	folder: FolderPayload,
+	status: FolderStatusPayload
+): HumanSeasonState {
+	const encodeJob = folder.encode_job;
+	const workflow = status.workflow_state ?? folder.workflow_state;
+	const sampleJob = status.calibration_job ?? folder.calibration_job;
+	const retryableSample = status.retryable_sample_job;
+	const calibration = record(folder.calibration);
+	const reviewGate = record(folder.review_gate);
+	const draftHash = text(calibration.draft_hash);
+	const acceptedHash = text(calibration.accepted_draft_hash);
+	const priorTestJobId = text(calibration.job_id);
+	const reviewGateStatus = text(reviewGate.status);
+
+	if (isActiveJob(encodeJob) || workflow?.primary_lane === 'processing') {
+		return {
+			key: 'making_season',
+			label: 'Making the season',
+			detail: 'The smaller episodes are being made now.',
+			tone: 'active'
+		};
+	}
+	if (isFailedJob(encodeJob) || workflow?.primary_lane === 'attention') {
+		return {
+			key: 'needs_help',
+			label: 'The season stopped',
+			detail: 'Completed episodes are safe. Try the unfinished work again.',
+			tone: 'attention',
+			recoveryKind: 'season'
+		};
+	}
+	if (workflow?.primary_lane === 'validate') {
+		return {
+			key: 'ready_to_check',
+			label: 'Ready to check',
+			detail: 'The new episodes are ready for a safety check.',
+			tone: 'ready'
+		};
+	}
+	if (workflow?.primary_lane === 'promote') {
+		return {
+			key: 'ready_to_finish',
+			label: 'Ready to finish',
+			detail: 'The smaller episodes passed their checks.',
+			tone: 'ready'
+		};
+	}
+	if (workflow?.primary_lane === 'complete' || workflow?.state === 'complete') {
+		return {
+			key: 'finished',
+			label: 'Finished',
+			detail: 'Every episode is in place.',
+			tone: 'success'
+		};
+	}
+	if (isActiveJob(sampleJob) || ['queued', 'running'].includes(status.calibration_status)) {
+		return {
+			key: 'making_test',
+			label: 'Making a test',
+			detail: 'One representative episode is being tested now.',
+			tone: 'active'
+		};
+	}
+	if (retryableSample || isFailedJob(sampleJob)) {
+		return {
+			key: 'needs_help',
+			label: 'The test stopped',
+			detail: 'Nothing was replaced. You can try the same test again.',
+			tone: 'attention',
+			recoveryKind: 'test'
+		};
+	}
+	const reviewReady =
+		booleanValue(calibration.browser_review_ready) || booleanValue(calibration.review_media_ready);
+	if (
+		reviewGateStatus === 'missing_review_media' ||
+		(priorTestJobId && !draftHash && !reviewReady)
+	) {
+		return {
+			key: 'needs_help',
+			label: 'The test needs another try',
+			detail: 'The previous test ended before the comparison was ready.',
+			tone: 'attention',
+			recoveryKind: 'test'
+		};
+	}
+	if (reviewReady && draftHash && draftHash !== acceptedHash) {
+		return {
+			key: 'ready_to_compare',
+			label: 'Test ready',
+			detail: 'Compare the original and new version.',
+			tone: 'ready'
+		};
+	}
+	if (booleanValue(reviewGate.can_confirm_full) || (draftHash && draftHash === acceptedHash)) {
+		return {
+			key: 'ready_to_make',
+			label: 'Test approved',
+			detail: 'The rest of the season can be made.',
+			tone: 'ready'
+		};
+	}
+	return {
+		key: 'needs_test',
+		label: 'Make a test',
+		detail: 'Choose a size, then compare one episode first.',
+		tone: 'quiet'
+	};
+}
+
+export function normalizeReviewPairs(folder: FolderPayload): ReviewPair[] {
+	const calibration = record(folder.calibration);
+	return records(calibration.review_pairs)
+		.map((pair) => {
+			const source = record(pair.source_clip);
+			const preview = record(pair.preview_clip);
+			const compare = record(pair.compare_clip);
+			return {
+				source: {
+					path: text(source.path),
+					timestampSeconds: numberValue(source.timestamp_seconds),
+					durationSeconds: numberValue(source.duration_seconds),
+					sizeBytes: numberValue(source.size_bytes)
+				},
+				preview: {
+					path: text(preview.path),
+					timestampSeconds: numberValue(preview.timestamp_seconds),
+					durationSeconds: numberValue(preview.duration_seconds),
+					sizeBytes: numberValue(preview.size_bytes)
+				},
+				comparePath: text(compare.path)
+			};
+		})
+		.filter((pair) => pair.source.path && pair.preview.path);
+}
+
+export function predictedEpisodeSize(folder: FolderPayload): number {
+	const calibration = record(folder.calibration);
+	return numberValue(record(calibration.sample_result).predicted_total_size_bytes);
+}
+
+export function folderSizeTargetAnalysis(folder: FolderPayload): SizeTargetAnalysis {
+	const analysis = record(folder.size_target_analysis);
+	const rawStatus = text(analysis.status);
+	const status = [
+		'inside_target_band',
+		'over_target',
+		'under_target',
+		'missing_prediction'
+	].includes(rawStatus)
+		? (rawStatus as SizeTargetAnalysis['status'])
+		: '';
+	return {
+		status,
+		budgetBytes: numberValue(analysis.budget_bytes),
+		predictedBytes: numberValue(analysis.predicted_total_size_bytes),
+		lowerBoundBytes: numberValue(analysis.lower_bound_bytes),
+		upperBoundBytes: numberValue(analysis.upper_bound_bytes),
+		predictedToBudgetRatio: numberValue(analysis.predicted_to_budget_ratio)
+	};
+}
+
+export function reviewSampleSizes(folder: FolderPayload): {
+	original: number;
+	smaller: number;
+	durationSeconds: number;
+	ratioPercent: number;
+} {
+	const totals = normalizeReviewPairs(folder).reduce(
+		(total, pair) => ({
+			original: total.original + pair.source.sizeBytes,
+			smaller: total.smaller + pair.preview.sizeBytes,
+			durationSeconds: total.durationSeconds + pair.source.durationSeconds
+		}),
+		{ original: 0, smaller: 0, durationSeconds: 0 }
+	);
+	return {
+		...totals,
+		ratioPercent: totals.original > 0 ? Math.round((totals.smaller / totals.original) * 100) : 0
+	};
+}
+
+export function currentEncodeProgress(job: EncodeQueueJob | null | undefined) {
+	const progress = job?.progress;
+	return {
+		percent: Math.min(100, Math.max(0, numberValue(progress?.percent_complete))),
+		completed: numberValue(progress?.completed_item_count),
+		total: numberValue(progress?.total_item_count || job?.shard_count || record(job).item_count),
+		currentEpisode: episodeLabel(progress?.current_item_rel_path),
+		eta: text(progress?.eta_copy),
+		hosts: Array.isArray(record(progress).active_host_labels)
+			? (record(progress).active_host_labels as unknown[]).map(String).filter(Boolean)
+			: []
+	};
+}
+
+export function plainFailureMessage(folder: FolderPayload, status: FolderStatusPayload): string {
+	const retryable = record(status.retryable_sample_job);
+	const sampleJob = record(status.calibration_job ?? folder.calibration_job);
+	const encodeJob = record(folder.encode_job);
+	const calibration = record(folder.calibration);
+	const reviewGate = record(folder.review_gate);
+	const raw = text(retryable.error) || text(sampleJob.error) || text(encodeJob.error);
+	const normalized = raw.toLowerCase();
+	if (
+		text(reviewGate.status) === 'missing_review_media' ||
+		(text(calibration.job_id) && !text(calibration.draft_hash))
+	) {
+		return 'The previous test ended before the comparison was ready. Nothing was replaced.';
+	}
+	if (!raw) return 'The work stopped before it finished. Your completed files are still safe.';
+	if (normalized.includes('restart') || normalized.includes('interrupted')) {
+		return 'The work stopped when Mediaforce restarted. Your completed files are still safe.';
+	}
+	if (normalized.includes('permission') || normalized.includes('denied')) {
+		return 'The selected computer could not reach one of the files. Check its connection, then try again.';
+	}
+	if (normalized.includes('suitable crf') || normalized.includes('quality target')) {
+		return 'That size goal was too small for this episode. Try a roomier goal.';
+	}
+	if (normalized.includes('stopped')) {
+		return 'The work was stopped before it finished. Nothing was replaced.';
+	}
+	return 'The work stopped before it finished. Nothing was replaced, and you can try again.';
+}
+
+export function activeSeasonCards(
+	cards: FolderCard[],
+	dashboard: DashboardSummaryPayload
+): Array<{ card: FolderCard; state: HumanSeasonState }> {
+	return cards
+		.map((card) => ({ card, state: librarySeasonState(card, dashboard) }))
+		.filter(({ state }) =>
+			[
+				'making_test',
+				'ready_to_compare',
+				'ready_to_make',
+				'making_season',
+				'ready_to_check',
+				'ready_to_finish',
+				'needs_help'
+			].includes(state.key)
+		)
+		.sort((left, right) => {
+			const order: Record<HumanSeasonStateKey, number> = {
+				making_test: 0,
+				making_season: 1,
+				ready_to_compare: 2,
+				needs_help: 3,
+				ready_to_make: 4,
+				ready_to_check: 5,
+				ready_to_finish: 6,
+				finished: 7,
+				needs_test: 8
+			};
+			return order[left.state.key] - order[right.state.key];
+		});
+}

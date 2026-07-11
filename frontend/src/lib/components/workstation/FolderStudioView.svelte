@@ -40,6 +40,7 @@
 		predictedFolderSizeBytes,
 		projectedReclaimBytes,
 		record,
+		REVIEW_ASSISTANT_PENDING_COPY,
 		resolveBenchRequestState,
 		resolvedMetricCopy,
 		resolveFolderTitle,
@@ -158,6 +159,8 @@
 	);
 	const workflowSteps = $derived(buildWorkflowSteps(workflow, activeScopeLabel));
 	const basicEncodeGuide = $derived(buildBasicEncodeGuide(workflow, activeScopeLabel));
+	const activeSampleRunning = $derived(workflow.primaryAction === 'monitor-sample');
+	const activeSampleHostLabel = $derived(String(calibrationJob?.host?.label ?? '').trim());
 	const proposalRows = $derived(buildProposalRows(studioFolder, pendingProposal));
 	const statusTiles = $derived(buildStatusTiles(studioFolder, status, hosts, workflow));
 	const footerSignals = $derived(buildFooterSignals(studioFolder, status, hosts, workflow));
@@ -262,8 +265,6 @@
 
 	async function sendBenchRequest() {
 		if (benchRequestDisabled) return;
-		const controller = new AbortController();
-		const timeout = window.setTimeout(() => controller.abort(), 30_000);
 		benchPending = true;
 		benchMessage = '';
 		benchError = '';
@@ -271,8 +272,7 @@
 			const response = await postJson<FolderBenchPreviewResponse>(
 				`${resolve('/')}api/folders/${encodedPrefix}/ai-tune/preview`,
 				{ note: trimmedBenchNote, host_key: selectedHostKey },
-				fetch,
-				{ signal: controller.signal }
+				fetch
 			);
 			localPendingProposal = response.proposal ?? studioFolder.pending_proposal ?? null;
 			localProposalPrefix = prefix;
@@ -280,14 +280,8 @@
 				response.message || 'Sample plan ready. Nothing is queued until you confirm it.';
 			benchNote = '';
 		} catch (error) {
-			benchError =
-				error instanceof DOMException && error.name === 'AbortError'
-					? 'Review assistant timed out after 30 seconds. Nothing was queued; try again or use the current sample source directly.'
-					: error instanceof Error
-						? error.message
-						: 'Review request failed.';
+			benchError = error instanceof Error ? error.message : 'Review request failed.';
 		} finally {
-			window.clearTimeout(timeout);
 			benchPending = false;
 		}
 	}
@@ -461,6 +455,35 @@
 					</div>
 				</div>
 			</header>
+
+			{#if benchPending || activeSampleRunning}
+				<section class="active-operation" role="status" aria-live="polite" aria-busy="true">
+					<div class="active-operation__state">
+						<span aria-hidden="true"></span>
+						<strong>{benchPending ? 'Review assistant working' : 'Sample encoding now'}</strong>
+					</div>
+					<div class="active-operation__copy">
+						<h2>{benchPending ? 'Building the sample plan' : workflow.title}</h2>
+						<p>{benchPending ? REVIEW_ASSISTANT_PENDING_COPY : workflow.copy}</p>
+					</div>
+					<div class="active-operation__meta">
+						{#if benchPending && benchRequestState.selectedHost?.label}
+							<span>Worker</span>
+							<strong>{benchRequestState.selectedHost.label}</strong>
+						{:else if activeSampleHostLabel}
+							<span>Worker</span>
+							<strong>{activeSampleHostLabel}</strong>
+						{/if}
+						{#if activeSampleRunning}
+							<a href={resolve('/ops')} data-mf-action="active-operation-ops"
+								>Open live operations</a
+							>
+						{:else}
+							<small>Keep this page open</small>
+						{/if}
+					</div>
+				</section>
+			{/if}
 
 			<nav class="workflow-strip" aria-label="Folder workflow">
 				{#each workflowSteps as step, index (step.label)}
@@ -1013,9 +1036,7 @@
 							{:else if benchMessage}
 								<p class="bench__status bench__status--ready">{benchMessage}</p>
 							{:else if benchPending}
-								<p class="bench__status">
-									Sending request to the review assistant. This can take up to 30 seconds.
-								</p>
+								<p class="bench__status">{REVIEW_ASSISTANT_PENDING_COPY}</p>
 							{:else if benchRequestState.blocker}
 								<p class="bench__status">{benchRequestState.blocker}</p>
 							{/if}
@@ -1313,6 +1334,74 @@
 
 	.folder-header h1 {
 		margin-top: var(--mf-space-3);
+	}
+
+	.active-operation {
+		align-items: center;
+		background: var(--mf-active-bg);
+		border: var(--mf-border);
+		border-left: 3px solid var(--mf-active-fg);
+		display: grid;
+		gap: var(--mf-space-5);
+		grid-template-columns: max-content minmax(0, 1fr) max-content;
+		order: 3;
+		padding: var(--mf-space-4) var(--mf-space-5);
+	}
+
+	.active-operation__state {
+		align-items: center;
+		color: var(--mf-active-fg-bright);
+		display: flex;
+		font-size: var(--mf-text-2xs);
+		gap: var(--mf-space-2);
+		letter-spacing: var(--mf-tracking-wide);
+		text-transform: uppercase;
+	}
+
+	.active-operation__state > span {
+		background: var(--mf-active-fg);
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--mf-active-fg) 20%, transparent);
+		height: 8px;
+		width: 8px;
+	}
+
+	.active-operation__copy {
+		display: grid;
+		gap: var(--mf-space-1);
+		min-width: 0;
+	}
+
+	.active-operation__copy h2 {
+		font-size: var(--mf-text-lg);
+	}
+
+	.active-operation__copy p {
+		color: var(--mf-fg-secondary);
+		font-size: var(--mf-text-sm);
+	}
+
+	.active-operation__meta {
+		display: grid;
+		gap: var(--mf-space-1);
+		justify-items: end;
+	}
+
+	.active-operation__meta span,
+	.active-operation__meta small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		text-transform: uppercase;
+	}
+
+	.active-operation__meta strong {
+		font-family: var(--mf-font-mono), monospace;
+		font-size: var(--mf-text-xs);
+	}
+
+	.active-operation__meta a {
+		color: var(--mf-active-fg-bright);
+		font-size: var(--mf-text-xs);
+		font-weight: var(--mf-weight-semibold);
 	}
 
 	.folder-header__path {
@@ -2563,6 +2652,7 @@
 		}
 
 		.folder-header,
+		.active-operation,
 		.workflow-strip,
 		.basic-run__header,
 		.decision,

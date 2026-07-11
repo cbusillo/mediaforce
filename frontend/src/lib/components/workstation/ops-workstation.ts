@@ -4,7 +4,7 @@ import type {
 	HostRuntime,
 	HostsPayload
 } from '$lib/api/types';
-import type { FooterSignal, ShellTone, StatusTile } from './OperatorShell.svelte';
+import type { FooterSignal, ShellTone, StatusTile } from './shell-types';
 
 export type OpsQueueKind = 'encode' | 'sample' | 'proof';
 export type OpsActionId =
@@ -86,6 +86,7 @@ function hostCapacityCounts(hosts: HostsPayload | null | undefined) {
 	const available = rows.filter((host) => host.available).length;
 	return {
 		available,
+		activeEncodes: rows.reduce((total, host) => total + numberValue(host.active_encode_count), 0),
 		encodeReady: rows.filter(hostEncodeReady).length,
 		busy: rows.filter((host) => host.available && numberValue(host.active_encode_count) > 0).length,
 		scheduledOff: rows.filter((host) => host.available && host.schedule_open === false).length,
@@ -96,13 +97,66 @@ function hostCapacityCounts(hosts: HostsPayload | null | undefined) {
 
 function hostCopy(value: unknown): string {
 	const host = record(value);
-	if (!host) return 'unassigned';
-	return compactText(host.label) || compactText(host.key) || compactText(host.host) || 'host';
+	if (!host) return '';
+	return compactText(host.label) || compactText(host.key) || compactText(host.host);
 }
 
 function calibrationHostCopy(job: CalibrationJob): string {
 	const host = record(job.host);
 	return hostCopy(host) || compactText(job.host_key) || 'unassigned';
+}
+
+function encodeHostCopy(job: EncodeQueueJob): string {
+	const activeHosts = job.active_hosts?.map(hostCopy).filter(Boolean).join(', ');
+	if (activeHosts) return activeHosts;
+	const progressHosts = job.progress?.active_host_labels
+		?.map(compactText)
+		.filter(Boolean)
+		.join(', ');
+	if (progressHosts) return progressHosts;
+	const assignedHost = hostCopy(job.host);
+	if (assignedHost) return assignedHost;
+	const status = String(job.status ?? '').toLowerCase();
+	return ['queued', 'retry_backoff'].includes(status) ? 'Selecting computer' : 'Unassigned';
+}
+
+function operatorErrorCopy(value: unknown): string {
+	const detail = compactText(value);
+	if (!detail) return '';
+	const permissionPath = detail.match(/permission denied:\s*['"]([^'"]+)['"]/i)?.[1];
+	if (permissionPath) {
+		return `Mediaforce cannot access ${permissionPath} on this computer. Mount the storage, then retry.`;
+	}
+	const missingPath = detail.match(/no such file or directory:\s*['"]([^'"]+)['"]/i)?.[1];
+	if (missingPath) {
+		return `Mediaforce cannot find ${missingPath} on this computer. Mount the storage, then retry.`;
+	}
+	return detail;
+}
+
+function operatorErrorSummary(value: unknown): string {
+	const detail = compactText(value);
+	const permissionPath = detail.match(/permission denied:\s*['"]([^'"]+)['"]/i)?.[1];
+	if (permissionPath) return 'Storage unavailable';
+	const missingPath = detail.match(/no such file or directory:\s*['"]([^'"]+)['"]/i)?.[1];
+	if (missingPath) return 'Storage not found';
+	return operatorErrorCopy(detail);
+}
+
+function compactTelemetryCopy(value: string): string {
+	return value.replace(/^\d+(?:\.\d+)?%\s*·\s*/, '').replace(/Est\. ETA\s*/i, 'ETA ');
+}
+
+function controllerStorageWaitingJobs(
+	dashboard: DashboardSummaryPayload | null | undefined
+): EncodeQueueJob[] {
+	return (dashboard?.encode_queue?.queued ?? []).filter((job) => {
+		const schedulerCopy = compactText(job.scheduler_status_copy);
+		return (
+			schedulerCopy.startsWith('Mediaforce cannot access ') &&
+			schedulerCopy.includes('Mount the storage')
+		);
+	});
 }
 
 function calibrationPrefix(job: CalibrationJob): string {
@@ -168,6 +222,56 @@ export function workerCapabilitiesSummary(capabilities: string[]): string {
 	return labels.length ? labels.join(' · ') : 'No work assigned';
 }
 
+export function hostWorkReason(
+	host: HostRuntime,
+	hosts: HostsPayload | null | undefined,
+	dashboard: DashboardSummaryPayload | null | undefined
+): string {
+	if (host.available && host.schedule_open === false) {
+		return host.schedule_detail || 'Outside its schedule; this is a normal wait.';
+	}
+	const activeCount = numberValue(host.active_encode_count);
+	const maxParallel = Math.max(numberValue(host.max_parallel_encodes), 1);
+	if (host.available && activeCount > 0) {
+		return activeCount >= maxParallel
+			? 'Working at capacity.'
+			: `Processing ${activeCount} episode part${activeCount === 1 ? '' : 's'}; capacity remains.`;
+	}
+	if (host.available && host.queue_active !== false) {
+		const queue = dashboard?.encode_queue;
+		const allCurrentWorkAssigned =
+			(queue?.running_count ?? 0) > 0 && (queue?.queued_count ?? 0) === 0;
+		if (allCurrentWorkAssigned) {
+			const readyHosts = (hosts?.hosts ?? [])
+				.filter(hostEncodeReady)
+				.sort(
+					(left, right) => right.priority - left.priority || left.label.localeCompare(right.label)
+				);
+			const readyIndex = readyHosts.findIndex((candidate) => candidate.key === host.key);
+			return readyIndex === 0
+				? 'Next in line; all current episode parts are already assigned.'
+				: 'Ready; all current episode parts are already assigned.';
+		}
+		return 'Ready for the next episode part.';
+	}
+	if (host.available && host.queue_active === false) {
+		return host.active_reason || host.message || 'Reachable but not accepting Mediaforce work.';
+	}
+	if (host.setup_supported === false) {
+		return host.message || 'Unavailable and cannot be prepared from this screen.';
+	}
+	return host.message || 'Unavailable; start or prepare this computer when it should be working.';
+}
+
+export function opsWorkLabel(prefix: string): string {
+	const segments = prefix
+		.split('/')
+		.map((segment) => segment.trim())
+		.filter(Boolean);
+	const workSegments = segments.length > 1 ? segments.slice(1) : segments;
+	return workSegments.join(' · ') || 'Media work';
+}
+
 export function encodeJobTone(job: EncodeQueueJob): ShellTone {
 	const status = String(job.status ?? '').toLowerCase();
 	if (['failed', 'needs_attention', 'stopped', 'retry_backoff'].includes(status)) return 'wait';
@@ -189,7 +293,7 @@ export function encodeJobProgress(job: EncodeQueueJob): string {
 	return [percent, item].filter((part) => part && part !== '—').join(' · ') || percent;
 }
 
-export function encodeJobDetail(job: EncodeQueueJob): string {
+function encodeJobRawDetail(job: EncodeQueueJob): string {
 	return (
 		(activeJobStatus(job.status) ? '' : job.error) ||
 		job.telemetry_summary ||
@@ -198,6 +302,10 @@ export function encodeJobDetail(job: EncodeQueueJob): string {
 		job.progress?.failure_analysis?.summary ||
 		'waiting for queue telemetry'
 	);
+}
+
+export function encodeJobDetail(job: EncodeQueueJob): string {
+	return operatorErrorSummary(compactTelemetryCopy(encodeJobRawDetail(job)));
 }
 
 function encodeJobTimestamp(job: EncodeQueueJob): number {
@@ -241,15 +349,17 @@ export function buildEncodeRows(
 	return displayJobs.map((job) => {
 		const status = String(job.status ?? '').toLowerCase();
 		const canRetryPrefix = prefixRetryStatuses.has(status) && retryableJobIds.has(job.job_id);
+		const activePartCount =
+			numberValue(job.running_shard_count) || job.progress?.active_host_labels?.length || 0;
 		return {
 			key: `encode:${job.job_id}`,
 			kind: 'encode',
 			tone: encodeJobTone(job),
 			status: statusCopy(job.status || 'unknown'),
 			prefix: job.prefix || 'system scope',
-			host: job.active_hosts?.map(hostCopy).filter(Boolean).join(', ') || hostCopy(job.host),
-			phase: job.running_shard_count
-				? `${job.running_shard_count} active parts`
+			host: encodeHostCopy(job),
+			phase: activePartCount
+				? `${activePartCount} active episode ${activePartCount === 1 ? 'part' : 'parts'}`
 				: 'processing queue',
 			progress: encodeJobProgress(job),
 			scheduler:
@@ -289,7 +399,11 @@ function buildCalibrationLaneRows(
 }
 
 export function rowRecoveryLabel(row: OpsQueueRow): string {
-	if (!row.action) return 'No action';
+	if (!row.action) {
+		if (row.tone === 'active') return 'Automatic';
+		if (row.tone === 'wait') return 'Waiting';
+		return 'No action';
+	}
 	if (row.action === 'retry-encode-prefix') return 'Retry folder';
 	if (row.action === 'retry-failed-encode') return 'Retry all';
 	if (row.action === 'stop-calibration') return 'Stop samples';
@@ -371,6 +485,10 @@ export function buildOpsBlockers(
 	const blockers: OpsBlocker[] = [];
 	const queue = dashboard?.encode_queue;
 	const attentionCount = queue?.needs_attention_count ?? 0;
+	const attentionJob = (queue?.recent ?? []).find((job) =>
+		['failed', 'needs_attention', 'stopped'].includes(String(job.status ?? '').toLowerCase())
+	);
+	const storageWaitingJobs = controllerStorageWaitingJobs(dashboard);
 	const capacity = hostCapacityCounts(hosts);
 	const runningCount = queue?.running_count ?? 0;
 	const queuedWork = (queue?.queued_count ?? 0) + (queue?.running_count ?? 0);
@@ -379,7 +497,7 @@ export function buildOpsBlockers(
 		blockers.push({
 			key: 'runtime-load',
 			tone: 'fail',
-			title: 'Mediaforce data unavailable',
+			title: 'Activity is unavailable',
 			detail: loadError
 		});
 	}
@@ -387,8 +505,8 @@ export function buildOpsBlockers(
 		blockers.push({
 			key: 'stop-requested',
 			tone: 'fail',
-			title: 'Processing is stopping',
-			detail: 'Workers are finishing current items before the queue can start more work.',
+			title: 'Season work is stopping',
+			detail: 'Computers are finishing their current episodes before more work can start.',
 			action: 'resume-encode'
 		});
 	}
@@ -396,8 +514,8 @@ export function buildOpsBlockers(
 		blockers.push({
 			key: 'paused',
 			tone: 'wait',
-			title: 'Processing is paused',
-			detail: queue.state.scheduler_summary ?? 'No new processing will start until resumed.',
+			title: 'Season work is paused',
+			detail: queue.state.scheduler_summary ?? 'No new season work will start until you resume it.',
 			action: 'resume-encode'
 		});
 	}
@@ -405,12 +523,31 @@ export function buildOpsBlockers(
 		blockers.push({
 			key: 'needs-attention',
 			tone: 'wait',
-			title: `${attentionCount} ${attentionCount === 1 ? 'folder has' : 'folders have'} retry available`,
-			detail: 'Review the row, then retry approved folders from this page.',
+			title:
+				attentionCount === 1 && attentionJob?.prefix
+					? `${opsWorkLabel(attentionJob.prefix)} needs attention`
+					: `${attentionCount} ${attentionCount === 1 ? 'season needs' : 'seasons need'} attention`,
+			detail: attentionJob
+				? operatorErrorCopy(encodeJobRawDetail(attentionJob))
+				: 'Review what happened, then retry the unfinished work.',
 			action: 'retry-failed-encode'
 		});
 	}
-	if (capacity.total > 0 && capacity.encodeReady === 0 && queuedWork > 0 && runningCount === 0) {
+	if (storageWaitingJobs.length > 0) {
+		blockers.push({
+			key: 'controller-storage',
+			tone: 'wait',
+			title: 'Media storage is not available',
+			detail:
+				storageWaitingJobs[0].scheduler_status_copy ??
+				'Mount the media storage on this computer to continue.'
+		});
+	} else if (
+		capacity.total > 0 &&
+		capacity.encodeReady === 0 &&
+		queuedWork > 0 &&
+		runningCount === 0
+	) {
 		const allAvailableHostsScheduledOff =
 			capacity.available > 0 && capacity.scheduledOff === capacity.available;
 		const workersReachable = capacity.available > 0;
@@ -418,22 +555,22 @@ export function buildOpsBlockers(
 			key: 'no-hosts-ready',
 			tone: workersReachable ? 'wait' : 'fail',
 			title: allAvailableHostsScheduledOff
-				? 'Workers are outside encode windows'
+				? 'Computers are outside their schedules'
 				: workersReachable
-					? 'Workers are busy or waiting'
-					: 'No workers can process right now',
+					? 'Computers are busy or waiting'
+					: 'No computer can work right now',
 			detail: allAvailableHostsScheduledOff
-				? 'Queued processing will wait for the next allowed encode window. Manual samples can still be prepared from Folder Studio.'
+				? 'Waiting seasons will start when the next allowed time begins.'
 				: workersReachable
-					? 'Workers are reachable but cannot claim another encode right now. Manual samples can still be prepared from Folder Studio.'
-					: 'Queued work exists, but every configured worker is unavailable or outside its work window.'
+					? 'The computers are reachable but cannot start another season right now.'
+					: 'Work is waiting, but every configured computer is unavailable or outside its schedule.'
 		});
 	} else if (scheduleWaiting > 0 && capacity.encodeReady === 0) {
 		blockers.push({
 			key: 'schedule-waiting',
 			tone: 'wait',
-			title: `${scheduleWaiting} queued ${scheduleWaiting === 1 ? 'folder is' : 'folders are'} waiting for a work window`,
-			detail: queue?.state.scheduler_summary ?? 'Work will start when an allowed window opens.'
+			title: `${scheduleWaiting} ${scheduleWaiting === 1 ? 'season is' : 'seasons are'} waiting for their scheduled time`,
+			detail: queue?.state.scheduler_summary ?? 'Work will start when its allowed time begins.'
 		});
 	}
 	return blockers;
@@ -451,13 +588,14 @@ export function buildOpsReadinessSummary(
 	const queuedCount = queue?.queued_count ?? 0;
 	const queuedWaiting = queue?.queued_waiting_count ?? 0;
 	const needsAttention = queue?.needs_attention_count ?? 0;
+	const storageWaitingJobs = controllerStorageWaitingJobs(dashboard);
 	const activeChecks = calibration?.active_count ?? 0;
 	const queuedWork = runningCount + queuedCount;
 
 	if (loadError) {
 		return {
 			tone: 'fail',
-			title: 'Ops data is unavailable',
+			title: 'Activity is unavailable',
 			detail: loadError,
 			metricLabel: 'Data',
 			metricValue: 'offline'
@@ -466,8 +604,8 @@ export function buildOpsReadinessSummary(
 	if (queue?.state.stop_requested) {
 		return {
 			tone: 'fail',
-			title: 'Processing is stopping',
-			detail: 'Workers are finishing current items before Mediaforce can start more work.',
+			title: 'Season work is stopping',
+			detail: 'Computers are finishing their current episodes before Mediaforce starts more work.',
 			metricLabel: 'Active work',
 			metricValue: String(runningCount)
 		};
@@ -475,8 +613,8 @@ export function buildOpsReadinessSummary(
 	if (queue?.state.is_paused) {
 		return {
 			tone: 'wait',
-			title: 'Processing is paused',
-			detail: queue.state.scheduler_summary ?? 'Resume the queue when processing should continue.',
+			title: 'Season work is paused',
+			detail: queue.state.scheduler_summary ?? 'Resume when season work should continue.',
 			metricLabel: 'Queued',
 			metricValue: String(queuedCount)
 		};
@@ -484,10 +622,21 @@ export function buildOpsReadinessSummary(
 	if (needsAttention > 0) {
 		return {
 			tone: 'wait',
-			title: 'Retry is available',
-			detail: `${needsAttention} approved ${needsAttention === 1 ? 'folder needs' : 'folders need'} operator review before retry.`,
-			metricLabel: 'Retry',
+			title: 'A season needs attention',
+			detail: `${needsAttention} ${needsAttention === 1 ? 'season needs' : 'seasons need'} a quick review before retrying.`,
+			metricLabel: 'Needs you',
 			metricValue: String(needsAttention)
+		};
+	}
+	if (storageWaitingJobs.length > 0 && runningCount === 0) {
+		return {
+			tone: 'wait',
+			title: 'Waiting for media storage',
+			detail:
+				storageWaitingJobs[0].scheduler_status_copy ??
+				'Mount the media storage on this computer to continue.',
+			metricLabel: 'Waiting',
+			metricValue: String(storageWaitingJobs.length)
 		};
 	}
 	if (capacity.total > 0 && capacity.encodeReady === 0 && queuedWork > 0 && runningCount === 0) {
@@ -497,36 +646,48 @@ export function buildOpsReadinessSummary(
 		return {
 			tone: workersReachable ? 'wait' : 'fail',
 			title: allAvailableHostsScheduledOff
-				? 'Waiting for encode windows'
+				? 'Waiting for scheduled time'
 				: workersReachable
-					? 'Workers are busy or waiting'
-					: 'No worker can work right now',
+					? 'Computers are busy or waiting'
+					: 'No computer can work right now',
 			detail: allAvailableHostsScheduledOff
-				? 'Workers are reachable but outside production encode windows; manual sample setup is still allowed.'
+				? 'Computers are reachable but outside their schedules.'
 				: workersReachable
-					? 'Workers are reachable but cannot claim another encode right now; manual sample setup is still allowed.'
-					: 'Queued work exists, but every configured worker is unavailable or outside its work window.',
-			metricLabel: 'Can encode',
+					? 'Computers are reachable but cannot start another season right now.'
+					: 'Work is waiting, but every configured computer is unavailable or outside its schedule.',
+			metricLabel: 'Available',
 			metricValue: '0'
 		};
 	}
 	if (runningCount > 0 || activeChecks > 0) {
+		const activeParts = capacity.activeEncodes;
+		const activeTotal = activeParts + activeChecks;
+		const detailParts: string[] = [];
+		if (activeParts > 0) {
+			detailParts.push(
+				`${activeParts} episode ${activeParts === 1 ? 'part' : 'parts'} across ${capacity.busy} ${capacity.busy === 1 ? 'computer' : 'computers'}`
+			);
+		}
+		if (activeChecks > 0) {
+			detailParts.push(`${activeChecks} ${activeChecks === 1 ? 'test' : 'tests'} active`);
+		}
+		if (queue?.telemetry?.eta_copy) {
+			detailParts.push(`Estimated finish in ${queue.telemetry.eta_copy}`);
+		}
 		return {
 			tone: 'active',
 			title: 'Mediaforce is working',
-			detail:
-				queue?.telemetry?.eta_copy ??
-				`${runningCount} processing ${runningCount === 1 ? 'job' : 'jobs'} and ${activeChecks} sample/review ${activeChecks === 1 ? 'job' : 'jobs'} active.`,
+			detail: detailParts.join(' · ') || 'Mediaforce is working.',
 			metricLabel: 'Running',
-			metricValue: String(runningCount + activeChecks)
+			metricValue: String(activeTotal || runningCount)
 		};
 	}
 	if (queuedWaiting > 0 && capacity.encodeReady === 0) {
 		return {
 			tone: 'wait',
-			title: 'Waiting for the work window',
+			title: 'Waiting for scheduled time',
 			detail:
-				queue?.state.scheduler_summary ?? 'Queued work will start when an allowed window opens.',
+				queue?.state.scheduler_summary ?? 'Waiting work will start when its allowed time begins.',
 			metricLabel: 'Waiting',
 			metricValue: String(queuedWaiting)
 		};
@@ -534,12 +695,12 @@ export function buildOpsReadinessSummary(
 	if (capacity.encodeReady > 0) {
 		return {
 			tone: 'ready',
-			title: queuedCount > 0 ? 'Queued and ready to start' : 'Ready for work',
+			title: queuedCount > 0 ? 'Ready to start' : 'Ready for work',
 			detail:
 				queuedCount > 0
-					? 'Workers can claim the queued folder now. If it stays queued after refresh, check the job row for the specific blocker.'
-					: 'Workers can claim eligible processing work now.',
-			metricLabel: 'Can encode',
+					? 'An available computer can start the waiting season now.'
+					: 'Computers are available for season work.',
+			metricLabel: 'Available',
 			metricValue: String(capacity.encodeReady)
 		};
 	}
@@ -547,7 +708,7 @@ export function buildOpsReadinessSummary(
 		tone: 'idle',
 		title: 'Standing by',
 		detail:
-			capacity.total > 0 ? 'No current work is waiting on Ops.' : 'Worker status is unavailable.',
+			capacity.total > 0 ? 'Nothing is waiting right now.' : 'Computer status is unavailable.',
 		metricLabel: 'Queued',
 		metricValue: String(queuedCount)
 	};

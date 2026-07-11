@@ -862,6 +862,32 @@ def _attach_failure_analysis_to_progress(job: dict[str, Any], analysis: dict[str
     job["progress"] = progress
 
 
+def _controller_staging_access_issue(
+        config: MediaforceConfig,
+        host: dict[str, Any],
+) -> str | None:
+    staging_root = config.staging_root_for_host(host).expanduser()
+    nearest_existing = staging_root
+    try:
+        while not nearest_existing.exists():
+            parent = nearest_existing.parent
+            if parent == nearest_existing:
+                break
+            nearest_existing = parent
+        accessible = (
+            nearest_existing.is_dir()
+            and os.access(nearest_existing, os.W_OK | os.X_OK)
+        )
+    except OSError:
+        accessible = False
+    if accessible:
+        return None
+    return (
+        f"Mediaforce cannot access {staging_root} on this computer. "
+        "Mount the storage to continue."
+    )
+
+
 def select_encode_host(
         connection: DBClient,
         config: MediaforceConfig,
@@ -889,7 +915,7 @@ def select_encode_host(
     def _probe_available(host: dict[str, Any]) -> bool:
         return bool(host.get("probe_available", host.get("available")))
 
-    active_hosts = [
+    active_host_candidates = [
         host
         for host in host_rows
         if bool(host.get("available"))
@@ -903,7 +929,7 @@ def select_encode_host(
         for host in host_rows
         if "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
     ]
-    startable_hosts = [
+    startable_host_candidates = [
         host
         for host in host_rows
         if not bool(host.get("available"))
@@ -914,8 +940,22 @@ def select_encode_host(
         and int(host.get("active_encode_count") or 0) < int(host.get("max_parallel_encodes") or 1)
         and _schedule_open(host)
     ]
-    if not encode_capable_hosts and not startable_hosts:
+    if not encode_capable_hosts and not startable_host_candidates:
         return None, "waiting for an available encode host"
+
+    storage_issues: list[str] = []
+
+    def _storage_ready(host: dict[str, Any]) -> bool:
+        issue = _controller_staging_access_issue(config, host)
+        if issue:
+            storage_issues.append(issue)
+            return False
+        return True
+
+    active_hosts = [host for host in active_host_candidates if _storage_ready(host)]
+    startable_hosts = [host for host in startable_host_candidates if _storage_ready(host)]
+    if not active_hosts and not startable_hosts and storage_issues:
+        return None, storage_issues[0]
 
     globally_blocked_hosts = _globally_backed_off_encode_hosts(connection, deps, now=now)
     blocked_host_tokens = {
@@ -1547,23 +1587,40 @@ def _finalize_encode_job_progress(
 def _encode_failure_is_host_related(failure_kind: str, error_message: str, host_payload: dict[str, Any]) -> bool:
     if failure_kind in {"host_unavailable", "ssh_transport"}:
         return True
+    return _encode_failure_is_ssh_transport(error_message, host_payload)
+
+
+def _encode_failure_is_ssh_transport(error_message: str, host_payload: dict[str, Any]) -> bool:
+    if str(host_payload.get("mode") or "") != "ssh":
+        return False
     lowered = error_message.lower()
-    markers = (
+    direct_markers = (
         "host key verification failed",
         "could not resolve hostname",
         "temporary failure in name resolution",
         "name or service not known",
         "nodename nor servname provided",
         "no route to host",
-        "connection refused",
-        "connection reset",
-        "operation timed out",
-        "broken pipe",
+        "kex_exchange_identification",
+        "ssh_exchange_identification",
+        "permission denied (publickey",
+        "ssh remote command exited with status 255",
         "ssh:",
     )
-    if any(marker in lowered for marker in markers):
+    if any(marker in lowered for marker in direct_markers):
         return True
-    return str(host_payload.get("mode") or "") == "ssh" and "permission denied" in lowered
+    transport_markers = (
+        "connection refused",
+        "connection reset",
+        "connection timed out",
+        "operation timed out",
+        "broken pipe",
+        "connection closed by",
+    )
+    ssh_context_markers = ("remote host", "port 22", "ssh connection")
+    return any(marker in lowered for marker in transport_markers) and any(
+        marker in lowered for marker in ssh_context_markers
+    )
 
 
 def _quality_temp_setup_is_host_related(message: str) -> bool:
@@ -1694,13 +1751,15 @@ def _cleanup_encode_retry_artifacts(
 def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
     message = str(exc).lower()
     host_payload = object_dict(job.get("host"))
+    if isinstance(exc, PermissionError):
+        return "controller_media_access"
     if isinstance(exc, QualityTempSetupError) and _quality_temp_setup_is_host_related(message):
         return "ssh_transport"
     if isinstance(exc, (QualitySearchError, QualityTempCleanupError, QualityTempSetupError)):
         return "deterministic"
     if _encode_failure_is_quality_policy_failure(message):
         return "deterministic"
-    if _encode_failure_is_host_related("ssh_transport", message, host_payload):
+    if _encode_failure_is_ssh_transport(message, host_payload):
         return "ssh_transport"
     if "staging file already exists" in message:
         return "deterministic"

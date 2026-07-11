@@ -25,32 +25,31 @@
 
 		align-items: center;
 		background: var(--badge-bg);
-		border: 1px solid var(--badge-line);
-		border-radius: var(--mf-radius-1);
+		border: 0;
+		border-radius: 999px;
 		color: var(--badge-fg);
 		display: inline-flex;
 		font-size: var(--mf-text-xs);
 		font-weight: var(--mf-weight-semibold);
 		gap: var(--mf-space-3);
 		line-height: 1;
-		min-height: 22px;
-		padding: 0 var(--mf-space-4);
+		min-height: 24px;
+		padding: 0 9px;
 		white-space: nowrap;
 	}
 
 	.state-badge--compact {
-		background: transparent;
-		border-color: transparent;
+		background: var(--badge-bg);
 		min-height: 0;
-		padding: 0;
+		padding: 5px 8px;
 	}
 
 	.state-badge__dot {
 		background: var(--badge-fg);
 		border-radius: 50%;
 		display: inline-block;
-		height: 7px;
-		width: 7px;
+		height: 6px;
+		width: 6px;
 	}
 
 	.state-badge--active {

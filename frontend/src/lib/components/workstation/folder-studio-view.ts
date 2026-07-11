@@ -32,7 +32,10 @@ import type {
 	FolderWorkflowState,
 	HostsPayload
 } from '$lib/api/types';
-import type { FooterSignal, ShellTone, StatusTile } from './OperatorShell.svelte';
+import type { FooterSignal, ShellTone, StatusTile } from './shell-types';
+
+export const REVIEW_ASSISTANT_PENDING_COPY =
+	'Sending request to the review assistant. This can take a few minutes. Keep this page open; nothing is queued until you review the plan.';
 
 export type WorkflowState = {
 	tone: ShellTone;
@@ -1766,11 +1769,13 @@ export function resolveWorkflow(
 	}
 	if (['running', 'queued'].includes(String(status.calibration_status ?? '').toLowerCase())) {
 		const elapsed = sampleJobElapsedCopy(calibrationJob);
+		const hostLabel = compactText(calibrationJob?.host?.label);
 		return {
 			tone: 'active',
 			label: 'Sampling',
 			title: 'Representative sample is running',
 			copy: compactParts([
+				hostLabel ? `Worker ${hostLabel}` : null,
 				elapsed || null,
 				'Review media is the missing prerequisite; approval appears once the comparison preview is ready.'
 			]),
@@ -2161,6 +2166,7 @@ function basicEncodeDetail(
 		if (workflow.primaryAction === 'focus-bench') {
 			return `Ask the review assistant for a representative sample plan. Nothing runs across the ${noun} until you approve review evidence.`;
 		}
+		if (workflow.primaryAction === 'monitor-sample') return workflow.copy;
 		return `Start by making one representative sample. Do not approve the ${noun} until review evidence is ready.`;
 	}
 	if (currentStep === 2) {
@@ -2194,11 +2200,13 @@ export function buildBasicEncodeGuide(
 	const title =
 		currentStep === 1 && workflow.primaryAction === 'focus-bench'
 			? 'Ask review assistant'
-			: currentStep === 2 && workflow.primaryAction === 'download-review-pack'
-				? 'Review sample video'
-				: currentStep === 3 && workflow.label === 'Encoding now'
-					? 'Encoding now'
-					: (BASIC_ENCODE_STEPS[currentStep]?.label ?? 'Follow the next step');
+			: currentStep === 1 && workflow.primaryAction === 'monitor-sample'
+				? 'Sample running'
+				: currentStep === 2 && workflow.primaryAction === 'download-review-pack'
+					? 'Review sample video'
+					: currentStep === 3 && workflow.label === 'Encoding now'
+						? 'Encoding now'
+						: (BASIC_ENCODE_STEPS[currentStep]?.label ?? 'Follow the next step');
 	const primary =
 		currentStep === 6 && workflow.secondaryAction === 'open-completed'
 			? workflow.secondary

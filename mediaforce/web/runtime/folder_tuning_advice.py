@@ -52,7 +52,7 @@ _SIZE_BUDGET_RE = re.compile(
 )
 _SCALE_HEIGHT_RE = re.compile(r"(?<!\d)(?P<height>240|360|480|540|720|1080|1440|2160|4320)p\b", re.IGNORECASE)
 _SOURCE_RESOLUTION_RE = re.compile(
-    r"\b(?:source|original|native)\s+resolution\b|\b(?:do\s+not|don't|dont|no)\s+(?:downsample|downscale|scale\s+down)\b|\bkeep\s+max_height\s+(?:unset|at\s+0|0)\b|\bmax_height\s+(?:unset|0)\b",
+    r"\b(?:source|original|native|current)\s+resolution\b|\b(?:do\s+not|don't|dont|no)\s+(?:downsample|downscale|scale\s+down)\b|\bkeep\s+max_height\s+(?:unset|at\s+0|0)\b|\bmax_height\s+(?:unset|0)\b",
     re.IGNORECASE,
 )
 _HARD_SIZE_CAP_RE = re.compile(
@@ -60,10 +60,11 @@ _HARD_SIZE_CAP_RE = re.compile(
     re.IGNORECASE,
 )
 _MEASURED_SIZE_FOLLOWUP_RE = re.compile(
-    r"\b(?:revise|retry|rerun)\s+(?:this\s+)?(?:sample|run|draft)\b.*\b(?:smaller|closer)\b|"
-    r"\b(?:run\s+another|next\s+sample|sample\s+again)\b.*\b(?:smaller|closer)\b|"
-    r"\b(?:last|previous|measured|sampled)\s+(?:sample|run|draft)\b.*\b(?:larger|over|miss(?:ed|es)?|target|budget|size)|"
-    r"\b(?:miss(?:ed|es)?|over)\s+(?:the\s+)?(?:size\s+)?(?:target|budget)\b.*\b(?:sample|run|draft)\b",
+    r"\bmeasured\s+follow[- ]?up\b|"
+    r"\b(?:revise|retry|rerun)\s+(?:this\s+)?(?:sample|run|draft|test)\b.*\b(?:smaller|closer)\b|"
+    r"\b(?:run\s+another|next\s+(?:sample|test)|(?:sample|test)\s+again)\b.*\b(?:smaller|closer)\b|"
+    r"\b(?:last|previous|measured|sampled)\s+(?:representative\s+)?(?:sample|run|draft|test)\b.*\b(?:larger|over|miss(?:ed|es)?|target|budget|size)|"
+    r"\b(?:miss(?:ed|es)?|over)\s+(?:the\s+)?(?:size\s+)?(?:target|budget)\b.*\b(?:sample|run|draft|test)\b",
     re.IGNORECASE,
 )
 _METRIC_TARGET_RE = re.compile(r"\b(?P<metric>vmaf|xpsnr)\s*(?:of\s*)?(?:around\s*)?(?P<target>\d+(?:\.\d+)?)\b", re.IGNORECASE)
@@ -1355,6 +1356,8 @@ def maybe_seed_baseline_policy(
         latest_failed_sample_job=latest_failed_sample_job,
         learning_context_payload=learning_context,
     )
+    if connection.in_transaction():
+        connection.commit()
     seed_response = request_seed_policy(project_root=project_root, payload=payload)
     maybe_force_repeated_seed_experiment(
         base_policy=base_policy,

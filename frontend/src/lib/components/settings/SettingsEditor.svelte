@@ -11,7 +11,6 @@
 		SettingsLibrary,
 		SettingsPayload
 	} from '$lib/api/types';
-	import { formatGiB } from '$lib/format';
 	import {
 		SCHEDULE_DAY_OPTIONS,
 		addHostDraft,
@@ -187,6 +186,11 @@
 
 	function inputValue(event: Event): string {
 		return (event.currentTarget as HTMLInputElement | HTMLTextAreaElement).value;
+	}
+
+	function formatStorage(bytes: number): string {
+		if (!Number.isFinite(bytes) || bytes <= 0) return '0 GB';
+		return `${(bytes / 1024 ** 3).toLocaleString('en-US', { maximumFractionDigits: 1 })} GB`;
 	}
 
 	function selectValue(event: Event): string {
@@ -372,13 +376,14 @@
 				<header class="settings-header">
 					<div>
 						<span class="mf-eyebrow">Settings</span>
-						<h1>Configure Mediaforce</h1>
-						<p>
-							Set the media libraries, working storage, worker machines, and run windows used by
-							this workstation.
-						</p>
+						<h1>Settings</h1>
+						<p>Choose where your shows live, where Mediaforce works, and when it may run.</p>
 					</div>
-					<div class="settings-header__actions" aria-label="Settings actions">
+					<div
+						class="settings-header__actions"
+						class:has-changes={dirty || Boolean(saveError)}
+						aria-label="Settings actions"
+					>
 						<StateBadge
 							tone={saveError ? 'fail' : dirty ? 'wait' : 'ready'}
 							label={saveError ? 'Error' : dirty ? 'Unsaved' : 'Saved'}
@@ -389,7 +394,7 @@
 							disabled={!dirty || savePending}
 							onclick={resetDraft}
 						>
-							Reset
+							Discard
 						</button>
 						<button
 							type="button"
@@ -418,27 +423,27 @@
 
 				<div class="settings-overview" aria-label="Settings sections">
 					<a href="#settings-libraries">
-						<span>Libraries</span>
+						<span>Library folders</span>
 						<strong>{configuredLibraries.length.toLocaleString('en-US')}</strong>
 					</a>
 					<a href="#settings-storage">
-						<span>Storage</span>
+						<span>Working space</span>
 						<strong>{draft.transcode_root.trim() ? 'Set' : 'Missing'}</strong>
 					</a>
 					<a href="#settings-assistant-defaults">
-						<span>Assistant defaults</span>
+						<span>Default size</span>
 						<strong>{defaultMetricCopy}</strong>
 					</a>
 					<a href="#settings-schedules">
-						<span>Work windows</span>
+						<span>Schedule</span>
 						<strong>{(configuredProfiles.length + 2).toLocaleString('en-US')}</strong>
 					</a>
 					<a href="#settings-workers">
-						<span>Workers</span>
+						<span>Computers</span>
 						<strong>{configuredHosts.length.toLocaleString('en-US')}</strong>
 					</a>
 					<a href="#settings-danger">
-						<span>Cleanup</span>
+						<span>Old originals</span>
 						<strong>{archiveCleanup?.has_cleanup ? 'Waiting' : 'Clear'}</strong>
 					</a>
 				</div>
@@ -447,7 +452,7 @@
 					<header class="settings-section__head">
 						<div>
 							<span class="mf-eyebrow">Basic setup</span>
-							<h2 id="settings-basic-title">Libraries and storage</h2>
+							<h2 id="settings-basic-title">Library and working space</h2>
 						</div>
 						<p>These are the only settings most setup sessions need.</p>
 					</header>
@@ -455,7 +460,7 @@
 					<div id="settings-libraries" class="settings-anchor">
 						<WorkstationPanel
 							eyebrow="Libraries"
-							title="Libraries"
+							title="Library folders"
 							meta={`${configuredLibraries.length.toLocaleString('en-US')} configured`}
 						>
 							<div class="table-wrap">
@@ -535,7 +540,7 @@
 					</div>
 
 					<div id="settings-storage" class="settings-anchor">
-						<WorkstationPanel eyebrow="Storage" title="Working storage">
+						<WorkstationPanel eyebrow="Working space" title="Working space">
 							<div class="storage-grid">
 								<label class="stacked-field">
 									<span>Working folder</span>
@@ -547,31 +552,31 @@
 									/>
 								</label>
 								<div class="storage-readout">
-									<span>Originals waiting folder</span>
+									<span>Original backup area</span>
 									<strong class="mf-path">{savedArchiveRootCopy}</strong>
 									{#if cleanupTargetDirty}
 										<small>Save settings before deleting from a changed cleanup folder.</small>
 									{/if}
 								</div>
 								<div class="storage-readout">
-									<span>Originals waiting</span>
+									<span>Old originals waiting</span>
 									<strong>{archiveCleanup?.file_count.toLocaleString('en-US') ?? '0'} files</strong>
-									<small>{formatGiB(archiveCleanup?.total_size_bytes ?? 0)}</small>
+									<small>{formatStorage(archiveCleanup?.total_size_bytes ?? 0)}</small>
 								</div>
 								<div class="storage-readout">
-									<span>Cleanup state</span>
+									<span>Backup area</span>
 									<StateBadge
 										tone={archiveCleanup?.has_cleanup ? 'wait' : 'ready'}
 										label={archiveCleanup?.has_cleanup ? 'Waiting' : 'Clear'}
 									/>
-									<small>Deletes are grouped in the danger section.</small>
+									<small>Old originals stay here until you choose to remove them below.</small>
 								</div>
 							</div>
 						</WorkstationPanel>
 					</div>
 
 					<div id="settings-assistant-defaults" class="settings-anchor">
-						<WorkstationPanel eyebrow="Assistant defaults" title="Encode defaults">
+						<WorkstationPanel eyebrow="Default size" title="Default episode size">
 							<div class="encode-defaults-grid">
 								<label class="stacked-field">
 									<span>Target size MB</span>
@@ -742,15 +747,15 @@
 					<header class="settings-section__head">
 						<div>
 							<span class="mf-eyebrow">Advanced setup</span>
-							<h2 id="settings-advanced-title">Workers and run windows</h2>
+							<h2 id="settings-advanced-title">Computers and schedule</h2>
 						</div>
 						<p>Use these when adding machines or changing when processing work may run.</p>
 					</header>
 
 					<div id="settings-schedules" class="settings-anchor">
 						<WorkstationPanel
-							eyebrow="Work windows"
-							title="Work windows"
+							eyebrow="Schedule"
+							title="Schedule"
 							meta={`${configuredProfiles.length.toLocaleString('en-US')} custom`}
 						>
 							<div class="schedule-list">
@@ -874,11 +879,11 @@
 
 					<div id="settings-workers" class="settings-anchor">
 						<WorkstationPanel
-							eyebrow="Workers"
-							title="Remote workers"
+							eyebrow="Computers"
+							title="Computers"
 							meta={`${configuredHosts.length.toLocaleString('en-US')} configured`}
 						>
-							<div class="host-runtime-board" aria-label="Worker status check">
+							<div class="host-runtime-board" aria-label="Computer status check">
 								{#each configuredHosts as host, index (`probe-host-${host.index}-${index}`)}
 									{@const runtime = hostRuntime(host)}
 									<div class="host-runtime-card host-runtime-card--{runtimeTone(runtime)}">
@@ -888,19 +893,19 @@
 												tone={runtimeTone(runtime)}
 												label={runtimeCopy(runtime)}
 											/>
-											<strong>{host.label || host.host || `Remote worker ${index + 1}`}</strong>
+											<strong>{host.label || host.host || `Computer ${index + 1}`}</strong>
 										</div>
 										<span
 											>{runtime?.schedule_detail ||
 												runtime?.schedule_profile_label ||
-												'No worker status yet'}</span
+												'No computer status yet'}</span
 										>
 										<small
 											>{runtime?.message || runtime?.active_reason || 'Status check pending'}</small
 										>
 									</div>
 								{:else}
-									<p class="empty-note">No remote workers are configured.</p>
+									<p class="empty-note">No additional computers are configured.</p>
 								{/each}
 							</div>
 							<div class="host-editor-list">
@@ -914,7 +919,7 @@
 													tone={runtimeTone(runtime)}
 													label={runtimeCopy(runtime)}
 												/>
-												<strong>{host.label || host.host || `Remote worker ${index + 1}`}</strong>
+												<strong>{host.label || host.host || `Computer ${index + 1}`}</strong>
 												<span
 													>{runtime?.message ||
 														runtime?.active_reason ||
@@ -927,12 +932,12 @@
 												onclick={() =>
 													(draft.remote_hosts = removeAtIndex(draft.remote_hosts, index))}
 											>
-												Remove worker
+												Remove computer
 											</button>
 										</header>
 										<div class="host-grid">
 											<label>
-												<span>Worker name</span>
+												<span>Computer name</span>
 												<input
 													class="field"
 													value={host.label}
@@ -982,7 +987,7 @@
 														</label>
 													{:else}
 														<span class="muted-copy"
-															>Add library keys before assigning workers.</span
+															>Add library folders before assigning computers.</span
 														>
 													{/each}
 												</div>
@@ -1036,7 +1041,7 @@
 													/>
 												</label>
 												<label>
-													<span>Worker staging folder</span>
+													<span>Temporary folder</span>
 													<input
 														class="field field--path"
 														value={host.staging_root}
@@ -1088,7 +1093,7 @@
 											</div>
 											<div class="host-options">
 												<div>
-													<span class="option-label">Worker abilities</span>
+													<span class="option-label">What this computer can do</span>
 													<div class="toggle-grid">
 														{#each savedSettings.host_capability_options as option (option.key)}
 															<label class="toggle-chip">
@@ -1124,7 +1129,7 @@
 									onclick={() =>
 										(draft.remote_hosts = addHostDraft(draft.remote_hosts, draftScheduleOptions))}
 								>
-									Add worker
+									Add computer
 								</button>
 							</div>
 						</WorkstationPanel>
@@ -1137,8 +1142,8 @@
 				>
 					<header class="settings-section__head">
 						<div>
-							<span class="mf-eyebrow">Danger zone</span>
-							<h2 id="settings-danger-title">Originals cleanup</h2>
+							<span class="mf-eyebrow">Old originals</span>
+							<h2 id="settings-danger-title">Remove old originals</h2>
 						</div>
 						<p>Deletes waiting originals from the cleanup folder after a second confirmation.</p>
 					</header>
@@ -1150,7 +1155,7 @@
 									<span>Cleanup folder</span>
 									<strong class="mf-path">{savedArchiveRootCopy}</strong>
 									<small
-										>{archiveCleanup?.file_count.toLocaleString('en-US') ?? '0'} files · {formatGiB(
+										>{archiveCleanup?.file_count.toLocaleString('en-US') ?? '0'} files · {formatStorage(
 											archiveCleanup?.total_size_bytes ?? 0
 										)}</small
 									>
@@ -1220,12 +1225,12 @@
 				</WorkstationPanel>
 				<nav class="settings-rail-nav" aria-label="Settings sections">
 					<span class="mf-eyebrow">Sections</span>
-					<a href="#settings-libraries">Libraries</a>
-					<a href="#settings-storage">Storage</a>
-					<a href="#settings-assistant-defaults">Assistant defaults</a>
-					<a href="#settings-schedules">Work windows</a>
-					<a href="#settings-workers">Workers</a>
-					<a href="#settings-danger">Cleanup</a>
+					<a href="#settings-libraries">Library folders</a>
+					<a href="#settings-storage">Working space</a>
+					<a href="#settings-assistant-defaults">Default size</a>
+					<a href="#settings-schedules">Schedule</a>
+					<a href="#settings-workers">Computers</a>
+					<a href="#settings-danger">Old originals</a>
 				</nav>
 				<WorkstationPanel eyebrow="Scope" title="Machine-local settings">
 					<div class="rail-list">
@@ -2070,6 +2075,374 @@
 
 		.settings-table--libraries td:nth-child(2)::before {
 			content: 'Folder path';
+		}
+	}
+
+	/* Human settings surface */
+	.settings-console {
+		display: block;
+		margin: 0 auto;
+		max-width: 1088px;
+		min-height: 0;
+		padding: 34px 24px 64px;
+	}
+
+	.settings-console__main {
+		gap: 18px;
+		padding: 0;
+	}
+
+	.settings-console__rail,
+	.settings-overview {
+		display: none;
+	}
+
+	.settings-header {
+		align-items: flex-end;
+		border: 0;
+		display: flex;
+		gap: 20px;
+		justify-content: space-between;
+		padding: 0 0 8px;
+	}
+
+	.settings-header > div:first-child {
+		display: grid;
+		gap: 5px;
+	}
+
+	.settings-header h1 {
+		font-size: clamp(22px, 2.5vw, 28px);
+		font-weight: 600;
+		letter-spacing: -0.02em;
+	}
+
+	.settings-header p {
+		color: var(--mf-fg-secondary);
+		font-size: 14px;
+	}
+
+	:global(.settings-console .mf-eyebrow) {
+		background: var(--mf-active-bg);
+		border-radius: 999px;
+		color: var(--mf-active-fg);
+		font-family: var(--mf-font-sans);
+		font-size: 11px;
+		font-weight: 700;
+		letter-spacing: 0.02em;
+		padding: 6px 9px;
+		text-transform: none;
+		width: fit-content;
+	}
+
+	.settings-header__actions {
+		display: none;
+	}
+
+	.settings-header__actions.has-changes {
+		align-items: center;
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-wait-line);
+		border-radius: var(--mf-radius-3);
+		display: flex;
+		gap: 8px;
+		padding: 8px;
+	}
+
+	.notice {
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-line);
+		border-radius: var(--mf-radius-3);
+		color: var(--mf-fg-secondary);
+		padding: 12px 14px;
+	}
+
+	.notice--fail {
+		background: var(--mf-fail-bg);
+		border-color: var(--mf-fail-line);
+		color: var(--mf-fail-fg);
+	}
+
+	.notice--ready {
+		background: var(--mf-ready-bg);
+		border-color: var(--mf-ready-line);
+		color: var(--mf-ready-fg);
+	}
+
+	.settings-section {
+		border: 0;
+		display: grid;
+		gap: 12px;
+		padding: 0;
+	}
+
+	.settings-section__head {
+		align-items: flex-end;
+		border: 0;
+		display: flex;
+		gap: 16px;
+		justify-content: space-between;
+		padding: 14px 2px 0;
+	}
+
+	.settings-section__head > div {
+		display: grid;
+		gap: 5px;
+	}
+
+	.settings-section__head h2 {
+		font-size: 18px;
+		font-weight: 600;
+		letter-spacing: -0.01em;
+	}
+
+	.settings-section__head p {
+		color: var(--mf-fg-tertiary);
+		font-size: 12px;
+		max-width: 360px;
+		text-align: right;
+	}
+
+	.settings-anchor {
+		display: block;
+		scroll-margin-top: 18px;
+	}
+
+	.table-wrap {
+		background: var(--mf-bg-panel);
+		border: 0;
+		overflow-x: auto;
+	}
+
+	.settings-table {
+		background: var(--mf-bg-panel);
+		color: var(--mf-fg-primary);
+	}
+
+	.settings-table th {
+		background: var(--mf-bg-panel-2);
+		border-bottom: 1px solid var(--mf-line);
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-sans);
+		font-size: 11px;
+		letter-spacing: 0.03em;
+		text-transform: none;
+	}
+
+	.settings-table td {
+		border-bottom: 1px solid var(--mf-line-muted);
+		color: var(--mf-fg-secondary);
+		font-family: var(--mf-font-sans);
+		padding: 12px;
+	}
+
+	.library-cell {
+		align-items: end;
+	}
+
+	.swatch-field {
+		display: none;
+	}
+
+	.field,
+	select.field,
+	textarea.field {
+		background: var(--mf-bg-input);
+		border: 1px solid var(--mf-line-strong);
+		border-radius: var(--mf-radius-2);
+		color: var(--mf-fg-primary);
+		font-family: var(--mf-font-sans);
+		min-height: 36px;
+	}
+
+	.field:focus,
+	select.field:focus,
+	textarea.field:focus {
+		border-color: var(--mf-active-fg);
+		box-shadow: var(--mf-ring-focus);
+		outline: none;
+	}
+
+	.stacked-field > span,
+	.library-key-field > span,
+	.option-label,
+	.storage-readout span,
+	.encode-defaults-readout span,
+	.host-runtime-card span,
+	.host-editor span,
+	.schedule-row span {
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-sans);
+		font-size: 11px;
+		letter-spacing: 0.02em;
+		text-transform: none;
+	}
+
+	.storage-grid,
+	.encode-defaults-grid,
+	.host-grid,
+	.host-options {
+		gap: 10px;
+		padding: 12px;
+	}
+
+	.storage-readout,
+	.encode-defaults-readout,
+	.schedule-row,
+	.host-runtime-card,
+	.host-editor,
+	.danger-zone,
+	.toggle-chip,
+	.day-pill {
+		background: var(--mf-bg-panel-2);
+		border: 1px solid var(--mf-line-muted);
+		border-radius: var(--mf-radius-2);
+		box-shadow: none;
+		color: var(--mf-fg-primary);
+	}
+
+	.storage-readout,
+	.encode-defaults-readout,
+	.schedule-row,
+	.host-runtime-card,
+	.host-editor,
+	.danger-zone {
+		padding: 12px;
+	}
+
+	.schedule-list,
+	.host-runtime-board,
+	.host-editor-list {
+		gap: 8px;
+		padding: 12px;
+	}
+
+	.host-editor__head,
+	.schedule-row__fields {
+		border: 0;
+		padding: 0 0 10px;
+	}
+
+	.host-advanced {
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-line);
+		border-radius: var(--mf-radius-2);
+		color: var(--mf-fg-secondary);
+	}
+
+	.host-advanced summary {
+		color: var(--mf-fg-primary);
+		font-family: var(--mf-font-sans);
+		font-weight: 600;
+		padding: 11px 12px;
+	}
+
+	.panel-actions,
+	.archive-actions {
+		background: transparent;
+		border: 0;
+		gap: 8px;
+		padding: 12px;
+	}
+
+	.control {
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-line-strong);
+		border-radius: var(--mf-radius-2);
+		color: var(--mf-fg-primary);
+		font-family: var(--mf-font-sans);
+		font-weight: 600;
+		min-height: 34px;
+		padding: 0 11px;
+	}
+
+	.control:hover {
+		background: var(--mf-bg-panel-2);
+		border-color: var(--mf-active-line);
+		color: var(--mf-active-fg);
+	}
+
+	.control--ready {
+		background: var(--mf-active-solid);
+		border-color: var(--mf-active-solid);
+		color: var(--mf-fg-on-accent);
+	}
+
+	.control--danger {
+		background: var(--mf-bg-panel);
+		border-color: var(--mf-fail-line);
+		color: var(--mf-fail-fg);
+	}
+
+	.control--armed {
+		background: var(--mf-fail-solid);
+		border-color: var(--mf-fail-solid);
+		color: var(--mf-fg-on-accent);
+	}
+
+	.settings-section--danger {
+		border: 0;
+		padding: 0;
+	}
+
+	.settings-section--danger .settings-section__head {
+		border: 0;
+	}
+
+	.settings-save-dock {
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-wait-line);
+		border-radius: var(--mf-radius-3);
+		bottom: 18px;
+		box-shadow: var(--mf-shadow-modal);
+		color: var(--mf-fg-primary);
+		left: 50%;
+		max-width: 520px;
+		padding: 9px;
+		position: fixed;
+		right: auto;
+		transform: translateX(-50%);
+		width: calc(100% - 32px);
+		z-index: 45;
+	}
+
+	.empty-note {
+		color: var(--mf-fg-secondary);
+	}
+
+	button:focus-visible,
+	a:focus-visible,
+	input:focus-visible,
+	select:focus-visible,
+	textarea:focus-visible,
+	summary:focus-visible {
+		box-shadow: var(--mf-ring-focus);
+		outline: none;
+	}
+
+	@media (max-width: 680px) {
+		.settings-console {
+			padding: 26px 12px 48px;
+		}
+
+		.settings-header,
+		.settings-section__head {
+			align-items: stretch;
+			flex-direction: column;
+		}
+
+		.settings-section__head p {
+			max-width: none;
+			text-align: left;
+		}
+
+		.settings-header__actions.has-changes {
+			align-items: stretch;
+			flex-wrap: wrap;
+		}
+
+		.settings-header__actions.has-changes :global(.state-badge) {
+			flex-basis: 100%;
 		}
 	}
 </style>

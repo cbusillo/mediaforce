@@ -46,7 +46,7 @@
 </script>
 
 <svelte:head>
-	<title>Mediaforce Completed</title>
+	<title>Finished seasons · Mediaforce</title>
 </svelte:head>
 
 <CompletedWorkstationView

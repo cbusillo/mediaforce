@@ -3,6 +3,21 @@
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<script>
+			(() => {
+				try {
+					const stored = localStorage.getItem('mediaforce-theme');
+					const theme =
+						stored === 'light' || stored === 'dark'
+							? stored
+							: matchMedia('(prefers-color-scheme: dark)').matches
+								? 'dark'
+								: 'light';
+					document.documentElement.dataset.theme = theme;
+					document.documentElement.style.colorScheme = theme;
+				} catch {}
+			})();
+		</script>
 		<title>Mediaforce</title>
 		%sveltekit.head%
 	</head>
