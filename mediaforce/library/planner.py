@@ -7,6 +7,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.evidence import stable_source_id
 from mediaforce.core.type_defs import float_value, object_dict
 from mediaforce.encoding.cadence import cadence_manifest_payload
+from mediaforce.encoding.fingerprint import media_fingerprint_manifest_payload
 from mediaforce.tuning.size_goals import operator_intent_from_policy
 
 
@@ -83,9 +84,15 @@ def build_manifest_item(row: dict[str, Any], config: MediaforceConfig) -> dict[s
     audio_summary = json.loads(row["audio_summary_json"])
     subtitle_summary = json.loads(row["subtitle_summary_json"])
     cadence_summary = json.loads(row["cadence_summary_json"]) if row.get("cadence_summary_json") else None
+    media_fingerprint = json.loads(row["media_fingerprint_json"]) if row.get("media_fingerprint_json") else None
     source_id = stable_source_id(row)
     cadence_evidence, cadence_decision = cadence_manifest_payload(
         cadence_summary,
+        source_id=source_id,
+        source_fingerprint=str(row.get("fingerprint") or "") or None,
+    )
+    media_fingerprint_evidence, media_fingerprint_decision = media_fingerprint_manifest_payload(
+        media_fingerprint,
         source_id=source_id,
         source_fingerprint=str(row.get("fingerprint") or "") or None,
     )
@@ -125,4 +132,7 @@ def build_manifest_item(row: dict[str, Any], config: MediaforceConfig) -> dict[s
         "cadence_evidence": cadence_evidence,
         "cadence_decision": cadence_decision,
         "cadence_class": cadence_decision["classification"],
+        "media_fingerprint": media_fingerprint,
+        "media_fingerprint_evidence": media_fingerprint_evidence,
+        "media_fingerprint_decision": media_fingerprint_decision,
     }

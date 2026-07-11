@@ -53,6 +53,7 @@ from mediaforce.tuning.calibration_jobs import list_queue_summary, \
     load_latest_job as load_latest_calibration_job, \
     load_latest_overlapping_job as load_latest_overlapping_calibration_job
 from mediaforce.review import BrowserReviewClip, CompareClip, EncodedPreviewClip
+from mediaforce.reviewing.helpers import ReviewMoment
 from mediaforce.web import app as web_app
 from mediaforce.web import settings_runtime
 from mediaforce.web.runtime import completed_runtime, dashboard_payloads, encode_runtime, \
@@ -5971,6 +5972,16 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             timestamp_seconds=10.0,
             duration_seconds=8.0,
         )
+        review_moment = ReviewMoment(
+            timestamp_seconds=10.0,
+            duration_seconds=8.0,
+            role="hard",
+            risk_tags=("dark_gradient_banding_risk",),
+            rationale="Measured dark gradient risk.",
+            confidence=0.88,
+            coverage=1.0,
+            evidence_id="ev1_fingerprint",
+        )
 
         with patch.object(web_app, "search_quality_for_source",
                           return_value=QualitySearchResult(27.0, "VMAF", 94.5, 94.6, "ok")):
@@ -5979,50 +5990,53 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     "run_sample_encode",
                     return_value=SampleEncodeResult("VMAF", 94.6, 18.0, 1200.0, 100_000_000, "ok"),
             ):
-                with patch.object(web_app, "recommend_review_timestamps", return_value=[10.0]):
-                    with patch.object(web_app, "encode_preview_clips", return_value=[preview_clip]):
-                        with patch.object(web_app, "render_source_review_clips", return_value=[source_clip]):
-                            with patch.object(web_app, "generate_compare_clips_from_previews",
-                                              return_value=[compare_clip]):
-                                with patch.object(
-                                        web_app,
-                                        "estimate_output_overhead_bytes",
-                                        return_value={"audio_bytes": 1, "subtitle_bytes": 2, "container_bytes": 3,
-                                                      "total_bytes": 6},
-                                ):
-                                    payload, cleanup_path = web_app._run_sampled_calibration(
-                                        config=self.config,
-                                        prefix="tv/show",
-                                        action="baseline",
-                                        host_data={"key": "localhost"},
-                                        notes="",
-                                        policy={
-                                            "video": {
-                                                "encoder": "libsvtav1",
-                                                "pixel_format": "yuv420p10le",
-                                                "quality_metric": "auto",
-                                                "sample_every": "8m",
-                                                "sample_duration": "20s",
-                                                "preset": 4,
+                with patch.object(web_app, "recommend_review_moments", return_value=[review_moment]):
+                    with patch.object(web_app, "recommend_review_timestamps", return_value=[10.0]):
+                        with patch.object(web_app, "encode_preview_clips", return_value=[preview_clip]):
+                            with patch.object(web_app, "render_source_review_clips", return_value=[source_clip]):
+                                with patch.object(web_app, "generate_compare_clips_from_previews",
+                                                  return_value=[compare_clip]):
+                                    with patch.object(
+                                            web_app,
+                                            "estimate_output_overhead_bytes",
+                                            return_value={"audio_bytes": 1, "subtitle_bytes": 2, "container_bytes": 3,
+                                                          "total_bytes": 6},
+                                    ):
+                                        payload, cleanup_path = web_app._run_sampled_calibration(
+                                            config=self.config,
+                                            prefix="tv/show",
+                                            action="baseline",
+                                            host_data={"key": "localhost"},
+                                            notes="",
+                                            policy={
+                                                "video": {
+                                                    "encoder": "libsvtav1",
+                                                    "pixel_format": "yuv420p10le",
+                                                    "quality_metric": "auto",
+                                                    "sample_every": "8m",
+                                                    "sample_duration": "20s",
+                                                    "preset": 4,
+                                                },
+                                                "audio": {},
+                                                "subtitle": {},
                                             },
-                                            "audio": {},
-                                            "subtitle": {},
-                                        },
-                                        seed_metadata=None,
-                                        sample_item={
-                                            "source_path": str(source_path),
-                                            "source_size_bytes": 200_000_000,
-                                            "duration_seconds": 2600.0,
-                                            "rel_path": "tv/show/episode-review.mkv",
-                                        },
-                                        calibration_run_id="run-123",
-                                        process_controller=Mock(),
-                                    )
+                                            seed_metadata=None,
+                                            sample_item={
+                                                "source_path": str(source_path),
+                                                "source_size_bytes": 200_000_000,
+                                                "duration_seconds": 2600.0,
+                                                "rel_path": "tv/show/episode-review.mkv",
+                                            },
+                                            calibration_run_id="run-123",
+                                            process_controller=Mock(),
+                                        )
 
         self.assertIsNone(cleanup_path)
         self.assertTrue(payload["preview_clips"][0]["path"].startswith("/review-media/run-123/"))
         self.assertTrue(payload["source_clips"][0]["path"].startswith("/review-media/run-123/"))
         self.assertTrue(payload["compare_clips"][0]["path"].startswith("/review-media/run-123/"))
+        self.assertEqual(payload["review_moments"][0]["role"], "hard")
+        self.assertEqual(payload["review_moments"][0]["evidence_id"], "ev1_fingerprint")
 
     def test_load_calibration_state_builds_review_pairs_for_browser_player(self) -> None:
         review_dir = self.config.paths.review_dir / "run-pairs" / "item-00"
@@ -16125,6 +16139,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 video_codec="h264",
                 audio_summary_json="[]",
                 subtitle_summary_json="[]",
+                media_fingerprint_json="{}",
                 last_scan_id="scan-1",
                 discovered_at=now,
                 last_seen_at=now,

@@ -6,6 +6,7 @@ from mediaforce.core.binaries import ffprobe_binary
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.encoding.cadence import analyze_cadence
+from mediaforce.encoding.fingerprint import analyze_media_fingerprint
 
 TRACK_FIELDS = ("index", "codec_name", "channels", "bit_rate", "language", "default", "forced")
 PROBE_TIMEOUT_SECONDS = 60
@@ -78,6 +79,12 @@ def probe_media(path: Path) -> ProbeSummary:
         video_stream=video_stream,
         duration_seconds=duration_seconds,
     )
+    media_fingerprint = analyze_media_fingerprint(
+        path,
+        video_stream=video_stream,
+        audio_streams=audio_streams,
+        duration_seconds=duration_seconds,
+    )
 
     return ProbeSummary(
         duration_seconds=duration_seconds,
@@ -95,6 +102,7 @@ def probe_media(path: Path) -> ProbeSummary:
         audio_summary_json=json.dumps(audio_summary, separators=(",", ":"), sort_keys=True),
         subtitle_summary_json=json.dumps(subtitle_summary, separators=(",", ":"), sort_keys=True),
         cadence_summary_json=json.dumps(cadence_summary, separators=(",", ":"), sort_keys=True),
+        media_fingerprint_json=json.dumps(media_fingerprint, separators=(",", ":"), sort_keys=True),
     )
 
 

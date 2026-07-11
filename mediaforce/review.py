@@ -26,7 +26,9 @@ from mediaforce.reviewing.helpers import auto_timestamps as _auto_timestamps_imp
     complexity_timestamps as _complexity_timestamps_impl, default_timestamps as _default_timestamps_impl, \
     format_crf as _format_crf_impl, planned_audio_action as _planned_audio_action_impl, \
     planned_opus_bitrate as _planned_opus_bitrate_impl, scene_change_timestamps as _scene_change_timestamps_impl, \
-    slug_seconds as _slug_seconds_impl
+    ReviewMoment, \
+    recommend_review_moments as _recommend_review_moments_impl, \
+    review_moment_payload as _review_moment_payload_impl, slug_seconds as _slug_seconds_impl
 from mediaforce.reviewing.renderers import render_compare_clip as _render_compare_clip_impl, \
     render_compare_clip_from_preview as _render_compare_clip_from_preview_impl, \
     render_encoded_preview_clip as _render_encoded_preview_clip_impl, \
@@ -159,6 +161,30 @@ def recommend_review_timestamps(
         process_controller: ManagedProcessController | None = None,
 ) -> list[float]:
     return _auto_timestamps(source_path, total_duration, clip_duration, process_controller=process_controller)
+
+
+def recommend_review_moments(
+        source_path: Path,
+        total_duration: float,
+        clip_duration: float,
+        *,
+        media_fingerprint: dict[str, Any] | None = None,
+        media_fingerprint_decision: dict[str, Any] | None = None,
+        process_controller: ManagedProcessController | None = None,
+) -> list[ReviewMoment]:
+    return _recommend_review_moments_impl(
+        source_path,
+        total_duration,
+        clip_duration,
+        media_fingerprint=media_fingerprint,
+        media_fingerprint_decision=media_fingerprint_decision,
+        process_controller=process_controller,
+        auto_timestamps_fn=_auto_timestamps,
+    )
+
+
+def review_moment_payload(moment: Any) -> dict[str, Any]:
+    return _review_moment_payload_impl(moment)
 
 
 def encode_preview_clips(

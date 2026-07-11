@@ -84,7 +84,9 @@ from mediaforce.review import (
     encode_preview_clips,
     generate_compare_clips,
     generate_compare_clips_from_previews,
+    recommend_review_moments,
     recommend_review_timestamps,
+    review_moment_payload,
     render_source_review_clips,
 )
 from mediaforce.reviewing.renderers import NATIVE_COMPARE_FILTER
@@ -2558,6 +2560,8 @@ def _calibration_run_deps() -> CalibrationRunDeps:
         run_sample_encode=run_sample_encode,
         detect_video_crop=detect_video_crop,
         recommend_review_timestamps=recommend_review_timestamps,
+        recommend_review_moments=recommend_review_moments,
+        review_moment_payload=review_moment_payload,
         encode_preview_clips=encode_preview_clips,
         render_source_review_clips=render_source_review_clips,
         generate_compare_clips_from_previews=generate_compare_clips_from_previews,

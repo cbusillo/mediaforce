@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS library_items
     audio_summary_json        TEXT    NOT NULL,
     subtitle_summary_json     TEXT    NOT NULL,
     cadence_summary_json      TEXT,
+    media_fingerprint_json    TEXT,
     status                    TEXT    NOT NULL DEFAULT 'discovered',
     priority_score            REAL    NOT NULL DEFAULT 0,
     recommendation            TEXT,
