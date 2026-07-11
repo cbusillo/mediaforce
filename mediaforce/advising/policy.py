@@ -172,6 +172,17 @@ def operator_note_parse_schema() -> dict[str, Any]:
 def has_nonpositive_video_budget(requested_experiment: dict[str, Any] | None) -> bool:
     request = object_dict(requested_experiment)
     for candidate in (request, object_dict(request.get("size_budget_request"))):
+        ledger = object_dict(candidate.get("stream_budget_ledger"))
+        feasibility = object_dict(ledger.get("feasibility"))
+        if str(feasibility.get("status") or "") == "arithmetically_infeasible":
+            return True
+        remaining_video_bytes = object_dict(ledger.get("totals")).get("remaining_video_bytes")
+        if (
+                isinstance(remaining_video_bytes, int | float)
+                and not isinstance(remaining_video_bytes, bool)
+                and float(remaining_video_bytes) <= 0
+        ):
+            return True
         estimated_video_bitrate = candidate.get("estimated_video_bitrate_kbps")
         if (
                 isinstance(estimated_video_bitrate, int | float)

@@ -477,6 +477,7 @@ def promote_one_item(
             default_subtitle_language=promoted_probe.default_subtitle_language,
             audio_summary_json=promoted_probe.audio_summary_json,
             subtitle_summary_json=promoted_probe.subtitle_summary_json,
+            attachment_summary_json=promoted_probe.attachment_summary_json,
             status="promoted",
             updated_at=now,
             last_seen_at=now,

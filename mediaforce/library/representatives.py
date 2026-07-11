@@ -41,6 +41,7 @@ _PUBLIC_ITEM_FIELDS = (
     "recommendation_reason",
     "audio_summary",
     "subtitle_summary",
+    "attachment_summary",
     "resolved_policy",
 )
 _OPTIONAL_TECHNICAL_FIELDS = (

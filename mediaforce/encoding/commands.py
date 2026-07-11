@@ -3,6 +3,7 @@ from typing import Any, Callable
 
 from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.quality import QualitySearchResult
+from mediaforce.encoding.streams import ProductionStreamPlan
 from mediaforce.encoding.video_filters import build_video_filter
 
 
@@ -15,7 +16,7 @@ def build_ffmpeg_command(
         preset: int,
         audio_policy: dict[str, Any],
         subtitle_policy: dict[str, Any],
-        selection: dict[str, Any],
+        selection: ProductionStreamPlan | dict[str, Any],
         quality: QualitySearchResult,
         text_subtitle_codecs: set[str],
         ffmpeg_binary: Callable[[], str],
@@ -76,10 +77,18 @@ def build_ffmpeg_command(
     for key, value in mediaforce_tags.items():
         cmd.extend(["-metadata", f"{key}={value}"])
 
-    for audio in selection["audio_tracks"]:
-        cmd.extend(["-map", f"0:{audio['index']}"])
-    for subtitle in selection["subtitle_tracks"]:
-        cmd.extend(["-map", f"0:{subtitle['index']}"])
+    if isinstance(selection, ProductionStreamPlan):
+        for audio in selection.audio_streams:
+            cmd.extend(["-map", f"0:{audio.source_index}"])
+        for subtitle in selection.subtitle_streams:
+            cmd.extend(["-map", f"0:{subtitle.source_index}"])
+        if selection.copies_attachments:
+            cmd.extend(["-map", "0:t?"])
+    else:
+        for audio in selection["audio_tracks"]:
+            cmd.extend(["-map", f"0:{audio['index']}"])
+        for subtitle in selection["subtitle_tracks"]:
+            cmd.extend(["-map", f"0:{subtitle['index']}"])
 
     cmd.extend(
         [
@@ -107,28 +116,55 @@ def build_ffmpeg_command(
     if video_filter:
         cmd.extend(["-vf", video_filter])
 
-    for output_index, audio in enumerate(selection["audio_tracks"]):
-        codec = audio_codec(audio, audio_policy)
-        cmd.extend([f"-c:a:{output_index}", codec])
-        cmd.extend([f"-metadata:s:a:{output_index}", "language=eng"])
-        cmd.extend([f"-disposition:a:{output_index}", "default"])
-        if codec == "libopus":
-            layout_filter = opus_layout_filter(audio)
-            if layout_filter:
-                cmd.extend([f"-af:a:{output_index}", layout_filter])
-                cmd.extend([f"-mapping_family:a:{output_index}", "1"])
-            cmd.extend([f"-b:a:{output_index}", opus_bitrate(audio, audio_policy)])
+    if isinstance(selection, ProductionStreamPlan):
+        for output_index, audio in enumerate(selection.audio_streams):
+            codec = str(audio.codec_argument or "copy")
+            cmd.extend([f"-c:a:{output_index}", codec])
+            cmd.extend([f"-metadata:s:a:{output_index}", "language=eng"])
+            cmd.extend([f"-disposition:a:{output_index}", "default"])
+            if codec == "libopus":
+                layout_filter = opus_layout_filter({"channels": audio.channels})
+                if layout_filter:
+                    cmd.extend([f"-af:a:{output_index}", layout_filter])
+                    cmd.extend([f"-mapping_family:a:{output_index}", "1"])
+                cmd.extend([f"-b:a:{output_index}", str(audio.output_bitrate_text)])
+        if not selection.audio_streams:
+            cmd.extend(["-an"])
 
-    for output_index, subtitle in enumerate(selection["subtitle_tracks"]):
-        codec = "srt" if subtitle["codec_name"] in text_subtitle_codecs else "copy"
-        cmd.extend([f"-c:s:{output_index}", codec])
-        cmd.extend([f"-metadata:s:s:{output_index}", "language=eng"])
-        disposition = "default" if output_index == 0 and not subtitle.get("forced") else "0"
-        if subtitle.get("forced"):
-            disposition = "forced"
-        cmd.extend([f"-disposition:s:{output_index}", disposition])
+        for output_index, subtitle in enumerate(selection.subtitle_streams):
+            cmd.extend([f"-c:s:{output_index}", str(subtitle.codec_argument or "copy")])
+            cmd.extend([f"-metadata:s:s:{output_index}", "language=eng"])
+            disposition = "default" if output_index == 0 and not subtitle.forced else "0"
+            if subtitle.forced:
+                disposition = "forced"
+            cmd.extend([f"-disposition:s:{output_index}", disposition])
+        if selection.copies_attachments:
+            cmd.extend(["-c:t", "copy"])
+        has_subtitles = bool(selection.subtitle_streams)
+    else:
+        for output_index, audio in enumerate(selection["audio_tracks"]):
+            codec = audio_codec(audio, audio_policy)
+            cmd.extend([f"-c:a:{output_index}", codec])
+            cmd.extend([f"-metadata:s:a:{output_index}", "language=eng"])
+            cmd.extend([f"-disposition:a:{output_index}", "default"])
+            if codec == "libopus":
+                layout_filter = opus_layout_filter(audio)
+                if layout_filter:
+                    cmd.extend([f"-af:a:{output_index}", layout_filter])
+                    cmd.extend([f"-mapping_family:a:{output_index}", "1"])
+                cmd.extend([f"-b:a:{output_index}", opus_bitrate(audio, audio_policy)])
 
-    if not selection["subtitle_tracks"]:
+        for output_index, subtitle in enumerate(selection["subtitle_tracks"]):
+            codec = "srt" if subtitle["codec_name"] in text_subtitle_codecs else "copy"
+            cmd.extend([f"-c:s:{output_index}", codec])
+            cmd.extend([f"-metadata:s:s:{output_index}", "language=eng"])
+            disposition = "default" if output_index == 0 and not subtitle.get("forced") else "0"
+            if subtitle.get("forced"):
+                disposition = "forced"
+            cmd.extend([f"-disposition:s:{output_index}", disposition])
+        has_subtitles = bool(selection["subtitle_tracks"])
+
+    if not has_subtitles:
         cmd.extend(["-sn"])
 
     return cmd + [str(staging_path)]

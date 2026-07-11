@@ -9,6 +9,7 @@ from mediaforce.advising.policy import has_nonpositive_video_budget, merge_polic
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.type_defs import object_dict, object_list
+from mediaforce.execution import resolve_stream_budget_ledger
 from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.web.runtime.folder_tuning_advice import operator_preserves_source_resolution, operator_request_from_intent
 from mediaforce.web.runtime.folder_tuning_helpers import (
@@ -75,10 +76,25 @@ def _job_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
         "duration_seconds": sample_item.get("duration_seconds"),
         "audio_summary": object_list(sample_item.get("audio_summary")),
         "subtitle_summary": object_list(sample_item.get("subtitle_summary")),
+        "attachment_summary": (
+            object_list(sample_item.get("attachment_summary"))
+            if isinstance(sample_item.get("attachment_summary"), list)
+            else None
+        ),
+        "output_container": sample_item.get("output_container"),
         "resolved_policy": object_dict(sample_item.get("resolved_policy")),
+        "stream_budget_ledger": object_dict(sample_item.get("stream_budget_ledger")),
         "representative_source_id": sample_item.get("representative_source_id"),
         "representative_selection": object_dict(sample_item.get("representative_selection")),
     }
+
+
+def _output_container(config: MediaforceConfig, sample_item: dict[str, Any]) -> str:
+    configured = str(object_dict(config.raw.get("media")).get("output_container") or "").strip()
+    if configured:
+        return configured
+    item_container = str(sample_item.get("output_container") or sample_item.get("container") or "").strip()
+    return item_container.removeprefix(".") or "mkv"
 
 
 def _latest_failed_sample_job_payload(job: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -295,7 +311,12 @@ def _can_keep_first_size_budget_sample(
     request = object_dict(operator_request)
     if str(request.get("request_type") or "").strip().lower() != "size_budget":
         return False
-    if str(request.get("feasibility") or "").strip().lower() != "plausible":
+    if str(request.get("feasibility") or "").strip().lower() not in {
+        "feasible",
+        "aggressive_but_measurable",
+        "requires_measurement",
+        "plausible",
+    }:
         return False
     if str(request.get("evidence_authority") or "none").strip().lower() == "rejected_visual_result":
         return False
@@ -353,12 +374,12 @@ def _keep_first_size_budget_sample(
     if has_nonpositive_video_budget(request):
         summary = "The requested total size leaves no positive video budget."
         diagnosis = (
-            "The estimated audio allocation consumes the requested total size, so this sample cannot queue "
-            "until the total target or audio allocation changes."
+            "The production audio, subtitle, attachment, and container allocation consumes the requested total "
+            "size, so this sample cannot queue until the total target or stream plan changes."
         )
         request_response = (
             "That total size cannot queue as written because it leaves no positive video budget. "
-            "Increase the total target or explicitly reduce the audio allocation first."
+            "Increase the total target or explicitly change the selected stream allocation first."
         )
         seed_job_fields["seed_source"] = "operator_request"
         seed_job_fields["seed_summary"] = summary
@@ -601,6 +622,16 @@ def folder_ai_tune_confirm_action(
                 advice_payload["learning_artifact"] = learning_artifact
             deps.save_advice_state(config, normalized_prefix, advice_payload)
 
+        queued_sample_item = dict(sample_item)
+        queued_sample_item["resolved_policy"] = final_policy
+        output_container = _output_container(config, queued_sample_item)
+        queued_sample_item["output_container"] = output_container
+        queued_sample_item["stream_budget_ledger"] = resolve_stream_budget_ledger(
+            queued_sample_item,
+            default_video_policy=object_dict(config.raw.get("video")),
+            output_container=output_container,
+            prefer_persisted=False,
+        ).to_payload()
         job_payload = {
             "job_id": uuid.uuid4().hex[:12],
             "status": "queued",
@@ -612,7 +643,7 @@ def folder_ai_tune_confirm_action(
             "action": action,
             "notes": operator_note,
             "policy": final_policy,
-            "sample_item": _job_sample_item_payload(sample_item),
+            "sample_item": _job_sample_item_payload(queued_sample_item),
             "created_at": deps.now_iso(),
             "started_at": None,
             "finished_at": None,
@@ -666,7 +697,17 @@ def _retry_latest_sample_job(
             sample_item = deps.sample_item(connection, config, normalized_prefix)
             if sample_item is None:
                 raise HTTPException(status_code=404, detail=f"No sample item found for {normalized_prefix}")
-            stored_sample_item = _job_sample_item_payload(object_dict(sample_item))
+            refreshed_sample_item = object_dict(sample_item)
+            refreshed_sample_item["resolved_policy"] = object_dict(existing_job.get("policy"))
+            output_container = _output_container(config, refreshed_sample_item)
+            refreshed_sample_item["output_container"] = output_container
+            refreshed_sample_item["stream_budget_ledger"] = resolve_stream_budget_ledger(
+                refreshed_sample_item,
+                default_video_policy=object_dict(config.raw.get("video")),
+                output_container=output_container,
+                prefer_persisted=False,
+            ).to_payload()
+            stored_sample_item = _job_sample_item_payload(refreshed_sample_item)
 
         job_payload = {
             **existing_job,
