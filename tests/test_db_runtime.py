@@ -16,7 +16,7 @@ from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import encode_queue_state
 from mediaforce.core.type_defs import object_dict
 
-CURRENT_DB_REVISION = "20260403_0004"
+CURRENT_DB_REVISION = "20260711_0005"
 
 
 class DatabaseRuntimeTests(unittest.TestCase):
@@ -32,10 +32,12 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 inspector = inspect(connection)
                 table_names = inspector.get_table_names()
                 indexes = {str(index_row["name"]) for index_row in inspector.get_indexes("encode_jobs")}
+                library_columns = {str(column["name"]) for column in inspector.get_columns("library_items")}
 
             self.assertEqual(version, CURRENT_DB_REVISION)
             self.assertGreaterEqual(len(table_names), 10)
             self.assertIn("idx_encode_jobs_status_retry_ready", indexes)
+            self.assertIn("cadence_summary_json", library_columns)
 
     def test_open_db_stamps_existing_legacy_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -101,6 +103,31 @@ class DatabaseRuntimeTests(unittest.TestCase):
             assert row is not None
             self.assertEqual(row["queue_name"], "heavy")
             self.assertIn("queue_name", object_dict(row))
+
+    def test_open_db_adds_cadence_evidence_column_to_previous_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "library.sqlite3"
+            with open_db(db_path):
+                pass
+            reset_engine_cache()
+
+            raw_connection = sqlite3.connect(db_path)
+            try:
+                raw_connection.execute("ALTER TABLE library_items DROP COLUMN cadence_summary_json")
+                raw_connection.execute(
+                    "UPDATE alembic_version SET version_num = ?",
+                    ("20260403_0004",),
+                )
+                raw_connection.commit()
+            finally:
+                raw_connection.close()
+
+            with open_db(db_path) as connection:
+                version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
+                columns = {str(column["name"]) for column in inspect(connection).get_columns("library_items")}
+
+            self.assertEqual(version, CURRENT_DB_REVISION)
+            self.assertIn("cadence_summary_json", columns)
 
     def test_open_db_rolls_back_on_base_exception(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

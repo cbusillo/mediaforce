@@ -58,6 +58,9 @@ def _stored_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
         "width": sample_item.get("width"),
         "height": sample_item.get("height"),
         "cadence_class": sample_item.get("cadence_class"),
+        "cadence_summary": object_dict(sample_item.get("cadence_summary")),
+        "cadence_evidence": object_dict(sample_item.get("cadence_evidence")),
+        "cadence_decision": object_dict(sample_item.get("cadence_decision")),
         "duration_seconds": sample_item.get("duration_seconds"),
         "audio_summary": object_list(sample_item.get("audio_summary")),
         "subtitle_summary": object_list(sample_item.get("subtitle_summary")),
@@ -278,6 +281,16 @@ def run_sampled_calibration(
     video_policy = object_dict(policy.get("video"))
     width = int_value(sample_item.get("width")) or None
     height = int_value(sample_item.get("height")) or None
+    cadence_decision = (
+        object_dict(sample_item.get("cadence_decision"))
+        if "cadence_decision" in sample_item
+        else None
+    )
+    cadence_evidence = (
+        object_dict(sample_item.get("cadence_evidence"))
+        if "cadence_evidence" in sample_item
+        else None
+    )
     preset = deps.effective_video_preset(video_policy, width=width, height=height)
     detected_crop = deps.detect_video_crop(
         source_path,
@@ -289,18 +302,31 @@ def run_sampled_calibration(
         process_controller=process_controller,
         host=quality_host,
     )
-    video_filter = build_video_filter(video_policy, width=width, height=height, detected_crop=detected_crop)
-    quality_result = deps.search_quality_for_source(
-        source_path,
+    video_filter = build_video_filter(
         video_policy,
-        source_codec=str(sample_item.get("video_codec") or ""),
         width=width,
         height=height,
         detected_crop=detected_crop,
-        process_controller=process_controller,
-        host=quality_host,
-        quality_temp_dir=quality_temp_dir,
+        cadence_decision=cadence_decision,
+        cadence_evidence=cadence_evidence,
+        cadence_source_fingerprint=str(sample_item.get("source_fingerprint") or "") or None,
     )
+    quality_kwargs: dict[str, Any] = {
+        "source_codec": str(sample_item.get("video_codec") or ""),
+        "width": width,
+        "height": height,
+        "detected_crop": detected_crop,
+        "process_controller": process_controller,
+        "host": quality_host,
+        "quality_temp_dir": quality_temp_dir,
+    }
+    if cadence_decision is not None:
+        quality_kwargs["cadence_decision"] = cadence_decision
+        quality_kwargs["cadence_evidence"] = cadence_evidence
+        quality_kwargs["cadence_source_fingerprint"] = (
+            str(sample_item.get("source_fingerprint") or "") or None
+        )
+    quality_result = deps.search_quality_for_source(source_path, video_policy, **quality_kwargs)
     sample_result = deps.run_sample_encode(
         source_path,
         source_codec=str(sample_item.get("video_codec") or ""),
@@ -378,6 +404,9 @@ def run_sampled_calibration(
             "estimated_subtitle_bytes": overhead["subtitle_bytes"],
             "estimated_container_bytes": overhead["container_bytes"],
             "sample_stdout": sample_result.stdout,
+            "cadence_evidence_id": cadence_decision.get("evidence_id") if cadence_decision else None,
+            "cadence_class": cadence_decision.get("classification") if cadence_decision else None,
+            "cadence_transform": cadence_decision.get("transform") if cadence_decision else None,
         },
         "compare_clips": [
             {

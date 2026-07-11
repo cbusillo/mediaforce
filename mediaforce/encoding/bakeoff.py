@@ -104,6 +104,7 @@ def _build_item_plan(
         "target_size_percent": _target_size_percent(size_target_bytes, source_size_bytes),
         "quality_floor": _quality_floor(video_policy),
         "max_height": int_value(video_policy.get("max_height")),
+        "cadence_decision": object_dict(item.get("cadence_decision")) if "cadence_decision" in item else None,
         "clip_duration_seconds": clip_duration_seconds,
         "review_artifact_dir": str(item_output_dir) if item_output_dir is not None else None,
         "engines": [_engine_candidate(engine, item, video_policy, item_output_dir) for engine in engines],
@@ -120,7 +121,23 @@ def _engine_candidate(
     source_codec = str(item.get("video_codec") or "")
     width = int_value(item.get("width")) or None
     height = int_value(item.get("height")) or None
-    video_filter = build_video_filter(video_policy, width=width, height=height, detected_crop=None)
+    video_filter = build_video_filter(
+        video_policy,
+        width=width,
+        height=height,
+        detected_crop=None,
+        cadence_decision=(
+            object_dict(item.get("cadence_decision"))
+            if "cadence_decision" in item
+            else None
+        ),
+        cadence_evidence=(
+            object_dict(item.get("cadence_evidence"))
+            if "cadence_evidence" in item
+            else None
+        ),
+        cadence_source_fingerprint=str(item.get("source_fingerprint") or "") or None,
+    )
     target_size_mb = int_value(video_policy.get("target_size_mb"))
     max_encoded_percent = int_value(video_policy.get("max_encoded_percent"))
     target_vmaf = float_value(video_policy.get("target_vmaf"))

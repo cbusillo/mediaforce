@@ -28,6 +28,9 @@ def build_ffmpeg_command(
         width: int | None = None,
         height: int | None = None,
         detected_crop: str | None = None,
+        cadence_decision: dict[str, Any] | None = None,
+        cadence_evidence: dict[str, Any] | None = None,
+        cadence_source_fingerprint: str | None = None,
 ) -> list[str]:
     _ = subtitle_policy
     host_payload = object_dict(host)
@@ -44,6 +47,15 @@ def build_ffmpeg_command(
         "mediaforce_quality_score": _format_metadata_number(quality.score),
         "mediaforce_chosen_crf": _format_metadata_number(quality.crf),
     }
+    cadence_payload = object_dict(cadence_decision)
+    if cadence_payload:
+        mediaforce_tags.update(
+            {
+                "mediaforce_cadence_class": str(cadence_payload.get("classification") or "unknown"),
+                "mediaforce_cadence_transform": str(cadence_payload.get("transform") or "none"),
+                "mediaforce_cadence_evidence_id": str(cadence_payload.get("evidence_id") or ""),
+            }
+        )
     cmd = [
         ffmpeg_binary(),
         "-y",
@@ -83,7 +95,15 @@ def build_ffmpeg_command(
             f"tune=0:film-grain={int(video_policy.get('default_grain', 0))}:film-grain-denoise={int(video_policy.get('grain_denoise', 0))}",
         ]
     )
-    video_filter = build_video_filter(video_policy, width=width, height=height, detected_crop=detected_crop)
+    video_filter = build_video_filter(
+        video_policy,
+        width=width,
+        height=height,
+        detected_crop=detected_crop,
+        cadence_decision=cadence_decision,
+        cadence_evidence=cadence_evidence,
+        cadence_source_fingerprint=cadence_source_fingerprint,
+    )
     if video_filter:
         cmd.extend(["-vf", video_filter])
 

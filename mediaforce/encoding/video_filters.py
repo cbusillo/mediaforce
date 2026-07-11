@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mediaforce.core.type_defs import int_value
+from mediaforce.encoding.cadence import cadence_filter
 
 
 CROP_RE = re.compile(r"crop=(?P<width>\d+):(?P<height>\d+):(?P<x>\d+):(?P<y>\d+)")
@@ -41,8 +42,20 @@ def build_video_filter(
         width: int | None = None,
         height: int | None = None,
         detected_crop: str | None = None,
+        cadence_decision: dict[str, Any] | None = None,
+        cadence_evidence: dict[str, Any] | None = None,
+        cadence_source_fingerprint: str | None = None,
 ) -> str | None:
     filters: list[str] = []
+    if cadence_decision is not None:
+        transform_filter = cadence_filter(
+            cadence_decision,
+            cadence_evidence,
+            source_fingerprint=cadence_source_fingerprint,
+        )
+        if transform_filter:
+            filters.append(transform_filter)
+
     crop_filter = _crop_filter(video_policy, width=width, height=height, detected_crop=detected_crop)
     if crop_filter:
         filters.append(crop_filter)

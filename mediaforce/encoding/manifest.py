@@ -12,6 +12,7 @@ from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.process_control import ProcessCancelledError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
+from mediaforce.encoding.cadence import CadenceResolutionError, cadence_filter
 from mediaforce.encoding.quality import quality_error_message, resolve_local_quality_temp_root
 from mediaforce.encoding.staging import safe_unlink
 
@@ -100,6 +101,7 @@ def describe_item_plan(
         opus_bitrate: Callable[[dict[str, Any], dict[str, Any]], str],
 ) -> dict[str, Any]:
     policy = item["resolved_policy"]
+    cadence_decision = object_dict(item.get("cadence_decision"))
     selection = select_streams(item)
     quality_metric, _ = select_quality_metric(str(policy["video"].get("quality_metric", "auto")))
     selected_audio = object_dict(selection["audio_tracks"][0])
@@ -124,6 +126,7 @@ def describe_item_plan(
             "min_target": float_value(policy["video"]["min_target_vmaf" if quality_metric == "vmaf" else "min_target_xpsnr"]),
             "max_encoded_percent": float_value(policy["video"].get("max_encoded_percent", 100)),
             "default_grain": int_value(policy["video"].get("default_grain", 0)),
+            "cadence": cadence_decision,
         },
         "audio": audio_plan,
         "subtitles": {
@@ -173,6 +176,54 @@ def encode_one_item(
         raise FileExistsError(f"Staging file already exists: {staging_path}")
 
     policy = item["resolved_policy"]
+    cadence_decision = (
+        object_dict(item.get("cadence_decision"))
+        if "cadence_decision" in item
+        else None
+    )
+    cadence_evidence = (
+        object_dict(item.get("cadence_evidence"))
+        if "cadence_evidence" in item
+        else None
+    )
+    current_source_fingerprint = str(item.get("source_fingerprint") or "") or None
+    try:
+        current_source_fingerprint = file_fingerprint(
+            source_path,
+            source_path.stat(),
+            float_value(item.get("duration_seconds")) or None,
+        )
+    except OSError:
+        pass
+    if cadence_decision is not None:
+        try:
+            cadence_filter(
+                cadence_decision,
+                cadence_evidence,
+                source_fingerprint=current_source_fingerprint,
+            )
+        except CadenceResolutionError as exc:
+            blocked_at = timestamp()
+            record_event(
+                connection,
+                item["library_item_id"],
+                "encoding_failed",
+                {
+                    **_encode_event_details(
+                        manifest_path=manifest_path,
+                        index=index,
+                        item=item,
+                        source_path=source_path,
+                        host=host,
+                        encode_context=encode_context,
+                    ),
+                    "encode_completed_at": blocked_at,
+                    "failure_kind": "cadence_unresolved",
+                    "error": str(exc),
+                },
+            )
+            connection.commit()
+            raise
     width = int_value(item.get("width")) or None
     height = int_value(item.get("height")) or None
     detected_crop = None
@@ -212,6 +263,9 @@ def encode_one_item(
         width=width,
         height=height,
         detected_crop=detected_crop,
+        cadence_decision=cadence_decision,
+        cadence_evidence=cadence_evidence,
+        cadence_source_fingerprint=current_source_fingerprint,
         process_controller=process_controller,
         host=quality_search_host,
         quality_temp_dir=_quality_temp_dir_for_encode_host(config, quality_search_host),
@@ -231,6 +285,9 @@ def encode_one_item(
         width=width,
         height=height,
         detected_crop=detected_crop,
+        cadence_decision=cadence_decision,
+        cadence_evidence=cadence_evidence,
+        cadence_source_fingerprint=current_source_fingerprint,
     )
 
     started_at = timestamp()

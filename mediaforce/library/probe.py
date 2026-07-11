@@ -5,8 +5,10 @@ from pathlib import Path
 from mediaforce.core.binaries import ffprobe_binary
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.type_defs import int_value, object_dict, object_list
+from mediaforce.encoding.cadence import analyze_cadence
 
 TRACK_FIELDS = ("index", "codec_name", "channels", "bit_rate", "language", "default", "forced")
+PROBE_TIMEOUT_SECONDS = 60
 
 
 def _normalize_language(stream: dict[str, object]) -> str | None:
@@ -42,7 +44,13 @@ def probe_media(path: Path) -> ProbeSummary:
         "-show_streams",
         str(path),
     ]
-    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    result = subprocess.run(
+        cmd,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=PROBE_TIMEOUT_SECONDS,
+    )
     payload = object_dict(json.loads(result.stdout))
 
     streams = [object_dict(stream) for stream in object_list(payload.get("streams"))]
@@ -64,8 +72,15 @@ def probe_media(path: Path) -> ProbeSummary:
         _normalize_language(subtitle_streams[0]) if subtitle_streams else None,
     )
 
+    duration_seconds = _as_float(format_info.get("duration"))
+    cadence_summary = analyze_cadence(
+        path,
+        video_stream=video_stream,
+        duration_seconds=duration_seconds,
+    )
+
     return ProbeSummary(
-        duration_seconds=_as_float(format_info.get("duration")),
+        duration_seconds=duration_seconds,
         video_codec=video_stream.get("codec_name") if video_stream else None,
         video_bitrate=_as_int(video_stream.get("bit_rate")) if video_stream else None,
         width=_as_int(video_stream.get("width")) if video_stream else None,
@@ -79,6 +94,7 @@ def probe_media(path: Path) -> ProbeSummary:
         default_subtitle_language=default_subtitle_language,
         audio_summary_json=json.dumps(audio_summary, separators=(",", ":"), sort_keys=True),
         subtitle_summary_json=json.dumps(subtitle_summary, separators=(",", ":"), sort_keys=True),
+        cadence_summary_json=json.dumps(cadence_summary, separators=(",", ":"), sort_keys=True),
     )
 
 
