@@ -45,3 +45,14 @@
 - When behavior, workflows, or operator-facing expectations change, update the
   relevant docs in the same change
 - Keep cross-references current when style or workflow guidance moves
+
+## Dependency updates
+
+- Keep Python and frontend dependency updates independently reviewable rather
+  than combining unrelated ecosystems in one pull request.
+- Group routine minor and patch updates, but leave semantic-version majors as
+  separate compatibility decisions after a bounded cooldown.
+- Keep security updates ungrouped and independently mergeable so routine
+  version grouping cannot delay an urgent fix.
+- Fix dependency constraints or application compatibility instead of enabling
+  legacy peer resolution or weakening acceptance gates.

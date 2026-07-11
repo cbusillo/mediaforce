@@ -1007,8 +1007,7 @@
 									rows="5"
 									placeholder="Describe the content and your quality or size goal, or ask for a standard sample to get started."
 									bind:this={benchTextarea}
-									bind:value={benchNote}
-								></textarea>
+									bind:value={benchNote}></textarea>
 							</label>
 							<div class="bench__controls">
 								<label>
