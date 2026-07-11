@@ -8,6 +8,7 @@ from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY
 from mediaforce.hosts.config import normalize_host_capabilities
 from mediaforce.remote import DEFAULT_HOST_CAPABILITIES, DEFAULT_HOST_MEDIA_ACCESS, normalize_host_media_access
 from mediaforce.core.type_defs import JSONValue
+from mediaforce.tuning.size_goals import megabytes_to_bytes
 
 DEFAULT_LIBRARY_COLOR_PALETTE = (
     "#a16207",
@@ -41,6 +42,9 @@ DEFAULT_VIDEO_DEFAULTS = {
     "min_target_xpsnr": "35",
     "target_size_mb": "300",
     "target_runtime_minutes": "45",
+    "size_goal_mode": "normalized",
+    "sample_projection_tolerance_percent": "10",
+    "final_output_tolerance_percent": "5",
     "decision_model": "size_first_review",
     "quality_engine": "ab_av1_fast_sample",
     "max_height": "1080",
@@ -323,6 +327,15 @@ def settings_video_defaults_for_config(config: MediaforceConfig) -> dict[str, st
         "target_size_mb": _settings_number_text(video.get("target_size_mb"), DEFAULT_VIDEO_DEFAULTS["target_size_mb"]),
         "target_runtime_minutes": _settings_number_text(
             video.get("target_runtime_minutes"), DEFAULT_VIDEO_DEFAULTS["target_runtime_minutes"]
+        ),
+        "size_goal_mode": "normalized",
+        "sample_projection_tolerance_percent": _settings_number_text(
+            video.get("sample_projection_tolerance_percent"),
+            DEFAULT_VIDEO_DEFAULTS["sample_projection_tolerance_percent"],
+        ),
+        "final_output_tolerance_percent": _settings_number_text(
+            video.get("final_output_tolerance_percent"),
+            DEFAULT_VIDEO_DEFAULTS["final_output_tolerance_percent"],
         ),
         "decision_model": _settings_choice_text(
             video.get("decision_model"),
@@ -711,6 +724,8 @@ def normalize_video_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
     min_target_xpsnr = _float_field("min_target_xpsnr", minimum=1, maximum=100)
     if min_target_xpsnr > target_xpsnr:
         raise ValueError("Video default min_target_xpsnr must be less than or equal to target_xpsnr.")
+    target_size_mb = _float_field("target_size_mb", minimum=1, maximum=100_000)
+    max_height = _int_field("max_height", minimum=0, maximum=4320)
 
     return {
         "quality_metric": metric,
@@ -718,11 +733,23 @@ def normalize_video_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
         "min_target_vmaf": min_target_vmaf,
         "target_xpsnr": target_xpsnr,
         "min_target_xpsnr": min_target_xpsnr,
-        "target_size_mb": _float_field("target_size_mb", minimum=1, maximum=100_000),
+        "target_size_mb": target_size_mb,
+        "target_size_bytes": megabytes_to_bytes(target_size_mb),
         "target_runtime_minutes": _float_field("target_runtime_minutes", minimum=1, maximum=1440),
+        "size_goal_schema_version": 1,
+        "size_goal_mode": "normalized",
+        "size_goal_source": "config_default",
+        "sample_projection_tolerance_percent": _float_field(
+            "sample_projection_tolerance_percent", minimum=0.1, maximum=100
+        ),
+        "final_output_tolerance_percent": _float_field(
+            "final_output_tolerance_percent", minimum=0.1, maximum=100
+        ),
         "decision_model": decision_model,
         "quality_engine": quality_engine,
-        "max_height": _int_field("max_height", minimum=0, maximum=4320),
+        "max_height": max_height,
+        "resolution_intent_mode": "max_height" if max_height > 0 else "source",
+        "resolution_intent_source": "config_default",
         "default_grain": _int_field("default_grain", minimum=0, maximum=50),
         "max_encoded_percent": _float_field("max_encoded_percent", minimum=1, maximum=100),
     }

@@ -7,6 +7,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import tuning_sessions
 from mediaforce.core.type_defs import object_dict
 from mediaforce.core.type_defs import JSONValue
+from mediaforce.tuning.size_goals import DEFAULT_SAMPLE_PROJECTION_TOLERANCE_PERCENT
 
 
 def video_quality_improvement_change(current_video: dict[str, Any], preview_video: dict[str, Any]) -> bool:
@@ -262,6 +263,9 @@ def proposal_alignment_issue(
         return None
 
     def _size_budget_alignment_issue() -> str | None:
+        typed_goal_issue = _typed_size_goal_alignment_issue()
+        if typed_goal_issue is not None:
+            return typed_goal_issue
         current_vmaf = _float_or_none(current_video.get("target_vmaf"))
         preview_vmaf = _float_or_none(preview_video.get("target_vmaf"))
         current_xpsnr = _float_or_none(current_video.get("target_xpsnr"))
@@ -330,6 +334,9 @@ def proposal_alignment_issue(
         return None
 
     def _size_budget_cap_alignment_issue() -> str | None:
+        typed_goal_issue = _typed_size_goal_alignment_issue()
+        if typed_goal_issue is not None:
+            return typed_goal_issue
         requested_cap = _float_or_none(requested_video.get("max_encoded_percent"))
         if requested_cap is None:
             requested_cap = _float_or_none(operator_request.get("applied_max_encoded_percent"))
@@ -371,6 +378,28 @@ def proposal_alignment_issue(
         tradeoff_issue = _unrequested_size_tradeoff_issue()
         if tradeoff_issue is not None:
             return tradeoff_issue
+        return None
+
+    def _typed_size_goal_alignment_issue() -> str | None:
+        requested_mode = str(requested_video.get("size_goal_mode") or "").strip().lower()
+        if requested_mode not in {"normalized", "absolute"}:
+            return None
+        preview_mode = str(preview_video.get("size_goal_mode") or "").strip().lower()
+        if preview_mode != requested_mode:
+            return f"The draft does not preserve the requested {requested_mode} size-goal mode."
+        for key, label in (
+                ("target_size_bytes", "canonical size bytes"),
+                ("target_size_mb", "size value"),
+                ("target_runtime_minutes", "reference runtime"),
+                ("sample_projection_tolerance_percent", "test target band"),
+                ("final_output_tolerance_percent", "final output band"),
+        ):
+            requested_value = _float_or_none(requested_video.get(key))
+            if requested_value is None:
+                continue
+            preview_value = _float_or_none(preview_video.get(key))
+            if preview_value is None or abs(preview_value - requested_value) > 0.001:
+                return f"The draft does not preserve the requested {label}."
         return None
 
     def _metric_alignment_issue() -> str | None:
@@ -471,7 +500,7 @@ def size_budget_sample_issue(
         *,
         operator_request: dict[str, Any] | None,
         calibration_payload: dict[str, Any],
-        tolerance: float = 0.15,
+        tolerance: float | None = None,
 ) -> str | None:
     analysis = size_budget_sample_analysis(
         operator_request=operator_request,
@@ -500,7 +529,7 @@ def size_budget_sample_analysis(
         *,
         operator_request: dict[str, Any] | None,
         calibration_payload: dict[str, Any],
-        tolerance: float = 0.15,
+        tolerance: float | None = None,
 ) -> dict[str, Any]:
     request = object_dict(operator_request)
     if not request or not bool(request.get("operator_confirmed")):
@@ -508,14 +537,17 @@ def size_budget_sample_analysis(
     budget_bytes = _operator_budget_bytes(request)
     if budget_bytes is None or budget_bytes <= 0:
         return {}
+    tolerance_percent = _sample_projection_tolerance_percent(request)
+    tolerance_ratio = tolerance if tolerance is not None else tolerance_percent / 100.0
     sample_result = object_dict(calibration_payload.get("sample_result"))
     predicted_total = _number_or_none(sample_result.get("predicted_total_size_bytes"))
-    lower_bound = float(budget_bytes) * (1.0 - tolerance)
-    upper_bound = float(budget_bytes) * (1.0 + tolerance)
+    lower_bound = float(budget_bytes) * (1.0 - tolerance_ratio)
+    upper_bound = float(budget_bytes) * (1.0 + tolerance_ratio)
     analysis = {
         "budget_bytes": budget_bytes,
         "budget_label": request.get("budget_label"),
-        "tolerance": tolerance,
+        "tolerance": tolerance_ratio,
+        "sample_projection_tolerance_percent": round(tolerance_ratio * 100.0, 3),
         "lower_bound_bytes": int(round(lower_bound)),
         "upper_bound_bytes": int(round(upper_bound)),
         "predicted_total_size_bytes": int(round(predicted_total)) if predicted_total is not None else None,
@@ -529,6 +561,21 @@ def size_budget_sample_analysis(
     if predicted_total > upper_bound:
         return {**analysis, "status": "over_target"}
     return {**analysis, "status": "inside_target_band"}
+
+
+def _sample_projection_tolerance_percent(operator_request: dict[str, Any]) -> float:
+    request = object_dict(operator_request)
+    size_request = object_dict(request.get("size_budget_request"))
+    for payload in (request, size_request):
+        value = _number_or_none(payload.get("sample_projection_tolerance_percent"))
+        if value is not None and value > 0:
+            return min(value, 100.0)
+    for payload in (request, size_request):
+        legacy_value = _number_or_none(payload.get("target_tolerance_percent"))
+        if legacy_value is None or legacy_value <= 0:
+            continue
+        return min(legacy_value * 100.0 if legacy_value <= 1.0 else legacy_value, 100.0)
+    return DEFAULT_SAMPLE_PROJECTION_TOLERANCE_PERCENT
 
 
 def _operator_budget_bytes(operator_request: dict[str, Any]) -> int | None:

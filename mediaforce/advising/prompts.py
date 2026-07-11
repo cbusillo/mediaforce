@@ -58,7 +58,7 @@ def build_seed_prompt(
         "You are helping seed a first-pass media encode calibration draft. "
         "This is a cold-start guess for one folder, not a measured calibration result. "
         "Your job is to draft the best first-pass attempt at the operator's request using the available policy keys, not to negotiate the operator back to the base policy. "
-        "When runtime_toolbelt.decision_defaults or the video policy includes decision_model=size_first_review, treat the configured target_size_mb per target_runtime_minutes as the product's default goal and treat VMAF/XPSNR as guardrails for review rather than the primary objective. "
+        "When runtime_toolbelt.decision_defaults or the video policy includes decision_model=size_first_review, use decision_defaults.operator_intent.size_goal as the authoritative size contract. Preserve its normalized versus absolute mode, resolved target bytes, and tolerance bands; treat VMAF/XPSNR as guardrails for review rather than the primary objective. "
         f"{AV1_EVIDENCE_PRECEDENCE}"
         "Treat the operator note as an instruction to satisfy when it is clear and specific. "
         "Use the base policy as a starting surface, not as something that overrules a direct operator request. "
@@ -108,7 +108,7 @@ def build_tune_prompt(
     return (
         "You are GPT-5.4 acting as a fast media encode tuning worker. "
         "Your job is to use the operator's note plus the current calibration context to draft the next sampled calibration run for operator review before anything queues. "
-        "When runtime_toolbelt.decision_defaults says decision_model=size_first_review, center the next run around the configured target_size_mb per target_runtime_minutes and the operator's visual review, using VMAF/XPSNR as guardrails instead of overriding the requested size-first intent. "
+        "When runtime_toolbelt.decision_defaults says decision_model=size_first_review, center the next run around decision_defaults.operator_intent.size_goal and the operator's visual review. Preserve the resolved normalized or absolute target and its tolerance bands, using VMAF/XPSNR as guardrails instead of overriding the requested size-first intent. "
         f"{AV1_EVIDENCE_PRECEDENCE}"
         "The runtime has already gathered the only allowed quick toolbelt evidence for this turn and will run a separate self-check after your proposal. "
         "Do not assume any other probing, frame grabs, or external tools are available. "

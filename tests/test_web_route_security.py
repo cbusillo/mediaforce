@@ -43,9 +43,16 @@ class WebRouteSecurityTests(unittest.TestCase):
         app = FastAPI()
         preview_started = threading.Event()
         release_preview = threading.Event()
+        captured_intents: list[dict[str, Any] | None] = []
 
-        def slow_preview(prefix: str, note: str, host_key: str) -> dict[str, Any]:
+        def slow_preview(
+                prefix: str,
+                note: str,
+                host_key: str,
+                operator_intent: dict[str, Any] | None,
+        ) -> dict[str, Any]:
             preview_started.set()
+            captured_intents.append(operator_intent)
             release_preview.wait(timeout=1.0)
             return {"ok": True, "prefix": prefix, "note": note, "host_key": host_key}
 
@@ -71,7 +78,17 @@ class WebRouteSecurityTests(unittest.TestCase):
             task = asyncio.create_task(
                 endpoint(
                     "tv/show",
-                    _json_request({"note": "target 225 MB", "host_key": "host-1"}),
+                    _json_request(
+                        {
+                            "note": "target 225 MB",
+                            "host_key": "host-1",
+                            "operator_intent": {
+                                "schema_version": 1,
+                                "size_goal": {"mode": "absolute", "value_mb": 225},
+                                "resolution": {"mode": "source"},
+                            },
+                        }
+                    ),
                 )
             )
             await asyncio.sleep(0.05)
@@ -84,6 +101,7 @@ class WebRouteSecurityTests(unittest.TestCase):
         self.assertTrue(preview_started.is_set())
         self.assertLess(elapsed, 0.2)
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured_intents[0]["size_goal"]["mode"], "absolute")
 
     def test_settings_save_hides_internal_validation_detail(self) -> None:
         app = FastAPI()
