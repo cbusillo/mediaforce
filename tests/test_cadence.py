@@ -82,7 +82,8 @@ class CadenceTests(unittest.TestCase):
         ) as run_probe:
             summary = probe_media(Path("/tmp/progressive.mkv"))
 
-        run_probe.assert_called_once()
+        ffprobe_calls = [call for call in run_probe.call_args_list if call.args[0][0] == "ffprobe"]
+        self.assertEqual(len(ffprobe_calls), 1)
         cadence = json.loads(summary.cadence_summary_json)
         self.assertEqual(cadence["probe"]["field_order"], "progressive")
         self.assertEqual(cadence["probe"]["average_frame_rate"], "24000/1001")

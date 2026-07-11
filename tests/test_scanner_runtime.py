@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
-from mediaforce.library.scanner import _cadence_summary_present, _failed_probe_summary, scan_library
+from mediaforce.library.scanner import _cadence_summary_present, _failed_probe_summary, _media_fingerprint_present, scan_library
 
 
 class _FakeCursor:
@@ -50,9 +50,14 @@ class ScannerRuntimeTests(unittest.TestCase):
     def test_failed_probe_becomes_blocked_unknown_evidence(self) -> None:
         summary = _failed_probe_summary(RuntimeError("corrupt media"))
 
-        self.assertTrue(_cadence_summary_present(summary.cadence_summary_json))
+        self.assertFalse(_cadence_summary_present(summary.cadence_summary_json))
+        self.assertFalse(_media_fingerprint_present(summary.media_fingerprint_json))
         self.assertIn('"classification":"unknown"', summary.cadence_summary_json)
         self.assertIn("corrupt media", summary.cadence_summary_json)
+        self.assertIn('"retry_required":true', summary.cadence_summary_json)
+        self.assertIn('"status":"unknown"', summary.media_fingerprint_json)
+        self.assertIn("corrupt media", summary.media_fingerprint_json)
+        self.assertIn('"retry_required":true', summary.media_fingerprint_json)
 
     def test_empty_or_malformed_cadence_summary_requires_reprobe(self) -> None:
         self.assertFalse(_cadence_summary_present(None))
@@ -61,6 +66,14 @@ class ScannerRuntimeTests(unittest.TestCase):
         old_summary = json.loads(_failed_probe_summary(RuntimeError("old")).cadence_summary_json)
         old_summary["analysis"]["tool"]["version"] = "0"
         self.assertFalse(_cadence_summary_present(json.dumps(old_summary)))
+
+    def test_empty_or_malformed_media_fingerprint_requires_reprobe(self) -> None:
+        self.assertFalse(_media_fingerprint_present(None))
+        self.assertFalse(_media_fingerprint_present("{}"))
+        self.assertFalse(_media_fingerprint_present("not-json"))
+        old_summary = json.loads(_failed_probe_summary(RuntimeError("old")).media_fingerprint_json)
+        old_summary["analysis"]["tool"]["version"] = "0"
+        self.assertFalse(_media_fingerprint_present(json.dumps(old_summary)))
 
 
 if __name__ == "__main__":

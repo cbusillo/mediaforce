@@ -61,6 +61,7 @@ library_items = Table(
     Column("subtitle_summary_json", Text, nullable=False),
     Column("attachment_summary_json", Text),
     Column("cadence_summary_json", Text),
+    Column("media_fingerprint_json", Text),
     Column("status", Text, nullable=False, server_default="discovered"),
     Column("priority_score", REAL, nullable=False, server_default="0"),
     Column("recommendation", Text),

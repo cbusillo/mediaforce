@@ -18,11 +18,22 @@ from mediaforce.library.planner import build_manifest_item
 
 REPRESENTATIVE_SELECTION_TOOL = "mediaforce.representative_selection"
 REPRESENTATIVE_SELECTION_TOOL_VERSION = "1"
-REPRESENTATIVE_SELECTION_POLICY_VERSION = 1
+REPRESENTATIVE_SELECTION_POLICY_VERSION = 2
 MEANINGFUL_CLUSTER_FRACTION = 0.20
 
 _PREFERRED_SAMPLE_STATUSES = frozenset({"discovered", "planned", "validated", "encoded"})
 _PROFILE_DIMENSIONS = ("video_codec", "resolution", "cadence", "audio_layout", "runtime")
+_FINGERPRINT_DIMENSIONS = (
+    "luma",
+    "gradient",
+    "motion",
+    "texture",
+    "noise",
+    "duplicate_cadence",
+    "animation",
+    "audio_complexity",
+)
+_COVERAGE_DIMENSIONS = (*_PROFILE_DIMENSIONS, *_FINGERPRINT_DIMENSIONS)
 _UNKNOWN_PROFILE_VALUE = "unknown"
 _PUBLIC_ITEM_FIELDS = (
     "library_item_id",
@@ -43,6 +54,7 @@ _PUBLIC_ITEM_FIELDS = (
     "subtitle_summary",
     "attachment_summary",
     "resolved_policy",
+    "media_fingerprint_decision",
 )
 _OPTIONAL_TECHNICAL_FIELDS = (
     "cadence_class",
@@ -160,7 +172,7 @@ def select_representatives(
     profile_counts = _profile_counts(candidates)
     dominant_profile = {
         dimension: _dominant_value(profile_counts[dimension])
-        for dimension in _PROFILE_DIMENSIONS
+        for dimension in _COVERAGE_DIMENSIONS
     }
     required_targets, target_counts = _required_coverage_targets(candidates, outlier_reasons)
 
@@ -246,6 +258,7 @@ def select_representatives(
         "version": REPRESENTATIVE_SELECTION_POLICY_VERSION,
         "meaningful_cluster_fraction": MEANINGFUL_CLUSTER_FRACTION,
         "profile_dimensions": list(_PROFILE_DIMENSIONS),
+        "fingerprint_dimensions": list(_FINGERPRINT_DIMENSIONS),
         "numeric_outliers_required_for_coverage": False,
     }
     policy_snapshot = {
@@ -323,6 +336,7 @@ def _candidate(item: dict[str, Any], median_runtime: float | None) -> _Candidate
             "cadence": _cadence_class(item),
             "audio_layout": _audio_layout_class(item),
             "runtime": _runtime_class(duration_seconds, median_runtime),
+            **_fingerprint_profile(item),
         },
     )
 
@@ -337,7 +351,7 @@ def _selection_sort_key(
 ) -> tuple[Any, ...]:
     mismatch_count = sum(
         candidate.profile[dimension] != dominant_profile[dimension]
-        for dimension in _PROFILE_DIMENSIONS
+        for dimension in _COVERAGE_DIMENSIONS
     )
     return (
         len(outlier_reasons.get(candidate.source_id, [])),
@@ -404,7 +418,7 @@ def _representation_assignments(
 def _representation_distance(candidate: _Candidate, representative: _Candidate) -> tuple[Any, ...]:
     profile_mismatches = sum(
         candidate.profile[dimension] != representative.profile[dimension]
-        for dimension in _PROFILE_DIMENSIONS
+        for dimension in _COVERAGE_DIMENSIONS
     )
     return (
         profile_mismatches,
@@ -424,19 +438,19 @@ def _coverage_payload(
         outlier_reasons: Mapping[str, list[str]],
 ) -> dict[str, Any]:
     selected_profiles = {
-        tuple(candidate.profile[dimension] for dimension in _PROFILE_DIMENSIONS)
+        tuple(candidate.profile[dimension] for dimension in _COVERAGE_DIMENSIONS)
         for candidate in selected
     }
     exact_candidates = [
         candidate
         for candidate in candidates
-        if tuple(candidate.profile[dimension] for dimension in _PROFILE_DIMENSIONS) in selected_profiles
+        if tuple(candidate.profile[dimension] for dimension in _COVERAGE_DIMENSIONS) in selected_profiles
     ]
     total_runtime = sum(candidate.duration_seconds or 0.0 for candidate in candidates)
     exact_runtime = sum(candidate.duration_seconds or 0.0 for candidate in exact_candidates)
     meaningful_covered = len(required_targets - uncovered_targets)
     dimensions: dict[str, Any] = {}
-    for dimension in _PROFILE_DIMENSIONS:
+    for dimension in _COVERAGE_DIMENSIONS:
         covered_values = {candidate.profile[dimension] for candidate in selected}
         covered_item_count = sum(
             count
@@ -463,9 +477,9 @@ def _coverage_payload(
     known_facts = sum(
         candidate.profile[dimension] != _UNKNOWN_PROFILE_VALUE
         for candidate in candidates
-        for dimension in _PROFILE_DIMENSIONS
+        for dimension in _COVERAGE_DIMENSIONS
     )
-    total_facts = len(candidates) * len(_PROFILE_DIMENSIONS)
+    total_facts = len(candidates) * len(_COVERAGE_DIMENSIONS)
     return {
         "candidate_item_count": len(candidates),
         "candidate_runtime_seconds": round(total_runtime, 3),
@@ -537,7 +551,7 @@ def _selection_rationale(
     ]
     dominant_matches = [
         dimension
-        for dimension in _PROFILE_DIMENSIONS
+        for dimension in _COVERAGE_DIMENSIONS
         if candidate.profile[dimension] == dominant_profile[dimension]
     ]
     if role == "primary":
@@ -577,7 +591,7 @@ def _required_coverage_targets(
     threshold = max(1, math.ceil(len(candidates) * MEANINGFUL_CLUSTER_FRACTION))
     targets: set[tuple[str, str]] = set()
     target_counts: dict[tuple[str, str], int] = {}
-    for dimension in _PROFILE_DIMENSIONS:
+    for dimension in _COVERAGE_DIMENSIONS:
         eligible_candidates = [
             candidate
             for candidate in candidates
@@ -599,7 +613,7 @@ def _required_coverage_targets(
 def _profile_targets(candidate: _Candidate) -> set[tuple[str, str]]:
     return {
         (dimension, candidate.profile[dimension])
-        for dimension in _PROFILE_DIMENSIONS
+        for dimension in _COVERAGE_DIMENSIONS
         if candidate.profile[dimension] != _UNKNOWN_PROFILE_VALUE
     }
 
@@ -607,12 +621,18 @@ def _profile_targets(candidate: _Candidate) -> set[tuple[str, str]]:
 def _profile_counts(candidates: Sequence[_Candidate]) -> dict[str, Counter[str]]:
     return {
         dimension: Counter(candidate.profile[dimension] for candidate in candidates)
-        for dimension in _PROFILE_DIMENSIONS
+        for dimension in _COVERAGE_DIMENSIONS
     }
 
 
 def _dominant_value(counts: Counter[str]) -> str:
-    return min(counts, key=lambda value: (-counts[value], value))
+    known_counts = {
+        value: count
+        for value, count in counts.items()
+        if value != _UNKNOWN_PROFILE_VALUE
+    }
+    candidates = known_counts or dict(counts)
+    return min(candidates, key=lambda value: (-candidates[value], value))
 
 
 def _outlier_reasons(candidates: Sequence[_Candidate]) -> dict[str, list[str]]:
@@ -727,6 +747,40 @@ def _audio_layout_class(item: Mapping[str, Any]) -> str:
         8: "7.1",
     }
     return "+".join(labels.get(channel_count, f"{channel_count}ch") for channel_count in channels)
+
+
+def _fingerprint_profile(item: Mapping[str, Any]) -> dict[str, str]:
+    decision = object_dict(item.get("media_fingerprint_decision"))
+    if not decision or str(decision.get("status") or "") != "measured":
+        return {dimension: _UNKNOWN_PROFILE_VALUE for dimension in _FINGERPRINT_DIMENSIONS}
+    traits = {str(value) for value in object_list(decision.get("traits"))}
+    finding_ids = {
+        str(finding.get("id"))
+        for finding in (object_dict(value) for value in object_list(decision.get("findings")))
+    }
+    values = traits | finding_ids
+    return {
+        "luma": "dark" if "dark_luma" in values else "typical",
+        "gradient": "gradient_risk" if "dark_gradient_banding_risk" in values else "typical",
+        "motion": "high_motion" if "high_motion" in values else "typical",
+        "texture": "high_texture" if "high_texture" in values else "typical",
+        "noise": _noise_profile(values),
+        "duplicate_cadence": "duplicate_cadence" if "duplicate_cadence" in values else "typical",
+        "animation": "animation_cues" if "animation_cues" in values else "typical",
+        "audio_complexity": "complex" if "audio_complexity" in values else "typical",
+    }
+
+
+def _noise_profile(values: set[str]) -> str:
+    for value in (
+            "likely_film_grain",
+            "likely_analog_noise",
+            "compression_noise_advisory",
+            "uncertain_noise_mix",
+    ):
+        if value in values:
+            return value
+    return "typical"
 
 
 def _runtime_class(duration_seconds: float | None, median_runtime: float | None) -> str:

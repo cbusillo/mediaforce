@@ -1,11 +1,24 @@
 import csv
 import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
-from mediaforce.core.type_defs import int_value, object_list
+from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 
 MAX_AUTO_SCAN_DURATION_SECONDS = 30 * 60
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewMoment:
+    timestamp_seconds: float
+    duration_seconds: float
+    role: str
+    risk_tags: tuple[str, ...]
+    rationale: str
+    confidence: float
+    coverage: float
+    evidence_id: str | None = None
 
 
 def planned_audio_action(audio_track: dict[str, Any], audio_policy: dict[str, Any]) -> str:
@@ -79,6 +92,201 @@ def auto_timestamps(
     if scene_points:
         return scene_points
     return default_timestamps_fn(total_duration, clip_duration)
+
+
+def recommend_review_moments(
+        source_path: Path,
+        total_duration: float,
+        clip_duration: float,
+        *,
+        media_fingerprint: dict[str, Any] | None = None,
+        media_fingerprint_decision: dict[str, Any] | None = None,
+        process_controller: Any = None,
+        auto_timestamps_fn: Callable[..., list[float]],
+) -> list[ReviewMoment]:
+    fingerprint_moments = fingerprint_review_moments(
+        total_duration,
+        clip_duration,
+        media_fingerprint=media_fingerprint,
+        media_fingerprint_decision=media_fingerprint_decision,
+    )
+    if fingerprint_moments:
+        return fingerprint_moments
+
+    timestamps = auto_timestamps_fn(
+        source_path,
+        total_duration,
+        clip_duration,
+        process_controller=process_controller,
+    )
+    return [
+        ReviewMoment(
+            timestamp_seconds=timestamp,
+            duration_seconds=clip_duration,
+            role="typical" if index == 0 else "coverage",
+            risk_tags=("fallback",),
+            rationale="Selected by the existing packet-size, scene-change, or default timestamp fallback.",
+            confidence=0.35,
+            coverage=0.0,
+        )
+        for index, timestamp in enumerate(timestamps)
+    ]
+
+
+def fingerprint_review_moments(
+        total_duration: float,
+        clip_duration: float,
+        *,
+        media_fingerprint: dict[str, Any] | None,
+        media_fingerprint_decision: dict[str, Any] | None,
+) -> list[ReviewMoment]:
+    summary = object_dict(media_fingerprint)
+    analysis = object_dict(summary.get("analysis"))
+    decision = object_dict(media_fingerprint_decision or summary.get("decision"))
+    if str(decision.get("status") or "") != "measured":
+        return []
+
+    usable_end = max(total_duration - clip_duration, 0.0)
+    ranges = [
+        object_dict(item)
+        for item in object_list(analysis.get("ranges"))
+        if object_dict(item).get("status") == "measured"
+    ]
+    if not ranges:
+        return []
+
+    evidence_id = str(decision.get("evidence_id") or "") or None
+    typical_range = min(ranges, key=_typical_range_sort_key)
+    selected = [
+        _range_review_moment(
+            typical_range,
+            clip_duration=clip_duration,
+            usable_end=usable_end,
+            role="typical",
+            evidence_id=evidence_id,
+            fallback_rationale="Closest measured range to typical luma, motion, texture, and duplicate cadence.",
+        )
+    ]
+    risk_candidates = sorted(ranges, key=_hard_range_sort_key, reverse=True)
+    for candidate in risk_candidates:
+        moment = _range_review_moment(
+            candidate,
+            clip_duration=clip_duration,
+            usable_end=usable_end,
+            role="hard",
+            evidence_id=evidence_id,
+            fallback_rationale="Measured range has elevated compression-risk signals.",
+        )
+        if not moment.risk_tags:
+            continue
+        if any(abs(moment.timestamp_seconds - existing.timestamp_seconds) < max(clip_duration * 1.5, 4.0) for existing in selected):
+            continue
+        selected.append(moment)
+        if len(selected) >= 3:
+            break
+    return sorted(selected, key=lambda moment: moment.timestamp_seconds)
+
+
+def review_moment_payload(moment: ReviewMoment) -> dict[str, Any]:
+    return {
+        "timestamp_seconds": moment.timestamp_seconds,
+        "duration_seconds": moment.duration_seconds,
+        "role": moment.role,
+        "risk_tags": list(moment.risk_tags),
+        "rationale": moment.rationale,
+        "confidence": moment.confidence,
+        "coverage": moment.coverage,
+        "evidence_id": moment.evidence_id,
+    }
+
+
+def _range_review_moment(
+        media_range: dict[str, Any],
+        *,
+        clip_duration: float,
+        usable_end: float,
+        role: str,
+        evidence_id: str | None,
+        fallback_rationale: str,
+) -> ReviewMoment:
+    measurements = object_dict(media_range.get("measurements"))
+    tags = _range_risk_tags(measurements, object_dict(media_range.get("audio")))
+    start_seconds = max(min(float_value(media_range.get("start_seconds")), usable_end), 0.0)
+    sampled_frames = int_value(media_range.get("sampled_frames"))
+    coverage = min(1.0, sampled_frames / 90.0) if sampled_frames else 0.0
+    confidence = min(1.0, 0.45 + _hard_range_score(media_range) * 0.35 + coverage * 0.20)
+    rationale = _moment_rationale(tags, measurements, fallback_rationale)
+    return ReviewMoment(
+        timestamp_seconds=round(start_seconds, 3),
+        duration_seconds=clip_duration,
+        role=role,
+        risk_tags=tuple(tags),
+        rationale=rationale,
+        confidence=round(confidence, 4),
+        coverage=round(coverage, 4),
+        evidence_id=evidence_id,
+    )
+
+
+def _range_risk_tags(measurements: Mapping[str, Any], audio: Mapping[str, Any]) -> list[str]:
+    tags: list[str] = []
+    if float_value(measurements.get("dark_frame_fraction")) >= 0.25:
+        tags.append("dark_luma")
+    if float_value(measurements.get("gradient_frame_fraction")) >= 0.16:
+        tags.append("dark_gradient_banding_risk")
+    if float_value(measurements.get("high_motion_frame_fraction")) >= 0.15 or float_value(measurements.get("ydif_p90")) >= 12.0:
+        tags.append("high_motion")
+    if float_value(measurements.get("high_texture_frame_fraction")) >= 0.22 or float_value(measurements.get("edge_density_p90")) >= 0.08:
+        tags.append("high_texture")
+    if float_value(measurements.get("duplicate_like_frame_fraction")) >= 0.35:
+        tags.append("duplicate_cadence")
+    if float_value(measurements.get("temporal_noise_proxy")) >= 2.2:
+        tags.append("texture_noise_advisory")
+    audio_measurements = object_dict(audio.get("measurements"))
+    if float_value(audio_measurements.get("loudness_range_lu")) >= 12.0:
+        tags.append("audio_loudness_range")
+    return tags
+
+
+def _moment_rationale(tags: list[str], measurements: Mapping[str, Any], fallback: str) -> str:
+    if not tags:
+        return fallback
+    return (
+        "Selected because measured review risks include "
+        + ", ".join(tags)
+        + f" (dark={float_value(measurements.get('dark_frame_fraction')):.0%}, "
+        + f"motion={float_value(measurements.get('ydif_p90')):.2f}, "
+        + f"texture={float_value(measurements.get('edge_density_p90')):.3f})."
+    )
+
+
+def _typical_range_sort_key(media_range: Mapping[str, Any]) -> tuple[float, float, float]:
+    measurements = object_dict(media_range.get("measurements"))
+    return (
+        abs(float_value(measurements.get("luma_mean")) - 100.0)
+        + float_value(measurements.get("dark_frame_fraction")) * 40.0,
+        abs(float_value(measurements.get("ydif_p50")) - 3.0),
+        abs(float_value(measurements.get("edge_density_mean")) - 0.035),
+    )
+
+
+def _hard_range_sort_key(media_range: Mapping[str, Any]) -> tuple[float, float]:
+    return (_hard_range_score(media_range), float_value(media_range.get("start_seconds")))
+
+
+def _hard_range_score(media_range: Mapping[str, Any]) -> float:
+    measurements = object_dict(media_range.get("measurements"))
+    score = 0.0
+    score += float_value(measurements.get("dark_frame_fraction")) * 0.16
+    score += float_value(measurements.get("gradient_frame_fraction")) * 0.20
+    score += min(float_value(measurements.get("ydif_p90")) / 24.0, 1.0) * 0.18
+    score += float_value(measurements.get("high_motion_frame_fraction")) * 0.16
+    score += min(float_value(measurements.get("edge_density_p90")) / 0.16, 1.0) * 0.16
+    score += float_value(measurements.get("duplicate_like_frame_fraction")) * 0.08
+    score += min(float_value(measurements.get("temporal_noise_proxy")) / 8.0, 1.0) * 0.06
+    audio = object_dict(object_dict(media_range.get("audio")).get("measurements"))
+    score += min(float_value(audio.get("loudness_range_lu")) / 24.0, 1.0) * 0.05
+    return min(score, 1.0)
 
 
 def complexity_timestamps(
