@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 
 from mediaforce import execution
 from mediaforce.encoding import quality_search
-from mediaforce.encoding.quality import QualitySearchResult
+from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
 from mediaforce.tuning.size_goals import SizeGoalIntent, megabytes_to_bytes
 from mediaforce.tuning.stream_budget import (
     StreamBudgetIdentityError,
@@ -277,6 +277,22 @@ class StreamBudgetTests(unittest.TestCase):
         run_crf_search = Mock(
             return_value=QualitySearchResult(crf=28.0, metric="VMAF", target=85.0, score=85.2, stdout="ok")
         )
+        measured_crfs: list[int] = []
+
+        def run_sample_encode(_path: Path, *, crf: float, **_kwargs: object) -> SampleEncodeResult:
+            crf_int = int(crf)
+            measured_crfs.append(crf_int)
+            predicted_video_bytes = 620_000_000 - 14_000_000 * crf_int
+            return SampleEncodeResult(
+                metric="VMAF",
+                score=90.0,
+                predicted_encode_percent=predicted_video_bytes / 40_000_000,
+                predicted_encode_seconds=30.0,
+                predicted_encode_size_bytes=predicted_video_bytes,
+                stdout=f"crf {crf_int}",
+                sampled_clip_size_bytes=crf_int * 100_000,
+            )
+
         quality_result = quality_search.search_quality(
             Path("/tmp/input.mkv"),
             self._policy()["video"],
@@ -286,6 +302,7 @@ class StreamBudgetTests(unittest.TestCase):
             build_svt_params=Mock(return_value=[]),
             effective_video_preset=Mock(return_value=4),
             run_crf_search=run_crf_search,
+            run_sample_encode=run_sample_encode,
         )
         with patch("mediaforce.execution.ffmpeg_binary", return_value="ffmpeg"), patch(
             "mediaforce.execution.ffmpeg_hwaccel_input_args", return_value=[]
@@ -302,7 +319,10 @@ class StreamBudgetTests(unittest.TestCase):
                 quality=quality_result,
             )
 
-        self.assertEqual(run_crf_search.call_args.kwargs["max_encoded_percent"], ledger.source_cap_video_percent)
+        self.assertFalse(run_crf_search.called)
+        self.assertEqual(measured_crfs[0], 37)
+        self.assertEqual(quality_result.target_size_trace["ledger"]["stream_plan_id"], ledger.stream_plan.plan_id)
+        self.assertEqual(quality_result.target_size_trace["selected_candidate"]["sampled_clip_bytes"], 3_200_000)
         self.assertIn("0:1", command)
         self.assertIn("0:2", command)
         self.assertIn("0:t?", command)

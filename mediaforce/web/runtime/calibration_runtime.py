@@ -441,6 +441,7 @@ def run_sampled_calibration(
         if stream_budget.non_video_bytes is not None
         else None
     )
+    target_size_trace = object_dict(getattr(quality_result, "target_size_trace", None)) or None
 
     payload = {
         "mode": "sample",
@@ -463,11 +464,13 @@ def run_sampled_calibration(
                 else None
             ),
             "predicted_encode_seconds": sample_result.predicted_encode_seconds,
+            "sampled_clip_bytes": sample_result.sampled_clip_size_bytes,
             "estimated_audio_bytes": stream_budget.audio_bytes,
             "estimated_subtitle_bytes": stream_budget.subtitle_bytes,
             "estimated_attachment_bytes": stream_budget.attachment_bytes,
             "estimated_container_bytes": stream_budget.container_bytes,
             "stream_budget_ledger": stream_budget.to_payload(),
+            "target_size_trace": target_size_trace,
             "sample_stdout": sample_result.stdout,
             "cadence_evidence_id": cadence_decision.get("evidence_id") if cadence_decision else None,
             "cadence_class": cadence_decision.get("classification") if cadence_decision else None,
