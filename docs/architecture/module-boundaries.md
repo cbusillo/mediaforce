@@ -115,6 +115,8 @@ test patch targets.
   - ffmpeg capability and hwaccel helpers
 - `quality.py`
   - quality-search and sample-encode helpers
+- `quality_search.py`
+  - quality-search orchestration and target-size sample search handoff
 - `commands.py`
   - ffmpeg argument and preset construction
 - `streams.py`
@@ -133,6 +135,8 @@ test patch targets.
   - validation, promotion, staging cleanup helpers
 - `manifest.py`
   - encode-one and encode-many orchestration
+  - final output size verification and bounded measured retry logging for
+    ledger-backed production encodes
 
 Guidance:
 
@@ -174,17 +178,25 @@ Guidance:
   - versioned deterministic whole-item budget and feasibility ledger
   - non-video estimates, provenance, uncertainty, source-relative video caps,
     and the remaining video bytes/bitrate for the persisted production plan
+- `target_size_search.py`
+  - deterministic target-size candidate search, typed search traces, final
+    output verification, and bounded retry candidate selection
 - `tuning_memory.py`
   - learned-memory session recording and artifact promotion helpers
 
 Guidance:
 
 - Keep calibration queue state, canonical size contracts, deterministic budget
-  arithmetic, and learned-memory helpers under `mediaforce/tuning/`.
+  arithmetic, target-size candidate search, and learned-memory helpers under
+  `mediaforce/tuning/`.
 - The stream budget ledger is the only non-video arithmetic authority. Search,
   manifests, queued jobs, production, and API payloads may project compatibility
   fields from it, but must not add audio, subtitle, attachment, or container
   overhead independently.
+- Target-size search consumes an already validated stream budget ledger and
+  already resolved transform plan. It may choose only CRF candidates inside the
+  approved policy range; cadence, cleanup, stream selection, quality floors, and
+  size caps remain upstream operator or ledger decisions.
 
 ### `mediaforce/reviewing/`
 

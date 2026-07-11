@@ -16,6 +16,14 @@ from mediaforce.encoding.cadence import CadenceResolutionError, cadence_filter
 from mediaforce.encoding.quality import quality_error_message, resolve_local_quality_temp_root
 from mediaforce.encoding.staging import safe_unlink
 from mediaforce.encoding.streams import ProductionStreamPlan
+from mediaforce.tuning.target_size_search import (
+    FinalSizeMissError,
+    FinalSizeVerification,
+    TargetSizeSearchError,
+    retry_quality_result_for_final_miss,
+    target_trace_with_actual_output,
+    verify_final_output_size,
+)
 from mediaforce.tuning.stream_budget import StreamBudgetLedger
 
 
@@ -304,23 +312,45 @@ def encode_one_item(
         else host
     )
     stream_budget = _persisted_stream_budget(item)
-    if stream_budget is not None:
-        stream_budget.require_positive_target_video_budget()
-    quality_result = search_quality(
-        quality_source_path,
-        policy["video"],
-        source_codec=str(item.get("video_codec") or ""),
-        width=width,
-        height=height,
-        detected_crop=detected_crop,
-        cadence_decision=cadence_decision,
-        cadence_evidence=cadence_evidence,
-        cadence_source_fingerprint=current_source_fingerprint,
-        process_controller=process_controller,
-        host=quality_search_host,
-        quality_temp_dir=_quality_temp_dir_for_encode_host(config, quality_search_host),
-        stream_budget_ledger=stream_budget,
-    )
+    try:
+        quality_result = search_quality(
+            quality_source_path,
+            policy["video"],
+            source_codec=str(item.get("video_codec") or ""),
+            width=width,
+            height=height,
+            detected_crop=detected_crop,
+            cadence_decision=cadence_decision,
+            cadence_evidence=cadence_evidence,
+            cadence_source_fingerprint=current_source_fingerprint,
+            process_controller=process_controller,
+            host=quality_search_host,
+            quality_temp_dir=_quality_temp_dir_for_encode_host(config, quality_search_host),
+            stream_budget_ledger=stream_budget,
+        )
+    except TargetSizeSearchError as exc:
+        blocked_at = timestamp()
+        record_event(
+            connection,
+            item["library_item_id"],
+            "encoding_needs_review",
+            {
+                **_encode_event_details(
+                    manifest_path=manifest_path,
+                    index=index,
+                    item=item,
+                    source_path=source_path,
+                    host=host,
+                    encode_context=encode_context,
+                ),
+                "encode_completed_at": blocked_at,
+                "failure_kind": f"target_size_{exc.status}",
+                "error": quality_error_message(exc),
+                "target_size_trace": exc.trace,
+            },
+        )
+        connection.commit()
+        raise
     selection = stream_budget.stream_plan if stream_budget is not None else select_streams(item)
     ffmpeg_cmd = build_ffmpeg_command(
         source_path=source_path,
@@ -365,25 +395,81 @@ def encode_one_item(
     if staging_path.exists() and overwrite:
         safe_unlink(staging_path)
 
+    final_verification: FinalSizeVerification | None = None
+    final_trace = object_dict(getattr(quality_result, "target_size_trace", None)) or None
+    retry_count = 0
     try:
-        result = run_encode_command(
-            ffmpeg_cmd=ffmpeg_cmd,
-            temp_output=temp_output,
-            staging_path=staging_path,
-            overwrite=overwrite,
-            process_controller=process_controller,
-            host=host,
-            progress_callback=progress_callback,
-        )
-        if result.returncode != 0:
-            details = (result.stdout or "").strip()
-            if (result.stderr or "").strip():
-                details = f"{details}\n{(result.stderr or '').strip()}".strip()
-            raise RuntimeError(details or "ffmpeg encode failed")
-        finalize_output_path(temp_output, staging_path)
+        while True:
+            result = run_encode_command(
+                ffmpeg_cmd=ffmpeg_cmd,
+                temp_output=temp_output,
+                staging_path=staging_path,
+                overwrite=overwrite,
+                process_controller=process_controller,
+                host=host,
+                progress_callback=progress_callback,
+            )
+            if result.returncode != 0:
+                details = (result.stdout or "").strip()
+                if (result.stderr or "").strip():
+                    details = f"{details}\n{(result.stderr or '').strip()}".strip()
+                raise RuntimeError(details or "ffmpeg encode failed")
+            finalize_output_path(temp_output, staging_path)
+            if stream_budget is None or stream_budget.total_target_bytes is None:
+                final_verification = None
+                break
+            final_verification = verify_final_output_size(stream_budget, staging_path.stat().st_size, retry_count=retry_count)
+            final_trace = target_trace_with_actual_output(
+                object_dict(getattr(quality_result, "target_size_trace", None)) or None,
+                final_verification,
+                retry_count=retry_count,
+            ) or final_trace
+            if final_verification.passed:
+                break
+            retry_quality = retry_quality_result_for_final_miss(quality_result, final_verification)
+            retry_payload = final_verification.to_payload()
+            retry_payload.update(
+                {
+                    **encode_event_details,
+                    "encode_started_at": started_at,
+                    "retry_count": retry_count,
+                    "target_size_trace": final_trace,
+                }
+            )
+            if retry_quality is None:
+                raise FinalSizeMissError(_final_size_miss_message(final_verification))
+            retry_count += 1
+            retry_payload["retry_count"] = retry_count
+            retry_payload["next_crf"] = retry_quality.crf
+            record_event(connection, item["library_item_id"], "encoding_target_size_retry", retry_payload)
+            connection.commit()
+            safe_unlink(temp_output)
+            safe_unlink(staging_path)
+            quality_result = retry_quality
+            ffmpeg_cmd = build_ffmpeg_command(
+                source_path=source_path,
+                staging_path=staging_path,
+                source_codec=str(item.get("video_codec") or ""),
+                video_policy=policy["video"],
+                preset=preset,
+                audio_policy=policy["audio"],
+                subtitle_policy=policy["subtitle"],
+                selection=selection,
+                quality=quality_result,
+                host=host,
+                width=width,
+                height=height,
+                detected_crop=detected_crop,
+                cadence_decision=cadence_decision,
+                cadence_evidence=cadence_evidence,
+                cadence_source_fingerprint=current_source_fingerprint,
+            )
     except Exception as exc:
         failed_at = timestamp()
-        event_type = "encoding_stopped" if isinstance(exc, ProcessCancelledError) else "encoding_failed"
+        if isinstance(exc, FinalSizeMissError):
+            event_type = "encoding_needs_review"
+        else:
+            event_type = "encoding_stopped" if isinstance(exc, ProcessCancelledError) else "encoding_failed"
         record_event(
             connection,
             item["library_item_id"],
@@ -393,7 +479,10 @@ def encode_one_item(
                 "encode_started_at": started_at,
                 "encode_completed_at": failed_at,
                 "encode_duration_seconds": round(max(time.monotonic() - start_monotonic, 0.0), 3),
+                "failure_kind": _failure_kind_for_exception(exc, final_verification),
                 "error": quality_error_message(exc),
+                "target_size_verification": final_verification.to_payload() if final_verification is not None else None,
+                "target_size_trace": final_trace,
             },
         )
         connection.commit()
@@ -441,6 +530,7 @@ def encode_one_item(
         "quality_metric": quality_result.metric,
         "quality_target": quality_result.target,
         "quality_score": quality_result.score,
+        "validation_json": json.dumps(_target_validation_payload(final_verification, final_trace), separators=(",", ":")),
         "encode_command_json": json.dumps(ffmpeg_cmd, separators=(",", ":")),
         "audio_summary_json": staged_probe.audio_summary_json,
         "subtitle_summary_json": staged_probe.subtitle_summary_json,
@@ -479,6 +569,8 @@ def encode_one_item(
             "quality_metric": quality_result.metric,
             "quality_target": quality_result.target,
             "quality_score": quality_result.score,
+            "target_size_verification": final_verification.to_payload() if final_verification is not None else None,
+            "target_size_trace": final_trace,
         },
     )
     connection.commit()
@@ -529,6 +621,36 @@ def _encode_event_details(
         "encode_host_mode": _host_text(host, "mode"),
         "encode_media_access": _host_text(host, "media_access"),
     }
+
+
+def _target_validation_payload(
+        verification: FinalSizeVerification | None,
+        trace: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if verification is None:
+        return {"passed": True, "target_size_verification": None, "target_size_trace": trace}
+    return {
+        "passed": verification.passed,
+        "target_size_verification": verification.to_payload(),
+        "target_size_trace": trace,
+    }
+
+
+def _final_size_miss_message(verification: FinalSizeVerification) -> str:
+    return (
+        "Final output size missed the approved target band: "
+        f"status={verification.status}, actual={verification.actual_output_bytes}, "
+        f"target={verification.target_size_bytes}, lower={verification.lower_bound_bytes}, "
+        f"upper={verification.upper_bound_bytes}."
+    )
+
+
+def _failure_kind_for_exception(exc: BaseException, verification: FinalSizeVerification | None) -> str:
+    if isinstance(exc, ProcessCancelledError):
+        return "cancelled"
+    if verification is not None and not verification.passed:
+        return "target_size_needs_review"
+    return "deterministic"
 
 
 def _quality_temp_dir_for_encode_host(config: MediaforceConfig, host: dict[str, Any] | None) -> Path:

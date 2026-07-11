@@ -11,10 +11,15 @@
 - `mediaforce/library/planner.py` persists the plan and ledger on manifest
   items. Queued sample and production jobs carry the same identity-bound
   payload rather than recomputing stream choices later.
-- `mediaforce/encoding/quality_search.py` consumes the ledger's source-relative
-  video cap after non-video overhead has been removed.
+- `mediaforce/encoding/quality_search.py` hands ledger-backed work to
+  `mediaforce/tuning/target_size_search.py`, which samples CRF candidates
+  against the remaining video budget without changing transforms, caps, stream
+  choices, or quality floors.
 - `mediaforce/encoding/commands.py` compiles the exact persisted stream plan
   into ffmpeg mappings and codec arguments.
+- `mediaforce/encoding/manifest.py` verifies the actual final output against
+  the resolved final-output band and records any bounded retry or needs-review
+  outcome.
 
 ## Contract
 
@@ -48,6 +53,32 @@ The ledger distinguishes four deterministic states:
 
 Arithmetic infeasibility is never delegated to an LLM. Quality risk remains a
 separate measured outcome for target-size search and operator review.
+
+## Target-size search
+
+The first representative sample is seeded from the approved whole-episode size
+goal after the ledger subtracts production audio, subtitle, attachment, and
+container bytes. The search records a typed trace containing:
+
+- sampled clip bytes when the sample engine reports them
+- predicted whole-episode video bytes
+- predicted whole-episode total bytes after non-video ledger bytes are added
+- the selected CRF, measured quality score, quality floor, sample target band,
+  source cap, ledger identity, stream-plan identity, and transform-plan identity
+
+The search may only choose among CRFs inside the approved policy range. It does
+not relax max size caps, lower quality floors, pick cadence transforms, change
+stream selection, or rewrite an operator's size goal. Monotonic curves select a
+candidate inside the sample band when one exists. Arithmetic impossibility,
+quality-floor conflict, and exhausted or noisy non-monotonic searches surface as
+structured infeasibility, quality-conflict, or needs-review outcomes.
+
+Production encodes verify actual output bytes against the resolved final band
+from the same size goal, currently ±5% by default. A final miss can retry only
+once, and only by reusing a candidate already measured and recorded in the
+search trace. If no bounded measured retry is available, or if the retry budget
+is exhausted, the item enters a needs-review failure state rather than falling
+back to quality-first encoding or silently relaxing the approved constraint.
 
 ## Fallbacks and migration
 

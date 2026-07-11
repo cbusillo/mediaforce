@@ -34,6 +34,7 @@ class QualitySearchResult:
     target: float
     score: float
     stdout: str
+    target_size_trace: dict[str, object] | None = None
 
 
 @dataclass(slots=True)
@@ -44,6 +45,7 @@ class SampleEncodeResult:
     predicted_encode_seconds: float
     predicted_encode_size_bytes: int
     stdout: str
+    sampled_clip_size_bytes: int | None = None
 
 
 @dataclass(slots=True)
@@ -499,7 +501,22 @@ def parse_sample_encode_result(stdout: str, metric: str) -> SampleEncodeResult:
         predicted_encode_seconds=float(payload["predicted_encode_seconds"]),
         predicted_encode_size_bytes=int(payload["predicted_encode_size"]),
         stdout=stdout,
+        sampled_clip_size_bytes=_sampled_clip_size_bytes(payload),
     )
+
+
+def _sampled_clip_size_bytes(payload: dict[str, object]) -> int | None:
+    for key in ("sampled_clip_size", "sampled_clip_size_bytes", "encoded_size", "encoded_size_bytes"):
+        value = payload.get(key)
+        if value is None:
+            continue
+        try:
+            parsed = int(float(value)) if isinstance(value, int | float | str) and str(value).strip() else 0
+        except (TypeError, ValueError):
+            parsed = 0
+        if parsed > 0:
+            return parsed
+    return None
 
 
 def _format_crf(value: float) -> str:

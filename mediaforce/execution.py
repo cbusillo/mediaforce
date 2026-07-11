@@ -35,7 +35,7 @@ from mediaforce.encoding.ffmpeg import ffmpeg_hwaccel_input_args
 from mediaforce.library.probe import probe_media
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, run_command
 from mediaforce.core.type_defs import float_value, int_value, object_dict
-from mediaforce.encoding.quality import QualitySearchResult, run_crf_search, select_quality_metric
+from mediaforce.encoding.quality import QualitySearchResult, run_crf_search, run_sample_encode, select_quality_metric
 from mediaforce.remote import execution_mode_for_host, host_media_access_for_host, remote_shell_path_export_line, \
     run_remote_command, ssh_client_options
 from mediaforce.core.utils import file_fingerprint, timestamp
@@ -353,6 +353,7 @@ def _search_quality(
         build_svt_params=build_svt_params,
         effective_video_preset=effective_video_preset,
         run_crf_search=run_crf_search,
+        run_sample_encode=run_sample_encode,
     )
 
 
