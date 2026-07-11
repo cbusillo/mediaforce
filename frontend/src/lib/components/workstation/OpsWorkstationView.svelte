@@ -18,6 +18,8 @@
 		hostPrepareTitle,
 		hostStateCopy,
 		hostTone,
+		hostWorkReason,
+		opsWorkLabel,
 		rowRecoveryLabel,
 		rowRecoveryTitle,
 		workerCapabilitiesSummary,
@@ -76,7 +78,7 @@
 				!encodeQueue?.state.stop_requested &&
 				encodeWorkCount > 0 &&
 				actionPending === null,
-			unavailable: 'No processing work is running or queued.'
+			unavailable: 'No season work is running or waiting.'
 		},
 		{
 			id: 'resume-encode' as const,
@@ -104,7 +106,7 @@
 					encodeQueue?.state.is_paused
 				) &&
 				actionPending === null,
-			unavailable: 'No processing work is running, queued, or paused.'
+			unavailable: 'No season work is running, waiting, or paused.'
 		},
 		{
 			id: 'stop-calibration' as const,
@@ -138,8 +140,8 @@
 	}
 
 	function actionTitle(action: OpsActionId): string {
-		if (action === 'stop-encode') return 'Stop running processing workers and pause the queue';
-		if (action === 'stop-calibration') return 'Stop running and queued sample/review jobs';
+		if (action === 'stop-encode') return 'Stop current season work and pause what is waiting';
+		if (action === 'stop-calibration') return 'Stop tests that are running or waiting';
 		if (action === 'retry-failed-encode')
 			return 'Retry approved folders that are ready to process again';
 		if (action === 'retry-encode-prefix') return 'Retry processing for this folder';
@@ -206,7 +208,7 @@
 		try {
 			await onRefresh();
 			lastRefreshAt = new Date();
-			if (!quiet) actionMessage = 'Ops state refreshed.';
+			if (!quiet) actionMessage = 'Activity refreshed.';
 		} catch (error) {
 			refreshError = error instanceof Error ? error.message : 'Refresh failed.';
 			if (!quiet) actionError = refreshError;
@@ -233,6 +235,7 @@
 		if (actionPending !== null) return true;
 		if (action === 'start-host') return host.available || !host.setup_supported;
 		if (action === 'prepare-host') {
+			if (host.available && !host.setup_requires_password && host.issues.length === 0) return true;
 			return hostPrepareDisabled(host, hostPasswords[host.key] ?? '');
 		}
 		if (action === 'reset-host-trust') return !host.trust_reset_supported;
@@ -248,22 +251,6 @@
 		);
 	}
 
-	function hostReadinessReason(host: HostRuntime): string {
-		if (host.available && host.schedule_open === false) {
-			return host.schedule_detail || 'Off schedule; this is a normal wait, not a failure.';
-		}
-		if (host.available && host.queue_active === false) {
-			return host.message || 'Worker is reachable but not accepting Mediaforce work.';
-		}
-		if (host.available) {
-			return host.message || host.active_reason || 'Ready for assigned work.';
-		}
-		if (host.setup_supported === false) {
-			return host.message || 'Unavailable and cannot be prepared from this screen.';
-		}
-		return host.message || 'Unavailable; start or prepare this worker when it should be working.';
-	}
-
 	function handleHostPasswordInput(host: HostRuntime, event: Event) {
 		hostPasswords = {
 			...hostPasswords,
@@ -276,10 +263,10 @@
 		if (actionPending === action) return 'Working';
 		if (action === 'pause-encode') return 'Pause';
 		if (action === 'resume-encode') return 'Resume';
-		if (action === 'retry-failed-encode') return 'Retry available';
-		if (action === 'retry-encode-prefix') return 'Retry folder';
-		if (action === 'stop-encode') return 'Stop processing';
-		if (action === 'stop-calibration') return 'Stop samples';
+		if (action === 'retry-failed-encode') return 'Retry unfinished work';
+		if (action === 'retry-encode-prefix') return 'Retry season';
+		if (action === 'stop-encode') return 'Stop season work';
+		if (action === 'stop-calibration') return 'Stop tests';
 		if (action === 'start-host') return 'Start';
 		if (action === 'prepare-host') return 'Prepare';
 		if (action === 'reset-host-trust') return 'Trust';
@@ -291,9 +278,9 @@
 	}
 
 	function queueKindLabel(row: OpsQueueRow): string {
-		if (row.kind === 'encode') return 'Processing';
+		if (row.kind === 'encode') return 'Season';
 		if (row.kind === 'proof') return 'Review';
-		return 'Sample';
+		return 'Test';
 	}
 
 	onMount(() => {
@@ -306,14 +293,22 @@
 	});
 </script>
 
-<OperatorShell route="ops" subject="Ops" crumb="/ops" {statusTiles} {footerSignals}>
+<OperatorShell route="ops" subject="Activity" crumb="/ops" {statusTiles} {footerSignals}>
 	<main class="ops">
-		<section class="ops__main" aria-label="Ops workstation">
+		<section class="ops__main" aria-label="Mediaforce activity">
 			<header class="ops-header">
 				<div>
-					<span class="mf-eyebrow">Ops</span>
-					<h1>{readiness.title}</h1>
+					<span class="mf-eyebrow">Activity</span>
+					<h1>What’s happening</h1>
 					<p>{readiness.detail}</p>
+					<button
+						type="button"
+						class="control control--compact ops-header__mobile-refresh"
+						disabled={refreshPending}
+						title="Refresh activity now"
+						onclick={() => refreshOps()}
+						>{refreshPending ? 'Refreshing' : 'Refresh activity'}</button
+					>
 				</div>
 				<div class="ops-header__status ops-header__status--{readiness.tone}">
 					<StateBadge tone={readiness.tone} label={readiness.title} />
@@ -325,19 +320,19 @@
 						type="button"
 						class="control control--compact"
 						disabled={refreshPending}
-						title="Refresh Ops state now"
+						title="Refresh activity now"
 						onclick={() => refreshOps()}>{refreshPending ? 'Refreshing' : 'Refresh'}</button
 					>
 				</div>
 			</header>
 
-			<WorkstationPanel eyebrow="Attention" title="What needs the operator">
+			<WorkstationPanel eyebrow="Attention" title="Needs your attention">
 				<div class="blocker-list">
 					{#each blockers.slice(0, 6) as blocker (blocker.key)}
 						<div class="blocker-row blocker-row--{blocker.tone}">
 							<StateBadge
 								tone={blocker.tone}
-								label={blocker.tone === 'fail' ? 'Blocked' : 'Attention'}
+								label={blocker.tone === 'fail' ? 'Problem' : 'Needs you'}
 							/>
 							<div>
 								<strong>{blocker.title}</strong>
@@ -358,15 +353,15 @@
 						<div class="empty-note empty-note--ready">
 							<StateBadge compact tone="ready" label="Clear" />
 							<div>
-								<strong>No operator action is needed right now.</strong>
-								<span>Schedule waits and covered worker issues stay in the readiness rail.</span>
+								<strong>Nothing needs you right now.</strong>
+								<span>Mediaforce will keep working when a computer is available.</span>
 							</div>
 						</div>
 					{/each}
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="Global controls" title="Processing and sample queues">
+			<WorkstationPanel eyebrow="Controls" title="Work controls">
 				<div class="scheduler-console">
 					<div class="scheduler-console__state">
 						<StateBadge
@@ -392,11 +387,11 @@
 						</div>
 					</div>
 					<div class="scheduler-console__scope">
-						<strong>Global work controls</strong>
+						<strong>Pause or restart work</strong>
 						<span
 							>{availableGlobalCommands.length > 0
-								? 'Only actions that can run now are shown in the command lane.'
-								: 'No global queue command is needed in the current state.'}</span
+								? 'Only actions that make sense right now are shown.'
+								: 'No action is needed in the current state.'}</span
 						>
 					</div>
 					<div class="scheduler-console__actions" aria-label="Work controls">
@@ -414,7 +409,7 @@
 						{:else}
 							<div class="command-standby">
 								<StateBadge compact tone="ready" label="No command" />
-								<span>Mediaforce does not need an operator command right now.</span>
+								<span>Mediaforce does not need a command right now.</span>
 							</div>
 						{/each}
 					</div>
@@ -444,9 +439,9 @@
 			</WorkstationPanel>
 
 			<WorkstationPanel
-				eyebrow="Jobs"
-				title="Running, queued, and retry-ready work"
-				meta={`${queueRows.length.toLocaleString('en-US')} visible`}
+				eyebrow="Current work"
+				title="Seasons in progress"
+				meta={queueRows.length ? `${queueRows.length.toLocaleString('en-US')} current` : undefined}
 			>
 				{#if queueRows.length > 0}
 					<div class="table-wrap">
@@ -455,10 +450,10 @@
 								<tr>
 									<th>State</th>
 									<th>Work</th>
-									<th>Worker</th>
+									<th>Computer</th>
 									<th>Progress</th>
 									<th>Work window</th>
-									<th>Recovery</th>
+									<th>Next step</th>
 								</tr>
 							</thead>
 							<tbody>
@@ -470,23 +465,23 @@
 										<td data-label="Work">
 											{#if canOpenFolder(row)}
 												<a class="work-link" href={resolve(folderRoutePath(row.prefix))}>
-													<strong>{row.prefix}</strong>
+													<strong>{opsWorkLabel(row.prefix)}</strong>
 													<span>{queueKindLabel(row)} · {row.phase}</span>
 												</a>
 											{:else}
 												<div class="work-link">
-													<strong>{row.prefix}</strong>
+													<strong>{opsWorkLabel(row.prefix)}</strong>
 													<span>{queueKindLabel(row)} · {row.phase}</span>
 												</div>
 											{/if}
 										</td>
-										<td data-label="Worker">{row.host}</td>
+										<td data-label="Computer">{row.host}</td>
 										<td data-label="Progress">
 											<strong>{row.progress}</strong>
 											<span>{row.detail}</span>
 										</td>
 										<td data-label="Work window">{row.scheduler}</td>
-										<td data-label="Recovery">
+										<td data-label="Next step">
 											{#if row.action}
 												{@const action = row.action}
 												<button
@@ -510,8 +505,8 @@
 					<div class="current-standby">
 						<StateBadge tone="ready" label="No current work" />
 						<div>
-							<strong>Processing is idle and ready.</strong>
-							<span>Queued folders, active samples, and retry-ready folders will appear here.</span>
+							<strong>Nothing is running right now.</strong>
+							<span>Tests and seasons will appear here when work begins.</span>
 						</div>
 					</div>
 				{/if}
@@ -534,7 +529,7 @@
 									<tr>
 										<th>State</th>
 										<th>Work</th>
-										<th>Worker</th>
+										<th>Computer</th>
 										<th>Last note</th>
 										<th>When</th>
 									</tr>
@@ -548,17 +543,17 @@
 											<td data-label="Work">
 												{#if canOpenFolder(row)}
 													<a class="work-link" href={resolve(folderRoutePath(row.prefix))}>
-														<strong>{row.prefix}</strong>
+														<strong>{opsWorkLabel(row.prefix)}</strong>
 														<span>{queueKindLabel(row)} · {row.phase}</span>
 													</a>
 												{:else}
 													<div class="work-link">
-														<strong>{row.prefix}</strong>
+														<strong>{opsWorkLabel(row.prefix)}</strong>
 														<span>{queueKindLabel(row)} · {row.phase}</span>
 													</div>
 												{/if}
 											</td>
-											<td data-label="Worker">{row.host}</td>
+											<td data-label="Computer">{row.host}</td>
 											<td data-label="Last note">
 												<strong>{row.progress}</strong>
 												<span>{row.detail}</span>
@@ -574,10 +569,10 @@
 			{/if}
 		</section>
 
-		<aside class="ops__rail" aria-label="Worker readiness">
+		<aside class="ops__rail" aria-label="Computer readiness">
 			<WorkstationPanel
-				eyebrow="Workers"
-				title="Readiness"
+				eyebrow="Computers"
+				title="Available computers"
 				meta={`${readyHosts.toLocaleString('en-US')}/${hosts?.hosts.length ?? 0}`}
 			>
 				<div class="host-list">
@@ -593,10 +588,17 @@
 							</div>
 							<dl>
 								<dt>Window</dt>
-								<dd>{host.schedule_detail || host.schedule_profile_label}</dd>
-								<dt>Work</dt>
-								<dd>{host.active_encode_count.toLocaleString('en-US')} processing</dd>
-								<dt>Can run</dt>
+								<dd title={host.schedule_detail}>
+									{host.schedule_open === false ? 'Closed now' : 'Open now'} · {host.schedule_profile_label ||
+										'Host schedule'}
+								</dd>
+								<dt>Now</dt>
+								<dd>
+									{host.active_encode_count > 0
+										? `${host.active_encode_count.toLocaleString('en-US')} episode ${host.active_encode_count === 1 ? 'part' : 'parts'}`
+										: 'Idle'}
+								</dd>
+								<dt>Can make</dt>
 								<dd>{workerCapabilitiesSummary(host.capabilities)}</dd>
 							</dl>
 							{#if host.setup_requires_password && host.setup_supported}
@@ -640,35 +642,35 @@
 									{/if}
 								</div>
 							{/if}
-							<p class="host-row__reason">{hostReadinessReason(host)}</p>
+							<p class="host-row__reason">{hostWorkReason(host, hosts, dashboard)}</p>
 						</div>
 					{:else}
-						<div class="empty-note">Worker status is unavailable.</div>
+						<div class="empty-note">Computer status is unavailable.</div>
 					{/each}
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="Work schedule" title="Work windows">
+			<WorkstationPanel eyebrow="Schedule" title="When work may run">
 				<div class="schedule-list">
 					<div class="scope-row scope-row--active">
-						<span>Work window</span>
+						<span>Current schedule</span>
 						<strong>{encodeQueue?.state.scheduler_summary ?? 'unknown'}</strong>
 						<small
-							>{queuedWaitingCount.toLocaleString('en-US')} folders waiting for a work window</small
+							>{queuedWaitingCount.toLocaleString('en-US')} seasons waiting for their scheduled time</small
 						>
-						<a class="inline-link" href={resolve('/settings')}>Edit work windows</a>
+						<a class="inline-link" href={resolve('/settings')}>Edit schedule</a>
 					</div>
 					{#each closedHosts as host (host.key)}
 						<div class="scope-row scope-row--wait">
 							<span>{host.label}</span>
-							<strong>Off schedule</strong>
+							<strong>Outside its schedule</strong>
 							<small>{host.schedule_detail}</small>
 						</div>
 					{:else}
 						<div class="scope-row">
-							<span>Worker windows</span>
-							<strong>Open or not reported</strong>
-							<small>No worker is currently scheduled off</small>
+							<span>Computer schedules</span>
+							<strong>Available now or not reported</strong>
+							<small>No computer is currently scheduled off</small>
 						</div>
 					{/each}
 				</div>
@@ -940,6 +942,22 @@
 		display: grid;
 		gap: var(--mf-space-4);
 		grid-template-columns: auto minmax(0, 1fr);
+		padding: var(--mf-space-3) var(--mf-space-4);
+	}
+
+	:global(.panel:has(.empty-note--ready)) {
+		background: transparent;
+		border: 0;
+		box-shadow: none;
+		overflow: visible;
+	}
+
+	:global(.panel:has(.empty-note--ready) .panel__header) {
+		display: none;
+	}
+
+	.blocker-list:has(.empty-note--ready) {
+		padding: 0;
 	}
 
 	.empty-note--ready div {
@@ -995,6 +1013,45 @@
 		border-collapse: collapse;
 		min-width: 860px;
 		width: 100%;
+	}
+
+	.ops-table--jobs {
+		min-width: 720px;
+		table-layout: fixed;
+	}
+
+	.ops-table--jobs th,
+	.ops-table--jobs td {
+		padding-inline: var(--mf-space-3);
+	}
+
+	.ops-table--jobs td {
+		height: auto;
+		padding-block: var(--mf-space-3);
+	}
+
+	.ops-table--jobs th:nth-child(1) {
+		width: 16%;
+	}
+
+	.ops-table--jobs th:nth-child(2) {
+		width: 22%;
+	}
+
+	.ops-table--jobs th:nth-child(3) {
+		width: 17%;
+	}
+
+	.ops-table--jobs th:nth-child(4) {
+		width: 22%;
+	}
+
+	.ops-table--jobs th:nth-child(5) {
+		width: 13%;
+	}
+
+	.ops-table--jobs th:nth-child(6) {
+		width: 10%;
 	}
 
 	th,
@@ -1090,6 +1147,12 @@
 		white-space: nowrap;
 	}
 
+	.ops-header__mobile-refresh {
+		display: none;
+		justify-self: start;
+		width: fit-content;
+	}
+
 	.control:hover:not(:disabled) {
 		background: var(--mf-bg-raised);
 	}
@@ -1165,9 +1228,15 @@
 	}
 
 	.host-row dl {
+		column-gap: var(--mf-space-4);
 		display: grid;
 		grid-template-columns: 72px minmax(0, 1fr);
 		row-gap: var(--mf-space-3);
+	}
+
+	.host-row dt,
+	.host-row dd {
+		margin: 0;
 	}
 
 	.host-password {
@@ -1318,13 +1387,357 @@
 		.scheduler-console__state,
 		.blocker-row,
 		.current-standby,
-		.empty-note--ready,
 		.ops-header__status {
 			align-items: start;
 			grid-template-columns: 1fr;
 		}
 
 		.command-details li {
+			grid-template-columns: 1fr;
+		}
+	}
+
+	/* Human activity surface */
+	.ops {
+		display: grid;
+		gap: 18px;
+		grid-template-columns: minmax(0, 1fr) 296px;
+		margin: 0 auto;
+		max-width: 1088px;
+		min-height: 0;
+		padding: 34px 24px 64px;
+	}
+
+	.ops__main {
+		gap: 16px;
+		padding: 0;
+	}
+
+	:global(.ops__main > .panel:nth-of-type(1)) {
+		order: 1;
+	}
+
+	:global(.ops__main > .panel:nth-of-type(2)) {
+		order: 3;
+	}
+
+	:global(.ops__main > .panel:nth-of-type(3)) {
+		order: 2;
+	}
+
+	:global(.ops__main > .panel:nth-of-type(n + 4)) {
+		order: 4;
+	}
+
+	.ops__rail {
+		background: transparent;
+		border: 0;
+		gap: 16px;
+		padding: 0;
+	}
+
+	.ops-header {
+		align-items: flex-end;
+		border: 0;
+		display: flex;
+		gap: 20px;
+		justify-content: space-between;
+		padding: 0 0 8px;
+	}
+
+	.ops-header > div:first-child {
+		display: grid;
+		gap: 5px;
+	}
+
+	.ops-header h1 {
+		font-size: clamp(22px, 2.5vw, 28px);
+		font-weight: 600;
+		letter-spacing: -0.02em;
+	}
+
+	.ops-header p {
+		color: var(--mf-fg-secondary);
+		font-size: 14px;
+	}
+
+	:global(.ops .mf-eyebrow) {
+		background: var(--mf-active-bg);
+		border-radius: 999px;
+		color: var(--mf-active-fg);
+		font-family: var(--mf-font-sans);
+		font-size: 11px;
+		font-weight: 700;
+		letter-spacing: 0.02em;
+		padding: 6px 9px;
+		text-transform: none;
+		width: fit-content;
+	}
+
+	.ops-header__status {
+		align-items: center;
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-line);
+		border-radius: var(--mf-radius-3);
+		display: flex;
+		gap: 12px;
+		min-width: 250px;
+		padding: 10px 11px;
+	}
+
+	.ops-header__status::before {
+		display: none;
+	}
+
+	.ops-header__status div {
+		display: grid;
+		gap: 1px;
+		margin-left: auto;
+	}
+
+	.ops-header__status div span {
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-sans);
+		font-size: 10px;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+	}
+
+	.ops-header__status div strong {
+		color: var(--mf-fg-primary);
+		font-family: var(--mf-font-sans);
+		font-size: 16px;
+	}
+
+	.blocker-list,
+	.scheduler-console,
+	.host-list,
+	.schedule-list {
+		gap: 8px;
+		padding: 12px;
+	}
+
+	.blocker-row,
+	.scheduler-console__state,
+	.scheduler-console__scope,
+	.command-standby,
+	.host-row,
+	.scope-row,
+	.empty-note,
+	.current-standby {
+		background: var(--mf-bg-panel-2);
+		border: 1px solid var(--mf-line-muted);
+		border-radius: var(--mf-radius-2);
+		box-shadow: none;
+		color: var(--mf-fg-primary);
+	}
+
+	.blocker-row {
+		grid-template-columns: auto minmax(0, 1fr) auto;
+		padding: 12px;
+	}
+
+	.blocker-row::before,
+	.host-row::before,
+	.scope-row::before {
+		display: none;
+	}
+
+	.blocker-row strong,
+	.scheduler-console strong,
+	.host-row strong,
+	.scope-row strong,
+	.current-standby strong,
+	.empty-note strong {
+		color: var(--mf-fg-primary);
+		font-family: var(--mf-font-sans);
+	}
+
+	.blocker-row span,
+	.scheduler-console span,
+	.host-row span,
+	.scope-row span,
+	.scope-row small,
+	.current-standby span,
+	.empty-note span {
+		color: var(--mf-fg-secondary);
+		font-family: var(--mf-font-sans);
+	}
+
+	.scheduler-console {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.scheduler-console__state,
+	.scheduler-console__scope {
+		padding: 12px;
+	}
+
+	.scheduler-console__actions {
+		background: transparent;
+		border: 0;
+		gap: 8px;
+		padding: 0;
+	}
+
+	.control {
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-line-strong);
+		border-radius: var(--mf-radius-2);
+		color: var(--mf-fg-primary);
+		font-family: var(--mf-font-sans);
+		font-weight: 600;
+		min-height: 34px;
+		padding: 0 11px;
+	}
+
+	.control:hover {
+		background: var(--mf-bg-panel-2);
+		border-color: var(--mf-active-line);
+		color: var(--mf-active-fg);
+	}
+
+	.control--ready {
+		background: var(--mf-active-solid);
+		border-color: var(--mf-active-solid);
+		color: var(--mf-fg-on-accent);
+	}
+
+	.control--warn {
+		background: var(--mf-wait-bg);
+		border-color: var(--mf-wait-line);
+		color: var(--mf-wait-fg);
+	}
+
+	.control--danger,
+	.control--armed {
+		background: var(--mf-fail-bg);
+		border-color: var(--mf-fail-line);
+		color: var(--mf-fail-fg);
+	}
+
+	.command-details {
+		background: transparent;
+		border: 0;
+		color: var(--mf-fg-secondary);
+	}
+
+	.command-details summary,
+	.refresh-note,
+	.disabled-copy {
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-sans);
+		font-size: 12px;
+	}
+
+	.table-wrap {
+		background: var(--mf-bg-panel);
+		border: 0;
+		overflow-x: auto;
+	}
+
+	.ops-table {
+		background: var(--mf-bg-panel);
+		color: var(--mf-fg-primary);
+	}
+
+	.ops-table th {
+		background: var(--mf-bg-panel-2);
+		border-bottom: 1px solid var(--mf-line);
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-sans);
+		font-size: 11px;
+		letter-spacing: 0.04em;
+		text-transform: none;
+	}
+
+	.ops-table td {
+		border-bottom: 1px solid var(--mf-line-muted);
+		color: var(--mf-fg-secondary);
+		font-family: var(--mf-font-sans);
+		font-size: 13px;
+	}
+
+	.work-link strong {
+		color: var(--mf-fg-primary);
+		font-family: var(--mf-font-sans);
+	}
+
+	.work-link span {
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-sans);
+	}
+
+	.host-row dl {
+		border: 0;
+		grid-template-columns: 76px minmax(0, 1fr);
+	}
+
+	.host-row dt {
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-sans);
+	}
+
+	.host-row dd {
+		color: var(--mf-fg-secondary);
+		font-family: var(--mf-font-sans);
+	}
+
+	.host-password input {
+		background: var(--mf-bg-input);
+		border: 1px solid var(--mf-line-strong);
+		border-radius: var(--mf-radius-2);
+		color: var(--mf-fg-primary);
+	}
+
+	.inline-link {
+		color: var(--mf-active-fg);
+	}
+
+	button:focus-visible,
+	a:focus-visible,
+	input:focus-visible,
+	summary:focus-visible {
+		box-shadow: var(--mf-ring-focus);
+		outline: none;
+	}
+
+	@media (max-width: 1100px) {
+		.ops {
+			grid-template-columns: 1fr;
+		}
+
+		.ops__rail {
+			align-items: start;
+			display: grid;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+	}
+
+	@media (max-width: 680px) {
+		.ops {
+			padding: 26px 12px 48px;
+		}
+
+		.ops-header {
+			align-items: stretch;
+			flex-direction: column;
+		}
+
+		.ops-header__status {
+			display: none;
+		}
+
+		.ops-header__mobile-refresh {
+			display: inline-flex;
+		}
+
+		.ops__rail {
+			grid-template-columns: 1fr;
+		}
+
+		.blocker-row {
 			grid-template-columns: 1fr;
 		}
 	}

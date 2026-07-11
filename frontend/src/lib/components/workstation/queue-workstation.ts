@@ -5,12 +5,16 @@ import type {
 	WorkflowTone,
 	HostsPayload
 } from '$lib/api/types';
-import type { FooterSignal, ShellTone, StatusTile } from './OperatorShell.svelte';
+import type { FooterSignal, ShellTone, StatusTile } from './shell-types';
 import { formatBytes, summarizeStatuses } from './folder-studio-view';
+
+const APPROVED_REVIEW_LABELS = new Set(['approved', 'approved draft', 'proposal accepted']);
 
 export function queueFolderTone(folder: FolderCard): ShellTone {
 	if (folderQueuedForWorkerWindow(folder)) return 'wait';
 	if (folderEncodingNow(folder)) return 'active';
+	const reviewState = reviewGateState(folder);
+	if (reviewState) return reviewGateTone(folder, reviewState);
 	if (folder.workflow_state?.tone) return workflowToneToShellTone(folder.workflow_state.tone);
 	const explicit = String(folder.review_badge_tone ?? '').toLowerCase();
 	if (explicit === 'fail' || explicit === 'blocked' || explicit === 'error') return 'fail';
@@ -25,6 +29,8 @@ export function queueFolderTone(folder: FolderCard): ShellTone {
 export function queueFolderState(folder: FolderCard): string {
 	if (folderQueuedForWorkerWindow(folder)) return 'Waiting for worker';
 	if (folderEncodingNow(folder)) return 'Encoding now';
+	const reviewState = reviewGateState(folder);
+	if (reviewState) return reviewState;
 	const workflowLabel = folder.workflow_state?.label?.trim();
 	if (workflowLabel) return workflowLabel;
 	const label = folder.review_badge_label?.trim();
@@ -53,6 +59,69 @@ function folderEncodingNow(folder: FolderCard): boolean {
 	if (workflow?.state !== 'processing') return false;
 	const detail = workflow.detail.toLowerCase();
 	return detail.includes('running') || detail.includes('encoding');
+}
+
+function reviewGateState(folder: FolderCard): string | null {
+	if (folder.workflow_state?.primary_lane !== 'encode' || folder.pending_count <= 0) return null;
+	const label = folder.review_badge_label?.trim() ?? '';
+	if (APPROVED_REVIEW_LABELS.has(label.toLowerCase())) return null;
+	return label ? queueStateLabel(label) : 'Needs sample';
+}
+
+function reviewGateTone(folder: FolderCard, state: string): ShellTone {
+	const normalizedState = state.toLowerCase();
+	if (
+		normalizedState.includes('failed') ||
+		normalizedState.includes('stopped') ||
+		normalizedState.includes('warning') ||
+		normalizedState.includes('needs attention')
+	) {
+		return 'fail';
+	}
+	if (normalizedState === 'sampling' || normalizedState.includes('running')) return 'active';
+	if (normalizedState === 'ready to review' || normalizedState === 'review pending') return 'ready';
+	const explicit = String(folder.review_badge_tone ?? '').toLowerCase();
+	if (explicit === 'fail' || explicit === 'blocked' || explicit === 'error') return 'fail';
+	if (explicit === 'ready' || explicit === 'success' || explicit === 'ok') return 'ready';
+	if (explicit === 'active' || explicit === 'running') return 'active';
+	return 'wait';
+}
+
+function reviewGateActionLabel(state: string): string {
+	const normalized = state.toLowerCase();
+	if (
+		normalized === 'needs sample' ||
+		normalized.includes('rerun') ||
+		normalized.includes('retry')
+	) {
+		return 'Ask review assistant';
+	}
+	if (normalized === 'ready to review' || normalized === 'review pending') return 'Review sample';
+	return 'Open Folder Studio';
+}
+
+function reviewGateDetail(folder: FolderCard, state: string): string {
+	const explicit = folder.review_badge_detail?.trim();
+	if (explicit) return explicit;
+	const normalized = state.toLowerCase();
+	if (normalized === 'needs sample') {
+		return 'Review one representative sample before queueing folder-wide processing.';
+	}
+	if (
+		normalized.includes('rerun') ||
+		normalized.includes('retry') ||
+		normalized.includes('failed') ||
+		normalized.includes('stopped')
+	) {
+		return 'Run a fresh representative sample before queueing folder-wide processing.';
+	}
+	if (normalized === 'ready to review' || normalized === 'review pending') {
+		return 'Review the representative sample before approving folder-wide processing.';
+	}
+	if (normalized === 'sampling' || normalized === 'sample waiting') {
+		return 'Representative sample work is in progress before folder-wide approval.';
+	}
+	return 'Finish sample review and approval before queueing folder-wide processing.';
 }
 
 export function queueStateLabel(label: string): string {
@@ -100,6 +169,8 @@ export function isQueueActionableFolder(folder: FolderCard): boolean {
 }
 
 export function queuePrimaryActionLabel(folder: FolderCard): string {
+	const reviewState = reviewGateState(folder);
+	if (reviewState) return reviewGateActionLabel(reviewState);
 	const workflow = folder.workflow_state;
 	if (!workflow) return 'Open Folder Studio';
 	const counts = workflow.counts ?? {};
@@ -206,6 +277,7 @@ export function workLaneKey(folder: FolderCard): WorkLaneKey {
 	if (workflow.primary_lane === 'processing') return 'processing';
 	if (workflow.primary_lane === 'validate') return 'validate';
 	if (workflow.primary_lane === 'promote') return 'promote';
+	if (reviewGateState(folder)) return 'sample';
 	if (workflow.primary_lane === 'encode') return 'encode';
 	return folder.pending_count > 0 ? 'sample' : 'other';
 }
@@ -333,6 +405,8 @@ export function buildQueueFooterSignals(
 }
 
 export function folderStatusCopy(folder: FolderCard): string {
+	const reviewState = reviewGateState(folder);
+	if (reviewState) return reviewGateDetail(folder, reviewState);
 	const workflowDetail = folder.workflow_state?.detail?.trim();
 	if (workflowDetail) return workflowDetail;
 	return folder.review_badge_detail || summarizeStatuses(folder.statuses);

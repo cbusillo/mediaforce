@@ -305,6 +305,7 @@ def list_completed_history_events(
                     "encoding_started",
                     "encoding_completed",
                     "encoding_failed",
+                    "encoding_stopped",
                     "validation_completed",
                     "promotion_completed",
                     ORIGINALS_REMOVED_EVENT,
@@ -515,10 +516,20 @@ def _history_event_copy(event_type: str, details: dict[str, Any]) -> tuple[str, 
             _int_or_none(details.get("bytes_saved")),
         )
     if event_type == "encoding_failed":
+        error = _history_detail_summary(details.get("error"))
+        if _is_stopped_encode_error(error):
+            return "Encoding stopped", "idle", error or "Encode stopped before promotion.", None
         return (
             "Encoding failed",
             "fail",
-            _history_detail_summary(details.get("error")) or "Encode failed before promotion.",
+            error or "Encode failed before promotion.",
+            None,
+        )
+    if event_type == "encoding_stopped":
+        return (
+            "Encoding stopped",
+            "idle",
+            _history_detail_summary(details.get("error")) or "Encode stopped before promotion.",
             None,
         )
     if event_type == "validation_completed":
@@ -529,6 +540,19 @@ def _history_event_copy(event_type: str, details: dict[str, Any]) -> tuple[str, 
             None,
         )
     return "Encoding started", "idle", "Encode worker started processing an item.", None
+
+
+def _is_stopped_encode_error(value: str) -> bool:
+    normalized = value.casefold()
+    return any(
+        phrase in normalized
+        for phrase in (
+            "operation was cancelled",
+            "stopped and cleaned",
+            "stopped by operator",
+            "cancelled by operator",
+        )
+    )
 
 
 def _path_detail(path: object, fallback: str) -> str:

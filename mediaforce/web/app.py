@@ -96,7 +96,7 @@ from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, obje
 from mediaforce.web.routes import register_completed_routes, register_dashboard_routes, register_folder_routes, \
     register_frontend_routes, register_host_routes, register_queue_routes, register_settings_routes
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_folders_payload, \
-    dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
+    dashboard_library_payload, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
     archive_cleanup_summary, clear_archive_cleanup_action, \
     clear_completed_backups_action, completed_page_payload, confirm_originals_removed_action, \
@@ -105,7 +105,7 @@ from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_fo
     folder_ai_tune_action, folder_ai_tune_confirm_action, folder_ai_tune_preview_action, \
     folder_card_cache_key, folder_status_payload, host_config_for_key, host_lifecycle_start_command, \
     host_lifecycle_start_timeout_seconds, host_lifecycle_stop_command, host_runtime_rows, \
-    load_calibration_state, load_json_object, load_pending_proposal, \
+    list_library_structure_cards, load_calibration_state, load_json_object, load_pending_proposal, \
     multimodal_review_pack_public_view, pause_encode_queue_action, pending_proposal_public_view, \
     planned_audio_review_context, preview_folder_cards, proposal_alignment_issue, \
     proposal_context_snapshot, proposal_signal_copy, promote_folder_outputs_action, \
@@ -173,6 +173,7 @@ from mediaforce.web.runtime.folder_tuning_advice import build_run_verdict_payloa
     tuning_policy_focus as runtime_tuning_policy_focus, \
     tuning_policy_key_paths as runtime_tuning_policy_key_paths, \
     apply_policy_fragment as runtime_apply_policy_fragment
+from mediaforce.web.runtime.folder_tuning_helpers import size_budget_sample_analysis
 from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_db as runtime_active_scan_from_db, \
     CalibrationQueueRuntimeDeps, calibration_queue_worker_loop as runtime_calibration_queue_worker_loop, \
     calibration_job_belongs_to_current_process as runtime_calibration_job_belongs_to_current_process, \
@@ -424,6 +425,21 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             include_series_folders=include_series_folders,
         )
 
+    def _dashboard_library_payload() -> dict[str, Any]:
+        return dashboard_library_payload(
+            config,
+            folder_card_cache_key=_folder_card_cache_key,
+            list_library_structure_cards=_list_library_structure_cards,
+        )
+
+    def _dashboard_library_details_payload() -> dict[str, Any]:
+        return dashboard_folders_payload(
+            config,
+            folder_card_cache_key=_folder_card_cache_key,
+            list_folder_cards=_list_library_detail_cards,
+            include_series_folders=False,
+        )
+
     def _dashboard_api_payload(preview_limit: int | None = None) -> dict[str, Any]:
         metric_support = _metric_support()
         return {
@@ -529,6 +545,8 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         app,
         dashboard_payload=_dashboard_api_payload,
         dashboard_folders_payload=_dashboard_folders_payload,
+        dashboard_library_payload=_dashboard_library_payload,
+        dashboard_library_details_payload=_dashboard_library_details_payload,
     )
     register_settings_routes(
         app,
@@ -631,6 +649,10 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             calibration=calibration,
             advice_state=advice_state,
         )
+        size_target_analysis = size_budget_sample_analysis(
+            operator_request=object_dict(object_dict(advice_state).get("operator_request")) or None,
+            calibration_payload=object_dict(calibration),
+        )
         video_policy = object_dict(policy.get("video"))
         resolved_metric, _ = select_quality_metric(str(video_policy.get("quality_metric", "auto")))
         sample_host_statuses = _sample_calibration_host_statuses(config)
@@ -647,6 +669,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 "hot_spots": hot_spots,
                 "calibration": calibration,
                 "advice": advice_state,
+                "size_target_analysis": size_target_analysis or None,
                 "pending_proposal": pending_proposal,
                 "recent_tuning_sessions": recent_sessions,
                 "approved_season_shortcut": approved_season_shortcut,
@@ -1514,6 +1537,31 @@ def _reset_folder_card_cache() -> None:
     reset_folder_card_cache()
 
 
+def _list_library_structure_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
+    needs_attention_badges = _folder_needs_attention_badges(connection)
+    calibration_job_badges = _folder_calibration_job_badges(connection)
+    return list_library_structure_cards(
+        connection,
+        folder_group=_folder_group,
+        review_badge_for_prefix=lambda prefix: _folder_review_badge(
+            config,
+            prefix,
+            needs_attention_badges=needs_attention_badges,
+            calibration_job_badges=calibration_job_badges,
+        ),
+    )
+
+
+def _list_library_detail_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
+    return _folder_cards_for_group(
+        config,
+        connection,
+        folder_group=_tv_season_folder_group,
+        minimum_recommended_savings_bytes=None,
+        rel_path_root="tv/",
+    )
+
+
 def _list_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
     needs_attention_badges: dict[str, dict[str, str | None]] | None = None
     calibration_job_badges: dict[str, dict[str, str | None]] | None = None
@@ -1543,7 +1591,13 @@ def _list_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[F
 
 
 def _list_series_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
-    return _folder_cards_for_group(config, connection, folder_group=_tv_series_folder_group, aggregate_badges=True)
+    return _folder_cards_for_group(
+        config,
+        connection,
+        folder_group=_tv_series_folder_group,
+        aggregate_badges=True,
+        rel_path_root="tv/",
+    )
 
 
 def _folder_cards_for_group(
@@ -1552,6 +1606,8 @@ def _folder_cards_for_group(
         *,
         folder_group: Any,
         aggregate_badges: bool = False,
+        minimum_recommended_savings_bytes: int | None = MIN_RECOMMENDED_SAVINGS_BYTES,
+        rel_path_root: str | None = None,
 ) -> list[FolderCard]:
     needs_attention_badges: dict[str, dict[str, str | None]] | None = None
     calibration_job_badges: dict[str, dict[str, str | None]] | None = None
@@ -1579,11 +1635,12 @@ def _folder_cards_for_group(
 
     return list_folder_cards(
         connection,
-        minimum_recommended_savings_bytes=MIN_RECOMMENDED_SAVINGS_BYTES,
+        minimum_recommended_savings_bytes=minimum_recommended_savings_bytes,
         folder_group=folder_group,
         age_days=_age_days,
         estimate_savings_bytes=_estimate_savings_bytes,
         review_badge_for_prefix=review_badge_for_prefix,
+        rel_path_root=rel_path_root,
     )
 
 
@@ -2611,6 +2668,13 @@ def _tv_series_folder_group(rel_path: str) -> tuple[str, str, str, str] | None:
     if len(parts) < 3 or parts[0] != "tv":
         return None
     return "/".join(parts[:2]), parts[1], "TV series", "Series"
+
+
+def _tv_season_folder_group(rel_path: str) -> tuple[str, str, str, str] | None:
+    group = _folder_group(rel_path)
+    if group is None or group[3] != "Season":
+        return None
+    return group
 
 
 def _folder_series_context(prefix: str) -> dict[str, str] | None:

@@ -19,6 +19,7 @@ const DEFAULT_ENDPOINT_TIMEOUT_MS = 2000;
 const DEFAULT_ROUTE_TIMEOUT_MS = 6000;
 const SERVER_START_TIMEOUT_MS = 12000;
 const NARROW_VIEWPORT = { width: 390, height: 844 };
+const APP_ROOT_SELECTOR = ".app-shell";
 
 /**
  * @typedef {object} SmokeFixtureRoute
@@ -38,17 +39,19 @@ const NARROW_VIEWPORT = { width: 390, height: 844 };
 const endpointChecks = [
   ["Dashboard summary", "/api/dashboard"],
   ["Dashboard folders", "/api/dashboard/folders"],
+  ["Library structure", "/api/dashboard/library"],
+  ["Library details", "/api/dashboard/library/details"],
   ["Host status", "/api/hosts?compact=1"],
   ["Settings initial payload", "/api/settings?include_archive_cleanup=0"],
   ["Completed payload", "/api/completed"],
 ];
 
 const routeChecks = [
-  ["Work", "/", "Work"],
-  ["Folders compatibility", "/folders", "Work"],
-  ["Ops", "/ops", "Ops"],
-  ["Settings", "/settings", "Settings"],
-  ["Completed", "/completed", "Completed"],
+  ["Library", "/", "Your library"],
+  ["Folders compatibility", "/folders", "Your library"],
+  ["Activity", "/ops", "What’s happening"],
+  ["Settings", "/settings", "Library and working space"],
+  ["Finished", "/completed", "Finished seasons"],
 ];
 
 function parseArgs(argv) {
@@ -174,13 +177,27 @@ async function seedSmokeFixtures(configPath, profile = "default") {
   return result;
 }
 
-async function fetchWithTimeout(url, timeoutMs) {
+async function fetchWithTimeout(url, timeoutMs, { expectJson = false } = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const started = performance.now();
-  let response;
   try {
-    response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    if (expectJson) {
+      const contentType = response.headers.get("content-type") ?? "";
+      if (!contentType.toLowerCase().includes("application/json")) {
+        throw new Error(
+          `expected JSON, received ${contentType || "no content type"}`,
+        );
+      }
+      await response.json();
+    } else {
+      await response.arrayBuffer();
+    }
+    return Math.round(performance.now() - started);
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       throw new Error(`timed out after ${timeoutMs}ms`);
@@ -189,12 +206,6 @@ async function fetchWithTimeout(url, timeoutMs) {
   } finally {
     clearTimeout(timeout);
   }
-  const elapsedMs = Math.round(performance.now() - started);
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
-  }
-  await response.arrayBuffer();
-  return elapsedMs;
 }
 
 async function waitForServer(baseUrl, child) {
@@ -282,7 +293,9 @@ async function startServer(configPath) {
 
 async function checkEndpoints(baseUrl, timeoutMs) {
   for (const [label, route] of endpointChecks) {
-    const elapsedMs = await fetchWithTimeout(`${baseUrl}${route}`, timeoutMs);
+    const elapsedMs = await fetchWithTimeout(`${baseUrl}${route}`, timeoutMs, {
+      expectJson: true,
+    });
     console.log(`endpoint ok: ${label} ${elapsedMs}ms`);
   }
 }
@@ -298,11 +311,12 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
     for (const [label, route, marker] of routeChecksForBrowser) {
       pageErrors.length = 0;
       const started = performance.now();
+      const requireFolderReadyMarker = route.startsWith("/folders/");
       await page.goto(`${baseUrl}${route}`, {
         waitUntil: "domcontentloaded",
         timeout: timeoutMs,
       });
-      await page.waitForSelector(".operator-shell", {
+      await page.waitForSelector(APP_ROOT_SELECTOR, {
         state: "visible",
         timeout: timeoutMs,
       });
@@ -310,32 +324,53 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
         state: "visible",
         timeout: timeoutMs,
       });
-      await page.waitForFunction(
-        (expectedMarker) => document.body.innerText.includes(expectedMarker),
-        marker,
-        { timeout: timeoutMs },
-      ).catch((error) => {
-        throw new Error(
-          `${label} did not show marker ${JSON.stringify(marker)} within ${timeoutMs}ms: ${error.message}`,
-        );
-      });
-      const state = await page.evaluate((expectedMarker) => {
+      await page
+        .waitForFunction(
+          ({ expectedMarker, requireFolderReady }) => {
+            if (!document.body.innerText.includes(expectedMarker)) return false;
+            if (!requireFolderReady) return true;
+            const readyMarker = document
+              .querySelector("[data-folder-ready-marker]")
+              ?.getAttribute("data-folder-ready-marker");
+            return Boolean(readyMarker?.includes(expectedMarker));
+          },
+          {
+            expectedMarker: marker,
+            requireFolderReady: requireFolderReadyMarker,
+          },
+          { timeout: timeoutMs },
+        )
+        .catch((error) => {
+          throw new Error(
+            `${label} did not show marker ${JSON.stringify(marker)} within ${timeoutMs}ms: ${error.message}`,
+          );
+        });
+      const state = await page.evaluate(({ expectedMarker, requireFolderReady }) => {
         const bodyText = document.body.innerText.trim();
+        const readyMarker = document
+          .querySelector("[data-folder-ready-marker]")
+          ?.getAttribute("data-folder-ready-marker");
         return {
           bodyLength: bodyText.length,
           hasMain: document.querySelector("main") !== null,
-          hasShell: document.querySelector(".operator-shell") !== null,
+          hasAppRoot: document.querySelector(".app-shell") !== null,
           hasMarker: bodyText.includes(expectedMarker),
+          hasReadyMarker:
+            !requireFolderReady || Boolean(readyMarker?.includes(expectedMarker)),
         };
-      }, marker);
+      }, {
+        expectedMarker: marker,
+        requireFolderReady: requireFolderReadyMarker,
+      });
       if (
-        !state.hasShell ||
+        !state.hasAppRoot ||
         !state.hasMain ||
         !state.hasMarker ||
+        !state.hasReadyMarker ||
         state.bodyLength < 80
       ) {
         throw new Error(
-          `${label} rendered an incomplete app shell: ${JSON.stringify(state)}`,
+          `${label} rendered an incomplete app root: ${JSON.stringify(state)}`,
         );
       }
       if (pageErrors.length > 0) {
@@ -346,6 +381,72 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
       const elapsedMs = Math.round(performance.now() - started);
       console.log(`route ok: ${label} ${elapsedMs}ms`);
     }
+  } finally {
+    await browser.close();
+  }
+}
+
+async function checkLibraryStructureWithoutDashboard(
+  baseUrl,
+  expectedMarker,
+  timeoutMs,
+) {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 1000 },
+    });
+    const pageErrors = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await page.addInitScript(() => {
+      const originalFetch = window.fetch.bind(window);
+      window.__mediaforceDashboardBlocked = false;
+      window.fetch = (input, init) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof Request
+              ? input.url
+              : String(input);
+        const requestUrl = new URL(url, window.location.origin);
+        if (
+          requestUrl.pathname === "/api/dashboard" &&
+          requestUrl.searchParams.get("preview_limit") === "0"
+        ) {
+          window.__mediaforceDashboardBlocked = true;
+          return new Promise(() => {});
+        }
+        return originalFetch(input, init);
+      };
+    });
+    await page.goto(`${baseUrl}/`, {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs,
+    });
+    await page.waitForFunction(
+      (marker) => document.body.innerText.includes(marker),
+      expectedMarker,
+      { timeout: timeoutMs },
+    );
+    const state = await page.evaluate(
+      (marker) => ({
+        hasMarker: document.body.innerText.includes(marker),
+        stillOpening: document.body.innerText.includes("Opening your library"),
+        dashboardBlocked: Boolean(window.__mediaforceDashboardBlocked),
+      }),
+      expectedMarker,
+    );
+    if (!state.hasMarker || state.stillOpening || !state.dashboardBlocked) {
+      throw new Error(
+        `Library structure waited for dashboard hydration: ${JSON.stringify(state)}`,
+      );
+    }
+    if (pageErrors.length > 0) {
+      throw new Error(
+        `Library structure fallback raised browser errors: ${pageErrors.join(" | ")}`,
+      );
+    }
+    console.log("route ok: Library structure without dashboard hydration");
   } finally {
     await browser.close();
   }
@@ -364,11 +465,12 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
     for (const [label, route, marker] of routeChecksForNarrow) {
       pageErrors.length = 0;
       const started = performance.now();
+      const requireFolderReadyMarker = route.startsWith("/folders/");
       await page.goto(`${baseUrl}${route}`, {
         waitUntil: "domcontentloaded",
         timeout: timeoutMs,
       });
-      await page.waitForSelector(".operator-shell", {
+      await page.waitForSelector(APP_ROOT_SELECTOR, {
         state: "visible",
         timeout: timeoutMs,
       });
@@ -376,17 +478,32 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
         state: "visible",
         timeout: timeoutMs,
       });
-      await page.waitForFunction(
-        (expectedMarker) => document.body.innerText.includes(expectedMarker),
-        marker,
-        { timeout: timeoutMs },
-      ).catch((error) => {
-        throw new Error(
-          `${label} narrow route did not show marker ${JSON.stringify(marker)} within ${timeoutMs}ms: ${error.message}`,
-        );
-      });
-      const state = await page.evaluate((expectedMarker) => {
+      await page
+        .waitForFunction(
+          ({ expectedMarker, requireFolderReady }) => {
+            if (!document.body.innerText.includes(expectedMarker)) return false;
+            if (!requireFolderReady) return true;
+            const readyMarker = document
+              .querySelector("[data-folder-ready-marker]")
+              ?.getAttribute("data-folder-ready-marker");
+            return Boolean(readyMarker?.includes(expectedMarker));
+          },
+          {
+            expectedMarker: marker,
+            requireFolderReady: requireFolderReadyMarker,
+          },
+          { timeout: timeoutMs },
+        )
+        .catch((error) => {
+          throw new Error(
+            `${label} narrow route did not show marker ${JSON.stringify(marker)} within ${timeoutMs}ms: ${error.message}`,
+          );
+        });
+      const state = await page.evaluate(({ expectedMarker, requireFolderReady }) => {
         const bodyText = document.body.innerText.trim();
+        const readyMarker = document
+          .querySelector("[data-folder-ready-marker]")
+          ?.getAttribute("data-folder-ready-marker");
         const visibleWideTables = Array.from(document.querySelectorAll("table"))
           .map((el) => {
             const rect = el.getBoundingClientRect();
@@ -406,15 +523,21 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
         return {
           bodyLength: bodyText.length,
           hasMarker: bodyText.includes(expectedMarker),
+          hasReadyMarker:
+            !requireFolderReady || Boolean(readyMarker?.includes(expectedMarker)),
           pageOverflow:
             document.documentElement.scrollWidth > window.innerWidth + 2,
           scrollWidth: document.documentElement.scrollWidth,
           visibleWideTables,
         };
-      }, marker);
+      }, {
+        expectedMarker: marker,
+        requireFolderReady: requireFolderReadyMarker,
+      });
       if (
         state.bodyLength < 80 ||
         !state.hasMarker ||
+        !state.hasReadyMarker ||
         state.pageOverflow ||
         state.visibleWideTables.length
       ) {
@@ -438,14 +561,10 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
 async function checkEmptyFixtureRoutes(baseUrl, configPath, timeoutMs, narrow) {
   await seedSmokeFixtures(configPath, "empty");
   const emptyRouteChecks = [
-    ["Empty Work", "/", "No folders match the current filters"],
-    ["Empty Folders", "/folders", "No folders match the current filters"],
-    ["Empty Ops", "/ops", "Processing is idle and ready"],
-    [
-      "Empty Completed",
-      "/completed",
-      "No completed folders match the active filters",
-    ],
+    ["Empty Library", "/", "Point Mediaforce at your TV folder"],
+    ["Empty Folders", "/folders", "Point Mediaforce at your TV folder"],
+    ["Empty Activity", "/ops", "Nothing is running right now"],
+    ["Empty Finished", "/completed", "No finished seasons match this search"],
   ];
   await checkRoutes(baseUrl, emptyRouteChecks, timeoutMs);
   if (narrow) {
@@ -478,6 +597,13 @@ async function main() {
     }
     await checkEndpoints(targetUrl, args.endpointTimeoutMs);
     await checkRoutes(targetUrl, browserRouteChecks, args.routeTimeoutMs);
+    if (fixtures?.folderRoutes?.length) {
+      await checkLibraryStructureWithoutDashboard(
+        targetUrl,
+        fixtures.folderRoutes[0].marker,
+        args.routeTimeoutMs,
+      );
+    }
     if (args.narrow) {
       await checkNarrowRoutes(
         targetUrl,

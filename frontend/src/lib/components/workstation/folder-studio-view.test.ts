@@ -25,6 +25,7 @@ import {
 	outputScopeLabel,
 	predictedFolderSizeBytes,
 	projectedReclaimBytes,
+	REVIEW_ASSISTANT_PENDING_COPY,
 	resolveBenchRequestState,
 	resolveQueueSubmissionMode,
 	resolveWorkflow,
@@ -121,6 +122,12 @@ function folderSummary(overrides: Partial<NonNullable<FolderPayload['summary']>>
 }
 
 describe('Folder Studio review request mapping', () => {
+	it('keeps the browser waiting for bounded backend inference', () => {
+		expect(REVIEW_ASSISTANT_PENDING_COPY).toContain('a few minutes');
+		expect(REVIEW_ASSISTANT_PENDING_COPY).toContain('nothing is queued');
+		expect(REVIEW_ASSISTANT_PENDING_COPY).not.toContain('30 seconds');
+	});
+
 	it('keeps pending route placeholders in a loading workflow state', () => {
 		const workflow = resolveWorkflow(
 			folderPayload({ pending: true, summary: undefined }),
@@ -1486,7 +1493,7 @@ describe('Folder Studio review request mapping', () => {
 			null,
 			null,
 			null,
-			{ status: 'running' } as FolderCalibrationJob,
+			{ status: 'running', host: { label: 'M2 MBP' } } as FolderCalibrationJob,
 			null
 		);
 
@@ -1496,7 +1503,14 @@ describe('Folder Studio review request mapping', () => {
 			primaryAction: 'monitor-sample',
 			secondary: 'Stop sample'
 		});
+		expect(workflow.copy).toContain('Worker M2 MBP');
 		expect(workflow.copy).toMatch(/Review media is the missing prerequisite/);
+		expect(buildBasicEncodeGuide(workflow)).toMatchObject({
+			title: 'Sample running',
+			detail: workflow.copy,
+			primary: 'Monitor sample',
+			action: 'monitor-sample'
+		});
 		expect(buildWorkflowSteps(workflow).find((step) => step.label === 'Sample')).toMatchObject({
 			current: true,
 			detail: 'Representative sample is running'

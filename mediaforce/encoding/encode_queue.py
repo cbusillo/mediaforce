@@ -280,7 +280,7 @@ def load_latest_terminal_encode_job_for_prefix(connection: DBClient, prefix: str
         _encode_job_select()
         .where(encode_jobs.c.prefix == prefix)
         .where(encode_jobs.c.status.in_(RECENT_ENCODE_JOB_STATUSES))
-        .where(or_(encode_jobs.c.job_kind != "shard", encode_jobs.c.status != "completed"))
+        .where(encode_jobs.c.job_kind.in_(DISPLAY_ENCODE_JOB_KINDS))
         .order_by(encode_jobs.c.created_at.desc(), _rowid_column().desc())
         .limit(1)
     ).mappings().fetchone()
@@ -342,12 +342,18 @@ def list_encode_jobs(
         statuses: tuple[str, ...],
         limit: int = 8,
         job_kinds: tuple[str, ...] | None = None,
+        newest_first: bool = False,
 ) -> list[dict[str, Any]]:
     statement = _encode_job_select().where(encode_jobs.c.status.in_(statuses))
     if job_kinds is not None:
         statement = statement.where(encode_jobs.c.job_kind.in_(job_kinds))
+    order_by = (
+        (encode_jobs.c.created_at.desc(), _rowid_column().desc())
+        if newest_first
+        else (encode_jobs.c.created_at.asc(), _rowid_column().asc())
+    )
     rows = connection.execute(
-        statement.order_by(encode_jobs.c.created_at.asc(), _rowid_column().asc()).limit(limit)
+        statement.order_by(*order_by).limit(limit)
     ).mappings().fetchall()
     return [_hydrate_job(row) for row in rows]
 
@@ -364,7 +370,13 @@ def list_child_encode_jobs(connection: DBClient, parent_job_id: str) -> list[dic
 def summarize_encode_queue(connection: DBClient) -> dict[str, Any]:
     queued = list_encode_jobs(connection, statuses=QUEUED_ENCODE_JOB_STATUSES, job_kinds=DISPLAY_ENCODE_JOB_KINDS)
     running = list_encode_jobs(connection, statuses=("running",), limit=2, job_kinds=DISPLAY_ENCODE_JOB_KINDS)
-    recent = list_encode_jobs(connection, statuses=RECENT_ENCODE_JOB_STATUSES, limit=6, job_kinds=DISPLAY_ENCODE_JOB_KINDS)
+    recent = list_encode_jobs(
+        connection,
+        statuses=RECENT_ENCODE_JOB_STATUSES,
+        limit=6,
+        job_kinds=DISPLAY_ENCODE_JOB_KINDS,
+        newest_first=True,
+    )
     counts = {
         "queued": _count_jobs(connection, statuses=QUEUED_ENCODE_JOB_STATUSES, job_kinds=DISPLAY_ENCODE_JOB_KINDS),
         "running": _count_jobs(connection, statuses=("running",), job_kinds=DISPLAY_ENCODE_JOB_KINDS),

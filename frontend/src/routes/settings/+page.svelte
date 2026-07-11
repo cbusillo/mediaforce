@@ -34,7 +34,7 @@
 </script>
 
 <svelte:head>
-	<title>Mediaforce Settings</title>
+	<title>Settings · Mediaforce</title>
 </svelte:head>
 
 <SettingsEditor {settings} {hosts} {loadError} />

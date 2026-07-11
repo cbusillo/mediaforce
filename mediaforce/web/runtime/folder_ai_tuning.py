@@ -206,14 +206,33 @@ def _proposal_ready_message(
     return "The bench did not produce a queueable draft yet. Adjust the note and ask again."
 
 
-def _size_budget_measurement_fragment(operator_request: dict[str, Any] | None) -> dict[str, Any] | None:
+def _size_budget_measurement_fragment(
+        operator_request: dict[str, Any] | None,
+        sample_item: dict[str, Any],
+) -> dict[str, Any] | None:
     request = object_dict(operator_request)
     request_type = str(request.get("request_type") or "").strip().lower()
     if request_type == "size_budget":
-        return object_dict(request.get("applied_policy"))
-    if request_type == "combined_experiment" and object_dict(request.get("size_budget_request")):
-        return object_dict(request.get("applied_policy"))
-    return None
+        size_request = request
+    elif request_type == "combined_experiment":
+        size_request = object_dict(request.get("size_budget_request"))
+        if not size_request:
+            return None
+    else:
+        return None
+    if not request.get("operator_confirmed") or has_nonpositive_video_budget(request):
+        return None
+    budget_bytes = _positive_number(size_request.get("budget_bytes"))
+    duration_seconds = _positive_number(sample_item.get("duration_seconds"))
+    if budget_bytes is None or duration_seconds is None:
+        return None
+    target_fragment = {
+        "video": {
+            "target_size_mb": round(budget_bytes / (1024 ** 2), 3),
+            "target_runtime_minutes": round(duration_seconds / 60.0, 3),
+        }
+    }
+    return merge_policy_fragments(object_dict(request.get("applied_policy")), target_fragment)
 
 
 def _can_keep_first_size_budget_sample(
@@ -368,12 +387,13 @@ def folder_ai_tune_preview_action(
             raise HTTPException(status_code=404, detail=f"No sample item found for {normalized_prefix}")
         calibration = deps.load_calibration_state(config, normalized_prefix)
         current_policy = object_dict(calibration.get("policy")) if calibration else object_dict(sample_item.get("resolved_policy"))
-        operator_request = deps.operator_requested_experiment(
-            trimmed_note,
-            sample_item,
-            current_policy=current_policy,
-        )
-        if calibration is None:
+    operator_request = deps.operator_requested_experiment(
+        trimmed_note,
+        sample_item,
+        current_policy=current_policy,
+    )
+    if calibration is None:
+        with open_db(config.paths.db_path) as connection:
             return _seed_preview_action(
                 config,
                 deps,
@@ -386,19 +406,18 @@ def folder_ai_tune_preview_action(
                 operator_request=operator_request,
                 latest_failed_sample_job=latest_failed_sample_job,
             )
-        return _tuned_preview_action(
-            config,
-            deps,
-            connection=connection,
-            normalized_prefix=normalized_prefix,
-            trimmed_note=trimmed_note,
-            host=host,
-            sample_item=sample_item,
-            summary=summary,
-            operator_request=operator_request,
-            calibration=calibration,
-            latest_failed_sample_job=latest_failed_sample_job,
-        )
+    return _tuned_preview_action(
+        config,
+        deps,
+        normalized_prefix=normalized_prefix,
+        trimmed_note=trimmed_note,
+        host=host,
+        sample_item=sample_item,
+        summary=summary,
+        operator_request=operator_request,
+        calibration=calibration,
+        latest_failed_sample_job=latest_failed_sample_job,
+    )
 
 
 def folder_ai_tune_confirm_action(
@@ -627,6 +646,11 @@ def _seed_preview_action(
     seeded_policy = object_dict(seed_metadata.get("policy")) if seed_metadata_raw is not None else base_policy
     seed_fragment = object_dict(seed_job_fields.get("seed_applied_policy"))
     combined_fragment = seed_fragment
+    measurement_fragment = _size_budget_measurement_fragment(operator_request, sample_item)
+    if measurement_fragment is not None:
+        combined_fragment = merge_policy_fragments(combined_fragment, measurement_fragment)
+        seeded_policy = deps.apply_policy_fragment(base_policy, combined_fragment)
+        seed_job_fields["seed_applied_policy"] = combined_fragment
     advice_payload_raw = deps.seed_advice_payload(trimmed_note, seed_metadata if seed_metadata_raw is not None else None)
     advice_payload = object_dict(advice_payload_raw) if advice_payload_raw is not None else None
     if advice_payload is None and operator_request:
@@ -671,8 +695,11 @@ def _seed_preview_action(
     )
     if alignment_issue is None:
         alignment_issue = blocking_evidence_issue
-    measurement_fragment = _size_budget_measurement_fragment(operator_request)
-    if blocking_evidence_issue is None and alignment_issue is not None and measurement_fragment is not None:
+    request_disposition = str(advice_details.get("request_disposition") or "").strip().lower()
+    measurement_override_needed = (
+        alignment_issue is not None or request_disposition in NONQUEUEABLE_DISPOSITIONS
+    )
+    if blocking_evidence_issue is None and measurement_override_needed and measurement_fragment is not None:
         seeded_policy = deps.apply_policy_fragment(base_policy, measurement_fragment) if measurement_fragment else base_policy
         seed_fragment = measurement_fragment
         combined_fragment = measurement_fragment
@@ -798,7 +825,6 @@ def _tuned_preview_action(
         config: MediaforceConfig,
         deps: FolderAiTuneDeps,
         *,
-        connection: DBClient,
         normalized_prefix: str,
         trimmed_note: str,
         host: Any,
@@ -812,16 +838,18 @@ def _tuned_preview_action(
         raise HTTPException(status_code=400, detail="Add a note so the tuner knows what to change before running another sample.")
     current_policy = object_dict(calibration.get("policy")) if calibration else object_dict(sample_item.get("resolved_policy"))
     metric_support = deps.metric_support()
-    learning_context = retrieve_learning_context(
-        connection,
-        prefix=normalized_prefix,
-        sample_item=sample_item,
-        note=trimmed_note,
-    )
+    with open_db(config.paths.db_path) as connection:
+        learning_context = retrieve_learning_context(
+            connection,
+            prefix=normalized_prefix,
+            sample_item=sample_item,
+            note=trimmed_note,
+        )
+        recent_sessions_payload = deps.recent_tuning_sessions(connection, normalized_prefix, limit=4)
     repeat_signal = deps.matching_request_history(
         note=trimmed_note,
         sample_item=sample_item,
-        recent_sessions_payload=deps.recent_tuning_sessions(connection, normalized_prefix, limit=4),
+        recent_sessions_payload=recent_sessions_payload,
     )
     runtime_toolbelt = deps.build_tuning_runtime_toolbelt(
         sample_item=sample_item,
@@ -907,10 +935,13 @@ def _tuned_preview_action(
         tuning_payload["review_artifact_critique"] = review_artifact_critique
     tuning = request_note_tuning(project_root=config.paths.project_root, payload=tuning_payload)
     tuned_policy, applied_fragment = apply_seed_policy(current_policy, object_dict(tuning.proposed_policy), mode="tune")
+    measurement_fragment = _size_budget_measurement_fragment(operator_request, sample_item)
     combined_fragment = _honor_operator_source_resolution(
         operator_request=operator_request,
         combined_fragment=applied_fragment,
     )
+    if measurement_fragment is not None:
+        combined_fragment = merge_policy_fragments(combined_fragment, measurement_fragment)
     if combined_fragment != applied_fragment:
         tuned_policy = deps.apply_policy_fragment(current_policy, combined_fragment)
     advice_payload = object_dict(deps.tuning_advice_payload(tuning=tuning, note=trimmed_note, applied_fragment=combined_fragment))
@@ -938,6 +969,7 @@ def _tuned_preview_action(
         operator_request=operator_request,
         size_target_analysis=size_target_analysis,
     )
+    deterministic_measurement_fragment = object_dict(measurement_fragment)
     if measured_budget_fragment and _operator_forbids_hard_budget_cap(operator_request):
         measured_budget_fragment = {}
         advice_payload["budget_enforcement"] = {
@@ -948,6 +980,10 @@ def _tuned_preview_action(
     if measured_budget_fragment:
         measured_budget_fragment = _measured_budget_fragment_preserving_stricter_cap(
             combined_fragment, measured_budget_fragment
+        )
+        deterministic_measurement_fragment = merge_policy_fragments(
+            deterministic_measurement_fragment,
+            measured_budget_fragment,
         )
         combined_fragment = merge_policy_fragments(combined_fragment, measured_budget_fragment)
         combined_fragment = _honor_operator_source_resolution(
@@ -989,25 +1025,66 @@ def _tuned_preview_action(
         operator_request,
         learning_context,
     )
+    request_disposition = tuning.request_disposition
+    request_response = tuning.request_response
+    proposal_summary = tuning.summary
+    proposal_diagnosis = tuning.diagnosis
+    proposal_confidence = tuning.confidence
+    proposal_suggested_follow_up = tuning.suggested_follow_up
     alignment_issue = deps.proposal_alignment_issue(
         operator_request=alignment_operator_request,
-        request_disposition=tuning.request_disposition,
+        request_disposition=request_disposition,
         current_policy=current_policy,
         preview_policy=tuned_policy,
         allow_measured_size_quality_tradeoff=allow_measured_size_quality_tradeoff,
         allow_measured_size_quality_increase=allow_measured_size_quality_increase,
     )
+    blocking_evidence_issue = _blocking_sample_evidence_issue(
+        operator_request=operator_request,
+        latest_failed_sample_job=latest_failed_sample_job,
+        current_policy=current_policy,
+        preview_policy=tuned_policy,
+    )
     if alignment_issue is None:
-        alignment_issue = _blocking_sample_evidence_issue(
+        alignment_issue = blocking_evidence_issue
+    measurement_override_needed = (
+        alignment_issue is not None
+        or str(request_disposition or "").strip().lower() in NONQUEUEABLE_DISPOSITIONS
+    )
+    if blocking_evidence_issue is None and measurement_override_needed and measurement_fragment is not None:
+        combined_fragment = _honor_operator_source_resolution(
             operator_request=operator_request,
-            latest_failed_sample_job=latest_failed_sample_job,
-            current_policy=current_policy,
-            preview_policy=tuned_policy,
+            combined_fragment=deterministic_measurement_fragment,
+        )
+        tuned_policy = deps.apply_policy_fragment(current_policy, combined_fragment)
+        alignment_issue = None
+        request_disposition = "honored"
+        request_response = (
+            "I kept this next sample to the explicit request so we can compare the measured result to your size target."
+        )
+        proposal_summary = "Kept the next sample to the explicit request before measuring the size target."
+        proposal_diagnosis = (
+            "The tuning worker did not produce a trustworthy draft, so the next sample uses the operator's explicit "
+            "size and resolution request."
+        )
+        proposal_confidence = "low"
+        proposal_suggested_follow_up = None
+        advice_payload.update(
+            {
+                "ok": True,
+                "summary": proposal_summary,
+                "diagnosis": proposal_diagnosis,
+                "confidence": proposal_confidence,
+                "suggested_follow_up": proposal_suggested_follow_up,
+                "request_disposition": request_disposition,
+                "request_response": request_response,
+                "applied_policy": combined_fragment,
+            }
         )
     can_queue = _proposal_can_queue(
         applied_fragment=combined_fragment,
         preview_policy=tuned_policy,
-        request_disposition=tuning.request_disposition,
+        request_disposition=request_disposition,
         alignment_issue=alignment_issue,
     )
     proposal_message = _proposal_ready_message(
@@ -1043,14 +1120,14 @@ def _tuned_preview_action(
         "message": proposal_message,
         "operator_note": trimmed_note,
         "operator_request": operator_request,
-        "operator_signal": deps.proposal_signal_copy(trimmed_note, operator_request, True, tuning.request_disposition),
-        "request_disposition": tuning.request_disposition,
-        "request_response": tuning.request_response,
+        "operator_signal": deps.proposal_signal_copy(trimmed_note, operator_request, True, request_disposition),
+        "request_disposition": request_disposition,
+        "request_response": request_response,
         "feasibility_note": tuning.feasibility_note,
-        "summary": tuning.summary,
-        "diagnosis": tuning.diagnosis,
-        "confidence": tuning.confidence,
-        "suggested_follow_up": tuning.suggested_follow_up,
+        "summary": proposal_summary,
+        "diagnosis": proposal_diagnosis,
+        "confidence": proposal_confidence,
+        "suggested_follow_up": proposal_suggested_follow_up,
         "applied_policy": combined_fragment,
         "preview_policy": tuned_policy,
         "current_policy": current_policy,

@@ -828,8 +828,17 @@ def save_profile_action(
             )
     ):
         size_issue = None
-    if size_issue is not None and not confirm_size_tradeoff:
-        raise HTTPException(status_code=409, detail=size_issue)
+    if size_issue is not None:
+        size_status = str(size_target_analysis.get("status") or "").strip()
+        if size_status == "missing_prediction":
+            raise HTTPException(status_code=409, detail=size_issue)
+        if not confirm_size_tradeoff:
+            raise HTTPException(status_code=409, detail=size_issue)
+        if reviewed_draft_hash.strip() != current_draft_hash:
+            raise HTTPException(
+                status_code=409,
+                detail="This draft changed after the size tradeoff review. Review the result and confirm approval again.",
+            )
     if str(calibration_payload.get("mode") or "sample") == "sample":
         if not calibration_payload.get("review_media_ready"):
             raise HTTPException(

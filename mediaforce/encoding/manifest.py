@@ -10,6 +10,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
+from mediaforce.core.process_control import ProcessCancelledError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.quality import quality_error_message, resolve_local_quality_temp_root
 from mediaforce.encoding.staging import safe_unlink
@@ -274,10 +275,11 @@ def encode_one_item(
         finalize_output_path(temp_output, staging_path)
     except Exception as exc:
         failed_at = timestamp()
+        event_type = "encoding_stopped" if isinstance(exc, ProcessCancelledError) else "encoding_failed"
         record_event(
             connection,
             item["library_item_id"],
-            "encoding_failed",
+            event_type,
             {
                 **encode_event_details,
                 "encode_started_at": started_at,

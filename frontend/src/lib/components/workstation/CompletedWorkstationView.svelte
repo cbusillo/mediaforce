@@ -10,7 +10,7 @@
 		CompletedPayload
 	} from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
-	import { formatBytes } from './folder-studio-view';
+	import { formatBytes as formatTechnicalBytes } from './folder-studio-view';
 	import OperatorShell from './OperatorShell.svelte';
 	import StateBadge from './StateBadge.svelte';
 	import WorkstationPanel from './WorkstationPanel.svelte';
@@ -24,6 +24,9 @@
 		cleanupState,
 		cleanupStateCounts,
 		cleanupTone,
+		completedHistoryDetail,
+		completedHistoryLabel,
+		completedHistorySearchText,
 		completedLibraryOptions,
 		completedStateOptions,
 		folderCanBeMarkedHandled,
@@ -34,7 +37,7 @@
 		totalSavedSize,
 		type CleanupState
 	} from './completed-workstation';
-	import type { ShellTone } from './OperatorShell.svelte';
+	import type { ShellTone } from './shell-types';
 
 	type WorkstationMode = 'completed' | 'history';
 	type CleanupScope = 'selected' | 'global';
@@ -138,24 +141,24 @@
 	);
 	const cleanupStatusLabel = $derived(
 		cleanupReadyFolders.length > 0
-			? 'Cleanup ready'
+			? 'Originals waiting'
 			: cleanupReviewCount > 0
 				? 'Review needed'
-				: 'Handled'
+				: 'Settled'
 	);
 	const cleanupStatusTitle = $derived(
 		cleanupReadyFolders.length > 0
-			? `${cleanupReadyFolders.length.toLocaleString('en-US')} completed folders have originals waiting.`
+			? `${cleanupReadyFolders.length.toLocaleString('en-US')} finished seasons have originals waiting.`
 			: cleanupReviewCount > 0
-				? `${cleanupReviewCount.toLocaleString('en-US')} completed folders need review.`
-				: 'Completed work is handled.'
+				? `${cleanupReviewCount.toLocaleString('en-US')} finished seasons need review.`
+				: 'No originals are waiting.'
 	);
 	const cleanupStatusDetail = $derived(
 		cleanupReadyFolders.length > 0
-			? 'Review the folders below before removing originals from the waiting folder.'
+			? 'Review the seasons below before removing their originals.'
 			: cleanupReviewCount > 0
-				? 'Check the new files, then mark the already-removed originals as handled.'
-				: 'No originals are waiting. History stays available for audit.'
+				? 'Check the new files, then confirm which originals are already gone.'
+				: 'Past changes remain available in History.'
 	);
 	const historyRows = $derived([
 		...localHistory.map((event) => ({ ...event, source: 'api' as const })),
@@ -166,17 +169,7 @@
 	const visibleHistory = $derived(
 		historyRows.filter((event) => {
 			if (normalizedHistoryQuery.length === 0) return true;
-			return [
-				event.label,
-				event.prefix,
-				event.title,
-				event.subtitle,
-				event.detail,
-				event.event_type
-			]
-				.join(' ')
-				.toLowerCase()
-				.includes(normalizedHistoryQuery);
+			return completedHistorySearchText(event).includes(normalizedHistoryQuery);
 		})
 	);
 	const selectedSummary = $derived(
@@ -423,6 +416,13 @@
 		});
 	}
 
+	function formatBytes(value: number | null | undefined): string {
+		return formatTechnicalBytes(value)
+			.replace('GiB', 'GB')
+			.replace('MiB', 'MB')
+			.replace('KiB', 'KB');
+	}
+
 	function eventTone(value: string): ShellTone {
 		if (value === 'active' || value === 'ready' || value === 'wait' || value === 'fail') {
 			return value;
@@ -433,64 +433,64 @@
 
 <OperatorShell
 	route="completed"
-	subject="Completed"
+	subject="Finished"
 	crumb="/completed"
 	{statusTiles}
 	{footerSignals}
 >
 	<main class="completed">
-		<section class="completed__main" aria-label="Completed cleanup workstation">
+		<section class="completed__main" aria-label="Finished seasons">
 			<header class="completed-header">
 				<div>
-					<span class="mf-eyebrow">Completed</span>
-					<h1>{readiness.title}</h1>
+					<span class="mf-eyebrow">Finished</span>
+					<h1>Finished seasons</h1>
 					<p>{readiness.detail}</p>
 				</div>
 				<div class="completed-header__facts" aria-label="Completed cleanup totals">
 					<div>
-						<span>Completed</span>
+						<span>Finished</span>
 						<strong>{folders.length.toLocaleString('en-US')}</strong>
 					</div>
 					<div>
-						<span>Waiting</span>
+						<span>Originals waiting</span>
 						<strong>{counts.ready.toLocaleString('en-US')}</strong>
 					</div>
 					<div>
-						<span>Review</span>
+						<span>Needs review</span>
 						<strong>{(counts.blocked + counts.unknown).toLocaleString('en-US')}</strong>
 					</div>
 					<div>
-						<span>Saved</span>
+						<span>Space saved</span>
 						<strong>{formatBytes(totalSavedSize(folders))}</strong>
 					</div>
 				</div>
 			</header>
 
-			<div class="modebar" role="tablist" aria-label="Completed workstation modes">
+			<div class="modebar" role="tablist" aria-label="Finished season views">
 				<button
 					type="button"
 					role="tab"
 					aria-selected={mode === 'completed'}
 					class:active={mode === 'completed'}
-					onclick={() => (mode = 'completed')}>Cleanup work</button
+					onclick={() => (mode = 'completed')}>Originals</button
 				>
 				<button
 					type="button"
 					role="tab"
 					aria-selected={mode === 'history'}
 					class:active={mode === 'history'}
-					onclick={() => (mode = 'history')}>Handled history</button
+					onclick={() => (mode = 'history')}>History</button
 				>
 			</div>
 
 			{#if !completed}
-				<WorkstationPanel eyebrow="Runtime" title="Completed work unavailable">
+				<WorkstationPanel eyebrow="Status" title="Finished seasons are unavailable">
 					<div class="empty-note empty-note--error">
-						{actionError || 'Completed data is loading or unavailable.'}
+						{actionError || 'Finished season data is loading or unavailable.'}
 					</div>
 				</WorkstationPanel>
 			{:else if mode === 'completed'}
-				<WorkstationPanel eyebrow="Current state" title="Cleanup state">
+				<WorkstationPanel eyebrow="Originals" title="What is waiting">
 					<div class="cleanup-status cleanup-status--{cleanupStatusTone}">
 						<StateBadge tone={cleanupStatusTone} label={cleanupStatusLabel} />
 						<div>
@@ -503,18 +503,22 @@
 				{#if showMainHistorySummary}
 					<WorkstationPanel
 						eyebrow="History"
-						title="Recent handled work"
+						title="Recent changes"
 						meta={`${historyRows.length.toLocaleString('en-US')} events`}
 					>
 						<div class="history-list history-list--summary">
 							{#each historyRows.slice(0, 5) as event (`summary:${event.source}:${event.id}:${event.created_at}`)}
 								<div class="history-row">
-									<StateBadge compact tone={eventTone(event.tone)} label={event.label} />
+									<StateBadge
+										compact
+										tone={eventTone(event.tone)}
+										label={completedHistoryLabel(event.label)}
+									/>
 									<div>
 										<strong>{event.title}</strong>
 										<span>{event.prefix}</span>
 									</div>
-									<p>{event.detail}</p>
+									<p>{completedHistoryDetail(event.detail)}</p>
 									<time>{formatTimestamp(event.created_at)}</time>
 								</div>
 							{/each}
@@ -522,18 +526,15 @@
 					</WorkstationPanel>
 				{/if}
 
-				<WorkstationPanel
-					eyebrow={cleanupNeedsAction ? 'Filters' : 'Archive'}
-					title={cleanupNeedsAction ? 'Cleanup scope' : 'Completed folders and filters'}
-				>
+				<WorkstationPanel eyebrow="Library" title="Find a finished season">
 					<div class="completed-filter" aria-label="Completed cleanup filters">
 						<div class="completed-filter__summary">
-							<span>{cleanupNeedsAction ? 'Visible cleanup' : 'Visible completed work'}</span>
+							<span>Visible seasons</span>
 							<strong
 								>{filteredFolders.length.toLocaleString('en-US')} / {folders.length.toLocaleString(
 									'en-US'
 								)}
-								folders</strong
+								seasons</strong
 							>
 							<small>{reviewFolders.length > 0 ? reviewSummary : selectedSummary}</small>
 						</div>
@@ -543,7 +544,7 @@
 							<input
 								type="search"
 								value={searchQuery}
-								placeholder="Title, path, state, or blocker"
+								placeholder="Show, season, or status"
 								oninput={handleSearchInput}
 							/>
 						</label>
@@ -613,11 +614,11 @@
 
 				{#if cleanupNeedsAction}
 					<WorkstationPanel
-						eyebrow="Action"
+						eyebrow="Originals"
 						title={cleanupWorkAvailable
-							? 'Remove waiting originals'
+							? 'Choose what to do with originals'
 							: cleanupReviewCount > 0
-								? 'Review already-removed originals'
+								? 'Review originals that are already gone'
 								: 'No cleanup action needed'}
 					>
 						<div class="cleanup-command">
@@ -633,7 +634,7 @@
 								<div>
 									<strong
 										>{recommendedFolder
-											? `Safest next cleanup: ${recommendedFolder.title}`
+											? `${recommendedFolder.title} is ready for your decision`
 											: cleanupReviewCount > 0
 												? 'Some originals were already removed'
 												: 'Completed work is handled'}</strong
@@ -656,13 +657,13 @@
 										type="button"
 										class="control"
 										disabled={filteredReadyFolders.length === 0}
-										onclick={selectVisibleReady}>Select waiting originals</button
+										onclick={selectVisibleReady}>Select visible originals</button
 									>
 									<button
 										type="button"
 										class="control"
 										disabled={filteredReviewFolders.length === 0}
-										onclick={selectVisibleReview}>Select needs review</button
+										onclick={selectVisibleReview}>Select visible review items</button
 									>
 									<button
 										type="button"
@@ -688,7 +689,7 @@
 										onclick={() => armCleanup('global')}
 										>{armedScope === 'global'
 											? 'Global armed'
-											: 'Delete all archived originals'}</button
+											: 'Delete all waiting originals'}</button
 									>
 									<button
 										type="button"
@@ -698,7 +699,7 @@
 										onclick={() => armReview('already-removed')}
 										>{armedReview === 'already-removed'
 											? 'Ready to mark handled'
-											: 'Mark originals already removed'}</button
+											: 'Confirm originals are already gone'}</button
 									>
 								</div>
 							{:else}
@@ -806,19 +807,24 @@
 				{/if}
 
 				<WorkstationPanel
-					eyebrow="Folders"
-					title={cleanupNeedsAction ? 'Completed folder groups' : 'Completed archive'}
+					eyebrow="Seasons"
+					title="Finished season list"
 					meta={`${filteredFolders.length.toLocaleString('en-US')} visible`}
 				>
 					<div class="table-wrap">
-						<table>
+						<table class="completed-table">
+							<colgroup>
+								<col class="completed-table__select" />
+								<col class="completed-table__season" />
+								<col class="completed-table__originals" />
+								<col class="completed-table__saved" />
+								<col class="completed-table__latest" />
+							</colgroup>
 							<thead>
 								<tr>
-									<th>Choose</th>
-									<th>State</th>
-									<th>Folder</th>
-									<th>Waiting originals</th>
-									<th>Reclaim</th>
+									<th aria-label="Choose"></th>
+									<th>Season and state</th>
+									<th>Originals</th>
 									<th>Saved</th>
 									<th>Latest</th>
 								</tr>
@@ -830,7 +836,7 @@
 										class:selected={selected(folder) || selectedForReview(folder)}
 										class:blocked={state === 'blocked'}
 									>
-										<td>
+										<td class="select-cell">
 											{#if folderCanBeSelected(folder, archive)}
 												<input
 													type="checkbox"
@@ -847,28 +853,35 @@
 												/>
 											{/if}
 										</td>
-										<td>
-											<StateBadge compact tone={cleanupTone(state)} label={cleanupLabel(state)} />
-											<span class="state-detail">{cleanupDetail(folder, archive)}</span>
-										</td>
-										<td>
+										<td class="season-state-cell">
 											<a class="folder-link" href={resolve(folderRoutePath(folder.prefix))}>
 												<strong>{folder.title}</strong>
 												<span>{folder.prefix}</span>
 											</a>
-											<small>{folder.subtitle || folder.scope_label}</small>
+											<div class="row-state">
+												<StateBadge compact tone={cleanupTone(state)} label={cleanupLabel(state)} />
+												<span class="state-detail">{cleanupDetail(folder, archive)}</span>
+											</div>
 										</td>
-										<td>
-											<strong>{folder.archived_backup_count.toLocaleString('en-US')}</strong>
-											<span>{folder.promoted_item_count.toLocaleString('en-US')} promoted</span>
+										<td class="originals-cell" data-label="Originals">
+											<strong>{folder.archived_backup_count.toLocaleString('en-US')} waiting</strong
+											>
+											<span
+												>{formatBytes(folder.archived_backup_size_bytes)} reclaim · {folder.promoted_item_count.toLocaleString(
+													'en-US'
+												)} promoted</span
+											>
 										</td>
-										<td>{formatBytes(folder.archived_backup_size_bytes)}</td>
-										<td>{formatBytes(folder.total_bytes_saved)}</td>
-										<td>{formatTimestamp(folder.latest_promoted_at)}</td>
+										<td class="saved-cell" data-label="Saved"
+											>{formatBytes(folder.total_bytes_saved)}</td
+										>
+										<td class="latest-cell" data-label="Latest"
+											>{formatTimestamp(folder.latest_promoted_at)}</td
+										>
 									</tr>
 								{:else}
 									<tr>
-										<td colspan="7">No completed folders match the active filters.</td>
+										<td colspan="5">No finished seasons match this search.</td>
 									</tr>
 								{/each}
 							</tbody>
@@ -894,12 +907,16 @@
 						<div class="history-list history-list--wide">
 							{#each visibleHistory as event (`${event.source}:${event.id}:${event.created_at}`)}
 								<div class="history-row">
-									<StateBadge compact tone={eventTone(event.tone)} label={event.label} />
+									<StateBadge
+										compact
+										tone={eventTone(event.tone)}
+										label={completedHistoryLabel(event.label)}
+									/>
 									<div>
 										<strong>{event.title}</strong>
 										<span>{event.prefix}</span>
 									</div>
-									<p>{event.detail}</p>
+									<p>{completedHistoryDetail(event.detail)}</p>
 									<time>{formatTimestamp(event.created_at)}</time>
 								</div>
 							{:else}
@@ -911,8 +928,8 @@
 			{/if}
 		</section>
 
-		<aside class="completed__rail" aria-label="Completed cleanup context">
-			<WorkstationPanel eyebrow="Cleanup" title="Cleanup folder">
+		<aside class="completed__rail" aria-label="Originals and history">
+			<WorkstationPanel eyebrow="Originals" title="Backup area">
 				<dl class="kv">
 					<dt>Folder</dt>
 					<dd>{archive.archive_root || 'not configured'}</dd>
@@ -925,7 +942,7 @@
 				</dl>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="State" title="Cleanup state">
+			<WorkstationPanel eyebrow="Summary" title="Originals by state">
 				<div class="scope-list">
 					<div class="scope-row scope-row--ready">
 						<span>Waiting originals</span>
@@ -953,13 +970,17 @@
 			{#if cleanupNeedsAction || mode === 'history'}
 				<WorkstationPanel
 					eyebrow="History"
-					title="Recent handled work"
+					title="Recent changes"
 					meta={`${historyRows.length.toLocaleString('en-US')} events`}
 				>
 					<div class="history-list">
 						{#each historyRows.slice(0, 8) as event (`rail:${event.source}:${event.id}:${event.created_at}`)}
 							<div class="history-row history-row--rail">
-								<StateBadge compact tone={eventTone(event.tone)} label={event.label} />
+								<StateBadge
+									compact
+									tone={eventTone(event.tone)}
+									label={completedHistoryLabel(event.label)}
+								/>
 								<div>
 									<strong>{event.title}</strong>
 									<span>{event.prefix}</span>
@@ -1128,7 +1149,6 @@
 	.cleanup-command__state span,
 	.scope-row small,
 	.folder-link span,
-	.folder-link + small,
 	.state-detail,
 	.history-row span,
 	.history-row p,
@@ -1391,13 +1411,34 @@
 	}
 
 	.table-wrap {
-		overflow: auto;
+		overflow: hidden;
 	}
 
-	table {
+	.completed-table {
 		border-collapse: collapse;
-		min-width: 980px;
+		min-width: 0;
+		table-layout: fixed;
 		width: 100%;
+	}
+
+	.completed-table__select {
+		width: 42px;
+	}
+
+	.completed-table__season {
+		width: 48%;
+	}
+
+	.completed-table__originals {
+		width: 18%;
+	}
+
+	.completed-table__saved {
+		width: 13%;
+	}
+
+	.completed-table__latest {
+		width: 21%;
 	}
 
 	th,
@@ -1429,27 +1470,57 @@
 		background: var(--mf-fail-bg);
 	}
 
-	td:nth-child(2) {
-		display: grid;
-		gap: var(--mf-space-1);
-		min-width: 160px;
+	.season-state-cell {
+		min-width: 0;
 	}
 
-	td:nth-child(4),
-	td:nth-child(5),
-	td:nth-child(6),
-	td:nth-child(7) {
+	.originals-cell,
+	.saved-cell,
+	.latest-cell {
 		font-family: var(--mf-font-mono), monospace;
 	}
 
-	td:nth-child(4) {
-		display: grid;
-		gap: var(--mf-space-1);
+	.originals-cell {
+		font-size: var(--mf-text-xs);
 	}
 
-	td:nth-child(4) span {
+	.originals-cell span {
+		display: block;
 		color: var(--mf-fg-tertiary);
 		font-family: var(--mf-font-sans), sans-serif;
+	}
+
+	.row-state {
+		align-items: center;
+		display: flex;
+		gap: var(--mf-space-3);
+		min-width: 0;
+		margin-top: var(--mf-space-2);
+	}
+
+	.row-state .state-detail {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.completed-table th {
+		height: 34px;
+	}
+
+	.completed-table td {
+		height: auto;
+		padding-block: 9px;
+		vertical-align: top;
+	}
+
+	.completed-table .select-cell {
+		text-align: center;
+	}
+
+	.completed-table .saved-cell,
+	.completed-table .latest-cell {
+		white-space: nowrap;
 	}
 
 	.folder-link {
@@ -1608,22 +1679,23 @@
 			overflow: visible;
 		}
 
-		table {
+		.completed-table {
 			min-width: 0;
 		}
 
-		thead {
+		.completed-table thead,
+		.completed-table colgroup {
 			display: none;
 		}
 
-		tbody,
-		tr,
-		td {
+		.completed-table tbody,
+		.completed-table tr,
+		.completed-table td {
 			display: block;
 			width: 100%;
 		}
 
-		tr {
+		.completed-table tr {
 			border-bottom: var(--mf-border-muted);
 			display: grid;
 			gap: var(--mf-space-3);
@@ -1631,43 +1703,36 @@
 			padding: var(--mf-space-4);
 		}
 
-		td {
+		.completed-table td {
 			border-bottom: 0;
 			height: auto;
 			min-width: 0;
 			padding: 0;
 		}
 
-		td:nth-child(1) {
-			grid-row: 1 / span 6;
+		.completed-table .select-cell {
+			grid-row: 1 / span 4;
 			padding-top: var(--mf-space-1);
 			width: 32px;
 		}
 
-		td:nth-child(2),
-		td:nth-child(3),
-		td:nth-child(4),
-		td:nth-child(5),
-		td:nth-child(6),
-		td:nth-child(7) {
+		.completed-table .season-state-cell,
+		.completed-table .originals-cell,
+		.completed-table .saved-cell,
+		.completed-table .latest-cell {
 			grid-column: 2;
 		}
 
-		td:nth-child(4),
-		td:nth-child(5),
-		td:nth-child(6),
-		td:nth-child(7) {
+		.completed-table td[data-label] {
 			align-items: baseline;
 			display: grid;
 			gap: var(--mf-space-3);
 			grid-template-columns: 68px minmax(0, 1fr);
 		}
 
-		td:nth-child(4)::before,
-		td:nth-child(5)::before,
-		td:nth-child(6)::before,
-		td:nth-child(7)::before {
+		.completed-table td[data-label]::before {
 			color: var(--mf-fg-tertiary);
+			content: attr(data-label);
 			font-family: var(--mf-font-sans), sans-serif;
 			font-size: var(--mf-text-2xs);
 			font-weight: var(--mf-weight-semibold);
@@ -1675,24 +1740,381 @@
 			text-transform: uppercase;
 		}
 
-		td:nth-child(4)::before {
-			content: 'Backups';
-		}
-
-		td:nth-child(5)::before {
-			content: 'Reclaim';
-		}
-
-		td:nth-child(6)::before {
-			content: 'Saved';
-		}
-
-		td:nth-child(7)::before {
-			content: 'Latest';
-		}
-
-		td:nth-child(4) span {
+		.completed-table .originals-cell > * {
 			grid-column: 2;
+		}
+	}
+
+	/* Human finished-seasons surface */
+	.completed {
+		display: grid;
+		gap: 18px;
+		grid-template-columns: minmax(0, 1fr);
+		margin: 0 auto;
+		max-width: 900px;
+		min-height: 0;
+		padding: 34px 24px 64px;
+	}
+
+	.completed__main {
+		gap: 16px;
+		padding: 0;
+	}
+
+	.completed__rail {
+		display: none;
+	}
+
+	.completed-header {
+		align-items: flex-end;
+		border: 0;
+		display: flex;
+		gap: 20px;
+		justify-content: space-between;
+		padding: 0 0 8px;
+	}
+
+	.completed-header > div:first-child {
+		display: grid;
+		gap: 5px;
+	}
+
+	.completed-header h1 {
+		font-size: clamp(22px, 2.5vw, 28px);
+		font-weight: 600;
+		letter-spacing: -0.02em;
+	}
+
+	.completed-header p {
+		color: var(--mf-fg-secondary);
+		font-size: 14px;
+	}
+
+	:global(.completed .mf-eyebrow) {
+		background: var(--mf-ready-bg);
+		border-radius: 999px;
+		color: var(--mf-ready-fg);
+		font-family: var(--mf-font-sans);
+		font-size: 11px;
+		font-weight: 700;
+		letter-spacing: 0.02em;
+		padding: 6px 9px;
+		text-transform: none;
+		width: fit-content;
+	}
+
+	.completed-header__facts {
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-line);
+		border-radius: var(--mf-radius-3);
+		display: grid;
+		grid-template-columns: repeat(4, minmax(74px, 1fr));
+		overflow: hidden;
+	}
+
+	.completed-header__facts div {
+		border-right: 1px solid var(--mf-line-muted);
+		display: grid;
+		gap: 2px;
+		padding: 9px 11px;
+	}
+
+	.completed-header__facts div:last-child {
+		border-right: 0;
+	}
+
+	.completed-header__facts span {
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-sans);
+		font-size: 10px;
+		letter-spacing: 0.02em;
+		text-transform: none;
+	}
+
+	.completed-header__facts strong {
+		color: var(--mf-fg-primary);
+		font-family: var(--mf-font-sans);
+		font-size: 15px;
+	}
+
+	.modebar {
+		background: transparent;
+		border-bottom: 1px solid var(--mf-line);
+		border-radius: 0;
+		gap: 8px;
+		justify-self: start;
+		padding: 0;
+	}
+
+	.modebar button {
+		border: 0;
+		border-bottom: 2px solid transparent;
+		border-radius: 0;
+		color: var(--mf-fg-secondary);
+		font-family: var(--mf-font-sans);
+		font-size: 13px;
+		font-weight: 600;
+		min-height: 34px;
+		padding: 0 14px;
+	}
+
+	.modebar button.active {
+		background: transparent;
+		border-bottom-color: var(--mf-active-fg);
+		box-shadow: none;
+		color: var(--mf-active-fg);
+	}
+
+	.cleanup-status,
+	.cleanup-command__state,
+	.cleanup-standby,
+	.scope-row,
+	.audit-note,
+	.history-row,
+	.empty-note {
+		background: var(--mf-bg-panel-2);
+		border: 1px solid var(--mf-line-muted);
+		border-radius: var(--mf-radius-2);
+		color: var(--mf-fg-primary);
+	}
+
+	.cleanup-status {
+		border-left: 0;
+		gap: 12px;
+		margin: 12px;
+		padding: 12px;
+	}
+
+	.cleanup-status strong,
+	.cleanup-command strong,
+	.scope-row strong,
+	.audit-note strong,
+	.history-row strong {
+		color: var(--mf-fg-primary);
+		font-family: var(--mf-font-sans);
+	}
+
+	.cleanup-status span,
+	.cleanup-command span,
+	.cleanup-command small,
+	.scope-row span,
+	.scope-row small,
+	.audit-note span,
+	.history-row span,
+	.history-row p,
+	.history-row time {
+		color: var(--mf-fg-secondary);
+		font-family: var(--mf-font-sans);
+	}
+
+	.history-list--summary .history-row > div span,
+	.history-row--rail > div span {
+		display: none;
+	}
+
+	.completed-filter {
+		display: grid;
+		gap: 12px;
+		grid-template-columns: minmax(190px, 0.7fr) minmax(260px, 1.3fr);
+		padding: 12px;
+	}
+
+	.completed-filter__group {
+		display: none;
+	}
+
+	.completed-filter__summary,
+	.completed-filter__search {
+		background: var(--mf-bg-panel-2);
+		border: 1px solid var(--mf-line-muted);
+		border-radius: var(--mf-radius-2);
+		padding: 11px 12px;
+	}
+
+	.completed-filter__summary span,
+	.completed-filter__search span {
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-sans);
+		font-size: 11px;
+	}
+
+	.completed-filter__summary strong {
+		color: var(--mf-fg-primary);
+		font-family: var(--mf-font-sans);
+	}
+
+	.completed-filter input,
+	.history-search input {
+		background: var(--mf-bg-input);
+		border: 1px solid var(--mf-line-strong);
+		border-radius: var(--mf-radius-2);
+		color: var(--mf-fg-primary);
+		font-family: var(--mf-font-sans);
+		min-height: 36px;
+	}
+
+	.cleanup-command,
+	.history-workspace,
+	.kv,
+	.scope-list,
+	.history-list,
+	.audit-note {
+		padding: 12px;
+	}
+
+	.cleanup-command__state {
+		border-left: 0;
+		padding: 12px;
+	}
+
+	.cleanup-command__actions {
+		background: transparent;
+		border: 0;
+		gap: 7px;
+		padding: 0;
+	}
+
+	.control {
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-line-strong);
+		border-radius: var(--mf-radius-2);
+		color: var(--mf-fg-primary);
+		font-family: var(--mf-font-sans);
+		font-weight: 600;
+		min-height: 34px;
+		padding: 0 11px;
+	}
+
+	.control:hover {
+		background: var(--mf-bg-panel-2);
+		border-color: var(--mf-active-line);
+		color: var(--mf-active-fg);
+	}
+
+	.control--primary {
+		background: var(--mf-active-bg);
+		border-color: var(--mf-active-line);
+		color: var(--mf-active-fg);
+	}
+
+	.control--danger {
+		background: var(--mf-bg-panel);
+		border-color: var(--mf-fail-line);
+		color: var(--mf-fail-fg);
+	}
+
+	.confirm-panel {
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-fail-line);
+		border-radius: var(--mf-radius-3);
+		box-shadow: var(--mf-shadow-modal);
+		color: var(--mf-fg-primary);
+		margin-top: 10px;
+		padding: 16px;
+	}
+
+	.confirm-panel .control--danger.armed {
+		background: var(--mf-fail-solid);
+		border-color: var(--mf-fail-solid);
+		color: var(--mf-fg-on-accent);
+	}
+
+	.confirm-panel--review {
+		border-color: var(--mf-active-line);
+	}
+
+	.confirm-panel--review .control--primary.armed {
+		background: var(--mf-active-solid);
+		border-color: var(--mf-active-solid);
+		color: var(--mf-fg-on-accent);
+	}
+
+	.table-wrap {
+		background: var(--mf-bg-panel);
+		border: 0;
+		overflow-x: hidden;
+	}
+
+	.completed-table {
+		background: var(--mf-bg-panel);
+		color: var(--mf-fg-primary);
+	}
+
+	th {
+		background: var(--mf-bg-panel-2);
+		border-bottom: 1px solid var(--mf-line);
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-sans);
+		font-size: 11px;
+		letter-spacing: 0.03em;
+		text-transform: none;
+	}
+
+	td {
+		border-bottom: 1px solid var(--mf-line-muted);
+		color: var(--mf-fg-secondary);
+		font-family: var(--mf-font-sans);
+		font-size: 13px;
+	}
+
+	.folder-link strong,
+	.state-cell strong {
+		color: var(--mf-fg-primary);
+		font-family: var(--mf-font-sans);
+	}
+
+	.folder-link span,
+	.state-detail {
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-sans);
+	}
+
+	.kv {
+		grid-template-columns: auto minmax(0, 1fr);
+	}
+
+	.kv dt,
+	.kv dd {
+		color: var(--mf-fg-secondary);
+		font-family: var(--mf-font-sans);
+	}
+
+	.scope-row {
+		border-left: 0;
+		padding: 10px;
+	}
+
+	button:focus-visible,
+	a:focus-visible,
+	input:focus-visible {
+		box-shadow: var(--mf-ring-focus);
+		outline: none;
+	}
+
+	@media (max-width: 680px) {
+		.completed {
+			padding: 26px 12px 48px;
+		}
+
+		.completed-header {
+			align-items: stretch;
+			flex-direction: column;
+		}
+
+		.completed-header__facts {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+
+		.completed-header__facts div:nth-child(2) {
+			border-right: 0;
+		}
+
+		.completed-header__facts div:nth-child(-n + 2) {
+			border-bottom: 1px solid var(--mf-line-muted);
+		}
+
+		.completed-filter {
+			grid-template-columns: 1fr;
 		}
 	}
 </style>

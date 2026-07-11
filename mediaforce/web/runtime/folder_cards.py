@@ -240,17 +240,77 @@ def preview_folder_cards(
     )
 
 
+def list_library_structure_cards(
+        connection: DBClient,
+        *,
+        folder_group: Callable[[str], FolderGroup | None],
+        review_badge_for_prefix: Callable[[str], FolderBadge],
+) -> list[FolderCard]:
+    rows = connection.execute(
+        select(
+            library_items.c.rel_path,
+            library_items.c.size_bytes,
+            library_items.c.status,
+        )
+        .where(library_items.c.status != "missing")
+        .where(library_items.c.rel_path.startswith("tv/", autoescape=True))
+        .order_by(library_items.c.rel_path)
+    ).mappings().fetchall()
+    grouped: dict[str, FolderCard] = {}
+    for row in rows:
+        group = folder_group(str(row["rel_path"]))
+        if group is None:
+            continue
+        prefix, title, subtitle, scope_label = group
+        if scope_label != "Season":
+            continue
+        card = grouped.get(prefix)
+        if card is None:
+            card = FolderCard(
+                prefix=prefix,
+                title=title,
+                subtitle=subtitle,
+                scope_label=scope_label,
+                item_count=0,
+                pending_count=0,
+                total_size_bytes=0,
+                estimated_savings_bytes=0,
+                known_saved_bytes=0,
+                projected_reclaim_bytes=0,
+                average_age_days=0.0,
+                sort_score=0.0,
+                statuses={},
+                video_codecs={},
+                details_loading=True,
+            )
+            grouped[prefix] = card
+        card.item_count += 1
+        card.total_size_bytes += max(0, int(row["size_bytes"] or 0))
+        status = str(row["status"] or "unknown")
+        card.statuses[status] = card.statuses.get(status, 0) + 1
+        if status != "promoted":
+            card.pending_count += 1
+    cards = sorted(
+        (card for card in grouped.values() if card.pending_count > 0),
+        key=lambda card: (card.total_size_bytes, card.title),
+        reverse=True,
+    )
+    _apply_folder_review_badges(cards, review_badge_for_prefix)
+    return cards
+
+
 def list_folder_cards(
         connection: DBClient,
         *,
-        minimum_recommended_savings_bytes: int,
+        minimum_recommended_savings_bytes: int | None,
         folder_group: Callable[[str], FolderGroup | None],
         age_days: Callable[[str], float],
         estimate_savings_bytes: Callable[..., int],
         review_badge_for_prefix: Callable[[str], FolderBadge],
+        rel_path_root: str | None = None,
 ) -> list[FolderCard]:
     folder_history, codec_history = _load_savings_history(connection, folder_group=folder_group)
-    rows = connection.execute(
+    query = (
         select(
             library_items.c.rel_path,
             library_items.c.source_path,
@@ -268,8 +328,10 @@ def list_folder_cards(
             )
         )
         .where(library_items.c.status != "missing")
-        .order_by(library_items.c.rel_path)
-    ).mappings().fetchall()
+    )
+    if rel_path_root:
+        query = query.where(library_items.c.rel_path.startswith(rel_path_root, autoescape=True))
+    rows = connection.execute(query.order_by(library_items.c.rel_path)).mappings().fetchall()
     grouped: dict[str, FolderCard] = {}
     for row in rows:
         rel_path = str(row["rel_path"])
@@ -333,7 +395,11 @@ def list_folder_cards(
     cards = [
         card
         for card in cards
-        if card.pending_count > 0 and card.projected_reclaim_bytes >= minimum_recommended_savings_bytes
+        if card.pending_count > 0
+        and (
+            minimum_recommended_savings_bytes is None
+            or card.projected_reclaim_bytes >= minimum_recommended_savings_bytes
+        )
     ]
     _apply_folder_workflow_states(connection, cards)
     _apply_folder_review_badges(cards, review_badge_for_prefix)
@@ -349,10 +415,11 @@ def list_folder_cards(
 
 
 def folder_card_cache_key(config: MediaforceConfig) -> tuple[str, int, int]:
-    try:
-        db_mtime_ns = config.paths.db_path.stat().st_mtime_ns
-    except OSError:
-        db_mtime_ns = 0
+    db_mtime_ns = max(
+        0,
+        _path_mtime_ns(config.paths.db_path),
+        _path_mtime_ns(Path(f"{config.paths.db_path}-wal")),
+    )
     return str(config.paths.db_path), db_mtime_ns, _web_state_latest_mtime_ns(config)
 
 

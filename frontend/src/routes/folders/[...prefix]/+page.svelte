@@ -4,18 +4,16 @@
 		initialDashboard,
 		initialFolderPayload,
 		initialFoldersPayload,
-		initialFolderStatusPayload,
-		initialHosts
+		initialFolderStatusPayload
 	} from '$lib/api/placeholders';
 	import type {
 		DashboardFoldersPayload,
 		DashboardSummaryPayload,
 		FolderPayload,
-		FolderStatusPayload,
-		HostsPayload
+		FolderStatusPayload
 	} from '$lib/api/types';
-	import FolderStudioView from '$lib/components/workstation/FolderStudioView.svelte';
-	import HomeWorkbenchView from '$lib/components/workstation/HomeWorkbenchView.svelte';
+	import SeasonExperience from '$lib/components/season/SeasonExperience.svelte';
+	import SeasonLibrary from '$lib/components/season/SeasonLibrary.svelte';
 
 	let { data }: { data: { mode: 'directory' | 'studio'; prefix: string } } = $props();
 	const mode = $derived(data.mode);
@@ -25,7 +23,6 @@
 	let foldersPayload = $state<DashboardFoldersPayload>(initialFoldersPayload);
 	let folder = $state<FolderPayload>(initialFolderPayload(''));
 	let status = $state<FolderStatusPayload>(initialFolderStatusPayload(''));
-	let hosts = $state<HostsPayload>(initialHosts);
 	let foldersPending = $state(false);
 	let folderPending = $state(false);
 	let loadError = $state<string | null>(null);
@@ -43,18 +40,16 @@
 		foldersPending = true;
 		loadError = null;
 		try {
-			const [dashboardPayload, foldersPayloadResult, hostsPayload] = await Promise.all([
+			const [dashboardPayload, foldersPayloadResult] = await Promise.all([
 				fetchJson<DashboardSummaryPayload>('/api/dashboard?preview_limit=0'),
-				fetchJson<DashboardFoldersPayload>('/api/dashboard/folders'),
-				fetchJson<HostsPayload>('/api/hosts?compact=1')
+				fetchJson<DashboardFoldersPayload>('/api/dashboard/folders')
 			]);
 			if (generation !== hydrationGeneration) return;
 			dashboard = dashboardPayload;
 			foldersPayload = foldersPayloadResult;
-			hosts = hostsPayload;
 		} catch (error) {
 			if (generation === hydrationGeneration) {
-				loadError = error instanceof Error ? error.message : 'Unable to load folder index.';
+				loadError = error instanceof Error ? error.message : 'Unable to open the season library.';
 			}
 		} finally {
 			if (generation === hydrationGeneration) foldersPending = false;
@@ -67,18 +62,16 @@
 		loadError = null;
 		const encodedPrefix = encodePrefix(currentPrefix);
 		try {
-			const [folderPayload, statusPayload, hostsPayload] = await Promise.all([
+			const [folderPayload, statusPayload] = await Promise.all([
 				fetchJson<FolderPayload>(`/api/folders/${encodedPrefix}`),
-				fetchJson<FolderStatusPayload>(`/api/folders/${encodedPrefix}/status`),
-				fetchJson<HostsPayload>('/api/hosts?compact=1')
+				fetchJson<FolderStatusPayload>(`/api/folders/${encodedPrefix}/status`)
 			]);
 			if (generation !== hydrationGeneration) return;
 			folder = folderPayload;
 			status = statusPayload;
-			hosts = hostsPayload;
 		} catch (error) {
 			if (generation === hydrationGeneration) {
-				loadError = error instanceof Error ? error.message : 'Unable to load folder state.';
+				loadError = error instanceof Error ? error.message : 'Unable to open this season.';
 			}
 		} finally {
 			if (generation === hydrationGeneration) folderPending = false;
@@ -97,12 +90,17 @@
 		if (currentMode === 'studio') {
 			folder = initialFolderPayload(currentPrefix);
 			status = initialFolderStatusPayload(currentPrefix);
-			hosts = initialHosts;
 			void hydrateStudio(currentPrefix);
+			const refreshTimer = window.setInterval(() => {
+				if (!folderPending) void hydrateStudio(currentPrefix);
+			}, 7000);
+			return () => {
+				window.clearInterval(refreshTimer);
+				hydrationGeneration += 1;
+			};
 		} else {
 			dashboard = initialDashboard;
 			foldersPayload = initialFoldersPayload;
-			hosts = initialHosts;
 			void hydrateDirectory();
 		}
 
@@ -113,25 +111,21 @@
 </script>
 
 <svelte:head>
-	<title>{mode === 'studio' ? `${prefix} · Mediaforce Folder Studio` : 'Mediaforce Work'}</title>
+	<title
+		>{mode === 'studio'
+			? `${prefix.split('/').at(-1)} · Mediaforce`
+			: 'Make a TV season smaller · Mediaforce'}</title
+	>
 </svelte:head>
 
 {#if mode === 'studio'}
-	<FolderStudioView
+	<SeasonExperience
 		{folder}
 		{status}
-		{hosts}
 		{folderPending}
 		loadError={loadError ?? undefined}
 		onMutate={refreshStudio}
 	/>
 {:else}
-	<HomeWorkbenchView
-		crumb="/"
-		{dashboard}
-		{foldersPayload}
-		{hosts}
-		{foldersPending}
-		loadError={loadError ?? undefined}
-	/>
+	<SeasonLibrary {dashboard} {foldersPayload} {foldersPending} loadError={loadError ?? undefined} />
 {/if}

@@ -38,7 +38,7 @@
 </script>
 
 <svelte:head>
-	<title>Mediaforce Ops</title>
+	<title>Activity · Mediaforce</title>
 </svelte:head>
 
 <OpsWorkstationView {dashboard} {hosts} loadError={loadError || null} onRefresh={refreshOpsData} />

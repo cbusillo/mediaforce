@@ -625,6 +625,34 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 ),
             ),
         ):
+            if item_id == completed_id:
+                connection.execute(
+                    item_events.insert().values(
+                        library_item_id=item_id,
+                        created_at=timestamp,
+                        event_type="encoding_failed",
+                        details_json=json.dumps(
+                            {
+                                "prefix": COMPLETED_PREFIX,
+                                "error": "Fixture encode failed before a successful retry.",
+                            }
+                        ),
+                    )
+                )
+            else:
+                connection.execute(
+                    item_events.insert().values(
+                        library_item_id=item_id,
+                        created_at=timestamp,
+                        event_type="encoding_stopped",
+                        details_json=json.dumps(
+                            {
+                                "prefix": BLOCKED_COMPLETED_PREFIX,
+                                "error": "Fixture encode was stopped by operator.",
+                            }
+                        ),
+                    )
+                )
             connection.execute(
                 staged_artifacts.insert().values(
                     library_item_id=item_id,
@@ -788,12 +816,12 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             {
                 "label": "Folder Studio sampling fixture",
                 "route": "/folders/tv/Sampling%20Show/Season%201",
-                "marker": "Sampling",
+                "marker": "Sampling Show",
             },
             {
                 "label": "Folder Studio retry fixture",
                 "route": "/folders/tv/Retry%20Show/Season%201",
-                "marker": "Retry sample",
+                "marker": "Retry Show",
             },
             {
                 "label": "Completed cleanup fixture",
@@ -803,32 +831,32 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             {
                 "label": "Ops unavailable host fixture",
                 "route": "/ops",
-                "marker": "Worker status",
+                "marker": "Smoke Worker",
             },
             {
                 "label": "Folder Studio review-ready fixture",
                 "route": "/folders/tv/Review%20Ready/Season%201",
-                "marker": "Download side-by-side video",
+                "marker": "Review Ready",
             },
             {
                 "label": "Folder Studio approved fixture",
                 "route": "/folders/tv/Approved%20Show/Season%201",
-                "marker": "This scope is complete",
+                "marker": "Approved Show",
             },
             {
                 "label": "Folder Studio missed-target fixture",
                 "route": "/folders/tv/Overshoot%20Show/Season%201",
-                "marker": "Approve anyway and queue",
+                "marker": "Overshoot Show",
             },
             {
                 "label": "Folder Studio active processing fixture",
                 "route": "/folders/tv/Encoding%20Show/Season%201",
-                "marker": "Encoding now",
+                "marker": "Encoding Show",
             },
             {
                 "label": "Folder Studio retryable processing fixture",
                 "route": "/folders/tv/Failed%20Encode/Season%201",
-                "marker": "Ask review assistant",
+                "marker": "Failed Encode",
             },
         ],
         "completedPrefix": COMPLETED_PREFIX,

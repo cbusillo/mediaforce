@@ -91,6 +91,7 @@ export interface EncodeJobProgressTelemetry {
 	completed_item_count?: number;
 	current_item_rel_path?: string;
 	progress_state?: string;
+	active_host_labels?: string[];
 	failure_analysis?: EncodeFailureAnalysis | null;
 }
 
@@ -421,6 +422,7 @@ export interface FolderPayload {
 	hot_spots?: number[];
 	calibration?: Record<string, unknown> | null;
 	advice?: Record<string, unknown> | null;
+	size_target_analysis?: Record<string, unknown> | null;
 	approved_season_shortcut?: Record<string, unknown> | null;
 	series_context?: { prefix: string; title: string } | null;
 	pending_proposal?: Record<string, unknown> | null;

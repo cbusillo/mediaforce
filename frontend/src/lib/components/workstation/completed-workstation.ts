@@ -4,7 +4,7 @@ import type {
 	CompletedHistoryEvent,
 	CompletedPayload
 } from '$lib/api/types';
-import type { FooterSignal, ShellTone, StatusTile } from './OperatorShell.svelte';
+import type { FooterSignal, ShellTone, StatusTile } from './shell-types';
 import { formatBytes } from './folder-studio-view';
 
 export type CleanupState = 'ready' | 'blocked' | 'unknown' | 'cleaned';
@@ -59,8 +59,42 @@ export function cleanupTone(state: CleanupState): ShellTone {
 export function cleanupLabel(state: CleanupState): string {
 	if (state === 'ready') return 'Originals waiting';
 	if (state === 'blocked') return 'Check settings';
-	if (state === 'unknown') return 'Originals already removed';
-	return 'Handled';
+	if (state === 'unknown') return 'Originals already gone';
+	return 'Finished';
+}
+
+export function completedHistoryLabel(value: string): string {
+	const normalized = value.toLowerCase();
+	if (normalized.includes('encoding started')) return 'Season started';
+	if (normalized.includes('encoding stopped')) return 'Season stopped';
+	if (normalized.includes('encoding failed')) return 'Season failed';
+	if (normalized.includes('promotion completed')) return 'Season finished';
+	if (normalized.includes('cleanup')) return 'Originals removed';
+	return value.replace(/encode/gi, 'season').replace(/promotion/gi, 'finish');
+}
+
+export function completedHistoryDetail(value: string): string {
+	return value
+		.replace(/encode worker/gi, 'A computer')
+		.replace(/processing an item/gi, 'making an episode')
+		.replace(/promoted items?/gi, 'finished episodes')
+		.replace(/GiB/g, 'GB')
+		.replace(/MiB/g, 'MB');
+}
+
+export function completedHistorySearchText(event: CompletedHistoryEvent): string {
+	return [
+		completedHistoryLabel(event.label),
+		completedHistoryDetail(event.detail),
+		event.label,
+		event.prefix,
+		event.title,
+		event.subtitle,
+		event.detail,
+		event.event_type
+	]
+		.join(' ')
+		.toLowerCase();
 }
 
 export function cleanupDetail(folder: CompletedFolderRow, archive: ArchiveCleanupSummary): string {
@@ -123,9 +157,9 @@ export function buildCompletedReadinessSummary(
 	if (!payload) {
 		return {
 			tone: loadError ? 'fail' : 'idle',
-			title: loadError ? 'Completed work is unavailable' : 'Completed work is loading',
-			detail: loadError ?? 'Waiting for completed work and cleanup state.',
-			metricLabel: 'Completed',
+			title: loadError ? 'Finished seasons are unavailable' : 'Finished seasons are loading',
+			detail: loadError ?? 'Opening finished seasons and their original-file status.',
+			metricLabel: 'Finished',
 			metricValue: loadError ? 'offline' : 'loading'
 		};
 	}
@@ -137,7 +171,7 @@ export function buildCompletedReadinessSummary(
 		return {
 			tone: 'ready',
 			title: 'Originals are waiting',
-			detail: `${counts.ready.toLocaleString('en-US')} completed ${counts.ready === 1 ? 'folder has' : 'folders have'} originals staged for removal.`,
+			detail: `${counts.ready.toLocaleString('en-US')} finished ${counts.ready === 1 ? 'season has' : 'seasons have'} originals waiting for your decision.`,
 			metricLabel: 'Waiting',
 			metricValue: String(counts.ready)
 		};
@@ -146,22 +180,20 @@ export function buildCompletedReadinessSummary(
 		return {
 			tone: counts.blocked > 0 ? 'fail' : 'wait',
 			title:
-				counts.blocked > 0
-					? 'Check before deleting'
-					: 'Already removed originals need confirmation',
+				counts.blocked > 0 ? 'Check before deleting' : 'Confirm originals that are already gone',
 			detail:
 				counts.blocked > 0
-					? `${counts.blocked.toLocaleString('en-US')} completed ${counts.blocked === 1 ? 'folder needs' : 'folders need'} settings checked before deleting originals.`
-					: `${counts.unknown.toLocaleString('en-US')} completed ${counts.unknown === 1 ? 'folder has' : 'folders have'} originals already gone; confirm after checking the new files.`,
+					? `${counts.blocked.toLocaleString('en-US')} finished ${counts.blocked === 1 ? 'season needs' : 'seasons need'} settings checked before originals can be removed.`
+					: `${counts.unknown.toLocaleString('en-US')} finished ${counts.unknown === 1 ? 'season has' : 'seasons have'} originals already gone; confirm after checking the new files.`,
 			metricLabel: counts.blocked > 0 ? 'Check' : 'Confirm',
 			metricValue: String(reviewCount)
 		};
 	}
 	return {
 		tone: 'idle',
-		title: 'Completed work is handled',
-		detail: `${folders.length.toLocaleString('en-US')} completed ${folders.length === 1 ? 'folder is' : 'folders are'} clean. Recent handled work is available for audit.`,
-		metricLabel: 'Handled',
+		title: 'Everything is settled',
+		detail: `${folders.length.toLocaleString('en-US')} finished ${folders.length === 1 ? 'season is' : 'seasons are'} settled. Recent changes remain available in History.`,
+		metricLabel: 'Finished',
 		metricValue: String(counts.cleaned)
 	};
 }

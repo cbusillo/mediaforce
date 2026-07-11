@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { navigating } from '$app/stores';
 	import favicon from '$lib/assets/favicon.svg';
+	import AppShell from '$lib/components/shell/AppShell.svelte';
 	import '$lib/design/tokens.css';
 
 	let { children } = $props();
@@ -12,52 +13,45 @@
 	<title>Mediaforce</title>
 </svelte:head>
 
-{@render children()}
+<AppShell>
+	{@render children()}
+</AppShell>
 
 {#if routeLoading}
-	<div class="route-loading" role="status" aria-live="polite" aria-label="Loading route data">
+	<div class="route-loading" role="status" aria-live="polite" aria-label="Opening page">
 		<span class="route-loading__bar" aria-hidden="true"></span>
-		<span>Loading workstation data</span>
+		<span>Opening page</span>
 	</div>
 {/if}
 
 <style>
 	.route-loading {
 		align-items: center;
-		background: var(--mf-bg-shell);
-		border: var(--mf-border-strong);
-		bottom: var(--mf-space-5);
-		box-shadow: var(--mf-shadow-popover);
-		color: var(--mf-fg-primary);
+		background: var(--mf-fg-primary);
+		border: 1px solid var(--mf-line-strong);
+		border-radius: 999px;
+		bottom: 18px;
+		box-shadow: var(--mf-shadow-modal);
+		color: var(--mf-fg-on-accent);
 		display: inline-flex;
-		font-family: var(--mf-font-mono), monospace;
-		font-size: var(--mf-text-xs);
-		gap: var(--mf-space-4);
-		left: var(--mf-space-5);
-		min-height: 32px;
-		padding: 0 var(--mf-space-5);
+		font-family: var(--mf-font-sans);
+		font-size: 12px;
+		font-weight: 700;
+		gap: 10px;
+		left: 18px;
+		min-height: 42px;
+		padding: 0 17px;
 		position: fixed;
-		text-transform: uppercase;
 		z-index: 100;
 	}
 
 	.route-loading__bar {
-		background: var(--mf-active-fg);
+		animation: route-loading-pulse 900ms ease-in-out infinite;
+		background: #78d0be;
+		border-radius: 50%;
 		display: inline-block;
-		height: 14px;
-		position: relative;
-		width: 4px;
-	}
-
-	.route-loading__bar::after {
-		animation: route-loading-pulse 900ms var(--mf-ease) infinite;
-		background: var(--mf-active-fg-bright);
-		content: '';
-		height: 14px;
-		left: 8px;
-		position: absolute;
-		top: 0;
-		width: 4px;
+		height: 7px;
+		width: 7px;
 	}
 
 	@keyframes route-loading-pulse {
@@ -67,6 +61,13 @@
 		}
 		50% {
 			opacity: 1;
+			transform: scale(1.15);
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.route-loading__bar {
+			animation: none;
 		}
 	}
 </style>
