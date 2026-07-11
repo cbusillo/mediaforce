@@ -71,6 +71,9 @@
 			min_target_xpsnr: '35',
 			target_size_mb: '300',
 			target_runtime_minutes: '45',
+			size_goal_mode: 'normalized',
+			sample_projection_tolerance_percent: '10',
+			final_output_tolerance_percent: '5',
 			decision_model: 'size_first_review',
 			quality_engine: 'ab_av1_fast_sample',
 			max_height: '1080',
@@ -253,7 +256,7 @@
 	}
 
 	function metricDefaultsCopy(defaults: SettingsPayload['video_defaults']) {
-		const target = `${defaults.target_size_mb} MB / ${defaults.target_runtime_minutes} min`;
+		const target = `${defaults.target_size_mb} MB / ${defaults.target_runtime_minutes} min normalized`;
 		const metric = defaults.quality_metric.trim().toLowerCase();
 		if (metric === 'xpsnr') return `${target} · XPSNR floor ${defaults.min_target_xpsnr}`;
 		if (metric === 'auto') return `${target} · Auto metric guardrails`;
@@ -579,7 +582,7 @@
 						<WorkstationPanel eyebrow="Default size" title="Default episode size">
 							<div class="encode-defaults-grid">
 								<label class="stacked-field">
-									<span>Target size MB</span>
+									<span>Reference size MB</span>
 									<input
 										class="field field--number"
 										type="number"
@@ -591,7 +594,7 @@
 									/>
 								</label>
 								<label class="stacked-field">
-									<span>Runtime minutes</span>
+									<span>Reference runtime minutes</span>
 									<input
 										class="field field--number"
 										type="number"
@@ -601,6 +604,32 @@
 										value={draft.video_defaults.target_runtime_minutes}
 										oninput={(event) =>
 											updateVideoDefault('target_runtime_minutes', inputValue(event))}
+									/>
+								</label>
+								<label class="stacked-field">
+									<span>Test target band %</span>
+									<input
+										class="field field--number"
+										type="number"
+										min="0.1"
+										max="100"
+										step="0.1"
+										value={draft.video_defaults.sample_projection_tolerance_percent}
+										oninput={(event) =>
+											updateVideoDefault('sample_projection_tolerance_percent', inputValue(event))}
+									/>
+								</label>
+								<label class="stacked-field">
+									<span>Final output band %</span>
+									<input
+										class="field field--number"
+										type="number"
+										min="0.1"
+										max="100"
+										step="0.1"
+										value={draft.video_defaults.final_output_tolerance_percent}
+										oninput={(event) =>
+											updateVideoDefault('final_output_tolerance_percent', inputValue(event))}
 									/>
 								</label>
 								<label class="stacked-field">
@@ -727,7 +756,11 @@
 										>{draft.video_defaults.target_size_mb} MB / {draft.video_defaults
 											.target_runtime_minutes} min</strong
 									>
-									<small>Size-first target before visual review.</small>
+									<small>
+										Scaled to each episode runtime · ±{draft.video_defaults
+											.sample_projection_tolerance_percent}% test · ±{draft.video_defaults
+											.final_output_tolerance_percent}% final
+									</small>
 								</div>
 								<div class="encode-defaults-readout">
 									<span>Resolution guardrail</span>

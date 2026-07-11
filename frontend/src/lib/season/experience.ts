@@ -3,7 +3,9 @@ import type {
 	EncodeQueueJob,
 	FolderCard,
 	FolderPayload,
-	FolderStatusPayload
+	FolderStatusPayload,
+	OperatorIntentRequestPayload,
+	SizeGoalMode
 } from '$lib/api/types';
 
 export type HumanSeasonStateKey =
@@ -43,10 +45,14 @@ export interface SeasonIdentity {
 }
 
 export interface SizeGoal {
-	key: 'recommended' | 'smaller' | 'roomier';
+	key: string;
 	title: string;
 	megabytesPerEpisode: number;
+	targetSizeBytes: number;
 	detail: string;
+	mode: SizeGoalMode;
+	operatorIntent: OperatorIntentRequestPayload;
+	requiresExplicitSelection: boolean;
 }
 
 export interface SizeTargetAnalysis {
@@ -196,6 +202,23 @@ export function formatFileSize(bytes: number | null | undefined): string {
 	return `${Math.round(value)} bytes`;
 }
 
+export function formatDecimalFileSize(bytes: number | null | undefined): string {
+	const value = numberValue(bytes);
+	if (value <= 0) return '0 MB';
+	for (const unit of [
+		{ threshold: 1_000_000_000_000, suffix: 'TB' },
+		{ threshold: 1_000_000_000, suffix: 'GB' },
+		{ threshold: 1_000_000, suffix: 'MB' }
+	]) {
+		if (value >= unit.threshold) {
+			const scaled = value / unit.threshold;
+			const digits = Number.isInteger(scaled) ? 0 : scaled >= 10 ? 1 : 2;
+			return `${scaled.toFixed(digits)} ${unit.suffix}`;
+		}
+	}
+	return `${Math.round(value / 1_000)} KB`;
+}
+
 export function formatDuration(seconds: number | null | undefined): string {
 	const value = numberValue(seconds);
 	if (value <= 0) return '';
@@ -207,31 +230,50 @@ export function formatDuration(seconds: number | null | undefined): string {
 }
 
 export function sizeGoals(folder: FolderPayload): SizeGoal[] {
-	const policy = record(folder.policy ?? folder.summary?.resolved_policy);
-	const video = record(policy.video);
-	const rawTarget = numberValue(video.target_size_mb) || 300;
-	const base = Math.min(1500, Math.max(100, Math.round(rawTarget / 25) * 25));
-	const rounded = (value: number) => Math.max(75, Math.round(value / 25) * 25);
-	return [
-		{
-			key: 'recommended',
-			title: 'Recommended',
-			megabytesPerEpisode: base,
-			detail: 'A balanced place to start for a living-room screen.'
-		},
-		{
-			key: 'smaller',
-			title: 'Save more space',
-			megabytesPerEpisode: rounded(base * 0.75),
-			detail: 'Smaller files. The test will show whether the trade-off feels right.'
-		},
-		{
-			key: 'roomier',
-			title: 'Keep more detail',
-			megabytesPerEpisode: rounded(base * 1.5),
-			detail: 'Larger files with more room for difficult scenes.'
-		}
-	];
+	const options = folder.size_goal_options ?? [];
+	return options.flatMap((option) => {
+		const targetMegabytes = numberValue(option.resolved_size_goal.target_size_mb);
+		const targetSizeBytes = numberValue(option.resolved_size_goal.target_size_bytes);
+		const mode = option.operator_intent.size_goal.mode;
+		if (
+			targetMegabytes <= 0 ||
+			targetSizeBytes <= 0 ||
+			(mode !== 'normalized' && mode !== 'absolute')
+		)
+			return [];
+		return [
+			{
+				key: option.key,
+				title: option.title,
+				megabytesPerEpisode: Math.round(targetMegabytes),
+				targetSizeBytes,
+				detail: option.detail || option.resolved_size_goal.rationale,
+				mode,
+				operatorIntent: option.operator_intent,
+				requiresExplicitSelection: option.requires_explicit_selection
+			}
+		];
+	});
+}
+
+export function isSizeGoalSelectionConfirmed(
+	goals: readonly SizeGoal[],
+	selectedGoalKey: SizeGoal['key'],
+	selectedGoalPrefix: string,
+	folderPrefix: string
+): boolean {
+	const requiresExplicitSelection = goals.some((goal) => goal.requiresExplicitSelection);
+	return (
+		!requiresExplicitSelection ||
+		(selectedGoalPrefix === folderPrefix && goals.some((goal) => goal.key === selectedGoalKey))
+	);
+}
+
+export function currentOperatorIntent(folder: FolderPayload): OperatorIntentRequestPayload | null {
+	const request = folder.resolved_operator_intent?.request;
+	if (!request || request.schema_version !== 1) return null;
+	if (request.size_goal.mode !== 'normalized' && request.size_goal.mode !== 'absolute') return null;
+	return request;
 }
 
 export function technicalVideoPolicy(folder: FolderPayload): Record<string, unknown> {
@@ -250,11 +292,19 @@ export function technicalVideoPolicy(folder: FolderPayload): Record<string, unkn
 }
 
 export function goalRequest(goal: SizeGoal): string {
-	return `Aim for about ${goal.megabytesPerEpisode} MB per episode. Keep the current resolution and make a representative test so I can judge the picture and sound.`;
+	const size = goal.operatorIntent.size_goal;
+	const resolution =
+		goal.operatorIntent.resolution.mode === 'source'
+			? 'Keep the current resolution.'
+			: `Limit the encoded height to ${goal.operatorIntent.resolution.max_height}p.`;
+	if (goal.mode === 'normalized') {
+		return `Use the ${size.value_mb} MB / ${size.reference_runtime_minutes} minute runtime-normalized goal, which resolves to about ${goal.megabytesPerEpisode} MB for this episode. ${resolution} Make a representative test so I can judge the picture and sound.`;
+	}
+	return `Use an absolute ${size.value_mb} MB per-episode target. ${resolution} Make a representative test so I can judge the picture and sound.`;
 }
 
 export function measuredFollowupRequest(analysis: SizeTargetAnalysis): string {
-	const targetMegabytes = Math.round(analysis.budgetBytes / 1024 ** 2);
+	const targetMegabytes = Math.round(analysis.budgetBytes / 1_000_000);
 	if (targetMegabytes <= 0) return '';
 	if (analysis.status === 'over_target' && analysis.predictedBytes > 0) {
 		return `Measured follow-up: keep the ${targetMegabytes} MB per episode goal. The last representative test was ${analysis.predictedToBudgetRatio.toFixed(1)} times over that goal. Keep the current resolution and make the next representative test materially smaller toward the goal while preserving as much picture and sound quality as possible.`;

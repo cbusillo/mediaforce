@@ -7,14 +7,18 @@ from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 
+def object_dict_or_none(value: Any) -> dict[str, Any] | None:
+    return value if isinstance(value, dict) else None
+
+
 def register_folder_routes(
         app: FastAPI,
         *,
         folder_status_payload: Callable[[str], dict[str, Any]],
         folder_content_payload: Callable[[str], tuple[dict[str, Any], int]],
         download_review_compare_action: Callable[[str], FileResponse],
-        folder_ai_tune_action: Callable[[str, str, str], dict[str, Any]],
-        folder_ai_tune_preview_action: Callable[[str, str, str], dict[str, Any]],
+        folder_ai_tune_action: Callable[[str, str, str, dict[str, Any] | None], dict[str, Any]],
+        folder_ai_tune_preview_action: Callable[[str, str, str, dict[str, Any] | None], dict[str, Any]],
         folder_ai_tune_confirm_action: Callable[[str, str], dict[str, Any]],
         clear_folder_tuning_action: Callable[[str], dict[str, Any]],
         approve_measured_encode_recovery_action: Callable[[str], dict[str, Any]],
@@ -44,6 +48,7 @@ def register_folder_routes(
             prefix.strip("/"),
             str(body.get("note", "")),
             str(body.get("host_key", "")),
+            object_dict_or_none(body.get("operator_intent")),
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
@@ -55,6 +60,7 @@ def register_folder_routes(
             prefix.strip("/"),
             str(body.get("note", "")),
             str(body.get("host_key", "")),
+            object_dict_or_none(body.get("operator_intent")),
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 

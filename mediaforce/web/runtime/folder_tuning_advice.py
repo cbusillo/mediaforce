@@ -14,6 +14,15 @@ from mediaforce.core.type_defs import JSONValue, float_value, int_value, object_
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.reviewing.helpers import planned_audio_action, select_primary_audio_track
 from mediaforce.tuning.tuning_memory import retrieve_learning_context
+from mediaforce.tuning.size_goals import (
+    DECIMAL_MEGABYTE_BYTES,
+    DEFAULT_FINAL_OUTPUT_TOLERANCE_PERCENT,
+    DEFAULT_SAMPLE_PROJECTION_TOLERANCE_PERCENT,
+    ResolutionIntent,
+    SizeGoalIntent,
+    bytes_to_megabytes,
+    operator_intent_from_request,
+)
 from mediaforce.web.runtime.folder_tuning_helpers import (
     load_json_object,
     recent_tuning_sessions,
@@ -21,7 +30,6 @@ from mediaforce.web.runtime.folder_tuning_helpers import (
 )
 
 MIN_RECOMMENDED_SAVINGS_BYTES = 100 * 1024 * 1024
-SIZE_BUDGET_TARGET_TOLERANCE = 0.15
 CALIBRATION_REVIEW_FIELDS = {
     "accepted_at",
     "accepted_draft_hash",
@@ -30,10 +38,10 @@ CALIBRATION_REVIEW_FIELDS = {
     "draft_hash",
 }
 _SIZE_BUDGET_UNIT_BYTES = {
-    "kb": 1024,
-    "mb": 1024 * 1024,
-    "gb": 1024 * 1024 * 1024,
-    "tb": 1024 * 1024 * 1024 * 1024,
+    "kb": 1_000,
+    "mb": DECIMAL_MEGABYTE_BYTES,
+    "gb": 1_000_000_000,
+    "tb": 1_000_000_000_000,
 }
 _AUDIO_STEP_DOWN_CANDIDATES_KBPS = {
     "surround_7_1_opus_bitrate": (384.0, 320.0, 256.0, 224.0, 192.0),
@@ -602,6 +610,14 @@ def size_budget_request(
             object_dict(object_dict(effective_sample_item.get("resolved_policy")).get("audio")),
             budget_bytes=budget_bytes,
         )
+    size_goal = SizeGoalIntent(
+        mode="absolute",
+        value_bytes=budget_bytes,
+        reference_runtime_seconds=None,
+        sample_projection_tolerance_percent=DEFAULT_SAMPLE_PROJECTION_TOLERANCE_PERCENT,
+        final_output_tolerance_percent=DEFAULT_FINAL_OUTPUT_TOLERANCE_PERCENT,
+        source="operator_note",
+    )
     return {
         "source": "operator_note",
         "operator_note_parse": parsed_note,
@@ -615,7 +631,10 @@ def size_budget_request(
         "estimated_video_bitrate_kbps": estimated_video_bitrate_kbps,
         "target_video_bitrate_kbps": estimated_video_bitrate_kbps,
         "target_encoded_percent": target_encoded_percent,
-        "target_tolerance_percent": SIZE_BUDGET_TARGET_TOLERANCE,
+        "target_tolerance_percent": DEFAULT_SAMPLE_PROJECTION_TOLERANCE_PERCENT,
+        "sample_projection_tolerance_percent": DEFAULT_SAMPLE_PROJECTION_TOLERANCE_PERCENT,
+        "final_output_tolerance_percent": DEFAULT_FINAL_OUTPUT_TOLERANCE_PERCENT,
+        "size_goal": size_goal.resolve(duration_seconds).to_payload(),
         "hard_size_cap": hard_size_cap,
         "measured_size_followup": measured_size_followup,
         "evidence_authority": str(parsed_note.get("evidence_authority") or "none"),
@@ -623,7 +642,7 @@ def size_budget_request(
         "requires_confirmation": requires_confirmation,
         "requested_max_encoded_percent": requested_max_encoded_percent,
         "applied_max_encoded_percent": None,
-        "applied_policy": None,
+        "applied_policy": size_goal.policy_fragment(item_runtime_seconds=duration_seconds),
         "audio_tradeoff_hint": tradeoff_hint,
     }
 
@@ -787,6 +806,115 @@ def operator_requested_experiment(
         requested_scale_target["evidence_authority"] = str(note_parse.get("evidence_authority") or "none")
         return requested_scale_target
     return None
+
+
+def operator_request_from_intent(
+        intent_payload: dict[str, Any],
+        *,
+        note: str,
+        sample_item: dict[str, Any],
+        current_policy: dict[str, Any],
+) -> dict[str, Any]:
+    intent = operator_intent_from_request(intent_payload)
+    duration_seconds = _positive_float_value(sample_item.get("duration_seconds"))
+    resolved_size_goal = intent.size_goal.resolve(duration_seconds)
+    if resolved_size_goal.requires_confirmation or resolved_size_goal.target_size_bytes is None:
+        raise ValueError(resolved_size_goal.rationale)
+
+    target_mb = bytes_to_megabytes(resolved_size_goal.target_size_bytes) or 0
+    parsed_note = {
+        "summary": resolved_size_goal.rationale,
+        "intent_type": "direct_request",
+        "request_type": "combined_experiment",
+        "operator_confirmed": True,
+        "evidence_authority": "none",
+        "size_budget_value": target_mb,
+        "size_budget_unit": "mb",
+        "scale_height": 0 if intent.resolution.mode == "source" else intent.resolution.max_height,
+        "black_bar_handling": None,
+        "crop": None,
+        "hard_size_cap": False,
+        "measured_size_followup": False,
+        "reasoning_note": "The operator selected a typed size and resolution intent in the guided workflow.",
+    }
+    size_request = size_budget_request(
+        note,
+        sample_item,
+        parsed_note,
+        current_policy=current_policy,
+    )
+    if size_request is None:
+        raise ValueError("The selected size could not be converted into a test budget.")
+    size_request.update(
+        {
+            "budget_bytes": resolved_size_goal.target_size_bytes,
+            "budget_label": _resolved_size_goal_label(intent.size_goal, resolved_size_goal.target_size_bytes),
+            "size_goal": resolved_size_goal.to_payload(),
+            "target_tolerance_percent": intent.size_goal.sample_projection_tolerance_percent,
+            "sample_projection_tolerance_percent": intent.size_goal.sample_projection_tolerance_percent,
+            "final_output_tolerance_percent": intent.size_goal.final_output_tolerance_percent,
+            "applied_policy": intent.size_goal.policy_fragment(item_runtime_seconds=duration_seconds),
+        }
+    )
+    scale_request = {
+        "source": "guided_workflow",
+        "operator_note_parse": parsed_note,
+        "honor_mode": "literal_experiment",
+        "request_type": "scale_target",
+        "scale_height": 0 if intent.resolution.mode == "source" else intent.resolution.max_height,
+        "scale_label": (
+            "source resolution"
+            if intent.resolution.mode == "source"
+            else f"{intent.resolution.max_height}p max height"
+        ),
+        "black_bar_handling": None,
+        "crop": None,
+        "applied_policy": intent.resolution.policy_fragment(),
+        "request_text": note,
+    }
+    return {
+        "source": "guided_workflow",
+        "operator_note_parse": parsed_note,
+        "honor_mode": "combined_experiment",
+        "request_type": "combined_experiment",
+        "request_text": note,
+        "budget_bytes": size_request["budget_bytes"],
+        "budget_label": size_request["budget_label"],
+        "scale_height": scale_request["scale_height"],
+        "scale_label": scale_request["scale_label"],
+        "estimated_source_percent": size_request.get("estimated_source_percent"),
+        "estimated_audio_bytes": size_request.get("estimated_audio_bytes"),
+        "estimated_video_bitrate_kbps": size_request.get("estimated_video_bitrate_kbps"),
+        "target_video_bitrate_kbps": size_request.get("target_video_bitrate_kbps"),
+        "target_encoded_percent": size_request.get("target_encoded_percent"),
+        "target_tolerance_percent": size_request["target_tolerance_percent"],
+        "sample_projection_tolerance_percent": size_request["sample_projection_tolerance_percent"],
+        "final_output_tolerance_percent": size_request["final_output_tolerance_percent"],
+        "size_goal": size_request["size_goal"],
+        "feasibility": size_request.get("feasibility"),
+        "requires_confirmation": size_request.get("requires_confirmation"),
+        "hard_size_cap": False,
+        "measured_size_followup": False,
+        "operator_confirmed": True,
+        "evidence_authority": "none",
+        "size_budget_request": size_request,
+        "scale_request": scale_request,
+        "applied_policy": intent.policy_fragment(item_runtime_seconds=duration_seconds),
+    }
+
+
+def _positive_float_value(value: Any) -> float | None:
+    parsed = float_value(value)
+    return parsed if parsed > 0 else None
+
+
+def _resolved_size_goal_label(size_goal: SizeGoalIntent, target_size_bytes: int) -> str:
+    target_mb = bytes_to_megabytes(target_size_bytes) or 0
+    if size_goal.mode == "normalized" and size_goal.reference_runtime_seconds is not None:
+        reference_mb = bytes_to_megabytes(size_goal.value_bytes) or 0
+        reference_minutes = size_goal.reference_runtime_seconds / 60.0
+        return f"about {target_mb:.0f} MB for this episode ({reference_mb:g} MB / {reference_minutes:g} min)"
+    return f"{target_mb:g} MB per episode"
 
 
 def apply_policy_fragment(policy: dict[str, Any], fragment: dict[str, Any] | None) -> dict[str, Any]:

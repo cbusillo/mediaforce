@@ -6,16 +6,21 @@ import type {
 	FolderPayload,
 	FolderStatusPayload,
 	FolderWorkflowState,
+	SizeGoalOptionPayload,
 	WorkflowLane
 } from '$lib/api/types';
 import {
 	activeSeasonCards,
 	approvalGuardFromMessage,
+	currentOperatorIntent,
 	detailSeasonState,
 	episodeLabel,
 	folderSizeTargetAnalysis,
-	isSeriesPrefix,
+	formatDecimalFileSize,
 	formatFileSize,
+	goalRequest,
+	isSeriesPrefix,
+	isSizeGoalSelectionConfirmed,
 	measuredFollowupRequest,
 	librarySeasonState,
 	normalizeReviewPairs,
@@ -108,6 +113,51 @@ function folder(overrides: Partial<FolderPayload> = {}): FolderPayload {
 	};
 }
 
+function sizeOption(
+	key: string,
+	mode: 'normalized' | 'absolute',
+	valueMegabytes: number,
+	targetMegabytes: number,
+	referenceRuntimeMinutes?: number,
+	requiresExplicitSelection = false
+): SizeGoalOptionPayload {
+	const rationale =
+		mode === 'normalized'
+			? `${valueMegabytes} MB per ${referenceRuntimeMinutes} minutes scales to about ${Math.round(targetMegabytes)} MB for this episode.`
+			: `${valueMegabytes} MB is an absolute per-episode target and does not scale with runtime.`;
+	return {
+		key,
+		title: key === 'recommended' ? 'Recommended' : key,
+		detail: rationale,
+		requires_explicit_selection: requiresExplicitSelection,
+		operator_intent: {
+			schema_version: 1,
+			size_goal: {
+				mode,
+				value_mb: valueMegabytes,
+				...(referenceRuntimeMinutes ? { reference_runtime_minutes: referenceRuntimeMinutes } : {}),
+				sample_projection_tolerance_percent: 10,
+				final_output_tolerance_percent: 5
+			},
+			resolution: { mode: 'source', max_height: null }
+		},
+		resolved_size_goal: {
+			schema_version: 1,
+			mode,
+			source: 'guided_preset',
+			status: 'resolved',
+			requires_confirmation: false,
+			reference_size_mb: valueMegabytes,
+			reference_runtime_minutes: referenceRuntimeMinutes ?? null,
+			target_size_bytes: targetMegabytes * 1_000_000,
+			target_size_mb: targetMegabytes,
+			sample_projection_tolerance_percent: 10,
+			final_output_tolerance_percent: 5,
+			rationale
+		}
+	};
+}
+
 function workflowState(primaryLane: WorkflowLane, state = primaryLane): FolderWorkflowState {
 	return {
 		prefix: card.prefix,
@@ -189,10 +239,10 @@ describe('season experience translation', () => {
 			folder({
 				size_target_analysis: {
 					status: 'over_target',
-					budget_bytes: 225 * 1024 ** 2,
+					budget_bytes: 225_000_000,
 					predicted_total_size_bytes: 1_089_842_509,
-					lower_bound_bytes: 200_540_160,
-					upper_bound_bytes: 271_319_040,
+					lower_bound_bytes: 202_500_000,
+					upper_bound_bytes: 247_500_000,
 					predicted_to_budget_ratio: 4.619
 				}
 			})
@@ -200,7 +250,7 @@ describe('season experience translation', () => {
 
 		expect(analysis).toMatchObject({
 			status: 'over_target',
-			budgetBytes: 225 * 1024 ** 2,
+			budgetBytes: 225_000_000,
 			predictedBytes: 1_089_842_509,
 			predictedToBudgetRatio: 4.619
 		});
@@ -237,10 +287,10 @@ describe('season experience translation', () => {
 	it('turns a missed target into an explicit measured follow-up request', () => {
 		const request = measuredFollowupRequest({
 			status: 'over_target',
-			budgetBytes: 225 * 1024 ** 2,
+			budgetBytes: 225_000_000,
 			predictedBytes: 1_089_842_509,
-			lowerBoundBytes: 200_540_160,
-			upperBoundBytes: 271_319_040,
+			lowerBoundBytes: 202_500_000,
+			upperBoundBytes: 247_500_000,
 			predictedToBudgetRatio: 4.619
 		});
 
@@ -254,10 +304,10 @@ describe('season experience translation', () => {
 	it('keeps the measured target when asking for an under-target quality pass', () => {
 		const request = measuredFollowupRequest({
 			status: 'under_target',
-			budgetBytes: 225 * 1024 ** 2,
-			predictedBytes: 150 * 1024 ** 2,
-			lowerBoundBytes: 200_540_160,
-			upperBoundBytes: 271_319_040,
+			budgetBytes: 225_000_000,
+			predictedBytes: 150_000_000,
+			lowerBoundBytes: 202_500_000,
+			upperBoundBytes: 247_500_000,
 			predictedToBudgetRatio: 0.667
 		});
 
@@ -268,10 +318,10 @@ describe('season experience translation', () => {
 	it('repeats the preserved target when the episode estimate is missing', () => {
 		const request = measuredFollowupRequest({
 			status: 'missing_prediction',
-			budgetBytes: 225 * 1024 ** 2,
+			budgetBytes: 225_000_000,
 			predictedBytes: 0,
-			lowerBoundBytes: 200_540_160,
-			upperBoundBytes: 271_319_040,
+			lowerBoundBytes: 202_500_000,
+			upperBoundBytes: 247_500_000,
 			predictedToBudgetRatio: 0
 		});
 
@@ -430,8 +480,61 @@ describe('season experience translation', () => {
 		).toMatchObject({ key: 'making_season', label: 'Making the season' });
 	});
 
-	it('makes real size goals around the resolved target', () => {
-		expect(sizeGoals(folder()).map((goal) => goal.megabytesPerEpisode)).toEqual([300, 225, 450]);
+	it('uses the API-resolved runtime-normalized goal instead of rebuilding it from flat policy', () => {
+		const options = [
+			sizeOption('recommended', 'normalized', 300, 586.667, 45),
+			sizeOption('smaller', 'normalized', 225, 440, 45),
+			sizeOption('roomier', 'normalized', 450, 880, 45)
+		];
+
+		const goals = sizeGoals(folder({ size_goal_options: options }));
+
+		expect(goals.map((goal) => goal.megabytesPerEpisode)).toEqual([587, 440, 880]);
+		expect(goals[0].mode).toBe('normalized');
+		expect(goalRequest(goals[0])).toContain('300 MB / 45 minute runtime-normalized goal');
+	});
+
+	it('preserves an API-resolved absolute per-episode target', () => {
+		const [goal] = sizeGoals(
+			folder({ size_goal_options: [sizeOption('recommended', 'absolute', 225, 225)] })
+		);
+
+		expect(goal.megabytesPerEpisode).toBe(225);
+		expect(goal.mode).toBe('absolute');
+		expect(goalRequest(goal)).toContain('absolute 225 MB per-episode target');
+	});
+
+	it('requires a fresh explicit legacy choice after folder navigation', () => {
+		const goals = sizeGoals(
+			folder({
+				size_goal_options: [
+					sizeOption('normalized', 'normalized', 225, 440, 45, true),
+					sizeOption('absolute', 'absolute', 225, 225, undefined, true)
+				]
+			})
+		);
+
+		expect(isSizeGoalSelectionConfirmed(goals, 'normalized', 'tv/Other', card.prefix)).toBe(false);
+		expect(isSizeGoalSelectionConfirmed(goals, 'normalized', card.prefix, card.prefix)).toBe(true);
+	});
+
+	it('returns the resolved typed request for measured follow-up work', () => {
+		const option = sizeOption('recommended', 'absolute', 225, 225);
+		const request = option.operator_intent;
+
+		expect(
+			currentOperatorIntent(
+				folder({
+					resolved_operator_intent: {
+						schema_version: 1,
+						requires_confirmation: false,
+						size_goal: option.resolved_size_goal,
+						resolution: { mode: 'source' },
+						request
+					}
+				})
+			)
+		).toEqual(request);
 	});
 
 	it('normalizes actual source and preview clips', () => {
@@ -471,6 +574,10 @@ describe('season experience translation', () => {
 	it('formats filenames and sizes for people', () => {
 		expect(episodeLabel('tv/Show/Season 2/Show.S02E07.mkv')).toBe('Episode 7');
 		expect(formatFileSize(1_073_741_824)).toBe('1.0 GB');
+	});
+
+	it('formats operator-facing target totals with decimal units', () => {
+		expect(formatDecimalFileSize(586_667_000 * 39)).toBe('22.9 GB');
 	});
 
 	it('turns backend approval gates into explicit human confirmations', () => {

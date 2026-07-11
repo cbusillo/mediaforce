@@ -18,6 +18,7 @@ from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, list_ch
 from mediaforce.encoding.staging import safe_unlink
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.run_manifests import create_folder_manifest
+from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.web.runtime.folder_tuning_helpers import (
     proposal_alignment_issue,
     size_budget_sample_analysis,
@@ -180,7 +181,24 @@ def queue_folder_encode_action(
             raise HTTPException(status_code=400, detail="Run a sampled calibration first.")
         saved_profile_path = config.paths.runtime_settings_path
         calibration_payload = object_dict(calibration)
-        upsert_override(saved_profile_path, normalized_prefix, calibration_payload["policy"])
+        calibration_policy = object_dict(calibration_payload.get("policy"))
+        calibration_video = object_dict(calibration_policy.get("video"))
+        if {"target_size_mb", "target_size_bytes", "size_goal_mode"} & calibration_video.keys():
+            calibration_intent = operator_intent_from_policy(
+                calibration_video,
+                default_video_policy=object_dict(config.raw.get("video")),
+                audio_policy=object_dict(calibration_policy.get("audio")),
+                subtitle_policy=object_dict(calibration_policy.get("subtitle")),
+            )
+            if calibration_intent.size_goal.requires_confirmation:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Confirm whether the saved legacy size is runtime-normalized or an absolute per-episode "
+                        "target before queueing production."
+                    ),
+                )
+        upsert_override(saved_profile_path, normalized_prefix, calibration_policy)
         active_encode_job = load_active_encode_job_for_prefix_fn(connection, normalized_prefix)
         if active_encode_job is not None:
             recovered = _recover_active_folder_encode_job(
