@@ -3,6 +3,7 @@ from typing import Any, Callable
 
 from mediaforce.encoding.quality import QualitySearchError, QualitySearchResult
 from mediaforce.encoding.video_filters import build_video_filter
+from mediaforce.tuning.stream_budget import StreamBudgetLedger
 
 MAX_CRF_SEARCH_CEILING = 63
 
@@ -21,6 +22,7 @@ def search_quality(
         process_controller: Any = None,
         host: dict[str, Any] | None = None,
         quality_temp_dir: Path | None = None,
+        stream_budget_ledger: StreamBudgetLedger | None = None,
         host_media_access_for_host: Callable[[dict[str, Any] | None], str],
         select_quality_metric: Callable[[str], tuple[str, float]],
         build_svt_params: Callable[[dict[str, Any]], list[str]],
@@ -50,6 +52,11 @@ def search_quality(
     attempted_target = metric_target
     last_error: Exception | None = None
     configured_max_crf = int(video_policy["max_crf"])
+    max_encoded_percent = float(video_policy["max_encoded_percent"])
+    if stream_budget_ledger is not None:
+        stream_budget_ledger.require_positive_source_cap_video_budget()
+        if stream_budget_ledger.source_cap_video_percent is not None:
+            max_encoded_percent = stream_budget_ledger.source_cap_video_percent
 
     while attempted_target >= min_target:
         for max_crf in _max_crf_attempts(configured_max_crf):
@@ -65,7 +72,7 @@ def search_quality(
                     sample_duration=str(video_policy["sample_duration"]),
                     min_crf=int(video_policy["min_crf"]),
                     max_crf=max_crf,
-                    max_encoded_percent=int(video_policy["max_encoded_percent"]),
+                    max_encoded_percent=max_encoded_percent,
                     svt_params=svt_params,
                     video_filter=video_filter,
                     thorough=bool(video_policy.get("thorough", False)),

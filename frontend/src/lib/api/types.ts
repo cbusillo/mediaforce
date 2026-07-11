@@ -476,6 +476,106 @@ export interface SizeGoalOptionPayload {
 	resolved_size_goal: ResolvedSizeGoalPayload;
 }
 
+export type StreamBudgetFeasibilityStatus =
+	'feasible' | 'aggressive_but_measurable' | 'arithmetically_infeasible' | 'requires_measurement';
+
+export interface StreamBudgetEntryPayload {
+	category: 'audio' | 'subtitle' | 'attachment' | 'container';
+	source_index: number | null;
+	action: string;
+	source_codec: string | null;
+	output_codec: string | null;
+	budget_bytes: number | null;
+	lower_bound_bytes: number | null;
+	upper_bound_bytes: number | null;
+	bitrate_bps: number | null;
+	provenance: string;
+	confidence: 'exact' | 'high' | 'medium' | 'low' | 'unknown';
+	requires_measurement: boolean;
+	rationale: string;
+}
+
+export interface PlannedStreamPayload {
+	kind: 'audio' | 'subtitle' | 'attachment';
+	source_index: number;
+	source_codec: string;
+	action: 'copy' | 'transcode' | 'drop';
+	output_codec: string | null;
+	codec_argument: string | null;
+	output_bitrate_bps: number | null;
+	output_bitrate_text: string | null;
+	channels: number | null;
+	language: string | null;
+	default: boolean;
+	forced: boolean;
+	source_bitrate_bps: number | null;
+	source_duration_seconds: number | null;
+	source_size_bytes: number | null;
+	file_name: string | null;
+	mime_type: string | null;
+}
+
+export interface ProductionStreamPlanPayload {
+	schema_version: 1;
+	plan_id: string;
+	source_id: string;
+	source_fingerprint: string | null;
+	policy_hash: string;
+	output_container: string;
+	attachments_known: boolean;
+	copy_unknown_attachments: boolean;
+	streams: PlannedStreamPayload[];
+}
+
+export interface StreamBudgetLedgerPayload {
+	schema_version: 1;
+	ledger_id: string;
+	source: {
+		source_id: string;
+		source_fingerprint: string | null;
+		source_size_bytes: number | null;
+		source_video_bitrate_bps: number | null;
+		duration_seconds: number | null;
+	};
+	policy_hash: string;
+	size_goal: ResolvedSizeGoalPayload;
+	stream_plan: ProductionStreamPlanPayload;
+	entries: StreamBudgetEntryPayload[];
+	totals: {
+		total_target_bytes: number | null;
+		audio_bytes: number | null;
+		subtitle_bytes: number | null;
+		attachment_bytes: number | null;
+		container_bytes: number | null;
+		non_video_bytes: number | null;
+		minimum_non_video_bytes: number;
+		maximum_non_video_bytes: number | null;
+		remaining_video_bytes: number | null;
+		remaining_video_bitrate_bps: number | null;
+	};
+	source_relative_cap: {
+		configured_total_percent: number | null;
+		total_cap_bytes: number | null;
+		video_cap_bytes: number | null;
+		video_cap_bitrate_bps: number | null;
+		video_cap_percent: number | null;
+		status: 'available' | 'arithmetically_infeasible' | 'requires_measurement' | 'unavailable';
+	};
+	feasibility: {
+		status: StreamBudgetFeasibilityStatus;
+		reasons: string[];
+		arithmetic_infeasible: boolean;
+		aggressive: boolean;
+		requires_measurement: boolean;
+	};
+	uncertainty: {
+		confidence: 'exact' | 'high' | 'medium' | 'low' | 'unknown';
+		requires_measurement: boolean;
+		minimum_non_video_bytes: number;
+		maximum_non_video_bytes: number | null;
+	};
+}
+
 export interface FolderPayload {
 	prefix: string;
 	pending: boolean;
@@ -488,6 +588,7 @@ export interface FolderPayload {
 	advice?: Record<string, unknown> | null;
 	size_target_analysis?: Record<string, unknown> | null;
 	resolved_operator_intent?: ResolvedOperatorIntentPayload;
+	stream_budget_ledger?: StreamBudgetLedgerPayload;
 	size_goal_options?: SizeGoalOptionPayload[];
 	approved_season_shortcut?: Record<string, unknown> | null;
 	series_context?: { prefix: string; title: string } | null;

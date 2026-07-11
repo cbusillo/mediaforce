@@ -20,6 +20,8 @@ Use this directory for guidance that should not live in `AGENTS.md`.
   selection, coverage, and the versioned evidence contract
 - `docs/architecture/cadence-evidence.md`: measured cadence classification,
   versioned evidence, and safe allow-listed transforms
+- `docs/architecture/stream-budget-ledger.md`: production stream selection,
+  non-video overhead, uncertainty, and deterministic size feasibility
 
 ## Design briefs
 

@@ -88,6 +88,52 @@ class CadenceTests(unittest.TestCase):
         self.assertEqual(cadence["probe"]["average_frame_rate"], "24000/1001")
         self.assertEqual(cadence["probe"]["time_base"], "1/90000")
 
+    def test_probe_summary_persists_stream_bytes_and_attachments(self) -> None:
+        payload = {
+            "format": {"duration": "120.0"},
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "field_order": "progressive",
+                },
+                {
+                    "index": 1,
+                    "codec_type": "audio",
+                    "codec_name": "aac",
+                    "channels": 2,
+                    "tags": {
+                        "language": "eng",
+                        "BPS": "192000",
+                        "NUMBER_OF_BYTES": "2880000",
+                        "DURATION": "00:02:00.000000000",
+                    },
+                },
+                {
+                    "index": 2,
+                    "codec_type": "attachment",
+                    "codec_name": "ttf",
+                    "extradata_size": 250000,
+                    "tags": {"filename": "font.ttf", "mimetype": "application/x-truetype-font"},
+                },
+            ],
+        }
+        with patch("mediaforce.library.probe.ffprobe_binary", return_value="ffprobe"), patch(
+            "mediaforce.library.probe.subprocess.run",
+            return_value=Mock(stdout=json.dumps(payload)),
+        ):
+            summary = probe_media(Path("/tmp/attachments.mkv"))
+
+        audio = json.loads(summary.audio_summary_json)[0]
+        attachment = json.loads(summary.attachment_summary_json)[0]
+        self.assertEqual(audio["bit_rate"], 192000)
+        self.assertEqual(audio["size_bytes"], 2880000)
+        self.assertEqual(audio["duration_seconds"], 120.0)
+        self.assertEqual(attachment["file_name"], "font.ttf")
+        self.assertEqual(attachment["mime_type"], "application/x-truetype-font")
+        self.assertEqual(attachment["size_bytes"], 250000)
+
     def test_unknown_probe_metadata_uses_bounded_representative_ranges(self) -> None:
         stderr = (
             "Repeated Fields: Neither: 200 Top: 0 Bottom: 0\n"

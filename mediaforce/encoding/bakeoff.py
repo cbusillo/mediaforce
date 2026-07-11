@@ -8,6 +8,7 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict
 from mediaforce.encoding.helpers import build_svt_params
 from mediaforce.encoding.video_filters import build_video_filter
 from mediaforce.tuning.size_goals import bytes_to_megabytes, operator_intent_from_policy
+from mediaforce.tuning.stream_budget import resolve_stream_budget_ledger
 
 
 DEFAULT_BAKEOFF_ENGINES = ("ab-av1", "av1an", "xav", "auto-boost")
@@ -102,6 +103,14 @@ def _build_item_plan(
     size_target_bytes = resolved_size_goal.target_size_bytes
     size_goal_issue = resolved_size_goal.rationale if size_target_bytes is None else None
     source_size_bytes = int_value(item.get("source_size_bytes")) or int_value(item.get("size_bytes"))
+    stream_budget = resolve_stream_budget_ledger(
+        item,
+        default_video_policy=config.video,
+        output_container=config.output_container,
+        resolved_size_goal=resolved_size_goal,
+    )
+    if stream_budget.arithmetic_infeasible:
+        size_goal_issue = "The production non-video plan consumes the requested total target."
 
     return {
         "index": index,
@@ -111,9 +120,12 @@ def _build_item_plan(
         "duration_seconds": duration_seconds,
         "resolution": _resolution(width, height),
         "target_size_bytes": size_target_bytes,
+        "target_video_size_bytes": stream_budget.remaining_video_bytes,
+        "target_video_bitrate_bps": stream_budget.remaining_video_bitrate_bps,
         "size_goal_status": resolved_size_goal.status,
         "size_goal_issue": size_goal_issue,
         "resolved_operator_intent": operator_intent.to_payload(item_runtime_seconds=duration_seconds or None),
+        "stream_budget_ledger": stream_budget.to_payload(),
         "target_size_percent": _target_size_percent(size_target_bytes, source_size_bytes),
         "quality_floor": _quality_floor(video_policy),
         "max_height": int_value(video_policy.get("max_height")),
@@ -126,7 +138,8 @@ def _build_item_plan(
                 item,
                 video_policy,
                 item_output_dir,
-                size_target_bytes,
+                stream_budget.remaining_video_bytes,
+                stream_budget.source_cap_video_percent,
                 size_goal_issue,
             )
             for engine in engines
@@ -139,7 +152,8 @@ def _engine_candidate(
         item: dict[str, Any],
         video_policy: dict[str, Any],
         output_dir: Path | None,
-        target_size_bytes: int | None,
+        target_video_size_bytes: int | None,
+        source_cap_video_percent: float | None,
         size_goal_issue: str | None,
 ) -> dict[str, Any]:
     source_path = str(item.get("source_path") or "SOURCE_PATH")
@@ -163,15 +177,19 @@ def _engine_candidate(
         ),
         cadence_source_fingerprint=str(item.get("source_fingerprint") or "") or None,
     )
-    target_size_mb = bytes_to_megabytes(target_size_bytes) or 0
-    max_encoded_percent = int_value(video_policy.get("max_encoded_percent"))
+    target_video_size_mb = bytes_to_megabytes(target_video_size_bytes) or 0
+    max_encoded_percent = (
+        source_cap_video_percent
+        if source_cap_video_percent is not None
+        else float_value(video_policy.get("max_encoded_percent"))
+    )
     target_vmaf = float_value(video_policy.get("target_vmaf"))
     min_target_vmaf = float_value(video_policy.get("min_target_vmaf"))
     preset = int_value(video_policy.get("preset"))
     pixel_format = str(video_policy.get("pixel_format") or "yuv420p10le")
     svt_params = build_svt_params(video_policy)
 
-    if engine == "auto-boost" and target_size_bytes is None:
+    if engine == "auto-boost" and (target_video_size_bytes is None or target_video_size_bytes <= 0):
         return _candidate_to_dict(
             BakeoffCandidate(
                 key="auto-boost",
@@ -202,7 +220,7 @@ def _engine_candidate(
             "--min-vmaf",
             _number(target_vmaf),
             "--max-encoded-percent",
-            str(max_encoded_percent),
+            _number(max_encoded_percent),
         ]
         command.extend(_sample_args(video_policy))
         command.extend(_filter_args(video_filter, "--vfilter"))
@@ -295,7 +313,7 @@ def _engine_candidate(
             source_path,
             str((output_dir or Path("bakeoff")) / "auto-boost.mkv"),
             "--target-size-mb",
-            str(target_size_mb),
+            str(target_video_size_mb),
         ]
         candidate = BakeoffCandidate(
             key="auto-boost",

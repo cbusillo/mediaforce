@@ -6,7 +6,7 @@ from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
-from mediaforce.execution import describe_item_plan, estimate_output_overhead_bytes
+from mediaforce.execution import describe_item_plan, resolve_stream_budget_ledger
 from mediaforce.review import render_audio_spectrogram_compare, render_review_contact_sheet, render_review_timeline_strip
 from mediaforce.reviewing.helpers import planned_audio_action, planned_opus_bitrate, select_primary_audio_track
 from mediaforce.tuning.size_goals import operator_intent_from_policy
@@ -97,11 +97,12 @@ def build_tuning_runtime_toolbelt(
     sample_plan_item = dict(sample_item)
     sample_plan_item["resolved_policy"] = current_policy
     try:
+        stream_budget = resolve_stream_budget_ledger(sample_plan_item, prefer_persisted=False)
+        sample_plan_item["stream_budget_ledger"] = stream_budget.to_payload()
         item_plan = describe_item_plan(sample_plan_item)
-        overhead = estimate_output_overhead_bytes(sample_plan_item)
     except (KeyError, TypeError, ValueError):
+        stream_budget = None
         item_plan = {}
-        overhead = {}
     sample_result = object_dict(object_dict(calibration).get("sample_result"))
     video_policy = object_dict(current_policy.get("video"))
     target_size_mb = float_value(video_policy.get("target_size_mb"))
@@ -128,6 +129,7 @@ def build_tuning_runtime_toolbelt(
             "sample_runtime_seconds": sample_duration_seconds or None,
             "sample_target_size_bytes": target_size_bytes,
             "operator_intent": operator_intent.to_payload(item_runtime_seconds=sample_duration_seconds or None),
+            "stream_budget_ledger_id": stream_budget.ledger_id if stream_budget is not None else None,
             "max_height": video_policy.get("max_height"),
             "quality_metric": video_policy.get("quality_metric"),
             "target_vmaf": video_policy.get("target_vmaf"),
@@ -136,7 +138,7 @@ def build_tuning_runtime_toolbelt(
             "min_target_xpsnr": video_policy.get("min_target_xpsnr"),
         },
         "item_plan": item_plan,
-        "estimated_overhead_bytes": overhead,
+        "stream_budget_ledger": stream_budget.to_payload() if stream_budget is not None else None,
         "recent_sample_result": {
             key: sample_result.get(key)
             for key in (

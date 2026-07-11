@@ -57,8 +57,8 @@ from mediaforce.execution import (
     detect_video_crop,
     encode_manifest_items,
     effective_video_preset,
-    estimate_output_overhead_bytes,
     promote_manifest_items,
+    resolve_stream_budget_ledger,
     search_quality_for_source,
     validate_manifest_items,
 )
@@ -169,7 +169,6 @@ from mediaforce.web.runtime.folder_tuning_advice import build_run_verdict_payloa
     operator_requested_experiment as runtime_operator_requested_experiment, \
     parse_audio_bitrate_kbps as runtime_parse_audio_bitrate_kbps, \
     record_run_verdict as runtime_record_run_verdict, review_gate as runtime_review_gate, \
-    sample_audio_target_kbps as runtime_sample_audio_target_kbps, \
     seed_advice_payload as runtime_seed_advice_payload, \
     summarize_calibration_result as runtime_summarize_calibration_result, \
     tuning_advice_payload as runtime_tuning_advice_payload, \
@@ -252,6 +251,7 @@ CALIBRATION_STAGED_ARTIFACT_COLUMNS = (
     "encode_command_json",
     "audio_summary_json",
     "subtitle_summary_json",
+    "attachment_summary_json",
     "validation_json",
     "staged_at",
     "validated_at",
@@ -280,7 +280,6 @@ BACKGROUND_WORKER_LEASES_LOCK = threading.Lock()
 
 
 _parse_audio_bitrate_kbps = runtime_parse_audio_bitrate_kbps
-_sample_audio_target_kbps = runtime_sample_audio_target_kbps
 _operator_requested_experiment = runtime_operator_requested_experiment
 _apply_policy_fragment = runtime_apply_policy_fragment
 
@@ -666,6 +665,18 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             subtitle_policy=object_dict(policy.get("subtitle")),
         )
         resolved_operator_intent = operator_intent.to_payload(item_runtime_seconds=item_runtime_seconds)
+        budget_item = {
+            **sample_item,
+            "resolved_policy": policy,
+            "output_container": config.output_container,
+        }
+        stream_budget = resolve_stream_budget_ledger(
+            budget_item,
+            default_video_policy=config.video,
+            output_container=config.output_container,
+            prefer_persisted=False,
+        )
+        budget_item["stream_budget_ledger"] = stream_budget.to_payload()
         size_goal_options = guided_size_goal_options(
             video_policy,
             item_runtime_seconds=item_runtime_seconds,
@@ -684,13 +695,14 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 "summary": summary,
                 "sample_item": public_representative_item(sample_item),
                 "representative_selection": representative_selection.public_payload(),
-                "item_plan": describe_item_plan({**sample_item, "resolved_policy": policy}),
+                "item_plan": describe_item_plan(budget_item),
                 "policy": policy,
                 "hot_spots": hot_spots,
                 "calibration": calibration,
                 "advice": advice_state,
                 "size_target_analysis": size_target_analysis or None,
                 "resolved_operator_intent": resolved_operator_intent,
+                "stream_budget_ledger": stream_budget.to_payload(),
                 "size_goal_options": size_goal_options,
                 "pending_proposal": pending_proposal,
                 "recent_tuning_sessions": recent_sessions,
@@ -2561,7 +2573,7 @@ def _calibration_run_deps() -> CalibrationRunDeps:
         encode_preview_clips=encode_preview_clips,
         render_source_review_clips=render_source_review_clips,
         generate_compare_clips_from_previews=generate_compare_clips_from_previews,
-        estimate_output_overhead_bytes=estimate_output_overhead_bytes,
+        resolve_stream_budget_ledger=resolve_stream_budget_ledger,
         build_svt_params=build_svt_params,
         review_url=_review_url,
         encode_manifest_items=encode_manifest_items,

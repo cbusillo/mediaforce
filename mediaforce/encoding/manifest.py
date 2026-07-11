@@ -1,7 +1,7 @@
 import json
 import time
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from sqlalchemy import update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -15,6 +15,8 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict, objec
 from mediaforce.encoding.cadence import CadenceResolutionError, cadence_filter
 from mediaforce.encoding.quality import quality_error_message, resolve_local_quality_temp_root
 from mediaforce.encoding.staging import safe_unlink
+from mediaforce.encoding.streams import ProductionStreamPlan
+from mediaforce.tuning.stream_budget import StreamBudgetLedger
 
 
 class SupportsCancellation(Protocol):
@@ -102,21 +104,63 @@ def describe_item_plan(
 ) -> dict[str, Any]:
     policy = item["resolved_policy"]
     cadence_decision = object_dict(item.get("cadence_decision"))
-    selection = select_streams(item)
+    ledger = _persisted_stream_budget(item)
+    selection = ledger.stream_plan if ledger is not None else select_streams(item)
     quality_metric, _ = select_quality_metric(str(policy["video"].get("quality_metric", "auto")))
-    selected_audio = object_dict(selection["audio_tracks"][0])
-    chosen_audio_codec = audio_codec(selected_audio, policy["audio"])
-    audio_plan = {
-        "source_codec": str(selected_audio.get("codec_name") or "unknown"),
-        "channels": int_value(selected_audio.get("channels")),
-        "language": selected_audio.get("language") or "und",
-        "action": "convert" if chosen_audio_codec == "libopus" else "copy",
-        "output_codec": "opus" if chosen_audio_codec == "libopus" else str(selected_audio.get("codec_name") or "unknown"),
-        "output_bitrate": opus_bitrate(selected_audio, policy["audio"]) if chosen_audio_codec == "libopus" else None,
-        "source_track_count": len(object_list(item.get("audio_summary"))),
-        "kept_track_count": len(selection["audio_tracks"]),
-    }
-    subtitle_tracks = selection["subtitle_tracks"]
+    if isinstance(selection, ProductionStreamPlan):
+        if selection.audio_streams:
+            selected_audio_plan = selection.audio_streams[0]
+            audio_plan = {
+                "source_codec": selected_audio_plan.source_codec,
+                "channels": selected_audio_plan.channels,
+                "language": selected_audio_plan.language or "und",
+                "action": "convert" if selected_audio_plan.action == "transcode" else "copy",
+                "output_codec": selected_audio_plan.output_codec,
+                "output_bitrate": selected_audio_plan.output_bitrate_text,
+                "source_track_count": len(object_list(item.get("audio_summary"))),
+                "kept_track_count": len(selection.audio_streams),
+            }
+        else:
+            audio_plan = {
+                "source_codec": None,
+                "channels": None,
+                "language": None,
+                "action": "none",
+                "output_codec": None,
+                "output_bitrate": None,
+                "source_track_count": 0,
+                "kept_track_count": 0,
+            }
+        subtitle_languages = [stream.language or "und" for stream in selection.subtitle_streams]
+        subtitle_codecs = [stream.source_codec for stream in selection.subtitle_streams]
+        kept_subtitle_count = len(selection.subtitle_streams)
+        attachment_plan = {
+            "source_track_count": len(object_list(item.get("attachment_summary"))),
+            "kept_track_count": len([stream for stream in selection.attachment_streams if stream.action == "copy"]),
+            "copy_unknown_source_tracks": selection.copy_unknown_attachments,
+        }
+    else:
+        selected_audio = object_dict(selection["audio_tracks"][0])
+        chosen_audio_codec = audio_codec(selected_audio, policy["audio"])
+        audio_plan = {
+            "source_codec": str(selected_audio.get("codec_name") or "unknown"),
+            "channels": int_value(selected_audio.get("channels")),
+            "language": selected_audio.get("language") or "und",
+            "action": "convert" if chosen_audio_codec == "libopus" else "copy",
+            "output_codec": "opus" if chosen_audio_codec == "libopus" else str(selected_audio.get("codec_name") or "unknown"),
+            "output_bitrate": opus_bitrate(selected_audio, policy["audio"]) if chosen_audio_codec == "libopus" else None,
+            "source_track_count": len(object_list(item.get("audio_summary"))),
+            "kept_track_count": len(selection["audio_tracks"]),
+        }
+        subtitle_tracks = selection["subtitle_tracks"]
+        subtitle_languages = [track.get("language") or "und" for track in subtitle_tracks]
+        subtitle_codecs = [track.get("codec_name") or "unknown" for track in subtitle_tracks]
+        kept_subtitle_count = len(subtitle_tracks)
+        attachment_plan = {
+            "source_track_count": len(object_list(item.get("attachment_summary"))),
+            "kept_track_count": 0,
+            "copy_unknown_source_tracks": False,
+        }
     return {
         "video": {
             "source_codec": item.get("video_codec") or "unknown",
@@ -131,10 +175,13 @@ def describe_item_plan(
         "audio": audio_plan,
         "subtitles": {
             "source_track_count": len(object_list(item.get("subtitle_summary"))),
-            "kept_track_count": len(subtitle_tracks),
-            "languages": [track.get("language") or "und" for track in subtitle_tracks],
-            "codecs": [track.get("codec_name") or "unknown" for track in subtitle_tracks],
+            "kept_track_count": kept_subtitle_count,
+            "languages": subtitle_languages,
+            "codecs": subtitle_codecs,
         },
+        "attachments": attachment_plan,
+        "stream_plan_id": selection.plan_id if isinstance(selection, ProductionStreamPlan) else None,
+        "stream_budget_ledger": ledger.to_payload() if ledger is not None else None,
     }
 
 
@@ -256,6 +303,9 @@ def encode_one_item(
         if quality_source_path != source_path and isinstance(host, dict)
         else host
     )
+    stream_budget = _persisted_stream_budget(item)
+    if stream_budget is not None:
+        stream_budget.require_positive_target_video_budget()
     quality_result = search_quality(
         quality_source_path,
         policy["video"],
@@ -269,8 +319,9 @@ def encode_one_item(
         process_controller=process_controller,
         host=quality_search_host,
         quality_temp_dir=_quality_temp_dir_for_encode_host(config, quality_search_host),
+        stream_budget_ledger=stream_budget,
     )
-    selection = select_streams(item)
+    selection = stream_budget.stream_plan if stream_budget is not None else select_streams(item)
     ffmpeg_cmd = build_ffmpeg_command(
         source_path=source_path,
         staging_path=staging_path,
@@ -393,6 +444,7 @@ def encode_one_item(
         "encode_command_json": json.dumps(ffmpeg_cmd, separators=(",", ":")),
         "audio_summary_json": staged_probe.audio_summary_json,
         "subtitle_summary_json": staged_probe.subtitle_summary_json,
+        "attachment_summary_json": staged_probe.attachment_summary_json,
         "staged_at": now,
         "updated_at": now,
     }
@@ -441,6 +493,15 @@ def encode_one_item(
         quality_score=quality_result.score,
         encode_command=ffmpeg_cmd,
     )
+
+
+def _persisted_stream_budget(item: Mapping[str, Any]) -> StreamBudgetLedger | None:
+    payload = object_dict(item.get("stream_budget_ledger"))
+    if not payload:
+        return None
+    ledger = StreamBudgetLedger.from_payload(payload)
+    ledger.validate_item(item)
+    return ledger
 
 
 def _encode_event_details(

@@ -5,7 +5,7 @@ import socket
 import threading
 import time
 import fcntl
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -701,7 +701,16 @@ def _encode_failure_analysis(
             continue
         item = manifest_items[index]
         video_policy = object_dict(object_dict(item.get("resolved_policy")).get("video"))
-        item_analysis = analyze_quality_policy_failure(error_message, video_policy)
+        source_cap_video_percent = float_value(
+            object_dict(object_dict(item.get("stream_budget_ledger")).get("source_relative_cap")).get(
+                "video_cap_percent"
+            )
+        ) or None
+        item_analysis = analyze_quality_policy_failure(
+            error_message,
+            video_policy,
+            max_encoded_percent_override=source_cap_video_percent,
+        )
         if not item_analysis:
             continue
         item_analysis["manifest_index"] = index
@@ -843,7 +852,7 @@ def _quality_policy_retry_caps_by_index(
 
 
 @contextmanager
-def _locked_manifest_file(manifest_path: Path):
+def _locked_manifest_file(manifest_path: Path) -> Iterator[None]:
     lock_path = manifest_path.with_suffix(f"{manifest_path.suffix}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+") as lock_file:

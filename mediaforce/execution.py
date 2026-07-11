@@ -24,10 +24,7 @@ from mediaforce.encoding.runner import run_encode_command as _run_encode_command
 from mediaforce.encoding.staging import finalize_output_path as _finalize_output_path_impl, \
     probe_packet_end_seconds, promote_one_item as promote_one_item_impl, remux_container_metadata, \
     validate_one_item as validate_one_item_impl
-from mediaforce.encoding.streams import _audio_codec as _audio_codec_impl, _check as _check_impl, \
-    estimate_output_overhead_bytes as estimate_output_overhead_bytes_impl, \
-    _estimate_audio_track_bytes as _estimate_audio_track_bytes_impl, \
-    _estimate_subtitle_track_bytes as _estimate_subtitle_track_bytes_impl, \
+from mediaforce.encoding.streams import ProductionStreamPlan, _audio_codec as _audio_codec_impl, _check as _check_impl, \
     _format_crf as _format_crf_impl, _opus_bitrate as _opus_bitrate_impl, \
     _opus_layout_filter as _opus_layout_filter_impl, _parse_bitrate_text as _parse_bitrate_text_impl, \
     _pick_audio as _pick_audio_impl, _pick_subtitles as _pick_subtitles_impl, \
@@ -42,6 +39,9 @@ from mediaforce.encoding.quality import QualitySearchResult, run_crf_search, sel
 from mediaforce.remote import execution_mode_for_host, host_media_access_for_host, remote_shell_path_export_line, \
     run_remote_command, ssh_client_options
 from mediaforce.core.utils import file_fingerprint, timestamp
+from mediaforce.tuning.stream_budget import StreamBudgetLedger, \
+    resolve_stream_budget_ledger as resolve_stream_budget_ledger_impl
+from mediaforce.tuning.size_goals import ResolvedSizeGoal
 
 TEXT_SUBTITLE_CODECS = {"ass", "mov_text", "srt", "ssa", "subrip", "text", "webvtt"}
 SVT_AV1_MIN_8K_PRESET = 5
@@ -118,8 +118,21 @@ def effective_video_preset(
     )
 
 
-def estimate_output_overhead_bytes(item: dict[str, Any]) -> dict[str, int]:
-    return estimate_output_overhead_bytes_impl(item, text_subtitle_codecs=TEXT_SUBTITLE_CODECS)
+def resolve_stream_budget_ledger(
+        item: dict[str, Any],
+        *,
+        default_video_policy: dict[str, Any] | None = None,
+        output_container: str | None = None,
+        resolved_size_goal: ResolvedSizeGoal | None = None,
+        prefer_persisted: bool = True,
+) -> StreamBudgetLedger:
+    return resolve_stream_budget_ledger_impl(
+        item,
+        default_video_policy=default_video_policy,
+        output_container=output_container,
+        resolved_size_goal=resolved_size_goal,
+        prefer_persisted=prefer_persisted,
+    )
 
 
 def resolve_item_source_path(
@@ -229,6 +242,7 @@ def search_quality_for_source(
         process_controller: ManagedProcessController | None = None,
         host: dict[str, Any] | None = None,
         quality_temp_dir: Path | None = None,
+        stream_budget_ledger: StreamBudgetLedger | None = None,
 ) -> QualitySearchResult:
     return _search_quality(
         source_path,
@@ -243,6 +257,7 @@ def search_quality_for_source(
         process_controller=process_controller,
         host=host,
         quality_temp_dir=quality_temp_dir,
+        stream_budget_ledger=stream_budget_ledger,
     )
 
 
@@ -317,6 +332,7 @@ def _search_quality(
         process_controller: ManagedProcessController | None = None,
         host: dict[str, Any] | None = None,
         quality_temp_dir: Path | None = None,
+        stream_budget_ledger: StreamBudgetLedger | None = None,
 ) -> QualitySearchResult:
     return _search_quality_impl(
         source_path,
@@ -331,6 +347,7 @@ def _search_quality(
         process_controller=process_controller,
         host=host,
         quality_temp_dir=quality_temp_dir,
+        stream_budget_ledger=stream_budget_ledger,
         host_media_access_for_host=host_media_access_for_host,
         select_quality_metric=select_quality_metric,
         build_svt_params=build_svt_params,
@@ -348,7 +365,7 @@ def _build_ffmpeg_command(
         preset: int,
         audio_policy: dict[str, Any],
         subtitle_policy: dict[str, Any],
-        selection: dict[str, Any],
+        selection: ProductionStreamPlan | dict[str, Any],
         quality: QualitySearchResult,
         host: dict[str, Any] | None = None,
         width: int | None = None,
@@ -638,14 +655,6 @@ def _opus_layout_filter(track: dict[str, Any]) -> str | None:
 
 def _check(validation: dict[str, Any], passed: bool, message: str) -> None:
     return _check_impl(validation, passed, message)
-
-
-def _estimate_audio_track_bytes(track: dict[str, Any], audio_policy: dict[str, Any], duration_seconds: float) -> int:
-    return _estimate_audio_track_bytes_impl(track, audio_policy, duration_seconds)
-
-
-def _estimate_subtitle_track_bytes(track: dict[str, Any]) -> int:
-    return _estimate_subtitle_track_bytes_impl(track, text_subtitle_codecs=TEXT_SUBTITLE_CODECS)
 
 
 def _parse_bitrate_text(value: str) -> int:
