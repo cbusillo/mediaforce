@@ -14,11 +14,10 @@
 	let structureLoadError = $state('');
 	let detailsLoadError = $state('');
 	let structurePending = $state(true);
-	let dashboardPending = $state(true);
 	let detailsPending = $state(true);
 	let disposed = false;
 	const loadError = $derived(
-		!foldersPayload.folders.length && !structurePending && !dashboardPending && !detailsPending
+		!foldersPayload.folders.length && !structurePending && !detailsPending
 			? structureLoadError || detailsLoadError
 			: ''
 	);
@@ -52,7 +51,6 @@
 			// Library structure is independently useful when live queue status is unavailable.
 		} finally {
 			if (!disposed) {
-				dashboardPending = false;
 				syncFolders();
 			}
 		}
@@ -106,7 +104,7 @@
 	}
 
 	function syncFolders() {
-		if (structurePending || dashboardPending) return;
+		if (structurePending) return;
 		foldersPayload = mergeFolderPayloads(structurePayload, detailsPayload);
 		dashboard = { ...dashboard, folders_preview: foldersPayload.folders };
 	}
@@ -115,7 +113,7 @@
 <SeasonLibrary
 	{dashboard}
 	{foldersPayload}
-	foldersPending={structurePending || dashboardPending}
+	foldersPending={structurePending}
 	{detailsPending}
 	{loadError}
 	detailsError={foldersPayload.folders.length ? detailsLoadError : ''}

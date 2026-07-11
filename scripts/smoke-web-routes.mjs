@@ -386,6 +386,72 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
   }
 }
 
+async function checkLibraryStructureWithoutDashboard(
+  baseUrl,
+  expectedMarker,
+  timeoutMs,
+) {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 1000 },
+    });
+    const pageErrors = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await page.addInitScript(() => {
+      const originalFetch = window.fetch.bind(window);
+      window.__mediaforceDashboardBlocked = false;
+      window.fetch = (input, init) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof Request
+              ? input.url
+              : String(input);
+        const requestUrl = new URL(url, window.location.origin);
+        if (
+          requestUrl.pathname === "/api/dashboard" &&
+          requestUrl.searchParams.get("preview_limit") === "0"
+        ) {
+          window.__mediaforceDashboardBlocked = true;
+          return new Promise(() => {});
+        }
+        return originalFetch(input, init);
+      };
+    });
+    await page.goto(`${baseUrl}/`, {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs,
+    });
+    await page.waitForFunction(
+      (marker) => document.body.innerText.includes(marker),
+      expectedMarker,
+      { timeout: timeoutMs },
+    );
+    const state = await page.evaluate(
+      (marker) => ({
+        hasMarker: document.body.innerText.includes(marker),
+        stillOpening: document.body.innerText.includes("Opening your library"),
+        dashboardBlocked: Boolean(window.__mediaforceDashboardBlocked),
+      }),
+      expectedMarker,
+    );
+    if (!state.hasMarker || state.stillOpening || !state.dashboardBlocked) {
+      throw new Error(
+        `Library structure waited for dashboard hydration: ${JSON.stringify(state)}`,
+      );
+    }
+    if (pageErrors.length > 0) {
+      throw new Error(
+        `Library structure fallback raised browser errors: ${pageErrors.join(" | ")}`,
+      );
+    }
+    console.log("route ok: Library structure without dashboard hydration");
+  } finally {
+    await browser.close();
+  }
+}
+
 async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
   const browser = await chromium.launch();
   try {
@@ -531,6 +597,13 @@ async function main() {
     }
     await checkEndpoints(targetUrl, args.endpointTimeoutMs);
     await checkRoutes(targetUrl, browserRouteChecks, args.routeTimeoutMs);
+    if (fixtures?.folderRoutes?.length) {
+      await checkLibraryStructureWithoutDashboard(
+        targetUrl,
+        fixtures.folderRoutes[0].marker,
+        args.routeTimeoutMs,
+      );
+    }
     if (args.narrow) {
       await checkNarrowRoutes(
         targetUrl,

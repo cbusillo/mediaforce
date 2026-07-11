@@ -2003,6 +2003,45 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             f"Mediaforce cannot access {self.config.staging_root} on this computer. Mount the storage to continue.",
         )
 
+    def test_host_selection_uses_controller_staging_storage_for_stream_host(self) -> None:
+        self.config.staging_root.mkdir(parents=True)
+        statuses = [
+            {
+                "key": "stream-host",
+                "label": "Stream Host",
+                "host": "stream-host",
+                "mode": "ssh",
+                "media_access": "stream",
+                "staging_root": "/remote-only/staging",
+                "priority": 90,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "probe_available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            }
+        ]
+
+        def controller_storage_only(
+                path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+                mode: int,
+        ) -> bool:
+            del mode
+            return Path(path) == self.config.staging_root
+
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.web.app._host_runtime_rows", return_value=statuses
+        ), patch(
+                "mediaforce.web.runtime.encode_runtime.os.access", side_effect=controller_storage_only
+        ):
+            host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, {})
+
+        self.assertIsNotNone(host_payload)
+        assert host_payload is not None
+        self.assertEqual(host_payload["key"], "stream-host")
+        self.assertIsNone(waiting_reason)
+
     def test_encode_queue_summary_returns_newest_terminal_jobs_first(self) -> None:
         self._write_manifest("manifest-recent-order.json", [])
         with open_db(self.config.paths.db_path) as connection:

@@ -334,43 +334,11 @@ export function librarySeasonState(
 		};
 	}
 
-	const badge = text(card.review_badge_label).toLowerCase();
-	if (badge.includes('ready to review')) {
-		return {
-			key: 'ready_to_compare',
-			label: 'Test ready',
-			detail: 'Compare the original and new version.',
-			tone: 'ready'
-		};
-	}
-	if (badge.includes('approved')) {
-		return {
-			key: 'ready_to_make',
-			label: 'Test approved',
-			detail: 'The rest of the season can be made.',
-			tone: 'ready'
-		};
-	}
-	if (badge.includes('validate')) {
-		return {
-			key: 'ready_to_check',
-			label: 'Ready to check',
-			detail: 'The new episodes are ready for a safety check.',
-			tone: 'ready'
-		};
-	}
-	if (badge.includes('rerun') || badge.includes('attention')) {
-		return {
-			key: 'needs_help',
-			label: 'Needs a little help',
-			detail: 'Open the season for one clear recovery step.',
-			tone: 'attention',
-			recoveryKind: badge.includes('rerun') ? 'test' : 'season'
-		};
-	}
-
 	const promoted = numberValue(card.statuses.promoted);
-	if (card.item_count > 0 && promoted >= card.item_count) {
+	if (
+		card.workflow_state?.primary_lane === 'complete' ||
+		(card.item_count > 0 && promoted >= card.item_count)
+	) {
 		return {
 			key: 'finished',
 			label: 'Finished',
@@ -409,6 +377,41 @@ export function librarySeasonState(
 			label: 'Making the season',
 			detail: 'The smaller episodes are being made now.',
 			tone: 'active'
+		};
+	}
+
+	const badge = text(card.review_badge_label).toLowerCase();
+	if (badge.includes('ready to review')) {
+		return {
+			key: 'ready_to_compare',
+			label: 'Test ready',
+			detail: 'Compare the original and new version.',
+			tone: 'ready'
+		};
+	}
+	if (badge.includes('approved')) {
+		return {
+			key: 'ready_to_make',
+			label: 'Test approved',
+			detail: 'The rest of the season can be made.',
+			tone: 'ready'
+		};
+	}
+	if (badge.includes('validate')) {
+		return {
+			key: 'ready_to_check',
+			label: 'Ready to check',
+			detail: 'The new episodes are ready for a safety check.',
+			tone: 'ready'
+		};
+	}
+	if (badge.includes('rerun') || badge.includes('attention')) {
+		return {
+			key: 'needs_help',
+			label: 'Needs a little help',
+			detail: 'Open the season for one clear recovery step.',
+			tone: 'attention',
+			recoveryKind: badge.includes('rerun') ? 'test' : 'season'
 		};
 	}
 	return {

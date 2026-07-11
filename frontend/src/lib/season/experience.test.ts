@@ -300,6 +300,25 @@ describe('season experience translation', () => {
 		expect(activeSeasonCards([finishingCard], dashboard)).toHaveLength(1);
 	});
 
+	it.each([
+		['attention', 'needs_help'],
+		['validate', 'ready_to_check'],
+		['promote', 'ready_to_finish'],
+		['processing', 'making_season'],
+		['complete', 'finished']
+	] as const)('shows the %s workflow before an older approved-test badge', (lane, expectedKey) => {
+		expect(
+			librarySeasonState(
+				{
+					...card,
+					review_badge_label: 'Approved draft',
+					workflow_state: workflowState(lane)
+				},
+				dashboard
+			)
+		).toMatchObject({ key: expectedKey });
+	});
+
 	it('uses review evidence over the generic folder state', () => {
 		expect(
 			detailSeasonState(

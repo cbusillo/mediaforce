@@ -866,7 +866,11 @@ def _controller_staging_access_issue(
         config: MediaforceConfig,
         host: dict[str, Any],
 ) -> str | None:
-    staging_root = config.staging_root_for_host(host).expanduser()
+    staging_root = (
+        config.staging_root
+        if host_media_access_for_host(host) == "stream"
+        else config.staging_root_for_host(host)
+    ).expanduser()
     nearest_existing = staging_root
     try:
         while not nearest_existing.exists():
