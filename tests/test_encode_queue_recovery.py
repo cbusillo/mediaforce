@@ -2190,10 +2190,18 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "target_xpsnr": 41.0,
                 "min_target_xpsnr": 35.0,
                 "target_size_mb": 300.0,
+                "target_size_bytes": 300_000_000,
                 "target_runtime_minutes": 45.0,
+                "size_goal_schema_version": 1,
+                "size_goal_mode": "normalized",
+                "size_goal_source": "config_default",
+                "sample_projection_tolerance_percent": 10.0,
+                "final_output_tolerance_percent": 5.0,
                 "decision_model": "size_first_review",
                 "quality_engine": "ab_av1_fast_sample",
                 "max_height": 1080,
+                "resolution_intent_mode": "max_height",
+                "resolution_intent_source": "config_default",
                 "default_grain": 8,
                 "max_encoded_percent": 80.0,
             },
@@ -8340,6 +8348,64 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             assert stored_status_row is not None
             self.assertEqual(stored_status_row["status"], "encoded")
 
+    def test_validate_one_item_rejects_output_outside_final_size_band(self) -> None:
+        source_path = self._create_source_file("episode-size-band.mkv")
+        staging_path = self._staging_path("episode-size-band.mkv")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_bytes(b"x" * 110)
+        self.config.raw["validation"] = {"require_size_reduction": True}
+        staged_probe = ProbeSummary(
+            duration_seconds=60.0,
+            video_codec="av1",
+            video_bitrate=900000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoded")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            item = {
+                "library_item_id": item_id,
+                "source_size_bytes": 200,
+                "duration_seconds": 60.0,
+                "subtitle_summary": [],
+                "resolved_operator_intent": {
+                    "size_goal": {
+                        "target_size_bytes": 100,
+                        "final_output_tolerance_percent": 5,
+                        "final_lower_bound_bytes": 95,
+                        "final_upper_bound_bytes": 105,
+                    }
+                },
+            }
+            with patch("mediaforce.execution.probe_media", return_value=staged_probe):
+                validation = execution.validate_one_item(connection, self.config, item)
+
+            self.assertFalse(validation["passed"])
+            self.assertEqual(
+                validation["final_size_goal"],
+                {
+                    "target_size_bytes": 100,
+                    "lower_bound_bytes": 95,
+                    "upper_bound_bytes": 105,
+                    "tolerance_percent": 5.0,
+                },
+            )
+            self.assertIn(
+                {"passed": False, "message": "staged file is within the final size target band"},
+                validation["checks"],
+            )
+
     def test_validate_one_item_repairs_unreadable_container_duration(self) -> None:
         source_path = self._create_source_file("episode-remux-repair.mkv")
         staging_path = self._staging_path("episode-remux-repair.mkv")
@@ -11892,11 +11958,22 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     "min_target_vmaf": 92,
                     "target_xpsnr": 36,
                     "min_target_xpsnr": 34,
+                    "target_size_mb": 300,
+                    "target_size_bytes": 300_000_000,
+                    "target_runtime_minutes": 45,
+                    "size_goal_schema_version": 1,
+                    "size_goal_mode": "normalized",
+                    "size_goal_source": "config_default",
+                    "sample_projection_tolerance_percent": 10,
+                    "final_output_tolerance_percent": 5,
                     "max_encoded_percent": 100,
                     "default_grain": 0,
+                    "max_height": 1080,
+                    "resolution_intent_mode": "max_height",
+                    "resolution_intent_source": "config_default",
                 },
-                "audio": {},
-                "subtitle": {},
+                "audio": {"keep_languages": ["eng"]},
+                "subtitle": {"keep_languages": ["eng"], "keep_forced": True},
                 "planning": {},
             }
         )
@@ -11907,7 +11984,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             connection.execute(
                 update(library_items)
                 .where(library_items.c.id == item_id)
-                .values(audio_summary_json=json.dumps([{"index": 0, "codec": "aac", "channels": 2, "language": "eng"}]))
+                .values(
+                    duration_seconds=88 * 60,
+                    audio_summary_json=json.dumps(
+                        [{"index": 0, "codec": "aac", "channels": 2, "language": "eng"}]
+                    ),
+                )
             )
             connection.commit()
 
@@ -11933,6 +12015,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertFalse(payload["pending"])
         self.assertEqual(payload["prefix"], "tv/show")
         self.assertEqual(payload["sample_item"]["rel_path"], "tv/show/episode-folder.mkv")
+        self.assertEqual(payload["resolved_operator_intent"]["size_goal"]["mode"], "normalized")
+        self.assertEqual(payload["resolved_operator_intent"]["size_goal"]["target_size_bytes"], 586_666_667)
+        self.assertEqual(payload["size_goal_options"][0]["resolved_size_goal"]["target_size_mb"], 586.667)
+        self.assertEqual(payload["size_goal_options"][0]["operator_intent"]["resolution"]["mode"], "source")
+        self.assertEqual(
+            payload["size_goal_options"][0]["operator_intent"]["streams"]["subtitle"]["keep_forced"],
+            True,
+        )
         self.assertIn("summary", payload)
 
     def test_folder_api_exposes_measured_size_target_analysis(self) -> None:
@@ -11958,7 +12048,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "operator_request": {
                 "request_type": "size_budget",
                 "operator_confirmed": True,
-                "budget_bytes": 225 * 1024 * 1024,
+                "budget_bytes": 225_000_000,
                 "budget_label": "225 MB per episode",
             }
         }
@@ -11995,13 +12085,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(
             payload["size_target_analysis"],
             {
-                "budget_bytes": 225 * 1024 * 1024,
+                "budget_bytes": 225_000_000,
                 "budget_label": "225 MB per episode",
-                "tolerance": 0.15,
-                "lower_bound_bytes": 200_540_160,
-                "upper_bound_bytes": 271_319_040,
+                "tolerance": 0.1,
+                "sample_projection_tolerance_percent": 10.0,
+                "lower_bound_bytes": 202_500_000,
+                "upper_bound_bytes": 247_500_000,
                 "predicted_total_size_bytes": 1_089_842_509,
-                "predicted_to_budget_ratio": 4.6194,
+                "predicted_to_budget_ratio": 4.8437,
                 "status": "over_target",
             },
         )
@@ -13247,6 +13338,38 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 ).scalar_one()
         )
         self.assertEqual(row_count, 1)
+
+    def test_queue_folder_encode_blocks_ambiguous_legacy_size_goal(self) -> None:
+        saved_overrides: list[dict[str, Any]] = []
+
+        with self.assertRaises(HTTPException) as raised:
+            folder_actions_runtime.queue_folder_encode_action(
+                self.config,
+                "tv/show",
+                "",
+                False,
+                now_iso=web_app._now_iso,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=lambda _config, _prefix: {
+                    "policy": {
+                        "video": {
+                            "target_size_mb": 225,
+                            "target_runtime_minutes": 45,
+                            "max_height": 1080,
+                        }
+                    }
+                },
+                review_gate=self._accepted_review_gate,
+                upsert_override=lambda _path, _prefix, policy: saved_overrides.append(dict(policy)),
+                load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
+                clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
+                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
+                save_encode_job=save_encode_job,
+            )
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertIn("runtime-normalized or an absolute", str(raised.exception.detail))
+        self.assertEqual(saved_overrides, [])
 
     def test_queue_folder_encode_reports_validate_next_action_when_no_encode_candidates(self) -> None:
         with open_db(self.config.paths.db_path) as connection:

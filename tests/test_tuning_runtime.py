@@ -103,6 +103,7 @@ from mediaforce.web.runtime.folder_ai_tuning import (
     _proposal_can_queue,
     _proposal_ready_message,
     _size_budget_measurement_fragment,
+    _unconfirmed_legacy_size_issue,
     folder_ai_tune_confirm_action,
     folder_ai_tune_preview_action,
 )
@@ -133,6 +134,33 @@ def _runtime_settings_writer(path_text: str, ready_path_text: str, mode: str) ->
         return runtime_settings
 
     update_runtime_settings(path, _apply)
+
+
+def _absolute_size_fragment(
+        size_mb: float,
+        runtime_minutes: float,
+        *,
+        preserve_source_resolution: bool = False,
+) -> dict[str, Any]:
+    video: dict[str, Any] = {
+        "size_goal_schema_version": 1,
+        "size_goal_mode": "absolute",
+        "size_goal_source": "operator_note",
+        "sample_projection_tolerance_percent": 10.0,
+        "final_output_tolerance_percent": 5.0,
+        "target_size_bytes": int(round(size_mb * 1_000_000)),
+        "target_size_mb": size_mb,
+        "target_runtime_minutes": runtime_minutes,
+    }
+    if preserve_source_resolution:
+        video.update(
+            {
+                "resolution_intent_mode": "source",
+                "resolution_intent_source": "operator",
+                "max_height": 0,
+            }
+        )
+    return {"video": video}
 
 
 def _fake_operator_note_parse(*, project_root: Path, payload: dict[str, object]) -> dict[str, object] | None:
@@ -578,6 +606,27 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIsNone(saved_jobs[0]["result"])
         self.assertNotEqual(saved_jobs[0]["job_id"], retryable_job["job_id"])
 
+    def test_saved_sample_work_blocks_unconfirmed_legacy_size_goal(self) -> None:
+        issue = _unconfirmed_legacy_size_issue(
+            self.config,
+            {"video": {"target_size_mb": 225, "target_runtime_minutes": 45}},
+        )
+
+        self.assertIsNotNone(issue)
+        self.assertIn("runtime-normalized or an absolute", str(issue))
+        self.assertIsNone(
+            _unconfirmed_legacy_size_issue(
+                self.config,
+                {
+                    "video": {
+                        "size_goal_mode": "absolute",
+                        "target_size_bytes": 225_000_000,
+                        "target_size_mb": 225,
+                        "target_runtime_minutes": 88,
+                    }
+                },
+            )
+        )
     def test_folder_ai_tune_confirm_fails_closed_when_stale_proposal_id_has_no_pending_proposal(self) -> None:
         host = HostStatus(
             key="cbusillo@localhost",
@@ -3823,11 +3872,12 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertFalse(request["requires_confirmation"])
         self.assertFalse(request["hard_size_cap"])
         self.assertFalse(request["measured_size_followup"])
-        self.assertAlmostEqual(request["estimated_source_percent"], 4.36, places=2)
-        self.assertAlmostEqual(request["target_encoded_percent"], 4.36, places=2)
+        self.assertAlmostEqual(request["estimated_source_percent"], 4.15, places=2)
+        self.assertAlmostEqual(request["target_encoded_percent"], 4.15, places=2)
         self.assertIsNone(request["requested_max_encoded_percent"])
         self.assertIsNone(request["applied_max_encoded_percent"])
-        self.assertIsNone(request["applied_policy"])
+        self.assertEqual(request["applied_policy"]["video"]["size_goal_mode"], "absolute")
+        self.assertEqual(request["applied_policy"]["video"]["target_size_bytes"], 200_000_000)
 
     def test_operator_requested_experiment_detects_generated_measured_followup(self) -> None:
         note = (
@@ -3856,7 +3906,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(request["request_type"], "combined_experiment")
         self.assertTrue(request["operator_confirmed"])
         self.assertTrue(request["measured_size_followup"])
-        self.assertEqual(request["budget_bytes"], 225 * 1024 * 1024)
+        self.assertEqual(request["budget_bytes"], 225_000_000)
         self.assertEqual(request["scale_height"], 0)
         self.assertEqual(request["applied_policy"]["video"]["max_height"], 0)
 
@@ -3873,7 +3923,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(request["request_type"], "combined_experiment")
         self.assertTrue(request["operator_confirmed"])
         self.assertTrue(request["measured_size_followup"])
-        self.assertEqual(request["budget_bytes"], 225 * 1024 * 1024)
+        self.assertEqual(request["budget_bytes"], 225_000_000)
         self.assertEqual(request["scale_height"], 0)
         self.assertEqual(request["applied_policy"]["video"]["max_height"], 0)
 
@@ -4002,8 +4052,9 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(request["hard_size_cap"])
         self.assertFalse(request["measured_size_followup"])
         self.assertEqual(request["budget_label"], "300 MB per episode")
-        self.assertAlmostEqual(request["requested_max_encoded_percent"], 7.23, places=2)
-        self.assertIsNone(request["applied_policy"])
+        self.assertAlmostEqual(request["requested_max_encoded_percent"], 6.9, places=2)
+        self.assertEqual(request["applied_policy"]["video"]["size_goal_mode"], "absolute")
+        self.assertEqual(request["applied_policy"]["video"]["target_size_bytes"], 300_000_000)
 
     def test_operator_requested_experiment_marks_measured_size_followup(self) -> None:
         request = _operator_requested_experiment(
@@ -4165,7 +4216,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(request["budget_label"], "300 MB per episode")
         self.assertEqual(request["scale_height"], 0)
         self.assertEqual(request["applied_policy"]["video"]["max_height"], 0)
-        self.assertAlmostEqual(request["estimated_video_bitrate_kbps"], 540.0, places=1)
+        self.assertAlmostEqual(request["estimated_video_bitrate_kbps"], 503.2, places=1)
 
     def test_size_budget_feasibility_treats_positive_av1_budget_as_plausible(self) -> None:
         feasibility, requires_confirmation = size_budget_feasibility(
@@ -4310,12 +4361,12 @@ class TuningRuntimeTests(unittest.TestCase):
             "request_type": "combined_experiment",
             "operator_confirmed": True,
             "budget_label": "225 MB per episode",
-            "budget_bytes": 225 * 1024 * 1024,
+            "budget_bytes": 225_000_000,
             "feasibility": "plausible",
             "applied_policy": {"video": {"max_height": 0}},
             "size_budget_request": {
                 "request_type": "size_budget",
-                "budget_bytes": 225 * 1024 * 1024,
+                "budget_bytes": 225_000_000,
                 "feasibility": "plausible",
                 "applied_policy": None,
             },
@@ -4402,24 +4453,10 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         proposal = saved_proposals[0]
         self.assertTrue(proposal["can_queue"])
-        expected_fragment = {
-            "video": {
-                "max_height": 0,
-                "target_size_mb": 225.0,
-                "target_runtime_minutes": 87.996,
-            }
-        }
+        expected_fragment = _absolute_size_fragment(225.0, 87.996, preserve_source_resolution=True)
         self.assertEqual(
             proposal["preview_policy"],
-            {
-                "video": {
-                    "target_size_mb": 225.0,
-                    "target_runtime_minutes": 87.996,
-                    "target_vmaf": 95.0,
-                    "max_encoded_percent": 80,
-                    "max_height": 0,
-                }
-            },
+            {"video": {**base_policy["video"], **expected_fragment["video"]}},
         )
         self.assertEqual(proposal["applied_policy"], expected_fragment)
         self.assertEqual(proposal["job_fields"]["seed_applied_policy"], expected_fragment)
@@ -4444,7 +4481,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 "applied_policy": {"video": {"max_height": 0}},
                 "size_budget_request": {
                     "request_type": "size_budget",
-                    "budget_bytes": 225 * 1024 * 1024,
+                    "budget_bytes": 225_000_000,
                 },
             },
             {"duration_seconds": 5279.774},
@@ -4455,6 +4492,12 @@ class TuningRuntimeTests(unittest.TestCase):
             {
                 "video": {
                     "max_height": 0,
+                    "size_goal_schema_version": 1,
+                    "size_goal_mode": "absolute",
+                    "size_goal_source": "operator_note",
+                    "sample_projection_tolerance_percent": 10.0,
+                    "final_output_tolerance_percent": 5.0,
+                    "target_size_bytes": 225_000_000,
                     "target_size_mb": 225.0,
                     "target_runtime_minutes": 87.996,
                 }
@@ -4488,12 +4531,12 @@ class TuningRuntimeTests(unittest.TestCase):
             "request_type": "combined_experiment",
             "operator_confirmed": True,
             "budget_label": "225 MB per episode",
-            "budget_bytes": 225 * 1024 * 1024,
+            "budget_bytes": 225_000_000,
             "feasibility": "plausible",
             "applied_policy": {"video": {"max_height": 0}},
             "size_budget_request": {
                 "request_type": "size_budget",
-                "budget_bytes": 225 * 1024 * 1024,
+                "budget_bytes": 225_000_000,
                 "feasibility": "plausible",
                 "applied_policy": None,
             },
@@ -4606,13 +4649,7 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         proposal = saved_proposals[0]
-        expected_fragment = {
-            "video": {
-                "max_height": 0,
-                "target_size_mb": 225.0,
-                "target_runtime_minutes": 87.996,
-            }
-        }
+        expected_fragment = _absolute_size_fragment(225.0, 87.996, preserve_source_resolution=True)
         self.assertTrue(proposal["can_queue"])
         self.assertEqual(proposal["request_disposition"], "honored")
         self.assertTrue(proposal["advice_payload"]["ok"])
@@ -4620,15 +4657,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(proposal["applied_policy"], expected_fragment)
         self.assertEqual(
             proposal["preview_policy"],
-            {
-                "video": {
-                    "target_size_mb": 225.0,
-                    "target_runtime_minutes": 87.996,
-                    "target_vmaf": 85.0,
-                    "max_encoded_percent": 80,
-                    "max_height": 0,
-                }
-            },
+            {"video": {**base_policy["video"], **expected_fragment["video"]}},
         )
 
         deps.load_pending_proposal = lambda *_args, **_kwargs: proposal
@@ -4660,7 +4689,7 @@ class TuningRuntimeTests(unittest.TestCase):
             "request_type": "size_budget",
             "operator_confirmed": True,
             "budget_label": "300 MB per episode",
-            "budget_bytes": 300 * 1024 * 1024,
+            "budget_bytes": 300_000_000,
             "feasibility": "plausible",
             "applied_policy": None,
         }
@@ -4757,22 +4786,10 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         proposal = saved_proposals[0]
         self.assertTrue(proposal["can_queue"])
-        expected_fragment = {
-            "video": {
-                "target_size_mb": 300.0,
-                "target_runtime_minutes": 44.774,
-            }
-        }
+        expected_fragment = _absolute_size_fragment(300.0, 44.774)
         self.assertEqual(
             proposal["preview_policy"],
-            {
-                "video": {
-                    "target_size_mb": 300.0,
-                    "target_vmaf": 85.0,
-                    "max_encoded_percent": 80,
-                    "target_runtime_minutes": 44.774,
-                }
-            },
+            {"video": {**base_policy["video"], **expected_fragment["video"]}},
         )
         self.assertEqual(proposal["applied_policy"], expected_fragment)
         self.assertEqual(proposal["request_disposition"], "honored")
@@ -4980,16 +4997,16 @@ class TuningRuntimeTests(unittest.TestCase):
             "operator_confirmed": True,
             "measured_size_followup": True,
             "budget_label": "300 MB per episode",
-            "budget_bytes": 314_572_800,
-            "target_encoded_percent": 7.23,
+            "budget_bytes": 300_000_000,
+            "target_encoded_percent": 6.9,
             "hard_size_cap": False,
             "applied_policy": None,
         }
         size_target_analysis = {
             "status": "over_target",
             "predicted_total_size_bytes": 803_322_876,
-            "budget_bytes": 314_572_800,
-            "predicted_to_budget_ratio": 2.55,
+            "budget_bytes": 300_000_000,
+            "predicted_to_budget_ratio": 2.6777,
         }
 
         def apply_fragment(current: dict[str, Any], fragment: dict[str, Any]) -> dict[str, Any]:
@@ -5096,8 +5113,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 "video": {
                     "target_vmaf": 88.0,
                     "min_target_vmaf": 88.0,
-                    "target_size_mb": 300.0,
-                    "target_runtime_minutes": 41.667,
+                    **_absolute_size_fragment(300.0, 41.667)["video"],
                     "max_encoded_percent": 7,
                 }
             },
@@ -5134,16 +5150,16 @@ class TuningRuntimeTests(unittest.TestCase):
             "request_type": "size_budget",
             "operator_confirmed": True,
             "budget_label": "300 MB per episode",
-            "budget_bytes": 314_572_800,
-            "target_encoded_percent": 7.23,
+            "budget_bytes": 300_000_000,
+            "target_encoded_percent": 6.9,
             "hard_size_cap": False,
             "applied_policy": None,
         }
         size_target_analysis = {
             "status": "over_target",
             "predicted_total_size_bytes": 803_322_876,
-            "budget_bytes": 314_572_800,
-            "predicted_to_budget_ratio": 2.55,
+            "budget_bytes": 300_000_000,
+            "predicted_to_budget_ratio": 2.6777,
         }
 
         def apply_fragment(current: dict[str, Any], fragment: dict[str, Any]) -> dict[str, Any]:
@@ -5232,7 +5248,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertNotIn("max_encoded_percent", proposal["applied_policy"].get("video", {}))
         self.assertEqual(
             proposal["applied_policy"],
-            {"video": {"target_size_mb": 300.0, "target_runtime_minutes": 41.667}},
+            _absolute_size_fragment(300.0, 41.667),
         )
         self.assertEqual(proposal["preview_policy"]["video"]["target_vmaf"], 95.0)
         self.assertEqual(proposal["request_disposition"], "honored")
@@ -8063,8 +8079,8 @@ class TuningRuntimeTests(unittest.TestCase):
         assert isinstance(decision_defaults, dict)
         self.assertEqual(decision_defaults["decision_model"], "size_first_review")
         self.assertEqual(decision_defaults["quality_engine"], "ab_av1_fast_sample")
-        self.assertEqual(decision_defaults["target_size_bytes"], 300 * 1024 * 1024)
-        self.assertEqual(decision_defaults["sample_target_size_bytes"], 300 * 1024 * 1024)
+        self.assertEqual(decision_defaults["target_size_bytes"], 300_000_000)
+        self.assertEqual(decision_defaults["sample_target_size_bytes"], 300_000_000)
         self.assertEqual(decision_defaults["max_height"], 1080)
 
     def test_planned_audio_review_context_uses_planner_primary_audio_track(self) -> None:

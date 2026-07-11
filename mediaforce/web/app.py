@@ -92,6 +92,7 @@ from mediaforce.tuning.tuning_memory import (
     record_visual_approval_artifact,
     sibling_approved_season_memory,
 )
+from mediaforce.tuning.size_goals import guided_size_goal_options, operator_intent_from_policy
 from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, object_dict, object_list
 from mediaforce.web.routes import register_completed_routes, register_dashboard_routes, register_folder_routes, \
     register_frontend_routes, register_host_routes, register_queue_routes, register_settings_routes
@@ -654,6 +655,21 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             calibration_payload=object_dict(calibration),
         )
         video_policy = object_dict(policy.get("video"))
+        item_runtime_seconds = float_value(sample_item.get("duration_seconds")) or None
+        operator_intent = operator_intent_from_policy(
+            video_policy,
+            default_video_policy=config.video,
+            audio_policy=object_dict(policy.get("audio")),
+            subtitle_policy=object_dict(policy.get("subtitle")),
+        )
+        resolved_operator_intent = operator_intent.to_payload(item_runtime_seconds=item_runtime_seconds)
+        size_goal_options = guided_size_goal_options(
+            video_policy,
+            item_runtime_seconds=item_runtime_seconds,
+            default_video_policy=config.video,
+            audio_policy=object_dict(policy.get("audio")),
+            subtitle_policy=object_dict(policy.get("subtitle")),
+        )
         resolved_metric, _ = select_quality_metric(str(video_policy.get("quality_metric", "auto")))
         sample_host_statuses = _sample_calibration_host_statuses(config)
         sample_host_key = _default_sample_host_key_from_statuses(sample_host_statuses)
@@ -670,6 +686,8 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 "calibration": calibration,
                 "advice": advice_state,
                 "size_target_analysis": size_target_analysis or None,
+                "resolved_operator_intent": resolved_operator_intent,
+                "size_goal_options": size_goal_options,
                 "pending_proposal": pending_proposal,
                 "recent_tuning_sessions": recent_sessions,
                 "approved_season_shortcut": approved_season_shortcut,
@@ -808,13 +826,34 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             record_tuning_session=record_tuning_session,
         )
 
-    def _folder_ai_tune_preview_action(normalized_prefix: str, note: str, host_key: str) -> dict[str, Any]:
+    def _folder_ai_tune_preview_action(
+            normalized_prefix: str,
+            note: str,
+            host_key: str,
+            operator_intent: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return folder_ai_tune_preview_action(
             config,
             _folder_ai_tune_deps(),
             normalized_prefix,
             note,
             host_key,
+            operator_intent,
+        )
+
+    def _folder_ai_tune_action(
+            normalized_prefix: str,
+            note: str,
+            host_key: str,
+            operator_intent: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return folder_ai_tune_action(
+            config,
+            _folder_ai_tune_deps(),
+            normalized_prefix,
+            note,
+            host_key,
+            operator_intent,
         )
 
     def _folder_ai_tune_confirm_action(normalized_prefix: str, proposal_id: str) -> dict[str, Any]:
@@ -823,15 +862,6 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             _folder_ai_tune_deps(),
             normalized_prefix,
             proposal_id,
-        )
-
-    def _folder_ai_tune_action(normalized_prefix: str, note: str, host_key: str) -> dict[str, Any]:
-        return folder_ai_tune_action(
-            config,
-            _folder_ai_tune_deps(),
-            normalized_prefix,
-            note,
-            host_key,
         )
 
     def _queue_folder_encode_action(normalized_prefix: str, notes: str, bypass_schedule: bool) -> ActionPayload:

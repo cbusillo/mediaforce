@@ -1,5 +1,5 @@
 import copy
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 import json
 import os
@@ -141,8 +141,55 @@ class MediaforceConfig:
             for section in ("video", "audio", "subtitle", "planning"):
                 values = override.get(section)
                 if isinstance(values, dict):
-                    policy[section].update(copy.deepcopy(values))
+                    normalized_values = copy.deepcopy(values)
+                    if section == "video":
+                        _migrate_legacy_video_override(self.video, normalized_values)
+                    policy[section].update(normalized_values)
         return policy
+
+
+def _migrate_legacy_video_override(base_video: dict[str, Any], override_video: dict[str, Any]) -> None:
+    if "size_goal_mode" not in override_video and (
+            "target_size_mb" in override_video
+            or "target_size_bytes" in override_video
+            or "target_runtime_minutes" in override_video
+    ):
+        base_size = _positive_number(base_video.get("target_size_mb"))
+        base_runtime = _positive_number(base_video.get("target_runtime_minutes"))
+        override_size = _positive_number(override_video.get("target_size_mb"))
+        override_runtime = _positive_number(override_video.get("target_runtime_minutes"))
+        if _same_number(base_size, override_size) and _same_number(base_runtime, override_runtime):
+            override_video["size_goal_mode"] = "normalized"
+            override_video["size_goal_source"] = "legacy_default_override"
+        elif override_runtime is not None and base_runtime is not None and not _same_number(
+                override_runtime, base_runtime
+        ):
+            override_video["size_goal_mode"] = "absolute"
+            override_video["size_goal_source"] = "legacy_inferred_absolute"
+        else:
+            override_video["size_goal_mode"] = "ambiguous"
+            override_video["size_goal_source"] = "legacy_ambiguous_override"
+
+    target_size_mb = _positive_number(override_video.get("target_size_mb"))
+    if target_size_mb is not None and _positive_number(override_video.get("target_size_bytes")) is None:
+        override_video["target_size_bytes"] = int(round(target_size_mb * 1_000_000))
+
+    if "resolution_intent_mode" not in override_video and "max_height" in override_video:
+        max_height = _positive_number(override_video.get("max_height"))
+        override_video["resolution_intent_mode"] = "max_height" if max_height is not None else "source"
+        override_video["resolution_intent_source"] = "legacy_inferred_override"
+
+
+def _positive_number(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _same_number(left: float | None, right: float | None) -> bool:
+    return left is not None and right is not None and abs(left - right) <= 0.001
 
 
 def _resolve_path(base: Path, value: str) -> Path:
@@ -312,8 +359,31 @@ def _merge_runtime_settings(base: dict[str, Any], payload: dict[str, Any]) -> di
     if not payload:
         return base
     merged = copy.deepcopy(base)
-    _deep_merge(merged, payload, extend_lists=False)
+    normalized_payload = copy.deepcopy(payload)
+    runtime_video = normalized_payload.get("video")
+    if isinstance(runtime_video, dict):
+        _normalize_runtime_video_defaults(runtime_video)
+    _deep_merge(merged, normalized_payload, extend_lists=False)
     return merged
+
+
+def _normalize_runtime_video_defaults(video: dict[str, Any]) -> None:
+    target_size_mb = _positive_number(video.get("target_size_mb"))
+    target_size_bytes = _positive_number(video.get("target_size_bytes"))
+    if target_size_mb is not None:
+        video["target_size_bytes"] = int(round(target_size_mb * 1_000_000))
+    elif target_size_bytes is not None:
+        video["target_size_mb"] = round(target_size_bytes / 1_000_000, 3)
+
+    if {"target_size_mb", "target_size_bytes", "target_runtime_minutes"} & video.keys():
+        video.setdefault("size_goal_schema_version", 1)
+        video.setdefault("size_goal_mode", "normalized")
+        video.setdefault("size_goal_source", "legacy_runtime_defaults")
+
+    if "max_height" in video and "resolution_intent_mode" not in video:
+        max_height = _positive_number(video.get("max_height"))
+        video["resolution_intent_mode"] = "max_height" if max_height is not None else "source"
+        video["resolution_intent_source"] = "legacy_runtime_defaults"
 
 
 def _merge_local_folder_policy_overrides(base: dict[str, Any], runtime_settings: dict[str, Any]) -> None:
@@ -366,7 +436,7 @@ def _resolve_runtime_settings_path(project_root: Path, state: dict[str, Any]) ->
 
 
 @contextmanager
-def _locked_runtime_settings(path: Path):
+def _locked_runtime_settings(path: Path) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.parent / f"{path.name}.lock"
     with lock_path.open("a+", encoding="utf-8") as lock_file:

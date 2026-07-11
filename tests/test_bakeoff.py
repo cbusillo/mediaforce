@@ -2,12 +2,13 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from typing import Any
 
 from mediaforce.core.config import load_config
 from mediaforce.encoding.bakeoff import build_bakeoff_plan, write_bakeoff_plan
 
 
-def _manifest() -> dict[str, object]:
+def _manifest() -> dict[str, Any]:
     return {
         "run_id": "test-run",
         "items": [
@@ -65,7 +66,8 @@ class BakeoffPlanTests(unittest.TestCase):
         self.assertEqual(plan["default_targets"]["target_size_mb"], 300)
         self.assertEqual(plan["default_targets"]["min_target_vmaf"], 80.0)
         item = plan["items"][0]
-        self.assertEqual(item["target_size_bytes"], 314_572_800)
+        self.assertEqual(item["target_size_bytes"], 300_000_000)
+        self.assertEqual(item["resolved_operator_intent"]["size_goal"]["mode"], "normalized")
         self.assertEqual(item["duration_seconds"], 2700.0)
         self.assertEqual(item["resolution"], "1920x1080")
         self.assertEqual(item["quality_floor"], {"metric": "vmaf", "target": 85.0, "minimum": 80.0})
@@ -80,11 +82,38 @@ class BakeoffPlanTests(unittest.TestCase):
         auto_boost = item["engines"][3]
         self.assertEqual(auto_boost["metric_support"], ["script-defined"])
 
+    def test_build_bakeoff_plan_resolves_normalized_target_for_item_runtime(self) -> None:
+        config = load_config(Path("config/defaults.toml"))
+        manifest = _manifest()
+        manifest["items"][0]["duration_seconds"] = 88 * 60
+
+        plan = build_bakeoff_plan(config, manifest, indexes=[0], engines=["auto-boost"])
+
+        item = plan["items"][0]
+        self.assertEqual(item["target_size_bytes"], 586_666_667)
+        command = item["engines"][0]["command"]
+        self.assertEqual(command[command.index("--target-size-mb") + 1], "586.667")
+
     def test_build_bakeoff_plan_can_limit_engines(self) -> None:
         config = load_config(Path("config/defaults.toml"))
         plan = build_bakeoff_plan(config, _manifest(), indexes=[0], engines=["av1an"])
 
         self.assertEqual([engine["key"] for engine in plan["items"][0]["engines"]], ["av1an"])
+
+    def test_build_bakeoff_plan_blocks_target_size_engine_when_runtime_is_missing(self) -> None:
+        config = load_config(Path("config/defaults.toml"))
+        manifest = _manifest()
+        manifest["items"][0]["duration_seconds"] = 0
+
+        plan = build_bakeoff_plan(config, manifest, indexes=[0], engines=["auto-boost"])
+
+        item = plan["items"][0]
+        self.assertIsNone(item["target_size_bytes"])
+        self.assertEqual(item["size_goal_status"], "missing_item_runtime")
+        self.assertIn("episode runtime", item["size_goal_issue"])
+        engine = item["engines"][0]
+        self.assertEqual(engine["command_status"], "blocked-unresolved-size-goal")
+        self.assertEqual(engine["command"], [])
 
     def test_write_bakeoff_plan_creates_parent_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
