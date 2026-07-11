@@ -62,15 +62,19 @@ def _job_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
         "library_item_id": sample_item.get("library_item_id"),
         "rel_path": sample_item.get("rel_path"),
         "source_path": sample_item.get("source_path"),
+        "source_fingerprint": sample_item.get("source_fingerprint"),
         "source_size_bytes": sample_item.get("source_size_bytes"),
         "video_codec": sample_item.get("video_codec"),
         "video_bitrate": sample_item.get("video_bitrate"),
         "width": sample_item.get("width"),
         "height": sample_item.get("height"),
+        "cadence_class": sample_item.get("cadence_class"),
         "duration_seconds": sample_item.get("duration_seconds"),
         "audio_summary": object_list(sample_item.get("audio_summary")),
         "subtitle_summary": object_list(sample_item.get("subtitle_summary")),
         "resolved_policy": object_dict(sample_item.get("resolved_policy")),
+        "representative_source_id": sample_item.get("representative_source_id"),
+        "representative_selection": object_dict(sample_item.get("representative_selection")),
     }
 
 
@@ -95,9 +99,12 @@ def _latest_failed_sample_job_payload(job: dict[str, Any] | None) -> dict[str, A
             "video_bitrate",
             "width",
             "height",
+            "cadence_class",
             "duration_seconds",
             "audio_summary",
             "subtitle_summary",
+            "representative_source_id",
+            "representative_selection",
         )
         if key in sample_item
     }
