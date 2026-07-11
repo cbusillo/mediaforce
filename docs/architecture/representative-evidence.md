@@ -17,21 +17,27 @@ to all matching catalog items only when none are runnable. Input order is not a
 selection signal.
 
 The primary representative is the non-outlier candidate nearest the dominant
-video codec, resolution tier, measured cadence class, audio layout, and runtime
-class, with median runtime and source size used as deterministic proximity
-signals. Source size is never a positive ranking signal, so a largest-file
-outlier is reported rather than automatically selected.
+video codec, resolution tier, measured cadence class, audio layout, runtime
+class, and measured fingerprint profile, with median runtime and source size
+used as deterministic proximity signals. Source size is never a positive
+ranking signal, so a largest-file outlier is reported rather than automatically
+selected.
 
 A technical value requires coverage when it occurs in at least 20% of the
 folder. The selector greedily adds the smallest deterministic set of samples
-needed to cover those meaningful codec, resolution, cadence, audio-layout, and
-runtime clusters. Numeric runtime outliers are reported but do not create a
-coverage requirement by themselves.
+needed to cover those meaningful codec, resolution, cadence, audio-layout,
+runtime, and fingerprint clusters. Numeric runtime outliers are reported but do
+not create a coverage requirement by themselves.
 
 Cadence is consumed only when a measured `cadence_class` (or compatible
 structured fact) is present. Missing cadence remains `unknown`; representative
 selection must not infer cadence from names, era, or content category. Cadence
 probing and transform decisions remain outside this module.
+
+Media fingerprint dimensions are consumed only from measured
+`media_fingerprint_decision` facts. Missing fingerprint evidence remains
+`unknown`; selection must not infer dark scenes, grain, animation, era, genre,
+or cleanup policy from paths, names, or categories.
 
 Coverage reports:
 
@@ -41,6 +47,9 @@ Coverage reports:
 - numeric outliers
 - known-fact and exact-profile confidence inputs
 - per-sample rationale and represented item/runtime totals
+
+Changing the representative-selection policy is versioned. Policy v2 adds
+measured fingerprint coverage dimensions to the earlier technical profile.
 
 Changing the threshold, clustering, tie breakers, or coverage semantics
 requires a representative-selection tool or policy version bump.

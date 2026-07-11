@@ -101,6 +101,8 @@ def _bootstrap_legacy_schema(connection: Connection) -> None:
     _ensure_column(connection, "encode_jobs", "last_failure_at", "TEXT")
     _ensure_column(connection, "encode_jobs", "host_cooldown_until", "TEXT")
     _ensure_column(connection, "encode_jobs", "progress_json", "TEXT")
+    _ensure_column(connection, "library_items", "cadence_summary_json", "TEXT")
+    _ensure_column(connection, "library_items", "media_fingerprint_json", "TEXT")
     connection.commit()
 
 

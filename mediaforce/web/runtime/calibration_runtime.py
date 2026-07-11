@@ -44,6 +44,8 @@ class CalibrationRunDeps:
     validate_manifest_items: Any
     generate_compare_clips: Any
     staged_artifact_columns: tuple[str, ...]
+    recommend_review_moments: Any | None = None
+    review_moment_payload: Any | None = None
 
 
 def _stored_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
@@ -61,6 +63,9 @@ def _stored_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
         "cadence_summary": object_dict(sample_item.get("cadence_summary")),
         "cadence_evidence": object_dict(sample_item.get("cadence_evidence")),
         "cadence_decision": object_dict(sample_item.get("cadence_decision")),
+        "media_fingerprint": object_dict(sample_item.get("media_fingerprint")),
+        "media_fingerprint_evidence": object_dict(sample_item.get("media_fingerprint_evidence")),
+        "media_fingerprint_decision": object_dict(sample_item.get("media_fingerprint_decision")),
         "duration_seconds": sample_item.get("duration_seconds"),
         "audio_summary": object_list(sample_item.get("audio_summary")),
         "subtitle_summary": object_list(sample_item.get("subtitle_summary")),
@@ -381,12 +386,25 @@ def run_sampled_calibration(
         quality_temp_dir=quality_temp_dir,
     )
 
-    timestamps = deps.recommend_review_timestamps(
-        source_path,
-        float_value(sample_item.get("duration_seconds")),
-        8.0,
-        process_controller=process_controller,
-    )
+    review_moments = []
+    if deps.recommend_review_moments is not None:
+        review_moments = deps.recommend_review_moments(
+            source_path,
+            float_value(sample_item.get("duration_seconds")),
+            8.0,
+            media_fingerprint=object_dict(sample_item.get("media_fingerprint")),
+            media_fingerprint_decision=object_dict(sample_item.get("media_fingerprint_decision")),
+            process_controller=process_controller,
+        )
+    timestamps = [moment.timestamp_seconds for moment in review_moments]
+    if not timestamps:
+        timestamps = deps.recommend_review_timestamps(
+            source_path,
+            float_value(sample_item.get("duration_seconds")),
+            8.0,
+            process_controller=process_controller,
+        )
+        review_moments = []
     output_dir = config.paths.review_dir / calibration_run_id / "item-00"
     preview_clips = deps.encode_preview_clips(
         source_path=source_path,
@@ -454,7 +472,13 @@ def run_sampled_calibration(
             "cadence_evidence_id": cadence_decision.get("evidence_id") if cadence_decision else None,
             "cadence_class": cadence_decision.get("classification") if cadence_decision else None,
             "cadence_transform": cadence_decision.get("transform") if cadence_decision else None,
+            "media_fingerprint_evidence_id": object_dict(sample_item.get("media_fingerprint_decision")).get("evidence_id"),
         },
+        "review_moments": [
+            deps.review_moment_payload(moment)
+            for moment in review_moments
+            if deps.review_moment_payload is not None
+        ],
         "compare_clips": [
             {
                 "path": deps.review_url(config, clip.output_path),

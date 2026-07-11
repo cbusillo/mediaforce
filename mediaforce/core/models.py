@@ -19,3 +19,4 @@ class ProbeSummary:
     subtitle_summary_json: str
     attachment_summary_json: str = "[]"
     cadence_summary_json: str = "{}"
+    media_fingerprint_json: str = "{}"

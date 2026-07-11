@@ -225,6 +225,43 @@ class RepresentativeSelectionTests(unittest.TestCase):
             self.assertEqual(persisted_selection["coverage"]["represented_item_count"], 2)
             self.assertEqual(item["representative_source_id"], selection.payload["primary_source_id"])
 
+    def test_measured_fingerprint_dimensions_select_hard_review_coverage(self) -> None:
+        items = [
+            self._item(1, media_traits=["typical"]),
+            self._item(2, media_traits=["typical"]),
+            self._item(3, media_traits=["dark_luma", "dark_gradient_banding_risk", "high_motion"]),
+        ]
+
+        selection = select_representatives(items, prefix="tv/Example/Season 1")
+
+        selected_paths = {item["rel_path"] for item in selection.payload["selected_items"]}
+        self.assertIn("tv/Example/Season 1/Episode 03.mkv", selected_paths)
+        self.assertIn("gradient", selection.payload["coverage"]["dimensions"])
+        gradient_values = {
+            item["value"]
+            for item in selection.payload["coverage"]["dimensions"]["gradient"]["uncovered_values"]
+        }
+        self.assertNotIn("gradient_risk", gradient_values)
+        profile = next(
+            item["technical_profile"]
+            for item in selection.payload["selected_items"]
+            if item["rel_path"] == "tv/Example/Season 1/Episode 03.mkv"
+        )
+        self.assertEqual(profile["gradient"], "gradient_risk")
+        self.assertEqual(profile["motion"], "high_motion")
+
+    def test_missing_fingerprints_do_not_outvote_measured_primary_evidence(self) -> None:
+        items = [self._item(1), self._item(2), self._item(3)]
+        items[0].pop("media_fingerprint_decision")
+        items[1].pop("media_fingerprint_decision")
+
+        selection = select_representatives(items, prefix="tv/Example/Season 1")
+
+        self.assertEqual(
+            selection.payload["selected_items"][0]["rel_path"],
+            "tv/Example/Season 1/Episode 03.mkv",
+        )
+
     @staticmethod
     def _item(
             index: int,
@@ -236,6 +273,7 @@ class RepresentativeSelectionTests(unittest.TestCase):
             height: int = 1080,
             cadence_class: str = "progressive",
             channels: int = 6,
+            media_traits: list[str] | None = None,
     ) -> dict[str, Any]:
         rel_path = f"tv/Example/Season 1/Episode {index:02d}.mkv"
         return {
@@ -263,6 +301,11 @@ class RepresentativeSelectionTests(unittest.TestCase):
             ],
             "subtitle_summary": [],
             "resolved_policy": {"video": {"target_vmaf": 95}},
+            "media_fingerprint_decision": {
+                "status": "measured",
+                "traits": media_traits or ["typical"],
+                "findings": [{"id": trait, "confidence": 0.9} for trait in (media_traits or []) if trait != "typical"],
+            },
         }
 
 

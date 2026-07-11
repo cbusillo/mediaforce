@@ -123,6 +123,9 @@ test patch targets.
 - `cadence.py`
   - measured cadence classification, evidence identity, transform gates, and
     the allow-listed cadence filter compiler
+- `fingerprint.py`
+  - bounded visual/audio complexity measurement, versioned media fingerprint
+    evidence, advisory confidence gates, and safe source-scoped decisions
 - `paths.py`
   - mounted/stream source and staging resolution
 - `progress.py`
@@ -155,8 +158,8 @@ Guidance:
 - `run_manifests.py`
   - candidate selection and run-manifest creation
 - `representatives.py`
-  - deterministic representative selection, coverage, rationale, and safe
-    public payload shaping
+  - deterministic representative selection, measured content coverage,
+    rationale, and safe public payload shaping
 
 Guidance:
 
@@ -194,8 +197,8 @@ Guidance:
   - compare clip generation
 - `audio.py`
   - spectrogram and audio-review outputs
-- `timestamps.py`
-  - review timestamp recommendation
+- `helpers.py`
+  - review timestamp and measured review-moment recommendation
 - `remote.py`
   - remote preview helpers when needed
 

@@ -23,6 +23,12 @@ from mediaforce.encoding.cadence import (
     CADENCE_TOOL_VERSION,
     unavailable_cadence_summary,
 )
+from mediaforce.encoding.fingerprint import (
+    MEDIA_FINGERPRINT_SCHEMA_VERSION,
+    MEDIA_FINGERPRINT_TOOL_NAME,
+    MEDIA_FINGERPRINT_TOOL_VERSION,
+    unavailable_media_fingerprint_summary,
+)
 from mediaforce.library.planner import recommend_item
 from mediaforce.library.probe import probe_media
 from mediaforce.core.type_defs import int_value, object_list
@@ -83,6 +89,7 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                     and row["size_bytes"] == stat_result.st_size
                     and row["mtime_ns"] == stat_result.st_mtime_ns
                     and _cadence_summary_present(row.get("cadence_summary_json"))
+                    and _media_fingerprint_present(row.get("media_fingerprint_json"))
             ):
                 connection.execute(
                     update(library_items)
@@ -144,6 +151,7 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                 "subtitle_summary_json": probe.subtitle_summary_json,
                 "attachment_summary_json": probe.attachment_summary_json,
                 "cadence_summary_json": probe.cadence_summary_json,
+                "media_fingerprint_json": probe.media_fingerprint_json,
                 "priority_score": recommendation.score,
                 "recommendation": recommendation.bucket,
                 "recommendation_reason": recommendation.reason,
@@ -239,7 +247,11 @@ def _cadence_summary_present(value: object) -> bool:
         payload = json.loads(value)
     except json.JSONDecodeError:
         return False
-    if not isinstance(payload, dict) or payload.get("schema_version") != CADENCE_SCHEMA_VERSION:
+    if (
+            not isinstance(payload, dict)
+            or payload.get("schema_version") != CADENCE_SCHEMA_VERSION
+            or payload.get("retry_required") is True
+    ):
         return False
     analysis = payload.get("analysis")
     if not isinstance(analysis, dict):
@@ -253,9 +265,37 @@ def _cadence_summary_present(value: object) -> bool:
     )
 
 
+def _media_fingerprint_present(value: object) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return False
+    if (
+            not isinstance(payload, dict)
+            or payload.get("schema_version") != MEDIA_FINGERPRINT_SCHEMA_VERSION
+            or payload.get("retry_required") is True
+    ):
+        return False
+    analysis = payload.get("analysis")
+    if not isinstance(analysis, dict):
+        return False
+    tool = analysis.get("tool")
+    return (
+        isinstance(payload.get("decision"), dict)
+        and isinstance(tool, dict)
+        and tool.get("name") == MEDIA_FINGERPRINT_TOOL_NAME
+        and tool.get("version") == MEDIA_FINGERPRINT_TOOL_VERSION
+    )
+
+
 def _failed_probe_summary(error: Exception) -> ProbeSummary:
     message = str(error).strip() or error.__class__.__name__
     cadence_summary = unavailable_cadence_summary(f"Media probing failed: {message}")
+    media_fingerprint = unavailable_media_fingerprint_summary(f"Media probing failed: {message}")
+    cadence_summary["retry_required"] = True
+    media_fingerprint["retry_required"] = True
     return ProbeSummary(
         duration_seconds=None,
         video_codec=None,
@@ -273,6 +313,7 @@ def _failed_probe_summary(error: Exception) -> ProbeSummary:
         subtitle_summary_json="[]",
         attachment_summary_json="",
         cadence_summary_json=json.dumps(cadence_summary, separators=(",", ":"), sort_keys=True),
+        media_fingerprint_json=json.dumps(media_fingerprint, separators=(",", ":"), sort_keys=True),
     )
 
 
