@@ -25,6 +25,21 @@ def stable_policy_hash(policy: Mapping[str, Any] | None) -> str:
     return f"sha256:{stable_json_hash(object_dict(policy))}"
 
 
+def stable_source_id(item: Mapping[str, Any]) -> str:
+    library_item_id = item.get("library_item_id") or item.get("id")
+    rel_path = str(item.get("rel_path") or "").strip().strip("/").replace("\\", "/")
+    if library_item_id not in (None, ""):
+        identity: dict[str, Any] = {"library_item_id": str(library_item_id)}
+    elif rel_path:
+        identity = {"rel_path": rel_path}
+    else:
+        identity = {
+            "fingerprint": _optional_text(item.get("source_fingerprint", item.get("fingerprint"))),
+            "file_name": str(item.get("file_name") or ""),
+        }
+    return f"src1_{stable_json_hash(identity)[:24]}"
+
+
 def build_evidence_envelope(
         *,
         kind: str,
@@ -64,6 +79,14 @@ def build_evidence_envelope(
         "evidence_id": f"ev1_{stable_json_hash(payload)[:32]}",
         **payload,
     }
+
+
+def evidence_envelope_valid(envelope: Mapping[str, Any] | None) -> bool:
+    payload = dict(object_dict(envelope))
+    evidence_id = str(payload.pop("evidence_id", ""))
+    if payload.get("schema") != EVIDENCE_SCHEMA or payload.get("version") != EVIDENCE_VERSION:
+        return False
+    return evidence_id == f"ev1_{stable_json_hash(payload)[:32]}"
 
 
 def evidence_staleness(

@@ -12,7 +12,7 @@ from sqlalchemy import or_, select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
-from mediaforce.core.evidence import build_evidence_envelope, stable_json_hash, stable_policy_hash
+from mediaforce.core.evidence import build_evidence_envelope, stable_policy_hash, stable_source_id
 from mediaforce.core.type_defs import mapping_dict, object_dict, object_list
 from mediaforce.library.planner import build_manifest_item
 
@@ -79,21 +79,6 @@ class _Candidate:
     @property
     def sort_key(self) -> tuple[str, str, str]:
         return self.rel_path.casefold(), self.rel_path, self.source_id
-
-
-def stable_source_id(item: Mapping[str, Any]) -> str:
-    library_item_id = item.get("library_item_id") or item.get("id")
-    rel_path = _normalized_rel_path(item.get("rel_path"))
-    if library_item_id not in (None, ""):
-        identity: dict[str, Any] = {"library_item_id": str(library_item_id)}
-    elif rel_path:
-        identity = {"rel_path": rel_path}
-    else:
-        identity = {
-            "fingerprint": _source_fingerprint(item),
-            "file_name": str(item.get("file_name") or ""),
-        }
-    return f"src1_{stable_json_hash(identity)[:24]}"
 
 
 def evidence_sources(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

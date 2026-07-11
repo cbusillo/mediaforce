@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,13 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import scan_runs
+from mediaforce.core.models import ProbeSummary
+from mediaforce.encoding.cadence import (
+    CADENCE_SCHEMA_VERSION,
+    CADENCE_TOOL_NAME,
+    CADENCE_TOOL_VERSION,
+    unavailable_cadence_summary,
+)
 from mediaforce.library.planner import recommend_item
 from mediaforce.library.probe import probe_media
 from mediaforce.core.type_defs import int_value, object_list
@@ -70,7 +78,12 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                 select(library_items).where(library_items.c.source_path == source_path)
             ).mappings().fetchone()
 
-            if row and row["size_bytes"] == stat_result.st_size and row["mtime_ns"] == stat_result.st_mtime_ns:
+            if (
+                    row
+                    and row["size_bytes"] == stat_result.st_size
+                    and row["mtime_ns"] == stat_result.st_mtime_ns
+                    and _cadence_summary_present(row.get("cadence_summary_json"))
+            ):
                 connection.execute(
                     update(library_items)
                     .where(library_items.c.source_path == source_path)
@@ -85,7 +98,10 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                 pending_writes = _flush_scan_progress(connection, scan_id, stats, pending_writes + 1)
                 continue
 
-            probe = probe_media(file_path)
+            try:
+                probe = probe_media(file_path)
+            except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
+                probe = _failed_probe_summary(exc)
             fingerprint = file_fingerprint(file_path=file_path, stat_result=stat_result,
                                            duration_seconds=probe.duration_seconds)
             rel_path = str(file_path.relative_to(root_path.parent))
@@ -126,6 +142,7 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                 "default_subtitle_language": probe.default_subtitle_language,
                 "audio_summary_json": probe.audio_summary_json,
                 "subtitle_summary_json": probe.subtitle_summary_json,
+                "cadence_summary_json": probe.cadence_summary_json,
                 "priority_score": recommendation.score,
                 "recommendation": recommendation.bucket,
                 "recommendation_reason": recommendation.reason,
@@ -212,6 +229,49 @@ def _flush_scan_progress(
     )
     connection.commit()
     return 0
+
+
+def _cadence_summary_present(value: object) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, dict) or payload.get("schema_version") != CADENCE_SCHEMA_VERSION:
+        return False
+    analysis = payload.get("analysis")
+    if not isinstance(analysis, dict):
+        return False
+    tool = analysis.get("tool")
+    return (
+        isinstance(payload.get("decision"), dict)
+        and isinstance(tool, dict)
+        and tool.get("name") == CADENCE_TOOL_NAME
+        and tool.get("version") == CADENCE_TOOL_VERSION
+    )
+
+
+def _failed_probe_summary(error: Exception) -> ProbeSummary:
+    message = str(error).strip() or error.__class__.__name__
+    cadence_summary = unavailable_cadence_summary(f"Media probing failed: {message}")
+    return ProbeSummary(
+        duration_seconds=None,
+        video_codec=None,
+        video_bitrate=None,
+        width=None,
+        height=None,
+        pix_fmt=None,
+        audio_track_count=0,
+        subtitle_track_count=0,
+        english_audio_count=0,
+        english_subtitle_count=0,
+        default_audio_language=None,
+        default_subtitle_language=None,
+        audio_summary_json="[]",
+        subtitle_summary_json="[]",
+        cadence_summary_json=json.dumps(cadence_summary, separators=(",", ":"), sort_keys=True),
+    )
 
 
 def _iter_media_files(

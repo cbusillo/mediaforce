@@ -15,6 +15,9 @@ def search_quality(
         width: int | None = None,
         height: int | None = None,
         detected_crop: str | None = None,
+        cadence_decision: dict[str, Any] | None = None,
+        cadence_evidence: dict[str, Any] | None = None,
+        cadence_source_fingerprint: str | None = None,
         process_controller: Any = None,
         host: dict[str, Any] | None = None,
         quality_temp_dir: Path | None = None,
@@ -35,7 +38,15 @@ def search_quality(
     )
     svt_params = build_svt_params(video_policy)
     preset = effective_video_preset(video_policy, width=width, height=height)
-    video_filter = build_video_filter(video_policy, width=width, height=height, detected_crop=detected_crop)
+    video_filter = build_video_filter(
+        video_policy,
+        width=width,
+        height=height,
+        detected_crop=detected_crop,
+        cadence_decision=cadence_decision,
+        cadence_evidence=cadence_evidence,
+        cadence_source_fingerprint=cadence_source_fingerprint,
+    )
     attempted_target = metric_target
     last_error: Exception | None = None
     configured_max_crf = int(video_policy["max_crf"])

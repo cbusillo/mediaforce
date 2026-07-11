@@ -117,6 +117,9 @@ test patch targets.
   - quality-search and sample-encode helpers
 - `commands.py`
   - ffmpeg argument and preset construction
+- `cadence.py`
+  - measured cadence classification, evidence identity, transform gates, and
+    the allow-listed cadence filter compiler
 - `paths.py`
   - mounted/stream source and staging resolution
 - `progress.py`
