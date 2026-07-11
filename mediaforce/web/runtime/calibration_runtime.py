@@ -37,7 +37,7 @@ class CalibrationRunDeps:
     encode_preview_clips: Any
     render_source_review_clips: Any
     generate_compare_clips_from_previews: Any
-    estimate_output_overhead_bytes: Any
+    resolve_stream_budget_ledger: Any
     build_svt_params: Any
     review_url: Any
     encode_manifest_items: Any
@@ -69,7 +69,14 @@ def _stored_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
         "duration_seconds": sample_item.get("duration_seconds"),
         "audio_summary": object_list(sample_item.get("audio_summary")),
         "subtitle_summary": object_list(sample_item.get("subtitle_summary")),
+        "attachment_summary": (
+            object_list(sample_item.get("attachment_summary"))
+            if isinstance(sample_item.get("attachment_summary"), list)
+            else None
+        ),
+        "output_container": sample_item.get("output_container"),
         "resolved_policy": object_dict(sample_item.get("resolved_policy")),
+        "stream_budget_ledger": object_dict(sample_item.get("stream_budget_ledger")),
         "representative_source_id": sample_item.get("representative_source_id"),
         "representative_selection": object_dict(sample_item.get("representative_selection")),
     }
@@ -81,6 +88,17 @@ def _job_sample_item(job: dict[str, Any]) -> dict[str, Any] | None:
     if not sample_item or any(sample_item.get(key) in {None, ""} for key in required_keys):
         return None
     return sample_item
+
+
+def _output_container(config: MediaforceConfig, sample_item: dict[str, Any]) -> str:
+    configured = str(object_dict(config.raw.get("media")).get("output_container") or "").strip()
+    if configured:
+        return configured.removeprefix(".")
+    item_container = str(sample_item.get("output_container") or sample_item.get("container") or "").strip()
+    if item_container:
+        return item_container.removeprefix(".")
+    source_suffix = Path(str(sample_item.get("source_path") or "")).suffix
+    return source_suffix.removeprefix(".") or "mkv"
 
 
 def snapshot_staged_artifact(
@@ -167,6 +185,17 @@ def run_calibration_job(
                     raise RuntimeError(f"No sample item found for {prefix}")
                 sample_item = object_dict(loaded_sample_item)
             sample_item["resolved_policy"] = policy
+            output_container = _output_container(config, sample_item)
+            sample_item["output_container"] = output_container
+            stream_budget = deps.resolve_stream_budget_ledger(
+                sample_item,
+                default_video_policy=object_dict(config.raw.get("video")) or object_dict(policy.get("video")),
+                output_container=output_container,
+                prefer_persisted=False,
+            )
+            sample_item["stream_budget_ledger"] = stream_budget.to_payload()
+            job["sample_item"] = _stored_sample_item_payload(sample_item)
+            deps.save_job_state(connection, config, prefix, job)
             current_library_item_id = int_value(sample_item.get("library_item_id"))
             library_item_id = current_library_item_id
             staged_artifact_snapshot = snapshot_staged_artifact(
@@ -284,6 +313,14 @@ def run_sampled_calibration(
     quality_host = _quality_host_data(config, host_data)
     quality_temp_dir = _quality_temp_dir_for_host(config, quality_host)
     video_policy = object_dict(policy.get("video"))
+    stream_budget = deps.resolve_stream_budget_ledger(
+        sample_item,
+        default_video_policy=object_dict(config.raw.get("video")) or video_policy,
+        output_container=_output_container(config, sample_item),
+    )
+    stream_budget.require_positive_target_video_budget()
+    sample_item["stream_budget_ledger"] = stream_budget.to_payload()
+    sample_item["output_container"] = _output_container(config, sample_item)
     width = int_value(sample_item.get("width")) or None
     height = int_value(sample_item.get("height")) or None
     cadence_decision = (
@@ -324,6 +361,7 @@ def run_sampled_calibration(
         "process_controller": process_controller,
         "host": quality_host,
         "quality_temp_dir": quality_temp_dir,
+        "stream_budget_ledger": stream_budget,
     }
     if cadence_decision is not None:
         quality_kwargs["cadence_decision"] = cadence_decision
@@ -398,8 +436,11 @@ def run_sampled_calibration(
         output_dir=output_dir,
         process_controller=process_controller,
     )
-    overhead = deps.estimate_output_overhead_bytes(sample_item)
-    estimated_total_size_bytes = sample_result.predicted_encode_size_bytes + overhead["total_bytes"]
+    estimated_total_size_bytes = (
+        sample_result.predicted_encode_size_bytes + stream_budget.non_video_bytes
+        if stream_budget.non_video_bytes is not None
+        else None
+    )
 
     payload = {
         "mode": "sample",
@@ -416,11 +457,17 @@ def run_sampled_calibration(
             "quality_score": sample_result.score,
             "predicted_video_size_bytes": sample_result.predicted_encode_size_bytes,
             "predicted_total_size_bytes": estimated_total_size_bytes,
-            "predicted_encode_percent": (estimated_total_size_bytes / int(sample_item["source_size_bytes"])) * 100,
+            "predicted_encode_percent": (
+                (estimated_total_size_bytes / int(sample_item["source_size_bytes"])) * 100
+                if estimated_total_size_bytes is not None
+                else None
+            ),
             "predicted_encode_seconds": sample_result.predicted_encode_seconds,
-            "estimated_audio_bytes": overhead["audio_bytes"],
-            "estimated_subtitle_bytes": overhead["subtitle_bytes"],
-            "estimated_container_bytes": overhead["container_bytes"],
+            "estimated_audio_bytes": stream_budget.audio_bytes,
+            "estimated_subtitle_bytes": stream_budget.subtitle_bytes,
+            "estimated_attachment_bytes": stream_budget.attachment_bytes,
+            "estimated_container_bytes": stream_budget.container_bytes,
+            "stream_budget_ledger": stream_budget.to_payload(),
             "sample_stdout": sample_result.stdout,
             "cadence_evidence_id": cadence_decision.get("evidence_id") if cadence_decision else None,
             "cadence_class": cadence_decision.get("classification") if cadence_decision else None,
@@ -539,7 +586,7 @@ def run_full_calibration(
         "config_path": str(config.paths.config_path),
         "db_path": str(config.paths.db_path),
         "staging_root": str(config.staging_root),
-        "output_container": config.output_container,
+        "output_container": _output_container(config, sample_item),
         "items": [manifest_item],
     }
     manifest_path = config.paths.web_state_dir / f"calibration-{calibration_run_id}.json"

@@ -239,8 +239,20 @@ class SizeGoalTests(unittest.TestCase):
                 "audio_track_count": 1,
                 "english_audio_count": 1,
                 "english_subtitle_count": 1,
-                "audio_summary_json": json.dumps([]),
+                "audio_summary_json": json.dumps(
+                    [
+                        {
+                            "index": 1,
+                            "codec_name": "aac",
+                            "channels": 2,
+                            "language": "eng",
+                            "default": 1,
+                            "bit_rate": 192_000,
+                        }
+                    ]
+                ),
                 "subtitle_summary_json": json.dumps([]),
+                "attachment_summary_json": json.dumps([]),
             },
             config,
         )
@@ -250,6 +262,11 @@ class SizeGoalTests(unittest.TestCase):
         self.assertEqual(resolved["target_size_bytes"], 586_666_667)
         self.assertEqual(resolved["sample_projection_tolerance_percent"], 10.0)
         self.assertEqual(resolved["final_output_tolerance_percent"], 5.0)
+        ledger = item["stream_budget_ledger"]
+        self.assertEqual(ledger["totals"]["total_target_bytes"], 586_666_667)
+        self.assertEqual(ledger["totals"]["remaining_video_bytes"], 454_080_000)
+        self.assertTrue(ledger["ledger_id"].startswith("sb1_"))
+        self.assertTrue(ledger["stream_plan"]["plan_id"].startswith("sp1_"))
 
     def _config_with_override(self, video_override: dict[str, object]) -> MediaforceConfig:
         paths = ConfigPaths(

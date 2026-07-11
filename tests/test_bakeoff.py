@@ -20,6 +20,20 @@ def _manifest() -> dict[str, Any]:
                 "width": 1920,
                 "height": 1080,
                 "video_codec": "hevc",
+                "source_fingerprint": "fingerprint-1",
+                "output_container": "mkv",
+                "audio_summary": [
+                    {
+                        "index": 1,
+                        "codec_name": "aac",
+                        "channels": 2,
+                        "language": "eng",
+                        "default": 1,
+                        "bit_rate": 192_000,
+                    }
+                ],
+                "subtitle_summary": [],
+                "attachment_summary": [],
                 "resolved_policy": {
                     "video": {
                         "encoder": "libsvtav1",
@@ -67,6 +81,8 @@ class BakeoffPlanTests(unittest.TestCase):
         self.assertEqual(plan["default_targets"]["min_target_vmaf"], 80.0)
         item = plan["items"][0]
         self.assertEqual(item["target_size_bytes"], 300_000_000)
+        self.assertEqual(item["target_video_size_bytes"], 231_200_000)
+        self.assertEqual(item["stream_budget_ledger"]["totals"]["non_video_bytes"], 68_800_000)
         self.assertEqual(item["resolved_operator_intent"]["size_goal"]["mode"], "normalized")
         self.assertEqual(item["duration_seconds"], 2700.0)
         self.assertEqual(item["resolution"], "1920x1080")
@@ -92,7 +108,8 @@ class BakeoffPlanTests(unittest.TestCase):
         item = plan["items"][0]
         self.assertEqual(item["target_size_bytes"], 586_666_667)
         command = item["engines"][0]["command"]
-        self.assertEqual(command[command.index("--target-size-mb") + 1], "586.667")
+        self.assertEqual(item["target_video_size_bytes"], 454_080_000)
+        self.assertEqual(command[command.index("--target-size-mb") + 1], "454.08")
 
     def test_build_bakeoff_plan_can_limit_engines(self) -> None:
         config = load_config(Path("config/defaults.toml"))

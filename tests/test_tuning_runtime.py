@@ -53,6 +53,7 @@ from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.db_tables import tuning_sessions
 from mediaforce.core.process_control import ProcessCancelledError
+from mediaforce.execution import resolve_stream_budget_ledger
 from mediaforce.hosts.types import HostStatus
 from mediaforce.tuning.tuning_memory import (
     promote_learning_artifact,
@@ -107,7 +108,7 @@ from mediaforce.web.runtime.folder_ai_tuning import (
     folder_ai_tune_confirm_action,
     folder_ai_tune_preview_action,
 )
-from mediaforce.web.runtime.folder_tuning_advice import audio_tradeoff_hint, operator_request_signature, size_budget_feasibility
+from mediaforce.web.runtime.folder_tuning_advice import audio_tradeoff_hint, operator_request_signature
 from mediaforce.web.runtime.folder_tuning_helpers import (
     measured_size_budget_policy_fragment,
     proposal_alignment_issue,
@@ -3868,7 +3869,11 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(request["request_type"], "size_budget")
         self.assertTrue(request["operator_confirmed"])
         self.assertEqual(request["budget_label"], "200 MB per episode")
-        self.assertEqual(request["feasibility"], "plausible")
+        self.assertEqual(request["feasibility"], "aggressive_but_measurable")
+        self.assertEqual(
+            request["stream_budget_ledger"]["feasibility"]["status"],
+            "aggressive_but_measurable",
+        )
         self.assertFalse(request["requires_confirmation"])
         self.assertFalse(request["hard_size_cap"])
         self.assertFalse(request["measured_size_followup"])
@@ -3953,7 +3958,7 @@ class TuningRuntimeTests(unittest.TestCase):
         assert request is not None
         self.assertEqual(request["request_type"], "combined_experiment")
         self.assertEqual(request["evidence_authority"], "operator_observed")
-        self.assertEqual(request["feasibility"], "plausible")
+        self.assertEqual(request["feasibility"], "aggressive_but_measurable")
         self.assertEqual(request["scale_height"], 0)
 
     def test_operator_requested_experiment_preserves_visual_rejection(self) -> None:
@@ -4216,37 +4221,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(request["budget_label"], "300 MB per episode")
         self.assertEqual(request["scale_height"], 0)
         self.assertEqual(request["applied_policy"]["video"]["max_height"], 0)
-        self.assertAlmostEqual(request["estimated_video_bitrate_kbps"], 503.2, places=1)
-
-    def test_size_budget_feasibility_treats_positive_av1_budget_as_plausible(self) -> None:
-        feasibility, requires_confirmation = size_budget_feasibility(
-            source_percent=4.36,
-            video_bitrate_kbps=379.7,
-            video_encoder="libsvtav1",
-        )
-
-        self.assertEqual(feasibility, "plausible")
-        self.assertFalse(requires_confirmation)
-
-    def test_size_budget_feasibility_leaves_tiny_positive_av1_budget_to_sampling(self) -> None:
-        feasibility, requires_confirmation = size_budget_feasibility(
-            source_percent=2.8,
-            video_bitrate_kbps=240.0,
-            video_encoder="libsvtav1",
-        )
-
-        self.assertEqual(feasibility, "plausible")
-        self.assertFalse(requires_confirmation)
-
-    def test_size_budget_feasibility_keeps_legacy_encoders_on_stricter_thresholds(self) -> None:
-        feasibility, requires_confirmation = size_budget_feasibility(
-            source_percent=4.36,
-            video_bitrate_kbps=379.7,
-            video_encoder="libx264",
-        )
-
-        self.assertEqual(feasibility, "unreasonable")
-        self.assertTrue(requires_confirmation)
+        self.assertAlmostEqual(request["estimated_video_bitrate_kbps"], 493.0, places=1)
 
     def test_operator_requested_experiment_uses_current_policy_for_av1_budget_feasibility(self) -> None:
         request = _operator_requested_experiment(
@@ -4273,7 +4248,7 @@ class TuningRuntimeTests(unittest.TestCase):
         )
 
         assert request is not None
-        self.assertEqual(request["feasibility"], "plausible")
+        self.assertEqual(request["feasibility"], "aggressive_but_measurable")
         self.assertFalse(request["requires_confirmation"])
 
     def test_folder_ai_tune_preview_uses_calibration_policy_for_operator_budget_request(self) -> None:
@@ -4472,6 +4447,14 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertTrue(confirm_result["ok"])
         self.assertEqual(saved_jobs[0]["policy"], proposal["preview_policy"])
+        queued_ledger = saved_jobs[0]["sample_item"]["stream_budget_ledger"]
+        self.assertEqual(queued_ledger["totals"]["total_target_bytes"], 225_000_000)
+        self.assertEqual(queued_ledger["totals"]["remaining_video_bytes"], 217_000_000)
+        self.assertEqual(queued_ledger["feasibility"]["status"], "requires_measurement")
+        self.assertEqual(
+            saved_jobs[0]["sample_item"]["resolved_policy"],
+            saved_jobs[0]["policy"],
+        )
 
     def test_size_budget_measurement_fragment_preserves_combined_source_resolution_request(self) -> None:
         fragment = _size_budget_measurement_fragment(
@@ -7544,12 +7527,7 @@ class TuningRuntimeTests(unittest.TestCase):
             encode_preview_clips=lambda *_args, **_kwargs: [],
             render_source_review_clips=lambda *_args, **_kwargs: [],
             generate_compare_clips_from_previews=lambda *_args, **_kwargs: [],
-            estimate_output_overhead_bytes=lambda *_args, **_kwargs: {
-                "total_bytes": 0,
-                "audio_bytes": 0,
-                "subtitle_bytes": 0,
-                "container_bytes": 0,
-            },
+            resolve_stream_budget_ledger=resolve_stream_budget_ledger,
             build_svt_params=lambda *_args, **_kwargs: {},
             review_url=lambda *_args, **_kwargs: "",
             encode_manifest_items=lambda *_args, **_kwargs: None,
@@ -7618,12 +7596,7 @@ class TuningRuntimeTests(unittest.TestCase):
             encode_preview_clips=lambda *_args, **_kwargs: [],
             render_source_review_clips=lambda *_args, **_kwargs: [],
             generate_compare_clips_from_previews=lambda *_args, **_kwargs: [],
-            estimate_output_overhead_bytes=lambda *_args, **_kwargs: {
-                "total_bytes": 0,
-                "audio_bytes": 0,
-                "subtitle_bytes": 0,
-                "container_bytes": 0,
-            },
+            resolve_stream_budget_ledger=resolve_stream_budget_ledger,
             build_svt_params=lambda *_args, **_kwargs: {},
             review_url=lambda *_args, **_kwargs: "",
             encode_manifest_items=lambda *_args, **_kwargs: None,

@@ -8,7 +8,18 @@ from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.encoding.cadence import analyze_cadence
 from mediaforce.encoding.fingerprint import analyze_media_fingerprint
 
-TRACK_FIELDS = ("index", "codec_name", "channels", "bit_rate", "language", "default", "forced")
+TRACK_FIELDS = (
+    "index",
+    "codec_name",
+    "channels",
+    "bit_rate",
+    "duration_seconds",
+    "size_bytes",
+    "language",
+    "default",
+    "forced",
+)
+ATTACHMENT_FIELDS = ("index", "codec_name", "file_name", "mime_type", "size_bytes")
 PROBE_TIMEOUT_SECONDS = 60
 
 
@@ -20,18 +31,32 @@ def _normalize_language(stream: dict[str, object]) -> str | None:
     return str(language).lower()
 
 
-def _stream_entry(stream: dict[str, object]) -> dict[str, object]:
+def _stream_entry(stream: dict[str, object], fallback_duration_seconds: float | None) -> dict[str, object]:
     disposition = object_dict(stream.get("disposition"))
     entry = {
         "index": stream.get("index"),
         "codec_name": stream.get("codec_name"),
         "channels": stream.get("channels"),
-        "bit_rate": stream.get("bit_rate"),
+        "bit_rate": _stream_bit_rate(stream),
+        "duration_seconds": _stream_duration_seconds(stream) or fallback_duration_seconds,
+        "size_bytes": _stream_size_bytes(stream),
         "language": _normalize_language(stream),
         "default": int_value(disposition.get("default", 0)),
         "forced": int_value(disposition.get("forced", 0)),
     }
     return {key: entry[key] for key in TRACK_FIELDS}
+
+
+def _attachment_entry(stream: dict[str, object]) -> dict[str, object]:
+    tags = object_dict(stream.get("tags"))
+    entry = {
+        "index": stream.get("index"),
+        "codec_name": stream.get("codec_name"),
+        "file_name": tags.get("filename") or tags.get("FILENAME"),
+        "mime_type": tags.get("mimetype") or tags.get("MIMETYPE"),
+        "size_bytes": _stream_size_bytes(stream) or _optional_int(stream.get("extradata_size")),
+    }
+    return {key: entry[key] for key in ATTACHMENT_FIELDS}
 
 
 def probe_media(path: Path) -> ProbeSummary:
@@ -59,9 +84,12 @@ def probe_media(path: Path) -> ProbeSummary:
     video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
     audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
     subtitle_streams = [stream for stream in streams if stream.get("codec_type") == "subtitle"]
+    attachment_streams = [stream for stream in streams if stream.get("codec_type") == "attachment"]
+    duration_seconds = _as_float(format_info.get("duration"))
 
-    audio_summary = [_stream_entry(stream) for stream in audio_streams]
-    subtitle_summary = [_stream_entry(stream) for stream in subtitle_streams]
+    audio_summary = [_stream_entry(stream, duration_seconds) for stream in audio_streams]
+    subtitle_summary = [_stream_entry(stream, duration_seconds) for stream in subtitle_streams]
+    attachment_summary = [_attachment_entry(stream) for stream in attachment_streams]
 
     default_audio_language = next(
         (_normalize_language(stream) for stream in audio_streams if object_dict(stream.get("disposition")).get("default")),
@@ -73,7 +101,6 @@ def probe_media(path: Path) -> ProbeSummary:
         _normalize_language(subtitle_streams[0]) if subtitle_streams else None,
     )
 
-    duration_seconds = _as_float(format_info.get("duration"))
     cadence_summary = analyze_cadence(
         path,
         video_stream=video_stream,
@@ -101,9 +128,54 @@ def probe_media(path: Path) -> ProbeSummary:
         default_subtitle_language=default_subtitle_language,
         audio_summary_json=json.dumps(audio_summary, separators=(",", ":"), sort_keys=True),
         subtitle_summary_json=json.dumps(subtitle_summary, separators=(",", ":"), sort_keys=True),
+        attachment_summary_json=json.dumps(attachment_summary, separators=(",", ":"), sort_keys=True),
         cadence_summary_json=json.dumps(cadence_summary, separators=(",", ":"), sort_keys=True),
         media_fingerprint_json=json.dumps(media_fingerprint, separators=(",", ":"), sort_keys=True),
     )
+
+
+def _stream_bit_rate(stream: dict[str, object]) -> int | None:
+    direct = _optional_int(stream.get("bit_rate"))
+    if direct is not None and direct > 0:
+        return direct
+    tags = object_dict(stream.get("tags"))
+    for key in ("BPS", "BPS-eng", "bps"):
+        parsed = _optional_int(tags.get(key))
+        if parsed is not None and parsed > 0:
+            return parsed
+    return None
+
+
+def _stream_size_bytes(stream: dict[str, object]) -> int | None:
+    tags = object_dict(stream.get("tags"))
+    for key in ("NUMBER_OF_BYTES", "NUMBER_OF_BYTES-eng", "number_of_bytes"):
+        parsed = _optional_int(tags.get(key))
+        if parsed is not None and parsed > 0:
+            return parsed
+    return None
+
+
+def _stream_duration_seconds(stream: dict[str, object]) -> float | None:
+    direct = _optional_float(stream.get("duration"))
+    if direct is not None and direct > 0:
+        return direct
+    tags = object_dict(stream.get("tags"))
+    for key in ("DURATION", "DURATION-eng", "duration"):
+        value = tags.get(key)
+        if value in (None, ""):
+            continue
+        text = str(value)
+        parts = text.split(":")
+        if len(parts) != 3:
+            continue
+        try:
+            hours, minutes, seconds = (float(part) for part in parts)
+        except ValueError:
+            continue
+        parsed = (hours * 3600.0) + (minutes * 60.0) + seconds
+        if parsed > 0:
+            return parsed
+    return None
 
 
 def _as_float(value: object) -> float | None:
@@ -122,3 +194,17 @@ def _as_int(value: object) -> int | None:
     if isinstance(value, (int, float, str)):
         return int(value)
     raise TypeError(f"Unsupported int value: {value!r}")
+
+
+def _optional_float(value: object) -> float | None:
+    try:
+        return _as_float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_int(value: object) -> int | None:
+    try:
+        return _as_int(value)
+    except (TypeError, ValueError):
+        return None

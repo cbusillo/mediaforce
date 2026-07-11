@@ -52,6 +52,7 @@ _PUBLIC_ITEM_FIELDS = (
     "recommendation_reason",
     "audio_summary",
     "subtitle_summary",
+    "attachment_summary",
     "resolved_policy",
     "media_fingerprint_decision",
 )

@@ -117,6 +117,9 @@ test patch targets.
   - quality-search and sample-encode helpers
 - `commands.py`
   - ffmpeg argument and preset construction
+- `streams.py`
+  - immutable production audio, subtitle, and attachment selection plan
+  - copy/transcode/drop decisions consumed by command construction and budgeting
 - `cadence.py`
   - measured cadence classification, evidence identity, transform gates, and
     the allow-listed cadence filter compiler
@@ -134,6 +137,12 @@ test patch targets.
 - `manifest.py`
   - encode-one and encode-many orchestration
 
+Guidance:
+
+- Production commands consume the stream plan embedded in the persisted stream
+  budget ledger. Do not independently reselect streams or reconstruct codec and
+  bitrate decisions in sample, queue, API, or production code.
+
 `mediaforce.execution` remains the stable compatibility wrapper surface.
 
 ### `mediaforce/library/`
@@ -141,7 +150,7 @@ test patch targets.
 - `planner.py`
   - item recommendation and manifest-item shaping
 - `probe.py`
-  - ffprobe-based media inspection and track summaries
+  - ffprobe-based media inspection and audio, subtitle, attachment track summaries
 - `scanner.py`
   - library scan orchestration and catalog updates
 - `folder_profiles.py`
@@ -162,13 +171,23 @@ Guidance:
 
 - `calibration_jobs.py`
   - calibration job persistence and queue helpers
+- `size_goals.py`
+  - canonical decimal-byte target intent and per-item runtime resolution
+- `stream_budget.py`
+  - versioned deterministic whole-item budget and feasibility ledger
+  - non-video estimates, provenance, uncertainty, source-relative video caps,
+    and the remaining video bytes/bitrate for the persisted production plan
 - `tuning_memory.py`
   - learned-memory session recording and artifact promotion helpers
 
 Guidance:
 
-- Keep calibration queue state and learned-memory helpers under
-  `mediaforce/tuning/`.
+- Keep calibration queue state, canonical size contracts, deterministic budget
+  arithmetic, and learned-memory helpers under `mediaforce/tuning/`.
+- The stream budget ledger is the only non-video arithmetic authority. Search,
+  manifests, queued jobs, production, and API payloads may project compatibility
+  fields from it, but must not add audio, subtitle, attachment, or container
+  overhead independently.
 
 ### `mediaforce/reviewing/`
 

@@ -2,6 +2,7 @@ import json
 import subprocess
 import hashlib
 import re
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.type_defs import JSONValue, float_value, int_value, object_dict, object_list
+from mediaforce.execution import resolve_stream_budget_ledger
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.reviewing.helpers import planned_audio_action, select_primary_audio_track
 from mediaforce.tuning.tuning_memory import retrieve_learning_context
@@ -19,6 +21,7 @@ from mediaforce.tuning.size_goals import (
     DEFAULT_FINAL_OUTPUT_TOLERANCE_PERCENT,
     DEFAULT_SAMPLE_PROJECTION_TOLERANCE_PERCENT,
     ResolutionIntent,
+    ResolvedSizeGoal,
     SizeGoalIntent,
     bytes_to_megabytes,
     operator_intent_from_request,
@@ -379,28 +382,6 @@ def parse_audio_bitrate_kbps(value: JSONValue, fallback: float) -> float:
     return parsed if parsed > 0 else fallback
 
 
-def sample_audio_target_kbps(sample_item: dict[str, Any] | None) -> float:
-    if not isinstance(sample_item, dict):
-        return 160.0
-    audio_policy = object_dict(object_dict(sample_item.get("resolved_policy")).get("audio"))
-    track = _primary_audio_track(sample_item)
-    if track is None:
-        return 160.0
-    codec_action = planned_audio_action(track, audio_policy)
-    if codec_action != "libopus":
-        source_bitrate_bps = int_value(track.get("bit_rate"))
-        if source_bitrate_bps > 0:
-            return round(source_bitrate_bps / 1000.0, 1)
-        channels = max(2, int_value(track.get("channels")))
-        return 640.0 if channels >= 6 else 192.0
-    channels = max(2, int_value(track.get("channels")))
-    if channels >= 8:
-        return parse_audio_bitrate_kbps(audio_policy.get("surround_7_1_opus_bitrate"), 320.0)
-    if channels >= 6:
-        return parse_audio_bitrate_kbps(audio_policy.get("surround_5_1_opus_bitrate"), 224.0)
-    return parse_audio_bitrate_kbps(audio_policy.get("stereo_opus_bitrate"), 128.0)
-
-
 def _primary_audio_track(sample_item: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(sample_item, dict):
         return None
@@ -509,29 +490,6 @@ def audio_tradeoff_hint(
     }
 
 
-def _is_av1_encoder(video_encoder: str | None) -> bool:
-    return "av1" in str(video_encoder or "").strip().lower()
-
-
-def size_budget_feasibility(
-        *,
-        source_percent: float | None,
-        video_bitrate_kbps: float | None,
-        video_encoder: str | None = None,
-) -> tuple[str, bool]:
-    if source_percent is None or video_bitrate_kbps is None:
-        return "unknown", False
-    if _is_av1_encoder(video_encoder):
-        if video_bitrate_kbps <= 0:
-            return "infeasible", True
-        return "plausible", False
-    if source_percent <= 10.0 or video_bitrate_kbps <= 500.0:
-        return "unreasonable", True
-    if source_percent <= 20.0 or video_bitrate_kbps <= 900.0:
-        return "aggressive", False
-    return "reasonable", False
-
-
 def _parsed_operator_note(note: str) -> dict[str, Any] | None:
     trimmed = note.strip()
     if not trimmed:
@@ -555,47 +513,71 @@ def size_budget_request(
         parsed_note: dict[str, Any],
         *,
         current_policy: dict[str, Any] | None = None,
+        resolved_size_goal: ResolvedSizeGoal | None = None,
 ) -> dict[str, Any] | None:
     effective_sample_item = dict(sample_item) if isinstance(sample_item, dict) else None
     effective_policy = object_dict(current_policy)
     if effective_sample_item is not None and effective_policy:
         effective_sample_item["resolved_policy"] = effective_policy
-    unit = str(parsed_note.get("size_budget_unit") or "").strip().lower()
-    multiplier = _SIZE_BUDGET_UNIT_BYTES.get(unit)
-    amount = float_value(parsed_note.get("size_budget_value"))
-    if multiplier is None or amount <= 0:
-        return None
+    if resolved_size_goal is None:
+        unit = str(parsed_note.get("size_budget_unit") or "").strip().lower()
+        multiplier = _SIZE_BUDGET_UNIT_BYTES.get(unit)
+        amount = float_value(parsed_note.get("size_budget_value"))
+        if multiplier is None or amount <= 0:
+            return None
+        budget_bytes = int(
+            (Decimal(str(amount)) * Decimal(multiplier)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        )
+        size_goal = SizeGoalIntent(
+            mode="absolute",
+            value_bytes=budget_bytes,
+            reference_runtime_seconds=None,
+            sample_projection_tolerance_percent=DEFAULT_SAMPLE_PROJECTION_TOLERANCE_PERCENT,
+            final_output_tolerance_percent=DEFAULT_FINAL_OUTPUT_TOLERANCE_PERCENT,
+            source="operator_note",
+        )
+    else:
+        if resolved_size_goal.target_size_bytes is None:
+            return None
+        budget_bytes = resolved_size_goal.target_size_bytes
+        unit = "mb"
+        amount = bytes_to_megabytes(budget_bytes) or 0
+        size_goal = resolved_size_goal.intent
     hard_size_cap = bool(parsed_note.get("hard_size_cap")) or bool(_HARD_SIZE_CAP_RE.search(trimmed))
     measured_size_followup = bool(parsed_note.get("measured_size_followup")) or bool(
         _MEASURED_SIZE_FOLLOWUP_RE.search(trimmed)
     )
-    budget_bytes = int(round(amount * multiplier))
-    source_size_bytes = None
     duration_seconds = None
     if isinstance(effective_sample_item, dict):
-        source_size_candidate = float_value(effective_sample_item.get("source_size_bytes"))
         duration_candidate = float_value(effective_sample_item.get("duration_seconds"))
-        source_size_bytes = source_size_candidate if source_size_candidate > 0 else None
         duration_seconds = duration_candidate if duration_candidate > 0 else None
-    video_encoder = None
-    if isinstance(effective_sample_item, dict):
-        resolved_policy = object_dict(effective_sample_item.get("resolved_policy"))
-        video_encoder = str(object_dict(resolved_policy.get("video")).get("encoder") or "").strip() or None
-    audio_kbps = sample_audio_target_kbps(effective_sample_item)
     estimated_audio_bytes = None
     estimated_video_bitrate_kbps = None
     estimated_source_percent = None
-    if duration_seconds and duration_seconds > 0:
-        estimated_audio_bytes = int(round((audio_kbps * 1000.0 / 8.0) * duration_seconds))
-        remaining_video_bytes = max(budget_bytes - estimated_audio_bytes, 0)
-        estimated_video_bitrate_kbps = round((remaining_video_bytes * 8.0 / duration_seconds) / 1000.0, 1)
-    if source_size_bytes and source_size_bytes > 0:
-        estimated_source_percent = round((budget_bytes / source_size_bytes) * 100.0, 2)
-    feasibility, requires_confirmation = size_budget_feasibility(
-        source_percent=estimated_source_percent,
-        video_bitrate_kbps=estimated_video_bitrate_kbps,
-        video_encoder=video_encoder,
-    )
+    stream_budget_payload = None
+    feasibility = "requires_measurement"
+    requires_confirmation = False
+    if effective_sample_item is not None:
+        goal = resolved_size_goal or size_goal.resolve(duration_seconds)
+        stream_budget = resolve_stream_budget_ledger(
+            effective_sample_item,
+            resolved_size_goal=goal,
+            prefer_persisted=False,
+        )
+        stream_budget_payload = stream_budget.to_payload()
+        estimated_audio_bytes = stream_budget.audio_bytes
+        estimated_video_bitrate_kbps = (
+            round(stream_budget.remaining_video_bitrate_bps / 1000.0, 1)
+            if stream_budget.remaining_video_bitrate_bps is not None
+            else None
+        )
+        estimated_source_percent = (
+            round((budget_bytes / stream_budget.source_size_bytes) * 100.0, 2)
+            if stream_budget.source_size_bytes is not None
+            else None
+        )
+        feasibility = stream_budget.feasibility_status
+        requires_confirmation = stream_budget.arithmetic_infeasible
     requested_max_encoded_percent = None
     target_encoded_percent = None
     if hard_size_cap and estimated_source_percent is not None:
@@ -610,14 +592,7 @@ def size_budget_request(
             object_dict(object_dict(effective_sample_item.get("resolved_policy")).get("audio")),
             budget_bytes=budget_bytes,
         )
-    size_goal = SizeGoalIntent(
-        mode="absolute",
-        value_bytes=budget_bytes,
-        reference_runtime_seconds=None,
-        sample_projection_tolerance_percent=DEFAULT_SAMPLE_PROJECTION_TOLERANCE_PERCENT,
-        final_output_tolerance_percent=DEFAULT_FINAL_OUTPUT_TOLERANCE_PERCENT,
-        source="operator_note",
-    )
+    resolved_goal = resolved_size_goal or size_goal.resolve(duration_seconds)
     return {
         "source": "operator_note",
         "operator_note_parse": parsed_note,
@@ -631,10 +606,11 @@ def size_budget_request(
         "estimated_video_bitrate_kbps": estimated_video_bitrate_kbps,
         "target_video_bitrate_kbps": estimated_video_bitrate_kbps,
         "target_encoded_percent": target_encoded_percent,
-        "target_tolerance_percent": DEFAULT_SAMPLE_PROJECTION_TOLERANCE_PERCENT,
-        "sample_projection_tolerance_percent": DEFAULT_SAMPLE_PROJECTION_TOLERANCE_PERCENT,
-        "final_output_tolerance_percent": DEFAULT_FINAL_OUTPUT_TOLERANCE_PERCENT,
-        "size_goal": size_goal.resolve(duration_seconds).to_payload(),
+        "target_tolerance_percent": size_goal.sample_projection_tolerance_percent,
+        "sample_projection_tolerance_percent": size_goal.sample_projection_tolerance_percent,
+        "final_output_tolerance_percent": size_goal.final_output_tolerance_percent,
+        "size_goal": resolved_goal.to_payload(),
+        "stream_budget_ledger": stream_budget_payload,
         "hard_size_cap": hard_size_cap,
         "measured_size_followup": measured_size_followup,
         "evidence_authority": str(parsed_note.get("evidence_authority") or "none"),
@@ -776,6 +752,7 @@ def operator_requested_experiment(
             "estimated_source_percent": object_dict(requested_size_budget).get("estimated_source_percent"),
             "estimated_audio_bytes": object_dict(requested_size_budget).get("estimated_audio_bytes"),
             "estimated_video_bitrate_kbps": object_dict(requested_size_budget).get("estimated_video_bitrate_kbps"),
+            "stream_budget_ledger": object_dict(requested_size_budget).get("stream_budget_ledger"),
             "feasibility": object_dict(requested_size_budget).get("feasibility"),
             "requires_confirmation": object_dict(requested_size_budget).get("requires_confirmation"),
             "hard_size_cap": object_dict(requested_size_budget).get("hard_size_cap"),
@@ -837,11 +814,16 @@ def operator_request_from_intent(
         "measured_size_followup": False,
         "reasoning_note": "The operator selected a typed size and resolution intent in the guided workflow.",
     }
+    planned_policy = merge_policy_fragments(
+        current_policy,
+        intent.policy_fragment(item_runtime_seconds=duration_seconds),
+    )
     size_request = size_budget_request(
         note,
         sample_item,
         parsed_note,
-        current_policy=current_policy,
+        current_policy=planned_policy,
+        resolved_size_goal=resolved_size_goal,
     )
     if size_request is None:
         raise ValueError("The selected size could not be converted into a test budget.")
@@ -891,6 +873,7 @@ def operator_request_from_intent(
         "sample_projection_tolerance_percent": size_request["sample_projection_tolerance_percent"],
         "final_output_tolerance_percent": size_request["final_output_tolerance_percent"],
         "size_goal": size_request["size_goal"],
+        "stream_budget_ledger": size_request.get("stream_budget_ledger"),
         "feasibility": size_request.get("feasibility"),
         "requires_confirmation": size_request.get("requires_confirmation"),
         "hard_size_cap": False,

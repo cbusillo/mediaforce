@@ -5996,40 +5996,34 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                             with patch.object(web_app, "render_source_review_clips", return_value=[source_clip]):
                                 with patch.object(web_app, "generate_compare_clips_from_previews",
                                                   return_value=[compare_clip]):
-                                    with patch.object(
-                                            web_app,
-                                            "estimate_output_overhead_bytes",
-                                            return_value={"audio_bytes": 1, "subtitle_bytes": 2, "container_bytes": 3,
-                                                          "total_bytes": 6},
-                                    ):
-                                        payload, cleanup_path = web_app._run_sampled_calibration(
-                                            config=self.config,
-                                            prefix="tv/show",
-                                            action="baseline",
-                                            host_data={"key": "localhost"},
-                                            notes="",
-                                            policy={
-                                                "video": {
-                                                    "encoder": "libsvtav1",
-                                                    "pixel_format": "yuv420p10le",
-                                                    "quality_metric": "auto",
-                                                    "sample_every": "8m",
-                                                    "sample_duration": "20s",
-                                                    "preset": 4,
-                                                },
-                                                "audio": {},
-                                                "subtitle": {},
+                                    payload, cleanup_path = web_app._run_sampled_calibration(
+                                        config=self.config,
+                                        prefix="tv/show",
+                                        action="baseline",
+                                        host_data={"key": "localhost"},
+                                        notes="",
+                                        policy={
+                                            "video": {
+                                                "encoder": "libsvtav1",
+                                                "pixel_format": "yuv420p10le",
+                                                "quality_metric": "auto",
+                                                "sample_every": "8m",
+                                                "sample_duration": "20s",
+                                                "preset": 4,
                                             },
-                                            seed_metadata=None,
-                                            sample_item={
-                                                "source_path": str(source_path),
-                                                "source_size_bytes": 200_000_000,
-                                                "duration_seconds": 2600.0,
-                                                "rel_path": "tv/show/episode-review.mkv",
-                                            },
-                                            calibration_run_id="run-123",
-                                            process_controller=Mock(),
-                                        )
+                                            "audio": {},
+                                            "subtitle": {},
+                                        },
+                                        seed_metadata=None,
+                                        sample_item={
+                                            "source_path": str(source_path),
+                                            "source_size_bytes": 200_000_000,
+                                            "duration_seconds": 2600.0,
+                                            "rel_path": "tv/show/episode-review.mkv",
+                                        },
+                                        calibration_run_id="run-123",
+                                        process_controller=Mock(),
+                                    )
 
         self.assertIsNone(cleanup_path)
         self.assertTrue(payload["preview_clips"][0]["path"].startswith("/review-media/run-123/"))
@@ -6037,6 +6031,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertTrue(payload["compare_clips"][0]["path"].startswith("/review-media/run-123/"))
         self.assertEqual(payload["review_moments"][0]["role"], "hard")
         self.assertEqual(payload["review_moments"][0]["evidence_id"], "ev1_fingerprint")
+        self.assertEqual(
+            payload["sample_result"]["stream_budget_ledger"]["ledger_id"],
+            payload["sample_item"]["stream_budget_ledger"]["ledger_id"],
+        )
 
     def test_load_calibration_state_builds_review_pairs_for_browser_player(self) -> None:
         review_dir = self.config.paths.review_dir / "run-pairs" / "item-00"
@@ -6622,6 +6620,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             process_controller=unittest.mock.ANY,
             host=host,
             quality_temp_dir=self.config.staging_root,
+            stream_budget_ledger=unittest.mock.ANY,
         )
         sample_encode_mock.assert_called_once()
         self.assertEqual(sample_encode_mock.call_args.kwargs["host"], host)
@@ -8934,13 +8933,20 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "source_path": str(source_path),
                 "source_fingerprint": "source-fingerprint",
                 "source_size_bytes": 1024,
+                "output_container": "mkv",
             }
+            item["stream_budget_ledger"] = execution.resolve_stream_budget_ledger(
+                item,
+                default_video_policy=item["resolved_policy"]["video"],
+                output_container="mkv",
+                prefer_persisted=False,
+            ).to_payload()
             with patch("mediaforce.execution.resolve_item_source_path", return_value=source_path), patch(
                     "mediaforce.execution.resolve_item_staging_path", return_value=staging_path
-            ), patch("mediaforce.execution._search_quality", return_value=quality_result), patch(
+            ), patch("mediaforce.execution._search_quality", return_value=quality_result) as search_mock, patch(
                 "mediaforce.execution._select_streams", return_value={"audio_tracks": [], "subtitle_tracks": []}
-            ), patch("mediaforce.execution._build_ffmpeg_command",
-                     return_value=["ffmpeg", "-i", str(source_path), str(staging_path)]), patch(
+            ) as select_mock, patch("mediaforce.execution._build_ffmpeg_command",
+                     return_value=["ffmpeg", "-i", str(source_path), str(staging_path)]) as command_mock, patch(
                 "mediaforce.execution._run_encode_command", side_effect=run_encode_side_effect
             ), patch("mediaforce.execution.probe_media", return_value=staged_probe), patch(
                 "mediaforce.execution.file_fingerprint", return_value="staged-fingerprint"
@@ -8959,6 +8965,15 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             self.assertEqual(result.staging_path, staging_path)
             self.assertTrue(staging_path.exists())
+            select_mock.assert_not_called()
+            self.assertEqual(
+                search_mock.call_args.kwargs["stream_budget_ledger"].ledger_id,
+                item["stream_budget_ledger"]["ledger_id"],
+            )
+            self.assertEqual(
+                command_mock.call_args.kwargs["selection"].plan_id,
+                item["stream_budget_ledger"]["stream_plan"]["plan_id"],
+            )
             artifact_row = self._staged_artifact_value(
                 connection,
                 item_id,
@@ -12041,8 +12056,18 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 .values(
                     duration_seconds=88 * 60,
                     audio_summary_json=json.dumps(
-                        [{"index": 0, "codec": "aac", "channels": 2, "language": "eng"}]
+                        [
+                            {
+                                "index": 0,
+                                "codec_name": "aac",
+                                "channels": 2,
+                                "language": "eng",
+                                "default": 1,
+                                "bit_rate": 192_000,
+                            }
+                        ]
                     ),
+                    attachment_summary_json=json.dumps([]),
                 )
             )
             connection.commit()
@@ -12079,6 +12104,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertNotIn(str(self.root), json.dumps(payload["representative_selection"], sort_keys=True))
         self.assertEqual(payload["resolved_operator_intent"]["size_goal"]["mode"], "normalized")
         self.assertEqual(payload["resolved_operator_intent"]["size_goal"]["target_size_bytes"], 586_666_667)
+        self.assertEqual(payload["stream_budget_ledger"]["totals"]["total_target_bytes"], 586_666_667)
+        self.assertEqual(payload["stream_budget_ledger"]["totals"]["non_video_bytes"], 132_586_667)
+        self.assertEqual(payload["stream_budget_ledger"]["totals"]["remaining_video_bytes"], 454_080_000)
+        self.assertEqual(
+            payload["item_plan"]["stream_plan_id"],
+            payload["stream_budget_ledger"]["stream_plan"]["plan_id"],
+        )
         self.assertEqual(payload["size_goal_options"][0]["resolved_size_goal"]["target_size_mb"], 586.667)
         self.assertEqual(payload["size_goal_options"][0]["operator_intent"]["resolution"]["mode"], "source")
         self.assertEqual(

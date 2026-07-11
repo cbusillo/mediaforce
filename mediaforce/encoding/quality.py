@@ -120,6 +120,8 @@ def parse_quality_search_measurements(stdout: str) -> list[QualitySearchMeasurem
 def analyze_quality_policy_failure(
         error_message: str,
         video_policy: dict[str, object],
+        *,
+        max_encoded_percent_override: float | None = None,
 ) -> dict[str, object] | None:
     if "failed to find a suitable crf" not in error_message.lower():
         return None
@@ -129,7 +131,11 @@ def analyze_quality_policy_failure(
     metric = _analysis_metric(video_policy, measurements)
     target_score = _float_policy(video_policy, f"target_{metric.lower()}", 0.0)
     min_score = _float_policy(video_policy, f"min_target_{metric.lower()}", target_score)
-    max_encoded_percent = _float_policy(video_policy, "max_encoded_percent", 100.0)
+    max_encoded_percent = (
+        max_encoded_percent_override
+        if max_encoded_percent_override is not None
+        else _float_policy(video_policy, "max_encoded_percent", 100.0)
+    )
     same_metric = [measurement for measurement in measurements if measurement.metric.lower() == metric.lower()]
     if not same_metric:
         return None
@@ -262,6 +268,10 @@ def _size_to_bytes(size: float, unit: str) -> int:
     return int(size * multipliers.get(normalized, 1))
 
 
+def _format_number(value: float) -> str:
+    return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
 def _host_hwaccel_context(host: dict[str, object] | None) -> tuple[str | None, bool | None]:
     host_payload = object_dict(host)
     platform_name = str(host_payload.get("platform") or "") or None
@@ -296,7 +306,7 @@ def run_crf_search(
         sample_duration: str,
         min_crf: int,
         max_crf: int,
-        max_encoded_percent: int,
+        max_encoded_percent: float,
         svt_params: list[str],
         thorough: bool,
         video_filter: str | None = None,
@@ -326,7 +336,7 @@ def run_crf_search(
         "--max-crf",
         str(max_crf),
         "--max-encoded-percent",
-        str(max_encoded_percent),
+        _format_number(max_encoded_percent),
     ]
     cmd.extend(
         ab_av1_hwaccel_input_args(

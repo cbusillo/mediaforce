@@ -1,7 +1,7 @@
 """Add persisted media fingerprint evidence to library items.
 
-Revision ID: 20260711_0006
-Revises: 20260711_0005
+Revision ID: 20260711_0007
+Revises: 20260711_0006
 Create Date: 2026-07-11 21:00:00
 """
 
@@ -9,8 +9,8 @@ import sqlalchemy as sa
 # noinspection PyPackageRequirements
 from alembic import op
 
-revision = "20260711_0006"
-down_revision = "20260711_0005"
+revision = "20260711_0007"
+down_revision = "20260711_0006"
 branch_labels = None
 depends_on = None
 

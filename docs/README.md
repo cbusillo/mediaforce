@@ -22,6 +22,8 @@ Use this directory for guidance that should not live in `AGENTS.md`.
   versioned evidence, and safe allow-listed transforms
 - `docs/architecture/media-fingerprint-evidence.md`: measured visual/audio
   complexity, versioned media fingerprint evidence, and review-moment selection
+- `docs/architecture/stream-budget-ledger.md`: production stream selection,
+  non-video overhead, uncertainty, and deterministic size feasibility
 
 ## Design briefs
 

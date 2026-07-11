@@ -1,5 +1,6 @@
 import copy
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Literal
 
 from mediaforce.core.type_defs import float_value, int_value, object_dict
@@ -30,7 +31,8 @@ _SUBTITLE_INTENT_KEYS = (
 
 
 def megabytes_to_bytes(value: float) -> int:
-    return int(round(max(0.0, value) * DECIMAL_MEGABYTE_BYTES))
+    decimal_value = max(Decimal(0), Decimal(str(value))) * Decimal(DECIMAL_MEGABYTE_BYTES)
+    return int(decimal_value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 def bytes_to_megabytes(value: int | float | None) -> float | None:

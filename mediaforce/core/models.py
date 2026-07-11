@@ -17,5 +17,6 @@ class ProbeSummary:
     default_subtitle_language: str | None
     audio_summary_json: str
     subtitle_summary_json: str
+    attachment_summary_json: str = "[]"
     cadence_summary_json: str = "{}"
     media_fingerprint_json: str = "{}"

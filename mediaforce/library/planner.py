@@ -9,6 +9,7 @@ from mediaforce.core.type_defs import float_value, object_dict
 from mediaforce.encoding.cadence import cadence_manifest_payload
 from mediaforce.encoding.fingerprint import media_fingerprint_manifest_payload
 from mediaforce.tuning.size_goals import operator_intent_from_policy
+from mediaforce.tuning.stream_budget import resolve_stream_budget_ledger
 
 
 @dataclass(slots=True)
@@ -83,6 +84,8 @@ def build_manifest_item(row: dict[str, Any], config: MediaforceConfig) -> dict[s
 
     audio_summary = json.loads(row["audio_summary_json"])
     subtitle_summary = json.loads(row["subtitle_summary_json"])
+    attachment_summary_json = row.get("attachment_summary_json")
+    attachment_summary = json.loads(attachment_summary_json) if attachment_summary_json else None
     cadence_summary = json.loads(row["cadence_summary_json"]) if row.get("cadence_summary_json") else None
     media_fingerprint = json.loads(row["media_fingerprint_json"]) if row.get("media_fingerprint_json") else None
     source_id = stable_source_id(row)
@@ -104,7 +107,7 @@ def build_manifest_item(row: dict[str, Any], config: MediaforceConfig) -> dict[s
         subtitle_policy=object_dict(policy.get("subtitle")),
     )
 
-    return {
+    item = {
         "library_item_id": row["id"],
         "source_path": row["source_path"],
         "rel_path": row["rel_path"],
@@ -117,6 +120,7 @@ def build_manifest_item(row: dict[str, Any], config: MediaforceConfig) -> dict[s
         "height": row.get("height"),
         "duration_seconds": row["duration_seconds"],
         "container": row["container"],
+        "output_container": config.output_container,
         "status": row["status"],
         "recommendation": recommendation.bucket,
         "priority_score": recommendation.score,
@@ -128,6 +132,7 @@ def build_manifest_item(row: dict[str, Any], config: MediaforceConfig) -> dict[s
         ),
         "audio_summary": audio_summary,
         "subtitle_summary": subtitle_summary,
+        "attachment_summary": attachment_summary,
         "cadence_summary": cadence_summary,
         "cadence_evidence": cadence_evidence,
         "cadence_decision": cadence_decision,
@@ -136,3 +141,11 @@ def build_manifest_item(row: dict[str, Any], config: MediaforceConfig) -> dict[s
         "media_fingerprint_evidence": media_fingerprint_evidence,
         "media_fingerprint_decision": media_fingerprint_decision,
     }
+    item["stream_budget_ledger"] = resolve_stream_budget_ledger(
+        item,
+        default_video_policy=config.video,
+        output_container=config.output_container,
+        resolved_size_goal=operator_intent.size_goal.resolve(float_value(row.get("duration_seconds")) or None),
+        prefer_persisted=False,
+    ).to_payload()
+    return item

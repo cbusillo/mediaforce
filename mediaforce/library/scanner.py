@@ -149,6 +149,7 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                 "default_subtitle_language": probe.default_subtitle_language,
                 "audio_summary_json": probe.audio_summary_json,
                 "subtitle_summary_json": probe.subtitle_summary_json,
+                "attachment_summary_json": probe.attachment_summary_json,
                 "cadence_summary_json": probe.cadence_summary_json,
                 "media_fingerprint_json": probe.media_fingerprint_json,
                 "priority_score": recommendation.score,
@@ -310,6 +311,7 @@ def _failed_probe_summary(error: Exception) -> ProbeSummary:
         default_subtitle_language=None,
         audio_summary_json="[]",
         subtitle_summary_json="[]",
+        attachment_summary_json="",
         cadence_summary_json=json.dumps(cadence_summary, separators=(",", ":"), sort_keys=True),
         media_fingerprint_json=json.dumps(media_fingerprint, separators=(",", ":"), sort_keys=True),
     )
