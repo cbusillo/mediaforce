@@ -9,6 +9,7 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict, objec
 from mediaforce.execution import describe_item_plan, estimate_output_overhead_bytes
 from mediaforce.review import render_audio_spectrogram_compare, render_review_contact_sheet, render_review_timeline_strip
 from mediaforce.reviewing.helpers import planned_audio_action, planned_opus_bitrate, select_primary_audio_track
+from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.web.runtime.folder_tuning_advice import audio_tradeoff_hint
 from mediaforce.web.runtime.folder_tuning_helpers import size_budget_sample_analysis
 
@@ -105,12 +106,15 @@ def build_tuning_runtime_toolbelt(
     video_policy = object_dict(current_policy.get("video"))
     target_size_mb = float_value(video_policy.get("target_size_mb"))
     target_runtime_minutes = float_value(video_policy.get("target_runtime_minutes"))
-    target_runtime_seconds = target_runtime_minutes * 60.0 if target_runtime_minutes > 0 else 0.0
-    target_size_bytes = int(round(target_size_mb * 1024 * 1024)) if target_size_mb > 0 else None
     sample_duration_seconds = float_value(sample_item.get("duration_seconds"))
-    sample_target_size_bytes = None
-    if target_size_bytes and target_runtime_seconds > 0 and sample_duration_seconds > 0:
-        sample_target_size_bytes = int(round(target_size_bytes * sample_duration_seconds / target_runtime_seconds))
+    operator_intent = operator_intent_from_policy(
+        video_policy,
+        default_video_policy=video_policy,
+        audio_policy=object_dict(current_policy.get("audio")),
+        subtitle_policy=object_dict(current_policy.get("subtitle")),
+    )
+    resolved_size_goal = operator_intent.size_goal.resolve(sample_duration_seconds or None)
+    target_size_bytes = resolved_size_goal.target_size_bytes
     toolbelt = {
         "allowed_policy_keys": deps.tuning_policy_key_paths(current_policy),
         "metric_support": metric_support,
@@ -122,7 +126,8 @@ def build_tuning_runtime_toolbelt(
             "target_runtime_minutes": target_runtime_minutes or None,
             "target_size_bytes": target_size_bytes,
             "sample_runtime_seconds": sample_duration_seconds or None,
-            "sample_target_size_bytes": sample_target_size_bytes,
+            "sample_target_size_bytes": target_size_bytes,
+            "operator_intent": operator_intent.to_payload(item_runtime_seconds=sample_duration_seconds or None),
             "max_height": video_policy.get("max_height"),
             "quality_metric": video_policy.get("quality_metric"),
             "target_vmaf": video_policy.get("target_vmaf"),

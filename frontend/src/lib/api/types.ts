@@ -364,6 +364,9 @@ export interface SettingsPayload {
 		min_target_xpsnr: string;
 		target_size_mb: string;
 		target_runtime_minutes: string;
+		size_goal_mode: string;
+		sample_projection_tolerance_percent: string;
+		final_output_tolerance_percent: string;
 		decision_model: string;
 		quality_engine: string;
 		max_height: string;
@@ -412,6 +415,67 @@ export interface FolderSummary {
 	suggested_override?: Record<string, unknown> | null;
 }
 
+export type SizeGoalMode = 'normalized' | 'absolute';
+
+export interface SizeGoalRequestPayload {
+	mode: SizeGoalMode;
+	value_mb: number;
+	reference_runtime_minutes?: number;
+	sample_projection_tolerance_percent: number;
+	final_output_tolerance_percent: number;
+}
+
+export interface ResolutionIntentRequestPayload {
+	mode: 'source' | 'max_height';
+	max_height?: number | null;
+}
+
+export interface OperatorIntentRequestPayload {
+	schema_version: 1;
+	size_goal: SizeGoalRequestPayload;
+	resolution: ResolutionIntentRequestPayload;
+	quality?: Record<string, unknown>;
+	streams?: {
+		audio?: Record<string, unknown>;
+		subtitle?: Record<string, unknown>;
+	};
+}
+
+export interface ResolvedSizeGoalPayload {
+	schema_version: 1;
+	mode: SizeGoalMode | 'ambiguous';
+	source: string;
+	status: string;
+	requires_confirmation: boolean;
+	reference_size_mb?: number | null;
+	reference_runtime_minutes?: number | null;
+	item_runtime_seconds?: number | null;
+	target_size_bytes?: number | null;
+	target_size_mb?: number | null;
+	sample_projection_tolerance_percent: number;
+	final_output_tolerance_percent: number;
+	rationale: string;
+}
+
+export interface ResolvedOperatorIntentPayload {
+	schema_version: 1;
+	requires_confirmation: boolean;
+	size_goal: ResolvedSizeGoalPayload;
+	resolution: Record<string, unknown>;
+	request: OperatorIntentRequestPayload | null;
+	quality?: Record<string, unknown>;
+	streams?: Record<string, unknown>;
+}
+
+export interface SizeGoalOptionPayload {
+	key: string;
+	title: string;
+	detail: string;
+	requires_explicit_selection: boolean;
+	operator_intent: OperatorIntentRequestPayload;
+	resolved_size_goal: ResolvedSizeGoalPayload;
+}
+
 export interface FolderPayload {
 	prefix: string;
 	pending: boolean;
@@ -423,6 +487,8 @@ export interface FolderPayload {
 	calibration?: Record<string, unknown> | null;
 	advice?: Record<string, unknown> | null;
 	size_target_analysis?: Record<string, unknown> | null;
+	resolved_operator_intent?: ResolvedOperatorIntentPayload;
+	size_goal_options?: SizeGoalOptionPayload[];
 	approved_season_shortcut?: Record<string, unknown> | null;
 	series_context?: { prefix: string; title: string } | null;
 	pending_proposal?: Record<string, unknown> | null;

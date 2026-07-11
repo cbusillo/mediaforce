@@ -75,6 +75,7 @@ def _library_item(
     priority_score: int,
     recommendation: str,
     recommendation_reason: str,
+    duration_seconds: float = 3_600.0,
 ) -> dict[str, Any]:
     timestamp = _now()
     source_path = _resolve_under_project(
@@ -90,7 +91,7 @@ def _library_item(
         "size_bytes": size_bytes,
         "mtime_ns": 1_700_000_000_000_000_000,
         "fingerprint": f"fixture:{rel_path}",
-        "duration_seconds": 3_600.0,
+        "duration_seconds": duration_seconds,
         "video_codec": video_codec,
         "video_bitrate": 8_000_000 if video_codec == "h264" else 4_500_000,
         "width": 1920,
@@ -470,6 +471,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 priority_score=92,
                 recommendation="priority_encode",
                 recommendation_reason="Fixture high-priority H.264 episode for browser QA.",
+                duration_seconds=88 * 60,
             ),
             _library_item(
                 project_root=project_root,

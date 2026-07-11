@@ -16,6 +16,8 @@ from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.process_control import run_command
 from mediaforce.core.type_defs import float_value
+from mediaforce.core.type_defs import int_value
+from mediaforce.core.type_defs import object_dict
 from mediaforce.core.type_defs import object_list
 
 TRANSIENT_FILE_BUSY_ERRNOS = {errno.EBUSY}
@@ -203,6 +205,22 @@ def validate_one_item(
 
     if require_size_reduction:
         check(validation, staged_size_bytes < source_size_bytes, "staged file is smaller than source")
+
+    resolved_size_goal = object_dict(object_dict(item.get("resolved_operator_intent")).get("size_goal"))
+    final_lower_bound_bytes = int_value(resolved_size_goal.get("final_lower_bound_bytes"))
+    final_upper_bound_bytes = int_value(resolved_size_goal.get("final_upper_bound_bytes"))
+    if final_lower_bound_bytes > 0 and final_upper_bound_bytes >= final_lower_bound_bytes:
+        validation["final_size_goal"] = {
+            "target_size_bytes": int_value(resolved_size_goal.get("target_size_bytes")) or None,
+            "lower_bound_bytes": final_lower_bound_bytes,
+            "upper_bound_bytes": final_upper_bound_bytes,
+            "tolerance_percent": float_value(resolved_size_goal.get("final_output_tolerance_percent")) or None,
+        }
+        check(
+            validation,
+            final_lower_bound_bytes <= staged_size_bytes <= final_upper_bound_bytes,
+            "staged file is within the final size target band",
+        )
 
     if source_duration_seconds > 0:
         check(validation, staged_duration_seconds > 0, "staged file duration is readable")

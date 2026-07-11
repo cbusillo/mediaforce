@@ -34,7 +34,8 @@ not only work when the current live library has rows.
 The managed smoke seeds a compact but non-empty workflow dataset:
 
 - Queue density: two pending `tv/Example Show/Season 1` items and one lower
-  priority movie folder.
+  priority movie folder. The representative episode is 88 minutes so the goal
+  screen resolves the 300 MB / 45 minute default to approximately 587 MB.
 - Folder Studio: `/folders/tv/Example%20Show/Season%201`, including enough item
   metadata to render policy comparison, sample facts, queue state, and side
   context.
@@ -110,6 +111,15 @@ details must agree on the requested total episode target. In particular, a
 request for 225 MB at source resolution must not fall back to the configured
 300 MB / 45 minute default after confirmation; the queued policy should pair
 225 MB with the representative episode runtime and preserve source resolution.
+
+For the runtime-normalized default, the goal screen must use the representative
+episode runtime supplied by the API. A representative 88-minute episode should
+show approximately 587 MB from the 300 MB / 45 minute reference, explain that
+scaling, and submit the typed normalized request rather than rebuilding the
+number in the browser. The same screen must keep an explicit 225 MB target at
+225 MB, show the ±10% sample and ±5% final bands in the resolved contract, and
+require an explicit mode choice for ambiguous legacy values before enabling the
+test action.
 
 When a measured sample lands outside that target band, the comparison viewport
 must say that the size goal was not met before presenting review media. It must

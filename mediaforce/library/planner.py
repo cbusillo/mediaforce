@@ -5,7 +5,9 @@ from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.evidence import stable_source_id
+from mediaforce.core.type_defs import float_value, object_dict
 from mediaforce.encoding.cadence import cadence_manifest_payload
+from mediaforce.tuning.size_goals import operator_intent_from_policy
 
 
 @dataclass(slots=True)
@@ -87,6 +89,13 @@ def build_manifest_item(row: dict[str, Any], config: MediaforceConfig) -> dict[s
         source_id=source_id,
         source_fingerprint=str(row.get("fingerprint") or "") or None,
     )
+    video_policy = object_dict(policy.get("video"))
+    operator_intent = operator_intent_from_policy(
+        video_policy,
+        default_video_policy=config.video,
+        audio_policy=object_dict(policy.get("audio")),
+        subtitle_policy=object_dict(policy.get("subtitle")),
+    )
 
     return {
         "library_item_id": row["id"],
@@ -107,6 +116,9 @@ def build_manifest_item(row: dict[str, Any], config: MediaforceConfig) -> dict[s
         "recommendation_reason": recommendation.reason,
         "staging_path": str(staging_root / output_rel),
         "resolved_policy": policy,
+        "resolved_operator_intent": operator_intent.to_payload(
+            item_runtime_seconds=float_value(row.get("duration_seconds")) or None
+        ),
         "audio_summary": audio_summary,
         "subtitle_summary": subtitle_summary,
         "cadence_summary": cadence_summary,

@@ -9,7 +9,8 @@ from mediaforce.advising.policy import has_nonpositive_video_budget, merge_polic
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.type_defs import object_dict, object_list
-from mediaforce.web.runtime.folder_tuning_advice import operator_preserves_source_resolution
+from mediaforce.tuning.size_goals import operator_intent_from_policy
+from mediaforce.web.runtime.folder_tuning_advice import operator_preserves_source_resolution, operator_request_from_intent
 from mediaforce.web.runtime.folder_tuning_helpers import (
     allows_measured_size_quality_tradeoff,
     measured_size_budget_policy_fragment,
@@ -183,7 +184,34 @@ def _honor_operator_source_resolution(
 ) -> dict[str, Any]:
     if not operator_preserves_source_resolution(operator_request):
         return combined_fragment
-    return merge_policy_fragments(combined_fragment, {"video": {"max_height": 0}})
+    return merge_policy_fragments(
+        combined_fragment,
+        {
+            "video": {
+                "max_height": 0,
+                "resolution_intent_mode": "source",
+                "resolution_intent_source": "operator",
+            }
+        },
+    )
+
+
+def _unconfirmed_legacy_size_issue(config: MediaforceConfig, policy: dict[str, Any]) -> str | None:
+    video_policy = object_dict(policy.get("video"))
+    if not {"target_size_mb", "target_size_bytes"} & video_policy.keys():
+        return None
+    intent = operator_intent_from_policy(
+        video_policy,
+        default_video_policy=object_dict(config.raw.get("video")),
+        audio_policy=object_dict(policy.get("audio")),
+        subtitle_policy=object_dict(policy.get("subtitle")),
+    )
+    if not intent.size_goal.requires_confirmation:
+        return None
+    return (
+        "Confirm whether the saved legacy size is runtime-normalized or an absolute per-episode target before "
+        "queueing another sample."
+    )
 
 
 def _proposal_can_queue(
@@ -235,17 +263,28 @@ def _size_budget_measurement_fragment(
         return None
     if not request.get("operator_confirmed") or has_nonpositive_video_budget(request):
         return None
-    budget_bytes = _positive_number(size_request.get("budget_bytes"))
+    raw_budget_bytes = _positive_number(size_request.get("budget_bytes"))
     duration_seconds = _positive_number(sample_item.get("duration_seconds"))
-    if budget_bytes is None or duration_seconds is None:
+    if raw_budget_bytes is None or duration_seconds is None:
         return None
+    budget_bytes = int(round(raw_budget_bytes))
+    applied_fragment = object_dict(request.get("applied_policy"))
+    applied_video = object_dict(applied_fragment.get("video"))
+    if str(applied_video.get("size_goal_mode") or "").strip().lower() in {"normalized", "absolute"}:
+        return applied_fragment
     target_fragment = {
         "video": {
-            "target_size_mb": round(budget_bytes / (1024 ** 2), 3),
+            "size_goal_schema_version": 1,
+            "size_goal_mode": "absolute",
+            "size_goal_source": "operator_note",
+            "sample_projection_tolerance_percent": 10.0,
+            "final_output_tolerance_percent": 5.0,
+            "target_size_bytes": budget_bytes,
+            "target_size_mb": round(budget_bytes / 1_000_000, 3),
             "target_runtime_minutes": round(duration_seconds / 60.0, 3),
         }
     }
-    return merge_policy_fragments(object_dict(request.get("applied_policy")), target_fragment)
+    return merge_policy_fragments(applied_fragment, target_fragment)
 
 
 def _can_keep_first_size_budget_sample(
@@ -382,6 +421,7 @@ def folder_ai_tune_preview_action(
         normalized_prefix: str,
         note: str,
         host_key: str,
+        operator_intent: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     trimmed_note = note.strip()
     host = deps.resolve_sample_host(config, host_key)
@@ -400,11 +440,50 @@ def folder_ai_tune_preview_action(
             raise HTTPException(status_code=404, detail=f"No sample item found for {normalized_prefix}")
         calibration = deps.load_calibration_state(config, normalized_prefix)
         current_policy = object_dict(calibration.get("policy")) if calibration else object_dict(sample_item.get("resolved_policy"))
-    operator_request = deps.operator_requested_experiment(
-        trimmed_note,
-        sample_item,
-        current_policy=current_policy,
+    if object_dict(operator_intent):
+        try:
+            operator_request = operator_request_from_intent(
+                object_dict(operator_intent),
+                note=trimmed_note,
+                sample_item=sample_item,
+                current_policy=current_policy,
+            )
+        except ValueError as exc:
+            return {"ok": False, "message": str(exc)}
+    else:
+        operator_request = deps.operator_requested_experiment(
+            trimmed_note,
+            sample_item,
+            current_policy=current_policy,
+        )
+    current_operator_intent = operator_intent_from_policy(
+        object_dict(current_policy.get("video")),
+        default_video_policy=object_dict(config.raw.get("video")),
+        audio_policy=object_dict(current_policy.get("audio")),
+        subtitle_policy=object_dict(current_policy.get("subtitle")),
     )
+    requested_video = object_dict(object_dict(object_dict(operator_request).get("applied_policy")).get("video"))
+    request_payload = object_dict(operator_request)
+    explicit_budget_bytes = _positive_number(request_payload.get("budget_bytes")) or _positive_number(
+        object_dict(request_payload.get("size_budget_request")).get("budget_bytes")
+    )
+    has_explicit_size_confirmation = (
+        str(requested_video.get("size_goal_mode") or "").strip().lower() in {"normalized", "absolute"}
+        or explicit_budget_bytes is not None
+    )
+    current_video = object_dict(current_policy.get("video"))
+    has_legacy_size_value = bool({"target_size_mb", "target_size_bytes"} & current_video.keys())
+    if (
+            has_legacy_size_value
+            and current_operator_intent.size_goal.requires_confirmation
+            and not has_explicit_size_confirmation
+    ):
+        return {
+            "ok": False,
+            "message": current_operator_intent.size_goal.resolve(
+                _positive_number(sample_item.get("duration_seconds"))
+            ).rationale,
+        }
     if calibration is None:
         with open_db(config.paths.db_path) as connection:
             return _seed_preview_action(
@@ -478,6 +557,9 @@ def folder_ai_tune_confirm_action(
 
         policy_source = object_dict(calibration.get("policy")) if calibration else object_dict(sample_item.get("resolved_policy"))
         final_policy = deps.apply_policy_fragment(policy_source, applied_policy)
+        legacy_size_issue = _unconfirmed_legacy_size_issue(config, final_policy)
+        if legacy_size_issue is not None:
+            return {"ok": False, "message": legacy_size_issue}
         if advice_payload:
             deps.save_advice_state(config, normalized_prefix, advice_payload)
 
@@ -569,6 +651,9 @@ def _retry_latest_sample_job(
         action = str(existing_job.get("action") or "").strip()
         if action not in {"baseline", "ai_tune"}:
             return {"ok": False, "message": "Ask the bench for a draft first."}
+        legacy_size_issue = _unconfirmed_legacy_size_issue(config, object_dict(existing_job.get("policy")))
+        if legacy_size_issue is not None:
+            return {"ok": False, "message": legacy_size_issue}
 
         stored_host = object_dict(existing_job.get("host"))
         host_key = str(stored_host.get("key") or "").strip()
@@ -614,8 +699,16 @@ def folder_ai_tune_action(
         normalized_prefix: str,
         note: str,
         host_key: str,
+        operator_intent: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    preview = folder_ai_tune_preview_action(config, deps, normalized_prefix, note, host_key)
+    preview = folder_ai_tune_preview_action(
+        config,
+        deps,
+        normalized_prefix,
+        note,
+        host_key,
+        operator_intent,
+    )
     if not preview.get("ok"):
         return preview
     proposal = object_dict(preview.get("proposal"))
@@ -661,6 +754,10 @@ def _seed_preview_action(
     combined_fragment = seed_fragment
     measurement_fragment = _size_budget_measurement_fragment(operator_request, sample_item)
     if measurement_fragment is not None:
+        measurement_fragment = _honor_operator_source_resolution(
+            operator_request=operator_request,
+            combined_fragment=measurement_fragment,
+        )
         combined_fragment = merge_policy_fragments(combined_fragment, measurement_fragment)
         seeded_policy = deps.apply_policy_fragment(base_policy, combined_fragment)
         seed_job_fields["seed_applied_policy"] = combined_fragment

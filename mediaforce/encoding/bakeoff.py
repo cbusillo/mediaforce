@@ -7,6 +7,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.type_defs import float_value, int_value, object_dict
 from mediaforce.encoding.helpers import build_svt_params
 from mediaforce.encoding.video_filters import build_video_filter
+from mediaforce.tuning.size_goals import bytes_to_megabytes, operator_intent_from_policy
 
 
 DEFAULT_BAKEOFF_ENGINES = ("ab-av1", "av1an", "xav", "auto-boost")
@@ -90,7 +91,16 @@ def _build_item_plan(
     source_path = str(item.get("source_path") or "")
     rel_path = str(item.get("rel_path") or source_path)
     item_output_dir = output_dir / f"item-{index:02d}" if output_dir is not None else None
-    size_target_bytes = _target_size_bytes(video_policy)
+    duration_seconds = float_value(item.get("duration_seconds"))
+    operator_intent = operator_intent_from_policy(
+        video_policy,
+        default_video_policy=config.video,
+        audio_policy=object_dict(policy.get("audio")),
+        subtitle_policy=object_dict(policy.get("subtitle")),
+    )
+    resolved_size_goal = operator_intent.size_goal.resolve(duration_seconds or None)
+    size_target_bytes = resolved_size_goal.target_size_bytes
+    size_goal_issue = resolved_size_goal.rationale if size_target_bytes is None else None
     source_size_bytes = int_value(item.get("source_size_bytes")) or int_value(item.get("size_bytes"))
 
     return {
@@ -98,16 +108,29 @@ def _build_item_plan(
         "rel_path": rel_path,
         "source_path": source_path,
         "source_size_bytes": source_size_bytes,
-        "duration_seconds": float_value(item.get("duration_seconds")),
+        "duration_seconds": duration_seconds,
         "resolution": _resolution(width, height),
         "target_size_bytes": size_target_bytes,
+        "size_goal_status": resolved_size_goal.status,
+        "size_goal_issue": size_goal_issue,
+        "resolved_operator_intent": operator_intent.to_payload(item_runtime_seconds=duration_seconds or None),
         "target_size_percent": _target_size_percent(size_target_bytes, source_size_bytes),
         "quality_floor": _quality_floor(video_policy),
         "max_height": int_value(video_policy.get("max_height")),
         "cadence_decision": object_dict(item.get("cadence_decision")) if "cadence_decision" in item else None,
         "clip_duration_seconds": clip_duration_seconds,
         "review_artifact_dir": str(item_output_dir) if item_output_dir is not None else None,
-        "engines": [_engine_candidate(engine, item, video_policy, item_output_dir) for engine in engines],
+        "engines": [
+            _engine_candidate(
+                engine,
+                item,
+                video_policy,
+                item_output_dir,
+                size_target_bytes,
+                size_goal_issue,
+            )
+            for engine in engines
+        ],
     }
 
 
@@ -116,6 +139,8 @@ def _engine_candidate(
         item: dict[str, Any],
         video_policy: dict[str, Any],
         output_dir: Path | None,
+        target_size_bytes: int | None,
+        size_goal_issue: str | None,
 ) -> dict[str, Any]:
     source_path = str(item.get("source_path") or "SOURCE_PATH")
     source_codec = str(item.get("video_codec") or "")
@@ -138,13 +163,29 @@ def _engine_candidate(
         ),
         cadence_source_fingerprint=str(item.get("source_fingerprint") or "") or None,
     )
-    target_size_mb = int_value(video_policy.get("target_size_mb"))
+    target_size_mb = bytes_to_megabytes(target_size_bytes) or 0
     max_encoded_percent = int_value(video_policy.get("max_encoded_percent"))
     target_vmaf = float_value(video_policy.get("target_vmaf"))
     min_target_vmaf = float_value(video_policy.get("min_target_vmaf"))
     preset = int_value(video_policy.get("preset"))
     pixel_format = str(video_policy.get("pixel_format") or "yuv420p10le")
     svt_params = build_svt_params(video_policy)
+
+    if engine == "auto-boost" and target_size_bytes is None:
+        return _candidate_to_dict(
+            BakeoffCandidate(
+                key="auto-boost",
+                label="Auto-Boost Essential",
+                category="scene-aware-candidate",
+                maturity="research-candidate",
+                required_tools=("Auto-Boost-Essential script", "SVT-AV1-Essential or compatible SVT-AV1"),
+                metric_support=("script-defined",),
+                command=(),
+                command_status="blocked-unresolved-size-goal",
+                sources=("https://github.com/nekotrix/auto-boost-algorithm/tree/main/Auto-Boost-Essential",),
+                notes=(size_goal_issue or "Resolve the size goal before running this target-size engine.",),
+            )
+        )
 
     if engine == "ab-av1":
         command = [
@@ -307,12 +348,25 @@ def _normalize_engines(engines: list[str] | None) -> list[str]:
 
 def _default_targets(config: MediaforceConfig) -> dict[str, Any]:
     video = config.video
-    target_size_mb = int_value(video.get("target_size_mb"))
-    target_runtime_minutes = int_value(video.get("target_runtime_minutes"))
+    operator_intent = operator_intent_from_policy(
+        video,
+        default_video_policy=video,
+        audio_policy=config.audio,
+        subtitle_policy=config.subtitle,
+    )
+    target_size_mb = bytes_to_megabytes(operator_intent.size_goal.value_bytes)
+    target_runtime_minutes = (
+        operator_intent.size_goal.reference_runtime_seconds / 60.0
+        if operator_intent.size_goal.reference_runtime_seconds is not None
+        else None
+    )
     return {
         "target_size_mb": target_size_mb,
         "target_runtime_minutes": target_runtime_minutes,
-        "target_size_bytes": target_size_mb * 1024 * 1024 if target_size_mb > 0 else None,
+        "target_size_bytes": operator_intent.size_goal.value_bytes,
+        "size_goal_mode": operator_intent.size_goal.mode,
+        "sample_projection_tolerance_percent": operator_intent.size_goal.sample_projection_tolerance_percent,
+        "final_output_tolerance_percent": operator_intent.size_goal.final_output_tolerance_percent,
         "max_height": int_value(video.get("max_height")),
         "quality_metric": str(video.get("quality_metric") or "auto"),
         "target_vmaf": float_value(video.get("target_vmaf")),
@@ -323,13 +377,6 @@ def _default_targets(config: MediaforceConfig) -> dict[str, Any]:
         "decision_model": str(video.get("decision_model") or "size_first_review"),
         "quality_engine": str(video.get("quality_engine") or "ab_av1_fast_sample"),
     }
-
-
-def _target_size_bytes(video_policy: dict[str, Any]) -> int | None:
-    target_size_mb = int_value(video_policy.get("target_size_mb"))
-    if target_size_mb <= 0:
-        return None
-    return target_size_mb * 1024 * 1024
 
 
 def _target_size_percent(target_size_bytes: int | None, source_size_bytes: int) -> float | None:

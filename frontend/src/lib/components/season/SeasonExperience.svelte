@@ -3,15 +3,22 @@
 	import { onMount, tick } from 'svelte';
 
 	import { apiDownloadHref, postJson } from '$lib/api/client';
-	import type { FolderPayload, FolderStatusPayload } from '$lib/api/types';
+	import type {
+		FolderPayload,
+		FolderStatusPayload,
+		OperatorIntentRequestPayload
+	} from '$lib/api/types';
 	import {
 		approvalGuardFromMessage,
 		currentEncodeProgress,
+		currentOperatorIntent,
 		detailSeasonState,
 		episodeLabel,
 		folderSizeTargetAnalysis,
+		formatDecimalFileSize,
 		formatFileSize,
 		goalRequest,
+		isSizeGoalSelectionConfirmed,
 		isSeriesPrefix,
 		measuredFollowupRequest,
 		normalizeReviewPairs,
@@ -74,6 +81,7 @@
 	} = $props();
 
 	let selectedGoalKey = $state<SizeGoal['key']>('recommended');
+	let selectedGoalPrefix = $state('');
 	let selectedHostKey = $state('');
 	let retryMode = $state(false);
 	let selectedMoment = $state(0);
@@ -102,6 +110,12 @@
 	const humanState = $derived(detailSeasonState(folder, status));
 	const goals = $derived(sizeGoals(folder));
 	const selectedGoal = $derived(goals.find((goal) => goal.key === selectedGoalKey) ?? goals[0]);
+	const requiresExplicitGoalSelection = $derived(
+		goals.some((goal) => goal.requiresExplicitSelection)
+	);
+	const goalSelectionConfirmed = $derived(
+		isSizeGoalSelectionConfirmed(goals, selectedGoalKey, selectedGoalPrefix, folder.prefix)
+	);
 	const hostOptions = $derived(
 		((folder.sample_host_options ?? []) as HostOption[]).filter((host) => host.key)
 	);
@@ -241,7 +255,11 @@
 	}
 
 	async function makeTest() {
-		await startTest(goalRequest(selectedGoal));
+		if (!selectedGoal || !goalSelectionConfirmed) {
+			actionError = 'Choose how this legacy size should behave before making a test.';
+			return;
+		}
+		await startTest(goalRequest(selectedGoal), selectedGoal.operatorIntent);
 	}
 
 	async function retryMeasuredTarget() {
@@ -251,10 +269,13 @@
 				'The previous test did not preserve its requested size. Choose a size and try again.';
 			return;
 		}
-		await startTest(note);
+		await startTest(note, currentOperatorIntent(folder));
 	}
 
-	async function startTest(note: string) {
+	async function startTest(
+		note: string,
+		operatorIntent: OperatorIntentRequestPayload | null = null
+	) {
 		actionError = '';
 		actionMessage = '';
 		actionStartedAt = Date.now();
@@ -264,7 +285,8 @@
 			const preview = ensureOk(
 				await postJson<ActionResponse>(endpoint('ai-tune/preview'), {
 					note,
-					host_key: selectedHostKey
+					host_key: selectedHostKey,
+					operator_intent: operatorIntent
 				}),
 				'We couldn’t prepare the test.'
 			);
@@ -377,7 +399,17 @@
 			(Boolean(asText(calibration.job_id)) && !asText(calibration.draft_hash)) ||
 			reviewGateStatus === 'missing_review_media';
 		if (incompleteSavedTest) {
-			await startTest(asText(calibration.notes) || goalRequest(selectedGoal));
+			if (!goalSelectionConfirmed) {
+				actionError = '';
+				retryMode = true;
+				await focusCurrentHeading();
+				return;
+			}
+			const fallbackNote = selectedGoal ? goalRequest(selectedGoal) : '';
+			await startTest(
+				asText(calibration.notes) || fallbackNote,
+				currentOperatorIntent(folder) ?? selectedGoal?.operatorIntent ?? null
+			);
 			return;
 		}
 		if (
@@ -610,6 +642,20 @@
 		await focusCurrentHeading();
 	}
 
+	function selectGoal(key: SizeGoal['key']) {
+		selectedGoalKey = key;
+		selectedGoalPrefix = folder.prefix;
+	}
+
+	function isGoalSelected(goal: SizeGoal): boolean {
+		if (requiresExplicitGoalSelection && selectedGoalPrefix !== folder.prefix) return false;
+		return selectedGoal === goal;
+	}
+
+	function goalTabIndex(goal: SizeGoal, index: number): number {
+		return isGoalSelected(goal) || (!goalSelectionConfirmed && index === 0) ? 0 : -1;
+	}
+
 	async function handleGoalKeydown(event: KeyboardEvent, index: number) {
 		let nextIndex: number;
 		if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = index + 1;
@@ -619,7 +665,7 @@
 		else return;
 		event.preventDefault();
 		nextIndex = (nextIndex + goals.length) % goals.length;
-		selectedGoalKey = goals[nextIndex].key;
+		selectGoal(goals[nextIndex].key);
 		await tick();
 		goalButtons[nextIndex]?.focus();
 	}
@@ -753,25 +799,29 @@
 				</div>
 
 				<div class="goal-options" role="radiogroup" aria-label="Size per episode">
+					{#if goals.length === 0}
+						<p class="goal-options__empty" role="status">
+							Mediaforce needs a representative episode runtime before it can resolve this size
+							goal.
+						</p>
+					{/if}
 					{#each goals as goal, goalIndex (goal.key)}
 						<button
 							bind:this={goalButtons[goalIndex]}
 							type="button"
-							class:selected={selectedGoalKey === goal.key}
-							onclick={() => (selectedGoalKey = goal.key)}
+							class:selected={isGoalSelected(goal)}
+							onclick={() => selectGoal(goal.key)}
 							onkeydown={(event) => handleGoalKeydown(event, goalIndex)}
 							role="radio"
-							aria-checked={selectedGoalKey === goal.key}
-							tabindex={selectedGoalKey === goal.key ? 0 : -1}
+							aria-checked={isGoalSelected(goal)}
+							tabindex={goalTabIndex(goal, goalIndex)}
 						>
 							<span class="goal-radio"><i></i></span>
 							<span class="goal-copy">
 								<span class="goal-label">{goal.title}</span>
 								<strong>{goal.megabytesPerEpisode} MB</strong>
 								<small
-									>per episode · about {formatFileSize(
-										goal.megabytesPerEpisode * 1024 ** 2 * episodeCount
-									)} total</small
+									>per episode · about {formatDecimalFileSize(goal.targetSizeBytes * episodeCount)} total</small
 								>
 								<p>{goal.detail}</p>
 							</span>
@@ -797,19 +847,25 @@
 							<p class="host-unavailable" role="status">
 								No computers are available right now. Open Details to see what needs attention.
 							</p>
+						{:else if requiresExplicitGoalSelection && !goalSelectionConfirmed}
+							<p class="host-unavailable" role="status">
+								Choose whether the saved legacy size scales with runtime or stays fixed per episode.
+							</p>
 						{/if}
 					</div>
 					<div class="goal-action__button">
 						<span class="mobile-safety">
 							{noAvailableHosts
 								? 'No computers available · Open Details'
-								: 'One short test · Nothing is replaced'}
+								: requiresExplicitGoalSelection && !goalSelectionConfirmed
+									? 'Choose one size behavior first'
+									: 'One short test · Nothing is replaced'}
 						</span>
 						<button
 							class="primary-button"
 							type="button"
 							onclick={makeTest}
-							disabled={noAvailableHosts}
+							disabled={noAvailableHosts || !selectedGoal || !goalSelectionConfirmed}
 						>
 							Make a test
 							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
@@ -1304,7 +1360,9 @@
 					</div>
 					<div>
 						<span>Target</span><strong
-							>{asNumber(technicalPolicy().target_size_mb) || selectedGoal.megabytesPerEpisode} MB / episode</strong
+							>{selectedGoal?.megabytesPerEpisode ||
+								asNumber(technicalPolicy().target_size_mb) ||
+								'—'} MB / episode</strong
 						>
 					</div>
 					{#if asNumber(sampleResult.chosen_crf)}<div>
@@ -3298,6 +3356,16 @@
 		max-width: none;
 	}
 
+	.goal-options__empty {
+		background: var(--mf-attention-bg);
+		border: 1px solid var(--mf-attention-line);
+		border-radius: var(--mf-radius-3);
+		color: var(--mf-attention-fg);
+		grid-column: 1 / -1;
+		margin: 0;
+		padding: 16px;
+	}
+
 	.goal-options button {
 		align-items: flex-start;
 		background: var(--mf-bg-panel);
@@ -3314,7 +3382,7 @@
 	}
 
 	.goal-options button:hover {
-		background: #fafcfb;
+		background: var(--mf-bg-panel-2);
 		border-color: var(--mf-active-line);
 		transform: none;
 	}
