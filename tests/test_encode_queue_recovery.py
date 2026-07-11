@@ -4467,6 +4467,46 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(percent_summary["item_count"], 1)
         self.assertEqual(wildcard_sample["rel_path"], "tv/show_1/Episode 01.mkv")
 
+    def test_sample_item_selection_does_not_choose_largest_file_outlier(self) -> None:
+        config = replace(
+            self.config,
+            raw={
+                **self.config.raw,
+                "media": {**self.config.raw["media"], "output_container": "mkv"},
+                "video": {"target_vmaf": 95.0},
+                "audio": {},
+                "subtitle": {},
+                "planning": {},
+            },
+        )
+        sizes = [900_000_000, 950_000_000, 1_000_000_000, 1_050_000_000, 12_000_000_000]
+        with open_db(self.config.paths.db_path) as connection:
+            for index, size_bytes in enumerate(sizes, start=1):
+                source = self._create_source_file(f"representative-{index:02d}.mkv")
+                item_id = self._insert_library_item(connection, source, status="planned")
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_id)
+                    .values(
+                        rel_path=f"tv/show/Season 1/Episode {index:02d}.mkv",
+                        parent_dir="tv/show/Season 1",
+                        size_bytes=size_bytes,
+                        duration_seconds=2700.0,
+                        width=1920,
+                        height=1080,
+                        audio_summary_json=json.dumps([{"codec_name": "eac3", "channels": 6}]),
+                    )
+                )
+
+            sample = web_app._sample_item(connection, config, "tv/show/Season 1")
+
+        assert sample is not None
+        self.assertNotEqual(sample["rel_path"], "tv/show/Season 1/Episode 05.mkv")
+        selection = sample["representative_selection"]
+        self.assertEqual(selection["coverage"]["selected_item_count"], 1)
+        self.assertEqual(selection["outliers"][0]["rel_path"], "tv/show/Season 1/Episode 05.mkv")
+        self.assertFalse(selection["outliers"][0]["selected"])
+
     def test_folder_workflow_marks_mixed_season_without_hiding_counts(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             encoded = self._create_source_file("Season 2/encoded.mkv")
@@ -11933,6 +11973,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertFalse(payload["pending"])
         self.assertEqual(payload["prefix"], "tv/show")
         self.assertEqual(payload["sample_item"]["rel_path"], "tv/show/episode-folder.mkv")
+        self.assertNotIn("source_path", payload["sample_item"])
+        self.assertNotIn("staging_path", payload["sample_item"])
+        self.assertEqual(payload["representative_selection"]["coverage"]["selected_item_count"], 1)
+        self.assertEqual(
+            payload["representative_selection"]["selected_items"][0]["rationale"]["role"],
+            "primary",
+        )
+        self.assertNotIn(str(self.root), json.dumps(payload["representative_selection"], sort_keys=True))
         self.assertIn("summary", payload)
 
     def test_folder_api_exposes_measured_size_target_analysis(self) -> None:

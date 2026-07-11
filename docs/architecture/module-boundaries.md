@@ -38,6 +38,8 @@ after the package consolidation pass. Avoid growing them with new helper logic.
   - JSON-oriented type aliases
 - `utils.py`
   - generic utility helpers such as timestamps and file fingerprints
+- `evidence.py`
+  - stable versioned evidence envelopes and source/policy/tool staleness checks
 - `binaries.py`
   - ffmpeg/ffprobe binary discovery
 - `process_control.py`
@@ -140,6 +142,9 @@ test patch targets.
   - folder inspection and suggested override shaping
 - `run_manifests.py`
   - candidate selection and run-manifest creation
+- `representatives.py`
+  - deterministic representative selection, coverage, rationale, and safe
+    public payload shaping
 
 Guidance:
 

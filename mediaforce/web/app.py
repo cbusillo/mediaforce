@@ -64,6 +64,8 @@ from mediaforce.execution import (
 )
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.planner import build_manifest_item
+from mediaforce.library.representatives import RepresentativeSelection, load_representative_selection, \
+    public_representative_item
 from mediaforce.library.run_manifests import select_encode_candidates
 from mediaforce.hosts.types import HostSetupResult
 from mediaforce.hosts.config import configured_remote_host_execution_mode
@@ -598,8 +600,8 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             if summary.get("item_count", 0) == 0:
                 status_code = 200 if folder_scan_job and folder_scan_job.get("status") in {"queued", "running"} else 404
                 return {**base_context, "pending": True, "scan_job": folder_scan_job}, status_code
-            sample_item = _sample_item(connection, config, normalized_prefix)
-            if sample_item is None:
+            representative_selection = _representative_selection(connection, config, normalized_prefix)
+            if representative_selection is None:
                 return (
                     {
                         **base_context,
@@ -609,6 +611,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                     },
                     404,
                 )
+            sample_item = representative_selection.primary_item()
             advice_state = _load_advice_state(config, normalized_prefix)
             pending_proposal_raw = _load_pending_proposal(config, normalized_prefix)
             pending_proposal = _pending_proposal_public_view(pending_proposal_raw)
@@ -663,7 +666,8 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 **base_context,
                 "pending": False,
                 "summary": summary,
-                "sample_item": sample_item,
+                "sample_item": public_representative_item(sample_item),
+                "representative_selection": representative_selection.public_payload(),
                 "item_plan": describe_item_plan({**sample_item, "resolved_policy": policy}),
                 "policy": policy,
                 "hot_spots": hot_spots,
@@ -2003,26 +2007,16 @@ def _folder_review_badge(
 
 
 def _sample_item(connection: DBClient, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
-    normalized_prefix = prefix.strip().strip("/")
-    base_query = (
-        select(library_items)
-        .where(
-            or_(
-                library_items.c.rel_path == normalized_prefix,
-                library_items.c.rel_path.like(_prefix_descendant_like_pattern(normalized_prefix), escape="\\"),
-            )
-        )
-        .order_by(library_items.c.priority_score.desc(), library_items.c.size_bytes.desc())
-        .limit(1)
-    )
-    row = connection.execute(
-        base_query.where(library_items.c.status.in_(("discovered", "planned", "validated", "encoded")))
-    ).mappings().fetchone()
-    if row is None:
-        row = connection.execute(base_query).mappings().fetchone()
-    if row is None:
-        return None
-    return build_manifest_item(mapping_dict(row), config)
+    selection = _representative_selection(connection, config, prefix)
+    return selection.primary_item() if selection is not None else None
+
+
+def _representative_selection(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+) -> RepresentativeSelection | None:
+    return load_representative_selection(connection, config, prefix)
 
 
 def _prefix_descendant_like_pattern(prefix: str) -> str:

@@ -16,6 +16,8 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 
 - `docs/architecture/module-boundaries.md`: durable backend/frontend module
   boundary map after the structural refactor pass
+- `docs/architecture/representative-evidence.md`: deterministic representative
+  selection, coverage, and the versioned evidence contract
 
 ## Design briefs
 
