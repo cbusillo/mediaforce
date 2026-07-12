@@ -10,7 +10,7 @@ import time
 import unittest
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi.routing import APIRoute
 from sqlalchemy import func
@@ -50,7 +50,7 @@ from mediaforce.core.evidence import stable_policy_hash
 from mediaforce.core.process_control import ProcessCancelledError
 from mediaforce.core.type_defs import object_dict
 from mediaforce.execution import resolve_stream_budget_ledger
-from mediaforce.hosts.types import HostStatus
+from mediaforce.hosts.types import HostReadinessError, HostStatus
 from mediaforce.tuning.tuning_memory import (
     promote_learning_artifact,
     record_tuning_session,
@@ -298,6 +298,19 @@ def _fake_operator_note_parse(
         "crop": crop,
         "reasoning_note": "test parser",
     }
+
+
+def _ready_calibration_host(host_data: dict[str, Any]) -> HostStatus:
+    return HostStatus(
+        key=str(host_data.get("key") or host_data.get("host") or "local"),
+        label=str(host_data.get("label") or "Test host"),
+        mode="ssh",
+        priority=0,
+        capabilities=["sample_calibration"],
+        available=True,
+        message="Mounted and ready",
+        missing_paths=[],
+    )
 
 
 class TuningRuntimeTests(unittest.TestCase):
@@ -7820,8 +7833,65 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(job)
         self.assertEqual(job["job_id"], "target-failed")
 
+    def test_run_calibration_job_records_storage_recovery_failure_before_sampling(self) -> None:
+        saved_payloads: list[dict[str, object]] = []
+        sample_item = Mock()
+
+        deps = CalibrationRunDeps(
+            now_iso=lambda: "2026-04-11T00:00:00+00:00",
+            ensure_sample_host_ready=Mock(
+                side_effect=HostReadinessError(
+                    "M2 MBP could not connect the media share with Finder.",
+                    failure_kind="host_configuration",
+                )
+            ),
+            load_job_state=lambda *_args, **_kwargs: {"job_id": "job-1", "status": "queued"},
+            sample_item=sample_item,
+            save_job_state=lambda _connection, _config, _prefix, payload: saved_payloads.append(dict(payload)),
+            save_calibration_state=lambda *_args, **_kwargs: None,
+            record_run_verdict=lambda *_args, **_kwargs: None,
+            summarize_calibration_result=lambda payload: payload,
+            calibration_mode_for_action=lambda _action: "sample",
+            effective_video_preset=lambda *_args, **_kwargs: 4,
+            search_quality_for_source=lambda *_args, **_kwargs: None,
+            run_sample_encode=lambda *_args, **_kwargs: None,
+            detect_video_crop=lambda *_args, **_kwargs: None,
+            recommend_review_timestamps=lambda *_args, **_kwargs: [],
+            encode_preview_clips=lambda *_args, **_kwargs: [],
+            render_source_review_clips=lambda *_args, **_kwargs: [],
+            generate_compare_clips_from_previews=lambda *_args, **_kwargs: [],
+            resolve_stream_budget_ledger=resolve_stream_budget_ledger,
+            build_svt_params=lambda *_args, **_kwargs: {},
+            review_url=lambda *_args, **_kwargs: "",
+            encode_manifest_items=lambda *_args, **_kwargs: None,
+            validate_manifest_items=lambda *_args, **_kwargs: None,
+            generate_compare_clips=lambda *_args, **_kwargs: [],
+            staged_artifact_columns=("library_item_id",),
+        )
+
+        with patch("mediaforce.web.runtime.calibration_runtime.load_config", return_value=self.config), patch(
+                "mediaforce.web.runtime.calibration_runtime.purge_transient_artifacts"
+        ):
+            run_calibration_job(
+                config_path=self.config.paths.config_path,
+                prefix="tv/show/season-1",
+                action="ai_tune",
+                host_data={"key": "cbusillo@chris-mbp", "label": "M2 MBP"},
+                notes="retry later",
+                policy={"video": {}},
+                job_id="job-1",
+                seed_metadata=None,
+                process_controller=type("Controller", (), {"throw_if_cancelled": lambda _self: None})(),
+                deps=deps,
+            )
+
+        failed = next(payload for payload in saved_payloads if payload.get("status") == "failed")
+        self.assertIn("could not connect the media share with Finder", str(failed.get("error") or ""))
+        sample_item.assert_not_called()
+
     def test_run_calibration_job_marks_cancelled_run_stopped(self) -> None:
         saved_statuses: list[str] = []
+        readiness = Mock(side_effect=lambda _config, host_data: _ready_calibration_host(host_data))
 
         def _save_job_state(_connection: object, _config: object, _prefix: str, payload: dict[str, object]) -> None:
             status = payload.get("status")
@@ -7829,6 +7899,7 @@ class TuningRuntimeTests(unittest.TestCase):
 
         deps = CalibrationRunDeps(
             now_iso=lambda: "2026-04-11T00:00:00+00:00",
+            ensure_sample_host_ready=readiness,
             load_job_state=lambda *_args, **_kwargs: {"job_id": "job-1", "status": "queued"},
             sample_item=lambda *_args, **_kwargs: {
                 "rel_path": "tv/show/season-1/episode.mkv",
@@ -7881,6 +7952,10 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("running", saved_statuses)
         self.assertIn("stopped", saved_statuses)
         self.assertNotIn("failed", saved_statuses)
+        readiness.assert_called_once_with(
+            self.config,
+            {"key": "cbusillo@localhost", "label": "M4 Studio"},
+        )
 
     def test_run_calibration_job_preserves_failed_target_search_evidence(self) -> None:
         saved_payloads: list[dict[str, object]] = []
@@ -7899,6 +7974,7 @@ class TuningRuntimeTests(unittest.TestCase):
 
         deps = CalibrationRunDeps(
             now_iso=lambda: "2026-04-11T00:00:00+00:00",
+            ensure_sample_host_ready=lambda _config, host_data: _ready_calibration_host(host_data),
             load_job_state=lambda *_args, **_kwargs: {"job_id": "job-1", "status": "queued"},
             sample_item=lambda *_args, **_kwargs: {
                 "rel_path": "tv/show/season-1/episode.mkv",
@@ -7990,6 +8066,7 @@ class TuningRuntimeTests(unittest.TestCase):
 
         deps = CalibrationRunDeps(
             now_iso=lambda: "2026-04-11T00:00:00+00:00",
+            ensure_sample_host_ready=lambda _config, host_data: _ready_calibration_host(host_data),
             load_job_state=lambda *_args, **_kwargs: {"job_id": "job-1", "status": "queued", "sample_item": dict(saved_sample_item)},
             sample_item=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not reselect sample item")),
             save_job_state=_save_job_state,

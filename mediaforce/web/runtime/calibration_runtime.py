@@ -1,7 +1,7 @@
 import json
 import shutil
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,7 @@ from mediaforce.tuning.target_size_search import TargetSizeSearchError
 @dataclass(slots=True)
 class CalibrationRunDeps:
     now_iso: Any
+    ensure_sample_host_ready: Any
     load_job_state: Any
     sample_item: Any
     save_job_state: Any
@@ -178,6 +179,8 @@ def run_calibration_job(
     staged_artifact_snapshot: dict[str, Any] | None = None
 
     try:
+        ready_host = deps.ensure_sample_host_ready(config, host_data)
+        host_data = {**host_data, **asdict(ready_host)}
         with open_db(config.paths.db_path) as connection:
             sample_item = _job_sample_item(job)
             if sample_item is None:

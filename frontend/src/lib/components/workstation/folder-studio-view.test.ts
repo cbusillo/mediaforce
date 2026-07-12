@@ -203,6 +203,25 @@ describe('Folder Studio review request mapping', () => {
 		});
 	});
 
+	it('shows storage-recoverable workers as reconnecting rather than already ready', () => {
+		const options = buildBenchHostOptions([
+			{
+				key: 'm2',
+				label: 'M2',
+				available: true,
+				storage_recovery_available: true,
+				detail: 'Storage will reconnect when the test starts.'
+			}
+		]);
+
+		expect(options[0]).toMatchObject({
+			available: true,
+			state: 'Reconnects for sample',
+			detail: 'Storage will reconnect when the test starts.'
+		});
+		expect(resolveBenchRequestState('try 300MB', 'm2', options, null, false).disabled).toBe(false);
+	});
+
 	it('maps worker states for output processing capacity', () => {
 		const options = buildProcessingHostOptions({
 			compact: true,
@@ -290,6 +309,40 @@ describe('Folder Studio review request mapping', () => {
 				detail: 'ssh failed'
 			}
 		]);
+	});
+
+	it('shows storage-recoverable processing workers as reconnecting capacity', () => {
+		const options = buildProcessingHostOptions({
+			compact: true,
+			hosts: [
+				{
+					key: 'm2',
+					label: 'M2',
+					available: false,
+					message: 'Storage will reconnect when work starts',
+					storage_recovery_available: true,
+					missing_paths: ['/Volumes/media/tv'],
+					issues: [],
+					detail: null,
+					capabilities: ['encode_queue'],
+					priority: 1,
+					max_parallel_encodes: 1,
+					active_encode_count: 0,
+					schedule_profile_label: 'always',
+					schedule_detail: 'always',
+					schedule_open: true,
+					active_flag: 'idle',
+					active_reason: 'shared storage will reconnect when work starts',
+					queue_active: false
+				}
+			]
+		});
+
+		expect(options[0]).toMatchObject({
+			state: 'Reconnects storage',
+			tone: 'wait',
+			detail: 'Storage will reconnect when work starts'
+		});
 	});
 
 	it('enables send only for a note, available host, and inactive sample job', () => {

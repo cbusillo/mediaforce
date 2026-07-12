@@ -8,6 +8,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.type_defs import object_dict
 from mediaforce.hosts.config import _host_capabilities, _host_priority, _parse_utc_offset_minutes, \
     host_media_access_for_host, host_targets_current_machine, stream_host_has_remote_source_roots
+from mediaforce.hosts.mount_runtime import finder_mount_roots_for_paths
 from mediaforce.hosts.status_helpers import _classify_ssh_failure, _find_local_tool, _host_capability_issues, \
     _host_setup_supported, _local_platform_name, _local_utc_offset_minutes, _parse_remote_status_output, \
     _remote_setup_needs_password, _remote_status_script, _status_from_paths, _status_platform
@@ -197,6 +198,7 @@ def _remote_host_status(
         paths=paths,
         repo_path=repo_check_path,
         include_expensive_tools=cached_tools is None,
+        mount_paths=[str(path) for path in finder_mount_roots_for_paths(paths)],
         writable_paths=writable_paths,
     )
     try:
@@ -329,6 +331,11 @@ def _remote_host_status(
     tools = object_dict(payload.get("tools"))
     tool_paths = object_dict(payload.get("tool_paths"))
     platform_name = _status_platform(payload.get("platform"), tools=tools)
+    missing_mounts = [
+        str(path_text)
+        for path_text, mounted in object_dict(payload.get("mounts")).items()
+        if platform_name == "macos" and not bool(mounted)
+    ]
     learn_remote_wake_mac(config, host, ssh_host)
     capability_issues = _host_capability_issues(
         host,
@@ -357,6 +364,7 @@ def _remote_host_status(
         videotoolbox_available=bool(tools.get("ffmpeg_videotoolbox")),
         utc_offset_minutes=_parse_utc_offset_minutes(payload.get("utc_offset")),
         issues=capability_issues,
+        missing_mounts=missing_mounts,
         setup_supported=_host_setup_supported(platform_name),
         setup_requires_password=_remote_setup_needs_password(capability_issues),
         require_paths=require_paths,
@@ -386,10 +394,16 @@ def _current_machine_host_status(
     else:
         status_paths = [Path(str(path).strip()).expanduser() for path in explicit_source_roots.values() if str(path).strip()]
         require_paths = bool(status_paths)
+    platform_name = _local_platform_name()
     mounted_paths = {
         str(path): path.exists()
         for path in status_paths
     }
+    missing_mounts = [
+        str(path)
+        for path in finder_mount_roots_for_paths(status_paths)
+        if platform_name == "macos" and not _local_mount_present(path)
+    ]
     source_path_map = explicit_source_roots if media_access == "stream" else merged_source_roots
     source_paths = [str(path) for path in source_path_map.values()]
     staging_path = str(config.staging_root_for_host(host)) if require_paths and media_access != "stream" else None
@@ -403,7 +417,6 @@ def _current_machine_host_status(
     }
     tools = local_tool_status_snapshot()
     ffmpeg_bin = _find_local_tool("ffmpeg", fallback_paths=["/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"])
-    platform_name = _local_platform_name()
     capability_issues = _host_capability_issues(
         host,
         tools=tools,
@@ -428,6 +441,7 @@ def _current_machine_host_status(
         videotoolbox_available=bool(tools.get("ffmpeg_videotoolbox")),
         utc_offset_minutes=_local_utc_offset_minutes(),
         issues=capability_issues,
+        missing_mounts=missing_mounts,
         setup_supported=_host_setup_supported(platform_name),
         require_paths=require_paths,
     )
@@ -460,3 +474,10 @@ def _local_path_writable(path: Path) -> bool:
         except OSError:
             pass
     return True
+
+
+def _local_mount_present(path: Path) -> bool:
+    try:
+        return path.is_mount()
+    except OSError:
+        return False

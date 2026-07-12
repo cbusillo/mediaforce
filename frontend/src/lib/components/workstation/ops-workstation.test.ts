@@ -354,6 +354,31 @@ describe('Ops workstation mapping', () => {
 		expect(hostStateCopy(unavailable)).toBe('Unavailable');
 	});
 
+	it('treats storage-recoverable workers as reconnecting capacity', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.needs_attention_count = 0;
+		dashboard.encode_queue.recent = [];
+		const recoverable = {
+			...hostsFixture().hosts[0],
+			available: false,
+			queue_active: false,
+			active_encode_count: 0,
+			storage_recovery_available: true,
+			message: 'Storage will reconnect when work starts'
+		};
+		const hosts = { compact: true, hosts: [recoverable] };
+
+		expect(buildOpsBlockers(dashboard, hosts, null).map((blocker) => blocker.key)).not.toContain(
+			'no-hosts-ready'
+		);
+		expect(buildOpsStatusTiles(dashboard, hosts, null).at(-1)).toMatchObject({
+			label: 'Workers',
+			value: '1 can encode / 1'
+		});
+		expect(hostTone(recoverable)).toBe('wait');
+		expect(hostStateCopy(recoverable)).toBe('Reconnects storage');
+	});
+
 	it('shows running encode telemetry instead of stale restart errors', () => {
 		const dashboard = dashboardFixture();
 		dashboard.encode_queue.running[0] = {

@@ -19,7 +19,7 @@ from mediaforce.hosts.wake_helpers import _broadcast_addresses_for_interface, _i
     _persist_remote_wake_mac, _resolve_host_to_ip, _resolved_ssh_network_host, _tcp_port_is_open, \
     _wake_broadcast_destinations
 from mediaforce.hosts.types import AB_AV1_MISSING_ISSUE, DEFAULT_HOST_CAPABILITIES, DEFAULT_HOST_MEDIA_ACCESS, \
-    DEFAULT_WAKE_WAIT_SECONDS, FFMPEG_MISSING_ISSUE, HostSetupResult, HostStatus, \
+    DEFAULT_WAKE_WAIT_SECONDS, FFMPEG_MISSING_ISSUE, HostReadinessError, HostSetupResult, HostStatus, \
     LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE, REMOTE_SHELL_PATH, REMOTE_STATUS_RETRY_DELAY_SECONDS, \
     SAMPLE_AV1_ENCODER_MISSING_ISSUE, SAMPLE_METRIC_MISSING_ISSUE
 
@@ -31,6 +31,7 @@ __all__ = [
     "FFMPEG_MISSING_ISSUE",
     "HostSetupResult",
     "HostStatus",
+    "HostReadinessError",
     "LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE",
     "REMOTE_SHELL_PATH",
     "REMOTE_STATUS_RETRY_DELAY_SECONDS",

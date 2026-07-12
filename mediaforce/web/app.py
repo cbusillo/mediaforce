@@ -7,7 +7,6 @@ import re
 import shutil
 import subprocess
 import threading
-import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
@@ -74,6 +73,7 @@ from mediaforce.remote import (
     HostStatus,
     collect_host_statuses,
     prepare_remote_host_with_password,
+    remote_mount_recovery_supported,
     reset_remote_host_trust,
     run_remote_command,
     run_host_lifecycle_command,
@@ -105,7 +105,7 @@ from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_fo
     archive_cleanup_summary, clear_archive_cleanup_action, \
     clear_completed_backups_action, completed_page_payload, confirm_originals_removed_action, \
     list_completed_folders, \
-    ensure_encode_host_ready, \
+    ensure_encode_host_ready, ensure_sample_host_ready, \
     folder_ai_tune_action, folder_ai_tune_confirm_action, folder_ai_tune_preview_action, \
     folder_card_cache_key, folder_status_payload, host_config_for_key, host_lifecycle_start_command, \
     host_lifecycle_start_timeout_seconds, host_lifecycle_stop_command, host_runtime_rows, \
@@ -133,8 +133,7 @@ from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
     run_full_calibration as runtime_run_full_calibration, \
     run_sampled_calibration as runtime_run_sampled_calibration, \
     remove_path as runtime_remove_path, snapshot_staged_artifact as runtime_snapshot_staged_artifact
-from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail, \
-    unavailable_host_error_message as runtime_unavailable_host_error_message
+from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 from mediaforce.web.runtime.encode_runtime import EncodeQueueRuntimeDeps, \
     clear_stale_encoding_items_when_idle as runtime_clear_stale_encoding_items_when_idle, \
@@ -598,7 +597,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         if started:
             message = f"{label} accepted the start command and is reachable now."
         else:
-            message = f"{label} was already reachable."
+            message = f"{label} is reachable now."
         return _host_action_result(HostSetupResult(ok=True, message=message))
 
     def _reset_host_trust_action(host_key: str) -> dict[str, Any]:
@@ -793,8 +792,11 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         )
         resolved_metric, _ = select_quality_metric(str(video_policy.get("quality_metric", "auto")))
         sample_host_statuses = _sample_calibration_host_statuses(config)
-        sample_host_key = _default_sample_host_key_from_statuses(sample_host_statuses)
         sample_host_choices = _sample_host_options_from_statuses(config, sample_host_statuses)
+        sample_host_key = _sample_host_key_from_choices(
+            _default_sample_host_key_from_statuses(sample_host_statuses),
+            sample_host_choices,
+        )
         return (
             {
                 **base_context,
@@ -1875,31 +1877,12 @@ def _fresh_host_status_for_key(config: MediaforceConfig, host_key: str) -> HostS
 
 
 def _ensure_encode_host_ready(config: MediaforceConfig, host_payload: dict[str, Any] | None) -> bool:
-    host = object_dict(host_payload)
-    host_key = str(host.get("key") or host.get("host") or host.get("label") or "").strip()
-    if not host_key:
-        return False
-    status = _fresh_host_status_for_key(config, host_key)
-    if status is not None and status.available:
-        return False
-    start_command = _host_lifecycle_start_command(host)
-    if not start_command:
-        raise RuntimeError(runtime_unavailable_host_error_message(status))
-    result = run_host_lifecycle_command(host, start_command, timeout=HOST_LIFECYCLE_COMMAND_TIMEOUT_SECONDS)
-    if result.returncode != 0:
-        raise RuntimeError(runtime_lifecycle_command_error_detail(result, "host start command failed"))
-    deadline = time.monotonic() + _host_lifecycle_start_timeout_seconds(host)
-    while time.monotonic() < deadline:
-        refreshed = _fresh_host_status_for_key(config, host_key)
-        if refreshed is not None and refreshed.available:
-            return True
-        time.sleep(HOST_LIFECYCLE_POLL_SECONDS)
-    refreshed = _fresh_host_status_for_key(config, host_key)
-    if refreshed is not None and refreshed.available:
-        return True
-    detail = refreshed.detail if refreshed is not None else None
-    message = refreshed.message if refreshed is not None else f"Timed out waiting for {host_key}"
-    raise RuntimeError(detail or message or f"Timed out waiting for {host_key}")
+    return ensure_encode_host_ready(
+        config,
+        host_payload,
+        lifecycle_command_timeout_seconds=HOST_LIFECYCLE_COMMAND_TIMEOUT_SECONDS,
+        lifecycle_poll_seconds=HOST_LIFECYCLE_POLL_SECONDS,
+    )
 
 
 def _stop_encode_host_if_configured(config: MediaforceConfig, host_payload: dict[str, Any] | None) -> None:
@@ -1944,7 +1927,8 @@ def _sample_host_options_from_statuses(
 
 
 def _sample_host_schedule_fields(config: MediaforceConfig, status: HostStatus) -> dict[str, Any]:
-    host_payload = {**_host_config_for_key(config, status.key), **asdict(status)}
+    host_config = _host_config_for_key(config, status.key)
+    host_payload = {**host_config, **asdict(status)}
     policy = _schedule_profile_policy_for_host(config, host_payload)
     schedule_open = _scheduler_allows_encode_run(policy, host_payload=host_payload)
     summary = str(policy.get("summary") or "").strip()
@@ -1952,6 +1936,7 @@ def _sample_host_schedule_fields(config: MediaforceConfig, status: HostStatus) -
         "schedule_open": schedule_open,
         "schedule_detail": summary,
         "schedule_profile_label": str(policy.get("label") or "Always"),
+        "storage_recovery_available": remote_mount_recovery_supported(config, host_config, status),
     }
 
 
@@ -1962,6 +1947,15 @@ def _sample_host_help_text(sample_host_choices: list[dict[str, Any]], selected_k
         detail = str(option.get("detail") or "").strip()
         return detail or "Choose where sampled calibration should run."
     return "Choose where sampled calibration should run."
+
+
+def _sample_host_key_from_choices(default_key: str, sample_host_choices: list[dict[str, Any]]) -> str:
+    if default_key:
+        return default_key
+    for option in sample_host_choices:
+        if bool(option.get("available")):
+            return str(option.get("key") or "").strip()
+    return ""
 
 
 def _resolve_sample_host(config: MediaforceConfig, host_key: str) -> HostStatus:
@@ -1977,7 +1971,7 @@ def _resolve_sample_host(config: MediaforceConfig, host_key: str) -> HostStatus:
     host = statuses.get(requested_key)
     if host is None:
         raise HTTPException(status_code=400, detail="Unknown sampled calibration host")
-    if not host.available:
+    if not host.available and not remote_mount_recovery_supported(config, _host_config_for_key(config, host.key), host):
         raise HTTPException(status_code=400, detail=host.message)
     return host
 
@@ -2695,6 +2689,7 @@ def _encode_queue_runtime_deps() -> EncodeQueueRuntimeDeps:
 def _calibration_run_deps() -> CalibrationRunDeps:
     return CalibrationRunDeps(
         now_iso=_now_iso,
+        ensure_sample_host_ready=ensure_sample_host_ready,
         load_job_state=_load_job_state,
         sample_item=_sample_item,
         save_job_state=_save_job_state,

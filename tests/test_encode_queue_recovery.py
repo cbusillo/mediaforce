@@ -1793,6 +1793,41 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "deterministic")
 
+    def test_mount_recovery_failure_preserves_host_retry_classification(self) -> None:
+        job = {"host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"}}
+        exc = remote.HostReadinessError(
+            "Remote A could not connect shared storage.",
+            failure_kind="host_unavailable",
+        )
+
+        self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "host_unavailable")
+        self.assertTrue(encode_runtime._encode_failure_is_retryable("host_unavailable", str(exc), job["host"]))
+
+    def test_mount_configuration_failure_is_not_retryable(self) -> None:
+        job = {"host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"}}
+        exc = remote.HostReadinessError(
+            "Mediaforce could not identify the SMB share.",
+            failure_kind="host_configuration",
+        )
+
+        failure_kind = encode_runtime._classify_encode_failure(exc, job)
+        self.assertEqual(failure_kind, "host_configuration")
+        self.assertFalse(encode_runtime._encode_failure_is_retryable(failure_kind, str(exc), job["host"]))
+
+    def test_controller_storage_failure_retries_other_hosts_within_attempt_cap(self) -> None:
+        job = {"host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"}}
+        exc = remote.HostReadinessError(
+            "The controller SMB volume is not mounted.",
+            failure_kind="controller_storage_unavailable",
+        )
+
+        failure_kind = encode_runtime._classify_encode_failure(exc, job)
+        self.assertEqual(failure_kind, "controller_storage_unavailable")
+        self.assertTrue(encode_runtime._encode_failure_is_retryable(failure_kind, str(exc), job["host"]))
+        self.assertFalse(
+            encode_runtime._encode_failure_retries_after_attempt_cap(failure_kind, str(exc), job["host"])
+        )
+
     def test_transient_ssh_failure_stays_in_retry_backoff_after_attempt_cap(self) -> None:
         source_path = self._create_source_file("episode-host-retry.mkv")
         staging_path = self._staging_path("episode-host-retry.mkv")
@@ -2619,6 +2654,39 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertFalse(rows[0]["queue_active"])
         self.assertEqual(rows[0]["active_reason"], "encode queue disabled by schedule")
 
+    def test_host_runtime_rows_marks_missing_storage_as_automatically_recoverable(self) -> None:
+        self.config.raw["remote_hosts"] = [
+            {
+                "host": "remote@mac",
+                "label": "Remote Mac",
+                "capabilities": ["encode_queue"],
+            }
+        ]
+        status = HostStatus(
+            key="remote@mac",
+            label="Remote Mac",
+            mode="ssh",
+            priority=20,
+            capabilities=["encode_queue"],
+            available=False,
+            message="Missing required paths",
+            missing_paths=["/Volumes/media/tv"],
+            missing_mounts=["/Volumes/media"],
+            platform="macos",
+            setup_supported=True,
+        )
+
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.web.app._safe_collect_host_statuses", return_value=[status]
+        ), patch(
+            "mediaforce.web.runtime.host_runtime.remote_mount_recovery_supported", return_value=True
+        ):
+            rows = web_app._host_runtime_rows(connection, self.config)
+
+        self.assertTrue(rows[0]["storage_recovery_available"])
+        self.assertEqual(rows[0]["message"], "Storage will reconnect when work starts")
+        self.assertEqual(rows[0]["active_reason"], "shared storage will reconnect when work starts")
+
     def test_select_encode_host_can_choose_startable_unavailable_host(self) -> None:
         host = {
             "key": "ct103",
@@ -2638,6 +2706,30 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIsNotNone(selected_host)
         assert selected_host is not None
         self.assertEqual(selected_host["key"], "ct103")
+        self.assertIsNone(waiting_reason)
+
+    def test_select_encode_host_can_choose_storage_recoverable_host(self) -> None:
+        host = {
+            "key": "remote-mac",
+            "host": "remote@mac",
+            "label": "Remote Mac",
+            "available": False,
+            "probe_available": False,
+            "priority": 50,
+            "capabilities": ["encode_queue"],
+            "active_encode_count": 0,
+            "max_parallel_encodes": 1,
+            "storage_recovery_available": True,
+            "schedule_profile": "always",
+            "issues": [],
+        }
+
+        with patch("mediaforce.web.app._host_runtime_rows", return_value=[host]):
+            selected_host, waiting_reason = web_app._select_encode_host(
+                cast(Any, None), self.config, {"job_id": "job-1", "bypass_schedule": False}
+            )
+
+        self.assertEqual(selected_host, host)
         self.assertIsNone(waiting_reason)
 
     def test_select_encode_host_does_not_choose_startable_host_with_capability_issues(self) -> None:
@@ -2878,16 +2970,97 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             missing_paths=[],
         )
         with patch(
-                "mediaforce.web.app.collect_host_statuses",
+                "mediaforce.web.runtime.host_runtime.collect_host_statuses",
                 side_effect=[[unavailable], [available]],
         ), patch(
-            "mediaforce.web.app.run_host_lifecycle_command",
+            "mediaforce.web.runtime.host_runtime.run_host_lifecycle_command",
             return_value=subprocess.CompletedProcess(args=["sh"], returncode=0, stdout="", stderr=""),
-        ) as lifecycle_mock, patch("mediaforce.web.app.time.sleep") as sleep_mock:
+        ) as lifecycle_mock, patch("mediaforce.web.runtime.host_runtime.time.sleep") as sleep_mock:
             started = web_app._ensure_encode_host_ready(self.config, host)
         lifecycle_mock.assert_called_once_with(host, "ssh prox-main.shiny pct start 103",
                                                timeout=web_app.HOST_LIFECYCLE_COMMAND_TIMEOUT_SECONDS)
         self.assertTrue(started)
+        sleep_mock.assert_not_called()
+
+    def test_ensure_encode_host_ready_recovers_missing_storage_without_marking_host_started(self) -> None:
+        host = {"key": "remote@mac", "host": "remote@mac", "label": "Remote Mac"}
+        missing = HostStatus(
+            key="remote@mac",
+            label="Remote Mac",
+            mode="ssh",
+            priority=50,
+            capabilities=["encode_queue"],
+            available=False,
+            message="Missing required paths",
+            missing_paths=["/Volumes/media/tv"],
+            missing_mounts=["/Volumes/media"],
+            platform="macos",
+        )
+        available = replace(missing, available=True, message="Mounted and ready", missing_paths=[])
+        mount_result = remote.HostSetupResult(
+            ok=True,
+            message="Connected shared storage on Remote Mac.",
+            performed_steps=["Connected media using the remote Finder Keychain."],
+        )
+
+        with patch(
+                "mediaforce.web.runtime.host_runtime.collect_host_statuses",
+                side_effect=[[missing], [available]],
+        ), patch(
+            "mediaforce.web.runtime.host_runtime.recover_remote_host_mounts",
+            return_value=mount_result,
+        ) as mount_mock, patch(
+            "mediaforce.web.runtime.host_runtime.run_host_lifecycle_command"
+        ) as lifecycle_mock:
+            started = web_app._ensure_encode_host_ready(self.config, host)
+
+        self.assertFalse(started)
+        mount_mock.assert_called_once_with(self.config, host, missing)
+        lifecycle_mock.assert_not_called()
+
+    def test_ensure_encode_host_ready_recovers_storage_after_host_wakes(self) -> None:
+        host = {
+            "key": "remote@mac",
+            "host": "remote@mac",
+            "label": "Remote Mac",
+            "start_command": "wake-remote-mac",
+            "start_timeout_seconds": 5,
+        }
+        sleeping = HostStatus(
+            key="remote@mac",
+            label="Remote Mac",
+            mode="ssh",
+            priority=50,
+            capabilities=["encode_queue"],
+            available=False,
+            message="SSH unavailable",
+            missing_paths=[],
+        )
+        missing = replace(
+            sleeping,
+            message="Shared storage disconnected",
+            missing_paths=["/Volumes/media/tv"],
+            missing_mounts=["/Volumes/media"],
+            platform="macos",
+        )
+        available = replace(missing, available=True, message="Mounted and ready", missing_paths=[], missing_mounts=[])
+        mount_result = remote.HostSetupResult(ok=True, message="Connected shared storage on Remote Mac.")
+
+        with patch(
+                "mediaforce.web.runtime.host_runtime.collect_host_statuses",
+                side_effect=[[sleeping], [missing], [available]],
+        ), patch(
+            "mediaforce.web.runtime.host_runtime.run_host_lifecycle_command",
+            return_value=subprocess.CompletedProcess(args=["sh"], returncode=0, stdout="", stderr=""),
+        ) as lifecycle_mock, patch(
+            "mediaforce.web.runtime.host_runtime.recover_remote_host_mounts",
+            return_value=mount_result,
+        ) as mount_mock, patch("mediaforce.web.runtime.host_runtime.time.sleep") as sleep_mock:
+            started = web_app._ensure_encode_host_ready(self.config, host)
+
+        self.assertTrue(started)
+        lifecycle_mock.assert_called_once()
+        mount_mock.assert_called_once_with(self.config, host, missing)
         sleep_mock.assert_not_called()
 
     def test_ensure_encode_host_ready_returns_false_when_host_already_available(self) -> None:
@@ -2907,8 +3080,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             message="Mounted and ready",
             missing_paths=[],
         )
-        with patch("mediaforce.web.app.collect_host_statuses", return_value=[available]), patch(
-                "mediaforce.web.app.run_host_lifecycle_command"
+        with patch("mediaforce.web.runtime.host_runtime.collect_host_statuses", return_value=[available]), patch(
+                "mediaforce.web.runtime.host_runtime.run_host_lifecycle_command"
         ) as lifecycle_mock:
             started = web_app._ensure_encode_host_ready(self.config, host)
         self.assertFalse(started)
@@ -6358,6 +6531,91 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             host = web_app._resolve_sample_host(self.config, "cbusillo@m1-mini")
         self.assertEqual(host.key, "cbusillo@m1-mini")
 
+    def test_sample_host_option_remains_selectable_when_storage_can_reconnect(self) -> None:
+        status = HostStatus(
+            key="cbusillo@m1-mini",
+            label="M1 mini",
+            mode="ssh",
+            priority=80,
+            capabilities=["sample_calibration"],
+            available=False,
+            message="Missing required paths",
+            missing_paths=["/Volumes/media/tv"],
+            missing_mounts=["/Volumes/media"],
+            platform="macos",
+        )
+
+        with patch("mediaforce.web.app.remote_mount_recovery_supported", return_value=True):
+            options = web_app._sample_host_options_from_statuses(self.config, [status])
+
+        self.assertTrue(options[0]["available"])
+        self.assertTrue(options[0]["storage_recovery_available"])
+        self.assertEqual(options[0]["detail"], "Storage will reconnect when the test starts.")
+
+    def test_default_sample_host_uses_storage_recoverable_host_when_none_are_ready(self) -> None:
+        host_config = {
+            "host": "cbusillo@m1-mini",
+            "label": "M1 mini",
+            "capabilities": ["sample_calibration"],
+        }
+        self.config.raw["remote_hosts"] = [host_config]
+        status = HostStatus(
+            key="cbusillo@m1-mini",
+            label="M1 mini",
+            mode="ssh",
+            priority=80,
+            capabilities=["sample_calibration"],
+            available=False,
+            message="Shared storage disconnected",
+            missing_paths=["/Volumes/media/tv"],
+            missing_mounts=["/Volumes/media"],
+            platform="macos",
+        )
+
+        with patch("mediaforce.web.app._safe_collect_host_statuses", return_value=[status]), patch(
+                "mediaforce.web.runtime.host_runtime.remote_mount_recovery_supported", return_value=True
+        ) as recovery_supported:
+            selected_key = web_app._default_sample_host_key(self.config)
+
+        self.assertEqual(selected_key, "cbusillo@m1-mini")
+        recovery_supported.assert_called_once_with(self.config, host_config, status)
+
+    def test_sample_host_choices_fall_back_past_offline_host_to_recoverable_host(self) -> None:
+        choices = [
+            {"key": "offline", "available": False},
+            {"key": "recoverable", "available": True, "storage_recovery_available": True},
+        ]
+
+        self.assertEqual(web_app._sample_host_key_from_choices("", choices), "recoverable")
+        self.assertEqual(web_app._sample_host_key_from_choices("explicit", choices), "explicit")
+
+    def test_resolve_sample_host_defers_storage_recovery_to_worker(self) -> None:
+        host_config = {
+            "host": "cbusillo@m1-mini",
+            "label": "M1 mini",
+            "capabilities": ["sample_calibration"],
+        }
+        self.config.raw["remote_hosts"] = [host_config]
+        missing = HostStatus(
+            key="cbusillo@m1-mini",
+            label="M1 mini",
+            mode="ssh",
+            priority=80,
+            capabilities=["sample_calibration"],
+            available=False,
+            message="Missing required paths",
+            missing_paths=["/Volumes/media/tv"],
+            missing_mounts=["/Volumes/media"],
+            platform="macos",
+        )
+        with patch("mediaforce.web.app._safe_collect_host_statuses", return_value=[missing]), patch(
+                "mediaforce.web.app.remote_mount_recovery_supported", return_value=True
+        ) as recovery_supported:
+            resolved = web_app._resolve_sample_host(self.config, "cbusillo@m1-mini")
+
+        self.assertEqual(resolved, missing)
+        recovery_supported.assert_called_once_with(self.config, host_config, missing)
+
     def test_resolve_sample_host_allows_closed_encode_schedule_for_manual_samples(self) -> None:
         config = replace(
             self.config,
@@ -7108,24 +7366,25 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertNotIn("for write_path in /srv/media/tv /srv/media/transcode", script)
         self.assertIn('mktemp "$path/.mediaforce-write-test.XXXXXX"', script)
 
-    def test_remote_host_status_keeps_missing_mounts_as_missing_paths(self) -> None:
+    def test_remote_host_status_tracks_disconnected_volume_separately_from_missing_paths(self) -> None:
         host: dict[str, object] = {
             "host": "cbusillo@encode-host",
             "label": "Encode Host",
             "capabilities": ["encode_queue"],
-            "source_roots": {"tv": "/srv/media/tv"},
-            "staging_root": "/srv/media/transcode",
+            "source_roots": {"tv": "/Volumes/My Share/tv"},
+            "staging_root": "/Volumes/My Share/transcode",
         }
         stdout = "\n".join(
             [
-                "path|/srv/media/tv|0",
-                "pathexists|/srv/media/tv|0",
-                "pathread|/srv/media/tv|0",
-                "pathwrite|/srv/media/tv|0",
-                "path|/srv/media/transcode|1",
-                "pathexists|/srv/media/transcode|1",
-                "pathread|/srv/media/transcode|1",
-                "pathwrite|/srv/media/transcode|1",
+                "mount|/Volumes/My Share|0",
+                "path|/Volumes/My Share/tv|0",
+                "pathexists|/Volumes/My Share/tv|0",
+                "pathread|/Volumes/My Share/tv|0",
+                "pathwrite|/Volumes/My Share/tv|0",
+                "path|/Volumes/My Share/transcode|1",
+                "pathexists|/Volumes/My Share/transcode|1",
+                "pathread|/Volumes/My Share/transcode|1",
+                "pathwrite|/Volumes/My Share/transcode|1",
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
@@ -7142,13 +7401,19 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with patch(
                 "mediaforce.remote._run_remote_ssh",
                 return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
-        ), patch("mediaforce.remote._learn_remote_wake_mac"):
+        ) as run_remote_ssh_mock, patch("mediaforce.remote._learn_remote_wake_mac"):
             status = remote._remote_host_status(self.config, host)
 
         self.assertFalse(status.available)
-        self.assertEqual(status.message, "Missing required paths")
-        self.assertEqual(status.missing_paths, ["/srv/media/tv"])
+        self.assertEqual(status.message, "Shared storage disconnected")
+        self.assertEqual(status.missing_paths, ["/Volumes/My Share/tv"])
+        self.assertEqual(status.missing_mounts, ["/Volumes/My Share"])
         self.assertEqual(status.issues, [])
+        self.assertIn(
+            "mount_output_path='/Volumes/My\\040Share'",
+            run_remote_ssh_mock.call_args.kwargs["input_text"],
+        )
+        self.assertIn(' on $mount_path (', run_remote_ssh_mock.call_args.kwargs["input_text"])
 
     def test_remote_host_status_rejects_unwritable_staging_root(self) -> None:
         host: dict[str, object] = {
@@ -8012,7 +8277,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         key_install_mock.assert_called_once_with(host, "secret")
         self.assertEqual(status_mock.call_count, 2)
 
-    def test_prepare_remote_host_with_password_routes_missing_paths_to_finish_prepare(self) -> None:
+    def test_prepare_remote_host_with_password_recovers_missing_macos_mounts_then_rechecks(self) -> None:
         host = {"host": "cbusillo@sample-host", "label": "Sample Host"}
         self.config.raw["remote_hosts"] = [host]
         needs_paths = HostStatus(
@@ -8023,15 +8288,55 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             capabilities=["encode_queue"],
             available=False,
             message="Missing required paths",
-            missing_paths=["/srv/media/transcode"],
+            missing_paths=["/Volumes/media/transcode"],
+            missing_mounts=["/Volumes/media"],
             repo_path=None,
+            platform="macos",
+            setup_supported=True,
+        )
+        ready = replace(needs_paths, available=True, message="Mounted and ready", missing_paths=[])
+        mounted = remote.HostSetupResult(
+            ok=True,
+            message="Connected shared storage on Sample Host.",
+            performed_steps=["Connected media using the remote Finder Keychain."],
+        )
+        with patch("mediaforce.remote._remote_host_status", side_effect=[needs_paths, ready]), patch(
+                "mediaforce.remote.recover_remote_host_mounts", return_value=mounted) as mount_mock, patch(
+                "mediaforce.remote._finish_remote_host_prepare") as finish_mock:
+            result = remote.prepare_remote_host_with_password(self.config, "Sample Host", password=None)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.performed_steps, ["Connected media using the remote Finder Keychain."])
+        mount_mock.assert_called_once_with(self.config, host, needs_paths)
+        finish_mock.assert_not_called()
+
+    def test_prepare_remote_host_with_password_creates_missing_child_paths_on_mounted_volume(self) -> None:
+        host = {"host": "cbusillo@sample-host", "label": "Sample Host"}
+        self.config.raw["remote_hosts"] = [host]
+        needs_path = HostStatus(
+            key="cbusillo@sample-host",
+            label="Sample Host",
+            mode="ssh",
+            priority=0,
+            capabilities=["encode_queue"],
+            available=False,
+            message="Missing required paths",
+            missing_paths=["/Volumes/media/transcode"],
+            missing_mounts=[],
+            repo_path=None,
+            platform="macos",
             setup_supported=True,
         )
         finished = remote.HostSetupResult(ok=True, message="Sample Host is mounted and ready.")
-        with patch("mediaforce.remote._remote_host_status", return_value=needs_paths), patch(
-                "mediaforce.remote._finish_remote_host_prepare", return_value=finished) as finish_mock:
+
+        with patch("mediaforce.remote._remote_host_status", return_value=needs_path), patch(
+                "mediaforce.remote.recover_remote_host_mounts"
+        ) as mount_mock, patch(
+            "mediaforce.remote._finish_remote_host_prepare", return_value=finished
+        ) as finish_mock:
             result = remote.prepare_remote_host_with_password(self.config, "Sample Host", password=None)
-        self.assertTrue(result.ok)
+
+        self.assertEqual(result, finished)
+        mount_mock.assert_not_called()
         finish_mock.assert_called_once_with(self.config, host, [])
 
     def test_request_remote_xcode_install_returns_missing_key_message_without_public_key(self) -> None:

@@ -99,6 +99,9 @@ Guidance:
   - host probe scripts, capability checks, status parsing
 - `lifecycle.py`
   - wake/start/stop commands, cooldown behavior
+- `mount_runtime.py`
+  - controller SMB mount discovery and password-free remote Finder mount recovery
+  - bounded transient LaunchAgent execution, cleanup, and Keychain recovery messages
 - `setup.py`
   - prepare/reset trust/bootstrap flows
 - `models.py`
