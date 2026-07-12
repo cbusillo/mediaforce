@@ -10,6 +10,14 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.execution import resolve_stream_budget_ledger
+from mediaforce.tuning.quality_risk import (
+    append_quality_risk_record,
+    build_quality_risk_contract,
+    normalize_quality_risk_tags,
+    quality_risk_feedback_moment_indexes,
+    quality_risk_public_view,
+    with_quality_risk_intent,
+)
 from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.web.runtime.folder_tuning_advice import operator_preserves_source_resolution, operator_request_from_intent
 from mediaforce.web.runtime.folder_tuning_helpers import (
@@ -56,6 +64,7 @@ class FolderAiTuneDeps:
     clear_pending_proposal: Any
     record_tuning_session: Any
     load_latest_failed_sample_job_state: Any | None = None
+    load_advice_state: Any | None = None
 
 
 def _job_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
@@ -239,8 +248,11 @@ def _proposal_can_queue(
         preview_policy: dict[str, Any],
         request_disposition: str | None,
         alignment_issue: str | None,
+        quality_risk_contract: dict[str, Any] | None = None,
 ) -> bool:
     if alignment_issue is not None:
+        return False
+    if str(object_dict(quality_risk_contract).get("verdict") or "") == "blocked":
         return False
     disposition = str(request_disposition or "").strip().lower()
     if disposition in NONQUEUEABLE_DISPOSITIONS:
@@ -248,6 +260,18 @@ def _proposal_can_queue(
     if applied_fragment:
         return True
     return bool(preview_policy) and disposition in QUEUEABLE_NO_CHANGE_DISPOSITIONS
+
+
+def _quality_risk_blocking_issue(contract: dict[str, Any] | None) -> str | None:
+    payload = object_dict(contract)
+    if str(payload.get("verdict") or "") != "blocked":
+        return None
+    gates = object_dict(payload.get("deterministic_gates"))
+    blocking_reasons = [str(value).strip() for value in object_list(gates.get("blocking_reasons")) if str(value).strip()]
+    if blocking_reasons:
+        return blocking_reasons[0]
+    effective_record = object_dict(object_dict(payload.get("operator_decision")).get("effective_record"))
+    return str(effective_record.get("details") or "Current quality-risk evidence blocks this sample plan.")
 
 
 def _proposal_ready_message(
@@ -264,6 +288,90 @@ def _proposal_ready_message(
     if can_queue:
         return f"The bench kept the current policy. Confirm when you are ready to rerun the {run_label} unchanged."
     return "The bench did not produce a queueable draft yet. Adjust the note and ask again."
+
+
+def _proposal_quality_risk_contract(
+        *,
+        prefix: str,
+        sample_item: dict[str, Any],
+        current_policy: dict[str, Any],
+        preview_policy: dict[str, Any],
+        operator_request: dict[str, Any] | None,
+        calibration: dict[str, Any] | None,
+        advice_state: dict[str, Any] | None,
+        latest_failed_sample_job: dict[str, Any] | None,
+        interpretation: dict[str, Any] | None = None,
+        proposed_policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    contract = build_quality_risk_contract(
+        prefix=prefix,
+        sample_item=sample_item,
+        current_policy=current_policy,
+        preview_policy=preview_policy,
+        operator_request=operator_request,
+        calibration=calibration,
+        advice_state=advice_state,
+        latest_failed_sample_job=latest_failed_sample_job,
+        interpretation=interpretation,
+        proposed_policy=proposed_policy,
+    )
+    contract["public_view"] = quality_risk_public_view(contract)
+    return contract
+
+
+def _persist_quality_risk_feedback(
+        config: MediaforceConfig,
+        deps: FolderAiTuneDeps,
+        *,
+        prefix: str,
+        note: str,
+        sample_item: dict[str, Any],
+        current_policy: dict[str, Any],
+        calibration: dict[str, Any],
+        operator_request: dict[str, Any] | None,
+        latest_failed_sample_job: dict[str, Any] | None,
+) -> dict[str, Any]:
+    request = object_dict(operator_request)
+    tags = normalize_quality_risk_tags(request.get("quality_risk_tags"))
+    authority = str(request.get("evidence_authority") or "none").strip().lower()
+    if tags == ["other"] and authority != "rejected_visual_result":
+        return object_dict(deps.load_advice_state(config, prefix)) if deps.load_advice_state is not None else {}
+    existing_state = (
+        object_dict(deps.load_advice_state(config, prefix))
+        if deps.load_advice_state is not None
+        else {}
+    )
+    contract = build_quality_risk_contract(
+        prefix=prefix,
+        sample_item=sample_item,
+        current_policy=current_policy,
+        preview_policy=current_policy,
+        operator_request=request,
+        calibration=calibration,
+        advice_state=existing_state,
+        latest_failed_sample_job=latest_failed_sample_job,
+    )
+    source_scope = object_dict(contract.get("source_scope"))
+    policy = object_dict(contract.get("policy"))
+    moment_indexes = quality_risk_feedback_moment_indexes(tags, calibration.get("review_moments"))
+    feedback_state = append_quality_risk_record(
+        existing_state,
+        prefix=prefix,
+        source_id=str(source_scope.get("source_id") or ""),
+        policy_hash=str(policy.get("preview_policy_hash") or ""),
+        sample_job_id=str(source_scope.get("sample_job_id") or "") or None,
+        kind="post_test",
+        verdict="rejected" if authority == "rejected_visual_result" else "needs_operator_review",
+        tags=tags,
+        details=str(request.get("quality_risk_details") or note).strip(),
+        created_at=deps.now_iso(),
+        evidence_ids=[str(value) for value in object_list(source_scope.get("evidence_ids"))],
+        moment_indexes=moment_indexes,
+    )
+    feedback_state["operator_note"] = note
+    feedback_state["operator_request"] = request
+    deps.save_advice_state(config, prefix, feedback_state)
+    return feedback_state
 
 
 def _size_budget_measurement_fragment(
@@ -334,19 +442,11 @@ def _operator_request_with_retrieved_memory_authority(
         operator_request: dict[str, Any] | None,
         learning_context: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
+    _ = learning_context
     request = object_dict(operator_request)
     if not request:
         return operator_request
-    authority = str(request.get("evidence_authority") or "none").strip().lower()
-    if authority != "none":
-        return request
-    if not any(
-            str(object_dict(memory).get("evidence_authority") or "none").strip().lower()
-            == "approved_visual_result"
-            for memory in learning_context
-    ):
-        return request
-    return {**request, "evidence_authority": "approved_visual_result"}
+    return request
 
 
 def _blocking_sample_evidence_issue(
@@ -480,6 +580,7 @@ def folder_ai_tune_preview_action(
             sample_item,
             current_policy=current_policy,
         )
+    operator_request = with_quality_risk_intent(operator_request, note=trimmed_note)
     current_operator_intent = operator_intent_from_policy(
         object_dict(current_policy.get("video")),
         default_video_policy=object_dict(config.raw.get("video")),
@@ -584,6 +685,30 @@ def folder_ai_tune_confirm_action(
         legacy_size_issue = _unconfirmed_legacy_size_issue(config, final_policy)
         if legacy_size_issue is not None:
             return {"ok": False, "message": legacy_size_issue}
+        current_advice_state = (
+            object_dict(deps.load_advice_state(config, normalized_prefix))
+            if deps.load_advice_state is not None
+            else {}
+        )
+        confirmation_advice_state = {**current_advice_state, **advice_payload}
+        latest_failed_loader = deps.load_latest_failed_sample_job_state or deps.load_retryable_sample_job_state
+        latest_failed_sample_job = _latest_failed_sample_job_payload(
+            latest_failed_loader(connection, config, normalized_prefix)
+        )
+        confirmation_quality_risk = _proposal_quality_risk_contract(
+            prefix=normalized_prefix,
+            sample_item=sample_item,
+            current_policy=policy_source,
+            preview_policy=final_policy,
+            operator_request=object_dict(pending_proposal.get("operator_request")) or None,
+            calibration=calibration,
+            advice_state=confirmation_advice_state,
+            latest_failed_sample_job=latest_failed_sample_job,
+            proposed_policy=applied_policy,
+        )
+        quality_risk_issue = _quality_risk_blocking_issue(confirmation_quality_risk)
+        if quality_risk_issue is not None:
+            return {"ok": False, "message": quality_risk_issue}
         if advice_payload:
             deps.save_advice_state(config, normalized_prefix, advice_payload)
 
@@ -645,6 +770,7 @@ def folder_ai_tune_confirm_action(
             "host": asdict(host),
             "action": action,
             "notes": operator_note,
+            "quality_risk_contract": confirmation_quality_risk,
             "policy": final_policy,
             "sample_item": _job_sample_item_payload(queued_sample_item),
             "created_at": deps.now_iso(),
@@ -886,11 +1012,25 @@ def _seed_preview_action(
             }
         )
         advice_details = object_dict(advice_payload)
+    quality_risk_contract = _proposal_quality_risk_contract(
+        prefix=normalized_prefix,
+        sample_item=sample_item,
+        current_policy=base_policy,
+        preview_policy=seeded_policy,
+        operator_request=operator_request,
+        calibration=None,
+        advice_state=advice_payload,
+        latest_failed_sample_job=latest_failed_sample_job,
+        proposed_policy=combined_fragment,
+    )
+    if alignment_issue is None:
+        alignment_issue = _quality_risk_blocking_issue(quality_risk_contract)
     can_queue = _proposal_can_queue(
         applied_fragment=combined_fragment,
         preview_policy=seeded_policy,
         request_disposition=advice_details.get("request_disposition"),
         alignment_issue=alignment_issue,
+        quality_risk_contract=quality_risk_contract,
     )
     proposal_message = _proposal_ready_message(
         can_queue=can_queue,
@@ -967,6 +1107,7 @@ def _seed_preview_action(
             ),
         },
     }
+    proposal_payload["quality_risk_contract"] = quality_risk_contract
     deps.save_pending_proposal(config, normalized_prefix, proposal_payload)
     return {
         "ok": True,
@@ -991,6 +1132,17 @@ def _tuned_preview_action(
     if not trimmed_note:
         raise HTTPException(status_code=400, detail="Add a note so the tuner knows what to change before running another sample.")
     current_policy = object_dict(calibration.get("policy")) if calibration else object_dict(sample_item.get("resolved_policy"))
+    quality_risk_feedback_state = _persist_quality_risk_feedback(
+        config,
+        deps,
+        prefix=normalized_prefix,
+        note=trimmed_note,
+        sample_item=sample_item,
+        current_policy=current_policy,
+        calibration=calibration,
+        operator_request=operator_request,
+        latest_failed_sample_job=latest_failed_sample_job,
+    )
     metric_support = deps.metric_support()
     with open_db(config.paths.db_path) as connection:
         learning_context = retrieve_learning_context(
@@ -1106,6 +1258,10 @@ def _tuned_preview_action(
     advice_payload["retrieved_memory"] = learning_context
     if operator_request:
         advice_payload["operator_request"] = operator_request
+    if object_list(quality_risk_feedback_state.get("quality_risk_records")):
+        advice_payload["quality_risk_records"] = object_list(
+            quality_risk_feedback_state.get("quality_risk_records")
+        )
     if combined_fragment:
         advice_payload["applied_policy"] = combined_fragment
     size_target_analysis = object_dict(runtime_toolbelt.get("size_target_analysis"))
@@ -1235,11 +1391,26 @@ def _tuned_preview_action(
                 "applied_policy": combined_fragment,
             }
         )
+    quality_risk_contract = _proposal_quality_risk_contract(
+        prefix=normalized_prefix,
+        sample_item=sample_item,
+        current_policy=current_policy,
+        preview_policy=tuned_policy,
+        operator_request=operator_request,
+        calibration=calibration,
+        advice_state=advice_payload,
+        latest_failed_sample_job=latest_failed_sample_job,
+        interpretation=review_artifact_critique,
+        proposed_policy=combined_fragment,
+    )
+    if alignment_issue is None:
+        alignment_issue = _quality_risk_blocking_issue(quality_risk_contract)
     can_queue = _proposal_can_queue(
         applied_fragment=combined_fragment,
         preview_policy=tuned_policy,
         request_disposition=request_disposition,
         alignment_issue=alignment_issue,
+        quality_risk_contract=quality_risk_contract,
     )
     proposal_message = _proposal_ready_message(
         can_queue=can_queue,
@@ -1326,6 +1497,7 @@ def _tuned_preview_action(
             },
         },
     }
+    tune_proposal_payload["quality_risk_contract"] = quality_risk_contract
     if public_review_pack is not None:
         tune_proposal_payload["multimodal_review_pack"] = public_review_pack
     deps.save_pending_proposal(config, normalized_prefix, tune_proposal_payload)

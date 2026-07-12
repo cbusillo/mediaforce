@@ -10,6 +10,7 @@
 	} from '$lib/api/types';
 	import {
 		approvalGuardFromMessage,
+		compareRiskSummary,
 		currentEncodeProgress,
 		currentOperatorIntent,
 		detailSeasonState,
@@ -140,6 +141,7 @@
 	const sizeTargetMissed = $derived(
 		['over_target', 'under_target', 'missing_prediction'].includes(sizeTarget.status)
 	);
+	const riskSummary = $derived(compareRiskSummary(folder));
 	const crfLimitReached = $derived(
 		asNumber(sampleResult.chosen_crf) > 0 &&
 			asNumber(technicalVideo.max_crf) > 0 &&
@@ -1038,6 +1040,29 @@
 					</div>
 				{/if}
 
+				{#if riskSummary}
+					<div class={`risk-summary risk-summary--${riskSummary.tone}`}>
+						<div class="risk-summary__headline">
+							<span>Quality risk</span>
+							<strong>{riskSummary.verdict}</strong>
+						</div>
+						<div class="risk-summary__fact">
+							<span>Top concern</span>
+							<strong>{riskSummary.topRisk}</strong>
+							<small>{riskSummary.topRiskLevel}</small>
+						</div>
+						<div class="risk-summary__fact">
+							<span>Authority</span>
+							<strong>{riskSummary.authority}</strong>
+							<small>{riskSummary.authorityDetail}</small>
+						</div>
+						<p class="risk-summary__detail">{riskSummary.detail}</p>
+						{#if riskSummary.focusMoments.length}
+							<p class="risk-summary__focus">Review focus: {riskSummary.focusMoments[0]}</p>
+						{/if}
+					</div>
+				{/if}
+
 				<div class="size-story">
 					<div>
 						<span>Current {scopeSizeLabel}</span>
@@ -1080,9 +1105,16 @@
 					</p>
 				{/if}
 
-				<div class="decision" class:decision--target-miss={sizeTargetMissed}>
+				<div
+					class="decision"
+					class:decision--target-miss={sizeTargetMissed}
+					class:decision--blocked={Boolean(riskSummary?.blocked)}
+				>
 					<div>
-						{#if sizeTarget.status === 'over_target'}
+						{#if riskSummary?.blocked}
+							<h2>This test is not safe to approve yet.</h2>
+							<p>{riskSummary.detail}</p>
+						{:else if sizeTarget.status === 'over_target'}
 							<h2>This is a quality checkpoint, not your requested-size result.</h2>
 							<p>Compare it now, then make a smaller test that moves toward your goal.</p>
 						{:else if sizeTarget.status === 'under_target'}
@@ -1099,7 +1131,20 @@
 						{/if}
 					</div>
 					<div class="decision-actions">
-						{#if sizeTargetMissed}
+						{#if riskSummary?.blocked}
+							<button class="secondary-button" type="button" onclick={chooseDifferentSize}>
+								Choose a different goal
+							</button>
+							<button
+								class="primary-button primary-button--light"
+								type="button"
+								onclick={retryMeasuredTarget}
+								disabled={actionPhase !== 'idle' || noAvailableHosts}
+							>
+								Run another test after fixing this
+								<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
+							</button>
+						{:else if sizeTargetMissed}
 							<button class="text-link" type="button" onclick={chooseDifferentSize}>
 								Choose a different goal
 							</button>
@@ -1130,7 +1175,7 @@
 								class="primary-button primary-button--light"
 								type="button"
 								onclick={() => approveTest()}
-								disabled={!currentPair}
+								disabled={!currentPair || Boolean(riskSummary?.blocked)}
 							>
 								Looks good
 								<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 3.5 3.5L16 5" /></svg>
@@ -2292,6 +2337,54 @@
 		text-align: center;
 	}
 
+	.risk-summary {
+		display: grid;
+		gap: 18px;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		margin-top: 26px;
+		padding: 18px 20px;
+		border: 1px solid rgba(125, 137, 128, 0.35);
+		border-radius: 18px;
+		background: rgba(20, 25, 22, 0.82);
+	}
+
+	.risk-summary--attention {
+		border-color: rgba(177, 98, 95, 0.6);
+		background: rgba(43, 21, 21, 0.84);
+	}
+
+	.risk-summary--ready {
+		border-color: rgba(86, 150, 137, 0.5);
+		background: rgba(20, 40, 36, 0.82);
+	}
+
+	.risk-summary span {
+		color: #9ba49e;
+		display: block;
+		font-size: 10px;
+		font-weight: 750;
+		letter-spacing: 0.09em;
+		margin-bottom: 6px;
+		text-transform: uppercase;
+	}
+
+	.risk-summary strong {
+		display: block;
+		font-size: 18px;
+		font-weight: 650;
+	}
+
+	.risk-summary p {
+		color: #d5dbd6;
+		font-size: 12px;
+		line-height: 1.5;
+		margin: 6px 0 0;
+	}
+
+	.risk-summary__moments {
+		grid-column: 1 / -1;
+	}
+
 	.decision {
 		align-items: center;
 		background: #e8eee8;
@@ -2877,6 +2970,10 @@
 		.size-story p {
 			grid-column: 1 / -1;
 			text-align: center;
+		}
+
+		.risk-summary {
+			grid-template-columns: 1fr;
 		}
 
 		.decision {
@@ -3889,6 +3986,11 @@
 	.decision--target-miss {
 		background: var(--mf-wait-bg);
 		border-color: var(--mf-wait-line);
+	}
+
+	.decision--blocked {
+		background: var(--mf-fail-bg);
+		border-color: var(--mf-fail-line);
 	}
 
 	.decision-actions {

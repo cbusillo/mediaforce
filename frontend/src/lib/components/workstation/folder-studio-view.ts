@@ -18,6 +18,7 @@ import {
 	type FolderCalibrationState,
 	type FolderItemPlan,
 	type FolderPolicy,
+	type FolderQualityRisk,
 	type FolderSampleItem,
 	type FolderOperatorRequest,
 	type PendingSampleProposal,
@@ -131,6 +132,13 @@ export type DecisionFact = {
 	label: string;
 	value: string;
 	detail: string;
+};
+
+export type QualityRiskFact = {
+	label: string;
+	value: string;
+	detail: string;
+	tone: ShellTone;
 };
 
 export type RuntimeFact = {
@@ -442,7 +450,9 @@ export function resolveWorkflowActionState(
 		approvedProfileReady,
 		pendingProposal,
 		calibrationJob,
-		pendingAction
+		pendingAction,
+		qualityRiskBlocked = false,
+		qualityRiskBlocker = ''
 	}: {
 		reviewPackReady: boolean;
 		approvalReviewReady?: boolean;
@@ -450,6 +460,8 @@ export function resolveWorkflowActionState(
 		pendingProposal: PendingSampleProposal | null;
 		calibrationJob: FolderCalibrationJob | null;
 		pendingAction?: WorkflowAction | null;
+		qualityRiskBlocked?: boolean;
+		qualityRiskBlocker?: string;
 	}
 ): WorkflowActionState {
 	if (pendingAction) {
@@ -461,6 +473,12 @@ export function resolveWorkflowActionState(
 	if (action === 'focus-bench') return { disabled: false, title: '' };
 	if (action === 'open-completed') return { disabled: false, title: '' };
 	if (action === 'approve-size-tradeoff') {
+		if (qualityRiskBlocked) {
+			return {
+				disabled: true,
+				title: qualityRiskBlocker || 'Measured quality-risk evidence still blocks approval.'
+			};
+		}
 		return approvalReviewReady
 			? { disabled: false, title: '' }
 			: { disabled: true, title: 'Review media is not ready yet.' };
@@ -891,11 +909,17 @@ export function buildDecisionFacts(
 	pendingProposal: PendingSampleProposal | null,
 	workflow?: WorkflowState
 ): DecisionFact[] {
+	const riskFacts = buildQualityRiskFacts(folder).map((fact) => ({
+		label: fact.label,
+		value: fact.value,
+		detail: fact.detail
+	}));
 	const outputFact = buildOutputDecisionFact(folder.workflow_state ?? undefined, workflow);
 	if (outputFact) {
 		return [
 			outputFact,
 			buildOutputScopeFact(folder),
+			...riskFacts,
 			{
 				label: 'Next action',
 				value: workflow?.primary ?? 'Use the decision buttons',
@@ -981,7 +1005,8 @@ export function buildDecisionFacts(
 				])
 			},
 			{ label: 'Folder output', value: verdict.predictedFolderTotal, detail: 'Projected total' },
-			{ label: 'Reclaim', value: verdict.reclaim, detail: verdict.quality }
+			{ label: 'Reclaim', value: verdict.reclaim, detail: verdict.quality },
+			...riskFacts
 		];
 	}
 	return [
@@ -1001,7 +1026,8 @@ export function buildDecisionFacts(
 			label: 'Next action',
 			value: workflow?.primary ?? 'Use the decision buttons',
 			detail: workflowActionDetail(workflow)
-		}
+		},
+		...riskFacts
 	];
 }
 
@@ -1125,6 +1151,110 @@ export function buildSampleFacts(
 function itemPlan(folder: FolderPayload): FolderItemPlan | null {
 	const plan = record<Record<string, unknown>>(folder.item_plan);
 	return plan ? (plan as FolderItemPlan) : null;
+}
+
+export function qualityRisk(folder: FolderPayload): FolderQualityRisk | null {
+	return record<FolderQualityRisk>(folder.quality_risk);
+}
+
+function qualityRiskLevelLabel(level: string | null | undefined): string {
+	const normalized = String(level ?? '')
+		.trim()
+		.toLowerCase();
+	if (normalized === 'high') return 'High';
+	if (normalized === 'medium') return 'Medium';
+	if (normalized === 'low') return 'Low';
+	return 'Unknown';
+}
+
+function qualityRiskTone(level: string | null | undefined): ShellTone {
+	const normalized = String(level ?? '')
+		.trim()
+		.toLowerCase();
+	if (normalized === 'high') return 'fail';
+	if (normalized === 'medium') return 'wait';
+	if (normalized === 'low') return 'ready';
+	return 'idle';
+}
+
+function qualityRiskVerdictCopy(verdict: string | null | undefined): string {
+	const normalized = String(verdict ?? '')
+		.trim()
+		.toLowerCase();
+	if (normalized === 'safe_to_sample') return 'Safe to sample';
+	if (normalized === 'needs_operator_review') return 'Needs operator review';
+	if (normalized === 'request_comparison') return 'Request comparison';
+	if (normalized === 'blocked') return 'Blocked';
+	return 'Unknown';
+}
+
+function operatorAuthorityCopy(risk: FolderQualityRisk | null): { value: string; detail: string } {
+	const operatorDecision = record<Record<string, unknown>>(risk?.operator_decision);
+	const status = String(operatorDecision?.status ?? '')
+		.trim()
+		.toLowerCase();
+	if (status === 'rejected') {
+		return {
+			value: 'Current rejection',
+			detail: 'The latest authoritative rejection outranks older approvals.'
+		};
+	}
+	if (status === 'approved') {
+		return {
+			value: 'Current approval',
+			detail: 'The current authoritative approval matches this source, policy, and sample.'
+		};
+	}
+	return {
+		value: 'No current decision',
+		detail: 'Older or sibling evidence is not treated as current authority.'
+	};
+}
+
+export function buildQualityRiskFacts(folder: FolderPayload): QualityRiskFact[] {
+	const risk = qualityRisk(folder);
+	if (!risk) return [];
+	const typedRisks = (risk.typed_risks ?? []).filter(Boolean);
+	const highestRisk =
+		typedRisks.find((item) => item.level === 'high') ??
+		typedRisks.find((item) => item.level === 'medium') ??
+		typedRisks[0] ??
+		null;
+	const authority = operatorAuthorityCopy(risk);
+	const blockingReasons = (risk.blocking_reasons ?? []).filter(Boolean);
+	return [
+		{
+			label: 'Risk verdict',
+			value: qualityRiskVerdictCopy(risk.verdict),
+			detail:
+				blockingReasons[0] ??
+				risk.comparison_reason ??
+				String(
+					risk.interpretation?.summary ??
+						'Measured evidence and review authority drive this verdict.'
+				),
+			tone: risk.blocked ? 'fail' : risk.request_comparison ? 'wait' : 'ready'
+		},
+		{
+			label: 'Top concern',
+			value: highestRisk ? highestRisk.label : 'No elevated concern',
+			detail: highestRisk
+				? `${qualityRiskLevelLabel(highestRisk.level)} risk`
+				: 'No typed risks were published.',
+			tone: qualityRiskTone(highestRisk?.level)
+		},
+		{
+			label: 'Authority',
+			value: authority.value,
+			detail: authority.detail,
+			tone:
+				String(risk.operator_decision?.status ?? '')
+					.trim()
+					.toLowerCase() === 'rejected'
+					? 'fail'
+					: 'idle'
+		}
+	];
 }
 
 function reviewPackAudioSummary(

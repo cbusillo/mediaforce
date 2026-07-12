@@ -52,7 +52,9 @@ from mediaforce.core.db_tables import learning_artifacts
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.db_tables import tuning_sessions
+from mediaforce.core.evidence import stable_policy_hash
 from mediaforce.core.process_control import ProcessCancelledError
+from mediaforce.core.type_defs import object_dict
 from mediaforce.execution import resolve_stream_budget_ledger
 from mediaforce.hosts.types import HostStatus
 from mediaforce.tuning.tuning_memory import (
@@ -62,6 +64,7 @@ from mediaforce.tuning.tuning_memory import (
     retrieve_learning_context,
     sibling_approved_season_memory,
 )
+from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_risk_public_view
 from mediaforce.web.app import (
     _advice_file,
     _backfill_multimodal_review_pack,
@@ -587,7 +590,13 @@ class TuningRuntimeTests(unittest.TestCase):
             multimodal_review_pack_public_view=lambda *_args, **_kwargs: None,
             tuning_advice_payload=lambda *_args, **_kwargs: {},
             load_pending_proposal=lambda *_args, **_kwargs: None,
-            apply_policy_fragment=lambda current, fragment: {**current, **fragment},
+            apply_policy_fragment=lambda current, fragment: {
+                **current,
+                "video": {
+                    **object_dict(current.get("video")),
+                    **object_dict(fragment.get("video")),
+                },
+            },
             save_advice_state=lambda *_args, **_kwargs: None,
             save_job_state=lambda _connection, _config, _prefix, payload: saved_jobs.append(dict(payload)),
             clear_pending_proposal=lambda *_args, **_kwargs: None,
@@ -688,7 +697,13 @@ class TuningRuntimeTests(unittest.TestCase):
             multimodal_review_pack_public_view=lambda *_args, **_kwargs: None,
             tuning_advice_payload=lambda *_args, **_kwargs: {},
             load_pending_proposal=lambda *_args, **_kwargs: None,
-            apply_policy_fragment=lambda current, fragment: {**current, **fragment},
+            apply_policy_fragment=lambda current, fragment: {
+                **current,
+                "video": {
+                    **object_dict(current.get("video")),
+                    **object_dict(fragment.get("video")),
+                },
+            },
             save_advice_state=lambda *_args, **_kwargs: None,
             save_job_state=lambda *_args, **_kwargs: None,
             clear_pending_proposal=lambda *_args, **_kwargs: None,
@@ -770,7 +785,13 @@ class TuningRuntimeTests(unittest.TestCase):
             multimodal_review_pack_public_view=lambda *_args, **_kwargs: None,
             tuning_advice_payload=lambda *_args, **_kwargs: {},
             load_pending_proposal=lambda *_args, **_kwargs: None,
-            apply_policy_fragment=lambda current, fragment: {**current, **fragment},
+            apply_policy_fragment=lambda current, fragment: {
+                **current,
+                "video": {
+                    **object_dict(current.get("video")),
+                    **object_dict(fragment.get("video")),
+                },
+            },
             save_advice_state=lambda *_args, **_kwargs: None,
             save_job_state=lambda _connection, _config, _prefix, payload: saved_jobs.append(dict(payload)),
             clear_pending_proposal=lambda *_args, **_kwargs: None,
@@ -4427,7 +4448,7 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         proposal = saved_proposals[0]
-        self.assertTrue(proposal["can_queue"])
+        self.assertTrue(proposal["can_queue"], proposal["quality_risk_contract"])
         expected_fragment = _absolute_size_fragment(225.0, 87.996, preserve_source_resolution=True)
         self.assertEqual(
             proposal["preview_policy"],
@@ -4633,7 +4654,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         proposal = saved_proposals[0]
         expected_fragment = _absolute_size_fragment(225.0, 87.996, preserve_source_resolution=True)
-        self.assertTrue(proposal["can_queue"])
+        self.assertTrue(proposal["can_queue"], proposal["quality_risk_contract"])
         self.assertEqual(proposal["request_disposition"], "honored")
         self.assertTrue(proposal["advice_payload"]["ok"])
         self.assertEqual(proposal["confidence"], "low")
@@ -4868,7 +4889,13 @@ class TuningRuntimeTests(unittest.TestCase):
             multimodal_review_pack_public_view=lambda *_args, **_kwargs: None,
             tuning_advice_payload=lambda *_args, **_kwargs: {},
             load_pending_proposal=lambda *_args, **_kwargs: None,
-            apply_policy_fragment=lambda current, fragment: {**current, **fragment},
+            apply_policy_fragment=lambda current, fragment: {
+                **current,
+                "video": {
+                    **object_dict(current.get("video")),
+                    **object_dict(fragment.get("video")),
+                },
+            },
             save_advice_state=lambda *_args, **_kwargs: None,
             save_job_state=lambda *_args, **_kwargs: None,
             clear_pending_proposal=lambda *_args, **_kwargs: None,
@@ -6509,10 +6536,132 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(Path(artifact["artifact_path"]).exists())
         self.assertTrue(context)
         self.assertIn("Aggressive but acceptable", context[0]["summary"])
-        self.assertEqual(context[0]["evidence_authority"], "approved_visual_result")
-        self.assertEqual(context[0]["approved_policy"], calibration["policy"])
-        self.assertEqual(context[0]["sample_result"], calibration["sample_result"])
-        self.assertEqual(context[0]["run_verdict"]["summary"], "Aggressive but acceptable for this show.")
+        self.assertEqual(context[0]["evidence_authority"], "none")
+        self.assertEqual(context[0]["approved_policy"], {})
+        self.assertEqual(context[0]["sample_result"], {})
+        self.assertEqual(context[0]["run_verdict"], {})
+
+    def test_retrieve_learning_context_keeps_sibling_approval_non_authoritative(self) -> None:
+        approved_sample_item = {
+            "rel_path": "tv/House/Season 2/Episode.mkv",
+            "video_codec": "h264",
+            "recommendation": "priority_encode",
+            "resolved_policy": {"video": {"quality_metric": "vmaf"}},
+        }
+        with open_db(self.config.paths.db_path) as connection:
+            artifact = record_visual_approval_artifact(
+                connection,
+                self.config,
+                prefix="tv/House/Season 2",
+                note="Looks good after review.",
+                sample_item=approved_sample_item,
+                calibration={
+                    "job_id": "job-house-s2",
+                    "policy": {"video": {"target_vmaf": 88.0}},
+                    "sample_result": {"quality_metric": "VMAF", "quality_score": 89.0},
+                },
+                run_verdict={"summary": "Approved for House season 2."},
+                created_at="2026-03-29T23:45:00+00:00",
+            )
+            context = retrieve_learning_context(
+                connection,
+                prefix="tv/House/Season 3",
+                sample_item={
+                    "rel_path": "tv/House/Season 3/Episode.mkv",
+                    "video_codec": "h264",
+                    "recommendation": "priority_encode",
+                    "resolved_policy": {"video": {"quality_metric": "vmaf"}},
+                },
+                note="Need a smaller approved draft.",
+            )
+
+        self.assertIsNotNone(artifact)
+        self.assertTrue(context)
+        self.assertEqual(context[0]["evidence_authority"], "none")
+        self.assertEqual(context[0]["approved_policy"], {})
+
+    def test_quality_risk_contract_public_view_keeps_current_rejection_authoritative(self) -> None:
+        current_policy = {"video": {"target_vmaf": 90.0}}
+        contract = build_quality_risk_contract(
+            prefix="tv/House/Season 2",
+            sample_item={
+                "rel_path": "tv/House/Season 2/Episode.mkv",
+                "representative_source_id": "src-house-s2",
+                "source_fingerprint": "fp-1",
+                "stream_budget_ledger": {"feasibility": {"status": "feasible"}},
+                "cadence_decision": {
+                    "classification": "progressive",
+                    "confidence": 0.98,
+                    "transform": "none",
+                    "evidence_id": "ev1_cadence",
+                },
+                "media_fingerprint_decision": {
+                    "status": "measured",
+                    "confidence": 0.88,
+                    "evidence_id": "ev1_fingerprint",
+                    "findings": [
+                        {
+                            "id": "high_motion",
+                            "confidence": 0.82,
+                            "rationale": "Motion stays elevated in the measured ranges.",
+                        }
+                    ],
+                },
+            },
+            current_policy=current_policy,
+            preview_policy=current_policy,
+            calibration={
+                "job_id": "job-123",
+                "sample_result": {"predicted_encode_percent": 12.0},
+                "review_moments": [
+                    {
+                        "timestamp_seconds": 89.0,
+                        "duration_seconds": 8.0,
+                        "role": "hard",
+                        "risk_tags": ["high_motion"],
+                        "rationale": "Compare the motion-heavy range.",
+                        "confidence": 0.88,
+                        "coverage": 0.66,
+                        "evidence_id": "ev1_fingerprint",
+                    }
+                ],
+            },
+            advice_state={
+                "quality_risk_records": [
+                    {
+                        "kind": "post_test",
+                        "verdict": "approved",
+                        "tags": ["motion_breakup"],
+                        "details": "Older approval.",
+                        "prefix": "tv/House/Season 2",
+                        "source_id": "src-house-s2",
+                        "policy_hash": "sha256:wrong",
+                        "sample_job_id": "job-old",
+                        "created_at": "2026-03-28T00:00:00+00:00",
+                    },
+                    {
+                        "kind": "post_test",
+                        "verdict": "rejected",
+                        "tags": ["motion_breakup"],
+                        "details": "Current rejection.",
+                        "prefix": "tv/House/Season 2",
+                        "source_id": "src-house-s2",
+                        "policy_hash": stable_policy_hash(current_policy),
+                        "sample_job_id": "job-123",
+                        "evidence_ids": ["ev1_cadence", "ev1_fingerprint"],
+                        "moment_indexes": [1],
+                        "created_at": "2026-03-29T00:00:00+00:00",
+                    },
+                ]
+            },
+        )
+
+        public_view = quality_risk_public_view(contract)
+        assert public_view is not None
+        self.assertEqual(public_view["verdict"], "blocked")
+        self.assertEqual(public_view["operator_decision"]["status"], "rejected")
+        self.assertEqual(public_view["operator_decision"]["effective_record"]["details"], "Current rejection.")
+        self.assertEqual(public_view["pre_test_instruction"]["moments"][0]["evidence_id"], "ev1_fingerprint")
 
     def test_retrieve_learning_context_ignores_unrelated_visual_approval(self) -> None:
         approved_sample_item = {
@@ -6857,6 +7006,20 @@ class TuningRuntimeTests(unittest.TestCase):
             )
         )
 
+    def test_quality_risk_blocker_prevents_sample_queue(self) -> None:
+        self.assertFalse(
+            _proposal_can_queue(
+                applied_fragment={"video": {"target_vmaf": 87.0}},
+                preview_policy={"video": {"target_vmaf": 87.0}},
+                request_disposition="honored",
+                alignment_issue=None,
+                quality_risk_contract={
+                    "verdict": "blocked",
+                    "deterministic_gates": {"blocking_reasons": ["Mixed cadence needs review."]},
+                },
+            )
+        )
+
     def test_proposal_alignment_issue_allows_explicit_combined_metric_target(self) -> None:
         issue = proposal_alignment_issue(
             operator_request={
@@ -7038,7 +7201,7 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertIsNone(issue)
 
-    def test_retrieved_visual_approval_authorizes_alignment_without_overriding_current_rejection(self) -> None:
+    def test_retrieved_visual_approval_remains_context_without_overriding_current_authority(self) -> None:
         request = {
             "request_type": "size_budget",
             "budget_label": "250 MB per episode",
@@ -7052,8 +7215,8 @@ class TuningRuntimeTests(unittest.TestCase):
         )
 
         assert effective_request is not None
-        self.assertEqual(effective_request["evidence_authority"], "approved_visual_result")
-        self.assertIsNone(
+        self.assertEqual(effective_request["evidence_authority"], "none")
+        self.assertIsNotNone(
             proposal_alignment_issue(
                 operator_request=effective_request,
                 request_disposition="honored",

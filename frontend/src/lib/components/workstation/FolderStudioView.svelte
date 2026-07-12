@@ -219,13 +219,16 @@
 	);
 	const benchRequestDisabled = $derived(benchRequestState.disabled);
 	function workflowActionState(action: WorkflowAction) {
+		const qualityRisk = studioFolder.quality_risk;
 		return resolveWorkflowActionState(action, {
 			reviewPackReady,
 			approvalReviewReady,
 			approvedProfileReady,
 			pendingProposal,
 			calibrationJob,
-			pendingAction: workflowPending
+			pendingAction: workflowPending,
+			qualityRiskBlocked: Boolean(qualityRisk?.blocked),
+			qualityRiskBlocker: qualityRisk?.blocking_reasons?.[0] ?? ''
 		});
 	}
 

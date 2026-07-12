@@ -18,6 +18,8 @@ from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, list_ch
 from mediaforce.encoding.staging import safe_unlink
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.run_manifests import create_folder_manifest
+from mediaforce.tuning.quality_risk import build_quality_risk_contract
+from mediaforce.tuning.quality_risk import append_quality_risk_record
 from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.web.runtime.folder_tuning_helpers import (
     proposal_alignment_issue,
@@ -857,6 +859,25 @@ def save_profile_action(
                 status_code=409,
                 detail="This draft changed after the size tradeoff review. Review the result and confirm approval again.",
             )
+    quality_risk_contract = build_quality_risk_contract(
+        prefix=normalized_prefix,
+        sample_item=object_dict(calibration_payload.get("sample_item")),
+        current_policy=object_dict(calibration_payload.get("policy")),
+        preview_policy=object_dict(calibration_payload.get("policy")),
+        operator_request=operator_request or None,
+        calibration=calibration_payload,
+        advice_state=advice_state,
+    )
+    if bool(object_dict(quality_risk_contract.get("deterministic_gates")).get("blocked")):
+        blocking_reasons = [
+            str(reason)
+            for reason in object_list(object_dict(quality_risk_contract.get("deterministic_gates")).get("blocking_reasons"))
+            if str(reason).strip()
+        ]
+        raise HTTPException(
+            status_code=409,
+            detail=blocking_reasons[0] if blocking_reasons else "Measured review facts still block approval for this sample.",
+        )
     if str(calibration_payload.get("mode") or "sample") == "sample":
         if not calibration_payload.get("review_media_ready"):
             raise HTTPException(
@@ -869,6 +890,11 @@ def save_profile_action(
         calibration_payload["accepted_sample_job_id"] = str(calibration_payload.get("job_id") or "")
         save_calibration_state(config, normalized_prefix, calibration_payload)
         existing_approval = object_dict(advice_state.get("approval_artifact"))
+        approval_artifact = (
+            existing_approval
+            if str(existing_approval.get("sample_job_id") or "") == str(calibration_payload.get("job_id") or "")
+            else None
+        )
         if str(existing_approval.get("sample_job_id") or "") != str(calibration_payload.get("job_id") or ""):
             with open_db(config.paths.db_path) as connection:
                 approval_artifact = record_visual_approval_artifact(
@@ -881,17 +907,40 @@ def save_profile_action(
                     run_verdict=object_dict(advice_state.get("run_verdict")),
                     created_at=str(calibration_payload["accepted_at"]),
                 )
-            if approval_artifact is not None:
-                approval_artifact["sample_job_id"] = str(calibration_payload.get("job_id") or "")
-                merge_advice_state(
-                    config,
-                    normalized_prefix,
-                    {
-                        "approval_artifact": approval_artifact,
-                        "operator_approved_at": calibration_payload["accepted_at"],
-                        "operator_approved_size_tradeoff": bool(size_issue),
-                    },
-                )
+        if approval_artifact is not None:
+            approval_artifact["sample_job_id"] = str(calibration_payload.get("job_id") or "")
+        source_scope = object_dict(quality_risk_contract.get("source_scope"))
+        contract_policy = object_dict(quality_risk_contract.get("policy"))
+        review_tags = [
+            str(object_dict(risk).get("tag") or "")
+            for risk in object_list(quality_risk_contract.get("typed_risks"))
+            if str(object_dict(risk).get("tag") or "").strip()
+        ]
+        quality_risk_state = append_quality_risk_record(
+            advice_state,
+            prefix=normalized_prefix,
+            source_id=str(source_scope.get("source_id") or ""),
+            policy_hash=str(contract_policy.get("preview_policy_hash") or ""),
+            sample_job_id=str(source_scope.get("sample_job_id") or "") or None,
+            kind="post_test",
+            verdict="approved",
+            tags=review_tags or ["other"],
+            details=str(
+                object_dict(advice_state).get("operator_note")
+                or "Operator approved this sample after reviewing the current evidence."
+            ),
+            created_at=str(calibration_payload["accepted_at"]),
+            evidence_ids=[str(value) for value in object_list(source_scope.get("evidence_ids"))],
+            moment_indexes=list(range(1, len(object_list(calibration_payload.get("review_moments"))) + 1)),
+        )
+        advice_patch: ActionPayload = {
+            "operator_approved_at": calibration_payload["accepted_at"],
+            "operator_approved_size_tradeoff": bool(size_issue),
+            "quality_risk_records": object_list(quality_risk_state.get("quality_risk_records")),
+        }
+        if approval_artifact is not None:
+            advice_patch["approval_artifact"] = approval_artifact
+        merge_advice_state(config, normalized_prefix, advice_patch)
     upsert_override(
         config.paths.runtime_settings_path,
         normalized_prefix,

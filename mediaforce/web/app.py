@@ -96,6 +96,7 @@ from mediaforce.tuning.tuning_memory import (
     record_visual_approval_artifact,
     sibling_approved_season_memory,
 )
+from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_risk_public_view
 from mediaforce.tuning.size_goals import guided_size_goal_options, operator_intent_from_policy
 from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, object_dict, object_list
 from mediaforce.web.routes import register_completed_routes, register_dashboard_routes, register_folder_routes, \
@@ -580,6 +581,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     )
 
     def _folder_content_payload(normalized_prefix: str) -> tuple[dict[str, Any], int]:
+        latest_failed_sample_job_payload: dict[str, Any] | None = None
         with open_db(config.paths.db_path) as connection:
             calibration_job = _load_job_state(connection, config, normalized_prefix)
             if calibration_job and calibration_job.get("status") in {"queued", "running"}:
@@ -641,6 +643,9 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             encode_candidate_count = _folder_encode_candidate_count(connection, config, normalized_prefix)
             workflow_state = build_folder_workflow_state(connection, normalized_prefix).to_payload()
             series_context = _folder_series_context(normalized_prefix)
+            latest_failed_sample_job_payload = object_dict(
+                _load_latest_failed_sample_job_state(connection, config, normalized_prefix)
+            ) or None
         policy = _folder_display_policy(
             sample_item=sample_item,
             calibration=calibration,
@@ -686,6 +691,33 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             audio_policy=object_dict(policy.get("audio")),
             subtitle_policy=object_dict(policy.get("subtitle")),
         )
+        current_quality_risk_policy = (
+            object_dict(object_dict(calibration).get("policy"))
+            or object_dict(sample_item.get("resolved_policy"))
+            or policy
+        )
+        pending_preview_policy = object_dict(object_dict(pending_proposal_raw).get("preview_policy"))
+        quality_risk_preview_policy = (
+            current_quality_risk_policy
+            if calibration
+            else pending_preview_policy or current_quality_risk_policy
+        )
+        quality_risk_contract = build_quality_risk_contract(
+            prefix=normalized_prefix,
+            sample_item=budget_item,
+            current_policy=current_quality_risk_policy,
+            preview_policy=quality_risk_preview_policy,
+            operator_request=object_dict(object_dict(advice_state).get("operator_request")) or None,
+            calibration=calibration,
+            advice_state=advice_state,
+            latest_failed_sample_job=latest_failed_sample_job_payload,
+            interpretation=object_dict(object_dict(advice_state).get("quality_risk_interpretation")) or None,
+            proposed_policy=(
+                object_dict(object_dict(pending_proposal_raw).get("applied_policy"))
+                if not calibration
+                else None
+            ),
+        )
         resolved_metric, _ = select_quality_metric(str(video_policy.get("quality_metric", "auto")))
         sample_host_statuses = _sample_calibration_host_statuses(config)
         sample_host_key = _default_sample_host_key_from_statuses(sample_host_statuses)
@@ -706,6 +738,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 "resolved_operator_intent": resolved_operator_intent,
                 "stream_budget_ledger": stream_budget.to_payload(),
                 "size_goal_options": size_goal_options,
+                "quality_risk": quality_risk_public_view(quality_risk_contract),
                 "pending_proposal": pending_proposal,
                 "recent_tuning_sessions": recent_sessions,
                 "approved_season_shortcut": approved_season_shortcut,
@@ -838,6 +871,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             tuning_advice_payload=_tuning_advice_payload,
             load_pending_proposal=_load_pending_proposal,
             apply_policy_fragment=_apply_policy_fragment,
+            load_advice_state=_load_advice_state,
             save_advice_state=_save_advice_state,
             save_job_state=_save_job_state,
             clear_pending_proposal=_clear_pending_proposal,
