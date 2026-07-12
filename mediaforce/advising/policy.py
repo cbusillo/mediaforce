@@ -56,46 +56,6 @@ def _advice_response_schema(policy_schema: dict[str, Any], *, request_dispositio
     }
 
 
-def tune_self_check_schema() -> dict[str, Any]:
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["status", "summary", "issues", "surround_audio_guardrail"],
-        "properties": {
-            "status": {"type": "string", "enum": ["pass", "warn", "fail"]},
-            "summary": {"type": "string"},
-            "issues": {"type": "array", "items": {"type": "string"}},
-            "surround_audio_guardrail": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["status", "reason"],
-                "properties": {
-                    "status": {"type": "string", "enum": ["ok", "prefer_preserve_current"]},
-                    "reason": {"type": "string"},
-                },
-            },
-        },
-    }
-
-
-def run_verdict_schema() -> dict[str, Any]:
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["summary", "outcome", "confidence", "next_step", "evidence_checked"],
-        "properties": {
-            "summary": {"type": "string"},
-            "outcome": {
-                "type": "string",
-                "enum": ["strong_match", "acceptable_experiment", "needs_review", "poor_fit"],
-            },
-            "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
-            "next_step": {"type": ["string", "null"]},
-            "evidence_checked": {"type": "array", "items": {"type": "string"}},
-        },
-    }
-
-
 def review_artifact_critique_schema() -> dict[str, Any]:
     return {
         "type": "object",
@@ -223,22 +183,6 @@ def try_load_json(raw: str) -> JSONValue:
         return json.loads(raw)
     except json.JSONDecodeError:
         return None
-
-
-def try_load_first_json_object(raw: str) -> JSONValue:
-    decoder = json.JSONDecoder()
-    candidate = raw.lstrip()
-    while candidate:
-        try:
-            parsed, _ = decoder.raw_decode(candidate)
-        except json.JSONDecodeError:
-            next_start = candidate.find("{", 1)
-            if next_start == -1:
-                return None
-            candidate = candidate[next_start:]
-            continue
-        return parsed
-    return None
 
 
 def policy_key_paths(policy: dict[str, Any]) -> list[str]:

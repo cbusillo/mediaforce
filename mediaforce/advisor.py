@@ -1,6 +1,5 @@
 import json
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,10 +9,10 @@ from mediaforce.advising.policy import compact_policy_payload as _compact_policy
     extract_seed_payload as _extract_seed_payload_impl, normalize_policy_section as _normalize_policy_section_impl, \
     policy_key_paths as _policy_key_paths_impl, policy_response_schema as _policy_response_schema_impl, \
     policy_section_schema as _policy_section_schema_impl, policy_shape_example as _policy_shape_example_impl, \
-    policy_value_schema as _policy_value_schema_impl, run_verdict_schema as _run_verdict_schema_impl, \
-    seed_response_schema as _seed_response_schema_impl, try_load_first_json_object as _try_load_first_json_object_impl, \
-    try_load_json as _try_load_json_impl, tune_response_schema as _tune_response_schema_impl, \
-    tune_self_check_schema as _tune_self_check_schema_impl, review_artifact_critique_schema as _review_artifact_critique_schema_impl, normalize_policy_value as _normalize_policy_value_impl, \
+    policy_value_schema as _policy_value_schema_impl, \
+    seed_response_schema as _seed_response_schema_impl, try_load_json as _try_load_json_impl, \
+    tune_response_schema as _tune_response_schema_impl, \
+    review_artifact_critique_schema as _review_artifact_critique_schema_impl, normalize_policy_value as _normalize_policy_value_impl, \
     normalize_video_policy_value as _normalize_video_policy_value_impl, \
     normalize_audio_policy_value as _normalize_audio_policy_value_impl, \
     normalize_subtitle_policy_value as _normalize_subtitle_policy_value_impl, \
@@ -24,18 +23,20 @@ from mediaforce.advising.policy import compact_policy_payload as _compact_policy
     parse_bitrate_kbps as _parse_bitrate_kbps_impl, \
     clamp_float as _clamp_float_impl, clamp_int as _clamp_int_impl, \
     operator_note_parse_schema as _operator_note_parse_schema_impl
-from mediaforce.advising.prompts import build_prompt as _build_prompt_impl, \
-    build_review_artifact_critique_prompt as _build_review_artifact_critique_prompt_impl, build_run_verdict_prompt as _build_run_verdict_prompt_impl, build_seed_prompt as _build_seed_prompt_impl, \
+from mediaforce.advising.prompts import \
+    build_review_artifact_critique_prompt as _build_review_artifact_critique_prompt_impl, build_seed_prompt as _build_seed_prompt_impl, \
     build_tune_prompt as _build_tune_prompt_impl, build_operator_note_parse_prompt as _build_operator_note_parse_prompt_impl
-from mediaforce.advising.runtime import StructuredLLMFailure, run_code_prompt as _run_code_prompt_impl, \
+from mediaforce.advising.privacy import advisor_evidence_references
+from mediaforce.advising.runtime import StructuredLLMFailure, \
+    run_codex_lab_process as _run_codex_lab_process_impl, \
     run_multimodal_tune_request as _run_multimodal_tune_request_impl, \
     run_structured_llm_request as _run_structured_llm_request_impl
+from mediaforce.advising.routing import AdvisorRouting, AdvisorTask
 
-ADVISOR_MODEL = "gpt-5.4"
 SEED_PROMPT_VERSION = "seed-v9"
 TUNE_PROMPT_VERSION = "tune-v10"
-TUNE_SELF_CHECK_VERSION = "tune-self-check-v1"
-RUN_VERDICT_PROMPT_VERSION = "run-verdict-v2"
+TUNE_SELF_CHECK_VERSION = "tune-self-check-v2-deterministic"
+RUN_VERDICT_PROMPT_VERSION = "run-verdict-v3-deterministic"
 REVIEW_ARTIFACT_CRITIQUE_PROMPT_VERSION = "review-artifact-critique-v1"
 OPERATOR_NOTE_PARSE_PROMPT_VERSION = "operator-note-parse-v2"
 REQUEST_DISPOSITIONS = ("honored", "honored_with_risk", "softened", "rejected", "unclear")
@@ -215,24 +216,6 @@ def _force_repeated_tune_experiment(
     return applied_fragment
 
 
-def _memory_disabled_code_args() -> list[str]:
-    return [
-        "-c",
-        "features.memories=false",
-        "-c",
-        "memories.use_memories=false",
-        "-c",
-        "memories.generate_memories=false",
-    ]
-
-
-@dataclass(slots=True)
-class AdvisorResponse:
-    ok: bool
-    summary: str
-    raw: str
-
-
 @dataclass(slots=True)
 class SeedPolicyResponse:
     ok: bool
@@ -293,12 +276,12 @@ class ReviewArtifactCritiqueResponse:
     evidence_checked: list[str]
 
 
-def request_tuning_advice(*, project_root: Path, payload: dict[str, Any]) -> AdvisorResponse:
-    prompt = _build_prompt(payload)
-    return _run_code_prompt(project_root=project_root, prompt=prompt, max_seconds=60)
-
-
-def request_seed_policy(*, project_root: Path, payload: dict[str, Any]) -> SeedPolicyResponse:
+def request_seed_policy(
+        *,
+        project_root: Path,
+        payload: dict[str, Any],
+        routing: AdvisorRouting | None = None,
+) -> SeedPolicyResponse:
     prompt = _build_seed_prompt(payload)
     base_policy = object_dict(payload.get("base_policy"))
     parsed = _run_structured_llm_request(
@@ -310,6 +293,10 @@ def request_seed_policy(*, project_root: Path, payload: dict[str, Any]) -> SeedP
         message=prompt,
         schema=_seed_response_schema(base_policy),
         max_seconds=75,
+        task=AdvisorTask.SEED_POLICY,
+        prompt_version=SEED_PROMPT_VERSION,
+        routing=routing,
+        evidence_references=advisor_evidence_references(payload),
     )
     if not isinstance(parsed, dict):
         return SeedPolicyResponse(
@@ -389,7 +376,12 @@ def request_seed_policy(*, project_root: Path, payload: dict[str, Any]) -> SeedP
     )
 
 
-def request_note_tuning(*, project_root: Path, payload: dict[str, Any]) -> TuningPolicyResponse:
+def request_note_tuning(
+        *,
+        project_root: Path,
+        payload: dict[str, Any],
+        routing: AdvisorRouting | None = None,
+) -> TuningPolicyResponse:
     prompt = _build_tune_prompt(payload)
     current_policy = object_dict(payload.get("policy"))
     review_pack = object_dict(payload.get("multimodal_review_pack")) or None
@@ -410,6 +402,10 @@ def request_note_tuning(*, project_root: Path, payload: dict[str, Any]) -> Tunin
             images=review_images,
             schema=_tune_response_schema(current_policy),
             max_seconds=90,
+            task=AdvisorTask.NOTE_TUNING,
+            prompt_version=TUNE_PROMPT_VERSION,
+            routing=routing,
+            evidence_references=advisor_evidence_references(payload),
         )
     else:
         parsed = _run_structured_llm_request(
@@ -421,6 +417,10 @@ def request_note_tuning(*, project_root: Path, payload: dict[str, Any]) -> Tunin
             message=prompt,
             schema=_tune_response_schema(current_policy),
             max_seconds=90,
+            task=AdvisorTask.NOTE_TUNING,
+            prompt_version=TUNE_PROMPT_VERSION,
+            routing=routing,
+            evidence_references=advisor_evidence_references(payload),
         )
     if not isinstance(parsed, dict):
         return TuningPolicyResponse(
@@ -566,7 +566,12 @@ def request_note_tuning(*, project_root: Path, payload: dict[str, Any]) -> Tunin
     )
 
 
-def request_review_artifact_critique(*, project_root: Path, payload: dict[str, Any]) -> ReviewArtifactCritiqueResponse:
+def request_review_artifact_critique(
+        *,
+        project_root: Path,
+        payload: dict[str, Any],
+        routing: AdvisorRouting | None = None,
+) -> ReviewArtifactCritiqueResponse:
     review_pack = object_dict(payload.get("multimodal_review_pack"))
     review_images = [
         str(path)
@@ -597,6 +602,10 @@ def request_review_artifact_critique(*, project_root: Path, payload: dict[str, A
         images=review_images,
         schema=_review_artifact_critique_schema(),
         max_seconds=75,
+        task=AdvisorTask.REVIEW_ARTIFACT_CRITIQUE,
+        prompt_version=REVIEW_ARTIFACT_CRITIQUE_PROMPT_VERSION,
+        routing=routing,
+        evidence_references=advisor_evidence_references(payload),
     )
     if not isinstance(parsed, dict):
         return ReviewArtifactCritiqueResponse(
@@ -629,43 +638,102 @@ def request_review_artifact_critique(*, project_root: Path, payload: dict[str, A
     )
 
 
-def request_run_verdict(*, project_root: Path, payload: dict[str, Any]) -> RunVerdictResponse:
-    parsed = _run_structured_llm_request(
-        project_root=project_root,
-        developer=(
-            "You are a media encode calibration reviewer. No tools are available. "
-            "Use only the provided measured result context and return concise JSON that satisfies the schema exactly."
-        ),
-        message=_build_run_verdict_prompt(payload),
-        schema=_run_verdict_schema(),
-        max_seconds=60,
+def request_run_verdict(
+        *,
+        project_root: Path,
+        payload: dict[str, Any],
+        routing: AdvisorRouting | None = None,
+) -> RunVerdictResponse:
+    del project_root, routing
+    sample_result = object_dict(payload.get("sample_result"))
+    size_target = object_dict(payload.get("size_target_analysis"))
+    operator_request = object_dict(payload.get("operator_request"))
+    size_status = str(size_target.get("status") or "").strip().lower()
+    quality_score = _optional_number(sample_result.get("quality_score"))
+    quality_target = _optional_number(sample_result.get("quality_target"))
+    if quality_target is None:
+        quality_target = _optional_number(operator_request.get("target"))
+    quality_met = None if quality_score is None or quality_target is None else quality_score >= quality_target
+
+    if size_status in {"infeasible", "quality_conflict", "over_target"} or quality_met is False:
+        outcome = "needs_review"
+    elif size_status in {"inside_target_band", "under_target"}:
+        outcome = "strong_match"
+    else:
+        outcome = "acceptable_experiment"
+    confidence = "high" if size_status and quality_met is not None else "medium" if sample_result else "low"
+    summary = _deterministic_run_verdict_summary(
+        size_status=size_status,
+        quality_score=quality_score,
+        quality_target=quality_target,
+        quality_met=quality_met,
     )
-    if not isinstance(parsed, dict):
-        return RunVerdictResponse(
-            ok=False,
-            summary="Measured calibration finished, but no model verdict was returned.",
-            raw=_raw_failure_payload(parsed),
-            prompt_version=RUN_VERDICT_PROMPT_VERSION,
-            outcome="unknown",
-            confidence="low",
-            next_step=None,
-            evidence_checked=[],
-        )
-    evidence_checked_raw = parsed.get("evidence_checked")
-    evidence_checked = evidence_checked_raw if isinstance(evidence_checked_raw, list) else []
+    next_step = (
+        "Review the comparison and choose a measured retry before approval."
+        if outcome == "needs_review"
+        else "Review the sampled moments, then approve the current evidence if picture and sound hold up."
+    )
+    evidence_checked = ["sample_result"]
+    if size_target:
+        evidence_checked.append("size_target_analysis")
+    if operator_request:
+        evidence_checked.append("operator_request")
+    verdict_payload = {
+        "summary": summary,
+        "outcome": outcome,
+        "confidence": confidence,
+        "next_step": next_step,
+        "evidence_checked": evidence_checked,
+        "source": "deterministic",
+    }
     return RunVerdictResponse(
-        ok=True,
-        summary=str(parsed.get("summary") or "Measured calibration finished."),
-        raw=json.dumps(parsed, indent=2, sort_keys=True),
+        ok=bool(sample_result),
+        summary=summary,
+        raw=json.dumps(verdict_payload, indent=2, sort_keys=True),
         prompt_version=RUN_VERDICT_PROMPT_VERSION,
-        outcome=str(parsed.get("outcome") or "unknown"),
-        confidence=str(parsed.get("confidence") or "unknown"),
-        next_step=(str(parsed.get("next_step")) if parsed.get("next_step") else None),
-        evidence_checked=[str(item) for item in evidence_checked],
+        outcome=outcome if sample_result else "unknown",
+        confidence=confidence,
+        next_step=next_step if sample_result else None,
+        evidence_checked=evidence_checked if sample_result else [],
     )
 
 
-def request_operator_note_parse(*, project_root: Path, payload: dict[str, Any]) -> dict[str, Any] | None:
+def _deterministic_run_verdict_summary(
+        *,
+        size_status: str,
+        quality_score: float | None,
+        quality_target: float | None,
+        quality_met: bool | None,
+) -> str:
+    if size_status == "infeasible":
+        return "The approved stream plan cannot fit inside the requested size budget."
+    if size_status == "quality_conflict":
+        return "The measured sample reached a quality-floor conflict before it could satisfy the requested size."
+    if size_status == "over_target":
+        return "The measured sample is above the requested whole-episode size band."
+    if quality_met is False and quality_score is not None and quality_target is not None:
+        return f"The measured quality score {quality_score:g} is below the requested floor {quality_target:g}."
+    if size_status == "inside_target_band":
+        return "The measured sample is inside the requested whole-episode size band."
+    if size_status == "under_target":
+        return "The measured sample is smaller than the requested whole-episode size without a measured quality-floor miss."
+    if quality_met is True:
+        return "The measured sample met the requested quality floor; review the current picture and sound before approval."
+    return "The measured calibration completed; review the current picture, sound, and size evidence before approval."
+
+
+def _optional_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value)
+
+
+def request_operator_note_parse(
+        *,
+        project_root: Path,
+        payload: dict[str, Any],
+        routing: AdvisorRouting | None = None,
+) -> dict[str, Any] | None:
     parsed = _run_structured_llm_request(
         project_root=project_root,
         developer=(
@@ -675,6 +743,10 @@ def request_operator_note_parse(*, project_root: Path, payload: dict[str, Any]) 
         message=_build_operator_note_parse_prompt(payload),
         schema=_operator_note_parse_schema(),
         max_seconds=45,
+        task=AdvisorTask.OPERATOR_NOTE_PARSE,
+        prompt_version=OPERATOR_NOTE_PARSE_PROMPT_VERSION,
+        routing=routing,
+        evidence_references=advisor_evidence_references(payload),
     )
     return parsed if isinstance(parsed, dict) else None
 
@@ -703,18 +775,6 @@ def apply_seed_policy(
     return applied_policy, applied_fragment
 
 
-def _run_code_prompt(*, project_root: Path, prompt: str, max_seconds: int) -> AdvisorResponse:
-    return _run_code_prompt_impl(
-        project_root=project_root,
-        prompt=prompt,
-        max_seconds=max_seconds,
-        advisor_model=ADVISOR_MODEL,
-        memory_disabled_code_args=_memory_disabled_code_args,
-        advisor_response_factory=AdvisorResponse,
-        subprocess_run=subprocess.run,
-    )
-
-
 def _run_structured_llm_request(
         *,
         project_root: Path,
@@ -722,6 +782,10 @@ def _run_structured_llm_request(
         message: str,
         schema: dict[str, Any],
         max_seconds: int,
+        task: AdvisorTask,
+        prompt_version: str,
+        routing: AdvisorRouting | None = None,
+        evidence_references: list[str] | None = None,
 ) -> dict[str, Any] | StructuredLLMFailure | None:
     return _run_structured_llm_request_impl(
         project_root=project_root,
@@ -729,11 +793,12 @@ def _run_structured_llm_request(
         message=message,
         schema=schema,
         max_seconds=max_seconds,
-        advisor_model=ADVISOR_MODEL,
-        memory_disabled_code_args=_memory_disabled_code_args,
-        subprocess_run=subprocess.run,
+        task=task,
+        prompt_version=prompt_version,
+        routing=routing,
+        evidence_references=evidence_references or [],
+        subprocess_run=_run_codex_lab_process_impl,
         try_load_json=_try_load_json,
-        try_load_first_json_object=_try_load_first_json_object,
     )
 
 
@@ -745,7 +810,11 @@ def _run_multimodal_tune_request(
         images: list[str],
         schema: dict[str, Any],
         max_seconds: int,
-) -> dict[str, Any] | None:
+        task: AdvisorTask,
+        prompt_version: str,
+        routing: AdvisorRouting | None = None,
+        evidence_references: list[str] | None = None,
+) -> dict[str, Any] | StructuredLLMFailure | None:
     return _run_multimodal_tune_request_impl(
         project_root=project_root,
         developer=developer,
@@ -753,16 +822,13 @@ def _run_multimodal_tune_request(
         images=images,
         schema=schema,
         max_seconds=max_seconds,
-        advisor_model=ADVISOR_MODEL,
-        memory_disabled_code_args=_memory_disabled_code_args,
-        subprocess_run=subprocess.run,
+        task=task,
+        prompt_version=prompt_version,
+        routing=routing,
+        evidence_references=evidence_references or [],
+        subprocess_run=_run_codex_lab_process_impl,
         try_load_json=_try_load_json,
-        try_load_first_json_object=_try_load_first_json_object,
     )
-
-
-def _build_prompt(payload: dict[str, Any]) -> str:
-    return _build_prompt_impl(payload)
 
 
 def _build_seed_prompt(payload: dict[str, Any]) -> str:
@@ -785,41 +851,33 @@ def _build_review_artifact_critique_prompt(payload: dict[str, Any]) -> str:
     return _build_review_artifact_critique_prompt_impl(payload)
 
 
-def _build_run_verdict_prompt(payload: dict[str, Any]) -> str:
-    return _build_run_verdict_prompt_impl(payload)
-
-
 def _build_operator_note_parse_prompt(payload: dict[str, Any]) -> str:
     return _build_operator_note_parse_prompt_impl(payload)
 
 
-def _run_tune_self_check(*, project_root: Path, tuning_context: dict[str, Any], proposal: dict[str, Any]) -> dict[
-                                                                                                                 str, Any] | None:
-    payload = {
-        "context": tuning_context,
-        "proposal": proposal,
+def _run_tune_self_check(
+        *,
+        project_root: Path,
+        tuning_context: dict[str, Any],
+        proposal: dict[str, Any],
+) -> dict[str, Any]:
+    del project_root, tuning_context
+    proposed_policy = object_dict(proposal.get("policy"))
+    if not proposed_policy:
+        return {
+            "status": "fail",
+            "summary": "The proposed draft did not contain an executable allow-listed policy fragment.",
+            "issues": ["No executable policy fragment was returned."],
+            "source": "deterministic",
+            "version": TUNE_SELF_CHECK_VERSION,
+        }
+    return {
+        "status": "pass",
+        "summary": "The normalized draft can proceed to deterministic quality-risk and operator-review gates.",
+        "issues": [],
+        "source": "deterministic",
+        "version": TUNE_SELF_CHECK_VERSION,
     }
-    hint = object_dict(object_dict(tuning_context.get("runtime_toolbelt")).get("audio_tradeoff_hint"))
-    hinted_audio_key = str(hint.get("policy_key") or "hinted audio bitrate").strip() or "hinted audio bitrate"
-    message = (
-        "Perform one fast self-check on the proposed next calibration draft. "
-        "Use only the provided context and proposal. Return whether the draft is acceptable, needs caution, or should be rejected. "
-        f"Also act as an audio-tradeoff referee: if the proposal lowers {hinted_audio_key}, "
-        "treat that as review risk according to context.runtime_toolbelt.audio_tradeoff_hint.review_risk_summary. "
-        "When context.runtime_toolbelt.audio_tradeoff_hint says the savings are low leverage or modest, prefer preserving the current hinted bitrate unless the operator explicitly asked to spend audio quality or the size target clearly depends on that audio cut. "
-        "Use surround_audio_guardrail.status=prefer_preserve_current when the overall draft is still usable but the hinted audio bitrate cut should be rolled back.\n\n"
-        f"{json.dumps(payload, indent=2, sort_keys=True)}"
-    )
-    return _run_structured_llm_request(
-        project_root=project_root,
-        developer=(
-            "You are validating a media encode tuning proposal. No tools are available. "
-            "Return JSON that satisfies the schema exactly and keep the summary concise."
-        ),
-        message=message,
-        schema=_tune_self_check_schema(),
-        max_seconds=45,
-    )
 
 
 def _tune_response_schema(current_policy: dict[str, Any]) -> dict[str, Any]:
@@ -828,10 +886,6 @@ def _tune_response_schema(current_policy: dict[str, Any]) -> dict[str, Any]:
 
 def _seed_response_schema(base_policy: dict[str, Any]) -> dict[str, Any]:
     return _seed_response_schema_impl(base_policy, request_dispositions=REQUEST_DISPOSITIONS)
-
-
-def _tune_self_check_schema() -> dict[str, Any]:
-    return _tune_self_check_schema_impl()
 
 
 def _apply_surround_audio_guardrail(
@@ -1007,12 +1061,26 @@ def _audio_guardrail_backstop_reason(
     hint = object_dict(object_dict(tuning_context.get("runtime_toolbelt")).get("audio_tradeoff_hint"))
     policy_key = str(hint.get("policy_key") or "").strip()
     leverage = str(hint.get("leverage") or "").strip().lower()
-    if policy_key not in _GUARDED_AUDIO_POLICY_KEYS or leverage not in {"low", "medium"}:
+    if leverage not in {"low", "medium"}:
         return None
     if _operator_note_mentions_audio(str(tuning_context.get("operator_note") or "")):
         return None
     current_audio = object_dict(current_policy.get("audio"))
     proposed_audio = object_dict(proposed_policy.get("audio"))
+    if policy_key not in _GUARDED_AUDIO_POLICY_KEYS:
+        lowered_keys = [
+            key
+            for key in _GUARDED_AUDIO_POLICY_KEYS
+            if current_audio.get(key) is not None
+            and proposed_audio.get(key) is not None
+            and _surround_audio_bitrate_was_lowered(
+                current_value=current_audio.get(key),
+                proposed_value=proposed_audio.get(key),
+            )
+        ]
+        if len(lowered_keys) != 1:
+            return None
+        policy_key = lowered_keys[0]
     current_value = current_audio.get(policy_key)
     proposed_value = proposed_audio.get(policy_key)
     if current_value is None or proposed_value is None:
@@ -1102,10 +1170,6 @@ def _rerun_tune_self_check_after_surround_guardrail(
     }
 
 
-def _run_verdict_schema() -> dict[str, Any]:
-    return _run_verdict_schema_impl()
-
-
 def _review_artifact_critique_schema() -> dict[str, Any]:
     return _review_artifact_critique_schema_impl()
 
@@ -1120,10 +1184,6 @@ def _extract_seed_payload(raw: str) -> JSONObject:
 
 def _try_load_json(raw: str) -> JSONValue:
     return _try_load_json_impl(raw)
-
-
-def _try_load_first_json_object(raw: str) -> JSONValue:
-    return _try_load_first_json_object_impl(raw)
 
 
 def _policy_key_paths(policy: dict[str, Any]) -> list[str]:

@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from mediaforce.advisor import AdvisorResponse
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.type_defs import float_value, object_dict, object_list
 from mediaforce.tuning.quality_risk import quality_risk_public_view
@@ -215,12 +214,8 @@ def review_pair_key(timestamp_seconds: float) -> int:
     return int(round(timestamp_seconds * 1000))
 
 
-def save_advice_state(advice_file: Path, advice: AdvisorResponse | dict[str, Any]) -> None:
-    if isinstance(advice, AdvisorResponse):
-        payload = {"ok": advice.ok, "summary": advice.summary, "raw": advice.raw}
-    else:
-        payload = dict(advice)
-    advice_file.write_text(json.dumps(payload, indent=2) + "\n")
+def save_advice_state(advice_file: Path, advice: dict[str, Any]) -> None:
+    advice_file.write_text(json.dumps(dict(advice), indent=2) + "\n")
 
 
 def load_pending_proposal(proposal_file: Path) -> dict[str, Any] | None:

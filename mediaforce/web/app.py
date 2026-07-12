@@ -30,10 +30,8 @@ from sqlalchemy import literal_column
 from sqlalchemy import or_
 from sqlalchemy import select
 
-from mediaforce.advisor import (
-    AdvisorResponse,
-    TuningPolicyResponse,
-)
+from mediaforce.advisor import TuningPolicyResponse
+from mediaforce.advising.routing import advisor_routing_from_config
 from mediaforce.tuning.calibration_jobs import load_active_job, load_job, \
     list_queue_summary
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, update_runtime_settings, \
@@ -321,6 +319,7 @@ def _record_run_verdict(config: MediaforceConfig, prefix: str, calibration_paylo
 
 def create_app(config_path: Path | None = None) -> FastAPI:
     config = load_config(config_path or DEFAULT_CONFIG_PATH)
+    advisor_routing = advisor_routing_from_config(config)
     cleanup_lock = threading.Lock()
 
     @asynccontextmanager
@@ -843,6 +842,21 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             allow_measured_size_quality_increase=allow_measured_size_quality_increase,
         )
 
+    def _operator_requested_experiment_for_config(
+            note: str,
+            sample_item: dict[str, Any] | None = None,
+            *,
+            parsed_note: dict[str, Any] | None = None,
+            current_policy: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        return runtime_operator_requested_experiment(
+            note,
+            sample_item,
+            parsed_note=parsed_note,
+            current_policy=current_policy,
+            advisor_routing=advisor_routing,
+        )
+
     def _folder_ai_tune_deps() -> FolderAiTuneDeps:
         return FolderAiTuneDeps(
             resolve_sample_host=_resolve_sample_host,
@@ -850,7 +864,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             load_retryable_sample_job_state=_load_retryable_sample_job_state,
             load_latest_failed_sample_job_state=_load_latest_failed_sample_job_state,
             sample_item=_sample_item,
-            operator_requested_experiment=_operator_requested_experiment,
+            operator_requested_experiment=_operator_requested_experiment_for_config,
             load_calibration_state=_load_calibration_state,
             recent_tuning_sessions=_recent_tuning_sessions,
             matching_request_history=runtime_matching_request_history,
@@ -873,6 +887,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             apply_policy_fragment=_apply_policy_fragment,
             load_advice_state=_load_advice_state,
             save_advice_state=_save_advice_state,
+            advisor_routing=advisor_routing,
             save_job_state=_save_job_state,
             clear_pending_proposal=_clear_pending_proposal,
             record_tuning_session=record_tuning_session,
@@ -2489,7 +2504,7 @@ def _review_pair_key(timestamp_seconds: float) -> int:
     return review_pair_key(timestamp_seconds)
 
 
-def _save_advice_state(config: MediaforceConfig, prefix: str, advice: AdvisorResponse | ActionPayload) -> None:
+def _save_advice_state(config: MediaforceConfig, prefix: str, advice: ActionPayload) -> None:
     save_advice_state(_advice_file(config, prefix), advice)
 
 
