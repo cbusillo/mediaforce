@@ -16,6 +16,8 @@ from mediaforce.tuning.target_size_search import (
 
 QUALITY_RISK_CONTRACT_SCHEMA = "mediaforce.quality_risk_contract"
 QUALITY_RISK_CONTRACT_VERSION = 1
+MAX_QUALITY_RISK_FEEDBACK_TAGS = 7
+MAX_QUALITY_RISK_FEEDBACK_DETAILS = 2000
 
 QUALITY_RISK_VERDICTS = (
     "safe_to_sample",
@@ -214,17 +216,20 @@ def with_quality_risk_intent(
         *,
         note: str,
 ) -> dict[str, Any] | None:
-    tags = quality_risk_tags_from_text(note)
     request = dict(object_dict(operator_request))
-    if not tags:
+    explicit_tags = object_list(request.get("quality_risk_tags"))
+    inferred_tags = quality_risk_tags_from_text(note)
+    if not explicit_tags and not inferred_tags:
         return request or None
+    tags = normalize_quality_risk_tags(explicit_tags or inferred_tags)[:MAX_QUALITY_RISK_FEEDBACK_TAGS]
+    details = str(request.get("quality_risk_details") or note).strip()[:MAX_QUALITY_RISK_FEEDBACK_DETAILS]
     request.setdefault("source", "operator_note")
     request.setdefault("request_type", "quality_risk_feedback")
     request.setdefault("request_text", note.strip())
     request.setdefault("operator_confirmed", False)
     request.setdefault("evidence_authority", "none")
     request["quality_risk_tags"] = tags
-    request["quality_risk_details"] = note.strip()
+    request["quality_risk_details"] = details
     return request
 
 

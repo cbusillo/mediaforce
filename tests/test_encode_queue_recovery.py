@@ -13508,6 +13508,92 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 409)
         self.assertIn("rejected after approval", str(raised.exception.detail))
 
+    def test_queue_folder_encode_rejects_newer_failed_target_search(self) -> None:
+        calibration = {
+            "policy": {"video": {"target_size_mb": 300, "target_size_bytes": 300_000_000, "size_goal_mode": "absolute"}},
+            "accepted_at": "2026-07-12T00:00:00+00:00",
+        }
+        failed_job = {
+            "job_id": "sample-2",
+            "status": "failed",
+            "finished_at": "2026-07-12T00:05:00+00:00",
+            "result": {
+                "target_size_status": "infeasible",
+                "target_size_trace": {"status": "infeasible"},
+            },
+        }
+
+        with self.assertRaises(HTTPException) as raised:
+            folder_actions_runtime.queue_folder_encode_action(
+                self.config,
+                "tv/show/Season 1",
+                "",
+                False,
+                now_iso=web_app._now_iso,
+                load_job_state=lambda *_args, **_kwargs: failed_job,
+                load_calibration_state=lambda *_args, **_kwargs: calibration,
+                review_gate=self._accepted_review_gate,
+                upsert_override=self._noop_upsert_override,
+                load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
+                clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
+                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
+                save_encode_job=save_encode_job,
+            )
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("cannot fit the required streams", str(raised.exception.detail))
+
+    def test_target_search_failure_before_approval_does_not_block_production(self) -> None:
+        reason = folder_actions_runtime._failed_target_size_job_blocking_reason(
+            {
+                "status": "failed",
+                "finished_at": "2026-07-11T23:59:00+00:00",
+                "result": {"target_size_status": "quality_conflict"},
+            },
+            {"accepted_at": "2026-07-12T00:00:00+00:00"},
+        )
+
+        self.assertIsNone(reason)
+
+    def test_advice_merge_preserves_concurrent_rejection(self) -> None:
+        prefix = "tv/show/Season 1"
+        rejected = {
+            "kind": "post_test",
+            "verdict": "rejected",
+            "sample_job_id": "sample-1",
+            "policy_hash": "policy-1",
+            "source_id": "source-1",
+            "prefix": prefix,
+            "created_at": "2026-07-12T00:01:00+00:00",
+        }
+        approved = {
+            **rejected,
+            "verdict": "approved",
+            "created_at": "2026-07-12T00:00:00+00:00",
+        }
+        web_app._save_advice_state(self.config, prefix, {"quality_risk_records": [rejected]})
+
+        merged = web_app._merge_advice_state(
+            self.config,
+            prefix,
+            {"quality_risk_records": [approved]},
+        )
+
+        self.assertEqual(
+            {str(object_dict(record).get("verdict")) for record in object_list(merged["quality_risk_records"])},
+            {"approved", "rejected"},
+        )
+
+    def test_queue_advice_loader_fails_closed_on_corrupt_state(self) -> None:
+        prefix = "tv/show/Season 1"
+        web_app._advice_file(self.config, prefix).write_text("{not-json")
+
+        with self.assertRaises(HTTPException) as raised:
+            web_app._load_advice_state_for_queue(self.config, prefix)
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("could not read the current review evidence safely", str(raised.exception.detail))
+
     def test_build_manifest_shards_creates_one_file_per_shard(self) -> None:
         manifest: folder_actions_runtime.ManifestPayload = {
             "items": [

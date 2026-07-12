@@ -285,21 +285,76 @@ _operator_requested_experiment = runtime_operator_requested_experiment
 _apply_policy_fragment = runtime_apply_policy_fragment
 
 
-def _load_advice_state(config: MediaforceConfig, prefix: str) -> ActionPayload | None:
-    path = _advice_file(config, prefix)
+def _read_advice_state(path: Path, *, strict: bool) -> ActionPayload | None:
     if not path.exists():
         return None
     try:
         payload = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
+        if strict:
+            raise
         return None
-    return payload if isinstance(payload, dict) else None
+    if isinstance(payload, dict):
+        return payload
+    if strict:
+        raise ValueError(f"Advice state at {path} must be a JSON object")
+    return None
+
+
+def _load_advice_state(config: MediaforceConfig, prefix: str) -> ActionPayload | None:
+    return _read_advice_state(_advice_file(config, prefix), strict=False)
+
+
+def _load_advice_state_for_queue(config: MediaforceConfig, prefix: str) -> ActionPayload | None:
+    try:
+        return _read_advice_state(_advice_file(config, prefix), strict=True)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Mediaforce could not read the current review evidence safely. "
+                "Repair or rerun the representative test before starting production."
+            ),
+        ) from exc
+
+
+@contextmanager
+def _locked_advice_state(config: MediaforceConfig, prefix: str) -> Iterator[Path]:
+    path = _advice_file(config, prefix)
+    lock_path = path.with_name(f".{path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield path
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _merge_quality_risk_records(existing: Any, incoming: Any) -> list[ActionPayload]:
+    records = [object_dict(record) for record in object_list(existing)]
+    binding_keys = ("kind", "verdict", "sample_job_id", "policy_hash", "source_id", "prefix")
+    for raw_record in object_list(incoming):
+        record = object_dict(raw_record)
+        records = [
+            current
+            for current in records
+            if not all(current.get(key) == record.get(key) for key in binding_keys)
+        ]
+        records.append(record)
+    return records[-100:]
 
 
 def _merge_advice_state(config: MediaforceConfig, prefix: str, patch: ActionPayload) -> ActionPayload:
-    existing = _load_advice_state(config, prefix) or {}
-    merged = {**existing, **patch}
-    _save_advice_state(config, prefix, merged)
+    with _locked_advice_state(config, prefix) as path:
+        existing = _read_advice_state(path, strict=True) or {}
+        merged = {**existing, **patch}
+        if "quality_risk_records" in patch:
+            merged["quality_risk_records"] = _merge_quality_risk_records(
+                existing.get("quality_risk_records"),
+                patch.get("quality_risk_records"),
+            )
+        save_advice_state(path, merged)
     return merged
 
 
@@ -885,7 +940,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             tuning_advice_payload=_tuning_advice_payload,
             load_pending_proposal=_load_pending_proposal,
             apply_policy_fragment=_apply_policy_fragment,
-            load_advice_state=_load_advice_state,
+            load_advice_state=_load_advice_state_for_queue,
             save_advice_state=_save_advice_state,
             advisor_routing=advisor_routing,
             save_job_state=_save_job_state,
@@ -2505,7 +2560,8 @@ def _review_pair_key(timestamp_seconds: float) -> int:
 
 
 def _save_advice_state(config: MediaforceConfig, prefix: str, advice: ActionPayload) -> None:
-    save_advice_state(_advice_file(config, prefix), advice)
+    with _locked_advice_state(config, prefix) as path:
+        save_advice_state(path, advice)
 
 
 def _load_pending_proposal(config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:

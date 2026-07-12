@@ -182,6 +182,9 @@ def queue_folder_encode_action(
         if calibration is None:
             raise HTTPException(status_code=400, detail="Run a sampled calibration first.")
         calibration_payload = object_dict(calibration)
+        failed_target_reason = _failed_target_size_job_blocking_reason(existing_job, calibration_payload)
+        if failed_target_reason is not None:
+            raise HTTPException(status_code=409, detail=failed_target_reason)
         if load_advice_state is not None:
             advice_state = object_dict(load_advice_state(config, normalized_prefix))
             quality_risk_contract = build_quality_risk_contract(
@@ -192,6 +195,7 @@ def queue_folder_encode_action(
                 operator_request=object_dict(advice_state.get("operator_request")) or None,
                 calibration=calibration_payload,
                 advice_state=advice_state,
+                latest_failed_sample_job=existing_job,
             )
             blocking_reason = _quality_risk_blocking_reason(quality_risk_contract)
             if blocking_reason is not None:
@@ -987,3 +991,35 @@ def _quality_risk_blocking_reason(contract: ActionPayload) -> str | None:
         if str(reason).strip()
     ]
     return blocking_reasons[0] if blocking_reasons else "Measured review facts still block this action."
+
+
+def _failed_target_size_job_blocking_reason(
+        job: JobPayload | None,
+        calibration: ActionPayload,
+) -> str | None:
+    job_payload = object_dict(job)
+    if str(job_payload.get("status") or "") not in {"failed", "stopped"}:
+        return None
+    result = object_dict(job_payload.get("result"))
+    trace = object_dict(result.get("target_size_trace"))
+    target_status = str(result.get("target_size_status") or trace.get("status") or "").strip().lower()
+    if target_status not in {"infeasible", "quality_conflict"}:
+        return None
+    accepted_at = str(calibration.get("accepted_at") or "").strip()
+    failed_at = str(
+        job_payload.get("finished_at")
+        or job_payload.get("updated_at")
+        or job_payload.get("created_at")
+        or ""
+    ).strip()
+    if accepted_at and failed_at and failed_at <= accepted_at:
+        return None
+    if target_status == "infeasible":
+        return (
+            "The latest size-directed test found that this target cannot fit the required streams. "
+            "Choose a different size and approve a fresh test before starting production."
+        )
+    return (
+        "The latest size-directed test could not reach this target without crossing the quality floor. "
+        "Choose a different size or revise the quality decision, then approve a fresh test before starting production."
+    )

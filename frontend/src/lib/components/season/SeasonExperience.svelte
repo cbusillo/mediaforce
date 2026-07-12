@@ -117,6 +117,9 @@
 	);
 	const scopeName = $derived(isSeriesScope ? identity.show : identity.season);
 	const scopeNoun = $derived(isSeriesScope ? 'show' : 'season');
+	const makeActionLabel = $derived(
+		isSeriesScope ? `Make all ${seriesSeasonCount} ${seriesSeasonLabel}` : 'Make the season'
+	);
 	const humanState = $derived(detailSeasonState(folder, status));
 	const goals = $derived(sizeGoals(folder));
 	const selectedGoal = $derived(goals.find((goal) => goal.key === selectedGoalKey) ?? goals[0]);
@@ -660,7 +663,7 @@
 
 	async function focusSafetyDialog() {
 		await tick();
-		(document.querySelector('.safety-dialog .primary-button') as HTMLElement | null)?.focus();
+		(document.querySelector('.safety-dialog .secondary-button') as HTMLElement | null)?.focus();
 	}
 
 	async function openSafetyDialog(dialog: SafetyDialog) {
@@ -674,13 +677,13 @@
 		await openSafetyDialog({
 			kind: 'approval',
 			title: `Accept ${formatDecimalFileSize(expectedEpisodeBytes)} per episode instead of ${sizeTargetLabel}?`,
-			detail: `This saves the tested settings as the ${scopeNoun} profile and queues the full ${scopeNoun} encode. It does not change this result to ${sizeTargetLabel} per episode.`,
-			primaryLabel: `Accept and queue ${scopeNoun}`,
+			detail: `This saves the tested settings as the ${scopeNoun} profile. Production remains separate until you choose ${makeActionLabel}. It does not change this result to ${sizeTargetLabel} per episode.`,
+			primaryLabel: 'Accept this result',
 			confirmSizeTradeoff: true,
 			changes: [
 				`Requested: ${sizeTargetLabel} per episode`,
 				`Measured estimate: ${formatDecimalFileSize(expectedEpisodeBytes)} per episode`,
-				`Next action: queue the full ${scopeNoun}`
+				`Next action: choose ${makeActionLabel} when you are ready`
 			]
 		});
 	}
@@ -1454,7 +1457,7 @@
 					</div>
 				</div>
 				<button class="primary-button" type="button" onclick={queueSeason}>
-					{isSeriesScope ? `Make all ${seriesSeasonCount} ${seriesSeasonLabel}` : 'Make the season'}
+					{makeActionLabel}
 					<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
 				</button>
 			</section>

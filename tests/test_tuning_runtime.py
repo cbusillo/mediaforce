@@ -58,7 +58,8 @@ from mediaforce.tuning.tuning_memory import (
     retrieve_learning_context,
     sibling_approved_season_memory,
 )
-from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_risk_public_view
+from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_risk_public_view, \
+    with_quality_risk_intent
 from mediaforce.tuning.target_size_search import TargetSizeSearchError
 from mediaforce.web.app import (
     _advice_file,
@@ -7751,6 +7752,28 @@ class TuningRuntimeTests(unittest.TestCase):
             request["quality_risk_details"],
             "Moment 2 loses texture and the center channel sounds thin.",
         )
+
+        normalized_request = with_quality_risk_intent(
+            request,
+            note="Keep the target because motion breakup and thin sound need another test. " + ("x" * 3000),
+        )
+
+        self.assertIsNotNone(normalized_request)
+        self.assertEqual(
+            normalized_request["quality_risk_tags"],
+            ["motion_breakup", "audio_quality_layout"],
+        )
+        self.assertEqual(
+            normalized_request["quality_risk_details"],
+            "Moment 2 loses texture and the center channel sounds thin.",
+        )
+        inferred_request = with_quality_risk_intent(
+            None,
+            note="Motion breakup needs another test. " + ("x" * 3000),
+        )
+        self.assertIsNotNone(inferred_request)
+        self.assertEqual(inferred_request["quality_risk_tags"], ["motion_breakup"])
+        self.assertEqual(len(inferred_request["quality_risk_details"]), 2000)
 
     def test_run_calibration_job_marks_cancelled_run_stopped(self) -> None:
         saved_statuses: list[str] = []
