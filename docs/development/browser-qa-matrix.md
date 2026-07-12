@@ -44,11 +44,25 @@ The managed smoke seeds a compact but non-empty workflow dataset:
 - Retryable state: `/folders/tv/Retry%20Show/Season%201`, with a failed sample
   job that exposes retry copy.
 - Review-ready state: `/folders/tv/Review%20Ready/Season%201`, with retained
-  review media and visible review-pack artifacts.
+  review media, explicit target/band/sample-byte facts, and picture/sound risk.
+- Absolute-target state: `/folders/tv/Absolute%20Goal/Season%201`, proving an
+  explicit 225 MB episode goal remains 225 MB for an 88-minute episode.
+- Under- and over-target states: `/folders/tv/Undershoot%20Show/Season%201` and
+  `/folders/tv/Overshoot%20Show/Season%201`, with contextual measured retries.
+- Infeasible and quality-conflict states:
+  `/folders/tv/Infeasible%20Goal/Season%201` and
+  `/folders/tv/Quality%20Conflict/Season%201`, proving arithmetic impossibility
+  is explained separately from a measured quality-floor conflict.
+- Approved state: `/folders/tv/Approved%20Show/Season%201`, where approval is
+  complete but production remains unqueued until `Make the season` is chosen.
 - Active processing state: `/folders/tv/Encoding%20Show/Season%201`, with a
   running folder processing row.
 - Retryable processing state: `/folders/tv/Failed%20Encode/Season%201`, with a
   needs-attention processing row that exposes recovery copy.
+- Delivery states: `/folders/tv/Validation%20Ready/Season%201`,
+  `/folders/tv/Promotion%20Ready/Season%201`, and
+  `/folders/tv/Finished%20Show/Season%201` cover validation, promotion, and
+  completed folder states.
 - Unavailable worker state: `config/web-smoke.toml` includes a smoke-only remote
   host that is unavailable, so `/ops` can expose the no-ready-host blocker while
   queued encode work exists.
@@ -76,8 +90,17 @@ Every browser QA pass should cover these routes:
 - `/folders/tv/Sampling%20Show/Season%201`: active sample queue state.
 - `/folders/tv/Retry%20Show/Season%201`: retryable sample state.
 - `/folders/tv/Review%20Ready/Season%201`: review-pack-ready sample state.
+- `/folders/tv/Absolute%20Goal/Season%201`: absolute 225 MB target state.
+- `/folders/tv/Overshoot%20Show/Season%201`: over-target comparison state.
+- `/folders/tv/Undershoot%20Show/Season%201`: under-target comparison state.
+- `/folders/tv/Infeasible%20Goal/Season%201`: arithmetic infeasibility state.
+- `/folders/tv/Quality%20Conflict/Season%201`: quality-floor conflict state.
+- `/folders/tv/Approved%20Show/Season%201`: approved, not-yet-queued state.
 - `/folders/tv/Encoding%20Show/Season%201`: running processing state.
 - `/folders/tv/Failed%20Encode/Season%201`: retryable processing state.
+- `/folders/tv/Validation%20Ready/Season%201`: validation-ready state.
+- `/folders/tv/Promotion%20Ready/Season%201`: promotion-ready state.
+- `/folders/tv/Finished%20Show/Season%201`: completed state.
 - `/ops`: blockers, worker readiness, queues, and collapsed history.
 - `/completed`: no-action history and cleanup-ready work.
 - `/settings`: basic, advanced, and danger-zone settings sections.

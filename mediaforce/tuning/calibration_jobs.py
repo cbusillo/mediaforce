@@ -56,6 +56,28 @@ def load_latest_failed_sample_job(connection: DBClient, prefix: str) -> dict[str
     return _hydrate_job(row) if row is not None else None
 
 
+def load_latest_failed_target_size_sample_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
+    rows = connection.execute(
+        _calibration_job_select()
+        .where(calibration_jobs.c.prefix == prefix)
+        .where(calibration_jobs.c.lane == "sample")
+        .where(calibration_jobs.c.status.in_(("failed", "stopped")))
+        .where(calibration_jobs.c.action.in_(("baseline", "ai_tune")))
+        .order_by(calibration_jobs.c.created_at.desc(), _rowid_column().desc())
+    ).mappings().fetchall()
+    for row in rows:
+        payload = _hydrate_job(row)
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            continue
+        trace = result.get("target_size_trace")
+        trace_status = trace.get("status") if isinstance(trace, dict) else None
+        target_status = str(result.get("target_size_status") or trace_status or "").strip().lower()
+        if target_status in {"infeasible", "quality_conflict"}:
+            return payload
+    return None
+
+
 def load_latest_retryable_sample_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
     return load_latest_failed_sample_job(connection, prefix)
 

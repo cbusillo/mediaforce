@@ -439,6 +439,10 @@ export interface OperatorIntentRequestPayload {
 		audio?: Record<string, unknown>;
 		subtitle?: Record<string, unknown>;
 	};
+	quality_risk_tags?: QualityRiskTag[];
+	quality_risk_details?: string;
+	evidence_authority?:
+		'none' | 'operator_observed' | 'approved_visual_result' | 'rejected_visual_result';
 }
 
 export interface ResolvedSizeGoalPayload {
@@ -454,6 +458,10 @@ export interface ResolvedSizeGoalPayload {
 	target_size_mb?: number | null;
 	sample_projection_tolerance_percent: number;
 	final_output_tolerance_percent: number;
+	sample_lower_bound_bytes?: number | null;
+	sample_upper_bound_bytes?: number | null;
+	final_lower_bound_bytes?: number | null;
+	final_upper_bound_bytes?: number | null;
 	rationale: string;
 }
 

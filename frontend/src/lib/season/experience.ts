@@ -6,6 +6,7 @@ import type {
 	FolderStatusPayload,
 	OperatorIntentRequestPayload,
 	QualityRiskPayload,
+	QualityRiskTag,
 	SizeGoalMode
 } from '$lib/api/types';
 
@@ -90,7 +91,52 @@ export interface CompareRiskSummary {
 	authority: string;
 	authorityDetail: string;
 	focusMoments: string[];
+	picture: CompareRiskFact;
+	sound: CompareRiskFact;
 }
+
+export interface CompareRiskFact {
+	label: string;
+	level: string;
+	detail: string;
+}
+
+export interface ResolvedTargetSummary {
+	targetBytes: number;
+	sampleLowerBoundBytes: number;
+	sampleUpperBoundBytes: number;
+	finalLowerBoundBytes: number;
+	finalUpperBoundBytes: number;
+	sampleTolerancePercent: number;
+	finalTolerancePercent: number;
+	mode: SizeGoalMode | '';
+	rationale: string;
+	itemRuntimeSeconds: number;
+	referenceSizeBytes: number;
+	referenceRuntimeMinutes: number;
+}
+
+export interface TargetConstraintSummary {
+	kind: 'arithmetic_infeasible' | 'quality_conflict';
+	title: string;
+	detail: string;
+	recoveryLabel: string;
+}
+
+export interface ReviewConcern {
+	tag: QualityRiskTag;
+	label: string;
+}
+
+export const REVIEW_CONCERNS: readonly ReviewConcern[] = [
+	{ tag: 'softness_detail_loss', label: 'Picture looks soft' },
+	{ tag: 'motion_breakup', label: 'Motion breaks up' },
+	{ tag: 'banding_dark_scene_damage', label: 'Dark scenes or gradients look wrong' },
+	{ tag: 'grain_noise_treatment', label: 'Grain or noise looks wrong' },
+	{ tag: 'cadence_interlace_artifacts', label: 'Motion cadence looks uneven' },
+	{ tag: 'audio_quality_layout', label: 'Sound quality or layout is wrong' },
+	{ tag: 'other', label: 'Something else' }
+];
 
 const ACTIVE_JOB_STATUSES = new Set(['queued', 'running', 'starting', 'retry_backoff', 'stopping']);
 const FAILURE_JOB_STATUSES = new Set(['failed', 'stopped', 'needs_attention']);
@@ -156,6 +202,26 @@ function riskAuthority(risk: QualityRiskPayload | null): { value: string; detail
 	};
 }
 
+function compareRiskFact(
+	risks: NonNullable<QualityRiskPayload['typed_risks']>,
+	predicate: (tag: QualityRiskTag) => boolean,
+	fallbackLabel: string,
+	fallbackDetail: string
+): CompareRiskFact {
+	const risk =
+		risks.find((item) => predicate(item.tag) && text(item.level).toLowerCase() === 'high') ??
+		risks.find((item) => predicate(item.tag) && text(item.level).toLowerCase() === 'medium') ??
+		risks.find((item) => predicate(item.tag));
+	if (!risk) {
+		return { label: fallbackLabel, level: 'No specific warning', detail: fallbackDetail };
+	}
+	return {
+		label: risk.label,
+		level: `${risk.level} risk`,
+		detail: risk.rationale
+	};
+}
+
 export function compareRiskSummary(folder: FolderPayload): CompareRiskSummary | null {
 	const risk = qualityRisk(folder);
 	if (!risk) return null;
@@ -166,6 +232,18 @@ export function compareRiskSummary(folder: FolderPayload): CompareRiskSummary | 
 		typedRisks[0] ??
 		null;
 	const authority = riskAuthority(risk);
+	const picture = compareRiskFact(
+		typedRisks,
+		(tag) => tag !== 'audio_quality_layout',
+		'No specific picture warning',
+		'Judge detail, motion, dark scenes, grain, and cadence in the selected moments.'
+	);
+	const sound = compareRiskFact(
+		typedRisks,
+		(tag) => tag === 'audio_quality_layout',
+		'No specific sound warning',
+		'Listen for clarity, channel layout, balance, and anything distracting.'
+	);
 	const focusMoments = (risk.pre_test_instruction?.moments ?? []).slice(0, 3).map((moment) => {
 		const labels = Array.isArray(moment.risk_tags) ? moment.risk_tags.join(', ') : 'review risk';
 		return `Moment ${moment.moment} · ${labels}`;
@@ -185,7 +263,9 @@ export function compareRiskSummary(folder: FolderPayload): CompareRiskSummary | 
 		topRiskDetail: topRisk?.rationale ?? 'No typed review focus was published for this sample.',
 		authority: authority.value,
 		authorityDetail: authority.detail,
-		focusMoments
+		focusMoments,
+		picture,
+		sound
 	};
 }
 
@@ -346,6 +426,123 @@ export function sizeGoals(folder: FolderPayload): SizeGoal[] {
 	});
 }
 
+export function resolvedTargetSummary(folder: FolderPayload): ResolvedTargetSummary | null {
+	const analysis = folderSizeTargetAnalysis(folder);
+	const resolved = folder.resolved_operator_intent?.size_goal;
+	const targetBytes = analysis.budgetBytes || numberValue(resolved?.target_size_bytes);
+	if (targetBytes <= 0) return null;
+	const sampleTolerancePercent = numberValue(resolved?.sample_projection_tolerance_percent) || 10;
+	const finalTolerancePercent = numberValue(resolved?.final_output_tolerance_percent) || 5;
+	const sampleRatio = sampleTolerancePercent / 100;
+	const finalRatio = finalTolerancePercent / 100;
+	return {
+		targetBytes,
+		sampleLowerBoundBytes:
+			analysis.lowerBoundBytes ||
+			numberValue(resolved?.sample_lower_bound_bytes) ||
+			Math.round(targetBytes * (1 - sampleRatio)),
+		sampleUpperBoundBytes:
+			analysis.upperBoundBytes ||
+			numberValue(resolved?.sample_upper_bound_bytes) ||
+			Math.round(targetBytes * (1 + sampleRatio)),
+		finalLowerBoundBytes:
+			numberValue(resolved?.final_lower_bound_bytes) || Math.round(targetBytes * (1 - finalRatio)),
+		finalUpperBoundBytes:
+			numberValue(resolved?.final_upper_bound_bytes) || Math.round(targetBytes * (1 + finalRatio)),
+		sampleTolerancePercent,
+		finalTolerancePercent,
+		mode: resolved?.mode === 'normalized' || resolved?.mode === 'absolute' ? resolved.mode : '',
+		rationale: text(resolved?.rationale),
+		itemRuntimeSeconds: numberValue(resolved?.item_runtime_seconds),
+		referenceSizeBytes: numberValue(resolved?.reference_size_mb) * 1_000_000,
+		referenceRuntimeMinutes: numberValue(resolved?.reference_runtime_minutes)
+	};
+}
+
+export function targetConstraintSummary(folder: FolderPayload): TargetConstraintSummary | null {
+	const search = folder.quality_risk?.target_size_search;
+	const feasibility = folder.stream_budget_ledger?.feasibility;
+	if (feasibility?.arithmetic_infeasible || search?.status === 'infeasible') {
+		return {
+			kind: 'arithmetic_infeasible',
+			title: 'This size cannot fit the required streams.',
+			detail:
+				'Audio, subtitles, attachments, and container overhead leave no positive video budget at this size. Choose a roomier goal before making another test.',
+			recoveryLabel: 'Choose a size that can fit'
+		};
+	}
+	if (search?.status === 'quality_conflict') {
+		const metric = text(search.selected_metric).toUpperCase();
+		const minimum = numberValue(search.minimum_metric_score);
+		const floor =
+			metric && minimum > 0 ? ` the ${metric} floor of ${minimum}` : ' the quality floor';
+		return {
+			kind: 'quality_conflict',
+			title: 'This size conflicts with the quality floor.',
+			detail: `Every measured candidate that fit the size fell below${floor}. Choose a roomier goal instead of silently lowering quality.`,
+			recoveryLabel: 'Choose a roomier goal'
+		};
+	}
+	return null;
+}
+
+function normalizedOperatorText(value: string, limit = 600): string {
+	return value.trim().replaceAll(/\s+/g, ' ').slice(0, limit);
+}
+
+export function testRequestWithInstructions(baseRequest: string, instructions: string): string {
+	const detail = normalizedOperatorText(instructions);
+	return detail
+		? `${baseRequest.trim()} Additional operator priorities: ${detail}`
+		: baseRequest.trim();
+}
+
+export function reviewFeedbackRequest(
+	baseRequest: string,
+	tags: readonly QualityRiskTag[],
+	details: string,
+	instructions = ''
+): string {
+	const selectedLabels = REVIEW_CONCERNS.filter((concern) => tags.includes(concern.tag)).map(
+		(concern) => concern.label
+	);
+	const feedbackDetail = normalizedOperatorText(details);
+	const feedback = [
+		selectedLabels.length ? `Operator review concerns: ${selectedLabels.join(', ')}.` : '',
+		feedbackDetail ? `Operator review detail: ${feedbackDetail}` : ''
+	]
+		.filter(Boolean)
+		.join(' ');
+	return testRequestWithInstructions(`${baseRequest.trim()} ${feedback}`.trim(), instructions);
+}
+
+export function reviewFeedbackIntent(
+	intent: OperatorIntentRequestPayload | null,
+	tags: readonly QualityRiskTag[],
+	details: string
+): OperatorIntentRequestPayload | null {
+	if (!intent) return null;
+	const feedbackDetail = normalizedOperatorText(details, 2000);
+	const normalizedTags: QualityRiskTag[] = tags.length ? [...new Set(tags)] : ['other'];
+	return {
+		...intent,
+		size_goal: { ...intent.size_goal },
+		resolution: { ...intent.resolution },
+		...(intent.quality ? { quality: { ...intent.quality } } : {}),
+		...(intent.streams
+			? {
+					streams: {
+						...(intent.streams.audio ? { audio: { ...intent.streams.audio } } : {}),
+						...(intent.streams.subtitle ? { subtitle: { ...intent.streams.subtitle } } : {})
+					}
+				}
+			: {}),
+		quality_risk_tags: normalizedTags,
+		quality_risk_details: feedbackDetail,
+		evidence_authority: 'rejected_visual_result'
+	};
+}
+
 export function isSizeGoalSelectionConfirmed(
 	goals: readonly SizeGoal[],
 	selectedGoalKey: SizeGoal['key'],
@@ -401,6 +598,9 @@ export function measuredFollowupRequest(analysis: SizeTargetAnalysis): string {
 	}
 	if (analysis.status === 'under_target' && analysis.predictedBytes > 0) {
 		return `Measured follow-up: keep the ${targetMegabytes} MB per episode goal. The last representative test landed below that goal. Keep the current resolution and make the next representative test spend more of the available size on picture and sound quality.`;
+	}
+	if (analysis.status === 'inside_target_band' && analysis.predictedBytes > 0) {
+		return `Measured revision: keep the ${targetMegabytes} MB per episode goal and current resolution. Make another representative test that addresses the operator's picture or sound concerns without changing the size target.`;
 	}
 	return `Aim for about ${targetMegabytes} MB per episode. Keep the current resolution and repeat the representative test because the previous run did not produce a usable full-episode size estimate.`;
 }
@@ -637,6 +837,14 @@ export function detailSeasonState(
 	}
 	const reviewReady =
 		booleanValue(calibration.browser_review_ready) || booleanValue(calibration.review_media_ready);
+	const currentRisk = qualityRisk(folder);
+	const currentRiskStatus = text(record(currentRisk?.operator_decision).status).toLowerCase();
+	const currentRiskBlocksApproval =
+		Boolean(currentRisk?.blocked) ||
+		['rejected', 'needs_operator_review'].includes(currentRiskStatus);
+	const currentDraftIsApproved =
+		!currentRiskBlocksApproval &&
+		(booleanValue(reviewGate.can_confirm_full) || (draftHash && draftHash === acceptedHash));
 	if (
 		reviewGateStatus === 'missing_review_media' ||
 		(priorTestJobId && !draftHash && !reviewReady)
@@ -649,7 +857,7 @@ export function detailSeasonState(
 			recoveryKind: 'test'
 		};
 	}
-	if (reviewReady && draftHash && draftHash !== acceptedHash) {
+	if (reviewReady && draftHash && !currentDraftIsApproved) {
 		return {
 			key: 'ready_to_compare',
 			label: 'Test ready',
@@ -657,7 +865,7 @@ export function detailSeasonState(
 			tone: 'ready'
 		};
 	}
-	if (booleanValue(reviewGate.can_confirm_full) || (draftHash && draftHash === acceptedHash)) {
+	if (currentDraftIsApproved) {
 		return {
 			key: 'ready_to_make',
 			label: 'Test approved',

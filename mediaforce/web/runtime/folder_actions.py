@@ -2,6 +2,7 @@ import hashlib
 import json
 import math
 from collections.abc import Callable
+from datetime import UTC, datetime
 import uuid
 from pathlib import Path
 from typing import Any, Protocol, TypeAlias
@@ -47,7 +48,6 @@ CalibrationDraftHashFn: TypeAlias = Callable[[ActionPayload], str]
 SaveCalibrationStateFn: TypeAlias = Callable[[MediaforceConfig, str, ActionPayload], None]
 LoadAdviceStateFn: TypeAlias = Callable[[MediaforceConfig, str], ActionPayload | None]
 MergeAdviceStateFn: TypeAlias = Callable[[MediaforceConfig, str, ActionPayload], ActionPayload]
-AutoQueueApprovedFolderEncodeFn: TypeAlias = Callable[[str, str, bool], ActionPayload]
 LoadSampleItemFn: TypeAlias = Callable[[DBClient, MediaforceConfig, str], FolderItem | None]
 QueueFolderEncodeActionFn: TypeAlias = Callable[[str, str, bool], ActionPayload]
 
@@ -170,6 +170,8 @@ def queue_folder_encode_action(
         clear_terminal_encode_jobs_for_prefix_fn: ClearTerminalEncodeJobsFn,
         prepare_terminal_encode_job_for_requeue_fn: PrepareTerminalEncodeJobForRequeueFn,
         save_encode_job: SaveEncodeJobFn,
+        load_advice_state: LoadAdviceStateFn | None = None,
+        load_latest_failed_target_size_job_state: LoadJobStateFn | None = None,
 ) -> ActionPayload:
     with open_db(config.paths.db_path) as connection:
         existing_job = load_job_state(connection, config, normalized_prefix)
@@ -181,8 +183,45 @@ def queue_folder_encode_action(
             raise HTTPException(status_code=400, detail=str(gate["message"]))
         if calibration is None:
             raise HTTPException(status_code=400, detail="Run a sampled calibration first.")
-        saved_profile_path = config.paths.runtime_settings_path
         calibration_payload = object_dict(calibration)
+        latest_failed_sample_job = (
+            load_latest_failed_target_size_job_state(connection, config, normalized_prefix)
+            if load_latest_failed_target_size_job_state is not None
+            else existing_job
+        )
+        failed_target_reason = _failed_target_size_job_blocking_reason(
+            latest_failed_sample_job,
+            calibration_payload,
+        )
+        if failed_target_reason is not None:
+            raise HTTPException(status_code=409, detail=failed_target_reason)
+        if load_advice_state is not None:
+            advice_state = object_dict(load_advice_state(config, normalized_prefix))
+            quality_risk_contract = build_quality_risk_contract(
+                prefix=normalized_prefix,
+                sample_item=object_dict(calibration_payload.get("sample_item")),
+                current_policy=object_dict(calibration_payload.get("policy")),
+                preview_policy=object_dict(calibration_payload.get("policy")),
+                operator_request=object_dict(advice_state.get("operator_request")) or None,
+                calibration=calibration_payload,
+                advice_state=advice_state,
+                latest_failed_sample_job=latest_failed_sample_job,
+            )
+            blocking_reason = _quality_risk_blocking_reason(quality_risk_contract)
+            if blocking_reason is not None:
+                raise HTTPException(status_code=409, detail=blocking_reason)
+            operator_status = str(
+                object_dict(quality_risk_contract.get("operator_decision")).get("status") or ""
+            ).strip().lower()
+            if operator_status == "rejected":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "The current review evidence was rejected after approval. "
+                        "Make and approve a revised test before starting the season."
+                    ),
+                )
+        saved_profile_path = config.paths.runtime_settings_path
         calibration_policy = object_dict(calibration_payload.get("policy"))
         calibration_video = object_dict(calibration_policy.get("video"))
         if {"target_size_mb", "target_size_bytes", "size_goal_mode"} & calibration_video.keys():
@@ -773,7 +812,6 @@ def save_profile_action(
         record_visual_approval_artifact: RecordVisualApprovalArtifactFn,
         merge_advice_state: MergeAdviceStateFn,
         upsert_override: UpsertOverrideFn,
-        auto_queue_folder_encode: AutoQueueApprovedFolderEncodeFn | None = None,
         confirm_high_impact: bool = False,
         confirm_size_tradeoff: bool = False,
         reviewed_draft_hash: str = "",
@@ -868,15 +906,11 @@ def save_profile_action(
         calibration=calibration_payload,
         advice_state=advice_state,
     )
-    if bool(object_dict(quality_risk_contract.get("deterministic_gates")).get("blocked")):
-        blocking_reasons = [
-            str(reason)
-            for reason in object_list(object_dict(quality_risk_contract.get("deterministic_gates")).get("blocking_reasons"))
-            if str(reason).strip()
-        ]
+    blocking_reason = _quality_risk_blocking_reason(quality_risk_contract)
+    if blocking_reason is not None:
         raise HTTPException(
             status_code=409,
-            detail=blocking_reasons[0] if blocking_reasons else "Measured review facts still block approval for this sample.",
+            detail=blocking_reason,
         )
     if str(calibration_payload.get("mode") or "sample") == "sample":
         if not calibration_payload.get("review_media_ready"):
@@ -946,76 +980,66 @@ def save_profile_action(
         normalized_prefix,
         calibration_payload["policy"],
     )
-    response: ActionPayload = {
+    return {
         "ok": True,
         "queued": False,
-        "auto_queue_status": "not_requested",
-        "message": "Approved the current draft and saved it as the folder profile.",
+        "auto_queue_status": "approval_only",
+        "message": (
+            "Approved the current test and saved it as the folder profile. "
+            "Choose Make the season when you are ready to start production."
+        ),
     }
-    if auto_queue_folder_encode is None:
-        return response
 
-    try:
-        queue_result = auto_queue_folder_encode(normalized_prefix, "", False)
-    except HTTPException as exc:
-        detail = str(exc.detail)
-        if detail == "No pending items were found to enqueue for this folder." or detail.startswith(
-                "No encode candidates were found for this folder."
-        ):
-            response["auto_queue_status"] = "no_pending"
-            response["message"] = (
-                "Approved the current draft and saved it as the folder profile. "
-                "There were no encode candidates left to queue for this folder."
-            )
-            response["queue_message"] = detail
-            return response
-        response["auto_queue_status"] = "blocked"
-        response["queue_message"] = detail
-        response["message"] = (
-            "Approved the current draft and saved it as the folder profile. "
-            f"Mediaforce could not auto-queue the folder encode: {detail}"
-        )
-        return response
 
-    queue_message = str(queue_result.get("message") or "").strip()
-    if queue_result.get("ok"):
-        response.update(
-            {
-                "queued": True,
-                "auto_queue_status": "queued",
-                "message": "Approved the current draft, saved it as the folder profile, and queued the full folder encode.",
-            }
-        )
-        if queue_message:
-            response["queue_message"] = queue_message
-        if queue_result.get("job") is not None:
-            response["job"] = queue_result["job"]
-        if queue_result.get("action") is not None:
-            response["action"] = queue_result["action"]
-        return response
+def _quality_risk_blocking_reason(contract: ActionPayload) -> str | None:
+    gates = object_dict(contract.get("deterministic_gates"))
+    if not bool(gates.get("blocked")):
+        return None
+    blocking_reasons = [
+        str(reason)
+        for reason in object_list(gates.get("blocking_reasons"))
+        if str(reason).strip()
+    ]
+    return blocking_reasons[0] if blocking_reasons else "Measured review facts still block this action."
 
-    if queue_message.startswith("A folder encode is already "):
-        response.update(
-            {
-                "queued": True,
-                "auto_queue_status": "already_active",
-                "queue_message": queue_message,
-                "message": (
-                    "Approved the current draft and saved it as the folder profile. "
-                    f"{queue_message}"
-                ),
-            }
-        )
-        return response
 
-    response.update(
-        {
-            "auto_queue_status": "blocked",
-            "queue_message": queue_message,
-            "message": (
-                "Approved the current draft and saved it as the folder profile. "
-                f"Mediaforce could not auto-queue the folder encode: {queue_message or 'unknown queue error'}"
-            ),
-        }
+def _failed_target_size_job_blocking_reason(
+        job: JobPayload | None,
+        calibration: ActionPayload,
+) -> str | None:
+    job_payload = object_dict(job)
+    if str(job_payload.get("status") or "") not in {"failed", "stopped"}:
+        return None
+    result = object_dict(job_payload.get("result"))
+    trace = object_dict(result.get("target_size_trace"))
+    target_status = str(result.get("target_size_status") or trace.get("status") or "").strip().lower()
+    if target_status not in {"infeasible", "quality_conflict"}:
+        return None
+    accepted_at = _parse_state_timestamp(calibration.get("accepted_at"))
+    failed_at = _parse_state_timestamp(
+        job_payload.get("finished_at")
+        or job_payload.get("updated_at")
+        or job_payload.get("created_at")
     )
-    return response
+    if accepted_at and failed_at and failed_at < accepted_at:
+        return None
+    if target_status == "infeasible":
+        return (
+            "The latest size-directed test found that this target cannot fit the required streams. "
+            "Choose a different size and approve a fresh test before starting production."
+        )
+    return (
+        "The latest size-directed test could not reach this target without crossing the quality floor. "
+        "Choose a different size or revise the quality decision, then approve a fresh test before starting production."
+    )
+
+
+def _parse_state_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)

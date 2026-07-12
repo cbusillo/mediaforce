@@ -25,9 +25,14 @@ import {
 	measuredFollowupRequest,
 	librarySeasonState,
 	normalizeReviewPairs,
+	resolvedTargetSummary,
+	reviewFeedbackIntent,
+	reviewFeedbackRequest,
 	reviewSampleSizes,
 	seasonIdentity,
 	sizeGoals,
+	targetConstraintSummary,
+	testRequestWithInstructions,
 	technicalVideoPolicy
 } from './experience';
 
@@ -264,7 +269,17 @@ describe('season experience translation', () => {
 			topRiskDetail: 'Measured temporal noise may be grain rather than removable noise.',
 			authority: 'No current decision',
 			authorityDetail: 'Older, stale, or sibling evidence is not treated as authority here.',
-			focusMoments: ['Moment 2 · grain_noise_treatment']
+			focusMoments: ['Moment 2 · grain_noise_treatment'],
+			picture: {
+				label: 'Grain / noise treatment',
+				level: 'medium risk',
+				detail: 'Measured temporal noise may be grain rather than removable noise.'
+			},
+			sound: {
+				label: 'No specific sound warning',
+				level: 'No specific warning',
+				detail: 'Listen for clarity, channel layout, balance, and anything distracting.'
+			}
 		});
 	});
 
@@ -375,6 +390,21 @@ describe('season experience translation', () => {
 
 		expect(request).toContain('225 MB per episode');
 		expect(request).toContain('previous run did not produce a usable full-episode size estimate');
+	});
+
+	it('keeps an inside-target goal fixed when the operator requests a revision', () => {
+		const request = measuredFollowupRequest({
+			status: 'inside_target_band',
+			budgetBytes: 587_000_000,
+			predictedBytes: 590_000_000,
+			lowerBoundBytes: 528_300_000,
+			upperBoundBytes: 645_700_000,
+			predictedToBudgetRatio: 1.005
+		});
+
+		expect(request).toContain('Measured revision');
+		expect(request).toContain('keep the 587 MB per episode goal');
+		expect(request).toContain('without changing the size target');
 	});
 
 	it('distinguishes a whole show from one season', () => {
@@ -502,6 +532,47 @@ describe('season experience translation', () => {
 		).toMatchObject({ key: 'needs_help', label: 'The test needs another try' });
 	});
 
+	it('returns an approved sample to review when current evidence is rejected', () => {
+		expect(
+			detailSeasonState(
+				folder({
+					calibration: {
+						job_id: 'sample-1',
+						draft_hash: 'draft-1',
+						accepted_draft_hash: 'draft-1',
+						review_media_ready: true
+					},
+					review_gate: { status: 'accepted', can_confirm_full: true },
+					quality_risk: {
+						operator_decision: { status: 'rejected' }
+					}
+				}),
+				status
+			)
+		).toMatchObject({ key: 'ready_to_compare', label: 'Test ready' });
+	});
+
+	it('trusts an accepted review gate when non-policy draft metadata changed', () => {
+		expect(
+			detailSeasonState(
+				folder({
+					calibration: {
+						job_id: 'sample-1',
+						draft_hash: 'draft-with-refreshed-metadata',
+						accepted_draft_hash: 'original-draft',
+						review_media_ready: true
+					},
+					review_gate: { status: 'accepted', can_confirm_full: true },
+					quality_risk: {
+						blocked: false,
+						operator_decision: { status: 'approved' }
+					}
+				}),
+				status
+			)
+		).toMatchObject({ key: 'ready_to_make', label: 'Test approved' });
+	});
+
 	it.each([
 		['validate', 'ready_to_check'],
 		['promote', 'ready_to_finish'],
@@ -540,6 +611,150 @@ describe('season experience translation', () => {
 		expect(goals.map((goal) => goal.megabytesPerEpisode)).toEqual([587, 440, 880]);
 		expect(goals[0].mode).toBe('normalized');
 		expect(goalRequest(goals[0])).toContain('300 MB / 45 minute runtime-normalized goal');
+	});
+
+	it('publishes explicit sample and final bands for the active whole-episode target', () => {
+		const option = sizeOption('recommended', 'normalized', 300, 586.667, 45);
+		const target = resolvedTargetSummary(
+			folder({
+				resolved_operator_intent: {
+					schema_version: 1,
+					requires_confirmation: false,
+					size_goal: {
+						...option.resolved_size_goal,
+						item_runtime_seconds: 88 * 60,
+						sample_lower_bound_bytes: 528_000_300,
+						sample_upper_bound_bytes: 645_333_700,
+						final_lower_bound_bytes: 557_333_650,
+						final_upper_bound_bytes: 616_000_350
+					},
+					resolution: { mode: 'source' },
+					request: option.operator_intent
+				}
+			})
+		);
+
+		expect(target).toMatchObject({
+			targetBytes: 586_667_000,
+			sampleLowerBoundBytes: 528_000_300,
+			sampleUpperBoundBytes: 645_333_700,
+			finalLowerBoundBytes: 557_333_650,
+			finalUpperBoundBytes: 616_000_350,
+			itemRuntimeSeconds: 5280,
+			mode: 'normalized'
+		});
+	});
+
+	it('distinguishes arithmetic infeasibility from a quality-floor conflict', () => {
+		expect(
+			targetConstraintSummary(
+				folder({
+					stream_budget_ledger: {
+						schema_version: 1,
+						ledger_id: 'ledger-1',
+						source: {
+							source_id: 'source-1',
+							source_fingerprint: null,
+							source_size_bytes: 1_000_000_000,
+							source_video_bitrate_bps: 5_000_000,
+							duration_seconds: 5280
+						},
+						policy_hash: 'policy-1',
+						size_goal: sizeOption('recommended', 'absolute', 1, 1).resolved_size_goal,
+						stream_plan: {
+							schema_version: 1,
+							plan_id: 'plan-1',
+							source_id: 'source-1',
+							source_fingerprint: null,
+							policy_hash: 'policy-1',
+							output_container: 'mkv',
+							attachments_known: true,
+							copy_unknown_attachments: false,
+							streams: []
+						},
+						entries: [],
+						totals: {
+							total_target_bytes: 1_000_000,
+							audio_bytes: 2_000_000,
+							subtitle_bytes: 0,
+							attachment_bytes: 0,
+							container_bytes: 0,
+							non_video_bytes: 2_000_000,
+							minimum_non_video_bytes: 2_000_000,
+							maximum_non_video_bytes: 2_000_000,
+							remaining_video_bytes: 0,
+							remaining_video_bitrate_bps: 0
+						},
+						source_relative_cap: {
+							configured_total_percent: null,
+							total_cap_bytes: null,
+							video_cap_bytes: null,
+							video_cap_bitrate_bps: null,
+							video_cap_percent: null,
+							status: 'arithmetically_infeasible'
+						},
+						feasibility: {
+							status: 'arithmetically_infeasible',
+							reasons: ['required streams exceed target'],
+							arithmetic_infeasible: true,
+							aggressive: false,
+							requires_measurement: false
+						},
+						uncertainty: {
+							confidence: 'exact',
+							requires_measurement: false,
+							minimum_non_video_bytes: 2_000_000,
+							maximum_non_video_bytes: 2_000_000
+						}
+					}
+				})
+			)
+		).toMatchObject({ kind: 'arithmetic_infeasible', recoveryLabel: 'Choose a size that can fit' });
+
+		expect(
+			targetConstraintSummary(
+				folder({
+					quality_risk: {
+						target_size_search: {
+							status: 'quality_conflict',
+							selected_metric: 'vmaf',
+							minimum_metric_score: 93
+						}
+					}
+				})
+			)
+		).toMatchObject({
+			kind: 'quality_conflict',
+			recoveryLabel: 'Choose a roomier goal',
+			detail: expect.stringContaining('VMAF floor of 93')
+		});
+	});
+
+	it('preserves typed size intent while recording structured review feedback', () => {
+		const intent = sizeOption('recommended', 'normalized', 300, 586.667, 45).operator_intent;
+		const feedbackIntent = reviewFeedbackIntent(
+			intent,
+			['motion_breakup', 'audio_quality_layout'],
+			'Moment 2 loses texture and the center channel sounds thin.'
+		);
+		const request = reviewFeedbackRequest(
+			'Keep the 587 MB goal.',
+			['motion_breakup', 'audio_quality_layout'],
+			'Moment 2 loses texture.',
+			'Preserve the original surround layout.'
+		);
+
+		expect(feedbackIntent).toMatchObject({
+			size_goal: intent.size_goal,
+			quality_risk_tags: ['motion_breakup', 'audio_quality_layout'],
+			evidence_authority: 'rejected_visual_result'
+		});
+		expect(request).toContain('Motion breaks up');
+		expect(request).toContain('Sound quality or layout is wrong');
+		expect(request).toContain('Preserve the original surround layout.');
+		expect(testRequestWithInstructions('Keep the target.', 'Preserve grain.')).toBe(
+			'Keep the target. Additional operator priorities: Preserve grain.'
+		);
 	});
 
 	it('preserves an API-resolved absolute per-episode target', () => {

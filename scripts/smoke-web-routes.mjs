@@ -26,6 +26,7 @@ const APP_ROOT_SELECTOR = ".app-shell";
  * @property {string} label
  * @property {string} route
  * @property {string} marker
+ * @property {string=} stageMarker
  */
 
 /**
@@ -308,7 +309,12 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
     });
     const pageErrors = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
-    for (const [label, route, marker] of routeChecksForBrowser) {
+    for (const [
+      label,
+      route,
+      marker,
+      stageMarker = "",
+    ] of routeChecksForBrowser) {
       pageErrors.length = 0;
       const started = performance.now();
       const requireFolderReadyMarker = route.startsWith("/folders/");
@@ -326,8 +332,13 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
       });
       await page
         .waitForFunction(
-          ({ expectedMarker, requireFolderReady }) => {
+          ({ expectedMarker, expectedStageMarker, requireFolderReady }) => {
             if (!document.body.innerText.includes(expectedMarker)) return false;
+            if (
+              expectedStageMarker &&
+              !document.body.innerText.includes(expectedStageMarker)
+            )
+              return false;
             if (!requireFolderReady) return true;
             const readyMarker = document
               .querySelector("[data-folder-ready-marker]")
@@ -336,6 +347,7 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
           },
           {
             expectedMarker: marker,
+            expectedStageMarker: stageMarker,
             requireFolderReady: requireFolderReadyMarker,
           },
           { timeout: timeoutMs },
@@ -345,27 +357,35 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
             `${label} did not show marker ${JSON.stringify(marker)} within ${timeoutMs}ms: ${error.message}`,
           );
         });
-      const state = await page.evaluate(({ expectedMarker, requireFolderReady }) => {
-        const bodyText = document.body.innerText.trim();
-        const readyMarker = document
-          .querySelector("[data-folder-ready-marker]")
-          ?.getAttribute("data-folder-ready-marker");
-        return {
-          bodyLength: bodyText.length,
-          hasMain: document.querySelector("main") !== null,
-          hasAppRoot: document.querySelector(".app-shell") !== null,
-          hasMarker: bodyText.includes(expectedMarker),
-          hasReadyMarker:
-            !requireFolderReady || Boolean(readyMarker?.includes(expectedMarker)),
-        };
-      }, {
-        expectedMarker: marker,
-        requireFolderReady: requireFolderReadyMarker,
-      });
+      const state = await page.evaluate(
+        ({ expectedMarker, expectedStageMarker, requireFolderReady }) => {
+          const bodyText = document.body.innerText.trim();
+          const readyMarker = document
+            .querySelector("[data-folder-ready-marker]")
+            ?.getAttribute("data-folder-ready-marker");
+          return {
+            bodyLength: bodyText.length,
+            hasMain: document.querySelector("main") !== null,
+            hasAppRoot: document.querySelector(".app-shell") !== null,
+            hasMarker: bodyText.includes(expectedMarker),
+            hasStageMarker:
+              !expectedStageMarker || bodyText.includes(expectedStageMarker),
+            hasReadyMarker:
+              !requireFolderReady ||
+              Boolean(readyMarker?.includes(expectedMarker)),
+          };
+        },
+        {
+          expectedMarker: marker,
+          expectedStageMarker: stageMarker,
+          requireFolderReady: requireFolderReadyMarker,
+        },
+      );
       if (
         !state.hasAppRoot ||
         !state.hasMain ||
         !state.hasMarker ||
+        !state.hasStageMarker ||
         !state.hasReadyMarker ||
         state.bodyLength < 80
       ) {
@@ -462,7 +482,12 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
     });
     const pageErrors = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
-    for (const [label, route, marker] of routeChecksForNarrow) {
+    for (const [
+      label,
+      route,
+      marker,
+      stageMarker = "",
+    ] of routeChecksForNarrow) {
       pageErrors.length = 0;
       const started = performance.now();
       const requireFolderReadyMarker = route.startsWith("/folders/");
@@ -480,8 +505,13 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
       });
       await page
         .waitForFunction(
-          ({ expectedMarker, requireFolderReady }) => {
+          ({ expectedMarker, expectedStageMarker, requireFolderReady }) => {
             if (!document.body.innerText.includes(expectedMarker)) return false;
+            if (
+              expectedStageMarker &&
+              !document.body.innerText.includes(expectedStageMarker)
+            )
+              return false;
             if (!requireFolderReady) return true;
             const readyMarker = document
               .querySelector("[data-folder-ready-marker]")
@@ -490,6 +520,7 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
           },
           {
             expectedMarker: marker,
+            expectedStageMarker: stageMarker,
             requireFolderReady: requireFolderReadyMarker,
           },
           { timeout: timeoutMs },
@@ -499,44 +530,54 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
             `${label} narrow route did not show marker ${JSON.stringify(marker)} within ${timeoutMs}ms: ${error.message}`,
           );
         });
-      const state = await page.evaluate(({ expectedMarker, requireFolderReady }) => {
-        const bodyText = document.body.innerText.trim();
-        const readyMarker = document
-          .querySelector("[data-folder-ready-marker]")
-          ?.getAttribute("data-folder-ready-marker");
-        const visibleWideTables = Array.from(document.querySelectorAll("table"))
-          .map((el) => {
-            const rect = el.getBoundingClientRect();
-            return {
-              text: String(el.textContent ?? "")
-                .trim()
-                .replace(/\s+/g, " ")
-                .slice(0, 80),
-              width: Math.round(rect.width),
-              height: Math.round(rect.height),
-              display: getComputedStyle(el).display,
-            };
-          })
-          .filter(
-            (item) => item.width > window.innerWidth + 2 && item.height > 0,
-          );
-        return {
-          bodyLength: bodyText.length,
-          hasMarker: bodyText.includes(expectedMarker),
-          hasReadyMarker:
-            !requireFolderReady || Boolean(readyMarker?.includes(expectedMarker)),
-          pageOverflow:
-            document.documentElement.scrollWidth > window.innerWidth + 2,
-          scrollWidth: document.documentElement.scrollWidth,
-          visibleWideTables,
-        };
-      }, {
-        expectedMarker: marker,
-        requireFolderReady: requireFolderReadyMarker,
-      });
+      const state = await page.evaluate(
+        ({ expectedMarker, expectedStageMarker, requireFolderReady }) => {
+          const bodyText = document.body.innerText.trim();
+          const readyMarker = document
+            .querySelector("[data-folder-ready-marker]")
+            ?.getAttribute("data-folder-ready-marker");
+          const visibleWideTables = Array.from(
+            document.querySelectorAll("table"),
+          )
+            .map((el) => {
+              const rect = el.getBoundingClientRect();
+              return {
+                text: String(el.textContent ?? "")
+                  .trim()
+                  .replace(/\s+/g, " ")
+                  .slice(0, 80),
+                width: Math.round(rect.width),
+                height: Math.round(rect.height),
+                display: getComputedStyle(el).display,
+              };
+            })
+            .filter(
+              (item) => item.width > window.innerWidth + 2 && item.height > 0,
+            );
+          return {
+            bodyLength: bodyText.length,
+            hasMarker: bodyText.includes(expectedMarker),
+            hasStageMarker:
+              !expectedStageMarker || bodyText.includes(expectedStageMarker),
+            hasReadyMarker:
+              !requireFolderReady ||
+              Boolean(readyMarker?.includes(expectedMarker)),
+            pageOverflow:
+              document.documentElement.scrollWidth > window.innerWidth + 2,
+            scrollWidth: document.documentElement.scrollWidth,
+            visibleWideTables,
+          };
+        },
+        {
+          expectedMarker: marker,
+          expectedStageMarker: stageMarker,
+          requireFolderReady: requireFolderReadyMarker,
+        },
+      );
       if (
         state.bodyLength < 80 ||
         !state.hasMarker ||
+        !state.hasStageMarker ||
         !state.hasReadyMarker ||
         state.pageOverflow ||
         state.visibleWideTables.length
@@ -593,6 +634,7 @@ async function main() {
         fixtureRoute.label,
         fixtureRoute.route,
         fixtureRoute.marker,
+        fixtureRoute.stageMarker ?? "",
       ]);
     }
     await checkEndpoints(targetUrl, args.endpointTimeoutMs);

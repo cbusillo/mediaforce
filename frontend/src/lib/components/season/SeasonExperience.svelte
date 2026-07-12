@@ -6,9 +6,11 @@
 	import type {
 		FolderPayload,
 		FolderStatusPayload,
-		OperatorIntentRequestPayload
+		OperatorIntentRequestPayload,
+		QualityRiskTag
 	} from '$lib/api/types';
 	import {
+		REVIEW_CONCERNS,
 		approvalGuardFromMessage,
 		compareRiskSummary,
 		currentEncodeProgress,
@@ -17,7 +19,6 @@
 		episodeLabel,
 		folderSizeTargetAnalysis,
 		formatDecimalFileSize,
-		formatFileSize,
 		goalRequest,
 		isSizeGoalSelectionConfirmed,
 		isSeriesPrefix,
@@ -25,10 +26,15 @@
 		normalizeReviewPairs,
 		plainFailureMessage,
 		predictedEpisodeSize,
+		resolvedTargetSummary,
+		reviewFeedbackIntent,
+		reviewFeedbackRequest,
 		reviewSampleSizes,
 		seasonIdentity,
 		sizeGoals,
+		targetConstraintSummary,
 		technicalVideoPolicy,
+		testRequestWithInstructions,
 		type SizeGoal
 	} from '$lib/season/experience';
 
@@ -92,6 +98,10 @@
 	let actionMessage = $state('');
 	let actionStartedAt = $state(0);
 	let clock = $state(Date.now());
+	let showInstructions = $state(false);
+	let operatorInstructions = $state('');
+	let selectedConcerns = $state<QualityRiskTag[]>([]);
+	let reviewFeedback = $state('');
 	let sourceVideo = $state<HTMLVideoElement | null>(null);
 	let previewVideo = $state<HTMLVideoElement | null>(null);
 	let goalButtons = $state<HTMLButtonElement[]>([]);
@@ -107,7 +117,9 @@
 	);
 	const scopeName = $derived(isSeriesScope ? identity.show : identity.season);
 	const scopeNoun = $derived(isSeriesScope ? 'show' : 'season');
-	const scopeSizeLabel = $derived(isSeriesScope ? 'show' : 'season');
+	const makeActionLabel = $derived(
+		isSeriesScope ? `Make all ${seriesSeasonCount} ${seriesSeasonLabel}` : 'Make the season'
+	);
 	const humanState = $derived(detailSeasonState(folder, status));
 	const goals = $derived(sizeGoals(folder));
 	const selectedGoal = $derived(goals.find((goal) => goal.key === selectedGoalKey) ?? goals[0]);
@@ -132,25 +144,44 @@
 	const expectedEpisodeBytes = $derived(predictedEpisodeSize(folder));
 	const actualSampleSizes = $derived(reviewSampleSizes(folder));
 	const sizeTarget = $derived(folderSizeTargetAnalysis(folder));
+	const targetSummary = $derived(resolvedTargetSummary(folder));
+	const targetConstraint = $derived(targetConstraintSummary(folder));
 	const technicalVideo = $derived(technicalVideoPolicy(folder));
 	const expectedSeasonBytes = $derived(expectedEpisodeBytes * episodeCount);
-	const targetSeasonBytes = $derived(sizeTarget.budgetBytes * episodeCount);
+	const currentTargetBytes = $derived(
+		targetSummary?.targetBytes || sizeTarget.budgetBytes || selectedGoal?.targetSizeBytes || 0
+	);
 	const sizeTargetLabel = $derived(
-		sizeTarget.budgetBytes > 0 ? formatFileSize(sizeTarget.budgetBytes) : 'the requested size'
+		currentTargetBytes > 0 ? formatDecimalFileSize(currentTargetBytes) : 'the requested size'
 	);
 	const sizeTargetMissed = $derived(
 		['over_target', 'under_target', 'missing_prediction'].includes(sizeTarget.status)
 	);
 	const riskSummary = $derived(compareRiskSummary(folder));
+	const approvalBlocked = $derived(Boolean(targetConstraint || riskSummary?.blocked));
+	const hasReviewFeedback = $derived(
+		selectedConcerns.length > 0 || reviewFeedback.trim().length > 0
+	);
+	const selectedGoalSampleLower = $derived(
+		selectedGoal
+			? Math.round(
+					selectedGoal.targetSizeBytes *
+						(1 - selectedGoal.operatorIntent.size_goal.sample_projection_tolerance_percent / 100)
+				)
+			: 0
+	);
+	const selectedGoalSampleUpper = $derived(
+		selectedGoal
+			? Math.round(
+					selectedGoal.targetSizeBytes *
+						(1 + selectedGoal.operatorIntent.size_goal.sample_projection_tolerance_percent / 100)
+				)
+			: 0
+	);
 	const crfLimitReached = $derived(
 		asNumber(sampleResult.chosen_crf) > 0 &&
 			asNumber(technicalVideo.max_crf) > 0 &&
 			asNumber(sampleResult.chosen_crf) >= asNumber(technicalVideo.max_crf)
-	);
-	const expectedSavingsPercent = $derived(
-		originalSeasonSize > 0 && expectedSeasonBytes > 0
-			? Math.max(0, Math.round((1 - expectedSeasonBytes / originalSeasonSize) * 100))
-			: 0
 	);
 	const selectedHost = $derived(
 		hostOptions.find((host) => host.key === selectedHostKey) ?? hostOptions[0]
@@ -261,17 +292,43 @@
 			actionError = 'Choose how this legacy size should behave before making a test.';
 			return;
 		}
-		await startTest(goalRequest(selectedGoal), selectedGoal.operatorIntent);
+		await startTest(
+			testRequestWithInstructions(goalRequest(selectedGoal), operatorInstructions),
+			selectedGoal.operatorIntent
+		);
 	}
 
 	async function retryMeasuredTarget() {
-		const note = measuredFollowupRequest(sizeTarget);
+		const measuredRequest = measuredFollowupRequest(sizeTarget);
+		const baseRequest =
+			measuredRequest ||
+			`Keep the ${sizeTargetLabel} whole-episode goal and current resolution. Make another representative test that addresses the operator's review concerns without changing the size target.`;
+		const note = hasReviewFeedback
+			? reviewFeedbackRequest(baseRequest, selectedConcerns, reviewFeedback, operatorInstructions)
+			: testRequestWithInstructions(baseRequest, operatorInstructions);
 		if (!note) {
 			actionError =
 				'The previous test did not preserve its requested size. Choose a size and try again.';
 			return;
 		}
-		await startTest(note, currentOperatorIntent(folder));
+		const operatorIntent = hasReviewFeedback
+			? reviewFeedbackIntent(currentOperatorIntent(folder), selectedConcerns, reviewFeedback)
+			: currentOperatorIntent(folder);
+		await startTest(note, operatorIntent);
+	}
+
+	async function submitReviewFeedback() {
+		if (!hasReviewFeedback) {
+			actionError = 'Choose a concern or describe what should change before making a revised test.';
+			return;
+		}
+		await retryMeasuredTarget();
+	}
+
+	function toggleConcern(tag: QualityRiskTag) {
+		selectedConcerns = selectedConcerns.includes(tag)
+			? selectedConcerns.filter((selectedTag) => selectedTag !== tag)
+			: [...selectedConcerns, tag];
 	}
 
 	async function startTest(
@@ -606,7 +663,7 @@
 
 	async function focusSafetyDialog() {
 		await tick();
-		(document.querySelector('.safety-dialog .primary-button') as HTMLElement | null)?.focus();
+		(document.querySelector('.safety-dialog .secondary-button') as HTMLElement | null)?.focus();
 	}
 
 	async function openSafetyDialog(dialog: SafetyDialog) {
@@ -619,14 +676,14 @@
 	async function confirmSizeTradeoff() {
 		await openSafetyDialog({
 			kind: 'approval',
-			title: `Accept ${formatFileSize(expectedEpisodeBytes)} per episode instead of ${sizeTargetLabel}?`,
-			detail: `This saves the tested settings as the ${scopeNoun} profile and queues the full ${scopeNoun} encode. It does not change this result to ${sizeTargetLabel} per episode.`,
-			primaryLabel: `Accept and queue ${scopeNoun}`,
+			title: `Accept ${formatDecimalFileSize(expectedEpisodeBytes)} per episode instead of ${sizeTargetLabel}?`,
+			detail: `This saves the tested settings as the ${scopeNoun} profile. Production remains separate until you choose ${makeActionLabel}. It does not change this result to ${sizeTargetLabel} per episode.`,
+			primaryLabel: 'Accept this result',
 			confirmSizeTradeoff: true,
 			changes: [
 				`Requested: ${sizeTargetLabel} per episode`,
-				`Measured estimate: ${formatFileSize(expectedEpisodeBytes)} per episode`,
-				`Next action: queue the full ${scopeNoun}`
+				`Measured estimate: ${formatDecimalFileSize(expectedEpisodeBytes)} per episode`,
+				`Next action: choose ${makeActionLabel} when you are ready`
 			]
 		});
 	}
@@ -795,8 +852,8 @@
 					<p class="lede">
 						{episodeCount} episodes{isSeriesScope
 							? ` across ${seriesSeasonCount} ${seriesSeasonLabel}`
-							: ''} · {formatFileSize(originalSeasonSize)} now. You will compare one representative test
-						before Mediaforce makes the rest.
+							: ''} · {formatDecimalFileSize(originalSeasonSize)} now. You will compare one representative
+						test before Mediaforce makes the rest.
 					</p>
 				</div>
 
@@ -829,6 +886,61 @@
 							</span>
 						</button>
 					{/each}
+				</div>
+
+				{#if selectedGoal}
+					<div class="goal-contract" aria-live="polite">
+						<div>
+							<span>Whole-episode target</span>
+							<strong>{formatDecimalFileSize(selectedGoal.targetSizeBytes)}</strong>
+						</div>
+						<div>
+							<span>Representative test band</span>
+							<strong
+								>{formatDecimalFileSize(selectedGoalSampleLower)}–{formatDecimalFileSize(
+									selectedGoalSampleUpper
+								)}</strong
+							>
+							<small
+								>±{selectedGoal.operatorIntent.size_goal.sample_projection_tolerance_percent}% while
+								testing</small
+							>
+						</div>
+						<div class="goal-contract__truth">
+							<strong>Size is the target.</strong>
+							<span>Picture and sound decide whether that size is worth keeping.</span>
+						</div>
+					</div>
+				{/if}
+
+				<div class="optional-instructions">
+					<button
+						type="button"
+						class="optional-instructions__toggle"
+						onclick={() => (showInstructions = !showInstructions)}
+						aria-expanded={showInstructions}
+						aria-controls="operator-instructions"
+					>
+						<span>
+							<strong>Tell us more</strong>
+							<small>Optional priorities for picture, sound, subtitles, or source treatment</small>
+						</span>
+						<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 7.5 5 5 5-5" /></svg>
+					</button>
+					{#if showInstructions}
+						<label id="operator-instructions" class="operator-instructions">
+							<span>Additional priorities</span>
+							<textarea
+								bind:value={operatorInstructions}
+								maxlength="600"
+								rows="3"
+								placeholder="For example: preserve the original surround layout and keep intentional grain."
+							></textarea>
+							<small
+								>{operatorInstructions.length}/600 · The selected size remains authoritative.</small
+							>
+						</label>
+					{/if}
 				</div>
 
 				<div class="goal-action">
@@ -881,9 +993,22 @@
 					<p class="eyebrow">Test in progress</p>
 					<h1>Making your test</h1>
 					<p class="lede">
-						{sampleEpisode} is being used to find a smaller version that matches your goal.
+						{sampleEpisode} is being used to target {sizeTargetLabel} for the whole episode, then check
+						whether the picture and sound hold up.
 					</p>
 					<div class="active-facts">
+						<div>
+							<span>Whole-episode target</span><strong>{sizeTargetLabel}</strong>
+						</div>
+						{#if targetSummary}
+							<div>
+								<span>Representative test band</span><strong
+									>{formatDecimalFileSize(
+										targetSummary.sampleLowerBoundBytes
+									)}–{formatDecimalFileSize(targetSummary.sampleUpperBoundBytes)}</strong
+								>
+							</div>
+						{/if}
 						<div>
 							<span>Current step</span><strong>{jobStageLabel(activeSampleJob.status)}</strong>
 						</div>
@@ -912,10 +1037,14 @@
 			<section class="compare-room">
 				<div class="compare-heading">
 					<div>
-						<p class={sizeTargetMissed ? 'eyebrow eyebrow--missed' : 'eyebrow'}>
-							{sizeTargetMissed ? 'Size goal not met' : 'Your test is ready'}
+						<p class={sizeTargetMissed || targetConstraint ? 'eyebrow eyebrow--missed' : 'eyebrow'}>
+							{targetConstraint
+								? 'Target needs a change'
+								: sizeTargetMissed
+									? 'Size goal not met'
+									: 'Looks good'}
 						</p>
-						<h1>Compare your test</h1>
+						<h1>{targetConstraint ? targetConstraint.title : 'Review picture and sound'}</h1>
 						<p>{sampleEpisode} · Compare the same moment on both sides.</p>
 					</div>
 					{#if reviewPairs.length > 1}
@@ -934,13 +1063,25 @@
 					{/if}
 				</div>
 
-				{#if sizeTarget.status === 'over_target'}
+				{#if targetConstraint}
+					<div class="target-warning target-warning--constraint" role="status">
+						<div>
+							<span
+								>{targetConstraint.kind === 'arithmetic_infeasible'
+									? 'Size cannot fit'
+									: 'Quality floor'}</span
+							>
+							<strong>{targetConstraint.title}</strong>
+						</div>
+						<p>{targetConstraint.detail}</p>
+					</div>
+				{:else if sizeTarget.status === 'over_target'}
 					<div class="target-warning" role="status">
 						<div>
 							<span>Requested size</span>
 							<strong
-								>This test estimates {formatFileSize(expectedEpisodeBytes)} per episode, not
-								{formatFileSize(sizeTarget.budgetBytes)}.</strong
+								>This test estimates {formatDecimalFileSize(expectedEpisodeBytes)} per episode, not
+								{formatDecimalFileSize(sizeTarget.budgetBytes)}.</strong
 							>
 						</div>
 						<p>
@@ -955,8 +1096,9 @@
 						<div>
 							<span>Requested size</span>
 							<strong
-								>This test estimates {formatFileSize(expectedEpisodeBytes)} per episode, below your
-								{formatFileSize(sizeTarget.budgetBytes)} goal.</strong
+								>This test estimates {formatDecimalFileSize(expectedEpisodeBytes)} per episode, below
+								your
+								{formatDecimalFileSize(sizeTarget.budgetBytes)} goal.</strong
 							>
 						</div>
 						<p>Make another test that spends the unused size on picture and sound quality.</p>
@@ -980,7 +1122,7 @@
 						<div class="video-card">
 							<div class="video-label">
 								<span>Original</span><small
-									>{formatFileSize(asNumber(sampleItem.source_size_bytes))} episode</small
+									>{formatDecimalFileSize(asNumber(sampleItem.source_size_bytes))} episode</small
 								>
 							</div>
 							<video
@@ -998,7 +1140,7 @@
 								<span>New</span>
 								<small
 									>{expectedEpisodeBytes
-										? `about ${formatFileSize(expectedEpisodeBytes)} episode`
+										? `about ${formatDecimalFileSize(expectedEpisodeBytes)} episode`
 										: 'test version'}</small
 								>
 							</div>
@@ -1047,9 +1189,14 @@
 							<strong>{riskSummary.verdict}</strong>
 						</div>
 						<div class="risk-summary__fact">
-							<span>Top concern</span>
-							<strong>{riskSummary.topRisk}</strong>
-							<small>{riskSummary.topRiskLevel}</small>
+							<span>Picture</span>
+							<strong>{riskSummary.picture.label}</strong>
+							<small>{riskSummary.picture.level} · {riskSummary.picture.detail}</small>
+						</div>
+						<div class="risk-summary__fact">
+							<span>Sound</span>
+							<strong>{riskSummary.sound.label}</strong>
+							<small>{riskSummary.sound.level} · {riskSummary.sound.detail}</small>
 						</div>
 						<div class="risk-summary__fact">
 							<span>Authority</span>
@@ -1063,55 +1210,141 @@
 					</div>
 				{/if}
 
-				<div class="size-story">
+				<div class="comparison-ledger" aria-label="Size comparison facts">
 					<div>
-						<span>Current {scopeSizeLabel}</span>
-						<strong>{formatFileSize(originalSeasonSize)}</strong>
-					</div>
-					<svg viewBox="0 0 34 16" aria-hidden="true"><path d="M1 8h30M25 2l6 6-6 6" /></svg>
-					<div>
-						<span>Rough {scopeNoun} projection from this episode</span>
-						<strong
-							>{expectedSeasonBytes
-								? formatFileSize(expectedSeasonBytes)
-								: 'Still estimating'}</strong
+						<span>Whole-episode target</span>
+						<strong>{sizeTargetLabel}</strong>
+						<small
+							>{targetSummary?.mode === 'normalized'
+								? 'Runtime-normalized goal'
+								: 'Per-episode goal'}</small
 						>
 					</div>
-					{#if sizeTarget.status === 'over_target'}
-						<p>
-							<b class="target-missed"
-								>{sizeTarget.predictedToBudgetRatio.toFixed(1)}× over your goal</b
-							>
-							{#if targetSeasonBytes}
-								· Your target is about {formatFileSize(targetSeasonBytes)} total.{/if}
-						</p>
-					{:else if sizeTarget.status === 'under_target'}
-						<p>
-							<b class="target-under">Below your goal</b>
-							{#if targetSeasonBytes}
-								· Your target is about {formatFileSize(targetSeasonBytes)} total.{/if}
-						</p>
-					{:else if expectedSavingsPercent}
-						<p><b>{expectedSavingsPercent}% smaller</b> based on this episode</p>
-					{/if}
+					<div>
+						<span>Representative test band</span>
+						<strong
+							>{targetSummary
+								? `${formatDecimalFileSize(targetSummary.sampleLowerBoundBytes)}–${formatDecimalFileSize(targetSummary.sampleUpperBoundBytes)}`
+								: 'Not available'}</strong
+						>
+						<small
+							>{targetSummary
+								? `±${targetSummary.sampleTolerancePercent}% while testing`
+								: 'Waiting for target evidence'}</small
+						>
+					</div>
+					<div class:comparison-ledger__missed={sizeTargetMissed || Boolean(targetConstraint)}>
+						<span>Predicted whole episode</span>
+						<strong
+							>{expectedEpisodeBytes
+								? formatDecimalFileSize(expectedEpisodeBytes)
+								: 'No usable estimate'}</strong
+						>
+						<small>
+							{sizeTarget.status === 'inside_target_band'
+								? 'Inside the representative band'
+								: sizeTarget.status === 'over_target'
+									? 'Above the representative band'
+									: sizeTarget.status === 'under_target'
+										? 'Below the representative band'
+										: 'Estimate requires another test'}
+						</small>
+					</div>
+					<div>
+						<span>Actual review clips</span>
+						<strong
+							>{actualSampleSizes.original && actualSampleSizes.smaller
+								? `${formatDecimalFileSize(actualSampleSizes.original)} → ${formatDecimalFileSize(actualSampleSizes.smaller)}`
+								: 'Clip bytes unavailable'}</strong
+						>
+						<small
+							>{actualSampleSizes.durationSeconds
+								? `${Math.round(actualSampleSizes.durationSeconds)} seconds sampled · not the episode size`
+								: 'Short review media only · not the episode size'}</small
+						>
+					</div>
 				</div>
-				{#if actualSampleSizes.original && actualSampleSizes.smaller}
-					<p class="actual-sample">
-						Across {Math.round(actualSampleSizes.durationSeconds)} seconds of review clips:
-						{formatFileSize(actualSampleSizes.original)} original →
-						{formatFileSize(actualSampleSizes.smaller)} new. That is {actualSampleSizes.ratioPercent}%
-						as large. Those clip bytes are only for picture-and-sound comparison; the measured
-						full-episode estimate is {formatFileSize(expectedEpisodeBytes)}.
-					</p>
-				{/if}
+
+				<div class="season-estimate-note">
+					<span>Estimated {scopeNoun} total</span>
+					<strong
+						>{expectedSeasonBytes
+							? formatDecimalFileSize(expectedSeasonBytes)
+							: 'Still estimating'}</strong
+					>
+					<small
+						>Representative estimate only; each production episode uses its own runtime target.</small
+					>
+				</div>
+
+				<div class="review-feedback-panel">
+					<div class="review-feedback-panel__heading">
+						<div>
+							<span>Want a revision?</span>
+							<h2>Tell Mediaforce what should change.</h2>
+						</div>
+						<p>The same size target stays in place unless you choose a different goal.</p>
+					</div>
+					<div class="concern-options" role="group" aria-label="Review concerns">
+						{#each REVIEW_CONCERNS as concern (concern.tag)}
+							<button
+								type="button"
+								class:active={selectedConcerns.includes(concern.tag)}
+								onclick={() => toggleConcern(concern.tag)}
+								aria-pressed={selectedConcerns.includes(concern.tag)}
+							>
+								{concern.label}
+							</button>
+						{/each}
+					</div>
+					<div class="review-feedback-fields">
+						<label>
+							<span>What did you notice?</span>
+							<textarea
+								bind:value={reviewFeedback}
+								maxlength="600"
+								rows="3"
+								placeholder="For example: fast movement loses texture around faces in Moment 2."
+							></textarea>
+							<small>{reviewFeedback.length}/600</small>
+						</label>
+						<label>
+							<span>Other priorities for the next test <small>(optional)</small></span>
+							<textarea
+								bind:value={operatorInstructions}
+								maxlength="600"
+								rows="3"
+								placeholder="Preserve surround audio, intentional grain, subtitle behavior, or another priority."
+							></textarea>
+							<small>{operatorInstructions.length}/600</small>
+						</label>
+					</div>
+					<div class="review-feedback-panel__action">
+						<p>
+							Submitting a concern records the current evidence as rejected and starts a revised
+							representative test.
+						</p>
+						<button
+							class="secondary-button"
+							type="button"
+							onclick={submitReviewFeedback}
+							disabled={!hasReviewFeedback || noAvailableHosts}
+						>
+							Make a revised test
+						</button>
+					</div>
+				</div>
 
 				<div
 					class="decision"
-					class:decision--target-miss={sizeTargetMissed}
-					class:decision--blocked={Boolean(riskSummary?.blocked)}
+					class:decision--target-miss={sizeTargetMissed || Boolean(targetConstraint)}
+					class:decision--blocked={approvalBlocked}
 				>
 					<div>
-						{#if riskSummary?.blocked}
+						{#if targetConstraint}
+							<h2>{targetConstraint.title}</h2>
+							<p>{targetConstraint.detail}</p>
+						{:else if riskSummary?.blocked}
 							<h2>This test is not safe to approve yet.</h2>
 							<p>{riskSummary.detail}</p>
 						{:else if sizeTarget.status === 'over_target'}
@@ -1131,7 +1364,16 @@
 						{/if}
 					</div>
 					<div class="decision-actions">
-						{#if riskSummary?.blocked}
+						{#if targetConstraint}
+							<button
+								class="primary-button primary-button--light"
+								type="button"
+								onclick={chooseDifferentSize}
+							>
+								{targetConstraint.recoveryLabel}
+								<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
+							</button>
+						{:else if riskSummary?.blocked}
 							<button class="secondary-button" type="button" onclick={chooseDifferentSize}>
 								Choose a different goal
 							</button>
@@ -1175,7 +1417,7 @@
 								class="primary-button primary-button--light"
 								type="button"
 								onclick={() => approveTest()}
-								disabled={!currentPair || Boolean(riskSummary?.blocked)}
+								disabled={!currentPair || approvalBlocked}
 							>
 								Looks good
 								<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 3.5 3.5L16 5" /></svg>
@@ -1197,21 +1439,25 @@
 					Mediaforce will make all {episodeCount} episodes{isSeriesScope
 						? ` across ${seriesSeasonCount} ${seriesSeasonLabel}`
 						: ' in this season'} with the same settings. New files stay separate until they pass their
-					checks.
+					checks. Nothing is queued until you choose the action below.
 				</p>
 				<div class="ready-summary">
 					<div><span>Episodes</span><strong>{episodeCount}</strong></div>
-					<div><span>Current size</span><strong>{formatFileSize(originalSeasonSize)}</strong></div>
+					<div><span>Approved episode target</span><strong>{sizeTargetLabel}</strong></div>
 					<div>
-						<span>Expected size</span><strong
+						<span>Current size</span><strong>{formatDecimalFileSize(originalSeasonSize)}</strong>
+					</div>
+					<div>
+						<span>Estimated {scopeNoun} total</span><strong
 							>{expectedSeasonBytes
-								? formatFileSize(expectedSeasonBytes)
+								? formatDecimalFileSize(expectedSeasonBytes)
 								: 'Varies by episode'}</strong
 						>
+						<small>Each episode gets its own runtime-derived target.</small>
 					</div>
 				</div>
 				<button class="primary-button" type="button" onclick={queueSeason}>
-					{isSeriesScope ? `Make all ${seriesSeasonCount} ${seriesSeasonLabel}` : 'Make the season'}
+					{makeActionLabel}
 					<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
 				</button>
 			</section>
@@ -1301,11 +1547,14 @@
 		{:else if humanState.key === 'needs_help'}
 			<section class="help-room">
 				<div class="help-mark" aria-hidden="true">!</div>
-				<p class="eyebrow">A small snag</p>
-				<h1>{humanState.label}.</h1>
-				<p class="lede">{plainFailureMessage(folder, status)}</p>
+				<p class="eyebrow">{targetConstraint ? 'Size needs a change' : 'A small snag'}</p>
+				<h1>{targetConstraint?.title || `${humanState.label}.`}</h1>
+				<p class="lede">{targetConstraint?.detail || plainFailureMessage(folder, status)}</p>
 				<div class="help-safety">
-					{#if humanState.recoveryKind === 'test'}
+					{#if targetConstraint}
+						<strong>No quality rule was silently relaxed.</strong>
+						<span>Choose a viable goal, then Mediaforce can make a fresh representative test.</span>
+					{:else if humanState.recoveryKind === 'test'}
 						<strong>Your library is safe.</strong>
 						<span>Nothing was replaced. Trying again rebuilds the comparison.</span>
 					{:else}
@@ -1320,8 +1569,17 @@
 						<span>episodes already made</span>
 					</div>
 				{/if}
-				<button class="primary-button" type="button" onclick={recoverSeason}>
-					{recoveryNeedsAdjustment ? 'Review retry' : 'Try again'}
+				<button
+					class="primary-button"
+					type="button"
+					onclick={() => (targetConstraint ? chooseDifferentSize() : recoverSeason())}
+				>
+					{targetConstraint?.recoveryLabel ||
+						(recoveryNeedsAdjustment
+							? 'Review retry'
+							: humanState.recoveryKind === 'test'
+								? 'Retry the sample'
+								: 'Retry unfinished episodes')}
 				</button>
 			</section>
 		{/if}
@@ -1405,11 +1663,47 @@
 					</div>
 					<div>
 						<span>Target</span><strong
-							>{selectedGoal?.megabytesPerEpisode ||
-								asNumber(technicalPolicy().target_size_mb) ||
-								'—'} MB / episode</strong
+							>{targetSummary?.targetBytes
+								? `${formatDecimalFileSize(targetSummary.targetBytes)} / episode`
+								: 'Not resolved'}</strong
 						>
 					</div>
+					{#if targetSummary}
+						<div>
+							<span>Target mode</span><strong
+								>{targetSummary.mode === 'normalized'
+									? 'Runtime-normalized'
+									: 'Absolute per episode'}</strong
+							>
+						</div>
+						<div>
+							<span>Sample band</span><strong
+								>{formatDecimalFileSize(
+									targetSummary.sampleLowerBoundBytes
+								)}–{formatDecimalFileSize(targetSummary.sampleUpperBoundBytes)}</strong
+							>
+						</div>
+						<div>
+							<span>Final output band</span><strong
+								>{formatDecimalFileSize(targetSummary.finalLowerBoundBytes)}–{formatDecimalFileSize(
+									targetSummary.finalUpperBoundBytes
+								)}</strong
+							>
+						</div>
+					{/if}
+					<div>
+						<span>Stream feasibility</span><strong
+							>{targetConstraint?.kind === 'arithmetic_infeasible'
+								? 'Cannot fit required streams'
+								: folder.stream_budget_ledger?.feasibility.status?.replaceAll('_', ' ') ||
+									'Awaiting measurement'}</strong
+						>
+					</div>
+					{#if riskSummary}
+						<div>
+							<span>Review authority</span><strong>{riskSummary.authority}</strong>
+						</div>
+					{/if}
 					{#if asNumber(sampleResult.chosen_crf)}<div>
 							<span>Chosen CRF</span><strong>{asNumber(sampleResult.chosen_crf)}</strong>
 						</div>{/if}
@@ -1425,10 +1719,10 @@
 					</button>
 				{/if}
 				{#if humanState.key === 'needs_help'}
-					<pre>{asText(asRecord(status.retryable_sample_job).error) ||
-							asText(activeSampleJob.error) ||
-							folder.encode_job?.error ||
-							'No technical error was recorded.'}</pre>
+					<p class="detail-error">
+						<strong>Recorded outcome</strong>
+						<span>{targetConstraint?.detail || plainFailureMessage(folder, status)}</span>
+					</p>
 				{/if}
 			</div>
 		</details>
@@ -1534,8 +1828,7 @@
 	.back-link svg,
 	.primary-button svg,
 	.details-drawer svg,
-	.safety-note svg,
-	.size-story svg {
+	.safety-note svg {
 		fill: none;
 		stroke: currentColor;
 		stroke-linecap: round;
@@ -2283,60 +2576,6 @@
 		color: var(--muted);
 	}
 
-	.size-story {
-		align-items: center;
-		border-bottom: 1px solid var(--line);
-		border-top: 1px solid var(--line);
-		display: grid;
-		gap: 24px;
-		grid-template-columns: 1fr 34px 1fr auto;
-		margin-top: 38px;
-		padding: 23px 0;
-	}
-
-	.size-story div {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-
-	.size-story span {
-		color: var(--muted);
-		font-size: 10px;
-		font-weight: 750;
-		letter-spacing: 0.09em;
-		text-transform: uppercase;
-	}
-
-	.size-story strong {
-		font-family: 'Iowan Old Style', Georgia, serif;
-		font-size: 27px;
-		font-weight: 500;
-	}
-
-	.size-story svg {
-		color: #64766a;
-		width: 34px;
-	}
-
-	.size-story p {
-		color: #aeb7b0;
-		font-size: 12px;
-		margin: 0;
-	}
-
-	.size-story b {
-		color: #9cd0af;
-		font-size: 14px;
-	}
-
-	.actual-sample {
-		color: #8e9690;
-		font-size: 11px;
-		margin: 12px 0 0;
-		text-align: center;
-	}
-
 	.risk-summary {
 		display: grid;
 		gap: 18px;
@@ -2881,23 +3120,6 @@
 		text-decoration: underline;
 	}
 
-	.details-content pre {
-		background: rgb(0 0 0 / 8%);
-		border-radius: 10px;
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 11px;
-		line-height: 1.5;
-		margin: 22px 0 0;
-		max-height: 220px;
-		overflow: auto;
-		padding: 14px;
-		white-space: pre-wrap;
-	}
-
-	.cinematic .details-content pre {
-		background: rgb(0 0 0 / 25%);
-	}
-
 	.experience-footer {
 		align-items: center;
 		border-top: 1px solid var(--line);
@@ -2940,6 +3162,42 @@
 			grid-template-columns: 1fr;
 		}
 
+		.goal-contract,
+		.review-feedback-fields {
+			grid-template-columns: 1fr;
+		}
+
+		.goal-contract > div + div {
+			border-left: 0;
+			border-top: 1px solid var(--mf-line-muted);
+		}
+
+		.comparison-ledger,
+		.risk-summary,
+		.risk-summary--attention,
+		.risk-summary--ready {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+
+		.comparison-ledger > div:nth-child(3) {
+			border-left: 0;
+			border-top: 1px solid var(--mf-line-muted);
+		}
+
+		.comparison-ledger > div:nth-child(4) {
+			border-top: 1px solid var(--mf-line-muted);
+		}
+
+		.review-feedback-panel__heading,
+		.review-feedback-panel__action {
+			align-items: stretch;
+			flex-direction: column;
+		}
+
+		.season-estimate-note {
+			grid-template-columns: 1fr;
+		}
+
 		.goal-options button {
 			min-height: 0;
 		}
@@ -2961,15 +3219,6 @@
 		.compare-heading {
 			align-items: flex-start;
 			flex-direction: column;
-		}
-
-		.size-story {
-			grid-template-columns: 1fr 28px 1fr;
-		}
-
-		.size-story p {
-			grid-column: 1 / -1;
-			text-align: center;
 		}
 
 		.risk-summary {
@@ -3150,14 +3399,6 @@
 		.safety-dialog__actions {
 			align-items: stretch;
 			flex-direction: column-reverse;
-		}
-
-		.size-story {
-			gap: 12px;
-		}
-
-		.size-story strong {
-			font-size: 21px;
 		}
 
 		.decision {
@@ -3903,67 +4144,6 @@
 		margin-top: 4px;
 	}
 
-	.size-story {
-		align-items: center;
-		background: var(--mf-bg-panel-2);
-		border: 1px solid var(--mf-line-muted);
-		border-radius: var(--mf-radius-3);
-		display: grid;
-		gap: 14px;
-		grid-template-columns: 1fr auto 1fr minmax(160px, 0.9fr);
-		margin: 0;
-		padding: 13px 15px;
-	}
-
-	.size-story div {
-		display: grid;
-		gap: 2px;
-	}
-
-	.size-story span {
-		color: var(--mf-fg-tertiary);
-		font-size: 11px;
-		font-weight: 600;
-		letter-spacing: 0.04em;
-		text-transform: uppercase;
-	}
-
-	.size-story strong {
-		color: var(--mf-fg-primary);
-		font-family: var(--mf-font-sans);
-		font-size: 18px;
-		font-weight: 600;
-	}
-
-	.size-story svg {
-		stroke: var(--mf-fg-tertiary);
-	}
-
-	.size-story p {
-		color: var(--mf-fg-secondary);
-		font-size: 12px;
-		text-align: right;
-	}
-
-	.size-story b {
-		color: var(--mf-ready-fg);
-	}
-
-	.size-story b.target-missed {
-		color: var(--mf-fail-fg);
-	}
-
-	.size-story b.target-under {
-		color: var(--mf-wait-fg);
-	}
-
-	.actual-sample {
-		color: var(--mf-fg-tertiary);
-		font-size: 12px;
-		margin: -8px 0 0;
-		text-align: center;
-	}
-
 	.decision {
 		align-items: center;
 		background: var(--mf-active-bg);
@@ -4269,16 +4449,8 @@
 		border-radius: var(--mf-radius-2);
 	}
 
-	.detail-grid strong,
-	.details-content pre {
+	.detail-grid strong {
 		color: var(--mf-fg-primary);
-	}
-
-	.details-content pre {
-		background: var(--mf-bg-stage);
-		border-radius: var(--mf-radius-2);
-		color: #dfe5e1;
-		font-family: var(--mf-font-mono);
 	}
 
 	.detail-download {
@@ -4311,6 +4483,342 @@
 
 	.safety-dialog li {
 		color: var(--mf-fg-primary);
+	}
+
+	.goal-contract {
+		background: var(--mf-bg-panel-2);
+		border: 1px solid var(--mf-line-muted);
+		border-radius: var(--mf-radius-3);
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+
+	.goal-contract > div {
+		display: grid;
+		gap: 3px;
+		padding: 13px 14px;
+	}
+
+	.goal-contract > div + div {
+		border-left: 1px solid var(--mf-line-muted);
+	}
+
+	.goal-contract span,
+	.goal-contract small {
+		color: var(--mf-fg-secondary);
+		font-size: 11px;
+	}
+
+	.goal-contract strong {
+		color: var(--mf-fg-primary);
+		font-size: 15px;
+	}
+
+	.goal-contract__truth {
+		background: var(--mf-active-bg);
+	}
+
+	.optional-instructions {
+		border: 1px solid var(--mf-line-muted);
+		border-radius: var(--mf-radius-3);
+		overflow: hidden;
+	}
+
+	.optional-instructions__toggle {
+		align-items: center;
+		background: var(--mf-bg-panel);
+		border: 0;
+		color: var(--mf-fg-primary);
+		display: flex;
+		justify-content: space-between;
+		min-height: 52px;
+		padding: 9px 14px;
+		text-align: left;
+		width: 100%;
+	}
+
+	.optional-instructions__toggle > span {
+		display: grid;
+		gap: 2px;
+	}
+
+	.optional-instructions__toggle strong {
+		font-size: 13px;
+	}
+
+	.optional-instructions__toggle small {
+		color: var(--mf-fg-tertiary);
+		font-size: 11px;
+	}
+
+	.optional-instructions__toggle svg {
+		fill: none;
+		height: 18px;
+		stroke: currentColor;
+		stroke-width: 1.7;
+		transition: transform 140ms ease;
+		width: 18px;
+	}
+
+	.optional-instructions__toggle[aria-expanded='true'] svg {
+		transform: rotate(180deg);
+	}
+
+	.operator-instructions,
+	.review-feedback-fields label {
+		background: var(--mf-bg-panel-2);
+		border-top: 1px solid var(--mf-line-muted);
+		display: grid;
+		gap: 7px;
+		padding: 13px 14px;
+	}
+
+	.operator-instructions > span,
+	.review-feedback-fields label > span {
+		color: var(--mf-fg-primary);
+		font-size: 12px;
+		font-weight: 650;
+	}
+
+	.operator-instructions textarea,
+	.review-feedback-fields textarea {
+		background: var(--mf-bg-input);
+		border: 1px solid var(--mf-line-strong);
+		border-radius: var(--mf-radius-2);
+		color: var(--mf-fg-primary);
+		font: inherit;
+		line-height: 1.45;
+		min-height: 76px;
+		padding: 10px 11px;
+		resize: vertical;
+		width: 100%;
+	}
+
+	.operator-instructions small,
+	.review-feedback-fields small {
+		color: var(--mf-fg-tertiary);
+		font-size: 10px;
+	}
+
+	.active-facts {
+		grid-template-columns: repeat(5, minmax(0, 1fr));
+	}
+
+	.target-warning--constraint {
+		background: var(--mf-fail-bg);
+		border-color: var(--mf-fail-line);
+	}
+
+	.risk-summary,
+	.risk-summary--attention,
+	.risk-summary--ready {
+		background: var(--mf-bg-panel-2);
+		border: 1px solid var(--mf-line-muted);
+		border-radius: var(--mf-radius-3);
+		color: var(--mf-fg-primary);
+		display: grid;
+		gap: 12px;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		margin: 0;
+		padding: 14px 15px;
+	}
+
+	.risk-summary--attention {
+		background: var(--mf-fail-bg);
+		border-color: var(--mf-fail-line);
+	}
+
+	.risk-summary--ready {
+		background: var(--mf-ready-bg);
+		border-color: var(--mf-ready-line);
+	}
+
+	.risk-summary span {
+		color: var(--mf-fg-tertiary);
+		font-size: 10px;
+		margin-bottom: 4px;
+	}
+
+	.risk-summary strong {
+		color: var(--mf-fg-primary);
+		font-size: 14px;
+	}
+
+	.risk-summary small {
+		color: var(--mf-fg-secondary);
+		display: block;
+		font-size: 10px;
+		line-height: 1.4;
+		margin-top: 3px;
+	}
+
+	.risk-summary__detail,
+	.risk-summary__focus {
+		color: var(--mf-fg-secondary) !important;
+		grid-column: 1 / -1;
+		margin: 0 !important;
+	}
+
+	.comparison-ledger {
+		border: 1px solid var(--mf-line-muted);
+		border-radius: var(--mf-radius-3);
+		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		overflow: hidden;
+	}
+
+	.comparison-ledger > div {
+		background: var(--mf-bg-panel-2);
+		display: grid;
+		gap: 3px;
+		padding: 13px 14px;
+	}
+
+	.comparison-ledger > div + div {
+		border-left: 1px solid var(--mf-line-muted);
+	}
+
+	.comparison-ledger span,
+	.season-estimate-note span {
+		color: var(--mf-fg-tertiary);
+		font-size: 10px;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+	}
+
+	.comparison-ledger strong,
+	.season-estimate-note strong {
+		color: var(--mf-fg-primary);
+		font-size: 15px;
+	}
+
+	.comparison-ledger small,
+	.season-estimate-note small {
+		color: var(--mf-fg-secondary);
+		font-size: 10px;
+		line-height: 1.4;
+	}
+
+	.comparison-ledger__missed {
+		background: var(--mf-wait-bg) !important;
+	}
+
+	.season-estimate-note {
+		align-items: center;
+		background: var(--mf-bg-panel-2);
+		border: 1px solid var(--mf-line-muted);
+		border-radius: var(--mf-radius-3);
+		display: grid;
+		gap: 3px 14px;
+		grid-template-columns: auto auto minmax(0, 1fr);
+		padding: 10px 14px;
+	}
+
+	.review-feedback-panel {
+		background: var(--mf-bg-panel-2);
+		border: 1px solid var(--mf-line-muted);
+		border-radius: var(--mf-radius-3);
+		display: grid;
+		gap: 13px;
+		padding: 15px;
+	}
+
+	.review-feedback-panel__heading,
+	.review-feedback-panel__action {
+		align-items: center;
+		display: flex;
+		gap: 16px;
+		justify-content: space-between;
+	}
+
+	.review-feedback-panel__heading > div {
+		display: grid;
+		gap: 3px;
+	}
+
+	.review-feedback-panel__heading span {
+		color: var(--mf-active-fg);
+		font-size: 10px;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+	}
+
+	.review-feedback-panel__heading h2,
+	.review-feedback-panel__heading p,
+	.review-feedback-panel__action p {
+		margin: 0;
+	}
+
+	.review-feedback-panel__heading p,
+	.review-feedback-panel__action p {
+		font-size: 11px;
+		max-width: 420px;
+	}
+
+	.concern-options {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+
+	.concern-options button {
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-line-strong);
+		border-radius: 999px;
+		color: var(--mf-fg-secondary);
+		font-size: 11px;
+		font-weight: 600;
+		min-height: 32px;
+		padding: 0 11px;
+	}
+
+	.concern-options button.active {
+		background: var(--mf-fail-bg);
+		border-color: var(--mf-fail-line);
+		color: var(--mf-fail-fg);
+	}
+
+	.review-feedback-fields {
+		display: grid;
+		gap: 10px;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.review-feedback-fields label {
+		border: 1px solid var(--mf-line-muted);
+		border-radius: var(--mf-radius-2);
+	}
+
+	.review-feedback-panel__action {
+		border-top: 1px solid var(--mf-line-muted);
+		padding-top: 12px;
+	}
+
+	.ready-summary {
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		max-width: 820px;
+	}
+
+	.ready-summary small {
+		color: var(--mf-fg-tertiary);
+		font-size: 10px;
+	}
+
+	.detail-error {
+		background: var(--mf-wait-bg);
+		border: 1px solid var(--mf-wait-line);
+		border-radius: var(--mf-radius-2);
+		display: grid;
+		gap: 3px;
+		padding: 11px 12px;
+	}
+
+	.detail-error strong,
+	.detail-error span {
+		color: var(--mf-wait-fg);
+		font-size: 12px;
 	}
 
 	@keyframes working-bar {
@@ -4376,15 +4884,6 @@
 			grid-template-columns: 1fr;
 		}
 
-		.size-story {
-			grid-template-columns: 1fr auto 1fr;
-		}
-
-		.size-story p {
-			grid-column: 1 / -1;
-			text-align: left;
-		}
-
 		.season-progress-room {
 			grid-template-columns: minmax(0, 1fr) 130px;
 		}
@@ -4443,12 +4942,28 @@
 			text-align: center;
 		}
 
-		.size-story {
+		.comparison-ledger,
+		.risk-summary,
+		.risk-summary--attention,
+		.risk-summary--ready {
 			grid-template-columns: 1fr;
 		}
 
-		.size-story svg {
-			display: none;
+		.review-feedback-fields,
+		.season-estimate-note {
+			align-items: start;
+			grid-template-columns: 1fr;
+		}
+
+		.comparison-ledger > div + div,
+		.comparison-ledger > div:nth-child(3),
+		.comparison-ledger > div:nth-child(4) {
+			border-left: 0;
+			border-top: 1px solid var(--mf-line-muted);
+		}
+
+		.concern-options button {
+			flex: 1 1 calc(50% - 6px);
 		}
 
 		.decision-actions,

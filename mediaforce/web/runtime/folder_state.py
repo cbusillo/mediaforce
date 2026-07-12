@@ -1,6 +1,8 @@
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
+import tempfile
 from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
@@ -215,7 +217,26 @@ def review_pair_key(timestamp_seconds: float) -> int:
 
 
 def save_advice_state(advice_file: Path, advice: dict[str, Any]) -> None:
-    advice_file.write_text(json.dumps(dict(advice), indent=2) + "\n")
+    advice_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=advice_file.parent,
+                prefix=f".{advice_file.name}.",
+                suffix=".tmp",
+                delete=False,
+        ) as tmp_file:
+            tmp_path = Path(tmp_file.name)
+            tmp_file.write(json.dumps(dict(advice), indent=2))
+            tmp_file.write("\n")
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        os.replace(tmp_path, advice_file)
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            tmp_path.unlink()
 
 
 def load_pending_proposal(proposal_file: Path) -> dict[str, Any] | None:
