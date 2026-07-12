@@ -11,6 +11,7 @@ from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQU
     normalize_execution_platform
 from mediaforce.hosts.config import _host_supports_capability, host_media_access_for_host, \
     _parse_utc_offset_minutes, remote_shell_path_export_line, stream_host_has_remote_source_roots
+from mediaforce.hosts.mount_runtime import mount_output_field
 from mediaforce.hosts.types import AB_AV1_MISSING_ISSUE, FFMPEG_MISSING_ISSUE, HostStatus, \
     LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE, SAMPLE_AV1_ENCODER_MISSING_ISSUE, SAMPLE_METRIC_MISSING_ISSUE, \
     SOURCE_ROOT_READ_MISSING_ISSUE, STAGING_ROOT_WRITE_MISSING_ISSUE
@@ -188,13 +189,20 @@ def _status_from_paths(
         videotoolbox_available: bool | None = None,
         utc_offset_minutes: int | None = None,
         issues: list[str] | None = None,
+        missing_mounts: list[str] | None = None,
         setup_supported: bool = False,
         setup_requires_password: bool = False,
         require_paths: bool = True,
 ) -> HostStatus:
     missing_paths = [path for path, mounted in mounted_paths.items() if not mounted]
+    missing_mount_list = list(missing_mounts or [])
     issue_list = [str(issue) for issue in object_list(issues)]
-    available = (len(mounted_paths) > 0 or not require_paths) and not missing_paths and not issue_list
+    available = (
+        (len(mounted_paths) > 0 or not require_paths)
+        and not missing_paths
+        and not missing_mount_list
+        and not issue_list
+    )
     return HostStatus(
         key=key,
         label=label,
@@ -202,7 +210,12 @@ def _status_from_paths(
         priority=priority,
         capabilities=capabilities,
         available=available,
-        message=_host_message(available=available, missing_paths=missing_paths, issues=issue_list),
+        message=_host_message(
+            available=available,
+            missing_paths=missing_paths,
+            missing_mounts=missing_mount_list,
+            issues=issue_list,
+        ),
         missing_paths=missing_paths,
         repo_path=repo_path,
         ffmpeg_path=ffmpeg_path,
@@ -210,15 +223,24 @@ def _status_from_paths(
         videotoolbox_available=videotoolbox_available,
         utc_offset_minutes=utc_offset_minutes,
         issues=issue_list,
+        missing_mounts=missing_mount_list,
         setup_supported=setup_supported,
         setup_requires_password=setup_requires_password,
     )
 
 
-def _host_message(*, available: bool, missing_paths: list[str], issues: list[str]) -> str:
+def _host_message(
+        *,
+        available: bool,
+        missing_paths: list[str],
+        missing_mounts: list[str],
+        issues: list[str],
+) -> str:
     _ = missing_paths
     if available:
         return "Mounted and ready"
+    if missing_mounts:
+        return "Shared storage disconnected"
     if any(issue == LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE for issue in issues):
         return "Linux sample unsupported"
     if any(issue == "Xcode Command Line Tools are not installed on the remote Mac." for issue in issues):
@@ -380,6 +402,7 @@ def _remote_status_script(
         paths: list[str],
         repo_path: str,
         include_expensive_tools: bool = True,
+        mount_paths: list[str] | None = None,
         writable_paths: list[str] | None = None,
 ) -> str:
     quoted_paths = " ".join(shlex.quote(path) for path in paths)
@@ -424,8 +447,20 @@ def _remote_status_script(
         'printf "meta|platform|%s\\n" "$PLATFORM_NAME"',
         'printf "time|utc_offset|%s\\n" "$(date +%z)"',
     ])
+    if mount_paths:
+        lines.append('MOUNT_OUTPUT="$(/sbin/mount 2>/dev/null || true)"')
+        for mount_path in mount_paths:
+            lines.extend([
+                f"mount_path={shlex.quote(mount_path)}",
+                f"mount_output_path={shlex.quote(mount_output_field(mount_path))}",
+                'if printf "%s\\n" "$MOUNT_OUTPUT" | /usr/bin/grep -F -- " on $mount_path (" >/dev/null 2>&1 || printf "%s\\n" "$MOUNT_OUTPUT" | /usr/bin/grep -F -- " on $mount_output_path (" >/dev/null 2>&1; then',
+                '  printf "mount|%s|1\\n" "$mount_path"',
+                'else',
+                '  printf "mount|%s|0\\n" "$mount_path"',
+                'fi',
+            ])
     if paths:
-        lines[16:16] = [
+        lines.extend([
             f"for path in {quoted_paths}; do",
             '  exists=0',
             '  readable=0',
@@ -452,7 +487,7 @@ def _remote_status_script(
             '  printf "pathread|%s|%s\\n" "$path" "$readable"',
             '  printf "pathwrite|%s|%s\\n" "$path" "$writable"',
             "done",
-        ]
+        ])
     if repo_path:
         lines.append(
             f'if [ -e {shlex.quote(repo_path)} ]; then printf "repo|exists|1\\n"; else printf "repo|exists|0\\n"; fi'
@@ -469,6 +504,7 @@ def _parse_remote_status_output(stdout: str) -> dict[str, Any]:
         "tool_paths": {},
         "tool_meta": {},
         "path_access": {},
+        "mounts": {},
         "repo_path_exists": True,
         "utc_offset": None,
         "platform": "unknown",
@@ -492,6 +528,8 @@ def _parse_remote_status_output(stdout: str) -> dict[str, Any]:
         elif kind == "pathwrite":
             access = payload["path_access"].setdefault(key, {})
             access["write"] = value == "1"
+        elif kind == "mount":
+            payload["mounts"][key] = value == "1"
         elif kind == "tool":
             payload["tools"][key] = value == "1"
         elif kind == "toolpath":

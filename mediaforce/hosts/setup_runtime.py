@@ -181,6 +181,7 @@ def prepare_remote_host_with_password(
         ssh_access_must_be_fixed_first: Callable[[HostStatus], bool],
         request_remote_xcode_install: Callable[[dict[str, Any]], HostSetupResult],
         bootstrap_remote_macos: Callable[[dict[str, Any], str, list[str]], HostSetupResult],
+        recover_remote_host_mounts: Callable[[MediaforceConfig, dict[str, Any], HostStatus], HostSetupResult],
         finish_remote_host_prepare: Callable[[MediaforceConfig, dict[str, Any], list[str]], HostSetupResult],
 ) -> HostSetupResult:
     host = _find_remote_host(config, host_key)
@@ -220,6 +221,13 @@ def prepare_remote_host_with_password(
             key_install.performed_steps = prep_steps
             if not key_install.ok:
                 return key_install
+            continue
+        if status.missing_mounts and status.platform == "macos":
+            mount_result = recover_remote_host_mounts(config, host, status)
+            prep_steps.extend(mount_result.performed_steps)
+            mount_result.performed_steps = prep_steps
+            if not mount_result.ok:
+                return mount_result
             continue
         if ssh_access_must_be_fixed_first(status):
             return HostSetupResult(

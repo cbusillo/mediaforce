@@ -30,6 +30,7 @@ class HostStatus:
     videotoolbox_available: bool | None = None
     utc_offset_minutes: int | None = None
     issues: list[str] = field(default_factory=list)
+    missing_mounts: list[str] = field(default_factory=list)
     detail: str | None = None
     setup_supported: bool = False
     setup_requires_password: bool = False
@@ -43,6 +44,13 @@ class HostSetupResult:
     detail: str | None = None
     performed_steps: list[str] = field(default_factory=list)
     requires_password: bool = False
+    failure_kind: str | None = None
+
+
+class HostReadinessError(RuntimeError):
+    def __init__(self, message: str, *, failure_kind: str) -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
 
 
 __all__ = [
@@ -53,6 +61,7 @@ __all__ = [
     "FFMPEG_MISSING_ISSUE",
     "HostSetupResult",
     "HostStatus",
+    "HostReadinessError",
     "LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE",
     "REMOTE_SHELL_PATH",
     "REMOTE_STATUS_RETRY_DELAY_SECONDS",

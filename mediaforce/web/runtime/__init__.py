@@ -19,7 +19,8 @@ from mediaforce.web.runtime.folder_tuning_runtime import FolderTuningRuntimeDeps
     build_tuning_runtime_toolbelt, multimodal_review_pack_public_view, planned_audio_review_context, \
     proposal_context_snapshot, review_pack_dir
 from mediaforce.web.runtime.host_runtime import default_sample_host_key, default_sample_host_key_from_statuses, \
-    ensure_encode_host_ready, fresh_host_status_for_key, host_config_for_key, host_lifecycle_start_command, \
+    ensure_encode_host_ready, ensure_sample_host_ready, fresh_host_status_for_key, host_config_for_key, \
+    host_lifecycle_start_command, \
     host_lifecycle_start_timeout_seconds, host_lifecycle_stop_command, host_runtime_rows, \
     sample_calibration_host_statuses, sample_host_options, sample_host_options_from_statuses, \
     stop_encode_host_if_configured
@@ -50,6 +51,7 @@ __all__ = [
     "default_sample_host_key",
     "default_sample_host_key_from_statuses",
     "ensure_encode_host_ready",
+    "ensure_sample_host_ready",
     "FolderAiTuneDeps",
     "FolderStateDeps",
     "FolderTuningRuntimeDeps",

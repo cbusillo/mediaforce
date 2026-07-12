@@ -31,7 +31,7 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict, objec
 from mediaforce.encoding.quality import QualitySearchError, QualityTempCleanupError, QualityTempSetupError, \
     analyze_quality_policy_failure, quality_error_message
 from mediaforce.encoding.staging import safe_unlink
-from mediaforce.remote import execution_mode_for_host, host_media_access_for_host, run_remote_command
+from mediaforce.remote import HostReadinessError, execution_mode_for_host, host_media_access_for_host, run_remote_command
 from mediaforce.web.runtime.host_runtime import host_config_for_key
 from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
 
@@ -948,7 +948,10 @@ def select_encode_host(
         if not bool(host.get("available"))
         and not _probe_available(host)
         and not object_list(host.get("issues"))
-        and bool(deps.host_lifecycle_start_command(host))
+        and (
+            bool(deps.host_lifecycle_start_command(host))
+            or bool(host.get("storage_recovery_available"))
+        )
         and "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
         and int(host.get("active_encode_count") or 0) < int(host.get("max_parallel_encodes") or 1)
         and _schedule_open(host)
@@ -1598,7 +1601,7 @@ def _finalize_encode_job_progress(
 
 
 def _encode_failure_is_host_related(failure_kind: str, error_message: str, host_payload: dict[str, Any]) -> bool:
-    if failure_kind in {"host_unavailable", "ssh_transport"}:
+    if failure_kind in {"controller_storage_unavailable", "host_unavailable", "ssh_transport"}:
         return True
     return _encode_failure_is_ssh_transport(error_message, host_payload)
 
@@ -1657,7 +1660,13 @@ def _quality_temp_setup_is_host_related(message: str) -> bool:
 
 
 def _encode_failure_is_retryable(failure_kind: str, error_message: str, host_payload: dict[str, Any]) -> bool:
-    if failure_kind in {"worker_restart", "stale_lease", "host_unavailable", "ssh_transport"}:
+    if failure_kind in {
+        "controller_storage_unavailable",
+        "worker_restart",
+        "stale_lease",
+        "host_unavailable",
+        "ssh_transport",
+    }:
         return True
     if failure_kind in {"stopped", "deterministic"}:
         return False
@@ -1669,6 +1678,8 @@ def _encode_failure_retries_after_attempt_cap(
         error_message: str,
         host_payload: dict[str, Any],
 ) -> bool:
+    if failure_kind == "controller_storage_unavailable":
+        return False
     if not _encode_failure_is_host_related(failure_kind, error_message, host_payload):
         return False
     lowered = error_message.lower()
@@ -1681,6 +1692,7 @@ def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) ->
         "worker_restart": "worker restart",
         "stale_lease": "stale worker lease",
         "host_unavailable": "host availability issue",
+        "controller_storage_unavailable": "controller storage issue",
         "ssh_transport": "SSH transport failure",
     }.get(failure_kind, "retryable failure")
     return f"retrying after {reason} at {retry_not_before}"
@@ -1764,6 +1776,8 @@ def _cleanup_encode_retry_artifacts(
 def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
     message = str(exc).lower()
     host_payload = object_dict(job.get("host"))
+    if isinstance(exc, HostReadinessError):
+        return exc.failure_kind
     if isinstance(exc, PermissionError):
         return "controller_media_access"
     if isinstance(exc, QualityTempSetupError) and _quality_temp_setup_is_host_related(message):

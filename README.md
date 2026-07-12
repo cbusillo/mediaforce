@@ -423,8 +423,15 @@ Mediaforce can install this Mac's SSH public key, then let the prep step
 create remote paths and install `ffmpeg-full` plus `ab-av1` for
 `sample_calibration` hosts when possible. Those sample hosts now verify
 `libvmaf`/`xpsnr` metric support and `libsvtav1` before they show as ready.
-Shared media mounts still need to exist on the remote host before it will show
-as ready.
+For mounted-media macOS hosts, Mediaforce can reconnect an SMB volume over SSH
+when the same `/Volumes/...` root is mounted on the controller. Recovery runs
+before preparation, sampling, or encode dispatch. The configured SSH account
+must be the active signed-in console user, and the remote Finder session uses
+that account's saved login-Keychain credentials; Mediaforce never reads or
+transports the password. If another account is active, the action identifies the
+account that must sign in. If Finder cannot use a saved credential, the action
+identifies the host and share that need one manual Finder connection with the
+password saved to Keychain before retrying.
 
 Sampled calibration and AI note tuning can now run on any configured host with
 the `sample_calibration` capability. The folder page uses one AI-guided sample

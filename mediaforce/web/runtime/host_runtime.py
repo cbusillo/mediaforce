@@ -13,8 +13,9 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.type_defs import float_value, object_dict
 from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS
-from mediaforce.remote import HostStatus, collect_host_statuses, host_status_targets_current_machine, \
-    normalize_host_media_access, run_host_lifecycle_command
+from mediaforce.remote import HostReadinessError, HostStatus, collect_host_statuses, host_status_targets_current_machine, \
+    normalize_host_media_access, recover_remote_host_mounts, remote_mount_recovery_supported, \
+    run_host_lifecycle_command
 
 
 def _progress_float(job: dict[str, Any], key: str) -> float:
@@ -56,6 +57,7 @@ def host_runtime_rows(
     current_time = now or datetime.now(UTC)
     for status in statuses:
         host_config = host_config_for_key(config, status.key)
+        storage_recovery_available = remote_mount_recovery_supported(config, host_config, status)
         capabilities = {capability.lower() for capability in status.capabilities}
         raw_allowed_libraries = host_config.get("allowed_libraries")
         allowed_libraries = [
@@ -79,6 +81,7 @@ def host_runtime_rows(
             "allowed_libraries": allowed_libraries,
             "source_roots": merged_source_roots,
             "staging_root": str(host_config.get("staging_root") or "").strip() or None,
+            "storage_recovery_available": storage_recovery_available,
         }
         max_parallel_encodes = host_max_parallel_encodes(host_config)
         schedule_profile = host_schedule_profile_key(host_config)
@@ -93,7 +96,11 @@ def host_runtime_rows(
         if active_probe_degraded:
             active_reason = "status check deferred while encode is running"
         elif not status.available:
-            active_reason = status.message
+            active_reason = (
+                "shared storage will reconnect when work starts"
+                if storage_recovery_available
+                else status.message
+            )
         elif not encode_capable:
             active_reason = "encode queue capability disabled"
         elif str(policy.get("mode") or "anytime") == "never":
@@ -129,6 +136,8 @@ def host_runtime_rows(
                 "probe_message": status.message,
                 "probe_issues": list(status.issues),
             }
+            if storage_recovery_available:
+                status_payload["message"] = "Storage will reconnect when work starts"
         rows.append(
             {
                 **status_payload,
@@ -355,6 +364,10 @@ def ensure_encode_host_ready(
     status = fresh_host_status_for_key(config, host_key)
     if status is not None and status.available:
         return False
+    if status is not None:
+        status = _recover_host_mounts(config, host, status)
+        if status is not None and status.available:
+            return False
     start_command = host_lifecycle_start_command(host)
     if not start_command:
         raise RuntimeError(unavailable_host_error_message(status))
@@ -364,15 +377,54 @@ def ensure_encode_host_ready(
     deadline = time.monotonic() + host_lifecycle_start_timeout_seconds(host)
     while time.monotonic() < deadline:
         refreshed = fresh_host_status_for_key(config, host_key)
-        if refreshed is not None and refreshed.available:
-            return True
+        if refreshed is not None:
+            refreshed = _recover_host_mounts(config, host, refreshed)
+            if refreshed.available:
+                return True
         time.sleep(lifecycle_poll_seconds)
     refreshed = fresh_host_status_for_key(config, host_key)
-    if refreshed is not None and refreshed.available:
-        return True
+    if refreshed is not None:
+        refreshed = _recover_host_mounts(config, host, refreshed)
+        if refreshed.available:
+            return True
     detail = refreshed.detail if refreshed is not None else None
     message = refreshed.message if refreshed is not None else f"Timed out waiting for {host_key}"
     raise RuntimeError(detail or message or f"Timed out waiting for {host_key}")
+
+
+def ensure_sample_host_ready(config: MediaforceConfig, host_payload: dict[str, Any] | None) -> HostStatus:
+    host = object_dict(host_payload)
+    host_key = str(host.get("key") or host.get("host") or host.get("label") or "").strip()
+    if not host_key:
+        raise HostReadinessError("Sample host is not configured.", failure_kind="host_configuration")
+    status = fresh_host_status_for_key(config, host_key)
+    if status is None:
+        raise HostReadinessError("Sample host is not available.", failure_kind="host_unavailable")
+    status = _recover_host_mounts(config, host, status)
+    if not status.available:
+        raise HostReadinessError(
+            status.detail or status.message or "Sample host is not available.",
+            failure_kind="host_unavailable",
+        )
+    return status
+
+
+def _recover_host_mounts(
+        config: MediaforceConfig,
+        host: dict[str, Any],
+        status: HostStatus,
+) -> HostStatus:
+    if not status.missing_mounts:
+        return status
+    mount_result = recover_remote_host_mounts(config, host, status)
+    if not mount_result.ok:
+        detail = f" Details: {mount_result.detail}" if mount_result.detail else ""
+        raise HostReadinessError(
+            f"{mount_result.message}{detail}",
+            failure_kind=mount_result.failure_kind or "host_unavailable",
+        )
+    host_key = str(host.get("key") or host.get("host") or host.get("label") or status.key).strip()
+    return fresh_host_status_for_key(config, host_key) or status
 
 
 def stop_encode_host_if_configured(host_payload: dict[str, Any] | None, *,
@@ -387,8 +439,15 @@ def stop_encode_host_if_configured(host_payload: dict[str, Any] | None, *,
 
 
 def default_sample_host_key(config: MediaforceConfig, *, safe_collect_statuses: Any) -> str:
-    return default_sample_host_key_from_statuses(
-        sample_calibration_host_statuses(config, safe_collect_statuses=safe_collect_statuses))
+    statuses = sample_calibration_host_statuses(config, safe_collect_statuses=safe_collect_statuses)
+    ready_key = default_sample_host_key_from_statuses(statuses)
+    if ready_key:
+        return ready_key
+    for status in statuses:
+        host = host_config_for_key(config, status.key)
+        if remote_mount_recovery_supported(config, host, status):
+            return status.key
+    return ""
 
 
 def default_sample_host_key_from_statuses(statuses: list[HostStatus]) -> str:
@@ -430,13 +489,19 @@ def sample_host_options_from_statuses(
     options: list[dict[str, Any]] = []
     for status in statuses:
         schedule_fields = object_dict(schedule_fields_for_host(status)) if schedule_fields_for_host else {}
+        storage_recovery_available = bool(schedule_fields.get("storage_recovery_available"))
         options.append(
             {
                 "key": status.key,
                 "label": status.label,
-                "detail": status.message if not status.available else (
-                    "This machine" if host_status_targets_current_machine(status) else "Remote host"),
-                "available": status.available,
+                "detail": (
+                    "Storage will reconnect when the test starts."
+                    if storage_recovery_available
+                    else status.message if not status.available else (
+                        "This machine" if host_status_targets_current_machine(status) else "Remote host"
+                    )
+                ),
+                "available": status.available or storage_recovery_available,
                 **schedule_fields,
             }
         )

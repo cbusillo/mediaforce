@@ -1,3 +1,4 @@
+import os
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -7,8 +8,10 @@ from typing import Any
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQUIRED_ISSUE
 from mediaforce.hosts.config import execution_mode_for_host, host_media_access_for_host, \
-    host_status_targets_current_machine, normalize_host_media_access, remote_shell_path_export_line, \
-    ssh_target_for_host
+    host_status_targets_current_machine, host_targets_current_machine, normalize_host_media_access, \
+    remote_shell_path_export_line, ssh_target_for_host
+from mediaforce.hosts.mount_runtime import ControllerSmbMount, RemoteSmbMount, controller_smb_mounts_from_output, \
+    mount_remote_smb_shares, remote_smb_mounts_for_paths
 from mediaforce.hosts.status_runtime import _current_machine_host_status as _current_machine_host_status_impl, \
     _remote_host_status as _remote_host_status_impl, _run_remote_status_probe as _run_remote_status_probe_impl
 from mediaforce.hosts.setup_runtime import _finish_remote_host_prepare as _finish_remote_host_prepare_impl, \
@@ -30,7 +33,7 @@ from mediaforce.hosts.wake_runtime import _ensure_remote_awake_for_ssh as _ensur
     _learn_remote_wake_mac as _learn_remote_wake_mac_impl, \
     _wake_remote_host_if_configured as _wake_remote_host_if_configured_impl
 from mediaforce.hosts.types import AB_AV1_MISSING_ISSUE, DEFAULT_HOST_CAPABILITIES, DEFAULT_HOST_MEDIA_ACCESS, \
-    DEFAULT_WAKE_WAIT_SECONDS, HostSetupResult, HostStatus, \
+    DEFAULT_WAKE_WAIT_SECONDS, HostReadinessError, HostSetupResult, HostStatus, \
     FFMPEG_MISSING_ISSUE, LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE, \
     REMOTE_STATUS_RETRY_DELAY_SECONDS, SAMPLE_AV1_ENCODER_MISSING_ISSUE, SAMPLE_METRIC_MISSING_ISSUE
 
@@ -42,6 +45,7 @@ __all__ = [
     "FFMPEG_MISSING_ISSUE",
     "HostSetupResult",
     "HostStatus",
+    "HostReadinessError",
     "LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE",
     "REMOTE_STATUS_RETRY_DELAY_SECONDS",
     "SAMPLE_AV1_ENCODER_MISSING_ISSUE",
@@ -56,6 +60,8 @@ __all__ = [
     "host_status_targets_current_machine",
     "normalize_host_media_access",
     "prepare_remote_host_with_password",
+    "recover_remote_host_mounts",
+    "remote_mount_recovery_supported",
     "remote_shell_path_export_line",
     "reset_remote_host_trust",
     "run_host_lifecycle_command",
@@ -71,6 +77,91 @@ def run_host_lifecycle_command(host: dict[str, object], command: str, *, timeout
     if not command_text:
         raise RuntimeError("Lifecycle command cannot be empty.")
     return _run_subprocess_text(["sh", "-lc", command_text], timeout=timeout)
+
+
+def remote_mount_recovery_supported(
+        config: MediaforceConfig,
+        host: dict[str, Any],
+        status: HostStatus,
+) -> bool:
+    if status.issues or not _missing_paths_covered_by_mounts(status.missing_paths, status.missing_mounts):
+        return False
+    return bool(_remote_smb_mounts_for_status(config, host, status))
+
+
+def recover_remote_host_mounts(
+        config: MediaforceConfig,
+        host: dict[str, Any],
+        status: HostStatus,
+) -> HostSetupResult:
+    mounts = _remote_smb_mounts_for_status(config, host, status)
+    label = str(host.get("label") or status.label or host.get("host") or "Remote host").strip() or "Remote host"
+    if not mounts:
+        return HostSetupResult(
+            ok=False,
+            message=f"{label} needs shared storage connected before it can run Mediaforce work.",
+            detail=(
+                "Mediaforce could not match the disconnected storage to an SMB volume mounted on this Mac."
+            ),
+            failure_kind="controller_storage_unavailable",
+        )
+    return mount_remote_smb_shares(host, mounts, run_remote_ssh=_run_remote_ssh)
+
+
+def _remote_smb_mounts_for_status(
+        config: MediaforceConfig,
+        host: dict[str, Any],
+        status: HostStatus,
+) -> list[RemoteSmbMount] | None:
+    _ = config
+    if (
+            status.available
+            or status.mode != "ssh"
+            or status.platform != "macos"
+            or not status.missing_mounts
+            or host_media_access_for_host(host) != "mounted"
+            or host_targets_current_machine(host)
+    ):
+        return None
+    controller_mounts: list[ControllerSmbMount] = controller_smb_mounts_from_output(_controller_smb_mount_output())
+    return remote_smb_mounts_for_paths(
+        status.missing_mounts,
+        controller_mounts,
+        remote_user=_ssh_user_for_host(host),
+    )
+
+
+def _controller_smb_mount_output() -> str:
+    try:
+        result = _run_subprocess_text(["/sbin/mount"], timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout if result.returncode == 0 else ""
+
+
+def _ssh_user_for_host(host: dict[str, Any]) -> str | None:
+    target = ssh_target_for_host(host)
+    if "@" not in target:
+        return None
+    user = target.rsplit("@", 1)[0].strip()
+    return user or None
+
+
+def _missing_paths_covered_by_mounts(missing_paths: list[str], missing_mounts: list[str]) -> bool:
+    mount_points = [Path(os.path.normpath(path)) for path in missing_mounts]
+    for raw_path in missing_paths:
+        path = Path(os.path.normpath(raw_path))
+        if not any(_path_is_within(path, mount_point) for mount_point in mount_points):
+            return False
+    return True
+
+
+def _path_is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
 
 
 def _run_subprocess_text(
@@ -196,6 +287,7 @@ def prepare_remote_host_with_password(
         ssh_access_must_be_fixed_first=_ssh_access_must_be_fixed_first,
         request_remote_xcode_install=_request_remote_xcode_install,
         bootstrap_remote_macos=lambda host, pwd, issues: _bootstrap_remote_macos(host, pwd, issues=issues),
+        recover_remote_host_mounts=recover_remote_host_mounts,
         finish_remote_host_prepare=_finish_remote_host_prepare,
     )
 
