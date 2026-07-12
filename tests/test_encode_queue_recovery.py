@@ -32,7 +32,7 @@ from mediaforce.core.db_tables import item_events
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.db_tables import staged_artifacts
-from mediaforce.core.evidence import stable_policy_hash
+from mediaforce.core.evidence import stable_policy_hash, stable_source_id
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.process_control import ProcessCancelledError
 from mediaforce.core.type_defs import object_dict, object_list
@@ -132,7 +132,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "can_confirm_full": True,
             "message": None,
             "status": "accepted",
-            "next_action_label": "Auto-queued after approval",
+            "next_action_label": "Make the season",
         }
 
     @staticmethod
@@ -5181,7 +5181,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual(accepted_gate["status"], "accepted")
         self.assertTrue(accepted_gate["can_confirm_full"])
-        self.assertEqual(accepted_gate["next_action_label"], "Auto-queued after approval")
+        self.assertEqual(accepted_gate["next_action_label"], "Make the season")
 
     def test_review_gate_preserves_legacy_approval_for_same_sample_when_hash_drifts(self) -> None:
         payload = {
@@ -5219,8 +5219,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(review_gate["status"], "needs_approval")
         self.assertFalse(review_gate["can_confirm_full"])
 
-    def test_save_profile_action_auto_queues_folder_encode(self) -> None:
-        manifest_path = self._write_manifest("manifest-approved-queue.json", [{"library_item_id": 1}])
+    def test_save_profile_action_approves_without_queueing_production(self) -> None:
         calibration_state: dict[str, folder_actions_runtime.ActionPayload] = {
             "tv/show": {
                 "mode": "sample",
@@ -5245,124 +5244,33 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ) -> None:
             calibration_state[prefix] = dict(payload)
 
-        with patch("mediaforce.web.runtime.folder_actions.load_config", return_value=self.config), patch(
-                "mediaforce.web.runtime.folder_actions.create_folder_manifest",
-                return_value=({"items": [{"library_item_id": 1}]}, manifest_path),
-        ):
-            result = folder_actions_runtime.save_profile_action(
-                self.config,
-                "tv/show",
-                now_iso=web_app._now_iso,
-                load_sample_item=lambda *_args, **_kwargs: {"resolved_policy": {"video": {"target_vmaf": 95.0}}},
-                load_calibration_state=load_calibration_state,
-                calibration_draft_hash=web_app._calibration_draft_hash,
-                save_calibration_state=save_calibration_state,
-                load_advice_state=lambda *_args, **_kwargs: None,
-                record_visual_approval_artifact=lambda *_args, **_kwargs: None,
-                merge_advice_state=lambda *_args, **_kwargs: {},
-                upsert_override=web_app._upsert_override,
-                auto_queue_folder_encode=lambda prefix, notes,
-                                                bypass_schedule: folder_actions_runtime.queue_folder_encode_action(
-                    self.config,
-                    prefix,
-                    notes,
-                    bypass_schedule,
-                    now_iso=web_app._now_iso,
-                    load_job_state=self._noop_load_job_state,
-                    load_calibration_state=load_calibration_state,
-                    review_gate=web_app._review_gate,
-                    upsert_override=web_app._upsert_override,
-                    load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                    clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                    prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
-                    save_encode_job=save_encode_job,
-                ),
-            )
+        result = folder_actions_runtime.save_profile_action(
+            self.config,
+            "tv/show",
+            now_iso=web_app._now_iso,
+            load_sample_item=lambda *_args, **_kwargs: {"resolved_policy": {"video": {"target_vmaf": 95.0}}},
+            load_calibration_state=load_calibration_state,
+            calibration_draft_hash=web_app._calibration_draft_hash,
+            save_calibration_state=save_calibration_state,
+            load_advice_state=lambda *_args, **_kwargs: None,
+            record_visual_approval_artifact=lambda *_args, **_kwargs: None,
+            merge_advice_state=lambda *_args, **_kwargs: {},
+            upsert_override=web_app._upsert_override,
+        )
 
         self.assertTrue(result["ok"])
-        self.assertTrue(result["queued"])
-        self.assertEqual(result["auto_queue_status"], "queued")
-        self.assertIn("queued the full folder encode", result["message"])
+        self.assertFalse(result["queued"])
+        self.assertEqual(result["auto_queue_status"], "approval_only")
+        self.assertIn("Choose Make the season", result["message"])
         calibration = load_calibration_state(self.config, "tv/show")
         assert calibration is not None
         self.assertTrue(calibration.get("accepted_at"))
         self.assertTrue(calibration.get("accepted_policy_hash"))
         with open_db(self.config.paths.db_path) as connection:
-            rows = connection.execute(
-                select(encode_jobs.c.job_kind, encode_jobs.c.status)
-                .where(encode_jobs.c.prefix == "tv/show")
-                .order_by(encode_jobs.c.created_at.asc(), encode_jobs.c.job_id.asc())
-            ).mappings().fetchall()
-        self.assertCountEqual(
-            [(str(row["job_kind"]), str(row["status"])) for row in rows],
-            [("folder", "queued"), ("shard", "queued")],
-        )
-
-    def test_save_profile_action_reports_when_nothing_is_left_to_queue(self) -> None:
-        manifest_path = self._write_manifest("manifest-approved-empty.json", [])
-        calibration_state: dict[str, folder_actions_runtime.ActionPayload] = {
-            "tv/show": {
-                "mode": "sample",
-                "job_id": "sample-1",
-                "review_media_ready": True,
-                "policy": {"video": {"target_vmaf": 95.0}},
-                "sample_item": {"library_item_id": 1},
-            }
-        }
-
-        def load_calibration_state(
-                _config: MediaforceConfig,
-                prefix: str,
-        ) -> folder_actions_runtime.ActionPayload | None:
-            payload = calibration_state.get(prefix)
-            return dict(payload) if payload is not None else None
-
-        def save_calibration_state(
-                _config: MediaforceConfig,
-                prefix: str,
-                payload: folder_actions_runtime.ActionPayload,
-        ) -> None:
-            calibration_state[prefix] = dict(payload)
-
-        with patch("mediaforce.web.runtime.folder_actions.load_config", return_value=self.config), patch(
-                "mediaforce.web.runtime.folder_actions.create_folder_manifest",
-                return_value=({"items": []}, manifest_path),
-        ):
-            result = folder_actions_runtime.save_profile_action(
-                self.config,
-                "tv/show",
-                now_iso=web_app._now_iso,
-                load_sample_item=lambda *_args, **_kwargs: {"resolved_policy": {"video": {"target_vmaf": 95.0}}},
-                load_calibration_state=load_calibration_state,
-                calibration_draft_hash=web_app._calibration_draft_hash,
-                save_calibration_state=save_calibration_state,
-                load_advice_state=lambda *_args, **_kwargs: None,
-                record_visual_approval_artifact=lambda *_args, **_kwargs: None,
-                merge_advice_state=lambda *_args, **_kwargs: {},
-                upsert_override=web_app._upsert_override,
-                auto_queue_folder_encode=lambda prefix, notes,
-                                                bypass_schedule: folder_actions_runtime.queue_folder_encode_action(
-                    self.config,
-                    prefix,
-                    notes,
-                    bypass_schedule,
-                    now_iso=web_app._now_iso,
-                    load_job_state=self._noop_load_job_state,
-                    load_calibration_state=load_calibration_state,
-                    review_gate=web_app._review_gate,
-                    upsert_override=web_app._upsert_override,
-                    load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                    clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                    prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
-                    save_encode_job=save_encode_job,
-                ),
+            queued_count = connection.scalar(
+                select(func.count()).select_from(encode_jobs).where(encode_jobs.c.prefix == "tv/show")
             )
-
-        self.assertTrue(result["ok"])
-        self.assertFalse(result["queued"])
-        self.assertEqual(result["auto_queue_status"], "no_pending")
-        self.assertIn("no encode candidates left to queue", result["message"])
-        self.assertIn("Next action:", result["queue_message"])
+        self.assertEqual(queued_count, 0)
 
     def test_retry_failed_encode_queue_action_retries_latest_approved_failures_only(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
@@ -5782,13 +5690,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             record_visual_approval_artifact=lambda *_args, **_kwargs: {"artifact_id": "approval-1"},
             merge_advice_state=lambda _config, _prefix, payload: merged_advice.append(dict(payload)),
             upsert_override=lambda *_args, **_kwargs: None,
-            auto_queue_folder_encode=lambda *_args, **_kwargs: {"ok": True, "message": "Queued folder encode."},
             confirm_size_tradeoff=True,
             reviewed_draft_hash=web_app._calibration_draft_hash(calibration_payload),
         )
 
         self.assertTrue(result["ok"])
-        self.assertTrue(result["queued"])
+        self.assertFalse(result["queued"])
         self.assertEqual(saved_payloads[0]["accepted_at"], "2026-05-24T04:40:00+00:00")
         self.assertTrue(merged_advice[0]["operator_approved_size_tradeoff"])
         quality_record = merged_advice[0]["quality_risk_records"][-1]
@@ -5812,8 +5719,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "sample_result": {"predicted_total_size_bytes": 376 * 1024 * 1024},
         }
         saved_payloads: list[folder_actions_runtime.ActionPayload] = []
-        queued_prefixes: list[str] = []
-
         with self.assertRaises(HTTPException) as exc:
             folder_actions_runtime.save_profile_action(
                 self.config,
@@ -5836,9 +5741,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 record_visual_approval_artifact=lambda *_args, **_kwargs: None,
                 merge_advice_state=lambda *_args, **_kwargs: {},
                 upsert_override=lambda *_args, **_kwargs: None,
-                auto_queue_folder_encode=lambda prefix, *_args, **_kwargs: queued_prefixes.append(prefix) or {
-                    "ok": True
-                },
                 confirm_size_tradeoff=True,
                 reviewed_draft_hash="draft-old",
             )
@@ -5846,7 +5748,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(exc.exception.status_code, 409)
         self.assertIn("changed after the size tradeoff review", str(exc.exception.detail))
         self.assertEqual(saved_payloads, [])
-        self.assertEqual(queued_prefixes, [])
 
     def test_save_profile_action_does_not_override_missing_size_prediction(self) -> None:
         calibration_payload: folder_actions_runtime.ActionPayload = {
@@ -5927,13 +5828,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             record_visual_approval_artifact=lambda *_args, **_kwargs: {"artifact_id": "approval-1"},
             merge_advice_state=lambda _config, _prefix, payload: merged_advice.append(dict(payload)),
             upsert_override=lambda *_args, **_kwargs: None,
-            auto_queue_folder_encode=lambda *_args, **_kwargs: {"ok": True, "message": "Queued folder encode."},
             confirm_high_impact=True,
             reviewed_draft_hash=web_app._calibration_draft_hash(calibration_payload),
         )
 
         self.assertTrue(result["ok"])
-        self.assertTrue(result["queued"])
+        self.assertFalse(result["queued"])
         self.assertEqual(saved_payloads[0]["accepted_at"], "2026-05-24T04:40:00+00:00")
         self.assertFalse(merged_advice[0]["operator_approved_size_tradeoff"])
 
@@ -5974,13 +5874,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             record_visual_approval_artifact=lambda *_args, **_kwargs: {"artifact_id": "approval-1"},
             merge_advice_state=lambda _config, _prefix, payload: merged_advice.append(dict(payload)),
             upsert_override=lambda *_args, **_kwargs: None,
-            auto_queue_folder_encode=lambda *_args, **_kwargs: {"ok": True, "message": "Queued folder encode."},
             confirm_high_impact=True,
             reviewed_draft_hash=web_app._calibration_draft_hash(calibration_payload),
         )
 
         self.assertTrue(result["ok"])
-        self.assertTrue(result["queued"])
+        self.assertFalse(result["queued"])
         self.assertEqual(saved_payloads[0]["accepted_at"], "2026-05-24T04:40:00+00:00")
         self.assertFalse(merged_advice[0]["operator_approved_size_tradeoff"])
 
@@ -13535,6 +13434,79 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             raised.exception.detail,
             "No encode candidates were found for this folder. Next action: Validate outputs.",
         )
+
+    def test_queue_folder_encode_rejects_current_review_rejection(self) -> None:
+        policy = {"video": {"target_vmaf": 95.0}}
+        sample_item = {
+            "rel_path": "tv/show/Season 1/Episode 01.mkv",
+            "source_size_bytes": 8_000_000_000,
+            "duration_seconds": 3600.0,
+            "resolved_policy": policy,
+        }
+        source_id = stable_source_id(sample_item)
+        policy_hash = stable_policy_hash(policy)
+        calibration = {
+            "mode": "sample",
+            "job_id": "sample-1",
+            "review_media_ready": True,
+            "policy": policy,
+            "sample_item": sample_item,
+            "sample_result": {"cadence_evidence_id": "ev1_current"},
+            "accepted_at": "2026-07-12T00:00:00+00:00",
+            "accepted_draft_hash": "draft-1",
+            "accepted_policy_hash": folder_actions_runtime._calibration_policy_hash({"policy": policy}),
+            "accepted_sample_job_id": "sample-1",
+            "draft_hash": "draft-1",
+        }
+        records = [
+            {
+                "kind": "post_test",
+                "created_at": "2026-07-12T00:00:00+00:00",
+                "verdict": "approved",
+                "tags": ["other"],
+                "details": "Approved current evidence.",
+                "evidence_ids": ["ev1_current"],
+                "moment_indexes": [],
+                "sample_job_id": "sample-1",
+                "policy_hash": policy_hash,
+                "source_id": source_id,
+                "prefix": "tv/show/Season 1",
+            },
+            {
+                "kind": "post_test",
+                "created_at": "2026-07-12T00:01:00+00:00",
+                "verdict": "rejected",
+                "tags": ["motion_breakup"],
+                "details": "Current motion evidence was rejected.",
+                "evidence_ids": ["ev1_current"],
+                "moment_indexes": [],
+                "sample_job_id": "sample-1",
+                "policy_hash": policy_hash,
+                "source_id": source_id,
+                "prefix": "tv/show/Season 1",
+            },
+        ]
+
+        with self.assertRaises(HTTPException) as raised:
+            folder_actions_runtime.queue_folder_encode_action(
+                self.config,
+                "tv/show/Season 1",
+                "",
+                False,
+                now_iso=web_app._now_iso,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=lambda *_args, **_kwargs: calibration,
+                review_gate=self._accepted_review_gate,
+                upsert_override=self._noop_upsert_override,
+                load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
+                clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
+                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
+                save_encode_job=save_encode_job,
+                load_advice_state=lambda *_args, **_kwargs: {"quality_risk_records": records},
+            )
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("rejected after approval", str(raised.exception.detail))
 
     def test_build_manifest_shards_creates_one_file_per_shard(self) -> None:
         manifest: folder_actions_runtime.ManifestPayload = {

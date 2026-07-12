@@ -802,7 +802,7 @@ def operator_request_from_intent(
         "applied_policy": intent.resolution.policy_fragment(),
         "request_text": note,
     }
-    return {
+    request = {
         "source": "guided_workflow",
         "operator_note_parse": parsed_note,
         "honor_mode": "combined_experiment",
@@ -832,6 +832,20 @@ def operator_request_from_intent(
         "scale_request": scale_request,
         "applied_policy": intent.policy_fragment(item_runtime_seconds=duration_seconds),
     }
+    feedback_tags = [
+        str(tag).strip()[:64]
+        for tag in object_list(intent_payload.get("quality_risk_tags"))[:7]
+        if str(tag).strip()
+    ]
+    if feedback_tags:
+        request["quality_risk_tags"] = feedback_tags
+    feedback_details = str(intent_payload.get("quality_risk_details") or "").strip()
+    if feedback_details:
+        request["quality_risk_details"] = feedback_details[:2000]
+    evidence_authority = str(intent_payload.get("evidence_authority") or "").strip().lower()
+    if evidence_authority in _EVIDENCE_AUTHORITY_VALUES:
+        request["evidence_authority"] = evidence_authority
+    return request
 
 
 def _positive_float_value(value: Any) -> float | None:
@@ -1363,10 +1377,10 @@ def review_gate(calibration: dict[str, Any] | None) -> dict[str, Any]:
     if can_confirm_full:
         return {
             "can_confirm_full": True,
-            "message": f"Approved sample draft saved at {accepted_at}. Mediaforce queues the folder encode automatically after approval.",
+            "message": f"Approved sample draft saved at {accepted_at}. Production starts only when you choose Make the season.",
             "status": "accepted",
             "accepted_at": accepted_at,
-            "next_action_label": "Auto-queued after approval",
+            "next_action_label": "Make the season",
         }
 
     if not review_media_ready:
@@ -1379,7 +1393,7 @@ def review_gate(calibration: dict[str, Any] | None) -> dict[str, Any]:
 
     return {
         "can_confirm_full": False,
-        "message": "Review the sample clips, then approve this draft to save the folder policy and queue the folder encode.",
+        "message": "Review the sample clips, then approve this draft to save the folder policy. Production remains separate until you choose Make the season.",
         "status": "needs_approval",
         "next_action_label": "Review clips and approve",
     }

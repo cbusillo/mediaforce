@@ -59,6 +59,7 @@ from mediaforce.tuning.tuning_memory import (
     sibling_approved_season_memory,
 )
 from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_risk_public_view
+from mediaforce.tuning.target_size_search import TargetSizeSearchError
 from mediaforce.web.app import (
     _advice_file,
     _backfill_multimodal_review_pack,
@@ -105,7 +106,11 @@ from mediaforce.web.runtime.folder_ai_tuning import (
     folder_ai_tune_confirm_action,
     folder_ai_tune_preview_action,
 )
-from mediaforce.web.runtime.folder_tuning_advice import audio_tradeoff_hint, operator_request_signature
+from mediaforce.web.runtime.folder_tuning_advice import (
+    audio_tradeoff_hint,
+    operator_request_from_intent,
+    operator_request_signature,
+)
 from mediaforce.web.runtime.folder_tuning_helpers import (
     measured_size_budget_policy_fragment,
     proposal_alignment_issue,
@@ -7703,6 +7708,50 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertEqual(smart_signature, auto_signature)
 
+    def test_guided_review_feedback_preserves_target_and_current_rejection(self) -> None:
+        request = operator_request_from_intent(
+            {
+                "schema_version": 1,
+                "size_goal": {
+                    "mode": "normalized",
+                    "value_mb": 300,
+                    "reference_runtime_minutes": 45,
+                    "sample_projection_tolerance_percent": 10,
+                    "final_output_tolerance_percent": 5,
+                },
+                "resolution": {"mode": "source", "max_height": None},
+                "quality_risk_tags": ["motion_breakup", "audio_quality_layout"],
+                "quality_risk_details": "Moment 2 loses texture and the center channel sounds thin.",
+                "evidence_authority": "rejected_visual_result",
+            },
+            note="Keep the target and revise the picture and sound.",
+            sample_item={
+                "rel_path": "tv/show/season-1/episode.mkv",
+                "source_size_bytes": 8_000_000_000,
+                "duration_seconds": 88 * 60,
+                "video_bitrate": 8_000_000,
+                "audio_summary": [],
+                "subtitle_summary": [],
+            },
+            current_policy={
+                "video": {"max_height": 0},
+                "audio": {},
+                "subtitle": {},
+            },
+        )
+
+        self.assertEqual(request["request_type"], "combined_experiment")
+        self.assertEqual(request["budget_bytes"], 586_666_667)
+        self.assertEqual(
+            request["quality_risk_tags"],
+            ["motion_breakup", "audio_quality_layout"],
+        )
+        self.assertEqual(request["evidence_authority"], "rejected_visual_result")
+        self.assertEqual(
+            request["quality_risk_details"],
+            "Moment 2 loses texture and the center channel sounds thin.",
+        )
+
     def test_run_calibration_job_marks_cancelled_run_stopped(self) -> None:
         saved_statuses: list[str] = []
 
@@ -7764,6 +7813,92 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("running", saved_statuses)
         self.assertIn("stopped", saved_statuses)
         self.assertNotIn("failed", saved_statuses)
+
+    def test_run_calibration_job_preserves_failed_target_search_evidence(self) -> None:
+        saved_payloads: list[dict[str, object]] = []
+        trace = {
+            "schema_version": 1,
+            "status": "quality_conflict",
+            "selection_reason": "all_candidates_violate_quality_floor",
+            "target": {
+                "total_target_bytes": 300_000_000,
+                "sample_lower_bound_bytes": 270_000_000,
+                "sample_upper_bound_bytes": 330_000_000,
+            },
+            "quality_floor": {"metric": "vmaf", "minimum": 93.0},
+            "curve": {"shape": "monotonic", "candidate_count": 3, "max_candidates": 6},
+        }
+
+        deps = CalibrationRunDeps(
+            now_iso=lambda: "2026-04-11T00:00:00+00:00",
+            load_job_state=lambda *_args, **_kwargs: {"job_id": "job-1", "status": "queued"},
+            sample_item=lambda *_args, **_kwargs: {
+                "rel_path": "tv/show/season-1/episode.mkv",
+                "source_path": str(self.root / "target-search-episode.mkv"),
+                "source_size_bytes": 8_000_000_000,
+                "video_codec": "h264",
+                "video_bitrate": 8_000_000,
+                "duration_seconds": 5280.0,
+                "audio_summary": [],
+                "subtitle_summary": [],
+            },
+            save_job_state=lambda _connection, _config, _prefix, payload: saved_payloads.append(dict(payload)),
+            save_calibration_state=lambda *_args, **_kwargs: None,
+            record_run_verdict=lambda *_args, **_kwargs: None,
+            summarize_calibration_result=lambda payload: payload,
+            calibration_mode_for_action=lambda _action: "sample",
+            effective_video_preset=lambda *_args, **_kwargs: 4,
+            search_quality_for_source=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                TargetSizeSearchError(
+                    "No candidate met both the target band and quality floor.",
+                    status="quality_conflict",
+                    trace=trace,
+                )
+            ),
+            run_sample_encode=lambda *_args, **_kwargs: None,
+            detect_video_crop=lambda *_args, **_kwargs: None,
+            recommend_review_timestamps=lambda *_args, **_kwargs: [],
+            encode_preview_clips=lambda *_args, **_kwargs: [],
+            render_source_review_clips=lambda *_args, **_kwargs: [],
+            generate_compare_clips_from_previews=lambda *_args, **_kwargs: [],
+            resolve_stream_budget_ledger=resolve_stream_budget_ledger,
+            build_svt_params=lambda *_args, **_kwargs: {},
+            review_url=lambda *_args, **_kwargs: "",
+            encode_manifest_items=lambda *_args, **_kwargs: None,
+            validate_manifest_items=lambda *_args, **_kwargs: None,
+            generate_compare_clips=lambda *_args, **_kwargs: [],
+            staged_artifact_columns=("library_item_id",),
+        )
+
+        (self.root / "target-search-episode.mkv").write_text("episode")
+        with patch("mediaforce.web.runtime.calibration_runtime.load_config", return_value=self.config), patch(
+                "mediaforce.web.runtime.calibration_runtime.purge_transient_artifacts"
+        ):
+            run_calibration_job(
+                config_path=self.config.paths.config_path,
+                prefix="tv/show/season-1",
+                action="ai_tune",
+                host_data={"key": "localhost", "label": "Local worker"},
+                notes="Keep the target.",
+                policy={
+                    "video": {
+                        "pixel_format": "yuv420p10le",
+                        "sample_every": "8m",
+                        "sample_duration": "20s",
+                        "encoder": "libsvtav1",
+                    }
+                },
+                job_id="job-1",
+                seed_metadata=None,
+                process_controller=type("Controller", (), {"throw_if_cancelled": lambda _self: None})(),
+                deps=deps,
+            )
+
+        failed = next(payload for payload in saved_payloads if payload.get("status") == "failed")
+        self.assertEqual(
+            failed["result"],
+            {"target_size_status": "quality_conflict", "target_size_trace": trace},
+        )
 
     def test_run_calibration_job_uses_saved_job_sample_item_before_reselecting(self) -> None:
         saved_statuses: list[str] = []

@@ -17,6 +17,7 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict, objec
 from mediaforce.encoding.quality import quality_error_message, resolve_local_quality_temp_root
 from mediaforce.encoding.video_filters import build_video_filter
 from mediaforce.state_cleanup import purge_transient_artifacts
+from mediaforce.tuning.target_size_search import TargetSizeSearchError
 
 
 @dataclass(slots=True)
@@ -264,6 +265,24 @@ def run_calibration_job(
                     "status": "stopped",
                     "finished_at": deps.now_iso(),
                     "error": "Calibration queue job was stopped and cleaned up.",
+                },
+            )
+    except TargetSizeSearchError as exc:
+        with open_db(config.paths.db_path) as connection:
+            deps.save_job_state(
+                connection,
+                config,
+                prefix,
+                {
+                    **job,
+                    "job_id": job_id,
+                    "status": "failed",
+                    "finished_at": deps.now_iso(),
+                    "error": quality_error_message(exc),
+                    "result": {
+                        "target_size_status": exc.status,
+                        "target_size_trace": exc.trace,
+                    },
                 },
             )
     except Exception as exc:

@@ -950,6 +950,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 deps=_encode_queue_runtime_deps(),
             ),
             save_encode_job=save_encode_job,
+            load_advice_state=_load_advice_state,
         )
 
     def _approve_measured_encode_recovery_action(normalized_prefix: str) -> ActionPayload:
@@ -1001,7 +1002,6 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             record_visual_approval_artifact=record_visual_approval_artifact,
             merge_advice_state=_merge_advice_state,
             upsert_override=_upsert_override,
-            auto_queue_folder_encode=_queue_folder_encode_action,
             confirm_high_impact=confirm_high_impact,
             confirm_size_tradeoff=confirm_size_tradeoff,
             reviewed_draft_hash=reviewed_draft_hash,
