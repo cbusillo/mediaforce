@@ -97,6 +97,22 @@ missing_english_audio_penalty = -30
 [validation]
 require_size_reduction = true
 
+[advisor]
+command = "codex-lab"
+telemetry_max_records = 5000
+
+[advisor.routes.operator_note_parse]
+models = ["gpt-5.6-luna", "gpt-5.6-terra"]
+
+[advisor.routes.seed_policy]
+models = ["gpt-5.6-terra", "gpt-5.6-sol"]
+
+[advisor.routes.note_tuning]
+models = ["gpt-5.6-terra", "gpt-5.6-sol"]
+
+[advisor.routes.review_artifact_critique]
+models = ["gpt-5.6-terra", "gpt-5.6-sol"]
+
 [planning.codec_bonus]
 h264 = 40
 hevc = 12

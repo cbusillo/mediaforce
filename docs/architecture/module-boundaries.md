@@ -226,18 +226,31 @@ Guidance:
 
 ### `mediaforce/advising/`
 
-- `models.py`
-  - response dataclasses and constants
+- `policy.py`
+  - structured schemas, policy normalization, and deterministic budget checks
 - `prompts.py`
-  - seed/tune/verdict prompt assembly
-- `schemas.py`
-  - structured response schemas
-- `runner.py`
-  - Code CLI subprocess invocation
-- `parsing.py`
-  - normalization and response shaping
+  - sanitized seed, tune, artifact-critique, and note-parse prompt assembly
+- `privacy.py`
+  - prompt minimization, path/PII redaction, and safe evidence references
+- `routing.py`
+  - typed task routes, defaults, config resolution, and optional model pricing
+- `runtime.py`
+  - isolated Codex Lab execution, JSONL validation, and bounded fallback
+- `telemetry.py`
+  - bounded privacy-safe attempt telemetry and optional cost calculation
+- `evals.py`
+  - media-safe synthetic evaluation corpus, scorer, and CLI
 
 `mediaforce.advisor` remains the stable compatibility wrapper surface.
+
+Guidance:
+
+- Keep model identifiers and fallback order in routing configuration, not in
+  prompts or web handlers.
+- Keep deterministic measurements, constraints, quality-risk gates, and current
+  operator authority outside the model boundary.
+- Do not retain prompts, model output, operator-note text, review media, or
+  machine-local paths in advisor telemetry.
 
 ### `mediaforce/cli.py`
 

@@ -6,6 +6,7 @@ from fastapi import HTTPException
 
 from mediaforce.advisor import apply_seed_policy, request_note_tuning, request_review_artifact_critique
 from mediaforce.advising.policy import has_nonpositive_video_budget, merge_policy_fragments
+from mediaforce.advising.routing import AdvisorRouting
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.type_defs import object_dict, object_list
@@ -65,6 +66,7 @@ class FolderAiTuneDeps:
     record_tuning_session: Any
     load_latest_failed_sample_job_state: Any | None = None
     load_advice_state: Any | None = None
+    advisor_routing: AdvisorRouting | None = None
 
 
 def _job_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
@@ -1143,6 +1145,19 @@ def _tuned_preview_action(
         operator_request=operator_request,
         latest_failed_sample_job=latest_failed_sample_job,
     )
+    if has_nonpositive_video_budget(object_dict(operator_request)):
+        return {
+            "ok": False,
+            "kind": "tuned_preview",
+            "summary": "The requested total size leaves no positive video budget.",
+            "message": (
+                "Increase the total target or explicitly change the selected stream allocation before another "
+                "sample can queue."
+            ),
+            "request_disposition": "rejected",
+            "operator_request": operator_request,
+            "can_queue": False,
+        }
     metric_support = deps.metric_support()
     with open_db(config.paths.db_path) as connection:
         learning_context = retrieve_learning_context(
@@ -1156,6 +1171,8 @@ def _tuned_preview_action(
         note=trimmed_note,
         sample_item=sample_item,
         recent_sessions_payload=recent_sessions_payload,
+        current_request=operator_request,
+        **({"advisor_routing": deps.advisor_routing} if deps.advisor_routing is not None else {}),
     )
     runtime_toolbelt = deps.build_tuning_runtime_toolbelt(
         sample_item=sample_item,
@@ -1183,23 +1200,25 @@ def _tuned_preview_action(
     public_review_pack = deps.multimodal_review_pack_public_view(config, multimodal_review_pack)
     review_artifact_critique: dict[str, Any] | None = None
     if multimodal_review_pack is not None:
+        critique_payload = {
+            "folder": normalized_prefix,
+            "operator_note": trimmed_note,
+            "requested_experiment": operator_request,
+            "sample_item": {
+                "rel_path": sample_item["rel_path"],
+                "source_size_bytes": sample_item["source_size_bytes"],
+                "duration_seconds": sample_item["duration_seconds"],
+                "audio_summary": sample_item["audio_summary"],
+            },
+            "recent_calibration": calibration,
+            "current_policy": current_policy,
+            "runtime_toolbelt": runtime_toolbelt,
+            "multimodal_review_pack": multimodal_review_pack,
+        }
         critique = request_review_artifact_critique(
             project_root=config.paths.project_root,
-            payload={
-                "folder": normalized_prefix,
-                "operator_note": trimmed_note,
-                "requested_experiment": operator_request,
-                "sample_item": {
-                    "rel_path": sample_item["rel_path"],
-                    "source_size_bytes": sample_item["source_size_bytes"],
-                    "duration_seconds": sample_item["duration_seconds"],
-                    "audio_summary": sample_item["audio_summary"],
-                },
-                "recent_calibration": calibration,
-                "current_policy": current_policy,
-                "runtime_toolbelt": runtime_toolbelt,
-                "multimodal_review_pack": multimodal_review_pack,
-            },
+            payload=critique_payload,
+            **({"routing": deps.advisor_routing} if deps.advisor_routing is not None else {}),
         )
         if critique.ok:
             review_artifact_critique = {
@@ -1220,7 +1239,6 @@ def _tuned_preview_action(
         "summary": summary,
         "sample_item": {
             "rel_path": sample_item["rel_path"],
-            "source_path": sample_item["source_path"],
             "source_size_bytes": sample_item["source_size_bytes"],
             "video_codec": sample_item["video_codec"],
             "duration_seconds": sample_item["duration_seconds"],
@@ -1236,10 +1254,18 @@ def _tuned_preview_action(
         "latest_failed_sample_job": latest_failed_sample_job,
     }
     if multimodal_review_pack is not None:
-        tuning_payload["multimodal_review_pack"] = multimodal_review_pack
+        tuning_payload["multimodal_review_pack"] = (
+            {key: value for key, value in multimodal_review_pack.items() if key != "images"}
+            if review_artifact_critique is not None
+            else multimodal_review_pack
+        )
     if review_artifact_critique is not None:
         tuning_payload["review_artifact_critique"] = review_artifact_critique
-    tuning = request_note_tuning(project_root=config.paths.project_root, payload=tuning_payload)
+    tuning = request_note_tuning(
+        project_root=config.paths.project_root,
+        payload=tuning_payload,
+        **({"routing": deps.advisor_routing} if deps.advisor_routing is not None else {}),
+    )
     tuned_policy, applied_fragment = apply_seed_policy(current_policy, object_dict(tuning.proposed_policy), mode="tune")
     measurement_fragment = _size_budget_measurement_fragment(operator_request, sample_item)
     combined_fragment = _honor_operator_source_resolution(

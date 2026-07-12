@@ -8,6 +8,7 @@ from typing import Any
 
 from mediaforce.advisor import apply_seed_policy, request_operator_note_parse, request_run_verdict, request_seed_policy
 from mediaforce.advising.policy import has_nonpositive_video_budget, merge_policy_fragments, policy_key_paths
+from mediaforce.advising.routing import AdvisorRouting, advisor_routing_from_config
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
@@ -79,6 +80,10 @@ _MEASURED_SIZE_FOLLOWUP_RE = re.compile(
     re.IGNORECASE,
 )
 _METRIC_TARGET_RE = re.compile(r"\b(?P<metric>vmaf|xpsnr)\s*(?:of\s*)?(?:around\s*)?(?P<target>\d+(?:\.\d+)?)\b", re.IGNORECASE)
+_REVERSED_METRIC_TARGET_RE = re.compile(
+    r"\b(?P<target>\d+(?:\.\d+)?)\s*(?P<metric>vmaf|xpsnr)\b",
+    re.IGNORECASE,
+)
 _METRIC_DIRECTIVE_RE = re.compile(
     r"\b(?:use|using|with|evaluate(?:\s+with)?|measure(?:\s+with)?|run(?:\s+with)?|metric(?:\s+is)?)\s+"
     r"(?P<metric>vmaf|xpsnr)\b",
@@ -221,7 +226,7 @@ def _heuristic_operator_note_parse(note: str) -> dict[str, Any] | None:
         evidence_authority = "operator_observed"
 
     size_budget_match = _positive_size_budget_match(trimmed)
-    metric_match = _METRIC_TARGET_RE.search(trimmed)
+    metric_match = _METRIC_TARGET_RE.search(trimmed) or _REVERSED_METRIC_TARGET_RE.search(trimmed)
     metric_directive_match = _METRIC_DIRECTIVE_RE.search(trimmed)
     scale_match = _SCALE_HEIGHT_RE.search(trimmed)
     crop_match = _CROP_VALUE_RE.search(trimmed)
@@ -310,67 +315,6 @@ def _heuristic_operator_note_parse(note: str) -> dict[str, Any] | None:
         "measured_size_followup": measured_size_followup,
         "reasoning_note": "Local heuristic recovered the explicit operator request from the note text.",
     }
-
-
-def _explicit_note_part_count(parsed: dict[str, Any] | None) -> int:
-    payload = object_dict(parsed)
-    if not payload:
-        return 0
-    return sum(
-        value is not None
-        for value in (
-            payload.get("metric_target") if payload.get("metric_target") is not None else payload.get("metric"),
-            payload.get("size_budget_value"),
-            payload.get("scale_height"),
-            payload.get("black_bar_handling"),
-            payload.get("crop"),
-        )
-    )
-
-
-def _merge_operator_note_parse(
-        structured_parse: dict[str, Any] | None,
-        heuristic_parse: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    structured = object_dict(structured_parse)
-    heuristic = object_dict(heuristic_parse)
-    if not structured:
-        return heuristic or None
-    if not heuristic:
-        return structured
-    if _explicit_note_part_count(heuristic) > _explicit_note_part_count(structured):
-        return heuristic
-    merged = dict(structured)
-    for key in (
-            "metric",
-            "metric_target",
-            "size_budget_value",
-            "size_budget_unit",
-            "scale_height",
-            "black_bar_handling",
-            "crop",
-            "evidence_authority",
-    ):
-        if merged.get(key) in {None, ""} and heuristic.get(key) is not None and heuristic.get(key) != "":
-            merged[key] = heuristic.get(key)
-    if not merged.get("operator_confirmed") and heuristic.get("operator_confirmed"):
-        merged["operator_confirmed"] = True
-        if str(merged.get("intent_type") or "").strip().lower() in {"unclear", "other"}:
-            merged["intent_type"] = "direct_request"
-    if heuristic.get("measured_size_followup"):
-        merged["measured_size_followup"] = True
-    structured_authority = str(merged.get("evidence_authority") or "none")
-    heuristic_authority = str(heuristic.get("evidence_authority") or "none")
-    if heuristic_authority == "rejected_visual_result":
-        merged["evidence_authority"] = heuristic_authority
-    elif structured_authority == "none" and heuristic_authority != "none":
-        merged["evidence_authority"] = heuristic_authority
-    merged = _normalize_operator_note_parse(merged)
-    if merged is None:
-        return heuristic
-    if _explicit_note_part_count(merged) < _explicit_note_part_count(heuristic):
-        return heuristic
-    return merged
 
 
 def parse_audio_bitrate_kbps(value: JSONValue, fallback: float) -> float:
@@ -490,21 +434,24 @@ def audio_tradeoff_hint(
     }
 
 
-def _parsed_operator_note(note: str) -> dict[str, Any] | None:
+def _parsed_operator_note(note: str, *, routing: AdvisorRouting | None = None) -> dict[str, Any] | None:
     trimmed = note.strip()
     if not trimmed:
         return None
-    structured_parse = _normalize_operator_note_parse(
-        request_operator_note_parse(
-            project_root=_PROJECT_ROOT,
-            payload={
-                "operator_note": trimmed,
-                "goal": "Classify the operator note into a concrete tuning request, if one exists.",
-            },
-        )
-    )
     heuristic_parse = _heuristic_operator_note_parse(trimmed)
-    return _merge_operator_note_parse(structured_parse, heuristic_parse)
+    if heuristic_parse is not None:
+        return heuristic_parse
+    request_kwargs: dict[str, Any] = {
+        "project_root": _PROJECT_ROOT,
+        "payload": {
+            "operator_note": trimmed,
+            "goal": "Classify the operator note into a concrete tuning request, if one exists.",
+        },
+    }
+    if routing is not None:
+        request_kwargs["routing"] = routing
+    structured_parse = _normalize_operator_note_parse(request_operator_note_parse(**request_kwargs))
+    return structured_parse
 
 
 def size_budget_request(
@@ -703,11 +650,12 @@ def operator_requested_experiment(
         *,
         parsed_note: dict[str, Any] | None = None,
         current_policy: dict[str, Any] | None = None,
+        advisor_routing: AdvisorRouting | None = None,
 ) -> dict[str, Any] | None:
     trimmed = note.strip()
     if not trimmed:
         return None
-    note_parse = object_dict(parsed_note) or object_dict(_parsed_operator_note(trimmed))
+    note_parse = object_dict(parsed_note) or object_dict(_parsed_operator_note(trimmed, routing=advisor_routing))
     request_type = str(note_parse.get("request_type") or "").strip().lower()
     if request_type == "none":
         evidence_authority = str(note_parse.get("evidence_authority") or "none").strip().lower()
@@ -957,8 +905,13 @@ def matching_request_history(
         sample_item: dict[str, Any] | None,
         recent_sessions_payload: list[dict[str, Any]],
         current_request: dict[str, Any] | None = None,
+        advisor_routing: AdvisorRouting | None = None,
 ) -> dict[str, Any] | None:
-    resolved_current_request = object_dict(current_request) or operator_requested_experiment(note, sample_item)
+    resolved_current_request = object_dict(current_request) or operator_requested_experiment(
+        note,
+        sample_item,
+        advisor_routing=advisor_routing,
+    )
     if not bool(object_dict(resolved_current_request).get("operator_confirmed")):
         return None
     current_signature = operator_request_signature(resolved_current_request)
@@ -975,6 +928,7 @@ def matching_request_history(
                     str(session.get("note") or ""),
                     sample_item,
                     parsed_note=prior_note_parse,
+                    advisor_routing=advisor_routing,
                 )
             )
         if operator_request_signature(prior_request) != current_signature:
@@ -1283,9 +1237,14 @@ def build_seed_policy_payload(
         requested_experiment: dict[str, Any] | None = None,
         latest_failed_sample_job: dict[str, Any] | None = None,
         learning_context_payload: list[dict[str, Any]] | None = None,
+        advisor_routing: AdvisorRouting | None = None,
 ) -> dict[str, Any]:
     suggested_override = object_dict(summary.get("suggested_override"))
-    resolved_requested_experiment = object_dict(requested_experiment) or operator_requested_experiment(user_note, sample_item)
+    resolved_requested_experiment = object_dict(requested_experiment) or operator_requested_experiment(
+        user_note,
+        sample_item,
+        advisor_routing=advisor_routing,
+    )
     recent_sessions = list(recent_sessions_payload) if recent_sessions_payload is not None else []
     requested_budget_bytes = int_value(object_dict(resolved_requested_experiment).get("budget_bytes")) or None
     repeat_signal = matching_request_history(
@@ -1293,6 +1252,7 @@ def build_seed_policy_payload(
         sample_item=sample_item,
         recent_sessions_payload=recent_sessions,
         current_request=resolved_requested_experiment,
+        advisor_routing=advisor_routing,
     )
     return {
         "folder": prefix,
@@ -1455,6 +1415,7 @@ def maybe_seed_baseline_policy(
         sample_item=sample_item,
         note=user_note,
     )
+    advisor_routing = advisor_routing_from_config(config)
     payload = build_seed_policy_payload(
         prefix=prefix,
         user_note=user_note,
@@ -1466,10 +1427,15 @@ def maybe_seed_baseline_policy(
         requested_experiment=requested_experiment,
         latest_failed_sample_job=latest_failed_sample_job,
         learning_context_payload=learning_context,
+        advisor_routing=advisor_routing,
     )
     if connection.in_transaction():
         connection.commit()
-    seed_response = request_seed_policy(project_root=project_root, payload=payload)
+    seed_response = request_seed_policy(
+        project_root=project_root,
+        payload=payload,
+        routing=advisor_routing,
+    )
     maybe_force_repeated_seed_experiment(
         base_policy=base_policy,
         seed_response=seed_response,

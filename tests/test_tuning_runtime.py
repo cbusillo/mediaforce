@@ -22,25 +22,19 @@ from mediaforce.advisor import (
     SEED_PROMPT_VERSION,
     SeedPolicyResponse,
     TuningPolicyResponse,
-    _build_prompt,
     _build_review_artifact_critique_prompt,
     _build_tune_prompt,
     _build_operator_note_parse_prompt,
     _extract_seed_payload,
     _filter_audio_specific_guardrail_issues,
     _force_repeated_tune_experiment,
-    _memory_disabled_code_args,
     _policy_response_schema,
     _run_tune_self_check,
-    _tune_self_check_schema,
-    _build_run_verdict_prompt,
-    _try_load_first_json_object,
     _build_seed_prompt,
     apply_seed_policy,
     request_review_artifact_critique,
     request_operator_note_parse,
     request_seed_policy,
-    request_tuning_advice,
     request_note_tuning,
     request_run_verdict,
 )
@@ -167,7 +161,31 @@ def _absolute_size_fragment(
     return {"video": video}
 
 
-def _fake_operator_note_parse(*, project_root: Path, payload: dict[str, object]) -> dict[str, object] | None:
+def _codex_lab_jsonl(final_text: str) -> str:
+    events = [
+        {"type": "thread.started", "thread_id": "test-thread"},
+        {
+            "type": "item.completed",
+            "item": {"id": "test-message", "type": "agent_message", "text": final_text},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 128,
+                "cached_input_tokens": 0,
+                "output_tokens": max(1, len(final_text) // 4),
+            },
+        },
+    ]
+    return "\n".join(json.dumps(event, separators=(",", ":")) for event in events)
+
+
+def _fake_operator_note_parse(
+        *,
+        project_root: Path,
+        payload: dict[str, object],
+        **_: object,
+) -> dict[str, object] | None:
     project_root.as_posix()
     note_value = payload.get("operator_note")
     note = note_value.strip() if isinstance(note_value, str) else ""
@@ -315,13 +333,19 @@ class TuningRuntimeTests(unittest.TestCase):
         def fake_run(cmd: list[str], **kwargs: object) -> object:
             self.assertIsInstance(kwargs, dict)
             commands.append(cmd)
-            return type("Result", (), {"returncode": 0, "stdout": response_body, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(response_body), "stderr": ""})()
 
         return commands, fake_run
 
     def _assert_structured_subprocess_call(self, commands: list[list[str]]) -> None:
         self.assertTrue(commands)
-        self.assertEqual(commands[0][1:7], _memory_disabled_code_args())
+        command = commands[0]
+        self.assertEqual(command[:3], ["codex-lab", "exec", "--ephemeral"])
+        self.assertIn("--ignore-user-config", command)
+        self.assertIn("--ignore-rules", command)
+        self.assertIn("--output-schema", command)
+        self.assertIn("--json", command)
+        self.assertEqual(command[-1], "-")
 
     def _insert_promoted_artifact(
             self,
@@ -426,7 +450,7 @@ class TuningRuntimeTests(unittest.TestCase):
             )
         )
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
             parsed = request_operator_note_parse(
                 project_root=self.root,
                 payload={"operator_note": "Can you target 300MB per episode?"},
@@ -436,8 +460,6 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(parsed["operator_confirmed"])
         self.assertEqual(parsed["evidence_authority"], "none")
         self._assert_structured_subprocess_call(commands)
-        self.assertIn("llm", commands[0])
-        self.assertIn(_build_operator_note_parse_prompt({"operator_note": "Can you target 300MB per episode?"}), commands[0])
 
     def test_folder_display_policy_prefers_pending_preview_before_first_sample(self) -> None:
         sample_item = {
@@ -1125,9 +1147,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(kwargs, dict)
             commands.append(cmd)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -1146,8 +1168,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(response.proposed_policy["video"]["target_xpsnr"], 34.5)
         self.assertEqual(response.request_disposition, "honored")
         self.assertIn("smaller", response.request_response)
-        self.assertTrue(commands)
-        self.assertEqual(commands[0][1:7], _memory_disabled_code_args())
+        self._assert_structured_subprocess_call(commands)
 
     def test_archive_cleanup_summary_counts_files_and_size(self) -> None:
         archive_root = self.config.archive_root
@@ -1994,28 +2015,6 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertFalse(cleanup_lock.locked())
 
-    def test_request_tuning_advice_reads_last_message_output(self) -> None:
-        commands: list[list[str]] = []
-
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
-            self.assertIsInstance(kwargs, dict)
-            commands.append(cmd)
-            output_index = cmd.index("--output-last-message") + 1
-            Path(cmd[output_index]).write_text("Recommendation\nTry one smaller sample.")
-            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
-            response = request_tuning_advice(
-                project_root=self.root,
-                payload={"folder": "tv/House/Season 2", "sample_result": {"quality_score": 91.4}},
-            )
-
-        self.assertTrue(response.ok)
-        self.assertEqual(response.summary, "Recommendation")
-        self.assertIn("smaller sample", response.raw)
-        self.assertTrue(commands)
-        self.assertEqual(commands[0][1:7], _memory_disabled_code_args())
-
     def test_request_note_tuning_uses_multimodal_exec_when_review_pack_present(self) -> None:
         image_path = self.root / "review-pack.png"
         image_path.write_bytes(b"png")
@@ -2025,24 +2024,21 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(kwargs, dict)
             commands.append(cmd)
             if "exec" in cmd:
-                output_index = cmd.index("--output-last-message") + 1
-                Path(cmd[output_index]).write_text(
-                    json.dumps(
-                        {
-                            "request_response": "The attached review pack still looks clean enough to push a bit smaller.",
-                            "request_disposition": "honored_with_risk",
-                            "summary": "Use the review pack to justify one smaller pass.",
-                            "diagnosis": "The attached source-versus-draft contact sheets do not show obvious new damage on the sampled moments.",
-                            "confidence": "medium",
-                            "evidence_checked": ["multimodal_review_pack.artifacts[0]",
-                                                 "runtime_toolbelt.review_media_context"],
-                            "suggested_follow_up": "If the next draft softens faces or dark scenes, stop there.",
-                            "feasibility_note": None,
-                            "policy": {"video": {"target_vmaf": 88.5, "max_crf": 41}},
-                        }
-                    )
+                response_body = json.dumps(
+                    {
+                        "request_response": "The attached review pack still looks clean enough to push a bit smaller.",
+                        "request_disposition": "honored_with_risk",
+                        "summary": "Use the review pack to justify one smaller pass.",
+                        "diagnosis": "The attached source-versus-draft contact sheets do not show obvious new damage on the sampled moments.",
+                        "confidence": "medium",
+                        "evidence_checked": ["multimodal_review_pack.artifacts[0]",
+                                             "runtime_toolbelt.review_media_context"],
+                        "suggested_follow_up": "If the next draft softens faces or dark scenes, stop there.",
+                        "feasibility_note": None,
+                        "policy": {"video": {"target_vmaf": 88.5, "max_crf": 41}},
+                    }
                 )
-                return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(response_body), "stderr": ""})()
             return type(
                 "Result",
                 (),
@@ -2059,7 +2055,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 },
             )()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -2081,7 +2077,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(commands)
         self.assertIn("exec", commands[0])
         self.assertIn("--image", commands[0])
-        self.assertEqual(commands[0][1:7], _memory_disabled_code_args())
+        self._assert_structured_subprocess_call(commands)
 
     def test_request_review_artifact_critique_uses_multimodal_exec(self) -> None:
         image_path = self.root / "review-pack.png"
@@ -2091,23 +2087,20 @@ class TuningRuntimeTests(unittest.TestCase):
         def fake_run(cmd: list[str], **kwargs: object) -> object:
             self.assertIsInstance(kwargs, dict)
             commands.append(cmd)
-            output_index = cmd.index("--output-last-message") + 1
-            Path(cmd[output_index]).write_text(
-                json.dumps(
-                    {
-                        "summary": "The hallway moment looks like the most fragile visual tradeoff.",
-                        "confidence": "medium",
-                        "weakest_moments": ["Moment 2 looks softer in dark material."],
-                        "preserved_strengths": ["Dialogue close-ups still look stable."],
-                        "artifacts_to_recheck": ["Compare timeline for review moment 2"],
-                        "recommendation": "Treat dark material as the veto moment for the next draft.",
-                        "evidence_checked": ["multimodal_review_pack.artifacts[0]"],
-                    }
-                )
+            response_body = json.dumps(
+                {
+                    "summary": "The hallway moment looks like the most fragile visual tradeoff.",
+                    "confidence": "medium",
+                    "weakest_moments": ["Moment 2 looks softer in dark material."],
+                    "preserved_strengths": ["Dialogue close-ups still look stable."],
+                    "artifacts_to_recheck": ["Compare timeline for review moment 2"],
+                    "recommendation": "Treat dark material as the veto moment for the next draft.",
+                    "evidence_checked": ["multimodal_review_pack.artifacts[0]"],
+                }
             )
-            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(response_body), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
             response = request_review_artifact_critique(
                 project_root=self.root,
                 payload={
@@ -2142,22 +2135,23 @@ class TuningRuntimeTests(unittest.TestCase):
                     "policy": {"video": {"default_grain": 20}},
                 }
             ),
-            json.dumps(
-                {
-                    "status": "fail",
-                    "summary": "The proposal is too aggressive for the stated goal.",
-                    "issues": ["Default grain increase is not supported by the supplied evidence."],
-                }
-            ),
         ]
 
         def fake_run(cmd: list[str], **kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
+            "mediaforce.advisor._run_tune_self_check",
+            return_value={
+                "status": "fail",
+                "summary": "The proposal is too aggressive for the stated goal.",
+                "issues": ["Default grain increase is not supported by the supplied evidence."],
+                "source": "deterministic",
+            },
+        ):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -2216,9 +2210,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -2271,7 +2265,17 @@ class TuningRuntimeTests(unittest.TestCase):
                     },
                 }
             ),
-            json.dumps(
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
+            "mediaforce.advisor._run_tune_self_check",
+            side_effect=[
                 {
                     "status": "fail",
                     "summary": "The surround audio cut is not a safe trade for this draft.",
@@ -2280,28 +2284,15 @@ class TuningRuntimeTests(unittest.TestCase):
                         "status": "prefer_preserve_current",
                         "reason": "Dropping 5.1 Opus from 224k to 192k is low-leverage here, so preserve the current surround bitrate and spend the size budget on video instead.",
                     },
-                }
-            ),
-            json.dumps(
+                },
                 {
                     "status": "warn",
                     "summary": "The remaining video-only draft is usable, but verify it against the review clips.",
                     "issues": ["The cap may still land a bit under the requested budget."],
-                    "surround_audio_guardrail": {
-                        "status": "ok",
-                        "reason": "",
-                    },
-                }
-            ),
-        ]
-
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
-            self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
-            stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
-
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+                    "surround_audio_guardrail": {"status": "ok", "reason": ""},
+                },
+            ],
+        ):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -2362,7 +2353,7 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
         initial_fail_self_check = {
             "status": "fail",
@@ -2374,7 +2365,7 @@ class TuningRuntimeTests(unittest.TestCase):
             },
         }
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             side_effect=[initial_fail_self_check, None],
         ):
@@ -2434,9 +2425,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             side_effect=[
                 {
@@ -2539,9 +2530,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -2611,9 +2602,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -2683,9 +2674,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -2760,9 +2751,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -2828,9 +2819,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -2855,8 +2846,8 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIsNone(response.proposed_policy)
         assert response.self_check is not None
         self.assertEqual(response.self_check["status"], "warn")
-        self.assertEqual(response.self_check["summary"], "Dropping stereo Opus from 128k to 112k is low-leverage here.")
-        self.assertEqual(response.suggested_follow_up, "Dropping stereo Opus from 128k to 112k is low-leverage here.")
+        self.assertIn("Dropping current stereo bitrate from 128k to 112k is low-leverage here", response.self_check["summary"])
+        self.assertIn("Dropping current stereo bitrate from 128k to 112k is low-leverage here", response.suggested_follow_up)
 
     def test_request_note_tuning_applies_audio_guardrail_when_self_check_is_missing(self) -> None:
         responses = [
@@ -2882,9 +2873,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             return_value=None,
         ):
@@ -2947,9 +2938,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             side_effect=[
                 {
@@ -3022,9 +3013,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             return_value={
                 "status": "pass",
@@ -3087,9 +3078,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             return_value={
                 "status": "pass",
@@ -3150,9 +3141,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             return_value={
                 "status": "pass",
@@ -3213,9 +3204,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             return_value={
                 "status": "pass",
@@ -3276,9 +3267,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             side_effect=[
                 {
@@ -3370,9 +3361,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -3398,7 +3389,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(response.ok)
         self.assertEqual(response.summary, "Kept the non-audio tightening, but preserved the current surround bitrate.")
         self.assertIn("lowering the current surround bitrate was not the right trade here", response.diagnosis)
-        self.assertIn("Dropping 5.1 Opus from 224k to 192k is low-leverage here", response.diagnosis)
+        self.assertIn("Dropping current surround bitrate from 224k to 192k is low-leverage here", response.diagnosis)
 
     def test_request_note_tuning_filters_audio_only_issues_after_guardrail_warn(self) -> None:
         responses = [
@@ -3418,7 +3409,17 @@ class TuningRuntimeTests(unittest.TestCase):
                     },
                 }
             ),
-            json.dumps(
+        ]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            self.assertIsInstance(cmd, list)
+            self.assertIsInstance(kwargs, dict)
+            stdout = responses.pop(0)
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
+            "mediaforce.advisor._run_tune_self_check",
+            side_effect=[
                 {
                     "status": "warn",
                     "summary": "The draft is mostly usable, but the surround audio cut is not the best lever here.",
@@ -3430,25 +3431,15 @@ class TuningRuntimeTests(unittest.TestCase):
                         "status": "prefer_preserve_current",
                         "reason": "Dropping 5.1 Opus from 224k to 192k is low-leverage here, so preserve the current surround bitrate and spend the size budget on video instead.",
                     },
-                }
-            ),
-            json.dumps(
+                },
                 {
                     "status": "warn",
                     "summary": "The remaining video-only draft is usable, but the cap may still land a bit under the requested budget.",
                     "issues": ["The cap may still land a bit under the requested budget."],
                     "surround_audio_guardrail": {"status": "ok", "reason": ""},
-                }
-            ),
-        ]
-
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
-            self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
-            stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
-
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+                },
+            ],
+        ):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -3522,9 +3513,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -3582,9 +3573,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -3618,19 +3609,8 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(response.proposed_policy["video"]["min_target_vmaf"], 87.0)
         self.assertEqual(response.proposed_policy["video"]["max_encoded_percent"], 8)
 
-    def test_request_run_verdict_uses_structured_runtime_path(self) -> None:
-        response_body = json.dumps(
-            {
-                "summary": "This aggressive sample landed much smaller and still looks usable on the checked moments.",
-                "outcome": "acceptable_experiment",
-                "confidence": "medium",
-                "next_step": "Approve it if the remaining review moments still look clean.",
-                "evidence_checked": ["sample_result", "operator_request"],
-            }
-        )
-        commands, fake_run = self._capture_subprocess_commands(response_body)
-
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+    def test_request_run_verdict_uses_deterministic_evidence(self) -> None:
+        with patch("mediaforce.advisor._run_codex_lab_process_impl") as subprocess_run:
             response = request_run_verdict(
                 project_root=self.root,
                 payload={
@@ -3643,8 +3623,9 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(response.ok)
         self.assertEqual(response.prompt_version, RUN_VERDICT_PROMPT_VERSION)
         self.assertEqual(response.outcome, "acceptable_experiment")
-        self.assertEqual(response.next_step, "Approve it if the remaining review moments still look clean.")
-        self._assert_structured_subprocess_call(commands)
+        self.assertEqual(response.confidence, "medium")
+        self.assertIn("met the requested quality floor", response.summary)
+        subprocess_run.assert_not_called()
 
     def test_request_seed_policy_uses_structured_runner(self) -> None:
         response_body = json.dumps(
@@ -3662,7 +3643,7 @@ class TuningRuntimeTests(unittest.TestCase):
         )
         commands, fake_run = self._capture_subprocess_commands(response_body)
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
             response = request_seed_policy(
                 project_root=self.root,
                 payload={
@@ -3692,7 +3673,7 @@ class TuningRuntimeTests(unittest.TestCase):
         )
         commands, fake_run = self._capture_subprocess_commands(response_body)
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
             response = request_seed_policy(
                 project_root=self.root,
                 payload={
@@ -3735,7 +3716,7 @@ class TuningRuntimeTests(unittest.TestCase):
         )
         commands, fake_run = self._capture_subprocess_commands(response_body)
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
             response = request_seed_policy(
                 project_root=self.root,
                 payload={
@@ -3774,7 +3755,7 @@ class TuningRuntimeTests(unittest.TestCase):
         )
         commands, fake_run = self._capture_subprocess_commands(response_body)
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
             response = request_seed_policy(
                 project_root=self.root,
                 payload={
@@ -3825,18 +3806,18 @@ class TuningRuntimeTests(unittest.TestCase):
             timeout = kwargs.get("timeout")
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=float(timeout or 0), stderr="model timed out")
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
             response = request_seed_policy(
                 project_root=self.root,
                 payload={
                     "folder": "tv/lucifer/season-2",
                     "base_policy": {"video": {"target_size_mb": 300.0}},
                 },
-            )
+        )
 
         self.assertFalse(response.ok)
-        self.assertIn("attempt 1: timed out", response.raw)
-        self.assertIn("model timed out", response.raw)
+        self.assertIn("attempt 1: timeout: Codex Lab timed out", response.raw)
+        self.assertNotIn("model timed out", response.raw)
 
     def test_operator_requested_experiment_detects_literal_vmaf_target(self) -> None:
         request = _operator_requested_experiment("I want to try 85 VMAF on this show.")
@@ -3904,6 +3885,41 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIsNone(request["applied_max_encoded_percent"])
         self.assertEqual(request["applied_policy"]["video"]["size_goal_mode"], "absolute")
         self.assertEqual(request["applied_policy"]["video"]["target_size_bytes"], 200_000_000)
+
+    def test_operator_requested_experiment_uses_model_for_ambiguous_worded_budget(self) -> None:
+        parsed_note = {
+            "summary": "Target roughly three hundred megabytes per episode.",
+            "intent_type": "direct_request",
+            "request_type": "size_budget",
+            "operator_confirmed": True,
+            "measured_size_followup": False,
+            "evidence_authority": "none",
+            "metric": None,
+            "metric_target": None,
+            "size_budget_value": 300,
+            "size_budget_unit": "mb",
+            "scale_height": None,
+            "black_bar_handling": None,
+            "crop": None,
+            "reasoning_note": "The amount was written as words.",
+        }
+        with patch(
+            "mediaforce.web.runtime.folder_tuning_advice.request_operator_note_parse",
+            return_value=parsed_note,
+        ) as note_parser:
+            request = _operator_requested_experiment(
+                "Please aim for roughly three hundred megabytes per episode.",
+                {
+                    "source_size_bytes": 3_519_516_042,
+                    "duration_seconds": 2561.35,
+                    "audio_summary": [{"channels": 6}],
+                    "resolved_policy": {"audio": {"surround_5_1_opus_bitrate": "224k"}},
+                },
+            )
+
+        assert request is not None
+        self.assertEqual(request["budget_bytes"], 300_000_000)
+        note_parser.assert_called_once()
 
     def test_operator_requested_experiment_detects_generated_measured_followup(self) -> None:
         note = (
@@ -4128,7 +4144,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertFalse(request["measured_size_followup"])
         self.assertFalse(request["hard_size_cap"])
 
-    def test_operator_requested_experiment_keeps_heuristic_followup_when_structured_parse_misses_it(self) -> None:
+    def test_operator_requested_experiment_uses_deterministic_followup_without_model(self) -> None:
         structured_parse = {
             "summary": "Size follow-up request.",
             "intent_type": "direct_request",
@@ -4149,7 +4165,7 @@ class TuningRuntimeTests(unittest.TestCase):
         with patch(
             "mediaforce.web.runtime.folder_tuning_advice.request_operator_note_parse",
             return_value=structured_parse,
-        ):
+        ) as note_parser:
             request = _operator_requested_experiment(
                 "Revise this sample smaller toward 300 MB per episode. The last sample was 766 MiB, 2.6x target.",
                 {
@@ -4168,6 +4184,7 @@ class TuningRuntimeTests(unittest.TestCase):
 
         assert request is not None
         self.assertTrue(request["measured_size_followup"])
+        note_parser.assert_not_called()
 
     def test_operator_requested_experiment_detects_scale_target_request(self) -> None:
         request = _operator_requested_experiment("Downsample the 4K files to 1080p for this folder.")
@@ -5028,7 +5045,12 @@ class TuningRuntimeTests(unittest.TestCase):
                     merged[section] = values
             return merged
 
-        def fake_request_note_tuning(*, project_root: Path, payload: dict[str, object]) -> TuningPolicyResponse:
+        def fake_request_note_tuning(
+                *,
+                project_root: Path,
+                payload: dict[str, object],
+                **_: object,
+        ) -> TuningPolicyResponse:
             self.assertEqual(project_root, self.config.paths.project_root)
             self.assertEqual(payload["requested_experiment"], operator_request)
             return TuningPolicyResponse(
@@ -5302,7 +5324,12 @@ class TuningRuntimeTests(unittest.TestCase):
                     merged[section] = values
             return merged
 
-        def fake_request_note_tuning(*, project_root: Path, payload: dict[str, object]) -> TuningPolicyResponse:
+        def fake_request_note_tuning(
+                *,
+                project_root: Path,
+                payload: dict[str, object],
+                **_: object,
+        ) -> TuningPolicyResponse:
             self.assertEqual(project_root, self.config.paths.project_root)
             self.assertEqual(payload["requested_experiment"], operator_request)
             return TuningPolicyResponse(
@@ -5448,7 +5475,12 @@ class TuningRuntimeTests(unittest.TestCase):
             missing_paths=[],
         )
 
-        def fake_request_note_tuning(*, project_root: Path, payload: dict[str, object]) -> TuningPolicyResponse:
+        def fake_request_note_tuning(
+                *,
+                project_root: Path,
+                payload: dict[str, object],
+                **_: object,
+        ) -> TuningPolicyResponse:
             self.assertEqual(project_root, self.config.paths.project_root)
             captured_payloads.append(payload)
             return TuningPolicyResponse(
@@ -5700,8 +5732,11 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertEqual(fragment, {})
 
-    def test_operator_requested_experiment_returns_none_when_structured_parse_fails(self) -> None:
-        with patch("mediaforce.web.runtime.folder_tuning_advice.request_operator_note_parse", return_value=None):
+    def test_operator_requested_experiment_uses_deterministic_budget_when_model_unavailable(self) -> None:
+        with patch(
+            "mediaforce.web.runtime.folder_tuning_advice.request_operator_note_parse",
+            return_value=None,
+        ) as note_parser:
             request = _operator_requested_experiment(
                 "Can you target 300MB per episode?",
                 {
@@ -5715,8 +5750,9 @@ class TuningRuntimeTests(unittest.TestCase):
         assert request is not None
         self.assertEqual(request["request_type"], "size_budget")
         self.assertTrue(request["operator_confirmed"])
+        note_parser.assert_not_called()
 
-    def test_operator_requested_experiment_recovers_combined_request_when_structured_parse_drops_scale(self) -> None:
+    def test_operator_requested_experiment_uses_deterministic_combined_request_without_model(self) -> None:
         with patch(
                 "mediaforce.web.runtime.folder_tuning_advice.request_operator_note_parse",
                 return_value={
@@ -5733,7 +5769,7 @@ class TuningRuntimeTests(unittest.TestCase):
                     "crop": None,
                     "reasoning_note": "Structured parse dropped the explicit scale target.",
                 },
-        ):
+        ) as note_parser:
             request = _operator_requested_experiment(
                 "Can we drop this to 1080P and try to hit around 300MB?",
                 {
@@ -5749,6 +5785,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(request["scale_height"], 1080)
         self.assertEqual(request["applied_policy"]["video"]["max_height"], 1080)
         self.assertEqual(request["budget_label"], "300 MB per episode")
+        note_parser.assert_not_called()
 
     def test_build_seed_policy_payload_carries_requested_experiment(self) -> None:
         payload = _build_seed_policy_payload(
@@ -6017,7 +6054,12 @@ class TuningRuntimeTests(unittest.TestCase):
             "policy": {"video": {"target_vmaf": 97.0, "max_encoded_percent": 14}},
         }
 
-        def fake_request_seed_policy(*, project_root: Path, payload: dict[str, object]) -> SeedPolicyResponse:
+        def fake_request_seed_policy(
+                *,
+                project_root: Path,
+                payload: dict[str, object],
+                **_: object,
+        ) -> SeedPolicyResponse:
             self.assertEqual(project_root, self.config.paths.project_root)
             self.assertFalse(connection.in_transaction())
             captured_payloads.append(payload)
@@ -6092,22 +6134,23 @@ class TuningRuntimeTests(unittest.TestCase):
                     "policy": {"video": {"target_vmaf": 89.0, "min_target_vmaf": 87.5}},
                 }
             ),
-            json.dumps(
-                {
-                    "status": "fail",
-                    "summary": "The bench explanation has caveats, but the explicit experiment is still coherent enough to review.",
-                    "issues": ["The fallback wording is weaker than the draft policy itself."],
-                }
-            ),
         ]
 
         def fake_run(cmd: list[str], **kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor.subprocess.run", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
+            "mediaforce.advisor._run_tune_self_check",
+            return_value={
+                "status": "fail",
+                "summary": "The bench explanation has caveats, but the explicit experiment is still coherent enough to review.",
+                "issues": ["The fallback wording is weaker than the draft policy itself."],
+                "source": "deterministic",
+            },
+        ):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -7930,14 +7973,6 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["summary"], "safe")
         self.assertEqual(payload["policy"], {"video": {}})
 
-    def test_try_load_first_json_object_skips_leading_text(self) -> None:
-        raw = "noise before {\"status\":\"pass\",\"summary\":\"ok\",\"issues\":[]} trailing"
-
-        payload = _try_load_first_json_object(raw)
-
-        assert isinstance(payload, dict)
-        self.assertEqual(payload["status"], "pass")
-
     def test_policy_response_schema_tracks_policy_shape(self) -> None:
         schema = _policy_response_schema(
             {
@@ -7997,25 +8032,18 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(applied["video"]["black_bar_detect_samples"], 5)
         self.assertEqual(applied["video"]["crop"], "1920:800:0:140")
 
-    def test_tune_self_check_schema_requires_surround_audio_guardrail(self) -> None:
-        schema = _tune_self_check_schema()
+    def test_tune_self_check_is_deterministic_and_requires_policy(self) -> None:
+        failed = _run_tune_self_check(project_root=self.root, tuning_context={}, proposal={})
+        passed = _run_tune_self_check(
+            project_root=self.root,
+            tuning_context={},
+            proposal={"policy": {"video": {"target_vmaf": 88.0}}},
+        )
 
-        self.assertIn("surround_audio_guardrail", schema["required"])
-        guardrail = schema["properties"]["surround_audio_guardrail"]
-        self.assertEqual(guardrail["required"], ["status", "reason"])
-        self.assertEqual(guardrail["properties"]["status"]["enum"], ["ok", "prefer_preserve_current"])
-
-    def test_generic_and_verdict_prompts_embed_context_and_shape(self) -> None:
-        generic_prompt = _build_prompt({"folder": "tv/House/Season 2", "sample": {"score": 91.4}})
-        verdict_prompt = _build_run_verdict_prompt(
-            {"folder": "tv/House/Season 2", "sample_result": {"quality_score": 91.4}})
-
-        self.assertIn("Recommendation, Why, Setting changes, Audio/Subtitles notes", generic_prompt)
-        self.assertIn("tv/House/Season 2", generic_prompt)
-        self.assertIn("acceptable_experiment", verdict_prompt)
-        self.assertIn("sample_result", verdict_prompt)
-        self.assertIn("Evidence precedence is strict", verdict_prompt)
-        self.assertIn("without implying quality damage", verdict_prompt)
+        self.assertEqual(failed["status"], "fail")
+        self.assertEqual(failed["source"], "deterministic")
+        self.assertEqual(passed["status"], "pass")
+        self.assertEqual(passed["source"], "deterministic")
 
     def test_tune_prompt_mentions_review_media_conversation(self) -> None:
         prompt = _build_tune_prompt(
@@ -8462,20 +8490,8 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("legacy H.264 or HEVC bitrate intuition", prompt)
         self.assertIn("high-80s VMAF", prompt)
 
-    def test_tune_self_check_prompt_references_hinted_audio_key(self) -> None:
-        captured_messages: list[str] = []
-
-        def fake_request(**kwargs: object) -> dict[str, object]:
-            message = kwargs["message"]
-            captured_messages.append(message if isinstance(message, str) else "")
-            return {
-                "status": "warn",
-                "summary": "ok",
-                "issues": [],
-                "surround_audio_guardrail": {"status": "ok", "reason": ""},
-            }
-
-        with patch("mediaforce.advisor._run_structured_llm_request", side_effect=fake_request):
+    def test_tune_self_check_bypasses_model_for_audio_hint(self) -> None:
+        with patch("mediaforce.advisor._run_structured_llm_request") as structured_request:
             result = _run_tune_self_check(
                 project_root=self.root,
                 tuning_context={
@@ -8491,9 +8507,9 @@ class TuningRuntimeTests(unittest.TestCase):
             )
 
         assert result is not None
-        self.assertTrue(captured_messages)
-        self.assertIn("stereo_opus_bitrate", captured_messages[0])
-        self.assertNotIn("surround_5_1_opus_bitrate", captured_messages[0])
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["source"], "deterministic")
+        structured_request.assert_not_called()
 
     def test_shutdown_cleanup_cancels_managed_processes(self) -> None:
         from mediaforce.web import app as web_app

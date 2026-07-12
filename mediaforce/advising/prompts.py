@@ -1,6 +1,7 @@
 import json
 from typing import Any, Callable
 
+from mediaforce.advising.privacy import sanitize_advisor_payload
 from mediaforce.core.type_defs import object_dict, object_list
 
 
@@ -30,26 +31,13 @@ def _audio_tradeoff_key_copy(hint: dict[str, Any] | None) -> str:
     return policy_key or "the hinted audio bitrate"
 
 
-def build_prompt(payload: dict[str, Any]) -> str:
-    serialized = json.dumps(payload, indent=2, sort_keys=True)
-    return (
-        "You are advising a personal media re-encoding calibration workflow. "
-        "Bias slightly toward smaller files, but do not recommend obvious quality damage. "
-        f"{AV1_EVIDENCE_PRECEDENCE}"
-        "Return short markdown with these sections exactly: "
-        "Recommendation, Why, Setting changes, Audio/Subtitles notes. "
-        "Use plain language for a human reviewing TV encodes. Here is the calibration context:\n\n"
-        f"{serialized}"
-    )
-
-
 def build_seed_prompt(
         payload: dict[str, Any],
         *,
         policy_key_paths: Callable[[dict[str, Any]], list[str]],
         policy_shape_example: Callable[[dict[str, Any]], dict[str, Any]],
 ) -> str:
-    serialized = json.dumps(payload, indent=2, sort_keys=True)
+    serialized = json.dumps(sanitize_advisor_payload(payload), indent=2, sort_keys=True)
     base_policy = object_dict(payload.get("base_policy"))
     hinted_audio_key = _audio_tradeoff_key_copy(object_dict(payload.get("audio_tradeoff_hint")))
     valid_keys = policy_key_paths(base_policy)
@@ -98,7 +86,7 @@ def build_tune_prompt(
     review_pack = object_dict(prompt_payload.get("multimodal_review_pack"))
     if review_pack:
         prompt_payload["multimodal_review_pack"] = _summarize_multimodal_review_pack(review_pack)
-    serialized = json.dumps(prompt_payload, indent=2, sort_keys=True)
+    serialized = json.dumps(sanitize_advisor_payload(prompt_payload), indent=2, sort_keys=True)
     current_policy = object_dict(payload.get("policy"))
     hinted_audio_key = _audio_tradeoff_key_copy(
         object_dict(object_dict(payload.get("runtime_toolbelt")).get("audio_tradeoff_hint"))
@@ -149,7 +137,7 @@ def build_review_artifact_critique_prompt(payload: dict[str, Any]) -> str:
     review_pack = object_dict(prompt_payload.get("multimodal_review_pack"))
     if review_pack:
         prompt_payload["multimodal_review_pack"] = _summarize_multimodal_review_pack(review_pack)
-    serialized = json.dumps(prompt_payload, indent=2, sort_keys=True)
+    serialized = json.dumps(sanitize_advisor_payload(prompt_payload), indent=2, sort_keys=True)
     return (
         "You are reviewing source-versus-draft media artifacts extracted from actual sampled review clips. "
         "Use the attached images as visual evidence from the real clips, but never claim to watch motion or hear audio beyond what those artifacts can support. "
@@ -163,24 +151,8 @@ def build_review_artifact_critique_prompt(payload: dict[str, Any]) -> str:
     )
 
 
-def build_run_verdict_prompt(payload: dict[str, Any]) -> str:
-    serialized = json.dumps(payload, indent=2, sort_keys=True)
-    return (
-        "You are GPT-5.4 summarizing a completed media encode calibration run for a human operator. "
-        "The run is already measured by deterministic tools; do not invent metrics. "
-        f"{AV1_EVIDENCE_PRECEDENCE}"
-        "If the operator requested an explicit experiment, judge the outcome against that request instead of generic conservative defaults. "
-        "When size_target_analysis is present, use its status and target band directly: inside_target_band means the size request is satisfied, under_target means the run is smaller than requested without implying quality damage, and over_target means another measured sample may be needed if the operator still wants that size. "
-        "Keep the answer short, practical, and honest about risk. "
-        "Return valid JSON only with this exact shape: "
-        '{"summary":"short verdict","outcome":"strong_match|acceptable_experiment|needs_review|poor_fit","confidence":"high|medium|low","next_step":"optional short suggestion","evidence_checked":["..."]}. '
-        "Here is the completed calibration context:\n\n"
-        f"{serialized}"
-    )
-
-
 def build_operator_note_parse_prompt(payload: dict[str, Any]) -> str:
-    serialized = json.dumps(payload, indent=2, sort_keys=True)
+    serialized = json.dumps(sanitize_advisor_payload(payload), indent=2, sort_keys=True)
     return (
         "You are classifying a media encode operator note before policy compilation. "
         "Decide whether the note is a direct request to execute now, an exploratory question, approval feedback, or something else. "
