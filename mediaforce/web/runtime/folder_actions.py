@@ -19,6 +19,8 @@ from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, list_ch
 from mediaforce.encoding.staging import safe_unlink
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.run_manifests import create_folder_manifest
+from mediaforce.library.candidate_selection import encode_candidate_decisions, scope_lifecycle_payload_from_decisions, \
+    workflow_eligibility
 from mediaforce.tuning.quality_risk import build_quality_risk_contract
 from mediaforce.tuning.quality_risk import append_quality_risk_record
 from mediaforce.tuning.size_goals import operator_intent_from_policy
@@ -160,6 +162,7 @@ def queue_folder_encode_action(
         normalized_prefix: str,
         notes: str,
         bypass_schedule: bool,
+        override_policy_holds: bool = False,
         *,
         now_iso: NowIsoFn,
         load_job_state: LoadJobStateFn,
@@ -173,6 +176,8 @@ def queue_folder_encode_action(
         load_advice_state: LoadAdviceStateFn | None = None,
         load_latest_failed_target_size_job_state: LoadJobStateFn | None = None,
 ) -> ActionPayload:
+    if override_policy_holds and len(Path(normalized_prefix).parts) != 3:
+        raise HTTPException(status_code=400, detail="Lifecycle holds can only be overridden for one season at a time.")
     with open_db(config.paths.db_path) as connection:
         existing_job = load_job_state(connection, config, normalized_prefix)
         if existing_job and existing_job.get("status") in {"queued", "running", "pending_review"}:
@@ -267,9 +272,30 @@ def queue_folder_encode_action(
             prepare_terminal_encode_job_for_requeue_fn(connection, latest_encode_job)
             _reset_stale_prefix_encoding_items_for_requeue(connection, config, normalized_prefix, now_iso=now_iso)
         refreshed_config = load_config(config.paths.config_path)
-        manifest, manifest_path = create_folder_manifest(connection, refreshed_config, prefix=normalized_prefix)
+        manifest_kwargs: dict[str, Any] = {"prefix": normalized_prefix}
+        if override_policy_holds:
+            manifest_kwargs["manual_override_prefix"] = normalized_prefix
+        manifest, manifest_path = create_folder_manifest(connection, refreshed_config, **manifest_kwargs)
         if not manifest["items"]:
-            workflow_state = build_folder_workflow_state(connection, normalized_prefix).to_payload()
+            lifecycle_decisions = encode_candidate_decisions(
+                connection,
+                refreshed_config,
+                prefixes=[normalized_prefix],
+            )
+            lifecycle = scope_lifecycle_payload_from_decisions(normalized_prefix, lifecycle_decisions)
+            if int(lifecycle.get("held_candidate_count") or 0) > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"{lifecycle['held_candidate_count']} encode candidate(s) are protected by the library "
+                        "lifecycle policy. Open one season to review or override its hold."
+                    ),
+                )
+            workflow_state = build_folder_workflow_state(
+                connection,
+                normalized_prefix,
+                candidate_eligibility=workflow_eligibility(lifecycle_decisions),
+            ).to_payload()
             next_action = object_dict(workflow_state.get("next_action"))
             action_label = str(next_action.get("label") or "No action")
             raise HTTPException(
@@ -324,7 +350,12 @@ def queue_folder_encode_action(
                     "item_count": len(shard_indexes),
                 },
             )
-    return {"ok": True, "message": "Queued the full folder encode.", "job": queue_job}
+    return {
+        "ok": True,
+        "message": "Queued the eligible folder encode.",
+        "job": queue_job,
+        "policy_holds_overridden": override_policy_holds,
+    }
 
 
 def approve_measured_encode_recovery_action(

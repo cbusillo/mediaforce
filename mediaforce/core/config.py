@@ -56,6 +56,11 @@ class MediaforceConfig:
         return self.raw["validation"]
 
     @property
+    def metadata(self) -> dict[str, Any]:
+        value = self.raw.get("metadata")
+        return value if isinstance(value, dict) else {}
+
+    @property
     def source_root_map(self) -> dict[str, Path]:
         return {
             key: Path(value).expanduser()
@@ -268,6 +273,43 @@ def upsert_runtime_folder_policy_override(path: Path, prefix: str, policy: dict[
         if not replaced:
             updated_overrides.append(override_payload)
         runtime_settings[FOLDER_POLICY_OVERRIDES_KEY] = updated_overrides
+        return runtime_settings
+
+    update_runtime_settings(path, _apply)
+
+
+def update_runtime_folder_policy_values(
+        path: Path,
+        prefix: str,
+        *,
+        section: str,
+        values: dict[str, Any],
+) -> None:
+    normalized_prefix = prefix.strip("/")
+    if section not in {"video", "audio", "subtitle", "planning"}:
+        raise ValueError(f"Unsupported folder policy section: {section}")
+
+    def _apply(runtime_settings: dict[str, Any]) -> dict[str, Any]:
+        overrides = _normalize_folder_policy_overrides(runtime_settings.get(FOLDER_POLICY_OVERRIDES_KEY))
+        existing = next(
+            (
+                copy.deepcopy(item)
+                for item in overrides
+                if str(item.get("path_prefix", "")).strip("/") == normalized_prefix
+            ),
+            {"path_prefix": normalized_prefix, "note": BENCH_SAVED_OVERRIDE_NOTE},
+        )
+        section_values = existing.get(section)
+        merged_values = copy.deepcopy(section_values) if isinstance(section_values, dict) else {}
+        merged_values.update(copy.deepcopy(values))
+        existing[section] = merged_values
+        updated = [
+            item
+            for item in overrides
+            if str(item.get("path_prefix", "")).strip("/") != normalized_prefix
+        ]
+        updated.append(existing)
+        runtime_settings[FOLDER_POLICY_OVERRIDES_KEY] = updated
         return runtime_settings
 
     update_runtime_settings(path, _apply)

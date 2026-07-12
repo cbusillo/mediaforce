@@ -2,6 +2,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY
@@ -510,6 +511,7 @@ def build_runtime_settings_payload(
         video_defaults: dict[str, Any] | None = None,
         encode_queue_scheduler: dict[str, Any],
         schedule_profiles: list[dict[str, Any]],
+        metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     def _text(value: JSONValue, default: str = "") -> str:
         if value is None:
@@ -670,6 +672,7 @@ def build_runtime_settings_payload(
         raise ValueError("Unknown schedule profile for host assignment: " + ", ".join(invalid_host_profiles))
 
     normalized_video_defaults = normalize_video_defaults(video_defaults)
+    normalized_metadata = normalize_metadata_settings(metadata, known_library_keys=known_library_keys)
     staging_root = Path(transcode_root).expanduser()
     return {
         "media": {
@@ -684,7 +687,69 @@ def build_runtime_settings_payload(
             "scheduler": normalize_encode_queue_scheduler(encode_queue_scheduler),
             "schedule_profiles": normalized_profiles,
         },
+        "metadata": normalized_metadata,
     }
+
+
+def normalize_metadata_settings(
+        raw: dict[str, Any] | None,
+        *,
+        known_library_keys: set[str],
+) -> dict[str, Any]:
+    payload = dict(raw) if isinstance(raw, dict) else {}
+    plex = dict(payload.get("plex")) if isinstance(payload.get("plex"), dict) else {}
+    tmdb = dict(payload.get("tmdb")) if isinstance(payload.get("tmdb"), dict) else {}
+    plex_base_url = _normalized_provider_url(plex.get("base_url"), allow_http=True)
+    tmdb_base_url = _normalized_provider_url(
+        tmdb.get("base_url") or "https://api.themoviedb.org/3",
+        allow_http=False,
+    )
+    library_roots = {
+        str(key): str(Path(str(value)).expanduser())
+        for key, value in (plex.get("library_roots") or {}).items()
+        if str(key) in known_library_keys and str(value or "").strip()
+    } if isinstance(plex.get("library_roots"), dict) else {}
+    return {
+        "plex": {
+            "enabled": bool(plex.get("enabled", True)),
+            "base_url": plex_base_url,
+            "token_env": _metadata_token_env(plex.get("token_env"), "MEDIAFORCE_PLEX_TOKEN"),
+            "refresh_interval_hours": _metadata_refresh_hours(plex.get("refresh_interval_hours"), 1.0),
+            "library_roots": library_roots,
+        },
+        "tmdb": {
+            "enabled": bool(tmdb.get("enabled", True)),
+            "base_url": tmdb_base_url,
+            "token_env": _metadata_token_env(tmdb.get("token_env"), "MEDIAFORCE_TMDB_TOKEN"),
+            "refresh_interval_hours": _metadata_refresh_hours(tmdb.get("refresh_interval_hours"), 24.0),
+        },
+    }
+
+
+def _normalized_provider_url(value: object, *, allow_http: bool) -> str:
+    text = str(value or "").strip().rstrip("/")
+    if not text:
+        return ""
+    parsed = urlsplit(text)
+    allowed_schemes = {"https"} | ({"http"} if allow_http else set())
+    if parsed.scheme not in allowed_schemes or not parsed.netloc or parsed.username or parsed.password:
+        raise ValueError("Provider URLs must use an allowed HTTP scheme and cannot contain credentials.")
+    if parsed.query or parsed.fragment:
+        raise ValueError("Provider URLs cannot contain query parameters or fragments.")
+    return text
+
+
+def _metadata_token_env(value: object, default: str) -> str:
+    name = str(value or default).strip()
+    return name if re.fullmatch(r"MEDIAFORCE_[A-Z0-9_]+", name) else default
+
+
+def _metadata_refresh_hours(value: object, default: float) -> float:
+    try:
+        parsed = float(str(value))
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 def normalize_video_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:

@@ -36,6 +36,7 @@ def register_settings_routes(
                 video_defaults=dict(body.get("video_defaults", {})),
                 encode_queue_scheduler=dict(body.get("encode_queue_scheduler", {})),
                 schedule_profiles=[dict(item) for item in body.get("schedule_profiles", [])],
+                metadata=(dict(body["metadata"]) if isinstance(body.get("metadata"), dict) else None),
             )
         except ValueError:
             return JSONResponse({"ok": False, "message": SETTINGS_SAVE_ERROR_MESSAGE}, status_code=400)

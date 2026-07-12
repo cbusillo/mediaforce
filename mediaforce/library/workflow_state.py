@@ -13,6 +13,7 @@ from mediaforce.core.db_tables import staged_artifacts
 WorkflowItemState = Literal[
     "missing",
     "encode_candidate",
+    "held",
     "encoding",
     "ready_to_validate",
     "ready_to_promote",
@@ -119,14 +120,31 @@ class FolderWorkflowState:
         }
 
 
-def build_folder_workflow_state(connection: DBClient, prefix: str) -> FolderWorkflowState:
+def build_folder_workflow_state(
+        connection: DBClient,
+        prefix: str,
+        *,
+        candidate_eligibility: dict[int, tuple[bool, str | None]] | None = None,
+) -> FolderWorkflowState:
     normalized_prefix = normalize_prefix(prefix)
-    item_states = tuple(derive_item_workflow_state(row) for row in _load_item_rows(connection, normalized_prefix))
+    item_states = tuple(
+        derive_item_workflow_state(
+            row,
+            encode_eligible=(candidate_eligibility or {}).get(int(row["item_id"]), (True, None))[0],
+            policy_blocker=(candidate_eligibility or {}).get(int(row["item_id"]), (True, None))[1],
+        )
+        for row in _load_item_rows(connection, normalized_prefix)
+    )
     job_state = _load_encode_job_state(connection, normalized_prefix)
     return _build_folder_state(normalized_prefix, item_states, job_state=job_state)
 
 
-def build_folder_workflow_states(connection: DBClient, prefixes: list[str]) -> dict[str, FolderWorkflowState]:
+def build_folder_workflow_states(
+        connection: DBClient,
+        prefixes: list[str],
+        *,
+        candidate_eligibility: dict[int, tuple[bool, str | None]] | None = None,
+) -> dict[str, FolderWorkflowState]:
     normalized_prefixes = [normalize_prefix(prefix) for prefix in prefixes]
     unique_prefixes = list(dict.fromkeys(normalized_prefixes))
     if not unique_prefixes:
@@ -136,7 +154,11 @@ def build_folder_workflow_states(connection: DBClient, prefixes: list[str]) -> d
     result: dict[str, FolderWorkflowState] = {}
     for prefix in unique_prefixes:
         item_states = tuple(
-            derive_item_workflow_state(row)
+            derive_item_workflow_state(
+                row,
+                encode_eligible=(candidate_eligibility or {}).get(int(row["item_id"]), (True, None))[0],
+                policy_blocker=(candidate_eligibility or {}).get(int(row["item_id"]), (True, None))[1],
+            )
             for row in rows
             if _path_matches_prefix(str(row["rel_path"]), prefix)
         )
@@ -148,7 +170,12 @@ def normalize_prefix(prefix: str) -> str:
     return prefix.strip().strip("/")
 
 
-def derive_item_workflow_state(row: DBRow) -> ItemWorkflowState:
+def derive_item_workflow_state(
+        row: DBRow,
+        *,
+        encode_eligible: bool = True,
+        policy_blocker: str | None = None,
+) -> ItemWorkflowState:
     status = str(row["status"] or "idle")
     has_staged_output = row["staged_library_item_id"] is not None and row["staging_path"] is not None
     promoted_at = row["promoted_at"]
@@ -176,8 +203,13 @@ def derive_item_workflow_state(row: DBRow) -> ItemWorkflowState:
         lane = "blocked"
         blocker = "Encoded item is missing its staged output."
     elif status in ENCODE_CANDIDATE_STATUSES:
-        state = "encode_candidate"
-        lane = "encode"
+        if encode_eligible:
+            state = "encode_candidate"
+            lane = "encode"
+        else:
+            state = "held"
+            lane = "none"
+            blocker = policy_blocker or "Library lifecycle policy is holding this item."
     else:
         state = "idle"
         lane = "none"
@@ -255,12 +287,17 @@ def _build_folder_state(
 ) -> FolderWorkflowState:
     lane_counts = Counter(item.lane for item in items)
     state_counts = Counter(item.state for item in items)
-    blockers = [item.blocker for item in items if item.blocker]
+    blockers = list(dict.fromkeys(
+        item.blocker
+        for item in items
+        if item.blocker and item.state == "blocked"
+    ))
     job_lane = job_state[0] if job_state is not None else None
     job_detail = job_state[1] if job_state is not None else None
     counts = {
         "items": len(items),
         "encode_candidates": state_counts.get("encode_candidate", 0),
+        "held": state_counts.get("held", 0),
         "ready_to_validate": state_counts.get("ready_to_validate", 0),
         "ready_to_promote": state_counts.get("ready_to_promote", 0),
         "processing": lane_counts.get("processing", 0),
@@ -383,6 +420,15 @@ def _folder_summary(
             "ready",
             f"{counts['encode_candidates']} item(s) can be queued for encoding.",
             WorkflowNextAction("queue_encode", "Queue encode", True, prefix),
+        )
+    if counts["held"] > 0:
+        return (
+            "held",
+            "none",
+            "Protected",
+            "idle",
+            f"{counts['held']} item(s) are held by the library lifecycle policy.",
+            WorkflowNextAction("review_scope", "Review protection", True, prefix),
         )
     return (
         "complete",

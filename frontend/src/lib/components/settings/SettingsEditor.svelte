@@ -80,6 +80,23 @@
 			default_grain: '8',
 			max_encoded_percent: '80'
 		},
+		metadata: {
+			plex: {
+				enabled: true,
+				base_url: '',
+				library_roots: {},
+				token_env: 'MEDIAFORCE_PLEX_TOKEN',
+				token_configured: false,
+				refresh_interval_hours: 1
+			},
+			tmdb: {
+				enabled: true,
+				base_url: 'https://api.themoviedb.org/3',
+				token_env: 'MEDIAFORCE_TMDB_TOKEN',
+				token_configured: false,
+				refresh_interval_hours: 24
+			}
+		},
 		schedule_profiles: []
 	};
 
@@ -253,6 +270,27 @@
 
 	function updateVideoDefault(key: keyof SettingsPayload['video_defaults'], value: string) {
 		draft.video_defaults = { ...draft.video_defaults, [key]: value };
+	}
+
+	function updatePlexMetadata(patch: Partial<SettingsPayload['metadata']['plex']>) {
+		draft.metadata = {
+			...draft.metadata,
+			plex: { ...draft.metadata.plex, ...patch }
+		};
+	}
+
+	function updateTmdbMetadata(patch: Partial<SettingsPayload['metadata']['tmdb']>) {
+		draft.metadata = {
+			...draft.metadata,
+			tmdb: { ...draft.metadata.tmdb, ...patch }
+		};
+	}
+
+	function updatePlexLibraryRoot(libraryKey: string, value: string) {
+		const library_roots = { ...draft.metadata.plex.library_roots };
+		if (value.trim()) library_roots[libraryKey] = value;
+		else delete library_roots[libraryKey];
+		updatePlexMetadata({ library_roots });
 	}
 
 	function metricDefaultsCopy(defaults: SettingsPayload['video_defaults']) {
@@ -780,10 +818,99 @@
 					<header class="settings-section__head">
 						<div>
 							<span class="mf-eyebrow">Advanced setup</span>
-							<h2 id="settings-advanced-title">Computers and schedule</h2>
+							<h2 id="settings-advanced-title">Metadata, computers, and schedule</h2>
 						</div>
-						<p>Use these when adding machines or changing when processing work may run.</p>
+						<p>Connect catalog metadata, add machines, and control when processing work may run.</p>
 					</header>
+
+					<div id="settings-metadata" class="settings-anchor">
+						<WorkstationPanel
+							eyebrow="Metadata"
+							title="Plex and series status"
+							meta={draft.metadata.plex.token_configured && draft.metadata.tmdb.token_configured
+								? 'credentials ready'
+								: 'credentials needed'}
+						>
+							<div class="metadata-grid">
+								<label class="toggle-chip metadata-toggle">
+									<input
+										type="checkbox"
+										checked={draft.metadata.plex.enabled}
+										onchange={(event) =>
+											updatePlexMetadata({
+												enabled: (event.currentTarget as HTMLInputElement).checked
+											})}
+									/>
+									<span>Use Plex catalog metadata</span>
+								</label>
+								<label class="stacked-field metadata-url">
+									<span>Plex server URL</span>
+									<input
+										class="field field--path"
+										value={draft.metadata.plex.base_url}
+										placeholder="http://plex.local:32400"
+										oninput={(event) => updatePlexMetadata({ base_url: inputValue(event) })}
+									/>
+								</label>
+								<div class="metadata-status">
+									<StateBadge
+										compact
+										tone={draft.metadata.plex.token_configured ? 'ready' : 'wait'}
+										label={draft.metadata.plex.token_configured ? 'Token ready' : 'Token missing'}
+									/>
+									<code>{draft.metadata.plex.token_env}</code>
+								</div>
+							</div>
+
+							<div class="table-wrap metadata-mappings">
+								<table class="settings-table settings-table--metadata">
+									<thead><tr><th>Library</th><th>Path reported by Plex</th></tr></thead>
+									<tbody>
+										{#each configuredLibraries as library (library.index)}
+											<tr>
+												<td><strong class="mf-mono">{library.key}</strong></td>
+												<td>
+													<input
+														class="field field--path"
+														value={draft.metadata.plex.library_roots[library.key] ?? ''}
+														placeholder={library.path || '/data/media/tv'}
+														oninput={(event) =>
+															updatePlexLibraryRoot(library.key, inputValue(event))}
+													/>
+												</td>
+											</tr>
+										{/each}
+									</tbody>
+								</table>
+							</div>
+
+							<div class="metadata-grid metadata-grid--tmdb">
+								<label class="toggle-chip metadata-toggle">
+									<input
+										type="checkbox"
+										checked={draft.metadata.tmdb.enabled}
+										onchange={(event) =>
+											updateTmdbMetadata({
+												enabled: (event.currentTarget as HTMLInputElement).checked
+											})}
+									/>
+									<span>Resolve current-series status with TMDB</span>
+								</label>
+								<div class="metadata-status">
+									<StateBadge
+										compact
+										tone={draft.metadata.tmdb.token_configured ? 'ready' : 'wait'}
+										label={draft.metadata.tmdb.token_configured ? 'Token ready' : 'Token missing'}
+									/>
+									<code>{draft.metadata.tmdb.token_env}</code>
+								</div>
+							</div>
+							<p class="metadata-help">
+								Tokens stay outside Mediaforce settings. A full library scan refreshes Plex age and
+								TMDB series status; cached metadata remains available during provider outages.
+							</p>
+						</WorkstationPanel>
+					</div>
 
 					<div id="settings-schedules" class="settings-anchor">
 						<WorkstationPanel
@@ -1648,6 +1775,49 @@
 		padding: var(--mf-space-5);
 	}
 
+	.metadata-grid {
+		align-items: end;
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-template-columns: minmax(220px, 0.9fr) minmax(300px, 1.5fr) minmax(190px, auto);
+		padding: var(--mf-space-5);
+	}
+
+	.metadata-grid--tmdb {
+		border-top: var(--mf-border);
+		grid-template-columns: minmax(280px, 1fr) minmax(190px, auto);
+	}
+
+	.metadata-toggle {
+		align-self: center;
+		justify-self: start;
+	}
+
+	.metadata-status {
+		align-items: center;
+		display: flex;
+		gap: var(--mf-space-3);
+		justify-content: flex-end;
+	}
+
+	.metadata-status code {
+		color: var(--mf-fg-secondary);
+		font-size: var(--mf-text-xs);
+	}
+
+	.metadata-mappings {
+		border-top: var(--mf-border);
+	}
+
+	.metadata-help {
+		border-top: var(--mf-border);
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-sm);
+		line-height: 1.5;
+		margin: 0;
+		padding: var(--mf-space-4) var(--mf-space-5);
+	}
+
 	.encode-defaults-grid {
 		align-items: end;
 		display: grid;
@@ -1991,6 +2161,7 @@
 		.settings-console,
 		.settings-overview,
 		.storage-grid,
+		.metadata-grid,
 		.danger-zone,
 		.host-options {
 			grid-template-columns: 1fr;
@@ -2475,6 +2646,60 @@
 
 		.settings-header__actions.has-changes :global(.state-badge) {
 			flex-basis: 100%;
+		}
+
+		.table-wrap {
+			overflow: visible;
+		}
+
+		.settings-table--libraries,
+		.settings-table--metadata {
+			display: block;
+			min-width: 0;
+			width: 100%;
+		}
+
+		.settings-table--metadata thead {
+			display: none;
+		}
+
+		.settings-table--metadata tbody,
+		.settings-table--metadata tr,
+		.settings-table--metadata td {
+			display: block;
+			width: 100%;
+		}
+
+		.settings-table--metadata tr {
+			border-bottom: var(--mf-border-muted);
+			display: grid;
+			gap: var(--mf-space-3);
+			padding: var(--mf-space-4);
+		}
+
+		.settings-table--metadata td {
+			border-bottom: 0;
+			height: auto;
+			min-width: 0;
+			padding: 0;
+		}
+
+		.settings-table--metadata td::before {
+			color: var(--mf-fg-tertiary);
+			display: block;
+			font-size: var(--mf-text-2xs);
+			font-weight: var(--mf-weight-semibold);
+			letter-spacing: 0.06em;
+			margin-bottom: var(--mf-space-2);
+			text-transform: uppercase;
+		}
+
+		.settings-table--metadata td:nth-child(1)::before {
+			content: 'Library';
+		}
+
+		.settings-table--metadata td:nth-child(2)::before {
+			content: 'Path reported by Plex';
 		}
 	}
 </style>

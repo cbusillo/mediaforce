@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 import re
@@ -17,6 +17,7 @@ from mediaforce.core.db_tables import (
     encode_queue_state,
     item_events,
     library_items,
+    series_metadata,
     staged_artifacts,
 )
 from mediaforce.core.evidence import stable_policy_hash, stable_source_id
@@ -47,6 +48,11 @@ VALIDATION_PREFIX = "tv/Validation Ready/Season 1"
 PROMOTION_PREFIX = "tv/Promotion Ready/Season 1"
 FINISHED_PREFIX = "tv/Finished Show/Season 1"
 ENCODE_WAITING_PREFIX = "movies/Waiting Encode"
+CURRENT_PREVIOUS_PREFIX = "tv/Current Season/Season 1"
+CURRENT_SEASON_PREFIX = "tv/Current Season/Season 2"
+CURRENT_SERIES_PREFIX = "tv/Current Season"
+PROTECTED_READY_PREFIX = "tv/Protected Ready/Season 2"
+PROTECTED_READY_SERIES_PREFIX = "tv/Protected Ready"
 FIXTURE_PREFIXES = (
     FOLDER_PREFIX,
     SAMPLING_PREFIX,
@@ -66,6 +72,9 @@ FIXTURE_PREFIXES = (
     PROMOTION_PREFIX,
     FINISHED_PREFIX,
     ENCODE_WAITING_PREFIX,
+    CURRENT_PREVIOUS_PREFIX,
+    CURRENT_SEASON_PREFIX,
+    PROTECTED_READY_PREFIX,
 )
 
 
@@ -93,8 +102,9 @@ def _library_item(
     recommendation: str,
     recommendation_reason: str,
     duration_seconds: float = 3_600.0,
+    age_days: int = 730,
 ) -> dict[str, Any]:
-    timestamp = _now()
+    timestamp = (datetime.now(UTC) - timedelta(days=age_days)).isoformat(timespec="seconds")
     source_path = _resolve_under_project(
         project_root, Path("scratch/web-smoke/source") / rel_path
     )
@@ -220,6 +230,7 @@ def _library_item(
                 }
             ]
         ),
+        "content_version_changed_at": timestamp,
         "status": status,
         "priority_score": priority_score,
         "recommendation": recommendation,
@@ -599,6 +610,16 @@ def _write_review_states(config: Any, rows_by_prefix: dict[str, dict[str, Any]])
     _write_review_sample_state(
         config,
         rows_by_prefix,
+        prefix=PROTECTED_READY_PREFIX,
+        job_id="web-smoke-protected-ready",
+        review_slug="web-smoke-protected-ready",
+        predicted_total_size_bytes=396_000_000,
+        quality_score=94.8,
+        accepted=True,
+    )
+    _write_review_sample_state(
+        config,
+        rows_by_prefix,
         prefix=MISSED_TARGET_PREFIX,
         job_id="web-smoke-overshoot",
         review_slug="web-smoke-overshoot",
@@ -683,6 +704,11 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             connection.execute(
                 library_items.delete().where(library_items.c.id.in_(fixture_ids))
             )
+        connection.execute(
+            series_metadata.delete().where(
+                series_metadata.c.series_prefix.in_((CURRENT_SERIES_PREFIX, PROTECTED_READY_SERIES_PREFIX))
+            )
+        )
 
         if profile == "empty":
             return {
@@ -915,6 +941,41 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 recommendation="already_optimized",
                 recommendation_reason="Fixture completed season state for browser QA.",
             ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
+                rel_path="tv/Current Season/Season 1/Episode 01.mkv",
+                size_bytes=7 * 1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=82,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture aged season remains eligible while the current season is protected.",
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
+                rel_path="tv/Current Season/Season 2/Episode 01.mkv",
+                size_bytes=8 * 1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=84,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture active current season is protected from automatic encoding.",
+                age_days=5,
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
+                rel_path="tv/Protected Ready/Season 2/Episode 01.mkv",
+                size_bytes=8 * 1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=85,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture approved current season requires an explicit lifecycle override.",
+                age_days=5,
+            ),
         ]
         inserted_ids: list[int] = []
         for row in rows:
@@ -927,10 +988,25 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             str(row["rel_path"]): item_id
             for row, item_id in zip(rows, inserted_ids, strict=True)
         }
+        timestamp = _now()
+        for series_prefix, tmdb_series_id in (
+            (CURRENT_SERIES_PREFIX, 4242),
+            (PROTECTED_READY_SERIES_PREFIX, 4343),
+        ):
+            connection.execute(
+                series_metadata.insert().values(
+                    series_prefix=series_prefix,
+                    plex_guids_json=json.dumps([f"tmdb://{tmdb_series_id}"]),
+                    tmdb_series_id=tmdb_series_id,
+                    tmdb_status="Returning Series",
+                    tmdb_in_production=1,
+                    tmdb_observed_at=timestamp,
+                    updated_at=timestamp,
+                )
+            )
 
         completed_id = inserted_ids[3]
         blocked_completed_id = inserted_ids[6]
-        timestamp = _now()
         for item_id, row, archived_path in (
             (completed_id, rows[3], str(archived_source)),
             (
@@ -1241,6 +1317,12 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "route": "/folders/tv/Approved%20Show/Season%201",
                 "marker": "Approved Show",
                 "stageMarker": "Ready to make the season",
+            },
+            {
+                "label": "Folder Studio protected approved fixture",
+                "route": "/folders/tv/Protected%20Ready/Season%202",
+                "marker": "Protected Ready",
+                "stageMarker": "This season is ready, but protected",
             },
             {
                 "label": "Folder Studio missed-target fixture",

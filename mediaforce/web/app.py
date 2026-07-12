@@ -34,7 +34,7 @@ from mediaforce.advising.routing import advisor_routing_from_config
 from mediaforce.tuning.calibration_jobs import load_active_job, load_job, \
     list_queue_summary
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, update_runtime_settings, \
-    upsert_runtime_folder_policy_override
+    update_runtime_folder_policy_values, upsert_runtime_folder_policy_override
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import calibration_jobs as calibration_jobs_table
@@ -64,6 +64,8 @@ from mediaforce.library.planner import build_manifest_item
 from mediaforce.library.representatives import RepresentativeSelection, load_representative_selection, \
     public_representative_item
 from mediaforce.library.run_manifests import select_encode_candidates
+from mediaforce.library.candidate_selection import encode_candidate_decisions, scope_lifecycle_payload_from_decisions, \
+    workflow_eligibility
 from mediaforce.hosts.types import HostSetupResult
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.core.process_control import ManagedProcessController
@@ -543,6 +545,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             video_defaults: dict[str, Any],
             encode_queue_scheduler: dict[str, Any],
             schedule_profiles: list[dict[str, Any]],
+            metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         nonlocal config
         if not transcode_root:
@@ -554,20 +557,24 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             video_defaults=video_defaults,
             encode_queue_scheduler=encode_queue_scheduler,
             schedule_profiles=schedule_profiles,
+            metadata=metadata if metadata is not None else config.metadata,
         )
-        libraries_changed = False
+        catalog_refresh_needed = False
 
         def _apply_runtime_settings(existing_runtime_settings: dict[str, Any]) -> dict[str, Any]:
-            nonlocal libraries_changed
+            nonlocal catalog_refresh_needed
             merged_runtime_settings = _merge_runtime_settings_payload(existing_runtime_settings, payload)
-            libraries_changed = _runtime_source_roots(existing_runtime_settings) != _runtime_source_roots(
-                merged_runtime_settings)
+            catalog_refresh_needed = (
+                _runtime_source_roots(existing_runtime_settings) != _runtime_source_roots(merged_runtime_settings)
+                or object_dict(existing_runtime_settings.get("metadata"))
+                != object_dict(merged_runtime_settings.get("metadata"))
+            )
             return merged_runtime_settings
 
         update_runtime_settings(config.paths.runtime_settings_path, _apply_runtime_settings)
         config = load_config(config.paths.config_path)
         app.state.config = config
-        if libraries_changed:
+        if catalog_refresh_needed:
             _reset_folder_card_cache()
             with open_db(config.paths.db_path) as connection:
                 _maybe_schedule_scan(connection, config, prefix=None)
@@ -712,8 +719,18 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             scheduler_policy = object_dict(encode_queue_state.get("scheduler"))
             encode_job = _decorate_encode_job_for_scheduler(config, encode_job)
             encode_queue_summary = _encode_queue_summary_copy(encode_queue, encode_queue_state, encode_job)
-            encode_candidate_count = _folder_encode_candidate_count(connection, config, normalized_prefix)
-            workflow_state = build_folder_workflow_state(connection, normalized_prefix).to_payload()
+            lifecycle_decisions = encode_candidate_decisions(
+                connection,
+                config,
+                prefixes=[normalized_prefix],
+            )
+            lifecycle = scope_lifecycle_payload_from_decisions(normalized_prefix, lifecycle_decisions)
+            encode_candidate_count = int(lifecycle.get("eligible_candidate_count") or 0)
+            workflow_state = build_folder_workflow_state(
+                connection,
+                normalized_prefix,
+                candidate_eligibility=workflow_eligibility(lifecycle_decisions),
+            ).to_payload()
             series_context = _folder_series_context(normalized_prefix)
             latest_failed_sample_job_payload = object_dict(
                 _load_latest_failed_sample_job_state(connection, config, normalized_prefix)
@@ -826,6 +843,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 "encode_queue_scheduler": scheduler_policy,
                 "encode_candidate_count": encode_candidate_count,
                 "workflow_state": workflow_state,
+                "lifecycle": lifecycle,
                 "series_context": series_context,
                 "resolved_metric": resolved_metric.upper(),
                 "sample_host_key": sample_host_key,
@@ -1007,12 +1025,18 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             proposal_id,
         )
 
-    def _queue_folder_encode_action(normalized_prefix: str, notes: str, bypass_schedule: bool) -> ActionPayload:
+    def _queue_folder_encode_action(
+            normalized_prefix: str,
+            notes: str,
+            bypass_schedule: bool,
+            override_policy_holds: bool = False,
+    ) -> ActionPayload:
         return queue_folder_encode_action(
             config,
             normalized_prefix,
             notes,
             bypass_schedule,
+            override_policy_holds,
             now_iso=_now_iso,
             load_job_state=_load_job_state,
             load_calibration_state=_load_calibration_state,
@@ -1145,6 +1169,36 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 prefix=normalized_prefix,
             )
 
+    def _save_series_lifecycle_action(normalized_prefix: str, mode: str) -> dict[str, Any]:
+        nonlocal config
+        parts = Path(normalized_prefix).parts
+        normalized_mode = mode.strip().lower()
+        if len(parts) != 2 or parts[0].lower() != "tv":
+            raise HTTPException(status_code=400, detail="Lifecycle mode can only be set for one TV series.")
+        if normalized_mode not in {"auto", "on", "off"}:
+            raise HTTPException(status_code=400, detail="Lifecycle mode must be auto, on, or off.")
+        update_runtime_folder_policy_values(
+            config.paths.runtime_settings_path,
+            normalized_prefix,
+            section="planning",
+            values={"series_lifecycle_mode": normalized_mode},
+        )
+        config = load_config(config.paths.config_path)
+        app.state.config = config
+        with open_db(config.paths.db_path) as connection:
+            decisions = encode_candidate_decisions(
+                connection,
+                config,
+                prefixes=[normalized_prefix],
+            )
+            lifecycle = scope_lifecycle_payload_from_decisions(normalized_prefix, decisions)
+        _reset_folder_card_cache()
+        return {
+            "ok": True,
+            "message": f"Series lifecycle mode set to {normalized_mode}.",
+            "lifecycle": lifecycle,
+        }
+
     register_folder_routes(
         app,
         folder_status_payload=_folder_status_payload,
@@ -1157,6 +1211,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         folder_ai_tune_preview_action=_folder_ai_tune_preview_action,
         folder_ai_tune_confirm_action=_folder_ai_tune_confirm_action,
         clear_folder_tuning_action=_clear_folder_tuning_action,
+        save_series_lifecycle_action=_save_series_lifecycle_action,
         approve_measured_encode_recovery_action=_approve_measured_encode_recovery_action,
         queue_folder_encode_action=_queue_folder_encode_action,
         validate_folder_outputs_action=_validate_folder_outputs_action,
@@ -1716,6 +1771,7 @@ def _list_library_structure_cards(config: MediaforceConfig, connection: DBClient
     calibration_job_badges = _folder_calibration_job_badges(connection)
     return list_library_structure_cards(
         connection,
+        config=config,
         folder_group=_folder_group,
         review_badge_for_prefix=lambda prefix: _folder_review_badge(
             config,
@@ -1809,6 +1865,7 @@ def _folder_cards_for_group(
 
     return list_folder_cards(
         connection,
+        config=config,
         minimum_recommended_savings_bytes=minimum_recommended_savings_bytes,
         folder_group=folder_group,
         age_days=_age_days,
@@ -1823,6 +1880,7 @@ def _preview_folder_cards(config: MediaforceConfig, connection: DBClient) -> lis
     calibration_job_badges = _folder_calibration_job_badges(connection)
     return preview_folder_cards(
         connection,
+        config=config,
         minimum_recommended_savings_bytes=MIN_RECOMMENDED_SAVINGS_BYTES,
         folder_group=_folder_group,
         estimate_savings_bytes=_estimate_savings_bytes,
@@ -2866,31 +2924,9 @@ def _folder_series_context(prefix: str) -> dict[str, str] | None:
 
 
 def _folder_encode_candidate_count(connection: DBClient, config: MediaforceConfig, prefix: str) -> int:
-    _ = config
-    normalized_prefix = prefix.strip().strip("/")
-    prefix_filter = or_(
-        library_items.c.rel_path == normalized_prefix,
-        library_items.c.rel_path.like(_prefix_descendant_like_pattern(normalized_prefix), escape="\\"),
-    )
-    candidate_filter = or_(
-        library_items.c.status.in_(("discovered", "planned")),
-        and_(
-            library_items.c.status == "validated",
-            staged_artifacts.c.library_item_id.is_(None),
-        ),
-    )
-    return int(
-        connection.execute(
-            select(func.count())
-            .select_from(
-                library_items.outerjoin(
-                    staged_artifacts,
-                    staged_artifacts.c.library_item_id == library_items.c.id,
-                )
-            )
-            .where(prefix_filter)
-            .where(candidate_filter)
-        ).scalar_one()
+    return sum(
+        decision.eligible
+        for decision in encode_candidate_decisions(connection, config, prefixes=[prefix])
     )
 
 

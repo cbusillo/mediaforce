@@ -19,6 +19,7 @@ from mediaforce.core.type_defs import float_value
 from mediaforce.core.type_defs import int_value
 from mediaforce.core.type_defs import object_dict
 from mediaforce.core.type_defs import object_list
+from mediaforce.core.utils import content_version_fingerprint
 
 TRANSIENT_FILE_BUSY_ERRNOS = {errno.EBUSY}
 TRANSIENT_FILE_BUSY_RETRY_ATTEMPTS = 8
@@ -447,6 +448,7 @@ def promote_one_item(
     promoted_stat = destination_path.stat()
     promoted_probe = probe_media(destination_path)
     promoted_fingerprint = file_fingerprint(destination_path, promoted_stat, promoted_probe.duration_seconds)
+    promoted_content_fingerprint = content_version_fingerprint(destination_path, promoted_stat)
     now = timestamp()
     rel_path = str(destination_path.relative_to(config.source_root_map[item["media_root"]].parent))
     parent_dir = str(destination_path.parent.relative_to(config.source_root_map[item["media_root"]].parent))
@@ -478,6 +480,8 @@ def promote_one_item(
             audio_summary_json=promoted_probe.audio_summary_json,
             subtitle_summary_json=promoted_probe.subtitle_summary_json,
             attachment_summary_json=promoted_probe.attachment_summary_json,
+            content_version_changed_at=now,
+            content_version_fingerprint=promoted_content_fingerprint,
             status="promoted",
             updated_at=now,
             last_seen_at=now,

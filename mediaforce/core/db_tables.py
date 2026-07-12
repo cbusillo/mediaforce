@@ -62,6 +62,8 @@ library_items = Table(
     Column("attachment_summary_json", Text),
     Column("cadence_summary_json", Text),
     Column("media_fingerprint_json", Text),
+    Column("content_version_changed_at", Text),
+    Column("content_version_fingerprint", Text),
     Column("status", Text, nullable=False, server_default="discovered"),
     Column("priority_score", REAL, nullable=False, server_default="0"),
     Column("recommendation", Text),
@@ -73,6 +75,45 @@ library_items = Table(
 )
 Index("idx_library_items_rel_path", library_items.c.rel_path)
 Index("idx_library_items_status_score", library_items.c.status, library_items.c.priority_score.desc())
+
+plex_item_metadata = Table(
+    "plex_item_metadata",
+    metadata,
+    Column("library_item_id", Integer, ForeignKey("library_items.id", ondelete="CASCADE"), primary_key=True),
+    Column("plex_server_id", Text, nullable=False),
+    Column("plex_item_rating_key", Text, nullable=False),
+    Column("plex_part_id", Text),
+    Column("plex_show_rating_key", Text),
+    Column("plex_season_index", Integer),
+    Column("plex_added_at", Text),
+    Column("plex_part_path", Text, nullable=False),
+    Column("observed_at", Text, nullable=False),
+)
+Index("idx_plex_item_metadata_show", plex_item_metadata.c.plex_show_rating_key)
+
+series_metadata = Table(
+    "series_metadata",
+    metadata,
+    Column("series_prefix", Text, primary_key=True),
+    Column("plex_server_id", Text),
+    Column("plex_show_rating_key", Text),
+    Column("plex_guids_json", Text, nullable=False, server_default="[]"),
+    Column("plex_observed_at", Text),
+    Column("tmdb_series_id", Integer),
+    Column("tmdb_status", Text),
+    Column("tmdb_in_production", Integer),
+    Column("tmdb_observed_at", Text),
+    Column("updated_at", Text, nullable=False),
+)
+Index("idx_series_metadata_tmdb", series_metadata.c.tmdb_series_id)
+
+metadata_sync_state = Table(
+    "metadata_sync_state",
+    metadata,
+    Column("provider", Text, primary_key=True),
+    Column("last_success_at", Text),
+    Column("updated_at", Text, nullable=False),
+)
 
 run_manifests = Table(
     "run_manifests",
