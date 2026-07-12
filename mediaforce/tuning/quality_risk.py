@@ -219,10 +219,13 @@ def with_quality_risk_intent(
     request = dict(object_dict(operator_request))
     explicit_tags = object_list(request.get("quality_risk_tags"))
     inferred_tags = quality_risk_tags_from_text(note)
-    if not explicit_tags and not inferred_tags:
+    explicit_details = str(request.get("quality_risk_details") or "").strip()
+    if not explicit_tags and not inferred_tags and not explicit_details:
         return request or None
-    tags = normalize_quality_risk_tags(explicit_tags or inferred_tags)[:MAX_QUALITY_RISK_FEEDBACK_TAGS]
-    details = str(request.get("quality_risk_details") or note).strip()[:MAX_QUALITY_RISK_FEEDBACK_DETAILS]
+    tags = normalize_quality_risk_tags(explicit_tags or inferred_tags or ["other"])[
+        :MAX_QUALITY_RISK_FEEDBACK_TAGS
+    ]
+    details = str(explicit_details or note).strip()[:MAX_QUALITY_RISK_FEEDBACK_DETAILS]
     request.setdefault("source", "operator_note")
     request.setdefault("request_type", "quality_risk_feedback")
     request.setdefault("request_text", note.strip())

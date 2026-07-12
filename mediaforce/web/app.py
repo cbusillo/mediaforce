@@ -123,7 +123,7 @@ from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_fo
     settings_page_payload, stop_calibration_queue_action, stop_encode_queue_action, \
     validate_folder_outputs_action, \
     build_multimodal_review_pack, build_tuning_runtime_toolbelt, load_latest_failed_sample_job_state, \
-    load_retryable_sample_job_state
+    load_latest_failed_target_size_job_state, load_retryable_sample_job_state
 from mediaforce.web.runtime.folder_actions import ActionPayload, FolderItem
 from mediaforce.web.runtime.folder_cards import list_folder_cards
 from mediaforce.library.workflow_state import build_folder_workflow_state
@@ -290,7 +290,7 @@ def _read_advice_state(path: Path, *, strict: bool) -> ActionPayload | None:
         return None
     try:
         payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         if strict:
             raise
         return None
@@ -308,7 +308,7 @@ def _load_advice_state(config: MediaforceConfig, prefix: str) -> ActionPayload |
 def _load_advice_state_for_queue(config: MediaforceConfig, prefix: str) -> ActionPayload | None:
     try:
         return _read_advice_state(_advice_file(config, prefix), strict=True)
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
         raise HTTPException(
             status_code=409,
             detail=(
@@ -336,13 +336,32 @@ def _merge_quality_risk_records(existing: Any, incoming: Any) -> list[ActionPayl
     binding_keys = ("kind", "verdict", "sample_job_id", "policy_hash", "source_id", "prefix")
     for raw_record in object_list(incoming):
         record = object_dict(raw_record)
+        matching = [
+            current
+            for current in records
+            if all(current.get(key) == record.get(key) for key in binding_keys)
+        ]
         records = [
             current
             for current in records
             if not all(current.get(key) == record.get(key) for key in binding_keys)
         ]
-        records.append(record)
+        records.append(
+            max(
+                [*matching, record],
+                key=lambda current: _advice_record_timestamp(current.get("created_at")),
+            )
+        )
     return records[-100:]
+
+
+def _advice_record_timestamp(value: Any) -> datetime:
+    text = str(value or "").strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
 
 
 def _merge_advice_state(config: MediaforceConfig, prefix: str, patch: ActionPayload) -> ActionPayload:
@@ -940,7 +959,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             tuning_advice_payload=_tuning_advice_payload,
             load_pending_proposal=_load_pending_proposal,
             apply_policy_fragment=_apply_policy_fragment,
-            load_advice_state=_load_advice_state_for_queue,
+            load_advice_state=_load_advice_state,
             save_advice_state=_save_advice_state,
             advisor_routing=advisor_routing,
             save_job_state=_save_job_state,
@@ -1005,7 +1024,8 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 deps=_encode_queue_runtime_deps(),
             ),
             save_encode_job=save_encode_job,
-            load_advice_state=_load_advice_state,
+            load_advice_state=_load_advice_state_for_queue,
+            load_latest_failed_target_size_job_state=_load_latest_failed_target_size_job_state,
         )
 
     def _approve_measured_encode_recovery_action(normalized_prefix: str) -> ActionPayload:
@@ -2561,7 +2581,14 @@ def _review_pair_key(timestamp_seconds: float) -> int:
 
 def _save_advice_state(config: MediaforceConfig, prefix: str, advice: ActionPayload) -> None:
     with _locked_advice_state(config, prefix) as path:
-        save_advice_state(path, advice)
+        existing = _read_advice_state(path, strict=True) or {}
+        payload = dict(advice)
+        if existing.get("quality_risk_records") or payload.get("quality_risk_records"):
+            payload["quality_risk_records"] = _merge_quality_risk_records(
+                existing.get("quality_risk_records"),
+                payload.get("quality_risk_records"),
+            )
+        save_advice_state(path, payload)
 
 
 def _load_pending_proposal(config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
@@ -2710,6 +2737,14 @@ def _load_latest_failed_sample_job_state(
         prefix: str,
 ) -> dict[str, Any] | None:
     return load_latest_failed_sample_job_state(connection, config, prefix, _job_runtime_deps())
+
+
+def _load_latest_failed_target_size_job_state(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+) -> dict[str, Any] | None:
+    return load_latest_failed_target_size_job_state(connection, config, prefix, _job_runtime_deps())
 
 
 def _save_job_state(

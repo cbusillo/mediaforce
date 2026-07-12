@@ -2,6 +2,7 @@ import hashlib
 import json
 import math
 from collections.abc import Callable
+from datetime import UTC, datetime
 import uuid
 from pathlib import Path
 from typing import Any, Protocol, TypeAlias
@@ -170,6 +171,7 @@ def queue_folder_encode_action(
         prepare_terminal_encode_job_for_requeue_fn: PrepareTerminalEncodeJobForRequeueFn,
         save_encode_job: SaveEncodeJobFn,
         load_advice_state: LoadAdviceStateFn | None = None,
+        load_latest_failed_target_size_job_state: LoadJobStateFn | None = None,
 ) -> ActionPayload:
     with open_db(config.paths.db_path) as connection:
         existing_job = load_job_state(connection, config, normalized_prefix)
@@ -182,7 +184,15 @@ def queue_folder_encode_action(
         if calibration is None:
             raise HTTPException(status_code=400, detail="Run a sampled calibration first.")
         calibration_payload = object_dict(calibration)
-        failed_target_reason = _failed_target_size_job_blocking_reason(existing_job, calibration_payload)
+        latest_failed_sample_job = (
+            load_latest_failed_target_size_job_state(connection, config, normalized_prefix)
+            if load_latest_failed_target_size_job_state is not None
+            else existing_job
+        )
+        failed_target_reason = _failed_target_size_job_blocking_reason(
+            latest_failed_sample_job,
+            calibration_payload,
+        )
         if failed_target_reason is not None:
             raise HTTPException(status_code=409, detail=failed_target_reason)
         if load_advice_state is not None:
@@ -195,7 +205,7 @@ def queue_folder_encode_action(
                 operator_request=object_dict(advice_state.get("operator_request")) or None,
                 calibration=calibration_payload,
                 advice_state=advice_state,
-                latest_failed_sample_job=existing_job,
+                latest_failed_sample_job=latest_failed_sample_job,
             )
             blocking_reason = _quality_risk_blocking_reason(quality_risk_contract)
             if blocking_reason is not None:
@@ -1005,14 +1015,13 @@ def _failed_target_size_job_blocking_reason(
     target_status = str(result.get("target_size_status") or trace.get("status") or "").strip().lower()
     if target_status not in {"infeasible", "quality_conflict"}:
         return None
-    accepted_at = str(calibration.get("accepted_at") or "").strip()
-    failed_at = str(
+    accepted_at = _parse_state_timestamp(calibration.get("accepted_at"))
+    failed_at = _parse_state_timestamp(
         job_payload.get("finished_at")
         or job_payload.get("updated_at")
         or job_payload.get("created_at")
-        or ""
-    ).strip()
-    if accepted_at and failed_at and failed_at <= accepted_at:
+    )
+    if accepted_at and failed_at and failed_at < accepted_at:
         return None
     if target_status == "infeasible":
         return (
@@ -1023,3 +1032,14 @@ def _failed_target_size_job_blocking_reason(
         "The latest size-directed test could not reach this target without crossing the quality floor. "
         "Choose a different size or revise the quality decision, then approve a fresh test before starting production."
     )
+
+
+def _parse_state_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)

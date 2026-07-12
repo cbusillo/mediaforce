@@ -13530,7 +13530,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "",
                 False,
                 now_iso=web_app._now_iso,
-                load_job_state=lambda *_args, **_kwargs: failed_job,
+                load_job_state=self._noop_load_job_state,
                 load_calibration_state=lambda *_args, **_kwargs: calibration,
                 review_gate=self._accepted_review_gate,
                 upsert_override=self._noop_upsert_override,
@@ -13538,6 +13538,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
                 prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
                 save_encode_job=save_encode_job,
+                load_latest_failed_target_size_job_state=lambda *_args, **_kwargs: failed_job,
             )
 
         self.assertEqual(raised.exception.status_code, 409)
@@ -13547,7 +13548,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         reason = folder_actions_runtime._failed_target_size_job_blocking_reason(
             {
                 "status": "failed",
-                "finished_at": "2026-07-11T23:59:00+00:00",
+                "finished_at": "2026-07-11T19:59:00-04:00",
                 "result": {"target_size_status": "quality_conflict"},
             },
             {"accepted_at": "2026-07-12T00:00:00+00:00"},
@@ -13583,6 +13584,57 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             {str(object_dict(record).get("verdict")) for record in object_list(merged["quality_risk_records"])},
             {"approved", "rejected"},
         )
+
+    def test_advice_save_preserves_existing_quality_risk_records(self) -> None:
+        prefix = "tv/show/Season 1"
+        rejected = {
+            "kind": "post_test",
+            "verdict": "rejected",
+            "sample_job_id": "sample-1",
+            "policy_hash": "policy-1",
+            "source_id": "source-1",
+            "prefix": prefix,
+            "created_at": "2026-07-12T00:01:00+00:00",
+        }
+        web_app._save_advice_state(self.config, prefix, {"quality_risk_records": [rejected]})
+
+        web_app._save_advice_state(self.config, prefix, {"summary": "Fresh tuning advice."})
+
+        saved = web_app._load_advice_state(self.config, prefix)
+        self.assertEqual(object_dict(saved).get("summary"), "Fresh tuning advice.")
+        self.assertEqual(
+            [object_dict(record).get("verdict") for record in object_list(object_dict(saved).get("quality_risk_records"))],
+            ["rejected"],
+        )
+
+    def test_advice_merge_keeps_newer_same_verdict_record(self) -> None:
+        prefix = "tv/show/Season 1"
+        newer = {
+            "kind": "post_test",
+            "verdict": "rejected",
+            "sample_job_id": "sample-1",
+            "policy_hash": "policy-1",
+            "source_id": "source-1",
+            "prefix": prefix,
+            "created_at": "2026-07-12T00:02:00+00:00",
+            "details": "Newer rejection evidence.",
+        }
+        stale = {
+            **newer,
+            "created_at": "2026-07-12T00:01:00+00:00",
+            "details": "Stale rejection evidence.",
+        }
+        web_app._save_advice_state(self.config, prefix, {"quality_risk_records": [newer]})
+
+        merged = web_app._merge_advice_state(
+            self.config,
+            prefix,
+            {"quality_risk_records": [stale]},
+        )
+
+        records = object_list(merged["quality_risk_records"])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(object_dict(records[0]).get("details"), "Newer rejection evidence.")
 
     def test_queue_advice_loader_fails_closed_on_corrupt_state(self) -> None:
         prefix = "tv/show/Season 1"

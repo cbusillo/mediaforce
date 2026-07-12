@@ -60,6 +60,7 @@ from mediaforce.tuning.tuning_memory import (
 )
 from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_risk_public_view, \
     with_quality_risk_intent
+from mediaforce.tuning.calibration_jobs import load_latest_failed_target_size_sample_job
 from mediaforce.tuning.target_size_search import TargetSizeSearchError
 from mediaforce.web.app import (
     _advice_file,
@@ -7774,6 +7775,50 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(inferred_request)
         self.assertEqual(inferred_request["quality_risk_tags"], ["motion_breakup"])
         self.assertEqual(len(inferred_request["quality_risk_details"]), 2000)
+        details_only_request = with_quality_risk_intent(
+            {"quality_risk_details": "x" * 3000},
+            note="Make another test.",
+        )
+        self.assertIsNotNone(details_only_request)
+        self.assertEqual(details_only_request["quality_risk_tags"], ["other"])
+        self.assertEqual(len(details_only_request["quality_risk_details"]), 2000)
+
+    def test_latest_failed_target_size_job_ignores_newer_unrelated_failure(self) -> None:
+        prefix = "tv/show/Season 1"
+        with open_db(self.config.paths.db_path) as connection:
+            for job_id, created_at, result in (
+                (
+                    "target-failed",
+                    "2026-07-12T00:00:00+00:00",
+                    {"target_size_status": "quality_conflict"},
+                ),
+                (
+                    "unrelated-failed",
+                    "2026-07-12T00:01:00+00:00",
+                    {"failure_kind": "host_unavailable"},
+                ),
+            ):
+                connection.execute(
+                    calibration_jobs.insert().values(
+                        job_id=job_id,
+                        prefix=prefix,
+                        status="failed",
+                        lane="sample",
+                        action="ai_tune",
+                        host_json="{}",
+                        notes="note",
+                        policy_json="{}",
+                        sample_item_json="{}",
+                        result_json=json.dumps(result),
+                        created_at=created_at,
+                        updated_at=created_at,
+                    )
+                )
+
+            job = load_latest_failed_target_size_sample_job(connection, prefix)
+
+        self.assertIsNotNone(job)
+        self.assertEqual(job["job_id"], "target-failed")
 
     def test_run_calibration_job_marks_cancelled_run_stopped(self) -> None:
         saved_statuses: list[str] = []
