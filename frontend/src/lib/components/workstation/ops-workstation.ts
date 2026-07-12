@@ -73,23 +73,33 @@ function activeJobStatus(status: unknown): boolean {
 }
 
 function hostEncodeReady(host: HostRuntime): boolean {
+	const storageRecovery = host.storage_recovery_available === true;
 	return (
-		host.available &&
+		(host.available || storageRecovery) &&
 		host.schedule_open !== false &&
-		host.queue_active !== false &&
+		(storageRecovery || host.queue_active !== false) &&
 		numberValue(host.active_encode_count) < numberValue(host.max_parallel_encodes)
 	);
 }
 
 function hostCapacityCounts(hosts: HostsPayload | null | undefined) {
 	const rows = hosts?.hosts ?? [];
-	const available = rows.filter((host) => host.available).length;
+	const available = rows.filter(
+		(host) => host.available || host.storage_recovery_available === true
+	).length;
 	return {
 		available,
 		activeEncodes: rows.reduce((total, host) => total + numberValue(host.active_encode_count), 0),
 		encodeReady: rows.filter(hostEncodeReady).length,
-		busy: rows.filter((host) => host.available && numberValue(host.active_encode_count) > 0).length,
-		scheduledOff: rows.filter((host) => host.available && host.schedule_open === false).length,
+		busy: rows.filter(
+			(host) =>
+				(host.available || host.storage_recovery_available === true) &&
+				numberValue(host.active_encode_count) > 0
+		).length,
+		scheduledOff: rows.filter(
+			(host) =>
+				(host.available || host.storage_recovery_available === true) && host.schedule_open === false
+		).length,
 		unavailable: Math.max(rows.length - available, 0),
 		total: rows.length
 	};
@@ -810,12 +820,13 @@ export function buildOpsFooterSignals(
 		},
 		{
 			label: 'Workers',
-			value: `${hosts?.hosts.filter((host) => host.available).length ?? 0}/${hosts?.hosts.length ?? 0}`
+			value: `${hosts?.hosts.filter((host) => host.available || host.storage_recovery_available === true).length ?? 0}/${hosts?.hosts.length ?? 0}`
 		}
 	];
 }
 
 export function hostTone(host: HostRuntime, fleetHasReadyCapacity = false): ShellTone {
+	if (host.storage_recovery_available === true) return 'wait';
 	if (!host.available) return fleetHasReadyCapacity ? 'wait' : 'fail';
 	if (host.active_encode_count > 0) return 'active';
 	if (host.schedule_open === false) return 'wait';
@@ -824,6 +835,7 @@ export function hostTone(host: HostRuntime, fleetHasReadyCapacity = false): Shel
 }
 
 export function hostStateCopy(host: HostRuntime): string {
+	if (host.storage_recovery_available === true) return 'Reconnects storage';
 	if (!host.available) return 'Unavailable';
 	if (host.active_encode_count > 0) return 'Busy';
 	if (host.schedule_open === false) return 'Window closed';

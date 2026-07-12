@@ -340,6 +340,7 @@ export function buildBenchHostOptions(
 		.map((host) => {
 			const key = compactText(host.key);
 			const available = host.available !== false;
+			const storageRecovery = host.storage_recovery_available === true;
 			const scheduleOpen = typeof host.schedule_open === 'boolean' ? host.schedule_open : null;
 			return {
 				key,
@@ -347,11 +348,13 @@ export function buildBenchHostOptions(
 				detail: compactText(host.detail) || compactText(host.message),
 				available,
 				scheduleOpen,
-				state: !available
-					? 'Unavailable'
-					: scheduleOpen === false
-						? 'Sample ok, encode later'
-						: 'Ready for samples'
+				state: storageRecovery
+					? 'Reconnects for sample'
+					: !available
+						? 'Unavailable'
+						: scheduleOpen === false
+							? 'Sample ok, encode later'
+							: 'Ready for samples'
 			};
 		})
 		.filter((host) => host.key);
@@ -383,6 +386,13 @@ function processingHostState(
 		: active
 			? `${active} encoding`
 			: '';
+	if (host.storage_recovery_available === true) {
+		return {
+			state: 'Reconnects storage',
+			tone: 'wait',
+			detail: compactText(host.message) || compactText(host.detail) || host.active_reason
+		};
+	}
 	if (!host.available) {
 		return {
 			state: 'Unavailable',

@@ -286,7 +286,9 @@ export interface HostRuntime {
 	probe_message?: string;
 	media_access?: string;
 	source_roots?: Record<string, string>;
+	storage_recovery_available?: boolean;
 	missing_paths: string[];
+	missing_mounts?: string[];
 	issues: string[];
 	probe_issues?: string[];
 	detail: string | null;

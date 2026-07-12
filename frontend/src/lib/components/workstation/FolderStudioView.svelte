@@ -1273,7 +1273,13 @@
 							<div class="host-row">
 								<StateBadge
 									compact
-									tone={host.available ? (host.scheduleOpen === false ? 'wait' : 'ready') : 'fail'}
+									tone={host.state === 'Reconnects for sample'
+										? 'wait'
+										: host.available
+											? host.scheduleOpen === false
+												? 'wait'
+												: 'ready'
+											: 'fail'}
 									label={host.state}
 								/>
 								<span>{host.label}{host.detail ? ` · ${host.detail}` : ''}</span>
