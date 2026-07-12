@@ -57,10 +57,14 @@ class ExternalMetadataTests(unittest.TestCase):
         def fake_fetch(url: str, headers, _timeout: float):
             requests.append((url, dict(headers)))
             if "type=2" in url:
+                query = parse_qs(urlsplit(url).query)
                 return {
                     "MediaContainer": {
                         "totalSize": 1,
-                        "Metadata": [{"ratingKey": "show-1", "Guid": [{"id": "tmdb://42"}]}],
+                        "Metadata": [{
+                            "ratingKey": "show-1",
+                            "Guid": ([{"id": "tmdb://42"}] if query.get("includeGuids") == ["1"] else []),
+                        }],
                     }
                 }, {}
             if "type=4" in url:
@@ -99,6 +103,7 @@ class ExternalMetadataTests(unittest.TestCase):
         self.assertEqual(show.guids, ("tmdb://42",))
         self.assertEqual(item.season_index, 0)
         self.assertEqual(series.status, "Returning Series")
+        self.assertEqual(parse_qs(urlsplit(requests[0][0]).query).get("includeGuids"), ["1"])
         self.assertEqual(requests[0][1]["X-Plex-Token"], "plex-secret")
         self.assertEqual(requests[-1][1]["Authorization"], "Bearer tmdb-secret")
         self.assertTrue(all("secret" not in url for url, _ in requests))

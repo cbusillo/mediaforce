@@ -146,7 +146,7 @@ class PlexClient:
                     )
 
     def shows(self) -> Iterator[PlexShow]:
-        for metadata in self._metadata(2):
+        for metadata in self._metadata(2, include_guids=True):
             rating_key = str(metadata.get("ratingKey") or "").strip()
             if not rating_key:
                 raise ProviderHttpError("Plex show metadata did not include ratingKey")
@@ -162,13 +162,16 @@ class PlexClient:
             }))
             yield PlexShow(rating_key=rating_key, guids=guids)
 
-    def _metadata(self, metadata_type: int) -> Iterator[JSONPayload]:
+    def _metadata(self, metadata_type: int, *, include_guids: bool = False) -> Iterator[JSONPayload]:
         page_size = 500
         offset = 0
         while True:
+            query: dict[str, object] = {"type": metadata_type, "includeElements": "Guid,Media"}
+            if include_guids:
+                query["includeGuids"] = 1
             payload, response_headers = self._get(
                 "library/all",
-                query={"type": metadata_type, "includeElements": "Guid,Media"},
+                query=query,
                 headers={
                     "X-Plex-Container-Start": str(offset),
                     "X-Plex-Container-Size": str(page_size),
