@@ -45,6 +45,47 @@ export interface FolderWorkflowState {
 	blockers: string[];
 }
 
+export interface LifecycleHoldReason {
+	code: string;
+	label: string;
+	detail: string;
+	release_at?: string | null;
+}
+
+export interface SeasonLifecycleState {
+	prefix: string;
+	label: string;
+	season_number?: number | null;
+	is_special: boolean;
+	ambiguous: boolean;
+	is_current_season: boolean;
+	candidate_count: number;
+	eligible_candidate_count: number;
+	held_candidate_count: number;
+	hold_reasons: LifecycleHoldReason[];
+	activity_at?: string | null;
+	ranking_added_at?: string | null;
+	ranking_added_source?: string;
+}
+
+export interface LifecycleState {
+	schema_version: number;
+	prefix: string;
+	series_prefix?: string | null;
+	policy_mode?: 'auto' | 'on' | 'off';
+	provider_state?: 'active' | 'ended' | 'unknown' | 'stale';
+	provider_status?: string | null;
+	provider_observed_at?: string | null;
+	current_season_number?: number | null;
+	candidate_count: number;
+	eligible_candidate_count: number;
+	held_candidate_count: number;
+	hold_reason_counts?: Record<string, number>;
+	ranking_added_at?: string | null;
+	can_override_holds?: boolean;
+	seasons: SeasonLifecycleState[];
+}
+
 export interface FolderCard {
 	prefix: string;
 	title: string;
@@ -64,6 +105,7 @@ export interface FolderCard {
 	review_badge_tone?: string | null;
 	review_badge_detail?: string | null;
 	workflow_state?: FolderWorkflowState | null;
+	lifecycle?: LifecycleState | null;
 	details_loading: boolean;
 }
 
@@ -392,6 +434,23 @@ export interface SettingsPayload {
 		total_size_bytes: number;
 		has_cleanup: boolean;
 	} | null;
+	metadata: {
+		plex: {
+			enabled: boolean;
+			base_url: string;
+			library_roots: Record<string, string>;
+			token_env: string;
+			token_configured: boolean;
+			refresh_interval_hours: number;
+		};
+		tmdb: {
+			enabled: boolean;
+			base_url: string;
+			token_env: string;
+			token_configured: boolean;
+			refresh_interval_hours: number;
+		};
+	};
 	runtime_settings_path: string;
 	repo_config_path: string;
 	host_notice: string | null;
@@ -739,6 +798,7 @@ export interface FolderPayload {
 	encode_queue_scheduler?: Record<string, unknown>;
 	encode_candidate_count?: number;
 	workflow_state?: FolderWorkflowState | null;
+	lifecycle?: LifecycleState | null;
 }
 
 export interface FolderBenchPreviewResponse {

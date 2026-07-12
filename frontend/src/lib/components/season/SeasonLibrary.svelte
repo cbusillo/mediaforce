@@ -1,9 +1,12 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
+	import { invalidateAll } from '$app/navigation';
+	import { postJson } from '$lib/api/client';
 	import type {
 		DashboardFoldersPayload,
 		DashboardSummaryPayload,
-		FolderCard
+		FolderCard,
+		SeasonLifecycleState
 	} from '$lib/api/types';
 	import {
 		activeSeasonCards,
@@ -42,6 +45,8 @@
 	let sortMode = $state<LibrarySort>('size');
 	let selectedShowPrefix = $state('');
 	let showListElement: HTMLElement | undefined = $state();
+	let policySaving = $state(false);
+	let policyError = $state('');
 
 	const seasonCards = $derived(
 		foldersPayload.folders.filter(
@@ -61,6 +66,10 @@
 			? [...(groupedSeasons.get(selectedShow.prefix) ?? [])].sort(compareSeasonCards)
 			: []
 	);
+	const selectedLifecycle = $derived(selectedShow?.lifecycle ?? null);
+	const lifecycleAvailable = $derived(selectedLifecycle !== null);
+	const eligibleEpisodeCount = $derived(selectedLifecycle?.eligible_candidate_count ?? 0);
+	const heldEpisodeCount = $derived(selectedLifecycle?.held_candidate_count ?? 0);
 	const activeCards = $derived(activeSeasonCards(seasonCards, dashboard).slice(0, 4));
 	const resumeCard = $derived(activeCards[0] ?? null);
 	const librarySize = $derived(
@@ -123,11 +132,77 @@
 		return title.trim().slice(0, 1).toUpperCase() || 'T';
 	}
 
+	function fullyHeld(card: FolderCard): boolean {
+		return Boolean(
+			card.lifecycle &&
+			card.lifecycle.held_candidate_count > 0 &&
+			card.lifecycle.eligible_candidate_count === 0
+		);
+	}
+
 	function librarySizeLabel(bytes: number): string {
 		if (bytes >= 1024 ** 4) {
 			return `${(bytes / 1024 ** 4).toLocaleString('en-US', { maximumFractionDigits: 1 })} TB`;
 		}
 		return formatFileSize(bytes);
+	}
+
+	function encodePrefix(prefix: string): string {
+		return prefix
+			.split('/')
+			.map((segment) => encodeURIComponent(segment))
+			.join('/');
+	}
+
+	function providerStateCopy(): string {
+		const lifecycle = selectedLifecycle;
+		if (!lifecycle)
+			return detailsPending ? 'Checking lifecycle policy' : 'Lifecycle policy unavailable';
+		if (lifecycle.provider_state === 'active') return lifecycle.provider_status || 'Active series';
+		if (lifecycle.provider_state === 'ended') return lifecycle.provider_status || 'Ended series';
+		if (lifecycle.provider_state === 'stale') return 'Cached status is stale';
+		return 'Series status unknown';
+	}
+
+	function lifecycleModeCopy(): string {
+		switch (selectedLifecycle?.policy_mode ?? 'auto') {
+			case 'on':
+				return 'On protects the highest numbered season until a newer season appears or it ages out.';
+			case 'off':
+				return 'Off skips current-season protection. Recent additions can still be held.';
+			default:
+				return 'Auto uses series status. Active, unknown, or stale status protects the current season.';
+		}
+	}
+
+	function seasonHoldCopy(season: SeasonLifecycleState | undefined): string {
+		if (!season?.held_candidate_count) return '';
+		const reasonCodes = new Set(season.hold_reasons.map((reason) => reason.code));
+		if (reasonCodes.has('current_season') && reasonCodes.has('recent_acquisition')) {
+			return 'Current + recent · held';
+		}
+		if (reasonCodes.has('current_season')) return 'Current · held';
+		if (reasonCodes.has('recent_acquisition')) return 'Recent · held';
+		return `${season.held_candidate_count} held`;
+	}
+
+	async function saveLifecycleMode(event: Event) {
+		if (!selectedShow || policySaving) return;
+		const mode = (event.currentTarget as HTMLSelectElement).value;
+		policySaving = true;
+		policyError = '';
+		try {
+			const response = await postJson<{ ok: boolean; message?: string }>(
+				`/api/folders/${encodePrefix(selectedShow.prefix)}/series-lifecycle`,
+				{ mode }
+			);
+			if (!response.ok) throw new Error(response.message || 'Lifecycle policy could not be saved.');
+			await invalidateAll();
+		} catch (error) {
+			policyError = error instanceof Error ? error.message : 'Lifecycle policy could not be saved.';
+		} finally {
+			policySaving = false;
+		}
 	}
 </script>
 
@@ -188,6 +263,8 @@
 					{resumeCard.card.item_count} episodes · {formatFileSize(resumeCard.card.total_size_bytes)}
 					{#if resumeCard.card.details_loading}
 						· savings calculating
+					{:else if fullyHeld(resumeCard.card)}
+						· protected · stays original
 					{:else}
 						· about {formatFileSize(resumeCard.card.projected_reclaim_bytes)} to save
 					{/if}
@@ -276,6 +353,9 @@
 								{#if show.details_loading && show.projected_reclaim_bytes <= 0}
 									<strong class="metric-pending">…</strong>
 									<small>{detailsPending ? 'calculating' : 'not estimated'}</small>
+								{:else if fullyHeld(show)}
+									<strong>Held</strong>
+									<small>no eligible savings</small>
 								{:else}
 									<strong>~{formatFileSize(show.projected_reclaim_bytes)}</strong>
 									<small>{show.details_loading ? 'partial estimate' : 'to save'}</small>
@@ -302,6 +382,10 @@
 										><strong class="metric-pending">…</strong>
 										{detailsPending ? 'calculating savings' : 'savings not estimated'}</span
 									>
+								{:else if fullyHeld(selectedShow)}
+									<span class="show-summary__savings"
+										><strong>Held</strong> · no eligible savings</span
+									>
 								{:else}
 									<span class="show-summary__savings"
 										><strong>~{formatFileSize(selectedShow.projected_reclaim_bytes)}</strong> to
@@ -309,27 +393,65 @@
 									>
 								{/if}
 							</div>
+							<div class="show-policy">
+								<label>
+									<span>Current-season policy</span>
+									<select
+										value={selectedLifecycle?.policy_mode ?? 'auto'}
+										onchange={saveLifecycleMode}
+										disabled={policySaving || !lifecycleAvailable}
+										aria-describedby="current-season-policy-help"
+									>
+										<option value="auto">Auto · use series status</option>
+										<option value="on">On · protect current season</option>
+										<option value="off">Off · no current-season hold</option>
+									</select>
+									<small id="current-season-policy-help">{lifecycleModeCopy()}</small>
+								</label>
+								<div>
+									<strong>{providerStateCopy()}</strong>
+									{#if lifecycleAvailable}
+										<span>{eligibleEpisodeCount} eligible · {heldEpisodeCount} held</span>
+									{:else}
+										<span
+											>{detailsPending ? 'Checking eligibility…' : 'Eligibility unavailable'}</span
+										>
+									{/if}
+								</div>
+							</div>
+							{#if policyError}<p class="policy-error">{policyError}</p>{/if}
 						{/if}
 					</div>
 
 					{#if selectedShow && selectedSeasons.length > 1}
 						<div class="show-action">
 							<div>
-								<strong>Use one setup for all {selectedSeasons.length} seasons</strong>
-								<span
-									>Approve one representative test, then make all {selectedShow.item_count} episodes with
-									that choice.</span
-								>
+								<strong>Use one setup for eligible seasons</strong>
+								{#if lifecycleAvailable}
+									<span
+										>Approve one representative test, then make {eligibleEpisodeCount} eligible episodes
+										with that choice. {heldEpisodeCount} held episodes stay original.</span
+									>
+								{:else}
+									<span>Mediaforce is checking which seasons the lifecycle policy allows.</span>
+								{/if}
 							</div>
-							<a class="primary-button" href={resolve(folderHref(selectedShow.prefix))}
-								>Set up whole show</a
-							>
+							{#if lifecycleAvailable && eligibleEpisodeCount > 0}
+								<a class="primary-button" href={resolve(folderHref(selectedShow.prefix))}
+									>Set up eligible seasons</a
+								>
+							{:else}
+								<button class="primary-button primary-button--disabled" type="button" disabled>
+									{lifecycleAvailable ? 'No eligible seasons' : 'Checking eligibility'}
+								</button>
+							{/if}
 						</div>
 					{/if}
 
 					{#each selectedSeasons as season (season.prefix)}
 						{@const state = librarySeasonState(season, dashboard)}
 						{@const seasonName = seasonIdentity(season.prefix).season}
+						{@const seasonLifecycle = season.lifecycle?.seasons?.[0]}
 						<a class="season-row" href={resolve(folderHref(season.prefix))}>
 							<span class="season-number">{seasonNumberLabel(seasonName)}</span>
 							<span class="season-copy">
@@ -342,12 +464,23 @@
 								{#if season.details_loading}
 									<strong class="metric-pending">…</strong>
 									<small>{detailsPending ? 'calculating savings' : 'not estimated'}</small>
+								{:else if seasonLifecycle?.held_candidate_count && !seasonLifecycle.eligible_candidate_count}
+									<strong>Held</strong>
+									<small>stays original</small>
 								{:else}
 									<strong>~{formatFileSize(season.projected_reclaim_bytes)}</strong>
 									<small>to save · {savingsPercent(season)}%</small>
 								{/if}
 							</span>
-							{#if state.key !== 'needs_test'}
+							{#if seasonLifecycle?.held_candidate_count}
+								<span
+									class="status-chip"
+									data-tone="attention"
+									title={seasonLifecycle.hold_reasons
+										.map((reason) => `${reason.label}: ${reason.detail}`)
+										.join(' ')}>{seasonHoldCopy(seasonLifecycle)}</span
+								>
+							{:else if state.key !== 'needs_test'}
 								<span class="status-chip" data-tone={state.tone}>{state.label}</span>
 							{/if}
 							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4.5 5.5 5.5L7 15.5" /></svg>
@@ -766,6 +899,51 @@
 		color: var(--mf-ready-fg);
 	}
 
+	.show-policy {
+		align-items: center;
+		border-left: 1px solid var(--mf-line-muted);
+		display: flex;
+		gap: 12px;
+		padding-left: 16px;
+	}
+
+	.show-policy label,
+	.show-policy > div {
+		display: grid;
+		gap: 3px;
+	}
+
+	.show-policy label small {
+		color: var(--mf-fg-tertiary);
+		font-size: 11px;
+		line-height: 1.35;
+		max-width: 360px;
+	}
+
+	.show-policy select {
+		background: var(--mf-bg-panel-2);
+		border: 1px solid var(--mf-line-strong);
+		border-radius: var(--mf-radius-1);
+		color: var(--mf-fg-primary);
+		font: inherit;
+		min-height: 30px;
+		padding: 3px 28px 3px 8px;
+	}
+
+	.show-policy strong {
+		font-size: 12px;
+	}
+
+	.show-policy span {
+		font-size: 11px;
+	}
+
+	.policy-error {
+		color: var(--mf-fail-fg);
+		font-size: 12px;
+		margin: 0;
+	}
+
 	.show-action {
 		align-items: center;
 		background: var(--mf-ready-bg);
@@ -887,6 +1065,11 @@
 	.primary-button:hover {
 		background: var(--mf-active-solid-hi);
 		color: var(--mf-fg-on-accent);
+	}
+
+	.primary-button--disabled {
+		cursor: default;
+		opacity: 0.62;
 	}
 
 	.secondary-button {
@@ -1022,7 +1205,16 @@
 		}
 
 		.season-list__heading {
+			flex-wrap: wrap;
 			position: static;
+		}
+
+		.show-policy {
+			border-left: 0;
+			border-top: 1px solid var(--mf-line-muted);
+			justify-content: space-between;
+			padding: 10px 0 0;
+			width: 100%;
 		}
 
 		.show-action {

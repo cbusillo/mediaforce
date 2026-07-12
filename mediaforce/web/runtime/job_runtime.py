@@ -27,6 +27,7 @@ from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.process_control import ManagedProcessController
 from mediaforce.library.scanner import scan_library
+from mediaforce.library.metadata_sync import sync_external_metadata
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.core.type_defs import JSONValue, object_dict
 from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
@@ -311,8 +312,17 @@ def run_scan_job(
     deps.save_scan_job_state(config, prefix, job)
 
     try:
+        metadata_stats: dict[str, Any] | None = None
         with open_db(config.paths.db_path) as connection:
             stats = scan_library(connection, config, prefixes=[prefix] if prefix else None)
+            if prefix is None:
+                try:
+                    metadata_stats = sync_external_metadata(connection, config).to_payload()
+                except Exception as exc:
+                    metadata_stats = {
+                        "status": "completed_with_warnings",
+                        "message": f"External metadata refresh failed: {type(exc).__name__}",
+                    }
         if prefix is None:
             deps.save_catalog_signature(config)
             deps.reset_folder_card_cache()
@@ -326,6 +336,7 @@ def run_scan_job(
                 "finished_at": deps.now_iso(),
                 "error": None,
                 "stats": _stats_payload(stats),
+                "metadata": metadata_stats,
             },
         )
     except Exception as exc:

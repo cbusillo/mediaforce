@@ -15,8 +15,10 @@ from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.planner import recommend_item
 from mediaforce.library.run_manifests import build_run_manifest as build_db_run_manifest, \
     select_candidates as select_run_manifest_candidates, \
+    select_encode_candidates as select_run_manifest_encode_candidates, \
     write_manifest as write_run_manifest
 from mediaforce.library.scanner import scan_library
+from mediaforce.library.metadata_sync import sync_external_metadata
 from mediaforce.review import generate_compare_clips
 from mediaforce.state_cleanup import purge_transient_artifacts
 
@@ -138,9 +140,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     with open_db(config.paths.db_path) as connection:
         if args.command == "scan":
             stats = scan_library(connection, config, prefixes=args.prefix or None, limit=args.limit)
+            metadata_status = None
+            if not args.prefix and args.limit is None:
+                metadata_status = sync_external_metadata(connection, config).status
             print(
                 f"scan_id={stats.scan_id} discovered={stats.discovered} reprobed={stats.reprobed} "
                 f"unchanged={stats.unchanged} missing={stats.missing} total_seen={stats.total_seen}"
+                f"{f' metadata={metadata_status}' if metadata_status else ''}"
             )
             return 0
 
@@ -151,10 +157,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "plan":
-            rows = _select_candidates(
+            rows = _select_encode_candidates(
                 connection,
                 config,
-                statuses=["discovered", "planned", "validated"],
                 prefixes=args.prefix,
                 limit=args.limit or int(config.planning.get("default_limit", 20)),
                 buckets=args.bucket or None,
@@ -387,6 +392,22 @@ def _select_candidates(
     )
 
 
+def _select_encode_candidates(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefixes: list[str],
+        limit: int | None,
+        buckets: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    return select_run_manifest_encode_candidates(
+        connection,
+        config,
+        prefixes=prefixes,
+        limit=limit,
+        buckets=buckets,
+    )
+
+
 def _print_report(rows: list[dict[str, Any]], config: MediaforceConfig) -> None:
     if not rows:
         print("No matching items found.")
@@ -444,10 +465,9 @@ def _create_campaign_manifest(
     )
     summary = inspect_prefix(connection, config, prefix)
     _print_folder_summary(summary)
-    rows = _select_candidates(
+    rows = _select_encode_candidates(
         connection,
         config,
-        statuses=["discovered", "planned", "validated"],
         prefixes=[prefix],
         limit=limit,
         buckets=buckets,

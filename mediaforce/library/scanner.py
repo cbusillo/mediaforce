@@ -4,7 +4,7 @@ import subprocess
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from sqlalchemy import case
 from sqlalchemy import insert
@@ -32,7 +32,7 @@ from mediaforce.encoding.fingerprint import (
 from mediaforce.library.planner import recommend_item
 from mediaforce.library.probe import probe_media
 from mediaforce.core.type_defs import int_value, object_list
-from mediaforce.core.utils import file_fingerprint, timestamp
+from mediaforce.core.utils import content_version_fingerprint, file_fingerprint, timestamp
 
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mp4", ".ts"}
 SCAN_COMMIT_INTERVAL = 25
@@ -80,6 +80,10 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
             stats.total_seen += 1
 
             stat_result = file_path.stat()
+            try:
+                content_fingerprint = content_version_fingerprint(file_path, stat_result)
+            except OSError:
+                content_fingerprint = None
             row = connection.execute(
                 select(library_items).where(library_items.c.source_path == source_path)
             ).mappings().fetchone()
@@ -88,6 +92,11 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                     row
                     and row["size_bytes"] == stat_result.st_size
                     and row["mtime_ns"] == stat_result.st_mtime_ns
+                    and (
+                        row.get("content_version_fingerprint") is None
+                        or content_fingerprint is None
+                        or row["content_version_fingerprint"] == content_fingerprint
+                    )
                     and _cadence_summary_present(row.get("cadence_summary_json"))
                     and _media_fingerprint_present(row.get("media_fingerprint_json"))
             ):
@@ -98,6 +107,13 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                         last_scan_id=scan_id,
                         last_seen_at=started_at,
                         updated_at=started_at,
+                        content_version_changed_at=case(
+                            (library_items.c.status == "missing", started_at),
+                            else_=library_items.c.content_version_changed_at,
+                        ),
+                        content_version_fingerprint=(
+                            content_fingerprint or row.get("content_version_fingerprint")
+                        ),
                         status=case((library_items.c.status == "missing", "discovered"), else_=library_items.c.status),
                     )
                 )
@@ -157,6 +173,8 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                 "recommendation_reason": recommendation.reason,
                 "last_scan_id": scan_id,
                 "discovered_at": started_at,
+                "content_version_changed_at": started_at,
+                "content_version_fingerprint": content_fingerprint,
                 "last_seen_at": started_at,
                 "updated_at": started_at,
             }
@@ -167,6 +185,16 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                 )
                 stats.discovered += 1
             else:
+                previous_content_fingerprint = str(row.get("content_version_fingerprint") or "") or None
+                content_changed = _content_version_changed(
+                    row,
+                    size_bytes=stat_result.st_size,
+                    content_fingerprint=content_fingerprint,
+                )
+                values["content_version_changed_at"] = (
+                    started_at if content_changed else row.get("content_version_changed_at")
+                )
+                values["content_version_fingerprint"] = content_fingerprint or previous_content_fingerprint
                 connection.execute(
                     update(library_items)
                     .where(library_items.c.source_path == source_path)
@@ -214,6 +242,24 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
     )
     connection.commit()
     return stats
+
+
+def _content_version_changed(
+        row: Any,
+        *,
+        size_bytes: int,
+        content_fingerprint: str | None,
+) -> bool:
+    if str(row["status"] or "") == "missing":
+        return True
+    if int(row["size_bytes"] or 0) != size_bytes:
+        return True
+    previous_content_fingerprint = str(row.get("content_version_fingerprint") or "") or None
+    return bool(
+        previous_content_fingerprint
+        and content_fingerprint
+        and previous_content_fingerprint != content_fingerprint
+    )
 
 
 def _flush_scan_progress(

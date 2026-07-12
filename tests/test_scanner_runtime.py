@@ -1,9 +1,18 @@
-import unittest
 import json
+import os
+import tempfile
+import unittest
 from pathlib import Path
 from typing import Any, cast
 
-from mediaforce.library.scanner import _cadence_summary_present, _failed_probe_summary, _media_fingerprint_present, scan_library
+from mediaforce.library.scanner import (
+    _cadence_summary_present,
+    _content_version_changed,
+    _failed_probe_summary,
+    _media_fingerprint_present,
+    scan_library,
+)
+from mediaforce.core.utils import content_version_fingerprint
 
 
 class _FakeCursor:
@@ -36,6 +45,44 @@ class _FakeConfig:
 
 
 class ScannerRuntimeTests(unittest.TestCase):
+    def test_content_version_fingerprint_ignores_mtime_but_detects_same_size_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "episode.mkv"
+            path.write_bytes(b"a" * 1024)
+            first_stat = path.stat()
+            first = content_version_fingerprint(path, first_stat)
+
+            os.utime(path, ns=(first_stat.st_atime_ns, first_stat.st_mtime_ns + 1_000_000_000))
+            touched = content_version_fingerprint(path, path.stat())
+            path.write_bytes(b"b" * 1024)
+            os.utime(path, ns=(first_stat.st_atime_ns, first_stat.st_mtime_ns))
+            replaced = content_version_fingerprint(path, path.stat())
+
+        self.assertEqual(first, touched)
+        self.assertNotEqual(first, replaced)
+
+    def test_first_post_migration_size_change_refreshes_content_age(self) -> None:
+        row = {
+            "status": "discovered",
+            "size_bytes": 1_024,
+            "content_version_fingerprint": None,
+        }
+
+        self.assertTrue(
+            _content_version_changed(
+                row,
+                size_bytes=2_048,
+                content_fingerprint=None,
+            )
+        )
+        self.assertFalse(
+            _content_version_changed(
+                row,
+                size_bytes=1_024,
+                content_fingerprint="first-baseline",
+            )
+        )
+
     def test_scan_library_commits_progress_before_and_after_work(self) -> None:
         connection = _FakeConnection()
 

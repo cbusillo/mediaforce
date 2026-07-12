@@ -8,7 +8,7 @@ scripts. It is built for a semi-automated workflow:
 - scan the configured source roots
 - keep durable state in SQLite
 - apply media-wide defaults with per-folder overrides
-- generate run manifests in priority order
+- generate run manifests from eligible media, oldest catalog additions first
 - stage outputs under the configured transcode root
 - validate and promote after review
 
@@ -32,7 +32,8 @@ defaults rather than product-level invariants.
 - Use the Mac Studio as the primary AV1 encode host.
 - Keep durable library state in SQLite and manifest files outside the repo.
 - Use human-edited policy manifests with per-folder overrides.
-- Generate run manifests in priority order rather than attempting a full,
+- Protect active and newly acquired TV seasons before generating run manifests,
+  then rank eligible media by catalog age rather than attempting a full,
   unattended library rewrite.
 - Review staged outputs before promotion.
 
@@ -100,7 +101,10 @@ changes and normal formula upgrades. You can override either binary with
 
 The web UI also auto-starts background catalog refreshes when the full library
 view is empty or stale, and it auto-refreshes the current folder before
-showing calibration actions when that folder's scan data is stale.
+showing calibration actions when that folder's scan data is stale. A full scan
+also refreshes configured Plex and TMDB metadata; provider failures leave the
+last successful metadata in place and surface a warning instead of blocking the
+catalog scan.
 
 The `/folders` index can browse either season folders or whole TV series
 prefixes. Use the Scope control there when an operation should cover an entire
@@ -315,9 +319,11 @@ in this order:
 4. Runtime environment overrides from
    `~/Library/Application Support/mediaforce/runtime-settings.json`
 
-This first version intentionally does **not** silently skip codecs or folders.
-It ranks and labels items, but leaves the final decision in the manifest and
-review loop.
+Codec and quality recommendations still rank and label rather than silently
+excluding media. TV lifecycle policy is a separate eligibility gate: protected
+seasons remain visible with their hold reason, do not enter automatic manifests,
+and can only be bypassed through an explicit season-level confirmation. The
+underlying lifecycle status and the existing runnable queue order do not change.
 
 The checked-in video defaults are intentionally operator-taste defaults, not a
 near-transparent archival preset. The baseline AV1 policy uses a size-first
@@ -340,8 +346,43 @@ that machine can reuse them without mutating the tracked repo defaults. If a
 bench-learned policy should become a shared starting point for everyone, copy it
 into `config/folder-defaults.toml` intentionally.
 
-Use the web Settings page for local libraries, the transcode folder, and remote
-host definitions so those environment details stay off the checked-in repo.
+Use the web Settings page for local libraries, the transcode folder, remote host
+definitions, the Plex server URL, and Plex-to-Mediaforce library path mappings
+so those environment details stay off the checked-in repo.
+
+## Library lifecycle policy
+
+TV series use a per-series current-season mode:
+
+- `Auto` protects the highest positive numbered season while cached TMDB status
+  says the series is active. Missing or stale status is treated conservatively.
+- `On` protects the highest numbered season regardless of provider status.
+- `Off` disables current-season protection for that series.
+
+Specials and Season 0 never identify the current season. A protected current
+season releases when a higher numbered season appears or after 365 days without
+a newly added or replaced episode. Independently, every season waits 30 days
+after its newest addition or replacement before automatic encoding. A manual
+override applies only to the exact season the operator confirms, and the
+resulting manifest records both the hold reasons and the override.
+
+Eligible media is ranked by Plex `addedAt`, oldest first. When Plex age is not
+available, Mediaforce records and uses its own discovery timestamp, then the
+filesystem modification time as the final fallback. Selection provenance is
+written into the run manifest so retries and recovery do not silently recompute
+membership under newer policy or metadata.
+
+Plex and TMDB credentials are never written through the Settings UI. Set them in
+the launch environment instead:
+
+- `MEDIAFORCE_PLEX_TOKEN`: Plex server token
+- `MEDIAFORCE_TMDB_TOKEN`: TMDB API read-access token
+
+The configured SSH account and media paths are unrelated to these credentials.
+Plex path mappings translate the paths reported by Plex to the corresponding
+Mediaforce source roots using exact root boundaries. See
+`docs/architecture/library-lifecycle-policy.md` for the durable data and
+selection contract.
 
 `mediaforce-web` reads optional startup defaults from the repo-local `.env`.
 Use that file for machine-specific web launcher settings like bind address,

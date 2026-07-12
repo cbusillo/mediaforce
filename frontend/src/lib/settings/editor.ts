@@ -28,6 +28,7 @@ export type SettingsSavePayload = {
 	video_defaults: SettingsPayload['video_defaults'];
 	encode_queue_scheduler: SettingsPayload['encode_queue_scheduler'];
 	schedule_profiles: ScheduleProfile[];
+	metadata: SettingsPayload['metadata'];
 };
 export type ArchiveCleanupClearPayload = {
 	transcode_root: string;
@@ -133,6 +134,13 @@ export function draftFromSettings(payload: SettingsPayload) {
 			})),
 		transcode_root: payload.transcode_root,
 		video_defaults: { ...payload.video_defaults },
+		metadata: {
+			plex: {
+				...payload.metadata.plex,
+				library_roots: { ...payload.metadata.plex.library_roots }
+			},
+			tmdb: { ...payload.metadata.tmdb }
+		},
 		schedule_profiles: payload.schedule_profiles
 			.filter((profile) => profile.key || profile.label)
 			.map((profile) => cloneScheduleProfile(profile))
@@ -153,7 +161,11 @@ export function buildSettingsSavePayload(
 		transcode_root: draft.transcode_root,
 		video_defaults: { ...draft.video_defaults },
 		encode_queue_scheduler: { ...settings.encode_queue_scheduler },
-		schedule_profiles: draft.schedule_profiles.map((profile) => cloneScheduleProfile(profile))
+		schedule_profiles: draft.schedule_profiles.map((profile) => cloneScheduleProfile(profile)),
+		metadata: {
+			plex: { ...draft.metadata.plex, library_roots: { ...draft.metadata.plex.library_roots } },
+			tmdb: { ...draft.metadata.tmdb }
+		}
 	};
 }
 

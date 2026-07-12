@@ -9,6 +9,7 @@ from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import library_items
 from mediaforce.encoding.encode_queue import summarize_encode_queue
 from mediaforce.library.workflow_state import build_folder_workflow_state
+from mediaforce.library.candidate_selection import encode_candidate_decisions, workflow_eligibility
 
 
 def dashboard_summary_payload(
@@ -107,7 +108,16 @@ def folder_status_payload(
         retryable_sample_job = load_retryable_sample_job_state(connection, config, normalized_prefix)
         active_encode_job = load_active_encode_job_for_prefix(connection, normalized_prefix)
         folder_scan_job = load_scan_job_state(config, normalized_prefix)
-        workflow_state = build_folder_workflow_state(connection, normalized_prefix).to_payload()
+        lifecycle_decisions = encode_candidate_decisions(
+            connection,
+            config,
+            prefixes=[normalized_prefix],
+        )
+        workflow_state = build_folder_workflow_state(
+            connection,
+            normalized_prefix,
+            candidate_eligibility=workflow_eligibility(lifecycle_decisions),
+        ).to_payload()
     polling_active = bool(
         (calibration_job and calibration_job.get("status") in {"queued", "running"})
         or (active_encode_job and active_encode_job.get("status") in {"queued", "retry_backoff", "running"})

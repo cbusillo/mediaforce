@@ -162,6 +162,23 @@ describe('settings draft helpers', () => {
 		],
 		archive_root: '/Volumes/Transcode/_replaced',
 		archive_cleanup: null,
+		metadata: {
+			plex: {
+				enabled: true,
+				base_url: 'http://plex.local:32400',
+				library_roots: { tv: '/data/tv' },
+				token_env: 'MEDIAFORCE_PLEX_TOKEN',
+				token_configured: true,
+				refresh_interval_hours: 2
+			},
+			tmdb: {
+				enabled: true,
+				base_url: 'https://api.themoviedb.org/3',
+				token_env: 'MEDIAFORCE_TMDB_TOKEN',
+				token_configured: true,
+				refresh_interval_hours: 48
+			}
+		},
 		runtime_settings_path: '/Users/operator/Library/Application Support/mediaforce/settings.json',
 		repo_config_path: '/Users/operator/mediaforce/config.yaml',
 		host_notice: null,
@@ -173,6 +190,7 @@ describe('settings draft helpers', () => {
 		const savePayload = buildSettingsSavePayload(draft, payload);
 
 		draft.remote_hosts[0]?.capabilities.push('sample_calibration');
+		draft.metadata.plex.library_roots.tv = '/changed/tv';
 		draft.schedule_profiles.push({
 			index: '0',
 			key: 'overnight',
@@ -185,6 +203,7 @@ describe('settings draft helpers', () => {
 
 		expect(savePayload.remote_hosts[0]?.capabilities).toEqual(['encode_queue']);
 		expect(savePayload.schedule_profiles).toEqual([]);
+		expect(savePayload.metadata.plex.library_roots).toEqual({ tv: '/data/tv' });
 	});
 
 	it('detects meaningful draft changes and ignores unchanged clones', () => {

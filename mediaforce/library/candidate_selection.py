@@ -1,0 +1,631 @@
+import re
+from collections import Counter
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, Literal
+
+from sqlalchemy import outerjoin, select
+
+from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.db import DBClient
+from mediaforce.core.db_tables import library_items, plex_item_metadata, series_metadata, staged_artifacts
+from mediaforce.core.type_defs import object_dict
+from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES, derive_item_workflow_state
+
+LifecycleMode = Literal["auto", "on", "off"]
+ProviderState = Literal["active", "ended", "unknown", "stale"]
+SEASON_PATTERN = re.compile(r"^Season\s+0*(\d+)$", re.IGNORECASE)
+OVERRIDEABLE_HOLD_CODES = frozenset({"recent_acquisition", "current_season"})
+
+
+@dataclass(frozen=True, slots=True)
+class SeasonIdentity:
+    series_prefix: str
+    season_prefix: str
+    season_number: int | None
+    label: str
+    is_special: bool
+    ambiguous: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AgeEvidence:
+    timestamp: datetime | None
+    source: str
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "timestamp": self.timestamp.isoformat(timespec="seconds") if self.timestamp is not None else None,
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class HoldReason:
+    code: str
+    label: str
+    detail: str
+    release_at: datetime | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "label": self.label,
+            "detail": self.detail,
+            "release_at": self.release_at.isoformat(timespec="seconds") if self.release_at is not None else None,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateDecision:
+    row: dict[str, Any]
+    workflow_lane: str
+    season: SeasonIdentity | None
+    policy_mode: LifecycleMode
+    provider_state: ProviderState
+    provider_status: str | None
+    provider_observed_at: datetime | None
+    is_current_season: bool
+    age: AgeEvidence
+    season_rank_age: AgeEvidence
+    season_activity_at: datetime | None
+    hold_reasons: tuple[HoldReason, ...]
+    manual_override: bool
+
+    @property
+    def item_id(self) -> int:
+        return int(self.row["item_id"])
+
+    @property
+    def eligible(self) -> bool:
+        return self.workflow_lane == "encode" and (not self.hold_reasons or self.override_applied)
+
+    @property
+    def override_applied(self) -> bool:
+        return self.manual_override and all(reason.code in OVERRIDEABLE_HOLD_CODES for reason in self.hold_reasons)
+
+    def provenance(self, *, rank_position: int | None = None) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "eligible": self.eligible,
+            "workflow_lane": self.workflow_lane,
+            "policy_mode": self.policy_mode,
+            "provider_state": self.provider_state,
+            "provider_status": self.provider_status,
+            "provider_observed_at": (
+                self.provider_observed_at.isoformat(timespec="seconds")
+                if self.provider_observed_at is not None
+                else None
+            ),
+            "series_prefix": self.season.series_prefix if self.season is not None else None,
+            "season_prefix": self.season.season_prefix if self.season is not None else None,
+            "season_number": self.season.season_number if self.season is not None else None,
+            "is_current_season": self.is_current_season,
+            "hold_reasons": [reason.to_payload() for reason in self.hold_reasons],
+            "manual_override": self.manual_override,
+            "override_applied": self.override_applied,
+            "media_age": self.age.to_payload(),
+            "season_rank_age": self.season_rank_age.to_payload(),
+            "season_activity_at": (
+                self.season_activity_at.isoformat(timespec="seconds")
+                if self.season_activity_at is not None
+                else None
+            ),
+            "rank_position": rank_position,
+        }
+
+
+def project_candidates(
+        connection: DBClient,
+        config: MediaforceConfig,
+        *,
+        prefixes: list[str] | None = None,
+        statuses: set[str] | frozenset[str] | None = None,
+        now: datetime | None = None,
+        manual_override_prefix: str | None = None,
+) -> list[CandidateDecision]:
+    current_time = (now or datetime.now(tz=UTC)).astimezone(UTC)
+    rows = _load_rows(connection)
+    metadata_by_series = {
+        str(row["series_prefix"]): object_dict(row)
+        for row in connection.execute(select(series_metadata)).mappings().fetchall()
+    }
+    season_by_item: dict[int, SeasonIdentity | None] = {}
+    season_rows: dict[str, list[dict[str, Any]]] = {}
+    numbered_by_series: dict[str, set[int]] = {}
+    for row in rows:
+        item_id = int(row["item_id"])
+        season = season_identity(row)
+        season_by_item[item_id] = season
+        if season is None:
+            continue
+        season_rows.setdefault(season.season_prefix, []).append(row)
+        if season.season_number is not None:
+            numbered_by_series.setdefault(season.series_prefix, set()).add(season.season_number)
+
+    season_activity = {
+        season_prefix: _latest_timestamp(_content_activity_at(row) for row in grouped_rows)
+        for season_prefix, grouped_rows in season_rows.items()
+    }
+    season_rank_age = {
+        season_prefix: _newest_age_evidence(_media_age(row) for row in grouped_rows)
+        for season_prefix, grouped_rows in season_rows.items()
+    }
+    normalized_prefixes = [prefix.strip().strip("/") for prefix in prefixes or []]
+    normalized_override = str(manual_override_prefix or "").strip().strip("/")
+    decisions: list[CandidateDecision] = []
+
+    for row in rows:
+        if statuses is not None and str(row["status"] or "") not in statuses:
+            continue
+        rel_path = str(row["rel_path"] or "")
+        if normalized_prefixes and not any(_path_matches_prefix(rel_path, prefix) for prefix in normalized_prefixes):
+            continue
+        workflow_lane = derive_item_workflow_state(row).lane
+        season = season_by_item[int(row["item_id"])]
+        policy = _resolved_policy(config, season.series_prefix if season is not None else rel_path)
+        lifecycle_keys = (
+            "series_lifecycle_mode",
+            "season_acquisition_hold_days",
+            "current_season_inactive_days",
+            "series_metadata_stale_days",
+        )
+        policy_enabled = all(
+            isinstance(config.raw.get(section), dict)
+            for section in ("video", "audio", "subtitle", "planning")
+        ) or any(
+            key in policy
+            for key in lifecycle_keys
+        )
+        mode = _lifecycle_mode(policy.get("series_lifecycle_mode"))
+        acquisition_days = _duration_days(policy.get("season_acquisition_hold_days"), 30)
+        inactive_days = _duration_days(policy.get("current_season_inactive_days"), 365)
+        stale_days = _positive_int(policy.get("series_metadata_stale_days"), 7)
+        series_metadata_row = metadata_by_series.get(season.series_prefix, {}) if season is not None else {}
+        provider_state, provider_status, provider_observed_at = _provider_state(
+            series_metadata_row,
+            now=current_time,
+            stale_after=timedelta(days=stale_days),
+        )
+        highest_number = (
+            max(numbered_by_series.get(season.series_prefix, set()), default=None)
+            if season is not None
+            else None
+        )
+        is_current = (
+            season is not None
+            and season.season_number is not None
+            and season.season_number == highest_number
+        )
+        activity_at = season_activity.get(season.season_prefix) if season is not None else None
+        rank_age = season_rank_age.get(season.season_prefix, _media_age(row)) if season is not None else _media_age(row)
+        manual_override = bool(
+            normalized_override
+            and season is not None
+            and season.season_prefix == normalized_override
+        )
+        hold_reasons = _hold_reasons(
+            season=season,
+            policy_enabled=policy_enabled,
+            mode=mode,
+            provider_state=provider_state,
+            is_current=is_current,
+            activity_at=activity_at,
+            now=current_time,
+            acquisition_days=acquisition_days,
+            inactive_days=inactive_days,
+        )
+        decisions.append(
+            CandidateDecision(
+                row=row,
+                workflow_lane=workflow_lane,
+                season=season,
+                policy_mode=mode,
+                provider_state=provider_state,
+                provider_status=provider_status,
+                provider_observed_at=provider_observed_at,
+                is_current_season=is_current,
+                age=_media_age(row),
+                season_rank_age=rank_age,
+                season_activity_at=activity_at,
+                hold_reasons=hold_reasons,
+                manual_override=manual_override,
+            )
+        )
+    return decisions
+
+
+def encode_candidate_decisions(
+        connection: DBClient,
+        config: MediaforceConfig,
+        *,
+        prefixes: list[str],
+        now: datetime | None = None,
+        manual_override_prefix: str | None = None,
+) -> list[CandidateDecision]:
+    return project_candidates(
+        connection,
+        config,
+        prefixes=prefixes,
+        statuses=ENCODE_CANDIDATE_STATUSES,
+        now=now,
+        manual_override_prefix=manual_override_prefix,
+    )
+
+
+def workflow_eligibility(decisions: list[CandidateDecision]) -> dict[int, tuple[bool, str | None]]:
+    return {
+        decision.item_id: (
+            decision.eligible,
+            decision.hold_reasons[0].detail if decision.hold_reasons else None,
+        )
+        for decision in decisions
+        if decision.workflow_lane == "encode"
+    }
+
+
+def scope_lifecycle_payload(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+        *,
+        now: datetime | None = None,
+) -> dict[str, Any]:
+    normalized_prefix = prefix.strip().strip("/")
+    decisions = encode_candidate_decisions(connection, config, prefixes=[normalized_prefix], now=now)
+    return scope_lifecycle_payload_from_decisions(normalized_prefix, decisions)
+
+
+def scope_lifecycle_payload_from_decisions(
+        prefix: str,
+        decisions: list[CandidateDecision],
+) -> dict[str, Any]:
+    normalized_prefix = prefix.strip().strip("/")
+    decisions = [
+        decision
+        for decision in decisions
+        if _path_matches_prefix(str(decision.row["rel_path"] or ""), normalized_prefix)
+    ]
+    if not decisions:
+        return {
+            "schema_version": 1,
+            "prefix": normalized_prefix,
+            "candidate_count": 0,
+            "eligible_candidate_count": 0,
+            "held_candidate_count": 0,
+            "seasons": [],
+        }
+    held = [decision for decision in decisions if decision.workflow_lane == "encode" and not decision.eligible]
+    eligible = [decision for decision in decisions if decision.eligible]
+    season_groups: dict[str, list[CandidateDecision]] = {}
+    for decision in decisions:
+        if decision.season is not None:
+            season_groups.setdefault(decision.season.season_prefix, []).append(decision)
+    seasons = [_season_payload(group) for group in season_groups.values()]
+    seasons.sort(key=lambda value: (value.get("season_number") is None, value.get("season_number") or 0, value["prefix"]))
+    representative = next((decision for decision in decisions if decision.season is not None), decisions[0])
+    reason_counts = Counter(reason.code for decision in held for reason in decision.hold_reasons)
+    rank_age = min(
+        (decision.season_rank_age.timestamp for decision in eligible if decision.season_rank_age.timestamp is not None),
+        default=None,
+    )
+    return {
+        "schema_version": 1,
+        "prefix": normalized_prefix,
+        "series_prefix": representative.season.series_prefix if representative.season is not None else None,
+        "policy_mode": representative.policy_mode,
+        "provider_state": representative.provider_state,
+        "provider_status": representative.provider_status,
+        "provider_observed_at": (
+            representative.provider_observed_at.isoformat(timespec="seconds")
+            if representative.provider_observed_at is not None
+            else None
+        ),
+        "current_season_number": next(
+            (decision.season.season_number for decision in decisions if decision.is_current_season and decision.season),
+            None,
+        ),
+        "candidate_count": sum(decision.workflow_lane == "encode" for decision in decisions),
+        "eligible_candidate_count": len(eligible),
+        "held_candidate_count": len(held),
+        "hold_reason_counts": dict(reason_counts),
+        "ranking_added_at": rank_age.isoformat(timespec="seconds") if rank_age is not None else None,
+        "can_override_holds": bool(
+            held
+            and _is_season_prefix(normalized_prefix)
+            and all(all(reason.code in OVERRIDEABLE_HOLD_CODES for reason in decision.hold_reasons) for decision in held)
+        ),
+        "seasons": seasons,
+    }
+
+
+def season_identity(row: dict[str, Any]) -> SeasonIdentity | None:
+    rel_path = str(row.get("rel_path") or "")
+    parts = Path(rel_path).parts
+    if len(parts) < 3 or parts[0].lower() != "tv":
+        return None
+    label = parts[2]
+    match = SEASON_PATTERN.fullmatch(label)
+    path_number = int(match.group(1)) if match is not None else None
+    plex_number = _positive_or_zero_int(row.get("plex_season_index"))
+    is_special = label.lower() == "specials" or path_number == 0 or plex_number == 0
+    if is_special:
+        number = None
+        ambiguous = False
+    else:
+        positive_path = path_number if path_number is not None and path_number > 0 else None
+        positive_plex = plex_number if plex_number is not None and plex_number > 0 else None
+        ambiguous = positive_path is not None and positive_plex is not None and positive_path != positive_plex
+        number = None if ambiguous else positive_plex or positive_path
+    return SeasonIdentity(
+        series_prefix="/".join(parts[:2]),
+        season_prefix="/".join(parts[:3]),
+        season_number=number,
+        label=label,
+        is_special=is_special,
+        ambiguous=ambiguous,
+    )
+
+
+def candidate_rank_key(decision: CandidateDecision, *, recommendation_score: float, size_bytes: int) -> tuple[Any, ...]:
+    timestamp = decision.season_rank_age.timestamp
+    return (
+        timestamp is None,
+        timestamp or datetime.max.replace(tzinfo=UTC),
+        -recommendation_score,
+        -size_bytes,
+        str(decision.season.season_prefix if decision.season is not None else decision.row["rel_path"]),
+        str(decision.row["rel_path"]),
+        decision.item_id,
+    )
+
+
+def _load_rows(connection: DBClient) -> list[dict[str, Any]]:
+    joined = outerjoin(
+        outerjoin(
+            library_items,
+            staged_artifacts,
+            staged_artifacts.c.library_item_id == library_items.c.id,
+        ),
+        plex_item_metadata,
+        plex_item_metadata.c.library_item_id == library_items.c.id,
+    )
+    query = (
+        select(
+            library_items,
+            library_items.c.id.label("item_id"),
+            staged_artifacts.c.staging_size_bytes,
+            staged_artifacts.c.staging_path,
+            staged_artifacts.c.library_item_id.label("staged_library_item_id"),
+            staged_artifacts.c.promoted_at,
+            staged_artifacts.c.validated_at,
+            staged_artifacts.c.quality_metric,
+            staged_artifacts.c.quality_score,
+            staged_artifacts.c.validation_json,
+            plex_item_metadata.c.plex_item_rating_key,
+            plex_item_metadata.c.plex_show_rating_key,
+            plex_item_metadata.c.plex_season_index,
+            plex_item_metadata.c.plex_added_at,
+            plex_item_metadata.c.observed_at.label("plex_observed_at"),
+        )
+        .select_from(joined)
+        .where(library_items.c.status != "missing")
+    )
+    return [object_dict(row) for row in connection.execute(query).mappings().fetchall()]
+
+
+def _hold_reasons(
+        *,
+        season: SeasonIdentity | None,
+        policy_enabled: bool,
+        mode: LifecycleMode,
+        provider_state: ProviderState,
+        is_current: bool,
+        activity_at: datetime | None,
+        now: datetime,
+        acquisition_days: int,
+        inactive_days: int,
+) -> tuple[HoldReason, ...]:
+    if season is None or not policy_enabled:
+        return ()
+    reasons: list[HoldReason] = []
+    if season.ambiguous:
+        reasons.append(
+            HoldReason(
+                code="season_identity_conflict",
+                label="Season mismatch",
+                detail="The folder name and Plex metadata identify different season numbers.",
+            )
+        )
+    if activity_at is None:
+        reasons.append(
+            HoldReason(
+                code="content_age_unknown",
+                label="Age unknown",
+                detail="Mediaforce cannot verify when this season was added or replaced.",
+            )
+        )
+        return tuple(reasons)
+    acquisition_release = activity_at + timedelta(days=acquisition_days)
+    if now < acquisition_release:
+        reasons.append(
+            HoldReason(
+                code="recent_acquisition",
+                label="Recent acquisition",
+                detail=f"This whole season is held for {acquisition_days} days after its newest addition or replacement.",
+                release_at=acquisition_release,
+            )
+        )
+    inactivity_release = activity_at + timedelta(days=inactive_days)
+    protection_enabled = mode == "on" or (mode == "auto" and provider_state in {"active", "unknown", "stale"})
+    if is_current and protection_enabled and now < inactivity_release:
+        reasons.append(
+            HoldReason(
+                code="current_season",
+                label="Current season",
+                detail=(
+                    "This is the highest numbered season. It releases when a newer season appears "
+                    f"or after {inactive_days} days without new or replaced episodes."
+                ),
+                release_at=inactivity_release,
+            )
+        )
+    return tuple(reasons)
+
+
+def _provider_state(
+        row: dict[str, Any],
+        *,
+        now: datetime,
+        stale_after: timedelta,
+) -> tuple[ProviderState, str | None, datetime | None]:
+    status = str(row.get("tmdb_status") or "").strip() or None
+    observed_at = _parse_timestamp(row.get("tmdb_observed_at"))
+    if observed_at is None:
+        return "unknown", status, None
+    if now - observed_at > stale_after:
+        return "stale", status, observed_at
+    in_production = row.get("tmdb_in_production")
+    if in_production in {1, True}:
+        return "active", status, observed_at
+    normalized = str(status or "").strip().lower()
+    if normalized in {"returning series", "planned", "in production", "pilot"}:
+        return "active", status, observed_at
+    if normalized in {"ended", "canceled", "cancelled"} or in_production in {0, False}:
+        return "ended", status, observed_at
+    return "unknown", status, observed_at
+
+
+def _media_age(row: dict[str, Any]) -> AgeEvidence:
+    plex_added_at = _parse_timestamp(row.get("plex_added_at"))
+    if plex_added_at is not None:
+        return AgeEvidence(plex_added_at, "plex")
+    discovered_at = _parse_timestamp(row.get("discovered_at"))
+    if discovered_at is not None:
+        return AgeEvidence(discovered_at, "mediaforce_discovered")
+    mtime_ns = _non_negative_int(row.get("mtime_ns"))
+    if mtime_ns is not None and mtime_ns > 0:
+        try:
+            return AgeEvidence(datetime.fromtimestamp(mtime_ns / 1_000_000_000, tz=UTC), "filesystem_mtime")
+        except (OSError, OverflowError, ValueError):
+            pass
+    return AgeEvidence(None, "unknown")
+
+
+def _content_activity_at(row: dict[str, Any]) -> datetime | None:
+    return _latest_timestamp((
+        _parse_timestamp(row.get("plex_added_at")),
+        _parse_timestamp(row.get("content_version_changed_at")),
+        _parse_timestamp(row.get("discovered_at")),
+    ))
+
+
+def _newest_age_evidence(values: Any) -> AgeEvidence:
+    known = [value for value in values if value.timestamp is not None]
+    if not known:
+        return AgeEvidence(None, "unknown")
+    return max(known, key=lambda value: value.timestamp or datetime.min.replace(tzinfo=UTC))
+
+
+def _season_payload(decisions: list[CandidateDecision]) -> dict[str, Any]:
+    representative = decisions[0]
+    held = [decision for decision in decisions if decision.workflow_lane == "encode" and not decision.eligible]
+    eligible = [decision for decision in decisions if decision.eligible]
+    reasons = []
+    seen_codes: set[str] = set()
+    for decision in held:
+        for reason in decision.hold_reasons:
+            if reason.code in seen_codes:
+                continue
+            seen_codes.add(reason.code)
+            reasons.append(reason.to_payload())
+    return {
+        "prefix": representative.season.season_prefix if representative.season is not None else "",
+        "label": representative.season.label if representative.season is not None else "",
+        "season_number": representative.season.season_number if representative.season is not None else None,
+        "is_special": bool(representative.season and representative.season.is_special),
+        "ambiguous": bool(representative.season and representative.season.ambiguous),
+        "is_current_season": representative.is_current_season,
+        "candidate_count": sum(decision.workflow_lane == "encode" for decision in decisions),
+        "eligible_candidate_count": len(eligible),
+        "held_candidate_count": len(held),
+        "hold_reasons": reasons,
+        "activity_at": (
+            representative.season_activity_at.isoformat(timespec="seconds")
+            if representative.season_activity_at is not None
+            else None
+        ),
+        "ranking_added_at": (
+            representative.season_rank_age.timestamp.isoformat(timespec="seconds")
+            if representative.season_rank_age.timestamp is not None
+            else None
+        ),
+        "ranking_added_source": representative.season_rank_age.source,
+    }
+
+
+def _resolved_policy(config: MediaforceConfig, prefix: str) -> dict[str, Any]:
+    try:
+        policy = config.resolve_policy(prefix)
+    except KeyError:
+        planning = config.raw.get("planning")
+        return dict(planning) if isinstance(planning, dict) else {}
+    planning = policy.get("planning")
+    return dict(planning) if isinstance(planning, dict) else {}
+
+
+def _lifecycle_mode(value: object) -> LifecycleMode:
+    normalized = str(value or "auto").strip().lower()
+    if normalized in {"auto", "on", "off"}:
+        return normalized  # type: ignore[return-value]
+    return "auto"
+
+
+def _path_matches_prefix(path: str, prefix: str) -> bool:
+    normalized_path = path.strip().strip("/")
+    return not prefix or normalized_path == prefix or normalized_path.startswith(f"{prefix}/")
+
+
+def _is_season_prefix(prefix: str) -> bool:
+    parts = Path(prefix).parts
+    return len(parts) == 3 and parts[0].lower() == "tv"
+
+
+def _latest_timestamp(values: Any) -> datetime | None:
+    known = [value for value in values if isinstance(value, datetime)]
+    return max(known) if known else None
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _positive_int(value: object, default: int) -> int:
+    parsed = _non_negative_int(value)
+    return parsed if parsed is not None and parsed > 0 else default
+
+
+def _duration_days(value: object, default: int) -> int:
+    parsed = _non_negative_int(value)
+    return parsed if parsed is not None else default
+
+
+def _positive_or_zero_int(value: object) -> int | None:
+    return _non_negative_int(value)
+
+
+def _non_negative_int(value: object) -> int | None:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None

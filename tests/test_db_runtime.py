@@ -16,7 +16,7 @@ from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import encode_queue_state
 from mediaforce.core.type_defs import object_dict
 
-CURRENT_DB_REVISION = "20260711_0007"
+CURRENT_DB_REVISION = "20260712_0010"
 
 
 class DatabaseRuntimeTests(unittest.TestCase):
@@ -40,6 +40,11 @@ class DatabaseRuntimeTests(unittest.TestCase):
             self.assertIn("cadence_summary_json", library_columns)
             self.assertIn("media_fingerprint_json", library_columns)
             self.assertIn("attachment_summary_json", library_columns)
+            self.assertIn("content_version_changed_at", library_columns)
+            self.assertIn("content_version_fingerprint", library_columns)
+            self.assertIn("plex_item_metadata", table_names)
+            self.assertIn("series_metadata", table_names)
+            self.assertIn("metadata_sync_state", table_names)
 
     def test_open_db_stamps_existing_legacy_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -184,6 +189,87 @@ class DatabaseRuntimeTests(unittest.TestCase):
 
             self.assertEqual(version, CURRENT_DB_REVISION)
             self.assertIn("media_fingerprint_json", columns)
+
+    def test_open_db_adds_library_lifecycle_metadata_to_previous_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "library.sqlite3"
+            with open_db(db_path):
+                pass
+            reset_engine_cache()
+
+            raw_connection = sqlite3.connect(db_path)
+            try:
+                raw_connection.execute("DROP TABLE series_metadata")
+                raw_connection.execute("DROP TABLE plex_item_metadata")
+                raw_connection.execute("ALTER TABLE library_items DROP COLUMN content_version_changed_at")
+                raw_connection.execute(
+                    "UPDATE alembic_version SET version_num = ?",
+                    ("20260711_0007",),
+                )
+                raw_connection.commit()
+            finally:
+                raw_connection.close()
+
+            with open_db(db_path) as connection:
+                version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
+                inspector = inspect(connection)
+                table_names = inspector.get_table_names()
+                library_columns = {str(column["name"]) for column in inspector.get_columns("library_items")}
+
+            self.assertEqual(version, CURRENT_DB_REVISION)
+            self.assertIn("content_version_changed_at", library_columns)
+            self.assertIn("plex_item_metadata", table_names)
+            self.assertIn("series_metadata", table_names)
+
+    def test_open_db_adds_content_version_fingerprint_to_previous_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "library.sqlite3"
+            with open_db(db_path):
+                pass
+            reset_engine_cache()
+
+            raw_connection = sqlite3.connect(db_path)
+            try:
+                raw_connection.execute("ALTER TABLE library_items DROP COLUMN content_version_fingerprint")
+                raw_connection.execute(
+                    "UPDATE alembic_version SET version_num = ?",
+                    ("20260712_0008",),
+                )
+                raw_connection.commit()
+            finally:
+                raw_connection.close()
+
+            with open_db(db_path) as connection:
+                version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
+                columns = {str(column["name"]) for column in inspect(connection).get_columns("library_items")}
+
+            self.assertEqual(version, CURRENT_DB_REVISION)
+            self.assertIn("content_version_fingerprint", columns)
+
+    def test_open_db_adds_metadata_sync_state_to_previous_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "library.sqlite3"
+            with open_db(db_path):
+                pass
+            reset_engine_cache()
+
+            raw_connection = sqlite3.connect(db_path)
+            try:
+                raw_connection.execute("DROP TABLE metadata_sync_state")
+                raw_connection.execute(
+                    "UPDATE alembic_version SET version_num = ?",
+                    ("20260712_0009",),
+                )
+                raw_connection.commit()
+            finally:
+                raw_connection.close()
+
+            with open_db(db_path) as connection:
+                version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
+                table_names = inspect(connection).get_table_names()
+
+            self.assertEqual(version, CURRENT_DB_REVISION)
+            self.assertIn("metadata_sync_state", table_names)
 
     def test_open_db_rolls_back_on_base_exception(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

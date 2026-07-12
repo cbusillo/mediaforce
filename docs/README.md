@@ -28,6 +28,8 @@ Use this directory for guidance that should not live in `AGENTS.md`.
   gates, interpretation, and current review authority
 - `docs/architecture/advisor-routing.md`: evaluated task routing, Codex Lab
   execution, deterministic bypasses, privacy-safe telemetry, and eval operation
+- `docs/architecture/library-lifecycle-policy.md`: current-season protection,
+  acquisition guards, Plex/TMDB metadata, age ranking, and manifest provenance
 
 ## Design briefs
 

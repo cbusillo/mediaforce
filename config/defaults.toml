@@ -85,6 +85,10 @@ default_mode = "first_english"
 
 [planning]
 default_limit = 20
+series_lifecycle_mode = "auto"
+current_season_inactive_days = 365
+season_acquisition_hold_days = 30
+series_metadata_stale_days = 7
 size_weight = 10
 large_file_gib = 4.0
 large_file_bonus = 25
@@ -93,6 +97,20 @@ small_file_penalty = -15
 multi_audio_bonus = 6
 english_subtitle_bonus = 3
 missing_english_audio_penalty = -30
+
+[metadata.plex]
+enabled = true
+base_url = ""
+token_env = "MEDIAFORCE_PLEX_TOKEN"
+refresh_interval_hours = 1
+
+[metadata.plex.library_roots]
+
+[metadata.tmdb]
+enabled = true
+base_url = "https://api.themoviedb.org/3"
+token_env = "MEDIAFORCE_TMDB_TOKEN"
+refresh_interval_hours = 24
 
 [validation]
 require_size_reduction = true

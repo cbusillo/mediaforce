@@ -64,7 +64,7 @@
 	};
 
 	type SafetyDialog = {
-		kind: 'approval' | 'recovery';
+		kind: 'approval' | 'recovery' | 'lifecycle_override';
 		title: string;
 		detail: string;
 		primaryLabel: string;
@@ -112,13 +112,32 @@
 	const isSeriesScope = $derived(isSeriesPrefix(folder.prefix));
 	const seriesSeasonCount = $derived(Object.keys(folder.summary?.seasons ?? {}).length);
 	const seriesSeasonLabel = $derived(seriesSeasonCount === 1 ? 'season' : 'seasons');
+	const lifecycle = $derived(folder.lifecycle ?? null);
+	const currentSeasonLifecycle = $derived(
+		lifecycle?.seasons.find((season) => season.prefix === folder.prefix) ??
+			lifecycle?.seasons[0] ??
+			null
+	);
+	const eligibleEpisodeCount = $derived(
+		lifecycle?.eligible_candidate_count ?? folder.encode_candidate_count ?? 0
+	);
+	const heldEpisodeCount = $derived(lifecycle?.held_candidate_count ?? 0);
+	const canOverrideLifecycleHolds = $derived(Boolean(lifecycle?.can_override_holds));
+	const lifecycleHoldReasons = $derived(currentSeasonLifecycle?.hold_reasons ?? []);
+	const lifecycleHold = $derived(lifecycleHoldReasons[0] ?? null);
 	const scopeTitle = $derived(
 		isSeriesScope ? identity.show : `${identity.show} · ${identity.season}`
 	);
 	const scopeName = $derived(isSeriesScope ? identity.show : identity.season);
 	const scopeNoun = $derived(isSeriesScope ? 'show' : 'season');
 	const makeActionLabel = $derived(
-		isSeriesScope ? `Make all ${seriesSeasonCount} ${seriesSeasonLabel}` : 'Make the season'
+		isSeriesScope
+			? `Make ${eligibleEpisodeCount} eligible ${eligibleEpisodeCount === 1 ? 'episode' : 'episodes'}`
+			: heldEpisodeCount > 0
+				? canOverrideLifecycleHolds
+					? 'Override hold and make the season'
+					: 'Season remains protected'
+				: 'Make the season'
 	);
 	const humanState = $derived(detailSeasonState(folder, status));
 	const goals = $derived(sizeGoals(folder));
@@ -140,6 +159,7 @@
 	const sampleResult = $derived(asRecord(calibration.sample_result));
 	const encodeProgress = $derived(currentEncodeProgress(folder.encode_job));
 	const episodeCount = $derived(folder.summary?.item_count ?? 0);
+	const productionEpisodeCount = $derived(isSeriesScope ? eligibleEpisodeCount : episodeCount);
 	const originalSeasonSize = $derived(folder.summary?.total_size_bytes ?? 0);
 	const expectedEpisodeBytes = $derived(predictedEpisodeSize(folder));
 	const actualSampleSizes = $derived(reviewSampleSizes(folder));
@@ -147,7 +167,7 @@
 	const targetSummary = $derived(resolvedTargetSummary(folder));
 	const targetConstraint = $derived(targetConstraintSummary(folder));
 	const technicalVideo = $derived(technicalVideoPolicy(folder));
-	const expectedSeasonBytes = $derived(expectedEpisodeBytes * episodeCount);
+	const expectedSeasonBytes = $derived(expectedEpisodeBytes * productionEpisodeCount);
 	const currentTargetBytes = $derived(
 		targetSummary?.targetBytes || sizeTarget.budgetBytes || selectedGoal?.targetSizeBytes || 0
 	);
@@ -422,16 +442,32 @@
 		}
 	}
 
-	async function queueSeason() {
+	async function queueSeason(overridePolicyHolds = false) {
 		await runAction('queueing', `We couldn’t start the ${scopeNoun}.`, async () => {
 			ensureOk(
 				await postJson<ActionResponse>(endpoint('queue-encode'), {
 					notes: 'Approved after comparing the representative test.',
-					bypass_schedule: false
+					bypass_schedule: false,
+					override_policy_holds: overridePolicyHolds
 				}),
 				'We couldn’t start the remaining episodes.'
 			);
 		});
+	}
+
+	async function requestQueueSeason() {
+		if (!isSeriesScope && heldEpisodeCount > 0) {
+			if (!canOverrideLifecycleHolds) return;
+			await openSafetyDialog({
+				kind: 'lifecycle_override',
+				title: 'Override this season’s protection?',
+				detail: `This will queue ${heldEpisodeCount} protected ${heldEpisodeCount === 1 ? 'episode' : 'episodes'} now. It bypasses only lifecycle timing holds; normal file, validation, and active-work safeguards still apply.`,
+				primaryLabel: 'Override and queue',
+				changes: lifecycleHoldReasons.map((reason) => `${reason.label}: ${reason.detail}`)
+			});
+			return;
+		}
+		await queueSeason(false);
 	}
 
 	async function checkOutputs() {
@@ -520,6 +556,10 @@
 		safetyDialogReturnFocus = null;
 		if (dialog.kind === 'approval') {
 			await approveTest(dialog.confirmHighImpact, dialog.confirmSizeTradeoff);
+			return;
+		}
+		if (dialog.kind === 'lifecycle_override') {
+			await queueSeason(true);
 			return;
 		}
 		await performMeasuredRecovery();
@@ -804,6 +844,33 @@
 			<div class="action-notice action-notice--success" role="status">
 				<span aria-hidden="true">✓</span>
 				<div><strong>{actionMessage}</strong></div>
+			</div>
+		{/if}
+
+		{#if !folder.pending && heldEpisodeCount > 0}
+			<div class="lifecycle-notice" role="status">
+				<span aria-hidden="true">◆</span>
+				<div>
+					<strong>
+						{isSeriesScope
+							? `${heldEpisodeCount} ${heldEpisodeCount === 1 ? 'episode is' : 'episodes are'} protected`
+							: lifecycleHoldReasons.length > 1
+								? `Season protected for ${lifecycleHoldReasons.length} reasons`
+								: lifecycleHold?.label || 'Season protected'}
+					</strong>
+					{#if isSeriesScope}
+						<p>
+							{eligibleEpisodeCount} episodes remain eligible for this show-level action. Protected seasons
+							stay visible and original.
+						</p>
+					{:else if lifecycleHoldReasons.length}
+						{#each lifecycleHoldReasons as reason (reason.code)}
+							<p><b>{reason.label}:</b> {reason.detail}</p>
+						{/each}
+					{:else}
+						<p>Open the queue action to review an explicit override.</p>
+					{/if}
+				</div>
 			</div>
 		{/if}
 
@@ -1266,7 +1333,7 @@
 				</div>
 
 				<div class="season-estimate-note">
-					<span>Estimated {scopeNoun} total</span>
+					<span>{isSeriesScope ? 'Estimated eligible output' : 'Estimated season total'}</span>
 					<strong
 						>{expectedSeasonBytes
 							? formatDecimalFileSize(expectedSeasonBytes)
@@ -1432,23 +1499,34 @@
 				<p class="eyebrow">Test approved</p>
 				<h1>
 					{isSeriesScope
-						? `Ready to make all ${seriesSeasonCount} ${seriesSeasonLabel}.`
-						: 'Ready to make the season.'}
+						? 'Ready to make the eligible seasons.'
+						: heldEpisodeCount > 0
+							? 'This season is ready, but protected.'
+							: 'Ready to make the season.'}
 				</h1>
 				<p class="lede">
-					Mediaforce will make all {episodeCount} episodes{isSeriesScope
-						? ` across ${seriesSeasonCount} ${seriesSeasonLabel}`
-						: ' in this season'} with the same settings. New files stay separate until they pass their
-					checks. Nothing is queued until you choose the action below.
+					Mediaforce will make {productionEpisodeCount}
+					{productionEpisodeCount === 1 ? 'episode' : 'episodes'} with the same settings. {heldEpisodeCount >
+					0
+						? `${heldEpisodeCount} protected ${heldEpisodeCount === 1 ? 'episode stays' : 'episodes stay'} original unless you explicitly override this season.`
+						: 'New files stay separate until they pass their checks.'} Nothing is queued until you choose
+					the action below.
 				</p>
 				<div class="ready-summary">
-					<div><span>Episodes</span><strong>{episodeCount}</strong></div>
+					<div>
+						<span>{isSeriesScope ? 'Eligible episodes' : 'Episodes'}</span><strong
+							>{productionEpisodeCount}</strong
+						>
+					</div>
 					<div><span>Approved episode target</span><strong>{sizeTargetLabel}</strong></div>
 					<div>
-						<span>Current size</span><strong>{formatDecimalFileSize(originalSeasonSize)}</strong>
+						<span>{isSeriesScope ? 'Current scope size' : 'Current size'}</span><strong
+							>{formatDecimalFileSize(originalSeasonSize)}</strong
+						>
 					</div>
 					<div>
-						<span>Estimated {scopeNoun} total</span><strong
+						<span>{isSeriesScope ? 'Estimated eligible output' : 'Estimated season total'}</span
+						><strong
 							>{expectedSeasonBytes
 								? formatDecimalFileSize(expectedSeasonBytes)
 								: 'Varies by episode'}</strong
@@ -1456,7 +1534,13 @@
 						<small>Each episode gets its own runtime-derived target.</small>
 					</div>
 				</div>
-				<button class="primary-button" type="button" onclick={queueSeason}>
+				<button
+					class="primary-button"
+					type="button"
+					onclick={requestQueueSeason}
+					disabled={(isSeriesScope && eligibleEpisodeCount === 0) ||
+						(!isSeriesScope && heldEpisodeCount > 0 && !canOverrideLifecycleHolds)}
+				>
 					{makeActionLabel}
 					<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
 				</button>
@@ -3589,6 +3673,42 @@
 
 	.action-notice p {
 		color: inherit;
+	}
+
+	.lifecycle-notice {
+		align-items: flex-start;
+		background: var(--mf-wait-bg);
+		border: 1px solid var(--mf-wait-line);
+		border-radius: var(--mf-radius-2);
+		color: var(--mf-wait-fg);
+		display: flex;
+		gap: 12px;
+		margin: 0 0 18px;
+		padding: 12px 14px;
+	}
+
+	.lifecycle-notice > span {
+		font-size: 12px;
+		line-height: 1.5;
+	}
+
+	.lifecycle-notice strong {
+		font-size: 13px;
+	}
+
+	.lifecycle-notice p {
+		color: var(--mf-fg-secondary);
+		font-size: 12px;
+		line-height: 1.45;
+		margin: 3px 0 0;
+	}
+
+	.lifecycle-notice p + p {
+		margin-top: 7px;
+	}
+
+	.lifecycle-notice b {
+		color: var(--mf-wait-fg);
 	}
 
 	.loading-room,

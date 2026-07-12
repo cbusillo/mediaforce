@@ -11,7 +11,10 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, staged_artifacts
+from mediaforce.library.candidate_selection import CandidateDecision, encode_candidate_decisions, \
+    scope_lifecycle_payload_from_decisions, workflow_eligibility
 from mediaforce.library.workflow_state import build_folder_workflow_states
+from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES
 from mediaforce.library.workflow_state import WorkflowPayload
 
 FolderGroup = tuple[str, str, str, str]
@@ -38,6 +41,7 @@ class FolderCard:
     review_badge_tone: str | None = None
     review_badge_detail: str | None = None
     workflow_state: WorkflowPayload | None = None
+    lifecycle: dict[str, object] | None = None
     details_loading: bool = False
 
 
@@ -113,6 +117,7 @@ def cached_folder_cards(
             return cached_cards
         cards: list[FolderCard] = list_folder_cards(
             connection,
+            config=config,
             minimum_recommended_savings_bytes=minimum_recommended_savings_bytes,
             folder_group=folder_group,
             age_days=age_days,
@@ -149,14 +154,18 @@ def reset_folder_card_cache() -> None:
 def preview_folder_cards(
         connection: DBClient,
         *,
+        config: MediaforceConfig | None = None,
         minimum_recommended_savings_bytes: int,
         folder_group: Callable[[str], FolderGroup | None],
         estimate_savings_bytes: Callable[..., int],
         review_badge_for_prefix: Callable[[str], FolderBadge],
 ) -> list[FolderCard]:
+    decisions = encode_candidate_decisions(connection, config, prefixes=[]) if config is not None else []
+    decisions_by_item = {decision.item_id: decision for decision in decisions}
     folder_history, codec_history = _load_savings_history(connection, folder_group=folder_group)
     rows = connection.execute(
         select(
+            library_items.c.id.label("item_id"),
             library_items.c.rel_path,
             library_items.c.size_bytes,
             library_items.c.status,
@@ -204,13 +213,14 @@ def preview_folder_cards(
         size_bytes = int(row["size_bytes"])
         card.total_size_bytes += size_bytes
         status = str(row["status"] or "unknown")
+        decision = decisions_by_item.get(int(row["item_id"]))
         codec = str(row["video_codec"] or "unknown")
         known_saved_bytes = _pending_folder_item_savings_bytes(status=status, bytes_saved=row["bytes_saved"])
         if known_saved_bytes is not None:
             card.known_saved_bytes += known_saved_bytes
         if status != "promoted":
             card.pending_count += 1
-            if known_saved_bytes is None:
+            if known_saved_bytes is None and _eligible_for_estimate(status, decision):
                 card.estimated_savings_bytes += _estimated_pending_savings_bytes(
                     size_bytes=size_bytes,
                     video_codec=codec,
@@ -228,7 +238,8 @@ def preview_folder_cards(
         for card in grouped.values()
         if card.pending_count > 0 and card.projected_reclaim_bytes >= minimum_recommended_savings_bytes
     ]
-    _apply_folder_workflow_states(connection, cards)
+    _apply_lifecycle(cards, decisions)
+    _apply_folder_workflow_states(connection, cards, decisions)
     _apply_folder_review_badges(cards, review_badge_for_prefix)
     return sorted(
         cards,
@@ -243,6 +254,7 @@ def preview_folder_cards(
 def list_library_structure_cards(
         connection: DBClient,
         *,
+        config: MediaforceConfig | None = None,
         folder_group: Callable[[str], FolderGroup | None],
         review_badge_for_prefix: Callable[[str], FolderBadge],
 ) -> list[FolderCard]:
@@ -302,6 +314,7 @@ def list_library_structure_cards(
 def list_folder_cards(
         connection: DBClient,
         *,
+        config: MediaforceConfig | None = None,
         minimum_recommended_savings_bytes: int | None,
         folder_group: Callable[[str], FolderGroup | None],
         age_days: Callable[[str], float],
@@ -309,9 +322,12 @@ def list_folder_cards(
         review_badge_for_prefix: Callable[[str], FolderBadge],
         rel_path_root: str | None = None,
 ) -> list[FolderCard]:
+    decisions = encode_candidate_decisions(connection, config, prefixes=[]) if config is not None else []
+    decisions_by_item = {decision.item_id: decision for decision in decisions}
     folder_history, codec_history = _load_savings_history(connection, folder_group=folder_group)
     query = (
         select(
+            library_items.c.id.label("item_id"),
             library_items.c.rel_path,
             library_items.c.source_path,
             library_items.c.mtime_ns,
@@ -361,7 +377,10 @@ def list_folder_cards(
         card.item_count += 1
         size_bytes = int(row["size_bytes"])
         card.total_size_bytes += size_bytes
-        path_age_days = _age_days_from_mtime_ns(row["mtime_ns"])
+        decision = decisions_by_item.get(int(row["item_id"]))
+        path_age_days = _decision_age_days(decision)
+        if path_age_days is None:
+            path_age_days = _age_days_from_mtime_ns(row["mtime_ns"])
         if path_age_days is None:
             path_age_days = age_days(str(row["source_path"]))
         card.average_age_days += path_age_days
@@ -372,8 +391,9 @@ def list_folder_cards(
             card.known_saved_bytes += known_saved_bytes
         if status != "promoted":
             card.pending_count += 1
-            if known_saved_bytes is None:
-                age_multiplier = _age_multiplier(path_age_days)
+            if known_saved_bytes is not None:
+                card.sort_score += known_saved_bytes / (1024 ** 3)
+            elif _eligible_for_estimate(status, decision):
                 estimated_savings = _estimated_pending_savings_bytes(
                     size_bytes=size_bytes,
                     video_codec=codec,
@@ -383,9 +403,7 @@ def list_folder_cards(
                     codec_history=codec_history.get(_canonical_video_codec(codec)),
                 )
                 card.estimated_savings_bytes += estimated_savings
-                card.sort_score += (estimated_savings / (1024 ** 3)) * age_multiplier
-            else:
-                card.sort_score += known_saved_bytes / (1024 ** 3)
+                card.sort_score += estimated_savings / (1024 ** 3)
         card.statuses[status] = card.statuses.get(status, 0) + 1
         card.video_codecs[codec] = card.video_codecs.get(codec, 0) + 1
     cards = list(grouped.values())
@@ -401,7 +419,8 @@ def list_folder_cards(
             or card.projected_reclaim_bytes >= minimum_recommended_savings_bytes
         )
     ]
-    _apply_folder_workflow_states(connection, cards)
+    _apply_lifecycle(cards, decisions)
+    _apply_folder_workflow_states(connection, cards, decisions)
     _apply_folder_review_badges(cards, review_badge_for_prefix)
     return sorted(
         cards,
@@ -451,10 +470,18 @@ def _apply_folder_review_badges(cards: list[FolderCard], review_badge_for_prefix
         card.review_badge_detail = badge.get("detail")
 
 
-def _apply_folder_workflow_states(connection: DBClient, cards: list[FolderCard]) -> None:
+def _apply_folder_workflow_states(
+        connection: DBClient,
+        cards: list[FolderCard],
+        decisions: list[CandidateDecision] | None = None,
+) -> None:
     if not cards:
         return
-    workflow_by_prefix = build_folder_workflow_states(connection, [card.prefix for card in cards])
+    workflow_by_prefix = build_folder_workflow_states(
+        connection,
+        [card.prefix for card in cards],
+        candidate_eligibility=workflow_eligibility(decisions or []),
+    )
     for card in cards:
         workflow = workflow_by_prefix.get(card.prefix)
         card.workflow_state = workflow.to_payload() if workflow is not None else None
@@ -496,8 +523,45 @@ def _copy_folder_card(card: FolderCard, *, include_review_badges: bool = True) -
         review_badge_tone=card.review_badge_tone if include_review_badges else None,
         review_badge_detail=card.review_badge_detail if include_review_badges else None,
         workflow_state=deepcopy(card.workflow_state),
+        lifecycle=deepcopy(card.lifecycle),
         details_loading=card.details_loading,
     )
+
+
+def _apply_lifecycle(cards: list[FolderCard], decisions: list[CandidateDecision]) -> None:
+    if not decisions:
+        return
+    now = datetime.now(tz=UTC)
+    for card in cards:
+        payload = scope_lifecycle_payload_from_decisions(card.prefix, decisions)
+        card.lifecycle = payload
+        ranking_added_at = payload.get("ranking_added_at")
+        if not isinstance(ranking_added_at, str):
+            continue
+        try:
+            timestamp = datetime.fromisoformat(ranking_added_at.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=UTC)
+        age_days = max((now - timestamp.astimezone(UTC)).total_seconds() / 86400.0, 0.0)
+        card.sort_score = age_days * 1_000_000 + card.projected_reclaim_bytes / (1024 ** 3)
+
+
+def _eligible_for_estimate(status: str, decision: CandidateDecision | None) -> bool:
+    if status not in ENCODE_CANDIDATE_STATUSES:
+        return True
+    return decision is None or decision.eligible
+
+
+def _decision_age_days(decision: CandidateDecision | None) -> float | None:
+    if decision is None or decision.age.timestamp is None:
+        return None
+    age_seconds = max(
+        (datetime.now(tz=UTC) - decision.age.timestamp.astimezone(UTC)).total_seconds(),
+        0.0,
+    )
+    return age_seconds / 86400.0
 
 
 def _load_savings_history(

@@ -11,6 +11,10 @@ def object_dict_or_none(value: Any) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+def _request_flag(body: object, key: str) -> bool:
+    return isinstance(body, dict) and body.get(key) is True
+
+
 def register_folder_routes(
         app: FastAPI,
         *,
@@ -21,8 +25,9 @@ def register_folder_routes(
         folder_ai_tune_preview_action: Callable[[str, str, str, dict[str, Any] | None], dict[str, Any]],
         folder_ai_tune_confirm_action: Callable[[str, str], dict[str, Any]],
         clear_folder_tuning_action: Callable[[str], dict[str, Any]],
+        save_series_lifecycle_action: Callable[[str, str], dict[str, Any]],
         approve_measured_encode_recovery_action: Callable[[str], dict[str, Any]],
-        queue_folder_encode_action: Callable[[str, str, bool], dict[str, Any]],
+        queue_folder_encode_action: Callable[[str, str, bool, bool], dict[str, Any]],
         validate_folder_outputs_action: Callable[[str], dict[str, Any]],
         promote_folder_outputs_action: Callable[[str], dict[str, Any]],
         save_profile_action: Callable[[str, bool, bool, str], dict[str, Any]],
@@ -79,13 +84,23 @@ def register_folder_routes(
         result = clear_folder_tuning_action(prefix.strip("/"))
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
+    @app.post("/api/folders/{prefix:path}/series-lifecycle")
+    async def api_folder_series_lifecycle(prefix: str, request: Request) -> JSONResponse:
+        body = await request.json()
+        result = save_series_lifecycle_action(
+            prefix.strip("/"),
+            str(body.get("mode", "")),
+        )
+        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
     @app.post("/api/folders/{prefix:path}/queue-encode")
     async def api_folder_queue_encode(prefix: str, request: Request) -> JSONResponse:
         body = await request.json()
         result = queue_folder_encode_action(
             prefix.strip("/"),
             str(body.get("notes", "")),
-            bool(body.get("bypass_schedule", False)),
+            _request_flag(body, "bypass_schedule"),
+            _request_flag(body, "override_policy_holds"),
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
@@ -103,7 +118,6 @@ def register_folder_routes(
     def api_folder_promote_outputs(prefix: str) -> JSONResponse:
         result = promote_folder_outputs_action(prefix.strip("/"))
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
-
     @app.post("/api/folders/{prefix:path}/save-profile")
     async def api_folder_save_profile(prefix: str, request: Request) -> JSONResponse:
         try:

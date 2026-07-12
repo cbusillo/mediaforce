@@ -55,6 +55,9 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   is explained separately from a measured quality-floor conflict.
 - Approved state: `/folders/tv/Approved%20Show/Season%201`, where approval is
   complete but production remains unqueued until `Make the season` is chosen.
+- Protected approved state: `/folders/tv/Protected%20Ready/Season%202`, where an
+  accepted test is ready but the current/recent season requires the explicit
+  lifecycle override dialog before queueing.
 - Active processing state: `/folders/tv/Encoding%20Show/Season%201`, with a
   running folder processing row.
 - Retryable processing state: `/folders/tv/Failed%20Encode/Season%201`, with a
@@ -63,6 +66,11 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   `/folders/tv/Promotion%20Ready/Season%201`, and
   `/folders/tv/Finished%20Show/Season%201` cover validation, promotion, and
   completed folder states.
+- Lifecycle states: `tv/Current Season` includes an aged eligible Season 1 and a
+  five-day-old active Season 2. Library must show eligible versus held episode
+  counts, active-series metadata, the `Auto` policy, and current/acquisition hold
+  reasons without hiding either season. The Season 2 route must require explicit
+  confirmation before its manual override can queue work.
 - Unavailable worker state: `config/web-smoke.toml` includes a smoke-only remote
   host that is unavailable, so `/ops` can expose the no-ready-host blocker while
   queued encode work exists.
@@ -167,6 +175,13 @@ and that narrow layouts replace the long show rail with a show picker. Opening a
 multi-season show must clearly state that one representative test and one size
 choice apply to all seasons before any full encode can be queued.
 
+For `Current Season`, verify that `Auto`, `On`, and `Off` are understandable as
+current-season policy rather than queue controls; saving a mode must retain the
+selected show. Eligible and held totals must agree between the show view and its
+season rows. Opening Season 2 must explain both its recent-acquisition and
+current-season holds, keep normal production disabled, and present the explicit
+override confirmation without implying that workflow safety checks are bypassed.
+
 Library structure must render before savings and workflow enrichment completes.
 With the detail request delayed, verify that show and season names, episode
 counts, current sizes, search, selection, and size/name sorting remain usable;
@@ -184,7 +199,8 @@ on Library, Activity, Finished, Settings, and folder review routes.
 ## State Gaps
 
 The current fixture covers non-empty queue, empty queue, waiting Folder Studio,
-queued sample, retryable sample, review-pack-ready sample, active encode,
-retryable processing, cleanup-ready Completed, blocked Completed, unavailable host
-Ops, idle Ops, and narrow layout. Future UI work should extend this fixture or
-add dedicated fixture modes when it introduces new workflow states.
+queued sample, retryable sample, review-pack-ready sample, protected current and
+recently acquired seasons, active encode, retryable processing, cleanup-ready
+Completed, blocked Completed, unavailable host Ops, idle Ops, and narrow layout.
+Future UI work should extend this fixture or add dedicated fixture modes when it
+introduces new workflow states.

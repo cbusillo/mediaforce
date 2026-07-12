@@ -1,6 +1,7 @@
 from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.library.metadata_sync import metadata_configuration_status
 from mediaforce.web.settings_runtime import HOST_CAPABILITY_OPTIONS, index_schedule_profile_rows, \
     index_settings_library_rows, index_settings_remote_rows, schedule_profile_options, settings_archive_root, \
     settings_library_rows_for_config, settings_remote_rows_for_config, settings_schedule_profile_rows_for_config, \
@@ -51,6 +52,7 @@ def settings_page_payload(
         "host_capability_options": list(HOST_CAPABILITY_OPTIONS),
         "archive_root": settings_archive_root(resolved_transcode_root),
         "archive_cleanup": archive_cleanup_summary_fn(config) if include_archive_cleanup else None,
+        "metadata": metadata_configuration_status(config),
         "runtime_settings_path": str(config.paths.runtime_settings_path),
         "repo_config_path": str(config.paths.config_path),
     }

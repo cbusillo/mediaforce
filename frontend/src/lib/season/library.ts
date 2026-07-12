@@ -82,6 +82,26 @@ function aggregateShowCard(showPrefix: string, seasons: FolderCard[]): FolderCar
 		review_badge_tone: null,
 		review_badge_detail: null,
 		workflow_state: null,
+		lifecycle: first.lifecycle
+			? {
+					...first.lifecycle,
+					prefix: showPrefix,
+					series_prefix: showPrefix,
+					candidate_count: seasons.reduce(
+						(total, season) => total + (season.lifecycle?.candidate_count ?? 0),
+						0
+					),
+					eligible_candidate_count: seasons.reduce(
+						(total, season) => total + (season.lifecycle?.eligible_candidate_count ?? 0),
+						0
+					),
+					held_candidate_count: seasons.reduce(
+						(total, season) => total + (season.lifecycle?.held_candidate_count ?? 0),
+						0
+					),
+					seasons: seasons.flatMap((season) => season.lifecycle?.seasons ?? [])
+				}
+			: null,
 		details_loading: seasons.some((season) => season.details_loading)
 	};
 }
