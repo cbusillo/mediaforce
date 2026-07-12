@@ -13,6 +13,7 @@ import {
 	buildDecisionFacts,
 	buildFooterSignals,
 	buildOutputReviewRows,
+	buildQualityRiskFacts,
 	buildProcessingHostOptions,
 	buildReviewWorkspaceView,
 	buildRuntimeFacts,
@@ -1206,6 +1207,19 @@ describe('Folder Studio review request mapping', () => {
 		).toEqual({ disabled: false, title: '' });
 	});
 
+	it('blocks size approval when deterministic quality-risk evidence is blocked', () => {
+		expect(
+			resolveWorkflowActionState('approve-size-tradeoff', {
+				reviewPackReady: true,
+				approvalReviewReady: true,
+				pendingProposal: null,
+				calibrationJob: null,
+				qualityRiskBlocked: true,
+				qualityRiskBlocker: 'Cadence evidence is missing.'
+			})
+		).toEqual({ disabled: true, title: 'Cadence evidence is missing.' });
+	});
+
 	it('queues already approved folders even after review media goes stale', () => {
 		expect(
 			resolveWorkflowActionState('queue-encode', {
@@ -2249,5 +2263,82 @@ describe('Folder Studio review request mapping', () => {
 			)
 		).toBe('season');
 		expect(outputScopeLabel(folderPayload())).toBe('folder');
+	});
+});
+
+describe('quality risk facts', () => {
+	it('projects a compact operator-facing quality risk summary', () => {
+		const folder = folderPayload({
+			quality_risk: {
+				verdict: 'request_comparison',
+				request_comparison: true,
+				comparison_reason: 'Low-confidence grain findings require comparison.',
+				typed_risks: [
+					{
+						tag: 'grain_noise_treatment',
+						label: 'Grain / noise treatment',
+						level: 'medium',
+						rationale: 'Measured temporal noise may be grain rather than removable noise.'
+					}
+				],
+				operator_decision: {
+					status: 'pending'
+				}
+			}
+		});
+
+		expect(buildQualityRiskFacts(folder)).toEqual([
+			{
+				label: 'Risk verdict',
+				value: 'Request comparison',
+				detail: 'Low-confidence grain findings require comparison.',
+				tone: 'wait'
+			},
+			{
+				label: 'Top concern',
+				value: 'Grain / noise treatment',
+				detail: 'Medium risk',
+				tone: 'wait'
+			},
+			{
+				label: 'Authority',
+				value: 'No current decision',
+				detail: 'Older or sibling evidence is not treated as current authority.',
+				tone: 'idle'
+			}
+		]);
+	});
+
+	it('adds the top quality risk to decision facts', () => {
+		const folder = folderPayload({
+			quality_risk: {
+				verdict: 'blocked',
+				blocked: true,
+				blocking_reasons: ['Current rejection blocks automatic reuse.'],
+				typed_risks: [
+					{
+						tag: 'motion_breakup',
+						label: 'Motion breakup',
+						level: 'high',
+						rationale: 'The current sample breaks up in high motion.'
+					}
+				],
+				operator_decision: {
+					status: 'rejected'
+				}
+			}
+		});
+
+		const facts = buildDecisionFacts(folder, null, null);
+		expect(facts[3]).toEqual({
+			label: 'Risk verdict',
+			value: 'Blocked',
+			detail: 'Current rejection blocks automatic reuse.'
+		});
+		expect(facts.slice(3).map((fact) => fact.label)).toEqual([
+			'Risk verdict',
+			'Top concern',
+			'Authority'
+		]);
 	});
 });

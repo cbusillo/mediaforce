@@ -5,6 +5,7 @@ import type {
 	FolderPayload,
 	FolderStatusPayload,
 	OperatorIntentRequestPayload,
+	QualityRiskPayload,
 	SizeGoalMode
 } from '$lib/api/types';
 
@@ -77,6 +78,20 @@ export interface ReviewPair {
 	comparePath: string;
 }
 
+export interface CompareRiskSummary {
+	verdict: string;
+	blocked: boolean;
+	tone: HumanSeasonTone;
+	title: string;
+	detail: string;
+	topRisk: string;
+	topRiskLevel: string;
+	topRiskDetail: string;
+	authority: string;
+	authorityDetail: string;
+	focusMoments: string[];
+}
+
 const ACTIVE_JOB_STATUSES = new Set(['queued', 'running', 'starting', 'retry_backoff', 'stopping']);
 const FAILURE_JOB_STATUSES = new Set(['failed', 'stopped', 'needs_attention']);
 
@@ -97,6 +112,81 @@ function text(value: unknown): string {
 function numberValue(value: unknown): number {
 	const parsed = Number(value ?? 0);
 	return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function qualityRisk(folder: FolderPayload): QualityRiskPayload | null {
+	const risk = record(folder.quality_risk);
+	return Object.keys(risk).length > 0 ? (risk as QualityRiskPayload) : null;
+}
+
+function riskVerdictCopy(verdict: string | null | undefined): string {
+	const normalized = text(verdict).toLowerCase();
+	if (normalized === 'blocked') return 'Blocked';
+	if (normalized === 'request_comparison') return 'Request comparison';
+	if (normalized === 'needs_operator_review') return 'Needs operator review';
+	if (normalized === 'safe_to_sample') return 'Safe to sample';
+	return 'Review evidence';
+}
+
+function riskTone(risk: QualityRiskPayload | null): HumanSeasonTone {
+	if (!risk) return 'quiet';
+	if (risk.blocked) return 'attention';
+	if (risk.request_comparison) return 'ready';
+	return 'quiet';
+}
+
+function riskAuthority(risk: QualityRiskPayload | null): { value: string; detail: string } {
+	const decision = record(risk?.operator_decision);
+	const status = text(decision.status).toLowerCase();
+	if (status === 'rejected') {
+		return {
+			value: 'Current rejection',
+			detail: 'The latest matching rejection outranks any older approval.'
+		};
+	}
+	if (status === 'approved') {
+		return {
+			value: 'Current approval',
+			detail: 'The current sample, source, and policy hash have an authoritative approval.'
+		};
+	}
+	return {
+		value: 'No current decision',
+		detail: 'Older, stale, or sibling evidence is not treated as authority here.'
+	};
+}
+
+export function compareRiskSummary(folder: FolderPayload): CompareRiskSummary | null {
+	const risk = qualityRisk(folder);
+	if (!risk) return null;
+	const typedRisks = Array.isArray(risk.typed_risks) ? risk.typed_risks : [];
+	const topRisk =
+		typedRisks.find((item) => text(item.level).toLowerCase() === 'high') ??
+		typedRisks.find((item) => text(item.level).toLowerCase() === 'medium') ??
+		typedRisks[0] ??
+		null;
+	const authority = riskAuthority(risk);
+	const focusMoments = (risk.pre_test_instruction?.moments ?? []).slice(0, 3).map((moment) => {
+		const labels = Array.isArray(moment.risk_tags) ? moment.risk_tags.join(', ') : 'review risk';
+		return `Moment ${moment.moment} · ${labels}`;
+	});
+	return {
+		verdict: riskVerdictCopy(risk.verdict),
+		blocked: Boolean(risk.blocked),
+		tone: riskTone(risk),
+		title: topRisk ? topRisk.label : riskVerdictCopy(risk.verdict),
+		detail:
+			(risk.blocking_reasons && risk.blocking_reasons[0]) ||
+			risk.comparison_reason ||
+			text(risk.interpretation?.summary) ||
+			'Measured evidence and review authority define the current risk state.',
+		topRisk: topRisk?.label ?? 'No elevated typed risk',
+		topRiskLevel: topRisk?.level ? `${topRisk.level} risk` : 'unknown risk',
+		topRiskDetail: topRisk?.rationale ?? 'No typed review focus was published for this sample.',
+		authority: authority.value,
+		authorityDetail: authority.detail,
+		focusMoments
+	};
 }
 
 function booleanValue(value: unknown): boolean {

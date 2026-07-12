@@ -576,6 +576,123 @@ export interface StreamBudgetLedgerPayload {
 	};
 }
 
+export type QualityRiskTag =
+	| 'softness_detail_loss'
+	| 'motion_breakup'
+	| 'banding_dark_scene_damage'
+	| 'grain_noise_treatment'
+	| 'cadence_interlace_artifacts'
+	| 'audio_quality_layout'
+	| 'other';
+
+export type QualityRiskLevel = 'low' | 'medium' | 'high' | 'unknown';
+export type QualityRiskOperatorStatus =
+	'pending' | 'approved' | 'rejected' | 'needs_operator_review';
+
+export type QualityRiskVerdict =
+	'safe_to_sample' | 'needs_operator_review' | 'request_comparison' | 'blocked';
+
+export interface QualityRiskItem {
+	tag: QualityRiskTag;
+	label: string;
+	level: QualityRiskLevel;
+	rationale: string;
+	evidence_ids?: string[];
+	moment_indexes?: number[];
+}
+
+export interface QualityRiskMomentRef {
+	moment: number;
+	timestamp_seconds: number;
+	role: string;
+	risk_tags: QualityRiskTag[];
+	evidence_id?: string | null;
+	rationale?: string | null;
+}
+
+export interface QualityRiskOperatorRecord {
+	kind?: string;
+	created_at?: string | null;
+	verdict?: string;
+	tags?: QualityRiskTag[];
+	details?: string;
+	evidence_id?: string | null;
+	evidence_ids?: string[];
+	moment_indexes?: number[];
+	sample_job_id?: string | null;
+	policy_hash?: string | null;
+	source_id?: string | null;
+	prefix?: string | null;
+	authoritative?: boolean;
+}
+
+export interface QualityRiskTargetSizeSearch {
+	trace_id?: string;
+	schema_version?: number;
+	status?: 'selected' | 'infeasible' | 'quality_conflict' | 'needs_review';
+	selection_reason?: string | null;
+	curve_shape?: 'single_point' | 'monotonic' | 'non_monotonic' | null;
+	candidate_count?: number;
+	max_candidates?: number;
+	target_bytes?: number | null;
+	lower_bound_bytes?: number | null;
+	upper_bound_bytes?: number | null;
+	selected_crf?: number | null;
+	selected_metric?: string | null;
+	selected_metric_score?: number | null;
+	minimum_metric_score?: number | null;
+	quality_floor_met?: boolean | null;
+	predicted_whole_episode_bytes?: number | null;
+	within_sample_band?: boolean | null;
+	transform_plan_id?: string | null;
+}
+
+export interface QualityRiskPreTestInstruction {
+	prefix?: string;
+	source_id?: string;
+	policy_hash?: string;
+	sample_job_id?: string | null;
+	focus_tags?: QualityRiskTag[];
+	focus_labels?: string[];
+	moments?: QualityRiskMomentRef[];
+}
+
+export interface QualityRiskPayload {
+	schema?: string;
+	version?: number;
+	verdict?: QualityRiskVerdict;
+	source_id?: string | null;
+	source_fingerprint?: string | null;
+	sample_job_id?: string | null;
+	evidence_ids?: string[];
+	policy_hash?: string | null;
+	current_policy_hash?: string | null;
+	preview_policy_hash?: string | null;
+	blocked?: boolean;
+	blocking_reasons?: string[];
+	request_comparison?: boolean;
+	comparison_reason?: string | null;
+	typed_risks?: QualityRiskItem[];
+	operator_decision?: {
+		status?: QualityRiskOperatorStatus;
+		current_rejection_outranks_approval?: boolean;
+		reviewed_policy_hash?: string;
+		records?: QualityRiskOperatorRecord[];
+		effective_record?: QualityRiskOperatorRecord | null;
+	} | null;
+	interpretation?: {
+		summary?: string;
+		verdict?: QualityRiskVerdict;
+		confidence?: QualityRiskLevel;
+		risks?: QualityRiskItem[];
+		suggested_actions?: string[];
+	} | null;
+	moment_count?: number;
+	review_moment_ids?: string[];
+	target_size_search?: QualityRiskTargetSizeSearch | null;
+	pre_test_instruction?: QualityRiskPreTestInstruction | null;
+}
+
 export interface FolderPayload {
 	prefix: string;
 	pending: boolean;
@@ -590,6 +707,7 @@ export interface FolderPayload {
 	resolved_operator_intent?: ResolvedOperatorIntentPayload;
 	stream_budget_ledger?: StreamBudgetLedgerPayload;
 	size_goal_options?: SizeGoalOptionPayload[];
+	quality_risk?: QualityRiskPayload | null;
 	approved_season_shortcut?: Record<string, unknown> | null;
 	series_context?: { prefix: string; title: string } | null;
 	pending_proposal?: Record<string, unknown> | null;

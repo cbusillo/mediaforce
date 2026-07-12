@@ -318,6 +318,115 @@ export type FolderMultimodalReviewPack = {
 	} | null;
 };
 
+export type QualityRiskTag =
+	| 'softness_detail_loss'
+	| 'motion_breakup'
+	| 'banding_dark_scene_damage'
+	| 'grain_noise_treatment'
+	| 'cadence_interlace_artifacts'
+	| 'audio_quality_layout'
+	| 'other';
+
+export type QualityRiskLevel = 'low' | 'medium' | 'high' | 'unknown';
+export type QualityRiskVerdict =
+	'safe_to_sample' | 'needs_operator_review' | 'request_comparison' | 'blocked';
+
+export type QualityRiskItem = {
+	tag: QualityRiskTag;
+	label: string;
+	level: QualityRiskLevel;
+	rationale: string;
+	evidence_ids?: string[];
+	moment_indexes?: number[];
+};
+
+export type QualityRiskOperatorRecord = {
+	kind?: string;
+	created_at?: string | null;
+	verdict?: string;
+	tags?: string[];
+	details?: string;
+	evidence_id?: string | null;
+	evidence_ids?: string[];
+	moment_indexes?: number[];
+	sample_job_id?: string | null;
+	policy_hash?: string | null;
+	source_id?: string | null;
+	prefix?: string | null;
+	authoritative?: boolean;
+};
+
+export type QualityRiskMomentRef = {
+	moment: number;
+	timestamp_seconds: number;
+	role: string;
+	risk_tags: QualityRiskTag[];
+	evidence_id?: string | null;
+	rationale?: string | null;
+};
+
+export type QualityRiskPreTestInstruction = {
+	prefix?: string;
+	source_id?: string;
+	policy_hash?: string;
+	sample_job_id?: string | null;
+	focus_tags?: QualityRiskTag[];
+	focus_labels?: string[];
+	moments?: QualityRiskMomentRef[];
+};
+
+export type QualityRiskTargetSizeSearch = {
+	trace_id?: string;
+	status?: 'selected' | 'infeasible' | 'quality_conflict' | 'needs_review';
+	selection_reason?: string | null;
+	curve_shape?: 'single_point' | 'monotonic' | 'non_monotonic' | null;
+	candidate_count?: number;
+	max_candidates?: number;
+	target_bytes?: number | null;
+	selected_crf?: number | null;
+	selected_metric?: string | null;
+	selected_metric_score?: number | null;
+	minimum_metric_score?: number | null;
+	predicted_whole_episode_bytes?: number | null;
+	within_sample_band?: boolean | null;
+	transform_plan_id?: string | null;
+};
+
+export type FolderQualityRisk = {
+	schema?: string;
+	version?: number;
+	verdict?: QualityRiskVerdict;
+	source_id?: string | null;
+	source_fingerprint?: string | null;
+	sample_job_id?: string | null;
+	evidence_ids?: string[];
+	policy_hash?: string | null;
+	current_policy_hash?: string | null;
+	preview_policy_hash?: string | null;
+	blocked?: boolean;
+	blocking_reasons?: string[];
+	request_comparison?: boolean;
+	comparison_reason?: string | null;
+	typed_risks?: QualityRiskItem[];
+	operator_decision?: {
+		status?: string;
+		current_rejection_outranks_approval?: boolean;
+		records?: QualityRiskOperatorRecord[];
+		effective_record?: QualityRiskOperatorRecord | null;
+	} | null;
+	interpretation?: {
+		summary?: string;
+		verdict?: QualityRiskVerdict;
+		confidence?: QualityRiskLevel;
+		risks?: QualityRiskItem[];
+		suggested_actions?: string[];
+	} | null;
+	moment_count?: number;
+	review_moment_ids?: string[];
+	target_size_search?: QualityRiskTargetSizeSearch | null;
+	pre_test_instruction?: QualityRiskPreTestInstruction | null;
+};
+
 export function normalizeReviewArtifacts(
 	reviewPack: FolderMultimodalReviewPack | null | undefined
 ): VisibleReviewArtifact[] {
@@ -389,6 +498,7 @@ export type PendingSampleProposal = {
 	operator_signal?: string | null;
 	evidence_checked?: string[];
 	multimodal_review_pack?: FolderMultimodalReviewPack | null;
+	quality_risk?: FolderQualityRisk | null;
 	trace?: ProposalTrace | null;
 };
 export type ProposalTrace = {

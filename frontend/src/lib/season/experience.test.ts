@@ -12,6 +12,7 @@ import type {
 import {
 	activeSeasonCards,
 	approvalGuardFromMessage,
+	compareRiskSummary,
 	currentOperatorIntent,
 	detailSeasonState,
 	episodeLabel,
@@ -218,6 +219,53 @@ describe('season experience translation', () => {
 		);
 
 		expect(videoPolicy.target_size_mb).toBe(200);
+	});
+
+	it('summarizes typed quality risk for the compare screen', () => {
+		const summary = compareRiskSummary(
+			folder({
+				quality_risk: {
+					verdict: 'request_comparison',
+					request_comparison: true,
+					comparison_reason: 'Low-confidence grain findings require comparison.',
+					typed_risks: [
+						{
+							tag: 'grain_noise_treatment',
+							label: 'Grain / noise treatment',
+							level: 'medium',
+							rationale: 'Measured temporal noise may be grain rather than removable noise.'
+						}
+					],
+					operator_decision: {
+						status: 'pending'
+					},
+					pre_test_instruction: {
+						moments: [
+							{
+								moment: 2,
+								timestamp_seconds: 89,
+								role: 'hard',
+								risk_tags: ['grain_noise_treatment']
+							}
+						]
+					}
+				}
+			})
+		);
+
+		expect(summary).toEqual({
+			verdict: 'Request comparison',
+			blocked: false,
+			tone: 'ready',
+			title: 'Grain / noise treatment',
+			detail: 'Low-confidence grain findings require comparison.',
+			topRisk: 'Grain / noise treatment',
+			topRiskLevel: 'medium risk',
+			topRiskDetail: 'Measured temporal noise may be grain rather than removable noise.',
+			authority: 'No current decision',
+			authorityDetail: 'Older, stale, or sibling evidence is not treated as authority here.',
+			focusMoments: ['Moment 2 · grain_noise_treatment']
+		});
 	});
 
 	it('falls through a pending proposal without video settings', () => {
