@@ -186,12 +186,20 @@ Guidance:
     output verification, and bounded retry candidate selection
 - `tuning_memory.py`
   - learned-memory session recording and artifact promotion helpers
+- `quality_risk.py`
+  - versioned quality-risk facts/gates/interpretation/operator-decision
+    contract
+  - allow-listed transform compilation checks, typed risk shaping, and
+    evidence-bound review-record precedence
 
 Guidance:
 
 - Keep calibration queue state, canonical size contracts, deterministic budget
   arithmetic, target-size candidate search, and learned-memory helpers under
   `mediaforce/tuning/`.
+- Keep quality-risk facts, deterministic gates, typed risk normalization, and
+  current review authority under `mediaforce/tuning/quality_risk.py` instead of
+  re-deriving them independently in routes, prompts, or the frontend.
 - The stream budget ledger is the only non-video arithmetic authority. Search,
   manifests, queued jobs, production, and API payloads may project compatibility
   fields from it, but must not add audio, subtitle, attachment, or container

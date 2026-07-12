@@ -134,15 +134,6 @@ def retrieve_learning_context(
             learning_artifacts.c.summary,
             learning_artifacts.c.tags_json,
             learning_artifacts.c.updated_at,
-            tuning_sessions.c.applied_policy_json,
-            tuning_sessions.c.toolbelt_json,
-        )
-        .select_from(
-            learning_artifacts.join(
-                tuning_sessions,
-                learning_artifacts.c.session_id == tuning_sessions.c.session_id,
-                isouter=True,
-            )
         )
         .order_by(learning_artifacts.c.updated_at.desc())
     ).mappings().fetchall()
@@ -161,19 +152,14 @@ def retrieve_learning_context(
         same_prefix = int(artifact_prefix == normalized_prefix)
         artifact_series_root = _season_root_prefix(artifact_prefix) or _series_root_prefix(artifact_prefix)
         same_series = int(bool(requested_series_root and artifact_series_root == requested_series_root))
-        approved_visual = "approval:visual" in tag_set and "decision:accepted" in tag_set
-        approval_authoritative = approved_visual and bool(same_prefix or same_series)
-        if approved_visual and not approval_authoritative:
+        if not same_prefix and not same_series:
             continue
-        score = overlap + (same_prefix * 10) + (same_series * 6) + (20 if approval_authoritative else 0)
+        approved_visual = "approval:visual" in tag_set and "decision:accepted" in tag_set
+        score = overlap + (same_prefix * 10) + (same_series * 6) + (2 if approved_visual else 0)
         if score <= 0:
             continue
         artifact_path = Path(str(row["artifact_path"]))
         excerpt = _artifact_excerpt(artifact_path)
-        applied_policy = _json_object(row.get("applied_policy_json"))
-        toolbelt = _json_object(row.get("toolbelt_json"))
-        sample_result = object_dict(toolbelt.get("sample_result"))
-        run_verdict = object_dict(toolbelt.get("run_verdict"))
         ranked.append(
             (
                 score,
@@ -185,10 +171,10 @@ def retrieve_learning_context(
                     "tags": tags,
                     "updated_at": str(row["updated_at"]),
                     "excerpt": excerpt,
-                    "evidence_authority": "approved_visual_result" if approval_authoritative else "none",
-                    "approved_policy": applied_policy if approval_authoritative else {},
-                    "sample_result": sample_result if approval_authoritative else {},
-                    "run_verdict": run_verdict if approval_authoritative else {},
+                    "evidence_authority": "none",
+                    "approved_policy": {},
+                    "sample_result": {},
+                    "run_verdict": {},
                 },
             )
         )

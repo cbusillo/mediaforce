@@ -32,6 +32,7 @@ from mediaforce.core.db_tables import item_events
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.db_tables import staged_artifacts
+from mediaforce.core.evidence import stable_policy_hash
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.process_control import ProcessCancelledError
 from mediaforce.core.type_defs import object_dict, object_list
@@ -5731,8 +5732,33 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "sample_item": {
                 "library_item_id": 1,
                 "resolved_policy": {"video": {"target_vmaf": 85.0, "max_encoded_percent": 80}},
+                "representative_source_id": "src-show-episode",
+                "source_fingerprint": "fp-show-episode",
+                "cadence_decision": {
+                    "classification": "progressive",
+                    "confidence": 0.98,
+                    "transform": "none",
+                    "evidence_id": "ev1_cadence",
+                },
+                "media_fingerprint_decision": {
+                    "status": "measured",
+                    "confidence": 0.9,
+                    "evidence_id": "ev1_fingerprint",
+                    "findings": [],
+                },
             },
-            "sample_result": {"predicted_total_size_bytes": 376 * 1024 * 1024},
+            "sample_result": {
+                "predicted_total_size_bytes": 376 * 1024 * 1024,
+                "cadence_evidence_id": "ev1_cadence",
+                "media_fingerprint_evidence_id": "ev1_fingerprint",
+            },
+            "review_moments": [
+                {
+                    "timestamp_seconds": 90.0,
+                    "risk_tags": ["high_motion"],
+                    "evidence_id": "ev1_fingerprint",
+                }
+            ],
         }
 
         result = folder_actions_runtime.save_profile_action(
@@ -5765,6 +5791,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertTrue(result["queued"])
         self.assertEqual(saved_payloads[0]["accepted_at"], "2026-05-24T04:40:00+00:00")
         self.assertTrue(merged_advice[0]["operator_approved_size_tradeoff"])
+        quality_record = merged_advice[0]["quality_risk_records"][-1]
+        self.assertEqual(quality_record["source_id"], "src-show-episode")
+        self.assertEqual(quality_record["policy_hash"], stable_policy_hash(calibration_payload["policy"]))
+        self.assertEqual(quality_record["sample_job_id"], "sample-1")
+        self.assertEqual(quality_record["evidence_ids"], ["ev1_cadence", "ev1_fingerprint"])
+        self.assertEqual(quality_record["moment_indexes"], [1])
 
     def test_save_profile_action_rejects_stale_size_tradeoff_confirmation_hash(self) -> None:
         calibration_payload: folder_actions_runtime.ActionPayload = {

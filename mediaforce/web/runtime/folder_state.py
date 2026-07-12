@@ -6,6 +6,7 @@ from typing import Any
 from mediaforce.advisor import AdvisorResponse
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.type_defs import float_value, object_dict, object_list
+from mediaforce.tuning.quality_risk import quality_risk_public_view
 
 
 @dataclass(slots=True)
@@ -281,6 +282,7 @@ def pending_proposal_public_view(deps: FolderStateDeps, payload: dict[str, Any] 
         "operator_signal": payload.get("operator_signal"),
         "evidence_checked": object_list(payload.get("evidence_checked")),
         "multimodal_review_pack": object_dict(payload.get("multimodal_review_pack")) or None,
+        "quality_risk": quality_risk_public_view(object_dict(payload.get("quality_risk_contract"))),
         "trace": deps.pending_proposal_trace_public_view(object_dict(payload.get("trace"))),
     }
 
