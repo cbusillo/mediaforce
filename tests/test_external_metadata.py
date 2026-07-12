@@ -67,6 +67,17 @@ class ExternalMetadataTests(unittest.TestCase):
                         }],
                     }
                 }, {}
+            if "type=1" in url:
+                return {
+                    "MediaContainer": {
+                        "totalSize": 1,
+                        "Metadata": [{
+                            "ratingKey": "movie-1",
+                            "addedAt": 1_700_000_000,
+                            "Media": [{"Part": [{"id": "part-1", "file": "/plex/movies/Movie.mkv"}]}],
+                        }],
+                    }
+                }, {}
             if "type=4" in url:
                 return {
                     "MediaContainer": {
@@ -97,13 +108,19 @@ class ExternalMetadataTests(unittest.TestCase):
         )
 
         show = list(plex.shows())[0]
+        movie = list(plex.items(1))[0]
         item = list(plex.items(4))[0]
         series = tmdb.series(42)
 
         self.assertEqual(show.guids, ("tmdb://42",))
+        self.assertEqual(movie.part_path, "/plex/movies/Movie.mkv")
         self.assertEqual(item.season_index, 0)
         self.assertEqual(series.status, "Returning Series")
-        self.assertEqual(parse_qs(urlsplit(requests[0][0]).query).get("includeGuids"), ["1"])
+        plex_queries = [parse_qs(urlsplit(url).query) for url, _headers in requests if url.startswith("http://plex")]
+        self.assertEqual([query.get("type") for query in plex_queries], [["2"], ["1"], ["4"]])
+        self.assertEqual(plex_queries[0].get("includeGuids"), ["1"])
+        self.assertNotIn("includeGuids", plex_queries[1])
+        self.assertNotIn("includeGuids", plex_queries[2])
         self.assertEqual(requests[0][1]["X-Plex-Token"], "plex-secret")
         self.assertEqual(requests[-1][1]["Authorization"], "Bearer tmdb-secret")
         self.assertTrue(all("secret" not in url for url, _ in requests))
