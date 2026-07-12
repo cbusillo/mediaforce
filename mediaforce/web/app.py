@@ -2581,7 +2581,10 @@ def _review_pair_key(timestamp_seconds: float) -> int:
 
 def _save_advice_state(config: MediaforceConfig, prefix: str, advice: ActionPayload) -> None:
     with _locked_advice_state(config, prefix) as path:
-        existing = _read_advice_state(path, strict=True) or {}
+        try:
+            existing = _read_advice_state(path, strict=True) or {}
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+            existing = {}
         payload = dict(advice)
         if existing.get("quality_risk_records") or payload.get("quality_risk_records"):
             payload["quality_risk_records"] = _merge_quality_risk_records(

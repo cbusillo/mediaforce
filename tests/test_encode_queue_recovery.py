@@ -13646,6 +13646,15 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 409)
         self.assertIn("could not read the current review evidence safely", str(raised.exception.detail))
 
+    def test_advice_save_repairs_corrupt_state(self) -> None:
+        prefix = "tv/show/Season 1"
+        web_app._advice_file(self.config, prefix).write_text("{not-json")
+
+        web_app._save_advice_state(self.config, prefix, {"summary": "Fresh representative-test advice."})
+
+        saved = web_app._load_advice_state_for_queue(self.config, prefix)
+        self.assertEqual(object_dict(saved).get("summary"), "Fresh representative-test advice.")
+
     def test_build_manifest_shards_creates_one_file_per_shard(self) -> None:
         manifest: folder_actions_runtime.ManifestPayload = {
             "items": [
