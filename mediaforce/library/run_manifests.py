@@ -8,7 +8,6 @@ from sqlalchemy import bindparam
 from sqlalchemy import or_
 from sqlalchemy import outerjoin
 from sqlalchemy import select
-from sqlalchemy import true
 from sqlalchemy import update
 
 from mediaforce.core.config import MediaforceConfig
@@ -20,6 +19,7 @@ from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES
 from mediaforce.library.workflow_state import derive_item_workflow_state
 from mediaforce.core.type_defs import object_dict
 from mediaforce.library.candidate_selection import candidate_rank_key, project_candidates
+from mediaforce.library.media_scopes import resolve_media_scope, resolve_media_scopes, scope_rel_path_filter
 from mediaforce.library.planner import build_manifest_item, recommend_item
 from mediaforce.library.scanner import scan_library
 
@@ -118,7 +118,8 @@ def select_candidates(
         .where(library_items.c.status.in_(statuses))
     )
     if prefixes:
-        query = query.where(or_(*(_prefix_filter(prefix) for prefix in prefixes)))
+        scopes = resolve_media_scopes(connection, prefixes)
+        query = query.where(or_(*(scope_rel_path_filter(library_items.c.rel_path, scope) for scope in scopes)))
     query = query.order_by(library_items.c.priority_score.desc(), library_items.c.size_bytes.desc())
     if limit is not None:
         query = query.limit(limit)
@@ -126,20 +127,6 @@ def select_candidates(
     if buckets:
         rows = [row for row in rows if recommend_item(row, config).bucket in buckets]
     return rows
-
-
-def _prefix_filter(prefix: str) -> Any:
-    normalized_prefix = prefix.strip().strip("/")
-    if not normalized_prefix:
-        return true()
-    return or_(
-        library_items.c.rel_path == normalized_prefix,
-        library_items.c.rel_path.like(f"{_sql_like_escape(normalized_prefix)}/%", escape="\\"),
-    )
-
-
-def _sql_like_escape(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def select_encode_candidates(
@@ -256,6 +243,7 @@ def create_folder_manifest(
 ) -> tuple[dict[str, Any], Path]:
     if scan_first:
         scan_library(connection, config, prefixes=[prefix])
+    scope = resolve_media_scope(connection, prefix)
     rows = select_encode_candidates(
         connection,
         config,
@@ -264,5 +252,6 @@ def create_folder_manifest(
         manual_override_prefix=manual_override_prefix,
     )
     manifest = build_run_manifest(rows, config)
+    manifest["selection"]["media_scope"] = scope.to_payload()
     manifest_path = write_manifest(connection, config, manifest)
     return manifest, manifest_path

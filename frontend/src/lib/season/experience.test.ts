@@ -92,6 +92,18 @@ const dashboard = {
 
 const status = {
 	prefix: card.prefix,
+	media_scope: {
+		schema_version: 1,
+		prefix: card.prefix,
+		root: 'tv',
+		domain: 'tv',
+		kind: 'tv_season',
+		match: 'descendants',
+		title: card.title,
+		subtitle: card.subtitle,
+		scope_label: card.scope_label,
+		parent: { prefix: 'tv/Big Brother (US)', title: 'Big Brother (US)' }
+	},
 	polling_active: false,
 	calibration_status: 'idle',
 	folder_scan_status: 'idle',
@@ -102,6 +114,7 @@ const status = {
 function folder(overrides: Partial<FolderPayload> = {}): FolderPayload {
 	return {
 		prefix: card.prefix,
+		media_scope: status.media_scope,
 		pending: false,
 		metric_support: dashboard.metric_support,
 		metric_status_copy: '',

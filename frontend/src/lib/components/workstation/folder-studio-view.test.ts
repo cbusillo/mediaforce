@@ -39,6 +39,18 @@ import type { FolderCalibrationState, PendingSampleProposal } from '$lib/folders
 function folderPayload(overrides: Partial<FolderPayload> = {}): FolderPayload {
 	return {
 		prefix: 'tv/Example/Season 1',
+		media_scope: {
+			schema_version: 1,
+			prefix: 'tv/Example/Season 1',
+			root: 'tv',
+			domain: 'tv',
+			kind: 'tv_season',
+			match: 'descendants',
+			title: 'Example · Season 1',
+			subtitle: 'Example',
+			scope_label: 'Season',
+			parent: { prefix: 'tv/Example', title: 'Example' }
+		},
 		pending: true,
 		summary: {
 			prefix: 'tv/Example/Season 1',
@@ -59,6 +71,18 @@ function folderPayload(overrides: Partial<FolderPayload> = {}): FolderPayload {
 function folderStatusPayload(overrides: Partial<FolderStatusPayload> = {}): FolderStatusPayload {
 	return {
 		prefix: 'tv/Example/Season 1',
+		media_scope: {
+			schema_version: 1,
+			prefix: 'tv/Example/Season 1',
+			root: 'tv',
+			domain: 'tv',
+			kind: 'tv_season',
+			match: 'descendants',
+			title: 'Example · Season 1',
+			subtitle: 'Example',
+			scope_label: 'Season',
+			parent: { prefix: 'tv/Example', title: 'Example' }
+		},
 		polling_active: false,
 		calibration_status: 'idle',
 		folder_scan_status: 'idle',

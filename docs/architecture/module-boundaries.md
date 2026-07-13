@@ -160,6 +160,9 @@ Guidance:
   - ffprobe-based media inspection and audio, subtitle, attachment track summaries
 - `scanner.py`
   - library scan orchestration and catalog updates
+- `media_scopes.py`
+  - canonical operator grouping for TV, movie, and generic media roots
+  - exact-item versus descendant matching, SQL-safe boundaries, and API scope payloads
 - `folder_profiles.py`
   - folder inspection and suggested override shaping
 - `run_manifests.py`
@@ -173,6 +176,12 @@ Guidance:
 - Keep scan, probe, planning, and manifest orchestration logic under
   `mediaforce/library/` instead of spreading it back across the top-level
   package.
+- Resolve operator paths through `MediaScope` before selecting items, loading
+  staged artifacts, or comparing queue jobs. File scopes match one exact
+  `rel_path`; folder scopes match case-sensitive, `/`-bounded descendants.
+- TV item grouping remains series/season oriented, while an explicitly
+  requested nested TV path retains its own bounded folder scope instead of
+  widening to the season.
 
 ### `mediaforce/tuning/`
 

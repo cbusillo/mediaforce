@@ -86,6 +86,30 @@ export interface LifecycleState {
 	seasons: SeasonLifecycleState[];
 }
 
+export type MediaScopeDomain = 'tv' | 'movie' | 'other';
+export type MediaScopeKind =
+	| 'library_root'
+	| 'tv_series'
+	| 'tv_season'
+	| 'movie_title'
+	| 'movie_file'
+	| 'media_folder'
+	| 'media_file';
+export type MediaScopeMatch = 'exact_item' | 'descendants';
+
+export interface MediaScopePayload {
+	schema_version: number;
+	prefix: string;
+	root: string;
+	domain: MediaScopeDomain;
+	kind: MediaScopeKind;
+	match: MediaScopeMatch;
+	title: string;
+	subtitle: string;
+	scope_label: string;
+	parent?: { prefix: string; title: string } | null;
+}
+
 export interface FolderCard {
 	prefix: string;
 	title: string;
@@ -106,6 +130,7 @@ export interface FolderCard {
 	review_badge_detail?: string | null;
 	workflow_state?: FolderWorkflowState | null;
 	lifecycle?: LifecycleState | null;
+	media_scope?: MediaScopePayload | null;
 	details_loading: boolean;
 }
 
@@ -764,6 +789,7 @@ export interface QualityRiskPayload {
 
 export interface FolderPayload {
 	prefix: string;
+	media_scope: MediaScopePayload;
 	pending: boolean;
 	summary?: FolderSummary;
 	sample_item?: Record<string, unknown>;
@@ -816,6 +842,7 @@ export interface FolderBenchConfirmResponse {
 
 export interface FolderStatusPayload {
 	prefix: string;
+	media_scope: MediaScopePayload;
 	polling_active: boolean;
 	calibration_status: string;
 	folder_scan_status: string;

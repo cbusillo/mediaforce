@@ -29,6 +29,7 @@ from mediaforce.encoding.fingerprint import (
     MEDIA_FINGERPRINT_TOOL_VERSION,
     unavailable_media_fingerprint_summary,
 )
+from mediaforce.library.media_scopes import path_matches_scope
 from mediaforce.library.planner import recommend_item
 from mediaforce.library.probe import probe_media
 from mediaforce.core.type_defs import int_value, object_list
@@ -373,7 +374,7 @@ def _iter_media_files(
             if file_path.suffix.lower() not in VIDEO_EXTENSIONS:
                 continue
             rel_path = str(file_path.relative_to(root_path.parent))
-            if prefixes and not any(rel_path.startswith(prefix) for prefix in prefixes):
+            if prefixes and not any(path_matches_scope(rel_path, prefix) for prefix in prefixes):
                 continue
             yield file_path
             matched += 1

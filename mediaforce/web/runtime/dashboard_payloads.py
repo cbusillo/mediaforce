@@ -8,6 +8,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import library_items
 from mediaforce.encoding.encode_queue import summarize_encode_queue
+from mediaforce.library.media_scopes import resolve_media_scope
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.candidate_selection import encode_candidate_decisions, workflow_eligibility
 
@@ -104,6 +105,7 @@ def folder_status_payload(
         load_active_encode_job_for_prefix: Any,
 ) -> dict[str, Any]:
     with open_db(config.paths.db_path) as connection:
+        media_scope = resolve_media_scope(connection, normalized_prefix)
         calibration_job = load_job_state(connection, config, normalized_prefix)
         retryable_sample_job = load_retryable_sample_job_state(connection, config, normalized_prefix)
         active_encode_job = load_active_encode_job_for_prefix(connection, normalized_prefix)
@@ -125,6 +127,7 @@ def folder_status_payload(
     )
     return {
         "prefix": normalized_prefix,
+        "media_scope": media_scope.to_payload(),
         "polling_active": polling_active,
         "calibration_status": calibration_job.get("status") if calibration_job else "idle",
         "folder_scan_status": folder_scan_job.get("status") if folder_scan_job else "idle",

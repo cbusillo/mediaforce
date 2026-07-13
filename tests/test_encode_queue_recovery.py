@@ -4359,6 +4359,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIsNone(first_cards[0].review_badge_label)
         self.assertEqual(second_cards[0].review_badge_label, "Encode failed")
         self.assertEqual(second_cards[0].review_badge_tone, "danger")
+        self.assertEqual(second_cards[0].media_scope["kind"], "tv_season")
+        self.assertEqual(second_cards[0].media_scope["match"], "descendants")
         folder_cards_runtime.reset_folder_card_cache()
 
     def test_folder_cards_show_delivery_badge_after_approved_draft_validates(self) -> None:
@@ -12488,6 +12490,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(payload["pending"])
         self.assertEqual(payload["prefix"], "tv/House/Season 5")
+        self.assertEqual(payload["media_scope"]["kind"], "tv_season")
+        self.assertEqual(payload["media_scope"]["parent"]["prefix"], "tv/House")
         self.assertEqual(payload["sample_item"]["rel_path"], "tv/House/Season 5/episode-promoted-folder.mp4")
         self.assertEqual(payload["summary"]["statuses"]["promoted"], 1)
 
@@ -14251,6 +14255,158 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual([item["library_item_id"] for item in items], [encoded_id, validated_id])
 
+    def test_load_folder_staged_items_exact_file_excludes_similarly_named_sibling(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            exact_id, sibling_id = self._insert_exact_root_staged_items(connection, status="encoded")
+
+            with patch(
+                    "mediaforce.web.app.build_manifest_item",
+                    side_effect=lambda row, _config: {"library_item_id": row["id"]},
+            ):
+                items = web_app._load_folder_staged_items(
+                    connection,
+                    self.config,
+                    "other/Foo.mkv",
+                    statuses={"encoded"},
+                )
+
+        self.assertEqual([item["library_item_id"] for item in items], [exact_id])
+        self.assertNotIn(sibling_id, [item["library_item_id"] for item in items])
+
+    def test_validate_exact_file_uses_only_matching_staged_item(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            exact_id, sibling_id = self._insert_exact_root_staged_items(connection, status="encoded")
+
+        validated_item_ids: list[int] = []
+
+        class _ValidateManifestItems(folder_actions_runtime.ValidateManifestItemsFn):
+            def __call__(
+                    self,
+                    _connection: DBClient,
+                    _config: MediaforceConfig,
+                    manifest: folder_actions_runtime.ManifestPayload,
+                    indexes: list[int],
+            ) -> list[folder_actions_runtime.ActionPayload]:
+                validated_item_ids.extend(
+                    int(manifest["items"][index]["library_item_id"])
+                    for index in indexes
+                )
+                return [{"passed": True}]
+
+        with patch(
+                "mediaforce.web.app.build_manifest_item",
+                side_effect=lambda row, _config: {"library_item_id": row["id"]},
+        ):
+            result = folder_actions_runtime.validate_folder_outputs_action(
+                self.config,
+                "other/Foo.mkv",
+                load_folder_staged_items_fn=web_app._load_folder_staged_items,
+                validate_manifest_items_fn=_ValidateManifestItems(),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(validated_item_ids, [exact_id])
+        self.assertNotIn(sibling_id, validated_item_ids)
+
+    def test_promote_exact_file_uses_only_matching_staged_item(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            exact_id, sibling_id = self._insert_exact_root_staged_items(connection, status="validated")
+
+        promoted_item_ids: list[int] = []
+
+        class _PromoteManifestItems(folder_actions_runtime.PromoteManifestItemsFn):
+            def __call__(
+                    self,
+                    _connection: DBClient,
+                    _config: MediaforceConfig,
+                    manifest: folder_actions_runtime.ManifestPayload,
+                    indexes: list[int],
+                    *,
+                    force: bool,
+            ) -> list[Path]:
+                self_test.assertFalse(force)
+                promoted_item_ids.extend(
+                    int(manifest["items"][index]["library_item_id"])
+                    for index in indexes
+                )
+                return [self_test.root / "promoted" / "Foo.mkv"]
+
+        self_test = self
+        with patch(
+                "mediaforce.web.app.build_manifest_item",
+                side_effect=lambda row, _config: {"library_item_id": row["id"]},
+        ):
+            result = folder_actions_runtime.promote_folder_outputs_action(
+                self.config,
+                "other/Foo.mkv",
+                load_folder_staged_items_fn=web_app._load_folder_staged_items,
+                promote_manifest_items_fn=_PromoteManifestItems(),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(promoted_item_ids, [exact_id])
+        self.assertNotIn(sibling_id, promoted_item_ids)
+
+    def test_stale_requeue_exact_file_does_not_reset_similarly_named_sibling(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            exact_id, sibling_id = self._insert_exact_root_staged_items(connection, status="encoding")
+
+            folder_actions_runtime._reset_stale_prefix_encoding_items_for_requeue(
+                connection,
+                self.config,
+                "other/Foo.mkv",
+                now_iso=web_app._now_iso,
+            )
+
+            rows = connection.execute(
+                select(library_items.c.id, library_items.c.status)
+                .where(library_items.c.id.in_((exact_id, sibling_id)))
+            ).mappings().fetchall()
+            staged_item_ids = set(
+                connection.execute(
+                    select(staged_artifacts.c.library_item_id)
+                    .where(staged_artifacts.c.library_item_id.in_((exact_id, sibling_id)))
+                ).scalars().all()
+            )
+
+        statuses = {int(row["id"]): str(row["status"]) for row in rows}
+        self.assertEqual(statuses[exact_id], "planned")
+        self.assertEqual(statuses[sibling_id], "encoding")
+        self.assertNotIn(exact_id, staged_item_ids)
+        self.assertIn(sibling_id, staged_item_ids)
+
+    def test_lifecycle_override_rejects_non_tv_exact_scope(self) -> None:
+        source = self.root / "source" / "other" / "Foo.mkv"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("source")
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(
+                connection,
+                source,
+                rel_path="other/Foo.mkv",
+            )
+
+        with self.assertRaises(HTTPException) as raised:
+            folder_actions_runtime.queue_folder_encode_action(
+                self.config,
+                "other/Foo.mkv",
+                "",
+                False,
+                True,
+                now_iso=web_app._now_iso,
+                load_job_state=Mock(),
+                load_calibration_state=Mock(),
+                review_gate=Mock(),
+                upsert_override=Mock(),
+                load_active_encode_job_for_prefix_fn=Mock(),
+                clear_terminal_encode_jobs_for_prefix_fn=Mock(),
+                prepare_terminal_encode_job_for_requeue_fn=Mock(),
+                save_encode_job=Mock(),
+            )
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertIn("one season at a time", str(raised.exception.detail))
+
     def test_validate_folder_outputs_action_uses_only_validate_lane_outputs(self) -> None:
         encoded_source = self._create_source_file("episode-encoded-validate.mkv")
         validated_source = self._create_source_file("episode-validated-promote.mkv")
@@ -14486,6 +14642,42 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(workflow_state["next_action"]["kind"], "validate_outputs")
         self.assertEqual(workflow_state["counts"]["encode_candidates"], 0)
 
+    def test_folder_status_payload_exposes_exact_file_scope(self) -> None:
+        source = self.root / "source" / "other" / "Foo.mkv"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("source")
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(
+                connection,
+                source,
+                rel_path="other/Foo.mkv",
+            )
+
+        payload = dashboard_payloads.folder_status_payload(
+            self.config,
+            "other/Foo.mkv",
+            load_job_state=lambda _connection, _config, _prefix: None,
+            load_retryable_sample_job_state=lambda _connection, _config, _prefix: None,
+            load_scan_job_state=lambda _config, _prefix: None,
+            load_active_encode_job_for_prefix=lambda _connection, _prefix: None,
+        )
+
+        self.assertEqual(
+            payload["media_scope"],
+            {
+                "schema_version": 1,
+                "prefix": "other/Foo.mkv",
+                "root": "other",
+                "domain": "other",
+                "kind": "media_file",
+                "match": "exact_item",
+                "title": "Foo",
+                "subtitle": "Other",
+                "scope_label": "File",
+                "parent": {"prefix": "other", "title": "Other"},
+            },
+        )
+
     def test_active_encode_job_lookup_matches_overlapping_series_and_season_scopes(self) -> None:
         def save_active_job(connection: DBClient, *, job_id: str, prefix: str, offset_seconds: int) -> None:
             timestamp = (datetime.now(tz=UTC) + timedelta(seconds=offset_seconds)).isoformat(timespec="seconds")
@@ -14536,6 +14728,58 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(child_match["job_id"], "series-active")
         self.assertIsNone(sibling_miss)
         self.assertEqual(parent_match["job_id"], "season-active")
+
+    def test_active_encode_job_lookup_does_not_treat_exact_file_as_parent_scope(self) -> None:
+        source = self.root / "source" / "other" / "Foo.mkv"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("source")
+        now = web_app._now_iso()
+        manifest_path = self._write_manifest("exact-file-descendant-job.json", [{"library_item_id": 1}])
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(
+                connection,
+                source,
+                rel_path="other/Foo.mkv",
+            )
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "impossible-descendant",
+                    "prefix": "other/Foo.mkv/descendant",
+                    "job_kind": "folder",
+                    "parent_job_id": None,
+                    "status": "running",
+                    "manifest_path": str(manifest_path),
+                    "manifest_indexes": None,
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "host": {},
+                    "last_host": {},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": None,
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": None,
+                    "last_failure_at": None,
+                    "host_cooldown_until": None,
+                    "created_at": now,
+                    "started_at": now,
+                    "finished_at": None,
+                    "updated_at": now,
+                },
+            )
+
+            match = load_active_encode_job_for_prefix(connection, "other/Foo.mkv")
+
+        self.assertIsNone(match)
 
     def test_latest_encode_job_lookup_matches_overlapping_series_and_season_scopes(self) -> None:
         def save_display_job(connection: DBClient, *, job_id: str, prefix: str, offset_seconds: int) -> None:
@@ -16608,17 +16852,51 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
     def _staging_path(self, name: str) -> Path:
         return self.root / "staging" / "tv" / "show" / name
 
+    def _insert_exact_root_staged_items(self, connection: DBClient, *, status: str) -> tuple[int, int]:
+        exact_source = self.root / "source" / "other" / "Foo.mkv"
+        sibling_source = self.root / "source" / "other" / "Foo.mkv.backup.mkv"
+        exact_source.parent.mkdir(parents=True, exist_ok=True)
+        exact_source.write_text("exact")
+        sibling_source.write_text("sibling")
+        exact_stage = self.root / "staging" / "other" / "Foo.mkv"
+        sibling_stage = self.root / "staging" / "other" / "Foo.mkv.backup.mkv"
+        exact_stage.parent.mkdir(parents=True, exist_ok=True)
+        exact_stage.write_text("exact staged")
+        sibling_stage.write_text("sibling staged")
+        exact_id = self._insert_library_item(
+            connection,
+            exact_source,
+            status=status,
+            rel_path="other/Foo.mkv",
+        )
+        sibling_id = self._insert_library_item(
+            connection,
+            sibling_source,
+            status=status,
+            rel_path="other/Foo.mkv.backup.mkv",
+        )
+        self._insert_staged_artifact(connection, exact_id, exact_stage)
+        self._insert_staged_artifact(connection, sibling_id, sibling_stage)
+        return exact_id, sibling_id
+
     @staticmethod
-    def _insert_library_item(connection: DBClient, source_path: Path, *,
-                             status: str = "planned") -> int:
+    def _insert_library_item(
+            connection: DBClient,
+            source_path: Path,
+            *,
+            status: str = "planned",
+            rel_path: str | None = None,
+    ) -> int:
         now = web_app._now_iso()
+        normalized_rel_path = rel_path or f"tv/show/{source_path.name}"
+        path = Path(normalized_rel_path)
         result = connection.execute(
             library_items.insert().values(
                 source_path=str(source_path),
-                rel_path=f"tv/show/{source_path.name}",
-                media_root="tv",
-                parent_dir="tv/show",
-                file_name=source_path.name,
+                rel_path=normalized_rel_path,
+                media_root=path.parts[0],
+                parent_dir=str(path.parent),
+                file_name=path.name,
                 container=".mkv",
                 size_bytes=1024,
                 mtime_ns=1,

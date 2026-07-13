@@ -42,6 +42,7 @@ class FolderCard:
     review_badge_detail: str | None = None
     workflow_state: WorkflowPayload | None = None
     lifecycle: dict[str, object] | None = None
+    media_scope: dict[str, object] | None = None
     details_loading: bool = False
 
 
