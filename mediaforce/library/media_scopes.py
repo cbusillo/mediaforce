@@ -1,6 +1,6 @@
 from dataclasses import dataclass
-from pathlib import PurePosixPath
-from typing import Any, Literal
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal, Mapping
 
 from sqlalchemy import and_, exists, literal, or_, select, true, union_all
 
@@ -19,6 +19,11 @@ ScopeKind = Literal[
 ]
 ScopeMatch = Literal["exact_item", "descendants"]
 ScopeGroup = tuple[str, str, str, str]
+
+
+def logical_library_rel_path(root: str, root_path: Path, item_path: Path) -> PurePosixPath:
+    relative_path = item_path.relative_to(root_path)
+    return PurePosixPath(root, *relative_path.parts)
 
 
 class MediaScopeConflict(ValueError):
@@ -69,33 +74,51 @@ def normalize_scope_prefix(prefix: str) -> str:
     return str(prefix or "").strip().strip("/")
 
 
-def media_group_scope_for_rel_path(rel_path: str) -> MediaScope | None:
+def media_group_scope_for_rel_path(
+        rel_path: str,
+        *,
+        library_types: Mapping[str, str] | None = None,
+) -> MediaScope | None:
     normalized = normalize_scope_prefix(rel_path)
     parts = PurePosixPath(normalized).parts
     if len(parts) < 2:
         return None
-    if parts[0].lower() == "tv" and len(parts) >= 4:
-        return media_scope_from_prefix("/".join(parts[:3]), match="descendants")
-    if parts[0].lower() == "tv" and len(parts) == 3:
-        return media_scope_from_prefix(normalized, match="exact_item")
+    domain = _scope_domain(parts[0], library_types)
+    if domain == "tv" and len(parts) >= 4:
+        return media_scope_from_prefix("/".join(parts[:3]), match="descendants", library_types=library_types)
+    if domain == "tv" and len(parts) == 3:
+        return media_scope_from_prefix(normalized, match="exact_item", library_types=library_types)
     if len(parts) == 2:
-        return media_scope_from_prefix(normalized, match="exact_item")
-    return media_scope_from_prefix("/".join(parts[:2]), match="descendants")
+        return media_scope_from_prefix(normalized, match="exact_item", library_types=library_types)
+    return media_scope_from_prefix("/".join(parts[:2]), match="descendants", library_types=library_types)
 
 
-def tv_series_scope_for_rel_path(rel_path: str) -> MediaScope | None:
+def tv_series_scope_for_rel_path(
+        rel_path: str,
+        *,
+        library_types: Mapping[str, str] | None = None,
+) -> MediaScope | None:
     normalized = normalize_scope_prefix(rel_path)
     parts = PurePosixPath(normalized).parts
-    if len(parts) < 3 or parts[0].lower() != "tv":
+    if len(parts) < 3 or _scope_domain(parts[0], library_types) != "tv":
         return None
-    return media_scope_from_prefix("/".join(parts[:2]), match="descendants")
+    return media_scope_from_prefix(
+        "/".join(parts[:2]),
+        match="descendants",
+        library_types=library_types,
+    )
 
 
-def media_scope_from_prefix(prefix: str, *, match: ScopeMatch) -> MediaScope:
+def media_scope_from_prefix(
+        prefix: str,
+        *,
+        match: ScopeMatch,
+        library_types: Mapping[str, str] | None = None,
+) -> MediaScope:
     normalized = normalize_scope_prefix(prefix)
     parts = PurePosixPath(normalized).parts
     root = parts[0] if parts else ""
-    domain = _scope_domain(root)
+    domain = _scope_domain(root, library_types)
     root_title = _root_title(root)
     title = root_title if root else "Library"
     subtitle = "Library"
@@ -157,11 +180,21 @@ def media_scope_from_prefix(prefix: str, *, match: ScopeMatch) -> MediaScope:
     )
 
 
-def resolve_media_scope(connection: DBClient, prefix: str) -> MediaScope:
-    return resolve_media_scopes(connection, [prefix])[0]
+def resolve_media_scope(
+        connection: DBClient,
+        prefix: str,
+        *,
+        library_types: Mapping[str, str] | None = None,
+) -> MediaScope:
+    return resolve_media_scopes(connection, [prefix], library_types=library_types)[0]
 
 
-def resolve_media_scopes(connection: DBClient, prefixes: list[str]) -> list[MediaScope]:
+def resolve_media_scopes(
+        connection: DBClient,
+        prefixes: list[str],
+        *,
+        library_types: Mapping[str, str] | None = None,
+) -> list[MediaScope]:
     normalized_prefixes = [normalize_scope_prefix(prefix) for prefix in prefixes]
     if not normalized_prefixes:
         return []
@@ -210,6 +243,7 @@ def resolve_media_scopes(connection: DBClient, prefixes: list[str]) -> list[Medi
         scopes_by_prefix[prefix] = media_scope_from_prefix(
             prefix,
             match="exact_item" if exact_match else "descendants",
+            library_types=library_types,
         )
     return [scopes_by_prefix[prefix] for prefix in normalized_prefixes]
 
@@ -293,19 +327,23 @@ def scopes_overlap(left: MediaScope | str, right: MediaScope | str) -> bool:
     )
 
 
-def is_tv_season_prefix(prefix: str) -> bool:
+def is_tv_season_prefix(prefix: str, *, library_types: Mapping[str, str] | None = None) -> bool:
     parts = PurePosixPath(normalize_scope_prefix(prefix)).parts
-    return len(parts) == 3 and parts[0].lower() == "tv"
+    return len(parts) == 3 and _scope_domain(parts[0], library_types) == "tv"
 
 
-def is_tv_series_prefix(prefix: str) -> bool:
+def is_tv_series_prefix(prefix: str, *, library_types: Mapping[str, str] | None = None) -> bool:
     parts = PurePosixPath(normalize_scope_prefix(prefix)).parts
-    return len(parts) == 2 and parts[0].lower() == "tv"
+    return len(parts) == 2 and _scope_domain(parts[0], library_types) == "tv"
 
 
-def series_context_for_prefix(prefix: str) -> dict[str, str] | None:
+def series_context_for_prefix(
+        prefix: str,
+        *,
+        library_types: Mapping[str, str] | None = None,
+) -> dict[str, str] | None:
     normalized = normalize_scope_prefix(prefix)
-    if not is_tv_season_prefix(normalized):
+    if not is_tv_season_prefix(normalized, library_types=library_types):
         return None
     parts = PurePosixPath(normalized).parts
     return {"prefix": "/".join(parts[:2]), "title": parts[1]}
@@ -317,7 +355,12 @@ def _legacy_scope(scope: MediaScope | str) -> MediaScope:
     return media_scope_from_prefix(scope, match="descendants")
 
 
-def _scope_domain(root: str) -> ScopeDomain:
+def _scope_domain(root: str, library_types: Mapping[str, str] | None = None) -> ScopeDomain:
+    configured = str((library_types or {}).get(root) or "").strip().lower()
+    if configured == "tv":
+        return "tv"
+    if configured == "movie":
+        return "movie"
     normalized = root.lower()
     if normalized == "tv":
         return "tv"

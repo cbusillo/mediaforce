@@ -38,9 +38,10 @@ first typed save.
 - `disabled`: neither scan nor process; a full scan marks former catalog rows
   missing
 
-TV is the only production-enabled type in this phase. Movies remains Browse
-only until the Movies workflow is complete. Other remains Browse only until its
-bounded generic workflow is complete. Spatial media remains safety-blocked
+TV and Movies are production-enabled types. Movies keeps extras and uncertain
+nested files out of title-wide production by default while exact-file actions
+remain deliberate. Other remains Browse only until its bounded generic workflow
+is complete. Spatial media remains safety-blocked
 until the 3D/VR qualification plan proves geometry, stream, metadata, audio,
 and target-device playback invariants.
 

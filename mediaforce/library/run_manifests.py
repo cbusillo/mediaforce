@@ -118,7 +118,7 @@ def select_candidates(
         .where(library_items.c.status.in_(statuses))
     )
     if prefixes:
-        scopes = resolve_media_scopes(connection, prefixes)
+        scopes = resolve_media_scopes(connection, prefixes, library_types=config.library_type_map)
         query = query.where(or_(*(scope_rel_path_filter(library_items.c.rel_path, scope) for scope in scopes)))
     query = query.order_by(library_items.c.priority_score.desc(), library_items.c.size_bytes.desc())
     if limit is not None:
@@ -243,7 +243,7 @@ def create_folder_manifest(
 ) -> tuple[dict[str, Any], Path]:
     if scan_first:
         scan_library(connection, config, prefixes=[prefix])
-    scope = resolve_media_scope(connection, prefix)
+    scope = resolve_media_scope(connection, prefix, library_types=config.library_type_map)
     rows = select_encode_candidates(
         connection,
         config,

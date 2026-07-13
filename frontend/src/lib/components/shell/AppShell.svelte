@@ -16,7 +16,13 @@
 	function isActive(href: string): boolean {
 		const pathname = page.url.pathname;
 		if (href === '/')
-			return pathname === '/' || pathname === '/folders' || pathname.startsWith('/folders/');
+			return (
+				pathname === '/' ||
+				pathname === '/movies' ||
+				pathname.startsWith('/movies/') ||
+				pathname === '/folders' ||
+				pathname.startsWith('/folders/')
+			);
 		return pathname === href || pathname.startsWith(`${href}/`);
 	}
 </script>

@@ -13,6 +13,8 @@ briefs as evidence only.
 - `docs/design/basic-user-vocabulary.md`: user-facing term and workflow-state
   reference. Use the vocabulary as product language, not as proof that old route
   layouts are valid.
+- `docs/design/movies-workflow.md`: active Movies Library and movie-specific
+  Folder Studio contract.
 - `docs/style/workstation-ui.md`: operator-workstation doctrine.
 - `docs/style/frontend.md`: Svelte/frontend implementation and validation
   expectations.

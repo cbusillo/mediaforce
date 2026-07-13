@@ -42,6 +42,8 @@ const endpointChecks = [
   ["Dashboard folders", "/api/dashboard/folders"],
   ["Library structure", "/api/dashboard/library"],
   ["Library details", "/api/dashboard/library/details"],
+  ["Movie library structure", "/api/dashboard/library/movies"],
+  ["Movie library details", "/api/dashboard/library/movies/details"],
   ["Host status", "/api/hosts?compact=1"],
   ["Settings initial payload", "/api/settings?include_archive_cleanup=0"],
   ["Completed payload", "/api/completed"],
@@ -49,6 +51,7 @@ const endpointChecks = [
 
 const routeChecks = [
   ["Library", "/", "Your library"],
+  ["Movies Library", "/movies", "MOVIE WORKSTATION"],
   ["Folders compatibility", "/folders", "Your library"],
   ["Activity", "/ops", "What’s happening"],
   ["Settings", "/settings", "Library and working space"],

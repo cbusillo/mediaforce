@@ -8,12 +8,13 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
-from mediaforce.core.type_defs import mapping_dict
+from mediaforce.core.type_defs import mapping_dict, object_dict
 from mediaforce.library.media_scopes import resolve_media_scope, scope_rel_path_filter
+from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
 
 
 def inspect_prefix(connection: DBClient, config: MediaforceConfig, prefix: str) -> dict[str, Any]:
-    scope = resolve_media_scope(connection, prefix)
+    scope = resolve_media_scope(connection, prefix, library_types=config.library_type_map)
     rows = [
         mapping_dict(row)
         for row in connection.execute(
@@ -22,6 +23,21 @@ def inspect_prefix(connection: DBClient, config: MediaforceConfig, prefix: str) 
             .order_by(library_items.c.rel_path)
         ).mappings().fetchall()
     ]
+    if scope.domain == "movie":
+        library = config.library_definition_map.get(scope.root, {})
+        policy = object_dict(library.get("policy"))
+        rows = [
+            row
+            for row in rows
+            if (
+                membership := classify_movie_path(str(row["rel_path"]), root=scope.root)
+            ) is not None
+            and movie_item_included(
+                membership,
+                policy,
+                explicit_exact=scope.match == "exact_item",
+            )[0]
+        ]
     if not rows:
         return {"prefix": prefix, "item_count": 0, "rows": []}
 
@@ -38,7 +54,7 @@ def inspect_prefix(connection: DBClient, config: MediaforceConfig, prefix: str) 
         for audio in json.loads(row["audio_summary_json"]):
             audio_codecs[f"{audio.get('codec_name')}:{audio.get('channels')}"] += 1
         rel_parts = Path(str(row["rel_path"])).parts
-        if len(rel_parts) >= 3:
+        if scope.domain == "tv" and len(rel_parts) >= 3:
             seasons[rel_parts[2]] += 1
 
     policy = config.resolve_policy(prefix)

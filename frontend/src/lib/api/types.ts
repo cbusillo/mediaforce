@@ -134,6 +134,103 @@ export interface FolderCard {
 	details_loading: boolean;
 }
 
+export type MovieMemberRole = 'feature' | 'extra' | 'uncertain';
+export type MovieScopeMode = 'single_file' | 'title_folder';
+export type MovieSavingsConfidence = 'pending' | 'measured' | 'estimated' | 'unavailable';
+
+export interface MovieAgeEvidence {
+	timestamp: string | null;
+	source: 'plex' | 'mediaforce_discovered' | 'filesystem_mtime' | 'unknown';
+}
+
+export interface MovieWorkflowItemState {
+	item_id: number;
+	rel_path: string;
+	status: string;
+	state: string;
+	lane: WorkflowLane;
+	has_staged_output: boolean;
+	blocker?: string | null;
+}
+
+export interface MoviePromotionConflict {
+	kind: 'duplicate_destination' | 'destination_exists';
+	destination_path: string;
+	member_prefixes: string[];
+	detail: string;
+}
+
+export interface MovieMember {
+	item_id: number;
+	prefix: string;
+	rel_path: string;
+	root: string;
+	title_prefix: string;
+	title: string;
+	scope_mode: MovieScopeMode;
+	role: MovieMemberRole;
+	label: string;
+	edition_label?: string | null;
+	extra_category?: string | null;
+	status: string;
+	size_bytes: number;
+	duration_seconds?: number | null;
+	video_codec?: string | null;
+	included_by_default: boolean;
+	selection_blocker?: string | null;
+	exact_action_available: boolean;
+	age?: MovieAgeEvidence | null;
+	workflow_state?: MovieWorkflowItemState | null;
+	promotion_conflicts: MoviePromotionConflict[];
+	details_loading: boolean;
+}
+
+export interface MovieLibraryRoot {
+	key: string;
+	label: string;
+	availability: 'production' | 'browse_only';
+	default_profile: string;
+	policy: Record<string, unknown>;
+}
+
+export interface MovieTitle {
+	prefix: string;
+	root: string;
+	library_label: string;
+	availability: 'production' | 'browse_only';
+	policy: Record<string, unknown>;
+	title: string;
+	scope_mode: MovieScopeMode;
+	item_count: number;
+	feature_count: number;
+	edition_count: number;
+	extra_count: number;
+	uncertain_count: number;
+	included_item_count: number;
+	total_size_bytes: number;
+	included_size_bytes: number;
+	projected_reclaim_bytes?: number | null;
+	known_saved_bytes?: number | null;
+	estimated_savings_bytes?: number | null;
+	savings_confidence: MovieSavingsConfidence;
+	age?: MovieAgeEvidence | null;
+	workflow_state?: FolderWorkflowState | null;
+	review_badge?: { label?: string | null; tone?: string | null; detail?: string | null } | null;
+	promotion_conflicts: MoviePromotionConflict[];
+	members: MovieMember[];
+	details_loading: boolean;
+	active_member_prefix?: string;
+	active_member?: MovieMember;
+}
+
+export interface MovieLibraryPayload {
+	schema_version: number;
+	libraries: MovieLibraryRoot[];
+	titles: MovieTitle[];
+	catalog_empty: boolean;
+	details_loading: boolean;
+}
+
 export interface QueueLane {
 	running: Array<Record<string, unknown>>;
 	queued: Array<Record<string, unknown>>;
@@ -870,6 +967,7 @@ export interface FolderPayload {
 	encode_candidate_count?: number;
 	workflow_state?: FolderWorkflowState | null;
 	lifecycle?: LifecycleState | null;
+	movie_context?: MovieTitle | null;
 }
 
 export interface FolderBenchPreviewResponse {

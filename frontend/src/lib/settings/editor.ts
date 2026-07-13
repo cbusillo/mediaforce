@@ -345,7 +345,7 @@ export function libraryReadiness(
 			detail: 'Mediaforce scans and shows this library but never processes it.'
 		};
 	}
-	if (library.library_type !== 'tv') {
+	if (!['tv', 'movie'].includes(library.library_type)) {
 		return {
 			state: 'blocked',
 			label: 'Workflow blocked',

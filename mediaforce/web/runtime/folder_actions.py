@@ -14,11 +14,13 @@ from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import encode_jobs, library_items, staged_artifacts
 from mediaforce.core.type_defs import float_value, object_dict, object_list
+from mediaforce.core.utils import filesystem_collision_key
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, list_child_encode_jobs, \
     load_latest_terminal_encode_job_for_prefix
 from mediaforce.encoding.staging import safe_unlink
 from mediaforce.library.media_scopes import MediaScope, path_matches_scope, resolve_media_scope, \
     scope_descendant_filter, scope_rel_path_filter
+from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.run_manifests import create_folder_manifest
 from mediaforce.library.candidate_selection import encode_candidate_decisions, scope_lifecycle_payload_from_decisions, \
@@ -159,6 +161,39 @@ def _no_active_encode_job(_connection: DBClient, _normalized_prefix: str) -> Job
     return None
 
 
+def production_action_blocker(
+        config: MediaforceConfig,
+        normalized_prefix: str,
+) -> ActionPayload | None:
+    root = str(normalized_prefix or "").strip().strip("/").split("/", 1)[0]
+    if not root:
+        if not isinstance(config.media.get("libraries"), list):
+            return None
+        return {
+            "ok": False,
+            "code": "library_not_configured",
+            "message": "Choose one configured library scope before running media actions.",
+        }
+    if root and root in config.source_root_map:
+        return None
+    library = config.library_definition_map.get(root)
+    if library is None:
+        return {
+            "ok": False,
+            "code": "library_not_configured",
+            "message": "This scope is not part of a configured library root. Scan the library before running media actions.",
+        }
+    label = str(library.get("label") or root or "This library")
+    availability = str(library.get("availability") or "browse_only").replace("_", " ")
+    return {
+        "ok": False,
+        "code": "library_not_production",
+        "message": (
+            f"{label} is {availability}. Set its availability to Production before running media actions."
+        ),
+    }
+
+
 def queue_folder_encode_action(
         config: MediaforceConfig,
         normalized_prefix: str,
@@ -178,8 +213,15 @@ def queue_folder_encode_action(
         load_advice_state: LoadAdviceStateFn | None = None,
         load_latest_failed_target_size_job_state: LoadJobStateFn | None = None,
 ) -> ActionPayload:
+    production_blocker = production_action_blocker(config, normalized_prefix)
+    if production_blocker is not None:
+        return production_blocker
     with open_db(config.paths.db_path) as connection:
-        scope = resolve_media_scope(connection, normalized_prefix)
+        scope = resolve_media_scope(
+            connection,
+            normalized_prefix,
+            library_types=config.library_type_map,
+        )
         if override_policy_holds and scope.kind != "tv_season":
             raise HTTPException(status_code=400, detail="Lifecycle holds can only be overridden for one season at a time.")
         existing_job = load_job_state(connection, config, normalized_prefix)
@@ -247,21 +289,29 @@ def queue_folder_encode_action(
                         "target before queueing production."
                     ),
                 )
-        upsert_override(saved_profile_path, normalized_prefix, calibration_policy)
         active_encode_job = load_active_encode_job_for_prefix_fn(connection, normalized_prefix)
         if active_encode_job is not None:
-            recovered = _recover_active_folder_encode_job(
-                connection,
-                active_encode_job,
-                notes=notes,
-                now_iso=now_iso,
-                prepare_terminal_encode_job_for_requeue_fn=prepare_terminal_encode_job_for_requeue_fn,
-                save_encode_job=save_encode_job,
-            )
-            if recovered is not None:
-                return recovered
+            active_prefix = str(active_encode_job.get("prefix") or normalized_prefix).strip().strip("/")
+            if active_prefix == normalized_prefix:
+                requeue_blocker = _movie_requeue_policy_blocker(
+                    connection,
+                    config,
+                    scope,
+                    active_encode_job,
+                )
+                if requeue_blocker is not None:
+                    raise HTTPException(status_code=409, detail=requeue_blocker)
+                recovered = _recover_active_folder_encode_job(
+                    connection,
+                    active_encode_job,
+                    notes=notes,
+                    now_iso=now_iso,
+                    prepare_terminal_encode_job_for_requeue_fn=prepare_terminal_encode_job_for_requeue_fn,
+                    save_encode_job=save_encode_job,
+                )
+                if recovered is not None:
+                    return recovered
             active_status = str(active_encode_job.get("status") or "queued").replace("_", " ")
-            active_prefix = str(active_encode_job.get("prefix") or normalized_prefix)
             return {
                 "ok": False,
                 "message": f"A folder encode is already {active_status} for {active_prefix}.",
@@ -272,8 +322,42 @@ def queue_folder_encode_action(
             "failed",
             "stopped",
         }:
+            requeue_blocker = _movie_requeue_policy_blocker(
+                connection,
+                config,
+                scope,
+                latest_encode_job,
+            )
+            if requeue_blocker is not None:
+                raise HTTPException(status_code=409, detail=requeue_blocker)
             prepare_terminal_encode_job_for_requeue_fn(connection, latest_encode_job)
             _reset_stale_prefix_encoding_items_for_requeue(connection, config, normalized_prefix, now_iso=now_iso)
+        preflight_decisions = encode_candidate_decisions(
+            connection,
+            config,
+            prefixes=[normalized_prefix],
+        )
+        if scope.domain == "movie" and not any(decision.eligible for decision in preflight_decisions):
+            movie_blockers = list(dict.fromkeys(
+                decision.production_blocker
+                for decision in preflight_decisions
+                if decision.production_blocker
+            ))
+            if movie_blockers:
+                raise HTTPException(status_code=409, detail=movie_blockers[0])
+            workflow_state = build_folder_workflow_state(
+                connection,
+                normalized_prefix,
+                candidate_eligibility=workflow_eligibility(preflight_decisions),
+                library_types=config.library_type_map,
+            ).to_payload()
+            next_action = object_dict(workflow_state.get("next_action"))
+            action_label = str(next_action.get("label") or "No action")
+            raise HTTPException(
+                status_code=400,
+                detail=f"No encode candidates were found for this movie scope. Next action: {action_label}.",
+            )
+        upsert_override(saved_profile_path, normalized_prefix, calibration_policy)
         refreshed_config = load_config(config.paths.config_path)
         manifest_kwargs: dict[str, Any] = {"prefix": normalized_prefix}
         if override_policy_holds:
@@ -285,19 +369,29 @@ def queue_folder_encode_action(
                 refreshed_config,
                 prefixes=[normalized_prefix],
             )
-            lifecycle = scope_lifecycle_payload_from_decisions(normalized_prefix, lifecycle_decisions)
-            if int(lifecycle.get("held_candidate_count") or 0) > 0:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"{lifecycle['held_candidate_count']} encode candidate(s) are protected by the library "
-                        "lifecycle policy. Open one season to review or override its hold."
-                    ),
-                )
+            if scope.domain == "movie":
+                movie_blockers = list(dict.fromkeys(
+                    decision.production_blocker
+                    for decision in lifecycle_decisions
+                    if decision.production_blocker
+                ))
+                if movie_blockers:
+                    raise HTTPException(status_code=409, detail=movie_blockers[0])
+            else:
+                lifecycle = scope_lifecycle_payload_from_decisions(normalized_prefix, lifecycle_decisions)
+                if int(lifecycle.get("held_candidate_count") or 0) > 0:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"{lifecycle['held_candidate_count']} encode candidate(s) are protected by the "
+                            "library lifecycle policy. Open one season to review or override its hold."
+                        ),
+                    )
             workflow_state = build_folder_workflow_state(
                 connection,
                 normalized_prefix,
                 candidate_eligibility=workflow_eligibility(lifecycle_decisions),
+                library_types=refreshed_config.library_type_map,
             ).to_payload()
             next_action = object_dict(workflow_state.get("next_action"))
             action_label = str(next_action.get("label") or "No action")
@@ -513,6 +607,9 @@ def validate_folder_outputs_action(
         load_folder_staged_items_fn: LoadFolderStagedItemsFn,
         validate_manifest_items_fn: ValidateManifestItemsFn,
 ) -> ActionPayload:
+    production_blocker = production_action_blocker(config, normalized_prefix)
+    if production_blocker is not None:
+        return production_blocker
     if load_active_encode_job_for_prefix_fn is None:
         load_active_encode_job_for_prefix_fn = _no_active_encode_job
     with open_db(config.paths.db_path) as connection:
@@ -572,6 +669,9 @@ def promote_folder_outputs_action(
         load_folder_staged_items_fn: LoadFolderStagedItemsFn,
         promote_manifest_items_fn: PromoteManifestItemsFn,
 ) -> ActionPayload:
+    production_blocker = production_action_blocker(config, normalized_prefix)
+    if production_blocker is not None:
+        return production_blocker
     if load_active_encode_job_for_prefix_fn is None:
         load_active_encode_job_for_prefix_fn = _no_active_encode_job
     with open_db(config.paths.db_path) as connection:
@@ -597,6 +697,9 @@ def promote_folder_outputs_action(
         )
         if inaccessible_response is not None:
             return inaccessible_response
+        promotion_conflict = _promotion_conflict_response(config, items)
+        if promotion_conflict is not None:
+            return promotion_conflict
         manifest: ManifestPayload = {"items": items}
         promoted_paths = promote_manifest_items_fn(connection, config, manifest, list(range(len(items))), force=False)
     promoted_count = len(promoted_paths)
@@ -605,6 +708,55 @@ def promote_folder_outputs_action(
         "ok": True,
         "message": f"Promoted {promoted_count} validated {file_label} into the library.",
         "promoted_count": promoted_count,
+    }
+
+
+def _promotion_conflict_response(
+        config: MediaforceConfig,
+        items: list[FolderItem],
+) -> ActionPayload | None:
+    destinations: dict[str, tuple[Path, list[str]]] = {}
+    destination_sources: list[tuple[str, Path, Path, str]] = []
+    for item in items:
+        source_value = str(item.get("source_path") or "").strip()
+        if not source_value:
+            continue
+        source_path = Path(source_value)
+        destination_path = source_path.with_suffix(f".{config.output_container.lstrip('.')}")
+        rel_path = str(item.get("rel_path") or source_path)
+        destination_key = filesystem_collision_key(destination_path)
+        if destination_key not in destinations:
+            destinations[destination_key] = (destination_path, [])
+        destinations[destination_key][1].append(rel_path)
+        destination_sources.append((destination_key, destination_path, source_path, rel_path))
+
+    conflicts: list[ActionPayload] = []
+    for destination_key, (destination_path, rel_paths) in destinations.items():
+        if len(rel_paths) > 1:
+            conflicts.append({
+                "kind": "duplicate_destination",
+                "destination_path": str(destination_path),
+                "rel_paths": rel_paths,
+            })
+        for item_key, item_destination, source_path, rel_path in destination_sources:
+            if item_key != destination_key:
+                continue
+            if item_destination != source_path and item_destination.exists():
+                conflicts.append({
+                    "kind": "destination_exists",
+                    "destination_path": str(item_destination),
+                    "rel_paths": [rel_path],
+                })
+    if not conflicts:
+        return None
+    return {
+        "ok": False,
+        "message": (
+            f"Promotion is blocked by {len(conflicts)} destination conflict"
+            f"{'s' if len(conflicts) != 1 else ''}. Review the affected files before replacing anything."
+        ),
+        "promoted_count": 0,
+        "conflicts": conflicts,
     }
 
 
@@ -734,6 +886,58 @@ def _folder_recoverable_children(connection: DBClient, parent_job_id: str) -> li
     ]
 
 
+def _movie_requeue_policy_blocker(
+        connection: DBClient,
+        config: MediaforceConfig,
+        scope: MediaScope,
+        job: JobPayload,
+) -> str | None:
+    if scope.domain != "movie":
+        return None
+    manifest_path = Path(str(job.get("manifest_path") or "").strip())
+    if not str(manifest_path):
+        return None
+    try:
+        manifest = object_dict(json.loads(manifest_path.read_text()))
+    except (OSError, json.JSONDecodeError):
+        return None
+    items = [object_dict(item) for item in object_list(manifest.get("items"))]
+    selected_indexes = [index for index in object_list(job.get("manifest_indexes")) if isinstance(index, int)]
+    if str(job.get("job_kind") or "") == "folder":
+        child_indexes = [
+            index
+            for child in list_child_encode_jobs(connection, str(job.get("job_id") or ""))
+            if str(child.get("status") or "") != "completed"
+            for index in object_list(child.get("manifest_indexes"))
+            if isinstance(index, int)
+        ]
+        if child_indexes:
+            selected_indexes = child_indexes
+    if not selected_indexes:
+        selected_indexes = list(range(len(items)))
+
+    library = config.library_definition_map.get(scope.root, {})
+    policy = object_dict(library.get("policy"))
+    for index in sorted(set(selected_indexes)):
+        if index < 0 or index >= len(items):
+            continue
+        rel_path = str(items[index].get("rel_path") or "").strip()
+        membership = classify_movie_path(rel_path, root=scope.root)
+        if membership is None:
+            continue
+        included, blocker = movie_item_included(
+            membership,
+            policy,
+            explicit_exact=scope.match == "exact_item",
+        )
+        if not included:
+            return (
+                f"The saved retry includes {rel_path}, which is outside the current movie title policy. "
+                f"{blocker or 'Open that exact movie file to retry it deliberately.'}"
+            )
+    return None
+
+
 def _validate_delivery_blocked_by_active_encode(active_encode_job: JobPayload | None) -> ActionPayload | None:
     if not active_encode_job:
         return None
@@ -756,7 +960,11 @@ def _reset_stale_prefix_encoding_items_for_requeue(
     normalized_prefix = str(prefix).strip().strip("/")
     if not normalized_prefix:
         return
-    scope = resolve_media_scope(connection, normalized_prefix)
+    scope = resolve_media_scope(
+        connection,
+        normalized_prefix,
+        library_types=config.library_type_map,
+    )
     protected_prefixes = _active_descendant_encode_prefixes(connection, scope)
     rows = connection.execute(
         select(library_items.c.id, library_items.c.rel_path)
@@ -770,6 +978,15 @@ def _reset_stale_prefix_encoding_items_for_requeue(
         rel_path = str(row["rel_path"] or "").strip()
         if _rel_path_is_within_any_prefix(rel_path, protected_prefixes):
             continue
+        if scope.domain == "movie":
+            membership = classify_movie_path(rel_path, root=scope.root)
+            library = config.library_definition_map.get(scope.root, {})
+            if membership is None or not movie_item_included(
+                    membership,
+                    object_dict(library.get("policy")),
+                    explicit_exact=scope.match == "exact_item",
+            )[0]:
+                continue
         if rel_path:
             output_suffix = str(object_dict(config.media).get("output_container") or "").strip()
             if output_suffix:
@@ -833,6 +1050,9 @@ def save_profile_action(
         confirm_size_tradeoff: bool = False,
         reviewed_draft_hash: str = "",
 ) -> ActionPayload:
+    production_blocker = production_action_blocker(config, normalized_prefix)
+    if production_blocker is not None:
+        return production_blocker
     calibration = load_calibration_state(config, normalized_prefix)
     if not calibration:
         raise HTTPException(status_code=400, detail="No draft calibration found for this folder")

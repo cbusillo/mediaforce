@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict, dataclass
@@ -60,14 +60,16 @@ from mediaforce.execution import (
     validate_manifest_items,
 )
 from mediaforce.library.folder_profiles import inspect_prefix
-from mediaforce.library.media_scopes import is_tv_series_prefix, media_group_scope_for_rel_path, resolve_media_scope, \
-    resolve_media_scopes, scope_rel_path_filter, series_context_for_prefix, tv_series_scope_for_rel_path
+from mediaforce.library.media_scopes import media_group_scope_for_rel_path, resolve_media_scope, resolve_media_scopes, \
+    scope_rel_path_filter, series_context_for_prefix, tv_series_scope_for_rel_path
+from mediaforce.library.movie_library import load_movie_library_payload, load_movie_scope_payload
+from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
 from mediaforce.library.planner import build_manifest_item
 from mediaforce.library.representatives import RepresentativeSelection, load_representative_selection, \
     public_representative_item
 from mediaforce.library.run_manifests import select_encode_candidates
-from mediaforce.library.candidate_selection import encode_candidate_decisions, scope_lifecycle_payload_from_decisions, \
-    workflow_eligibility
+from mediaforce.library.candidate_selection import encode_candidate_decisions, project_candidates, \
+    scope_lifecycle_payload_from_decisions, workflow_eligibility
 from mediaforce.hosts.types import HostSetupResult
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.core.process_control import ManagedProcessController
@@ -128,7 +130,7 @@ from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_fo
     validate_folder_outputs_action, \
     build_multimodal_review_pack, build_tuning_runtime_toolbelt, load_latest_failed_sample_job_state, \
     load_latest_failed_target_size_job_state, load_retryable_sample_job_state
-from mediaforce.web.runtime.folder_actions import ActionPayload, FolderItem
+from mediaforce.web.runtime.folder_actions import ActionPayload, FolderItem, production_action_blocker
 from mediaforce.web.runtime.folder_cards import list_folder_cards
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
@@ -529,6 +531,32 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             include_series_folders=False,
         )
 
+    def _dashboard_movie_library_payload() -> dict[str, Any]:
+        with open_db(config.paths.db_path) as connection:
+            return load_movie_library_payload(
+                connection,
+                config,
+                include_details=False,
+            )
+
+    def _dashboard_movie_library_details_payload() -> dict[str, Any]:
+        with open_db(config.paths.db_path) as connection:
+            cards = _folder_cards_for_group(
+                config,
+                connection,
+                folder_group=lambda rel_path: _movie_folder_group(
+                    rel_path,
+                    library_types=config.library_type_map,
+                ),
+                minimum_recommended_savings_bytes=None,
+            )
+            return load_movie_library_payload(
+                connection,
+                config,
+                include_details=True,
+                metrics_by_prefix={card.prefix: asdict(card) for card in cards},
+            )
+
     def _dashboard_api_payload(preview_limit: int | None = None) -> dict[str, Any]:
         metric_support = _metric_support()
         return {
@@ -694,6 +722,8 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         dashboard_folders_payload=_dashboard_folders_payload,
         dashboard_library_payload=_dashboard_library_payload,
         dashboard_library_details_payload=_dashboard_library_details_payload,
+        dashboard_movie_library_payload=_dashboard_movie_library_payload,
+        dashboard_movie_library_details_payload=_dashboard_movie_library_details_payload,
     )
     register_settings_routes(
         app,
@@ -726,7 +756,16 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     def _folder_content_payload(normalized_prefix: str) -> tuple[dict[str, Any], int]:
         latest_failed_sample_job_payload: dict[str, Any] | None = None
         with open_db(config.paths.db_path) as connection:
-            media_scope = resolve_media_scope(connection, normalized_prefix)
+            media_scope = resolve_media_scope(
+                connection,
+                normalized_prefix,
+                library_types=config.library_type_map,
+            )
+            movie_context = (
+                load_movie_scope_payload(connection, config, normalized_prefix)
+                if media_scope.domain == "movie"
+                else None
+            )
             calibration_job = _load_job_state(connection, config, normalized_prefix)
             if calibration_job and calibration_job.get("status") in {"queued", "running"}:
                 existing_scan_job = _load_scan_job_state(config, normalized_prefix)
@@ -741,6 +780,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             base_context: dict[str, Any] = {
                 "prefix": normalized_prefix,
                 "media_scope": media_scope.to_payload(),
+                "movie_context": movie_context,
                 "calibration_job": calibration_job,
                 "folder_scan_job": folder_scan_job,
                 "metric_support": metric_support,
@@ -766,9 +806,10 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             pending_proposal = _pending_proposal_public_view(pending_proposal_raw)
             calibration = _load_calibration_state(config, normalized_prefix)
             recent_sessions = _recent_tuning_sessions(connection, normalized_prefix)
-            approved_season_shortcut = sibling_approved_season_memory(
-                connection,
-                prefix=normalized_prefix,
+            approved_season_shortcut = (
+                sibling_approved_season_memory(connection, prefix=normalized_prefix)
+                if media_scope.domain == "tv"
+                else None
             )
             review_gate = _review_gate(calibration)
             hot_spots = _preview_hotspots(sample_item, calibration)
@@ -785,19 +826,28 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             scheduler_policy = object_dict(encode_queue_state.get("scheduler"))
             encode_job = _decorate_encode_job_for_scheduler(config, encode_job)
             encode_queue_summary = _encode_queue_summary_copy(encode_queue, encode_queue_state, encode_job)
-            lifecycle_decisions = encode_candidate_decisions(
-                connection,
-                config,
-                prefixes=[normalized_prefix],
+            lifecycle_decisions = (
+                project_candidates(connection, config, prefixes=[normalized_prefix])
+                if media_scope.domain == "movie"
+                else encode_candidate_decisions(connection, config, prefixes=[normalized_prefix])
             )
-            lifecycle = scope_lifecycle_payload_from_decisions(normalized_prefix, lifecycle_decisions)
-            encode_candidate_count = int(lifecycle.get("eligible_candidate_count") or 0)
+            lifecycle = (
+                scope_lifecycle_payload_from_decisions(normalized_prefix, lifecycle_decisions)
+                if media_scope.domain == "tv"
+                else None
+            )
+            encode_candidate_count = sum(decision.eligible for decision in lifecycle_decisions)
             workflow_state = build_folder_workflow_state(
                 connection,
                 normalized_prefix,
                 candidate_eligibility=workflow_eligibility(lifecycle_decisions),
+                library_types=config.library_type_map,
             ).to_payload()
-            series_context = _folder_series_context(normalized_prefix)
+            series_context = (
+                _folder_series_context(normalized_prefix, library_types=config.library_type_map)
+                if media_scope.domain == "tv"
+                else None
+            )
             latest_failed_sample_job_payload = object_dict(
                 _load_latest_failed_sample_job_state(connection, config, normalized_prefix)
             ) or None
@@ -924,7 +974,10 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             return completed_page_payload(
                 config,
                 connection,
-                folder_group=_folder_group,
+                folder_group=lambda rel_path: _folder_group(
+                    rel_path,
+                    library_types=config.library_type_map,
+                ),
             )
 
     def _clear_completed_backups_action(prefixes: list[str] | None) -> dict[str, Any]:
@@ -935,13 +988,19 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         with open_db(config.paths.db_path) as connection:
             folders = list_completed_folders(
                 connection,
-                folder_group=_folder_group,
+                folder_group=lambda rel_path: _folder_group(
+                    rel_path,
+                    library_types=config.library_type_map,
+                ),
                 archive_root=archive_root,
             )
         valid_prefixes = {folder.prefix for folder in folders}
         result = clear_completed_backups_action(
             config,
-            folder_group=_folder_group,
+            folder_group=lambda rel_path: _folder_group(
+                rel_path,
+                library_types=config.library_type_map,
+            ),
             prefixes=prefixes,
             valid_prefixes=valid_prefixes,
         )
@@ -956,13 +1015,19 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         with open_db(config.paths.db_path) as connection:
             folders = list_completed_folders(
                 connection,
-                folder_group=_folder_group,
+                folder_group=lambda rel_path: _folder_group(
+                    rel_path,
+                    library_types=config.library_type_map,
+                ),
                 archive_root=archive_root,
             )
             valid_prefixes = {folder.prefix for folder in folders}
             result = confirm_originals_removed_action(
                 connection,
-                folder_group=_folder_group,
+                folder_group=lambda rel_path: _folder_group(
+                    rel_path,
+                    library_types=config.library_type_map,
+                ),
                 archive_root=archive_root,
                 prefixes=prefixes,
                 valid_prefixes=valid_prefixes,
@@ -1059,6 +1124,9 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             host_key: str,
             operator_intent: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        blocker = production_action_blocker(config, normalized_prefix)
+        if blocker is not None:
+            return blocker
         return folder_ai_tune_preview_action(
             config,
             _folder_ai_tune_deps(),
@@ -1074,6 +1142,9 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             host_key: str,
             operator_intent: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        blocker = production_action_blocker(config, normalized_prefix)
+        if blocker is not None:
+            return blocker
         return folder_ai_tune_action(
             config,
             _folder_ai_tune_deps(),
@@ -1084,6 +1155,9 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         )
 
     def _folder_ai_tune_confirm_action(normalized_prefix: str, proposal_id: str) -> dict[str, Any]:
+        blocker = production_action_blocker(config, normalized_prefix)
+        if blocker is not None:
+            return blocker
         return folder_ai_tune_confirm_action(
             config,
             _folder_ai_tune_deps(),
@@ -1121,6 +1195,9 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         )
 
     def _approve_measured_encode_recovery_action(normalized_prefix: str) -> ActionPayload:
+        blocker = production_action_blocker(config, normalized_prefix)
+        if blocker is not None:
+            return blocker
         return approve_measured_encode_recovery_action(
             config,
             normalized_prefix,
@@ -1238,7 +1315,13 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     def _save_series_lifecycle_action(normalized_prefix: str, mode: str) -> dict[str, Any]:
         nonlocal config
         normalized_mode = mode.strip().lower()
-        if not is_tv_series_prefix(normalized_prefix):
+        with open_db(config.paths.db_path) as connection:
+            media_scope = resolve_media_scope(
+                connection,
+                normalized_prefix,
+                library_types=config.library_type_map,
+            )
+        if media_scope.domain != "tv" or media_scope.kind != "tv_series":
             raise HTTPException(status_code=400, detail="Lifecycle mode can only be set for one TV series.")
         if normalized_mode not in {"auto", "on", "off"}:
             raise HTTPException(status_code=400, detail="Lifecycle mode must be auto, on, or off.")
@@ -1837,7 +1920,7 @@ def _list_library_structure_cards(config: MediaforceConfig, connection: DBClient
     cards = list_library_structure_cards(
         connection,
         config=config,
-        folder_group=_folder_group,
+        folder_group=lambda rel_path: _folder_group(rel_path, library_types=config.library_type_map),
         review_badge_for_prefix=lambda prefix: _folder_review_badge(
             config,
             prefix,
@@ -1845,16 +1928,19 @@ def _list_library_structure_cards(config: MediaforceConfig, connection: DBClient
             calibration_job_badges=calibration_job_badges,
         ),
     )
-    return _attach_media_scopes(connection, cards)
+    return _attach_media_scopes(connection, config, cards)
 
 
 def _list_library_detail_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
     return _folder_cards_for_group(
         config,
         connection,
-        folder_group=_tv_season_folder_group,
+        folder_group=lambda rel_path: _tv_season_folder_group(
+            rel_path,
+            library_types=config.library_type_map,
+        ),
         minimum_recommended_savings_bytes=None,
-        rel_path_root="tv/",
+        media_roots={root for root, library_type in config.library_type_map.items() if library_type == "tv"},
     )
 
 
@@ -1879,21 +1965,24 @@ def _list_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[F
         config,
         connection,
         minimum_recommended_savings_bytes=MIN_RECOMMENDED_SAVINGS_BYTES,
-        folder_group=_folder_group,
+        folder_group=lambda rel_path: _folder_group(rel_path, library_types=config.library_type_map),
         age_days=_age_days,
         estimate_savings_bytes=_estimate_savings_bytes,
         review_badge_for_prefix=review_badge_for_prefix,
     )
-    return _attach_media_scopes(connection, cards)
+    return _attach_media_scopes(connection, config, cards)
 
 
 def _list_series_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
     return _folder_cards_for_group(
         config,
         connection,
-        folder_group=_tv_series_folder_group,
+        folder_group=lambda rel_path: _tv_series_folder_group(
+            rel_path,
+            library_types=config.library_type_map,
+        ),
         aggregate_badges=True,
-        rel_path_root="tv/",
+        media_roots={root for root, library_type in config.library_type_map.items() if library_type == "tv"},
     )
 
 
@@ -1905,6 +1994,7 @@ def _folder_cards_for_group(
         aggregate_badges: bool = False,
         minimum_recommended_savings_bytes: int | None = MIN_RECOMMENDED_SAVINGS_BYTES,
         rel_path_root: str | None = None,
+        media_roots: set[str] | None = None,
 ) -> list[FolderCard]:
     needs_attention_badges: dict[str, dict[str, str | None]] | None = None
     calibration_job_badges: dict[str, dict[str, str | None]] | None = None
@@ -1939,8 +2029,9 @@ def _folder_cards_for_group(
         estimate_savings_bytes=_estimate_savings_bytes,
         review_badge_for_prefix=review_badge_for_prefix,
         rel_path_root=rel_path_root,
+        media_roots=media_roots,
     )
-    return _attach_media_scopes(connection, cards)
+    return _attach_media_scopes(connection, config, cards)
 
 
 def _preview_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
@@ -1950,7 +2041,7 @@ def _preview_folder_cards(config: MediaforceConfig, connection: DBClient) -> lis
         connection,
         config=config,
         minimum_recommended_savings_bytes=MIN_RECOMMENDED_SAVINGS_BYTES,
-        folder_group=_folder_group,
+        folder_group=lambda rel_path: _folder_group(rel_path, library_types=config.library_type_map),
         estimate_savings_bytes=_estimate_savings_bytes,
         review_badge_for_prefix=lambda prefix: _folder_review_badge(
             config,
@@ -1959,11 +2050,19 @@ def _preview_folder_cards(config: MediaforceConfig, connection: DBClient) -> lis
             calibration_job_badges=calibration_job_badges,
         ),
     )
-    return _attach_media_scopes(connection, cards)
+    return _attach_media_scopes(connection, config, cards)
 
 
-def _attach_media_scopes(connection: DBClient, cards: list[FolderCard]) -> list[FolderCard]:
-    scopes = resolve_media_scopes(connection, [card.prefix for card in cards])
+def _attach_media_scopes(
+        connection: DBClient,
+        config: MediaforceConfig,
+        cards: list[FolderCard],
+) -> list[FolderCard]:
+    scopes = resolve_media_scopes(
+        connection,
+        [card.prefix for card in cards],
+        library_types=config.library_type_map,
+    )
     for card, scope in zip(cards, scopes, strict=True):
         card.media_scope = scope.to_payload()
     return cards
@@ -2325,7 +2424,11 @@ def _load_folder_staged_items(
     normalized_prefix = normalized_prefix.strip().strip("/")
     if not normalized_prefix or not statuses:
         return []
-    scope = resolve_media_scope(connection, normalized_prefix)
+    scope = resolve_media_scope(
+        connection,
+        normalized_prefix,
+        library_types=config.library_type_map,
+    )
     rows = connection.execute(
         select(library_items)
         .join(staged_artifacts, staged_artifacts.c.library_item_id == library_items.c.id)
@@ -2337,6 +2440,16 @@ def _load_folder_staged_items(
     ).mappings().fetchall()
     items: list[FolderItem] = []
     for row in rows:
+        if scope.domain == "movie":
+            membership = classify_movie_path(str(row["rel_path"]), root=scope.root)
+            library = config.library_definition_map.get(scope.root, {})
+            policy = object_dict(library.get("policy"))
+            if membership is None or not movie_item_included(
+                    membership,
+                    policy,
+                    explicit_exact=scope.match == "exact_item",
+            )[0]:
+                continue
         item = build_manifest_item(mapping_dict(row), config)
         item["staging_host_label"] = str(row.get("encode_host_label") or "").strip() or None
         item["staging_host_key"] = str(row.get("encode_host_key") or "").strip() or None
@@ -2928,25 +3041,52 @@ def _preview_hotspots(sample_item: dict[str, Any], calibration: dict[str, Any] |
     return [round(usable * ratio, 3) for ratio in (0.2, 0.5, 0.8)]
 
 
-def _folder_group(rel_path: str) -> tuple[str, str, str, str] | None:
-    scope = media_group_scope_for_rel_path(rel_path)
+def _folder_group(
+        rel_path: str,
+        *,
+        library_types: Mapping[str, str] | None = None,
+) -> tuple[str, str, str, str] | None:
+    scope = media_group_scope_for_rel_path(rel_path, library_types=library_types)
     return scope.group_tuple() if scope is not None else None
 
 
-def _tv_series_folder_group(rel_path: str) -> tuple[str, str, str, str] | None:
-    scope = tv_series_scope_for_rel_path(rel_path)
+def _movie_folder_group(
+        rel_path: str,
+        *,
+        library_types: Mapping[str, str] | None = None,
+) -> tuple[str, str, str, str] | None:
+    scope = media_group_scope_for_rel_path(rel_path, library_types=library_types)
+    if scope is None or scope.domain != "movie":
+        return None
+    return scope.group_tuple()
+
+
+def _tv_series_folder_group(
+        rel_path: str,
+        *,
+        library_types: Mapping[str, str] | None = None,
+) -> tuple[str, str, str, str] | None:
+    scope = tv_series_scope_for_rel_path(rel_path, library_types=library_types)
     return scope.group_tuple() if scope is not None else None
 
 
-def _tv_season_folder_group(rel_path: str) -> tuple[str, str, str, str] | None:
-    scope = media_group_scope_for_rel_path(rel_path)
+def _tv_season_folder_group(
+        rel_path: str,
+        *,
+        library_types: Mapping[str, str] | None = None,
+) -> tuple[str, str, str, str] | None:
+    scope = media_group_scope_for_rel_path(rel_path, library_types=library_types)
     if scope is None or scope.kind != "tv_season":
         return None
     return scope.group_tuple()
 
 
-def _folder_series_context(prefix: str) -> dict[str, str] | None:
-    return series_context_for_prefix(prefix)
+def _folder_series_context(
+        prefix: str,
+        *,
+        library_types: Mapping[str, str] | None = None,
+) -> dict[str, str] | None:
+    return series_context_for_prefix(prefix, library_types=library_types)
 
 
 def _folder_encode_candidate_count(connection: DBClient, config: MediaforceConfig, prefix: str) -> int:

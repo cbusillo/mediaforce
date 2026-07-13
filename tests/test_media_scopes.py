@@ -29,6 +29,10 @@ class MediaScopeTests(unittest.TestCase):
         other_folder = media_group_scope_for_rel_path("other/Concert/Night 1.mkv")
         tv_season = media_group_scope_for_rel_path("tv/Show/Season 2/Episode 1.mkv")
         tv_series = tv_series_scope_for_rel_path("tv/Show/Season 2/Episode 1.mkv")
+        custom_tv_series = tv_series_scope_for_rel_path(
+            "shows/Show/Season 2/Episode 1.mkv",
+            library_types={"shows": "tv"},
+        )
 
         self.assertIsNotNone(movie_file)
         self.assertEqual((movie_file.kind, movie_file.match, movie_file.prefix), ("movie_file", "exact_item", "movies/Foo.mkv"))
@@ -43,6 +47,8 @@ class MediaScopeTests(unittest.TestCase):
         self.assertEqual((tv_season.kind, tv_season.prefix), ("tv_season", "tv/Show/Season 2"))
         self.assertIsNotNone(tv_series)
         self.assertEqual((tv_series.kind, tv_series.prefix), ("tv_series", "tv/Show"))
+        self.assertIsNotNone(custom_tv_series)
+        self.assertEqual((custom_tv_series.kind, custom_tv_series.prefix), ("tv_series", "shows/Show"))
 
     def test_web_grouping_preserves_tv_and_exposes_exact_root_files(self) -> None:
         self.assertEqual(

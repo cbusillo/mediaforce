@@ -15,6 +15,7 @@ from mediaforce.core.db_tables import library_items
 from mediaforce.core.evidence import build_evidence_envelope, stable_policy_hash, stable_source_id
 from mediaforce.core.type_defs import mapping_dict, object_dict, object_list
 from mediaforce.library.media_scopes import resolve_media_scope, scope_rel_path_filter
+from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
 from mediaforce.library.planner import build_manifest_item
 
 REPRESENTATIVE_SELECTION_TOOL = "mediaforce.representative_selection"
@@ -121,7 +122,7 @@ def load_representative_selection(
         config: MediaforceConfig,
         prefix: str,
 ) -> RepresentativeSelection | None:
-    scope = resolve_media_scope(connection, prefix)
+    scope = resolve_media_scope(connection, prefix, library_types=config.library_type_map)
     rows = connection.execute(
         select(library_items)
         .where(scope_rel_path_filter(library_items.c.rel_path, scope))
@@ -129,6 +130,21 @@ def load_representative_selection(
     ).mappings().fetchall()
     if not rows:
         return None
+
+    library = config.library_definition_map.get(scope.root, {})
+    if str(library.get("type") or "") == "movie":
+        policy = library.get("policy") if isinstance(library.get("policy"), dict) else {}
+        explicit_exact = scope.match == "exact_item"
+        rows = [
+            row
+            for row in rows
+            if (
+                membership := classify_movie_path(str(row["rel_path"]), root=scope.root)
+            ) is not None
+            and movie_item_included(membership, policy, explicit_exact=explicit_exact)[0]
+        ]
+        if not rows:
+            return None
 
     preferred_rows = [row for row in rows if str(row.get("status") or "") in _PREFERRED_SAMPLE_STATUSES]
     candidate_rows = preferred_rows or list(rows)
