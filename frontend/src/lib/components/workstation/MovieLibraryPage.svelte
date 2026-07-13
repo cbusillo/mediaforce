@@ -19,15 +19,22 @@
 	onMount(() => {
 		disposed = false;
 		let refreshTimer: number | undefined;
-		void hydrateStructure().finally(() => {
+		void hydrateStructure().finally(async () => {
 			if (disposed) return;
-			void hydrateDetails();
-			refreshTimer = window.setInterval(() => void hydrateDetails(true), 7000);
+			await hydrateDetails();
+			if (!disposed) scheduleRefresh();
 		});
+
+		function scheduleRefresh() {
+			refreshTimer = window.setTimeout(async () => {
+				await hydrateDetails(true);
+				if (!disposed) scheduleRefresh();
+			}, 7000);
+		}
 
 		return () => {
 			disposed = true;
-			if (refreshTimer) window.clearInterval(refreshTimer);
+			if (refreshTimer) window.clearTimeout(refreshTimer);
 		};
 	});
 

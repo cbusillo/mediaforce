@@ -29,6 +29,7 @@
 	let hosts = $state<HostsPayload>(initialHosts);
 	let foldersPending = $state(false);
 	let folderPending = $state(false);
+	let folderHydrated = $state(false);
 	let loadError = $state<string | null>(null);
 	let hydrationGeneration = 0;
 
@@ -81,7 +82,10 @@
 				loadError = error instanceof Error ? error.message : 'Unable to open this media scope.';
 			}
 		} finally {
-			if (generation === hydrationGeneration) folderPending = false;
+			if (generation === hydrationGeneration) {
+				folderPending = false;
+				folderHydrated = true;
+			}
 		}
 	}
 
@@ -95,6 +99,7 @@
 		loadError = null;
 
 		if (currentMode === 'studio') {
+			folderHydrated = false;
 			folder = initialFolderPayload(currentPrefix);
 			status = initialFolderStatusPayload(currentPrefix);
 			hosts = initialHosts;
@@ -121,17 +126,22 @@
 <svelte:head>
 	<title
 		>{mode === 'studio'
-			? `${prefix.split('/').at(-1)} · ${folder.media_scope.domain === 'movie' ? 'Movie Studio' : 'Mediaforce'}`
+			? `${prefix.split('/').at(-1)} · ${folder.pending ? 'Studio' : folder.media_scope.domain === 'movie' ? 'Movie Studio' : 'Mediaforce'}`
 			: 'Make a TV season smaller · Mediaforce'}</title
 	>
 </svelte:head>
 
 {#if mode === 'studio'}
-	{#if folderPending && folder.pending}
+	{#if !folderHydrated && (folder.pending || folderPending)}
 		<div class="studio-loading" role="status">
 			<span aria-hidden="true"></span>
 			<strong>Opening Studio</strong>
 			<p>Reading scope, membership, workflow, and worker readiness.</p>
+		</div>
+	{:else if folder.pending}
+		<div class="studio-loading" role="alert">
+			<strong>Studio could not open</strong>
+			<p>{loadError ?? 'The media scope is unavailable.'}</p>
 		</div>
 	{:else if folder.media_scope.domain === 'movie'}
 		<MovieStudioView

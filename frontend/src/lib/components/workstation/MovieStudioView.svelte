@@ -50,6 +50,7 @@
 	);
 	const calibration = $derived(asRecord(folder.calibration));
 	const pendingProposal = $derived(asRecord(folder.pending_proposal));
+	const pendingProposalCanQueue = $derived(pendingProposal.can_queue === true);
 	const reviewGate = $derived(asRecord(folder.review_gate));
 	const calibrationJob = $derived(asRecord(folder.calibration_job));
 	const encodeJob = $derived(folder.encode_job ?? null);
@@ -101,7 +102,7 @@
 	}
 
 	async function startSample() {
-		if (isBrowseOnly || isBusy) return;
+		if (isBrowseOnly || isBusy || !pendingProposalCanQueue) return;
 		await runAction('start-sample', async () => {
 			const response = await postJson<FolderBenchConfirmResponse>(
 				`/api/folders/${folderRoutePrefix(folder.prefix)}/ai-tune/confirm`,
@@ -224,7 +225,7 @@
 		if (['failed', 'stopped', 'needs_attention'].includes(encodeStatus)) return 'retry';
 		if (workflow?.next_action.kind === 'validate_outputs') return 'validate';
 		if (workflow?.next_action.kind === 'promote_outputs') return 'promote';
-		if (Object.keys(pendingProposal).length) return 'start';
+		if (Object.keys(pendingProposal).length && pendingProposalCanQueue) return 'start';
 		if (reviewGate.status === 'accepted') return 'queue';
 		if (reviewReady) return 'queue';
 		return 'prepare';
@@ -412,12 +413,24 @@
 			>
 				<div class="sample-bench">
 					{#if Object.keys(pendingProposal).length}
-						<div class="sample-plan">
-							<strong>Sample plan is ready</strong>
-							<p>Nothing starts until you confirm this plan.</p>
-							<button class="secondary" disabled={isBusy || isBrowseOnly} onclick={startSample}
-								>Start sample</button
+						<div class:sample-plan--blocked={!pendingProposalCanQueue} class="sample-plan">
+							<strong
+								>{pendingProposalCanQueue
+									? 'Sample plan is ready'
+									: 'Sample plan needs another request'}</strong
 							>
+							<p>
+								{pendingProposalCanQueue
+									? 'Nothing starts until you confirm this plan.'
+									: asText(pendingProposal.message) ||
+										asText(pendingProposal.suggested_follow_up) ||
+										'The bench did not produce a queueable sample plan.'}
+							</p>
+							{#if pendingProposalCanQueue}
+								<button class="secondary" disabled={isBusy || isBrowseOnly} onclick={startSample}
+									>Start sample</button
+								>
+							{/if}
 						</div>
 					{/if}
 					<div class="sample-facts">
@@ -752,6 +765,15 @@
 		display: grid;
 		gap: var(--mf-space-4);
 		padding: var(--mf-space-6);
+	}
+
+	.sample-plan--blocked {
+		background: var(--mf-attention-bg);
+		border-color: var(--mf-attention-line);
+	}
+
+	.sample-plan--blocked strong {
+		color: var(--mf-attention-fg);
 	}
 
 	.sample-plan .secondary {
