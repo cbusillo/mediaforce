@@ -50,6 +50,9 @@ VALIDATION_PREFIX = "tv/Validation Ready/Season 1"
 PROMOTION_PREFIX = "tv/Promotion Ready/Season 1"
 FINISHED_PREFIX = "tv/Finished Show/Season 1"
 ENCODE_WAITING_PREFIX = "movies/Waiting Encode"
+MOVIE_LOOSE_PREFIX = "movies/Loose Feature.mkv"
+MOVIE_EDITIONS_PREFIX = "movies/Editions Showcase"
+MOVIE_CONFLICT_PREFIX = "movies/Promotion Conflict"
 CURRENT_PREVIOUS_PREFIX = "tv/Current Season/Season 1"
 CURRENT_SEASON_PREFIX = "tv/Current Season/Season 2"
 CURRENT_SERIES_PREFIX = "tv/Current Season"
@@ -74,6 +77,9 @@ FIXTURE_PREFIXES = (
     PROMOTION_PREFIX,
     FINISHED_PREFIX,
     ENCODE_WAITING_PREFIX,
+    MOVIE_LOOSE_PREFIX,
+    MOVIE_EDITIONS_PREFIX,
+    MOVIE_CONFLICT_PREFIX,
     CURRENT_PREVIOUS_PREFIX,
     CURRENT_SEASON_PREFIX,
     PROTECTED_READY_PREFIX,
@@ -984,6 +990,78 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 recommendation_reason="Fixture approved current season requires an explicit lifecycle override.",
                 age_days=5,
             ),
+            _library_item(
+                project_root=project_root,
+                media_root="movies",
+                rel_path="movies/Loose Feature.mkv",
+                size_bytes=11 * 1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=72,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture root-level exact movie file for browser QA.",
+                age_days=1_200,
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="movies",
+                rel_path="movies/Editions Showcase/Editions Showcase - Theatrical.mkv",
+                size_bytes=12 * 1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=74,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture theatrical movie edition for browser QA.",
+                age_days=980,
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="movies",
+                rel_path="movies/Editions Showcase/Editions Showcase - Director's Cut.mkv",
+                size_bytes=14 * 1024**3,
+                status="planned",
+                video_codec="h264",
+                priority_score=73,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture independently reachable movie edition for browser QA.",
+                age_days=960,
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="movies",
+                rel_path="movies/Editions Showcase/Featurettes/Making Of.mkv",
+                size_bytes=650 * 1024**2,
+                status="discovered",
+                video_codec="h264",
+                priority_score=20,
+                recommendation="review_encode",
+                recommendation_reason="Fixture excluded movie extra for browser QA.",
+                age_days=950,
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="movies",
+                rel_path="movies/Editions Showcase/Disc 2/Alternate.mkv",
+                size_bytes=4 * 1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=18,
+                recommendation="review_encode",
+                recommendation_reason="Fixture uncertain nested movie file for browser QA.",
+                age_days=940,
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="movies",
+                rel_path="movies/Promotion Conflict/Feature.mp4",
+                size_bytes=9 * 1024**3,
+                status="validated",
+                video_codec="h264",
+                priority_score=70,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture movie promotion collision for browser QA.",
+                age_days=900,
+            ),
         ]
         inserted_ids: list[int] = []
         for row in rows:
@@ -1155,6 +1233,29 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 )
             )
 
+        movie_conflict_row = rows_by_prefix[MOVIE_CONFLICT_PREFIX]
+        movie_conflict_id = ids_by_rel_path[str(movie_conflict_row["rel_path"])]
+        movie_conflict_destination = Path(str(movie_conflict_row["source_path"])).with_suffix(".mkv")
+        movie_conflict_destination.parent.mkdir(parents=True, exist_ok=True)
+        movie_conflict_destination.write_bytes(b"mediaforce smoke conflicting movie destination\n")
+        movie_conflict_staging = staging_root / Path(str(movie_conflict_row["rel_path"])).with_suffix(".mkv")
+        movie_conflict_staging.parent.mkdir(parents=True, exist_ok=True)
+        movie_conflict_staging.write_bytes(b"mediaforce smoke staged movie output\n")
+        connection.execute(
+            staged_artifacts.insert().values(
+                library_item_id=movie_conflict_id,
+                source_rel_path=movie_conflict_row["rel_path"],
+                source_size_bytes=movie_conflict_row["size_bytes"],
+                staging_path=str(movie_conflict_staging),
+                staging_size_bytes=max(1, int(movie_conflict_row["size_bytes"]) // 2),
+                bytes_saved=max(1, int(movie_conflict_row["size_bytes"]) // 2),
+                size_ratio=0.5,
+                staged_at=timestamp,
+                validated_at=timestamp,
+                updated_at=timestamp,
+            )
+        )
+
         policy = config.resolve_policy(rows[0]["rel_path"])
         for item_id, row, job in (
             (
@@ -1305,6 +1406,30 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "route": "/folders/tv/Example%20Show/Season%201",
                 "marker": "Example Show",
                 "stageMarker": "Choose a size for Season 1",
+            },
+            {
+                "label": "Movie Studio editions fixture",
+                "route": "/folders/movies/Editions%20Showcase",
+                "marker": "Editions Showcase",
+                "stageMarker": "Files and editions",
+            },
+            {
+                "label": "Movie Studio exact-file fixture",
+                "route": "/folders/movies/Loose%20Feature.mkv",
+                "marker": "Loose Feature",
+                "stageMarker": "Exact Movie File",
+            },
+            {
+                "label": "Movie Studio promotion-conflict fixture",
+                "route": "/folders/movies/Promotion%20Conflict",
+                "marker": "Promotion Conflict",
+                "stageMarker": "Promotion is blocked",
+            },
+            {
+                "label": "Movie Studio active-processing fixture",
+                "route": "/folders/movies/Waiting%20Encode",
+                "marker": "Waiting Encode",
+                "stageMarker": "Monitor processing",
             },
             {
                 "label": "Folder Studio sampling fixture",

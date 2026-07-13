@@ -24,6 +24,7 @@
 		sortShowCards,
 		type LibrarySort
 	} from '$lib/season/library';
+	import LibraryModeNav from '$lib/components/workstation/LibraryModeNav.svelte';
 
 	let {
 		dashboard,
@@ -215,6 +216,7 @@
 </svelte:head>
 
 <main class="season-library">
+	<LibraryModeNav active="tv" />
 	<header class="page-heading">
 		<div>
 			<h1>Your library</h1>

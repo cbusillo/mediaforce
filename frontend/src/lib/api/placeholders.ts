@@ -6,6 +6,7 @@ import type {
 	FolderStatusPayload,
 	HostsPayload,
 	MediaScopePayload,
+	MovieLibraryPayload,
 	QueueLane
 } from './types';
 
@@ -48,6 +49,14 @@ export const initialFoldersPayload: DashboardFoldersPayload = {
 };
 
 export const initialHosts: HostsPayload = { compact: true, hosts: [] };
+
+export const initialMovieLibrary: MovieLibraryPayload = {
+	schema_version: 1,
+	libraries: [],
+	titles: [],
+	catalog_empty: false,
+	details_loading: true
+};
 
 function loadingMediaScope(prefix: string): MediaScopePayload {
 	return {

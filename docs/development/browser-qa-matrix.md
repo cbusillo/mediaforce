@@ -36,6 +36,15 @@ The managed smoke seeds a compact but non-empty workflow dataset:
 - Queue density: two pending `tv/Example Show/Season 1` items and one lower
   priority movie folder. The representative episode is 88 minutes so the goal
   screen resolves the 300 MB / 45 minute default to approximately 587 MB.
+- Movies Library: `/movies` includes a root-level exact file, a conventional
+  title directory with two independently reachable editions, an excluded
+  featurette, an uncertain nested file, active processing, completed titles,
+  and a preflight promotion conflict.
+- Movie Studio: `/folders/movies/Loose%20Feature.mkv`,
+  `/folders/movies/Editions%20Showcase`,
+  `/folders/movies/Waiting%20Encode`, and
+  `/folders/movies/Promotion%20Conflict` cover exact-file, editions/extras,
+  active-job, and collision-blocked states on desktop and narrow viewports.
 - Folder Studio: `/folders/tv/Example%20Show/Season%201`, including enough item
   metadata to render policy comparison, sample facts, queue state, and side
   context.
