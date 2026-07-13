@@ -21,6 +21,15 @@ export function mergeMovieLibraryPayloads(
 	};
 }
 
+export function movieReclaimLowerBound(title: MovieTitle): number | null {
+	if (title.projected_reclaim_bytes != null) return title.projected_reclaim_bytes;
+	return (title.known_saved_bytes ?? 0) > 0 ? (title.known_saved_bytes ?? null) : null;
+}
+
+export function movieReclaimTotalIsLowerBound(titles: MovieTitle[]): boolean {
+	return titles.some((title) => title.projected_reclaim_bytes == null);
+}
+
 function mergeMovieTitle(structure: MovieTitle, details?: MovieTitle): MovieTitle {
 	if (!details) return structure;
 	const detailsByPrefix = new Map(details.members.map((member) => [member.prefix, member]));

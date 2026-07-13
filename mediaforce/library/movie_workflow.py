@@ -30,6 +30,24 @@ _EXTRA_NAME_PATTERNS = (
     (re.compile(r"(?:^|[-_.\s])shorts?$", re.IGNORECASE), "Shorts"),
     (re.compile(r"(?:^|[-_.\s])trailers?$", re.IGNORECASE), "Trailers"),
 )
+_EXTRA_TOKEN_SEQUENCES = (
+    (("behind", "the", "scenes"), "Behind the scenes"),
+    (("bonus", "features"), "Bonus features"),
+    (("deleted", "scenes"), "Deleted scenes"),
+    (("bonus",), "Bonus features"),
+    (("extra",), "Extras"),
+    (("extras",), "Extras"),
+    (("featurette",), "Featurettes"),
+    (("featurettes",), "Featurettes"),
+    (("interview",), "Interviews"),
+    (("interviews",), "Interviews"),
+    (("sample",), "Samples"),
+    (("samples",), "Samples"),
+    (("short",), "Shorts"),
+    (("shorts",), "Shorts"),
+    (("trailer",), "Trailers"),
+    (("trailers",), "Trailers"),
+)
 _EDITION_PATTERNS = (
     (re.compile(r"\bdirector'?s\s+cut\b", re.IGNORECASE), "Director's Cut"),
     (re.compile(r"\btheatrical(?:\s+cut)?\b", re.IGNORECASE), "Theatrical Cut"),
@@ -39,6 +57,7 @@ _EDITION_PATTERNS = (
     (re.compile(r"\bspecial\s+edition\b", re.IGNORECASE), "Special Edition"),
     (re.compile(r"\bremaster(?:ed)?\b", re.IGNORECASE), "Remastered"),
 )
+_TITLE_YEAR_SUFFIX = re.compile(r"\s*[([{](?:18|19|20)\d{2}[)\]}]\s*$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,7 +122,7 @@ def classify_movie_path(rel_path: str, *, root: str) -> MovieMembership | None:
                 label=file_label,
                 extra_category=category,
             )
-    extra_category = infer_extra_category(file_label)
+    extra_category = infer_extra_category(file_label, title=title)
     if extra_category is not None:
         return MovieMembership(
             rel_path=normalized,
@@ -164,12 +183,26 @@ def infer_edition_label(value: str) -> str | None:
     return None
 
 
-def infer_extra_category(value: str) -> str | None:
+def infer_extra_category(value: str, *, title: str | None = None) -> str | None:
+    tokens = _tokens(value)
+    if title:
+        title_tokens = _tokens(_TITLE_YEAR_SUFFIX.sub("", title))
+        if tokens[:len(title_tokens)] == title_tokens:
+            tokens = tokens[len(title_tokens):]
+    for sequence, category in _EXTRA_TOKEN_SEQUENCES:
+        width = len(sequence)
+        if any(tuple(tokens[index:index + width]) == sequence for index in range(len(tokens) - width + 1)):
+            return category
+    candidate = " ".join(tokens)
     for pattern, category in _EXTRA_NAME_PATTERNS:
-        if pattern.search(value):
+        if pattern.search(candidate):
             return category
     return None
 
 
 def _normalized_token(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def _tokens(value: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", value.lower())

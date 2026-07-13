@@ -132,6 +132,7 @@ export interface FolderCard {
 	lifecycle?: LifecycleState | null;
 	media_scope?: MediaScopePayload | null;
 	details_loading: boolean;
+	estimate_unavailable_count?: number;
 }
 
 export type MovieMemberRole = 'feature' | 'extra' | 'uncertain';

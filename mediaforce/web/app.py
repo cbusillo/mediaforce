@@ -68,7 +68,7 @@ from mediaforce.library.planner import build_manifest_item
 from mediaforce.library.representatives import RepresentativeSelection, load_representative_selection, \
     public_representative_item
 from mediaforce.library.run_manifests import select_encode_candidates
-from mediaforce.library.candidate_selection import encode_candidate_decisions, project_candidates, \
+from mediaforce.library.candidate_selection import CandidateDecision, encode_candidate_decisions, project_candidates, \
     scope_lifecycle_payload_from_decisions, workflow_eligibility
 from mediaforce.hosts.types import HostSetupResult
 from mediaforce.hosts.config import configured_remote_host_execution_mode
@@ -541,6 +541,19 @@ def create_app(config_path: Path | None = None) -> FastAPI:
 
     def _dashboard_movie_library_details_payload() -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection:
+            movie_roots = {
+                root
+                for root, library_type in config.library_type_map.items()
+                if library_type == "movie"
+            }
+            if not movie_roots:
+                return load_movie_library_payload(
+                    connection,
+                    config,
+                    include_details=True,
+                    candidate_decisions=[],
+                )
+            decisions = project_candidates(connection, config, prefixes=sorted(movie_roots))
             cards = _folder_cards_for_group(
                 config,
                 connection,
@@ -549,12 +562,17 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                     library_types=config.library_type_map,
                 ),
                 minimum_recommended_savings_bytes=None,
+                media_roots=movie_roots,
+                candidate_decisions=decisions,
+                include_lifecycle=False,
+                include_workflow_states=False,
             )
             return load_movie_library_payload(
                 connection,
                 config,
                 include_details=True,
                 metrics_by_prefix={card.prefix: asdict(card) for card in cards},
+                candidate_decisions=decisions,
             )
 
     def _dashboard_api_payload(preview_limit: int | None = None) -> dict[str, Any]:
@@ -761,11 +779,32 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 normalized_prefix,
                 library_types=config.library_type_map,
             )
-            movie_context = (
-                load_movie_scope_payload(connection, config, normalized_prefix)
-                if media_scope.domain == "movie"
-                else None
-            )
+            movie_context = None
+            if media_scope.domain == "movie":
+                membership = classify_movie_path(normalized_prefix, root=media_scope.root)
+                movie_title_prefix = membership.title_prefix if membership is not None else normalized_prefix
+                movie_decisions = project_candidates(connection, config, prefixes=[movie_title_prefix])
+                movie_cards = _folder_cards_for_group(
+                    config,
+                    connection,
+                    folder_group=lambda rel_path: _movie_folder_group(
+                        rel_path,
+                        library_types=config.library_type_map,
+                    ),
+                    minimum_recommended_savings_bytes=None,
+                    rel_path_root=movie_title_prefix,
+                    media_roots={media_scope.root},
+                    candidate_decisions=movie_decisions,
+                    include_lifecycle=False,
+                    include_workflow_states=False,
+                )
+                movie_context = load_movie_scope_payload(
+                    connection,
+                    config,
+                    normalized_prefix,
+                    metrics_by_prefix={card.prefix: asdict(card) for card in movie_cards},
+                    candidate_decisions=movie_decisions,
+                )
             calibration_job = _load_job_state(connection, config, normalized_prefix)
             if calibration_job and calibration_job.get("status") in {"queued", "running"}:
                 existing_scan_job = _load_scan_job_state(config, normalized_prefix)
@@ -1995,6 +2034,9 @@ def _folder_cards_for_group(
         minimum_recommended_savings_bytes: int | None = MIN_RECOMMENDED_SAVINGS_BYTES,
         rel_path_root: str | None = None,
         media_roots: set[str] | None = None,
+        candidate_decisions: list[CandidateDecision] | None = None,
+        include_lifecycle: bool = True,
+        include_workflow_states: bool = True,
 ) -> list[FolderCard]:
     needs_attention_badges: dict[str, dict[str, str | None]] | None = None
     calibration_job_badges: dict[str, dict[str, str | None]] | None = None
@@ -2030,6 +2072,9 @@ def _folder_cards_for_group(
         review_badge_for_prefix=review_badge_for_prefix,
         rel_path_root=rel_path_root,
         media_roots=media_roots,
+        candidate_decisions=candidate_decisions,
+        include_lifecycle=include_lifecycle,
+        include_workflow_states=include_workflow_states,
     )
     return _attach_media_scopes(connection, config, cards)
 

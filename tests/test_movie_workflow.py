@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -11,8 +11,8 @@ from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items, plex_item_metadata, staged_artifacts
 from mediaforce.library.candidate_selection import candidate_rank_key, project_candidates, workflow_eligibility
-from mediaforce.library.media_scopes import media_group_scope_for_rel_path, resolve_media_scope
-from mediaforce.library.movie_library import load_movie_library_payload
+from mediaforce.library.media_scopes import ScopeDomain, media_group_scope_for_rel_path, resolve_media_scope
+from mediaforce.library.movie_library import load_movie_library_payload, load_movie_scope_payload
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
 from mediaforce.library.representatives import load_representative_selection
 from mediaforce.library.workflow_state import build_folder_workflow_state
@@ -20,6 +20,7 @@ from mediaforce.web.runtime.folder_actions import _promotion_conflict_response
 from mediaforce.web.runtime.folder_actions import _reset_stale_prefix_encoding_items_for_requeue
 from mediaforce.web.runtime.folder_actions import promote_folder_outputs_action, queue_folder_encode_action, \
     validate_folder_outputs_action
+from mediaforce.web.runtime.folder_cards import list_folder_cards
 
 
 class MovieWorkflowTests(unittest.TestCase):
@@ -49,6 +50,40 @@ class MovieWorkflowTests(unittest.TestCase):
         self.assertEqual((single_file.role, single_file.scope_mode), ("feature", "single_file"))
         self.assertFalse(movie_item_included(extra, {"extras": "exclude"}, explicit_exact=False)[0])
         self.assertTrue(movie_item_included(extra, {"extras": "exclude"}, explicit_exact=True)[0])
+
+    def test_classifies_release_named_bonus_and_extras_files_without_misreading_the_title(self) -> None:
+        bonus = classify_movie_path(
+            "movies/Bohemian Rhapsody (2018)/"
+            "Bohemian.Rhapsody.2018.BONUS.Complete.Live.Aid.Performance.1080p.mkv",
+            root="movies",
+        )
+        extras = classify_movie_path(
+            "movies/Jurassic World Rebirth (2025)/"
+            "Jurassic World Rebirth 2025 Extras 1080p BluRay Remux.mkv",
+            root="movies",
+        )
+        titled_extra = classify_movie_path(
+            "movies/The Extras (2005)/The Extras 2005 1080p BluRay.mkv",
+            root="movies",
+        )
+
+        self.assertEqual((bonus.role, bonus.extra_category), ("extra", "Bonus features"))
+        self.assertEqual((extras.role, extras.extra_category), ("extra", "Extras"))
+        self.assertEqual(titled_extra.role, "feature")
+
+    def test_title_words_that_match_extra_tokens_remain_features_without_filename_years(self) -> None:
+        feature_paths = (
+            "movies/The Extras (2005)/The Extras.mkv",
+            "movies/Short Term 12 (2013)/Short Term 12.mkv",
+            "movies/Interview with the Vampire (1994)/Interview with the Vampire.mkv",
+            "movies/Bonus (2024)/Bonus.mkv",
+            "movies/Trailer Park Boys The Movie (2006)/Trailer Park Boys The Movie.mkv",
+        )
+
+        memberships = [classify_movie_path(path, root="movies") for path in feature_paths]
+
+        self.assertTrue(all(membership is not None for membership in memberships))
+        self.assertEqual([membership.role for membership in memberships], ["feature"] * len(feature_paths))
 
     def test_custom_typed_root_resolves_movie_scopes(self) -> None:
         scope = media_group_scope_for_rel_path(
@@ -197,6 +232,208 @@ class MovieWorkflowTests(unittest.TestCase):
             )
 
         self.assertEqual(payload["titles"][0]["age"]["source"], "mediaforce_discovered")
+
+    def test_movie_folder_cards_ignore_tv_history_and_report_unavailable_estimate(self) -> None:
+        config = self._config(
+            extras="exclude",
+            additional_libraries=[
+                {
+                    "key": "shows",
+                    "label": "TV",
+                    "path": str(self.root / "shows"),
+                    "type": "tv",
+                    "availability": "production",
+                    "default_profile": "tv_balanced",
+                    "policy": {},
+                },
+            ],
+        )
+        with open_db(config.paths.db_path) as connection:
+            movie_id = self._insert_item(connection, "films/Example/Example.mkv", size_bytes=1_000)
+            tv_id = self._insert_item(
+                connection,
+                "shows/Example/Season 1/Example S01E01.mkv",
+                size_bytes=1_000,
+                status="promoted",
+            )
+            connection.execute(
+                library_items.update()
+                .where(library_items.c.id.in_((movie_id, tv_id)))
+                .values(video_codec="hevc")
+            )
+            self._insert_stage(connection, tv_id, "shows/Example/Season 1/Example S01E01.mkv")
+            connection.execute(
+                staged_artifacts.update()
+                .where(staged_artifacts.c.library_item_id == tv_id)
+                .values(
+                    source_rel_path="shows/Example/Season 1/Example S01E01.mkv",
+                    source_video_codec="hevc",
+                    source_size_bytes=1_000,
+                    bytes_saved=950,
+                    promoted_at="2026-07-13T00:00:00+00:00",
+                )
+            )
+            decisions = project_candidates(connection, config, prefixes=[])
+            estimate_savings = Mock(return_value=160)
+
+            with patch("mediaforce.web.runtime.folder_cards._apply_lifecycle") as lifecycle_mock, patch(
+                    "mediaforce.web.runtime.folder_cards._apply_folder_workflow_states"
+            ) as workflow_mock:
+                cards = list_folder_cards(
+                    connection,
+                    config=config,
+                    minimum_recommended_savings_bytes=None,
+                    folder_group=lambda rel_path: self._movie_group(config, rel_path),
+                    age_days=lambda _path: 0.0,
+                    estimate_savings_bytes=estimate_savings,
+                    review_badge_for_prefix=lambda _prefix: {"label": None, "tone": None, "detail": None},
+                    candidate_decisions=decisions,
+                    include_lifecycle=False,
+                    include_workflow_states=False,
+                )
+
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0].estimated_savings_bytes, 0)
+        self.assertEqual(cards[0].estimate_unavailable_count, 1)
+        estimate_savings.assert_not_called()
+        lifecycle_mock.assert_not_called()
+        workflow_mock.assert_not_called()
+
+    def test_movie_library_payload_preserves_unavailable_reclaim_as_null(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_item(connection, "films/Example/Example.mkv")
+            payload = load_movie_library_payload(
+                connection,
+                self.config,
+                include_details=True,
+                metrics_by_prefix={
+                    "films/Example": {
+                        "projected_reclaim_bytes": 0,
+                        "estimated_savings_bytes": 0,
+                        "estimate_unavailable_count": 1,
+                    }
+                },
+            )
+
+        title = payload["titles"][0]
+        self.assertIsNone(title["projected_reclaim_bytes"])
+        self.assertIsNone(title["estimated_savings_bytes"])
+        self.assertEqual(title["known_saved_bytes"], 0)
+        self.assertEqual(title["savings_confidence"], "unavailable")
+
+    def test_movie_scope_payload_preserves_unavailable_reclaim_as_null(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_item(connection, "films/Example/Example.mkv")
+            decisions = project_candidates(connection, self.config, prefixes=["films/Example"])
+            payload = load_movie_scope_payload(
+                connection,
+                self.config,
+                "films/Example",
+                metrics_by_prefix={
+                    "films/Example": {
+                        "projected_reclaim_bytes": 0,
+                        "estimated_savings_bytes": 0,
+                        "estimate_unavailable_count": 1,
+                    }
+                },
+                candidate_decisions=decisions,
+            )
+            payload_without_metrics = load_movie_scope_payload(
+                connection,
+                self.config,
+                "films/Example",
+                candidate_decisions=decisions,
+            )
+
+        self.assertIsNotNone(payload)
+        self.assertIsNone(payload["projected_reclaim_bytes"])
+        self.assertIsNone(payload["estimated_savings_bytes"])
+        self.assertEqual(payload["savings_confidence"], "unavailable")
+        self.assertIsNotNone(payload_without_metrics)
+        self.assertIsNone(payload_without_metrics["projected_reclaim_bytes"])
+
+    def test_tv_folder_cards_ignore_movie_codec_history(self) -> None:
+        config = self._config(
+            extras="exclude",
+            additional_libraries=[
+                {
+                    "key": "shows",
+                    "label": "TV",
+                    "path": str(self.root / "shows"),
+                    "type": "tv",
+                    "availability": "production",
+                    "default_profile": "tv_balanced",
+                    "policy": {},
+                },
+            ],
+        )
+        with open_db(config.paths.db_path) as connection:
+            pending_id = self._insert_item(
+                connection,
+                "shows/Example/Season 1/Example S01E01.mkv",
+                size_bytes=1_000,
+            )
+            movie_id = self._insert_item(
+                connection,
+                "films/Example/Example.mkv",
+                size_bytes=1_000,
+                status="promoted",
+            )
+            connection.execute(
+                library_items.update()
+                .where(library_items.c.id.in_((pending_id, movie_id)))
+                .values(video_codec="h264")
+            )
+            self._insert_stage(connection, movie_id, "films/Example/Example.mkv")
+            connection.execute(
+                staged_artifacts.update()
+                .where(staged_artifacts.c.library_item_id == movie_id)
+                .values(
+                    source_rel_path="films/Example/Example.mkv",
+                    source_video_codec="h264",
+                    source_size_bytes=1_000,
+                    bytes_saved=900,
+                    promoted_at="2026-07-13T00:00:00+00:00",
+                )
+            )
+            decisions = project_candidates(
+                connection,
+                config,
+                prefixes=[],
+                manual_override_prefix="shows/Example/Season 1",
+            )
+            estimate_savings = Mock(return_value=420)
+            cards = list_folder_cards(
+                connection,
+                config=config,
+                minimum_recommended_savings_bytes=None,
+                folder_group=lambda rel_path: self._domain_group(config, rel_path, "tv"),
+                age_days=lambda _path: 0.0,
+                estimate_savings_bytes=estimate_savings,
+                review_badge_for_prefix=lambda _prefix: {"label": None, "tone": None, "detail": None},
+                candidate_decisions=decisions,
+                include_lifecycle=False,
+                include_workflow_states=False,
+            )
+
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0].estimated_savings_bytes, 420)
+        estimate_savings.assert_called_once()
+
+    def test_movie_library_payload_reuses_precomputed_candidate_projection(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_item(connection, "films/Example/Example.mkv")
+            decisions = project_candidates(connection, self.config, prefixes=[])
+            with patch("mediaforce.library.movie_library.project_candidates") as projection_mock:
+                payload = load_movie_library_payload(
+                    connection,
+                    self.config,
+                    include_details=True,
+                    candidate_decisions=decisions,
+                )
+
+        projection_mock.assert_not_called()
+        self.assertEqual(payload["titles"][0]["workflow_state"]["state"], "encode_candidates")
 
     def test_promotion_preflight_blocks_duplicate_output_destinations(self) -> None:
         conflict = _promotion_conflict_response(
@@ -496,6 +733,21 @@ class MovieWorkflowTests(unittest.TestCase):
                 runtime_settings_path=self.root / "runtime-settings.json",
             ),
         )
+
+    @staticmethod
+    def _movie_group(config: MediaforceConfig, rel_path: str) -> tuple[str, str, str, str] | None:
+        return MovieWorkflowTests._domain_group(config, rel_path, "movie")
+
+    @staticmethod
+    def _domain_group(
+            config: MediaforceConfig,
+            rel_path: str,
+            domain: ScopeDomain,
+    ) -> tuple[str, str, str, str] | None:
+        scope = media_group_scope_for_rel_path(rel_path, library_types=config.library_type_map)
+        if scope is None or scope.domain != domain:
+            return None
+        return scope.group_tuple()
 
     @staticmethod
     def _insert_item(

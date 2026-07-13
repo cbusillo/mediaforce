@@ -21,6 +21,9 @@ second encode path.
 - Movies uses a dense title list with a persistent inspector, not a poster wall.
 - The list exposes state, title, file membership, size, reclaim estimate, age
   provenance, and the next action.
+- Reclaim is evidence-backed: an unmeasured movie reports no estimate rather
+  than borrowing TV or generic codec history. Known staged savings remain
+  visible independently.
 - The inspector exposes every feature, edition, extra, and uncertain member as
   a reachable row.
 - Narrow layouts stack the inspector below the selected title without horizontal
@@ -34,6 +37,9 @@ second encode path.
 - Movie copy uses title, feature, edition, extra, and file. It never uses show,
   season, episode, or lifecycle language.
 - Movie membership is visible before sample or queue actions.
+- Structure renders before details; background detail refreshes never overlap.
+- A failed or non-queueable sample proposal stays visible as a blocked plan and
+  never exposes a start action.
 
 ## Safety
 

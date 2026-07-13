@@ -44,6 +44,7 @@ class FolderCard:
     lifecycle: dict[str, object] | None = None
     media_scope: dict[str, object] | None = None
     details_loading: bool = False
+    estimate_unavailable_count: int = 0
 
 
 @dataclass(slots=True)
@@ -163,7 +164,11 @@ def preview_folder_cards(
 ) -> list[FolderCard]:
     decisions = project_candidates(connection, config, prefixes=[]) if config is not None else []
     decisions_by_item = {decision.item_id: decision for decision in decisions}
-    folder_history, codec_history = _load_savings_history(connection, folder_group=folder_group)
+    folder_history, codec_history = _load_savings_history(
+        connection,
+        folder_group=folder_group,
+        decisions_by_item=decisions_by_item,
+    )
     rows = connection.execute(
         select(
             library_items.c.id.label("item_id"),
@@ -227,14 +232,17 @@ def preview_folder_cards(
         if status != "promoted" and production_included:
             card.pending_count += 1
             if known_saved_bytes is None and _eligible_for_estimate(status, decision):
-                card.estimated_savings_bytes += _estimated_pending_savings_bytes(
-                    size_bytes=size_bytes,
-                    video_codec=codec,
-                    audio_summary_json=str(row["audio_summary_json"] or "[]"),
-                    estimate_savings_bytes=estimate_savings_bytes,
-                    folder_history=folder_history.get(prefix),
-                    codec_history=codec_history.get(_canonical_video_codec(codec)),
-                )
+                if decision is not None and decision.media_domain == "movie":
+                    card.estimate_unavailable_count += 1
+                else:
+                    card.estimated_savings_bytes += _estimated_pending_savings_bytes(
+                        size_bytes=size_bytes,
+                        video_codec=codec,
+                        audio_summary_json=str(row["audio_summary_json"] or "[]"),
+                        estimate_savings_bytes=estimate_savings_bytes,
+                        folder_history=folder_history.get(prefix),
+                        codec_history=_codec_history_for_decision(codec_history, decision, codec),
+                    )
         card.statuses[status] = card.statuses.get(status, 0) + 1
         card.video_codecs[codec] = card.video_codecs.get(codec, 0) + 1
     for card in grouped.values():
@@ -331,10 +339,23 @@ def list_folder_cards(
         review_badge_for_prefix: Callable[[str], FolderBadge],
         rel_path_root: str | None = None,
         media_roots: set[str] | None = None,
+        candidate_decisions: list[CandidateDecision] | None = None,
+        include_lifecycle: bool = True,
+        include_workflow_states: bool = True,
 ) -> list[FolderCard]:
-    decisions = project_candidates(connection, config, prefixes=[]) if config is not None else []
+    decisions = (
+        candidate_decisions
+        if candidate_decisions is not None
+        else project_candidates(connection, config, prefixes=[])
+        if config is not None
+        else []
+    )
     decisions_by_item = {decision.item_id: decision for decision in decisions}
-    folder_history, codec_history = _load_savings_history(connection, folder_group=folder_group)
+    folder_history, codec_history = _load_savings_history(
+        connection,
+        folder_group=folder_group,
+        decisions_by_item=decisions_by_item,
+    )
     query = (
         select(
             library_items.c.id.label("item_id"),
@@ -413,16 +434,19 @@ def list_folder_cards(
             if known_saved_bytes is not None:
                 card.sort_score += known_saved_bytes / (1024 ** 3)
             elif _eligible_for_estimate(status, decision):
-                estimated_savings = _estimated_pending_savings_bytes(
-                    size_bytes=size_bytes,
-                    video_codec=codec,
-                    audio_summary_json=str(row["audio_summary_json"] or "[]"),
-                    estimate_savings_bytes=estimate_savings_bytes,
-                    folder_history=folder_history.get(prefix),
-                    codec_history=codec_history.get(_canonical_video_codec(codec)),
-                )
-                card.estimated_savings_bytes += estimated_savings
-                card.sort_score += estimated_savings / (1024 ** 3)
+                if decision is not None and decision.media_domain == "movie":
+                    card.estimate_unavailable_count += 1
+                else:
+                    estimated_savings = _estimated_pending_savings_bytes(
+                        size_bytes=size_bytes,
+                        video_codec=codec,
+                        audio_summary_json=str(row["audio_summary_json"] or "[]"),
+                        estimate_savings_bytes=estimate_savings_bytes,
+                        folder_history=folder_history.get(prefix),
+                        codec_history=_codec_history_for_decision(codec_history, decision, codec),
+                    )
+                    card.estimated_savings_bytes += estimated_savings
+                    card.sort_score += estimated_savings / (1024 ** 3)
         card.statuses[status] = card.statuses.get(status, 0) + 1
         card.video_codecs[codec] = card.video_codecs.get(codec, 0) + 1
     cards = list(grouped.values())
@@ -438,8 +462,10 @@ def list_folder_cards(
             or card.projected_reclaim_bytes >= minimum_recommended_savings_bytes
         )
     ]
-    _apply_lifecycle(cards, decisions)
-    _apply_folder_workflow_states(connection, cards, decisions, config=config)
+    if include_lifecycle:
+        _apply_lifecycle(cards, decisions)
+    if include_workflow_states:
+        _apply_folder_workflow_states(connection, cards, decisions, config=config)
     _apply_folder_review_badges(cards, review_badge_for_prefix)
     return sorted(
         cards,
@@ -547,6 +573,7 @@ def _copy_folder_card(card: FolderCard, *, include_review_badges: bool = True) -
         workflow_state=deepcopy(card.workflow_state),
         lifecycle=deepcopy(card.lifecycle),
         details_loading=card.details_loading,
+        estimate_unavailable_count=card.estimate_unavailable_count,
     )
 
 
@@ -590,9 +617,11 @@ def _load_savings_history(
         connection: DBClient,
         *,
         folder_group: Callable[[str], FolderGroup | None],
-) -> tuple[dict[str, SavingsHistory], dict[str, SavingsHistory]]:
+        decisions_by_item: dict[int, CandidateDecision],
+) -> tuple[dict[str, SavingsHistory], dict[tuple[str, str], SavingsHistory]]:
     rows = connection.execute(
         select(
+            library_items.c.id.label("item_id"),
             library_items.c.rel_path,
             library_items.c.status,
             staged_artifacts.c.source_rel_path,
@@ -612,7 +641,7 @@ def _load_savings_history(
     ).mappings().fetchall()
 
     folder_history: dict[str, SavingsHistory] = {}
-    codec_history: dict[str, SavingsHistory] = {}
+    codec_history: dict[tuple[str, str], SavingsHistory] = {}
     for row in rows:
         source_size_bytes = int(row["source_size_bytes"] or 0)
         if source_size_bytes <= 0:
@@ -624,10 +653,21 @@ def _load_savings_history(
         if group is not None and codec is not None:
             history = folder_history.setdefault(group[0], SavingsHistory())
             history.record(source_size_bytes=source_size_bytes, bytes_saved=bytes_saved, codec_key=codec)
-        if codec is not None:
-            history = codec_history.setdefault(codec, SavingsHistory())
+        decision = decisions_by_item.get(int(row["item_id"]))
+        if codec is not None and decision is not None:
+            history = codec_history.setdefault((decision.media_domain, codec), SavingsHistory())
             history.record(source_size_bytes=source_size_bytes, bytes_saved=bytes_saved, codec_key=codec)
     return folder_history, codec_history
+
+
+def _codec_history_for_decision(
+        codec_history: dict[tuple[str, str], SavingsHistory],
+        decision: CandidateDecision | None,
+        codec: str,
+) -> SavingsHistory | None:
+    if decision is None:
+        return None
+    return codec_history.get((decision.media_domain, _canonical_video_codec(codec)))
 
 
 def _estimated_pending_savings_bytes(

@@ -3,6 +3,7 @@
 
 	import type { MovieLibraryPayload, MovieMember, MovieTitle } from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
+	import { movieReclaimLowerBound, movieReclaimTotalIsLowerBound } from '$lib/movies/library';
 	import LibraryModeNav from './LibraryModeNav.svelte';
 
 	let {
@@ -51,8 +52,12 @@
 		payload.titles.reduce((total, title) => total + title.total_size_bytes, 0)
 	);
 	const totalReclaim = $derived(
-		payload.titles.reduce((total, title) => total + (title.projected_reclaim_bytes ?? 0), 0)
+		payload.titles.reduce((total, title) => total + (movieReclaimLowerBound(title) ?? 0), 0)
 	);
+	const reclaimCoverage = $derived(
+		payload.titles.filter((title) => movieReclaimLowerBound(title) != null).length
+	);
+	const reclaimHasUnknowns = $derived(movieReclaimTotalIsLowerBound(payload.titles));
 	const actionableCount = $derived(
 		payload.titles.filter((title) =>
 			['encode', 'validate', 'promote', 'processing', 'attention'].includes(
@@ -114,7 +119,7 @@
 	}
 
 	function formatBytes(value: number | null | undefined): string {
-		if (value == null) return 'Pending';
+		if (value == null) return 'No estimate';
 		if (value < 1024) return `${value} B`;
 		const units = ['KB', 'MB', 'GB', 'TB'];
 		let size = value;
@@ -124,6 +129,14 @@
 			unit += 1;
 		}
 		return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
+	}
+
+	function formatReclaim(title: MovieTitle): string {
+		const lowerBound = movieReclaimLowerBound(title);
+		if (lowerBound == null) return 'No estimate';
+		return title.projected_reclaim_bytes == null
+			? `At least ${formatBytes(lowerBound)}`
+			: formatBytes(lowerBound);
 	}
 
 	function formatAge(title: MovieTitle): string {
@@ -204,9 +217,15 @@
 			<div><strong>{payload.titles.length}</strong><span>titles</span></div>
 			<div><strong>{formatBytes(totalSize)}</strong><span>stored</span></div>
 			<div>
-				<strong>{detailsPending ? '…' : formatBytes(totalReclaim)}</strong><span
-					>projected reclaim</span
-				>
+				<strong
+					>{detailsPending
+						? '…'
+						: reclaimCoverage === 0
+							? 'No estimate'
+							: reclaimHasUnknowns
+								? `At least ${formatBytes(totalReclaim)}`
+								: formatBytes(totalReclaim)}</strong
+				><span>projected reclaim</span>
 			</div>
 			<div><strong>{actionableCount}</strong><span>active or ready</span></div>
 		</div>
@@ -336,7 +355,9 @@
 								<small>
 									{title.details_loading
 										? 'Reclaim pending'
-										: `${formatBytes(title.projected_reclaim_bytes)} reclaim · ${title.savings_confidence}`}
+										: title.savings_confidence === 'unavailable'
+											? 'No estimate yet'
+											: `${formatReclaim(title)} reclaim · ${title.savings_confidence}`}
 								</small>
 							</span>
 							<span class="state-badge" data-tone={workflowTone(title)}>
@@ -374,7 +395,9 @@
 							</div>
 							<div>
 								<span>Projected reclaim</span><strong
-									>{formatBytes(selectedTitle.projected_reclaim_bytes)}</strong
+									>{selectedTitle.details_loading
+										? 'Pending'
+										: formatReclaim(selectedTitle)}</strong
 								>
 							</div>
 							<div><span>Ranking age</span><strong>{formatAge(selectedTitle)}</strong></div>
