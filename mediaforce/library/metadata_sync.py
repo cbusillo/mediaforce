@@ -357,8 +357,11 @@ def _plex_path_mappings(config: MediaforceConfig) -> tuple[PlexPathMapping, ...]
     plex_settings = _mapping(config.metadata.get("plex"))
     library_roots = _mapping(plex_settings.get("library_roots"))
     mappings: list[PlexPathMapping] = []
-    for key, local_root in config.source_root_map.items():
-        configured_root = str(library_roots.get(key) or "").strip()
+    scan_source_roots = getattr(config, "scan_source_root_map", config.source_root_map)
+    library_definitions = getattr(config, "library_definition_map", {})
+    for key, local_root in scan_source_roots.items():
+        definition = library_definitions.get(key, {}) if isinstance(library_definitions, dict) else {}
+        configured_root = str(definition.get("plex_path") or library_roots.get(key) or "").strip()
         mappings.append(
             PlexPathMapping(
                 plex_root=configured_root or str(local_root),

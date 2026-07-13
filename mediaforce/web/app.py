@@ -210,6 +210,8 @@ from mediaforce.web.settings_runtime import (
     settings_remote_rows_for_config as _settings_remote_rows_for_config_runtime,
     settings_transcode_root_value as _settings_transcode_root_value_runtime,
     runtime_source_roots as _runtime_source_roots,
+    runtime_library_signature as _runtime_library_signature,
+    bind_runtime_library_overrides as _bind_runtime_library_overrides,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -541,7 +543,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
 
     def _save_settings_action(
             *,
-            libraries: list[dict[str, str]],
+            libraries: list[dict[str, Any]],
             remote_hosts: list[dict[str, Any]],
             transcode_root: str,
             video_defaults: dict[str, Any],
@@ -560,14 +562,40 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             encode_queue_scheduler=encode_queue_scheduler,
             schedule_profiles=schedule_profiles,
             metadata=metadata if metadata is not None else config.metadata,
+            existing_library_types={
+                key: str(definition.get("type") or "")
+                for key, definition in config.library_definition_map.items()
+            },
+            existing_libraries={
+                str(item.get("key") or ""): dict(item)
+                for item in config.media.get("libraries", [])
+                if isinstance(item, dict) and str(item.get("key") or "").strip()
+            } if isinstance(config.media.get("libraries"), list) else {},
+            existing_library_paths={
+                str(key): str(path)
+                for key, path in config.media.get("source_roots", {}).items()
+            } if isinstance(config.media.get("source_roots"), dict) else {},
         )
+        changed_type_roots = {
+            str(definition.get("key") or ""): str(
+                config.library_definition_map[str(definition.get("key") or "")].get("type") or ""
+            )
+            for definition in payload.get("media", {}).get("libraries", [])
+            if isinstance(definition, dict)
+            and str(definition.get("key") or "") in config.library_definition_map
+            and str(config.library_definition_map[str(definition.get("key") or "")].get("type") or "")
+            != str(definition.get("type") or "")
+        }
         catalog_refresh_needed = False
 
         def _apply_runtime_settings(existing_runtime_settings: dict[str, Any]) -> dict[str, Any]:
             nonlocal catalog_refresh_needed
             merged_runtime_settings = _merge_runtime_settings_payload(existing_runtime_settings, payload)
+            merged_runtime_settings = _bind_runtime_library_overrides(merged_runtime_settings, changed_type_roots)
             catalog_refresh_needed = (
                 _runtime_source_roots(existing_runtime_settings) != _runtime_source_roots(merged_runtime_settings)
+                or _runtime_library_signature(existing_runtime_settings)
+                != _runtime_library_signature(merged_runtime_settings)
                 or object_dict(existing_runtime_settings.get("metadata"))
                 != object_dict(merged_runtime_settings.get("metadata"))
             )
@@ -579,9 +607,36 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         if catalog_refresh_needed:
             _reset_folder_card_cache()
             with open_db(config.paths.db_path) as connection:
-                _maybe_schedule_scan(connection, config, prefix=None)
+                _maybe_schedule_scan(connection, config, prefix=None, force=True)
         _refresh_host_status_cache(config)
         return {"ok": True, "message": "Settings saved.", "settings": _settings_page_payload(saved=True)}
+
+    def _library_type_preview_action(key: str, library_type: str) -> dict[str, Any]:
+        definition = config.library_definition_map.get(key)
+        if definition is None:
+            raise ValueError("Unknown library root.")
+        current_type = str(definition.get("type") or "other")
+        supported_types = {"tv", "movie", "spatial", "other"}
+        if library_type not in supported_types:
+            raise ValueError("Unsupported library type.")
+        with open_db(config.paths.db_path) as connection:
+            item_count = int(
+                connection.execute(
+                    select(func.count()).select_from(library_items).where(library_items.c.media_root == key)
+                ).scalar_one()
+            )
+        return {
+            "ok": True,
+            "preview": {
+                "key": key,
+                "from_type": current_type,
+                "to_type": library_type,
+                "item_count": item_count,
+                "requires_rescan": current_type != library_type,
+                "clears_saved_profiles": current_type != library_type,
+                "acknowledgement": f"{key}:{current_type}->{library_type}",
+            },
+        }
 
     def _prepare_host_action(host_key: str, remote_password: str | None = None) -> dict[str, Any]:
         nonlocal config
@@ -638,6 +693,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         app,
         settings_payload=_settings_page_payload,
         save_settings_action=_save_settings_action,
+        library_type_preview_action=_library_type_preview_action,
         archive_cleanup_payload=lambda transcode_root=None: archive_cleanup_summary(
             config,
             transcode_root=transcode_root,
@@ -2550,10 +2606,13 @@ def _catalog_signature_file(config: MediaforceConfig) -> Path:
 
 
 def _current_catalog_signature(config: MediaforceConfig) -> dict[str, Any]:
-    return {"source_roots": _runtime_source_roots(config.raw)}
+    return {
+        "source_roots": {key: str(path) for key, path in config.scan_source_root_map.items()},
+        "libraries": _runtime_library_signature(config.raw),
+    }
 
 
-def _settings_library_rows_for_config(config: MediaforceConfig, *, min_rows: int = 3) -> list[dict[str, str]]:
+def _settings_library_rows_for_config(config: MediaforceConfig, *, min_rows: int = 3) -> list[dict[str, Any]]:
     return _settings_library_rows_for_config_runtime(config, min_rows=min_rows)
 
 
@@ -2582,7 +2641,13 @@ def _load_catalog_signature(config: MediaforceConfig) -> dict[str, Any] | None:
     source_roots = payload.get("source_roots")
     if not isinstance(source_roots, dict):
         return None
-    return {"source_roots": _runtime_source_roots({"media": {"source_roots": source_roots}})}
+    libraries = payload.get("libraries")
+    return {
+        "source_roots": _runtime_source_roots({"media": {"source_roots": source_roots}}),
+        "libraries": _runtime_library_signature(
+            {"media": {"libraries": libraries if isinstance(libraries, list) else []}}
+        ),
+    }
 
 
 def _save_catalog_signature(config: MediaforceConfig) -> None:
@@ -2832,9 +2897,9 @@ def _save_scan_job_state(config: MediaforceConfig, prefix: str | None, payload: 
 
 
 def _maybe_schedule_scan(
-        connection: DBClient, config: MediaforceConfig, prefix: str | None
+        connection: DBClient, config: MediaforceConfig, prefix: str | None, *, force: bool = False
 ) -> dict[str, Any] | None:
-    return runtime_maybe_schedule_scan(connection, config, prefix, _job_runtime_deps())
+    return runtime_maybe_schedule_scan(connection, config, prefix, _job_runtime_deps(), force=force)
 
 
 def _scan_is_stale(connection: DBClient, config: MediaforceConfig, prefix: str | None) -> bool:

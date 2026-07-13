@@ -1,6 +1,7 @@
 from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.library.library_settings import LIBRARY_PROFILE_OPTIONS, LIBRARY_TYPE_OPTIONS
 from mediaforce.library.metadata_sync import metadata_configuration_status
 from mediaforce.web.settings_runtime import HOST_CAPABILITY_OPTIONS, index_schedule_profile_rows, \
     index_settings_library_rows, index_settings_remote_rows, schedule_profile_options, settings_archive_root, \
@@ -43,6 +44,11 @@ def settings_page_payload(
         "host_notice": host_notice,
         "host_notice_kind": host_notice_kind,
         "libraries": index_settings_library_rows(libraries) if libraries is not None else settings_library_rows_for_config(config),
+        "library_type_options": list(LIBRARY_TYPE_OPTIONS),
+        "library_profile_options": {
+            library_type: list(options)
+            for library_type, options in LIBRARY_PROFILE_OPTIONS.items()
+        },
         "remote_hosts": index_settings_remote_rows(remote_hosts) if remote_hosts is not None else settings_remote_rows_for_config(config),
         "transcode_root": resolved_transcode_root,
         "video_defaults": dict(video_defaults) if video_defaults is not None else settings_video_defaults_for_config(config),

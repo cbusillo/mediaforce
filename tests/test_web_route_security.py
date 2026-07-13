@@ -114,6 +114,7 @@ class WebRouteSecurityTests(unittest.TestCase):
             app,
             settings_payload=lambda _include_archive_cleanup: {},
             save_settings_action=save_settings_action,
+            library_type_preview_action=lambda _key, _library_type: {},
             archive_cleanup_payload=lambda _transcode_root: {},
             clear_archive_cleanup_action=lambda _transcode_root: {},
         )
