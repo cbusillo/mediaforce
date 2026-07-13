@@ -346,9 +346,14 @@ that machine can reuse them without mutating the tracked repo defaults. If a
 bench-learned policy should become a shared starting point for everyone, copy it
 into `config/folder-defaults.toml` intentionally.
 
-Use the web Settings page for local libraries, the transcode folder, remote host
-definitions, the Plex server URL, and Plex-to-Mediaforce library path mappings
-so those environment details stay off the checked-in repo.
+Use the web Settings page for ordered typed library roots, the transcode folder,
+remote host definitions, the Plex server URL, and Plex-to-Mediaforce path
+mappings so those environment details stay off the checked-in repo. Library
+labels are editable while root IDs remain stable. TV can run in Production;
+Movies, 3D/VR, and Other can be configured as Browse only until their dedicated
+workflow and safety plans land. Changing an existing type requires an explicit
+compatibility preview and never moves media files. See
+`docs/architecture/typed-library-settings.md` for the durable config contract.
 
 ## Library lifecycle policy
 

@@ -1,4 +1,8 @@
 import type {
+	LibraryPolicy,
+	LibraryReadiness,
+	LibraryType,
+	LibraryTypeChangePreview,
 	ScheduleProfile,
 	SettingsHost,
 	SettingsLibrary,
@@ -124,7 +128,7 @@ export function draftFromSettings(payload: SettingsPayload) {
 	return {
 		libraries: payload.libraries
 			.filter((library) => library.key || library.path)
-			.map((library) => ({ ...library })),
+			.map((library) => ({ ...library, policy: { ...library.policy } })),
 		remote_hosts: payload.remote_hosts
 			.filter((host) => host.label || host.host)
 			.map((host) => ({
@@ -152,7 +156,7 @@ export function buildSettingsSavePayload(
 	settings: SettingsPayload
 ): SettingsSavePayload {
 	return {
-		libraries: draft.libraries.map((library) => ({ ...library })),
+		libraries: draft.libraries.map((library) => ({ ...library, policy: { ...library.policy } })),
 		remote_hosts: draft.remote_hosts.map((host) => ({
 			...host,
 			capabilities: [...host.capabilities],
@@ -163,7 +167,14 @@ export function buildSettingsSavePayload(
 		encode_queue_scheduler: { ...settings.encode_queue_scheduler },
 		schedule_profiles: draft.schedule_profiles.map((profile) => cloneScheduleProfile(profile)),
 		metadata: {
-			plex: { ...draft.metadata.plex, library_roots: { ...draft.metadata.plex.library_roots } },
+			plex: {
+				...draft.metadata.plex,
+				library_roots: Object.fromEntries(
+					draft.libraries
+						.filter((library) => library.key.trim() && library.plex_path.trim())
+						.map((library) => [library.key.trim(), library.plex_path.trim()])
+				)
+			},
 			tmdb: { ...draft.metadata.tmdb }
 		}
 	};
@@ -194,7 +205,172 @@ export function hostDraftRuntimeKey(host: SettingsHost): string {
 }
 
 export function addLibraryDraft(libraries: SettingsLibrary[]): SettingsLibrary[] {
-	return [...libraries, { index: String(libraries.length), key: '', path: '', color: '#0f766e' }];
+	const key = nextLibraryKey(libraries);
+	return [
+		...libraries,
+		{
+			index: String(libraries.length),
+			key,
+			label: '',
+			path: '',
+			color: '#0f766e',
+			library_type: 'other',
+			availability: 'browse_only',
+			default_profile: 'other_conservative',
+			plex_path: '',
+			policy: libraryPolicyDefaults('other'),
+			readiness: libraryReadiness({
+				key,
+				label: '',
+				path: '',
+				library_type: 'other',
+				availability: 'browse_only',
+				policy: libraryPolicyDefaults('other')
+			}),
+			type_change_confirmation: ''
+		}
+	];
+}
+
+export function moveLibraryDraft(
+	libraries: SettingsLibrary[],
+	index: number,
+	direction: -1 | 1
+): SettingsLibrary[] {
+	const target = index + direction;
+	if (target < 0 || target >= libraries.length) return libraries;
+	const reordered = [...libraries];
+	[reordered[index], reordered[target]] = [reordered[target], reordered[index]];
+	return reordered.map((library, candidate) => ({ ...library, index: String(candidate) }));
+}
+
+export function applyLibraryTypeChange(
+	libraries: SettingsLibrary[],
+	index: number,
+	libraryType: LibraryType,
+	profileOptions: SettingsPayload['library_profile_options'],
+	preview?: LibraryTypeChangePreview
+): SettingsLibrary[] {
+	return libraries.map((library, candidate) => {
+		if (candidate !== index) return library;
+		const policy = libraryPolicyDefaults(libraryType);
+		const updated = {
+			...library,
+			library_type: libraryType,
+			availability: preview
+				? ('browse_only' as const)
+				: libraryType === 'tv'
+					? ('production' as const)
+					: ('browse_only' as const),
+			default_profile: profileOptions[libraryType][0]?.key ?? defaultLibraryProfile(libraryType),
+			policy,
+			type_change_confirmation: preview?.acknowledgement ?? ''
+		};
+		return { ...updated, readiness: libraryReadiness(updated) };
+	});
+}
+
+export function libraryPolicyDefaults(libraryType: LibraryType): LibraryPolicy {
+	if (libraryType === 'tv') {
+		return {
+			series_lifecycle_mode: 'auto',
+			current_season_inactive_days: 365,
+			season_acquisition_hold_days: 30,
+			series_metadata_stale_days: 7
+		};
+	}
+	if (libraryType === 'movie') {
+		return {
+			grouping: 'title',
+			editions: 'separate',
+			extras: 'exclude',
+			ranking: 'oldest_added_first'
+		};
+	}
+	if (libraryType === 'spatial') {
+		return {
+			playback_target: '',
+			stereo_layout: 'unknown',
+			projection: 'unknown',
+			geometry_policy: 'preserve',
+			container_profile: 'unqualified'
+		};
+	}
+	return { grouping: 'folder' };
+}
+
+export function libraryReadiness(
+	library: Pick<
+		SettingsLibrary,
+		'key' | 'label' | 'path' | 'library_type' | 'availability' | 'policy'
+	>
+): LibraryReadiness {
+	if (!library.key.trim() || !library.label.trim() || !library.path.trim()) {
+		return {
+			state: 'incomplete',
+			label: 'Incomplete',
+			detail: 'Add a label, root ID, and local path.'
+		};
+	}
+	if (library.availability === 'disabled') {
+		return {
+			state: 'disabled',
+			label: 'Disabled',
+			detail: 'Mediaforce will not scan or process this library.'
+		};
+	}
+	if (library.library_type === 'spatial') {
+		const missing = [
+			!library.policy.playback_target?.trim() ? 'playback target' : '',
+			library.policy.stereo_layout === 'unknown' ? 'stereo layout' : '',
+			library.policy.projection === 'unknown' ? 'projection' : ''
+		].filter(Boolean);
+		if (missing.length) {
+			return {
+				state: 'incomplete',
+				label: 'Incomplete',
+				detail: `Add ${missing.join(', ')} before playback qualification.`
+			};
+		}
+		return {
+			state: 'blocked',
+			label: 'Safety blocked',
+			detail: 'Browse-only until 3D / VR playback qualification is implemented.'
+		};
+	}
+	if (library.availability === 'browse_only') {
+		return {
+			state: 'browse_only',
+			label: 'Browse only',
+			detail: 'Mediaforce scans and shows this library but never processes it.'
+		};
+	}
+	if (library.library_type !== 'tv') {
+		return {
+			state: 'blocked',
+			label: 'Workflow blocked',
+			detail: 'Production is not available for this library type yet.'
+		};
+	}
+	return {
+		state: 'ready',
+		label: 'Ready',
+		detail: 'Scanning and production processing are enabled.'
+	};
+}
+
+function nextLibraryKey(libraries: SettingsLibrary[]): string {
+	const used = new Set(libraries.map((library) => library.key));
+	let suffix = libraries.length + 1;
+	while (used.has(`library_${suffix}`)) suffix += 1;
+	return `library_${suffix}`;
+}
+
+function defaultLibraryProfile(libraryType: LibraryType): string {
+	if (libraryType === 'tv') return 'inherit_defaults';
+	if (libraryType === 'movie') return 'movie_balanced';
+	if (libraryType === 'spatial') return 'spatial_preserve';
+	return 'other_conservative';
 }
 
 export function addHostDraft(

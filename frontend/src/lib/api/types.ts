@@ -383,11 +383,54 @@ export interface HostsPayload {
 	hosts: HostRuntime[];
 }
 
+export type LibraryType = 'tv' | 'movie' | 'spatial' | 'other';
+export type LibraryAvailability = 'production' | 'browse_only' | 'disabled';
+
+export interface LibraryPolicy {
+	series_lifecycle_mode?: 'auto' | 'on' | 'off';
+	current_season_inactive_days?: number;
+	season_acquisition_hold_days?: number;
+	series_metadata_stale_days?: number;
+	grouping?: 'title' | 'folder' | 'file';
+	editions?: 'separate';
+	extras?: 'exclude' | 'include';
+	ranking?: 'oldest_added_first' | 'largest_first';
+	playback_target?: string;
+	stereo_layout?: 'unknown' | 'side_by_side' | 'top_bottom' | 'frame_sequential';
+	projection?: 'unknown' | 'flat' | 'equirectangular_180' | 'equirectangular_360';
+	geometry_policy?: 'preserve';
+	container_profile?: 'unqualified';
+}
+
+export interface LibraryReadiness {
+	state: 'ready' | 'incomplete' | 'blocked' | 'browse_only' | 'disabled';
+	label: string;
+	detail: string;
+}
+
 export interface SettingsLibrary {
 	index: string;
 	key: string;
+	label: string;
 	path: string;
 	color: string;
+	library_type: LibraryType;
+	availability: LibraryAvailability;
+	default_profile: string;
+	plex_path: string;
+	policy: LibraryPolicy;
+	readiness: LibraryReadiness;
+	type_change_confirmation: string;
+}
+
+export interface LibraryTypeChangePreview {
+	key: string;
+	from_type: LibraryType;
+	to_type: LibraryType;
+	item_count: number;
+	requires_rescan: boolean;
+	clears_saved_profiles: boolean;
+	acknowledgement: string;
 }
 
 export interface SettingsHost {
@@ -423,6 +466,8 @@ export interface SettingsPayload {
 	error: string | null;
 	saved: boolean;
 	libraries: SettingsLibrary[];
+	library_type_options: Array<{ key: LibraryType; label: string }>;
+	library_profile_options: Record<LibraryType, Array<{ key: string; label: string }>>;
 	remote_hosts: SettingsHost[];
 	transcode_root: string;
 	video_defaults: {

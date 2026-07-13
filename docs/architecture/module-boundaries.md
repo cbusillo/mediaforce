@@ -163,6 +163,9 @@ Guidance:
 - `media_scopes.py`
   - canonical operator grouping for TV, movie, and generic media roots
   - exact-item versus descendant matching, SQL-safe boundaries, and API scope payloads
+- `library_settings.py`
+  - ordered typed-root schema, legacy inference, safe availability defaults,
+    type-specific policies, and profile registries
 - `folder_profiles.py`
   - folder inspection and suggested override shaping
 - `run_manifests.py`
