@@ -5,6 +5,7 @@ import type {
 	FolderPayload,
 	FolderStatusPayload,
 	HostsPayload,
+	MediaScopePayload,
 	QueueLane
 } from './types';
 
@@ -48,9 +49,25 @@ export const initialFoldersPayload: DashboardFoldersPayload = {
 
 export const initialHosts: HostsPayload = { compact: true, hosts: [] };
 
+function loadingMediaScope(prefix: string): MediaScopePayload {
+	return {
+		schema_version: 1,
+		prefix,
+		root: prefix.split('/')[0] ?? '',
+		domain: 'other',
+		kind: 'media_folder',
+		match: 'descendants',
+		title: prefix.split('/').at(-1) || 'Library',
+		subtitle: 'Library',
+		scope_label: 'Folder',
+		parent: null
+	};
+}
+
 export function initialFolderPayload(prefix: string): FolderPayload {
 	return {
 		prefix,
+		media_scope: loadingMediaScope(prefix),
 		pending: true,
 		metric_support: { vmaf: false, xpsnr: false, ssim: false },
 		metric_status_copy: 'loading',
@@ -78,6 +95,7 @@ export function initialFolderPayload(prefix: string): FolderPayload {
 export function initialFolderStatusPayload(prefix: string): FolderStatusPayload {
 	return {
 		prefix,
+		media_scope: loadingMediaScope(prefix),
 		polling_active: false,
 		calibration_status: 'loading',
 		folder_scan_status: 'loading',
