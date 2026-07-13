@@ -70,6 +70,13 @@ class WorkflowNextAction:
 
 
 @dataclass(frozen=True, slots=True)
+class EncodeEligibility:
+    eligible: bool
+    blocker: str | None = None
+    blocked: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ItemWorkflowState:
     item_id: int
     rel_path: str
@@ -126,16 +133,12 @@ def build_folder_workflow_state(
         connection: DBClient,
         prefix: str,
         *,
-        candidate_eligibility: dict[int, tuple[bool, str | None]] | None = None,
+        candidate_eligibility: Mapping[int, EncodeEligibility] | None = None,
         library_types: Mapping[str, str] | None = None,
 ) -> FolderWorkflowState:
     scope = resolve_media_scope(connection, prefix, library_types=library_types)
     item_states = tuple(
-        derive_item_workflow_state(
-            row,
-            encode_eligible=(candidate_eligibility or {}).get(int(row["item_id"]), (True, None))[0],
-            policy_blocker=(candidate_eligibility or {}).get(int(row["item_id"]), (True, None))[1],
-        )
+        _derive_item_workflow_state(row, candidate_eligibility)
         for row in _load_item_rows(connection, scope)
     )
     job_state = _load_encode_job_state(connection, scope)
@@ -146,7 +149,7 @@ def build_folder_workflow_states(
         connection: DBClient,
         prefixes: list[str],
         *,
-        candidate_eligibility: dict[int, tuple[bool, str | None]] | None = None,
+        candidate_eligibility: Mapping[int, EncodeEligibility] | None = None,
         library_types: Mapping[str, str] | None = None,
 ) -> dict[str, FolderWorkflowState]:
     normalized_prefixes = list(dict.fromkeys(normalize_prefix(prefix) for prefix in prefixes))
@@ -158,11 +161,7 @@ def build_folder_workflow_states(
     result: dict[str, FolderWorkflowState] = {}
     for scope in scopes:
         item_states = tuple(
-            derive_item_workflow_state(
-                row,
-                encode_eligible=(candidate_eligibility or {}).get(int(row["item_id"]), (True, None))[0],
-                policy_blocker=(candidate_eligibility or {}).get(int(row["item_id"]), (True, None))[1],
-            )
+            _derive_item_workflow_state(row, candidate_eligibility)
             for row in rows
             if path_matches_scope(str(row["rel_path"]), scope)
         )
@@ -183,6 +182,7 @@ def derive_item_workflow_state(
         *,
         encode_eligible: bool = True,
         policy_blocker: str | None = None,
+        encode_blocked: bool = False,
 ) -> ItemWorkflowState:
     status = str(row["status"] or "idle")
     has_staged_output = row["staged_library_item_id"] is not None and row["staging_path"] is not None
@@ -201,8 +201,8 @@ def derive_item_workflow_state(
         state = "encoding"
         lane = "processing"
     elif not encode_eligible:
-        state = "held"
-        lane = "none"
+        state = "blocked" if encode_blocked else "held"
+        lane = "blocked" if encode_blocked else "none"
         blocker = policy_blocker or "This item is excluded from the current production scope."
     elif has_staged_output and status == "encoded":
         state = "ready_to_validate"
@@ -229,6 +229,23 @@ def derive_item_workflow_state(
         lane=lane,
         has_staged_output=has_staged_output,
         blocker=blocker,
+    )
+
+
+def _derive_item_workflow_state(
+        row: DBRow,
+        candidate_eligibility: Mapping[int, EncodeEligibility] | None,
+) -> ItemWorkflowState:
+    eligibility = (
+        candidate_eligibility.get(int(row["item_id"]), EncodeEligibility(eligible=True))
+        if candidate_eligibility is not None
+        else EncodeEligibility(eligible=True)
+    )
+    return derive_item_workflow_state(
+        row,
+        encode_eligible=eligibility.eligible,
+        policy_blocker=eligibility.blocker,
+        encode_blocked=eligibility.blocked,
     )
 
 

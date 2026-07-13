@@ -433,6 +433,8 @@ def list_folder_cards(
             card.pending_count += 1
             if known_saved_bytes is not None:
                 card.sort_score += known_saved_bytes / (1024 ** 3)
+            elif decision is not None and decision.target_size_blocker is not None:
+                card.estimate_unavailable_count += 1
             elif _eligible_for_estimate(status, decision):
                 if decision is not None and decision.media_domain == "movie":
                     card.estimate_unavailable_count += 1

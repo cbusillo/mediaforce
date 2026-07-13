@@ -1669,6 +1669,94 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(captured[0]["allow_measured_size_quality_increase"])
 
+    def test_sample_confirmation_blocks_infeasible_target_before_saving_job(self) -> None:
+        saved_jobs: list[dict[str, Any]] = []
+        host = HostStatus(
+            key="host-1",
+            label="M4 Studio",
+            mode="ssh",
+            priority=10,
+            capabilities=["sample_calibration"],
+            available=True,
+            message="Mounted and ready",
+            missing_paths=[],
+        )
+        pending_proposal = {
+            "proposal_id": "proposal-1",
+            "can_queue": True,
+            "host": {"key": host.key},
+            "operator_note": "",
+            "action": "baseline",
+            "applied_policy": {
+                "video": {
+                    "target_size_mb": 600,
+                    "target_size_bytes": 600_000_000,
+                    "target_runtime_minutes": 92,
+                    "size_goal_schema_version": 1,
+                    "size_goal_mode": "absolute",
+                    "size_goal_source": "operator_request",
+                    "sample_projection_tolerance_percent": 10,
+                    "final_output_tolerance_percent": 5,
+                    "max_encoded_percent": 80,
+                }
+            },
+            "advice_payload": {},
+        }
+        sample_item = {
+            "rel_path": "movies/Small Target/Feature.mkv",
+            "source_path": str(self.root / "source" / "movies" / "Small Target" / "Feature.mkv"),
+            "source_size_bytes": 360_000_000,
+            "video_codec": "hevc",
+            "duration_seconds": 5_520.0,
+            "audio_summary": [],
+            "subtitle_summary": [],
+            "resolved_policy": {"video": {}},
+        }
+        deps = FolderAiTuneDeps(
+            resolve_sample_host=lambda *_args, **_kwargs: host,
+            load_job_state=lambda *_args, **_kwargs: None,
+            load_retryable_sample_job_state=lambda *_args, **_kwargs: None,
+            sample_item=lambda *_args, **_kwargs: dict(sample_item),
+            operator_requested_experiment=lambda *_args, **_kwargs: None,
+            load_calibration_state=lambda *_args, **_kwargs: None,
+            recent_tuning_sessions=lambda *_args, **_kwargs: [],
+            matching_request_history=lambda *_args, **_kwargs: None,
+            metric_support=lambda: {},
+            maybe_seed_baseline_policy=lambda *_args, **_kwargs: None,
+            seed_advice_payload=lambda *_args, **_kwargs: None,
+            proposal_alignment_issue=lambda *_args, **_kwargs: None,
+            now_iso=lambda: "2026-07-13T00:00:00+00:00",
+            proposal_signal_copy=lambda *_args, **_kwargs: "",
+            proposal_context_snapshot=lambda *_args, **_kwargs: {},
+            save_pending_proposal=lambda *_args, **_kwargs: None,
+            pending_proposal_public_view=lambda payload: payload,
+            build_tuning_runtime_toolbelt=lambda *_args, **_kwargs: {},
+            review_pack_dir=lambda *_args, **_kwargs: self.root / "review-pack",
+            remove_path_if_exists=lambda *_args, **_kwargs: None,
+            build_multimodal_review_pack=lambda *_args, **_kwargs: None,
+            multimodal_review_pack_public_view=lambda *_args, **_kwargs: None,
+            tuning_advice_payload=lambda *_args, **_kwargs: {},
+            load_pending_proposal=lambda *_args, **_kwargs: dict(pending_proposal),
+            apply_policy_fragment=lambda current, fragment: {
+                **current,
+                "video": {
+                    **object_dict(current.get("video")),
+                    **object_dict(fragment.get("video")),
+                },
+            },
+            save_advice_state=lambda *_args, **_kwargs: None,
+            save_job_state=lambda _connection, _config, _prefix, payload: saved_jobs.append(dict(payload)),
+            clear_pending_proposal=lambda *_args, **_kwargs: None,
+            record_tuning_session=lambda *_args, **_kwargs: "session-1",
+        )
+
+        result = folder_ai_tune_confirm_action(self.config, deps, "movies/Small Target", "proposal-1")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "target_lower_bound_exceeds_source_relative_cap")
+        self.assertIn("Target size exceeds the 80% source cap", result["message"])
+        self.assertEqual(saved_jobs, [])
+
     def test_completed_cleanup_route_passes_selected_prefixes(self) -> None:
         from mediaforce.web import app as web_app
 

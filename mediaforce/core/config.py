@@ -342,6 +342,19 @@ def upsert_runtime_folder_policy_override(path: Path, prefix: str, policy: dict[
     update_runtime_settings(path, _apply)
 
 
+def with_folder_policy_override(
+        config: MediaforceConfig,
+        prefix: str,
+        policy: dict[str, Any],
+) -> MediaforceConfig:
+    raw = copy.deepcopy(config.raw)
+    overrides = raw.get("overrides")
+    normalized_overrides = list(overrides) if isinstance(overrides, list) else []
+    normalized_overrides.append(_build_folder_policy_override(prefix, policy))
+    raw["overrides"] = normalized_overrides
+    return MediaforceConfig(raw=raw, paths=config.paths)
+
+
 def update_runtime_folder_policy_values(
         path: Path,
         prefix: str,

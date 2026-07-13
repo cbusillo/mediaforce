@@ -10,7 +10,7 @@ from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items, plex_item_metadata, series_metadata
 from mediaforce.library.candidate_selection import project_candidates, season_identity
 from mediaforce.library.run_manifests import build_run_manifest, create_folder_manifest, select_encode_candidates
-from mediaforce.library.workflow_state import build_folder_workflow_state, derive_item_workflow_state
+from mediaforce.library.workflow_state import EncodeEligibility, build_folder_workflow_state, derive_item_workflow_state
 from mediaforce.web.routes.folders import _request_flag
 from mediaforce.web.runtime.folder_cards import list_folder_cards
 
@@ -376,8 +376,11 @@ class LibraryLifecycleTests(unittest.TestCase):
                 connection,
                 "tv/Show",
                 candidate_eligibility={
-                    eligible_item_id: (True, None),
-                    held_item_id: (False, "This season is still receiving episodes."),
+                    eligible_item_id: EncodeEligibility(eligible=True),
+                    held_item_id: EncodeEligibility(
+                        eligible=False,
+                        blocker="This season is still receiving episodes.",
+                    ),
                 },
             )
 

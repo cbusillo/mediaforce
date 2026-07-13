@@ -7,7 +7,11 @@ from typing import Any, Callable, Literal
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.type_defs import float_value, int_value, object_dict
 from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
-from mediaforce.tuning.stream_budget import StreamBudgetLedger
+from mediaforce.tuning.stream_budget import (
+    StreamBudgetLedger,
+    StreamBudgetProjectionBlocker,
+    stream_budget_projection_blocker,
+)
 
 
 TARGET_SIZE_SEARCH_SCHEMA_VERSION = 1
@@ -146,11 +150,11 @@ def search_target_size(
             trace=trace,
         )
     validated_transform_plan = dict(object_dict(transform_plan))
-    source_cap_issue = _source_cap_issue(stream_budget_ledger)
-    if source_cap_issue is not None:
+    source_cap_blocker = _source_cap_blocker(stream_budget_ledger)
+    if source_cap_blocker is not None:
         trace = _trace_payload(
             status="infeasible",
-            reason=source_cap_issue,
+            reason=source_cap_blocker.code,
             ledger=stream_budget_ledger,
             candidates=[],
             selected=None,
@@ -162,7 +166,7 @@ def search_target_size(
             transform_plan=validated_transform_plan,
         )
         raise TargetSizeSearchError(
-            "The approved size target cannot be reached without violating the approved source-relative cap.",
+            source_cap_blocker.message,
             status="infeasible",
             trace=trace,
         )
@@ -698,16 +702,14 @@ def _distance(candidate: dict[str, Any]) -> float:
     return distance if distance > 0 else 10 ** 30
 
 
-def _source_cap_issue(ledger: StreamBudgetLedger) -> str | None:
-    if ledger.source_cap_status == "arithmetically_infeasible":
-        return "source_relative_cap_consumed_by_non_video_budget"
-    if ledger.source_cap_video_bytes is None or ledger.non_video_bytes is None or ledger.total_target_bytes is None:
+def _source_cap_blocker(ledger: StreamBudgetLedger) -> StreamBudgetProjectionBlocker | None:
+    blocker = stream_budget_projection_blocker(ledger)
+    if blocker is None or blocker.code not in {
+        "source_relative_cap_consumed_by_non_video_budget",
+        "target_lower_bound_exceeds_source_relative_cap",
+    }:
         return None
-    lower, _ = _sample_bounds(ledger)
-    cap_total = ledger.source_cap_video_bytes + ledger.non_video_bytes
-    if cap_total < lower:
-        return "target_lower_bound_exceeds_source_relative_cap"
-    return None
+    return blocker
 
 
 def _sample_bounds(ledger: StreamBudgetLedger) -> tuple[int, int]:

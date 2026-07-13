@@ -53,6 +53,7 @@ ENCODE_WAITING_PREFIX = "movies/Waiting Encode"
 MOVIE_LOOSE_PREFIX = "movies/Loose Feature.mkv"
 MOVIE_EDITIONS_PREFIX = "movies/Editions Showcase"
 MOVIE_CONFLICT_PREFIX = "movies/Promotion Conflict"
+MOVIE_TARGET_BLOCKED_PREFIX = "movies/Target Too Large"
 CURRENT_PREVIOUS_PREFIX = "tv/Current Season/Season 1"
 CURRENT_SEASON_PREFIX = "tv/Current Season/Season 2"
 CURRENT_SERIES_PREFIX = "tv/Current Season"
@@ -80,6 +81,7 @@ FIXTURE_PREFIXES = (
     MOVIE_LOOSE_PREFIX,
     MOVIE_EDITIONS_PREFIX,
     MOVIE_CONFLICT_PREFIX,
+    MOVIE_TARGET_BLOCKED_PREFIX,
     CURRENT_PREVIOUS_PREFIX,
     CURRENT_SEASON_PREFIX,
     PROTECTED_READY_PREFIX,
@@ -1005,6 +1007,19 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             _library_item(
                 project_root=project_root,
                 media_root="movies",
+                rel_path="movies/Target Too Large/Feature.mkv",
+                size_bytes=360_000_000,
+                status="discovered",
+                video_codec="hevc",
+                priority_score=71,
+                recommendation="review_encode",
+                recommendation_reason="Fixture movie target exceeds the source-relative cap.",
+                duration_seconds=5_520.0,
+                age_days=1_100,
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="movies",
                 rel_path="movies/Editions Showcase/Editions Showcase - Theatrical.mkv",
                 size_bytes=12 * 1024**3,
                 status="discovered",
@@ -1430,6 +1445,12 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "route": "/folders/movies/Waiting%20Encode",
                 "marker": "Waiting Encode",
                 "stageMarker": "Monitor processing",
+            },
+            {
+                "label": "Movie Studio infeasible-target fixture",
+                "route": "/folders/movies/Target%20Too%20Large",
+                "marker": "Target Too Large",
+                "stageMarker": "Target size exceeds the 80% source cap.",
             },
             {
                 "label": "Folder Studio sampling fixture",

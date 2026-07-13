@@ -72,6 +72,29 @@ class StreamBudgetEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class StreamBudgetProjectionBlocker:
+    code: str
+    message: str
+    target_size_bytes: int | None
+    target_lower_bound_bytes: int | None
+    source_cap_percent: float | None
+    source_cap_total_bytes: int | None
+    non_video_bytes: int | None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "status": "infeasible",
+            "code": self.code,
+            "message": self.message,
+            "target_size_bytes": self.target_size_bytes,
+            "target_lower_bound_bytes": self.target_lower_bound_bytes,
+            "source_cap_percent": self.source_cap_percent,
+            "source_cap_total_bytes": self.source_cap_total_bytes,
+            "non_video_bytes": self.non_video_bytes,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class StreamBudgetLedger:
     ledger_id: str
     source_id: str
@@ -302,6 +325,51 @@ def resolve_stream_budget_ledger(
         item_payload,
         resolved_size_goal=resolved_size_goal,
         stream_plan=stream_plan,
+    )
+
+
+def stream_budget_projection_blocker(
+        ledger: StreamBudgetLedger,
+) -> StreamBudgetProjectionBlocker | None:
+    target_lower_bound = _target_lower_bound_bytes(ledger)
+    if ledger.arithmetic_infeasible:
+        code = ledger.feasibility_reasons[0] if ledger.feasibility_reasons else "arithmetically_infeasible_stream_budget"
+        message = {
+            "target_consumed_by_minimum_non_video_bytes": (
+                "The requested size target leaves no room for video. Increase the target or reduce preserved streams."
+            ),
+            "target_consumed_by_reserved_non_video_bytes": (
+                "The requested size target leaves no room for video. Increase the target or reduce preserved streams."
+            ),
+        }.get(code, "The requested size target is arithmetically infeasible for this file.")
+        return _projection_blocker(
+            ledger,
+            code=code,
+            message=message,
+            target_lower_bound=target_lower_bound,
+        )
+    if ledger.source_cap_status == "arithmetically_infeasible":
+        return _projection_blocker(
+            ledger,
+            code="source_relative_cap_consumed_by_non_video_budget",
+            message=(
+                f"Preserved streams consume the {_source_cap_label(ledger)} source cap. "
+                "Reduce preserved streams or increase the maximum encoded percent."
+            ),
+            target_lower_bound=target_lower_bound,
+        )
+    if target_lower_bound is None or ledger.source_cap_total_bytes is None:
+        return None
+    if ledger.source_cap_total_bytes >= target_lower_bound:
+        return None
+    return _projection_blocker(
+        ledger,
+        code="target_lower_bound_exceeds_source_relative_cap",
+        message=(
+            f"Target size exceeds the {_source_cap_label(ledger)} source cap. "
+            "Lower the target or increase the maximum encoded percent."
+        ),
+        target_lower_bound=target_lower_bound,
     )
 
 
@@ -778,6 +846,41 @@ def _feasibility(
     if aggressive_reasons:
         return "aggressive_but_measurable", tuple(dict.fromkeys(aggressive_reasons))
     return "feasible", ()
+
+
+def _projection_blocker(
+        ledger: StreamBudgetLedger,
+        *,
+        code: str,
+        message: str,
+        target_lower_bound: int | None,
+) -> StreamBudgetProjectionBlocker:
+    return StreamBudgetProjectionBlocker(
+        code=code,
+        message=message,
+        target_size_bytes=ledger.total_target_bytes,
+        target_lower_bound_bytes=target_lower_bound,
+        source_cap_percent=ledger.source_cap_percent,
+        source_cap_total_bytes=ledger.source_cap_total_bytes,
+        non_video_bytes=ledger.non_video_bytes,
+    )
+
+
+def _target_lower_bound_bytes(ledger: StreamBudgetLedger) -> int | None:
+    resolved_lower_bound = _optional_int(ledger.size_goal.get("sample_lower_bound_bytes"))
+    if resolved_lower_bound is not None:
+        return resolved_lower_bound
+    if ledger.total_target_bytes is None:
+        return None
+    tolerance = _optional_float(ledger.size_goal.get("sample_projection_tolerance_percent"))
+    normalized_tolerance = max(tolerance if tolerance is not None else 10.0, 0.0)
+    return int(round(ledger.total_target_bytes * (1.0 - normalized_tolerance / 100.0)))
+
+
+def _source_cap_label(ledger: StreamBudgetLedger) -> str:
+    if ledger.source_cap_percent is None:
+        return "configured"
+    return f"{ledger.source_cap_percent:g}%"
 
 
 def _source_cap_status(

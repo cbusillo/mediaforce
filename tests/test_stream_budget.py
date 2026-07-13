@@ -10,6 +10,7 @@ from mediaforce.tuning.stream_budget import (
     StreamBudgetIdentityError,
     StreamBudgetLedger,
     resolve_stream_budget_ledger,
+    stream_budget_projection_blocker,
 )
 
 
@@ -230,6 +231,84 @@ class StreamBudgetTests(unittest.TestCase):
         self.assertEqual(ledger.source_cap_total_bytes, 800_000_000)
         self.assertEqual(ledger.source_cap_video_bytes, 696_000_000)
         self.assertEqual(ledger.source_cap_video_percent, 69.6)
+
+    def test_projection_blocks_target_band_above_source_cap(self) -> None:
+        ledger = self._ledger(
+            target_bytes=600_000_000,
+            source_size_bytes=360_000_000,
+            audio={
+                "index": 1,
+                "codec_name": "aac",
+                "channels": 2,
+                "language": "eng",
+                "default": 1,
+                "size_bytes": 12_000_000,
+            },
+        )
+
+        blocker = stream_budget_projection_blocker(ledger)
+
+        self.assertIsNotNone(blocker)
+        self.assertEqual(blocker.code, "target_lower_bound_exceeds_source_relative_cap")
+        self.assertEqual(blocker.target_lower_bound_bytes, 540_000_000)
+        self.assertEqual(blocker.source_cap_total_bytes, 288_000_000)
+        self.assertIn("80% source cap", blocker.message)
+
+    def test_projection_allows_target_band_below_source_cap(self) -> None:
+        ledger = self._ledger(
+            target_bytes=600_000_000,
+            source_size_bytes=800_000_000,
+            audio={
+                "index": 1,
+                "codec_name": "aac",
+                "channels": 2,
+                "language": "eng",
+                "default": 1,
+                "size_bytes": 12_000_000,
+            },
+        )
+
+        self.assertIsNone(stream_budget_projection_blocker(ledger))
+
+    def test_projection_blocks_target_consumed_by_non_video_budget(self) -> None:
+        ledger = self._ledger(
+            target_bytes=10_000_000,
+            source_size_bytes=1_000_000_000,
+            audio={
+                "index": 1,
+                "codec_name": "aac",
+                "channels": 2,
+                "language": "eng",
+                "default": 1,
+                "size_bytes": 12_000_000,
+            },
+        )
+
+        blocker = stream_budget_projection_blocker(ledger)
+
+        self.assertIsNotNone(blocker)
+        self.assertTrue(blocker.code.startswith("target_consumed_by_"))
+        self.assertIn("leaves no room for video", blocker.message)
+
+    def test_projection_blocks_source_cap_consumed_by_non_video_budget(self) -> None:
+        ledger = self._ledger(
+            target_bytes=600_000_000,
+            source_size_bytes=100_000_000,
+            audio={
+                "index": 1,
+                "codec_name": "aac",
+                "channels": 2,
+                "language": "eng",
+                "default": 1,
+                "size_bytes": 100_000_000,
+            },
+        )
+
+        blocker = stream_budget_projection_blocker(ledger)
+
+        self.assertIsNotNone(blocker)
+        self.assertEqual(blocker.code, "source_relative_cap_consumed_by_non_video_budget")
+        self.assertIn("consume the 80% source cap", blocker.message)
 
     def test_ledger_round_trip_rejects_stale_policy(self) -> None:
         ledger = self._ledger(

@@ -54,6 +54,15 @@ The ledger distinguishes four deterministic states:
 Arithmetic infeasibility is never delegated to an LLM. Quality risk remains a
 separate measured outcome for target-size search and operator review.
 
+`stream_budget_projection_blocker()` exposes the same deterministic arithmetic
+for planning surfaces. Movie candidate projection and CLI/web start actions use
+that result before creating sample jobs, manifests, or encode jobs. Sample
+confirmation checks the proposed policy, while production queueing checks the
+accepted calibration policy through an in-memory override before persisting it.
+A target whose lower sample-band bound is above the configured source-relative
+cap is a hard workflow blocker; `requires_measurement` remains available for
+measured review instead of being treated as impossible.
+
 ## Target-size search
 
 The first representative sample is seeded from the approved whole-episode size

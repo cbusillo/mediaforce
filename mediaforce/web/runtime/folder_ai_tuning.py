@@ -20,6 +20,7 @@ from mediaforce.tuning.quality_risk import (
     with_quality_risk_intent,
 )
 from mediaforce.tuning.size_goals import operator_intent_from_policy
+from mediaforce.tuning.stream_budget import StreamBudgetProjectionBlocker, stream_budget_projection_blocker
 from mediaforce.web.runtime.folder_tuning_advice import operator_preserves_source_resolution, operator_request_from_intent
 from mediaforce.web.runtime.folder_tuning_helpers import (
     allows_measured_size_quality_tradeoff,
@@ -109,6 +110,34 @@ def _output_container(config: MediaforceConfig, sample_item: dict[str, Any]) -> 
         return configured
     item_container = str(sample_item.get("output_container") or sample_item.get("container") or "").strip()
     return item_container.removeprefix(".") or "mkv"
+
+
+def _prepare_sample_item(
+        config: MediaforceConfig,
+        sample_item: dict[str, Any],
+        policy: dict[str, Any],
+) -> tuple[dict[str, Any], StreamBudgetProjectionBlocker | None]:
+    prepared = dict(sample_item)
+    prepared["resolved_policy"] = policy
+    output_container = _output_container(config, prepared)
+    prepared["output_container"] = output_container
+    ledger = resolve_stream_budget_ledger(
+        prepared,
+        default_video_policy=object_dict(config.raw.get("video")),
+        output_container=output_container,
+        prefer_persisted=False,
+    )
+    prepared["stream_budget_ledger"] = ledger.to_payload()
+    return prepared, stream_budget_projection_blocker(ledger)
+
+
+def _target_size_blocker_response(blocker: StreamBudgetProjectionBlocker) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "code": blocker.code,
+        "message": blocker.message,
+        "target_size_blocker": blocker.to_payload(),
+    }
 
 
 def _latest_failed_sample_job_payload(job: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -687,6 +716,9 @@ def folder_ai_tune_confirm_action(
         legacy_size_issue = _unconfirmed_legacy_size_issue(config, final_policy)
         if legacy_size_issue is not None:
             return {"ok": False, "message": legacy_size_issue}
+        queued_sample_item, target_size_blocker = _prepare_sample_item(config, sample_item, final_policy)
+        if target_size_blocker is not None:
+            return _target_size_blocker_response(target_size_blocker)
         current_advice_state = (
             object_dict(deps.load_advice_state(config, normalized_prefix))
             if deps.load_advice_state is not None
@@ -752,16 +784,6 @@ def folder_ai_tune_confirm_action(
                 advice_payload["learning_artifact"] = learning_artifact
             deps.save_advice_state(config, normalized_prefix, advice_payload)
 
-        queued_sample_item = dict(sample_item)
-        queued_sample_item["resolved_policy"] = final_policy
-        output_container = _output_container(config, queued_sample_item)
-        queued_sample_item["output_container"] = output_container
-        queued_sample_item["stream_budget_ledger"] = resolve_stream_budget_ledger(
-            queued_sample_item,
-            default_video_policy=object_dict(config.raw.get("video")),
-            output_container=output_container,
-            prefer_persisted=False,
-        ).to_payload()
         job_payload = {
             "job_id": uuid.uuid4().hex[:12],
             "status": "queued",
@@ -828,17 +850,15 @@ def _retry_latest_sample_job(
             sample_item = deps.sample_item(connection, config, normalized_prefix)
             if sample_item is None:
                 raise HTTPException(status_code=404, detail=f"No sample item found for {normalized_prefix}")
-            refreshed_sample_item = object_dict(sample_item)
-            refreshed_sample_item["resolved_policy"] = object_dict(existing_job.get("policy"))
-            output_container = _output_container(config, refreshed_sample_item)
-            refreshed_sample_item["output_container"] = output_container
-            refreshed_sample_item["stream_budget_ledger"] = resolve_stream_budget_ledger(
-                refreshed_sample_item,
-                default_video_policy=object_dict(config.raw.get("video")),
-                output_container=output_container,
-                prefer_persisted=False,
-            ).to_payload()
-            stored_sample_item = _job_sample_item_payload(refreshed_sample_item)
+            stored_sample_item = object_dict(sample_item)
+        prepared_sample_item, target_size_blocker = _prepare_sample_item(
+            config,
+            stored_sample_item,
+            object_dict(existing_job.get("policy")),
+        )
+        if target_size_blocker is not None:
+            return _target_size_blocker_response(target_size_blocker)
+        stored_sample_item = _job_sample_item_payload(prepared_sample_item)
 
         job_payload = {
             **existing_job,
