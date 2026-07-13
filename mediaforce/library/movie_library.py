@@ -13,7 +13,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, plex_item_metadata, staged_artifacts
 from mediaforce.core.type_defs import mapping_dict, object_dict
 from mediaforce.core.utils import filesystem_collision_key
-from mediaforce.library.candidate_selection import encode_candidate_decisions, workflow_eligibility
+from mediaforce.library.candidate_selection import CandidateDecision, project_candidates, workflow_eligibility
 from mediaforce.library.media_scopes import resolve_media_scope, resolve_media_scopes, scope_rel_path_filter
 from mediaforce.library.movie_workflow import MovieMembership, classify_movie_path, movie_item_included
 from mediaforce.library.workflow_state import build_folder_workflow_states, derive_item_workflow_state
@@ -28,6 +28,7 @@ def load_movie_library_payload(
         include_details: bool,
         metrics_by_prefix: MovieMetrics | None = None,
         prefixes: list[str] | None = None,
+        candidate_decisions: list[CandidateDecision] | None = None,
 ) -> dict[str, Any]:
     libraries = _movie_libraries(config)
     library_by_root = {str(library["key"]): library for library in libraries}
@@ -82,7 +83,13 @@ def load_movie_library_payload(
         if membership is not None:
             grouped_rows[membership.title_prefix].append((row, membership))
 
-    decisions = encode_candidate_decisions(connection, config, prefixes=prefixes or []) if include_details else []
+    decisions = (
+        candidate_decisions
+        if include_details and candidate_decisions is not None
+        else project_candidates(connection, config, prefixes=prefixes or [])
+        if include_details
+        else []
+    )
     decisions_by_item = {decision.item_id: decision for decision in decisions}
     eligibility = workflow_eligibility(decisions)
     for grouped in grouped_rows.values():
@@ -112,6 +119,7 @@ def load_movie_library_payload(
             eligibility=eligibility,
             workflow=workflows.get(prefix),
             metrics=object_dict(metrics.get(prefix)),
+            metrics_available=prefix in metrics,
             config=config,
             include_details=include_details,
         )
@@ -131,6 +139,9 @@ def load_movie_scope_payload(
         connection: DBClient,
         config: MediaforceConfig,
         prefix: str,
+        *,
+        metrics_by_prefix: MovieMetrics | None = None,
+        candidate_decisions: list[CandidateDecision] | None = None,
 ) -> dict[str, Any] | None:
     normalized = str(prefix or "").strip().strip("/")
     scope = resolve_media_scope(
@@ -146,7 +157,9 @@ def load_movie_scope_payload(
         connection,
         config,
         include_details=True,
+        metrics_by_prefix=metrics_by_prefix,
         prefixes=[title_prefix],
+        candidate_decisions=candidate_decisions,
     )
     for title in payload["titles"]:
         if str(title.get("prefix") or "") == normalized:
@@ -226,6 +239,7 @@ def _title_payload(
         eligibility: dict[int, tuple[bool, str | None]],
         workflow: Any,
         metrics: dict[str, Any],
+        metrics_available: bool,
         config: MediaforceConfig,
         include_details: bool,
 ) -> dict[str, Any]:
@@ -258,9 +272,22 @@ def _title_payload(
         if isinstance((age := member.get("age")), Mapping) and age.get("timestamp")
     ]
     title_age = min(ages, key=lambda age: str(age["timestamp"])) if ages else None
-    projected_reclaim = int(metrics.get("projected_reclaim_bytes") or 0)
+    estimate_unavailable_count = (
+        int(metrics.get("estimate_unavailable_count") or 0)
+        if metrics_available
+        else 1
+    )
+    projected_reclaim = (
+        None
+        if estimate_unavailable_count > 0
+        else int(metrics.get("projected_reclaim_bytes") or 0)
+    )
     known_saved = int(metrics.get("known_saved_bytes") or 0)
-    estimated_savings = int(metrics.get("estimated_savings_bytes") or 0)
+    estimated_savings = (
+        None
+        if estimate_unavailable_count > 0
+        else int(metrics.get("estimated_savings_bytes") or 0)
+    )
     workflow_payload = workflow.to_payload() if workflow is not None else None
     workflow_payload = adapt_movie_workflow_payload(workflow_payload, library=library, members=members)
     return {
@@ -283,8 +310,9 @@ def _title_payload(
         "known_saved_bytes": known_saved if include_details else None,
         "estimated_savings_bytes": estimated_savings if include_details else None,
         "savings_confidence": (
-            "measured" if known_saved > 0 and estimated_savings == 0
-            else "estimated" if projected_reclaim > 0
+            "unavailable" if estimate_unavailable_count > 0
+            else "measured" if known_saved > 0 and estimated_savings == 0
+            else "estimated" if projected_reclaim and projected_reclaim > 0
             else "unavailable"
         ) if include_details else "pending",
         "age": title_age if include_details else None,
