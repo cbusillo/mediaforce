@@ -11,6 +11,8 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, plex_item_metadata, series_metadata, staged_artifacts
 from mediaforce.core.type_defs import object_dict
+from mediaforce.library.media_scopes import is_tv_season_prefix, normalize_scope_prefix, path_matches_scope, \
+    resolve_media_scopes
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES, derive_item_workflow_state
 
 LifecycleMode = Literal["auto", "on", "off"]
@@ -152,15 +154,15 @@ def project_candidates(
         season_prefix: _newest_age_evidence(_media_age(row) for row in grouped_rows)
         for season_prefix, grouped_rows in season_rows.items()
     }
-    normalized_prefixes = [prefix.strip().strip("/") for prefix in prefixes or []]
-    normalized_override = str(manual_override_prefix or "").strip().strip("/")
+    resolved_scopes = resolve_media_scopes(connection, prefixes or [])
+    normalized_override = normalize_scope_prefix(manual_override_prefix or "")
     decisions: list[CandidateDecision] = []
 
     for row in rows:
         if statuses is not None and str(row["status"] or "") not in statuses:
             continue
         rel_path = str(row["rel_path"] or "")
-        if normalized_prefixes and not any(_path_matches_prefix(rel_path, prefix) for prefix in normalized_prefixes):
+        if resolved_scopes and not any(scope.includes(rel_path) for scope in resolved_scopes):
             continue
         workflow_lane = derive_item_workflow_state(row).lane
         season = season_by_item[int(row["item_id"])]
@@ -285,7 +287,7 @@ def scope_lifecycle_payload_from_decisions(
     decisions = [
         decision
         for decision in decisions
-        if _path_matches_prefix(str(decision.row["rel_path"] or ""), normalized_prefix)
+        if path_matches_scope(str(decision.row["rel_path"] or ""), normalized_prefix)
     ]
     if not decisions:
         return {
@@ -582,14 +584,8 @@ def _lifecycle_mode(value: object) -> LifecycleMode:
     return "auto"
 
 
-def _path_matches_prefix(path: str, prefix: str) -> bool:
-    normalized_path = path.strip().strip("/")
-    return not prefix or normalized_path == prefix or normalized_path.startswith(f"{prefix}/")
-
-
 def _is_season_prefix(prefix: str) -> bool:
-    parts = Path(prefix).parts
-    return len(parts) == 3 and parts[0].lower() == "tv"
+    return is_tv_season_prefix(prefix)
 
 
 def _latest_timestamp(values: Any) -> datetime | None:

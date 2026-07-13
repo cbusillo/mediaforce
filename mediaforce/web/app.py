@@ -60,6 +60,8 @@ from mediaforce.execution import (
     validate_manifest_items,
 )
 from mediaforce.library.folder_profiles import inspect_prefix
+from mediaforce.library.media_scopes import is_tv_series_prefix, media_group_scope_for_rel_path, resolve_media_scope, \
+    resolve_media_scopes, scope_rel_path_filter, series_context_for_prefix, tv_series_scope_for_rel_path
 from mediaforce.library.planner import build_manifest_item
 from mediaforce.library.representatives import RepresentativeSelection, load_representative_selection, \
     public_representative_item
@@ -662,6 +664,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     def _folder_content_payload(normalized_prefix: str) -> tuple[dict[str, Any], int]:
         latest_failed_sample_job_payload: dict[str, Any] | None = None
         with open_db(config.paths.db_path) as connection:
+            media_scope = resolve_media_scope(connection, normalized_prefix)
             calibration_job = _load_job_state(connection, config, normalized_prefix)
             if calibration_job and calibration_job.get("status") in {"queued", "running"}:
                 existing_scan_job = _load_scan_job_state(config, normalized_prefix)
@@ -675,6 +678,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             metric_support = _metric_support()
             base_context: dict[str, Any] = {
                 "prefix": normalized_prefix,
+                "media_scope": media_scope.to_payload(),
                 "calibration_job": calibration_job,
                 "folder_scan_job": folder_scan_job,
                 "metric_support": metric_support,
@@ -1171,9 +1175,8 @@ def create_app(config_path: Path | None = None) -> FastAPI:
 
     def _save_series_lifecycle_action(normalized_prefix: str, mode: str) -> dict[str, Any]:
         nonlocal config
-        parts = Path(normalized_prefix).parts
         normalized_mode = mode.strip().lower()
-        if len(parts) != 2 or parts[0].lower() != "tv":
+        if not is_tv_series_prefix(normalized_prefix):
             raise HTTPException(status_code=400, detail="Lifecycle mode can only be set for one TV series.")
         if normalized_mode not in {"auto", "on", "off"}:
             raise HTTPException(status_code=400, detail="Lifecycle mode must be auto, on, or off.")
@@ -1769,7 +1772,7 @@ def _reset_folder_card_cache() -> None:
 def _list_library_structure_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
     needs_attention_badges = _folder_needs_attention_badges(connection)
     calibration_job_badges = _folder_calibration_job_badges(connection)
-    return list_library_structure_cards(
+    cards = list_library_structure_cards(
         connection,
         config=config,
         folder_group=_folder_group,
@@ -1780,6 +1783,7 @@ def _list_library_structure_cards(config: MediaforceConfig, connection: DBClient
             calibration_job_badges=calibration_job_badges,
         ),
     )
+    return _attach_media_scopes(connection, cards)
 
 
 def _list_library_detail_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
@@ -1809,7 +1813,7 @@ def _list_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[F
             calibration_job_badges=calibration_job_badges,
         )
 
-    return cached_folder_cards(
+    cards = cached_folder_cards(
         config,
         connection,
         minimum_recommended_savings_bytes=MIN_RECOMMENDED_SAVINGS_BYTES,
@@ -1818,6 +1822,7 @@ def _list_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[F
         estimate_savings_bytes=_estimate_savings_bytes,
         review_badge_for_prefix=review_badge_for_prefix,
     )
+    return _attach_media_scopes(connection, cards)
 
 
 def _list_series_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
@@ -1863,7 +1868,7 @@ def _folder_cards_for_group(
             calibration_job_badges=calibration_job_badges,
         )
 
-    return list_folder_cards(
+    cards = list_folder_cards(
         connection,
         config=config,
         minimum_recommended_savings_bytes=minimum_recommended_savings_bytes,
@@ -1873,12 +1878,13 @@ def _folder_cards_for_group(
         review_badge_for_prefix=review_badge_for_prefix,
         rel_path_root=rel_path_root,
     )
+    return _attach_media_scopes(connection, cards)
 
 
 def _preview_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
     needs_attention_badges = _folder_needs_attention_badges(connection)
     calibration_job_badges = _folder_calibration_job_badges(connection)
-    return preview_folder_cards(
+    cards = preview_folder_cards(
         connection,
         config=config,
         minimum_recommended_savings_bytes=MIN_RECOMMENDED_SAVINGS_BYTES,
@@ -1891,6 +1897,14 @@ def _preview_folder_cards(config: MediaforceConfig, connection: DBClient) -> lis
             calibration_job_badges=calibration_job_badges,
         ),
     )
+    return _attach_media_scopes(connection, cards)
+
+
+def _attach_media_scopes(connection: DBClient, cards: list[FolderCard]) -> list[FolderCard]:
+    scopes = resolve_media_scopes(connection, [card.prefix for card in cards])
+    for card, scope in zip(cards, scopes, strict=True):
+        card.media_scope = scope.to_payload()
+    return cards
 
 
 def _host_runtime_rows(
@@ -2239,11 +2253,6 @@ def _representative_selection(
     return load_representative_selection(connection, config, prefix)
 
 
-def _prefix_descendant_like_pattern(prefix: str) -> str:
-    escaped_prefix = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"{escaped_prefix}/%"
-
-
 def _load_folder_staged_items(
         connection: DBClient,
         config: MediaforceConfig,
@@ -2254,16 +2263,11 @@ def _load_folder_staged_items(
     normalized_prefix = normalized_prefix.strip().strip("/")
     if not normalized_prefix or not statuses:
         return []
-    descendant_pattern = _prefix_descendant_like_pattern(normalized_prefix)
+    scope = resolve_media_scope(connection, normalized_prefix)
     rows = connection.execute(
         select(library_items)
         .join(staged_artifacts, staged_artifacts.c.library_item_id == library_items.c.id)
-        .where(
-            or_(
-                library_items.c.parent_dir == normalized_prefix,
-                library_items.c.parent_dir.like(descendant_pattern, escape="\\"),
-            )
-        )
+        .where(scope_rel_path_filter(library_items.c.rel_path, scope))
         .where(library_items.c.status.in_(tuple(sorted(statuses))))
         .where(staged_artifacts.c.staging_path.is_not(None))
         .where(staged_artifacts.c.promoted_at.is_(None))
@@ -2891,36 +2895,24 @@ def _preview_hotspots(sample_item: dict[str, Any], calibration: dict[str, Any] |
 
 
 def _folder_group(rel_path: str) -> tuple[str, str, str, str] | None:
-    parts = Path(rel_path).parts
-    if len(parts) < 2:
-        return None
-    if parts[0] == "tv" and len(parts) >= 3:
-        return "/".join(parts[:3]), f"{parts[1]} · {parts[2]}", parts[1], "Season"
-    return "/".join(parts[:2]), parts[1], parts[0].title(), "Folder"
+    scope = media_group_scope_for_rel_path(rel_path)
+    return scope.group_tuple() if scope is not None else None
 
 
 def _tv_series_folder_group(rel_path: str) -> tuple[str, str, str, str] | None:
-    parts = Path(rel_path).parts
-    if len(parts) < 3 or parts[0] != "tv":
-        return None
-    return "/".join(parts[:2]), parts[1], "TV series", "Series"
+    scope = tv_series_scope_for_rel_path(rel_path)
+    return scope.group_tuple() if scope is not None else None
 
 
 def _tv_season_folder_group(rel_path: str) -> tuple[str, str, str, str] | None:
-    group = _folder_group(rel_path)
-    if group is None or group[3] != "Season":
+    scope = media_group_scope_for_rel_path(rel_path)
+    if scope is None or scope.kind != "tv_season":
         return None
-    return group
+    return scope.group_tuple()
 
 
 def _folder_series_context(prefix: str) -> dict[str, str] | None:
-    parts = Path(prefix).parts
-    if len(parts) < 3 or parts[0] != "tv":
-        return None
-    series_prefix = "/".join(parts[:2])
-    if series_prefix == prefix:
-        return None
-    return {"prefix": series_prefix, "title": parts[1]}
+    return series_context_for_prefix(prefix)
 
 
 def _folder_encode_candidate_count(connection: DBClient, config: MediaforceConfig, prefix: str) -> int:

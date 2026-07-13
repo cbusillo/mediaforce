@@ -11,6 +11,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import item_events, library_items, staged_artifacts
 from mediaforce.encoding.staging import safe_unlink
+from mediaforce.library.media_scopes import path_matches_scope
 FolderGroup = tuple[str, str, str, str]
 ORIGINALS_REMOVED_EVENT = "originals_removed_confirmed"
 HISTORY_DETAIL_MAX_CHARS = 320
@@ -443,10 +444,7 @@ def _normalized_prefixes(prefixes: list[str] | None) -> set[str] | None:
 
 
 def _path_matches_prefixes(rel_path: str, prefixes: set[str]) -> bool:
-    for prefix in prefixes:
-        if rel_path == prefix or rel_path.startswith(f"{prefix}/"):
-            return True
-    return False
+    return any(path_matches_scope(rel_path, prefix) for prefix in prefixes)
 
 
 def _configured_archive_root(config: MediaforceConfig) -> Path | None:

@@ -7,13 +7,14 @@ from dataclasses import dataclass
 from statistics import median, quantiles
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.evidence import build_evidence_envelope, stable_policy_hash, stable_source_id
 from mediaforce.core.type_defs import mapping_dict, object_dict, object_list
+from mediaforce.library.media_scopes import resolve_media_scope, scope_rel_path_filter
 from mediaforce.library.planner import build_manifest_item
 
 REPRESENTATIVE_SELECTION_TOOL = "mediaforce.representative_selection"
@@ -120,15 +121,10 @@ def load_representative_selection(
         config: MediaforceConfig,
         prefix: str,
 ) -> RepresentativeSelection | None:
-    normalized_prefix = prefix.strip().strip("/")
+    scope = resolve_media_scope(connection, prefix)
     rows = connection.execute(
         select(library_items)
-        .where(
-            or_(
-                library_items.c.rel_path == normalized_prefix,
-                library_items.c.rel_path.like(_prefix_descendant_pattern(normalized_prefix), escape="\\"),
-            )
-        )
+        .where(scope_rel_path_filter(library_items.c.rel_path, scope))
         .order_by(library_items.c.rel_path.asc())
     ).mappings().fetchall()
     if not rows:
@@ -146,8 +142,8 @@ def load_representative_selection(
         items.append(item)
     return select_representatives(
         items,
-        prefix=normalized_prefix,
-        policy=config.resolve_policy(normalized_prefix),
+        prefix=scope.prefix,
+        policy=config.resolve_policy(scope.prefix),
     )
 
 
@@ -825,8 +821,3 @@ def _fraction(numerator: int | float, denominator: int | float) -> float:
     if denominator <= 0:
         return 1.0
     return round(float(numerator) / float(denominator), 4)
-
-
-def _prefix_descendant_pattern(prefix: str) -> str:
-    escaped_prefix = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"{escaped_prefix}/%"

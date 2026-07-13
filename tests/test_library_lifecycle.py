@@ -6,10 +6,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from mediaforce.core.config import ConfigPaths, DEFAULT_CONFIG_PATH, MediaforceConfig
-from mediaforce.core.db import open_db, reset_engine_cache
+from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items, plex_item_metadata, series_metadata
 from mediaforce.library.candidate_selection import project_candidates, season_identity
-from mediaforce.library.run_manifests import build_run_manifest, select_encode_candidates
+from mediaforce.library.run_manifests import build_run_manifest, create_folder_manifest, select_encode_candidates
 from mediaforce.library.workflow_state import build_folder_workflow_state, derive_item_workflow_state
 from mediaforce.web.routes.folders import _request_flag
 from mediaforce.web.runtime.folder_cards import list_folder_cards
@@ -259,6 +259,22 @@ class LibraryLifecycleTests(unittest.TestCase):
         )
         self.assertTrue(provenance["override_applied"])
 
+    def test_manifest_exact_root_movie_excludes_similarly_named_sibling(self) -> None:
+        config = self._config(mode="off")
+        with open_db(config.paths.db_path) as connection:
+            exact_id = self._insert_item(connection, "movies/Foo.mkv", age_days=100)
+            self._insert_item(connection, "movies/Foo.mkv.backup.mkv", age_days=100)
+
+            manifest, _ = create_folder_manifest(
+                connection,
+                config,
+                prefix="movies/Foo.mkv",
+            )
+
+        self.assertEqual([item["library_item_id"] for item in manifest["items"]], [exact_id])
+        self.assertEqual(manifest["selection"]["media_scope"]["kind"], "movie_file")
+        self.assertEqual(manifest["selection"]["media_scope"]["match"], "exact_item")
+
     def test_manual_override_does_not_bypass_unknown_content_age(self) -> None:
         config = self._config(mode="off")
         with open_db(config.paths.db_path) as connection:
@@ -360,7 +376,11 @@ class LibraryLifecycleTests(unittest.TestCase):
     def _config(self, *, mode: str | None = None) -> MediaforceConfig:
         with DEFAULT_CONFIG_PATH.open("rb") as handle:
             raw = copy.deepcopy(tomllib.load(handle))
-        raw["media"]["source_roots"] = {"tv": str(self.root / "source" / "tv")}
+        raw["media"]["source_roots"] = {
+            "movies": str(self.root / "source" / "movies"),
+            "other": str(self.root / "source" / "other"),
+            "tv": str(self.root / "source" / "tv"),
+        }
         raw["media"]["staging_root"] = str(self.root / "staging")
         raw["media"]["archive_root"] = str(self.root / "archive")
         if mode is not None:
@@ -381,7 +401,7 @@ class LibraryLifecycleTests(unittest.TestCase):
         )
         return MediaforceConfig(raw=raw, paths=paths)
 
-    def _insert_item(self, connection, rel_path: str, *, age_days: int) -> int:
+    def _insert_item(self, connection: DBClient, rel_path: str, *, age_days: int) -> int:
         timestamp = NOW - timedelta(days=age_days)
         timestamp_text = timestamp.isoformat(timespec="seconds")
         source_path = self.root / "source" / rel_path
@@ -389,7 +409,7 @@ class LibraryLifecycleTests(unittest.TestCase):
             library_items.insert().values(
                 source_path=str(source_path),
                 rel_path=rel_path,
-                media_root="tv",
+                media_root=Path(rel_path).parts[0],
                 parent_dir=str(Path(rel_path).parent),
                 file_name=Path(rel_path).name,
                 container="mkv",
@@ -419,7 +439,7 @@ class LibraryLifecycleTests(unittest.TestCase):
 
     @staticmethod
     def _insert_series_metadata(
-            connection,
+            connection: DBClient,
             prefix: str,
             *,
             status: str,
@@ -438,7 +458,13 @@ class LibraryLifecycleTests(unittest.TestCase):
         )
 
     @staticmethod
-    def _insert_plex_metadata(connection, item_id: int, *, added_at: datetime, season_index: int) -> None:
+    def _insert_plex_metadata(
+            connection: DBClient,
+            item_id: int,
+            *,
+            added_at: datetime,
+            season_index: int,
+    ) -> None:
         connection.execute(
             plex_item_metadata.insert().values(
                 library_item_id=item_id,

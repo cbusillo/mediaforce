@@ -17,6 +17,8 @@ from mediaforce.core.type_defs import float_value, object_dict, object_list
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, list_child_encode_jobs, \
     load_latest_terminal_encode_job_for_prefix
 from mediaforce.encoding.staging import safe_unlink
+from mediaforce.library.media_scopes import MediaScope, path_matches_scope, resolve_media_scope, \
+    scope_descendant_filter, scope_rel_path_filter
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.run_manifests import create_folder_manifest
 from mediaforce.library.candidate_selection import encode_candidate_decisions, scope_lifecycle_payload_from_decisions, \
@@ -176,9 +178,10 @@ def queue_folder_encode_action(
         load_advice_state: LoadAdviceStateFn | None = None,
         load_latest_failed_target_size_job_state: LoadJobStateFn | None = None,
 ) -> ActionPayload:
-    if override_policy_holds and len(Path(normalized_prefix).parts) != 3:
-        raise HTTPException(status_code=400, detail="Lifecycle holds can only be overridden for one season at a time.")
     with open_db(config.paths.db_path) as connection:
+        scope = resolve_media_scope(connection, normalized_prefix)
+        if override_policy_holds and scope.kind != "tv_season":
+            raise HTTPException(status_code=400, detail="Lifecycle holds can only be overridden for one season at a time.")
         existing_job = load_job_state(connection, config, normalized_prefix)
         if existing_job and existing_job.get("status") in {"queued", "running", "pending_review"}:
             return {"ok": False, "message": "A calibration job is already active for this folder."}
@@ -753,16 +756,11 @@ def _reset_stale_prefix_encoding_items_for_requeue(
     normalized_prefix = str(prefix).strip().strip("/")
     if not normalized_prefix:
         return
-    descendant_pattern = _prefix_descendant_path_pattern(normalized_prefix)
-    protected_prefixes = _active_descendant_encode_prefixes(connection, normalized_prefix)
+    scope = resolve_media_scope(connection, normalized_prefix)
+    protected_prefixes = _active_descendant_encode_prefixes(connection, scope)
     rows = connection.execute(
         select(library_items.c.id, library_items.c.rel_path)
-        .where(
-            or_(
-                library_items.c.parent_dir == normalized_prefix,
-                library_items.c.parent_dir.like(descendant_pattern, escape="\\"),
-            )
-        )
+        .where(scope_rel_path_filter(library_items.c.rel_path, scope))
         .where(library_items.c.status == "encoding")
     ).mappings().fetchall()
     if not rows:
@@ -794,40 +792,28 @@ def _reset_stale_prefix_encoding_items_for_requeue(
         )
 
 
-def _prefix_descendant_path_pattern(prefix: str) -> str:
-    if not prefix:
-        return "%"
-    escaped_prefix = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"{escaped_prefix}/%"
-
-
-def _active_descendant_encode_prefixes(connection: DBClient, prefix: str) -> set[str]:
-    if not prefix:
+def _active_descendant_encode_prefixes(connection: DBClient, scope: MediaScope) -> set[str]:
+    if not scope.prefix or scope.match == "exact_item":
         return set()
-    descendant_pattern = _prefix_descendant_path_pattern(prefix)
     rows = connection.execute(
         select(encode_jobs.c.prefix)
         .where(encode_jobs.c.status.in_(("queued", "retry_backoff", "running")))
         .where(
             or_(
-                encode_jobs.c.prefix == prefix,
-                encode_jobs.c.prefix.like(descendant_pattern, escape="\\"),
+                encode_jobs.c.prefix == scope.prefix,
+                scope_descendant_filter(encode_jobs.c.prefix, scope.prefix),
             )
         )
     ).fetchall()
     return {
         str(row[0]).strip().strip("/")
         for row in rows
-        if str(row[0] or "").strip().strip("/") and str(row[0]).strip().strip("/") != prefix
+        if str(row[0] or "").strip().strip("/") and str(row[0]).strip().strip("/") != scope.prefix
     }
 
 
 def _rel_path_is_within_any_prefix(rel_path: str, prefixes: set[str]) -> bool:
-    normalized_rel_path = str(rel_path).strip().strip("/")
-    for prefix in prefixes:
-        if normalized_rel_path == prefix or normalized_rel_path.startswith(f"{prefix}/"):
-            return True
-    return False
+    return any(path_matches_scope(rel_path, prefix) for prefix in prefixes)
 
 
 def save_profile_action(

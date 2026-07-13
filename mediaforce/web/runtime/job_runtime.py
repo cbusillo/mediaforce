@@ -12,9 +12,7 @@ from typing import Any
 
 from sqlalchemy import func
 from sqlalchemy import literal_column
-from sqlalchemy import or_
 from sqlalchemy import select
-from sqlalchemy import true
 from sqlalchemy import update
 
 from mediaforce.tuning.calibration_jobs import claim_next_queued_calibration_job, load_latest_failed_sample_job, \
@@ -26,8 +24,9 @@ from mediaforce.core.db_tables import calibration_jobs
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.process_control import ManagedProcessController
-from mediaforce.library.scanner import scan_library
+from mediaforce.library.media_scopes import path_matches_scope, resolve_media_scope, scope_rel_path_filter
 from mediaforce.library.metadata_sync import sync_external_metadata
+from mediaforce.library.scanner import scan_library
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.core.type_defs import JSONValue, object_dict
 from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
@@ -484,11 +483,12 @@ def scan_is_stale(
             return True
         return datetime.now(tz=UTC) - latest > deps.full_scan_stale_after
 
+    scope = resolve_media_scope(connection, prefix)
     item_count = int(
         connection.execute(
             select(func.count())
             .select_from(library_items)
-            .where(_prefix_filter(prefix))
+            .where(scope_rel_path_filter(library_items.c.rel_path, scope))
         ).scalar_one()
     )
     if item_count == 0:
@@ -497,21 +497,6 @@ def scan_is_stale(
     if latest is None:
         return True
     return datetime.now(tz=UTC) - latest > deps.prefix_scan_stale_after
-
-
-def _prefix_filter(prefix: str) -> Any:
-    normalized_prefix = prefix.strip().strip("/")
-    if not normalized_prefix:
-        return true()
-    return or_(
-        library_items.c.rel_path == normalized_prefix,
-        library_items.c.rel_path.like(f"{_sql_like_escape(normalized_prefix)}/%", escape="\\"),
-    )
-
-
-def _sql_like_escape(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
 
 def latest_scan_completed_at(connection: DBClient, prefix: str | None) -> datetime | None:
     rows = connection.execute(
@@ -544,7 +529,7 @@ def latest_scan_completed_at(connection: DBClient, prefix: str | None) -> dateti
             prefixes = []
         for candidate in prefixes:
             normalized = str(candidate).strip("/")
-            if normalized and prefix.startswith(normalized):
+            if normalized and path_matches_scope(prefix, normalized):
                 return completed
     return None
 
@@ -680,7 +665,7 @@ def _scan_run_matches_prefix(row: DBRow, prefix: str | None) -> str | None | obj
         prefixes = []
     for candidate in prefixes:
         normalized = str(candidate).strip("/")
-        if normalized and prefix.startswith(normalized):
+        if normalized and path_matches_scope(prefix, normalized):
             return normalized
     return _MISSING
 

@@ -2,13 +2,15 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from sqlalchemy import or_, select, true
+from sqlalchemy import or_, select
 
 from mediaforce.core.db import DBClient
 from mediaforce.core.db import DBRow
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
+from mediaforce.library.media_scopes import MediaScope, normalize_scope_prefix, path_matches_scope, \
+    resolve_media_scope, resolve_media_scopes, scope_rel_path_filter, scopes_overlap
 
 WorkflowItemState = Literal[
     "missing",
@@ -126,17 +128,17 @@ def build_folder_workflow_state(
         *,
         candidate_eligibility: dict[int, tuple[bool, str | None]] | None = None,
 ) -> FolderWorkflowState:
-    normalized_prefix = normalize_prefix(prefix)
+    scope = resolve_media_scope(connection, prefix)
     item_states = tuple(
         derive_item_workflow_state(
             row,
             encode_eligible=(candidate_eligibility or {}).get(int(row["item_id"]), (True, None))[0],
             policy_blocker=(candidate_eligibility or {}).get(int(row["item_id"]), (True, None))[1],
         )
-        for row in _load_item_rows(connection, normalized_prefix)
+        for row in _load_item_rows(connection, scope)
     )
-    job_state = _load_encode_job_state(connection, normalized_prefix)
-    return _build_folder_state(normalized_prefix, item_states, job_state=job_state)
+    job_state = _load_encode_job_state(connection, scope)
+    return _build_folder_state(scope.prefix, item_states, job_state=job_state)
 
 
 def build_folder_workflow_states(
@@ -145,14 +147,14 @@ def build_folder_workflow_states(
         *,
         candidate_eligibility: dict[int, tuple[bool, str | None]] | None = None,
 ) -> dict[str, FolderWorkflowState]:
-    normalized_prefixes = [normalize_prefix(prefix) for prefix in prefixes]
-    unique_prefixes = list(dict.fromkeys(normalized_prefixes))
-    if not unique_prefixes:
+    normalized_prefixes = list(dict.fromkeys(normalize_prefix(prefix) for prefix in prefixes))
+    if not normalized_prefixes:
         return {}
-    rows = _load_item_rows_for_prefixes(connection, unique_prefixes)
-    job_states = _load_encode_job_states(connection, unique_prefixes)
+    scopes = resolve_media_scopes(connection, normalized_prefixes)
+    rows = _load_item_rows_for_scopes(connection, scopes)
+    job_states = _load_encode_job_states(connection, scopes)
     result: dict[str, FolderWorkflowState] = {}
-    for prefix in unique_prefixes:
+    for scope in scopes:
         item_states = tuple(
             derive_item_workflow_state(
                 row,
@@ -160,14 +162,18 @@ def build_folder_workflow_states(
                 policy_blocker=(candidate_eligibility or {}).get(int(row["item_id"]), (True, None))[1],
             )
             for row in rows
-            if _path_matches_prefix(str(row["rel_path"]), prefix)
+            if path_matches_scope(str(row["rel_path"]), scope)
         )
-        result[prefix] = _build_folder_state(prefix, item_states, job_state=job_states.get(prefix))
+        result[scope.prefix] = _build_folder_state(
+            scope.prefix,
+            item_states,
+            job_state=job_states.get(scope.prefix),
+        )
     return result
 
 
 def normalize_prefix(prefix: str) -> str:
-    return prefix.strip().strip("/")
+    return normalize_scope_prefix(prefix)
 
 
 def derive_item_workflow_state(
@@ -225,7 +231,7 @@ def derive_item_workflow_state(
     )
 
 
-def _load_item_rows(connection: DBClient, prefix: str) -> list[DBRow]:
+def _load_item_rows(connection: DBClient, scope: MediaScope) -> list[DBRow]:
     query = (
         select(
             library_items.c.id.label("item_id"),
@@ -242,15 +248,15 @@ def _load_item_rows(connection: DBClient, prefix: str) -> list[DBRow]:
                 staged_artifacts.c.library_item_id == library_items.c.id,
             )
         )
-        .where(_prefix_filter(library_items.c.rel_path, prefix))
+        .where(scope_rel_path_filter(library_items.c.rel_path, scope))
         .order_by(library_items.c.rel_path)
     )
     return connection.execute(query).mappings().fetchall()
 
 
-def _load_item_rows_for_prefixes(connection: DBClient, prefixes: list[str]) -> list[DBRow]:
+def _load_item_rows_for_scopes(connection: DBClient, scopes: list[MediaScope]) -> list[DBRow]:
     rows_by_key: dict[tuple[int, str | None], DBRow] = {}
-    for prefix_batch in _chunks(prefixes, PREFIX_QUERY_BATCH_SIZE):
+    for scope_batch in _chunks(scopes, PREFIX_QUERY_BATCH_SIZE):
         query = (
             select(
                 library_items.c.id.label("item_id"),
@@ -267,7 +273,7 @@ def _load_item_rows_for_prefixes(connection: DBClient, prefixes: list[str]) -> l
                     staged_artifacts.c.library_item_id == library_items.c.id,
                 )
             )
-            .where(or_(*(_prefix_filter(library_items.c.rel_path, prefix) for prefix in prefix_batch)))
+            .where(or_(*(scope_rel_path_filter(library_items.c.rel_path, scope) for scope in scope_batch)))
             .order_by(library_items.c.rel_path)
         )
         for row in connection.execute(query).mappings().fetchall():
@@ -275,7 +281,7 @@ def _load_item_rows_for_prefixes(connection: DBClient, prefixes: list[str]) -> l
     return sorted(rows_by_key.values(), key=lambda row: str(row["rel_path"]))
 
 
-def _chunks(values: list[str], size: int) -> list[list[str]]:
+def _chunks(values: list[Any], size: int) -> list[list[Any]]:
     return [values[index:index + size] for index in range(0, len(values), size)]
 
 
@@ -461,13 +467,13 @@ def _mixed_next_action(prefix: str, lane: WorkflowLane) -> WorkflowNextAction:
     return WorkflowNextAction("review_scope", "Review scope", True, prefix)
 
 
-def _load_encode_job_state(connection: DBClient, prefix: str) -> tuple[WorkflowLane, str] | None:
+def _load_encode_job_state(connection: DBClient, scope: MediaScope) -> tuple[WorkflowLane, str] | None:
     rows = connection.execute(
         select(encode_jobs.c.prefix, encode_jobs.c.status, encode_jobs.c.error)
         .where(encode_jobs.c.status.in_(JOB_STATUSES_FOR_WORKFLOW))
         .order_by(encode_jobs.c.updated_at.desc(), encode_jobs.c.created_at.desc())
     ).mappings().fetchall()
-    overlapping_rows = [row for row in rows if _prefixes_overlap(prefix, str(row["prefix"] or ""))]
+    overlapping_rows = [row for row in rows if scopes_overlap(scope, str(row["prefix"] or ""))]
     active = next((row for row in overlapping_rows if row["status"] in PROCESSING_JOB_STATUSES), None)
     if active is not None:
         return "processing", f"Encode job is {active['status']} for {active['prefix']}."
@@ -478,51 +484,23 @@ def _load_encode_job_state(connection: DBClient, prefix: str) -> tuple[WorkflowL
     return None
 
 
-def _load_encode_job_states(connection: DBClient, prefixes: list[str]) -> dict[str, tuple[WorkflowLane, str] | None]:
+def _load_encode_job_states(connection: DBClient, scopes: list[MediaScope]) -> dict[str, tuple[WorkflowLane, str] | None]:
     rows = connection.execute(
         select(encode_jobs.c.prefix, encode_jobs.c.status, encode_jobs.c.error)
         .where(encode_jobs.c.status.in_(JOB_STATUSES_FOR_WORKFLOW))
         .order_by(encode_jobs.c.updated_at.desc(), encode_jobs.c.created_at.desc())
     ).mappings().fetchall()
     result: dict[str, tuple[WorkflowLane, str] | None] = {}
-    for prefix in prefixes:
-        overlapping_rows = [row for row in rows if _prefixes_overlap(prefix, str(row["prefix"] or ""))]
+    for scope in scopes:
+        overlapping_rows = [row for row in rows if scopes_overlap(scope, str(row["prefix"] or ""))]
         active = next((row for row in overlapping_rows if row["status"] in PROCESSING_JOB_STATUSES), None)
         if active is not None:
-            result[prefix] = "processing", f"Encode job is {active['status']} for {active['prefix']}."
+            result[scope.prefix] = "processing", f"Encode job is {active['status']} for {active['prefix']}."
             continue
         latest = overlapping_rows[0] if overlapping_rows else None
         if latest is not None and latest["status"] in ATTENTION_JOB_STATUSES:
             error = str(latest["error"] or "Encode job needs operator attention.")
-            result[prefix] = "attention", f"Encode job is {latest['status']} for {latest['prefix']}: {error}"
+            result[scope.prefix] = "attention", f"Encode job is {latest['status']} for {latest['prefix']}: {error}"
             continue
-        result[prefix] = None
+        result[scope.prefix] = None
     return result
-
-
-def _prefix_filter(column: Any, prefix: str) -> Any:
-    if not prefix:
-        return true()
-    return or_(column == prefix, column.like(f"{_sql_like_escape(prefix)}/%", escape="\\"))
-
-
-def _sql_like_escape(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
-def _path_matches_prefix(path: str, prefix: str) -> bool:
-    normalized_path = normalize_prefix(path)
-    normalized_prefix = normalize_prefix(prefix)
-    return not normalized_prefix or normalized_path == normalized_prefix or normalized_path.startswith(f"{normalized_prefix}/")
-
-
-def _prefixes_overlap(left: str, right: str) -> bool:
-    normalized_left = normalize_prefix(left)
-    normalized_right = normalize_prefix(right)
-    if not normalized_left or not normalized_right:
-        return True
-    return (
-        normalized_left == normalized_right
-        or normalized_left.startswith(f"{normalized_right}/")
-        or normalized_right.startswith(f"{normalized_left}/")
-    )
