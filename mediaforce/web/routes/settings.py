@@ -42,7 +42,7 @@ def register_settings_routes(
                 metadata=(dict(body["metadata"]) if isinstance(body.get("metadata"), dict) else None),
             )
         except SettingsValidationError as exc:
-            return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "message": exc.public_message}, status_code=400)
         except ValueError:
             return JSONResponse({"ok": False, "message": SETTINGS_SAVE_ERROR_MESSAGE}, status_code=400)
         return JSONResponse(result)

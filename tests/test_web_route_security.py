@@ -12,6 +12,7 @@ from starlette.routing import Route
 from mediaforce.web.routes.completed import COMPLETED_CLEANUP_ERROR_MESSAGE, register_completed_routes
 from mediaforce.web.routes.folders import register_folder_routes
 from mediaforce.web.routes.settings import SETTINGS_SAVE_ERROR_MESSAGE, register_settings_routes
+from mediaforce.web.settings_runtime import SettingsValidationError
 
 
 def _json_request(payload: dict[str, Any]) -> Request:
@@ -124,6 +125,29 @@ class WebRouteSecurityTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(json.loads(response.body), {"ok": False, "message": SETTINGS_SAVE_ERROR_MESSAGE})
         self.assertNotIn("/Volumes/media/private", response.body.decode())
+
+    def test_settings_save_returns_explicit_operator_validation_detail(self) -> None:
+        app = FastAPI()
+
+        def save_settings_action(**_kwargs: Any) -> dict[str, Any]:
+            raise SettingsValidationError("Library local paths must be absolute.")
+
+        register_settings_routes(
+            app,
+            settings_payload=lambda _include_archive_cleanup: {},
+            save_settings_action=save_settings_action,
+            library_type_preview_action=lambda _key, _library_type: {},
+            archive_cleanup_payload=lambda _transcode_root: {},
+            clear_archive_cleanup_action=lambda _transcode_root: {},
+        )
+
+        response = asyncio.run(_route_endpoint(app, "/api/settings", "POST")(_json_request({})))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            json.loads(response.body),
+            {"ok": False, "message": "Library local paths must be absolute."},
+        )
 
     def test_completed_cleanup_hides_internal_validation_detail(self) -> None:
         app = FastAPI()

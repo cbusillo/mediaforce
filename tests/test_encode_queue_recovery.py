@@ -2223,7 +2223,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "ranking": "oldest_added_first",
             },
         }
-        with self.assertRaisesRegex(ValueError, "compatibility preview"):
+        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
             web_app._build_runtime_settings_payload(
                 libraries=[row],
                 remote_hosts=[],
@@ -2232,6 +2232,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 schedule_profiles=[],
                 existing_library_types={"tv": "tv"},
             )
+        self.assertIn("compatibility preview", raised.exception.public_message)
 
         payload = web_app._build_runtime_settings_payload(
             libraries=[
@@ -2251,7 +2252,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(payload["media"]["libraries"][0]["availability"], "browse_only")
 
     def test_runtime_settings_payload_rejects_non_tv_production(self) -> None:
-        with self.assertRaisesRegex(ValueError, "production is not available"):
+        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
             web_app._build_runtime_settings_payload(
                 libraries=[
                     {
@@ -2268,6 +2269,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
                 schedule_profiles=[],
             )
+        self.assertIn("production is not available", raised.exception.public_message)
 
     def test_typed_library_maps_scan_browse_only_but_only_produce_ready_roots(self) -> None:
         self.config.raw["media"]["source_roots"] = {
@@ -2385,7 +2387,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertNotEqual(self.config.resolve_policy("tv/Example/Season 01")["video"].get("crf"), 22)
 
     def test_runtime_settings_payload_rejects_submitted_secret_values(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Credential values are not accepted"):
+        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
             web_app._build_runtime_settings_payload(
                 libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
                 remote_hosts=[],
@@ -2394,6 +2396,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 schedule_profiles=[],
                 metadata={"plex": {"token": "must-not-persist"}},
             )
+        self.assertEqual(raised.exception.public_message, "Credential values are not accepted in Settings.")
+        self.assertEqual(str(raised.exception), "Settings validation failed.")
 
     def test_runtime_settings_payload_defaults_host_schedule_to_always(self) -> None:
         payload = web_app._build_runtime_settings_payload(
@@ -2587,7 +2591,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(payload["remote_hosts"][0]["staging_root"], str(self.root / "remote-staging"))
 
     def test_runtime_settings_payload_rejects_unknown_library_override(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Unknown library override"):
+        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
             web_app._build_runtime_settings_payload(
                 libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
                 remote_hosts=[
@@ -2604,9 +2608,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
                 schedule_profiles=[],
             )
+        self.assertIn("Unknown library override", raised.exception.public_message)
 
     def test_runtime_settings_payload_rejects_unknown_host_schedule_profile(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Unknown schedule profile"):
+        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
             web_app._build_runtime_settings_payload(
                 libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
                 remote_hosts=[
@@ -2623,9 +2628,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
                 schedule_profiles=[],
             )
+        self.assertIn("Unknown schedule profile", raised.exception.public_message)
 
     def test_runtime_settings_payload_rejects_reserved_schedule_profile_key(self) -> None:
-        with self.assertRaisesRegex(ValueError, "reserved"):
+        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
             web_app._build_runtime_settings_payload(
                 libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
                 remote_hosts=[],
@@ -2640,6 +2646,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     }
                 ],
             )
+        self.assertIn("reserved", raised.exception.public_message)
 
     def test_runtime_settings_payload_preserves_allowed_libraries_for_host(self) -> None:
         payload = web_app._build_runtime_settings_payload(
@@ -2823,7 +2830,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["all_day_days_of_week"], ["sun"])
 
     def test_build_runtime_settings_payload_rejects_schedule_profile_without_days(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Select at least one day"):
+        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
             settings_runtime.build_runtime_settings_payload(
                 libraries=[{"key": "movies", "path": str(self.root / "source" / "movies"), "color": "#123456"}],
                 remote_hosts=[],
@@ -2840,6 +2847,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     }
                 ],
             )
+        self.assertIn("Select at least one day", raised.exception.public_message)
 
     def test_host_runtime_rows_mark_never_schedule_as_disabled(self) -> None:
         self.config.raw["remote_hosts"] = [

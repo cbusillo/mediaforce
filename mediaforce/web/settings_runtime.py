@@ -68,7 +68,9 @@ HOST_CAPABILITY_OPTIONS = (
 
 
 class SettingsValidationError(ValueError):
-    pass
+    def __init__(self, public_message: str) -> None:
+        self.public_message = public_message
+        super().__init__("Settings validation failed.")
 
 
 def settings_library_rows(source_root_map: dict[str, Path], *, min_rows: int = 3) -> list[dict[str, Any]]:
@@ -788,7 +790,7 @@ def build_runtime_settings_payload(
             }
         )
     if not source_roots:
-        raise ValueError("Add at least one library before saving settings.")
+        raise SettingsValidationError("Add at least one library before saving settings.")
     library_colors = library_color_map_from_source_roots(source_roots, library_colors)
     known_library_keys = set(source_roots)
 
@@ -805,12 +807,12 @@ def build_runtime_settings_payload(
         if not label and not host and not repo_path and not wake_mac and not start_command and not stop_command:
             continue
         if not host:
-            raise ValueError("Each remote host row needs an SSH host value.")
+            raise SettingsValidationError("Each remote host row needs an SSH host value.")
         priority_text = _text(row.get("priority", "0"), "0") or "0"
         try:
             priority = int(priority_text)
         except ValueError as exc:
-            raise ValueError(f"Host priority must be a whole number for {label or host}.") from exc
+            raise SettingsValidationError(f"Host priority must be a whole number for {label or host}.") from exc
         max_parallel_text = _text(
             row.get("max_parallel_encodes", str(DEFAULT_HOST_MAX_PARALLEL_ENCODES)),
             str(DEFAULT_HOST_MAX_PARALLEL_ENCODES),
@@ -818,11 +820,11 @@ def build_runtime_settings_payload(
         try:
             max_parallel_encodes = max(1, int(max_parallel_text or str(DEFAULT_HOST_MAX_PARALLEL_ENCODES)))
         except ValueError as exc:
-            raise ValueError(f"Parallel encodes must be a whole number for {label or host}.") from exc
+            raise SettingsValidationError(f"Parallel encodes must be a whole number for {label or host}.") from exc
         try:
             start_timeout_seconds = max(1, int(start_timeout_text))
         except ValueError as exc:
-            raise ValueError(f"Start timeout must be a whole number for {label or host}.") from exc
+            raise SettingsValidationError(f"Start timeout must be a whole number for {label or host}.") from exc
         schedule_profile = canonical_schedule_profile_key(row.get("schedule_profile", DEFAULT_HOST_SCHEDULE_PROFILE))
         payload: dict[str, Any] = {"host": host}
         if label:
@@ -883,13 +885,13 @@ def build_runtime_settings_payload(
         if not any((key_text, label_text, start_hour_text, end_hour_text)):
             continue
         if not key_text:
-            raise ValueError("Each schedule profile needs a key.")
+            raise SettingsValidationError("Each schedule profile needs a key.")
         if key_text in {ALWAYS_SCHEDULE_PROFILE, NEVER_SCHEDULE_PROFILE}:
-            raise ValueError(f"Schedule profile key '{key_text}' is reserved.")
+            raise SettingsValidationError(f"Schedule profile key '{key_text}' is reserved.")
         if key_text in seen_profile_keys:
-            raise ValueError(f"Duplicate schedule profile key: {key_text}")
+            raise SettingsValidationError(f"Duplicate schedule profile key: {key_text}")
         if not days_of_week and not all_day_days_of_week:
-            raise ValueError(f"Select at least one day for schedule profile '{key_text}'.")
+            raise SettingsValidationError(f"Select at least one day for schedule profile '{key_text}'.")
         normalized = normalize_encode_queue_scheduler(
             {
                 "mode": "night",
@@ -922,7 +924,9 @@ def build_runtime_settings_payload(
         }
     )
     if invalid_host_profiles:
-        raise ValueError("Unknown schedule profile for host assignment: " + ", ".join(invalid_host_profiles))
+        raise SettingsValidationError(
+            "Unknown schedule profile for host assignment: " + ", ".join(invalid_host_profiles)
+        )
 
     normalized_video_defaults = normalize_video_defaults(video_defaults)
     metadata_payload = dict(metadata) if isinstance(metadata, dict) else {}
@@ -1009,9 +1013,9 @@ def _normalized_provider_url(value: object, *, allow_http: bool) -> str:
     parsed = urlsplit(text)
     allowed_schemes = {"https"} | ({"http"} if allow_http else set())
     if parsed.scheme not in allowed_schemes or not parsed.netloc or parsed.username or parsed.password:
-        raise ValueError("Provider URLs must use an allowed HTTP scheme and cannot contain credentials.")
+        raise SettingsValidationError("Provider URLs must use an allowed HTTP scheme and cannot contain credentials.")
     if parsed.query or parsed.fragment:
-        raise ValueError("Provider URLs cannot contain query parameters or fragments.")
+        raise SettingsValidationError("Provider URLs cannot contain query parameters or fragments.")
     return text
 
 
@@ -1046,25 +1050,25 @@ def normalize_video_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
         try:
             value = float(str(payload.get(key, DEFAULT_VIDEO_DEFAULTS[key])))
         except (TypeError, ValueError) as exc:
-            raise ValueError(f"Video default {key} must be a number.") from exc
+            raise SettingsValidationError(f"Video default {key} must be a number.") from exc
         if value < minimum or value > maximum:
-            raise ValueError(f"Video default {key} must be between {minimum:g} and {maximum:g}.")
+            raise SettingsValidationError(f"Video default {key} must be between {minimum:g} and {maximum:g}.")
         return value
 
     def _int_field(key: str, *, minimum: int, maximum: int) -> int:
         value = _float_field(key, minimum=minimum, maximum=maximum)
         if not value.is_integer():
-            raise ValueError(f"Video default {key} must be a whole number.")
+            raise SettingsValidationError(f"Video default {key} must be a whole number.")
         return int(value)
 
     target_vmaf = _float_field("target_vmaf", minimum=1, maximum=100)
     min_target_vmaf = _float_field("min_target_vmaf", minimum=1, maximum=100)
     if min_target_vmaf > target_vmaf:
-        raise ValueError("Video default min_target_vmaf must be less than or equal to target_vmaf.")
+        raise SettingsValidationError("Video default min_target_vmaf must be less than or equal to target_vmaf.")
     target_xpsnr = _float_field("target_xpsnr", minimum=1, maximum=100)
     min_target_xpsnr = _float_field("min_target_xpsnr", minimum=1, maximum=100)
     if min_target_xpsnr > target_xpsnr:
-        raise ValueError("Video default min_target_xpsnr must be less than or equal to target_xpsnr.")
+        raise SettingsValidationError("Video default min_target_xpsnr must be less than or equal to target_xpsnr.")
     target_size_mb = _float_field("target_size_mb", minimum=1, maximum=100_000)
     max_height = _int_field("max_height", minimum=0, maximum=4320)
 
@@ -1217,9 +1221,9 @@ def normalize_host_source_root_overrides(
         try:
             raw_value = json.loads(text)
         except json.JSONDecodeError as exc:
-            raise ValueError(f"Library path overrides must be valid JSON for {host_label}.") from exc
+            raise SettingsValidationError(f"Library path overrides must be valid JSON for {host_label}.") from exc
     if not isinstance(raw_value, dict):
-        raise ValueError(f"Library path overrides must be a JSON object for {host_label}.")
+        raise SettingsValidationError(f"Library path overrides must be a JSON object for {host_label}.")
 
     normalized: dict[str, str] = {}
     for key, path in raw_value.items():
@@ -1227,7 +1231,7 @@ def normalize_host_source_root_overrides(
         if not key_text:
             continue
         if key_text not in known_library_keys:
-            raise ValueError(f"Unknown library override '{key_text}' for {host_label}.")
+            raise SettingsValidationError(f"Unknown library override '{key_text}' for {host_label}.")
         path_text = str(path or "").strip()
         if not path_text:
             continue
