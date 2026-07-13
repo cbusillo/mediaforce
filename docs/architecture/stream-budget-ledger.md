@@ -84,10 +84,16 @@ structured infeasibility, quality-conflict, or needs-review outcomes.
 
 Production encodes verify actual output bytes against the resolved final band
 from the same size goal, currently ±5% by default. A final miss can retry only
-once, and only by reusing a candidate already measured and recorded in the
-search trace. If no bounded measured retry is available, or if the retry budget
-is exhausted, the item enters a needs-review failure state rather than falling
-back to quality-first encoding or silently relaxing the approved constraint.
+once. The completed output calibrates the sample curve's video-byte projection;
+an already measured candidate may be reused when that corrected projection is
+inside the final band. Otherwise Mediaforce may interpolate one integer CRF
+between measured quality-safe candidates and run one targeted sample at that
+CRF. The replacement full encode starts only when the new sample supplies a real
+quality score that meets the configured floor, remains under the
+source-relative cap, and its calibrated total projection is inside the final
+band. If no bounded measured retry is available, or if the retry budget is
+exhausted, the item enters a needs-review failure state rather than falling back
+to quality-first encoding or silently relaxing the approved constraint.
 
 ## Fallbacks and migration
 

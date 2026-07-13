@@ -211,6 +211,7 @@ def encode_one_item(
         resolve_item_staging_path: Callable[..., Path],
         effective_video_preset: Callable[..., int],
         search_quality: Callable[..., Any],
+        measure_quality_candidate: Callable[..., Any],
         select_streams: Callable[[dict[str, Any]], dict[str, Any]],
         build_ffmpeg_command: Callable[..., list[str]],
         detect_video_crop: Callable[..., str | None] | None,
@@ -426,7 +427,44 @@ def encode_one_item(
             ) or final_trace
             if final_verification.passed:
                 break
-            retry_quality = retry_quality_result_for_final_miss(quality_result, final_verification)
+            safe_unlink(staging_path)
+            quality_result.target_size_trace = final_trace
+
+            def measure_retry_candidate(crf: float) -> Any:
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "progress_state": "quality_search",
+                            "phase_label": "Measuring retry",
+                            "fps": None,
+                            "speed": None,
+                            "eta_seconds": None,
+                            "elapsed_seconds": 0.0,
+                            "out_time_seconds": 0.0,
+                        }
+                    )
+                return measure_quality_candidate(
+                    quality_source_path,
+                    policy["video"],
+                    crf=crf,
+                    source_codec=str(item.get("video_codec") or ""),
+                    width=width,
+                    height=height,
+                    detected_crop=detected_crop,
+                    cadence_decision=cadence_decision,
+                    cadence_evidence=cadence_evidence,
+                    cadence_source_fingerprint=current_source_fingerprint,
+                    process_controller=process_controller,
+                    host=quality_search_host,
+                    quality_temp_dir=_quality_temp_dir_for_encode_host(config, quality_search_host),
+                )
+
+            retry_quality = retry_quality_result_for_final_miss(
+                quality_result,
+                final_verification,
+                measure_candidate=measure_retry_candidate,
+            )
+            final_trace = object_dict(quality_result.target_size_trace) or final_trace
             retry_payload = final_verification.to_payload()
             retry_payload.update(
                 {
@@ -438,13 +476,14 @@ def encode_one_item(
             )
             if retry_quality is None:
                 raise FinalSizeMissError(_final_size_miss_message(final_verification))
+            final_trace = object_dict(retry_quality.target_size_trace) or final_trace
+            retry_payload["target_size_trace"] = final_trace
             retry_count += 1
             retry_payload["retry_count"] = retry_count
             retry_payload["next_crf"] = retry_quality.crf
             record_event(connection, item["library_item_id"], "encoding_target_size_retry", retry_payload)
             connection.commit()
             safe_unlink(temp_output)
-            safe_unlink(staging_path)
             quality_result = retry_quality
             ffmpeg_cmd = build_ffmpeg_command(
                 source_path=source_path,
