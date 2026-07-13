@@ -62,6 +62,7 @@
 	);
 	const activeHostCount = $derived(hosts.hosts.filter((host) => host.available).length);
 	const isBrowseOnly = $derived(context?.availability === 'browse_only');
+	const isWorkflowBlocked = $derived(workflow?.primary_lane === 'blocked');
 	const isBusy = $derived(Boolean(pendingAction));
 	const conflicts = $derived(context?.promotion_conflicts ?? []);
 	const reviewReady = $derived(
@@ -96,6 +97,8 @@
 					host_key: selectedHostKey
 				}
 			);
+			if (!response.ok)
+				throw new Error(response.message || 'The movie target is not ready for sampling.');
 			note = '';
 			return response.message || 'Sample plan ready. Review it before starting work.';
 		});
@@ -108,6 +111,7 @@
 				`/api/folders/${folderRoutePrefix(folder.prefix)}/ai-tune/confirm`,
 				{ proposal_id: asText(pendingProposal.proposal_id) }
 			);
+			if (!response.ok) throw new Error(response.message || 'The movie sample could not start.');
 			return response.message || 'Sample run queued.';
 		});
 	}
@@ -119,6 +123,7 @@
 				`/api/folders/${folderRoutePrefix(folder.prefix)}/ai-tune/confirm`,
 				{ proposal_id: '' }
 			);
+			if (!response.ok) throw new Error(response.message || 'The movie sample could not restart.');
 			return response.message || 'Sample retry queued.';
 		});
 	}
@@ -134,6 +139,7 @@
 					reviewed_draft_hash: asText(calibration.draft_hash)
 				}
 			);
+			if (!response.ok) throw new Error(response.message || 'The movie work could not be queued.');
 			return response.message || `Approved the sample and queued this ${scopeNoun}.`;
 		});
 	}
@@ -145,6 +151,7 @@
 				`/api/folders/${folderRoutePrefix(folder.prefix)}/queue-encode`,
 				{ notes: '', bypass_schedule: false }
 			);
+			if (!response.ok) throw new Error(response.message || 'The movie work could not be queued.');
 			return response.message || `Queued this ${scopeNoun}.`;
 		});
 	}
@@ -228,6 +235,7 @@
 		if (Object.keys(pendingProposal).length && pendingProposalCanQueue) return 'start';
 		if (reviewGate.status === 'accepted') return 'queue';
 		if (reviewReady) return 'queue';
+		if (isWorkflowBlocked) return 'none';
 		return 'prepare';
 	}
 
@@ -479,7 +487,8 @@
 						<button
 							class="secondary"
 							disabled={isBusy || isBrowseOnly || !selectedHostKey}
-							onclick={prepareSample}>Prepare new sample</button
+							onclick={prepareSample}
+							>{isWorkflowBlocked ? 'Draft revised sample' : 'Prepare new sample'}</button
 						>
 						{#if status.retryable_sample_job}
 							<button class="secondary" disabled={isBusy || isBrowseOnly} onclick={retrySample}

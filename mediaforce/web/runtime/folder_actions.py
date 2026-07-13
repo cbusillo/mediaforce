@@ -10,7 +10,7 @@ from typing import Any, Protocol, TypeAlias
 from fastapi import HTTPException
 from sqlalchemy import delete, or_, select, update
 
-from mediaforce.core.config import MediaforceConfig, load_config
+from mediaforce.core.config import MediaforceConfig, load_config, with_folder_policy_override
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import encode_jobs, library_items, staged_artifacts
 from mediaforce.core.type_defs import float_value, object_dict, object_list
@@ -24,7 +24,7 @@ from mediaforce.library.movie_workflow import classify_movie_path, movie_item_in
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.run_manifests import create_folder_manifest
 from mediaforce.library.candidate_selection import encode_candidate_decisions, scope_lifecycle_payload_from_decisions, \
-    workflow_eligibility
+    scope_target_size_blocker, workflow_eligibility
 from mediaforce.tuning.quality_risk import build_quality_risk_contract
 from mediaforce.tuning.quality_risk import append_quality_risk_record
 from mediaforce.tuning.size_goals import operator_intent_from_policy
@@ -234,6 +234,32 @@ def queue_folder_encode_action(
         if calibration is None:
             raise HTTPException(status_code=400, detail="Run a sampled calibration first.")
         calibration_payload = object_dict(calibration)
+        calibration_policy = object_dict(calibration_payload.get("policy"))
+        calibration_video = object_dict(calibration_policy.get("video"))
+        if {"target_size_mb", "target_size_bytes", "size_goal_mode"} & calibration_video.keys():
+            calibration_intent = operator_intent_from_policy(
+                calibration_video,
+                default_video_policy=object_dict(config.raw.get("video")),
+                audio_policy=object_dict(calibration_policy.get("audio")),
+                subtitle_policy=object_dict(calibration_policy.get("subtitle")),
+            )
+            if calibration_intent.size_goal.requires_confirmation:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Confirm whether the saved legacy size is runtime-normalized or an absolute per-episode "
+                        "target before queueing production."
+                    ),
+                )
+        preflight_config = with_folder_policy_override(config, normalized_prefix, calibration_policy)
+        target_size_blocker = scope_target_size_blocker(connection, preflight_config, normalized_prefix)
+        if target_size_blocker is not None:
+            return {
+                "ok": False,
+                "code": target_size_blocker.code,
+                "message": target_size_blocker.message,
+                "target_size_blocker": target_size_blocker.to_payload(),
+            }
         latest_failed_sample_job = (
             load_latest_failed_target_size_job_state(connection, config, normalized_prefix)
             if load_latest_failed_target_size_job_state is not None
@@ -269,24 +295,6 @@ def queue_folder_encode_action(
                     detail=(
                         "The current review evidence was rejected after approval. "
                         "Make and approve a revised test before starting the season."
-                    ),
-                )
-        saved_profile_path = config.paths.runtime_settings_path
-        calibration_policy = object_dict(calibration_payload.get("policy"))
-        calibration_video = object_dict(calibration_policy.get("video"))
-        if {"target_size_mb", "target_size_bytes", "size_goal_mode"} & calibration_video.keys():
-            calibration_intent = operator_intent_from_policy(
-                calibration_video,
-                default_video_policy=object_dict(config.raw.get("video")),
-                audio_policy=object_dict(calibration_policy.get("audio")),
-                subtitle_policy=object_dict(calibration_policy.get("subtitle")),
-            )
-            if calibration_intent.size_goal.requires_confirmation:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "Confirm whether the saved legacy size is runtime-normalized or an absolute per-episode "
-                        "target before queueing production."
                     ),
                 )
         active_encode_job = load_active_encode_job_for_prefix_fn(connection, normalized_prefix)
@@ -334,7 +342,7 @@ def queue_folder_encode_action(
             _reset_stale_prefix_encoding_items_for_requeue(connection, config, normalized_prefix, now_iso=now_iso)
         preflight_decisions = encode_candidate_decisions(
             connection,
-            config,
+            preflight_config,
             prefixes=[normalized_prefix],
         )
         if scope.domain == "movie" and not any(decision.eligible for decision in preflight_decisions):
@@ -349,7 +357,7 @@ def queue_folder_encode_action(
                 connection,
                 normalized_prefix,
                 candidate_eligibility=workflow_eligibility(preflight_decisions),
-                library_types=config.library_type_map,
+                library_types=preflight_config.library_type_map,
             ).to_payload()
             next_action = object_dict(workflow_state.get("next_action"))
             action_label = str(next_action.get("label") or "No action")
@@ -357,6 +365,7 @@ def queue_folder_encode_action(
                 status_code=400,
                 detail=f"No encode candidates were found for this movie scope. Next action: {action_label}.",
             )
+        saved_profile_path = config.paths.runtime_settings_path
         upsert_override(saved_profile_path, normalized_prefix, calibration_policy)
         refreshed_config = load_config(config.paths.config_path)
         manifest_kwargs: dict[str, Any] = {"prefix": normalized_prefix}
@@ -489,6 +498,20 @@ def approve_measured_encode_recovery_action(
             status_code=400,
             detail="This failure does not have enough measured quality data for one-click recovery.",
         )
+    preflight_config = with_folder_policy_override(
+        config,
+        normalized_prefix,
+        object_dict(recovery.get("policy")),
+    )
+    with open_db(config.paths.db_path) as connection:
+        target_size_blocker = scope_target_size_blocker(connection, preflight_config, normalized_prefix)
+    if target_size_blocker is not None:
+        return {
+            "ok": False,
+            "code": target_size_blocker.code,
+            "message": target_size_blocker.message,
+            "target_size_blocker": target_size_blocker.to_payload(),
+        }
 
     calibration_payload["policy"] = recovery["policy"]
     calibration_payload["accepted_at"] = now_iso()

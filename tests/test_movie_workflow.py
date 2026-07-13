@@ -7,7 +7,8 @@ from unittest.mock import Mock, patch
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from mediaforce.core.config import ConfigPaths, MediaforceConfig
+from mediaforce.cli import main as cli_main
+from mediaforce.core.config import ConfigPaths, MediaforceConfig, with_folder_policy_override
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items, plex_item_metadata, staged_artifacts
 from mediaforce.library.candidate_selection import candidate_rank_key, project_candidates, workflow_eligibility
@@ -435,6 +436,72 @@ class MovieWorkflowTests(unittest.TestCase):
         projection_mock.assert_not_called()
         self.assertEqual(payload["titles"][0]["workflow_state"]["state"], "encode_candidates")
 
+    def test_movie_library_payload_accepts_partial_candidate_projection(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_item(connection, "films/Example/Example.mkv")
+            payload = load_movie_library_payload(
+                connection,
+                self.config,
+                include_details=True,
+                candidate_decisions=[],
+            )
+
+        title = payload["titles"][0]
+        self.assertEqual(title["workflow_state"]["state"], "encode_candidates")
+        self.assertEqual(title["members"][0]["workflow_state"]["state"], "encode_candidate")
+
+    def test_target_size_projection_blocks_small_movie_and_keeps_larger_movie_ready(self) -> None:
+        config = self._config(extras="exclude", video=self._target_size_video_policy())
+        blocked_prefix = "films/Small Target"
+        feasible_prefix = "films/Larger Target"
+        with open_db(config.paths.db_path) as connection:
+            blocked_id = self._insert_item(
+                connection,
+                f"{blocked_prefix}/Feature.mkv",
+                size_bytes=360_000_000,
+                duration_seconds=5_520.0,
+            )
+            feasible_id = self._insert_item(
+                connection,
+                f"{feasible_prefix}/Feature.mkv",
+                size_bytes=800_000_000,
+                duration_seconds=5_520.0,
+            )
+            extra_id = self._insert_item(
+                connection,
+                f"{feasible_prefix}/Featurettes/Making Of.mkv",
+                size_bytes=120_000_000,
+                duration_seconds=1_200.0,
+            )
+            decisions = project_candidates(connection, config, prefixes=[])
+            decisions_by_id = {decision.item_id: decision for decision in decisions}
+            blocked_workflow = build_folder_workflow_state(
+                connection,
+                blocked_prefix,
+                candidate_eligibility=workflow_eligibility(decisions),
+                library_types=config.library_type_map,
+            )
+            feasible_workflow = build_folder_workflow_state(
+                connection,
+                feasible_prefix,
+                candidate_eligibility=workflow_eligibility(decisions),
+                library_types=config.library_type_map,
+            )
+
+        blocker = decisions_by_id[blocked_id].target_size_blocker
+        self.assertIsNotNone(blocker)
+        self.assertEqual(blocker.code, "target_lower_bound_exceeds_source_relative_cap")
+        self.assertFalse(decisions_by_id[blocked_id].eligible)
+        self.assertEqual(blocked_workflow.state, "blocked")
+        self.assertEqual(blocked_workflow.primary_lane, "blocked")
+        self.assertEqual(blocked_workflow.label, "Needs attention")
+        self.assertIn("Target size exceeds the 80% source cap", blocked_workflow.detail)
+        self.assertTrue(decisions_by_id[feasible_id].eligible)
+        self.assertIsNone(decisions_by_id[feasible_id].target_size_blocker)
+        self.assertFalse(decisions_by_id[extra_id].production_included)
+        self.assertIsNone(decisions_by_id[extra_id].target_size_blocker)
+        self.assertEqual(feasible_workflow.state, "encode_candidates")
+
     def test_promotion_preflight_blocks_duplicate_output_destinations(self) -> None:
         conflict = _promotion_conflict_response(
             self.config,
@@ -608,6 +675,152 @@ class MovieWorkflowTests(unittest.TestCase):
         self.assertIn("Extras are excluded", str(raised.exception.detail))
         self.assertEqual(persisted, [])
 
+    def test_infeasible_target_queue_stops_before_profile_manifest_or_job_writes(self) -> None:
+        config = self._config(extras="exclude", video=self._target_size_video_policy())
+        prefix = "films/Small Target"
+        with open_db(config.paths.db_path) as connection:
+            self._insert_item(
+                connection,
+                f"{prefix}/Feature.mkv",
+                size_bytes=360_000_000,
+                duration_seconds=5_520.0,
+            )
+        persisted: list[str] = []
+        queued: list[dict[str, object]] = []
+
+        with patch("mediaforce.web.runtime.folder_actions.create_folder_manifest") as create_manifest:
+            result = queue_folder_encode_action(
+                config,
+                prefix,
+                "",
+                False,
+                now_iso=lambda: "2026-07-13T00:00:00+00:00",
+                load_job_state=lambda *_args: None,
+                load_calibration_state=lambda *_args: {"policy": {}},
+                review_gate=lambda _calibration: {"can_confirm_full": True, "message": "Ready"},
+                upsert_override=lambda *_args: persisted.append("persisted"),
+                load_active_encode_job_for_prefix_fn=lambda *_args: None,
+                clear_terminal_encode_jobs_for_prefix_fn=lambda *_args: None,
+                prepare_terminal_encode_job_for_requeue_fn=lambda *_args: None,
+                save_encode_job=lambda *_args: queued.append(_args[-1]),
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "target_lower_bound_exceeds_source_relative_cap")
+        self.assertIn("Target size exceeds the 80% source cap", result["message"])
+        self.assertEqual(persisted, [])
+        self.assertEqual(queued, [])
+        create_manifest.assert_not_called()
+
+    def test_revised_feasible_target_can_queue_movie_work(self) -> None:
+        config = self._config(extras="exclude", video=self._target_size_video_policy())
+        prefix = "films/Revised Target"
+        rel_path = f"{prefix}/Feature.mkv"
+        with open_db(config.paths.db_path) as connection:
+            self._insert_item(
+                connection,
+                rel_path,
+                size_bytes=360_000_000,
+                duration_seconds=5_520.0,
+            )
+        calibration_policy = config.resolve_policy(rel_path)
+        calibration_policy["video"].update(self._absolute_target_video_policy(200_000_000))
+        approved_config = with_folder_policy_override(config, prefix, calibration_policy)
+        persisted: list[str] = []
+        queued: list[dict[str, object]] = []
+        manifest = {"items": [{"rel_path": rel_path}]}
+        manifest_path = self.root / "runs" / "feasible.json"
+
+        with patch("mediaforce.web.runtime.folder_actions.load_config", return_value=approved_config), patch(
+            "mediaforce.web.runtime.folder_actions.create_folder_manifest",
+            return_value=(manifest, manifest_path),
+        ):
+            result = queue_folder_encode_action(
+                config,
+                prefix,
+                "",
+                False,
+                now_iso=lambda: "2026-07-13T00:00:00+00:00",
+                load_job_state=lambda *_args: None,
+                load_calibration_state=lambda *_args: {"policy": calibration_policy},
+                review_gate=lambda _calibration: {"can_confirm_full": True, "message": "Ready"},
+                upsert_override=lambda *_args: persisted.append("persisted"),
+                load_active_encode_job_for_prefix_fn=lambda *_args: None,
+                clear_terminal_encode_jobs_for_prefix_fn=lambda *_args: None,
+                prepare_terminal_encode_job_for_requeue_fn=lambda *_args: None,
+                save_encode_job=lambda *_args: queued.append(_args[-1]),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(persisted, ["persisted"])
+        self.assertEqual([job["job_kind"] for job in queued], ["folder", "shard"])
+        self.assertTrue(all(job["manifest_path"] == str(manifest_path) for job in queued))
+
+    def test_approved_infeasible_target_blocks_before_profile_manifest_or_job_writes(self) -> None:
+        config = self._config(extras="exclude", video=self._target_size_video_policy())
+        prefix = "films/Larger Target"
+        rel_path = f"{prefix}/Feature.mkv"
+        with open_db(config.paths.db_path) as connection:
+            self._insert_item(
+                connection,
+                rel_path,
+                size_bytes=800_000_000,
+                duration_seconds=5_520.0,
+            )
+        calibration_policy = config.resolve_policy(rel_path)
+        calibration_policy["video"].update(self._absolute_target_video_policy(800_000_000))
+        persisted: list[str] = []
+        queued: list[dict[str, object]] = []
+
+        with patch("mediaforce.web.runtime.folder_actions.create_folder_manifest") as create_manifest:
+            result = queue_folder_encode_action(
+                config,
+                prefix,
+                "",
+                False,
+                now_iso=lambda: "2026-07-13T00:00:00+00:00",
+                load_job_state=lambda *_args: None,
+                load_calibration_state=lambda *_args: {"policy": calibration_policy},
+                review_gate=lambda _calibration: {"can_confirm_full": True, "message": "Ready"},
+                upsert_override=lambda *_args: persisted.append("persisted"),
+                load_active_encode_job_for_prefix_fn=lambda *_args: None,
+                clear_terminal_encode_jobs_for_prefix_fn=lambda *_args: None,
+                prepare_terminal_encode_job_for_requeue_fn=lambda *_args: None,
+                save_encode_job=lambda *_args: queued.append(_args[-1]),
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "target_lower_bound_exceeds_source_relative_cap")
+        self.assertEqual(persisted, [])
+        self.assertEqual(queued, [])
+        create_manifest.assert_not_called()
+
+    def test_cli_plan_reports_target_blocker_without_writing_a_manifest(self) -> None:
+        config = self._config(extras="exclude", video=self._target_size_video_policy())
+        prefix = "films/Small Target"
+        with open_db(config.paths.db_path) as connection:
+            self._insert_item(
+                connection,
+                f"{prefix}/Feature.mkv",
+                size_bytes=360_000_000,
+                duration_seconds=5_520.0,
+            )
+
+        with patch("mediaforce.cli.load_config", return_value=config), patch(
+            "mediaforce.cli.purge_transient_artifacts"
+        ), patch("mediaforce.cli._write_manifest") as write_manifest, patch("builtins.print") as print_line:
+            exit_code = cli_main([
+                "--config",
+                str(config.paths.config_path),
+                "plan",
+                "--prefix",
+                prefix,
+            ])
+
+        self.assertEqual(exit_code, 2)
+        self.assertTrue(any("Target size exceeds the 80% source cap" in str(call) for call in print_line.call_args_list))
+        write_manifest.assert_not_called()
+
     def test_title_queue_does_not_recover_an_active_exact_extra_job(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             self._insert_item(connection, "films/Example/Extras/Trailer.mkv", status="encoding")
@@ -689,6 +902,7 @@ class MovieWorkflowTests(unittest.TestCase):
             ranking: str = "oldest_added_first",
             availability: str = "production",
             additional_libraries: list[dict[str, object]] | None = None,
+            video: dict[str, object] | None = None,
     ) -> MediaforceConfig:
         libraries: list[dict[str, object]] = [
             {
@@ -715,7 +929,7 @@ class MovieWorkflowTests(unittest.TestCase):
                     "staging_root": str(self.root / "staging"),
                     "archive_root": str(self.root / "archive"),
                 },
-                "video": {},
+                "video": video or {},
                 "audio": {},
                 "subtitle": {},
                 "planning": {},
@@ -756,6 +970,7 @@ class MovieWorkflowTests(unittest.TestCase):
             *,
             size_bytes: int = 1024,
             status: str = "discovered",
+            duration_seconds: float = 7_200.0,
     ) -> int:
         timestamp = datetime.now(tz=UTC).isoformat(timespec="seconds")
         path = Path(rel_path)
@@ -770,7 +985,7 @@ class MovieWorkflowTests(unittest.TestCase):
                 size_bytes=size_bytes,
                 mtime_ns=1_700_000_000_000_000_000,
                 fingerprint=f"movie-{rel_path}",
-                duration_seconds=7_200.0,
+                duration_seconds=duration_seconds,
                 video_codec="h264",
                 audio_summary_json="[]",
                 subtitle_summary_json="[]",
@@ -785,6 +1000,34 @@ class MovieWorkflowTests(unittest.TestCase):
             )
         )
         return int(result.inserted_primary_key[0])
+
+    @staticmethod
+    def _target_size_video_policy() -> dict[str, object]:
+        return {
+            "target_size_mb": 300,
+            "target_size_bytes": 300_000_000,
+            "target_runtime_minutes": 45,
+            "size_goal_schema_version": 1,
+            "size_goal_mode": "normalized",
+            "size_goal_source": "config_default",
+            "sample_projection_tolerance_percent": 10,
+            "final_output_tolerance_percent": 5,
+            "max_encoded_percent": 80,
+        }
+
+    @staticmethod
+    def _absolute_target_video_policy(target_size_bytes: int) -> dict[str, object]:
+        return {
+            "target_size_mb": target_size_bytes / 1_000_000,
+            "target_size_bytes": target_size_bytes,
+            "target_runtime_minutes": 92,
+            "size_goal_schema_version": 1,
+            "size_goal_mode": "absolute",
+            "size_goal_source": "operator_request",
+            "sample_projection_tolerance_percent": 10,
+            "final_output_tolerance_percent": 5,
+            "max_encoded_percent": 80,
+        }
 
     @staticmethod
     def _insert_stage(connection: DBClient, item_id: int, rel_path: str) -> None:

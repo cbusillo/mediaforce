@@ -15,7 +15,13 @@ from mediaforce.core.type_defs import object_dict
 from mediaforce.library.library_settings import normalize_library_policy, normalize_library_type
 from mediaforce.library.media_scopes import normalize_scope_prefix, path_matches_scope, resolve_media_scopes
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
-from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES, derive_item_workflow_state
+from mediaforce.library.planner import build_manifest_item
+from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES, EncodeEligibility, derive_item_workflow_state
+from mediaforce.tuning.stream_budget import (
+    StreamBudgetLedger,
+    StreamBudgetProjectionBlocker,
+    stream_budget_projection_blocker,
+)
 
 LifecycleMode = Literal["auto", "on", "off"]
 ProviderState = Literal["active", "ended", "unknown", "stale"]
@@ -79,6 +85,7 @@ class CandidateDecision:
     media_role: str | None
     production_included: bool
     production_blocker: str | None
+    target_size_blocker: StreamBudgetProjectionBlocker | None
     ranking_mode: str
     media_domain: str
 
@@ -91,6 +98,7 @@ class CandidateDecision:
         return (
             self.workflow_lane == "encode"
             and self.production_included
+            and self.target_size_blocker is None
             and (not self.hold_reasons or self.override_applied)
         )
 
@@ -121,6 +129,11 @@ class CandidateDecision:
             "media_role": self.media_role,
             "production_included": self.production_included,
             "production_blocker": self.production_blocker,
+            "target_size_blocker": (
+                self.target_size_blocker.to_payload()
+                if self.target_size_blocker is not None
+                else None
+            ),
             "ranking_mode": self.ranking_mode,
             "media_domain": self.media_domain,
             "media_age": self.age.to_payload(),
@@ -214,6 +227,11 @@ def project_candidates(
         if not production_enabled:
             label = str(library.get("label") or media_root or "This library")
             production_blocker = f"{label} is browse only; set its availability to Production before processing."
+        target_size_blocker = (
+            _target_size_projection_blocker(row, config)
+            if library_type == "movie" and workflow_lane == "encode" and production_included
+            else None
+        )
         ranking_mode = (
             str(library_policy.get("ranking") or "oldest_added_first")
             if library_type == "movie"
@@ -289,6 +307,7 @@ def project_candidates(
                 media_role=membership.role if membership is not None else None,
                 production_included=production_included,
                 production_blocker=production_blocker,
+                target_size_blocker=target_size_blocker,
                 ranking_mode=ranking_mode,
                 media_domain=library_type,
             )
@@ -314,15 +333,44 @@ def encode_candidate_decisions(
     )
 
 
-def workflow_eligibility(decisions: list[CandidateDecision]) -> dict[int, tuple[bool, str | None]]:
+def scope_target_size_blocker(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+) -> StreamBudgetProjectionBlocker | None:
+    blocked = [
+        decision
+        for decision in encode_candidate_decisions(connection, config, prefixes=[prefix])
+        if decision.target_size_blocker is not None
+    ]
+    if not blocked:
+        return None
+    blocked.sort(key=lambda decision: str(decision.row.get("rel_path") or ""))
+    return blocked[0].target_size_blocker
+
+
+def workflow_eligibility(decisions: list[CandidateDecision]) -> dict[int, EncodeEligibility]:
     return {
-        decision.item_id: (
-            decision.eligible if decision.workflow_lane == "encode" else decision.production_included,
-            decision.production_blocker
-            or (decision.hold_reasons[0].detail if decision.hold_reasons else None),
+        decision.item_id: EncodeEligibility(
+            eligible=decision.eligible if decision.workflow_lane == "encode" else decision.production_included,
+            blocker=(
+                decision.production_blocker
+                or (decision.target_size_blocker.message if decision.target_size_blocker is not None else None)
+                or (decision.hold_reasons[0].detail if decision.hold_reasons else None)
+            ),
+            blocked=decision.target_size_blocker is not None,
         )
         for decision in decisions
     }
+
+
+def _target_size_projection_blocker(
+        row: dict[str, Any],
+        config: MediaforceConfig,
+) -> StreamBudgetProjectionBlocker | None:
+    item = build_manifest_item(row, config)
+    ledger = StreamBudgetLedger.from_payload(object_dict(item.get("stream_budget_ledger")))
+    return stream_budget_projection_blocker(ledger)
 
 
 def scope_lifecycle_payload(

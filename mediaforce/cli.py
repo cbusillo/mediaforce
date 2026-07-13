@@ -12,6 +12,7 @@ from mediaforce.execution import describe_item_plan, encode_manifest_items, prom
     validate_manifest_items
 from mediaforce.encoding.bakeoff import DEFAULT_BAKEOFF_ENGINES, build_bakeoff_plan, write_bakeoff_plan
 from mediaforce.library.folder_profiles import inspect_prefix
+from mediaforce.library.candidate_selection import scope_target_size_blocker
 from mediaforce.library.planner import recommend_item
 from mediaforce.library.run_manifests import build_run_manifest as build_db_run_manifest, \
     select_candidates as select_run_manifest_candidates, \
@@ -21,6 +22,10 @@ from mediaforce.library.scanner import scan_library
 from mediaforce.library.metadata_sync import sync_external_metadata
 from mediaforce.review import generate_compare_clips
 from mediaforce.state_cleanup import purge_transient_artifacts
+
+
+class TargetSizePreflightBlocked(RuntimeError):
+    pass
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -157,6 +162,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "plan":
+            blocker = _target_size_blocker_for_prefixes(connection, config, args.prefix)
+            if blocker is not None:
+                print(f"Plan blocked: {blocker}")
+                return 2
             rows = _select_encode_candidates(
                 connection,
                 config,
@@ -175,14 +184,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "campaign":
-            manifest, output_path = _create_campaign_manifest(
-                connection,
-                config,
-                prefix=args.prefix,
-                limit=args.limit,
-                buckets=args.bucket or None,
-                output_path=args.output,
-            )
+            try:
+                manifest, output_path = _create_campaign_manifest(
+                    connection,
+                    config,
+                    prefix=args.prefix,
+                    limit=args.limit,
+                    buckets=args.bucket or None,
+                    output_path=args.output,
+                )
+            except TargetSizePreflightBlocked as exc:
+                print(f"Campaign blocked: {exc}")
+                return 2
             print(f"\nCampaign manifest: {output_path}")
             if manifest["items"]:
                 print("\nFirst item plan:")
@@ -206,14 +219,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "run":
-            manifest, output_path = _create_campaign_manifest(
-                connection,
-                config,
-                prefix=args.prefix,
-                limit=args.limit,
-                buckets=args.bucket or None,
-                output_path=args.output,
-            )
+            try:
+                manifest, output_path = _create_campaign_manifest(
+                    connection,
+                    config,
+                    prefix=args.prefix,
+                    limit=args.limit,
+                    buckets=args.bucket or None,
+                    output_path=args.output,
+                )
+            except TargetSizePreflightBlocked as exc:
+                print(f"Run blocked: {exc}")
+                return 2
             print(f"\nRun manifest: {output_path}")
             if not manifest["items"]:
                 print("No items selected for this run.")
@@ -465,6 +482,9 @@ def _create_campaign_manifest(
     )
     summary = inspect_prefix(connection, config, prefix)
     _print_folder_summary(summary)
+    blocker = scope_target_size_blocker(connection, config, prefix)
+    if blocker is not None:
+        raise TargetSizePreflightBlocked(blocker.message)
     rows = _select_encode_candidates(
         connection,
         config,
@@ -475,6 +495,18 @@ def _create_campaign_manifest(
     manifest = _build_run_manifest(rows, config)
     manifest_path = _write_manifest(connection, config, manifest, output_path)
     return manifest, manifest_path
+
+
+def _target_size_blocker_for_prefixes(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefixes: list[str],
+) -> str | None:
+    for prefix in prefixes:
+        blocker = scope_target_size_blocker(connection, config, prefix)
+        if blocker is not None:
+            return blocker.message
+    return None
 
 
 def _resolve_manifest_path(connection: DBClient, manifest_path: Path | None) -> Path:

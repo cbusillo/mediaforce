@@ -16,7 +16,7 @@ from mediaforce.core.utils import filesystem_collision_key
 from mediaforce.library.candidate_selection import CandidateDecision, project_candidates, workflow_eligibility
 from mediaforce.library.media_scopes import resolve_media_scope, resolve_media_scopes, scope_rel_path_filter
 from mediaforce.library.movie_workflow import MovieMembership, classify_movie_path, movie_item_included
-from mediaforce.library.workflow_state import build_folder_workflow_states, derive_item_workflow_state
+from mediaforce.library.workflow_state import EncodeEligibility, build_folder_workflow_states, derive_item_workflow_state
 
 MovieMetrics = Mapping[str, Mapping[str, Any]]
 
@@ -97,7 +97,7 @@ def load_movie_library_payload(
             item_id = int(row["item_id"])
             library = library_by_root[membership.root]
             included, blocker = _production_inclusion(library, membership)
-            eligibility.setdefault(item_id, (included, blocker))
+            eligibility.setdefault(item_id, EncodeEligibility(eligible=included, blocker=blocker))
 
     workflows = (
         build_folder_workflow_states(
@@ -236,7 +236,7 @@ def _title_payload(
         *,
         library_by_root: dict[str, dict[str, Any]],
         decisions_by_item: dict[int, Any],
-        eligibility: dict[int, tuple[bool, str | None]],
+        eligibility: dict[int, EncodeEligibility],
         workflow: Any,
         metrics: dict[str, Any],
         metrics_available: bool,
@@ -334,7 +334,7 @@ def _member_payload(
         *,
         library: dict[str, Any],
         decision: Any,
-        eligibility: tuple[bool, str | None],
+        eligibility: EncodeEligibility,
         workflow_item: dict[str, Any] | None,
         conflicts: list[dict[str, Any]],
         include_details: bool,
@@ -349,8 +349,9 @@ def _member_payload(
     if include_details and workflow_item is None:
         workflow_item = derive_item_workflow_state(
             row,
-            encode_eligible=eligibility[0],
-            policy_blocker=eligibility[1],
+            encode_eligible=eligibility.eligible,
+            policy_blocker=eligibility.blocker,
+            encode_blocked=eligibility.blocked,
         ).to_payload()
     return {
         **membership.to_payload(),
