@@ -5,10 +5,16 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
+from sqlalchemy import select
+
+from mediaforce.core.config import ConfigPaths, MediaforceConfig
+from mediaforce.core.db import open_db, reset_engine_cache
+from mediaforce.core.db_tables import library_items
 from mediaforce.library.scanner import (
     _cadence_summary_present,
     _content_version_changed,
     _failed_probe_summary,
+    _iter_media_files,
     _media_fingerprint_present,
     scan_library,
 )
@@ -93,6 +99,71 @@ class ScannerRuntimeTests(unittest.TestCase):
         self.assertGreaterEqual(len(connection.statements), 2)
         self.assertTrue(connection.statements[0])
         self.assertTrue(connection.statements[-1])
+
+    def test_media_file_prefixes_use_the_configured_root_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            physical_root = Path(temp_dir) / "Movies on Disk"
+            feature = physical_root / "Example" / "Feature.mkv"
+            feature.parent.mkdir(parents=True)
+            feature.write_bytes(b"movie")
+
+            matches = list(
+                _iter_media_files(
+                    "films",
+                    physical_root,
+                    prefixes=["films/Example"],
+                    limit=None,
+                    seen=0,
+                )
+            )
+
+        self.assertEqual(matches, [feature])
+
+    def test_rescan_rewrites_catalog_identity_to_the_configured_root_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            physical_root = project_root / "Movies on Disk"
+            feature = physical_root / "Example" / "Feature.mkv"
+            feature.parent.mkdir(parents=True)
+            feature.write_bytes(b"not a real movie")
+            paths = ConfigPaths(
+                project_root=project_root,
+                config_path=project_root / "config.toml",
+                db_path=project_root / "library.sqlite3",
+                run_manifest_dir=project_root / "runs",
+                web_state_dir=project_root / "web",
+                review_dir=project_root / "review",
+                runtime_settings_path=project_root / "runtime-settings.json",
+            )
+
+            def config_for(key: str) -> MediaforceConfig:
+                return MediaforceConfig(
+                    raw={
+                        "media": {"source_roots": {key: str(physical_root)}},
+                        "video": {},
+                        "audio": {},
+                        "subtitle": {},
+                        "planning": {},
+                        "validation": {},
+                        "overrides": [],
+                        "remote_hosts": [],
+                    },
+                    paths=paths,
+                )
+
+            try:
+                with open_db(paths.db_path) as connection:
+                    scan_library(connection, config_for("legacy_movies"))
+                    scan_library(connection, config_for("films"))
+                    row = connection.execute(
+                        select(library_items.c.media_root, library_items.c.rel_path, library_items.c.parent_dir)
+                    ).mappings().one()
+            finally:
+                reset_engine_cache()
+
+        self.assertEqual(row["media_root"], "films")
+        self.assertEqual(row["rel_path"], "films/Example/Feature.mkv")
+        self.assertEqual(row["parent_dir"], "films/Example")
 
     def test_failed_probe_becomes_blocked_unknown_evidence(self) -> None:
         summary = _failed_probe_summary(RuntimeError("corrupt media"))

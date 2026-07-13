@@ -1,6 +1,6 @@
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from sqlalchemy import or_, select
 
@@ -127,8 +127,9 @@ def build_folder_workflow_state(
         prefix: str,
         *,
         candidate_eligibility: dict[int, tuple[bool, str | None]] | None = None,
+        library_types: Mapping[str, str] | None = None,
 ) -> FolderWorkflowState:
-    scope = resolve_media_scope(connection, prefix)
+    scope = resolve_media_scope(connection, prefix, library_types=library_types)
     item_states = tuple(
         derive_item_workflow_state(
             row,
@@ -146,11 +147,12 @@ def build_folder_workflow_states(
         prefixes: list[str],
         *,
         candidate_eligibility: dict[int, tuple[bool, str | None]] | None = None,
+        library_types: Mapping[str, str] | None = None,
 ) -> dict[str, FolderWorkflowState]:
     normalized_prefixes = list(dict.fromkeys(normalize_prefix(prefix) for prefix in prefixes))
     if not normalized_prefixes:
         return {}
-    scopes = resolve_media_scopes(connection, normalized_prefixes)
+    scopes = resolve_media_scopes(connection, normalized_prefixes, library_types=library_types)
     rows = _load_item_rows_for_scopes(connection, scopes)
     job_states = _load_encode_job_states(connection, scopes)
     result: dict[str, FolderWorkflowState] = {}
@@ -198,6 +200,10 @@ def derive_item_workflow_state(
     elif status == "encoding":
         state = "encoding"
         lane = "processing"
+    elif not encode_eligible:
+        state = "held"
+        lane = "none"
+        blocker = policy_blocker or "This item is excluded from the current production scope."
     elif has_staged_output and status == "encoded":
         state = "ready_to_validate"
         lane = "validate"
@@ -209,13 +215,8 @@ def derive_item_workflow_state(
         lane = "blocked"
         blocker = "Encoded item is missing its staged output."
     elif status in ENCODE_CANDIDATE_STATUSES:
-        if encode_eligible:
-            state = "encode_candidate"
-            lane = "encode"
-        else:
-            state = "held"
-            lane = "none"
-            blocker = policy_blocker or "Library lifecycle policy is holding this item."
+        state = "encode_candidate"
+        lane = "encode"
     else:
         state = "idle"
         lane = "none"

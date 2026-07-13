@@ -20,6 +20,7 @@ from mediaforce.core.type_defs import int_value
 from mediaforce.core.type_defs import object_dict
 from mediaforce.core.type_defs import object_list
 from mediaforce.core.utils import content_version_fingerprint
+from mediaforce.library.media_scopes import logical_library_rel_path
 
 TRANSIENT_FILE_BUSY_ERRNOS = {errno.EBUSY}
 TRANSIENT_FILE_BUSY_RETRY_ATTEMPTS = 8
@@ -450,8 +451,13 @@ def promote_one_item(
     promoted_fingerprint = file_fingerprint(destination_path, promoted_stat, promoted_probe.duration_seconds)
     promoted_content_fingerprint = content_version_fingerprint(destination_path, promoted_stat)
     now = timestamp()
-    rel_path = str(destination_path.relative_to(config.source_root_map[item["media_root"]].parent))
-    parent_dir = str(destination_path.parent.relative_to(config.source_root_map[item["media_root"]].parent))
+    logical_path = logical_library_rel_path(
+        str(item["media_root"]),
+        config.source_root_map[str(item["media_root"])],
+        destination_path,
+    )
+    rel_path = logical_path.as_posix()
+    parent_dir = logical_path.parent.as_posix()
 
     connection.execute(
         update(library_items)

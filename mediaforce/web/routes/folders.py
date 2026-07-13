@@ -124,11 +124,10 @@ def register_folder_routes(
             body = await request.json()
         except Exception:
             body = {}
-        return JSONResponse(
-            save_profile_action(
-                prefix.strip("/"),
-                bool(body.get("confirm_high_impact", False)),
-                bool(body.get("confirm_size_tradeoff", False)),
-                str(body.get("reviewed_draft_hash", "")),
-            )
+        result = save_profile_action(
+            prefix.strip("/"),
+            bool(body.get("confirm_high_impact", False)),
+            bool(body.get("confirm_size_tradeoff", False)),
+            str(body.get("reviewed_draft_hash", "")),
         )
+        return JSONResponse(result, status_code=200 if result.get("ok") else 409)

@@ -1,6 +1,7 @@
 import json
 import os
 import uuid
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from itertools import chain
@@ -188,7 +189,7 @@ def _sync_plex(
     observed_at_text = observed_at.isoformat(timespec="seconds")
     series_claims: dict[str, set[str]] = {}
     for row, item in claims.values():
-        series_prefix = _series_prefix(str(row["rel_path"] or ""))
+        series_prefix = _series_prefix(str(row["rel_path"] or ""), library_types=config.library_type_map)
         if series_prefix and item.show_rating_key:
             series_claims.setdefault(series_prefix, set()).add(item.show_rating_key)
     referenced_show_keys = {rating_key for rating_keys in series_claims.values() for rating_key in rating_keys}
@@ -236,7 +237,12 @@ def _sync_plex(
     conflicted_series_prefixes = {
         prefix
         for item_id in conflicted_item_ids
-        for prefix in [_series_prefix(str(rows_by_id[item_id]["rel_path"] or ""))]
+        for prefix in [
+            _series_prefix(
+                str(rows_by_id[item_id]["rel_path"] or ""),
+                library_types=config.library_type_map,
+            )
+        ]
         if prefix is not None
     }
     for series_prefix, rating_keys in series_claims.items():
@@ -288,7 +294,7 @@ def _sync_plex(
     local_series_prefixes = {
         prefix
         for row in rows
-        for prefix in [_series_prefix(str(row["rel_path"] or ""))]
+        for prefix in [_series_prefix(str(row["rel_path"] or ""), library_types=config.library_type_map)]
         if prefix is not None
     }
     stale_series_prefixes = local_series_prefixes - refreshed_series - conflicted_series_prefixes
@@ -424,9 +430,15 @@ def _provider_error_message(provider: str, error: ProviderHttpError) -> str:
     return f"{provider} metadata refresh failed; cached metadata was preserved."
 
 
-def _series_prefix(rel_path: str) -> str | None:
+def _series_prefix(
+        rel_path: str,
+        *,
+        library_types: Mapping[str, str] | None = None,
+) -> str | None:
     parts = Path(rel_path).parts
-    if len(parts) < 3 or parts[0].lower() != "tv":
+    root = parts[0] if parts else ""
+    configured_type = str((library_types or {}).get(root) or "").strip().lower()
+    if len(parts) < 3 or (configured_type or root.lower()) != "tv":
         return None
     return "/".join(parts[:2])
 

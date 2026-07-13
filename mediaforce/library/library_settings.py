@@ -168,4 +168,4 @@ def library_type_label(library_type: str) -> str:
 
 
 def library_production_supported(library_type: str) -> bool:
-    return library_type == "tv"
+    return library_type in {"tv", "movie"}

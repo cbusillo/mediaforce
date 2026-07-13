@@ -1,5 +1,6 @@
 import re
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -11,8 +12,9 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, plex_item_metadata, series_metadata, staged_artifacts
 from mediaforce.core.type_defs import object_dict
-from mediaforce.library.media_scopes import is_tv_season_prefix, normalize_scope_prefix, path_matches_scope, \
-    resolve_media_scopes
+from mediaforce.library.library_settings import normalize_library_policy, normalize_library_type
+from mediaforce.library.media_scopes import normalize_scope_prefix, path_matches_scope, resolve_media_scopes
+from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES, derive_item_workflow_state
 
 LifecycleMode = Literal["auto", "on", "off"]
@@ -74,6 +76,11 @@ class CandidateDecision:
     season_activity_at: datetime | None
     hold_reasons: tuple[HoldReason, ...]
     manual_override: bool
+    media_role: str | None
+    production_included: bool
+    production_blocker: str | None
+    ranking_mode: str
+    media_domain: str
 
     @property
     def item_id(self) -> int:
@@ -81,7 +88,11 @@ class CandidateDecision:
 
     @property
     def eligible(self) -> bool:
-        return self.workflow_lane == "encode" and (not self.hold_reasons or self.override_applied)
+        return (
+            self.workflow_lane == "encode"
+            and self.production_included
+            and (not self.hold_reasons or self.override_applied)
+        )
 
     @property
     def override_applied(self) -> bool:
@@ -107,6 +118,11 @@ class CandidateDecision:
             "hold_reasons": [reason.to_payload() for reason in self.hold_reasons],
             "manual_override": self.manual_override,
             "override_applied": self.override_applied,
+            "media_role": self.media_role,
+            "production_included": self.production_included,
+            "production_blocker": self.production_blocker,
+            "ranking_mode": self.ranking_mode,
+            "media_domain": self.media_domain,
             "media_age": self.age.to_payload(),
             "season_rank_age": self.season_rank_age.to_payload(),
             "season_activity_at": (
@@ -138,7 +154,7 @@ def project_candidates(
     numbered_by_series: dict[str, set[int]] = {}
     for row in rows:
         item_id = int(row["item_id"])
-        season = season_identity(row)
+        season = season_identity(row, library_types=config.library_type_map)
         season_by_item[item_id] = season
         if season is None:
             continue
@@ -154,13 +170,19 @@ def project_candidates(
         season_prefix: _newest_age_evidence(_media_age(row) for row in grouped_rows)
         for season_prefix, grouped_rows in season_rows.items()
     }
-    resolved_scopes = resolve_media_scopes(connection, prefixes or [])
+    resolved_scopes = resolve_media_scopes(
+        connection,
+        prefixes or [],
+        library_types=config.library_type_map,
+    )
     normalized_override = normalize_scope_prefix(manual_override_prefix or "")
     decisions: list[CandidateDecision] = []
     production_roots = set(config.source_root_map)
+    scan_roots = set(config.scan_source_root_map)
 
     for row in rows:
-        if str(row["media_root"] or "") not in production_roots:
+        media_root = str(row["media_root"] or "")
+        if media_root not in scan_roots:
             continue
         if statuses is not None and str(row["status"] or "") not in statuses:
             continue
@@ -169,6 +191,34 @@ def project_candidates(
             continue
         workflow_lane = derive_item_workflow_state(row).lane
         season = season_by_item[int(row["item_id"])]
+        library = config.library_definition_map.get(media_root, {})
+        library_type = normalize_library_type(library.get("type"), key=media_root)
+        library_policy = normalize_library_policy(library_type, library.get("policy"))
+        membership = (
+            classify_movie_path(rel_path, root=media_root)
+            if library_type == "movie"
+            else None
+        )
+        explicit_exact = any(
+            scope.match == "exact_item" and scope.prefix == rel_path
+            for scope in resolved_scopes
+        )
+        member_included, member_blocker = (
+            movie_item_included(membership, library_policy, explicit_exact=explicit_exact)
+            if membership is not None
+            else (True, None)
+        )
+        production_enabled = media_root in production_roots
+        production_included = production_enabled and member_included
+        production_blocker = member_blocker
+        if not production_enabled:
+            label = str(library.get("label") or media_root or "This library")
+            production_blocker = f"{label} is browse only; set its availability to Production before processing."
+        ranking_mode = (
+            str(library_policy.get("ranking") or "oldest_added_first")
+            if library_type == "movie"
+            else "oldest_added_first"
+        )
         policy = _resolved_policy(config, season.series_prefix if season is not None else rel_path)
         lifecycle_keys = (
             "series_lifecycle_mode",
@@ -176,14 +226,14 @@ def project_candidates(
             "current_season_inactive_days",
             "series_metadata_stale_days",
         )
-        policy_enabled = all(
-            isinstance(config.raw.get(section), dict)
-            for section in ("video", "audio", "subtitle", "planning")
-        ) or any(
-            key in policy
-            for key in lifecycle_keys
+        policy_enabled = season is not None and (
+            all(
+                isinstance(config.raw.get(section), dict)
+                for section in ("video", "audio", "subtitle", "planning")
+            )
+            or any(key in policy for key in lifecycle_keys)
         )
-        mode = _lifecycle_mode(policy.get("series_lifecycle_mode"))
+        mode = _lifecycle_mode(policy.get("series_lifecycle_mode")) if season is not None else "off"
         acquisition_days = _duration_days(policy.get("season_acquisition_hold_days"), 30)
         inactive_days = _duration_days(policy.get("current_season_inactive_days"), 365)
         stale_days = _positive_int(policy.get("series_metadata_stale_days"), 7)
@@ -236,6 +286,11 @@ def project_candidates(
                 season_activity_at=activity_at,
                 hold_reasons=hold_reasons,
                 manual_override=manual_override,
+                media_role=membership.role if membership is not None else None,
+                production_included=production_included,
+                production_blocker=production_blocker,
+                ranking_mode=ranking_mode,
+                media_domain=library_type,
             )
         )
     return decisions
@@ -262,11 +317,11 @@ def encode_candidate_decisions(
 def workflow_eligibility(decisions: list[CandidateDecision]) -> dict[int, tuple[bool, str | None]]:
     return {
         decision.item_id: (
-            decision.eligible,
-            decision.hold_reasons[0].detail if decision.hold_reasons else None,
+            decision.eligible if decision.workflow_lane == "encode" else decision.production_included,
+            decision.production_blocker
+            or (decision.hold_reasons[0].detail if decision.hold_reasons else None),
         )
         for decision in decisions
-        if decision.workflow_lane == "encode"
     }
 
 
@@ -338,17 +393,31 @@ def scope_lifecycle_payload_from_decisions(
         "ranking_added_at": rank_age.isoformat(timespec="seconds") if rank_age is not None else None,
         "can_override_holds": bool(
             held
-            and _is_season_prefix(normalized_prefix)
+            and any(
+                decision.season is not None and decision.season.season_prefix == normalized_prefix
+                for decision in decisions
+            )
             and all(all(reason.code in OVERRIDEABLE_HOLD_CODES for reason in decision.hold_reasons) for decision in held)
         ),
         "seasons": seasons,
     }
 
 
-def season_identity(row: dict[str, Any]) -> SeasonIdentity | None:
+def season_identity(
+        row: dict[str, Any],
+        *,
+        library_types: Mapping[str, str] | None = None,
+) -> SeasonIdentity | None:
     rel_path = str(row.get("rel_path") or "")
     parts = Path(rel_path).parts
-    if len(parts) < 3 or parts[0].lower() != "tv":
+    if len(parts) < 3:
+        return None
+    root = parts[0]
+    if library_types is None:
+        is_tv = root.lower() == "tv"
+    else:
+        is_tv = normalize_library_type(library_types.get(root), key=root) == "tv"
+    if not is_tv:
         return None
     label = parts[2]
     match = SEASON_PATTERN.fullmatch(label)
@@ -375,6 +444,15 @@ def season_identity(row: dict[str, Any]) -> SeasonIdentity | None:
 
 def candidate_rank_key(decision: CandidateDecision, *, recommendation_score: float, size_bytes: int) -> tuple[Any, ...]:
     timestamp = decision.season_rank_age.timestamp
+    if decision.ranking_mode == "largest_first":
+        return (
+            -size_bytes,
+            timestamp is None,
+            timestamp or datetime.max.replace(tzinfo=UTC),
+            -recommendation_score,
+            str(decision.row["rel_path"]),
+            decision.item_id,
+        )
     return (
         timestamp is None,
         timestamp or datetime.max.replace(tzinfo=UTC),
@@ -585,10 +663,6 @@ def _lifecycle_mode(value: object) -> LifecycleMode:
     if normalized in {"auto", "on", "off"}:
         return normalized  # type: ignore[return-value]
     return "auto"
-
-
-def _is_season_prefix(prefix: str) -> bool:
-    return is_tv_season_prefix(prefix)
 
 
 def _latest_timestamp(values: Any) -> datetime | None:

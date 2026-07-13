@@ -29,7 +29,7 @@ from mediaforce.encoding.fingerprint import (
     MEDIA_FINGERPRINT_TOOL_VERSION,
     unavailable_media_fingerprint_summary,
 )
-from mediaforce.library.media_scopes import path_matches_scope
+from mediaforce.library.media_scopes import logical_library_rel_path, path_matches_scope
 from mediaforce.library.planner import recommend_item
 from mediaforce.library.probe import probe_media
 from mediaforce.core.type_defs import int_value, object_list
@@ -75,9 +75,12 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
     pending_writes = 0
 
     for root_name, root_path in scan_source_roots.items():
-        for file_path in _iter_media_files(root_path, prefixes=normalized_prefixes or None, limit=limit,
+        for file_path in _iter_media_files(root_name, root_path, prefixes=normalized_prefixes or None, limit=limit,
                                            seen=stats.total_seen):
             source_path = str(file_path)
+            logical_path = logical_library_rel_path(root_name, root_path, file_path)
+            rel_path = logical_path.as_posix()
+            parent_dir = logical_path.parent.as_posix()
             seen_paths.add(source_path)
             stats.total_seen += 1
 
@@ -109,6 +112,9 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                         last_scan_id=scan_id,
                         last_seen_at=started_at,
                         updated_at=started_at,
+                        rel_path=rel_path,
+                        media_root=root_name,
+                        parent_dir=parent_dir,
                         content_version_changed_at=case(
                             (library_items.c.status == "missing", started_at),
                             else_=library_items.c.content_version_changed_at,
@@ -129,8 +135,6 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                 probe = _failed_probe_summary(exc)
             fingerprint = file_fingerprint(file_path=file_path, stat_result=stat_result,
                                            duration_seconds=probe.duration_seconds)
-            rel_path = str(file_path.relative_to(root_path.parent))
-            parent_dir = str(file_path.parent.relative_to(root_path.parent))
             recommendation = recommend_item(
                 {
                     "rel_path": rel_path,
@@ -375,7 +379,11 @@ def _failed_probe_summary(error: Exception) -> ProbeSummary:
 
 
 def _iter_media_files(
-        root_path: Path, prefixes: list[str] | None, limit: int | None, seen: int
+        root_name: str,
+        root_path: Path,
+        prefixes: list[str] | None,
+        limit: int | None,
+        seen: int,
 ) -> Iterator[Path]:
     matched = 0
     for dirpath, _, filenames in os.walk(root_path):
@@ -383,7 +391,7 @@ def _iter_media_files(
             file_path = Path(dirpath, name)
             if file_path.suffix.lower() not in VIDEO_EXTENSIONS:
                 continue
-            rel_path = str(file_path.relative_to(root_path.parent))
+            rel_path = logical_library_rel_path(root_name, root_path, file_path).as_posix()
             if prefixes and not any(path_matches_scope(rel_path, prefix) for prefix in prefixes):
                 continue
             yield file_path

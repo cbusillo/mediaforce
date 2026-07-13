@@ -2251,25 +2251,24 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(payload["media"]["libraries"][0]["type"], "movie")
         self.assertEqual(payload["media"]["libraries"][0]["availability"], "browse_only")
 
-    def test_runtime_settings_payload_rejects_non_tv_production(self) -> None:
-        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
-            web_app._build_runtime_settings_payload(
-                libraries=[
-                    {
-                        "key": "movies",
-                        "label": "Movies",
-                        "path": str(self.root / "source" / "movies"),
-                        "library_type": "movie",
-                        "availability": "production",
-                        "default_profile": "movie_balanced",
-                    }
-                ],
-                remote_hosts=[],
-                transcode_root=str(self.root / "staging"),
-                encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-                schedule_profiles=[],
-            )
-        self.assertIn("production is not available", raised.exception.public_message)
+    def test_runtime_settings_payload_accepts_movie_production(self) -> None:
+        payload = web_app._build_runtime_settings_payload(
+            libraries=[
+                {
+                    "key": "movies",
+                    "label": "Movies",
+                    "path": str(self.root / "source" / "movies"),
+                    "library_type": "movie",
+                    "availability": "production",
+                    "default_profile": "movie_balanced",
+                }
+            ],
+            remote_hosts=[],
+            transcode_root=str(self.root / "staging"),
+            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
+            schedule_profiles=[],
+        )
+        self.assertEqual(payload["media"]["libraries"][0]["availability"], "production")
 
     def test_typed_library_maps_scan_browse_only_but_only_produce_ready_roots(self) -> None:
         self.config.raw["media"]["source_roots"] = {
@@ -2318,7 +2317,38 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(list(self.config.configured_source_root_map), ["shows"])
         self.assertEqual(list(self.config.source_root_map), ["shows"])
 
-    def test_canonical_config_cannot_enable_unsupported_library_production(self) -> None:
+    def test_custom_typed_tv_root_appears_in_library_structure(self) -> None:
+        self.config.raw["media"]["libraries"] = [
+            {
+                "key": "shows",
+                "label": "Shows",
+                "path": str(self.root / "source" / "Shows on Disk"),
+                "type": "tv",
+                "availability": "production",
+            }
+        ]
+        source = self._create_source_file("custom-tv-root.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source)
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_id)
+                .values(
+                    media_root="shows",
+                    rel_path="shows/Example/Season 1/Episode.mkv",
+                    parent_dir="shows/Example/Season 1",
+                )
+            )
+            with patch.object(
+                    web_app,
+                    "_folder_review_badge",
+                    return_value={"label": None, "tone": None, "detail": None},
+            ):
+                cards = web_app._list_library_structure_cards(self.config, connection)
+
+        self.assertEqual([card.prefix for card in cards], ["shows/Example/Season 1"])
+
+    def test_canonical_config_enables_movie_production(self) -> None:
         self.config.raw["media"]["libraries"] = [
             {
                 "key": "movies",
@@ -2329,7 +2359,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ]
 
         self.assertEqual(list(self.config.scan_source_root_map), ["movies"])
-        self.assertEqual(self.config.source_root_map, {})
+        self.assertEqual(list(self.config.source_root_map), ["movies"])
 
     def test_library_scan_signature_ignores_operator_order(self) -> None:
         first = {
@@ -7542,8 +7572,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual([status.key for status in statuses], ["first-host", "second-host"])
 
     def test_remote_host_status_targets_current_machine_without_ssh_probe(self) -> None:
-        source_root = Path(next(iter(self.config.source_root_map.values())))
-        source_root.mkdir(parents=True, exist_ok=True)
+        for source_root in self.config.source_root_map.values():
+            Path(source_root).mkdir(parents=True, exist_ok=True)
         self.config.staging_root.mkdir(parents=True, exist_ok=True)
         host: dict[str, object] = {
             "host": "cbusillo@localhost",
@@ -9292,6 +9322,79 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(library_row["fingerprint"], "promoted-fingerprint")
             self.assertEqual(staged_row["promoted_path"], str(destination_path))
             self.assertEqual(staged_row["archived_source_path"], str(archived_source))
+
+    def test_promote_one_item_preserves_custom_library_root_identity(self) -> None:
+        physical_root = self.root / "source" / "Movies on Disk"
+        source_path = physical_root / "Example" / "Feature.mkv"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text("source")
+        staging_path = self.root / "staging" / "films" / "Example" / "Feature.mp4"
+        staging_path.parent.mkdir(parents=True)
+        staging_path.write_text("encoded")
+        media = dict(self.config.raw["media"])
+        media.update({
+            "source_roots": {"films": str(physical_root)},
+            "output_container": "mp4",
+        })
+        custom_config = MediaforceConfig(
+            raw={**self.config.raw, "media": media},
+            paths=self.config.paths,
+        )
+        promoted_probe = ProbeSummary(
+            duration_seconds=60.0,
+            video_codec="av1",
+            video_bitrate=900000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+
+        with open_db(custom_config.paths.db_path) as connection:
+            item_id = self._insert_library_item(
+                connection,
+                source_path,
+                status="validated",
+                rel_path="films/Example/Feature.mkv",
+            )
+            connection.execute(
+                staged_artifacts.insert().values(
+                    library_item_id=item_id,
+                    staging_path=str(staging_path),
+                    validation_json=json.dumps({"passed": True}),
+                    updated_at=web_app._now_iso(),
+                )
+            )
+            item = {
+                "library_item_id": item_id,
+                "source_path": str(source_path),
+                "rel_path": "films/Example/Feature.mkv",
+                "media_root": "films",
+            }
+
+            with patch("mediaforce.execution.probe_media", return_value=promoted_probe), patch(
+                    "mediaforce.execution.file_fingerprint", return_value="promoted-fingerprint"
+            ):
+                execution.promote_one_item(connection, custom_config, item, force=False)
+
+            library_row = self._library_item_value(
+                connection,
+                item_id,
+                library_items.c.media_root,
+                library_items.c.rel_path,
+                library_items.c.parent_dir,
+            )
+
+        self.assertEqual(library_row["media_root"], "films")
+        self.assertEqual(library_row["rel_path"], "films/Example/Feature.mp4")
+        self.assertEqual(library_row["parent_dir"], "films/Example")
 
     def test_run_tracked_process_reports_progress_snapshots(self) -> None:
         class FakeTextProcess:
@@ -17139,7 +17242,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         raw = {
             "state": {"cleanup": {"transient_artifact_retention_days": 14}},
             "media": {
-                "source_roots": {"tv": str(self.root / "source" / "tv")},
+                "source_roots": {
+                    "tv": str(self.root / "source" / "tv"),
+                    "other": str(self.root / "source" / "other"),
+                },
                 "staging_root": str(self.root / "staging"),
                 "archive_root": str(self.root / "archive"),
             },

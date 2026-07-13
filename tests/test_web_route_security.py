@@ -105,6 +105,35 @@ class WebRouteSecurityTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(captured_intents[0]["size_goal"]["mode"], "absolute")
 
+    def test_folder_save_profile_failure_returns_conflict_status(self) -> None:
+        app = FastAPI()
+        register_folder_routes(
+            app,
+            folder_status_payload=lambda _prefix: {},
+            folder_content_payload=lambda _prefix: ({}, 200),
+            download_review_compare_action=lambda _prefix: None,
+            folder_ai_tune_action=lambda *_args: {},
+            folder_ai_tune_preview_action=lambda *_args: {},
+            folder_ai_tune_confirm_action=lambda *_args: {},
+            clear_folder_tuning_action=lambda _prefix: {},
+            save_series_lifecycle_action=lambda _prefix, _mode: {},
+            approve_measured_encode_recovery_action=lambda _prefix: {},
+            queue_folder_encode_action=lambda *_args: {},
+            validate_folder_outputs_action=lambda _prefix: {},
+            promote_folder_outputs_action=lambda _prefix: {},
+            save_profile_action=lambda *_args: {
+                "ok": False,
+                "code": "library_not_production",
+                "message": "Movies is browse only.",
+            },
+        )
+        endpoint = _route_endpoint(app, "/api/folders/{prefix:path}/save-profile", "POST")
+
+        response = asyncio.run(endpoint("films/Example", _json_request({})))
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(json.loads(response.body)["code"], "library_not_production")
+
     def test_settings_save_hides_internal_validation_detail(self) -> None:
         app = FastAPI()
 

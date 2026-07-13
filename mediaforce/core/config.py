@@ -84,6 +84,13 @@ class MediaforceConfig:
         return library_definition_map(self.media)
 
     @property
+    def library_type_map(self) -> dict[str, str]:
+        return {
+            key: str(definition.get("type") or "other")
+            for key, definition in self.library_definition_map.items()
+        }
+
+    @property
     def scan_source_root_map(self) -> dict[str, Path]:
         configured = self.configured_source_root_map
         if not isinstance(self.media.get("libraries"), list):

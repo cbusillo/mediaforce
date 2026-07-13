@@ -1,9 +1,14 @@
 import hashlib
 import os
+import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 
 CONTENT_VERSION_SAMPLE_BYTES = 64 * 1024
+
+
+def filesystem_collision_key(path: Path) -> str:
+    return unicodedata.normalize("NFC", os.path.normpath(str(path))).casefold()
 
 
 def timestamp() -> str:

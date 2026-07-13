@@ -45,6 +45,19 @@ class LibraryLifecycleTests(unittest.TestCase):
         self.assertIsNone(plex_special.season_number)
         self.assertTrue(plex_special.is_special)
 
+    def test_season_identity_uses_typed_root_authority(self) -> None:
+        custom_tv = season_identity(
+            {"rel_path": "shows/Example/Season 1/Episode.mkv"},
+            library_types={"shows": "tv"},
+        )
+        movie_named_tv = season_identity(
+            {"rel_path": "tv/Example/Season 1.mkv"},
+            library_types={"tv": "movie"},
+        )
+
+        self.assertEqual(custom_tv.season_prefix, "shows/Example/Season 1")
+        self.assertIsNone(movie_named_tv)
+
     def test_auto_protects_only_highest_numbered_active_season(self) -> None:
         config = self._config()
         with open_db(config.paths.db_path) as connection:

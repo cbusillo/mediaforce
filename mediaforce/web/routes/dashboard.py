@@ -14,6 +14,8 @@ def register_dashboard_routes(
         dashboard_folders_payload: Callable[[bool], dict[str, Any]],
         dashboard_library_payload: Callable[[], dict[str, Any]],
         dashboard_library_details_payload: Callable[[], dict[str, Any]],
+        dashboard_movie_library_payload: Callable[[], dict[str, Any]],
+        dashboard_movie_library_details_payload: Callable[[], dict[str, Any]],
 ) -> None:
     @app.get("/api/dashboard")
     def api_dashboard(preview_limit: PreviewLimit = None) -> JSONResponse:
@@ -30,3 +32,11 @@ def register_dashboard_routes(
     @app.get("/api/dashboard/library/details")
     def api_dashboard_library_details() -> JSONResponse:
         return JSONResponse(dashboard_library_details_payload())
+
+    @app.get("/api/dashboard/library/movies")
+    def api_dashboard_movie_library() -> JSONResponse:
+        return JSONResponse(dashboard_movie_library_payload())
+
+    @app.get("/api/dashboard/library/movies/details")
+    def api_dashboard_movie_library_details() -> JSONResponse:
+        return JSONResponse(dashboard_movie_library_details_payload())

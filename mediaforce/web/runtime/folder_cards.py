@@ -11,7 +11,7 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, staged_artifacts
-from mediaforce.library.candidate_selection import CandidateDecision, encode_candidate_decisions, \
+from mediaforce.library.candidate_selection import CandidateDecision, project_candidates, \
     scope_lifecycle_payload_from_decisions, workflow_eligibility
 from mediaforce.library.workflow_state import build_folder_workflow_states
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES
@@ -161,7 +161,7 @@ def preview_folder_cards(
         estimate_savings_bytes: Callable[..., int],
         review_badge_for_prefix: Callable[[str], FolderBadge],
 ) -> list[FolderCard]:
-    decisions = encode_candidate_decisions(connection, config, prefixes=[]) if config is not None else []
+    decisions = project_candidates(connection, config, prefixes=[]) if config is not None else []
     decisions_by_item = {decision.item_id: decision for decision in decisions}
     folder_history, codec_history = _load_savings_history(connection, folder_group=folder_group)
     rows = connection.execute(
@@ -215,11 +215,16 @@ def preview_folder_cards(
         card.total_size_bytes += size_bytes
         status = str(row["status"] or "unknown")
         decision = decisions_by_item.get(int(row["item_id"]))
+        production_included = decision is None or decision.production_included
         codec = str(row["video_codec"] or "unknown")
-        known_saved_bytes = _pending_folder_item_savings_bytes(status=status, bytes_saved=row["bytes_saved"])
+        known_saved_bytes = (
+            _pending_folder_item_savings_bytes(status=status, bytes_saved=row["bytes_saved"])
+            if production_included
+            else None
+        )
         if known_saved_bytes is not None:
             card.known_saved_bytes += known_saved_bytes
-        if status != "promoted":
+        if status != "promoted" and production_included:
             card.pending_count += 1
             if known_saved_bytes is None and _eligible_for_estimate(status, decision):
                 card.estimated_savings_bytes += _estimated_pending_savings_bytes(
@@ -240,7 +245,7 @@ def preview_folder_cards(
         if card.pending_count > 0 and card.projected_reclaim_bytes >= minimum_recommended_savings_bytes
     ]
     _apply_lifecycle(cards, decisions)
-    _apply_folder_workflow_states(connection, cards, decisions)
+    _apply_folder_workflow_states(connection, cards, decisions, config=config)
     _apply_folder_review_badges(cards, review_badge_for_prefix)
     return sorted(
         cards,
@@ -259,16 +264,19 @@ def list_library_structure_cards(
         folder_group: Callable[[str], FolderGroup | None],
         review_badge_for_prefix: Callable[[str], FolderBadge],
 ) -> list[FolderCard]:
-    rows = connection.execute(
-        select(
-            library_items.c.rel_path,
-            library_items.c.size_bytes,
-            library_items.c.status,
-        )
-        .where(library_items.c.status != "missing")
-        .where(library_items.c.rel_path.startswith("tv/", autoescape=True))
-        .order_by(library_items.c.rel_path)
-    ).mappings().fetchall()
+    query = select(
+        library_items.c.rel_path,
+        library_items.c.size_bytes,
+        library_items.c.status,
+    ).where(library_items.c.status != "missing")
+    if config is None:
+        query = query.where(library_items.c.rel_path.startswith("tv/", autoescape=True))
+    else:
+        tv_roots = [root for root, library_type in config.library_type_map.items() if library_type == "tv"]
+        if not tv_roots:
+            return []
+        query = query.where(library_items.c.media_root.in_(tv_roots))
+    rows = connection.execute(query.order_by(library_items.c.rel_path)).mappings().fetchall()
     grouped: dict[str, FolderCard] = {}
     for row in rows:
         group = folder_group(str(row["rel_path"]))
@@ -322,8 +330,9 @@ def list_folder_cards(
         estimate_savings_bytes: Callable[..., int],
         review_badge_for_prefix: Callable[[str], FolderBadge],
         rel_path_root: str | None = None,
+        media_roots: set[str] | None = None,
 ) -> list[FolderCard]:
-    decisions = encode_candidate_decisions(connection, config, prefixes=[]) if config is not None else []
+    decisions = project_candidates(connection, config, prefixes=[]) if config is not None else []
     decisions_by_item = {decision.item_id: decision for decision in decisions}
     folder_history, codec_history = _load_savings_history(connection, folder_group=folder_group)
     query = (
@@ -348,6 +357,10 @@ def list_folder_cards(
     )
     if rel_path_root:
         query = query.where(library_items.c.rel_path.startswith(rel_path_root, autoescape=True))
+    if media_roots is not None:
+        if not media_roots:
+            return []
+        query = query.where(library_items.c.media_root.in_(tuple(media_roots)))
     rows = connection.execute(query.order_by(library_items.c.rel_path)).mappings().fetchall()
     grouped: dict[str, FolderCard] = {}
     for row in rows:
@@ -387,10 +400,15 @@ def list_folder_cards(
         card.average_age_days += path_age_days
         status = str(row["status"] or "unknown")
         codec = str(row["video_codec"] or "unknown")
-        known_saved_bytes = _pending_folder_item_savings_bytes(status=status, bytes_saved=row["bytes_saved"])
+        production_included = decision is None or decision.production_included
+        known_saved_bytes = (
+            _pending_folder_item_savings_bytes(status=status, bytes_saved=row["bytes_saved"])
+            if production_included
+            else None
+        )
         if known_saved_bytes is not None:
             card.known_saved_bytes += known_saved_bytes
-        if status != "promoted":
+        if status != "promoted" and production_included:
             card.pending_count += 1
             if known_saved_bytes is not None:
                 card.sort_score += known_saved_bytes / (1024 ** 3)
@@ -421,7 +439,7 @@ def list_folder_cards(
         )
     ]
     _apply_lifecycle(cards, decisions)
-    _apply_folder_workflow_states(connection, cards, decisions)
+    _apply_folder_workflow_states(connection, cards, decisions, config=config)
     _apply_folder_review_badges(cards, review_badge_for_prefix)
     return sorted(
         cards,
@@ -475,6 +493,8 @@ def _apply_folder_workflow_states(
         connection: DBClient,
         cards: list[FolderCard],
         decisions: list[CandidateDecision] | None = None,
+        *,
+        config: MediaforceConfig | None = None,
 ) -> None:
     if not cards:
         return
@@ -482,6 +502,7 @@ def _apply_folder_workflow_states(
         connection,
         [card.prefix for card in cards],
         candidate_eligibility=workflow_eligibility(decisions or []),
+        library_types=config.library_type_map if config is not None else None,
     )
     for card in cards:
         workflow = workflow_by_prefix.get(card.prefix)
