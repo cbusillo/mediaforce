@@ -17,6 +17,7 @@ from mediaforce.core.db_tables import (
     encode_queue_state,
     item_events,
     library_items,
+    scan_runs,
     series_metadata,
     staged_artifacts,
 )
@@ -27,6 +28,7 @@ from mediaforce.web.runtime.folder_tuning_advice import (
     calibration_draft_hash,
     calibration_policy_hash,
 )
+from mediaforce.web.runtime.catalog_signature import save_catalog_signature
 
 FIXTURE_SCAN_ID = "web-smoke-fixtures"
 LEGACY_FIXTURE_SCAN_IDS = ("fixture-scan",)
@@ -676,6 +678,11 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 calibration_jobs.c.job_id.like("web-smoke-%")
             )
         )
+        connection.execute(
+            scan_runs.delete().where(
+                scan_runs.c.scan_id.in_((FIXTURE_SCAN_ID, *LEGACY_FIXTURE_SCAN_IDS))
+            )
+        )
         fixture_ids = [
             int(row["id"])
             for row in connection.execute(
@@ -711,6 +718,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
         )
 
         if profile == "empty":
+            save_catalog_signature(config)
             return {
                 "profile": profile,
                 "folderRoutes": [],
@@ -983,6 +991,25 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             inserted_ids.append(int(result.inserted_primary_key[0]))
         for row, item_id in zip(rows, inserted_ids, strict=True):
             row["id"] = item_id
+        scan_timestamp = _now()
+        connection.execute(
+            scan_runs.insert().values(
+                scan_id=FIXTURE_SCAN_ID,
+                started_at=scan_timestamp,
+                completed_at=scan_timestamp,
+                owner_pid=None,
+                last_progress_at=scan_timestamp,
+                roots_json=json.dumps(
+                    {key: str(path) for key, path in config.scan_source_root_map.items()},
+                    sort_keys=True,
+                ),
+                scope="full",
+                prefixes_json=None,
+                file_count=len(rows),
+                reprobed_count=len(rows),
+                unchanged_count=0,
+            )
+        )
         rows_by_prefix = {str(row["parent_dir"]): row for row in rows}
         ids_by_rel_path = {
             str(row["rel_path"]): item_id
@@ -1266,6 +1293,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
         )
 
     _write_review_states(config, rows_by_prefix)
+    save_catalog_signature(config)
 
     return {
         "profile": profile,

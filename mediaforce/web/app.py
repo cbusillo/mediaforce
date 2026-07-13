@@ -180,6 +180,12 @@ from mediaforce.web.runtime.folder_tuning_advice import build_run_verdict_payloa
     tuning_policy_key_paths as runtime_tuning_policy_key_paths, \
     apply_policy_fragment as runtime_apply_policy_fragment
 from mediaforce.web.runtime.folder_tuning_helpers import size_budget_sample_analysis
+from mediaforce.web.runtime.catalog_signature import (
+    catalog_signature_file as _catalog_signature_file,
+    current_catalog_signature as _current_catalog_signature,
+    load_catalog_signature as _load_catalog_signature,
+    save_catalog_signature as _save_catalog_signature,
+)
 from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_db as runtime_active_scan_from_db, \
     CalibrationQueueRuntimeDeps, calibration_queue_worker_loop as runtime_calibration_queue_worker_loop, \
     calibration_job_belongs_to_current_process as runtime_calibration_job_belongs_to_current_process, \
@@ -2601,17 +2607,6 @@ def _scan_job_file(config: MediaforceConfig, prefix: str | None) -> Path:
     return _state_web_dir(config) / f"scan-{_slug(name)}.job.json"
 
 
-def _catalog_signature_file(config: MediaforceConfig) -> Path:
-    return _state_web_dir(config) / "full-catalog.signature.json"
-
-
-def _current_catalog_signature(config: MediaforceConfig) -> dict[str, Any]:
-    return {
-        "source_roots": {key: str(path) for key, path in config.scan_source_root_map.items()},
-        "libraries": _runtime_library_signature(config.raw),
-    }
-
-
 def _settings_library_rows_for_config(config: MediaforceConfig, *, min_rows: int = 3) -> list[dict[str, Any]]:
     return _settings_library_rows_for_config_runtime(config, min_rows=min_rows)
 
@@ -2626,32 +2621,6 @@ def _settings_transcode_root_value(config: MediaforceConfig) -> str:
 
 def _settings_archive_root(transcode_root: str) -> str:
     return _settings_archive_root_runtime(transcode_root)
-
-
-def _load_catalog_signature(config: MediaforceConfig) -> dict[str, Any] | None:
-    path = _catalog_signature_file(config)
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    source_roots = payload.get("source_roots")
-    if not isinstance(source_roots, dict):
-        return None
-    libraries = payload.get("libraries")
-    return {
-        "source_roots": _runtime_source_roots({"media": {"source_roots": source_roots}}),
-        "libraries": _runtime_library_signature(
-            {"media": {"libraries": libraries if isinstance(libraries, list) else []}}
-        ),
-    }
-
-
-def _save_catalog_signature(config: MediaforceConfig) -> None:
-    _catalog_signature_file(config).write_text(json.dumps(_current_catalog_signature(config), indent=2) + "\n")
 
 
 _calibration_draft_hash = runtime_calibration_draft_hash
