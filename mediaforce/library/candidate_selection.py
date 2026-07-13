@@ -157,8 +157,11 @@ def project_candidates(
     resolved_scopes = resolve_media_scopes(connection, prefixes or [])
     normalized_override = normalize_scope_prefix(manual_override_prefix or "")
     decisions: list[CandidateDecision] = []
+    production_roots = set(config.source_root_map)
 
     for row in rows:
+        if str(row["media_root"] or "") not in production_roots:
+            continue
         if statuses is not None and str(row["status"] or "") not in statuses:
             continue
         rel_path = str(row["rel_path"] or "")

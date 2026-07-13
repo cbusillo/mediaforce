@@ -1346,6 +1346,14 @@ def load_next_runnable_encode_job(
         job = load_encode_job(connection, str(row["job_id"]))
         if job is None:
             continue
+        library_key = _encode_job_library_key(job)
+        if library_key and library_key not in config.source_root_map:
+            waiting_reason = "Library is Browse only or Disabled in Settings."
+            if str(job.get("waiting_reason") or "") != waiting_reason:
+                job.update({"waiting_reason": waiting_reason, "updated_at": deps.now_iso()})
+                save_encode_job(connection, job)
+                sync_encode_job_parent(connection, job, deps)
+            continue
         host_payload, waiting_reason = select_encode_host(connection, config, job, deps)
         if host_payload is None:
             if str(job.get("waiting_reason") or "") != str(waiting_reason or ""):
@@ -1374,6 +1382,21 @@ def run_encode_job(
     with open_db(config.paths.db_path) as connection:
         job = load_encode_job(connection, job_id)
         if job is None:
+            return
+        library_key = _encode_job_library_key(job)
+        if library_key and library_key not in config.source_root_map:
+            job.update(
+                {
+                    "status": "queued",
+                    "worker_id": None,
+                    "owner_pid": None,
+                    "process_pid": None,
+                    "waiting_reason": "Library is Browse only or Disabled in Settings.",
+                    "updated_at": deps.now_iso(),
+                }
+            )
+            save_encode_job(connection, job)
+            sync_encode_job_parent(connection, job, deps)
             return
         manifest_path = Path(job["manifest_path"])
         manifest = json.loads(manifest_path.read_text())

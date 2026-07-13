@@ -242,6 +242,8 @@ def maybe_schedule_scan(
         config: MediaforceConfig,
         prefix: str | None,
         deps: JobRuntimeDeps,
+        *,
+        force: bool = False,
 ) -> dict[str, Any] | None:
     active_scan = active_scan_from_db(connection, config, prefix, deps)
     if active_scan is not None:
@@ -263,7 +265,7 @@ def maybe_schedule_scan(
         job = _expire_scan_job(config, prefix, job, deps)
     if job and job.get("status") in {"queued", "running"}:
         return job
-    if not scan_is_stale(connection, config, prefix, deps):
+    if not force and not scan_is_stale(connection, config, prefix, deps):
         return job
     if job and job.get("status") == "failed":
         finished_at = deps.parse_iso(job.get("finished_at") or job.get("started_at"))

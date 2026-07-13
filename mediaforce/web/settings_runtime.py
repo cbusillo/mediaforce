@@ -4,9 +4,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.config import FOLDER_POLICY_OVERRIDES_KEY, MediaforceConfig
 from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY
 from mediaforce.hosts.config import normalize_host_capabilities
+from mediaforce.library.library_settings import DEFAULT_LIBRARY_PROFILES, LIBRARY_PROFILE_OPTIONS, \
+    LIBRARY_TYPE_OPTIONS, default_library_policy, library_production_supported, library_type_label, \
+    normalize_library_availability, normalize_library_definition, normalize_library_policy, normalize_library_type
 from mediaforce.remote import DEFAULT_HOST_CAPABILITIES, DEFAULT_HOST_MEDIA_ACCESS, normalize_host_media_access
 from mediaforce.core.type_defs import JSONValue
 from mediaforce.tuning.size_goals import megabytes_to_bytes
@@ -64,46 +67,156 @@ HOST_CAPABILITY_OPTIONS = (
 )
 
 
-def settings_library_rows(source_root_map: dict[str, Path], *, min_rows: int = 3) -> list[dict[str, str]]:
+class SettingsValidationError(ValueError):
+    def __init__(self, public_message: str) -> None:
+        self.public_message = public_message
+        super().__init__("Settings validation failed.")
+
+
+def settings_library_rows(source_root_map: dict[str, Path], *, min_rows: int = 3) -> list[dict[str, Any]]:
     rows = [
         {
             "key": key,
+            "label": key.replace("_", " ").replace("-", " ").title(),
             "path": str(path),
             "color": DEFAULT_LIBRARY_COLOR_PALETTE[index % len(DEFAULT_LIBRARY_COLOR_PALETTE)],
+            "library_type": normalize_library_type(None, key=key),
         }
         for index, (key, path) in enumerate(source_root_map.items())
     ]
     return index_settings_library_rows(rows, min_rows=min_rows)
 
 
-def settings_library_rows_for_config(config: MediaforceConfig, *, min_rows: int = 3) -> list[dict[str, str]]:
-    media = config.raw.get("media")
-    source_roots = media.get("source_roots") if isinstance(media, dict) else None
+def settings_library_rows_for_config(config: MediaforceConfig, *, min_rows: int = 3) -> list[dict[str, Any]]:
     library_colors = library_color_map_for_config(config)
-    rows: list[dict[str, str]] = []
-    if isinstance(source_roots, dict):
-        for key, value in source_roots.items():
-            key_text = str(key).strip()
-            path_text = stringify_pathlike(value)
-            if not key_text and not path_text:
-                continue
-            rows.append({"key": key_text, "path": path_text, "color": library_colors.get(key_text, "")})
+    plex = config.metadata.get("plex")
+    plex_roots = plex.get("library_roots") if isinstance(plex, dict) else None
+    plex_root_map = plex_roots if isinstance(plex_roots, dict) else {}
+    rows: list[dict[str, Any]] = []
+    for definition in config.library_definitions:
+        key = str(definition["key"])
+        rows.append(
+            {
+                "key": key,
+                "label": str(definition["label"]),
+                "path": str(definition.get("path") or ""),
+                "color": str(definition.get("color") or library_colors.get(key, "")),
+                "library_type": str(definition["type"]),
+                "availability": str(definition["availability"]),
+                "default_profile": str(definition["default_profile"]),
+                "plex_path": str(definition.get("plex_path") or plex_root_map.get(key) or ""),
+                "policy": dict(definition["policy"]),
+            }
+        )
     return index_settings_library_rows(rows, min_rows=min_rows)
 
 
-def index_settings_library_rows(rows: list[dict[str, str]], *, min_rows: int = 1) -> list[dict[str, str]]:
-    indexed = [
-        {
-            "index": str(index),
-            "key": row.get("key", ""),
-            "path": row.get("path", ""),
-            "color": row.get("color", ""),
-        }
-        for index, row in enumerate(rows)
-    ]
+def index_settings_library_rows(rows: list[dict[str, Any]], *, min_rows: int = 1) -> list[dict[str, Any]]:
+    indexed: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        key = str(row.get("key") or "").strip()
+        library_type = normalize_library_type(row.get("library_type") or row.get("type"), key=key)
+        definition = normalize_library_definition(
+            {
+                "label": row.get("label"),
+                "type": library_type,
+                "availability": row.get("availability"),
+                "default_profile": row.get("default_profile"),
+                "policy": row.get("policy"),
+            },
+            key=key,
+        )
+        indexed.append(
+            {
+                "index": str(index),
+                "key": key,
+                "label": definition["label"],
+                "path": str(row.get("path") or ""),
+                "color": str(row.get("color") or ""),
+                "library_type": library_type,
+                "availability": definition["availability"],
+                "default_profile": definition["default_profile"],
+                "plex_path": str(row.get("plex_path") or ""),
+                "policy": definition["policy"],
+                "readiness": library_readiness(
+                    key=key,
+                    label=str(definition["label"]),
+                    path=str(row.get("path") or ""),
+                    library_type=library_type,
+                    availability=str(definition["availability"]),
+                    policy=dict(definition["policy"]),
+                ),
+                "type_change_confirmation": "",
+            }
+        )
     while len(indexed) < min_rows:
-        indexed.append({"index": str(len(indexed)), "key": "", "path": "", "color": "#0f766e"})
+        indexed.append(empty_settings_library_row(len(indexed)))
     return indexed
+
+
+def empty_settings_library_row(index: int) -> dict[str, Any]:
+    library_type = "other"
+    return {
+        "index": str(index),
+        "key": "",
+        "label": "",
+        "path": "",
+        "color": "#0f766e",
+        "library_type": library_type,
+        "availability": "browse_only",
+        "default_profile": DEFAULT_LIBRARY_PROFILES[library_type],
+        "plex_path": "",
+        "policy": default_library_policy(library_type),
+        "readiness": {"state": "incomplete", "label": "Incomplete", "detail": "Add a label and local path."},
+        "type_change_confirmation": "",
+    }
+
+
+def library_readiness(
+        *,
+        key: str,
+        label: str,
+        path: str,
+        library_type: str,
+        availability: str,
+        policy: dict[str, Any],
+) -> dict[str, str]:
+    if not key or not label.strip() or not path.strip():
+        return {"state": "incomplete", "label": "Incomplete", "detail": "Add a label, root ID, and local path."}
+    if availability == "disabled":
+        return {"state": "disabled", "label": "Disabled", "detail": "Mediaforce will not scan or process this library."}
+    if library_type == "spatial":
+        missing = []
+        if not str(policy.get("playback_target") or "").strip():
+            missing.append("playback target")
+        if str(policy.get("stereo_layout") or "unknown") == "unknown":
+            missing.append("stereo layout")
+        if str(policy.get("projection") or "unknown") == "unknown":
+            missing.append("projection")
+        if missing:
+            return {
+                "state": "incomplete",
+                "label": "Incomplete",
+                "detail": f"Add {', '.join(missing)} before playback qualification.",
+            }
+        return {
+            "state": "blocked",
+            "label": "Safety blocked",
+            "detail": "Browse-only until 3D / VR playback qualification is implemented.",
+        }
+    if availability == "browse_only":
+        return {
+            "state": "browse_only",
+            "label": "Browse only",
+            "detail": "Mediaforce scans and shows this library but never processes it.",
+        }
+    if not library_production_supported(library_type):
+        return {
+            "state": "blocked",
+            "label": "Workflow blocked",
+            "detail": f"{library_type_label(library_type)} production is not available yet.",
+        }
+    return {"state": "ready", "label": "Ready", "detail": "Scanning and production processing are enabled."}
 
 
 def settings_remote_rows(remote_hosts: list[dict[str, Any]], *, min_rows: int = 3) -> list[dict[str, Any]]:
@@ -503,6 +616,70 @@ def normalize_encode_queue_scheduler(raw: dict[str, Any] | None) -> dict[str, An
     return normalized
 
 
+def normalize_submitted_library_policy(library_type: str, value: Any) -> dict[str, Any]:
+    policy = normalize_library_policy(normalize_library_type(library_type), value)
+    if library_type == "tv":
+        lifecycle_mode = str(policy.get("series_lifecycle_mode") or "auto").strip().lower()
+        if lifecycle_mode not in {"auto", "on", "off"}:
+            raise SettingsValidationError("TV current-season protection must be Automatic, Always, or Off.")
+        return {
+            "series_lifecycle_mode": lifecycle_mode,
+            "current_season_inactive_days": _library_policy_integer(
+                policy.get("current_season_inactive_days"), label="Current-season inactivity", minimum=1, maximum=3650
+            ),
+            "season_acquisition_hold_days": _library_policy_integer(
+                policy.get("season_acquisition_hold_days"), label="New-season hold", minimum=0, maximum=365
+            ),
+            "series_metadata_stale_days": _library_policy_integer(
+                policy.get("series_metadata_stale_days"), label="Series metadata freshness", minimum=1, maximum=365
+            ),
+        }
+    if library_type == "movie":
+        grouping = str(policy.get("grouping") or "title")
+        editions = str(policy.get("editions") or "separate")
+        extras = str(policy.get("extras") or "exclude")
+        ranking = str(policy.get("ranking") or "oldest_added_first")
+        if grouping != "title" or editions != "separate" or extras not in {"exclude", "include"}:
+            raise SettingsValidationError("Choose supported movie grouping, edition, and extras policies.")
+        if ranking not in {"oldest_added_first", "largest_first"}:
+            raise SettingsValidationError("Choose a supported movie ranking policy.")
+        return {"grouping": grouping, "editions": editions, "extras": extras, "ranking": ranking}
+    if library_type == "spatial":
+        stereo_layout = str(policy.get("stereo_layout") or "unknown")
+        projection = str(policy.get("projection") or "unknown")
+        geometry_policy = str(policy.get("geometry_policy") or "preserve")
+        container_profile = str(policy.get("container_profile") or "unqualified")
+        if stereo_layout not in {"unknown", "side_by_side", "top_bottom", "frame_sequential"}:
+            raise SettingsValidationError("Choose a supported 3D stereo layout.")
+        if projection not in {"unknown", "flat", "equirectangular_180", "equirectangular_360"}:
+            raise SettingsValidationError("Choose a supported 3D / VR projection.")
+        if geometry_policy != "preserve" or container_profile != "unqualified":
+            raise SettingsValidationError(
+                "3D / VR geometry and container handling must remain source-preserving and unqualified."
+            )
+        return {
+            "playback_target": str(policy.get("playback_target") or "").strip(),
+            "stereo_layout": stereo_layout,
+            "projection": projection,
+            "geometry_policy": geometry_policy,
+            "container_profile": container_profile,
+        }
+    grouping = str(policy.get("grouping") or "folder")
+    if grouping not in {"folder", "file"}:
+        raise SettingsValidationError("Other libraries must group work by folder or file.")
+    return {"grouping": grouping}
+
+
+def _library_policy_integer(value: Any, *, label: str, minimum: int, maximum: int) -> int:
+    try:
+        normalized = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise SettingsValidationError(f"{label} must be a whole number.") from exc
+    if normalized < minimum or normalized > maximum:
+        raise SettingsValidationError(f"{label} must be between {minimum} and {maximum} days.")
+    return normalized
+
+
 def build_runtime_settings_payload(
         *,
         libraries: list[dict[str, Any]],
@@ -512,6 +689,9 @@ def build_runtime_settings_payload(
         encode_queue_scheduler: dict[str, Any],
         schedule_profiles: list[dict[str, Any]],
         metadata: dict[str, Any] | None = None,
+        existing_library_types: dict[str, str] | None = None,
+        existing_libraries: dict[str, dict[str, Any]] | None = None,
+        existing_library_paths: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     def _text(value: JSONValue, default: str = "") -> str:
         if value is None:
@@ -520,22 +700,97 @@ def build_runtime_settings_payload(
 
     source_roots: dict[str, str] = {}
     library_colors: dict[str, str] = {}
+    library_definitions: list[dict[str, Any]] = []
+    plex_library_roots: dict[str, str] = {}
+    seen_paths: set[str] = set()
+    seen_plex_paths: set[str] = set()
+    current_types = existing_library_types or {}
+    current_libraries = existing_libraries or {}
+    current_paths = existing_library_paths or {}
+    _reject_submitted_secrets(metadata)
+    staging_root = Path(transcode_root).expanduser()
+    if not staging_root.is_absolute():
+        raise SettingsValidationError("The working folder must be an absolute path.")
     for row in libraries:
         key_text = _text(row.get("key", ""))
+        label_text = _text(row.get("label", ""))
         path_text = _text(row.get("path", ""))
-        if not key_text and not path_text:
+        if not key_text and not label_text and not path_text:
             continue
         normalized_key = normalize_library_key(key_text)
         if not normalized_key or not path_text:
-            raise ValueError("Each library row needs both a library name and a mounted path.")
+            raise SettingsValidationError("Each library needs a root ID and local path.")
+        if normalized_key != key_text or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", key_text):
+            raise SettingsValidationError("Library root IDs use lowercase letters, numbers, underscores, and hyphens.")
+        if not label_text:
+            label_text = normalized_key.replace("_", " ").replace("-", " ").title()
+        if len(label_text) > 80:
+            raise SettingsValidationError("Library labels must be 80 characters or fewer.")
         if normalized_key in source_roots:
-            raise ValueError(f"Duplicate library name: {normalized_key}")
-        source_roots[normalized_key] = str(Path(path_text).expanduser())
+            raise SettingsValidationError(f"Duplicate library root ID: {normalized_key}")
+        path = Path(path_text).expanduser()
+        if not path.is_absolute() and current_paths.get(normalized_key) != path_text:
+            raise SettingsValidationError("Library local paths must be absolute.")
+        normalized_path = str(path)
+        if normalized_path in seen_paths:
+            raise SettingsValidationError("Each library needs a distinct local path.")
+        if any(_paths_overlap(path, Path(existing)) for existing in seen_paths):
+            raise SettingsValidationError("Library local paths cannot contain one another.")
+        if _paths_overlap(path, staging_root):
+            raise SettingsValidationError("Library paths cannot contain the working folder or be inside it.")
+        explicit_type = _text(row.get("library_type", ""))
+        if explicit_type and explicit_type not in {option["key"] for option in LIBRARY_TYPE_OPTIONS}:
+            raise SettingsValidationError("Choose a supported library type.")
+        library_type = normalize_library_type(explicit_type or None, key=normalized_key)
+        availability_text = _text(row.get("availability", ""))
+        if availability_text and availability_text not in {"production", "browse_only", "disabled"}:
+            raise SettingsValidationError("Choose Production, Browse only, or Disabled for each library.")
+        availability = normalize_library_availability(availability_text or None, library_type=library_type)
+        previous_type = current_types.get(normalized_key)
+        expected_confirmation = f"{normalized_key}:{previous_type}->{library_type}" if previous_type else ""
+        if previous_type and previous_type != library_type and row.get("type_change_confirmation") != expected_confirmation:
+            raise SettingsValidationError("Confirm the library type compatibility preview before saving.")
+        if previous_type and previous_type != library_type:
+            availability = "browse_only"
+        if availability == "production" and not library_production_supported(library_type):
+            raise SettingsValidationError(
+                f"{library_type_label(library_type)} production is not available yet; use Browse only."
+            )
+        profile = _text(row.get("default_profile", DEFAULT_LIBRARY_PROFILES[library_type]))
+        valid_profiles = {option["key"] for option in LIBRARY_PROFILE_OPTIONS[library_type]}
+        if profile not in valid_profiles:
+            raise SettingsValidationError(f"Choose a valid default profile for {library_type_label(library_type)}.")
+        policy = normalize_submitted_library_policy(library_type, row.get("policy"))
+        source_roots[normalized_key] = normalized_path
+        seen_paths.add(normalized_path)
         color_text = normalize_library_color(row.get("color"))
         if color_text is not None:
             library_colors[normalized_key] = color_text
+        plex_path = _text(row.get("plex_path", ""))
+        if plex_path:
+            normalized_plex_path = Path(plex_path).expanduser()
+            if not normalized_plex_path.is_absolute():
+                raise SettingsValidationError("Custom Plex paths must be absolute.")
+            if str(normalized_plex_path) in seen_plex_paths:
+                raise SettingsValidationError("Each custom Plex path must be unique.")
+            plex_library_roots[normalized_key] = str(normalized_plex_path)
+            seen_plex_paths.add(str(normalized_plex_path))
+        library_definitions.append(
+            {
+                **current_libraries.get(normalized_key, {}),
+                "key": normalized_key,
+                "label": label_text,
+                "path": normalized_path,
+                "color": color_text or "",
+                "plex_path": plex_library_roots.get(normalized_key, ""),
+                "type": library_type,
+                "availability": availability,
+                "default_profile": profile,
+                "policy": policy,
+            }
+        )
     if not source_roots:
-        raise ValueError("Add at least one library before saving settings.")
+        raise SettingsValidationError("Add at least one library before saving settings.")
     library_colors = library_color_map_from_source_roots(source_roots, library_colors)
     known_library_keys = set(source_roots)
 
@@ -552,12 +807,12 @@ def build_runtime_settings_payload(
         if not label and not host and not repo_path and not wake_mac and not start_command and not stop_command:
             continue
         if not host:
-            raise ValueError("Each remote host row needs an SSH host value.")
+            raise SettingsValidationError("Each remote host row needs an SSH host value.")
         priority_text = _text(row.get("priority", "0"), "0") or "0"
         try:
             priority = int(priority_text)
         except ValueError as exc:
-            raise ValueError(f"Host priority must be a whole number for {label or host}.") from exc
+            raise SettingsValidationError(f"Host priority must be a whole number for {label or host}.") from exc
         max_parallel_text = _text(
             row.get("max_parallel_encodes", str(DEFAULT_HOST_MAX_PARALLEL_ENCODES)),
             str(DEFAULT_HOST_MAX_PARALLEL_ENCODES),
@@ -565,11 +820,11 @@ def build_runtime_settings_payload(
         try:
             max_parallel_encodes = max(1, int(max_parallel_text or str(DEFAULT_HOST_MAX_PARALLEL_ENCODES)))
         except ValueError as exc:
-            raise ValueError(f"Parallel encodes must be a whole number for {label or host}.") from exc
+            raise SettingsValidationError(f"Parallel encodes must be a whole number for {label or host}.") from exc
         try:
             start_timeout_seconds = max(1, int(start_timeout_text))
         except ValueError as exc:
-            raise ValueError(f"Start timeout must be a whole number for {label or host}.") from exc
+            raise SettingsValidationError(f"Start timeout must be a whole number for {label or host}.") from exc
         schedule_profile = canonical_schedule_profile_key(row.get("schedule_profile", DEFAULT_HOST_SCHEDULE_PROFILE))
         payload: dict[str, Any] = {"host": host}
         if label:
@@ -630,13 +885,13 @@ def build_runtime_settings_payload(
         if not any((key_text, label_text, start_hour_text, end_hour_text)):
             continue
         if not key_text:
-            raise ValueError("Each schedule profile needs a key.")
+            raise SettingsValidationError("Each schedule profile needs a key.")
         if key_text in {ALWAYS_SCHEDULE_PROFILE, NEVER_SCHEDULE_PROFILE}:
-            raise ValueError(f"Schedule profile key '{key_text}' is reserved.")
+            raise SettingsValidationError(f"Schedule profile key '{key_text}' is reserved.")
         if key_text in seen_profile_keys:
-            raise ValueError(f"Duplicate schedule profile key: {key_text}")
+            raise SettingsValidationError(f"Duplicate schedule profile key: {key_text}")
         if not days_of_week and not all_day_days_of_week:
-            raise ValueError(f"Select at least one day for schedule profile '{key_text}'.")
+            raise SettingsValidationError(f"Select at least one day for schedule profile '{key_text}'.")
         normalized = normalize_encode_queue_scheduler(
             {
                 "mode": "night",
@@ -669,15 +924,21 @@ def build_runtime_settings_payload(
         }
     )
     if invalid_host_profiles:
-        raise ValueError("Unknown schedule profile for host assignment: " + ", ".join(invalid_host_profiles))
+        raise SettingsValidationError(
+            "Unknown schedule profile for host assignment: " + ", ".join(invalid_host_profiles)
+        )
 
     normalized_video_defaults = normalize_video_defaults(video_defaults)
-    normalized_metadata = normalize_metadata_settings(metadata, known_library_keys=known_library_keys)
-    staging_root = Path(transcode_root).expanduser()
+    metadata_payload = dict(metadata) if isinstance(metadata, dict) else {}
+    plex_payload = dict(metadata_payload.get("plex")) if isinstance(metadata_payload.get("plex"), dict) else {}
+    plex_payload["library_roots"] = plex_library_roots
+    metadata_payload["plex"] = plex_payload
+    normalized_metadata = normalize_metadata_settings(metadata_payload, known_library_keys=known_library_keys)
     return {
         "media": {
             "source_roots": source_roots,
             "library_colors": library_colors,
+            "libraries": library_definitions,
             "staging_root": str(staging_root),
             "archive_root": str(staging_root / "_replaced"),
         },
@@ -689,6 +950,25 @@ def build_runtime_settings_payload(
         },
         "metadata": normalized_metadata,
     }
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    return left == right or left in right.parents or right in left.parents
+
+
+def _reject_submitted_secrets(value: Any, *, path: tuple[str, ...] = ()) -> None:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            key_text = str(key).strip().lower()
+            next_path = (*path, key_text)
+            secret_key = key_text in {"token", "password", "secret", "api_key", "apikey"}
+            if secret_key and nested is not None and nested != "" and nested is not False:
+                raise SettingsValidationError("Credential values are not accepted in Settings.")
+            _reject_submitted_secrets(nested, path=next_path)
+        return
+    if isinstance(value, list):
+        for nested in value:
+            _reject_submitted_secrets(nested, path=path)
 
 
 def normalize_metadata_settings(
@@ -733,9 +1013,9 @@ def _normalized_provider_url(value: object, *, allow_http: bool) -> str:
     parsed = urlsplit(text)
     allowed_schemes = {"https"} | ({"http"} if allow_http else set())
     if parsed.scheme not in allowed_schemes or not parsed.netloc or parsed.username or parsed.password:
-        raise ValueError("Provider URLs must use an allowed HTTP scheme and cannot contain credentials.")
+        raise SettingsValidationError("Provider URLs must use an allowed HTTP scheme and cannot contain credentials.")
     if parsed.query or parsed.fragment:
-        raise ValueError("Provider URLs cannot contain query parameters or fragments.")
+        raise SettingsValidationError("Provider URLs cannot contain query parameters or fragments.")
     return text
 
 
@@ -770,25 +1050,25 @@ def normalize_video_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
         try:
             value = float(str(payload.get(key, DEFAULT_VIDEO_DEFAULTS[key])))
         except (TypeError, ValueError) as exc:
-            raise ValueError(f"Video default {key} must be a number.") from exc
+            raise SettingsValidationError(f"Video default {key} must be a number.") from exc
         if value < minimum or value > maximum:
-            raise ValueError(f"Video default {key} must be between {minimum:g} and {maximum:g}.")
+            raise SettingsValidationError(f"Video default {key} must be between {minimum:g} and {maximum:g}.")
         return value
 
     def _int_field(key: str, *, minimum: int, maximum: int) -> int:
         value = _float_field(key, minimum=minimum, maximum=maximum)
         if not value.is_integer():
-            raise ValueError(f"Video default {key} must be a whole number.")
+            raise SettingsValidationError(f"Video default {key} must be a whole number.")
         return int(value)
 
     target_vmaf = _float_field("target_vmaf", minimum=1, maximum=100)
     min_target_vmaf = _float_field("min_target_vmaf", minimum=1, maximum=100)
     if min_target_vmaf > target_vmaf:
-        raise ValueError("Video default min_target_vmaf must be less than or equal to target_vmaf.")
+        raise SettingsValidationError("Video default min_target_vmaf must be less than or equal to target_vmaf.")
     target_xpsnr = _float_field("target_xpsnr", minimum=1, maximum=100)
     min_target_xpsnr = _float_field("min_target_xpsnr", minimum=1, maximum=100)
     if min_target_xpsnr > target_xpsnr:
-        raise ValueError("Video default min_target_xpsnr must be less than or equal to target_xpsnr.")
+        raise SettingsValidationError("Video default min_target_xpsnr must be less than or equal to target_xpsnr.")
     target_size_mb = _float_field("target_size_mb", minimum=1, maximum=100_000)
     max_height = _int_field("max_height", minimum=0, maximum=4320)
 
@@ -831,6 +1111,53 @@ def merge_runtime_settings_payload(existing: dict[str, Any], updates: dict[str, 
             merged[key] = nested
             continue
         merged[key] = value
+    return merged
+
+
+def runtime_library_signature(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    media = payload.get("media")
+    if not isinstance(media, dict):
+        return []
+    libraries = media.get("libraries")
+    if not isinstance(libraries, list):
+        return []
+    signature: list[dict[str, Any]] = []
+    for item in libraries:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()
+        if not key:
+            continue
+        definition = normalize_library_definition(item, key=key)
+        signature.append(
+            {
+                "key": key,
+                "type": definition["type"],
+                "scannable": definition["availability"] != "disabled",
+            }
+        )
+    return sorted(signature, key=lambda item: str(item["key"]))
+
+
+def bind_runtime_library_overrides(payload: dict[str, Any], previous_types: dict[str, str]) -> dict[str, Any]:
+    if not previous_types:
+        return payload
+    overrides = payload.get(FOLDER_POLICY_OVERRIDES_KEY)
+    if not isinstance(overrides, list):
+        return payload
+    merged = dict(payload)
+    rebound: list[Any] = []
+    for override in overrides:
+        if not isinstance(override, dict):
+            rebound.append(override)
+            continue
+        root = str(override.get("path_prefix") or "").strip("/").split("/", 1)[0]
+        previous_type = previous_types.get(root)
+        if previous_type and not str(override.get("library_type") or "").strip():
+            rebound.append({**override, "library_type": previous_type})
+            continue
+        rebound.append(override)
+    merged[FOLDER_POLICY_OVERRIDES_KEY] = rebound
     return merged
 
 
@@ -894,9 +1221,9 @@ def normalize_host_source_root_overrides(
         try:
             raw_value = json.loads(text)
         except json.JSONDecodeError as exc:
-            raise ValueError(f"Library path overrides must be valid JSON for {host_label}.") from exc
+            raise SettingsValidationError(f"Library path overrides must be valid JSON for {host_label}.") from exc
     if not isinstance(raw_value, dict):
-        raise ValueError(f"Library path overrides must be a JSON object for {host_label}.")
+        raise SettingsValidationError(f"Library path overrides must be a JSON object for {host_label}.")
 
     normalized: dict[str, str] = {}
     for key, path in raw_value.items():
@@ -904,7 +1231,7 @@ def normalize_host_source_root_overrides(
         if not key_text:
             continue
         if key_text not in known_library_keys:
-            raise ValueError(f"Unknown library override '{key_text}' for {host_label}.")
+            raise SettingsValidationError(f"Unknown library override '{key_text}' for {host_label}.")
         path_text = str(path or "").strip()
         if not path_text:
             continue

@@ -30,6 +30,8 @@ Use this directory for guidance that should not live in `AGENTS.md`.
   execution, deterministic bypasses, privacy-safe telemetry, and eval operation
 - `docs/architecture/library-lifecycle-policy.md`: current-season protection,
   acquisition guards, Plex/TMDB metadata, age ranking, and manifest provenance
+- `docs/architecture/typed-library-settings.md`: ordered typed roots,
+  availability states, type-change compatibility, and credential boundaries
 
 ## Design briefs
 

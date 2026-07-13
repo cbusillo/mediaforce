@@ -23,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy import update
 
 from mediaforce import execution, quality, remote, review, state_cleanup
-from mediaforce.core import binaries
+from mediaforce.core import binaries, config as config_runtime
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import calibration_jobs
@@ -2177,6 +2177,228 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["key"], "late_night")
         self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["timezone"], "host_local")
 
+    def test_runtime_settings_payload_persists_canonical_typed_library_rows(self) -> None:
+        payload = web_app._build_runtime_settings_payload(
+            libraries=[
+                {
+                    "key": "movies",
+                    "label": "Movies",
+                    "path": str(self.root / "source" / "movies"),
+                    "color": "#4e6fa6",
+                    "library_type": "movie",
+                    "availability": "browse_only",
+                    "default_profile": "movie_balanced",
+                    "plex_path": "/mnt/media/movies",
+                    "policy": {
+                        "grouping": "title",
+                        "editions": "separate",
+                        "extras": "exclude",
+                        "ranking": "oldest_added_first",
+                    },
+                }
+            ],
+            remote_hosts=[],
+            transcode_root=str(self.root / "staging"),
+            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
+            schedule_profiles=[],
+        )
+
+        self.assertEqual(payload["media"]["source_roots"], {"movies": str(self.root / "source" / "movies")})
+        self.assertEqual(payload["media"]["libraries"][0]["type"], "movie")
+        self.assertEqual(payload["media"]["libraries"][0]["path"], str(self.root / "source" / "movies"))
+        self.assertEqual(payload["metadata"]["plex"]["library_roots"], {"movies": "/mnt/media/movies"})
+
+    def test_runtime_settings_payload_requires_root_bound_type_change_confirmation(self) -> None:
+        row = {
+            "key": "tv",
+            "label": "TV Shows",
+            "path": str(self.root / "source" / "tv"),
+            "library_type": "movie",
+            "availability": "browse_only",
+            "default_profile": "movie_balanced",
+            "policy": {
+                "grouping": "title",
+                "editions": "separate",
+                "extras": "exclude",
+                "ranking": "oldest_added_first",
+            },
+        }
+        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
+            web_app._build_runtime_settings_payload(
+                libraries=[row],
+                remote_hosts=[],
+                transcode_root=str(self.root / "staging"),
+                encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
+                schedule_profiles=[],
+                existing_library_types={"tv": "tv"},
+            )
+        self.assertIn("compatibility preview", raised.exception.public_message)
+
+        payload = web_app._build_runtime_settings_payload(
+            libraries=[
+                {
+                    **row,
+                    "availability": "production",
+                    "type_change_confirmation": "tv:tv->movie",
+                }
+            ],
+            remote_hosts=[],
+            transcode_root=str(self.root / "staging"),
+            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
+            schedule_profiles=[],
+            existing_library_types={"tv": "tv"},
+        )
+        self.assertEqual(payload["media"]["libraries"][0]["type"], "movie")
+        self.assertEqual(payload["media"]["libraries"][0]["availability"], "browse_only")
+
+    def test_runtime_settings_payload_rejects_non_tv_production(self) -> None:
+        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
+            web_app._build_runtime_settings_payload(
+                libraries=[
+                    {
+                        "key": "movies",
+                        "label": "Movies",
+                        "path": str(self.root / "source" / "movies"),
+                        "library_type": "movie",
+                        "availability": "production",
+                        "default_profile": "movie_balanced",
+                    }
+                ],
+                remote_hosts=[],
+                transcode_root=str(self.root / "staging"),
+                encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
+                schedule_profiles=[],
+            )
+        self.assertIn("production is not available", raised.exception.public_message)
+
+    def test_typed_library_maps_scan_browse_only_but_only_produce_ready_roots(self) -> None:
+        self.config.raw["media"]["source_roots"] = {
+            "tv": str(self.root / "source" / "tv"),
+            "movies": str(self.root / "source" / "movies"),
+            "other": str(self.root / "source" / "other"),
+        }
+        self.config.raw["media"]["libraries"] = [
+            {
+                "key": "movies",
+                "path": str(self.root / "source" / "movies"),
+                "type": "movie",
+                "availability": "browse_only",
+            },
+            {
+                "key": "tv",
+                "path": str(self.root / "source" / "tv"),
+                "type": "tv",
+                "availability": "production",
+            },
+            {
+                "key": "other",
+                "path": str(self.root / "source" / "other"),
+                "type": "other",
+                "availability": "disabled",
+            },
+        ]
+
+        self.assertEqual(list(self.config.configured_source_root_map), ["movies", "tv", "other"])
+        self.assertEqual(list(self.config.scan_source_root_map), ["movies", "tv"])
+        self.assertEqual(list(self.config.source_root_map), ["tv"])
+
+    def test_canonical_library_rows_do_not_require_legacy_source_roots(self) -> None:
+        self.config.raw["media"] = {
+            "libraries": [
+                {
+                    "key": "shows",
+                    "label": "Shows",
+                    "path": str(self.root / "source" / "shows"),
+                    "type": "tv",
+                    "availability": "production",
+                }
+            ]
+        }
+
+        self.assertEqual(list(self.config.configured_source_root_map), ["shows"])
+        self.assertEqual(list(self.config.source_root_map), ["shows"])
+
+    def test_canonical_config_cannot_enable_unsupported_library_production(self) -> None:
+        self.config.raw["media"]["libraries"] = [
+            {
+                "key": "movies",
+                "path": str(self.root / "source" / "movies"),
+                "type": "movie",
+                "availability": "production",
+            }
+        ]
+
+        self.assertEqual(list(self.config.scan_source_root_map), ["movies"])
+        self.assertEqual(self.config.source_root_map, {})
+
+    def test_library_scan_signature_ignores_operator_order(self) -> None:
+        first = {
+            "media": {
+                "libraries": [
+                    {"key": "movies", "type": "movie", "availability": "browse_only"},
+                    {"key": "tv", "type": "tv", "availability": "production"},
+                ]
+            }
+        }
+        second = {
+            "media": {
+                "libraries": [
+                    {"key": "tv", "type": "tv", "availability": "production"},
+                    {"key": "movies", "type": "movie", "availability": "browse_only"},
+                ]
+            }
+        }
+
+        self.assertEqual(
+            settings_runtime.runtime_library_signature(first),
+            settings_runtime.runtime_library_signature(second),
+        )
+
+    def test_type_change_preserves_but_disables_incompatible_runtime_overrides(self) -> None:
+        payload = {
+            "folder_policy_overrides": [
+                {"path_prefix": "tv/Example/Season 01", "video": {"crf": 22}},
+                {"path_prefix": "movies/Example", "video": {"crf": 24}},
+            ]
+        }
+
+        rebound = settings_runtime.bind_runtime_library_overrides(payload, {"tv": "tv"})
+
+        self.assertEqual(rebound["folder_policy_overrides"][0]["library_type"], "tv")
+        self.assertNotIn("library_type", rebound["folder_policy_overrides"][1])
+
+        self.config.raw["media"]["libraries"] = [
+            {
+                "key": "tv",
+                "path": str(self.root / "source" / "tv"),
+                "type": "movie",
+                "availability": "browse_only",
+            }
+        ]
+        normalized_overrides = config_runtime._normalize_folder_policy_overrides(
+            rebound["folder_policy_overrides"]
+        )
+        self.config.raw["overrides"] = normalized_overrides
+        self.assertEqual(normalized_overrides[0]["library_type"], "tv")
+        self.config.raw.setdefault("video", {})
+        self.config.raw.setdefault("audio", {})
+        self.config.raw.setdefault("subtitle", {})
+        self.config.raw.setdefault("planning", {})
+        self.assertNotEqual(self.config.resolve_policy("tv/Example/Season 01")["video"].get("crf"), 22)
+
+    def test_runtime_settings_payload_rejects_submitted_secret_values(self) -> None:
+        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
+            web_app._build_runtime_settings_payload(
+                libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
+                remote_hosts=[],
+                transcode_root=str(self.root / "staging"),
+                encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
+                schedule_profiles=[],
+                metadata={"plex": {"token": "must-not-persist"}},
+            )
+        self.assertEqual(raised.exception.public_message, "Credential values are not accepted in Settings.")
+        self.assertEqual(str(raised.exception), "Settings validation failed.")
+
     def test_runtime_settings_payload_defaults_host_schedule_to_always(self) -> None:
         payload = web_app._build_runtime_settings_payload(
             libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
@@ -2369,7 +2591,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(payload["remote_hosts"][0]["staging_root"], str(self.root / "remote-staging"))
 
     def test_runtime_settings_payload_rejects_unknown_library_override(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Unknown library override"):
+        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
             web_app._build_runtime_settings_payload(
                 libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
                 remote_hosts=[
@@ -2386,9 +2608,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
                 schedule_profiles=[],
             )
+        self.assertIn("Unknown library override", raised.exception.public_message)
 
     def test_runtime_settings_payload_rejects_unknown_host_schedule_profile(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Unknown schedule profile"):
+        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
             web_app._build_runtime_settings_payload(
                 libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
                 remote_hosts=[
@@ -2405,9 +2628,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
                 schedule_profiles=[],
             )
+        self.assertIn("Unknown schedule profile", raised.exception.public_message)
 
     def test_runtime_settings_payload_rejects_reserved_schedule_profile_key(self) -> None:
-        with self.assertRaisesRegex(ValueError, "reserved"):
+        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
             web_app._build_runtime_settings_payload(
                 libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
                 remote_hosts=[],
@@ -2422,6 +2646,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     }
                 ],
             )
+        self.assertIn("reserved", raised.exception.public_message)
 
     def test_runtime_settings_payload_preserves_allowed_libraries_for_host(self) -> None:
         payload = web_app._build_runtime_settings_payload(
@@ -2605,7 +2830,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["all_day_days_of_week"], ["sun"])
 
     def test_build_runtime_settings_payload_rejects_schedule_profile_without_days(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Select at least one day"):
+        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
             settings_runtime.build_runtime_settings_payload(
                 libraries=[{"key": "movies", "path": str(self.root / "source" / "movies"), "color": "#123456"}],
                 remote_hosts=[],
@@ -2622,6 +2847,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     }
                 ],
             )
+        self.assertIn("Select at least one day", raised.exception.public_message)
 
     def test_host_runtime_rows_mark_never_schedule_as_disabled(self) -> None:
         self.config.raw["remote_hosts"] = [
@@ -3203,6 +3429,39 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             self.assertTrue(web_app._scan_is_stale(connection, self.config, prefix=None))
 
+    def test_full_scan_becomes_stale_when_library_type_changes(self) -> None:
+        source_path = self._create_source_file("typed-scan-episode.mkv")
+        self.config.raw["media"]["libraries"] = [
+            {
+                "key": "tv",
+                "path": str(self.root / "source" / "tv"),
+                "type": "tv",
+                "availability": "production",
+            }
+        ]
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(connection, source_path)
+            now = web_app._now_iso()
+            self._insert_scan_run(
+                connection,
+                scan_id="scan-typed",
+                started_at=now,
+                completed_at=now,
+                roots_json=json.dumps({"tv": str(self.root / "source" / "tv")}),
+                scope="full",
+                prefixes_json=None,
+                file_count=1,
+                reprobed_count=0,
+                unchanged_count=0,
+            )
+            web_app._save_catalog_signature(self.config)
+            self.assertFalse(web_app._scan_is_stale(connection, self.config, prefix=None))
+
+            self.config.raw["media"]["libraries"][0]["type"] = "movie"
+            self.config.raw["media"]["libraries"][0]["availability"] = "browse_only"
+
+            self.assertTrue(web_app._scan_is_stale(connection, self.config, prefix=None))
+
     def test_full_scan_becomes_stale_after_fifteen_minutes(self) -> None:
         source_path = self._create_source_file("episode-b.mkv")
 
@@ -3281,6 +3540,19 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             assert refreshed_job is not None
             self.assertEqual(refreshed_job["status"], "queued")
             self.assertNotEqual(refreshed_job["job_id"], "scan-stale-job")
+
+    def test_forced_scan_schedules_even_when_catalog_is_fresh(self) -> None:
+        fake_thread = Mock()
+        with open_db(self.config.paths.db_path) as connection, patch(
+            "mediaforce.web.runtime.job_runtime.scan_is_stale",
+            return_value=False,
+        ), patch.object(web_app.threading, "Thread", return_value=fake_thread):
+            job = web_app._maybe_schedule_scan(connection, self.config, prefix=None, force=True)
+
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job["status"], "queued")
+        fake_thread.start.assert_called_once()
 
     def test_scheduler_uses_host_local_time_for_windows(self) -> None:
         policy = web_app._normalize_encode_queue_scheduler(
@@ -12575,6 +12847,46 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             assert job is not None
             self.assertEqual(job["job_id"], "job-queued-runtime")
             self.assertEqual(job["host"]["key"], "local")
+
+    def test_load_next_runnable_encode_job_holds_browse_only_library_work(self) -> None:
+        source_path = self._create_source_file("episode-browse-only.mkv")
+        staging_path = self._staging_path("episode-browse-only.mkv")
+        self.config.raw["media"]["libraries"] = [
+            {
+                "key": "tv",
+                "path": str(self.root / "source" / "tv"),
+                "type": "tv",
+                "availability": "browse_only",
+            }
+        ]
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path)
+            self._write_manifest(
+                "manifest-browse-only.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-browse-only",
+                manifest_name="manifest-browse-only.json",
+                host={},
+                status="queued",
+                attempt_count=0,
+            )
+            connection.commit()
+            deps = Mock()
+            deps.now_iso.return_value = web_app._now_iso()
+
+            with patch("mediaforce.web.runtime.encode_runtime.select_encode_host") as select_host:
+                job = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
+
+            self.assertIsNone(job)
+            select_host.assert_not_called()
+            blocked = load_encode_job(connection, "job-browse-only")
+            self.assertIsNotNone(blocked)
+            assert blocked is not None
+            self.assertEqual(blocked["waiting_reason"], "Library is Browse only or Disabled in Settings.")
 
     def test_process_encode_queue_once_dispatches_multiple_jobs(self) -> None:
         manifest_path = self._write_manifest(

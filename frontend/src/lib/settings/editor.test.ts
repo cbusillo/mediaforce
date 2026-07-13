@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	DEFAULT_SCHEDULE_DAYS,
+	applyLibraryTypeChange,
+	addLibraryDraft,
 	addScheduleDraft,
 	archiveCleanupTargetDirty,
 	buildArchiveCleanupClearPayload,
@@ -10,6 +12,8 @@ import {
 	draftFromSettings,
 	hostLibraryAccessChecked,
 	hostLibraryAccessCopy,
+	libraryReadiness,
+	moveLibraryDraft,
 	scheduleDaysSummaryCopy,
 	scheduleWindowSummaryCopy,
 	settingsDraftIsDirty,
@@ -109,7 +113,39 @@ describe('settings draft helpers', () => {
 	const payload: SettingsPayload = {
 		error: null,
 		saved: false,
-		libraries: [{ index: '0', key: 'tv', path: '/Volumes/TV', color: '#4e6fa6' }],
+		libraries: [
+			{
+				index: '0',
+				key: 'tv',
+				label: 'TV Shows',
+				path: '/Volumes/TV',
+				color: '#4e6fa6',
+				library_type: 'tv',
+				availability: 'production',
+				default_profile: 'inherit_defaults',
+				plex_path: '/data/tv',
+				policy: {
+					series_lifecycle_mode: 'auto',
+					current_season_inactive_days: 365,
+					season_acquisition_hold_days: 30,
+					series_metadata_stale_days: 7
+				},
+				readiness: { state: 'ready', label: 'Ready', detail: 'Ready.' },
+				type_change_confirmation: ''
+			}
+		],
+		library_type_options: [
+			{ key: 'tv', label: 'TV' },
+			{ key: 'movie', label: 'Movies' },
+			{ key: 'spatial', label: '3D / VR' },
+			{ key: 'other', label: 'Other' }
+		],
+		library_profile_options: {
+			tv: [{ key: 'inherit_defaults', label: 'Use assistant defaults' }],
+			movie: [{ key: 'movie_balanced', label: 'Balanced movie' }],
+			spatial: [{ key: 'spatial_preserve', label: 'Preserve source geometry' }],
+			other: [{ key: 'other_conservative', label: 'Conservative' }]
+		},
 		remote_hosts: [
 			{
 				index: '0',
@@ -212,6 +248,52 @@ describe('settings draft helpers', () => {
 
 		draft.libraries[0] = { ...draft.libraries[0], path: '/Volumes/TV2' };
 		expect(settingsDraftIsDirty(draft, payload)).toBe(true);
+	});
+
+	it('creates stable library IDs and preserves order through moves', () => {
+		const libraries = addLibraryDraft(payload.libraries);
+
+		expect(libraries[1]?.key).toBe('library_2');
+		expect(libraries[1]?.availability).toBe('browse_only');
+		expect(moveLibraryDraft(libraries, 1, -1).map((library) => library.key)).toEqual([
+			'library_2',
+			'tv'
+		]);
+	});
+
+	it('resets confirmed type changes to a safe browse-only policy', () => {
+		const preview = {
+			key: 'tv',
+			from_type: 'tv' as const,
+			to_type: 'movie' as const,
+			item_count: 42,
+			requires_rescan: true,
+			clears_saved_profiles: true,
+			acknowledgement: 'tv:tv->movie'
+		};
+
+		const changed = applyLibraryTypeChange(
+			payload.libraries,
+			0,
+			'movie',
+			payload.library_profile_options,
+			preview
+		)[0];
+
+		expect(changed?.availability).toBe('browse_only');
+		expect(changed?.policy.grouping).toBe('title');
+		expect(changed?.type_change_confirmation).toBe('tv:tv->movie');
+	});
+
+	it('keeps spatial roots incomplete until playback facts are supplied', () => {
+		const spatial = applyLibraryTypeChange(
+			payload.libraries,
+			0,
+			'spatial',
+			payload.library_profile_options
+		)[0];
+
+		expect(spatial && libraryReadiness(spatial).state).toBe('incomplete');
 	});
 
 	it('uses the saved transcode root for destructive archive cleanup', () => {

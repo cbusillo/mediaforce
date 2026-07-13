@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
-from sqlalchemy import case
+from sqlalchemy import and_, case, or_
 from sqlalchemy import insert
 from sqlalchemy import not_
 from sqlalchemy import select
@@ -53,7 +53,8 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                  limit: int | None = None) -> ScanStats:
     scan_id = uuid.uuid4().hex
     started_at = timestamp()
-    roots_json = json.dumps(sorted(config.source_root_map.keys()))
+    scan_source_roots = getattr(config, "scan_source_root_map", config.source_root_map)
+    roots_json = json.dumps(sorted(scan_source_roots.keys()))
     normalized_prefixes = sorted({prefix.strip("/") for prefix in object_list(prefixes) if str(prefix).strip("/")})
     scope = "prefix" if normalized_prefixes else "full"
     connection.execute(
@@ -73,7 +74,7 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
     seen_paths: set[str] = set()
     pending_writes = 0
 
-    for root_name, root_path in config.source_root_map.items():
+    for root_name, root_path in scan_source_roots.items():
         for file_path in _iter_media_files(root_path, prefixes=normalized_prefixes or None, limit=limit,
                                            seen=stats.total_seen):
             source_path = str(file_path)
@@ -214,14 +215,23 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
             break
 
     full_scan = not normalized_prefixes and limit is None
-    if full_scan and seen_paths:
+    if full_scan:
+        active_roots = tuple(scan_source_roots.keys())
+        stale_filter = library_items.c.status != "missing"
+        if active_roots and seen_paths:
+            stale_filter = and_(
+                stale_filter,
+                or_(
+                    not_(library_items.c.media_root.in_(active_roots)),
+                    and_(
+                        library_items.c.media_root.in_(active_roots),
+                        not_(library_items.c.source_path.in_(tuple(seen_paths))),
+                    ),
+                ),
+            )
         cursor = connection.execute(
             update(library_items)
-            .where(
-                library_items.c.media_root.in_(tuple(config.source_root_map.keys())),
-                not_(library_items.c.source_path.in_(tuple(seen_paths))),
-                library_items.c.status != "missing",
-            )
+            .where(stale_filter)
             .values(status="missing", updated_at=started_at)
         )
         stats.missing = int_value(cursor.rowcount) if cursor.rowcount != -1 else 0

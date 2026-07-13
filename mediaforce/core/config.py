@@ -10,6 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from mediaforce.library.library_settings import configured_library_definitions, library_definition_map, \
+    library_production_supported
+
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "defaults.toml"
 FOLDER_POLICY_OVERRIDES_KEY = "folder_policy_overrides"
 BENCH_SAVED_OVERRIDE_NOTE = "Saved from the calibration bench."
@@ -61,10 +64,48 @@ class MediaforceConfig:
         return value if isinstance(value, dict) else {}
 
     @property
-    def source_root_map(self) -> dict[str, Path]:
+    def configured_source_root_map(self) -> dict[str, Path]:
+        if isinstance(self.media.get("libraries"), list):
+            return {
+                str(definition["key"]): Path(str(definition["path"])).expanduser()
+                for definition in self.library_definitions
+            }
         return {
             key: Path(value).expanduser()
             for key, value in self.media["source_roots"].items()
+        }
+
+    @property
+    def library_definitions(self) -> list[dict[str, Any]]:
+        return configured_library_definitions(self.media)
+
+    @property
+    def library_definition_map(self) -> dict[str, dict[str, Any]]:
+        return library_definition_map(self.media)
+
+    @property
+    def scan_source_root_map(self) -> dict[str, Path]:
+        configured = self.configured_source_root_map
+        if not isinstance(self.media.get("libraries"), list):
+            return configured
+        definitions = self.library_definition_map
+        return {
+            key: path
+            for key, path in configured.items()
+            if definitions.get(key, {}).get("availability") != "disabled"
+        }
+
+    @property
+    def source_root_map(self) -> dict[str, Path]:
+        configured = self.configured_source_root_map
+        if not isinstance(self.media.get("libraries"), list):
+            return configured
+        definitions = self.library_definition_map
+        return {
+            key: path
+            for key, path in configured.items()
+            if definitions.get(key, {}).get("availability") == "production"
+            and library_production_supported(str(definitions.get(key, {}).get("type") or ""))
         }
 
     def source_root_map_for_host(self, host: dict[str, Any] | None = None) -> dict[str, Path]:
@@ -135,10 +176,26 @@ class MediaforceConfig:
         }
 
         normalized_rel_path = rel_path.strip("/")
+        root_key = normalized_rel_path.split("/", 1)[0]
+        library = self.library_definition_map.get(root_key)
+        if library and library.get("type") == "tv":
+            library_policy = library.get("policy")
+            if isinstance(library_policy, dict):
+                for key in (
+                    "series_lifecycle_mode",
+                    "current_season_inactive_days",
+                    "season_acquisition_hold_days",
+                    "series_metadata_stale_days",
+                ):
+                    if key in library_policy:
+                        policy["planning"][key] = copy.deepcopy(library_policy[key])
         matching_overrides: list[tuple[int, int, dict[str, Any]]] = []
         for index, override in enumerate(self.overrides):
             prefix = str(override.get("path_prefix", "")).strip("/")
             if prefix and not _path_prefix_matches(normalized_rel_path, prefix):
+                continue
+            override_library_type = str(override.get("library_type") or "").strip()
+            if override_library_type and library and override_library_type != str(library.get("type") or ""):
                 continue
             matching_overrides.append((len(prefix), index, override))
 
@@ -462,6 +519,9 @@ def _build_folder_policy_override(prefix: str, policy: dict[str, Any]) -> dict[s
         values = policy.get(section)
         if isinstance(values, dict) and values:
             override[section] = copy.deepcopy(values)
+    library_type = str(policy.get("library_type") or "").strip()
+    if library_type:
+        override["library_type"] = library_type
     return override
 
 

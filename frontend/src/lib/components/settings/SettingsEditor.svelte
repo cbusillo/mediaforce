@@ -6,6 +6,8 @@
 		ArchiveCleanupPayload,
 		HostRuntime,
 		HostsPayload,
+		LibraryType,
+		LibraryTypeChangePreview,
 		ScheduleProfile,
 		SettingsHost,
 		SettingsLibrary,
@@ -16,6 +18,7 @@
 		addHostDraft,
 		addLibraryDraft,
 		addScheduleDraft,
+		applyLibraryTypeChange,
 		archiveCleanupTargetDirty,
 		buildArchiveCleanupClearPayload,
 		buildSettingsSavePayload,
@@ -23,6 +26,7 @@
 		hostLibraryAccessChecked,
 		hostLibraryAccessCopy,
 		hostDraftRuntimeKey,
+		moveLibraryDraft,
 		removeAtIndex,
 		scheduleWindowSummaryCopy,
 		settingsDraftIsDirty,
@@ -33,6 +37,7 @@
 		type SettingsDraft
 	} from '$lib/settings/editor';
 	import OperatorShell from '../workstation/OperatorShell.svelte';
+	import LibraryRootsPanel from './LibraryRootsPanel.svelte';
 	import StateBadge from '../workstation/StateBadge.svelte';
 	import WorkstationPanel from '../workstation/WorkstationPanel.svelte';
 	import { workerCapabilityLabel } from '../workstation/ops-workstation';
@@ -46,6 +51,18 @@
 		ok: boolean;
 		message?: string;
 		archive_cleanup?: ArchiveCleanupPayload;
+	};
+	type TypePreviewResponse = {
+		ok: boolean;
+		message?: string;
+		preview?: LibraryTypeChangePreview;
+	};
+	type PendingTypeChange = {
+		index: number;
+		libraryType: LibraryType;
+		loading: boolean;
+		preview: LibraryTypeChangePreview | null;
+		error: string;
 	};
 	type BadgeTone = 'active' | 'ready' | 'wait' | 'fail' | 'idle';
 
@@ -109,6 +126,8 @@
 	let clearArchiveArmed = $state(false);
 	let archiveMessage = $state('');
 	let archiveError = $state('');
+	let pendingTypeChange = $state<PendingTypeChange | null>(null);
+	let pendingRemovalIndex = $state<number | null>(null);
 	let lastSettingsKey = '';
 
 	$effect(() => {
@@ -250,12 +269,6 @@
 		return 'Offline';
 	}
 
-	function updateLibrary(index: number, patch: Partial<SettingsLibrary>) {
-		draft.libraries = draft.libraries.map((library, candidate) =>
-			candidate === index ? { ...library, ...patch } : library
-		);
-	}
-
 	function updateHost(index: number, patch: Partial<SettingsHost>) {
 		draft.remote_hosts = draft.remote_hosts.map((host, candidate) =>
 			candidate === index ? { ...host, ...patch } : host
@@ -286,11 +299,88 @@
 		};
 	}
 
-	function updatePlexLibraryRoot(libraryKey: string, value: string) {
-		const library_roots = { ...draft.metadata.plex.library_roots };
-		if (value.trim()) library_roots[libraryKey] = value;
-		else delete library_roots[libraryKey];
-		updatePlexMetadata({ library_roots });
+	function updateLibraries(libraries: SettingsLibrary[]) {
+		draft.libraries = libraries;
+	}
+
+	function addLibrary() {
+		draft.libraries = addLibraryDraft(draft.libraries);
+	}
+
+	function moveLibrary(index: number, direction: -1 | 1) {
+		draft.libraries = moveLibraryDraft(draft.libraries, index, direction);
+	}
+
+	function requestLibraryRemoval(index: number) {
+		pendingRemovalIndex = index;
+	}
+
+	function confirmLibraryRemoval() {
+		if (pendingRemovalIndex === null) return;
+		draft.libraries = removeAtIndex(draft.libraries, pendingRemovalIndex).map((library, index) => ({
+			...library,
+			index: String(index)
+		}));
+		pendingRemovalIndex = null;
+	}
+
+	async function requestLibraryTypeChange(index: number, libraryType: LibraryType) {
+		const library = draft.libraries[index];
+		if (!library || library.library_type === libraryType || !savedSettings) return;
+		const savedLibrary = savedSettings.libraries.find((candidate) => candidate.key === library.key);
+		if (!savedLibrary) {
+			draft.libraries = applyLibraryTypeChange(
+				draft.libraries,
+				index,
+				libraryType,
+				savedSettings.library_profile_options
+			);
+			return;
+		}
+		pendingTypeChange = { index, libraryType, loading: true, preview: null, error: '' };
+		try {
+			const response = await postJson<TypePreviewResponse>(
+				`${resolve('/')}api/settings/library-type-preview`,
+				{ key: library.key, library_type: libraryType }
+			);
+			if (!response.ok || !response.preview) {
+				pendingTypeChange = {
+					index,
+					libraryType,
+					loading: false,
+					preview: null,
+					error: response.message || 'Compatibility preview could not be loaded.'
+				};
+				return;
+			}
+			pendingTypeChange = {
+				index,
+				libraryType,
+				loading: false,
+				preview: response.preview,
+				error: ''
+			};
+		} catch (error) {
+			pendingTypeChange = {
+				index,
+				libraryType,
+				loading: false,
+				preview: null,
+				error: error instanceof Error ? error.message : 'Compatibility preview could not be loaded.'
+			};
+		}
+	}
+
+	function confirmLibraryTypeChange() {
+		if (!pendingTypeChange?.preview || !savedSettings) return;
+		draft.libraries = applyLibraryTypeChange(
+			draft.libraries,
+			pendingTypeChange.index,
+			pendingTypeChange.libraryType,
+			savedSettings.library_profile_options,
+			pendingTypeChange.preview
+		);
+		pendingTypeChange = null;
 	}
 
 	function metricDefaultsCopy(defaults: SettingsPayload['video_defaults']) {
@@ -299,6 +389,13 @@
 		if (metric === 'xpsnr') return `${target} · XPSNR floor ${defaults.min_target_xpsnr}`;
 		if (metric === 'auto') return `${target} · Auto metric guardrails`;
 		return `${target} · VMAF floor ${defaults.min_target_vmaf}`;
+	}
+
+	function libraryTypeLabel(libraryType: LibraryType): string {
+		return (
+			savedSettings?.library_type_options.find((option) => option.key === libraryType)?.label ??
+			libraryType
+		);
 	}
 
 	function toggleScheduleDay(
@@ -418,7 +515,9 @@
 					<div>
 						<span class="mf-eyebrow">Settings</span>
 						<h1>Settings</h1>
-						<p>Choose where your shows live, where Mediaforce works, and when it may run.</p>
+						<p>
+							Choose where your media lives, how each library behaves, and when Mediaforce may run.
+						</p>
 					</div>
 					<div
 						class="settings-header__actions"
@@ -462,6 +561,84 @@
 					</div>
 				{/if}
 
+				{#if pendingTypeChange}
+					<div class="settings-modal-backdrop" role="presentation">
+						<div
+							class="settings-modal"
+							role="dialog"
+							aria-modal="true"
+							aria-labelledby="library-type-preview-title"
+						>
+							<span class="mf-eyebrow">Compatibility preview</span>
+							<h2 id="library-type-preview-title">Change library type?</h2>
+							{#if pendingTypeChange.loading}
+								<p>Checking scanned items and saved profiles…</p>
+							{:else if pendingTypeChange.error}
+								<div class="notice notice--fail">{pendingTypeChange.error}</div>
+							{:else if pendingTypeChange.preview}
+								<p>
+									Changing
+									<strong>{libraryTypeLabel(pendingTypeChange.preview.from_type)}</strong> to
+									<strong>{libraryTypeLabel(pendingTypeChange.preview.to_type)}</strong> changes
+									grouping for {pendingTypeChange.preview.item_count.toLocaleString('en-US')} scanned
+									items.
+								</p>
+								<ul class="settings-modal__facts">
+									<li>The library returns to Browse only until the new workflow is reviewed.</li>
+									<li>A fresh scan applies the new grouping and metadata rules.</li>
+									<li>Existing profiles are preserved but no longer apply to the new type.</li>
+									<li>No media files move or delete.</li>
+								</ul>
+							{/if}
+							<div class="settings-modal__actions">
+								<button type="button" class="control" onclick={() => (pendingTypeChange = null)}>
+									Keep current type
+								</button>
+								<button
+									type="button"
+									class="control control--ready"
+									disabled={!pendingTypeChange.preview || pendingTypeChange.loading}
+									onclick={confirmLibraryTypeChange}
+								>
+									Apply type and rescan
+								</button>
+							</div>
+						</div>
+					</div>
+				{/if}
+
+				{#if pendingRemovalIndex !== null && draft.libraries[pendingRemovalIndex]}
+					<div class="settings-modal-backdrop" role="presentation">
+						<div
+							class="settings-modal"
+							role="dialog"
+							aria-modal="true"
+							aria-labelledby="library-remove-title"
+						>
+							<span class="mf-eyebrow">Remove library</span>
+							<h2 id="library-remove-title">
+								Remove {draft.libraries[pendingRemovalIndex].label || 'this library'}?
+							</h2>
+							<p>
+								Mediaforce stops scanning this root after Save. Files stay where they are and are
+								never deleted by this action.
+							</p>
+							<div class="settings-modal__actions">
+								<button type="button" class="control" onclick={() => (pendingRemovalIndex = null)}>
+									Keep library
+								</button>
+								<button
+									type="button"
+									class="control control--danger"
+									onclick={confirmLibraryRemoval}
+								>
+									Remove from Mediaforce
+								</button>
+							</div>
+						</div>
+					</div>
+				{/if}
+
 				<div class="settings-overview" aria-label="Settings sections">
 					<a href="#settings-libraries">
 						<span>Library folders</span>
@@ -495,88 +672,29 @@
 							<span class="mf-eyebrow">Basic setup</span>
 							<h2 id="settings-basic-title">Library and working space</h2>
 						</div>
-						<p>These are the only settings most setup sessions need.</p>
+						<p>
+							Configure library behavior first, then choose working space and processing defaults.
+						</p>
 					</header>
 
 					<div id="settings-libraries" class="settings-anchor">
 						<WorkstationPanel
 							eyebrow="Libraries"
-							title="Library folders"
+							title="Library roots"
 							meta={`${configuredLibraries.length.toLocaleString('en-US')} configured`}
 						>
-							<div class="table-wrap">
-								<table class="settings-table settings-table--libraries">
-									<thead>
-										<tr>
-											<th>Library</th>
-											<th>Folder</th>
-											<th>Action</th>
-										</tr>
-									</thead>
-									<tbody>
-										{#each draft.libraries as library, index (`library-${library.index}-${index}`)}
-											<tr>
-												<td>
-													<div class="library-cell">
-														<label
-															class="swatch-field"
-															aria-label={`Color for ${library.key || 'library'}`}
-														>
-															<input
-																type="color"
-																value={library.color}
-																oninput={(event) =>
-																	updateLibrary(index, { color: inputValue(event) })}
-															/>
-															<span class="mf-mono">{library.color || 'unset'}</span>
-														</label>
-														<label class="library-key-field">
-															<span>Library name</span>
-															<input
-																id={`library-key-${index}`}
-																class="field"
-																value={library.key}
-																placeholder="tv"
-																oninput={(event) =>
-																	updateLibrary(index, { key: inputValue(event) })}
-															/>
-														</label>
-													</div>
-												</td>
-												<td>
-													<label class="sr-label" for={`library-path-${index}`}>Folder path</label>
-													<input
-														id={`library-path-${index}`}
-														class="field field--path"
-														value={library.path}
-														placeholder="/Volumes/Media/TV"
-														oninput={(event) => updateLibrary(index, { path: inputValue(event) })}
-													/>
-												</td>
-												<td>
-													<button
-														type="button"
-														class="control control--compact control--danger"
-														onclick={() =>
-															(draft.libraries = removeAtIndex(draft.libraries, index))}
-													>
-														Remove
-													</button>
-												</td>
-											</tr>
-										{/each}
-									</tbody>
-								</table>
-							</div>
-							<div class="panel-actions">
-								<button
-									type="button"
-									class="control"
-									onclick={() => (draft.libraries = addLibraryDraft(draft.libraries))}
-								>
-									Add library
-								</button>
-							</div>
+							<LibraryRootsPanel
+								libraries={draft.libraries}
+								typeOptions={savedSettings.library_type_options}
+								profileOptions={savedSettings.library_profile_options}
+								plexReady={draft.metadata.plex.token_configured}
+								plexTokenEnv={draft.metadata.plex.token_env}
+								onLibrariesChange={updateLibraries}
+								onAdd={addLibrary}
+								onRemove={requestLibraryRemoval}
+								onMove={moveLibrary}
+								onTypeChange={requestLibraryTypeChange}
+							/>
 						</WorkstationPanel>
 					</div>
 
@@ -856,32 +974,10 @@
 									<StateBadge
 										compact
 										tone={draft.metadata.plex.token_configured ? 'ready' : 'wait'}
-										label={draft.metadata.plex.token_configured ? 'Token ready' : 'Token missing'}
+										label={draft.metadata.plex.token_configured ? 'Token ready' : 'Token needed'}
 									/>
 									<code>{draft.metadata.plex.token_env}</code>
 								</div>
-							</div>
-
-							<div class="table-wrap metadata-mappings">
-								<table class="settings-table settings-table--metadata">
-									<thead><tr><th>Library</th><th>Path reported by Plex</th></tr></thead>
-									<tbody>
-										{#each configuredLibraries as library (library.index)}
-											<tr>
-												<td><strong class="mf-mono">{library.key}</strong></td>
-												<td>
-													<input
-														class="field field--path"
-														value={draft.metadata.plex.library_roots[library.key] ?? ''}
-														placeholder={library.path || '/data/media/tv'}
-														oninput={(event) =>
-															updatePlexLibraryRoot(library.key, inputValue(event))}
-													/>
-												</td>
-											</tr>
-										{/each}
-									</tbody>
-								</table>
 							</div>
 
 							<div class="metadata-grid metadata-grid--tmdb">
@@ -900,14 +996,15 @@
 									<StateBadge
 										compact
 										tone={draft.metadata.tmdb.token_configured ? 'ready' : 'wait'}
-										label={draft.metadata.tmdb.token_configured ? 'Token ready' : 'Token missing'}
+										label={draft.metadata.tmdb.token_configured ? 'Token ready' : 'Token needed'}
 									/>
 									<code>{draft.metadata.tmdb.token_env}</code>
 								</div>
 							</div>
 							<p class="metadata-help">
-								Tokens stay outside Mediaforce settings. A full library scan refreshes Plex age and
-								TMDB series status; cached metadata remains available during provider outages.
+								Tokens stay outside Mediaforce settings and are never accepted or shown here. A full
+								library scan refreshes Plex age and TMDB series status; cached metadata remains
+								available during provider outages.
 							</p>
 						</WorkstationPanel>
 					</div>
@@ -1464,6 +1561,49 @@
 		padding: var(--mf-space-5);
 	}
 
+	.settings-modal-backdrop {
+		position: fixed;
+		inset: 0;
+		z-index: 1000;
+		display: grid;
+		place-items: center;
+		padding: var(--mf-space-5);
+		background: var(--mf-bg-overlay);
+	}
+
+	.settings-modal {
+		display: grid;
+		gap: var(--mf-space-4);
+		width: min(36rem, 100%);
+		max-height: calc(100vh - 2rem);
+		overflow: auto;
+		padding: var(--mf-space-6);
+		border: var(--mf-border-strong);
+		background: var(--mf-bg-panel);
+		box-shadow: var(--mf-shadow-modal);
+	}
+
+	.settings-modal h2,
+	.settings-modal p {
+		margin: 0;
+	}
+
+	.settings-modal__facts {
+		display: grid;
+		gap: var(--mf-space-2);
+		margin: 0;
+		padding-left: 1.2rem;
+		color: var(--mf-fg-secondary);
+	}
+
+	.settings-modal__actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: var(--mf-space-3);
+		padding-top: var(--mf-space-3);
+		border-top: var(--mf-border-muted);
+	}
+
 	.settings-header {
 		align-items: end;
 		border-bottom: var(--mf-border);
@@ -1633,45 +1773,6 @@
 		margin-right: auto;
 	}
 
-	.table-wrap {
-		overflow: auto;
-	}
-
-	table {
-		border-collapse: collapse;
-		min-width: 700px;
-		width: 100%;
-	}
-
-	th,
-	td {
-		border-bottom: var(--mf-border-muted);
-		font-size: var(--mf-text-xs);
-		height: var(--mf-row-default);
-		padding: var(--mf-space-2) var(--mf-space-5);
-		text-align: left;
-		vertical-align: middle;
-	}
-
-	th {
-		background: var(--mf-bg-strip);
-		color: var(--mf-fg-tertiary);
-		font-size: var(--mf-text-2xs);
-		font-weight: var(--mf-weight-semibold);
-		letter-spacing: 0.08em;
-		position: sticky;
-		text-transform: uppercase;
-		top: 0;
-	}
-
-	.settings-table--libraries td:nth-child(1) {
-		min-width: 240px;
-	}
-
-	.settings-table--libraries td:nth-child(2) {
-		min-width: 220px;
-	}
-
 	.field {
 		background: var(--mf-bg-input);
 		border: var(--mf-border);
@@ -1718,15 +1819,6 @@
 		display: grid;
 		gap: var(--mf-space-2);
 		min-width: 0;
-	}
-
-	.swatch-field input {
-		background: transparent;
-		border: var(--mf-border);
-		border-radius: var(--mf-radius-1);
-		height: var(--mf-control-md);
-		padding: 0;
-		width: 36px;
 	}
 
 	.sr-label {
@@ -2222,63 +2314,6 @@
 		.settings-save-dock .control {
 			flex: 1 1 auto;
 		}
-
-		.table-wrap {
-			overflow: visible;
-		}
-
-		.settings-table--libraries {
-			min-width: 0;
-		}
-
-		.settings-table--libraries thead {
-			display: none;
-		}
-
-		.settings-table--libraries tbody,
-		.settings-table--libraries tr,
-		.settings-table--libraries td {
-			display: block;
-			width: 100%;
-		}
-
-		.settings-table--libraries tr {
-			border-bottom: var(--mf-border-muted);
-			display: grid;
-			gap: var(--mf-space-3);
-			grid-template-columns: minmax(0, 1fr);
-			padding: var(--mf-space-4);
-		}
-
-		.settings-table--libraries td {
-			border-bottom: 0;
-			height: auto;
-			min-width: 0;
-			padding: 0;
-		}
-
-		.settings-table--libraries td:nth-child(1),
-		.settings-table--libraries td:nth-child(2) {
-			display: grid;
-			gap: var(--mf-space-2);
-		}
-
-		.settings-table--libraries td:nth-child(1)::before,
-		.settings-table--libraries td:nth-child(2)::before {
-			color: var(--mf-fg-tertiary);
-			font-size: var(--mf-text-2xs);
-			font-weight: var(--mf-weight-semibold);
-			letter-spacing: 0.08em;
-			text-transform: uppercase;
-		}
-
-		.settings-table--libraries td:nth-child(1)::before {
-			content: 'Library';
-		}
-
-		.settings-table--libraries td:nth-child(2)::before {
-			content: 'Folder path';
-		}
 	}
 
 	/* Human settings surface */
@@ -2409,42 +2444,6 @@
 	.settings-anchor {
 		display: block;
 		scroll-margin-top: 18px;
-	}
-
-	.table-wrap {
-		background: var(--mf-bg-panel);
-		border: 0;
-		overflow-x: auto;
-	}
-
-	.settings-table {
-		background: var(--mf-bg-panel);
-		color: var(--mf-fg-primary);
-	}
-
-	.settings-table th {
-		background: var(--mf-bg-panel-2);
-		border-bottom: 1px solid var(--mf-line);
-		color: var(--mf-fg-tertiary);
-		font-family: var(--mf-font-sans);
-		font-size: 11px;
-		letter-spacing: 0.03em;
-		text-transform: none;
-	}
-
-	.settings-table td {
-		border-bottom: 1px solid var(--mf-line-muted);
-		color: var(--mf-fg-secondary);
-		font-family: var(--mf-font-sans);
-		padding: 12px;
-	}
-
-	.library-cell {
-		align-items: end;
-	}
-
-	.swatch-field {
-		display: none;
 	}
 
 	.field,
@@ -2646,60 +2645,6 @@
 
 		.settings-header__actions.has-changes :global(.state-badge) {
 			flex-basis: 100%;
-		}
-
-		.table-wrap {
-			overflow: visible;
-		}
-
-		.settings-table--libraries,
-		.settings-table--metadata {
-			display: block;
-			min-width: 0;
-			width: 100%;
-		}
-
-		.settings-table--metadata thead {
-			display: none;
-		}
-
-		.settings-table--metadata tbody,
-		.settings-table--metadata tr,
-		.settings-table--metadata td {
-			display: block;
-			width: 100%;
-		}
-
-		.settings-table--metadata tr {
-			border-bottom: var(--mf-border-muted);
-			display: grid;
-			gap: var(--mf-space-3);
-			padding: var(--mf-space-4);
-		}
-
-		.settings-table--metadata td {
-			border-bottom: 0;
-			height: auto;
-			min-width: 0;
-			padding: 0;
-		}
-
-		.settings-table--metadata td::before {
-			color: var(--mf-fg-tertiary);
-			display: block;
-			font-size: var(--mf-text-2xs);
-			font-weight: var(--mf-weight-semibold);
-			letter-spacing: 0.06em;
-			margin-bottom: var(--mf-space-2);
-			text-transform: uppercase;
-		}
-
-		.settings-table--metadata td:nth-child(1)::before {
-			content: 'Library';
-		}
-
-		.settings-table--metadata td:nth-child(2)::before {
-			content: 'Path reported by Plex';
 		}
 	}
 </style>
