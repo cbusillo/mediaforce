@@ -14,7 +14,7 @@ from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import item_events, library_items, staged_artifacts
 from mediaforce.core.models import ProbeSummary
-from mediaforce.encoding.quality import QualitySearchResult
+from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
 
 
 class TargetSizeProductionTests(unittest.TestCase):
@@ -42,7 +42,7 @@ class TargetSizeProductionTests(unittest.TestCase):
                 target_size_trace=self._trace(item, selected_crf=28.0),
             )
 
-            self._encode_with_output_sizes(connection, item, quality, [5_100_000])
+            build_calls, measure_calls = self._encode_with_output_sizes(connection, item, quality, [5_100_000])
 
             artifact = self._staged_artifact(connection, item_id, staged_artifacts.c.validation_json)
             assert artifact is not None
@@ -52,6 +52,8 @@ class TargetSizeProductionTests(unittest.TestCase):
             self.assertEqual(final_output["status"], "inside_target_band")
             self.assertEqual(final_output["actual_output_bytes"], 5_100_000)
             self.assertEqual(validation["target_size_trace"]["selected_candidate"]["predicted_whole_episode_bytes"], 5_000_000)
+            self.assertEqual(len(build_calls), 1)
+            self.assertEqual(measure_calls, [])
 
     def test_encode_uses_one_logged_retry_from_measured_candidate_for_final_miss(self) -> None:
         source_path = self._source_file("episode-target-retry.mkv")
@@ -69,7 +71,12 @@ class TargetSizeProductionTests(unittest.TestCase):
                 target_size_trace=self._trace(item, selected_crf=28.0, retry_crf=31.0),
             )
 
-            build_calls = self._encode_with_output_sizes(connection, item, quality, [5_400_000, 5_100_000])
+            build_calls, measure_calls = self._encode_with_output_sizes(
+                connection,
+                item,
+                quality,
+                [5_400_000, 5_100_000],
+            )
 
             artifact = self._staged_artifact(connection, item_id, staged_artifacts.c.validation_json)
             assert artifact is not None
@@ -81,6 +88,64 @@ class TargetSizeProductionTests(unittest.TestCase):
             self.assertEqual(final_output["actual_output_bytes"], 5_100_000)
             self.assertIn("encoding_target_size_retry", [event["event_type"] for event in events])
             self.assertEqual([call.kwargs["quality"].crf for call in build_calls], [28.0, 31.0])
+            self.assertEqual(measure_calls, [])
+
+    def test_encode_measures_interpolated_retry_before_second_full_encode(self) -> None:
+        source_path = self._source_file("episode-target-measured-retry.mkv")
+        staging_path = self._staging_path("episode-target-measured-retry.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            self._attach_stream_budget(item)
+            quality = QualitySearchResult(
+                crf=34.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="target-size-search",
+                target_size_trace=self._trace(
+                    item,
+                    selected_crf=34.0,
+                    retry_crf=38.0,
+                    retry_predicted_total=4_200_000,
+                ),
+            )
+            retry_sample = SampleEncodeResult(
+                metric="VMAF",
+                score=84.5,
+                predicted_encode_percent=20.0,
+                predicted_encode_seconds=30.0,
+                predicted_encode_size_bytes=800_000,
+                stdout="measured retry",
+            )
+
+            build_calls, measure_calls = self._encode_with_output_sizes(
+                connection,
+                item,
+                quality,
+                [5_400_000, 5_100_000],
+                retry_sample=retry_sample,
+            )
+
+            artifact = self._staged_artifact(
+                connection,
+                item_id,
+                staged_artifacts.c.chosen_crf,
+                staged_artifacts.c.quality_score,
+                staged_artifacts.c.validation_json,
+            )
+            assert artifact is not None
+            validation = json.loads(cast(str, artifact["validation_json"]))
+            attempts = validation["target_size_trace"]["final_output_attempts"]
+            self.assertEqual([call.kwargs["quality"].crf for call in build_calls], [34.0, 35.0])
+            self.assertEqual([call.kwargs["crf"] for call in measure_calls], [35.0])
+            self.assertEqual(artifact["chosen_crf"], 35.0)
+            self.assertEqual(artifact["quality_score"], 84.5)
+            self.assertEqual([attempt["status"] for attempt in attempts], ["over_target", "inside_target_band"])
+            self.assertEqual(
+                validation["target_size_trace"]["selected_candidate"]["role"],
+                "final_retry_measurement",
+            )
 
     def test_encode_surfaces_needs_review_when_final_miss_has_no_measured_retry(self) -> None:
         source_path = self._source_file("episode-target-review.mkv")
@@ -110,13 +175,60 @@ class TargetSizeProductionTests(unittest.TestCase):
             self.assertEqual(failed_details["target_size_verification"]["status"], "over_target")
             self.assertFalse(staging_path.exists())
 
+    def test_encode_persists_rejected_retry_measurement_reason(self) -> None:
+        source_path = self._source_file("episode-target-retry-rejected.mkv")
+        staging_path = self._staging_path("episode-target-retry-rejected.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            self._attach_stream_budget(item)
+            quality = QualitySearchResult(
+                crf=34.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="target-size-search",
+                target_size_trace=self._trace(
+                    item,
+                    selected_crf=34.0,
+                    retry_crf=38.0,
+                    retry_predicted_total=4_200_000,
+                ),
+            )
+            rejected_sample = SampleEncodeResult(
+                metric="VMAF",
+                score=79.5,
+                predicted_encode_percent=20.0,
+                predicted_encode_seconds=30.0,
+                predicted_encode_size_bytes=800_000,
+                stdout="below floor",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "Final output size missed"):
+                self._encode_with_output_sizes(
+                    connection,
+                    item,
+                    quality,
+                    [5_400_000],
+                    retry_sample=rejected_sample,
+                )
+
+            events = self._events(connection, item_id)
+            failed_details = json.loads(cast(str, events[-1]["details_json"]))
+            rejection_trace = failed_details["target_size_trace"]
+            self.assertEqual(rejection_trace["selection_reason"], "final_retry_measurement_below_quality_floor")
+            self.assertEqual(rejection_trace["final_retry_calibration"]["status"], "rejected")
+            self.assertFalse(staging_path.exists())
+
     def _encode_with_output_sizes(
             self,
             connection: DBClient,
             item: dict[str, Any],
             quality: QualitySearchResult,
             output_sizes: list[int],
-    ) -> list[Any]:
+            *,
+            retry_sample: SampleEncodeResult | None = None,
+    ) -> tuple[list[Any], list[Any]]:
         sizes = list(output_sizes)
 
         def run_encode_side_effect(*, temp_output: Path, **_: object) -> subprocess.CompletedProcess[str]:
@@ -141,9 +253,17 @@ class TargetSizeProductionTests(unittest.TestCase):
             audio_summary_json="[]",
             subtitle_summary_json="[]",
         )
+
+        def measure_retry_side_effect(*_args: object, **_kwargs: object) -> SampleEncodeResult:
+            if retry_sample is None:
+                self.fail("Retry measurement was not expected")
+            return retry_sample
+
         with patch("mediaforce.execution.resolve_item_source_path", return_value=Path(item["source_path"])), patch(
             "mediaforce.execution.resolve_item_staging_path", return_value=Path(item["staging_path"])
         ), patch("mediaforce.execution._search_quality", return_value=quality), patch(
+            "mediaforce.execution._measure_quality_candidate", side_effect=measure_retry_side_effect
+        ) as measure_mock, patch(
             "mediaforce.execution._build_ffmpeg_command", return_value=["ffmpeg", "-i", item["source_path"], item["staging_path"]]
         ) as command_mock, patch(
             "mediaforce.execution._run_encode_command", side_effect=run_encode_side_effect
@@ -159,7 +279,7 @@ class TargetSizeProductionTests(unittest.TestCase):
                 item,
                 overwrite=False,
             )
-            return list(command_mock.call_args_list)
+            return list(command_mock.call_args_list), list(measure_mock.call_args_list)
 
     def _attach_stream_budget(self, item: dict[str, Any]) -> None:
         item["stream_budget_ledger"] = execution.resolve_stream_budget_ledger(
@@ -175,12 +295,13 @@ class TargetSizeProductionTests(unittest.TestCase):
             *,
             selected_crf: float,
             retry_crf: float | None = None,
+            retry_predicted_total: int = 4_800_000,
     ) -> dict[str, Any]:
         ledger = item["stream_budget_ledger"]
         selected = self._candidate(selected_crf, predicted_total=5_000_000)
         candidates = [self._candidate(24.0, predicted_total=5_800_000), selected]
         if retry_crf is not None:
-            candidates.append(self._candidate(retry_crf, predicted_total=4_800_000))
+            candidates.append(self._candidate(retry_crf, predicted_total=retry_predicted_total))
         return {
             "schema_version": 1,
             "status": "selected",
@@ -192,8 +313,11 @@ class TargetSizeProductionTests(unittest.TestCase):
                 "total_target_bytes": 5_000_000,
                 "target_video_bytes": 1_000_000,
                 "non_video_bytes": 4_000_000,
+                "sample_projection_tolerance_percent": 10.0,
                 "final_output_tolerance_percent": 5.0,
             },
+            "source_cap": {"video_cap_bytes": 16_000_000},
+            "quality_floor": {"metric": "VMAF", "target": 85.0, "minimum": 80.0},
             "candidates": candidates,
             "selected_candidate": selected,
         }

@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from mediaforce.encoding.quality import SampleEncodeResult
+from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
 from mediaforce.tuning.size_goals import SizeGoalIntent
 from mediaforce.tuning.stream_budget import StreamBudgetLedger, resolve_stream_budget_ledger
 from mediaforce.tuning.target_size_search import (
@@ -209,7 +209,7 @@ class TargetSizeSearchTests(unittest.TestCase):
         self.assertEqual(context.exception.trace["curve"]["shape"], "non_monotonic")
         self.assertEqual(len(context.exception.trace["candidates"]), 6)
 
-    def test_final_output_verification_allows_only_bounded_retry_from_measured_candidates(self) -> None:
+    def test_final_output_verification_allows_only_one_calibrated_retry(self) -> None:
         ledger = self._ledger(target_bytes=300_000_000, source_size_bytes=1_000_000_000)
         verification = verify_final_output_size(ledger, 330_000_000, retry_count=0)
         self.assertEqual(verification.status, "over_target")
@@ -244,13 +244,431 @@ class TargetSizeSearchTests(unittest.TestCase):
                 "",
             ),
         )
-        retry_quality = retry_quality_result_for_final_miss(quality, verification)
+        measured_crfs: list[float] = []
+
+        def measure_candidate(crf: float) -> SampleEncodeResult:
+            measured_crfs.append(crf)
+            predicted_video_bytes = 1_000_000_000 - 28_000_000 * int(crf)
+            return SampleEncodeResult(
+                "VMAF",
+                90.0,
+                predicted_video_bytes / 10_000_000,
+                30.0,
+                predicted_video_bytes,
+                "",
+            )
+
+        retry_quality = retry_quality_result_for_final_miss(
+            quality,
+            verification,
+            measure_candidate=measure_candidate,
+        )
 
         self.assertIsNotNone(retry_quality)
-        self.assertEqual(retry_quality.crf, 28.0)
+        assert retry_quality is not None
+        self.assertEqual(measured_crfs, [27.0])
+        self.assertEqual(retry_quality.crf, 27.0)
+        retry_curve = retry_quality.target_size_trace["curve"]
+        self.assertEqual(retry_curve["candidate_count"], retry_curve["search_candidate_count"] + 1)
+        self.assertEqual(retry_curve["final_retry_measurement_count"], 1)
         exhausted = verify_final_output_size(ledger, 330_000_000, retry_count=1)
         self.assertFalse(exhausted.retry_allowed)
-        self.assertIsNone(retry_quality_result_for_final_miss(quality, exhausted))
+        self.assertIsNone(retry_quality_result_for_final_miss(quality, exhausted, measure_candidate=measure_candidate))
+        self.assertEqual(measured_crfs, [27.0])
+
+    def test_final_output_retry_measures_interpolated_crf_from_actual_output(self) -> None:
+        target_size_bytes = 374_403_556
+        non_video_bytes = 66_775_402
+        selected = {
+            "attempt": 3,
+            "role": "refine",
+            "crf": 34.0,
+            "metric": "VMAF",
+            "metric_target": 85.0,
+            "metric_score": 93.9602279663086,
+            "quality_floor_met": True,
+            "predicted_video_bytes": 273_124_145,
+            "predicted_whole_episode_bytes": 339_899_547,
+            "violates_source_cap": False,
+        }
+        bracket = {
+            "attempt": 2,
+            "role": "refine",
+            "crf": 38.0,
+            "metric": "VMAF",
+            "metric_target": 85.0,
+            "metric_score": 92.91368865966797,
+            "quality_floor_met": True,
+            "predicted_video_bytes": 216_536_877,
+            "predicted_whole_episode_bytes": 283_312_279,
+            "violates_source_cap": False,
+        }
+        quality = QualitySearchResult(
+            crf=34.0,
+            metric="VMAF",
+            target=85.0,
+            score=93.9602279663086,
+            stdout="target-size-search",
+            target_size_trace={
+                "schema_version": 1,
+                "status": "selected",
+                "target": {
+                    "total_target_bytes": target_size_bytes,
+                    "non_video_bytes": non_video_bytes,
+                    "sample_projection_tolerance_percent": 10.0,
+                    "final_output_tolerance_percent": 5.0,
+                },
+                "source_cap": {"video_cap_bytes": 649_576_742},
+                "quality_floor": {"metric": "VMAF", "target": 85.0, "minimum": 80.0},
+                "candidates": [bracket, selected],
+                "selected_candidate": selected,
+            },
+        )
+        ledger = self._ledger(target_bytes=target_size_bytes, source_size_bytes=895_440_181)
+        verification = verify_final_output_size(ledger, 406_928_998, retry_count=0)
+        measured_crfs: list[float] = []
+
+        def measure_candidate(crf: float) -> SampleEncodeResult:
+            measured_crfs.append(crf)
+            return SampleEncodeResult(
+                metric="VMAF",
+                score=93.41461181640625,
+                predicted_encode_percent=30.53648895336881,
+                predicted_encode_seconds=7562.0,
+                predicted_encode_size_bytes=240_554_519,
+                stdout="crf 36 measured",
+            )
+
+        retry_quality = retry_quality_result_for_final_miss(
+            quality,
+            verification,
+            measure_candidate=measure_candidate,
+        )
+
+        self.assertIsNotNone(retry_quality)
+        assert retry_quality is not None
+        self.assertEqual(measured_crfs, [36.0])
+        self.assertEqual(retry_quality.crf, 36.0)
+        self.assertEqual(retry_quality.score, 93.41461181640625)
+        retry_trace = retry_quality.target_size_trace or {}
+        self.assertEqual(retry_trace["selection_reason"], "calibrated_final_size_retry_candidate")
+        self.assertEqual(
+            retry_trace["final_retry_calibration"]["calibrated_predicted_whole_episode_bytes"],
+            366_366_215,
+        )
+        self.assertEqual(retry_trace["selected_candidate"]["role"], "final_retry_measurement")
+
+    def test_final_output_retry_rejects_interpolated_sample_below_quality_floor(self) -> None:
+        selected = {
+            "crf": 30.0,
+            "metric": "VMAF",
+            "metric_target": 85.0,
+            "metric_score": 86.0,
+            "quality_floor_met": True,
+            "predicted_video_bytes": 1_000_000,
+            "predicted_whole_episode_bytes": 5_000_000,
+            "violates_source_cap": False,
+        }
+        bracket = {
+            "crf": 34.0,
+            "metric": "VMAF",
+            "metric_target": 85.0,
+            "metric_score": 82.0,
+            "quality_floor_met": True,
+            "predicted_video_bytes": 200_000,
+            "predicted_whole_episode_bytes": 4_200_000,
+            "violates_source_cap": False,
+        }
+        quality = QualitySearchResult(
+            crf=30.0,
+            metric="VMAF",
+            target=85.0,
+            score=86.0,
+            stdout="target-size-search",
+            target_size_trace={
+                "target": {
+                    "total_target_bytes": 5_000_000,
+                    "non_video_bytes": 4_000_000,
+                    "sample_projection_tolerance_percent": 10.0,
+                },
+                "source_cap": {"video_cap_bytes": 10_000_000},
+                "quality_floor": {"metric": "VMAF", "target": 85.0, "minimum": 80.0},
+                "candidates": [selected, bracket],
+                "selected_candidate": selected,
+            },
+        )
+        verification = verify_final_output_size(
+            self._ledger(target_bytes=5_000_000, source_size_bytes=20_000_000),
+            5_400_000,
+            retry_count=0,
+        )
+
+        retry_quality = retry_quality_result_for_final_miss(
+            quality,
+            verification,
+            measure_candidate=lambda _crf: SampleEncodeResult(
+                "VMAF", 79.9, 20.0, 30.0, 800_000, "below floor"
+            ),
+        )
+
+        self.assertIsNone(retry_quality)
+        rejection_trace = quality.target_size_trace or {}
+        self.assertEqual(rejection_trace["selection_reason"], "final_retry_measurement_below_quality_floor")
+        self.assertEqual(rejection_trace["final_retry_calibration"]["status"], "rejected")
+        self.assertEqual(rejection_trace["candidates"][-1]["role"], "final_retry_measurement")
+
+    def test_final_output_retry_interpolates_lower_crf_for_under_target_output(self) -> None:
+        selected = {
+            "crf": 34.0,
+            "metric": "VMAF",
+            "metric_target": 85.0,
+            "metric_score": 86.0,
+            "quality_floor_met": True,
+            "predicted_video_bytes": 1_000_000,
+            "predicted_whole_episode_bytes": 5_000_000,
+            "violates_source_cap": False,
+        }
+        bracket = {
+            "crf": 30.0,
+            "metric": "VMAF",
+            "metric_target": 85.0,
+            "metric_score": 86.5,
+            "quality_floor_met": True,
+            "predicted_video_bytes": 2_333_333,
+            "predicted_whole_episode_bytes": 6_333_333,
+            "violates_source_cap": True,
+        }
+        quality = QualitySearchResult(
+            crf=34.0,
+            metric="VMAF",
+            target=85.0,
+            score=86.0,
+            stdout="target-size-search",
+            target_size_trace={
+                "target": {
+                    "total_target_bytes": 5_000_000,
+                    "non_video_bytes": 4_000_000,
+                    "sample_projection_tolerance_percent": 10.0,
+                },
+                "source_cap": {"video_cap_bytes": 1_500_000},
+                "quality_floor": {"metric": "VMAF", "target": 85.0, "minimum": 80.0},
+                "candidates": [selected, bracket],
+                "selected_candidate": selected,
+            },
+        )
+        verification = verify_final_output_size(
+            self._ledger(target_bytes=5_000_000, source_size_bytes=20_000_000),
+            4_600_000,
+            retry_count=0,
+        )
+        measured_crfs: list[float] = []
+
+        def measure_candidate(crf: float) -> SampleEncodeResult:
+            measured_crfs.append(crf)
+            return SampleEncodeResult("VMAF", 86.2, 20.0, 30.0, 1_700_000, "measured")
+
+        retry_quality = retry_quality_result_for_final_miss(
+            quality,
+            verification,
+            measure_candidate=measure_candidate,
+        )
+
+        self.assertIsNotNone(retry_quality)
+        assert retry_quality is not None
+        self.assertEqual(measured_crfs, [32.0])
+        self.assertEqual(retry_quality.crf, 32.0)
+        self.assertEqual(
+            retry_quality.target_size_trace["final_retry_calibration"][
+                "calibrated_predicted_whole_episode_bytes"
+            ],
+            5_020_000,
+        )
+        self.assertTrue(retry_quality.target_size_trace["selected_candidate"]["sample_projection_violates_source_cap"])
+        self.assertFalse(retry_quality.target_size_trace["selected_candidate"]["violates_source_cap"])
+        self.assertTrue(retry_quality.target_size_trace["selected_candidate"]["within_calibrated_final_band"])
+
+    def test_final_output_retry_requires_a_bracket_with_an_intermediate_integer_crf(self) -> None:
+        selected = {
+            "crf": 34.0,
+            "metric": "VMAF",
+            "metric_target": 85.0,
+            "metric_score": 86.0,
+            "quality_floor_met": True,
+            "predicted_video_bytes": 1_000_000,
+            "predicted_whole_episode_bytes": 5_000_000,
+            "violates_source_cap": False,
+        }
+        verification = verify_final_output_size(
+            self._ledger(target_bytes=5_000_000, source_size_bytes=20_000_000),
+            5_400_000,
+            retry_count=0,
+        )
+        cases = (
+            (31.0, 900_000, "no corrected target bracket"),
+            (35.0, 500_000, "no intermediate integer crf"),
+        )
+        for bracket_crf, bracket_video_bytes, label in cases:
+            with self.subTest(label=label):
+                bracket = {
+                    "crf": bracket_crf,
+                    "metric": "VMAF",
+                    "metric_target": 85.0,
+                    "metric_score": 84.0,
+                    "quality_floor_met": True,
+                    "predicted_video_bytes": bracket_video_bytes,
+                    "predicted_whole_episode_bytes": bracket_video_bytes + 4_000_000,
+                    "violates_source_cap": False,
+                }
+                quality = QualitySearchResult(
+                    crf=34.0,
+                    metric="VMAF",
+                    target=85.0,
+                    score=86.0,
+                    stdout="target-size-search",
+                    target_size_trace={
+                        "target": {
+                            "total_target_bytes": 5_000_000,
+                            "non_video_bytes": 4_000_000,
+                            "sample_projection_tolerance_percent": 10.0,
+                        },
+                        "source_cap": {"video_cap_bytes": 10_000_000},
+                        "quality_floor": {"metric": "VMAF", "target": 85.0, "minimum": 80.0},
+                        "candidates": [selected, bracket],
+                        "selected_candidate": selected,
+                    },
+                )
+
+                retry_quality = retry_quality_result_for_final_miss(
+                    quality,
+                    verification,
+                    measure_candidate=lambda _crf: self.fail("Unsafe retries must not be measured"),
+                )
+
+                self.assertIsNone(retry_quality)
+
+    def test_final_output_retry_interpolation_respects_calibrated_source_cap(self) -> None:
+        selected = {
+            "crf": 30.0,
+            "metric": "VMAF",
+            "metric_target": 85.0,
+            "metric_score": 86.0,
+            "quality_floor_met": True,
+            "predicted_video_bytes": 800_000,
+            "predicted_whole_episode_bytes": 900_000,
+            "violates_source_cap": False,
+        }
+        bracket = {
+            "crf": 36.0,
+            "metric": "VMAF",
+            "metric_target": 85.0,
+            "metric_score": 82.0,
+            "quality_floor_met": True,
+            "predicted_video_bytes": 500_000,
+            "predicted_whole_episode_bytes": 600_000,
+            "violates_source_cap": False,
+        }
+        quality = QualitySearchResult(
+            crf=30.0,
+            metric="VMAF",
+            target=85.0,
+            score=86.0,
+            stdout="target-size-search",
+            target_size_trace={
+                "target": {
+                    "total_target_bytes": 1_000_000,
+                    "non_video_bytes": 100_000,
+                    "sample_projection_tolerance_percent": 10.0,
+                },
+                "source_cap": {"video_cap_bytes": 870_000},
+                "quality_floor": {"metric": "VMAF", "target": 85.0, "minimum": 80.0},
+                "candidates": [selected, bracket],
+                "selected_candidate": selected,
+            },
+        )
+        verification = verify_final_output_size(
+            self._ledger(target_bytes=1_000_000, source_size_bytes=2_000_000),
+            1_100_000,
+            retry_count=0,
+        )
+        measured_crfs: list[float] = []
+
+        def measure_candidate(crf: float) -> SampleEncodeResult:
+            measured_crfs.append(crf)
+            return SampleEncodeResult("VMAF", 84.0, 20.0, 30.0, 683_000, "measured")
+
+        retry_quality = retry_quality_result_for_final_miss(
+            quality,
+            verification,
+            measure_candidate=measure_candidate,
+        )
+
+        self.assertIsNotNone(retry_quality)
+        assert retry_quality is not None
+        self.assertEqual(measured_crfs, [32.0])
+        self.assertEqual(retry_quality.crf, 32.0)
+        self.assertLessEqual(
+            retry_quality.target_size_trace["selected_candidate"]["calibrated_predicted_video_bytes"],
+            870_000,
+        )
+
+    def test_final_output_retry_rejects_non_finite_quality_score(self) -> None:
+        selected = {
+            "crf": 30.0,
+            "metric": "VMAF",
+            "metric_target": 85.0,
+            "metric_score": 86.0,
+            "quality_floor_met": True,
+            "predicted_video_bytes": 1_000_000,
+            "predicted_whole_episode_bytes": 5_000_000,
+            "violates_source_cap": False,
+        }
+        bracket = {
+            "crf": 34.0,
+            "metric": "VMAF",
+            "metric_target": 85.0,
+            "metric_score": 82.0,
+            "quality_floor_met": True,
+            "predicted_video_bytes": 200_000,
+            "predicted_whole_episode_bytes": 4_200_000,
+            "violates_source_cap": False,
+        }
+        quality = QualitySearchResult(
+            crf=30.0,
+            metric="VMAF",
+            target=85.0,
+            score=86.0,
+            stdout="target-size-search",
+            target_size_trace={
+                "target": {
+                    "total_target_bytes": 5_000_000,
+                    "non_video_bytes": 4_000_000,
+                    "sample_projection_tolerance_percent": 10.0,
+                },
+                "source_cap": {"video_cap_bytes": 10_000_000},
+                "quality_floor": {"metric": "VMAF", "target": 85.0, "minimum": 80.0},
+                "candidates": [selected, bracket],
+                "selected_candidate": selected,
+            },
+        )
+        verification = verify_final_output_size(
+            self._ledger(target_bytes=5_000_000, source_size_bytes=20_000_000),
+            5_400_000,
+            retry_count=0,
+        )
+
+        retry_quality = retry_quality_result_for_final_miss(
+            quality,
+            verification,
+            measure_candidate=lambda _crf: SampleEncodeResult(
+                "VMAF", float("nan"), 20.0, 30.0, 800_000, "invalid score"
+            ),
+        )
+
+        self.assertIsNone(retry_quality)
+        self.assertEqual(
+            quality.target_size_trace["selection_reason"],
+            "final_retry_measurement_invalid_quality_score",
+        )
 
     def test_search_rejects_mutated_transform_plan_identity(self) -> None:
         transform_plan = self._transform_plan()

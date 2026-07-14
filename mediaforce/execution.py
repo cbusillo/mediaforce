@@ -17,7 +17,8 @@ from mediaforce.encoding.manifest import describe_item_plan as describe_item_pla
 from mediaforce.encoding.progress import _ffmpeg_command_with_progress as _ffmpeg_command_with_progress_impl, \
     _progress_float as _progress_float_impl, _progress_out_time_seconds as _progress_out_time_seconds_impl, \
     _progress_speed as _progress_speed_impl, _update_ffmpeg_progress_state as _update_ffmpeg_progress_state_impl
-from mediaforce.encoding.quality_search import search_quality as _search_quality_impl
+from mediaforce.encoding.quality_search import measure_quality_candidate as _measure_quality_candidate_impl, \
+    search_quality as _search_quality_impl
 from mediaforce.encoding.runner import run_encode_command as _run_encode_command_impl, \
     run_streamed_remote_encode_command as _run_streamed_remote_encode_command_impl, \
     run_tracked_process as _run_tracked_process_impl
@@ -35,7 +36,8 @@ from mediaforce.encoding.ffmpeg import ffmpeg_hwaccel_input_args
 from mediaforce.library.probe import probe_media
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, run_command
 from mediaforce.core.type_defs import float_value, int_value, object_dict
-from mediaforce.encoding.quality import QualitySearchResult, run_crf_search, run_sample_encode, select_quality_metric
+from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult, run_crf_search, run_sample_encode, \
+    select_quality_metric
 from mediaforce.remote import execution_mode_for_host, host_media_access_for_host, remote_shell_path_export_line, \
     run_remote_command, ssh_client_options
 from mediaforce.core.utils import file_fingerprint, timestamp
@@ -215,6 +217,7 @@ def encode_one_item(
         resolve_item_staging_path=resolve_item_staging_path,
         effective_video_preset=effective_video_preset,
         search_quality=_search_quality,
+        measure_quality_candidate=_measure_quality_candidate,
         select_streams=_select_streams,
         build_ffmpeg_command=_build_ffmpeg_command,
         detect_video_crop=_detect_video_crop,
@@ -353,6 +356,44 @@ def _search_quality(
         build_svt_params=build_svt_params,
         effective_video_preset=effective_video_preset,
         run_crf_search=run_crf_search,
+        run_sample_encode=run_sample_encode,
+    )
+
+
+def _measure_quality_candidate(
+        source_path: Path,
+        video_policy: dict[str, Any],
+        *,
+        crf: float,
+        source_codec: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        detected_crop: str | None = None,
+        cadence_decision: dict[str, Any] | None = None,
+        cadence_evidence: dict[str, Any] | None = None,
+        cadence_source_fingerprint: str | None = None,
+        process_controller: ManagedProcessController | None = None,
+        host: dict[str, Any] | None = None,
+        quality_temp_dir: Path | None = None,
+) -> SampleEncodeResult:
+    return _measure_quality_candidate_impl(
+        source_path,
+        video_policy,
+        crf=crf,
+        source_codec=source_codec,
+        width=width,
+        height=height,
+        detected_crop=detected_crop,
+        cadence_decision=cadence_decision,
+        cadence_evidence=cadence_evidence,
+        cadence_source_fingerprint=cadence_source_fingerprint,
+        process_controller=process_controller,
+        host=host,
+        quality_temp_dir=quality_temp_dir,
+        host_media_access_for_host=host_media_access_for_host,
+        select_quality_metric=select_quality_metric,
+        build_svt_params=build_svt_params,
+        effective_video_preset=effective_video_preset,
         run_sample_encode=run_sample_encode,
     )
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -18,6 +19,8 @@ TARGET_SIZE_SEARCH_SCHEMA_VERSION = 1
 TARGET_SIZE_TRANSFORM_PLAN_SCHEMA_VERSION = 1
 MAX_TARGET_SIZE_CANDIDATES = 6
 MAX_FINAL_OUTPUT_RETRIES = 1
+MIN_FINAL_RETRY_CALIBRATION_FACTOR = 0.5
+MAX_FINAL_RETRY_CALIBRATION_FACTOR = 2.0
 
 SearchStatus = Literal["selected", "infeasible", "quality_conflict", "needs_review"]
 CurveShape = Literal["single_point", "monotonic", "non_monotonic"]
@@ -334,13 +337,40 @@ def verify_final_output_size(
 def retry_quality_result_for_final_miss(
         quality: QualitySearchResult,
         verification: FinalSizeVerification,
+        *,
+        measure_candidate: Callable[[float], SampleEncodeResult] | None = None,
 ) -> QualitySearchResult | None:
     trace = object_dict(quality.target_size_trace)
     if not trace or not verification.retry_allowed:
         return None
     selected = object_dict(trace.get("selected_candidate"))
     selected_crf = float_value(selected.get("crf"))
-    if selected_crf <= 0:
+    target = object_dict(trace.get("target"))
+    non_video_bytes = int_value(target.get("non_video_bytes"))
+    selected_predicted_video_bytes = int_value(selected.get("predicted_video_bytes"))
+    actual_output_bytes = int_value(verification.actual_output_bytes)
+    actual_video_bytes = actual_output_bytes - non_video_bytes
+    if (
+            "crf" not in selected
+            or not math.isfinite(selected_crf)
+            or selected_crf < 0
+            or non_video_bytes < 0
+            or selected_predicted_video_bytes <= 0
+            or actual_video_bytes <= 0
+    ):
+        return None
+    calibration_factor = actual_video_bytes / selected_predicted_video_bytes
+    if not MIN_FINAL_RETRY_CALIBRATION_FACTOR <= calibration_factor <= MAX_FINAL_RETRY_CALIBRATION_FACTOR:
+        return None
+    target_size_bytes = int_value(verification.target_size_bytes)
+    lower_bound_bytes = int_value(verification.lower_bound_bytes)
+    upper_bound_bytes = int_value(verification.upper_bound_bytes)
+    if target_size_bytes <= 0 or lower_bound_bytes <= 0 or upper_bound_bytes <= 0:
+        return None
+    source_cap = object_dict(trace.get("source_cap"))
+    source_cap_video_bytes = int_value(source_cap.get("video_cap_bytes")) or None
+    minimum_quality_score = float_value(object_dict(trace.get("quality_floor")).get("minimum"))
+    if minimum_quality_score <= 0:
         return None
     candidates = [object_dict(candidate) for candidate in trace.get("candidates", []) if isinstance(candidate, dict)]
     if verification.status == "over_target":
@@ -348,35 +378,389 @@ def retry_quality_result_for_final_miss(
             candidate for candidate in candidates
             if float_value(candidate.get("crf")) > selected_crf
             and bool(candidate.get("quality_floor_met"))
-            and not bool(candidate.get("violates_source_cap"))
+            and int_value(candidate.get("predicted_video_bytes")) > 0
         ]
-        eligible.sort(key=lambda candidate: (float_value(candidate.get("crf")), _distance(candidate)))
+        eligible.sort(key=lambda candidate: float_value(candidate.get("crf")))
     elif verification.status == "under_target":
         eligible = [
             candidate for candidate in candidates
-            if 0 < float_value(candidate.get("crf")) < selected_crf
+            if candidate.get("crf") is not None
+            and 0 <= float_value(candidate.get("crf")) < selected_crf
             and bool(candidate.get("quality_floor_met"))
-            and not bool(candidate.get("violates_source_cap"))
+            and int_value(candidate.get("predicted_video_bytes")) > 0
         ]
-        eligible.sort(key=lambda candidate: (-float_value(candidate.get("crf")), _distance(candidate)))
+        eligible.sort(key=lambda candidate: -float_value(candidate.get("crf")))
     else:
         return None
     if not eligible:
         return None
-    candidate = eligible[0]
+
+    calibrated = [
+        (
+            candidate,
+            _calibrated_video_bytes(candidate, calibration_factor),
+            _calibrated_total_bytes(candidate, calibration_factor, non_video_bytes),
+        )
+        for candidate in eligible
+    ]
+    calibrated_safe = [
+        entry for entry in calibrated
+        if source_cap_video_bytes is None or entry[1] <= source_cap_video_bytes
+    ]
+    in_band = [
+        entry for entry in calibrated_safe
+        if lower_bound_bytes <= entry[2] <= upper_bound_bytes
+    ]
+    if in_band:
+        candidate, calibrated_video_bytes, calibrated_total_bytes = min(
+            in_band,
+            key=lambda entry: (
+                abs(entry[2] - target_size_bytes),
+                abs(float_value(entry[0].get("crf")) - selected_crf),
+                -float_value(entry[0].get("metric_score")),
+            ),
+        )
+        return _final_retry_quality_result(
+            quality,
+            trace,
+            selected,
+            _candidate_with_calibration(
+                candidate,
+                calibration_factor=calibration_factor,
+                calibrated_video_bytes=calibrated_video_bytes,
+                calibrated_total_bytes=calibrated_total_bytes,
+                source_cap_video_bytes=source_cap_video_bytes,
+                lower_bound_bytes=lower_bound_bytes,
+                upper_bound_bytes=upper_bound_bytes,
+            ),
+            verification,
+            calibration_factor=calibration_factor,
+            non_video_bytes=non_video_bytes,
+            bracket_candidate=candidate,
+        )
+
+    if verification.status == "over_target":
+        bracket = next((entry for entry in calibrated_safe if entry[2] < target_size_bytes), None)
+    else:
+        bracket = next((entry for entry in calibrated_safe if entry[2] > target_size_bytes), None)
+    if bracket is None or measure_candidate is None:
+        return None
+    bracket_candidate, bracket_video_bytes, _bracket_total_bytes = bracket
+    retry_crf = _interpolated_retry_crf(
+        selected_crf=selected_crf,
+        selected_actual_video_bytes=actual_video_bytes,
+        bracket_crf=float_value(bracket_candidate.get("crf")),
+        bracket_calibrated_video_bytes=bracket_video_bytes,
+        non_video_bytes=non_video_bytes,
+        target_size_bytes=target_size_bytes,
+        lower_bound_bytes=lower_bound_bytes,
+        upper_bound_bytes=upper_bound_bytes,
+        source_cap_video_bytes=source_cap_video_bytes,
+        measured_crfs=_measured_integer_crfs(candidates),
+    )
+    if retry_crf is None:
+        return None
+    sample = measure_candidate(retry_crf)
+    measured_candidate = _measured_retry_candidate(
+        sample,
+        trace=trace,
+        crf=retry_crf,
+        non_video_bytes=non_video_bytes,
+        target_size_bytes=target_size_bytes,
+        source_cap_video_bytes=source_cap_video_bytes,
+    )
+    calibrated_video_bytes = round(sample.predicted_encode_size_bytes * calibration_factor)
+    calibrated_total_bytes = calibrated_video_bytes + non_video_bytes
+    candidate = _candidate_with_calibration(
+        measured_candidate,
+        calibration_factor=calibration_factor,
+        calibrated_video_bytes=calibrated_video_bytes,
+        calibrated_total_bytes=calibrated_total_bytes,
+        source_cap_video_bytes=source_cap_video_bytes,
+        lower_bound_bytes=lower_bound_bytes,
+        upper_bound_bytes=upper_bound_bytes,
+    )
+    rejection_reason = None
+    if not math.isfinite(sample.score):
+        rejection_reason = "final_retry_measurement_invalid_quality_score"
+    elif sample.predicted_encode_size_bytes <= 0:
+        rejection_reason = "final_retry_measurement_invalid_projection"
+    elif sample.metric.casefold() != quality.metric.casefold():
+        rejection_reason = "final_retry_measurement_metric_mismatch"
+    elif sample.score < minimum_quality_score:
+        rejection_reason = "final_retry_measurement_below_quality_floor"
+    elif bool(candidate.get("violates_source_cap")):
+        rejection_reason = "final_retry_measurement_exceeds_source_cap"
+    elif not bool(candidate.get("within_calibrated_final_band")):
+        rejection_reason = "final_retry_measurement_outside_final_band"
+    if rejection_reason is not None:
+        quality.target_size_trace = _final_retry_rejection_trace(
+            trace,
+            selected,
+            candidate,
+            verification,
+            calibration_factor=calibration_factor,
+            non_video_bytes=non_video_bytes,
+            bracket_candidate=bracket_candidate,
+            rejection_reason=rejection_reason,
+        )
+        return None
+    retry_trace_candidates = [dict(existing) for existing in candidates]
+    retry_trace_candidates.append(candidate)
+    retry_trace = dict(trace)
+    retry_trace["candidates"] = retry_trace_candidates
+    _refresh_retry_curve(retry_trace)
+    return _final_retry_quality_result(
+        quality,
+        retry_trace,
+        selected,
+        candidate,
+        verification,
+        calibration_factor=calibration_factor,
+        non_video_bytes=non_video_bytes,
+        bracket_candidate=bracket_candidate,
+        stdout=sample.stdout,
+    )
+
+
+def _final_retry_quality_result(
+        quality: QualitySearchResult,
+        trace: dict[str, Any],
+        selected: dict[str, Any],
+        candidate: dict[str, Any],
+        verification: FinalSizeVerification,
+        *,
+        calibration_factor: float,
+        non_video_bytes: int,
+        bracket_candidate: dict[str, Any],
+        stdout: str | None = None,
+) -> QualitySearchResult:
     retry_trace = dict(trace)
     retry_trace["selected_candidate"] = candidate
     retry_trace["status"] = "selected"
-    retry_trace["selection_reason"] = "bounded_final_size_retry_candidate"
+    retry_trace["selection_reason"] = "calibrated_final_size_retry_candidate"
     retry_trace["final_retry_from_candidate"] = selected
+    retry_trace["final_retry_calibration"] = {
+        **_final_retry_calibration_payload(
+            selected,
+            candidate,
+            verification,
+            calibration_factor=calibration_factor,
+            non_video_bytes=non_video_bytes,
+            bracket_candidate=bracket_candidate,
+        ),
+        "status": "selected",
+    }
     return QualitySearchResult(
         crf=float_value(candidate.get("crf")),
         metric=str(candidate.get("metric") or quality.metric),
         target=float_value(candidate.get("metric_target")) or quality.target,
         score=float_value(candidate.get("metric_score")),
-        stdout=quality.stdout,
+        stdout=stdout if stdout is not None else quality.stdout,
         target_size_trace=retry_trace,
     )
+
+
+def _candidate_with_calibration(
+        candidate: dict[str, Any],
+        *,
+        calibration_factor: float,
+        calibrated_video_bytes: int,
+        calibrated_total_bytes: int,
+        source_cap_video_bytes: int | None,
+        lower_bound_bytes: int,
+        upper_bound_bytes: int,
+) -> dict[str, Any]:
+    return {
+        **candidate,
+        "sample_projection_violates_source_cap": bool(candidate.get("violates_source_cap")),
+        "violates_source_cap": (
+            source_cap_video_bytes is not None
+            and calibrated_video_bytes > source_cap_video_bytes
+        ),
+        "projection_calibration_factor": round(calibration_factor, 9),
+        "calibrated_predicted_video_bytes": calibrated_video_bytes,
+        "calibrated_predicted_whole_episode_bytes": calibrated_total_bytes,
+        "within_calibrated_final_band": lower_bound_bytes <= calibrated_total_bytes <= upper_bound_bytes,
+    }
+
+
+def _final_retry_rejection_trace(
+        trace: dict[str, Any],
+        selected: dict[str, Any],
+        candidate: dict[str, Any],
+        verification: FinalSizeVerification,
+        *,
+        calibration_factor: float,
+        non_video_bytes: int,
+        bracket_candidate: dict[str, Any],
+        rejection_reason: str,
+) -> dict[str, Any]:
+    retry_trace = dict(trace)
+    retry_trace["candidates"] = [
+        *[dict(existing) for existing in trace.get("candidates", []) if isinstance(existing, dict)],
+        candidate,
+    ]
+    _refresh_retry_curve(retry_trace)
+    retry_trace["status"] = "needs_review"
+    retry_trace["selection_reason"] = rejection_reason
+    retry_trace["final_retry_from_candidate"] = selected
+    retry_trace["final_retry_calibration"] = {
+        **_final_retry_calibration_payload(
+            selected,
+            candidate,
+            verification,
+            calibration_factor=calibration_factor,
+            non_video_bytes=non_video_bytes,
+            bracket_candidate=bracket_candidate,
+        ),
+        "status": "rejected",
+        "rejection_reason": rejection_reason,
+    }
+    return retry_trace
+
+
+def _refresh_retry_curve(trace: dict[str, Any]) -> None:
+    curve = object_dict(trace.get("curve"))
+    if not curve:
+        return
+    candidates = [candidate for candidate in trace.get("candidates", []) if isinstance(candidate, dict)]
+    retry_measurement_count = sum(candidate.get("role") == "final_retry_measurement" for candidate in candidates)
+    trace["curve"] = {
+        **curve,
+        "search_candidate_count": int_value(curve.get("candidate_count")),
+        "candidate_count": len(candidates),
+        "final_retry_measurement_count": retry_measurement_count,
+    }
+
+
+def _final_retry_calibration_payload(
+        selected: dict[str, Any],
+        candidate: dict[str, Any],
+        verification: FinalSizeVerification,
+        *,
+        calibration_factor: float,
+        non_video_bytes: int,
+        bracket_candidate: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": TARGET_SIZE_SEARCH_SCHEMA_VERSION,
+        "anchor_crf": float_value(selected.get("crf")),
+        "anchor_predicted_video_bytes": int_value(selected.get("predicted_video_bytes")),
+        "anchor_actual_output_bytes": verification.actual_output_bytes,
+        "non_video_bytes": non_video_bytes,
+        "video_projection_factor": round(calibration_factor, 9),
+        "bracket_crf": float_value(bracket_candidate.get("crf")),
+        "selected_retry_crf": float_value(candidate.get("crf")),
+        "calibrated_predicted_video_bytes": int_value(candidate.get("calibrated_predicted_video_bytes")),
+        "calibrated_predicted_whole_episode_bytes": int_value(
+            candidate.get("calibrated_predicted_whole_episode_bytes")
+        ),
+    }
+
+
+def _calibrated_video_bytes(candidate: dict[str, Any], calibration_factor: float) -> int:
+    return round(int_value(candidate.get("predicted_video_bytes")) * calibration_factor)
+
+
+def _calibrated_total_bytes(candidate: dict[str, Any], calibration_factor: float, non_video_bytes: int) -> int:
+    return _calibrated_video_bytes(candidate, calibration_factor) + non_video_bytes
+
+
+def _interpolated_retry_crf(
+        *,
+        selected_crf: float,
+        selected_actual_video_bytes: int,
+        bracket_crf: float,
+        bracket_calibrated_video_bytes: int,
+        non_video_bytes: int,
+        target_size_bytes: int,
+        lower_bound_bytes: int,
+        upper_bound_bytes: int,
+        source_cap_video_bytes: int | None,
+        measured_crfs: set[int],
+) -> float | None:
+    if (
+            selected_actual_video_bytes <= 0
+            or bracket_calibrated_video_bytes <= 0
+            or bracket_crf == selected_crf
+    ):
+        return None
+    start = math.floor(min(selected_crf, bracket_crf)) + 1
+    stop = math.ceil(max(selected_crf, bracket_crf))
+    candidates: list[tuple[float, int]] = []
+    for integer_crf in range(start, stop):
+        if integer_crf in measured_crfs:
+            continue
+        retry_crf = float(integer_crf)
+        fraction = (retry_crf - selected_crf) / (bracket_crf - selected_crf)
+        if not 0 < fraction < 1:
+            continue
+        predicted_video_bytes = round(
+            math.exp(
+                math.log(selected_actual_video_bytes)
+                + (math.log(bracket_calibrated_video_bytes) - math.log(selected_actual_video_bytes)) * fraction
+            )
+        )
+        predicted_total_bytes = predicted_video_bytes + non_video_bytes
+        if (
+                lower_bound_bytes <= predicted_total_bytes <= upper_bound_bytes
+                and (source_cap_video_bytes is None or predicted_video_bytes <= source_cap_video_bytes)
+        ):
+            candidates.append((retry_crf, predicted_total_bytes))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda entry: (abs(entry[1] - target_size_bytes), entry[0]))[0]
+
+
+def _measured_integer_crfs(candidates: list[dict[str, Any]]) -> set[int]:
+    measured: set[int] = set()
+    for candidate in candidates:
+        if candidate.get("crf") is None:
+            continue
+        crf = float_value(candidate.get("crf"))
+        rounded_crf = round(crf) if math.isfinite(crf) else 0
+        if math.isfinite(crf) and math.isclose(crf, rounded_crf):
+            measured.add(rounded_crf)
+    return measured
+
+
+def _measured_retry_candidate(
+        sample: SampleEncodeResult,
+        *,
+        trace: dict[str, Any],
+        crf: float,
+        non_video_bytes: int,
+        target_size_bytes: int,
+        source_cap_video_bytes: int | None,
+) -> dict[str, Any]:
+    target = object_dict(trace.get("target"))
+    tolerance = float_value(target.get("sample_projection_tolerance_percent"))
+    lower_bound_bytes, upper_bound_bytes = _bounds(target_size_bytes, tolerance)
+    predicted_total_bytes = sample.predicted_encode_size_bytes + non_video_bytes
+    attempts = [int_value(object_dict(candidate).get("attempt")) for candidate in trace.get("candidates", [])]
+    minimum_quality_score = float_value(object_dict(trace.get("quality_floor")).get("minimum"))
+    return {
+        "attempt": max(attempts, default=0) + 1,
+        "role": "final_retry_measurement",
+        "crf": crf,
+        "metric": sample.metric,
+        "metric_target": float_value(object_dict(trace.get("quality_floor")).get("target")),
+        "metric_score": sample.score,
+        "min_metric_score": minimum_quality_score,
+        "quality_floor_met": sample.score >= minimum_quality_score,
+        "sampled_clip_bytes": sample.sampled_clip_size_bytes,
+        "predicted_video_bytes": sample.predicted_encode_size_bytes,
+        "predicted_whole_episode_bytes": predicted_total_bytes,
+        "predicted_encode_percent": sample.predicted_encode_percent,
+        "predicted_encode_seconds": sample.predicted_encode_seconds,
+        "target_distance_bytes": abs(predicted_total_bytes - target_size_bytes),
+        "within_sample_band": lower_bound_bytes <= predicted_total_bytes <= upper_bound_bytes,
+        "violates_source_cap": (
+            source_cap_video_bytes is not None
+            and sample.predicted_encode_size_bytes > source_cap_video_bytes
+        ),
+    }
 
 
 def target_trace_with_actual_output(
@@ -389,11 +773,15 @@ def target_trace_with_actual_output(
     if not payload:
         return None
     payload = dict(payload)
-    payload["final_output"] = {
+    final_output = {
         **verification.to_payload(),
         "retry_count": retry_count,
         "max_retries": MAX_FINAL_OUTPUT_RETRIES,
     }
+    attempts = [dict(attempt) for attempt in payload.get("final_output_attempts", []) if isinstance(attempt, dict)]
+    attempts.append(final_output)
+    payload["final_output_attempts"] = attempts
+    payload["final_output"] = final_output
     return payload
 
 
@@ -695,11 +1083,6 @@ def _curve_shape(candidates: list[TargetSizeCandidate]) -> CurveShape:
 
 def _candidate_distance(candidate: TargetSizeCandidate) -> int:
     return candidate.target_distance_bytes if candidate.target_distance_bytes is not None else 10 ** 30
-
-
-def _distance(candidate: dict[str, Any]) -> float:
-    distance = float_value(candidate.get("target_distance_bytes"))
-    return distance if distance > 0 else 10 ** 30
 
 
 def _source_cap_blocker(ledger: StreamBudgetLedger) -> StreamBudgetProjectionBlocker | None:

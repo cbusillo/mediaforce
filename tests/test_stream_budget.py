@@ -408,6 +408,47 @@ class StreamBudgetTests(unittest.TestCase):
         self.assertIn("-c:t", command)
         self.assertEqual(ledger.stream_plan.plan_id, StreamBudgetLedger.from_payload(ledger.to_payload()).stream_plan.plan_id)
 
+    def test_retry_measurement_reuses_quality_search_context(self) -> None:
+        sample = SampleEncodeResult(
+            metric="VMAF",
+            score=93.4,
+            predicted_encode_percent=30.5,
+            predicted_encode_seconds=120.0,
+            predicted_encode_size_bytes=240_000_000,
+            stdout="measured",
+        )
+        run_sample_encode = Mock(return_value=sample)
+        build_svt_params = Mock(return_value=["tune=0"])
+        effective_video_preset = Mock(return_value=5)
+
+        result = quality_search.measure_quality_candidate(
+            Path("/tmp/input.mkv"),
+            self._policy()["video"],
+            crf=36.0,
+            source_codec="h264",
+            width=3840,
+            height=2160,
+            host={"mode": "ssh", "media_access": "stream"},
+            quality_temp_dir=Path("/tmp/quality"),
+            host_media_access_for_host=Mock(return_value="stream"),
+            select_quality_metric=Mock(return_value=("vmaf", 95.0)),
+            build_svt_params=build_svt_params,
+            effective_video_preset=effective_video_preset,
+            run_sample_encode=run_sample_encode,
+        )
+
+        self.assertIs(result, sample)
+        build_svt_params.assert_called_once()
+        effective_video_preset.assert_called_once_with(self._policy()["video"], width=3840, height=2160)
+        call = run_sample_encode.call_args
+        self.assertEqual(call.args, (Path("/tmp/input.mkv"),))
+        self.assertEqual(call.kwargs["crf"], 36.0)
+        self.assertEqual(call.kwargs["preferred_metric"], "vmaf")
+        self.assertEqual(call.kwargs["preset"], 5)
+        self.assertEqual(call.kwargs["svt_params"], ["tune=0"])
+        self.assertEqual(call.kwargs["host"]["mode"], "local")
+        self.assertEqual(call.kwargs["quality_temp_dir"], Path("/tmp/quality"))
+
     def _ledger(
             self,
             *,
