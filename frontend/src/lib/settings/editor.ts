@@ -303,7 +303,8 @@ export function libraryReadiness(
 	library: Pick<
 		SettingsLibrary,
 		'key' | 'label' | 'path' | 'library_type' | 'availability' | 'policy'
-	>
+	> &
+		Partial<Pick<SettingsLibrary, 'default_profile'>>
 ): LibraryReadiness {
 	if (!library.key.trim() || !library.label.trim() || !library.path.trim()) {
 		return {
@@ -345,11 +346,25 @@ export function libraryReadiness(
 			detail: 'Mediaforce scans and shows this library but never processes it.'
 		};
 	}
-	if (!['tv', 'movie'].includes(library.library_type)) {
+	if (!['tv', 'movie', 'other'].includes(library.library_type)) {
 		return {
 			state: 'blocked',
 			label: 'Workflow blocked',
 			detail: 'Production is not available for this library type yet.'
+		};
+	}
+	if (library.library_type === 'other') {
+		if (!library.default_profile?.trim()) {
+			return {
+				state: 'incomplete',
+				label: 'Profile needed',
+				detail: 'Choose an explicit Other processing profile before enabling Production.'
+			};
+		}
+		return {
+			state: 'ready',
+			label: 'Ready',
+			detail: 'Generic file and folder scopes use the selected profile and require probe readiness.'
 		};
 	}
 	return {

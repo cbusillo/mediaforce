@@ -7,6 +7,7 @@ import type {
 	HostsPayload,
 	MediaScopePayload,
 	MovieLibraryPayload,
+	OtherLibraryPayload,
 	QueueLane
 } from './types';
 
@@ -55,6 +56,17 @@ export const initialMovieLibrary: MovieLibraryPayload = {
 	libraries: [],
 	titles: [],
 	catalog_empty: false,
+	details_loading: true
+};
+
+export const initialOtherLibrary: OtherLibraryPayload = {
+	schema_version: 1,
+	libraries: [],
+	work_units: [],
+	catalog_empty: false,
+	catalog_truncated: false,
+	catalog_item_limit: 5000,
+	catalog_work_unit_limit: 500,
 	details_loading: true
 };
 

@@ -1,20 +1,31 @@
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-from sqlalchemy import outerjoin, select
+from sqlalchemy import or_, outerjoin, select
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, plex_item_metadata, series_metadata, staged_artifacts
 from mediaforce.core.type_defs import object_dict
 from mediaforce.library.library_settings import normalize_library_policy, normalize_library_type
-from mediaforce.library.media_scopes import normalize_scope_prefix, path_matches_scope, resolve_media_scopes
+from mediaforce.library.media_scopes import (
+    MediaScope,
+    normalize_scope_prefix,
+    path_matches_scope,
+    resolve_media_scopes,
+    scope_rel_path_filter,
+)
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
+from mediaforce.library.other_profiles import (
+    OTHER_FOLDER_SCOPE_MAX_ITEMS,
+    other_group_scope_for_rel_path,
+    other_item_profile_blocker,
+)
 from mediaforce.library.planner import build_manifest_item
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES, EncodeEligibility, derive_item_workflow_state
 from mediaforce.tuning.stream_budget import (
@@ -85,6 +96,7 @@ class CandidateDecision:
     media_role: str | None
     production_included: bool
     production_blocker: str | None
+    profile_blocker: str | None
     target_size_blocker: StreamBudgetProjectionBlocker | None
     ranking_mode: str
     media_domain: str
@@ -129,6 +141,7 @@ class CandidateDecision:
             "media_role": self.media_role,
             "production_included": self.production_included,
             "production_blocker": self.production_blocker,
+            "profile_blocker": self.profile_blocker,
             "target_size_blocker": (
                 self.target_size_blocker.to_payload()
                 if self.target_size_blocker is not None
@@ -157,11 +170,17 @@ def project_candidates(
         manual_override_prefix: str | None = None,
 ) -> list[CandidateDecision]:
     current_time = (now or datetime.now(tz=UTC)).astimezone(UTC)
-    rows = _load_rows(connection)
-    metadata_by_series = {
-        str(row["series_prefix"]): object_dict(row)
-        for row in connection.execute(select(series_metadata)).mappings().fetchall()
-    }
+    resolved_scopes = resolve_media_scopes(
+        connection,
+        prefixes or [],
+        library_types=config.library_type_map,
+    )
+    query_scopes = (
+        resolved_scopes
+        if resolved_scopes and all(scope.domain == "other" for scope in resolved_scopes)
+        else []
+    )
+    rows = _load_rows(connection, scopes=query_scopes)
     season_by_item: dict[int, SeasonIdentity | None] = {}
     season_rows: dict[str, list[dict[str, Any]]] = {}
     numbered_by_series: dict[str, set[int]] = {}
@@ -175,6 +194,15 @@ def project_candidates(
         if season.season_number is not None:
             numbered_by_series.setdefault(season.series_prefix, set()).add(season.season_number)
 
+    metadata_by_series = (
+        {
+            str(row["series_prefix"]): object_dict(row)
+            for row in connection.execute(select(series_metadata)).mappings().fetchall()
+        }
+        if season_rows
+        else {}
+    )
+
     season_activity = {
         season_prefix: _latest_timestamp(_content_activity_at(row) for row in grouped_rows)
         for season_prefix, grouped_rows in season_rows.items()
@@ -183,11 +211,31 @@ def project_candidates(
         season_prefix: _newest_age_evidence(_media_age(row) for row in grouped_rows)
         for season_prefix, grouped_rows in season_rows.items()
     }
-    resolved_scopes = resolve_media_scopes(
-        connection,
-        prefixes or [],
-        library_types=config.library_type_map,
-    )
+    explicit_scope_keys = {(scope.prefix, scope.match) for scope in resolved_scopes}
+    other_rows_by_prefix: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        media_root = str(row.get("media_root") or "")
+        library = config.library_definition_map.get(media_root, {})
+        if normalize_library_type(library.get("type"), key=media_root) != "other":
+            continue
+        group_scope = other_group_scope_for_rel_path(str(row.get("rel_path") or ""), config)
+        if group_scope is not None:
+            other_rows_by_prefix[group_scope.prefix].append(row)
+    other_group_blockers: dict[str, str | None] = {}
+    for group_prefix, grouped_rows in other_rows_by_prefix.items():
+        library = config.library_definition_map.get(str(grouped_rows[0].get("media_root") or ""), {})
+        profile_blockers = [
+            blocker
+            for row in grouped_rows
+            if (blocker := other_item_profile_blocker(row, library)) is not None
+        ]
+        if len(grouped_rows) > OTHER_FOLDER_SCOPE_MAX_ITEMS:
+            other_group_blockers[group_prefix] = (
+                f"This Other folder contains more than {OTHER_FOLDER_SCOPE_MAX_ITEMS} files. "
+                "Split it or use exact-file grouping before processing."
+            )
+        else:
+            other_group_blockers[group_prefix] = profile_blockers[0] if profile_blockers else None
     normalized_override = normalize_scope_prefix(manual_override_prefix or "")
     decisions: list[CandidateDecision] = []
     production_roots = set(config.source_root_map)
@@ -221,9 +269,18 @@ def project_candidates(
             if membership is not None
             else (True, None)
         )
+        profile_blocker = None
+        if library_type == "other":
+            group_scope = other_group_scope_for_rel_path(rel_path, config)
+            if group_scope is None or (group_scope.prefix, group_scope.match) not in explicit_scope_keys:
+                profile_blocker = (
+                    "Open this item through its bounded Other Library work unit before processing."
+                )
+            else:
+                profile_blocker = other_group_blockers.get(group_scope.prefix)
         production_enabled = media_root in production_roots
-        production_included = production_enabled and member_included
-        production_blocker = member_blocker
+        production_included = production_enabled and member_included and profile_blocker is None
+        production_blocker = profile_blocker or member_blocker
         if not production_enabled:
             label = str(library.get("label") or media_root or "This library")
             production_blocker = f"{label} is browse only; set its availability to Production before processing."
@@ -307,6 +364,7 @@ def project_candidates(
                 media_role=membership.role if membership is not None else None,
                 production_included=production_included,
                 production_blocker=production_blocker,
+                profile_blocker=profile_blocker,
                 target_size_blocker=target_size_blocker,
                 ranking_mode=ranking_mode,
                 media_domain=library_type,
@@ -358,7 +416,7 @@ def workflow_eligibility(decisions: list[CandidateDecision]) -> dict[int, Encode
                 or (decision.target_size_blocker.message if decision.target_size_blocker is not None else None)
                 or (decision.hold_reasons[0].detail if decision.hold_reasons else None)
             ),
-            blocked=decision.target_size_blocker is not None,
+            blocked=decision.profile_blocker is not None or decision.target_size_blocker is not None,
         )
         for decision in decisions
     }
@@ -512,7 +570,11 @@ def candidate_rank_key(decision: CandidateDecision, *, recommendation_score: flo
     )
 
 
-def _load_rows(connection: DBClient) -> list[dict[str, Any]]:
+def _load_rows(
+        connection: DBClient,
+        *,
+        scopes: list[MediaScope] | None = None,
+) -> list[dict[str, Any]]:
     joined = outerjoin(
         outerjoin(
             library_items,
@@ -543,6 +605,10 @@ def _load_rows(connection: DBClient) -> list[dict[str, Any]]:
         .select_from(joined)
         .where(library_items.c.status != "missing")
     )
+    if scopes:
+        query = query.where(
+            or_(*(scope_rel_path_filter(library_items.c.rel_path, scope) for scope in scopes))
+        )
     return [object_dict(row) for row in connection.execute(query).mappings().fetchall()]
 
 

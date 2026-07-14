@@ -17,6 +17,7 @@
 	import SeasonExperience from '$lib/components/season/SeasonExperience.svelte';
 	import SeasonLibrary from '$lib/components/season/SeasonLibrary.svelte';
 	import MovieStudioView from '$lib/components/workstation/MovieStudioView.svelte';
+	import OtherStudioView from '$lib/components/workstation/OtherStudioView.svelte';
 
 	let { data }: { data: { mode: 'directory' | 'studio'; prefix: string } } = $props();
 	const mode = $derived(data.mode);
@@ -126,7 +127,7 @@
 <svelte:head>
 	<title
 		>{mode === 'studio'
-			? `${prefix.split('/').at(-1)} · ${folder.pending ? 'Studio' : folder.media_scope.domain === 'movie' ? 'Movie Studio' : 'Mediaforce'}`
+			? `${prefix.split('/').at(-1)} · ${folder.pending ? 'Studio' : folder.media_scope.domain === 'movie' ? 'Movie Studio' : folder.media_scope.domain === 'other' ? 'Other Studio' : 'Mediaforce'}`
 			: 'Make a TV season smaller · Mediaforce'}</title
 	>
 </svelte:head>
@@ -145,6 +146,15 @@
 		</div>
 	{:else if folder.media_scope.domain === 'movie'}
 		<MovieStudioView
+			{folder}
+			{status}
+			{hosts}
+			{folderPending}
+			loadError={loadError ?? undefined}
+			onMutate={refreshStudio}
+		/>
+	{:else if folder.media_scope.domain === 'other'}
+		<OtherStudioView
 			{folder}
 			{status}
 			{hosts}

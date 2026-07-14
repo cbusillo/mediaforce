@@ -44,6 +44,8 @@ const endpointChecks = [
   ["Library details", "/api/dashboard/library/details"],
   ["Movie library structure", "/api/dashboard/library/movies"],
   ["Movie library details", "/api/dashboard/library/movies/details"],
+  ["Other library structure", "/api/dashboard/library/other"],
+  ["Other library details", "/api/dashboard/library/other/details"],
   ["Host status", "/api/hosts?compact=1"],
   ["Settings initial payload", "/api/settings?include_archive_cleanup=0"],
   ["Completed payload", "/api/completed"],
@@ -52,6 +54,7 @@ const endpointChecks = [
 const routeChecks = [
   ["Library", "/", "Your library"],
   ["Movies Library", "/movies", "MOVIE WORKSTATION"],
+  ["Other Library", "/other", "Other Library"],
   ["Folders compatibility", "/folders", "Your library"],
   ["Activity", "/ops", "What’s happening"],
   ["Settings", "/settings", "Library and working space"],
@@ -607,6 +610,7 @@ async function checkEmptyFixtureRoutes(baseUrl, configPath, timeoutMs, narrow) {
   const emptyRouteChecks = [
     ["Empty Library", "/", "Point Mediaforce at your TV folder"],
     ["Empty Folders", "/folders", "Point Mediaforce at your TV folder"],
+    ["Empty Other Library", "/other", "No Other media is indexed"],
     ["Empty Activity", "/ops", "Nothing is running right now"],
     ["Empty Finished", "/completed", "No finished seasons match this search"],
   ];
@@ -643,9 +647,15 @@ async function main() {
     await checkEndpoints(targetUrl, args.endpointTimeoutMs);
     await checkRoutes(targetUrl, browserRouteChecks, args.routeTimeoutMs);
     if (fixtures?.folderRoutes?.length) {
+      const libraryFixture = fixtures.folderRoutes.find((fixtureRoute) =>
+        fixtureRoute.route.startsWith("/folders/tv/"),
+      );
+      if (!libraryFixture) {
+        throw new Error("Fixture payload did not include a TV library route.");
+      }
       await checkLibraryStructureWithoutDashboard(
         targetUrl,
-        fixtures.folderRoutes[0].marker,
+        libraryFixture.marker,
         args.routeTimeoutMs,
       );
     }

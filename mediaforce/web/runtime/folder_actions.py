@@ -56,6 +56,7 @@ LoadAdviceStateFn: TypeAlias = Callable[[MediaforceConfig, str], ActionPayload |
 MergeAdviceStateFn: TypeAlias = Callable[[MediaforceConfig, str, ActionPayload], ActionPayload]
 LoadSampleItemFn: TypeAlias = Callable[[DBClient, MediaforceConfig, str], FolderItem | None]
 QueueFolderEncodeActionFn: TypeAlias = Callable[[str, str, bool], ActionPayload]
+ValidateScopeActionFn: TypeAlias = Callable[[DBClient, str], ActionPayload | None]
 
 
 def _calibration_policy_hash(payload: ActionPayload) -> str:
@@ -212,11 +213,17 @@ def queue_folder_encode_action(
         save_encode_job: SaveEncodeJobFn,
         load_advice_state: LoadAdviceStateFn | None = None,
         load_latest_failed_target_size_job_state: LoadJobStateFn | None = None,
+        validate_scope_action: ValidateScopeActionFn | None = None,
 ) -> ActionPayload:
     production_blocker = production_action_blocker(config, normalized_prefix)
     if production_blocker is not None:
         return production_blocker
     with open_db(config.paths.db_path) as connection:
+        if validate_scope_action is not None:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            scope_blocker = validate_scope_action(connection, normalized_prefix)
+            if scope_blocker is not None:
+                return scope_blocker
         scope = resolve_media_scope(
             connection,
             normalized_prefix,
@@ -629,6 +636,7 @@ def validate_folder_outputs_action(
         load_active_encode_job_for_prefix_fn: LoadActiveEncodeJobFn | None = None,
         load_folder_staged_items_fn: LoadFolderStagedItemsFn,
         validate_manifest_items_fn: ValidateManifestItemsFn,
+        validate_scope_action: ValidateScopeActionFn | None = None,
 ) -> ActionPayload:
     production_blocker = production_action_blocker(config, normalized_prefix)
     if production_blocker is not None:
@@ -636,6 +644,11 @@ def validate_folder_outputs_action(
     if load_active_encode_job_for_prefix_fn is None:
         load_active_encode_job_for_prefix_fn = _no_active_encode_job
     with open_db(config.paths.db_path) as connection:
+        if validate_scope_action is not None:
+            connection.exec_driver_sql("BEGIN")
+            scope_blocker = validate_scope_action(connection, normalized_prefix)
+            if scope_blocker is not None:
+                return scope_blocker
         active_encode_job = load_active_encode_job_for_prefix_fn(connection, normalized_prefix)
         encode_blocked = _validate_delivery_blocked_by_active_encode(active_encode_job)
         if encode_blocked is not None:
@@ -691,6 +704,7 @@ def promote_folder_outputs_action(
         load_active_encode_job_for_prefix_fn: LoadActiveEncodeJobFn | None = None,
         load_folder_staged_items_fn: LoadFolderStagedItemsFn,
         promote_manifest_items_fn: PromoteManifestItemsFn,
+        validate_scope_action: ValidateScopeActionFn | None = None,
 ) -> ActionPayload:
     production_blocker = production_action_blocker(config, normalized_prefix)
     if production_blocker is not None:
@@ -698,6 +712,11 @@ def promote_folder_outputs_action(
     if load_active_encode_job_for_prefix_fn is None:
         load_active_encode_job_for_prefix_fn = _no_active_encode_job
     with open_db(config.paths.db_path) as connection:
+        if validate_scope_action is not None:
+            connection.exec_driver_sql("BEGIN")
+            scope_blocker = validate_scope_action(connection, normalized_prefix)
+            if scope_blocker is not None:
+                return scope_blocker
         active_encode_job = load_active_encode_job_for_prefix_fn(connection, normalized_prefix)
         encode_blocked = _validate_delivery_blocked_by_active_encode(active_encode_job)
         if encode_blocked is not None:

@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 
-	let { active }: { active: 'tv' | 'movie' } = $props();
+	let { active }: { active: 'tv' | 'movie' | 'other' } = $props();
 </script>
 
 <nav class="library-mode-nav" aria-label="Library type">
@@ -14,6 +14,11 @@
 		href={resolve('/movies')}
 		class:active={active === 'movie'}
 		aria-current={active === 'movie' ? 'page' : undefined}>Movies</a
+	>
+	<a
+		href={resolve('/other')}
+		class:active={active === 'other'}
+		aria-current={active === 'other' ? 'page' : undefined}>Other</a
 	>
 </nav>
 

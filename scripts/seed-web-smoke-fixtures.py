@@ -54,6 +54,13 @@ MOVIE_LOOSE_PREFIX = "movies/Loose Feature.mkv"
 MOVIE_EDITIONS_PREFIX = "movies/Editions Showcase"
 MOVIE_CONFLICT_PREFIX = "movies/Promotion Conflict"
 MOVIE_TARGET_BLOCKED_PREFIX = "movies/Target Too Large"
+OTHER_FOLDER_PREFIX = "other/Field Notes"
+OTHER_ROOT_FILE_PREFIX = "other/Loose Capture.mkv"
+OTHER_BLOCKED_PREFIX = "other/Needs Probe"
+OTHER_OVERSIZED_PREFIX = "other/Oversized Intake"
+OTHER_ACTIVE_PREFIX = "other/Active Batch"
+OTHER_VALIDATION_PREFIX = "other/Validation Ready"
+OTHER_PROMOTION_PREFIX = "other/Promotion Ready"
 CURRENT_PREVIOUS_PREFIX = "tv/Current Season/Season 1"
 CURRENT_SEASON_PREFIX = "tv/Current Season/Season 2"
 CURRENT_SERIES_PREFIX = "tv/Current Season"
@@ -82,6 +89,13 @@ FIXTURE_PREFIXES = (
     MOVIE_EDITIONS_PREFIX,
     MOVIE_CONFLICT_PREFIX,
     MOVIE_TARGET_BLOCKED_PREFIX,
+    OTHER_FOLDER_PREFIX,
+    OTHER_ROOT_FILE_PREFIX,
+    OTHER_BLOCKED_PREFIX,
+    OTHER_OVERSIZED_PREFIX,
+    OTHER_ACTIVE_PREFIX,
+    OTHER_VALIDATION_PREFIX,
+    OTHER_PROMOTION_PREFIX,
     CURRENT_PREVIOUS_PREFIX,
     CURRENT_SEASON_PREFIX,
     PROTECTED_READY_PREFIX,
@@ -113,6 +127,8 @@ def _library_item(
     recommendation_reason: str,
     duration_seconds: float = 3_600.0,
     age_days: int = 730,
+    width: int | None = 1920,
+    height: int | None = 1080,
 ) -> dict[str, Any]:
     timestamp = (datetime.now(UTC) - timedelta(days=age_days)).isoformat(timespec="seconds")
     source_path = _resolve_under_project(
@@ -217,8 +233,8 @@ def _library_item(
         "duration_seconds": duration_seconds,
         "video_codec": video_codec,
         "video_bitrate": 8_000_000 if video_codec == "h264" else 4_500_000,
-        "width": 1920,
-        "height": 1080,
+        "width": width,
+        "height": height,
         "pix_fmt": "yuv420p",
         "audio_track_count": 1,
         "subtitle_track_count": 1,
@@ -1077,7 +1093,108 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 recommendation_reason="Fixture movie promotion collision for browser QA.",
                 age_days=900,
             ),
+            _library_item(
+                project_root=project_root,
+                media_root="other",
+                rel_path="other/Field Notes/Camera A.mkv",
+                size_bytes=4 * 1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=69,
+                recommendation="review_encode",
+                recommendation_reason="Fixture bounded Other folder member for browser QA.",
+                age_days=820,
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="other",
+                rel_path="other/Field Notes/Nested/Camera B.mkv",
+                size_bytes=3 * 1024**3,
+                status="planned",
+                video_codec="hevc",
+                priority_score=61,
+                recommendation="review_encode",
+                recommendation_reason="Fixture nested Other folder member for membership review.",
+                age_days=810,
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="other",
+                rel_path=OTHER_ROOT_FILE_PREFIX,
+                size_bytes=5 * 1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=67,
+                recommendation="review_encode",
+                recommendation_reason="Fixture root-level exact Other file for browser QA.",
+                age_days=800,
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="other",
+                rel_path="other/Needs Probe/Unknown Stream.mkv",
+                size_bytes=2 * 1024**3,
+                status="discovered",
+                video_codec="",
+                priority_score=30,
+                recommendation="review_encode",
+                recommendation_reason="Fixture unsupported Other profile state for browser QA.",
+                age_days=790,
+                width=None,
+                height=None,
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="other",
+                rel_path="other/Active Batch/Camera C.mkv",
+                size_bytes=6 * 1024**3,
+                status="encoding",
+                video_codec="h264",
+                priority_score=65,
+                recommendation="review_encode",
+                recommendation_reason="Fixture active Other processing state for browser QA.",
+                age_days=780,
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="other",
+                rel_path="other/Validation Ready/Camera D.mkv",
+                size_bytes=5 * 1024**3,
+                status="encoded",
+                video_codec="h264",
+                priority_score=64,
+                recommendation="review_encode",
+                recommendation_reason="Fixture Other validation state for browser QA.",
+                age_days=770,
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="other",
+                rel_path="other/Promotion Ready/Camera E.mkv",
+                size_bytes=5 * 1024**3,
+                status="validated",
+                video_codec="hevc",
+                priority_score=63,
+                recommendation="review_encode",
+                recommendation_reason="Fixture Other promotion state for browser QA.",
+                age_days=760,
+            ),
         ]
+        rows.extend(
+            _library_item(
+                project_root=project_root,
+                media_root="other",
+                rel_path=f"{OTHER_OVERSIZED_PREFIX}/Clip-{index:03d}.mkv",
+                size_bytes=32 * 1024**2,
+                status="discovered",
+                video_codec="h264",
+                priority_score=25,
+                recommendation="review_encode",
+                recommendation_reason="Fixture oversized Other scope for browser safety coverage.",
+                age_days=700,
+            )
+            for index in range(251)
+        )
         inserted_ids: list[int] = []
         for row in rows:
             result = connection.execute(library_items.insert().values(**row))
@@ -1225,6 +1342,8 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
         for prefix, validated_at in (
             (VALIDATION_PREFIX, None),
             (PROMOTION_PREFIX, timestamp),
+            (OTHER_VALIDATION_PREFIX, None),
+            (OTHER_PROMOTION_PREFIX, timestamp),
         ):
             row = rows_by_prefix[prefix]
             item_id = ids_by_rel_path[str(row["rel_path"])]
@@ -1395,6 +1514,25 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 status="queued",
                 waiting_reason="No configured host is available for queued encode work.",
             ),
+            _encode_job(
+                project_root=project_root,
+                job_id="web-smoke-other-running",
+                prefix=OTHER_ACTIVE_PREFIX,
+                rel_path="other/Active Batch/Camera C.mkv",
+                status="running",
+                progress={
+                    "total_duration_seconds": 3600.0,
+                    "overall_completed_duration_seconds": 900.0,
+                    "remaining_duration_seconds": 2700.0,
+                    "percent_complete": 25,
+                    "fps": 76.0,
+                    "speed": 1.55,
+                    "current_item_number": 1,
+                    "total_item_count": 1,
+                    "current_item_rel_path": "other/Active Batch/Camera C.mkv",
+                    "progress_state": "encoding",
+                },
+            ),
         ]
         for row in encode_rows:
             connection.execute(encode_jobs.insert().values(**row))
@@ -1416,6 +1554,53 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
         "folderPrefix": FOLDER_PREFIX,
         "folderRoute": "/folders/tv/Example%20Show/Season%201",
         "folderRoutes": [
+            {
+                "label": "Other Library fixture",
+                "route": "/other",
+                "marker": "Field Notes",
+            },
+            {
+                "label": "Other Studio bounded-folder fixture",
+                "route": "/folders/other/Field%20Notes",
+                "marker": "Field Notes",
+                "stageMarker": "Files in this scope",
+            },
+            {
+                "label": "Other Studio exact-file fixture",
+                "route": "/folders/other/Loose%20Capture.mkv",
+                "marker": "Loose Capture",
+                "stageMarker": "One exact file",
+            },
+            {
+                "label": "Other Studio profile-blocked fixture",
+                "route": "/folders/other/Needs%20Probe",
+                "marker": "Needs Probe",
+                "stageMarker": "Profile blocked",
+            },
+            {
+                "label": "Other Studio oversized-scope fixture",
+                "route": "/folders/other/Oversized%20Intake",
+                "marker": "Oversized Intake",
+                "stageMarker": "More than 250 files",
+            },
+            {
+                "label": "Other Studio active-processing fixture",
+                "route": "/folders/other/Active%20Batch",
+                "marker": "Active Batch",
+                "stageMarker": "Production is active.",
+            },
+            {
+                "label": "Other Studio validation fixture",
+                "route": "/folders/other/Validation%20Ready",
+                "marker": "Validation Ready",
+                "stageMarker": "Validate ready output",
+            },
+            {
+                "label": "Other Studio promotion fixture",
+                "route": "/folders/other/Promotion%20Ready",
+                "marker": "Promotion Ready",
+                "stageMarker": "Promote validated output",
+            },
             {
                 "label": "Folder Studio waiting fixture",
                 "route": "/folders/tv/Example%20Show/Season%201",
@@ -1555,7 +1740,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
         ],
         "completedPrefix": COMPLETED_PREFIX,
         "libraryItems": len(rows),
-        "encodeJobs": 3,
+        "encodeJobs": 4,
     }
 
 

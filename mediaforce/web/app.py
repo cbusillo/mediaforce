@@ -64,6 +64,9 @@ from mediaforce.library.media_scopes import media_group_scope_for_rel_path, reso
     scope_rel_path_filter, series_context_for_prefix, tv_series_scope_for_rel_path
 from mediaforce.library.movie_library import load_movie_library_payload, load_movie_scope_payload
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
+from mediaforce.library.other_library import load_other_library_payload, load_other_scope_payload, \
+    other_group_scope_for_rel_path, other_scope_action_blocker
+from mediaforce.library.other_profiles import OTHER_FOLDER_SCOPE_MAX_ITEMS
 from mediaforce.library.planner import build_manifest_item
 from mediaforce.library.representatives import RepresentativeSelection, load_representative_selection, \
     public_representative_item
@@ -575,6 +578,67 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 candidate_decisions=decisions,
             )
 
+    def _dashboard_other_library_payload() -> dict[str, Any]:
+        with open_db(config.paths.db_path) as connection:
+            return load_other_library_payload(
+                connection,
+                config,
+                include_details=False,
+            )
+
+    def _dashboard_other_library_details_payload() -> dict[str, Any]:
+        with open_db(config.paths.db_path) as connection:
+            other_roots = {
+                root
+                for root, library_type in config.library_type_map.items()
+                if library_type == "other"
+            }
+            if not other_roots:
+                return load_other_library_payload(
+                    connection,
+                    config,
+                    include_details=True,
+                    candidate_decisions=[],
+                )
+            structure = load_other_library_payload(
+                connection,
+                config,
+                include_details=False,
+            )
+            work_unit_prefixes = [
+                str(unit.get("prefix") or "")
+                for unit in structure["work_units"]
+                if str(unit.get("prefix") or "")
+                and int(unit.get("item_count") or 0) <= OTHER_FOLDER_SCOPE_MAX_ITEMS
+            ]
+            decisions = (
+                project_candidates(connection, config, prefixes=work_unit_prefixes)
+                if work_unit_prefixes
+                else []
+            )
+            cards = _folder_cards_for_group(
+                config,
+                connection,
+                folder_group=lambda rel_path: (
+                    scope.group_tuple()
+                    if (scope := other_group_scope_for_rel_path(rel_path, config)) is not None
+                    else None
+                ),
+                minimum_recommended_savings_bytes=None,
+                media_roots=other_roots,
+                candidate_decisions=decisions,
+                restrict_to_candidate_items=True,
+                include_lifecycle=False,
+                include_workflow_states=False,
+            )
+            return load_other_library_payload(
+                connection,
+                config,
+                include_details=True,
+                metrics_by_prefix={card.prefix: asdict(card) for card in cards},
+                candidate_decisions=decisions,
+            )
+
     def _dashboard_api_payload(preview_limit: int | None = None) -> dict[str, Any]:
         metric_support = _metric_support()
         return {
@@ -742,6 +806,8 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         dashboard_library_details_payload=_dashboard_library_details_payload,
         dashboard_movie_library_payload=_dashboard_movie_library_payload,
         dashboard_movie_library_details_payload=_dashboard_movie_library_details_payload,
+        dashboard_other_library_payload=_dashboard_other_library_payload,
+        dashboard_other_library_details_payload=_dashboard_other_library_details_payload,
     )
     register_settings_routes(
         app,
@@ -780,6 +846,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 library_types=config.library_type_map,
             )
             movie_context = None
+            other_context = None
             if media_scope.domain == "movie":
                 membership = classify_movie_path(normalized_prefix, root=media_scope.root)
                 movie_title_prefix = membership.title_prefix if membership is not None else normalized_prefix
@@ -820,6 +887,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 "prefix": normalized_prefix,
                 "media_scope": media_scope.to_payload(),
                 "movie_context": movie_context,
+                "other_context": other_context,
                 "calibration_job": calibration_job,
                 "folder_scan_job": folder_scan_job,
                 "metric_support": metric_support,
@@ -875,6 +943,14 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 if media_scope.domain == "tv"
                 else None
             )
+            if media_scope.domain == "other":
+                other_context = load_other_scope_payload(
+                    connection,
+                    config,
+                    normalized_prefix,
+                    candidate_decisions=lifecycle_decisions,
+                )
+                base_context["other_context"] = other_context
             encode_candidate_count = sum(decision.eligible for decision in lifecycle_decisions)
             workflow_state = build_folder_workflow_state(
                 connection,
@@ -1162,8 +1238,12 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             note: str,
             host_key: str,
             operator_intent: dict[str, Any] | None = None,
+            scope_membership_token: str = "",
     ) -> dict[str, Any]:
         blocker = production_action_blocker(config, normalized_prefix)
+        if blocker is not None:
+            return blocker
+        blocker = _other_scope_action_blocker(normalized_prefix, scope_membership_token)
         if blocker is not None:
             return blocker
         return folder_ai_tune_preview_action(
@@ -1180,8 +1260,12 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             note: str,
             host_key: str,
             operator_intent: dict[str, Any] | None = None,
+            scope_membership_token: str = "",
     ) -> dict[str, Any]:
         blocker = production_action_blocker(config, normalized_prefix)
+        if blocker is not None:
+            return blocker
+        blocker = _other_scope_action_blocker(normalized_prefix, scope_membership_token)
         if blocker is not None:
             return blocker
         return folder_ai_tune_action(
@@ -1193,8 +1277,15 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             operator_intent,
         )
 
-    def _folder_ai_tune_confirm_action(normalized_prefix: str, proposal_id: str) -> dict[str, Any]:
+    def _folder_ai_tune_confirm_action(
+            normalized_prefix: str,
+            proposal_id: str,
+            scope_membership_token: str = "",
+    ) -> dict[str, Any]:
         blocker = production_action_blocker(config, normalized_prefix)
+        if blocker is not None:
+            return blocker
+        blocker = _other_scope_action_blocker(normalized_prefix, scope_membership_token)
         if blocker is not None:
             return blocker
         return folder_ai_tune_confirm_action(
@@ -1209,6 +1300,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             notes: str,
             bypass_schedule: bool,
             override_policy_holds: bool = False,
+            scope_membership_token: str = "",
     ) -> ActionPayload:
         return queue_folder_encode_action(
             config,
@@ -1231,10 +1323,22 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             save_encode_job=save_encode_job,
             load_advice_state=_load_advice_state_for_queue,
             load_latest_failed_target_size_job_state=_load_latest_failed_target_size_job_state,
+            validate_scope_action=lambda connection, prefix: other_scope_action_blocker(
+                connection,
+                config,
+                prefix,
+                membership_token=scope_membership_token,
+            ),
         )
 
-    def _approve_measured_encode_recovery_action(normalized_prefix: str) -> ActionPayload:
+    def _approve_measured_encode_recovery_action(
+            normalized_prefix: str,
+            scope_membership_token: str = "",
+    ) -> ActionPayload:
         blocker = production_action_blocker(config, normalized_prefix)
+        if blocker is not None:
+            return blocker
+        blocker = _other_scope_action_blocker(normalized_prefix, scope_membership_token)
         if blocker is not None:
             return blocker
         return approve_measured_encode_recovery_action(
@@ -1246,25 +1350,49 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             save_calibration_state=_save_calibration_state,
             review_gate=_review_gate,
             upsert_override=_upsert_override,
-            queue_folder_encode_action=_queue_folder_encode_action,
+            queue_folder_encode_action=lambda prefix, notes, bypass_schedule: _queue_folder_encode_action(
+                prefix,
+                notes,
+                bypass_schedule,
+                False,
+                scope_membership_token,
+            ),
         )
 
-    def _validate_folder_outputs_action(normalized_prefix: str) -> ActionPayload:
+    def _validate_folder_outputs_action(
+            normalized_prefix: str,
+            scope_membership_token: str = "",
+    ) -> ActionPayload:
         return validate_folder_outputs_action(
             config,
             normalized_prefix,
             load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
             load_folder_staged_items_fn=_load_folder_staged_items,
             validate_manifest_items_fn=validate_manifest_items,
+            validate_scope_action=lambda connection, prefix: other_scope_action_blocker(
+                connection,
+                config,
+                prefix,
+                membership_token=scope_membership_token,
+            ),
         )
 
-    def _promote_folder_outputs_action(normalized_prefix: str) -> ActionPayload:
+    def _promote_folder_outputs_action(
+            normalized_prefix: str,
+            scope_membership_token: str = "",
+    ) -> ActionPayload:
         return promote_folder_outputs_action(
             config,
             normalized_prefix,
             load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
             load_folder_staged_items_fn=_load_folder_staged_items,
             promote_manifest_items_fn=promote_manifest_items,
+            validate_scope_action=lambda connection, prefix: other_scope_action_blocker(
+                connection,
+                config,
+                prefix,
+                membership_token=scope_membership_token,
+            ),
         )
 
     def _save_profile_action(
@@ -1272,7 +1400,11 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             confirm_high_impact: bool,
             confirm_size_tradeoff: bool,
             reviewed_draft_hash: str,
+            scope_membership_token: str = "",
     ) -> ActionPayload:
+        blocker = _other_scope_action_blocker(normalized_prefix, scope_membership_token)
+        if blocker is not None:
+            return blocker
         return save_profile_action(
             config,
             normalized_prefix,
@@ -1289,6 +1421,18 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             confirm_size_tradeoff=confirm_size_tradeoff,
             reviewed_draft_hash=reviewed_draft_hash,
         )
+
+    def _other_scope_action_blocker(
+            normalized_prefix: str,
+            membership_token: str,
+    ) -> dict[str, Any] | None:
+        with open_db(config.paths.db_path) as connection:
+            return other_scope_action_blocker(
+                connection,
+                config,
+                normalized_prefix,
+                membership_token=membership_token,
+            )
 
     def _pause_encode_queue_action() -> dict[str, Any]:
         return pause_encode_queue_action(
@@ -1323,14 +1467,23 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             queue_folder_encode_action=_queue_folder_encode_action,
         )
 
-    def _retry_failed_encode_prefix_action(prefix: str) -> dict[str, Any]:
+    def _retry_failed_encode_prefix_action(
+            prefix: str,
+            scope_membership_token: str = "",
+    ) -> dict[str, Any]:
         return retry_failed_encode_prefix_action(
             connection_factory=lambda: open_db(config.paths.db_path),
             config=config,
             prefix=prefix,
             load_calibration_state=_load_calibration_state,
             review_gate=_review_gate,
-            queue_folder_encode_action=_queue_folder_encode_action,
+            queue_folder_encode_action=lambda normalized_prefix, notes, bypass_schedule: _queue_folder_encode_action(
+                normalized_prefix,
+                notes,
+                bypass_schedule,
+                False,
+                scope_membership_token,
+            ),
         )
 
     def _stop_calibration_queue_action() -> dict[str, Any]:
@@ -2035,6 +2188,7 @@ def _folder_cards_for_group(
         rel_path_root: str | None = None,
         media_roots: set[str] | None = None,
         candidate_decisions: list[CandidateDecision] | None = None,
+        restrict_to_candidate_items: bool = False,
         include_lifecycle: bool = True,
         include_workflow_states: bool = True,
 ) -> list[FolderCard]:
@@ -2073,6 +2227,7 @@ def _folder_cards_for_group(
         rel_path_root=rel_path_root,
         media_roots=media_roots,
         candidate_decisions=candidate_decisions,
+        restrict_to_candidate_items=restrict_to_candidate_items,
         include_lifecycle=include_lifecycle,
         include_workflow_states=include_workflow_states,
     )

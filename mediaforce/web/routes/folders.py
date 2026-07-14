@@ -15,22 +15,30 @@ def _request_flag(body: object, key: str) -> bool:
     return isinstance(body, dict) and body.get(key) is True
 
 
+async def _request_body(request: Request) -> dict[str, Any]:
+    try:
+        body = await request.json()
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
 def register_folder_routes(
         app: FastAPI,
         *,
         folder_status_payload: Callable[[str], dict[str, Any]],
         folder_content_payload: Callable[[str], tuple[dict[str, Any], int]],
         download_review_compare_action: Callable[[str], FileResponse],
-        folder_ai_tune_action: Callable[[str, str, str, dict[str, Any] | None], dict[str, Any]],
-        folder_ai_tune_preview_action: Callable[[str, str, str, dict[str, Any] | None], dict[str, Any]],
-        folder_ai_tune_confirm_action: Callable[[str, str], dict[str, Any]],
+        folder_ai_tune_action: Callable[[str, str, str, dict[str, Any] | None, str], dict[str, Any]],
+        folder_ai_tune_preview_action: Callable[[str, str, str, dict[str, Any] | None, str], dict[str, Any]],
+        folder_ai_tune_confirm_action: Callable[[str, str, str], dict[str, Any]],
         clear_folder_tuning_action: Callable[[str], dict[str, Any]],
         save_series_lifecycle_action: Callable[[str, str], dict[str, Any]],
-        approve_measured_encode_recovery_action: Callable[[str], dict[str, Any]],
-        queue_folder_encode_action: Callable[[str, str, bool, bool], dict[str, Any]],
-        validate_folder_outputs_action: Callable[[str], dict[str, Any]],
-        promote_folder_outputs_action: Callable[[str], dict[str, Any]],
-        save_profile_action: Callable[[str, bool, bool, str], dict[str, Any]],
+        approve_measured_encode_recovery_action: Callable[[str, str], dict[str, Any]],
+        queue_folder_encode_action: Callable[[str, str, bool, bool, str], dict[str, Any]],
+        validate_folder_outputs_action: Callable[[str, str], dict[str, Any]],
+        promote_folder_outputs_action: Callable[[str, str], dict[str, Any]],
+        save_profile_action: Callable[[str, bool, bool, str, str], dict[str, Any]],
 ) -> None:
     @app.get("/api/folders/{prefix:path}/status")
     def api_folder_status(prefix: str) -> JSONResponse:
@@ -47,35 +55,38 @@ def register_folder_routes(
 
     @app.post("/api/folders/{prefix:path}/ai-tune")
     async def api_folder_ai_tune(prefix: str, request: Request) -> JSONResponse:
-        body = await request.json()
+        body = await _request_body(request)
         result = await run_in_threadpool(
             folder_ai_tune_action,
             prefix.strip("/"),
             str(body.get("note", "")),
             str(body.get("host_key", "")),
             object_dict_or_none(body.get("operator_intent")),
+            str(body.get("scope_membership_token", "")),
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     @app.post("/api/folders/{prefix:path}/ai-tune/preview")
     async def api_folder_ai_tune_preview(prefix: str, request: Request) -> JSONResponse:
-        body = await request.json()
+        body = await _request_body(request)
         result = await run_in_threadpool(
             folder_ai_tune_preview_action,
             prefix.strip("/"),
             str(body.get("note", "")),
             str(body.get("host_key", "")),
             object_dict_or_none(body.get("operator_intent")),
+            str(body.get("scope_membership_token", "")),
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     @app.post("/api/folders/{prefix:path}/ai-tune/confirm")
     async def api_folder_ai_tune_confirm(prefix: str, request: Request) -> JSONResponse:
-        body = await request.json()
+        body = await _request_body(request)
         result = await run_in_threadpool(
             folder_ai_tune_confirm_action,
             prefix.strip("/"),
             str(body.get("proposal_id", "")),
+            str(body.get("scope_membership_token", "")),
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
@@ -86,7 +97,7 @@ def register_folder_routes(
 
     @app.post("/api/folders/{prefix:path}/series-lifecycle")
     async def api_folder_series_lifecycle(prefix: str, request: Request) -> JSONResponse:
-        body = await request.json()
+        body = await _request_body(request)
         result = save_series_lifecycle_action(
             prefix.strip("/"),
             str(body.get("mode", "")),
@@ -95,39 +106,56 @@ def register_folder_routes(
 
     @app.post("/api/folders/{prefix:path}/queue-encode")
     async def api_folder_queue_encode(prefix: str, request: Request) -> JSONResponse:
-        body = await request.json()
-        result = queue_folder_encode_action(
+        body = await _request_body(request)
+        result = await run_in_threadpool(
+            queue_folder_encode_action,
             prefix.strip("/"),
             str(body.get("notes", "")),
             _request_flag(body, "bypass_schedule"),
             _request_flag(body, "override_policy_holds"),
+            str(body.get("scope_membership_token", "")),
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     @app.post("/api/folders/{prefix:path}/approve-recovery")
-    def api_folder_approve_recovery(prefix: str) -> JSONResponse:
-        result = approve_measured_encode_recovery_action(prefix.strip("/"))
+    async def api_folder_approve_recovery(prefix: str, request: Request) -> JSONResponse:
+        body = await _request_body(request)
+        result = await run_in_threadpool(
+            approve_measured_encode_recovery_action,
+            prefix.strip("/"),
+            str(body.get("scope_membership_token", "")),
+        )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     @app.post("/api/folders/{prefix:path}/validate-outputs")
-    def api_folder_validate_outputs(prefix: str) -> JSONResponse:
-        result = validate_folder_outputs_action(prefix.strip("/"))
+    async def api_folder_validate_outputs(prefix: str, request: Request) -> JSONResponse:
+        body = await _request_body(request)
+        result = await run_in_threadpool(
+            validate_folder_outputs_action,
+            prefix.strip("/"),
+            str(body.get("scope_membership_token", "")),
+        )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     @app.post("/api/folders/{prefix:path}/promote-outputs")
-    def api_folder_promote_outputs(prefix: str) -> JSONResponse:
-        result = promote_folder_outputs_action(prefix.strip("/"))
+    async def api_folder_promote_outputs(prefix: str, request: Request) -> JSONResponse:
+        body = await _request_body(request)
+        result = await run_in_threadpool(
+            promote_folder_outputs_action,
+            prefix.strip("/"),
+            str(body.get("scope_membership_token", "")),
+        )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
     @app.post("/api/folders/{prefix:path}/save-profile")
     async def api_folder_save_profile(prefix: str, request: Request) -> JSONResponse:
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        result = save_profile_action(
+        body = await _request_body(request)
+        result = await run_in_threadpool(
+            save_profile_action,
             prefix.strip("/"),
             bool(body.get("confirm_high_impact", False)),
             bool(body.get("confirm_size_tradeoff", False)),
             str(body.get("reviewed_draft_hash", "")),
+            str(body.get("scope_membership_token", "")),
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)

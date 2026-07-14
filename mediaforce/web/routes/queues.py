@@ -3,6 +3,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 
 def register_queue_routes(
@@ -11,7 +12,7 @@ def register_queue_routes(
         pause_encode_queue_action: Callable[[], dict[str, Any]],
         resume_encode_queue_action: Callable[[], dict[str, Any]],
         retry_failed_encode_queue_action: Callable[[], dict[str, Any]],
-        retry_failed_encode_prefix_action: Callable[[str], dict[str, Any]],
+        retry_failed_encode_prefix_action: Callable[[str, str], dict[str, Any]],
         stop_encode_queue_action: Callable[[], dict[str, Any]],
         stop_calibration_queue_action: Callable[[], dict[str, Any]],
 ) -> None:
@@ -30,7 +31,12 @@ def register_queue_routes(
     @app.post("/api/encode-queue/retry-prefix")
     async def api_retry_failed_encode_prefix(request: Request) -> JSONResponse:
         body = await request.json()
-        return JSONResponse(retry_failed_encode_prefix_action(str(body.get("prefix", "")).strip()))
+        result = await run_in_threadpool(
+            retry_failed_encode_prefix_action,
+            str(body.get("prefix", "")).strip(),
+            str(body.get("scope_membership_token", "")),
+        )
+        return JSONResponse(result)
 
     @app.post("/api/encode-queue/stop")
     def api_stop_encode_queue() -> JSONResponse:
