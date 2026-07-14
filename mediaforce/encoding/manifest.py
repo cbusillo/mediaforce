@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -25,6 +26,8 @@ from mediaforce.tuning.target_size_search import (
     verify_final_output_size,
 )
 from mediaforce.tuning.stream_budget import StreamBudgetLedger
+
+LOGGER = logging.getLogger(__name__)
 
 
 class SupportsCancellation(Protocol):
@@ -193,6 +196,52 @@ def describe_item_plan(
     }
 
 
+def _persist_event_best_effort(
+        connection: DBClient,
+        library_item_id: int,
+        event_type: str,
+        details: dict[str, Any],
+        record_event: Callable[[DBClient, int, str, dict[str, Any]], None],
+) -> list[str]:
+    errors: list[str] = []
+    try:
+        record_event(connection, library_item_id, event_type, details)
+        connection.commit()
+    except Exception as persistence_error:
+        errors.append(f"Failed to persist {event_type} event: {persistence_error}")
+        try:
+            connection.rollback()
+        except Exception as rollback_error:
+            errors.append(f"Failed to roll back event transaction: {rollback_error}")
+    return errors
+
+
+def _persist_failure_event_without_masking(
+        connection: DBClient,
+        library_item_id: int,
+        event_type: str,
+        details: dict[str, Any],
+        primary_error: Exception,
+        record_event: Callable[[DBClient, int, str, dict[str, Any]], None],
+) -> None:
+    for note in _persist_event_best_effort(
+            connection,
+            library_item_id,
+            event_type,
+            details,
+            record_event,
+    ):
+        primary_error.add_note(note)
+
+
+def _cleanup_paths_without_masking(primary_error: Exception, *paths: Path) -> None:
+    for path in paths:
+        try:
+            safe_unlink(path)
+        except Exception as cleanup_error:
+            primary_error.add_note(f"Failed to remove {path}: {cleanup_error}")
+
+
 def encode_one_item(
         connection: DBClient,
         config: MediaforceConfig,
@@ -223,6 +272,7 @@ def encode_one_item(
         file_fingerprint: Callable[[Path, Any, float | None], str],
         encode_result_factory: Callable[..., Any],
 ) -> Any:
+    connection.commit()
     source_path = resolve_item_source_path(config, item, host=host)
     quality_source_path = resolve_item_quality_source_path(config, item, host=host)
     staging_path = resolve_item_staging_path(config, item, host=host)
@@ -260,7 +310,7 @@ def encode_one_item(
             )
         except CadenceResolutionError as exc:
             blocked_at = timestamp()
-            record_event(
+            _persist_failure_event_without_masking(
                 connection,
                 item["library_item_id"],
                 "encoding_failed",
@@ -277,8 +327,9 @@ def encode_one_item(
                     "failure_kind": "cadence_unresolved",
                     "error": str(exc),
                 },
+                exc,
+                record_event,
             )
-            connection.commit()
             raise
     width = int_value(item.get("width")) or None
     height = int_value(item.get("height")) or None
@@ -331,7 +382,7 @@ def encode_one_item(
         )
     except TargetSizeSearchError as exc:
         blocked_at = timestamp()
-        record_event(
+        _persist_failure_event_without_masking(
             connection,
             item["library_item_id"],
             "encoding_needs_review",
@@ -349,8 +400,9 @@ def encode_one_item(
                 "error": quality_error_message(exc),
                 "target_size_trace": exc.trace,
             },
+            exc,
+            record_event,
         )
-        connection.commit()
         raise
     selection = stream_budget.stream_plan if stream_budget is not None else select_streams(item)
     ffmpeg_cmd = build_ffmpeg_command(
@@ -481,8 +533,22 @@ def encode_one_item(
             retry_count += 1
             retry_payload["retry_count"] = retry_count
             retry_payload["next_crf"] = retry_quality.crf
-            record_event(connection, item["library_item_id"], "encoding_target_size_retry", retry_payload)
-            connection.commit()
+            persistence_errors = _persist_event_best_effort(
+                connection,
+                item["library_item_id"],
+                "encoding_target_size_retry",
+                retry_payload,
+                record_event,
+            )
+            if persistence_errors:
+                final_trace = {
+                    **(object_dict(final_trace) or {}),
+                    "event_persistence_errors": [
+                        *object_list(object_dict(final_trace).get("event_persistence_errors")),
+                        *persistence_errors,
+                    ],
+                }
+                retry_quality.target_size_trace = final_trace
             safe_unlink(temp_output)
             quality_result = retry_quality
             ffmpeg_cmd = build_ffmpeg_command(
@@ -509,7 +575,7 @@ def encode_one_item(
             event_type = "encoding_needs_review"
         else:
             event_type = "encoding_stopped" if isinstance(exc, ProcessCancelledError) else "encoding_failed"
-        record_event(
+        _persist_failure_event_without_masking(
             connection,
             item["library_item_id"],
             event_type,
@@ -523,10 +589,10 @@ def encode_one_item(
                 "target_size_verification": final_verification.to_payload() if final_verification is not None else None,
                 "target_size_trace": final_trace,
             },
+            exc,
+            record_event,
         )
-        connection.commit()
-        safe_unlink(temp_output)
-        safe_unlink(staging_path)
+        _cleanup_paths_without_masking(exc, temp_output, staging_path)
         raise
 
     staged_stat = staging_path.stat()
@@ -590,7 +656,8 @@ def encode_one_item(
         .where(library_items.c.id == item["library_item_id"])
         .values(status="encoded", updated_at=now)
     )
-    record_event(
+    connection.commit()
+    completion_event_errors = _persist_event_best_effort(
         connection,
         item["library_item_id"],
         "encoding_completed",
@@ -611,8 +678,10 @@ def encode_one_item(
             "target_size_verification": final_verification.to_payload() if final_verification is not None else None,
             "target_size_trace": final_trace,
         },
+        record_event,
     )
-    connection.commit()
+    for event_error in completion_event_errors:
+        LOGGER.warning("%s", event_error)
 
     return encode_result_factory(
         staging_path=staging_path,
@@ -653,6 +722,7 @@ def _encode_event_details(
         "source_duration_seconds": _item_float(item, "duration_seconds"),
         "source_video_codec": _item_text(item, "video_codec"),
         "encode_origin": _encode_context_text(encode_context, "origin"),
+        "encode_owner_pid": _encode_context_int(encode_context, "owner_pid"),
         "encode_job_id": _encode_context_text(encode_context, "encode_job_id"),
         "encode_worker_id": _encode_context_text(encode_context, "encode_worker_id"),
         "encode_host_key": _host_text(host, "key", fallback_key="host"),
@@ -704,6 +774,11 @@ def _quality_temp_dir_for_encode_host(config: MediaforceConfig, host: dict[str, 
 def _encode_context_text(encode_context: dict[str, Any] | None, key: str) -> str | None:
     payload = object_dict(encode_context)
     value = str(payload.get(key) or "").strip()
+    return value or None
+
+
+def _encode_context_int(encode_context: dict[str, Any] | None, key: str) -> int | None:
+    value = int_value(object_dict(encode_context).get(key))
     return value or None
 
 

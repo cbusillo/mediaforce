@@ -207,6 +207,7 @@ def run_calibration_job(
                 current_library_item_id,
                 deps.staged_artifact_columns,
             )
+            connection.commit()
 
             calibration_run_id = uuid.uuid4().hex[:12]
             if deps.calibration_mode_for_action(action) == "full":

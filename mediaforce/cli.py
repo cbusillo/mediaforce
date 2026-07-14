@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -275,7 +276,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             manifest = _load_manifest(manifest_path)
             indexes = _resolve_indexes(manifest, args)
             encode_results = encode_manifest_items(connection, config, manifest_path, manifest, indexes,
-                                                   overwrite=args.overwrite, encode_context={"origin": "cli"})
+                                                   overwrite=args.overwrite,
+                                                   encode_context={"origin": "cli", "owner_pid": os.getpid()})
             for result in encode_results:
                 percent = _percent_string(result.staging_size_bytes, result.source_size_bytes)
                 print(
@@ -631,7 +633,7 @@ def _run_review(
         manifest,
         [index],
         overwrite=overwrite,
-        encode_context={"origin": "cli"},
+        encode_context={"origin": "cli", "owner_pid": os.getpid()},
     )[0]
     percent = _percent_string(encode_result.staging_size_bytes, encode_result.source_size_bytes)
     print(
