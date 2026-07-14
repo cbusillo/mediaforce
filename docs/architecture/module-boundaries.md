@@ -166,6 +166,13 @@ Guidance:
 - `library_settings.py`
   - ordered typed-root schema, legacy inference, safe availability defaults,
     type-specific policies, and profile registries
+- `other_profiles.py`
+  - generic Other profile probe requirements, canonical scope boundaries, and
+    bounded folder/catalog limits
+- `other_library.py`
+  - Other folder/file grouping, Library payloads, exact scope membership, and
+    processing confirmation guards; action callers consume membership tokens
+    rather than minting replacements
 - `folder_profiles.py`
   - folder inspection and suggested override shaping
 - `run_manifests.py`

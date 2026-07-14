@@ -174,7 +174,7 @@ class MovieWorkflowTests(unittest.TestCase):
         self.assertEqual(oldest_sorted[0].age.source, "plex")
         self.assertEqual(largest_sorted[0].item_id, larger_id)
 
-    def test_typed_movie_root_can_enter_production_while_other_and_spatial_remain_blocked(self) -> None:
+    def test_typed_movie_and_other_roots_can_enter_production_while_spatial_remains_blocked(self) -> None:
         config = self._config(
             extras="exclude",
             additional_libraries=[
@@ -192,7 +192,7 @@ class MovieWorkflowTests(unittest.TestCase):
                 },
             ],
         )
-        self.assertEqual(set(config.source_root_map), {"films"})
+        self.assertEqual(set(config.source_root_map), {"films", "other"})
 
     def test_movie_library_payload_keeps_editions_extras_age_and_conflicts_visible(self) -> None:
         with open_db(self.config.paths.db_path) as connection:

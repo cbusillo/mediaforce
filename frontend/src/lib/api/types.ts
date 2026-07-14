@@ -232,6 +232,107 @@ export interface MovieLibraryPayload {
 	details_loading: boolean;
 }
 
+export interface OtherProfileReadiness {
+	state: 'ready' | 'blocked' | 'browse_only';
+	label: string;
+	detail: string;
+	profile: string;
+	profile_label: string;
+	blockers: string[];
+}
+
+export interface OtherWorkflowItemState {
+	item_id: number;
+	rel_path: string;
+	status: string;
+	state: string;
+	lane: WorkflowLane;
+	has_staged_output: boolean;
+	blocker?: string | null;
+}
+
+export interface OtherMember {
+	item_id: number;
+	prefix: string;
+	rel_path: string;
+	label: string;
+	status: string;
+	size_bytes: number;
+	duration_seconds?: number | null;
+	video_codec?: string | null;
+	width?: number | null;
+	height?: number | null;
+	profile_supported: boolean;
+	profile_blocker?: string | null;
+	workflow_state?: OtherWorkflowItemState | null;
+}
+
+export interface OtherLibraryRoot {
+	key: string;
+	label: string;
+	availability: 'production' | 'browse_only';
+	default_profile: string;
+	policy: Record<string, unknown>;
+}
+
+export interface OtherWorkUnit {
+	prefix: string;
+	root: string;
+	library_label: string;
+	availability: 'production' | 'browse_only';
+	default_profile: string;
+	policy: Record<string, unknown>;
+	title: string;
+	subtitle: string;
+	scope_label: string;
+	scope_mode: 'exact_file' | 'folder';
+	media_scope: MediaScopePayload;
+	item_count: number;
+	total_size_bytes: number;
+	eligible_item_count?: number | null;
+	blocked_item_count: number;
+	statuses: Record<string, number>;
+	video_codecs: Record<string, number>;
+	projected_reclaim_bytes?: number | null;
+	estimate_unavailable_count?: number | null;
+	profile_readiness: OtherProfileReadiness;
+	workflow_state?: FolderWorkflowState | null;
+	membership_requires_confirmation: boolean;
+	details_loading: boolean;
+}
+
+export interface OtherLibraryPayload {
+	schema_version: number;
+	libraries: OtherLibraryRoot[];
+	work_units: OtherWorkUnit[];
+	catalog_empty: boolean;
+	catalog_truncated: boolean;
+	catalog_item_limit: number;
+	catalog_work_unit_limit: number;
+	details_loading: boolean;
+}
+
+export interface OtherScopeContext {
+	schema_version: number;
+	prefix: string;
+	root: string;
+	library_label: string;
+	availability: 'production' | 'browse_only';
+	default_profile: string;
+	policy: Record<string, unknown>;
+	media_scope: MediaScopePayload;
+	item_count: number;
+	eligible_item_count: number;
+	blocked_item_count: number;
+	total_size_bytes: number;
+	membership_complete: boolean;
+	membership_limit: number;
+	membership_requires_confirmation: boolean;
+	membership_token: string;
+	profile_readiness: OtherProfileReadiness;
+	members: OtherMember[];
+}
+
 export interface QueueLane {
 	running: Array<Record<string, unknown>>;
 	queued: Array<Record<string, unknown>>;
@@ -969,6 +1070,7 @@ export interface FolderPayload {
 	workflow_state?: FolderWorkflowState | null;
 	lifecycle?: LifecycleState | null;
 	movie_context?: MovieTitle | null;
+	other_context?: OtherScopeContext | null;
 }
 
 export interface FolderBenchPreviewResponse {

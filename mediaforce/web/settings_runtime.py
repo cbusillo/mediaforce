@@ -144,6 +144,7 @@ def index_settings_library_rows(rows: list[dict[str, Any]], *, min_rows: int = 1
                     path=str(row.get("path") or ""),
                     library_type=library_type,
                     availability=str(definition["availability"]),
+                    default_profile=str(definition["default_profile"]),
                     policy=dict(definition["policy"]),
                 ),
                 "type_change_confirmation": "",
@@ -179,6 +180,7 @@ def library_readiness(
         path: str,
         library_type: str,
         availability: str,
+        default_profile: str,
         policy: dict[str, Any],
 ) -> dict[str, str]:
     if not key or not label.strip() or not path.strip():
@@ -215,6 +217,19 @@ def library_readiness(
             "state": "blocked",
             "label": "Workflow blocked",
             "detail": f"{library_type_label(library_type)} production is not available yet.",
+        }
+    if library_type == "other":
+        valid_profiles = {option["key"] for option in LIBRARY_PROFILE_OPTIONS["other"]}
+        if default_profile not in valid_profiles:
+            return {
+                "state": "incomplete",
+                "label": "Profile needed",
+                "detail": "Choose an explicit Other processing profile before enabling Production.",
+            }
+        return {
+            "state": "ready",
+            "label": "Ready",
+            "detail": "Generic file and folder scopes use the selected profile and require probe readiness.",
         }
     return {"state": "ready", "label": "Ready", "detail": "Scanning and production processing are enabled."}
 

@@ -201,7 +201,9 @@
 						onchange={(event) =>
 							patchSelected({ availability: selectValue(event) as LibraryAvailability })}
 					>
-						<option value="production" disabled={selected.library_type !== 'tv'}>Production</option>
+						<option value="production" disabled={selected.library_type === 'spatial'}
+							>Production</option
+						>
 						<option value="browse_only">Browse only</option>
 						<option value="disabled">Disabled</option>
 					</select>

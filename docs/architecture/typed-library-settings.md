@@ -38,12 +38,18 @@ first typed save.
 - `disabled`: neither scan nor process; a full scan marks former catalog rows
   missing
 
-TV and Movies are production-enabled types. Movies keeps extras and uncertain
-nested files out of title-wide production by default while exact-file actions
-remain deliberate. Other remains Browse only until its bounded generic workflow
-is complete. Spatial media remains safety-blocked
-until the 3D/VR qualification plan proves geometry, stream, metadata, audio,
-and target-device playback invariants.
+TV, Movies, and Other are production-enabled types. Movies keeps extras and
+uncertain nested files out of title-wide production by default while exact-file
+actions remain deliberate. Other uses an explicit generic profile, exact
+root-level files, and bounded top-level folder scopes; folders above the
+membership limit must be split or switched to exact-file grouping before
+processing. Every non-empty folder scope requires a current membership token,
+and unscoped candidate selection excludes Other items. Library responses cap one
+catalog window at 5,000 indexed items and 500 work units so a generic root cannot
+exhaust the operator process; truncated catalogs remain non-actionable until the
+configured roots are narrowed. Spatial media remains safety-blocked until the
+3D/VR qualification plan proves geometry, stream, metadata, audio, and
+target-device playback invariants.
 
 ## Type policies
 
@@ -52,10 +58,11 @@ and series-status freshness. These values layer above global planning defaults
 and below explicit folder overrides.
 
 Movies records title grouping, separate editions, extras inclusion, and ranking
-intent. Other records a bounded folder or exact-file work unit. Spatial records
-the playback target, stereo layout, projection, source-preserving geometry, and
-an unqualified container state. Controls that do not apply to the selected type
-are structurally absent from Settings.
+intent. Other records a bounded top-level folder or exact-file work unit and
+requires operators to review folder membership before sampling or queueing.
+Spatial records the playback target, stereo layout, projection,
+source-preserving geometry, and an unqualified container state. Controls that do
+not apply to the selected type are structurally absent from Settings.
 
 ## Type changes
 

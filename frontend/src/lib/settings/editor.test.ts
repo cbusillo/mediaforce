@@ -296,6 +296,25 @@ describe('settings draft helpers', () => {
 		expect(spatial && libraryReadiness(spatial).state).toBe('incomplete');
 	});
 
+	it('allows an Other root into production with an explicit profile', () => {
+		const other = {
+			...payload.libraries[0],
+			key: 'other',
+			label: 'Other',
+			path: '/Volumes/Other',
+			library_type: 'other' as const,
+			availability: 'production' as const,
+			default_profile: 'other_conservative',
+			policy: { grouping: 'folder' as const }
+		};
+
+		expect(libraryReadiness(other)).toEqual({
+			state: 'ready',
+			label: 'Ready',
+			detail: 'Generic file and folder scopes use the selected profile and require probe readiness.'
+		});
+	});
+
 	it('uses the saved transcode root for destructive archive cleanup', () => {
 		const draft = draftFromSettings(payload);
 		draft.transcode_root = '/Volumes/UnsavedTranscode';

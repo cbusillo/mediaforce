@@ -17,7 +17,47 @@ output_container = "mkv"
 
 [media.source_roots]
 movies = "scratch/web-smoke/source/movies"
+other = "scratch/web-smoke/source/other"
 tv = "scratch/web-smoke/source/tv"
+
+[[media.libraries]]
+key = "movies"
+label = "Movies"
+path = "scratch/web-smoke/source/movies"
+type = "movie"
+availability = "production"
+default_profile = "movie_balanced"
+
+[media.libraries.policy]
+grouping = "title"
+editions = "separate"
+extras = "exclude"
+ranking = "oldest_added_first"
+
+[[media.libraries]]
+key = "tv"
+label = "TV"
+path = "scratch/web-smoke/source/tv"
+type = "tv"
+availability = "production"
+default_profile = "inherit_defaults"
+
+[media.libraries.policy]
+series_lifecycle_mode = "auto"
+current_season_inactive_days = 365
+season_acquisition_hold_days = 30
+series_metadata_stale_days = 7
+
+[[media.libraries]]
+key = "other"
+label = "Other"
+path = "scratch/web-smoke/source/other"
+type = "other"
+availability = "production"
+default_profile = "other_conservative"
+
+[media.libraries.policy]
+grouping = "folder"
 
 [video]
 encoder = "libsvtav1"

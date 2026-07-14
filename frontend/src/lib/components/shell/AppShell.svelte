@@ -20,6 +20,8 @@
 				pathname === '/' ||
 				pathname === '/movies' ||
 				pathname.startsWith('/movies/') ||
+				pathname === '/other' ||
+				pathname.startsWith('/other/') ||
 				pathname === '/folders' ||
 				pathname.startsWith('/folders/')
 			);

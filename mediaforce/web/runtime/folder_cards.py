@@ -340,6 +340,7 @@ def list_folder_cards(
         rel_path_root: str | None = None,
         media_roots: set[str] | None = None,
         candidate_decisions: list[CandidateDecision] | None = None,
+        restrict_to_candidate_items: bool = False,
         include_lifecycle: bool = True,
         include_workflow_states: bool = True,
 ) -> list[FolderCard]:
@@ -382,6 +383,11 @@ def list_folder_cards(
         if not media_roots:
             return []
         query = query.where(library_items.c.media_root.in_(tuple(media_roots)))
+    if restrict_to_candidate_items:
+        candidate_item_ids = tuple(decision.item_id for decision in candidate_decisions)
+        if not candidate_item_ids:
+            return []
+        query = query.where(library_items.c.id.in_(candidate_item_ids))
     rows = connection.execute(query.order_by(library_items.c.rel_path)).mappings().fetchall()
     grouped: dict[str, FolderCard] = {}
     for row in rows:

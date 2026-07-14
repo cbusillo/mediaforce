@@ -187,6 +187,16 @@ and that narrow layouts replace the long show rail with a show picker. Opening a
 multi-season show must clearly state that one representative test and one size
 choice apply to all seasons before any full encode can be queued.
 
+On Other Library, verify that root-level files are exact work units and nested
+media is grouped by the configured bounded folder or file policy. Every row must
+show reachable file count, stored size, workflow state, and profile readiness.
+Other Studio must list exact membership before sampling or queueing, require an
+explicit membership acknowledgement for every non-empty folder, block incomplete
+probe/profile requirements, and never show TV, movie, edition, extras, or spatial
+terminology. Cover the empty root, root-level file, nested folder, scope above the
+250-file limit, catalog-window warning, unsupported media, active processing,
+validation, and promotion states at 1024px and 390px without horizontal overflow.
+
 For `Current Season`, verify that `Auto`, `On`, and `Off` are understandable as
 current-season policy rather than queue controls; saving a mode must retain the
 selected show. Eligible and held totals must agree between the show view and its
