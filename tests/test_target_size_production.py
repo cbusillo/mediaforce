@@ -1,10 +1,11 @@
 import json
+import sqlite3
 import subprocess
 import tempfile
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 from unittest.mock import patch
 
 from sqlalchemy import select
@@ -220,6 +221,226 @@ class TargetSizeProductionTests(unittest.TestCase):
             self.assertEqual(rejection_trace["final_retry_calibration"]["status"], "rejected")
             self.assertFalse(staging_path.exists())
 
+    def test_encode_preserves_primary_error_when_failure_event_write_fails(self) -> None:
+        source_path = self._source_file("episode-primary-failure.mkv")
+        staging_path = self._staging_path("episode-primary-failure.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            self._attach_stream_budget(item)
+            quality = QualitySearchResult(
+                crf=28.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="quality-search",
+            )
+
+            def record_event(
+                    _connection: DBClient,
+                    _library_item_id: int,
+                    event_type: str,
+                    _details: dict[str, Any],
+            ) -> None:
+                if event_type == "encoding_failed":
+                    raise sqlite3.OperationalError("database is locked")
+
+            failed_process = subprocess.CompletedProcess(
+                args=["ffmpeg"],
+                returncode=1,
+                stdout="",
+                stderr="primary ffmpeg failure",
+            )
+            with patch("mediaforce.execution.resolve_item_source_path", return_value=source_path), patch(
+                "mediaforce.execution.resolve_item_staging_path", return_value=staging_path
+            ), patch("mediaforce.execution._search_quality", return_value=quality), patch(
+                "mediaforce.execution._build_ffmpeg_command",
+                return_value=["ffmpeg", "-i", str(source_path), str(staging_path)],
+            ), patch("mediaforce.execution._run_encode_command", return_value=failed_process), patch(
+                "mediaforce.execution._record_event",
+                side_effect=record_event,
+            ), patch(
+                "mediaforce.encoding.manifest.safe_unlink",
+                side_effect=OSError("cleanup failed"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "primary ffmpeg failure") as raised:
+                    execution.encode_one_item(
+                        connection,
+                        self.config,
+                        self.root / "runs" / "manifest.json",
+                        {"run_id": "primary-failure-run", "items": [item]},
+                        0,
+                        item,
+                        overwrite=False,
+                    )
+            self.assertIn(
+                "Failed to persist encoding_failed event: database is locked",
+                raised.exception.__notes__,
+            )
+            self.assertTrue(any("cleanup failed" in note for note in raised.exception.__notes__))
+            self.assertEqual(connection.execute(select(1)).scalar_one(), 1)
+
+    def test_standalone_encode_allows_web_worker_write_during_media_work(self) -> None:
+        source_path = self._source_file("episode-concurrent-writer.mkv")
+        staging_path = self._staging_path("episode-concurrent-writer.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            self._attach_stream_budget(item)
+            quality = QualitySearchResult(
+                crf=28.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="target-size-search",
+                target_size_trace=self._trace(item, selected_crf=28.0),
+            )
+
+            def web_worker_poll() -> None:
+                with open_db(self.config.paths.db_path) as writer:
+                    writer.exec_driver_sql("PRAGMA busy_timeout=100")
+                    writer.execute(
+                        item_events.insert().values(
+                            library_item_id=item_id,
+                            created_at="2026-07-14T00:00:00+00:00",
+                            event_type="web_worker_poll",
+                            details_json="{}",
+                        )
+                    )
+
+            self._encode_with_output_sizes(
+                connection,
+                item,
+                quality,
+                [5_100_000],
+                during_encode=web_worker_poll,
+            )
+
+            event_types = [event["event_type"] for event in self._events(connection, item_id)]
+            self.assertIn("web_worker_poll", event_types)
+
+    def test_encode_releases_caller_write_before_quality_search(self) -> None:
+        source_path = self._source_file("episode-quality-writer.mkv")
+        staging_path = self._staging_path("episode-quality-writer.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            self._attach_stream_budget(item)
+            quality = QualitySearchResult(
+                crf=28.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="target-size-search",
+                target_size_trace=self._trace(item, selected_crf=28.0),
+            )
+
+            def web_worker_poll() -> None:
+                with open_db(self.config.paths.db_path) as writer:
+                    writer.exec_driver_sql("PRAGMA busy_timeout=100")
+                    writer.execute(
+                        item_events.insert().values(
+                            library_item_id=item_id,
+                            created_at="2026-07-14T00:00:00+00:00",
+                            event_type="quality_search_web_poll",
+                            details_json="{}",
+                        )
+                    )
+
+            self._encode_with_output_sizes(
+                connection,
+                item,
+                quality,
+                [5_100_000],
+                during_quality_search=web_worker_poll,
+            )
+
+            event_types = [event["event_type"] for event in self._events(connection, item_id)]
+            self.assertIn("quality_search_web_poll", event_types)
+
+    def test_retry_event_write_failure_does_not_abort_successful_encode(self) -> None:
+        source_path = self._source_file("episode-retry-event-failure.mkv")
+        staging_path = self._staging_path("episode-retry-event-failure.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            self._attach_stream_budget(item)
+            quality = QualitySearchResult(
+                crf=28.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="target-size-search",
+                target_size_trace=self._trace(item, selected_crf=28.0, retry_crf=31.0),
+            )
+            record_event = execution._record_event
+
+            def record_event_with_retry_failure(
+                    event_connection: DBClient,
+                    library_item_id: int,
+                    event_type: str,
+                    details: dict[str, Any],
+            ) -> None:
+                if event_type == "encoding_target_size_retry":
+                    raise sqlite3.OperationalError("database is locked")
+                record_event(event_connection, library_item_id, event_type, details)
+
+            with patch("mediaforce.execution._record_event", side_effect=record_event_with_retry_failure):
+                self._encode_with_output_sizes(connection, item, quality, [5_400_000, 5_100_000])
+
+            artifact = self._staged_artifact(connection, item_id, staged_artifacts.c.validation_json)
+            assert artifact is not None
+            validation = json.loads(cast(str, artifact["validation_json"]))
+            event_types = [event["event_type"] for event in self._events(connection, item_id)]
+            self.assertTrue(staging_path.exists())
+            self.assertIn("encoding_completed", event_types)
+            self.assertNotIn("encoding_failed", event_types)
+            self.assertEqual(
+                validation["target_size_trace"]["event_persistence_errors"],
+                ["Failed to persist encoding_target_size_retry event: database is locked"],
+            )
+
+    def test_completion_event_write_failure_preserves_successful_encode(self) -> None:
+        source_path = self._source_file("episode-completion-event-failure.mkv")
+        staging_path = self._staging_path("episode-completion-event-failure.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            self._attach_stream_budget(item)
+            quality = QualitySearchResult(
+                crf=28.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="target-size-search",
+                target_size_trace=self._trace(item, selected_crf=28.0),
+            )
+            record_event = execution._record_event
+
+            def record_event_with_completion_failure(
+                    event_connection: DBClient,
+                    library_item_id: int,
+                    event_type: str,
+                    details: dict[str, Any],
+            ) -> None:
+                if event_type == "encoding_completed":
+                    raise sqlite3.OperationalError("database is locked")
+                record_event(event_connection, library_item_id, event_type, details)
+
+            with self.assertLogs("mediaforce.encoding.manifest", level="WARNING"), patch(
+                "mediaforce.execution._record_event",
+                side_effect=record_event_with_completion_failure,
+            ):
+                self._encode_with_output_sizes(connection, item, quality, [5_100_000])
+
+            artifact = self._staged_artifact(connection, item_id, staged_artifacts.c.staging_path)
+            status = connection.execute(
+                select(library_items.c.status).where(library_items.c.id == item_id)
+            ).scalar_one()
+            self.assertIsNotNone(artifact)
+            self.assertTrue(staging_path.exists())
+            self.assertEqual(status, "encoded")
+
     def _encode_with_output_sizes(
             self,
             connection: DBClient,
@@ -228,10 +449,14 @@ class TargetSizeProductionTests(unittest.TestCase):
             output_sizes: list[int],
             *,
             retry_sample: SampleEncodeResult | None = None,
+            during_encode: Callable[[], None] | None = None,
+            during_quality_search: Callable[[], None] | None = None,
     ) -> tuple[list[Any], list[Any]]:
         sizes = list(output_sizes)
 
         def run_encode_side_effect(*, temp_output: Path, **_: object) -> subprocess.CompletedProcess[str]:
+            if during_encode is not None:
+                during_encode()
             size = sizes.pop(0)
             temp_output.parent.mkdir(parents=True, exist_ok=True)
             temp_output.write_bytes(b"0" * size)
@@ -259,9 +484,14 @@ class TargetSizeProductionTests(unittest.TestCase):
                 self.fail("Retry measurement was not expected")
             return retry_sample
 
+        def search_quality_side_effect(*_args: object, **_kwargs: object) -> QualitySearchResult:
+            if during_quality_search is not None:
+                during_quality_search()
+            return quality
+
         with patch("mediaforce.execution.resolve_item_source_path", return_value=Path(item["source_path"])), patch(
             "mediaforce.execution.resolve_item_staging_path", return_value=Path(item["staging_path"])
-        ), patch("mediaforce.execution._search_quality", return_value=quality), patch(
+        ), patch("mediaforce.execution._search_quality", side_effect=search_quality_side_effect), patch(
             "mediaforce.execution._measure_quality_candidate", side_effect=measure_retry_side_effect
         ) as measure_mock, patch(
             "mediaforce.execution._build_ffmpeg_command", return_value=["ffmpeg", "-i", item["source_path"], item["staging_path"]]

@@ -255,6 +255,60 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(job["last_failure_kind"], "stale_lease")
             self.assertIn("stale worker lease", str(job["waiting_reason"]))
 
+    def test_stale_lease_reconciler_preserves_a_fresh_heartbeat(self) -> None:
+        source_path = self._create_source_file("episode-fresh-heartbeat.mkv")
+        staging_path = self._staging_path("episode-fresh-heartbeat.mkv")
+        future_lease = "2999-01-01T00:00:00+00:00"
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-fresh-heartbeat.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-fresh-heartbeat",
+                manifest_name="manifest-fresh-heartbeat.json",
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="running",
+                attempt_count=1,
+                lease_expires_at="2000-01-01T00:00:00+00:00",
+            )
+
+        real_load_encode_job = load_encode_job
+        load_count = 0
+
+        def load_with_interleaved_heartbeat(connection: DBClient, job_id: str) -> dict[str, Any] | None:
+            nonlocal load_count
+            payload = real_load_encode_job(connection, job_id)
+            load_count += 1
+            if load_count == 1 and payload is not None:
+                with open_db(self.config.paths.db_path) as heartbeat_connection:
+                    refreshed = real_load_encode_job(heartbeat_connection, job_id)
+                    assert refreshed is not None
+                    refreshed.update(
+                        {
+                            "heartbeat_at": web_app._now_iso(),
+                            "lease_expires_at": future_lease,
+                            "updated_at": web_app._now_iso(),
+                        }
+                    )
+                    save_encode_job(heartbeat_connection, refreshed)
+            return payload
+
+        with open_db(self.config.paths.db_path) as connection, patch(
+            "mediaforce.web.runtime.encode_runtime.load_encode_job",
+            side_effect=load_with_interleaved_heartbeat,
+        ):
+            web_app._reconcile_encode_jobs(connection, self.config)
+
+        with open_db(self.config.paths.db_path) as connection:
+            job = real_load_encode_job(connection, "job-fresh-heartbeat")
+        assert job is not None
+        self.assertEqual(job["status"], "running")
+        self.assertEqual(job["lease_expires_at"], future_lease)
+
     def test_retry_backoff_promotes_job_to_queued_when_ready(self) -> None:
         source_path = self._create_source_file("episode-c.mkv")
         staging_path = self._staging_path("episode-c.mkv")
@@ -344,7 +398,16 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 lease_expires_at="2999-01-01T00:00:00+00:00",
             )
 
-            with patch("mediaforce.web.app._sweep_orphaned_encode_processes") as sweep_mock:
+            def sweep_with_concurrent_writer(*_args: object, **_kwargs: object) -> None:
+                with open_db(self.config.paths.db_path) as writer:
+                    writer.exec_driver_sql("PRAGMA busy_timeout=100")
+                    writer.exec_driver_sql("BEGIN IMMEDIATE")
+                    writer.exec_driver_sql("ROLLBACK")
+
+            with patch(
+                "mediaforce.web.app._sweep_orphaned_encode_processes",
+                side_effect=sweep_with_concurrent_writer,
+            ) as sweep_mock:
                 web_app._recover_encode_queue(connection, self.config)
 
             job = load_encode_job(connection, "job-restart-sweep")
@@ -374,6 +437,37 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertIsNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
         self.assertFalse(staging_path.exists())
         self.assertFalse(partial_path.exists())
+
+    def test_reconcile_encode_jobs_preserves_active_standalone_cli_encode(self) -> None:
+        source_path = self._create_source_file("episode-active-cli.mkv")
+        staging_path = self._staging_path("episode-active-cli.mkv")
+        partial_path = staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}")
+        partial_path.parent.mkdir(parents=True, exist_ok=True)
+        partial_path.write_text("active partial")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            connection.execute(
+                item_events.insert().values(
+                    library_item_id=item_id,
+                    created_at=web_app._now_iso(),
+                    event_type="encoding_started",
+                    details_json=json.dumps(
+                        {
+                            "encode_origin": "cli",
+                            "encode_owner_pid": os.getpid(),
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+
+            web_app._reconcile_encode_jobs(connection, self.config)
+
+            item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+            assert item_status_row is not None
+            self.assertEqual(item_status_row["status"], "encoding")
+        self.assertTrue(partial_path.exists())
 
     def test_reconcile_encode_jobs_skips_promoted_stale_encoding_rows(self) -> None:
         source_path = self._create_source_file("episode-idle-promoted.mkv")
@@ -9294,7 +9388,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             ):
                 destination_path = execution.promote_one_item(connection, self.config, item, force=False)
 
+            with open_db(self.config.paths.db_path) as reader:
+                committed_status = reader.execute(
+                    select(library_items.c.status).where(library_items.c.id == item_id)
+                ).scalar_one()
+
             self.assertEqual(destination_path, source_path.with_suffix(".mp4"))
+            self.assertEqual(committed_status, "promoted")
             self.assertTrue(destination_path.exists())
             archived_source = self.config.archive_root / Path("tv/show/episode-promote.mkv")
             self.assertTrue(archived_source.exists())
@@ -9395,6 +9495,69 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(library_row["media_root"], "films")
         self.assertEqual(library_row["rel_path"], "films/Example/Feature.mp4")
         self.assertEqual(library_row["parent_dir"], "films/Example")
+
+    def test_promotion_event_write_failure_preserves_promoted_state(self) -> None:
+        source_path = self._create_source_file("episode-promote-event-failure.mkv")
+        staging_path = self._staging_path("episode-promote-event-failure.mp4")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("encoded")
+        self.config.raw["media"]["output_container"] = "mp4"
+        promoted_probe = ProbeSummary(
+            duration_seconds=60.0,
+            video_codec="av1",
+            video_bitrate=900000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="validated")
+            connection.execute(
+                staged_artifacts.insert().values(
+                    library_item_id=item_id,
+                    staging_path=str(staging_path),
+                    validation_json=json.dumps({"passed": True}),
+                    updated_at=web_app._now_iso(),
+                )
+            )
+            item = {
+                "library_item_id": item_id,
+                "source_path": str(source_path),
+                "rel_path": "tv/show/episode-promote-event-failure.mkv",
+                "media_root": "tv",
+            }
+
+            with self.assertLogs("mediaforce.encoding.staging", level="WARNING"), patch(
+                "mediaforce.execution.probe_media",
+                return_value=promoted_probe,
+            ), patch(
+                "mediaforce.execution.file_fingerprint",
+                return_value="promoted-fingerprint",
+            ), patch(
+                "mediaforce.execution._record_event",
+                side_effect=sqlite3.OperationalError("database is locked"),
+            ):
+                destination_path = execution.promote_one_item(connection, self.config, item, force=False)
+
+        with open_db(self.config.paths.db_path) as connection:
+            status = connection.execute(
+                select(library_items.c.status).where(library_items.c.id == item_id)
+            ).scalar_one()
+            promoted_path = connection.execute(
+                select(staged_artifacts.c.promoted_path).where(staged_artifacts.c.library_item_id == item_id)
+            ).scalar_one()
+        self.assertTrue(destination_path.exists())
+        self.assertEqual(status, "promoted")
+        self.assertEqual(promoted_path, str(destination_path))
 
     def test_run_tracked_process_reports_progress_snapshots(self) -> None:
         class FakeTextProcess:
@@ -16685,6 +16848,66 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertTrue(staging_b.exists())
         self.assertEqual(item_a_row["status"], "planned")
         self.assertEqual(item_b_row["status"], "encoding")
+
+    def test_cleanup_encode_retry_artifacts_commits_between_file_removals(self) -> None:
+        source_a = self._create_source_file("cleanup-writer-a.mkv")
+        source_b = self._create_source_file("cleanup-writer-b.mkv")
+        staging_a = self._staging_path("cleanup-writer-a.mkv")
+        staging_b = self._staging_path("cleanup-writer-b.mkv")
+        for path in (staging_a, staging_b):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("staged")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_a = self._insert_library_item(connection, source_a, status="encoding")
+            item_b = self._insert_library_item(connection, source_b, status="encoding")
+
+        cleanup_manifest = self._write_manifest(
+            "manifest-cleanup-writer.json",
+            [
+                {"library_item_id": item_a, "staging_path": str(staging_a)},
+                {"library_item_id": item_b, "staging_path": str(staging_b)},
+            ],
+        )
+        remove_path = encode_runtime._remove_path
+        writer_ran = False
+
+        def remove_with_concurrent_writer(path: Path) -> None:
+            nonlocal writer_ran
+            if path == staging_b and not writer_ran:
+                writer_ran = True
+                with open_db(self.config.paths.db_path) as writer:
+                    writer.exec_driver_sql("PRAGMA busy_timeout=100")
+                    writer.execute(
+                        item_events.insert().values(
+                            library_item_id=item_b,
+                            created_at=web_app._now_iso(),
+                            event_type="cleanup_concurrent_writer",
+                            details_json="{}",
+                        )
+                    )
+            remove_path(path)
+
+        with open_db(self.config.paths.db_path) as connection, patch(
+            "mediaforce.web.runtime.encode_runtime._remove_path",
+            side_effect=remove_with_concurrent_writer,
+        ):
+            encode_runtime._cleanup_encode_retry_artifacts(
+                connection,
+                manifest_path=cleanup_manifest,
+                indexes=[0, 1],
+                deps=web_app._encode_queue_runtime_deps(),
+            )
+
+        with open_db(self.config.paths.db_path) as connection:
+            statuses = connection.execute(
+                select(library_items.c.status).where(library_items.c.id.in_((item_a, item_b)))
+            ).scalars().all()
+            event_type = connection.execute(
+                select(item_events.c.event_type).where(item_events.c.library_item_id == item_b)
+            ).scalar_one()
+        self.assertEqual(statuses, ["planned", "planned"])
+        self.assertEqual(event_type, "cleanup_concurrent_writer")
 
     def test_default_config_path_points_to_repo_config_defaults(self) -> None:
         self.assertEqual(

@@ -39,7 +39,7 @@ from mediaforce.advisor import (
     request_run_verdict,
 )
 from mediaforce.core.config import ConfigPaths, MediaforceConfig, load_config, save_runtime_settings
-from mediaforce.core.db import open_db
+from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import calibration_jobs
 from mediaforce.core.db_tables import item_events
 from mediaforce.core.db_tables import learning_artifacts
@@ -60,7 +60,7 @@ from mediaforce.tuning.tuning_memory import (
 )
 from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_risk_public_view, \
     with_quality_risk_intent
-from mediaforce.tuning.calibration_jobs import load_latest_failed_target_size_sample_job
+from mediaforce.tuning.calibration_jobs import load_latest_failed_target_size_sample_job, save_job
 from mediaforce.tuning.target_size_search import TargetSizeSearchError
 from mediaforce.web.app import (
     _advice_file,
@@ -8200,6 +8200,138 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertIn("running", saved_statuses)
         self.assertIn("stopped", saved_statuses)
+
+    def test_run_calibration_job_releases_write_lock_before_media_work(self) -> None:
+        prefix = "tv/show/Season 1"
+        rel_path = f"{prefix}/Episode 01.mkv"
+        timestamp = "2026-07-14T00:00:00+00:00"
+        self._insert_library_item(rel_path=rel_path)
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = int(
+                connection.execute(
+                    select(library_items.c.id).where(library_items.c.rel_path == rel_path)
+                ).scalar_one()
+            )
+        source_path = self.root / "source" / rel_path
+        sample_item = {
+            "library_item_id": item_id,
+            "rel_path": rel_path,
+            "source_path": str(source_path),
+            "source_size_bytes": source_path.stat().st_size,
+            "source_fingerprint": f"fp-{rel_path}",
+            "video_codec": "h264",
+            "duration_seconds": 1800.0,
+            "width": 1920,
+            "height": 1080,
+            "audio_summary": [],
+            "subtitle_summary": [],
+        }
+        policy = {
+            "video": {
+                "encoder": "libsvtav1",
+                "pixel_format": "yuv420p10le",
+                "sample_every": "8m",
+                "sample_duration": "20s",
+                "max_encoded_percent": 80,
+            },
+            "audio": {},
+            "subtitle": {},
+        }
+        job = {
+            "job_id": "job-write-boundary",
+            "prefix": prefix,
+            "status": "queued",
+            "lane": "sample",
+            "action": "ai_tune",
+            "host": {},
+            "notes": "",
+            "policy": policy,
+            "sample_item": sample_item,
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+
+        def save_job_state(
+                connection: DBClient,
+                _config: object,
+                saved_prefix: str,
+                payload: dict[str, object],
+        ) -> None:
+            save_job(
+                connection,
+                {
+                    **payload,
+                    "prefix": saved_prefix,
+                    "created_at": payload.get("created_at") or timestamp,
+                    "updated_at": timestamp,
+                },
+            )
+
+        def concurrent_media_work(*_args: object, **_kwargs: object) -> None:
+            with open_db(self.config.paths.db_path) as writer:
+                writer.exec_driver_sql("PRAGMA busy_timeout=100")
+                writer.execute(
+                    item_events.insert().values(
+                        library_item_id=item_id,
+                        created_at=timestamp,
+                        event_type="concurrent_cli_writer",
+                        details_json="{}",
+                    )
+                )
+            raise ProcessCancelledError()
+
+        deps = CalibrationRunDeps(
+            now_iso=lambda: timestamp,
+            ensure_sample_host_ready=lambda _config, host_data: _ready_calibration_host(host_data),
+            load_job_state=lambda *_args, **_kwargs: dict(job),
+            sample_item=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("saved sample required")),
+            save_job_state=save_job_state,
+            save_calibration_state=lambda *_args, **_kwargs: None,
+            record_run_verdict=lambda *_args, **_kwargs: None,
+            summarize_calibration_result=lambda payload: payload,
+            calibration_mode_for_action=lambda _action: "sample",
+            effective_video_preset=lambda *_args, **_kwargs: 4,
+            search_quality_for_source=concurrent_media_work,
+            run_sample_encode=lambda *_args, **_kwargs: None,
+            detect_video_crop=lambda *_args, **_kwargs: None,
+            recommend_review_timestamps=lambda *_args, **_kwargs: [],
+            encode_preview_clips=lambda *_args, **_kwargs: [],
+            render_source_review_clips=lambda *_args, **_kwargs: [],
+            generate_compare_clips_from_previews=lambda *_args, **_kwargs: [],
+            resolve_stream_budget_ledger=resolve_stream_budget_ledger,
+            build_svt_params=lambda *_args, **_kwargs: [],
+            review_url=lambda *_args, **_kwargs: "",
+            encode_manifest_items=lambda *_args, **_kwargs: None,
+            validate_manifest_items=lambda *_args, **_kwargs: None,
+            generate_compare_clips=lambda *_args, **_kwargs: [],
+            staged_artifact_columns=("library_item_id",),
+        )
+
+        with patch("mediaforce.web.runtime.calibration_runtime.load_config", return_value=self.config), patch(
+                "mediaforce.web.runtime.calibration_runtime.purge_transient_artifacts"
+        ):
+            run_calibration_job(
+                config_path=self.config.paths.config_path,
+                prefix=prefix,
+                action="ai_tune",
+                host_data={"key": "local", "label": "Local"},
+                notes="",
+                policy=policy,
+                job_id=str(job["job_id"]),
+                seed_metadata=None,
+                process_controller=type("Controller", (), {"throw_if_cancelled": lambda _self: None})(),
+                deps=deps,
+            )
+
+        with open_db(self.config.paths.db_path) as connection:
+            event_types = connection.execute(
+                select(item_events.c.event_type).where(item_events.c.library_item_id == item_id)
+            ).scalars().all()
+            saved_status = connection.execute(
+                select(calibration_jobs.c.status).where(calibration_jobs.c.job_id == job["job_id"])
+            ).scalar_one()
+        self.assertIn("concurrent_cli_writer", event_types)
+        self.assertEqual(saved_status, "stopped")
 
     def test_apply_seed_policy_ignores_null_tunable_fields(self) -> None:
         base_policy = {

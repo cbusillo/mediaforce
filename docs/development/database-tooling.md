@@ -42,6 +42,24 @@ Mediaforce's SQLite schema.
     `tests/test_encode_queue_recovery.py tests/test_tuning_runtime.py`
   - `uv run mediaforce --help`
 
+## Runtime transaction boundaries
+
+- End SQLite write transactions before starting ffmpeg, ffprobe, ab-av1, remote
+  host waits, or other long-running media work.
+- Persist the queued or running state, commit it, perform the media work, then
+  use a short transaction to persist completion or failure state.
+- Keep heartbeat, cancellation, polling, and recovery writes independent from
+  media-process lifetimes so CLI and web workers can make progress together.
+- Flush pending catalog writes before media probes, and commit promotion state
+  per item before the next item starts probing.
+- Recheck stale worker leases while holding a short SQLite write claim, persist
+  the ownership transition, then perform retry cleanup without that claim.
+- Record standalone CLI ownership with the encode event so web recovery does
+  not remove artifacts while that process is still active.
+- Treat failure-event persistence as secondary to the original media failure.
+  Commit successful encode or promotion state first, and retain event failures
+  as diagnostics without replacing the primary result or exception.
+
 ## Creating a new migration
 
 1. Update `mediaforce/core/db_tables.py` to reflect the desired head schema.

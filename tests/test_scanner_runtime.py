@@ -4,12 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
 
 from sqlalchemy import select
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items
+from mediaforce.core.models import ProbeSummary
 from mediaforce.library.scanner import (
     _cadence_summary_present,
     _content_version_changed,
@@ -99,6 +101,61 @@ class ScannerRuntimeTests(unittest.TestCase):
         self.assertGreaterEqual(len(connection.statements), 2)
         self.assertTrue(connection.statements[0])
         self.assertTrue(connection.statements[-1])
+
+    def test_scan_releases_write_transaction_before_probing_next_item(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            media_root = project_root / "movies"
+            media_root.mkdir()
+            for name in ("first.mkv", "second.mkv"):
+                (media_root / name).write_bytes(name.encode())
+            paths = ConfigPaths(
+                project_root=project_root,
+                config_path=project_root / "config.toml",
+                db_path=project_root / "library.sqlite3",
+                run_manifest_dir=project_root / "runs",
+                web_state_dir=project_root / "web",
+                review_dir=project_root / "review",
+                runtime_settings_path=project_root / "runtime-settings.json",
+            )
+            config = MediaforceConfig(
+                raw={
+                    "media": {"source_roots": {"movies": str(media_root)}},
+                    "video": {},
+                    "audio": {},
+                    "subtitle": {},
+                    "planning": {},
+                    "validation": {},
+                    "overrides": [],
+                    "remote_hosts": [],
+                },
+                paths=paths,
+            )
+            probe_count = 0
+            writer_errors: list[Exception] = []
+
+            def probe_with_concurrent_writer(_path: Path) -> ProbeSummary:
+                nonlocal probe_count
+                probe_count += 1
+                if probe_count == 2:
+                    try:
+                        with open_db(paths.db_path) as writer:
+                            writer.exec_driver_sql("PRAGMA busy_timeout=100")
+                            writer.exec_driver_sql("BEGIN IMMEDIATE")
+                            writer.exec_driver_sql("ROLLBACK")
+                    except Exception as exc:
+                        writer_errors.append(exc)
+                return _failed_probe_summary(RuntimeError("fixture probe"))
+
+            try:
+                with patch("mediaforce.library.scanner.probe_media", side_effect=probe_with_concurrent_writer):
+                    with open_db(paths.db_path) as connection:
+                        stats = scan_library(connection, config)
+            finally:
+                reset_engine_cache()
+
+        self.assertEqual(stats.discovered, 2)
+        self.assertEqual(writer_errors, [])
 
     def test_media_file_prefixes_use_the_configured_root_key(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

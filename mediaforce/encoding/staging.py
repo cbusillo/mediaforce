@@ -1,5 +1,6 @@
 import errno
 import json
+import logging
 import shutil
 import time
 from pathlib import Path
@@ -21,6 +22,8 @@ from mediaforce.core.type_defs import object_dict
 from mediaforce.core.type_defs import object_list
 from mediaforce.core.utils import content_version_fingerprint
 from mediaforce.library.media_scopes import logical_library_rel_path
+
+LOGGER = logging.getLogger(__name__)
 
 TRANSIENT_FILE_BUSY_ERRNOS = {errno.EBUSY}
 TRANSIENT_FILE_BUSY_RETRY_ATTEMPTS = 8
@@ -503,13 +506,22 @@ def promote_one_item(
             updated_at=now,
         )
     )
-    record_event(
-        connection,
-        item["library_item_id"],
-        "promotion_completed",
-        {
-            "promoted_path": str(destination_path),
-            "archived_source_path": str(archive_path),
-        },
-    )
+    connection.commit()
+    try:
+        record_event(
+            connection,
+            item["library_item_id"],
+            "promotion_completed",
+            {
+                "promoted_path": str(destination_path),
+                "archived_source_path": str(archive_path),
+            },
+        )
+        connection.commit()
+    except Exception as event_error:
+        LOGGER.warning("Failed to persist promotion_completed event: %s", event_error)
+        try:
+            connection.rollback()
+        except Exception as rollback_error:
+            LOGGER.warning("Failed to roll back promotion event transaction: %s", rollback_error)
     return destination_path

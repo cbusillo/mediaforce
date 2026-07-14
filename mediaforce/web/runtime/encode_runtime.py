@@ -22,6 +22,7 @@ from sqlalchemy import update
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import encode_jobs
+from mediaforce.core.db_tables import item_events
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS, ensure_queue_state, list_child_encode_jobs, \
@@ -69,6 +70,7 @@ def recover_encode_queue(
         config: MediaforceConfig,
         deps: EncodeQueueRuntimeDeps,
 ) -> None:
+    connection.commit()
     reconcile_encode_jobs(connection, config, deps, restart_recovery=True)
 
 
@@ -98,6 +100,14 @@ def reconcile_encode_jobs(
             if restart_recovery
             else "Encode queue job stopped heartbeating and was reclaimed for retry."
         )
+        payload = _claim_stale_encode_job(
+            connection,
+            str(row["job_id"]),
+            deps,
+            restart_recovery=restart_recovery,
+        )
+        if payload is None:
+            continue
         transition_encode_job_failure(
             connection,
             config,
@@ -122,6 +132,7 @@ def reconcile_encode_jobs(
             continue
         manifest_path = str(payload.get("manifest_path") or "").strip()
         if manifest_path:
+            connection.commit()
             _cleanup_encode_retry_artifacts(
                 connection,
                 manifest_path=Path(manifest_path),
@@ -144,7 +155,29 @@ def reconcile_encode_jobs(
     if running_count == 0 and (state.get("active_job_id") or state.get("stop_requested")):
         state.update({"active_job_id": None, "stop_requested": False, "updated_at": deps.now_iso()})
         save_queue_state(connection, state)
+    connection.commit()
     clear_stale_encoding_items_when_idle(connection, config, deps)
+    connection.commit()
+
+
+def _claim_stale_encode_job(
+        connection: DBClient,
+        job_id: str,
+        deps: EncodeQueueRuntimeDeps,
+        *,
+        restart_recovery: bool,
+) -> dict[str, Any] | None:
+    connection.commit()
+    connection.exec_driver_sql("BEGIN IMMEDIATE")
+    payload = load_encode_job(connection, job_id)
+    if payload is None or str(payload.get("status") or "") != "running":
+        connection.rollback()
+        return None
+    lease_expires_at = deps.parse_iso(payload.get("lease_expires_at"))
+    if not restart_recovery and lease_expires_at is not None and lease_expires_at > datetime.now(tz=UTC):
+        connection.rollback()
+        return None
+    return payload
 
 
 def clear_stale_encoding_items_when_idle(
@@ -175,8 +208,12 @@ def clear_stale_encoding_items_when_idle(
     if not stale_rows:
         return 0
 
+    stale_ids: list[int] = []
     for row in stale_rows:
         if row["promoted_at"] is not None:
+            continue
+        item_id = int(row["id"])
+        if _active_standalone_cli_encode(connection, item_id):
             continue
         for staging_path, host in _candidate_stale_staging_targets(config, row):
             _remove_stale_staging_path(staging_path, host=host)
@@ -184,8 +221,8 @@ def clear_stale_encoding_items_when_idle(
                 staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}"),
                 host=host,
             )
+        stale_ids.append(item_id)
 
-    stale_ids = [int(row["id"]) for row in stale_rows if row["promoted_at"] is None]
     if not stale_ids:
         return 0
     updated_at = deps.now_iso()
@@ -201,6 +238,37 @@ def clear_stale_encoding_items_when_idle(
         .values(status="planned", updated_at=updated_at)
     )
     return len(stale_ids)
+
+
+def _active_standalone_cli_encode(connection: DBClient, library_item_id: int) -> bool:
+    details_rows = connection.execute(
+        select(item_events.c.details_json)
+        .where(item_events.c.library_item_id == library_item_id)
+        .where(item_events.c.event_type == "encoding_started")
+        .order_by(item_events.c.id.desc())
+    ).scalars().all()
+    for details_json in details_rows:
+        try:
+            details = json.loads(str(details_json))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(details, dict) or str(details.get("encode_origin") or "") != "cli":
+            continue
+        if _process_is_running(int_value(details.get("encode_owner_pid"))):
+            return True
+    return False
+
+
+def _process_is_running(process_id: int) -> bool:
+    if process_id <= 0:
+        return False
+    try:
+        os.kill(process_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _candidate_stale_staging_targets(
@@ -625,12 +693,6 @@ def transition_encode_job_failure(
     )
 
     if retryable and (attempt_count < deps.encode_job_max_attempts or retry_beyond_attempt_cap):
-        _cleanup_encode_retry_artifacts(
-            connection,
-            manifest_path=Path(str(job["manifest_path"])),
-            indexes=job.get("manifest_indexes"),
-            deps=deps,
-        )
         retry_delay = _encode_job_retry_delay_seconds(min(attempt_count, deps.encode_job_max_attempts), deps)
         retry_not_before = (now + timedelta(seconds=retry_delay)).isoformat(timespec="seconds")
         retry_reason = _encode_retry_waiting_reason(
@@ -657,6 +719,14 @@ def transition_encode_job_failure(
         _attach_failure_analysis_to_progress(job, failure_analysis)
         save_encode_job(connection, job)
         sync_encode_job_parent(connection, job, deps)
+        connection.commit()
+        _cleanup_encode_retry_artifacts(
+            connection,
+            manifest_path=Path(str(job["manifest_path"])),
+            indexes=job.get("manifest_indexes"),
+            deps=deps,
+        )
+        connection.commit()
         return
 
     terminal_reason = "max_attempts_exhausted" if retryable else failure_kind
@@ -674,6 +744,7 @@ def transition_encode_job_failure(
     _attach_failure_analysis_to_progress(job, failure_analysis)
     save_encode_job(connection, job)
     sync_encode_job_parent(connection, job, deps)
+    connection.commit()
 
 
 def _encode_failure_analysis(
@@ -1259,6 +1330,7 @@ def process_encode_queue_once(*, config_path: Path, deps: EncodeQueueRuntimeDeps
     claimed_jobs: list[dict[str, Any]] = []
     with open_db(config.paths.db_path) as connection:
         ensure_queue_state(connection, updated_at=deps.now_iso())
+        connection.commit()
         reconcile_encode_jobs(connection, config, deps)
         state = load_queue_state(connection)
         if state.get("stop_requested"):
@@ -1794,6 +1866,7 @@ def _cleanup_encode_retry_artifacts(
                 updated_at=now_iso,
             )
         )
+        connection.commit()
 
 
 def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:

@@ -129,6 +129,7 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                 pending_writes = _flush_scan_progress(connection, scan_id, stats, pending_writes + 1)
                 continue
 
+            pending_writes = _commit_scan_progress_before_probe(connection, scan_id, stats, pending_writes)
             try:
                 probe = probe_media(file_path)
             except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
@@ -257,6 +258,18 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
     )
     connection.commit()
     return stats
+
+
+def _commit_scan_progress_before_probe(
+        connection: DBClient,
+        scan_id: str,
+        stats: ScanStats,
+        pending_writes: int,
+) -> int:
+    if pending_writes:
+        return _flush_scan_progress(connection, scan_id, stats, pending_writes, force=True)
+    connection.commit()
+    return 0
 
 
 def _content_version_changed(
