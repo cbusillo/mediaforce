@@ -26,6 +26,8 @@
 	} from '$lib/season/library';
 	import LibraryModeNav from '$lib/components/workstation/LibraryModeNav.svelte';
 
+	type LifecycleMode = 'auto' | 'on' | 'off';
+
 	let {
 		dashboard,
 		foldersPayload,
@@ -46,7 +48,9 @@
 	let sortMode = $state<LibrarySort>('size');
 	let selectedShowPrefix = $state('');
 	let showListElement: HTMLElement | undefined = $state();
-	let policySaving = $state(false);
+	let pendingLifecycleMode = $state<{ prefix: string; mode: LifecycleMode } | null>(null);
+	let policySavingPrefix = $state('');
+	let policySavingTitle = $state('');
 	let policyError = $state('');
 
 	const seasonCards = $derived(
@@ -68,6 +72,12 @@
 			: []
 	);
 	const selectedLifecycle = $derived(selectedShow?.lifecycle ?? null);
+	const displayedLifecycleMode = $derived<LifecycleMode>(
+		pendingLifecycleMode?.prefix === selectedShow?.prefix
+			? pendingLifecycleMode.mode
+			: (selectedLifecycle?.policy_mode ?? 'auto')
+	);
+	const policySaving = $derived(Boolean(policySavingPrefix));
 	const lifecycleAvailable = $derived(selectedLifecycle !== null);
 	const eligibleEpisodeCount = $derived(selectedLifecycle?.eligible_candidate_count ?? 0);
 	const heldEpisodeCount = $derived(selectedLifecycle?.held_candidate_count ?? 0);
@@ -166,9 +176,9 @@
 	}
 
 	function lifecycleModeCopy(): string {
-		switch (selectedLifecycle?.policy_mode ?? 'auto') {
+		switch (displayedLifecycleMode) {
 			case 'on':
-				return 'On protects the highest numbered season until a newer season appears or it ages out.';
+				return 'On always protects the highest numbered season. For an active series, this matches Auto.';
 			case 'off':
 				return 'Off skips current-season protection. Recent additions can still be held.';
 			default:
@@ -189,20 +199,29 @@
 
 	async function saveLifecycleMode(event: Event) {
 		if (!selectedShow || policySaving) return;
-		const mode = (event.currentTarget as HTMLSelectElement).value;
-		policySaving = true;
+		const show = selectedShow;
+		const mode = (event.currentTarget as HTMLSelectElement).value as LifecycleMode;
+		pendingLifecycleMode = { prefix: show.prefix, mode };
+		policySavingPrefix = show.prefix;
+		policySavingTitle = show.title;
 		policyError = '';
 		try {
 			const response = await postJson<{ ok: boolean; message?: string }>(
-				`/api/folders/${encodePrefix(selectedShow.prefix)}/series-lifecycle`,
+				`/api/folders/${encodePrefix(show.prefix)}/series-lifecycle`,
 				{ mode }
 			);
 			if (!response.ok) throw new Error(response.message || 'Lifecycle policy could not be saved.');
 			await invalidateAll();
 		} catch (error) {
-			policyError = error instanceof Error ? error.message : 'Lifecycle policy could not be saved.';
+			policyError = `${show.title}: ${
+				error instanceof Error ? error.message : 'Lifecycle policy could not be saved.'
+			}`;
 		} finally {
-			policySaving = false;
+			if (pendingLifecycleMode?.prefix === show.prefix) pendingLifecycleMode = null;
+			if (policySavingPrefix === show.prefix) {
+				policySavingPrefix = '';
+				policySavingTitle = '';
+			}
 		}
 	}
 </script>
@@ -397,18 +416,24 @@
 							</div>
 							<div class="show-policy">
 								<label>
-									<span>Current-season policy</span>
-									<select
-										value={selectedLifecycle?.policy_mode ?? 'auto'}
-										onchange={saveLifecycleMode}
-										disabled={policySaving || !lifecycleAvailable}
-										aria-describedby="current-season-policy-help"
-									>
-										<option value="auto">Auto · use series status</option>
-										<option value="on">On · protect current season</option>
-										<option value="off">Off · no current-season hold</option>
-									</select>
-									<small id="current-season-policy-help">{lifecycleModeCopy()}</small>
+									<span>Current-season policy for this show</span>
+									{#key selectedShow.prefix}
+										<select
+											value={displayedLifecycleMode}
+											onchange={saveLifecycleMode}
+											disabled={policySaving || !lifecycleAvailable}
+											aria-describedby="current-season-policy-help"
+										>
+											<option value="auto">Auto · use series status</option>
+											<option value="on">On · protect current season</option>
+											<option value="off">Off · no current-season hold</option>
+										</select>
+									{/key}
+									<small id="current-season-policy-help">
+										{policySaving
+											? `Saving current-season policy for ${policySavingTitle}…`
+											: lifecycleModeCopy()}
+									</small>
 								</label>
 								<div>
 									<strong>{providerStateCopy()}</strong>

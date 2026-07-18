@@ -478,6 +478,63 @@ async function checkLibraryStructureWithoutDashboard(
   }
 }
 
+async function checkLifecyclePolicyShowIsolation(baseUrl, timeoutMs) {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 1000 },
+    });
+    let markSaveRequested = () => {};
+    const saveRequested = new Promise((resolve) => {
+      markSaveRequested = resolve;
+    });
+    await page.route(/\/api\/folders\/.*\/series-lifecycle$/, async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.continue();
+        return;
+      }
+      markSaveRequested();
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+    await page.goto(`${baseUrl}/`, {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs,
+    });
+    const showButtons = page.locator(".show-list button");
+    await showButtons.nth(1).waitFor({ state: "visible", timeout: timeoutMs });
+    const policySelect = page.locator(
+      'select[aria-describedby="current-season-policy-help"]',
+    );
+    await page.waitForFunction(
+      () => {
+        const select = document.querySelector(
+          'select[aria-describedby="current-season-policy-help"]',
+        );
+        return select instanceof HTMLSelectElement && !select.disabled;
+      },
+      undefined,
+      { timeout: timeoutMs },
+    );
+    await policySelect.selectOption("on");
+    await saveRequested;
+    await showButtons.nth(1).click();
+    const selectedValue = await policySelect.inputValue();
+    if (selectedValue !== "auto") {
+      throw new Error(
+        `Current-season policy leaked across shows while saving: ${selectedValue}`,
+      );
+    }
+    console.log("route ok: Current-season policy stays scoped to one show");
+  } finally {
+    await browser.close();
+  }
+}
+
 async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
   const browser = await chromium.launch();
   try {
@@ -658,6 +715,7 @@ async function main() {
         libraryFixture.marker,
         args.routeTimeoutMs,
       );
+      await checkLifecyclePolicyShowIsolation(targetUrl, args.routeTimeoutMs);
     }
     if (args.narrow) {
       await checkNarrowRoutes(
