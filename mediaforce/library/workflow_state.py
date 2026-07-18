@@ -9,8 +9,8 @@ from mediaforce.core.db import DBRow
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
-from mediaforce.library.media_scopes import MediaScope, normalize_scope_prefix, path_matches_scope, \
-    resolve_media_scope, resolve_media_scopes, scope_rel_path_filter, scopes_overlap
+from mediaforce.library.media_scopes import MediaScope, media_scope_from_prefix, normalize_scope_prefix, \
+    path_matches_scope, resolve_media_scope, resolve_media_scopes, scope_rel_path_filter, scopes_overlap
 
 WorkflowItemState = Literal[
     "missing",
@@ -157,13 +157,13 @@ def build_folder_workflow_states(
         return {}
     scopes = resolve_media_scopes(connection, normalized_prefixes, library_types=library_types)
     rows = _load_item_rows_for_scopes(connection, scopes)
+    rows_by_prefix = _group_item_rows_by_scope(scopes, rows)
     job_states = _load_encode_job_states(connection, scopes)
     result: dict[str, FolderWorkflowState] = {}
     for scope in scopes:
         item_states = tuple(
             _derive_item_workflow_state(row, candidate_eligibility)
-            for row in rows
-            if path_matches_scope(str(row["rel_path"]), scope)
+            for row in rows_by_prefix[scope.prefix]
         )
         result[scope.prefix] = _build_folder_state(
             scope.prefix,
@@ -171,6 +171,27 @@ def build_folder_workflow_states(
             job_state=job_states.get(scope.prefix),
         )
     return result
+
+
+def _group_item_rows_by_scope(
+        scopes: list[MediaScope],
+        rows: list[DBRow],
+) -> dict[str, list[DBRow]]:
+    rows_by_prefix = {scope.prefix: [] for scope in scopes}
+    exact_prefixes = {scope.prefix for scope in scopes if scope.match == "exact_item"}
+    descendant_prefixes = {scope.prefix for scope in scopes if scope.match == "descendants"}
+    for row in rows:
+        rel_path = normalize_scope_prefix(str(row["rel_path"]))
+        if "" in descendant_prefixes:
+            rows_by_prefix[""].append(row)
+        if rel_path in exact_prefixes:
+            rows_by_prefix[rel_path].append(row)
+        ancestor = ""
+        for segment in rel_path.split("/")[:-1]:
+            ancestor = segment if not ancestor else f"{ancestor}/{segment}"
+            if ancestor in descendant_prefixes:
+                rows_by_prefix[ancestor].append(row)
+    return rows_by_prefix
 
 
 def normalize_prefix(prefix: str) -> str:
@@ -508,9 +529,13 @@ def _load_encode_job_states(connection: DBClient, scopes: list[MediaScope]) -> d
         .where(encode_jobs.c.status.in_(JOB_STATUSES_FOR_WORKFLOW))
         .order_by(encode_jobs.c.updated_at.desc(), encode_jobs.c.created_at.desc())
     ).mappings().fetchall()
+    scoped_rows = [
+        (row, media_scope_from_prefix(str(row["prefix"] or ""), match="descendants"))
+        for row in rows
+    ]
     result: dict[str, tuple[WorkflowLane, str] | None] = {}
     for scope in scopes:
-        overlapping_rows = [row for row in rows if scopes_overlap(scope, str(row["prefix"] or ""))]
+        overlapping_rows = [row for row, job_scope in scoped_rows if scopes_overlap(scope, job_scope)]
         active = next((row for row in overlapping_rows if row["status"] in PROCESSING_JOB_STATUSES), None)
         if active is not None:
             result[scope.prefix] = "processing", f"Encode job is {active['status']} for {active['prefix']}."

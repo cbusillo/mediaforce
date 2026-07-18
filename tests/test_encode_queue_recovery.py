@@ -4033,6 +4033,50 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(cards[0].known_saved_bytes, -1024)
         self.assertEqual(cards[0].projected_reclaim_bytes, -1024)
 
+    def test_library_detail_cards_scope_lifecycle_decisions_per_season(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            for season_number in (1, 2):
+                for episode_number in (1, 2):
+                    source = self._create_source_file(
+                        f"lifecycle-scope-{season_number}-{episode_number}.mkv"
+                    )
+                    self._insert_library_item(
+                        connection,
+                        source,
+                        rel_path=(
+                            f"tv/show/Season {season_number}/Episode {episode_number}.mkv"
+                        ),
+                    )
+
+            original_payload = folder_cards_runtime.scope_lifecycle_payload_from_decisions
+            decision_counts: dict[str, int] = {}
+
+            def capture_payload(prefix: str, decisions: list[Any]) -> dict[str, Any]:
+                decision_counts[prefix] = len(decisions)
+                return original_payload(prefix, decisions)
+
+            with patch.object(
+                    folder_cards_runtime,
+                    "scope_lifecycle_payload_from_decisions",
+                    side_effect=capture_payload,
+            ):
+                cards = web_app._list_library_detail_cards(self.config, connection)
+
+        self.assertEqual(
+            decision_counts,
+            {
+                "tv/show/Season 1": 2,
+                "tv/show/Season 2": 2,
+            },
+        )
+        self.assertEqual(
+            {card.prefix: card.lifecycle["candidate_count"] for card in cards},
+            {
+                "tv/show/Season 1": 2,
+                "tv/show/Season 2": 2,
+            },
+        )
+
     def test_series_folder_cards_group_tv_items_by_show(self) -> None:
         first = self._create_source_file("season-one.mkv")
         second = self._create_source_file("season-two.mkv")
@@ -4906,6 +4950,46 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(workflow.counts["ready_to_validate"], 3)
         self.assertEqual(workflow.counts["encode_candidates"], 0)
         self.assertEqual(workflow.next_action.kind, "validate_outputs")
+
+    def test_bulk_folder_workflow_states_group_nested_and_exact_scopes(self) -> None:
+        prefixes = [
+            "tv/show",
+            "tv/show/Season 1",
+            "tv/show/Season 2",
+            "other/Loose.mkv",
+        ]
+        with open_db(self.config.paths.db_path) as connection:
+            for rel_path in (
+                    "tv/show/Season 1/Episode 1.mkv",
+                    "tv/show/Season 2/Episode 1.mkv",
+                    "other/Loose.mkv",
+            ):
+                source = self._create_source_file(rel_path.replace("/", "-"))
+                self._insert_library_item(connection, source, rel_path=rel_path)
+
+            expected = {
+                prefix: workflow_state_runtime.build_folder_workflow_state(
+                    connection,
+                    prefix,
+                    library_types=self.config.library_type_map,
+                ).to_payload()
+                for prefix in prefixes
+            }
+            with patch.object(
+                    workflow_state_runtime,
+                    "path_matches_scope",
+                    side_effect=AssertionError("bulk workflow grouping must not rescan every row"),
+            ):
+                states = workflow_state_runtime.build_folder_workflow_states(
+                    connection,
+                    prefixes,
+                    library_types=self.config.library_type_map,
+                )
+
+        self.assertEqual(
+            {prefix: state.to_payload() for prefix, state in states.items()},
+            expected,
+        )
 
     def test_folder_workflow_marks_validated_staged_outputs_ready_to_promote(self) -> None:
         with open_db(self.config.paths.db_path) as connection:

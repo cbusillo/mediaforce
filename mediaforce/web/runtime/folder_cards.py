@@ -589,8 +589,18 @@ def _apply_lifecycle(cards: list[FolderCard], decisions: list[CandidateDecision]
     if not decisions:
         return
     now = datetime.now(tz=UTC)
+    decisions_by_prefix: dict[str, list[CandidateDecision]] = {}
+    for decision in decisions:
+        season = decision.season
+        if season is None:
+            continue
+        decisions_by_prefix.setdefault(season.season_prefix, []).append(decision)
+        decisions_by_prefix.setdefault(season.series_prefix, []).append(decision)
     for card in cards:
-        payload = scope_lifecycle_payload_from_decisions(card.prefix, decisions)
+        payload = scope_lifecycle_payload_from_decisions(
+            card.prefix,
+            decisions_by_prefix.get(card.prefix, decisions),
+        )
         card.lifecycle = payload
         ranking_added_at = payload.get("ranking_added_at")
         if not isinstance(ranking_added_at, str):
