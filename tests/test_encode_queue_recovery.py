@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import errno
 import io
 import json
@@ -9,6 +10,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+import tomllib
 import unittest
 from collections.abc import Mapping
 from dataclasses import replace
@@ -15068,6 +15070,129 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 400)
         self.assertIn("one season at a time", str(raised.exception.detail))
+
+    def test_older_season_override_rejects_non_series_scope(self) -> None:
+        source = self._create_source_file("older-season-scope.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(
+                connection,
+                source,
+                rel_path="tv/show/Season 1/older-season-scope.mkv",
+            )
+
+        with self.assertRaises(HTTPException) as raised:
+            folder_actions_runtime.queue_folder_encode_action(
+                self.config,
+                "tv/show/Season 1",
+                "",
+                False,
+                override_older_seasons=True,
+                now_iso=web_app._now_iso,
+                load_job_state=Mock(),
+                load_calibration_state=Mock(),
+                review_gate=Mock(),
+                upsert_override=Mock(),
+                load_active_encode_job_for_prefix_fn=Mock(),
+                clear_terminal_encode_jobs_for_prefix_fn=Mock(),
+                prepare_terminal_encode_job_for_requeue_fn=Mock(),
+                save_encode_job=Mock(),
+            )
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertIn("one TV series", str(raised.exception.detail))
+
+    def test_older_season_override_requires_explicit_confirmation(self) -> None:
+        source = self._create_source_file("older-season-confirmation.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(
+                connection,
+                source,
+                rel_path="tv/show/Season 1/older-season-confirmation.mkv",
+            )
+
+        with self.assertRaises(HTTPException) as raised:
+            folder_actions_runtime.queue_folder_encode_action(
+                self.config,
+                "tv/show",
+                "",
+                False,
+                override_older_seasons=True,
+                now_iso=web_app._now_iso,
+                load_job_state=Mock(),
+                load_calibration_state=Mock(),
+                review_gate=Mock(),
+                upsert_override=Mock(),
+                load_active_encode_job_for_prefix_fn=Mock(),
+                clear_terminal_encode_jobs_for_prefix_fn=Mock(),
+                prepare_terminal_encode_job_for_requeue_fn=Mock(),
+                save_encode_job=Mock(),
+            )
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertIn("Confirm the older-season selection", str(raised.exception.detail))
+
+    def test_queue_older_seasons_freezes_server_selected_manifest(self) -> None:
+        with config_runtime.DEFAULT_CONFIG_PATH.open("rb") as handle:
+            complete_raw = copy.deepcopy(tomllib.load(handle))
+        complete_raw["media"].update(self.config.raw["media"])
+        complete_raw["remote_hosts"] = []
+        complete_raw["encode_queue"] = self.config.raw["encode_queue"]
+        queue_config = MediaforceConfig(raw=complete_raw, paths=self.config.paths)
+        with open_db(self.config.paths.db_path) as connection:
+            for rel_path in (
+                    "tv/show/Season 1/Episode 1.mkv",
+                    "tv/show/Season 2/Episode 1.mkv",
+                    "tv/show/Season 3/Episode 1.mkv",
+                    "tv/show/Specials/Aftershow.mkv",
+            ):
+                source = self._create_source_file(rel_path.replace("/", "-"))
+                self._insert_library_item(connection, source, rel_path=rel_path)
+
+        saved_jobs: list[dict[str, Any]] = []
+        calibration = {
+            "policy": {},
+            "accepted_at": web_app._now_iso(),
+            "draft_hash": "approved-draft",
+        }
+        with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
+            result = folder_actions_runtime.queue_folder_encode_action(
+                queue_config,
+                "tv/show",
+                "Approved older seasons after comparing the representative test.",
+                False,
+                override_older_seasons=True,
+                older_seasons_confirmed=True,
+                now_iso=web_app._now_iso,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=lambda *_args, **_kwargs: calibration,
+                review_gate=self._accepted_review_gate,
+                upsert_override=self._noop_upsert_override,
+                load_active_encode_job_for_prefix_fn=lambda *_args, **_kwargs: None,
+                clear_terminal_encode_jobs_for_prefix_fn=lambda *_args, **_kwargs: None,
+                prepare_terminal_encode_job_for_requeue_fn=lambda *_args, **_kwargs: None,
+                save_encode_job=lambda _connection, job: saved_jobs.append(dict(job)),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["policy_holds_overridden"])
+        self.assertEqual(result["older_season_override"]["latest_season_number"], 3)
+        parent_job = next(job for job in saved_jobs if job["job_kind"] == "folder")
+        manifest = json.loads(Path(parent_job["manifest_path"]).read_text())
+        self.assertEqual(
+            {
+                item["selection_provenance"]["season_prefix"]
+                for item in manifest["items"]
+            },
+            {"tv/show/Season 1", "tv/show/Season 2"},
+        )
+        self.assertEqual(
+            manifest["selection"]["lifecycle_override"]["latest_season_prefixes"],
+            ["tv/show/Season 3"],
+        )
+        self.assertNotIn(
+            "tv/show/Season 3",
+            manifest["selection"]["lifecycle_override"]["included_season_prefixes"],
+        )
 
     def test_validate_folder_outputs_action_uses_only_validate_lane_outputs(self) -> None:
         encoded_source = self._create_source_file("episode-encoded-validate.mkv")

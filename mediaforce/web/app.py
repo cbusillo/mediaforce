@@ -71,8 +71,9 @@ from mediaforce.library.planner import build_manifest_item
 from mediaforce.library.representatives import RepresentativeSelection, load_representative_selection, \
     public_representative_item
 from mediaforce.library.run_manifests import select_encode_candidates
-from mediaforce.library.candidate_selection import CandidateDecision, encode_candidate_decisions, project_candidates, \
-    scope_lifecycle_payload_from_decisions, workflow_eligibility
+from mediaforce.library.candidate_selection import CandidateDecision, encode_candidate_decisions, \
+    older_season_override_selection, project_candidates, scope_lifecycle_payload_from_decisions, \
+    workflow_eligibility
 from mediaforce.hosts.types import HostSetupResult
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.core.process_control import ManagedProcessController
@@ -839,6 +840,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
 
     def _folder_content_payload(normalized_prefix: str) -> tuple[dict[str, Any], int]:
         latest_failed_sample_job_payload: dict[str, Any] | None = None
+        older_season_override: dict[str, Any] | None = None
         with open_db(config.paths.db_path) as connection:
             media_scope = resolve_media_scope(
                 connection,
@@ -935,7 +937,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             encode_queue_summary = _encode_queue_summary_copy(encode_queue, encode_queue_state, encode_job)
             lifecycle_decisions = (
                 project_candidates(connection, config, prefixes=[normalized_prefix])
-                if media_scope.domain == "movie"
+                if media_scope.domain == "movie" or media_scope.kind == "tv_series"
                 else encode_candidate_decisions(connection, config, prefixes=[normalized_prefix])
             )
             lifecycle = (
@@ -943,6 +945,11 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 if media_scope.domain == "tv"
                 else None
             )
+            if media_scope.kind == "tv_series":
+                older_season_override = older_season_override_selection(
+                    lifecycle_decisions,
+                    normalized_prefix,
+                ).to_payload()
             if media_scope.domain == "other":
                 other_context = load_other_scope_payload(
                     connection,
@@ -1075,6 +1082,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 "encode_candidate_count": encode_candidate_count,
                 "workflow_state": workflow_state,
                 "lifecycle": lifecycle,
+                "older_season_override": older_season_override,
                 "series_context": series_context,
                 "resolved_metric": resolved_metric.upper(),
                 "sample_host_key": sample_host_key,
@@ -1295,11 +1303,13 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             proposal_id,
         )
 
-    def _queue_folder_encode_action(
+    def _queue_encode_action(
             normalized_prefix: str,
             notes: str,
             bypass_schedule: bool,
             override_policy_holds: bool = False,
+            override_older_seasons: bool = False,
+            older_seasons_confirmed: bool = False,
             scope_membership_token: str = "",
     ) -> ActionPayload:
         return queue_folder_encode_action(
@@ -1308,6 +1318,8 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             notes,
             bypass_schedule,
             override_policy_holds,
+            override_older_seasons=override_older_seasons,
+            older_seasons_confirmed=older_seasons_confirmed,
             now_iso=_now_iso,
             load_job_state=_load_job_state,
             load_calibration_state=_load_calibration_state,
@@ -1329,6 +1341,42 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 prefix,
                 membership_token=scope_membership_token,
             ),
+        )
+
+    def _queue_folder_encode_action(
+            normalized_prefix: str,
+            notes: str,
+            bypass_schedule: bool,
+            override_policy_holds: bool = False,
+            scope_membership_token: str = "",
+    ) -> ActionPayload:
+        return _queue_encode_action(
+            normalized_prefix,
+            notes,
+            bypass_schedule,
+            override_policy_holds=override_policy_holds,
+            scope_membership_token=scope_membership_token,
+        )
+
+    def _queue_older_seasons_encode_action(
+            normalized_prefix: str,
+            notes: str,
+            bypass_schedule: bool,
+            confirmed: bool,
+            scope_membership_token: str = "",
+    ) -> ActionPayload:
+        if not confirmed:
+            raise HTTPException(
+                status_code=400,
+                detail="Confirm the older-season selection before starting production.",
+            )
+        return _queue_encode_action(
+            normalized_prefix,
+            notes,
+            bypass_schedule,
+            override_older_seasons=True,
+            older_seasons_confirmed=confirmed,
+            scope_membership_token=scope_membership_token,
         )
 
     def _approve_measured_encode_recovery_action(
@@ -1554,6 +1602,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         save_series_lifecycle_action=_save_series_lifecycle_action,
         approve_measured_encode_recovery_action=_approve_measured_encode_recovery_action,
         queue_folder_encode_action=_queue_folder_encode_action,
+        queue_older_seasons_encode_action=_queue_older_seasons_encode_action,
         validate_folder_outputs_action=_validate_folder_outputs_action,
         promote_folder_outputs_action=_promote_folder_outputs_action,
         save_profile_action=_save_profile_action,

@@ -87,11 +87,14 @@ tie breakers; they do not make an ineligible item runnable.
 
 ## Manual override
 
-Only an exact season prefix may bypass lifecycle holds. The operator must use the
-season surface and confirm the bypass; a series-wide queue action cannot silently
-override held seasons. Manual override bypasses current-season and acquisition
-holds only. Missing sources, active processing, staged-output consistency,
-validation, promotion, and other workflow safety rules still apply.
+An exact season prefix may bypass lifecycle holds from the season surface after
+the operator confirms the bypass. A separate show-level action may also process
+older numbered seasons with one approved setup. That action always excludes the
+highest numbered season, Specials, ambiguous season identities, and unsafe
+items; it does not change the show policy. Both override paths bypass only
+current-season and acquisition timing holds. Missing sources, active processing,
+staged-output consistency, validation, promotion, and other workflow safety
+rules still apply.
 
 ## Manifest provenance
 

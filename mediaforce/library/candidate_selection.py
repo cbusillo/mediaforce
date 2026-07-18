@@ -1,6 +1,6 @@
 import re
 from collections import Counter, defaultdict
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -160,6 +160,46 @@ class CandidateDecision:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class OlderSeasonOverrideSelection:
+    series_prefix: str
+    latest_season_number: int | None
+    latest_season_prefixes: tuple[str, ...]
+    included_season_prefixes: tuple[str, ...]
+    overridden_season_prefixes: tuple[str, ...]
+    candidate_count: int
+    overridden_candidate_count: int
+    current_size_bytes: int
+
+    @property
+    def available(self) -> bool:
+        return bool(self.included_season_prefixes)
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "mode": "older_seasons",
+            "available": self.available,
+            "series_prefix": self.series_prefix,
+            "latest_season_number": self.latest_season_number,
+            "latest_season_label": (
+                f"Season {self.latest_season_number}"
+                if self.latest_season_number is not None
+                else None
+            ),
+            "latest_season_prefixes": list(self.latest_season_prefixes),
+            "included_season_prefixes": list(self.included_season_prefixes),
+            "overridden_season_prefixes": list(self.overridden_season_prefixes),
+            "season_count": len(self.included_season_prefixes),
+            "candidate_count": self.candidate_count,
+            "overridden_candidate_count": self.overridden_candidate_count,
+            "already_eligible_candidate_count": (
+                self.candidate_count - self.overridden_candidate_count
+            ),
+            "current_size_bytes": self.current_size_bytes,
+        }
+
+
 def project_candidates(
         connection: DBClient,
         config: MediaforceConfig,
@@ -168,6 +208,7 @@ def project_candidates(
         statuses: set[str] | frozenset[str] | None = None,
         now: datetime | None = None,
         manual_override_prefix: str | None = None,
+        manual_override_prefixes: Collection[str] | None = None,
 ) -> list[CandidateDecision]:
     current_time = (now or datetime.now(tz=UTC)).astimezone(UTC)
     library_types = config.library_type_map
@@ -179,7 +220,11 @@ def project_candidates(
     )
     query_scopes = (
         resolved_scopes
-        if resolved_scopes and all(scope.domain == "other" for scope in resolved_scopes)
+        if resolved_scopes
+        and all(
+            scope.domain == "other" or scope.kind == "tv_series"
+            for scope in resolved_scopes
+        )
         else []
     )
     rows = _load_rows(connection, scopes=query_scopes)
@@ -238,7 +283,14 @@ def project_candidates(
             )
         else:
             other_group_blockers[group_prefix] = profile_blockers[0] if profile_blockers else None
+    normalized_overrides = {
+        normalize_scope_prefix(prefix)
+        for prefix in (manual_override_prefixes or ())
+        if normalize_scope_prefix(prefix)
+    }
     normalized_override = normalize_scope_prefix(manual_override_prefix or "")
+    if normalized_override:
+        normalized_overrides.add(normalized_override)
     decisions: list[CandidateDecision] = []
     production_roots = set(config.source_root_map)
     scan_roots = set(config.scan_source_root_map)
@@ -344,9 +396,9 @@ def project_candidates(
         activity_at = season_activity.get(season.season_prefix) if season is not None else None
         rank_age = season_rank_age.get(season.season_prefix, _media_age(row)) if season is not None else _media_age(row)
         manual_override = bool(
-            normalized_override
+            normalized_overrides
             and season is not None
-            and season.season_prefix == normalized_override
+            and season.season_prefix in normalized_overrides
         )
         hold_reasons = _hold_reasons(
             season=season,
@@ -393,6 +445,7 @@ def encode_candidate_decisions(
         prefixes: list[str],
         now: datetime | None = None,
         manual_override_prefix: str | None = None,
+        manual_override_prefixes: Collection[str] | None = None,
 ) -> list[CandidateDecision]:
     return project_candidates(
         connection,
@@ -401,6 +454,107 @@ def encode_candidate_decisions(
         statuses=ENCODE_CANDIDATE_STATUSES,
         now=now,
         manual_override_prefix=manual_override_prefix,
+        manual_override_prefixes=manual_override_prefixes,
+    )
+
+
+def older_season_override_selection(
+        decisions: list[CandidateDecision],
+        series_prefix: str,
+) -> OlderSeasonOverrideSelection:
+    normalized_series = normalize_scope_prefix(series_prefix)
+    scoped = [
+        decision
+        for decision in decisions
+        if decision.season is not None
+        and decision.season.series_prefix == normalized_series
+    ]
+    prefixes_by_number: dict[int, set[str]] = defaultdict(set)
+    for decision in scoped:
+        season = decision.season
+        if season is None or season.season_number is None or season.season_number <= 0:
+            continue
+        prefixes_by_number[season.season_number].add(season.season_prefix)
+    latest_season_number = max(prefixes_by_number, default=None)
+    if latest_season_number is None:
+        return OlderSeasonOverrideSelection(
+            series_prefix=normalized_series,
+            latest_season_number=None,
+            latest_season_prefixes=(),
+            included_season_prefixes=(),
+            overridden_season_prefixes=(),
+            candidate_count=0,
+            overridden_candidate_count=0,
+            current_size_bytes=0,
+        )
+
+    candidates_by_prefix: dict[str, list[CandidateDecision]] = defaultdict(list)
+    season_number_by_prefix: dict[str, int] = {}
+    for decision in scoped:
+        season = decision.season
+        if (
+            season is None
+            or season.season_number is None
+            or season.season_number <= 0
+            or decision.workflow_lane != "encode"
+        ):
+            continue
+        candidates_by_prefix[season.season_prefix].append(decision)
+        season_number_by_prefix[season.season_prefix] = season.season_number
+
+    duplicate_numbers = {
+        season_number
+        for season_number, prefixes in prefixes_by_number.items()
+        if len(prefixes) > 1
+    }
+    included: list[str] = []
+    overridden: list[str] = []
+    candidate_count = 0
+    overridden_candidate_count = 0
+    current_size_bytes = 0
+    for season_prefix, season_decisions in sorted(
+            candidates_by_prefix.items(),
+            key=lambda item: (season_number_by_prefix[item[0]], item[0]),
+    ):
+        season_number = season_number_by_prefix[season_prefix]
+        if season_number >= latest_season_number or season_number in duplicate_numbers:
+            continue
+        if any(
+            decision.season is None
+            or decision.season.ambiguous
+            or decision.season.is_special
+            or decision.season.season_number != season_number
+            or not decision.production_included
+            or decision.profile_blocker is not None
+            or decision.target_size_blocker is not None
+            for decision in season_decisions
+        ):
+            continue
+        if any(
+            any(reason.code not in OVERRIDEABLE_HOLD_CODES for reason in decision.hold_reasons)
+            for decision in season_decisions
+        ):
+            continue
+        included.append(season_prefix)
+        held_count = sum(bool(decision.hold_reasons) for decision in season_decisions)
+        if held_count:
+            overridden.append(season_prefix)
+            overridden_candidate_count += held_count
+        candidate_count += len(season_decisions)
+        current_size_bytes += sum(
+            max(0, int(decision.row.get("size_bytes") or 0))
+            for decision in season_decisions
+        )
+
+    return OlderSeasonOverrideSelection(
+        series_prefix=normalized_series,
+        latest_season_number=latest_season_number,
+        latest_season_prefixes=tuple(sorted(prefixes_by_number[latest_season_number])),
+        included_season_prefixes=tuple(included),
+        overridden_season_prefixes=tuple(overridden),
+        candidate_count=candidate_count,
+        overridden_candidate_count=overridden_candidate_count,
+        current_size_bytes=current_size_bytes,
     )
 
 

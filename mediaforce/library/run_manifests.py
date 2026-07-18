@@ -18,7 +18,7 @@ from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES
 from mediaforce.library.workflow_state import derive_item_workflow_state
 from mediaforce.core.type_defs import object_dict
-from mediaforce.library.candidate_selection import candidate_rank_key, project_candidates
+from mediaforce.library.candidate_selection import OlderSeasonOverrideSelection, candidate_rank_key, project_candidates
 from mediaforce.library.media_scopes import resolve_media_scope, resolve_media_scopes, scope_rel_path_filter
 from mediaforce.library.planner import build_manifest_item, recommend_item
 from mediaforce.library.scanner import scan_library
@@ -52,6 +52,7 @@ def select_candidates(
         buckets: list[str] | None = None,
         require_encode_lane: bool = False,
         manual_override_prefix: str | None = None,
+        manual_override_prefixes: list[str] | tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     if require_encode_lane:
         projected = project_candidates(
@@ -60,6 +61,7 @@ def select_candidates(
             prefixes=prefixes,
             statuses=set(statuses),
             manual_override_prefix=manual_override_prefix,
+            manual_override_prefixes=manual_override_prefixes,
         )
         ranked: list[tuple[Any, dict[str, Any]]] = []
         for decision in projected:
@@ -137,6 +139,7 @@ def select_encode_candidates(
         limit: int | None,
         buckets: list[str] | None = None,
         manual_override_prefix: str | None = None,
+        manual_override_prefixes: list[str] | tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     return select_candidates(
         connection,
@@ -147,6 +150,7 @@ def select_encode_candidates(
         buckets=buckets,
         require_encode_lane=True,
         manual_override_prefix=manual_override_prefix,
+        manual_override_prefixes=manual_override_prefixes,
     )
 
 
@@ -240,18 +244,33 @@ def create_folder_manifest(
         limit: int | None = None,
         scan_first: bool = False,
         manual_override_prefix: str | None = None,
+        older_season_override: OlderSeasonOverrideSelection | None = None,
 ) -> tuple[dict[str, Any], Path]:
+    if manual_override_prefix and older_season_override is not None:
+        raise ValueError("Exact-season and older-season lifecycle overrides cannot be combined")
     if scan_first:
         scan_library(connection, config, prefixes=[prefix])
     scope = resolve_media_scope(connection, prefix, library_types=config.library_type_map)
+    selection_prefixes = (
+        list(older_season_override.included_season_prefixes)
+        if older_season_override is not None
+        else [prefix]
+    )
     rows = select_encode_candidates(
         connection,
         config,
-        prefixes=[prefix],
+        prefixes=selection_prefixes,
         limit=limit,
         manual_override_prefix=manual_override_prefix,
+        manual_override_prefixes=(
+            older_season_override.overridden_season_prefixes
+            if older_season_override is not None
+            else None
+        ),
     )
     manifest = build_run_manifest(rows, config)
     manifest["selection"]["media_scope"] = scope.to_payload()
+    if older_season_override is not None:
+        manifest["selection"]["lifecycle_override"] = older_season_override.to_payload()
     manifest_path = write_manifest(connection, config, manifest)
     return manifest, manifest_path
