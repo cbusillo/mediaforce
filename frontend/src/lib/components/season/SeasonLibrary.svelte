@@ -19,6 +19,7 @@
 	import {
 		buildShowCards,
 		filterShowCards,
+		olderSeasonLibraryAction,
 		savingsPercent,
 		seasonsByShow,
 		sortShowCards,
@@ -74,6 +75,9 @@
 			: []
 	);
 	const selectedLifecycle = $derived(selectedShow?.lifecycle ?? null);
+	const olderSeasonAction = $derived(
+		selectedLifecycle ? olderSeasonLibraryAction(selectedLifecycle) : null
+	);
 	const displayedLifecycleMode = $derived<LifecycleMode>(
 		pendingLifecycleMode?.prefix === selectedShow?.prefix
 			? pendingLifecycleMode.mode
@@ -454,7 +458,26 @@
 						{/if}
 					</div>
 
-					{#if selectedShow && selectedSeasons.length > 1}
+					{#if selectedShow && olderSeasonAction}
+						<div class="show-action show-action--override">
+							<div>
+								<strong>Process older seasons with one setup</strong>
+								<span>
+									Include {olderSeasonAction.episodeCount}
+									{olderSeasonAction.episodeCount === 1 ? 'episode' : 'episodes'} across
+									{olderSeasonAction.seasonCount} older
+									{olderSeasonAction.seasonCount === 1 ? 'season' : 'seasons'}.
+									{olderSeasonAction.latestSeasonLabel} stays original, and the current-season policy
+									does not change. Recent-acquisition holds are bypassed only after confirmation.
+								</span>
+							</div>
+							<a class="primary-button" href={resolve(folderHref(selectedShow.prefix))}
+								>Set up older seasons</a
+							>
+						</div>
+					{/if}
+
+					{#if selectedShow && selectedSeasons.length > 1 && (!lifecycleAvailable || eligibleEpisodeCount > 0 || !olderSeasonAction)}
 						<div class="show-action">
 							<div>
 								<strong>Use one setup for eligible seasons</strong>
@@ -999,6 +1022,15 @@
 	.show-action span {
 		color: var(--mf-fg-secondary);
 		font-size: 12px;
+	}
+
+	.show-action--override {
+		background: var(--mf-wait-bg);
+		border-color: var(--mf-wait-line);
+	}
+
+	.show-action--override strong {
+		color: var(--mf-wait-fg);
 	}
 
 	.show-action .primary-button {

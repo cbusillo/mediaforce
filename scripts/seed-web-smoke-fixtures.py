@@ -65,6 +65,7 @@ CURRENT_PREVIOUS_PREFIX = "tv/Current Season/Season 1"
 CURRENT_SEASON_PREFIX = "tv/Current Season/Season 2"
 CURRENT_SERIES_PREFIX = "tv/Current Season"
 PROTECTED_READY_PREFIX = "tv/Protected Ready/Season 2"
+PROTECTED_READY_PREVIOUS_PREFIX = "tv/Protected Ready/Season 1"
 PROTECTED_READY_SERIES_PREFIX = "tv/Protected Ready"
 FIXTURE_PREFIXES = (
     FOLDER_PREFIX,
@@ -98,6 +99,7 @@ FIXTURE_PREFIXES = (
     OTHER_PROMOTION_PREFIX,
     CURRENT_PREVIOUS_PREFIX,
     CURRENT_SEASON_PREFIX,
+    PROTECTED_READY_PREVIOUS_PREFIX,
     PROTECTED_READY_PREFIX,
 )
 
@@ -646,6 +648,16 @@ def _write_review_states(config: Any, rows_by_prefix: dict[str, dict[str, Any]])
     _write_review_sample_state(
         config,
         rows_by_prefix,
+        prefix=PROTECTED_READY_SERIES_PREFIX,
+        job_id="web-smoke-protected-ready-series",
+        review_slug="web-smoke-protected-ready-series",
+        predicted_total_size_bytes=396_000_000,
+        quality_score=94.8,
+        accepted=True,
+    )
+    _write_review_sample_state(
+        config,
+        rows_by_prefix,
         prefix=MISSED_TARGET_PREFIX,
         job_id="web-smoke-overshoot",
         review_slug="web-smoke-overshoot",
@@ -999,6 +1011,18 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             _library_item(
                 project_root=project_root,
                 media_root="tv",
+                rel_path="tv/Protected Ready/Season 1/Episode 01.mkv",
+                size_bytes=7 * 1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=83,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture older season requires an explicit lifecycle override.",
+                age_days=5,
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
                 rel_path="tv/Protected Ready/Season 2/Episode 01.mkv",
                 size_bytes=8 * 1024**3,
                 status="discovered",
@@ -1221,6 +1245,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             )
         )
         rows_by_prefix = {str(row["parent_dir"]): row for row in rows}
+        rows_by_prefix[PROTECTED_READY_SERIES_PREFIX] = rows_by_prefix[PROTECTED_READY_PREFIX]
         ids_by_rel_path = {
             str(row["rel_path"]): item_id
             for row, item_id in zip(rows, inserted_ids, strict=True)
@@ -1682,6 +1707,12 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "route": "/folders/tv/Protected%20Ready/Season%202",
                 "marker": "Protected Ready",
                 "stageMarker": "This season is ready, but protected",
+            },
+            {
+                "label": "Folder Studio older-season override fixture",
+                "route": "/folders/tv/Protected%20Ready",
+                "marker": "Protected Ready",
+                "stageMarker": "Ready to process the older seasons",
             },
             {
                 "label": "Folder Studio missed-target fixture",

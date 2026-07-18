@@ -64,7 +64,7 @@
 	};
 
 	type SafetyDialog = {
-		kind: 'approval' | 'recovery' | 'lifecycle_override';
+		kind: 'approval' | 'recovery' | 'lifecycle_override' | 'older_seasons_override';
 		title: string;
 		detail: string;
 		primaryLabel: string;
@@ -123,6 +123,12 @@
 	);
 	const heldEpisodeCount = $derived(lifecycle?.held_candidate_count ?? 0);
 	const canOverrideLifecycleHolds = $derived(Boolean(lifecycle?.can_override_holds));
+	const olderSeasonOverride = $derived(
+		isSeriesScope ? (folder.older_season_override ?? null) : null
+	);
+	const canQueueOlderSeasons = $derived(
+		Boolean(olderSeasonOverride?.available && olderSeasonOverride.candidate_count > 0)
+	);
 	const lifecycleHoldReasons = $derived(currentSeasonLifecycle?.hold_reasons ?? []);
 	const lifecycleHold = $derived(lifecycleHoldReasons[0] ?? null);
 	const scopeTitle = $derived(
@@ -162,6 +168,15 @@
 	const productionEpisodeCount = $derived(isSeriesScope ? eligibleEpisodeCount : episodeCount);
 	const originalSeasonSize = $derived(folder.summary?.total_size_bytes ?? 0);
 	const expectedEpisodeBytes = $derived(predictedEpisodeSize(folder));
+	const olderSeasonProjectedSavingsBytes = $derived(
+		olderSeasonOverride && expectedEpisodeBytes > 0
+			? Math.max(
+					0,
+					olderSeasonOverride.current_size_bytes -
+						expectedEpisodeBytes * olderSeasonOverride.candidate_count
+				)
+			: null
+	);
 	const actualSampleSizes = $derived(reviewSampleSizes(folder));
 	const sizeTarget = $derived(folderSizeTargetAnalysis(folder));
 	const targetSummary = $derived(resolvedTargetSummary(folder));
@@ -470,6 +485,48 @@
 		await queueSeason(false);
 	}
 
+	async function queueOlderSeasons() {
+		await runAction('queueing', 'We couldn’t start the older seasons.', async () => {
+			ensureOk(
+				await postJson<ActionResponse>(endpoint('queue-older-seasons'), {
+					notes: 'Approved after reviewing the explicit older-season lifecycle override.',
+					bypass_schedule: false,
+					confirmed: true
+				}),
+				'We couldn’t start the older seasons.'
+			);
+		});
+	}
+
+	async function requestQueueOlderSeasons() {
+		const selection = olderSeasonOverride;
+		if (!selection?.available) return;
+		const latestSeason = selection.latest_season_label || 'The latest season';
+		const changes = [
+			`${selection.season_count} ${selection.season_count === 1 ? 'season' : 'seasons'} · ${selection.candidate_count} ${selection.candidate_count === 1 ? 'episode' : 'episodes'}.`,
+			`Current size: ${formatDecimalFileSize(selection.current_size_bytes)}.`,
+			olderSeasonProjectedSavingsBytes !== null
+				? `Projected savings: about ${formatDecimalFileSize(olderSeasonProjectedSavingsBytes)}.`
+				: 'Projected savings are not available for this setup.',
+			`${latestSeason} stays original.`,
+			selection.overridden_candidate_count > 0
+				? `${selection.overridden_candidate_count} ${selection.overridden_candidate_count === 1 ? 'episode bypasses' : 'episodes bypass'} lifecycle timing holds.`
+				: 'No lifecycle hold is bypassed; this action only excludes the latest season.',
+			selection.already_eligible_candidate_count > 0
+				? `${selection.already_eligible_candidate_count} already-eligible ${selection.already_eligible_candidate_count === 1 ? 'episode is' : 'episodes are'} included.`
+				: '',
+			'The current-season policy does not change.',
+			'Specials, ambiguous seasons, and unsafe items remain excluded.'
+		].filter(Boolean);
+		await openSafetyDialog({
+			kind: 'older_seasons_override',
+			title: `Process ${selection.season_count} older ${selection.season_count === 1 ? 'season' : 'seasons'} now?`,
+			detail: `This queues ${selection.candidate_count} ${selection.candidate_count === 1 ? 'episode' : 'episodes'} with the approved setup. Mediaforce will recheck the selection before anything starts.`,
+			primaryLabel: 'Process older seasons',
+			changes
+		});
+	}
+
 	async function checkOutputs() {
 		await runAction('checking', 'We couldn’t check the new episodes.', async () => {
 			ensureOk(
@@ -560,6 +617,10 @@
 		}
 		if (dialog.kind === 'lifecycle_override') {
 			await queueSeason(true);
+			return;
+		}
+		if (dialog.kind === 'older_seasons_override') {
+			await queueOlderSeasons();
 			return;
 		}
 		await performMeasuredRecovery();
@@ -653,7 +714,7 @@
 				detail: `Recording the test you chose and checking whether the ${scopeNoun} can start.`
 			},
 			queueing: {
-				title: isSeriesScope ? 'Starting every season' : 'Starting the season',
+				title: isSeriesScope ? 'Starting selected seasons' : 'Starting the season',
 				detail: 'Preparing the remaining episodes and finding available computers.'
 			},
 			checking: {
@@ -859,10 +920,21 @@
 								: lifecycleHold?.label || 'Season protected'}
 					</strong>
 					{#if isSeriesScope}
-						<p>
-							{eligibleEpisodeCount} episodes remain eligible for this show-level action. Protected seasons
-							stay visible and original.
-						</p>
+						{#if canQueueOlderSeasons && olderSeasonOverride}
+							<p>
+								{eligibleEpisodeCount} episodes are eligible normally. A separate confirmed action can
+								include {olderSeasonOverride.candidate_count}
+								{olderSeasonOverride.candidate_count === 1 ? 'episode' : 'episodes'} across
+								{olderSeasonOverride.season_count} older
+								{olderSeasonOverride.season_count === 1 ? 'season' : 'seasons'} while
+								{olderSeasonOverride.latest_season_label || 'the latest season'} stays original.
+							</p>
+						{:else}
+							<p>
+								{eligibleEpisodeCount} episodes remain eligible for this show-level action. Protected
+								seasons stay visible and original.
+							</p>
+						{/if}
 					{:else if lifecycleHoldReasons.length}
 						{#each lifecycleHoldReasons as reason (reason.code)}
 							<p><b>{reason.label}:</b> {reason.detail}</p>
@@ -1499,19 +1571,35 @@
 				<p class="eyebrow">Test approved</p>
 				<h1>
 					{isSeriesScope
-						? 'Ready to make the eligible seasons.'
+						? canQueueOlderSeasons
+							? eligibleEpisodeCount > 0
+								? 'Ready to choose which seasons to make.'
+								: 'Ready to process the older seasons.'
+							: 'Ready to make the eligible seasons.'
 						: heldEpisodeCount > 0
 							? 'This season is ready, but protected.'
 							: 'Ready to make the season.'}
 				</h1>
-				<p class="lede">
-					Mediaforce will make {productionEpisodeCount}
-					{productionEpisodeCount === 1 ? 'episode' : 'episodes'} with the same settings. {heldEpisodeCount >
-					0
-						? `${heldEpisodeCount} protected ${heldEpisodeCount === 1 ? 'episode stays' : 'episodes stay'} original unless you explicitly override this season.`
-						: 'New files stay separate until they pass their checks.'} Nothing is queued until you choose
-					the action below.
-				</p>
+				{#if isSeriesScope && canQueueOlderSeasons && olderSeasonOverride}
+					<p class="lede">
+						The approved setup can make {eligibleEpisodeCount} normally eligible
+						{eligibleEpisodeCount === 1 ? 'episode' : 'episodes'}. The older-season option can
+						include {olderSeasonOverride.candidate_count}
+						{olderSeasonOverride.candidate_count === 1 ? 'episode' : 'episodes'} across
+						{olderSeasonOverride.season_count} older
+						{olderSeasonOverride.season_count === 1 ? 'season' : 'seasons'} with explicit confirmation.
+						Nothing is queued until you choose an action.
+					</p>
+				{:else}
+					<p class="lede">
+						Mediaforce will make {productionEpisodeCount}
+						{productionEpisodeCount === 1 ? 'episode' : 'episodes'} with the same settings. {heldEpisodeCount >
+						0
+							? `${heldEpisodeCount} protected ${heldEpisodeCount === 1 ? 'episode stays' : 'episodes stay'} original unless you explicitly override this season.`
+							: 'New files stay separate until they pass their checks.'} Nothing is queued until you choose
+						the action below.
+					</p>
+				{/if}
 				<div class="ready-summary">
 					<div>
 						<span>{isSeriesScope ? 'Eligible episodes' : 'Episodes'}</span><strong
@@ -1534,16 +1622,47 @@
 						<small>Each episode gets its own runtime-derived target.</small>
 					</div>
 				</div>
-				<button
-					class="primary-button"
-					type="button"
-					onclick={requestQueueSeason}
-					disabled={(isSeriesScope && eligibleEpisodeCount === 0) ||
-						(!isSeriesScope && heldEpisodeCount > 0 && !canOverrideLifecycleHolds)}
-				>
-					{makeActionLabel}
-					<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
-				</button>
+				{#if isSeriesScope && canQueueOlderSeasons && olderSeasonOverride}
+					<div class="older-season-option">
+						<div>
+							<strong>Process older seasons</strong>
+							<p>
+								{olderSeasonOverride.latest_season_label || 'The latest season'} stays original.
+								{#if olderSeasonOverride.overridden_candidate_count > 0}
+									{olderSeasonOverride.overridden_candidate_count} protected
+									{olderSeasonOverride.overridden_candidate_count === 1 ? 'episode' : 'episodes'} will
+									bypass lifecycle timing holds; the policy itself stays unchanged.
+								{:else}
+									No lifecycle hold is bypassed; this action only keeps the latest season out of the
+									queue.
+								{/if}
+							</p>
+							<small>
+								{formatDecimalFileSize(olderSeasonOverride.current_size_bytes)} current
+								{#if olderSeasonProjectedSavingsBytes !== null}
+									· about {formatDecimalFileSize(olderSeasonProjectedSavingsBytes)} projected savings
+								{/if}
+							</small>
+						</div>
+						<button class="primary-button" type="button" onclick={requestQueueOlderSeasons}>
+							Process {olderSeasonOverride.season_count} older
+							{olderSeasonOverride.season_count === 1 ? 'season' : 'seasons'}
+							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
+						</button>
+					</div>
+				{/if}
+				{#if !isSeriesScope || eligibleEpisodeCount > 0 || !canQueueOlderSeasons}
+					<button
+						class="primary-button"
+						type="button"
+						onclick={requestQueueSeason}
+						disabled={(isSeriesScope && eligibleEpisodeCount === 0) ||
+							(!isSeriesScope && heldEpisodeCount > 0 && !canOverrideLifecycleHolds)}
+					>
+						{makeActionLabel}
+						<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
+					</button>
+				{/if}
 			</section>
 		{:else if humanState.key === 'making_season'}
 			<section class="season-progress-room" aria-live="polite">
@@ -4926,6 +5045,47 @@
 		font-size: 10px;
 	}
 
+	.older-season-option {
+		align-items: center;
+		background: var(--mf-wait-bg);
+		border: 1px solid var(--mf-wait-line);
+		border-radius: var(--mf-radius-3);
+		display: flex;
+		gap: 20px;
+		justify-content: space-between;
+		margin-bottom: 16px;
+		max-width: 820px;
+		padding: 16px;
+		text-align: left;
+		width: 100%;
+	}
+
+	.older-season-option > div {
+		display: grid;
+		gap: 4px;
+	}
+
+	.older-season-option strong {
+		color: var(--mf-wait-fg);
+		font-size: 14px;
+	}
+
+	.older-season-option p {
+		color: var(--mf-fg-secondary);
+		font-size: 12px;
+		margin: 0;
+	}
+
+	.older-season-option small {
+		color: var(--mf-fg-tertiary);
+		font-size: 11px;
+	}
+
+	.older-season-option .primary-button {
+		flex: 0 0 auto;
+		white-space: nowrap;
+	}
+
 	.detail-error {
 		background: var(--mf-wait-bg);
 		border: 1px solid var(--mf-wait-line);
@@ -4979,6 +5139,11 @@
 		.active-facts,
 		.ready-summary {
 			grid-template-columns: 1fr;
+		}
+
+		.older-season-option {
+			align-items: stretch;
+			flex-direction: column;
 		}
 
 		.active-facts div,

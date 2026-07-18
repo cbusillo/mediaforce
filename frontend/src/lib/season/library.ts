@@ -9,6 +9,16 @@ import { seasonIdentity } from './experience';
 
 export type LibrarySort = 'savings' | 'size' | 'seasons' | 'name';
 
+export interface OlderSeasonLibraryAction {
+	latestSeasonLabel: string;
+	seasonCount: number;
+	episodeCount: number;
+	overriddenSeasonCount: number;
+	overriddenEpisodeCount: number;
+}
+
+const OVERRIDEABLE_HOLD_CODES = new Set(['current_season', 'recent_acquisition']);
+
 export function mergeFolderPayloads(
 	structure: DashboardFoldersPayload,
 	details: DashboardFoldersPayload
@@ -69,6 +79,54 @@ export function applySeriesLifecycle(
 		...payload,
 		folders: payload.folders.map(updateCard),
 		series_folders: payload.series_folders?.map(updateCard)
+	};
+}
+
+export function olderSeasonLibraryAction(
+	lifecycle: LifecycleState
+): OlderSeasonLibraryAction | null {
+	const numberedSeasons = lifecycle.seasons.filter(
+		(season) =>
+			!season.is_special &&
+			Number.isInteger(season.season_number) &&
+			Number(season.season_number) > 0
+	);
+	const latestSeasonNumber = Math.max(
+		...numberedSeasons.map((season) => Number(season.season_number)),
+		0
+	);
+	if (latestSeasonNumber <= 0) return null;
+	const prefixCountByNumber = new Map<number, number>();
+	for (const season of numberedSeasons) {
+		const seasonNumber = Number(season.season_number);
+		prefixCountByNumber.set(seasonNumber, (prefixCountByNumber.get(seasonNumber) ?? 0) + 1);
+	}
+	const included = numberedSeasons.filter((season) => {
+		const seasonNumber = Number(season.season_number);
+		if (
+			seasonNumber >= latestSeasonNumber ||
+			season.ambiguous ||
+			(prefixCountByNumber.get(seasonNumber) ?? 0) > 1 ||
+			season.candidate_count <= 0
+		)
+			return false;
+		if (season.held_candidate_count <= 0) return season.eligible_candidate_count > 0;
+		return (
+			season.hold_reasons.length > 0 &&
+			season.hold_reasons.every((reason) => OVERRIDEABLE_HOLD_CODES.has(reason.code))
+		);
+	});
+	const overridden = included.filter((season) => season.held_candidate_count > 0);
+	if (!included.length) return null;
+	return {
+		latestSeasonLabel: `Season ${latestSeasonNumber}`,
+		seasonCount: included.length,
+		episodeCount: included.reduce((total, season) => total + season.candidate_count, 0),
+		overriddenSeasonCount: overridden.length,
+		overriddenEpisodeCount: overridden.reduce(
+			(total, season) => total + season.held_candidate_count,
+			0
+		)
 	};
 }
 
