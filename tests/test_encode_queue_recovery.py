@@ -15177,21 +15177,21 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertTrue(result["policy_holds_overridden"])
         self.assertEqual(result["older_season_override"]["latest_season_number"], 3)
         parent_job = next(job for job in saved_jobs if job["job_kind"] == "folder")
-        manifest = json.loads(Path(parent_job["manifest_path"]).read_text())
+        queued_manifest = json.loads(Path(parent_job["manifest_path"]).read_text())
         self.assertEqual(
             {
                 item["selection_provenance"]["season_prefix"]
-                for item in manifest["items"]
+                for item in queued_manifest["items"]
             },
             {"tv/show/Season 1", "tv/show/Season 2"},
         )
         self.assertEqual(
-            manifest["selection"]["lifecycle_override"]["latest_season_prefixes"],
+            queued_manifest["selection"]["lifecycle_override"]["latest_season_prefixes"],
             ["tv/show/Season 3"],
         )
         self.assertNotIn(
             "tv/show/Season 3",
-            manifest["selection"]["lifecycle_override"]["included_season_prefixes"],
+            queued_manifest["selection"]["lifecycle_override"]["included_season_prefixes"],
         )
 
     def test_validate_folder_outputs_action_uses_only_validate_lane_outputs(self) -> None:
