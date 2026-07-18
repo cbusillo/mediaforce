@@ -495,11 +495,7 @@ async function checkLifecyclePolicyShowIsolation(baseUrl, timeoutMs) {
       }
       markSaveRequested();
       await new Promise((resolve) => setTimeout(resolve, 1000));
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ ok: true }),
-      });
+      await route.continue();
     });
     await page.goto(`${baseUrl}/`, {
       waitUntil: "domcontentloaded",
@@ -520,6 +516,12 @@ async function checkLifecyclePolicyShowIsolation(baseUrl, timeoutMs) {
       undefined,
       { timeout: timeoutMs },
     );
+    const saveCompleted = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url().includes("/series-lifecycle") &&
+        response.ok(),
+    );
     await policySelect.selectOption("on");
     await saveRequested;
     await showButtons.nth(1).click();
@@ -529,6 +531,18 @@ async function checkLifecyclePolicyShowIsolation(baseUrl, timeoutMs) {
         `Current-season policy leaked across shows while saving: ${selectedValue}`,
       );
     }
+    await saveCompleted;
+    await showButtons.nth(0).click();
+    await page.waitForFunction(
+      () => {
+        const select = document.querySelector(
+          'select[aria-describedby="current-season-policy-help"]',
+        );
+        return select instanceof HTMLSelectElement && select.value === "on";
+      },
+      undefined,
+      { timeout: timeoutMs },
+    );
     console.log("route ok: Current-season policy stays scoped to one show");
   } finally {
     await browser.close();

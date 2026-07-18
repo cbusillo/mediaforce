@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import type { FolderCard } from '$lib/api/types';
+import type { FolderCard, LifecycleState, SeasonLifecycleState } from '$lib/api/types';
 
 import {
+	applySeriesLifecycle,
 	buildShowCards,
 	filterShowCards,
 	mergeFolderPayloads,
@@ -28,6 +29,42 @@ function card(prefix: string, size: number, savings: number): FolderCard {
 		statuses: { discovered: 10 },
 		video_codecs: { h264: 10 },
 		details_loading: false
+	};
+}
+
+function seasonLifecycle(prefix: string, held: number): SeasonLifecycleState {
+	return {
+		prefix,
+		label: prefix.split('/').at(-1) ?? prefix,
+		season_number: Number(prefix.match(/Season (\d+)$/)?.[1] ?? 0),
+		is_special: false,
+		ambiguous: false,
+		is_current_season: prefix.endsWith('Season 2'),
+		candidate_count: 10,
+		eligible_candidate_count: 10 - held,
+		held_candidate_count: held,
+		hold_reasons: held
+			? [{ code: 'current_season', label: 'Current season', detail: 'Protected.' }]
+			: []
+	};
+}
+
+function lifecycle(mode: 'auto' | 'on' | 'off', held: number): LifecycleState {
+	const seasons = [
+		seasonLifecycle('tv/Alpha/Season 1', 0),
+		seasonLifecycle('tv/Alpha/Season 2', held)
+	];
+	return {
+		schema_version: 1,
+		prefix: 'tv/Alpha',
+		series_prefix: 'tv/Alpha',
+		policy_mode: mode,
+		provider_state: 'active',
+		candidate_count: 20,
+		eligible_candidate_count: 20 - held,
+		held_candidate_count: held,
+		hold_reason_counts: held ? { current_season: held } : {},
+		seasons
 	};
 }
 
@@ -146,5 +183,42 @@ describe('season library grouping', () => {
 			'tv/Alpha/Season 1',
 			'tv/Beta/Season 1'
 		]);
+	});
+
+	it('applies a saved series lifecycle to its show and individual season cards', () => {
+		const before = lifecycle('auto', 10);
+		const seasons = [
+			{
+				...card('tv/Alpha/Season 1', 1000, 300),
+				lifecycle: { ...before, seasons: [before.seasons[0]] }
+			},
+			{
+				...card('tv/Alpha/Season 2', 1000, 300),
+				lifecycle: { ...before, seasons: [before.seasons[1]] }
+			}
+		];
+		const [show] = buildShowCards([], seasons);
+		const saved = lifecycle('off', 0);
+
+		const updated = applySeriesLifecycle(
+			{
+				folders: seasons,
+				series_folders: [show],
+				catalog_empty: false,
+				folder_cache_key: 'details'
+			},
+			saved
+		);
+
+		expect(updated.series_folders?.[0].lifecycle?.policy_mode).toBe('off');
+		expect(updated.folders.map((entry) => entry.lifecycle?.policy_mode)).toEqual(['off', 'off']);
+		expect(updated.folders[0].lifecycle?.seasons.map((season) => season.prefix)).toEqual([
+			'tv/Alpha/Season 1'
+		]);
+		expect(updated.folders[1].lifecycle).toMatchObject({
+			eligible_candidate_count: 10,
+			held_candidate_count: 0,
+			hold_reason_counts: {}
+		});
 	});
 });

@@ -1,4 +1,9 @@
-import type { DashboardFoldersPayload, FolderCard } from '$lib/api/types';
+import type {
+	DashboardFoldersPayload,
+	FolderCard,
+	LifecycleState,
+	SeasonLifecycleState
+} from '$lib/api/types';
 
 import { seasonIdentity } from './experience';
 
@@ -22,6 +27,48 @@ export function mergeFolderPayloads(
 		catalog_empty: structure.catalog_empty && details.catalog_empty,
 		folder_cache_key:
 			details.folder_cache_key === 'loading' ? structure.folder_cache_key : details.folder_cache_key
+	};
+}
+
+function lifecycleForSeason(
+	lifecycle: LifecycleState,
+	season: SeasonLifecycleState
+): LifecycleState {
+	const canOverrideHolds =
+		season.held_candidate_count > 0 &&
+		season.hold_reasons.length > 0 &&
+		season.hold_reasons.every((reason) =>
+			['current_season', 'recent_acquisition'].includes(reason.code)
+		);
+	return {
+		...lifecycle,
+		prefix: season.prefix,
+		candidate_count: season.candidate_count,
+		eligible_candidate_count: season.eligible_candidate_count,
+		held_candidate_count: season.held_candidate_count,
+		hold_reason_counts: Object.fromEntries(
+			season.hold_reasons.map((reason) => [reason.code, season.held_candidate_count])
+		),
+		can_override_holds: canOverrideHolds,
+		seasons: [season]
+	};
+}
+
+export function applySeriesLifecycle(
+	payload: DashboardFoldersPayload,
+	lifecycle: LifecycleState
+): DashboardFoldersPayload {
+	const seriesPrefix = lifecycle.series_prefix ?? lifecycle.prefix;
+	const seasonsByPrefix = new Map(lifecycle.seasons.map((season) => [season.prefix, season]));
+	const updateCard = (card: FolderCard): FolderCard => {
+		if (card.prefix === seriesPrefix) return { ...card, lifecycle };
+		const season = seasonsByPrefix.get(card.prefix);
+		return season ? { ...card, lifecycle: lifecycleForSeason(lifecycle, season) } : card;
+	};
+	return {
+		...payload,
+		folders: payload.folders.map(updateCard),
+		series_folders: payload.series_folders?.map(updateCard)
 	};
 }
 

@@ -3,8 +3,12 @@
 
 	import { fetchJson } from '$lib/api/client';
 	import { initialDashboard, initialFoldersPayload } from '$lib/api/placeholders';
-	import type { DashboardFoldersPayload, DashboardSummaryPayload } from '$lib/api/types';
-	import { mergeFolderPayloads } from '$lib/season/library';
+	import type {
+		DashboardFoldersPayload,
+		DashboardSummaryPayload,
+		LifecycleState
+	} from '$lib/api/types';
+	import { applySeriesLifecycle, mergeFolderPayloads } from '$lib/season/library';
 	import SeasonLibrary from './SeasonLibrary.svelte';
 
 	let dashboard = $state<DashboardSummaryPayload>(initialDashboard);
@@ -103,6 +107,12 @@
 		}
 	}
 
+	function applySavedLifecycle(lifecycle: LifecycleState) {
+		structurePayload = applySeriesLifecycle(structurePayload, lifecycle);
+		detailsPayload = applySeriesLifecycle(detailsPayload, lifecycle);
+		syncFolders();
+	}
+
 	function syncFolders() {
 		if (structurePending) return;
 		foldersPayload = mergeFolderPayloads(structurePayload, detailsPayload);
@@ -117,4 +127,5 @@
 	{detailsPending}
 	{loadError}
 	detailsError={foldersPayload.folders.length ? detailsLoadError : ''}
+	onLifecycleSaved={applySavedLifecycle}
 />
