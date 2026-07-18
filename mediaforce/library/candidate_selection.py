@@ -170,10 +170,12 @@ def project_candidates(
         manual_override_prefix: str | None = None,
 ) -> list[CandidateDecision]:
     current_time = (now or datetime.now(tz=UTC)).astimezone(UTC)
+    library_types = config.library_type_map
+    library_definitions = config.library_definition_map
     resolved_scopes = resolve_media_scopes(
         connection,
         prefixes or [],
-        library_types=config.library_type_map,
+        library_types=library_types,
     )
     query_scopes = (
         resolved_scopes
@@ -186,7 +188,7 @@ def project_candidates(
     numbered_by_series: dict[str, set[int]] = {}
     for row in rows:
         item_id = int(row["item_id"])
-        season = season_identity(row, library_types=config.library_type_map)
+        season = season_identity(row, library_types=library_types)
         season_by_item[item_id] = season
         if season is None:
             continue
@@ -215,7 +217,7 @@ def project_candidates(
     other_rows_by_prefix: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         media_root = str(row.get("media_root") or "")
-        library = config.library_definition_map.get(media_root, {})
+        library = library_definitions.get(media_root, {})
         if normalize_library_type(library.get("type"), key=media_root) != "other":
             continue
         group_scope = other_group_scope_for_rel_path(str(row.get("rel_path") or ""), config)
@@ -223,7 +225,7 @@ def project_candidates(
             other_rows_by_prefix[group_scope.prefix].append(row)
     other_group_blockers: dict[str, str | None] = {}
     for group_prefix, grouped_rows in other_rows_by_prefix.items():
-        library = config.library_definition_map.get(str(grouped_rows[0].get("media_root") or ""), {})
+        library = library_definitions.get(str(grouped_rows[0].get("media_root") or ""), {})
         profile_blockers = [
             blocker
             for row in grouped_rows
@@ -240,6 +242,8 @@ def project_candidates(
     decisions: list[CandidateDecision] = []
     production_roots = set(config.source_root_map)
     scan_roots = set(config.scan_source_root_map)
+    library_context_by_root: dict[str, tuple[dict[str, Any], str, dict[str, Any]]] = {}
+    policy_by_prefix: dict[str, dict[str, Any]] = {}
 
     for row in rows:
         media_root = str(row["media_root"] or "")
@@ -252,9 +256,14 @@ def project_candidates(
             continue
         workflow_lane = derive_item_workflow_state(row).lane
         season = season_by_item[int(row["item_id"])]
-        library = config.library_definition_map.get(media_root, {})
-        library_type = normalize_library_type(library.get("type"), key=media_root)
-        library_policy = normalize_library_policy(library_type, library.get("policy"))
+        library_context = library_context_by_root.get(media_root)
+        if library_context is None:
+            library = library_definitions.get(media_root, {})
+            library_type = normalize_library_type(library.get("type"), key=media_root)
+            library_policy = normalize_library_policy(library_type, library.get("policy"))
+            library_context = library, library_type, library_policy
+            library_context_by_root[media_root] = library_context
+        library, library_type, library_policy = library_context
         membership = (
             classify_movie_path(rel_path, root=media_root)
             if library_type == "movie"
@@ -294,7 +303,11 @@ def project_candidates(
             if library_type == "movie"
             else "oldest_added_first"
         )
-        policy = _resolved_policy(config, season.series_prefix if season is not None else rel_path)
+        policy_prefix = season.series_prefix if season is not None else rel_path
+        policy = policy_by_prefix.get(policy_prefix)
+        if policy is None:
+            policy = _resolved_policy(config, policy_prefix)
+            policy_by_prefix[policy_prefix] = policy
         lifecycle_keys = (
             "series_lifecycle_mode",
             "season_acquisition_hold_days",
