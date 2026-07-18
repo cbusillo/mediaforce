@@ -1,11 +1,11 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
-	import { invalidateAll } from '$app/navigation';
 	import { postJson } from '$lib/api/client';
 	import type {
 		DashboardFoldersPayload,
 		DashboardSummaryPayload,
 		FolderCard,
+		LifecycleState,
 		SeasonLifecycleState
 	} from '$lib/api/types';
 	import {
@@ -34,7 +34,8 @@
 		foldersPending = false,
 		detailsPending = false,
 		loadError = '',
-		detailsError = ''
+		detailsError = '',
+		onLifecycleSaved = () => undefined
 	}: {
 		dashboard: DashboardSummaryPayload;
 		foldersPayload: DashboardFoldersPayload;
@@ -42,6 +43,7 @@
 		detailsPending?: boolean;
 		loadError?: string;
 		detailsError?: string;
+		onLifecycleSaved?: (lifecycle: LifecycleState) => void;
 	} = $props();
 
 	let query = $state('');
@@ -206,12 +208,14 @@
 		policySavingTitle = show.title;
 		policyError = '';
 		try {
-			const response = await postJson<{ ok: boolean; message?: string }>(
-				`/api/folders/${encodePrefix(show.prefix)}/series-lifecycle`,
-				{ mode }
-			);
+			const response = await postJson<{
+				ok: boolean;
+				message?: string;
+				lifecycle?: LifecycleState;
+			}>(`/api/folders/${encodePrefix(show.prefix)}/series-lifecycle`, { mode });
 			if (!response.ok) throw new Error(response.message || 'Lifecycle policy could not be saved.');
-			await invalidateAll();
+			if (!response.lifecycle) throw new Error('Saved lifecycle policy was not returned.');
+			onLifecycleSaved(response.lifecycle);
 		} catch (error) {
 			policyError = `${show.title}: ${
 				error instanceof Error ? error.message : 'Lifecycle policy could not be saved.'
