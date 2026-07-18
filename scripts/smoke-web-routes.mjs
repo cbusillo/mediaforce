@@ -549,6 +549,58 @@ async function checkLifecyclePolicyShowIsolation(baseUrl, timeoutMs) {
   }
 }
 
+async function checkOlderSeasonConfirmation(baseUrl, timeoutMs) {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 1000 },
+    });
+    let queueRequests = 0;
+    page.on("request", (request) => {
+      if (request.url().includes("/queue-older-seasons")) {
+        queueRequests += 1;
+      }
+    });
+    await page.goto(`${baseUrl}/folders/tv/Protected%20Ready`, {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs,
+    });
+    const action = page.getByRole("button", {
+      name: "Process 1 older season",
+    });
+    await action.waitFor({ state: "visible", timeout: timeoutMs });
+    await action.click();
+    const dialog = page.getByRole("alertdialog");
+    await dialog.waitFor({ state: "visible", timeout: timeoutMs });
+    const dialogText = await dialog.innerText();
+    for (const marker of [
+      "1 season · 1 episode",
+      "Current size:",
+      "Projected savings: about",
+      "Season 2 stays original",
+      "current-season policy does not change",
+    ]) {
+      if (!dialogText.includes(marker)) {
+        throw new Error(
+          `Older-season confirmation missed ${JSON.stringify(marker)}: ${dialogText}`,
+        );
+      }
+    }
+    await dialog.getByRole("button", { name: "Go back" }).click();
+    await dialog.waitFor({ state: "hidden", timeout: timeoutMs });
+    if (queueRequests !== 0) {
+      throw new Error(
+        "Canceling the older-season confirmation queued production.",
+      );
+    }
+    console.log(
+      "route ok: Older-season confirmation is explicit and cancel-safe",
+    );
+  } finally {
+    await browser.close();
+  }
+}
+
 async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
   const browser = await chromium.launch();
   try {
@@ -730,6 +782,7 @@ async function main() {
         args.routeTimeoutMs,
       );
       await checkLifecyclePolicyShowIsolation(targetUrl, args.routeTimeoutMs);
+      await checkOlderSeasonConfirmation(targetUrl, args.routeTimeoutMs);
     }
     if (args.narrow) {
       await checkNarrowRoutes(

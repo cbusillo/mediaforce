@@ -8,7 +8,7 @@ from pathlib import Path
 from mediaforce.core.config import ConfigPaths, DEFAULT_CONFIG_PATH, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items, plex_item_metadata, series_metadata
-from mediaforce.library.candidate_selection import project_candidates, season_identity
+from mediaforce.library.candidate_selection import older_season_override_selection, project_candidates, season_identity
 from mediaforce.library.run_manifests import build_run_manifest, create_folder_manifest, select_encode_candidates
 from mediaforce.library.workflow_state import EncodeEligibility, build_folder_workflow_state, derive_item_workflow_state
 from mediaforce.web.routes.folders import _request_flag
@@ -188,6 +188,65 @@ class LibraryLifecycleTests(unittest.TestCase):
         self.assertTrue(override_by_season[2].eligible)
         self.assertTrue(override_by_season[2].manual_override)
 
+    def test_older_season_override_excludes_latest_even_when_policy_is_off(self) -> None:
+        config = self._config(mode="off")
+        with open_db(config.paths.db_path) as connection:
+            self._insert_item(connection, "tv/Show/Season 1/Episode 01.mkv", age_days=5)
+            self._insert_item(connection, "tv/Show/Season 2/Episode 01.mkv", age_days=100)
+            self._insert_item(connection, "tv/Show/Season 3/Episode 01.mkv", age_days=5)
+            self._insert_item(connection, "tv/Show/Specials/Aftershow.mkv", age_days=5)
+
+            selection = older_season_override_selection(
+                project_candidates(connection, config, prefixes=["tv/Show"], now=NOW),
+                "tv/Show",
+            )
+
+        self.assertTrue(selection.available)
+        self.assertEqual(selection.latest_season_number, 3)
+        self.assertEqual(selection.latest_season_prefixes, ("tv/Show/Season 3",))
+        self.assertEqual(
+            selection.included_season_prefixes,
+            ("tv/Show/Season 1", "tv/Show/Season 2"),
+        )
+        self.assertEqual(selection.overridden_season_prefixes, ("tv/Show/Season 1",))
+        self.assertEqual(selection.candidate_count, 2)
+        self.assertEqual(selection.overridden_candidate_count, 1)
+
+    def test_older_season_override_excludes_ambiguous_and_unknown_age_seasons(self) -> None:
+        config = self._config(mode="off")
+        with open_db(config.paths.db_path) as connection:
+            unknown_id = self._insert_item(
+                connection,
+                "tv/Show/Season 1/Episode 01.mkv",
+                age_days=100,
+            )
+            ambiguous_id = self._insert_item(
+                connection,
+                "tv/Show/Season 2/Episode 01.mkv",
+                age_days=100,
+            )
+            self._insert_item(connection, "tv/Show/Season 3/Episode 01.mkv", age_days=100)
+            connection.execute(
+                library_items.update()
+                .where(library_items.c.id == unknown_id)
+                .values(discovered_at="unknown", content_version_changed_at=None)
+            )
+            self._insert_plex_metadata(
+                connection,
+                ambiguous_id,
+                added_at=NOW - timedelta(days=100),
+                season_index=9,
+            )
+
+            selection = older_season_override_selection(
+                project_candidates(connection, config, prefixes=["tv/Show"], now=NOW),
+                "tv/Show",
+            )
+
+        self.assertFalse(selection.available)
+        self.assertEqual(selection.latest_season_number, 3)
+        self.assertEqual(selection.included_season_prefixes, ())
+
     def test_selection_ranks_plex_age_then_mediaforce_discovery(self) -> None:
         config = self._config(mode="off")
         with open_db(config.paths.db_path) as connection:
@@ -271,6 +330,55 @@ class LibraryLifecycleTests(unittest.TestCase):
             {"recent_acquisition", "current_season"},
         )
         self.assertTrue(provenance["override_applied"])
+
+    def test_older_season_manifest_freezes_exact_scope_and_override_provenance(self) -> None:
+        config = self._config(mode="off")
+        with open_db(config.paths.db_path) as connection:
+            first_id = self._insert_item(
+                connection,
+                "tv/Show/Season 1/Episode 01.mkv",
+                age_days=5,
+            )
+            second_id = self._insert_item(
+                connection,
+                "tv/Show/Season 2/Episode 01.mkv",
+                age_days=100,
+            )
+            self._insert_item(connection, "tv/Show/Season 3/Episode 01.mkv", age_days=5)
+            self._insert_item(connection, "tv/Show/Specials/Aftershow.mkv", age_days=5)
+            selection = older_season_override_selection(
+                project_candidates(connection, config, prefixes=["tv/Show"], now=NOW),
+                "tv/Show",
+            )
+
+            manifest, _ = create_folder_manifest(
+                connection,
+                config,
+                prefix="tv/Show",
+                older_season_override=selection,
+            )
+
+        self.assertEqual(
+            [item["library_item_id"] for item in manifest["items"]],
+            [second_id, first_id],
+        )
+        override = manifest["selection"]["lifecycle_override"]
+        self.assertEqual(
+            override["included_season_prefixes"],
+            ["tv/Show/Season 1", "tv/Show/Season 2"],
+        )
+        self.assertEqual(
+            override["overridden_season_prefixes"],
+            ["tv/Show/Season 1"],
+        )
+        provenance_by_season = {
+            item["selection_provenance"]["season_number"]: item["selection_provenance"]
+            for item in manifest["items"]
+        }
+        self.assertTrue(provenance_by_season[1]["manual_override"])
+        self.assertTrue(provenance_by_season[1]["override_applied"])
+        self.assertFalse(provenance_by_season[2]["manual_override"])
+        self.assertFalse(provenance_by_season[2]["override_applied"])
 
     def test_manifest_exact_root_movie_excludes_similarly_named_sibling(self) -> None:
         config = self._config(mode="off")

@@ -36,6 +36,7 @@ def register_folder_routes(
         save_series_lifecycle_action: Callable[[str, str], dict[str, Any]],
         approve_measured_encode_recovery_action: Callable[[str, str], dict[str, Any]],
         queue_folder_encode_action: Callable[[str, str, bool, bool, str], dict[str, Any]],
+        queue_older_seasons_encode_action: Callable[[str, str, bool, bool, str], dict[str, Any]],
         validate_folder_outputs_action: Callable[[str, str], dict[str, Any]],
         promote_folder_outputs_action: Callable[[str, str], dict[str, Any]],
         save_profile_action: Callable[[str, bool, bool, str, str], dict[str, Any]],
@@ -123,6 +124,19 @@ def register_folder_routes(
         result = await run_in_threadpool(
             approve_measured_encode_recovery_action,
             prefix.strip("/"),
+            str(body.get("scope_membership_token", "")),
+        )
+        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+    @app.post("/api/folders/{prefix:path}/queue-older-seasons")
+    async def api_folder_queue_older_seasons(prefix: str, request: Request) -> JSONResponse:
+        body = await _request_body(request)
+        result = await run_in_threadpool(
+            queue_older_seasons_encode_action,
+            prefix.strip("/"),
+            str(body.get("notes", "")),
+            _request_flag(body, "bypass_schedule"),
+            _request_flag(body, "confirmed"),
             str(body.get("scope_membership_token", "")),
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)

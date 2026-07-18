@@ -7,6 +7,7 @@ import {
 	buildShowCards,
 	filterShowCards,
 	mergeFolderPayloads,
+	olderSeasonLibraryAction,
 	savingsPercent,
 	seasonsByShow,
 	sortShowCards
@@ -219,6 +220,96 @@ describe('season library grouping', () => {
 			eligible_candidate_count: 10,
 			held_candidate_count: 0,
 			hold_reason_counts: {}
+		});
+	});
+
+	it('offers one older-season action while preserving the latest season', () => {
+		const heldOlderSeason = {
+			...seasonLifecycle('tv/Alpha/Season 1', 10),
+			is_current_season: false,
+			hold_reasons: [
+				{ code: 'current_season', label: 'Current season', detail: 'Protected.' },
+				{ code: 'recent_acquisition', label: 'Recent acquisition', detail: 'Waiting.' }
+			]
+		};
+		const eligibleSeason = {
+			...seasonLifecycle('tv/Alpha/Season 2', 0),
+			is_current_season: false
+		};
+		const latestSeason = {
+			...seasonLifecycle('tv/Alpha/Season 3', 10),
+			is_current_season: true,
+			hold_reasons: [
+				{ code: 'recent_acquisition', label: 'Recent acquisition', detail: 'Waiting.' },
+				{ code: 'current_season', label: 'Current season', detail: 'Protected.' }
+			]
+		};
+		const action = olderSeasonLibraryAction({
+			...lifecycle('on', 0),
+			candidate_count: 30,
+			eligible_candidate_count: 10,
+			held_candidate_count: 20,
+			seasons: [heldOlderSeason, eligibleSeason, latestSeason]
+		});
+
+		expect(action).toEqual({
+			latestSeasonLabel: 'Season 3',
+			seasonCount: 2,
+			episodeCount: 20,
+			overriddenSeasonCount: 1,
+			overriddenEpisodeCount: 10
+		});
+	});
+
+	it('does not offer the action for ambiguous or non-overrideable older seasons', () => {
+		const action = olderSeasonLibraryAction({
+			...lifecycle('on', 0),
+			candidate_count: 20,
+			eligible_candidate_count: 0,
+			held_candidate_count: 20,
+			seasons: [
+				{
+					...seasonLifecycle('tv/Alpha/Season 1', 10),
+					ambiguous: true,
+					is_current_season: false,
+					hold_reasons: [
+						{ code: 'recent_acquisition', label: 'Recent acquisition', detail: 'Waiting.' }
+					]
+				},
+				{
+					...seasonLifecycle('tv/Alpha/Season 2', 10),
+					is_current_season: false,
+					hold_reasons: [{ code: 'content_age_unknown', label: 'Age unknown', detail: 'Unknown.' }]
+				},
+				{
+					...seasonLifecycle('tv/Alpha/Season 3', 0),
+					is_current_season: true
+				}
+			]
+		});
+
+		expect(action).toBeNull();
+	});
+
+	it('offers the older-season scope even when no lifecycle hold needs bypassing', () => {
+		const action = olderSeasonLibraryAction({
+			...lifecycle('off', 20),
+			candidate_count: 30,
+			eligible_candidate_count: 30,
+			held_candidate_count: 0,
+			seasons: [
+				seasonLifecycle('tv/Alpha/Season 1', 0),
+				seasonLifecycle('tv/Alpha/Season 2', 0),
+				seasonLifecycle('tv/Alpha/Season 3', 0)
+			]
+		});
+
+		expect(action).toEqual({
+			latestSeasonLabel: 'Season 3',
+			seasonCount: 2,
+			episodeCount: 20,
+			overriddenSeasonCount: 0,
+			overriddenEpisodeCount: 0
 		});
 	});
 });

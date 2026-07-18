@@ -73,6 +73,7 @@ class WebRouteSecurityTests(unittest.TestCase):
             save_series_lifecycle_action=lambda _prefix, _mode: {"ok": True},
             approve_measured_encode_recovery_action=lambda _prefix, _membership_token: {},
             queue_folder_encode_action=lambda _prefix, _notes, _bypass_schedule, _override_policy_holds, _membership_token: {},
+            queue_older_seasons_encode_action=lambda _prefix, _notes, _bypass, _confirmed, _token: {},
             validate_folder_outputs_action=lambda _prefix, _membership_token: {},
             promote_folder_outputs_action=lambda _prefix, _membership_token: {},
             save_profile_action=lambda _prefix, _profile, _approve, _notes, _membership_token: {},
@@ -131,15 +132,22 @@ class WebRouteSecurityTests(unittest.TestCase):
             save_series_lifecycle_action=lambda _prefix, _mode: {},
             approve_measured_encode_recovery_action=lambda _prefix, token: capture("recovery", token),
             queue_folder_encode_action=lambda _prefix, _notes, _bypass, _override, token: capture("queue", token),
+            queue_older_seasons_encode_action=lambda _prefix, _notes, _bypass, confirmed, token: capture(
+                "older-confirmed" if confirmed else "older-unconfirmed",
+                token,
+            ),
             validate_folder_outputs_action=lambda _prefix, token: capture("validate", token),
             promote_folder_outputs_action=lambda _prefix, token: capture("promote", token),
             save_profile_action=lambda _prefix, _high, _size, _hash, token: capture("save", token),
         )
-        request = lambda: _json_request({"scope_membership_token": "membership-v2"})
+        request = lambda **extra: _json_request({"scope_membership_token": "membership-v2", **extra})
 
         async def exercise() -> None:
             await _route_endpoint(app, "/api/folders/{prefix:path}/queue-encode", "POST")(
                 "other/Batch", request()
+            )
+            await _route_endpoint(app, "/api/folders/{prefix:path}/queue-older-seasons", "POST")(
+                "tv/Show", request(confirmed=True)
             )
             await _route_endpoint(app, "/api/folders/{prefix:path}/approve-recovery", "POST")(
                 "other/Batch", request()
@@ -160,6 +168,7 @@ class WebRouteSecurityTests(unittest.TestCase):
             captured,
             [
                 ("queue", "membership-v2"),
+                ("older-confirmed", "membership-v2"),
                 ("recovery", "membership-v2"),
                 ("validate", "membership-v2"),
                 ("promote", "membership-v2"),
@@ -181,6 +190,7 @@ class WebRouteSecurityTests(unittest.TestCase):
             save_series_lifecycle_action=lambda _prefix, _mode: {},
             approve_measured_encode_recovery_action=lambda _prefix, _membership_token: {},
             queue_folder_encode_action=lambda *_args: {},
+            queue_older_seasons_encode_action=lambda *_args: {},
             validate_folder_outputs_action=lambda _prefix, _membership_token: {},
             promote_folder_outputs_action=lambda _prefix, _membership_token: {},
             save_profile_action=lambda *_args: {

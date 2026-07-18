@@ -23,8 +23,8 @@ from mediaforce.library.media_scopes import MediaScope, path_matches_scope, reso
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.run_manifests import create_folder_manifest
-from mediaforce.library.candidate_selection import encode_candidate_decisions, scope_lifecycle_payload_from_decisions, \
-    scope_target_size_blocker, workflow_eligibility
+from mediaforce.library.candidate_selection import encode_candidate_decisions, older_season_override_selection, \
+    project_candidates, scope_lifecycle_payload_from_decisions, scope_target_size_blocker, workflow_eligibility
 from mediaforce.tuning.quality_risk import build_quality_risk_contract
 from mediaforce.tuning.quality_risk import append_quality_risk_record
 from mediaforce.tuning.size_goals import operator_intent_from_policy
@@ -202,6 +202,8 @@ def queue_folder_encode_action(
         bypass_schedule: bool,
         override_policy_holds: bool = False,
         *,
+        override_older_seasons: bool = False,
+        older_seasons_confirmed: bool = False,
         now_iso: NowIsoFn,
         load_job_state: LoadJobStateFn,
         load_calibration_state: LoadCalibrationStateFn,
@@ -229,8 +231,20 @@ def queue_folder_encode_action(
             normalized_prefix,
             library_types=config.library_type_map,
         )
+        if override_policy_holds and override_older_seasons:
+            raise HTTPException(status_code=400, detail="Choose one lifecycle override mode.")
         if override_policy_holds and scope.kind != "tv_season":
             raise HTTPException(status_code=400, detail="Lifecycle holds can only be overridden for one season at a time.")
+        if override_older_seasons and scope.kind != "tv_series":
+            raise HTTPException(
+                status_code=400,
+                detail="Older-season holds can only be overridden for one TV series.",
+            )
+        if override_older_seasons and not older_seasons_confirmed:
+            raise HTTPException(
+                status_code=400,
+                detail="Confirm the older-season selection before starting production.",
+            )
         existing_job = load_job_state(connection, config, normalized_prefix)
         if existing_job and existing_job.get("status") in {"queued", "running", "pending_review"}:
             return {"ok": False, "message": "A calibration job is already active for this folder."}
@@ -376,10 +390,34 @@ def queue_folder_encode_action(
         upsert_override(saved_profile_path, normalized_prefix, calibration_policy)
         refreshed_config = load_config(config.paths.config_path)
         manifest_kwargs: dict[str, Any] = {"prefix": normalized_prefix}
+        older_season_selection = None
         if override_policy_holds:
             manifest_kwargs["manual_override_prefix"] = normalized_prefix
+        elif override_older_seasons:
+            older_season_selection = older_season_override_selection(
+                project_candidates(
+                    connection,
+                    refreshed_config,
+                    prefixes=[normalized_prefix],
+                ),
+                normalized_prefix,
+            )
+            if not older_season_selection.available:
+                raise HTTPException(
+                    status_code=409,
+                    detail="No safe older-season candidates remain for this show.",
+                )
+            manifest_kwargs["older_season_override"] = older_season_selection
         manifest, manifest_path = create_folder_manifest(connection, refreshed_config, **manifest_kwargs)
         if not manifest["items"]:
+            if older_season_selection is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "The safe older-season selection changed before it could be queued. "
+                        "Reload the show and review it again."
+                    ),
+                )
             lifecycle_decisions = encode_candidate_decisions(
                 connection,
                 refreshed_config,
@@ -465,9 +503,24 @@ def queue_folder_encode_action(
             )
     return {
         "ok": True,
-        "message": "Queued the eligible folder encode.",
+        "message": (
+            "Queued the older seasons."
+            if older_season_selection is not None
+            else "Queued the eligible folder encode."
+        ),
         "job": queue_job,
-        "policy_holds_overridden": override_policy_holds,
+        "policy_holds_overridden": bool(
+            override_policy_holds
+            or (
+                older_season_selection is not None
+                and older_season_selection.overridden_season_prefixes
+            )
+        ),
+        "older_season_override": (
+            older_season_selection.to_payload()
+            if older_season_selection is not None
+            else None
+        ),
     }
 
 

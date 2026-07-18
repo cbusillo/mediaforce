@@ -86,6 +86,23 @@ export interface LifecycleState {
 	seasons: SeasonLifecycleState[];
 }
 
+export interface OlderSeasonOverridePayload {
+	schema_version: number;
+	mode: 'older_seasons';
+	available: boolean;
+	series_prefix: string;
+	latest_season_number?: number | null;
+	latest_season_label?: string | null;
+	latest_season_prefixes: string[];
+	included_season_prefixes: string[];
+	overridden_season_prefixes: string[];
+	season_count: number;
+	candidate_count: number;
+	overridden_candidate_count: number;
+	already_eligible_candidate_count: number;
+	current_size_bytes: number;
+}
+
 export type MediaScopeDomain = 'tv' | 'movie' | 'other';
 export type MediaScopeKind =
 	| 'library_root'
@@ -1069,6 +1086,7 @@ export interface FolderPayload {
 	encode_candidate_count?: number;
 	workflow_state?: FolderWorkflowState | null;
 	lifecycle?: LifecycleState | null;
+	older_season_override?: OlderSeasonOverridePayload | null;
 	movie_context?: MovieTitle | null;
 	other_context?: OtherScopeContext | null;
 }
