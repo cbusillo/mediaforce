@@ -287,7 +287,7 @@ def media_fingerprint_manifest_payload(
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     summary_payload = object_dict(summary)
     if not summary_payload:
-        return None, _unknown_decision(0.0, "Media fingerprint evidence is missing; run a scan before review.")
+        return None, _unknown_decision(0.0, "Media fingerprint evidence is missing; refresh analysis before review.")
 
     analysis = object_dict(summary_payload.get("analysis"))
     tool = object_dict(analysis.get("tool"))
@@ -298,7 +298,7 @@ def media_fingerprint_manifest_payload(
     ):
         decision = _unknown_decision(
             0.0,
-            "Media fingerprint evidence uses an unsupported analyzer version; run a new scan before review.",
+            "Media fingerprint evidence uses an unsupported analyzer version; refresh analysis before review.",
         )
     else:
         decision = classify_media_fingerprint(analysis)

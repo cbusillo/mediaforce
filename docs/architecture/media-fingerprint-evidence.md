@@ -7,10 +7,10 @@
   and low-confidence advisory gates.
 - `mediaforce/library/probe.py` records the persisted fingerprint summary during
   media probing alongside cadence evidence.
-- `mediaforce/library/scanner.py` treats missing, malformed, or old fingerprint
-  summaries as stale scan facts and records explicit unknown summaries for
-  failed probes. Failed-probe summaries carry a retry marker and never satisfy
-  the unchanged-row freshness check.
+- `mediaforce/library/scanner.py` preserves fingerprint summaries while
+  reconciling unchanged catalog rows, even when the summary is missing,
+  malformed, old, or retryable. New or content-changed files still receive the
+  existing full probe until the durable evidence worker owns refreshes.
 - `mediaforce/library/planner.py` binds persisted fingerprint facts to the
   current source fingerprint and carries the versioned envelope on manifest
   items.
@@ -36,6 +36,9 @@ The manifest envelope includes the source fingerprint, analyzer/tool version,
 policy hash, sampled ranges, aggregate measurements, audio probe facts, and the
 derived decision. A source fingerprint, analyzer, or policy change therefore
 creates a different evidence identity instead of silently reusing stale facts.
+Catalog freshness does not make stale fingerprint evidence current; malformed
+or missing summaries are projected as explicit unknown evidence at planning
+boundaries instead of forcing a catalog-wide media reread.
 
 ## Classification and gates
 

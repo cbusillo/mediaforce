@@ -80,6 +80,8 @@ Guidance:
   - `folder_ai_tuning.py`
   - `dashboard_payloads.py`
   - `settings_payloads.py`
+  - `tool_capabilities.py`
+    - explicit-lifecycle ffmpeg capability snapshots used by read-only payloads
 - `serializers.py`
   - shared API payload shaping across routes
 
@@ -159,7 +161,8 @@ Guidance:
 - `probe.py`
   - ffprobe-based media inspection and audio, subtitle, attachment track summaries
 - `scanner.py`
-  - library scan orchestration and catalog updates
+  - library inventory orchestration and catalog updates
+  - unchanged inventory rows preserve evidence without launching deep analysis
 - `media_scopes.py`
   - canonical operator grouping for TV, movie, and generic media roots
   - exact-item versus descendant matching, SQL-safe boundaries, and API scope payloads

@@ -13,14 +13,12 @@ from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items, scan_runs
 from mediaforce.core.models import ProbeSummary
 from mediaforce.library.scanner import (
-    _cadence_summary_present,
     _content_version_changed,
     _failed_probe_summary,
     _iter_media_files,
-    _media_fingerprint_present,
     scan_library,
 )
-from mediaforce.core.utils import content_version_fingerprint
+from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
 from mediaforce.web.runtime.job_runtime import _stats_payload
 
 
@@ -193,6 +191,134 @@ class ScannerRuntimeTests(unittest.TestCase):
 
         self.assertEqual(stats.discovered, 2)
         self.assertEqual(writer_errors, [])
+
+    def test_unchanged_inventory_preserves_noncurrent_evidence_without_probing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            media_root = project_root / "movies"
+            media_root.mkdir()
+            movie = media_root / "Feature.mkv"
+            movie.write_bytes(b"movie")
+            config = self._config(project_root, {"movies": media_root})
+            retryable_summary = _failed_probe_summary(RuntimeError("fixture probe failure"))
+            stale_cadence = json.loads(retryable_summary.cadence_summary_json)
+            stale_cadence.pop("retry_required", None)
+            stale_cadence["analysis"]["tool"]["version"] = "0"
+            stale_fingerprint = json.loads(retryable_summary.media_fingerprint_json)
+            stale_fingerprint.pop("retry_required", None)
+            stale_fingerprint["analysis"]["tool"]["version"] = "0"
+
+            try:
+                with open_db(config.paths.db_path) as connection:
+                    with patch("mediaforce.library.scanner.probe_media", return_value=retryable_summary):
+                        scan_library(connection, config)
+
+                    evidence_cases = (
+                        (None, None),
+                        ("not-json", "not-json"),
+                        (json.dumps(stale_cadence), json.dumps(stale_fingerprint)),
+                        (retryable_summary.cadence_summary_json, retryable_summary.media_fingerprint_json),
+                    )
+                    for cadence_summary, media_fingerprint in evidence_cases:
+                        with self.subTest(cadence_summary=cadence_summary, media_fingerprint=media_fingerprint):
+                            connection.execute(
+                                update(library_items).values(
+                                    cadence_summary_json=cadence_summary,
+                                    media_fingerprint_json=media_fingerprint,
+                                )
+                            )
+                            connection.commit()
+                            with patch(
+                                "mediaforce.library.scanner.probe_media",
+                                return_value=retryable_summary,
+                            ) as probe_mock:
+                                stats = scan_library(connection, config)
+                            row = connection.execute(select(library_items)).mappings().one()
+
+                            probe_mock.assert_not_called()
+                            self.assertEqual(stats.unchanged, 1)
+                            self.assertEqual(stats.reprobed, 0)
+                            self.assertEqual(row["cadence_summary_json"], cadence_summary)
+                            self.assertEqual(row["media_fingerprint_json"], media_fingerprint)
+            finally:
+                reset_engine_cache()
+
+    def test_mtime_only_change_preserves_evidence_without_probing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            media_root = project_root / "movies"
+            media_root.mkdir()
+            movie = media_root / "Feature.mkv"
+            movie.write_bytes(b"movie")
+            config = self._config(project_root, {"movies": media_root})
+            retryable_summary = _failed_probe_summary(RuntimeError("fixture probe failure"))
+
+            try:
+                with open_db(config.paths.db_path) as connection:
+                    with patch("mediaforce.library.scanner.probe_media", return_value=retryable_summary):
+                        scan_library(connection, config)
+                    original_row = dict(connection.execute(select(library_items)).mappings().one())
+                    original_stat = movie.stat()
+                    os.utime(
+                        movie,
+                        ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns + 1_000_000_000),
+                    )
+
+                    with patch(
+                        "mediaforce.library.scanner.probe_media",
+                        return_value=retryable_summary,
+                    ) as probe_mock:
+                        stats = scan_library(connection, config)
+                    refreshed_row = connection.execute(select(library_items)).mappings().one()
+                    expected_fingerprint = file_fingerprint(
+                        movie,
+                        movie.stat(),
+                        refreshed_row["duration_seconds"],
+                    )
+            finally:
+                reset_engine_cache()
+
+        probe_mock.assert_not_called()
+        self.assertEqual(stats.unchanged, 1)
+        self.assertEqual(stats.reprobed, 0)
+        self.assertNotEqual(refreshed_row["mtime_ns"], original_row["mtime_ns"])
+        self.assertNotEqual(refreshed_row["fingerprint"], original_row["fingerprint"])
+        self.assertEqual(
+            refreshed_row["fingerprint"],
+            expected_fingerprint,
+        )
+        self.assertEqual(refreshed_row["cadence_summary_json"], original_row["cadence_summary_json"])
+        self.assertEqual(refreshed_row["media_fingerprint_json"], original_row["media_fingerprint_json"])
+
+    def test_same_size_same_mtime_content_replacement_still_probes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            media_root = project_root / "movies"
+            media_root.mkdir()
+            movie = media_root / "Feature.mkv"
+            movie.write_bytes(b"movie")
+            config = self._config(project_root, {"movies": media_root})
+            retryable_summary = _failed_probe_summary(RuntimeError("fixture probe failure"))
+
+            try:
+                with open_db(config.paths.db_path) as connection:
+                    with patch("mediaforce.library.scanner.probe_media", return_value=retryable_summary):
+                        scan_library(connection, config)
+                    original_stat = movie.stat()
+                    movie.write_bytes(b"other")
+                    os.utime(movie, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+                    with patch(
+                        "mediaforce.library.scanner.probe_media",
+                        return_value=retryable_summary,
+                    ) as probe_mock:
+                        stats = scan_library(connection, config)
+            finally:
+                reset_engine_cache()
+
+        probe_mock.assert_called_once_with(movie)
+        self.assertEqual(stats.unchanged, 0)
+        self.assertEqual(stats.reprobed, 1)
 
     def test_media_file_prefixes_use_the_configured_root_key(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -587,30 +713,12 @@ class ScannerRuntimeTests(unittest.TestCase):
     def test_failed_probe_becomes_blocked_unknown_evidence(self) -> None:
         summary = _failed_probe_summary(RuntimeError("corrupt media"))
 
-        self.assertFalse(_cadence_summary_present(summary.cadence_summary_json))
-        self.assertFalse(_media_fingerprint_present(summary.media_fingerprint_json))
         self.assertIn('"classification":"unknown"', summary.cadence_summary_json)
         self.assertIn("corrupt media", summary.cadence_summary_json)
         self.assertIn('"retry_required":true', summary.cadence_summary_json)
         self.assertIn('"status":"unknown"', summary.media_fingerprint_json)
         self.assertIn("corrupt media", summary.media_fingerprint_json)
         self.assertIn('"retry_required":true', summary.media_fingerprint_json)
-
-    def test_empty_or_malformed_cadence_summary_requires_reprobe(self) -> None:
-        self.assertFalse(_cadence_summary_present(None))
-        self.assertFalse(_cadence_summary_present("{}"))
-        self.assertFalse(_cadence_summary_present("not-json"))
-        old_summary = json.loads(_failed_probe_summary(RuntimeError("old")).cadence_summary_json)
-        old_summary["analysis"]["tool"]["version"] = "0"
-        self.assertFalse(_cadence_summary_present(json.dumps(old_summary)))
-
-    def test_empty_or_malformed_media_fingerprint_requires_reprobe(self) -> None:
-        self.assertFalse(_media_fingerprint_present(None))
-        self.assertFalse(_media_fingerprint_present("{}"))
-        self.assertFalse(_media_fingerprint_present("not-json"))
-        old_summary = json.loads(_failed_probe_summary(RuntimeError("old")).media_fingerprint_json)
-        old_summary["analysis"]["tool"]["version"] = "0"
-        self.assertFalse(_media_fingerprint_present(json.dumps(old_summary)))
 
 
 if __name__ == "__main__":

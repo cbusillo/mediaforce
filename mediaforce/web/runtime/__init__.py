@@ -24,7 +24,7 @@ from mediaforce.web.runtime.host_runtime import default_sample_host_key, default
     host_lifecycle_start_timeout_seconds, host_lifecycle_stop_command, host_runtime_rows, \
     sample_calibration_host_statuses, sample_host_options, sample_host_options_from_statuses, \
     stop_encode_host_if_configured
-from mediaforce.web.runtime.host_status import refresh_host_status_cache, safe_collect_host_statuses
+from mediaforce.web.runtime.host_status import cached_host_statuses, refresh_host_status_cache, safe_collect_host_statuses
 from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_db, \
     calibration_job_belongs_to_current_process, expire_calibration_job, latest_scan_completed_at, \
     load_job_state, load_latest_failed_sample_job_state, load_latest_failed_target_size_job_state, \
@@ -68,6 +68,7 @@ __all__ = [
     "host_config_for_key",
     "active_scan_from_db",
     "calibration_job_belongs_to_current_process",
+    "cached_host_statuses",
     "expire_calibration_job",
     "latest_scan_completed_at",
     "load_calibration_state",

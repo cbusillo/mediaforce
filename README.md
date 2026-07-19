@@ -99,12 +99,12 @@ On macOS, Mediaforce now prefers Homebrew's `ffmpeg-full` and `ffprobe` from
 changes and normal formula upgrades. You can override either binary with
 `MEDIAFORCE_FFMPEG` or `MEDIAFORCE_FFPROBE`.
 
-The web UI also auto-starts background catalog refreshes when the full library
-view is empty or stale, and it auto-refreshes the current folder before
-showing calibration actions when that folder's scan data is stale. A full scan
-also refreshes configured Plex and TMDB metadata; provider failures leave the
-last successful metadata in place and surface a warning instead of blocking the
-catalog scan.
+Web and API reads only report persisted catalog and job state; opening or
+polling a page does not start scans, host probes, or media analysis. Save a
+library-path change in Settings or run `mediaforce scan` when inventory should
+be reconciled. A full scan also refreshes configured Plex and TMDB metadata;
+provider failures leave the last successful metadata in place and surface a
+warning instead of blocking the catalog scan.
 
 The `/folders` index can browse either season folders or whole TV series
 prefixes. Use the Scope control there when an operation should cover an entire

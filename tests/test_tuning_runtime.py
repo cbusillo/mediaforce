@@ -64,7 +64,6 @@ from mediaforce.tuning.calibration_jobs import load_latest_failed_target_size_sa
 from mediaforce.tuning.target_size_search import TargetSizeSearchError
 from mediaforce.web.app import (
     _advice_file,
-    _backfill_multimodal_review_pack,
     _build_multimodal_review_pack,
     _build_review_compare_video_from_pairs,
     _build_seed_policy_payload,
@@ -76,6 +75,7 @@ from mediaforce.web.app import (
     _calibration_file,
     _clear_folder_tuning_state,
     _folder_display_policy,
+    _request_triggers_periodic_cleanup,
     _run_periodic_cleanup,
     _review_compare_bundle_entries,
     _review_compare_pair_entries,
@@ -1210,7 +1210,7 @@ class TuningRuntimeTests(unittest.TestCase):
             self.config,
             folder_card_cache_key=lambda _config: ("empty", 0, 0),
             preview_folder_cards=lambda _config, _connection: [],
-            maybe_schedule_scan=lambda _connection, _config, prefix=None: None,
+            load_scan_status=lambda _connection, _config, prefix=None: None,
             decorate_encode_queue_for_scheduler=lambda _config, summary: summary,
             library_color_map_for_config=lambda _config: {},
         )
@@ -1227,7 +1227,7 @@ class TuningRuntimeTests(unittest.TestCase):
             self.config,
             folder_card_cache_key=lambda _config: ("one-item", 0, 0),
             preview_folder_cards=fail_preview_cards,
-            maybe_schedule_scan=lambda _connection, _config, prefix=None: None,
+            load_scan_status=lambda _connection, _config, prefix=None: None,
             decorate_encode_queue_for_scheduler=lambda _config, summary: summary,
             library_color_map_for_config=lambda _config: {},
             preview_limit=0,
@@ -1242,7 +1242,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 self.config,
                 folder_card_cache_key=lambda _config: ("empty", 0, 0),
                 preview_folder_cards=lambda _config, _connection: [],
-                maybe_schedule_scan=lambda _connection, _config, prefix=None: None,
+                load_scan_status=lambda _connection, _config, prefix=None: None,
                 decorate_encode_queue_for_scheduler=lambda _config, summary: summary,
                 library_color_map_for_config=lambda _config: {},
                 preview_limit=-1,
@@ -2122,6 +2122,12 @@ class TuningRuntimeTests(unittest.TestCase):
                 time.sleep(0.01)
 
         self.assertFalse(cleanup_lock.locked())
+
+    def test_periodic_cleanup_ignores_safe_read_methods(self) -> None:
+        self.assertFalse(_request_triggers_periodic_cleanup("GET"))
+        self.assertFalse(_request_triggers_periodic_cleanup("HEAD"))
+        self.assertFalse(_request_triggers_periodic_cleanup("OPTIONS"))
+        self.assertTrue(_request_triggers_periodic_cleanup("POST"))
 
     def test_request_note_tuning_uses_multimodal_exec_when_review_pack_present(self) -> None:
         image_path = self.root / "review-pack.png"
@@ -6418,72 +6424,6 @@ class TuningRuntimeTests(unittest.TestCase):
             public_view["audio_plan"]["summary"],
             "Primary track eac3 is planned for Opus at 224k.",
         )
-
-    def test_backfill_multimodal_review_pack_restores_legacy_advice_with_retained_clips(self) -> None:
-        prefix = "movies/The Super Mario Galaxy Movie (2026)"
-        advice_path = _advice_file(self.config, prefix)
-        advice_path.parent.mkdir(parents=True, exist_ok=True)
-        advice_path.write_text(json.dumps({"summary": "Legacy draft without review pack."}) + "\n")
-
-        sample_item = {
-            "rel_path": f"{prefix}/The.Super.Mario.Galaxy.Movie.2026.mkv",
-            "source_path": str(self.root / "galaxy-source.mkv"),
-            "source_size_bytes": 2_519_516_042,
-            "video_codec": "h264",
-            "duration_seconds": 2561.35,
-            "audio_summary": [{"codec_name": "eac3", "channels": 6, "language": "eng", "default": 1, "index": 1}],
-            "subtitle_summary": [],
-            "resolved_policy": {
-                "video": {"quality_metric": "vmaf", "target_vmaf": 85.0},
-                "audio": {"convert_to_opus_codecs": ["eac3"], "surround_5_1_opus_bitrate": "224k"},
-            },
-        }
-
-        calibration = {
-            "draft_hash": "728b984563319b8f",
-            "review_media_ready": True,
-            "policy": sample_item["resolved_policy"],
-            "source_clips": [{"path": "/review-media/legacy-run/item-00/source-01.mp4", "timestamp_seconds": 345.0}],
-            "preview_clips": [{"path": "/review-media/legacy-run/item-00/encoded-01.mp4", "timestamp_seconds": 345.0}],
-            "compare_clips": [{"path": "/review-media/legacy-run/item-00/compare-01.mkv", "timestamp_seconds": 345.0}],
-        }
-
-        with patch(
-            "mediaforce.web.app._build_multimodal_review_pack",
-            return_value={"artifacts": [{"kind": "audio_spectrogram_compare"}]},
-        ), patch(
-            "mediaforce.web.app._multimodal_review_pack_public_view",
-            return_value={
-                "artifact_count": 3,
-                "artifacts": [
-                    {"kind": "video_compare_timeline", "image_url": "/review-media/review-compare.png"},
-                    {"kind": "video_contact_sheet", "image_url": "/review-media/review-video.png"},
-                    {"kind": "audio_spectrogram_compare", "image_url": "/review-media/review-audio.png"},
-                ],
-            },
-        ):
-            merged = _backfill_multimodal_review_pack(
-                self.config,
-                prefix,
-                sample_item=sample_item,
-                calibration=calibration,
-                advice_state={"summary": "Legacy draft without review pack."},
-            )
-
-        assert merged is not None
-        self.assertEqual(merged["summary"], "Legacy draft without review pack.")
-        pack = merged.get("multimodal_review_pack")
-        assert isinstance(pack, dict)
-        artifact_kinds = [artifact["kind"] for artifact in pack["artifacts"]]
-        self.assertIn("video_contact_sheet", artifact_kinds)
-        self.assertIn("video_compare_timeline", artifact_kinds)
-        self.assertIn("audio_spectrogram_compare", artifact_kinds)
-        calibration_advice = calibration.get("advice")
-        assert isinstance(calibration_advice, dict)
-        self.assertEqual(calibration_advice.get("multimodal_review_pack"), pack)
-        persisted_advice = json.loads(advice_path.read_text())
-        self.assertEqual(persisted_advice["summary"], "Legacy draft without review pack.")
-        self.assertEqual(persisted_advice["multimodal_review_pack"], pack)
 
     def test_build_multimodal_review_pack_includes_compare_timelines_and_moment_signals(self) -> None:
         sample_item = {

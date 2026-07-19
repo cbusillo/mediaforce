@@ -267,7 +267,7 @@ def maybe_schedule_scan(
         return job
     if not force and not scan_is_stale(connection, config, prefix, deps):
         return job
-    if job and job.get("status") == "failed":
+    if not force and job and job.get("status") == "failed":
         finished_at = deps.parse_iso(job.get("finished_at") or job.get("started_at"))
         interrupted_restart = str(job.get("error") or "") == deps.scan_interrupted_error
         if not interrupted_restart and finished_at and datetime.now(tz=UTC) - finished_at < deps.scan_retry_cooldown:
@@ -297,6 +297,22 @@ def maybe_schedule_scan(
     )
     thread.start()
     return job_payload
+
+
+def load_scan_status(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str | None,
+        deps: JobRuntimeDeps,
+) -> dict[str, Any] | None:
+    active_scan = active_scan_from_db(connection, config, prefix, deps, repair_stale=False)
+    if active_scan is not None:
+        return active_scan
+    if prefix is not None:
+        full_job = _scan_job_snapshot(config, None, deps)
+        if full_job and full_job.get("status") in {"queued", "running"}:
+            return full_job
+    return _scan_job_snapshot(config, prefix, deps)
 
 
 def run_scan_job(
@@ -541,6 +557,8 @@ def active_scan_from_db(
         config: MediaforceConfig,
         prefix: str | None,
         deps: JobRuntimeDeps,
+        *,
+        repair_stale: bool = True,
 ) -> dict[str, Any] | None:
     rows = connection.execute(
         select(
@@ -567,7 +585,15 @@ def active_scan_from_db(
         job_prefix = None if scope in {"full", "unknown"} else str(matched_prefix)
         job = deps.load_scan_job_state(config, job_prefix)
         if job and job.get("status") in {"queued", "running"} and not deps.scan_process_is_alive(job.get("owner_pid")):
-            job = _expire_scan_job(config, job_prefix, job, deps)
+            job = (
+                _expire_scan_job(config, job_prefix, job, deps)
+                if repair_stale
+                else _interrupted_scan_job(
+                    job,
+                    deps,
+                    finished_at=job.get("finished_at") or job.get("started_at") or job.get("created_at"),
+                )
+            )
 
         if deps.scan_process_is_alive(row["owner_pid"]):
             return {
@@ -596,7 +622,7 @@ def active_scan_from_db(
                 "stats": job.get("stats"),
             }
 
-        if job is not None:
+        if job is not None and repair_stale:
             _expire_scan_run(connection, str(row["scan_id"]))
     return None
 
@@ -695,14 +721,40 @@ def _expire_scan_job(
         job: dict[str, Any],
         deps: JobRuntimeDeps,
 ) -> dict[str, Any]:
-    expired = {
-        **job,
-        "status": "failed",
-        "finished_at": deps.now_iso(),
-        "error": deps.scan_interrupted_error,
-    }
+    expired = _interrupted_scan_job(job, deps, finished_at=deps.now_iso())
     deps.save_scan_job_state(config, prefix, expired)
     return expired
+
+
+def _scan_job_snapshot(
+        config: MediaforceConfig,
+        prefix: str | None,
+        deps: JobRuntimeDeps,
+) -> dict[str, Any] | None:
+    job = deps.load_scan_job_state(config, prefix)
+    if not job:
+        return None
+    if job.get("status") in {"queued", "running"} and not deps.scan_process_is_alive(job.get("owner_pid")):
+        return _interrupted_scan_job(
+            job,
+            deps,
+            finished_at=job.get("finished_at") or job.get("started_at") or job.get("created_at"),
+        )
+    return job
+
+
+def _interrupted_scan_job(
+        job: dict[str, Any],
+        deps: JobRuntimeDeps,
+        *,
+        finished_at: Any,
+) -> dict[str, Any]:
+    return {
+        **job,
+        "status": "failed",
+        "finished_at": finished_at,
+        "error": deps.scan_interrupted_error,
+    }
 
 
 def _now_iso() -> str:

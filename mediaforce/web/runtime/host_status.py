@@ -20,20 +20,7 @@ def collect_host_statuses_with_fallback(config: MediaforceConfig) -> list[HostSt
     try:
         return collect_host_statuses(config)
     except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
-        return [
-            HostStatus(
-                key="host-status-error",
-                label="Host status unavailable",
-                mode="ssh",
-                priority=0,
-                capabilities=[],
-                available=False,
-                message="Host checks could not load with the current runtime settings.",
-                missing_paths=[],
-                issues=["Review the runtime settings values and save the page again."],
-                detail=str(exc),
-            )
-        ]
+        return _host_status_error(str(exc))
 
 
 def refresh_host_status_cache(config: MediaforceConfig) -> list[HostStatus]:
@@ -69,6 +56,17 @@ def safe_collect_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
     if _host_status_config_is_malformed(config):
         return collect_host_statuses_with_fallback(config)
     _schedule_host_status_refresh(config)
+    return _fallback_host_statuses(config)
+
+
+def cached_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
+    _complete_host_status_refresh_if_ready()
+    cache_key = _host_status_cache_key(config)
+    with _HOST_STATUS_CACHE_LOCK:
+        if _HOST_STATUS_CACHE_KEY == cache_key and _HOST_STATUS_CACHE_VALUE:
+            return list(_HOST_STATUS_CACHE_VALUE)
+    if _host_status_config_is_malformed(config):
+        return _host_status_error(None)
     return _fallback_host_statuses(config)
 
 
@@ -121,6 +119,23 @@ def _fallback_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
 
 def _host_status_config_is_malformed(config: MediaforceConfig) -> bool:
     return any(not isinstance(host, dict) for host in config.remote_hosts)
+
+
+def _host_status_error(detail: str | None) -> list[HostStatus]:
+    return [
+        HostStatus(
+            key="host-status-error",
+            label="Host status unavailable",
+            mode="ssh",
+            priority=0,
+            capabilities=[],
+            available=False,
+            message="Host checks could not load with the current runtime settings.",
+            missing_paths=[],
+            issues=["Review the runtime settings values and save the page again."],
+            detail=detail,
+        )
+    ]
 
 
 def _complete_host_status_refresh_if_ready() -> None:

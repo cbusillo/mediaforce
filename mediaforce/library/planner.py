@@ -86,8 +86,8 @@ def build_manifest_item(row: dict[str, Any], config: MediaforceConfig) -> dict[s
     subtitle_summary = json.loads(row["subtitle_summary_json"])
     attachment_summary_json = row.get("attachment_summary_json")
     attachment_summary = json.loads(attachment_summary_json) if attachment_summary_json else None
-    cadence_summary = json.loads(row["cadence_summary_json"]) if row.get("cadence_summary_json") else None
-    media_fingerprint = json.loads(row["media_fingerprint_json"]) if row.get("media_fingerprint_json") else None
+    cadence_summary = _evidence_summary(row.get("cadence_summary_json"))
+    media_fingerprint = _evidence_summary(row.get("media_fingerprint_json"))
     source_id = stable_source_id(row)
     cadence_evidence, cadence_decision = cadence_manifest_payload(
         cadence_summary,
@@ -149,3 +149,13 @@ def build_manifest_item(row: dict[str, Any], config: MediaforceConfig) -> dict[s
         prefer_persisted=False,
     ).to_payload()
     return item
+
+
+def _evidence_summary(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None

@@ -1,5 +1,4 @@
 import json
-import subprocess
 import hashlib
 import re
 from decimal import Decimal, ROUND_HALF_UP
@@ -9,7 +8,6 @@ from typing import Any
 from mediaforce.advisor import apply_seed_policy, request_operator_note_parse, request_run_verdict, request_seed_policy
 from mediaforce.advising.policy import has_nonpositive_video_budget, merge_policy_fragments, policy_key_paths
 from mediaforce.advising.routing import AdvisorRouting, advisor_routing_from_config
-from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.type_defs import JSONValue, float_value, int_value, object_dict, object_list
@@ -32,6 +30,7 @@ from mediaforce.web.runtime.folder_tuning_helpers import (
     recent_tuning_sessions,
     size_budget_sample_analysis,
 )
+from mediaforce.web.runtime.tool_capabilities import metric_support
 
 MIN_RECOMMENDED_SAVINGS_BYTES = 100 * 1024 * 1024
 CALIBRATION_REVIEW_FIELDS = {
@@ -1085,20 +1084,6 @@ def record_run_verdict(
     if verdict.raw:
         verdict_payload["raw"] = verdict.raw
     merge_advice_state(prefix, {"run_verdict": verdict_payload})
-
-
-def metric_support() -> dict[str, bool]:
-    try:
-        result = subprocess.run([ffmpeg_binary(), "-hide_banner", "-filters"], check=True, capture_output=True, text=True)
-    except (OSError, subprocess.SubprocessError):
-        return {"vmaf": False, "xpsnr": False, "ssim": False, "psnr": False}
-    output = result.stdout.lower()
-    return {
-        "vmaf": "libvmaf" in output,
-        "xpsnr": "xpsnr" in output,
-        "ssim": "ssim" in output,
-        "psnr": " psnr " in output or "\n ts psnr" in output,
-    }
 
 
 def metric_status_copy(metric_support_payload: dict[str, bool]) -> str:

@@ -3680,6 +3680,38 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(job["status"], "queued")
         fake_thread.start.assert_called_once()
 
+    def test_forced_scan_bypasses_recent_failure_cooldown(self) -> None:
+        now = web_app._now_iso()
+        web_app._save_scan_job_state(
+            self.config,
+            None,
+            {
+                "job_id": "recent-failure",
+                "status": "failed",
+                "scope": "full",
+                "prefix": None,
+                "owner_pid": os.getpid(),
+                "created_at": now,
+                "started_at": now,
+                "finished_at": now,
+                "error": "fixture failure",
+                "stats": None,
+            },
+        )
+        fake_thread = Mock()
+        with open_db(self.config.paths.db_path) as connection, patch.object(
+            web_app.threading,
+            "Thread",
+            return_value=fake_thread,
+        ):
+            job = web_app._maybe_schedule_scan(connection, self.config, prefix=None, force=True)
+
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job["status"], "queued")
+        self.assertNotEqual(job["job_id"], "recent-failure")
+        fake_thread.start.assert_called_once()
+
     def test_scheduler_uses_host_local_time_for_windows(self) -> None:
         policy = web_app._normalize_encode_queue_scheduler(
             {"mode": "night", "start_hour": 22, "end_hour": 6, "timezone": "host_local"}
@@ -12831,7 +12863,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         )
 
     def test_app_lifespan_does_not_wait_for_transient_cleanup(self) -> None:
-        cleanup_threads: list[Any] = []
+        startup_threads: list[Any] = []
 
         class FakeCleanupThread:
             def __init__(
@@ -12850,12 +12882,15 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 self.daemon = daemon
 
             def start(self) -> None:
-                cleanup_threads.append(self)
+                startup_threads.append(self)
 
         cleanup_mock = Mock(side_effect=AssertionError("cleanup should not run synchronously"))
+        metric_refresh_mock = Mock(side_effect=AssertionError("metric refresh should not run synchronously"))
         safe_collect_mock = Mock(return_value=[])
         with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
                 "mediaforce.web.app.purge_transient_artifacts", cleanup_mock
+        ), patch(
+                "mediaforce.web.app._refresh_metric_support", metric_refresh_mock
         ), patch("mediaforce.web.app.threading.Thread", FakeCleanupThread), patch(
                 "mediaforce.web.app._start_calibration_queue_worker"
         ), patch("mediaforce.web.app._start_encode_queue_worker"), patch(
@@ -12870,14 +12905,20 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             asyncio.run(exercise_lifespan())
 
         cleanup_mock.assert_not_called()
+        metric_refresh_mock.assert_not_called()
         safe_collect_mock.assert_called_once_with(self.config)
-        self.assertEqual(len(cleanup_threads), 1)
-        cleanup_thread = cleanup_threads[0]
+        self.assertEqual(len(startup_threads), 2)
+        threads_by_name = {thread.name: thread for thread in startup_threads}
+        cleanup_thread = threads_by_name["transient-cleanup"]
         self.assertIs(cleanup_thread.target, cleanup_mock)
         self.assertEqual(cleanup_thread.args, (self.config,))
         self.assertEqual(cleanup_thread.kwargs, {"force": True})
-        self.assertEqual(cleanup_thread.name, "transient-cleanup")
         self.assertTrue(cleanup_thread.daemon)
+        metric_thread = threads_by_name["metric-support-refresh"]
+        self.assertIs(metric_thread.target, metric_refresh_mock)
+        self.assertEqual(metric_thread.args, ())
+        self.assertEqual(metric_thread.kwargs, {})
+        self.assertTrue(metric_thread.daemon)
 
     def test_folder_api_route_returns_payload_for_seeded_prefix(self) -> None:
         source_path = self._create_source_file("episode-folder.mkv")
@@ -12946,8 +12987,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             for route in app.router.routes
             if getattr(route, "path", "") == "/api/folders/{prefix:path}"
         )
-        with patch("mediaforce.web.app._maybe_schedule_scan", return_value=None), patch(
-                "mediaforce.web.app._sample_calibration_host_statuses", return_value=[]
+        with patch("mediaforce.web.app._load_scan_status", return_value=None), patch(
+                "mediaforce.web.app._cached_sample_calibration_host_statuses", return_value=[]
         ):
             response = folder_endpoint("tv/show")
         payload = json.loads(response.body)
@@ -13025,12 +13066,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             for route in app.router.routes
             if getattr(route, "path", "") == "/api/folders/{prefix:path}"
         )
-        with patch("mediaforce.web.app._maybe_schedule_scan", return_value=None), patch(
-                "mediaforce.web.app._sample_calibration_host_statuses", return_value=[]
+        with patch("mediaforce.web.app._load_scan_status", return_value=None), patch(
+                "mediaforce.web.app._cached_sample_calibration_host_statuses", return_value=[]
         ), patch("mediaforce.web.app._load_advice_state", return_value=advice_state), patch(
             "mediaforce.web.app._load_calibration_state", return_value=calibration
-        ), patch(
-            "mediaforce.web.app._backfill_multimodal_review_pack", return_value=advice_state
         ), patch("mediaforce.web.app._preview_hotspots", return_value=[]), patch(
             "mediaforce.web.app.describe_item_plan", return_value={}
         ):
@@ -13105,8 +13144,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             for route in app.router.routes
             if getattr(route, "path", "") == "/api/folders/{prefix:path}"
         )
-        with patch("mediaforce.web.app._maybe_schedule_scan", return_value=None), patch(
-                "mediaforce.web.app._sample_calibration_host_statuses", return_value=[]
+        with patch("mediaforce.web.app._load_scan_status", return_value=None), patch(
+                "mediaforce.web.app._cached_sample_calibration_host_statuses", return_value=[]
         ):
             response = folder_endpoint("tv/House/Season 5")
         payload = json.loads(response.body)
@@ -15284,7 +15323,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "tv/show",
             load_job_state=web_app._load_overlapping_job_state,
             load_retryable_sample_job_state=web_app._load_retryable_sample_job_state,
-            load_scan_job_state=web_app._load_scan_job_state,
+            load_scan_status=web_app._load_scan_status,
             load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
         )
 
@@ -15316,7 +15355,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "tv/show",
             load_job_state=web_app._load_overlapping_job_state,
             load_retryable_sample_job_state=web_app._load_retryable_sample_job_state,
-            load_scan_job_state=web_app._load_scan_job_state,
+            load_scan_status=web_app._load_scan_status,
             load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
         )
 
@@ -15419,7 +15458,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "tv/show",
             load_job_state=web_app._load_job_state,
             load_retryable_sample_job_state=web_app._load_retryable_sample_job_state,
-            load_scan_job_state=web_app._load_scan_job_state,
+            load_scan_status=web_app._load_scan_status,
             load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
         )
 
@@ -15445,7 +15484,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "other/Foo.mkv",
             load_job_state=lambda _connection, _config, _prefix: None,
             load_retryable_sample_job_state=lambda _connection, _config, _prefix: None,
-            load_scan_job_state=lambda _config, _prefix: None,
+            load_scan_status=lambda _connection, _config, _prefix: None,
             load_active_encode_job_for_prefix=lambda _connection, _prefix: None,
         )
 
