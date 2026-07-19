@@ -8,6 +8,7 @@ from mediaforce.core.evidence import stable_source_id
 from mediaforce.core.type_defs import float_value, object_dict
 from mediaforce.encoding.cadence import cadence_manifest_payload
 from mediaforce.encoding.fingerprint import media_fingerprint_manifest_payload
+from mediaforce.library.evidence_state import parse_evidence_summary
 from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.tuning.stream_budget import resolve_stream_budget_ledger
 
@@ -152,10 +153,4 @@ def build_manifest_item(row: dict[str, Any], config: MediaforceConfig) -> dict[s
 
 
 def _evidence_summary(value: object) -> dict[str, Any] | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        payload = json.loads(value)
-    except json.JSONDecodeError:
-        return None
-    return payload if isinstance(payload, dict) else None
+    return parse_evidence_summary(value)

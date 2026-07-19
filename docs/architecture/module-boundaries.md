@@ -163,6 +163,11 @@ Guidance:
 - `scanner.py`
   - library inventory orchestration and catalog updates
   - unchanged inventory rows preserve evidence without launching deep analysis
+- `evidence_state.py`
+  - rebuildable per-item/per-kind projection of canonical cadence and
+    fingerprint JSON
+  - compact freshness reasons, source/analyzer/policy identities, retry timing,
+    and media-free status/count queries
 - `media_scopes.py`
   - canonical operator grouping for TV, movie, and generic media roots
   - exact-item versus descendant matching, SQL-safe boundaries, and API scope payloads

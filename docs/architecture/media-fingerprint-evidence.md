@@ -11,6 +11,9 @@
   reconciling unchanged catalog rows, even when the summary is missing,
   malformed, old, or retryable. New or content-changed files still receive the
   existing full probe until the durable evidence worker owns refreshes.
+- `mediaforce/library/evidence_state.py` projects canonical fingerprint JSON
+  into independently queryable lifecycle state and keeps policy-only
+  reclassification separate from media analysis.
 - `mediaforce/library/planner.py` binds persisted fingerprint facts to the
   current source fingerprint and carries the versioned envelope on manifest
   items.

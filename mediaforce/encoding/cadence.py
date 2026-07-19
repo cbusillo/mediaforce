@@ -13,6 +13,7 @@ from mediaforce.core.evidence import build_evidence_envelope, evidence_envelope_
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 
 CADENCE_SCHEMA_VERSION = 1
+CADENCE_EVIDENCE_KIND = "cadence_analysis"
 CADENCE_TOOL_NAME = "mediaforce.ffmpeg_idet"
 CADENCE_TOOL_VERSION = "1"
 DEFAULT_IDET_MAX_FRAMES = 600
@@ -328,7 +329,7 @@ def cadence_manifest_payload(
         for item in (object_dict(value) for value in object_list(analysis.get("ranges")))
     ]
     envelope = build_evidence_envelope(
-        kind="cadence_analysis",
+        kind=CADENCE_EVIDENCE_KIND,
         sources=[{"source_id": source_id, "fingerprint": source_fingerprint}],
         policy_hash=stable_policy_hash(cadence_policy_snapshot()),
         tool_name=str(tool.get("name") or CADENCE_TOOL_NAME),

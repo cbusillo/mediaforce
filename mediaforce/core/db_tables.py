@@ -76,6 +76,45 @@ library_items = Table(
 Index("idx_library_items_rel_path", library_items.c.rel_path)
 Index("idx_library_items_status_score", library_items.c.status, library_items.c.priority_score.desc())
 
+library_item_evidence_state = Table(
+    "library_item_evidence_state",
+    metadata,
+    Column(
+        "library_item_id",
+        Integer,
+        ForeignKey("library_items.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("evidence_kind", Text, primary_key=True),
+    Column("state", Text, nullable=False),
+    Column("reason", Text),
+    Column("summary_sha256", Text),
+    Column("source_fingerprint", Text),
+    Column("summary_schema_version", Integer),
+    Column("analyzer_name", Text),
+    Column("analyzer_version", Text),
+    Column("analyzer_runtime_version", Text),
+    Column("policy_hash", Text, nullable=False),
+    Column("decision_status", Text),
+    Column("attempt_count", Integer, nullable=False, server_default="0"),
+    Column("retry_not_before", Text),
+    Column("last_attempt_at", Text),
+    Column("last_error", Text),
+    Column("updated_at", Text, nullable=False),
+)
+Index(
+    "idx_library_item_evidence_state_kind_state",
+    library_item_evidence_state.c.evidence_kind,
+    library_item_evidence_state.c.state,
+    library_item_evidence_state.c.reason,
+)
+Index(
+    "idx_library_item_evidence_state_work_ready",
+    library_item_evidence_state.c.state,
+    library_item_evidence_state.c.retry_not_before,
+    library_item_evidence_state.c.evidence_kind,
+)
+
 plex_item_metadata = Table(
     "plex_item_metadata",
     metadata,

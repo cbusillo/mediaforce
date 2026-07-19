@@ -1,9 +1,12 @@
+import json
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+# noinspection PyPackageRequirements
+from alembic import command
 from sqlalchemy import create_engine
 from sqlalchemy import inspect
 from sqlalchemy import select
@@ -14,9 +17,15 @@ from mediaforce.core.db import reset_engine_cache
 from mediaforce.core.db_tables import alembic_version
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import encode_queue_state
+from mediaforce.core.db_tables import library_item_evidence_state
+from mediaforce.core.db_tables import library_items
+from mediaforce.core.db_migrations import _alembic_config, _alembic_script_location
+from mediaforce.core.evidence import stable_policy_hash
 from mediaforce.core.type_defs import object_dict
+from mediaforce.encoding.cadence import cadence_policy_snapshot
+from mediaforce.encoding.fingerprint import media_fingerprint_policy_snapshot
 
-CURRENT_DB_REVISION = "20260712_0010"
+CURRENT_DB_REVISION = "20260719_0011"
 
 
 class DatabaseRuntimeTests(unittest.TestCase):
@@ -27,11 +36,18 @@ class DatabaseRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "library.sqlite3"
 
-            with open_db(db_path) as connection:
+            with patch("subprocess.run", side_effect=AssertionError("unexpected subprocess")), patch(
+                "subprocess.Popen",
+                side_effect=AssertionError("unexpected subprocess"),
+            ), open_db(db_path) as connection:
                 version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
                 inspector = inspect(connection)
                 table_names = inspector.get_table_names()
                 indexes = {str(index_row["name"]) for index_row in inspector.get_indexes("encode_jobs")}
+                evidence_indexes = {
+                    str(index_row["name"])
+                    for index_row in inspector.get_indexes("library_item_evidence_state")
+                }
                 library_columns = {str(column["name"]) for column in inspector.get_columns("library_items")}
 
             self.assertEqual(version, CURRENT_DB_REVISION)
@@ -45,6 +61,9 @@ class DatabaseRuntimeTests(unittest.TestCase):
             self.assertIn("plex_item_metadata", table_names)
             self.assertIn("series_metadata", table_names)
             self.assertIn("metadata_sync_state", table_names)
+            self.assertIn("library_item_evidence_state", table_names)
+            self.assertIn("idx_library_item_evidence_state_kind_state", evidence_indexes)
+            self.assertIn("idx_library_item_evidence_state_work_ready", evidence_indexes)
 
     def test_open_db_stamps_existing_legacy_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -271,6 +290,131 @@ class DatabaseRuntimeTests(unittest.TestCase):
             self.assertEqual(version, CURRENT_DB_REVISION)
             self.assertIn("metadata_sync_state", table_names)
 
+    def test_open_db_projects_existing_evidence_without_media_subprocesses(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "library.sqlite3"
+            cadence_json = json.dumps(
+                {
+                    "schema_version": 1,
+                    "probe": {
+                        "field_order": "progressive",
+                        "idet_required": False,
+                    },
+                    "analysis": {
+                        "sampled_frames": 0,
+                        "tool": {
+                            "name": "mediaforce.ffmpeg_idet",
+                            "version": "1",
+                            "ffmpeg_version": "ffmpeg fixture",
+                        }
+                    },
+                    "decision": {"status": "resolved", "classification": "progressive"},
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            fingerprint_json = '{"retry_required":true}'
+            with open_db(db_path) as connection:
+                connection.execute(
+                    library_items.insert().values(
+                        **self._library_item_values(
+                            cadence_summary_json=cadence_json,
+                            media_fingerprint_json=fingerprint_json,
+                        )
+                    )
+                )
+            reset_engine_cache()
+
+            raw_connection = sqlite3.connect(db_path)
+            try:
+                raw_connection.execute("DROP TABLE library_item_evidence_state")
+                raw_connection.execute(
+                    "UPDATE alembic_version SET version_num = ?",
+                    ("20260712_0010",),
+                )
+                raw_connection.commit()
+            finally:
+                raw_connection.close()
+
+            with patch("subprocess.run", side_effect=AssertionError("unexpected subprocess")), patch(
+                "subprocess.Popen",
+                side_effect=AssertionError("unexpected subprocess"),
+            ), open_db(db_path) as connection:
+                version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
+                state_rows = connection.execute(
+                    select(
+                        library_item_evidence_state.c.evidence_kind,
+                        library_item_evidence_state.c.state,
+                        library_item_evidence_state.c.reason,
+                        library_item_evidence_state.c.policy_hash,
+                    ).order_by(library_item_evidence_state.c.evidence_kind)
+                ).mappings().fetchall()
+                canonical = connection.execute(
+                    select(
+                        library_items.c.cadence_summary_json,
+                        library_items.c.media_fingerprint_json,
+                    )
+                ).mappings().one()
+
+            self.assertEqual(version, CURRENT_DB_REVISION)
+            self.assertEqual(
+                [(row["evidence_kind"], row["state"], row["reason"]) for row in state_rows],
+                [
+                    ("cadence_analysis", "current", None),
+                    ("media_fingerprint", "analysis_required", "retry_required"),
+                ],
+            )
+            self.assertEqual(canonical["cadence_summary_json"], cadence_json)
+            self.assertEqual(canonical["media_fingerprint_json"], fingerprint_json)
+            self.assertEqual(
+                {row["evidence_kind"]: row["policy_hash"] for row in state_rows},
+                {
+                    "cadence_analysis": stable_policy_hash(cadence_policy_snapshot()),
+                    "media_fingerprint": stable_policy_hash(media_fingerprint_policy_snapshot()),
+                },
+            )
+
+    def test_evidence_state_downgrade_preserves_canonical_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "library.sqlite3"
+            cadence_json = '{"schema_version":1}'
+            fingerprint_json = '{"schema_version":1}'
+            with open_db(db_path) as connection:
+                connection.execute(
+                    library_items.insert().values(
+                        **self._library_item_values(
+                            cadence_summary_json=cadence_json,
+                            media_fingerprint_json=fingerprint_json,
+                        )
+                    )
+                )
+            reset_engine_cache()
+
+            with _alembic_script_location() as script_location:
+                command.downgrade(
+                    _alembic_config(db_path, script_location),
+                    "20260712_0010",
+                )
+
+            raw_connection = sqlite3.connect(db_path)
+            try:
+                table_names = {
+                    str(row[0])
+                    for row in raw_connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    ).fetchall()
+                }
+                canonical = raw_connection.execute(
+                    "SELECT cadence_summary_json, media_fingerprint_json FROM library_items"
+                ).fetchone()
+                version = raw_connection.execute("SELECT version_num FROM alembic_version").fetchone()
+            finally:
+                raw_connection.close()
+
+            self.assertNotIn("library_item_evidence_state", table_names)
+            self.assertEqual(canonical, (cadence_json, fingerprint_json))
+            self.assertEqual(version, ("20260712_0010",))
+
     def test_open_db_rolls_back_on_base_exception(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "library.sqlite3"
@@ -327,6 +471,43 @@ class DatabaseRuntimeTests(unittest.TestCase):
         self.assertTrue(fake.commit_called)
         self.assertTrue(fake.close_called)
         self.assertTrue(fake.closed)
+
+    @staticmethod
+    def _library_item_values(
+            *,
+            cadence_summary_json: str | None,
+            media_fingerprint_json: str | None,
+    ) -> dict[str, object]:
+        now = "2026-07-19T12:00:00+00:00"
+        return {
+            "source_path": "/media/item.mkv",
+            "rel_path": "tv/show/item.mkv",
+            "media_root": "tv",
+            "parent_dir": "tv/show",
+            "file_name": "item.mkv",
+            "container": ".mkv",
+            "size_bytes": 1000,
+            "mtime_ns": 1,
+            "fingerprint": "file-1",
+            "duration_seconds": 60.0,
+            "video_codec": "h264",
+            "audio_track_count": 1,
+            "subtitle_track_count": 0,
+            "english_audio_count": 1,
+            "english_subtitle_count": 0,
+            "audio_summary_json": "[]",
+            "subtitle_summary_json": "[]",
+            "cadence_summary_json": cadence_summary_json,
+            "media_fingerprint_json": media_fingerprint_json,
+            "content_version_changed_at": now,
+            "content_version_fingerprint": "content-1",
+            "status": "discovered",
+            "priority_score": 0,
+            "last_scan_id": "fixture",
+            "discovered_at": now,
+            "last_seen_at": now,
+            "updated_at": now,
+        }
 
 
 if __name__ == "__main__":

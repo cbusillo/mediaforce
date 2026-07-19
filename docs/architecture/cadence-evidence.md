@@ -11,6 +11,9 @@
   unchanged catalog rows. Missing, malformed, old, or retryable cadence
   remains non-current evidence and does not make routine inventory refresh
   decode the source again.
+- `mediaforce/library/evidence_state.py` projects canonical cadence JSON into
+  independently queryable current, analysis-required, or
+  classification-required state without changing the payload.
 - `mediaforce/library/planner.py` binds persisted cadence facts to the source
   fingerprint, cadence transform policy, and versioned evidence envelope
   carried by each manifest item.
