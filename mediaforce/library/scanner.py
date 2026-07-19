@@ -18,8 +18,6 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.models import ProbeSummary
-from mediaforce.encoding.cadence import unavailable_cadence_summary
-from mediaforce.encoding.fingerprint import unavailable_media_fingerprint_summary
 from mediaforce.library.evidence_state import sync_library_item_evidence_states
 from mediaforce.library.media_scopes import logical_library_rel_path, path_matches_scope
 from mediaforce.library.planner import recommend_item
@@ -219,8 +217,6 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                 "audio_summary_json": probe.audio_summary_json,
                 "subtitle_summary_json": probe.subtitle_summary_json,
                 "attachment_summary_json": probe.attachment_summary_json,
-                "cadence_summary_json": probe.cadence_summary_json,
-                "media_fingerprint_json": probe.media_fingerprint_json,
                 "priority_score": recommendation.score,
                 "recommendation": recommendation.bucket,
                 "recommendation_reason": recommendation.reason,
@@ -259,11 +255,14 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                     )
                 )
                 stats.reprobed += 1
+            item = connection.execute(
+                select(library_items).where(library_items.c.id == library_item_id)
+            ).mappings().one()
             sync_library_item_evidence_states(
                 connection,
-                {**values, "id": library_item_id},
-                preserve_source_identity=False,
-                preserve_policy_identity=False,
+                item,
+                preserve_source_identity=row is not None,
+                preserve_policy_identity=row is not None,
                 reset_attempt_state=True,
                 updated_at=started_at,
             )
@@ -392,12 +391,7 @@ def _flush_scan_progress(
     return 0
 
 
-def _failed_probe_summary(error: Exception) -> ProbeSummary:
-    message = str(error).strip() or error.__class__.__name__
-    cadence_summary = unavailable_cadence_summary(f"Media probing failed: {message}")
-    media_fingerprint = unavailable_media_fingerprint_summary(f"Media probing failed: {message}")
-    cadence_summary["retry_required"] = True
-    media_fingerprint["retry_required"] = True
+def _failed_probe_summary(_error: Exception) -> ProbeSummary:
     return ProbeSummary(
         duration_seconds=None,
         video_codec=None,
@@ -413,9 +407,9 @@ def _failed_probe_summary(error: Exception) -> ProbeSummary:
         default_subtitle_language=None,
         audio_summary_json="[]",
         subtitle_summary_json="[]",
-        attachment_summary_json="",
-        cadence_summary_json=json.dumps(cadence_summary, separators=(",", ":"), sort_keys=True),
-        media_fingerprint_json=json.dumps(media_fingerprint, separators=(",", ":"), sort_keys=True),
+        attachment_summary_json="[]",
+        cadence_summary_json=None,
+        media_fingerprint_json=None,
     )
 
 

@@ -10,6 +10,7 @@ from typing import Any, Literal, Mapping
 
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.evidence import build_evidence_envelope, evidence_envelope_valid, stable_policy_hash
+from mediaforce.core.process_control import ManagedProcessController, run_command
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 
 CADENCE_SCHEMA_VERSION = 1
@@ -83,6 +84,7 @@ def analyze_cadence(
         max_frames: int = DEFAULT_IDET_MAX_FRAMES,
         range_count: int = DEFAULT_IDET_RANGE_COUNT,
         timeout_seconds: float = 60.0,
+        process_controller: ManagedProcessController | None = None,
 ) -> dict[str, Any]:
     stream = object_dict(video_stream)
     probe = {
@@ -111,12 +113,15 @@ def analyze_cadence(
     aggregate = _empty_counts()
     ranges: list[dict[str, Any]] = []
     for start_seconds in starts:
+        if process_controller is not None:
+            process_controller.throw_if_cancelled()
         result = _run_idet_range(
             path,
             ffmpeg_name=ffmpeg_name,
             start_seconds=start_seconds,
             frame_limit=frames_per_range,
             timeout_seconds=timeout_seconds,
+            process_controller=process_controller,
         )
         counts = parse_idet_output(result["stderr"]) if result["status"] == "measured" else _empty_counts()
         _merge_counts(aggregate, counts)
@@ -353,6 +358,18 @@ def cadence_manifest_payload(
     return envelope, decision
 
 
+def reclassify_cadence_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
+    payload = copy.deepcopy(object_dict(summary))
+    probe = object_dict(payload.get("probe"))
+    analysis = object_dict(payload.get("analysis"))
+    payload["decision"] = classify_cadence(
+        probe=probe,
+        analysis=analysis,
+        coverage=_analysis_coverage(analysis),
+    )
+    return payload
+
+
 def cadence_filter(
         decision: Mapping[str, Any] | None,
         evidence: Mapping[str, Any] | None,
@@ -457,6 +474,7 @@ def _run_idet_range(
         start_seconds: float,
         frame_limit: int,
         timeout_seconds: float,
+        process_controller: ManagedProcessController | None = None,
 ) -> dict[str, str]:
     command = [
         ffmpeg_name,
@@ -481,9 +499,9 @@ def _run_idet_range(
         "-",
     ]
     try:
-        result = subprocess.run(
+        result = run_command(
             command,
-            check=False,
+            process_controller=process_controller,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,

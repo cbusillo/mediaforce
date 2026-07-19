@@ -35,6 +35,10 @@ class ManagedProcessController:
             self._cancel_requested = True
             self._terminate_locked()
 
+    def terminate(self) -> None:
+        with self._lock:
+            self._terminate_locked()
+
     def reset(self) -> None:
         with self._lock:
             self._cancel_requested = False
@@ -97,9 +101,18 @@ def run_command(
         capture_output: bool = True,
         text: bool = True,
         env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        check: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     if process_controller is None:
-        return subprocess.run(cmd, capture_output=capture_output, text=text, env=env)
+        return subprocess.run(
+            cmd,
+            capture_output=capture_output,
+            text=text,
+            env=env,
+            timeout=timeout,
+            check=check,
+        )
 
     process_controller.throw_if_cancelled()
     stdout_pipe = subprocess.PIPE if capture_output else None
@@ -114,9 +127,25 @@ def run_command(
     )
     process_controller.attach(process, terminate_process_group=True)
     try:
-        stdout, stderr = process.communicate()
+        try:
+            if timeout is None:
+                stdout, stderr = process.communicate()
+            else:
+                stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process_controller.terminate()
+            process.communicate()
+            raise
     finally:
         process_controller.clear(process)
     if process_controller.cancelled:
         raise ProcessCancelledError("Operation was cancelled.")
-    return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+    completed = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+    if check and completed.returncode:
+        raise subprocess.CalledProcessError(
+            completed.returncode,
+            cmd,
+            output=stdout,
+            stderr=stderr,
+        )
+    return completed

@@ -241,6 +241,38 @@ def sync_library_item_evidence_states(
     return projections
 
 
+def sync_library_item_evidence_state(
+        connection: DBClient,
+        item: Mapping[str, Any],
+        evidence_kind: EvidenceKind,
+        *,
+        preserve_source_identity: bool = True,
+        preserve_policy_identity: bool = True,
+        reset_attempt_state: bool = False,
+        updated_at: str | None = None,
+) -> EvidenceStateProjection:
+    library_item_id = int(item["id"])
+    previous_state = None
+    if preserve_source_identity or preserve_policy_identity:
+        previous_state = load_library_item_evidence_states(connection, library_item_id).get(evidence_kind)
+    projection = project_evidence_state(
+        evidence_kind,
+        item.get(_evidence_spec(evidence_kind).column_name),
+        source_fingerprint=_item_source_fingerprint(item),
+        previous_state=previous_state,
+        preserve_source_identity=preserve_source_identity,
+        preserve_policy_identity=preserve_policy_identity,
+        updated_at=updated_at,
+    )
+    _upsert_projections(
+        connection,
+        library_item_id,
+        [projection],
+        reset_attempt_state=reset_attempt_state,
+    )
+    return projection
+
+
 def rebuild_library_item_evidence_states(
         connection: DBClient,
         *,

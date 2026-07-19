@@ -100,6 +100,14 @@ library_item_evidence_state = Table(
     Column("retry_not_before", Text),
     Column("last_attempt_at", Text),
     Column("last_error", Text),
+    Column("work_batch_id", Text),
+    Column("work_status", Text),
+    Column("work_source_fingerprint", Text),
+    Column("leased_at", Text),
+    Column("lease_expires_at", Text),
+    Column("heartbeat_at", Text),
+    Column("worker_id", Text),
+    Column("process_pid", Integer),
     Column("updated_at", Text, nullable=False),
 )
 Index(
@@ -113,6 +121,34 @@ Index(
     library_item_evidence_state.c.state,
     library_item_evidence_state.c.retry_not_before,
     library_item_evidence_state.c.evidence_kind,
+)
+Index(
+    "idx_library_item_evidence_state_work_claim",
+    library_item_evidence_state.c.work_batch_id,
+    library_item_evidence_state.c.work_status,
+    library_item_evidence_state.c.retry_not_before,
+    library_item_evidence_state.c.evidence_kind,
+    library_item_evidence_state.c.library_item_id,
+)
+
+evidence_queue_state = Table(
+    "evidence_queue_state",
+    metadata,
+    Column("queue_name", Text, primary_key=True),
+    Column("batch_id", Text),
+    Column("status", Text, nullable=False, server_default="idle"),
+    Column("scope_json", Text),
+    Column("evidence_kinds_json", Text, nullable=False, server_default="[]"),
+    Column("is_paused", Integer, nullable=False, server_default="0"),
+    Column("cancel_requested", Integer, nullable=False, server_default="0"),
+    Column("item_count", Integer, nullable=False, server_default="0"),
+    Column("completed_count", Integer, nullable=False, server_default="0"),
+    Column("failed_count", Integer, nullable=False, server_default="0"),
+    Column("cancelled_count", Integer, nullable=False, server_default="0"),
+    Column("created_at", Text),
+    Column("started_at", Text),
+    Column("finished_at", Text),
+    Column("updated_at", Text, nullable=False),
 )
 
 plex_item_metadata = Table(

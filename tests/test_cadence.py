@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 
 from mediaforce.core.evidence import build_evidence_envelope
 from mediaforce.encoding.cadence import (
+    CADENCE_EVIDENCE_KIND,
     CadenceResolutionError,
     analyze_cadence,
     cadence_filter,
@@ -16,7 +17,7 @@ from mediaforce.encoding.commands import build_ffmpeg_command
 from mediaforce.encoding.quality import QualitySearchResult
 from mediaforce.encoding.quality_search import search_quality
 from mediaforce.encoding.video_filters import build_video_filter
-from mediaforce.library.probe import probe_media
+from mediaforce.library.probe import probe_evidence, probe_media
 
 
 class CadenceTests(unittest.TestCase):
@@ -58,7 +59,7 @@ class CadenceTests(unittest.TestCase):
         self.assertEqual(summary["decision"]["classification"], "progressive")
         self.assertEqual(summary["decision"]["transform"], "none")
 
-    def test_probe_summary_persists_frame_rate_and_field_order_evidence(self) -> None:
+    def test_evidence_probe_persists_frame_rate_and_field_order_evidence(self) -> None:
         payload = {
             "format": {"duration": "2700.0"},
             "streams": [
@@ -80,14 +81,33 @@ class CadenceTests(unittest.TestCase):
             "mediaforce.library.probe.subprocess.run",
             return_value=Mock(stdout=json.dumps(payload)),
         ) as run_probe:
-            summary = probe_media(Path("/tmp/progressive.mkv"))
+            summary = probe_evidence(Path("/tmp/progressive.mkv"), CADENCE_EVIDENCE_KIND)
 
         ffprobe_calls = [call for call in run_probe.call_args_list if call.args[0][0] == "ffprobe"]
         self.assertEqual(len(ffprobe_calls), 1)
-        cadence = json.loads(summary.cadence_summary_json)
-        self.assertEqual(cadence["probe"]["field_order"], "progressive")
-        self.assertEqual(cadence["probe"]["average_frame_rate"], "24000/1001")
-        self.assertEqual(cadence["probe"]["time_base"], "1/90000")
+        self.assertEqual(summary["probe"]["field_order"], "progressive")
+        self.assertEqual(summary["probe"]["average_frame_rate"], "24000/1001")
+        self.assertEqual(summary["probe"]["time_base"], "1/90000")
+
+    def test_inventory_probe_never_runs_deep_evidence_analysis(self) -> None:
+        payload = {
+            "format": {"duration": "120.0"},
+            "streams": [{"index": 0, "codec_type": "video", "codec_name": "h264"}],
+        }
+        with patch(
+            "mediaforce.library.probe.subprocess.run",
+            return_value=Mock(stdout=json.dumps(payload)),
+        ), patch(
+            "mediaforce.library.probe.analyze_cadence",
+            side_effect=AssertionError("unexpected cadence analysis"),
+        ), patch(
+            "mediaforce.library.probe.analyze_media_fingerprint",
+            side_effect=AssertionError("unexpected fingerprint analysis"),
+        ):
+            summary = probe_media(Path("/tmp/inventory-only.mkv"))
+
+        self.assertIsNone(summary.cadence_summary_json)
+        self.assertIsNone(summary.media_fingerprint_json)
 
     def test_probe_summary_persists_stream_bytes_and_attachments(self) -> None:
         payload = {
