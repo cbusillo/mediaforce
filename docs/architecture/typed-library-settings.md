@@ -87,3 +87,14 @@ a catalog scan. Label, color, ordering, profile, and policy changes do not alter
 filesystem membership. Metadata configuration changes continue through the
 metadata refresh performed by the scan runtime. Unrelated host, schedule,
 working-folder, and advanced runtime settings survive typed-library saves.
+
+Full scans reconcile each configured root independently. Mediaforce only marks
+files missing inside roots that were completely enumerated. If a configured
+root is absent, unreadable, only partially readable, or unexpectedly returns no
+media after previously containing active items, cached catalog state is
+preserved. The same circuit breaker applies when a previously populated root
+returns 20% or less of at least 25 active items. The scan reports an operator
+warning without exposing the local path. Disabling or removing a library in
+Settings remains the explicit action that accepts its disappearance and marks
+its former rows missing. Prefix scans only access roots named by their logical
+scope.

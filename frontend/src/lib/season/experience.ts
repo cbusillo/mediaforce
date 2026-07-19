@@ -1,4 +1,5 @@
 import type {
+	DashboardScanJob,
 	DashboardSummaryPayload,
 	EncodeQueueJob,
 	FolderCard,
@@ -44,6 +45,11 @@ export interface SeasonIdentity {
 	show: string;
 	season: string;
 	showPrefix: string;
+}
+
+export interface CatalogWarningNotice {
+	title: string;
+	detail: string;
 }
 
 export interface SizeGoal {
@@ -140,6 +146,55 @@ export const REVIEW_CONCERNS: readonly ReviewConcern[] = [
 
 const ACTIVE_JOB_STATUSES = new Set(['queued', 'running', 'starting', 'retry_backoff', 'stopping']);
 const FAILURE_JOB_STATUSES = new Set(['failed', 'stopped', 'needs_attention']);
+
+export function catalogWarningNotice(
+	scanJob: DashboardScanJob | null
+): CatalogWarningNotice | null {
+	const warnings = scanJob?.stats?.warnings ?? [];
+	if (warnings.length === 0) return null;
+	if (warnings.length > 1) {
+		return {
+			title: `${warnings.length} libraries need attention.`,
+			detail:
+				'Mediaforce could not safely reconcile these libraries, so their cached catalog state was preserved.'
+		};
+	}
+
+	const warning = warnings[0];
+	if (warning.code === 'source_unexpectedly_empty') {
+		return {
+			title: `${warning.label} returned no media.`,
+			detail:
+				'Cached catalog state was preserved. Disable or remove the library in Settings if it was intentionally cleared.'
+		};
+	}
+	if (warning.code === 'source_scan_incomplete') {
+		return {
+			title: `${warning.label} could not be fully read.`,
+			detail:
+				'Cached catalog state was preserved because the scan did not finish reading this library.'
+		};
+	}
+	if (warning.code === 'source_mass_disappearance') {
+		return {
+			title: `${warning.label} returned far fewer items than expected.`,
+			detail: 'Cached catalog state was preserved so surviving workflow status remains unchanged.'
+		};
+	}
+	if (warning.code === 'source_unavailable') {
+		return {
+			title: `${warning.label} storage is unavailable.`,
+			detail:
+				'Cached catalog state was preserved. Mediaforce will try this library again after storage returns.'
+		};
+	}
+	return {
+		title: `${warning.label} needs attention.`,
+		detail:
+			warning.message ||
+			'Cached catalog state was preserved because this library could not be reconciled.'
+	};
+}
 
 function record(value: unknown): Record<string, unknown> {
 	return value && typeof value === 'object' && !Array.isArray(value)

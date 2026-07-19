@@ -466,10 +466,24 @@ export interface DashboardScanJob {
 	finished_at: string | null;
 	error: string | null;
 	stats: {
-		items_seen: number;
-		updated_paths: number;
+		items_seen?: number;
+		updated_paths?: number;
 		unchanged: number;
+		scan_id?: string;
+		discovered?: number;
+		reprobed?: number;
+		missing?: number;
+		total_seen?: number;
+		warnings?: DashboardScanWarning[];
 	} | null;
+}
+
+export interface DashboardScanWarning {
+	code: string;
+	library_key: string;
+	label: string;
+	message: string;
+	preserved_item_count: number;
 }
 
 export interface ArchiveCleanupSummary {

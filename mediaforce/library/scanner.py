@@ -2,11 +2,12 @@ import json
 import os
 import subprocess
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-from sqlalchemy import and_, case, or_
+from sqlalchemy import and_, case
+from sqlalchemy import func
 from sqlalchemy import insert
 from sqlalchemy import not_
 from sqlalchemy import select
@@ -37,6 +38,23 @@ from mediaforce.core.utils import content_version_fingerprint, file_fingerprint,
 
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mp4", ".ts"}
 SCAN_COMMIT_INTERVAL = 25
+MASS_DISAPPEARANCE_MIN_ITEMS = 25
+MASS_DISAPPEARANCE_MAX_REMAINING_PERCENT = 20
+
+
+@dataclass(frozen=True, slots=True)
+class ScanWarning:
+    code: str
+    library_key: str
+    label: str
+    message: str
+    preserved_item_count: int
+
+
+@dataclass(slots=True)
+class _RootEnumeration:
+    issue_code: str | None = None
+    matched_count: int = 0
 
 
 @dataclass(slots=True)
@@ -47,16 +65,20 @@ class ScanStats:
     unchanged: int = 0
     missing: int = 0
     total_seen: int = 0
+    warnings: list[ScanWarning] = field(default_factory=list)
 
 
 def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[str] | None = None,
                  limit: int | None = None) -> ScanStats:
     scan_id = uuid.uuid4().hex
     started_at = timestamp()
-    scan_source_roots = getattr(config, "scan_source_root_map", config.source_root_map)
-    roots_json = json.dumps(sorted(scan_source_roots.keys()))
     normalized_prefixes = sorted({prefix.strip("/") for prefix in object_list(prefixes) if str(prefix).strip("/")})
-    scope = "prefix" if normalized_prefixes else "full"
+    scan_source_roots = _scan_roots_for_prefixes(
+        getattr(config, "scan_source_root_map", config.source_root_map),
+        normalized_prefixes,
+    )
+    roots_json = json.dumps(sorted(scan_source_roots.keys()))
+    scope = "limited" if limit is not None else "prefix" if normalized_prefixes else "full"
     connection.execute(
         insert(scan_runs).values(
             scan_id=scan_id,
@@ -71,20 +93,34 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
     connection.commit()
 
     stats = ScanStats(scan_id=scan_id)
-    seen_paths: set[str] = set()
+    seen_paths_by_root: dict[str, set[str]] = {}
+    reconcilable_roots: set[str] = set()
     pending_writes = 0
+    full_scan = not normalized_prefixes and limit is None
 
     for root_name, root_path in scan_source_roots.items():
-        for file_path in _iter_media_files(root_name, root_path, prefixes=normalized_prefixes or None, limit=limit,
-                                           seen=stats.total_seen):
+        previous_item_count = _active_item_count(connection, root_name) if full_scan else 0
+        enumeration = _RootEnumeration()
+        root_seen_paths = seen_paths_by_root.setdefault(root_name, set())
+        for file_path in _iter_media_files(
+                root_name,
+                root_path,
+                prefixes=normalized_prefixes or None,
+                limit=limit,
+                seen=stats.total_seen,
+                enumeration=enumeration,
+        ):
             source_path = str(file_path)
             logical_path = logical_library_rel_path(root_name, root_path, file_path)
             rel_path = logical_path.as_posix()
             parent_dir = logical_path.parent.as_posix()
-            seen_paths.add(source_path)
+            try:
+                stat_result = file_path.stat()
+            except OSError:
+                enumeration.issue_code = "source_scan_incomplete"
+                continue
+            root_seen_paths.add(source_path)
             stats.total_seen += 1
-
-            stat_result = file_path.stat()
             try:
                 content_fingerprint = content_version_fingerprint(file_path, stat_result)
             except OSError:
@@ -216,30 +252,37 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
             if limit is not None and stats.total_seen >= limit:
                 break
 
+        if enumeration.issue_code:
+            stats.warnings.append(
+                _scan_warning(config, root_name, enumeration.issue_code, previous_item_count)
+            )
+        elif full_scan and previous_item_count > 0 and enumeration.matched_count == 0:
+            stats.warnings.append(
+                _scan_warning(config, root_name, "source_unexpectedly_empty", previous_item_count)
+            )
+        elif full_scan and _mass_disappearance_is_suspicious(previous_item_count, enumeration.matched_count):
+            stats.warnings.append(
+                _scan_warning(
+                    config,
+                    root_name,
+                    "source_mass_disappearance",
+                    max(previous_item_count - enumeration.matched_count, 0),
+                )
+            )
+        else:
+            reconcilable_roots.add(root_name)
+
         if limit is not None and stats.total_seen >= limit:
             break
 
-    full_scan = not normalized_prefixes and limit is None
     if full_scan:
-        active_roots = tuple(scan_source_roots.keys())
-        stale_filter = library_items.c.status != "missing"
-        if active_roots and seen_paths:
-            stale_filter = and_(
-                stale_filter,
-                or_(
-                    not_(library_items.c.media_root.in_(active_roots)),
-                    and_(
-                        library_items.c.media_root.in_(active_roots),
-                        not_(library_items.c.source_path.in_(tuple(seen_paths))),
-                    ),
-                ),
-            )
-        cursor = connection.execute(
-            update(library_items)
-            .where(stale_filter)
-            .values(status="missing", updated_at=started_at)
+        stats.missing = _reconcile_missing_items(
+            connection,
+            configured_roots=set(scan_source_roots),
+            reconcilable_roots=reconcilable_roots,
+            seen_paths_by_root=seen_paths_by_root,
+            updated_at=started_at,
         )
-        stats.missing = int_value(cursor.rowcount) if cursor.rowcount != -1 else 0
         pending_writes = _flush_scan_progress(connection, scan_id, stats, pending_writes + 1)
 
     _flush_scan_progress(connection, scan_id, stats, pending_writes, force=True)
@@ -391,23 +434,154 @@ def _failed_probe_summary(error: Exception) -> ProbeSummary:
     )
 
 
+def _active_item_count(connection: DBClient, root_name: str) -> int:
+    return int(
+        connection.execute(
+            select(func.count())
+            .select_from(library_items)
+            .where(
+                library_items.c.media_root == root_name,
+                library_items.c.status != "missing",
+            )
+        ).scalar_one()
+    )
+
+
+def _scan_roots_for_prefixes(
+        scan_source_roots: dict[str, Path],
+        normalized_prefixes: list[str],
+) -> dict[str, Path]:
+    if not normalized_prefixes:
+        return scan_source_roots
+    return {
+        root_name: root_path
+        for root_name, root_path in scan_source_roots.items()
+        if any(
+            prefix == root_name or prefix.startswith(f"{root_name}/")
+            for prefix in normalized_prefixes
+        )
+    }
+
+
+def _mass_disappearance_is_suspicious(previous_item_count: int, matched_count: int) -> bool:
+    return (
+        previous_item_count >= MASS_DISAPPEARANCE_MIN_ITEMS
+        and matched_count > 0
+        and matched_count * 100 <= previous_item_count * MASS_DISAPPEARANCE_MAX_REMAINING_PERCENT
+    )
+
+
+def _scan_warning(
+        config: MediaforceConfig,
+        root_name: str,
+        code: str,
+        preserved_item_count: int,
+) -> ScanWarning:
+    definitions = getattr(config, "library_definition_map", {})
+    definition = definitions.get(root_name, {}) if isinstance(definitions, dict) else {}
+    label = str(definition.get("label") or root_name.replace("_", " ").replace("-", " ").title())
+    if code == "source_unexpectedly_empty":
+        message = (
+            f"{label} returned no media. Cached catalog state was preserved; disable or remove the library "
+            "in Settings to accept the empty state."
+        )
+    elif code == "source_mass_disappearance":
+        message = (
+            f"{label} returned far fewer media items than expected. Cached catalog state was preserved so "
+            "surviving workflow status remains unchanged."
+        )
+    elif code == "source_scan_incomplete":
+        message = f"{label} could not be fully read. Cached catalog state was preserved."
+    else:
+        message = f"{label} is unavailable. Cached catalog state was preserved."
+    return ScanWarning(
+        code=code,
+        library_key=root_name,
+        label=label,
+        message=message,
+        preserved_item_count=preserved_item_count,
+    )
+
+
+def _reconcile_missing_items(
+        connection: DBClient,
+        *,
+        configured_roots: set[str],
+        reconcilable_roots: set[str],
+        seen_paths_by_root: dict[str, set[str]],
+        updated_at: str,
+) -> int:
+    missing_count = 0
+    removed_root_filter = library_items.c.status != "missing"
+    if configured_roots:
+        removed_root_filter = and_(
+            removed_root_filter,
+            not_(library_items.c.media_root.in_(tuple(sorted(configured_roots)))),
+        )
+    missing_count += _mark_items_missing(connection, removed_root_filter, updated_at)
+
+    for root_name in sorted(reconcilable_roots):
+        stale_filter = and_(
+            library_items.c.status != "missing",
+            library_items.c.media_root == root_name,
+        )
+        seen_paths = seen_paths_by_root.get(root_name, set())
+        if not seen_paths:
+            continue
+        stale_filter = and_(
+            stale_filter,
+            not_(library_items.c.source_path.in_(tuple(sorted(seen_paths)))),
+        )
+        missing_count += _mark_items_missing(connection, stale_filter, updated_at)
+    return missing_count
+
+
+def _mark_items_missing(connection: DBClient, stale_filter: Any, updated_at: str) -> int:
+    cursor = connection.execute(
+        update(library_items)
+        .where(stale_filter)
+        .values(status="missing", updated_at=updated_at)
+    )
+    return int_value(cursor.rowcount) if cursor.rowcount != -1 else 0
+
+
 def _iter_media_files(
         root_name: str,
         root_path: Path,
         prefixes: list[str] | None,
         limit: int | None,
         seen: int,
+        enumeration: _RootEnumeration | None = None,
 ) -> Iterator[Path]:
+    scan_state = enumeration or _RootEnumeration()
+    if limit is not None and seen >= limit:
+        return
+    try:
+        if not root_path.is_dir():
+            scan_state.issue_code = "source_unavailable"
+            return
+    except OSError:
+        scan_state.issue_code = "source_unavailable"
+        return
+
     matched = 0
-    for dirpath, _, filenames in os.walk(root_path):
-        for name in sorted(filenames):
-            file_path = Path(dirpath, name)
-            if file_path.suffix.lower() not in VIDEO_EXTENSIONS:
-                continue
-            rel_path = logical_library_rel_path(root_name, root_path, file_path).as_posix()
-            if prefixes and not any(path_matches_scope(rel_path, prefix) for prefix in prefixes):
-                continue
-            yield file_path
-            matched += 1
-            if limit is not None and seen + matched >= limit:
-                return
+
+    def _record_error(_error: OSError) -> None:
+        scan_state.issue_code = "source_scan_incomplete"
+
+    try:
+        for dirpath, _, filenames in os.walk(root_path, onerror=_record_error):
+            for name in sorted(filenames):
+                file_path = Path(dirpath, name)
+                if file_path.suffix.lower() not in VIDEO_EXTENSIONS:
+                    continue
+                rel_path = logical_library_rel_path(root_name, root_path, file_path).as_posix()
+                if prefixes and not any(path_matches_scope(rel_path, prefix) for prefix in prefixes):
+                    continue
+                matched += 1
+                scan_state.matched_count += 1
+                yield file_path
+                if limit is not None and seen + matched >= limit:
+                    return
+    except OSError:
+        scan_state.issue_code = "source_scan_incomplete"

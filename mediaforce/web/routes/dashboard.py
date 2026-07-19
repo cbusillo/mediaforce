@@ -11,6 +11,7 @@ def register_dashboard_routes(
         app: FastAPI,
         *,
         dashboard_payload: Callable[[int | None], dict[str, Any]],
+        dashboard_scan_job_payload: Callable[[], dict[str, Any] | None],
         dashboard_folders_payload: Callable[[bool], dict[str, Any]],
         dashboard_library_payload: Callable[[], dict[str, Any]],
         dashboard_library_details_payload: Callable[[], dict[str, Any]],
@@ -22,6 +23,10 @@ def register_dashboard_routes(
     @app.get("/api/dashboard")
     def api_dashboard(preview_limit: PreviewLimit = None) -> JSONResponse:
         return JSONResponse(dashboard_payload(preview_limit))
+
+    @app.get("/api/dashboard/scan-job")
+    def api_dashboard_scan_job() -> JSONResponse:
+        return JSONResponse(dashboard_scan_job_payload())
 
     @app.get("/api/dashboard/folders")
     def api_dashboard_folders(include_series: int = 1) -> JSONResponse:
