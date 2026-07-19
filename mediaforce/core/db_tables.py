@@ -151,6 +151,14 @@ evidence_queue_state = Table(
     Column("updated_at", Text, nullable=False),
 )
 
+background_work_state = Table(
+    "background_work_state",
+    metadata,
+    Column("work_area", Text, primary_key=True),
+    Column("is_paused", Integer, nullable=False, server_default="0"),
+    Column("updated_at", Text, nullable=False),
+)
+
 plex_item_metadata = Table(
     "plex_item_metadata",
     metadata,

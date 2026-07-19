@@ -15,6 +15,7 @@ from mediaforce.core.db import _load_sql_asset
 from mediaforce.core.db import open_db
 from mediaforce.core.db import reset_engine_cache
 from mediaforce.core.db_tables import alembic_version
+from mediaforce.core.db_tables import background_work_state
 from mediaforce.core.db_tables import evidence_queue_state
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import encode_queue_state
@@ -26,7 +27,7 @@ from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.cadence import cadence_policy_snapshot
 from mediaforce.encoding.fingerprint import media_fingerprint_policy_snapshot
 
-CURRENT_DB_REVISION = "20260719_0012"
+CURRENT_DB_REVISION = "20260719_0013"
 
 
 class DatabaseRuntimeTests(unittest.TestCase):
@@ -68,6 +69,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
             self.assertIn("metadata_sync_state", table_names)
             self.assertIn("library_item_evidence_state", table_names)
             self.assertIn("evidence_queue_state", table_names)
+            self.assertIn("background_work_state", table_names)
             self.assertIn("idx_library_item_evidence_state_kind_state", evidence_indexes)
             self.assertIn("idx_library_item_evidence_state_work_ready", evidence_indexes)
             self.assertIn("idx_library_item_evidence_state_work_claim", evidence_indexes)
@@ -513,6 +515,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 raw_connection.close()
 
             self.assertNotIn("evidence_queue_state", table_names)
+            self.assertNotIn("background_work_state", table_names)
             self.assertNotIn("work_status", evidence_columns)
             self.assertEqual(
                 downgraded_state,
@@ -534,6 +537,9 @@ class DatabaseRuntimeTests(unittest.TestCase):
                     )
                 ).one()
                 queue_rows = connection.execute(select(evidence_queue_state.c.queue_name)).fetchall()
+                background_rows = connection.execute(
+                    select(background_work_state.c.work_area)
+                ).fetchall()
                 version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
 
             self.assertEqual(version, CURRENT_DB_REVISION)
@@ -542,6 +548,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 (2, "2026-07-20T00:00:00+00:00", "fixture failure", None, None),
             )
             self.assertEqual(queue_rows, [])
+            self.assertEqual(background_rows, [])
 
     def test_open_db_rolls_back_on_base_exception(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

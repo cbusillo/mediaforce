@@ -32,15 +32,18 @@ aggregate counts. Queue data is operational and rebuildable; canonical
 evidence is not.
 
 Alembic revision `20260719_0012` adds this operational state without creating a
-batch or queueing existing evidence. Analyzer or policy changes remain visible
-as projection state until an operator explicitly starts work.
+batch or queueing existing evidence. Revision `20260719_0013` adds the durable
+`background_work_state` switch shared by catalog inventory and evidence
+analysis. Analyzer or policy changes remain visible as projection state until
+an operator explicitly prepares and starts work.
 
 ## Batch lifecycle
 
 `start_evidence_work()` requires a non-empty resolved scope. It selects only
 non-current evidence inside that exact item or descendant scope, caps the
-batch at 25 work units by default, snapshots each source fingerprint, and
-creates the batch paused.
+batch at 25 evidence updates by default, snapshots each source fingerprint,
+and creates the batch paused. One media file can contribute two updates because
+cadence and media fingerprint are independent evidence kinds.
 
 Queue states are:
 
@@ -89,6 +92,10 @@ media.
 - Expired leases are reclaimed on the next explicit worker pass. A live lease
   is never stolen merely because another scheduler starts.
 - Pause prevents new claims but does not interrupt the active safe unit.
+- The global background-work pause prevents new catalog scans, batch creation,
+  queue resumes, and evidence claims. A scan or evidence update already running
+  is allowed to finish safely. A queued scan rechecks the switch before it opens
+  a source.
 - Cancel marks pending units cancelled and asks the heartbeat/controller path
   to terminate the active subprocess group. The attempt is restored when that
   cancellation is observed.
@@ -96,6 +103,27 @@ media.
   and reuses stored measurements without `ffmpeg` or `ffprobe`.
 
 ## Operator flow
+
+The Activity workstation exposes the same bounded state machine:
+
+1. `Refresh catalog` performs inventory only. It updates changed file facts and
+   never starts cadence or fingerprint analysis.
+2. `Prepare analysis` chooses one explicit item, folder, or root scope, evidence
+   kinds, and a maximum number of updates. The new batch is paused.
+3. `Start analysis` launches one process-local bounded runner. It exits when the
+   prepared batch completes, reaches its update budget, or becomes blocked.
+4. `Pause after this item`, `Resume analysis`, and `Cancel batch` write durable
+   queue controls near the visible scope and progress.
+5. `Pause new background work` is separate from encode approval and processing
+   controls. It governs catalog inventory and evidence analysis only.
+
+The workstation polls while a catalog scan or evidence runner is active and
+returns to manual refresh when idle. Backlog totals are paired with filters and
+pagination so every counted evidence update remains reachable. Source-root
+warnings use the scanner's preserved-cache messages rather than discarding the
+last known catalog.
+
+The CLI remains available for advanced or scripted operation.
 
 Create a paused folder pilot:
 
