@@ -50,6 +50,7 @@ const endpointChecks = [
   ["Host status", "/api/hosts?compact=1"],
   ["Settings initial payload", "/api/settings?include_archive_cleanup=0"],
   ["Completed payload", "/api/completed"],
+  ["Operator catalog and evidence work", "/api/operator-work"],
 ];
 
 const routeChecks = [
@@ -57,7 +58,7 @@ const routeChecks = [
   ["Movies Library", "/movies", "MOVIE WORKSTATION"],
   ["Other Library", "/other", "Other Library"],
   ["Folders compatibility", "/folders", "Your library"],
-  ["Activity", "/ops", "What’s happening"],
+  ["Activity", "/ops", "Remembered media state"],
   ["Settings", "/settings", "Library and working space"],
   ["Finished", "/completed", "Finished seasons"],
 ];

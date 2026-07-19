@@ -36,6 +36,10 @@ The managed smoke seeds a compact but non-empty workflow dataset:
 - Queue density: two pending `tv/Example Show/Season 1` items and one lower
   priority movie folder. The representative episode is 88 minutes so the goal
   screen resolves the 300 MB / 45 minute default to approximately 587 MB.
+- Activity catalog/evidence state: the catalog is current, four evidence updates
+  are reachable in the backlog, and a two-update `tv/Example Show/Season 1`
+  batch is prepared but paused. Loading or filtering the page must not start
+  analysis.
 - Movies Library: `/movies` includes a root-level exact file, a conventional
   title directory with two independently reachable editions, an excluded
   featurette, an uncertain nested file, active processing, completed titles,
@@ -99,6 +103,26 @@ The managed smoke seeds a compact but non-empty workflow dataset:
 Seeded rows use `last_scan_id = web-smoke-fixtures` and are replaced on each
 managed smoke run. Runtime state remains under `state/web-smoke/` and
 `scratch/web-smoke/`.
+
+## Activity Work-State Matrix
+
+For changes to catalog or evidence controls, verify these visible states in a
+real browser at desktop and 390px widths:
+
+- idle: `Quiet`, no repeating network refresh, manual refresh available
+- prepared: explicit scope/count, `Start analysis`, and `Cancel batch`
+- running: current path/evidence kind, completed/remaining counts, and elapsed
+  progress with `Pause after this item`
+- paused: scope and progress preserved with `Resume analysis`
+- retry waiting and source unavailable: plain labels plus next retry/source copy
+- failed, cancelled, and complete: terminal copy without pretending work is
+  still running
+- global pause: catalog refresh, preparation, and resume disabled while encode
+  approval/processing controls remain separate
+- source warning: cached-state preservation is explicit and the remembered
+  library count remains visible
+- backlog: filters, range, total, previous/next, and row scope controls remain
+  reachable without horizontal page overflow
 
 ## Required Route Coverage
 

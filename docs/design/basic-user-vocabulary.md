@@ -9,7 +9,7 @@ implementation nouns.
 
 - Name the user's next decision before naming the subsystem.
 - Prefer short labels that describe work state: `Ready to review`, `Waiting for
-  worker`, `Needs sample`, `Safe to delete`.
+worker`, `Needs sample`, `Safe to delete`.
 - Keep implementation terms available in advanced settings, logs, tooltips, or
   metadata rows when they help diagnosis.
 - Do not use different names for the same state across routes.
@@ -85,6 +85,21 @@ debugging a worker, or comparing logs against backend output.
   tried again.
 - Historical sample failures: `Past sample issues`. Old sample/proof failures
   are history unless they block current work.
+- Catalog facts match policy: `Current`. Mediaforce can browse remembered file
+  facts without opening media.
+- Catalog age recommends another inventory pass: `Refresh suggested`.
+- A source could not be reconciled safely: `Needs a check`. Explain that cached
+  catalog state was preserved.
+- Evidence scope selected but not started: `Prepared`. Preparing never opens
+  media or starts FFmpeg.
+- Evidence analyzer owns a work unit: `Analyzing`.
+- Evidence work stopped before the next unit: `Paused`.
+- A retry delay protects the source: `Retry scheduled`.
+- The source root is unavailable: `Source unavailable`.
+- A bounded evidence batch finished cleanly: `Complete`.
+- A bounded evidence batch has failures: `Needs attention`.
+- No catalog or evidence work is active: `Quiet`. Do not imply a worker is
+  polling in the background.
 
 ### Completed
 
@@ -122,7 +137,7 @@ debugging a worker, or comparing logs against backend output.
 - Ops may expose more technical detail, but first-level headings should still
   use `workers`, `sample queue`, `processing queue`, and `retry available`.
 - Completed should use destructive language directly: `Delete archived
-  originals`, `selected originals`, `cleanup folder`, and `safe to delete`.
+originals`, `selected originals`, `cleanup folder`, and `safe to delete`.
 - Settings should split basic labels from advanced fields. `Working folder`,
   `cleanup folder`, `remote workers`, and `work windows` should be visible
   before `transcode root`, `archive root`, `SSH host`, or `staging root`.

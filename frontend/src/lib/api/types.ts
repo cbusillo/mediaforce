@@ -486,6 +486,149 @@ export interface DashboardScanWarning {
 	preserved_item_count: number;
 }
 
+export interface OperatorWorkActionResult {
+	ok: boolean;
+	message: string;
+}
+
+export interface OperatorWorkBackground {
+	work_area: string;
+	is_paused: boolean;
+	updated_at: string | null;
+	status: 'active' | 'paused';
+}
+
+export interface OperatorCatalogRoot {
+	key: string;
+	label: string;
+	item_count: number;
+}
+
+export interface OperatorCatalogState {
+	status: string;
+	freshness: 'current' | 'stale' | 'unknown';
+	item_count: number;
+	last_completed_at: string | null;
+	job: DashboardScanJob | null;
+	source_roots: OperatorCatalogRoot[];
+	warnings: DashboardScanWarning[];
+	can_refresh: boolean;
+}
+
+export interface OperatorEvidenceScope extends MediaScopePayload {
+	work_limit: number;
+}
+
+export interface OperatorEvidenceRunningItem {
+	library_item_id: number;
+	evidence_kind: string;
+	attempt_count: number;
+	last_attempt_at: string | null;
+	heartbeat_at: string | null;
+	process_pid: number | null;
+	rel_path: string;
+}
+
+export interface OperatorEvidenceQueue {
+	queue_name: string;
+	batch_id: string | null;
+	status: string;
+	scope: OperatorEvidenceScope | null;
+	evidence_kinds: string[];
+	is_paused: boolean;
+	cancel_requested: boolean;
+	item_count: number;
+	completed_count: number;
+	failed_count: number;
+	cancelled_count: number;
+	created_at: string | null;
+	started_at: string | null;
+	finished_at: string | null;
+	updated_at: string | null;
+	counts: Record<string, number>;
+	running: OperatorEvidenceRunningItem | null;
+	remaining_count: number;
+}
+
+export interface OperatorEvidenceProgress {
+	total_count: number;
+	remaining_count: number;
+	done_count: number;
+	percent: number | null;
+	counts: Record<string, number>;
+	running: OperatorEvidenceRunningItem | null;
+}
+
+export interface OperatorEvidenceKindSummary {
+	total: number;
+	states: Record<string, number>;
+	reasons: Record<string, number>;
+}
+
+export interface OperatorEvidenceInventory {
+	total: number;
+	backlog_total: number;
+	by_kind: Record<string, OperatorEvidenceKindSummary>;
+}
+
+export interface OperatorEvidenceBacklogRow {
+	library_item_id: number;
+	evidence_kind: string;
+	state: string;
+	reason: string | null;
+	work_status: string | null;
+	attempt_count: number;
+	retry_not_before: string | null;
+	last_attempt_at: string | null;
+	last_error: string | null;
+	updated_at: string;
+	rel_path: string;
+	media_root: string;
+	parent_dir: string;
+	file_name: string;
+}
+
+export interface OperatorEvidenceBacklog {
+	offset: number;
+	limit: number;
+	total: number;
+	range_start: number;
+	range_end: number;
+	has_previous: boolean;
+	has_next: boolean;
+	filters: {
+		evidence_kind: string | null;
+		state: string | null;
+		media_root: string | null;
+		work_status: string | null;
+	};
+	rows: OperatorEvidenceBacklogRow[];
+}
+
+export interface OperatorEvidenceState {
+	live_status: string;
+	terminal_status: string | null;
+	runner_active: boolean;
+	queue: OperatorEvidenceQueue;
+	progress: OperatorEvidenceProgress;
+	inventory: OperatorEvidenceInventory;
+	backlog: OperatorEvidenceBacklog;
+	can_prepare: boolean;
+	can_pause: boolean;
+	can_resume: boolean;
+	can_cancel: boolean;
+}
+
+export interface OperatorWorkPayload {
+	background: OperatorWorkBackground;
+	catalog: OperatorCatalogState;
+	evidence: OperatorEvidenceState;
+	refresh: {
+		mode: 'active' | 'manual';
+		interval_ms: number | null;
+	};
+}
+
 export interface ArchiveCleanupSummary {
 	archive_root: string;
 	file_count: number;
