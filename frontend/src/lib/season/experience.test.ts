@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import type {
+	DashboardScanJob,
+	DashboardScanWarning,
 	DashboardSummaryPayload,
 	FolderCard,
 	FolderPayload,
@@ -12,6 +14,7 @@ import type {
 import {
 	activeSeasonCards,
 	approvalGuardFromMessage,
+	catalogWarningNotice,
 	compareRiskSummary,
 	currentOperatorIntent,
 	detailSeasonState,
@@ -110,6 +113,140 @@ const status = {
 	calibration_job: null,
 	folder_scan_job: null
 } satisfies FolderStatusPayload;
+
+function scanJobWithWarnings(...warnings: DashboardScanWarning[]): DashboardScanJob {
+	return {
+		job_id: 'scan-warning',
+		status: 'completed',
+		scope: 'full',
+		prefix: null,
+		created_at: null,
+		started_at: null,
+		finished_at: null,
+		error: null,
+		stats: { unchanged: 0, warnings }
+	};
+}
+
+describe('catalog scan warnings', () => {
+	it('explains that cached catalog state was preserved for unavailable storage', () => {
+		const notice = catalogWarningNotice({
+			job_id: 'scan-1',
+			status: 'completed',
+			scope: 'full',
+			prefix: null,
+			created_at: null,
+			started_at: null,
+			finished_at: null,
+			error: null,
+			stats: {
+				unchanged: 24,
+				warnings: [
+					{
+						code: 'source_unavailable',
+						library_key: 'movies',
+						label: 'Movies',
+						message: 'Movies is unavailable. Cached catalog state was preserved.',
+						preserved_item_count: 24
+					}
+				]
+			}
+		});
+
+		expect(notice).toEqual({
+			title: 'Movies storage is unavailable.',
+			detail:
+				'Cached catalog state was preserved. Mediaforce will try this library again after storage returns.'
+		});
+		expect(JSON.stringify(notice)).not.toContain('/Volumes/');
+	});
+
+	it('explains the mass-disappearance circuit breaker', () => {
+		const notice = catalogWarningNotice({
+			job_id: 'scan-2',
+			status: 'completed',
+			scope: 'full',
+			prefix: null,
+			created_at: null,
+			started_at: null,
+			finished_at: null,
+			error: null,
+			stats: {
+				unchanged: 5,
+				warnings: [
+					{
+						code: 'source_mass_disappearance',
+						library_key: 'movies',
+						label: 'Movies',
+						message: 'Movies returned far fewer media items than expected.',
+						preserved_item_count: 25
+					}
+				]
+			}
+		});
+
+		expect(notice?.title).toBe('Movies returned far fewer items than expected.');
+		expect(notice?.detail).toBe(
+			'Cached catalog state was preserved so surviving workflow status remains unchanged.'
+		);
+	});
+
+	it('explains unexpectedly empty and incomplete library scans', () => {
+		const empty = catalogWarningNotice(
+			scanJobWithWarnings({
+				code: 'source_unexpectedly_empty',
+				library_key: 'movies',
+				label: 'Movies',
+				message: 'Movies returned no media.',
+				preserved_item_count: 24
+			})
+		);
+		const incomplete = catalogWarningNotice(
+			scanJobWithWarnings({
+				code: 'source_scan_incomplete',
+				library_key: 'other',
+				label: 'Other',
+				message: 'Other could not be fully read.',
+				preserved_item_count: 8
+			})
+		);
+
+		expect(empty?.title).toBe('Movies returned no media.');
+		expect(empty?.detail).toContain('Disable or remove the library in Settings');
+		expect(incomplete).toEqual({
+			title: 'Other could not be fully read.',
+			detail:
+				'Cached catalog state was preserved because the scan did not finish reading this library.'
+		});
+	});
+
+	it('uses accurate generic copy when multiple warning types are present', () => {
+		const notice = catalogWarningNotice(
+			scanJobWithWarnings(
+				{
+					code: 'source_scan_incomplete',
+					library_key: 'tv',
+					label: 'TV',
+					message: 'TV could not be fully read.',
+					preserved_item_count: 12
+				},
+				{
+					code: 'source_mass_disappearance',
+					library_key: 'movies',
+					label: 'Movies',
+					message: 'Movies returned far fewer media items than expected.',
+					preserved_item_count: 25
+				}
+			)
+		);
+
+		expect(notice).toEqual({
+			title: '2 libraries need attention.',
+			detail:
+				'Mediaforce could not safely reconcile these libraries, so their cached catalog state was preserved.'
+		});
+	});
+});
 
 function folder(overrides: Partial<FolderPayload> = {}): FolderPayload {
 	return {

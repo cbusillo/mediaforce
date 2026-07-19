@@ -39,6 +39,7 @@ const APP_ROOT_SELECTOR = ".app-shell";
 
 const endpointChecks = [
   ["Dashboard summary", "/api/dashboard"],
+  ["Dashboard scan job", "/api/dashboard/scan-job"],
   ["Dashboard folders", "/api/dashboard/folders"],
   ["Library structure", "/api/dashboard/library"],
   ["Library details", "/api/dashboard/library/details"],
@@ -308,7 +309,7 @@ async function checkEndpoints(baseUrl, timeoutMs) {
 }
 
 async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
-  const browser = await chromium.launch();
+  const browser = await chromium.launch({ channel: "chromium" });
   try {
     const page = await browser.newPage({
       viewport: { width: 1440, height: 1000 },
@@ -417,7 +418,7 @@ async function checkLibraryStructureWithoutDashboard(
   expectedMarker,
   timeoutMs,
 ) {
-  const browser = await chromium.launch();
+  const browser = await chromium.launch({ channel: "chromium" });
   try {
     const page = await browser.newPage({
       viewport: { width: 1440, height: 1000 },
@@ -479,7 +480,7 @@ async function checkLibraryStructureWithoutDashboard(
 }
 
 async function checkLifecyclePolicyShowIsolation(baseUrl, timeoutMs) {
-  const browser = await chromium.launch();
+  const browser = await chromium.launch({ channel: "chromium" });
   try {
     const page = await browser.newPage({
       viewport: { width: 1440, height: 1000 },
@@ -550,7 +551,7 @@ async function checkLifecyclePolicyShowIsolation(baseUrl, timeoutMs) {
 }
 
 async function checkOlderSeasonConfirmation(baseUrl, timeoutMs) {
-  const browser = await chromium.launch();
+  const browser = await chromium.launch({ channel: "chromium" });
   try {
     const page = await browser.newPage({
       viewport: { width: 1440, height: 1000 },
@@ -602,7 +603,7 @@ async function checkOlderSeasonConfirmation(baseUrl, timeoutMs) {
 }
 
 async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
-  const browser = await chromium.launch();
+  const browser = await chromium.launch({ channel: "chromium" });
   try {
     const page = await browser.newPage({
       viewport: NARROW_VIEWPORT,

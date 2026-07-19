@@ -1,10 +1,16 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
+	import { fetchJson } from '$lib/api/client';
+	import type { DashboardScanJob } from '$lib/api/types';
+	import { catalogWarningNotice } from '$lib/season/experience';
 	import type { Snippet } from 'svelte';
 	import ThemeToggle from './ThemeToggle.svelte';
 
 	let { children }: { children: Snippet } = $props();
+	let scanJob = $state<DashboardScanJob | null>(null);
+	let scanRequest = 0;
+	const catalogWarning = $derived(catalogWarningNotice(scanJob));
 
 	const navigation = [
 		{ label: 'Library', href: '/', icon: 'seasons' },
@@ -26,6 +32,22 @@
 				pathname.startsWith('/folders/')
 			);
 		return pathname === href || pathname.startsWith(`${href}/`);
+	}
+
+	$effect(() => {
+		const pathname = page.url.pathname;
+		void pathname;
+		void refreshScanJob();
+	});
+
+	async function refreshScanJob() {
+		const request = ++scanRequest;
+		try {
+			const payload = await fetchJson<DashboardScanJob | null>('/api/dashboard/scan-job');
+			if (request === scanRequest) scanJob = payload;
+		} catch {
+			// Library routes remain useful when scan status cannot be refreshed.
+		}
 	}
 </script>
 
@@ -70,6 +92,14 @@
 			<ThemeToggle />
 		</div>
 	</header>
+	{#if catalogWarning}
+		<aside class="catalog-warning" role="alert" aria-live="polite">
+			<div class="catalog-warning__inner">
+				<strong>{catalogWarning.title}</strong>
+				<span>{catalogWarning.detail}</span>
+			</div>
+		</aside>
+	{/if}
 
 	<div class="app-content">
 		{@render children()}
@@ -179,6 +209,26 @@
 		min-height: calc(100vh - 58px);
 	}
 
+	.catalog-warning {
+		background: var(--mf-wait-bg);
+		border-bottom: 1px solid var(--mf-wait-line);
+		color: var(--mf-wait-fg);
+	}
+
+	.catalog-warning__inner {
+		align-items: baseline;
+		display: flex;
+		font-size: 13px;
+		gap: 8px;
+		margin: 0 auto;
+		max-width: 1120px;
+		padding: 9px 24px;
+	}
+
+	.catalog-warning__inner strong {
+		white-space: nowrap;
+	}
+
 	@media (max-width: 680px) {
 		.app-header__inner {
 			height: 62px;
@@ -220,6 +270,17 @@
 
 		.app-content {
 			min-height: calc(100vh - 62px);
+		}
+
+		.catalog-warning__inner {
+			align-items: stretch;
+			flex-direction: column;
+			gap: 2px;
+			padding: 9px 14px;
+		}
+
+		.catalog-warning__inner strong {
+			white-space: normal;
 		}
 	}
 </style>

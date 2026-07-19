@@ -802,6 +802,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     register_dashboard_routes(
         app,
         dashboard_payload=_dashboard_api_payload,
+        dashboard_scan_job_payload=lambda: _load_scan_job_state(config, None),
         dashboard_folders_payload=_dashboard_folders_payload,
         dashboard_library_payload=_dashboard_library_payload,
         dashboard_library_details_payload=_dashboard_library_details_payload,
