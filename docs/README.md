@@ -51,3 +51,5 @@ Use this directory for guidance that should not live in `AGENTS.md`.
   contract for UI exploration and critique
 - `docs/development/browser-qa-matrix.md`: repeatable browser route, fixture,
   and narrow-layout validation matrix
+- `docs/development/catalog-refresh-benchmark.md`: generated catalog-scale
+  inventory benchmark and subprocess/resource metrics

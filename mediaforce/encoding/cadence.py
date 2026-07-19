@@ -305,7 +305,7 @@ def cadence_manifest_payload(
     ):
         decision = _unknown_decision(
             0.0,
-            "Cadence evidence uses an unsupported analyzer version; run a new scan before encoding.",
+            "Cadence evidence uses an unsupported analyzer version; refresh cadence analysis before encoding.",
         )
     else:
         decision = classify_cadence(
@@ -431,7 +431,7 @@ def _unknown_decision(coverage: float, rationale: str | None = None) -> dict[str
         confidence=0.0,
         coverage=coverage,
         transform=None,
-        rationale=rationale or "Cadence evidence is missing or inconclusive; run a new scan before encoding.",
+        rationale=rationale or "Cadence evidence is missing or inconclusive; refresh cadence analysis before encoding.",
     )
 
 

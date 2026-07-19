@@ -18,22 +18,12 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.models import ProbeSummary
-from mediaforce.encoding.cadence import (
-    CADENCE_SCHEMA_VERSION,
-    CADENCE_TOOL_NAME,
-    CADENCE_TOOL_VERSION,
-    unavailable_cadence_summary,
-)
-from mediaforce.encoding.fingerprint import (
-    MEDIA_FINGERPRINT_SCHEMA_VERSION,
-    MEDIA_FINGERPRINT_TOOL_NAME,
-    MEDIA_FINGERPRINT_TOOL_VERSION,
-    unavailable_media_fingerprint_summary,
-)
+from mediaforce.encoding.cadence import unavailable_cadence_summary
+from mediaforce.encoding.fingerprint import unavailable_media_fingerprint_summary
 from mediaforce.library.media_scopes import logical_library_rel_path, path_matches_scope
 from mediaforce.library.planner import recommend_item
 from mediaforce.library.probe import probe_media
-from mediaforce.core.type_defs import int_value, object_list
+from mediaforce.core.type_defs import float_value, int_value, object_list
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint, timestamp
 
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mp4", ".ts"}
@@ -131,15 +121,12 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
 
             if (
                     row
-                    and row["size_bytes"] == stat_result.st_size
-                    and row["mtime_ns"] == stat_result.st_mtime_ns
-                    and (
-                        row.get("content_version_fingerprint") is None
-                        or content_fingerprint is None
-                        or row["content_version_fingerprint"] == content_fingerprint
+                    and _source_content_unchanged(
+                        row,
+                        size_bytes=stat_result.st_size,
+                        mtime_ns=stat_result.st_mtime_ns,
+                        content_fingerprint=content_fingerprint,
                     )
-                    and _cadence_summary_present(row.get("cadence_summary_json"))
-                    and _media_fingerprint_present(row.get("media_fingerprint_json"))
             ):
                 connection.execute(
                     update(library_items)
@@ -151,6 +138,13 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                         rel_path=rel_path,
                         media_root=root_name,
                         parent_dir=parent_dir,
+                        size_bytes=stat_result.st_size,
+                        mtime_ns=stat_result.st_mtime_ns,
+                        fingerprint=file_fingerprint(
+                            file_path=file_path,
+                            stat_result=stat_result,
+                            duration_seconds=float_value(row.get("duration_seconds")),
+                        ),
                         content_version_changed_at=case(
                             (library_items.c.status == "missing", started_at),
                             else_=library_items.c.content_version_changed_at,
@@ -333,6 +327,21 @@ def _content_version_changed(
     )
 
 
+def _source_content_unchanged(
+        row: Any,
+        *,
+        size_bytes: int,
+        mtime_ns: int,
+        content_fingerprint: str | None,
+) -> bool:
+    if int(row["size_bytes"] or 0) != size_bytes:
+        return False
+    previous_content_fingerprint = str(row.get("content_version_fingerprint") or "") or None
+    if previous_content_fingerprint and content_fingerprint:
+        return previous_content_fingerprint == content_fingerprint
+    return int(row["mtime_ns"] or 0) == mtime_ns
+
+
 def _flush_scan_progress(
         connection: DBClient,
         scan_id: str,
@@ -355,56 +364,6 @@ def _flush_scan_progress(
     )
     connection.commit()
     return 0
-
-
-def _cadence_summary_present(value: object) -> bool:
-    if not isinstance(value, str) or not value.strip():
-        return False
-    try:
-        payload = json.loads(value)
-    except json.JSONDecodeError:
-        return False
-    if (
-            not isinstance(payload, dict)
-            or payload.get("schema_version") != CADENCE_SCHEMA_VERSION
-            or payload.get("retry_required") is True
-    ):
-        return False
-    analysis = payload.get("analysis")
-    if not isinstance(analysis, dict):
-        return False
-    tool = analysis.get("tool")
-    return (
-        isinstance(payload.get("decision"), dict)
-        and isinstance(tool, dict)
-        and tool.get("name") == CADENCE_TOOL_NAME
-        and tool.get("version") == CADENCE_TOOL_VERSION
-    )
-
-
-def _media_fingerprint_present(value: object) -> bool:
-    if not isinstance(value, str) or not value.strip():
-        return False
-    try:
-        payload = json.loads(value)
-    except json.JSONDecodeError:
-        return False
-    if (
-            not isinstance(payload, dict)
-            or payload.get("schema_version") != MEDIA_FINGERPRINT_SCHEMA_VERSION
-            or payload.get("retry_required") is True
-    ):
-        return False
-    analysis = payload.get("analysis")
-    if not isinstance(analysis, dict):
-        return False
-    tool = analysis.get("tool")
-    return (
-        isinstance(payload.get("decision"), dict)
-        and isinstance(tool, dict)
-        and tool.get("name") == MEDIA_FINGERPRINT_TOOL_NAME
-        and tool.get("version") == MEDIA_FINGERPRINT_TOOL_VERSION
-    )
 
 
 def _failed_probe_summary(error: Exception) -> ProbeSummary:
