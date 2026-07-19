@@ -701,6 +701,7 @@ class TuningRuntimeTests(unittest.TestCase):
             "notes": "Aim for 8%",
             "policy": {"video": {"target_vmaf": 93.5, "default_grain": 0}},
             "sample_item": {
+                "library_item_id": 1,
                 "rel_path": "tv/show/episode.mkv",
                 "source_path": str(self.root / "source" / "tv" / "show" / "episode.mkv"),
                 "source_size_bytes": 1234,
@@ -779,6 +780,7 @@ class TuningRuntimeTests(unittest.TestCase):
             "notes": "Aim for 8%",
             "policy": {"video": {"target_vmaf": 93.5, "default_grain": 0}},
             "sample_item": {
+                "library_item_id": 1,
                 "rel_path": "tv/show/episode.mkv",
                 "source_path": str(self.root / "source" / "tv" / "show" / "episode.mkv"),
                 "source_size_bytes": 1234,

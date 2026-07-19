@@ -5,6 +5,8 @@ from typing import Any
 
 from mediaforce.core.evidence import build_evidence_envelope, evidence_staleness
 from mediaforce.library.representatives import (
+    FINGERPRINT_DIMENSIONS,
+    TECHNICAL_PROFILE_DIMENSIONS,
     REPRESENTATIVE_SELECTION_TOOL,
     REPRESENTATIVE_SELECTION_TOOL_VERSION,
     evidence_sources,
@@ -249,6 +251,54 @@ class RepresentativeSelectionTests(unittest.TestCase):
         )
         self.assertEqual(profile["gradient"], "gradient_risk")
         self.assertEqual(profile["motion"], "high_motion")
+
+    def test_explicit_fingerprint_dimensions_limit_coverage_without_changing_default(self) -> None:
+        items = [
+            self._item(1, media_traits=["typical"]),
+            self._item(2, media_traits=["typical"]),
+            self._item(3, media_traits=["dark_gradient_banding_risk"]),
+        ]
+
+        default_selection = select_representatives(items, prefix="tv/Example/Season 1")
+        explicit_default = select_representatives(
+            items,
+            prefix="tv/Example/Season 1",
+            fingerprint_dimensions=FINGERPRINT_DIMENSIONS,
+        )
+        luma_only = select_representatives(
+            items,
+            prefix="tv/Example/Season 1",
+            fingerprint_dimensions=("luma",),
+        )
+        technical_only = select_representatives(
+            items,
+            prefix="tv/Example/Season 1",
+            fingerprint_dimensions=(),
+        )
+
+        self.assertEqual(default_selection.payload, explicit_default.payload)
+        self.assertIn(
+            "tv/Example/Season 1/Episode 03.mkv",
+            {item["rel_path"] for item in default_selection.payload["selected_items"]},
+        )
+        self.assertEqual(luma_only.payload["coverage"]["selected_item_count"], 1)
+        self.assertEqual(technical_only.payload["coverage"]["selected_item_count"], 1)
+        self.assertEqual(
+            set(luma_only.payload["coverage"]["dimensions"]),
+            {*TECHNICAL_PROFILE_DIMENSIONS, "luma"},
+        )
+        self.assertEqual(
+            technical_only.payload["evidence"]["result"]["selection_policy"]["fingerprint_dimensions"],
+            [],
+        )
+
+    def test_unknown_fingerprint_dimension_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unsupported fingerprint dimensions: color"):
+            select_representatives(
+                [self._item(1)],
+                prefix="tv/Example/Season 1",
+                fingerprint_dimensions=("color",),
+            )
 
     def test_missing_fingerprints_do_not_outvote_measured_primary_evidence(self) -> None:
         items = [self._item(1), self._item(2), self._item(3)]

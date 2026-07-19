@@ -42,6 +42,7 @@ from mediaforce.encoding import manifest as manifest
 from mediaforce.encoding import quality_search
 from mediaforce.encoding import staging as staging_runtime
 from mediaforce.encoding import video_filters
+from mediaforce.encoding.cadence import analyze_cadence
 from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_prefix, list_child_encode_jobs, \
     load_active_encode_job_for_prefix, load_encode_job, load_latest_encode_job, \
     load_latest_terminal_encode_job_for_prefix, load_queue_state, repair_persisted_encode_job_hosts, \
@@ -16244,7 +16245,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 _config: MediaforceConfig,
                 *,
                 prefix: str,
+                prepare_only: bool = False,
         ) -> tuple[folder_actions_runtime.ManifestPayload, Path]:
+            self.assertTrue(prepare_only)
             self.assertEqual(prefix, "tv/show")
             pending_ids = {
                 int(row["id"])
@@ -16352,7 +16355,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 _config: MediaforceConfig,
                 *,
                 prefix: str,
+                prepare_only: bool = False,
         ) -> tuple[folder_actions_runtime.ManifestPayload, Path]:
+            self.assertTrue(prepare_only)
             self.assertEqual(prefix, "tv/show")
             pending_ids = {
                 int(row["id"])
@@ -17794,6 +17799,20 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 video_codec="h264",
                 audio_summary_json="[]",
                 subtitle_summary_json="[]",
+                cadence_summary_json=json.dumps(
+                    analyze_cadence(
+                        Path("unused.mkv"),
+                        video_stream={
+                            "field_order": "progressive",
+                            "avg_frame_rate": "24/1",
+                            "r_frame_rate": "24/1",
+                            "time_base": "1/1000",
+                        },
+                        duration_seconds=60.0,
+                    ),
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
                 media_fingerprint_json="{}",
                 last_scan_id="scan-1",
                 discovered_at=now,

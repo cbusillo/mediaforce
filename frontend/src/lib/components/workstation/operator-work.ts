@@ -150,21 +150,37 @@ export function evidenceKindLabel(kind: string): string {
 	return humanize(kind);
 }
 
-export function evidenceStateLabel(state: string): string {
+export function evidenceStateLabel(state: string, decisionStatus: string | null = null): string {
+	if (state === 'current' && decisionStatus && !['resolved', 'measured'].includes(decisionStatus)) {
+		return 'Needs decision';
+	}
 	if (state === 'current') return 'Current';
 	if (state === 'analysis_required') return 'Needs analysis';
 	if (state === 'classification_required') return 'Needs update';
 	return humanize(state);
 }
 
-export function evidenceStateTone(state: string): OperatorStateTone {
+export function evidenceStateTone(
+	state: string,
+	decisionStatus: string | null = null
+): OperatorStateTone {
+	if (state === 'current' && decisionStatus && !['resolved', 'measured'].includes(decisionStatus)) {
+		return 'wait';
+	}
 	if (state === 'current') return 'ready';
 	if (state === 'analysis_required') return 'wait';
 	if (state === 'classification_required') return 'active';
 	return 'idle';
 }
 
-export function evidenceReasonCopy(reason: string | null): string {
+export function evidenceReasonCopy(
+	reason: string | null,
+	state: string | null = null,
+	decisionStatus: string | null = null
+): string {
+	if (state === 'current' && decisionStatus && !['resolved', 'measured'].includes(decisionStatus)) {
+		return 'The measured motion pattern needs an operator decision before conversion.';
+	}
 	if (!reason) return 'Evidence is not current.';
 	if (reason === 'missing') return 'No saved measurement exists yet.';
 	if (reason === 'malformed') return 'The saved measurement could not be read.';
@@ -175,6 +191,46 @@ export function evidenceReasonCopy(reason: string | null): string {
 	if (reason === 'policy_changed')
 		return 'The interpretation policy changed; stored measurements can be reused.';
 	return 'Mediaforce cannot prove this evidence is current.';
+}
+
+export interface EvidenceWorkReasonView {
+	label: string;
+	detail: string;
+}
+
+export function evidenceWorkReasonView(reason: string | null): EvidenceWorkReasonView | null {
+	if (!reason) return null;
+	if (reason === 'sample_safety') {
+		return { label: 'Blocks sample', detail: 'Required before the selected sample can run.' };
+	}
+	if (reason === 'encode_safety') {
+		return {
+			label: 'Blocks production',
+			detail: 'Required before the selected production work can start.'
+		};
+	}
+	if (reason === 'policy_reclassification') {
+		return {
+			label: 'No media read',
+			detail: 'Reinterprets stored measurements without opening the media.'
+		};
+	}
+	if (reason === 'representative_technical_coverage') {
+		return {
+			label: 'Representative check',
+			detail: 'Chosen from codec, resolution, cadence, audio layout, and runtime.'
+		};
+	}
+	if (reason === 'representative_uncertainty') {
+		return {
+			label: 'Bounded follow-up',
+			detail: 'Checks one nearby file because measured representative coverage is uncertain.'
+		};
+	}
+	if (reason === 'operator_scope') {
+		return { label: 'Operator request', detail: 'Prepared from the scope you selected.' };
+	}
+	return { label: 'Priority work', detail: 'Prepared for a decision that needs current evidence.' };
 }
 
 export function evidenceWorkStatusView(row: OperatorEvidenceBacklogRow): OperatorStateView {

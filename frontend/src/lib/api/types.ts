@@ -522,6 +522,8 @@ export interface OperatorEvidenceScope extends MediaScopePayload {
 export interface OperatorEvidenceRunningItem {
 	library_item_id: number;
 	evidence_kind: string;
+	work_priority: number;
+	work_reason: string | null;
 	attempt_count: number;
 	last_attempt_at: string | null;
 	heartbeat_at: string | null;
@@ -576,7 +578,10 @@ export interface OperatorEvidenceBacklogRow {
 	evidence_kind: string;
 	state: string;
 	reason: string | null;
+	decision_status: string | null;
 	work_status: string | null;
+	work_priority: number;
+	work_reason: string | null;
 	attempt_count: number;
 	retry_not_before: string | null;
 	last_attempt_at: string | null;
@@ -1182,6 +1187,8 @@ export interface QualityRiskPayload {
 	preview_policy_hash?: string | null;
 	blocked?: boolean;
 	blocking_reasons?: string[];
+	cadence_gate?: string | null;
+	cadence_transform?: string | null;
 	request_comparison?: boolean;
 	comparison_reason?: string | null;
 	typed_risks?: QualityRiskItem[];

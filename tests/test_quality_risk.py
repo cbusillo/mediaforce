@@ -90,6 +90,8 @@ class QualityRiskContractTests(unittest.TestCase):
         public = quality_risk_public_view(contract)
         assert public is not None
         self.assertEqual(public["verdict"], "blocked")
+        self.assertEqual(public["cadence_gate"], "progressive")
+        self.assertEqual(public["cadence_transform"], "none")
         self.assertEqual(public["operator_decision"]["status"], "rejected")
         self.assertTrue(public["operator_decision"]["effective_record"]["authoritative"])
 

@@ -1,4 +1,5 @@
 import argparse
+from dataclasses import asdict
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,8 @@ from mediaforce.execution import describe_item_plan, encode_manifest_items, prom
 from mediaforce.encoding.bakeoff import DEFAULT_BAKEOFF_ENGINES, build_bakeoff_plan, write_bakeoff_plan
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.candidate_selection import scope_target_size_blocker
+from mediaforce.library.evidence_acquisition import load_fingerprint_acquisition_items, \
+    replay_representative_dimensions
 from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, EvidenceQueueConflict, \
     cancel_evidence_queue, evidence_queue_summary, pause_evidence_queue, resume_evidence_queue, \
     start_evidence_work
@@ -72,6 +75,14 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_actions.add_parser("pause", help="Prevent new evidence claims")
     evidence_actions.add_parser("resume", help="Allow claims from the paused evidence batch")
     evidence_actions.add_parser("cancel", help="Cancel queued work and stop the active managed process")
+    evidence_replay_parser = evidence_actions.add_parser(
+        "replay",
+        help="Compare representative dimensions from stored evidence without reading media",
+    )
+    evidence_replay_parser.add_argument(
+        "prefix",
+        help="Explicit scope such as tv/Show/Season 1 or movies/Title (Year)",
+    )
     evidence_run_parser = evidence_actions.add_parser(
         "run",
         help="Run a bounded foreground worker pass and exit",
@@ -448,6 +459,26 @@ def _run_evidence_command(config: MediaforceConfig, args: argparse.Namespace) ->
                     summary = resume_evidence_queue(connection)
                 elif action == "cancel":
                     summary = cancel_evidence_queue(connection)
+                elif action == "replay":
+                    scope, items, measured_source_ids = load_fingerprint_acquisition_items(
+                        connection,
+                        config,
+                        args.prefix,
+                    )
+                    if not items:
+                        raise ValueError(f"No representative candidates were found for {args.prefix!r}.")
+                    report = replay_representative_dimensions(
+                        items,
+                        prefix=scope.prefix,
+                        policy=config.resolve_policy(scope.prefix),
+                        measured_source_ids=measured_source_ids,
+                    )
+                    summary = {
+                        "scope": scope.to_payload(),
+                        "candidate_count": len(items),
+                        "measured_fingerprint_count": len(measured_source_ids),
+                        "report": asdict(report),
+                    }
                 else:
                     raise ValueError(f"Unsupported evidence action: {action}")
     except (EvidenceQueueConflict, ValueError) as exc:

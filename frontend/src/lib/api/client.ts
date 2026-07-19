@@ -1,5 +1,17 @@
 type FetchLike = typeof fetch;
 
+export class ApiError extends Error {
+	readonly status: number;
+	readonly payload: Record<string, unknown> | null;
+
+	constructor(message: string, status: number, payload: Record<string, unknown> | null) {
+		super(message);
+		this.name = 'ApiError';
+		this.status = status;
+		this.payload = payload;
+	}
+}
+
 export function apiDownloadHref(path: string): string {
 	if (typeof window === 'undefined') return path;
 	const normalizedPath = path.startsWith('/') ? path : `/${path}`;
@@ -11,22 +23,34 @@ export function apiDownloadHref(path: string): string {
 	return normalizedPath;
 }
 
-function extractErrorMessage(raw: string, status: number): string {
+function parseErrorPayload(raw: string): Record<string, unknown> | null {
+	try {
+		const parsed = JSON.parse(raw) as unknown;
+		return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+			? (parsed as Record<string, unknown>)
+			: null;
+	} catch {
+		return null;
+	}
+}
+
+function extractErrorMessage(
+	raw: string,
+	status: number,
+	payload: Record<string, unknown> | null
+): string {
 	const trimmed = raw.trim();
 	if (!trimmed) {
 		return `Request failed with status ${status}`;
 	}
 
-	try {
-		const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+	if (payload) {
 		for (const key of ['message', 'detail', 'error']) {
-			const value = parsed[key];
+			const value = payload[key];
 			if (typeof value === 'string' && value.trim()) {
 				return value.trim();
 			}
 		}
-	} catch {
-		// Fall back to the raw response body when the server did not return JSON.
 	}
 
 	return trimmed;
@@ -46,8 +70,13 @@ export async function fetchJson<T>(
 	});
 
 	if (!response.ok) {
-		const message = extractErrorMessage(await response.text(), response.status);
-		throw new Error(message);
+		const raw = await response.text();
+		const payload = parseErrorPayload(raw);
+		throw new ApiError(
+			extractErrorMessage(raw, response.status, payload),
+			response.status,
+			payload
+		);
 	}
 
 	return (await response.json()) as T;

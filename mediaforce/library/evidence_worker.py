@@ -349,11 +349,22 @@ def _commit_evidence_summary(
                 reset_attempt_state=True,
             )
         elif classification_only and projection.state == EVIDENCE_STATE_ANALYSIS_REQUIRED:
-            transition_evidence_work(
-                connection,
-                claim,
-                work_status="queued",
-            )
+            if (
+                    claim.evidence_kind == MEDIA_FINGERPRINT_EVIDENCE_KIND
+                    and claim.work_priority != 0
+            ):
+                transition_evidence_work(
+                    connection,
+                    claim,
+                    work_status="completed",
+                    reset_attempt_state=True,
+                )
+            else:
+                transition_evidence_work(
+                    connection,
+                    claim,
+                    work_status="queued",
+                )
         else:
             transition_evidence_work(
                 connection,

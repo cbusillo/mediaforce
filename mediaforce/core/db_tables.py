@@ -102,6 +102,8 @@ library_item_evidence_state = Table(
     Column("last_error", Text),
     Column("work_batch_id", Text),
     Column("work_status", Text),
+    Column("work_priority", Integer, nullable=False, server_default="100"),
+    Column("work_reason", Text),
     Column("work_source_fingerprint", Text),
     Column("leased_at", Text),
     Column("lease_expires_at", Text),
@@ -127,6 +129,7 @@ Index(
     library_item_evidence_state.c.work_batch_id,
     library_item_evidence_state.c.work_status,
     library_item_evidence_state.c.retry_not_before,
+    library_item_evidence_state.c.work_priority,
     library_item_evidence_state.c.evidence_kind,
     library_item_evidence_state.c.library_item_id,
 )

@@ -636,6 +636,8 @@ def quality_risk_public_view(contract: Mapping[str, Any] | None) -> dict[str, An
         "preview_policy_hash": str(policy.get("preview_policy_hash") or "") or None,
         "blocked": bool(gates.get("blocked")),
         "blocking_reasons": [str(reason) for reason in object_list(gates.get("blocking_reasons")) if str(reason).strip()],
+        "cadence_gate": str(gates.get("cadence_gate") or "") or None,
+        "cadence_transform": str(gates.get("cadence_transform") or "") or None,
         "request_comparison": bool(gates.get("request_comparison")),
         "comparison_reason": str(gates.get("comparison_reason") or "") or None,
         "typed_risks": typed_risks,

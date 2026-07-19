@@ -22,6 +22,7 @@ from mediaforce.tuning.quality_risk import (
 from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.tuning.stream_budget import StreamBudgetProjectionBlocker, stream_budget_projection_blocker
 from mediaforce.web.runtime.folder_tuning_advice import operator_preserves_source_resolution, operator_request_from_intent
+from mediaforce.web.runtime.decision_evidence import cadence_evidence_blocker
 from mediaforce.web.runtime.folder_tuning_helpers import (
     allows_measured_size_quality_tradeoff,
     measured_size_budget_policy_fragment,
@@ -582,6 +583,7 @@ def folder_ai_tune_preview_action(
     host = deps.resolve_sample_host(config, host_key)
 
     with open_db(config.paths.db_path) as connection:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
         existing_job = deps.load_job_state(connection, config, normalized_prefix)
         if existing_job and existing_job.get("status") in {"queued", "running", "pending_review"}:
             return {"ok": False, "message": "A calibration job is already active for this folder."}
@@ -593,6 +595,16 @@ def folder_ai_tune_preview_action(
         sample_item = deps.sample_item(connection, config, normalized_prefix)
         if sample_item is None:
             raise HTTPException(status_code=404, detail=f"No sample item found for {normalized_prefix}")
+        cadence_blocker = cadence_evidence_blocker(
+            connection,
+            config,
+            normalized_prefix,
+            library_item_ids=[int(sample_item.get("library_item_id") or 0)],
+            decision_label="queueing this sample",
+            work_reason="sample_safety",
+        )
+        if cadence_blocker is not None:
+            return cadence_blocker
         calibration = deps.load_calibration_state(config, normalized_prefix)
         current_policy = object_dict(calibration.get("policy")) if calibration else object_dict(sample_item.get("resolved_policy"))
     if object_dict(operator_intent):
@@ -696,12 +708,23 @@ def folder_ai_tune_confirm_action(
     advice_payload = object_dict(pending_proposal.get("advice_payload"))
 
     with open_db(config.paths.db_path) as connection:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
         existing_job = deps.load_job_state(connection, config, normalized_prefix)
         if existing_job and existing_job.get("status") in {"queued", "running", "pending_review"}:
             return {"ok": False, "message": "A calibration job is already active for this folder."}
         sample_item = deps.sample_item(connection, config, normalized_prefix)
         if sample_item is None:
             raise HTTPException(status_code=404, detail=f"No sample item found for {normalized_prefix}")
+        cadence_blocker = cadence_evidence_blocker(
+            connection,
+            config,
+            normalized_prefix,
+            library_item_ids=[int(sample_item.get("library_item_id") or 0)],
+            decision_label="queueing this sample",
+            work_reason="sample_safety",
+        )
+        if cadence_blocker is not None:
+            return cadence_blocker
         calibration = deps.load_calibration_state(config, normalized_prefix)
         if action == "baseline" and calibration is not None:
             return {
@@ -822,6 +845,7 @@ def _retry_latest_sample_job(
         normalized_prefix: str,
 ) -> dict[str, Any]:
     with open_db(config.paths.db_path) as connection:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
         existing_job = deps.load_retryable_sample_job_state(connection, config, normalized_prefix)
         if existing_job is None:
             return {"ok": False, "message": "Ask the bench for a draft first."}
@@ -846,11 +870,21 @@ def _retry_latest_sample_job(
         host = deps.resolve_sample_host(config, host_key)
 
         stored_sample_item = object_dict(existing_job.get("sample_item"))
-        if not stored_sample_item:
-            sample_item = deps.sample_item(connection, config, normalized_prefix)
-            if sample_item is None:
-                raise HTTPException(status_code=404, detail=f"No sample item found for {normalized_prefix}")
-            stored_sample_item = object_dict(sample_item)
+        current_sample_item = deps.sample_item(connection, config, normalized_prefix)
+        if current_sample_item is not None:
+            stored_sample_item = object_dict(current_sample_item)
+        elif not stored_sample_item or not int(stored_sample_item.get("library_item_id") or 0):
+            raise HTTPException(status_code=404, detail=f"No current sample item found for {normalized_prefix}")
+        cadence_blocker = cadence_evidence_blocker(
+            connection,
+            config,
+            normalized_prefix,
+            library_item_ids=[int(stored_sample_item.get("library_item_id") or 0)],
+            decision_label="queueing this sample",
+            work_reason="sample_safety",
+        )
+        if cadence_blocker is not None:
+            return cadence_blocker
         prepared_sample_item, target_size_blocker = _prepare_sample_item(
             config,
             stored_sample_item,

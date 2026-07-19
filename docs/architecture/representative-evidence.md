@@ -54,6 +54,34 @@ measured fingerprint coverage dimensions to the earlier technical profile.
 Changing the threshold, clustering, tie breakers, or coverage semantics
 requires a representative-selection tool or policy version bump.
 
+## Bounded acquisition
+
+Fingerprint completeness is not a catalog invariant. Acquisition starts from
+the representative set produced by codec, resolution, measured cadence, audio
+layout, and runtime alone. Missing or stale fingerprint decisions are removed
+from the selection input, so hidden historical facts cannot influence the next
+candidate.
+
+After those technical representatives are current, Mediaforce may select a
+small follow-up frontier near representatives that expose a non-typical measured
+trait but have not yet established a meaningful cluster. The frontier is capped
+at three items per prepared batch and the total automatic scope budget is the
+smaller of the candidate count or `max(3, 2 × technical representatives)`.
+Acquisition stops when meaningful representative coverage is satisfied or the
+scope budget is exhausted; unselected items intentionally remain unmeasured.
+
+`mediaforce evidence replay <prefix>` reports technical-only, all-dimension, and
+leave-one-fingerprint-dimension-out selections. Each replay includes added and
+removed representatives, hard-case recall, sample-set growth, full acquisition
+cost, and remaining cost. This is a policy/cost report only and launches no
+media subprocess.
+
+`audio_complexity` remains available because local replay across 20 measured TV
+season scopes changed the representative set in 8 scopes and improved hard-case
+recall in 4. Its separate audio sampling cost is reported explicitly; scopes
+where it changes neither selection nor recall are marked `defer`. This keeps the
+dimension reviewable without granting it safety or cleanup authority.
+
 ## Evidence envelope v1
 
 Every envelope has a deterministic `evidence_id`, schema version, kind,

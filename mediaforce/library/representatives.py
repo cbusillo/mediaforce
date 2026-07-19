@@ -14,7 +14,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.evidence import build_evidence_envelope, stable_policy_hash, stable_source_id
 from mediaforce.core.type_defs import mapping_dict, object_dict, object_list
-from mediaforce.library.media_scopes import resolve_media_scope, scope_rel_path_filter
+from mediaforce.library.media_scopes import MediaScope, resolve_media_scope, scope_rel_path_filter
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
 from mediaforce.library.planner import build_manifest_item
 
@@ -24,8 +24,8 @@ REPRESENTATIVE_SELECTION_POLICY_VERSION = 2
 MEANINGFUL_CLUSTER_FRACTION = 0.20
 
 _PREFERRED_SAMPLE_STATUSES = frozenset({"discovered", "planned", "validated", "encoded"})
-_PROFILE_DIMENSIONS = ("video_codec", "resolution", "cadence", "audio_layout", "runtime")
-_FINGERPRINT_DIMENSIONS = (
+TECHNICAL_PROFILE_DIMENSIONS = ("video_codec", "resolution", "cadence", "audio_layout", "runtime")
+FINGERPRINT_DIMENSIONS = (
     "luma",
     "gradient",
     "motion",
@@ -35,7 +35,6 @@ _FINGERPRINT_DIMENSIONS = (
     "animation",
     "audio_complexity",
 )
-_COVERAGE_DIMENSIONS = (*_PROFILE_DIMENSIONS, *_FINGERPRINT_DIMENSIONS)
 _UNKNOWN_PROFILE_VALUE = "unknown"
 _PUBLIC_ITEM_FIELDS = (
     "library_item_id",
@@ -122,6 +121,38 @@ def load_representative_selection(
         config: MediaforceConfig,
         prefix: str,
 ) -> RepresentativeSelection | None:
+    scope, items = load_representative_candidates(connection, config, prefix)
+    if not items:
+        return None
+    return select_representatives(
+        items,
+        prefix=scope.prefix,
+        policy=config.resolve_policy(scope.prefix),
+    )
+
+
+def load_representative_candidates(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+) -> tuple[MediaScope, list[dict[str, Any]]]:
+    scope, candidate_rows = load_representative_candidate_rows(connection, config, prefix)
+    items: list[dict[str, Any]] = []
+    for row in candidate_rows:
+        row_payload = mapping_dict(row)
+        item = build_manifest_item(row_payload, config)
+        for field in _OPTIONAL_TECHNICAL_FIELDS:
+            if row_payload.get(field) not in (None, ""):
+                item[field] = row_payload[field]
+        items.append(item)
+    return scope, items
+
+
+def load_representative_candidate_rows(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+) -> tuple[MediaScope, list[Mapping[str, Any]]]:
     scope = resolve_media_scope(connection, prefix, library_types=config.library_type_map)
     rows = connection.execute(
         select(library_items)
@@ -129,7 +160,7 @@ def load_representative_selection(
         .order_by(library_items.c.rel_path.asc())
     ).mappings().fetchall()
     if not rows:
-        return None
+        return scope, []
 
     library = config.library_definition_map.get(scope.root, {})
     if str(library.get("type") or "") == "movie":
@@ -144,23 +175,10 @@ def load_representative_selection(
             and movie_item_included(membership, policy, explicit_exact=explicit_exact)[0]
         ]
         if not rows:
-            return None
+            return scope, []
 
     preferred_rows = [row for row in rows if str(row.get("status") or "") in _PREFERRED_SAMPLE_STATUSES]
-    candidate_rows = preferred_rows or list(rows)
-    items: list[dict[str, Any]] = []
-    for row in candidate_rows:
-        row_payload = mapping_dict(row)
-        item = build_manifest_item(row_payload, config)
-        for field in _OPTIONAL_TECHNICAL_FIELDS:
-            if row_payload.get(field) not in (None, ""):
-                item[field] = row_payload[field]
-        items.append(item)
-    return select_representatives(
-        items,
-        prefix=scope.prefix,
-        policy=config.resolve_policy(scope.prefix),
-    )
+    return scope, preferred_rows or list(rows)
 
 
 def select_representatives(
@@ -169,24 +187,26 @@ def select_representatives(
         prefix: str = "",
         policy: Mapping[str, Any] | None = None,
         tool_version: str = REPRESENTATIVE_SELECTION_TOOL_VERSION,
+        fingerprint_dimensions: Iterable[str] | None = None,
 ) -> RepresentativeSelection:
     if not items:
         raise ValueError("At least one representative candidate is required")
 
+    active_fingerprint_dimensions = _normalize_fingerprint_dimensions(fingerprint_dimensions)
+    coverage_dimensions = (*TECHNICAL_PROFILE_DIMENSIONS, *active_fingerprint_dimensions)
     item_payloads = [copy.deepcopy(dict(item)) for item in items]
-    median_runtime = _median_positive(item.get("duration_seconds") for item in item_payloads)
-    median_size = _median_positive(item.get("source_size_bytes", item.get("size_bytes")) for item in item_payloads)
-    candidates = sorted(
-        (_candidate(item, median_runtime) for item in item_payloads),
-        key=lambda candidate: candidate.sort_key,
-    )
+    candidates, median_runtime, median_size = _representative_candidates(item_payloads)
     outlier_reasons = _outlier_reasons(candidates)
-    profile_counts = _profile_counts(candidates)
+    profile_counts = _profile_counts(candidates, coverage_dimensions)
     dominant_profile = {
         dimension: _dominant_value(profile_counts[dimension])
-        for dimension in _COVERAGE_DIMENSIONS
+        for dimension in coverage_dimensions
     }
-    required_targets, target_counts = _required_coverage_targets(candidates, outlier_reasons)
+    required_targets, target_counts = _required_coverage_targets(
+        candidates,
+        outlier_reasons,
+        profile_dimensions=coverage_dimensions,
+    )
 
     primary = min(
         candidates,
@@ -196,18 +216,19 @@ def select_representatives(
             median_runtime=median_runtime,
             median_size=median_size,
             outlier_reasons=outlier_reasons,
+            profile_dimensions=coverage_dimensions,
         ),
     )
     selected = [primary]
     newly_covered: dict[str, set[tuple[str, str]]] = {
-        primary.source_id: required_targets & _profile_targets(primary),
+        primary.source_id: required_targets & _profile_targets(primary, coverage_dimensions),
     }
-    uncovered_targets = required_targets - _profile_targets(primary)
+    uncovered_targets = required_targets - _profile_targets(primary, coverage_dimensions)
     while uncovered_targets:
         covering_candidates = [
             candidate
             for candidate in candidates
-            if candidate not in selected and uncovered_targets & _profile_targets(candidate)
+            if candidate not in selected and uncovered_targets & _profile_targets(candidate, coverage_dimensions)
         ]
         if not covering_candidates:
             break
@@ -221,14 +242,19 @@ def select_representatives(
                 median_runtime=median_runtime,
                 median_size=median_size,
                 outlier_reasons=outlier_reasons,
+                profile_dimensions=coverage_dimensions,
             ),
         )
-        covered = uncovered_targets & _profile_targets(next_candidate)
+        covered = uncovered_targets & _profile_targets(next_candidate, coverage_dimensions)
         selected.append(next_candidate)
         newly_covered[next_candidate.source_id] = covered
         uncovered_targets -= covered
 
-    assignments = _representation_assignments(candidates, selected)
+    assignments = _representation_assignments(
+        candidates,
+        selected,
+        profile_dimensions=coverage_dimensions,
+    )
     coverage = _coverage_payload(
         candidates,
         selected,
@@ -237,6 +263,7 @@ def select_representatives(
         required_targets,
         uncovered_targets,
         outlier_reasons,
+        profile_dimensions=coverage_dimensions,
     )
     confidence = _confidence_payload(coverage)
     rationale = [
@@ -249,6 +276,7 @@ def select_representatives(
             assignment=assignments[candidate.source_id],
             dominant_profile=dominant_profile,
             outlier_reasons=outlier_reasons,
+            profile_dimensions=coverage_dimensions,
         )
         for index, candidate in enumerate(selected)
     ]
@@ -269,8 +297,8 @@ def select_representatives(
     selection_policy = {
         "version": REPRESENTATIVE_SELECTION_POLICY_VERSION,
         "meaningful_cluster_fraction": MEANINGFUL_CLUSTER_FRACTION,
-        "profile_dimensions": list(_PROFILE_DIMENSIONS),
-        "fingerprint_dimensions": list(_FINGERPRINT_DIMENSIONS),
+        "profile_dimensions": list(TECHNICAL_PROFILE_DIMENSIONS),
+        "fingerprint_dimensions": list(active_fingerprint_dimensions),
         "numeric_outliers_required_for_coverage": False,
     }
     policy_snapshot = {
@@ -332,6 +360,40 @@ def select_representatives(
     )
 
 
+def representative_profiles(
+        items: Sequence[Mapping[str, Any]],
+        *,
+        fingerprint_dimensions: Iterable[str] | None = None,
+) -> dict[str, dict[str, str]]:
+    active_fingerprint_dimensions = _normalize_fingerprint_dimensions(fingerprint_dimensions)
+    profile_dimensions = (*TECHNICAL_PROFILE_DIMENSIONS, *active_fingerprint_dimensions)
+    candidates, _median_runtime, _median_size = _representative_candidates(
+        [copy.deepcopy(dict(item)) for item in items]
+    )
+    return {
+        candidate.source_id: {
+            dimension: candidate.profile[dimension]
+            for dimension in profile_dimensions
+        }
+        for candidate in candidates
+    }
+
+
+def _representative_candidates(
+        item_payloads: Sequence[dict[str, Any]],
+) -> tuple[list[_Candidate], float | None, float | None]:
+    median_runtime = _median_positive(item.get("duration_seconds") for item in item_payloads)
+    median_size = _median_positive(
+        item.get("source_size_bytes", item.get("size_bytes"))
+        for item in item_payloads
+    )
+    candidates = sorted(
+        (_candidate(item, median_runtime) for item in item_payloads),
+        key=lambda candidate: candidate.sort_key,
+    )
+    return candidates, median_runtime, median_size
+
+
 def _candidate(item: dict[str, Any], median_runtime: float | None) -> _Candidate:
     duration_seconds = _positive_float(item.get("duration_seconds"))
     size_bytes = _positive_int(item.get("source_size_bytes", item.get("size_bytes")))
@@ -360,10 +422,11 @@ def _selection_sort_key(
         median_runtime: float | None,
         median_size: float | None,
         outlier_reasons: Mapping[str, list[str]],
+        profile_dimensions: Sequence[str],
 ) -> tuple[Any, ...]:
     mismatch_count = sum(
         candidate.profile[dimension] != dominant_profile[dimension]
-        for dimension in _COVERAGE_DIMENSIONS
+        for dimension in profile_dimensions
     )
     return (
         len(outlier_reasons.get(candidate.source_id, [])),
@@ -383,8 +446,9 @@ def _coverage_sort_key(
         median_runtime: float | None,
         median_size: float | None,
         outlier_reasons: Mapping[str, list[str]],
+        profile_dimensions: Sequence[str],
 ) -> tuple[Any, ...]:
-    covered = uncovered_targets & _profile_targets(candidate)
+    covered = uncovered_targets & _profile_targets(candidate, profile_dimensions)
     covered_items = sum(target_counts[target] for target in covered)
     return (
         -covered_items,
@@ -395,6 +459,7 @@ def _coverage_sort_key(
             median_runtime=median_runtime,
             median_size=median_size,
             outlier_reasons=outlier_reasons,
+            profile_dimensions=profile_dimensions,
         ),
     )
 
@@ -402,6 +467,8 @@ def _coverage_sort_key(
 def _representation_assignments(
         candidates: Sequence[_Candidate],
         selected: Sequence[_Candidate],
+        *,
+        profile_dimensions: Sequence[str],
 ) -> dict[str, dict[str, Any]]:
     assignments = {
         candidate.source_id: {
@@ -413,7 +480,11 @@ def _representation_assignments(
     for candidate in candidates:
         representative = min(
             selected,
-            key=lambda selected_candidate: _representation_distance(candidate, selected_candidate),
+            key=lambda selected_candidate: _representation_distance(
+                candidate,
+                selected_candidate,
+                profile_dimensions=profile_dimensions,
+            ),
         )
         assignment = assignments[representative.source_id]
         assignment["represented_item_count"] += 1
@@ -427,10 +498,15 @@ def _representation_assignments(
     return assignments
 
 
-def _representation_distance(candidate: _Candidate, representative: _Candidate) -> tuple[Any, ...]:
+def _representation_distance(
+        candidate: _Candidate,
+        representative: _Candidate,
+        *,
+        profile_dimensions: Sequence[str],
+) -> tuple[Any, ...]:
     profile_mismatches = sum(
         candidate.profile[dimension] != representative.profile[dimension]
-        for dimension in _COVERAGE_DIMENSIONS
+        for dimension in profile_dimensions
     )
     return (
         profile_mismatches,
@@ -448,21 +524,23 @@ def _coverage_payload(
         required_targets: set[tuple[str, str]],
         uncovered_targets: set[tuple[str, str]],
         outlier_reasons: Mapping[str, list[str]],
+        *,
+        profile_dimensions: Sequence[str],
 ) -> dict[str, Any]:
     selected_profiles = {
-        tuple(candidate.profile[dimension] for dimension in _COVERAGE_DIMENSIONS)
+        tuple(candidate.profile[dimension] for dimension in profile_dimensions)
         for candidate in selected
     }
     exact_candidates = [
         candidate
         for candidate in candidates
-        if tuple(candidate.profile[dimension] for dimension in _COVERAGE_DIMENSIONS) in selected_profiles
+        if tuple(candidate.profile[dimension] for dimension in profile_dimensions) in selected_profiles
     ]
     total_runtime = sum(candidate.duration_seconds or 0.0 for candidate in candidates)
     exact_runtime = sum(candidate.duration_seconds or 0.0 for candidate in exact_candidates)
     meaningful_covered = len(required_targets - uncovered_targets)
     dimensions: dict[str, Any] = {}
-    for dimension in _COVERAGE_DIMENSIONS:
+    for dimension in profile_dimensions:
         covered_values = {candidate.profile[dimension] for candidate in selected}
         covered_item_count = sum(
             count
@@ -489,9 +567,9 @@ def _coverage_payload(
     known_facts = sum(
         candidate.profile[dimension] != _UNKNOWN_PROFILE_VALUE
         for candidate in candidates
-        for dimension in _COVERAGE_DIMENSIONS
+        for dimension in profile_dimensions
     )
-    total_facts = len(candidates) * len(_COVERAGE_DIMENSIONS)
+    total_facts = len(candidates) * len(profile_dimensions)
     return {
         "candidate_item_count": len(candidates),
         "candidate_runtime_seconds": round(total_runtime, 3),
@@ -551,6 +629,7 @@ def _selection_rationale(
         assignment: Mapping[str, Any],
         dominant_profile: Mapping[str, str],
         outlier_reasons: Mapping[str, list[str]],
+        profile_dimensions: Sequence[str],
 ) -> dict[str, Any]:
     covered_clusters = [
         {
@@ -563,7 +642,7 @@ def _selection_rationale(
     ]
     dominant_matches = [
         dimension
-        for dimension in _COVERAGE_DIMENSIONS
+        for dimension in profile_dimensions
         if candidate.profile[dimension] == dominant_profile[dimension]
     ]
     if role == "primary":
@@ -599,11 +678,13 @@ def _selected_item_payload(candidate: _Candidate, rationale: Mapping[str, Any]) 
 def _required_coverage_targets(
         candidates: Sequence[_Candidate],
         outlier_reasons: Mapping[str, list[str]],
+        *,
+        profile_dimensions: Sequence[str],
 ) -> tuple[set[tuple[str, str]], dict[tuple[str, str], int]]:
     threshold = max(1, math.ceil(len(candidates) * MEANINGFUL_CLUSTER_FRACTION))
     targets: set[tuple[str, str]] = set()
     target_counts: dict[tuple[str, str], int] = {}
-    for dimension in _COVERAGE_DIMENSIONS:
+    for dimension in profile_dimensions:
         eligible_candidates = [
             candidate
             for candidate in candidates
@@ -622,18 +703,21 @@ def _required_coverage_targets(
     return targets, target_counts
 
 
-def _profile_targets(candidate: _Candidate) -> set[tuple[str, str]]:
+def _profile_targets(candidate: _Candidate, profile_dimensions: Sequence[str]) -> set[tuple[str, str]]:
     return {
         (dimension, candidate.profile[dimension])
-        for dimension in _COVERAGE_DIMENSIONS
+        for dimension in profile_dimensions
         if candidate.profile[dimension] != _UNKNOWN_PROFILE_VALUE
     }
 
 
-def _profile_counts(candidates: Sequence[_Candidate]) -> dict[str, Counter[str]]:
+def _profile_counts(
+        candidates: Sequence[_Candidate],
+        profile_dimensions: Sequence[str],
+) -> dict[str, Counter[str]]:
     return {
         dimension: Counter(candidate.profile[dimension] for candidate in candidates)
-        for dimension in _COVERAGE_DIMENSIONS
+        for dimension in profile_dimensions
     }
 
 
@@ -764,7 +848,7 @@ def _audio_layout_class(item: Mapping[str, Any]) -> str:
 def _fingerprint_profile(item: Mapping[str, Any]) -> dict[str, str]:
     decision = object_dict(item.get("media_fingerprint_decision"))
     if not decision or str(decision.get("status") or "") != "measured":
-        return {dimension: _UNKNOWN_PROFILE_VALUE for dimension in _FINGERPRINT_DIMENSIONS}
+        return {dimension: _UNKNOWN_PROFILE_VALUE for dimension in FINGERPRINT_DIMENSIONS}
     traits = {str(value) for value in object_list(decision.get("traits"))}
     finding_ids = {
         str(finding.get("id"))
@@ -781,6 +865,17 @@ def _fingerprint_profile(item: Mapping[str, Any]) -> dict[str, str]:
         "animation": "animation_cues" if "animation_cues" in values else "typical",
         "audio_complexity": "complex" if "audio_complexity" in values else "typical",
     }
+
+
+def _normalize_fingerprint_dimensions(dimensions: Iterable[str] | None) -> tuple[str, ...]:
+    if dimensions is None:
+        return FINGERPRINT_DIMENSIONS
+    requested_dimensions = {str(dimension).strip() for dimension in dimensions}
+    unsupported_dimensions = sorted(requested_dimensions - set(FINGERPRINT_DIMENSIONS))
+    if unsupported_dimensions:
+        labels = ", ".join(unsupported_dimensions)
+        raise ValueError(f"Unsupported fingerprint dimensions: {labels}")
+    return tuple(dimension for dimension in FINGERPRINT_DIMENSIONS if dimension in requested_dimensions)
 
 
 def _noise_profile(values: set[str]) -> str:

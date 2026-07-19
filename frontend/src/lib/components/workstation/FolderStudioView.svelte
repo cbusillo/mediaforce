@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
-	import { apiDownloadHref, postJson } from '$lib/api/client';
+	import { ApiError, apiDownloadHref, postJson } from '$lib/api/client';
 	import { folderRoutePath, folderRoutePrefix } from '$lib/folder-display';
 	import {
 		formatDateTimeCopy,
@@ -79,6 +79,7 @@
 	let benchError = $state('');
 	let profileMessage = $state('');
 	let profileError = $state('');
+	let blockerAction = $state<{ route: '/ops'; label: string } | null>(null);
 	let benchTextarea = $state<HTMLTextAreaElement | null>(null);
 	let localPendingProposal = $state<Record<string, unknown> | null | undefined>(undefined);
 	let localProposalPrefix = $state('');
@@ -107,7 +108,18 @@
 		}
 		benchMessage = '';
 		benchError = '';
+		blockerAction = null;
 	});
+
+	function actionErrorMessage(error: unknown, fallback: string): string {
+		blockerAction = null;
+		if (error instanceof ApiError) {
+			const route = String(error.payload?.next_route ?? '').trim();
+			const label = String(error.payload?.next_action_label ?? '').trim();
+			if (route === '/ops' && label) blockerAction = { route, label };
+		}
+		return error instanceof Error ? error.message : fallback;
+	}
 	const summary = $derived(studioFolder.summary);
 	const title = $derived(resolveFolderTitle(prefix));
 	const library = $derived(prefix.split('/')[0] || 'Library');
@@ -271,6 +283,7 @@
 		benchPending = true;
 		benchMessage = '';
 		benchError = '';
+		blockerAction = null;
 		try {
 			const response = await postJson<FolderBenchPreviewResponse>(
 				`${resolve('/')}api/folders/${encodedPrefix}/ai-tune/preview`,
@@ -283,7 +296,7 @@
 				response.message || 'Sample plan ready. Nothing is queued until you confirm it.';
 			benchNote = '';
 		} catch (error) {
-			benchError = error instanceof Error ? error.message : 'Review request failed.';
+			benchError = actionErrorMessage(error, 'Review request failed.');
 		} finally {
 			benchPending = false;
 		}
@@ -296,6 +309,7 @@
 		workflowPending = action;
 		benchMessage = '';
 		benchError = '';
+		blockerAction = null;
 		try {
 			const response = await postJson<FolderBenchConfirmResponse>(
 				`${resolve('/')}api/folders/${encodedPrefix}/ai-tune/confirm`,
@@ -306,7 +320,7 @@
 			benchMessage = response.message || 'Queued the sample run from the plan.';
 			await onMutate();
 		} catch (error) {
-			benchError = error instanceof Error ? error.message : 'Sample could not be queued.';
+			benchError = actionErrorMessage(error, 'Sample could not be queued.');
 		} finally {
 			workflowPending = null;
 		}
@@ -321,6 +335,8 @@
 		workflowPending = action;
 		profileMessage = '';
 		profileError = '';
+		blockerAction = null;
+		blockerAction = null;
 		try {
 			const response =
 				submissionMode === 'queue-approved'
@@ -340,8 +356,7 @@
 				response.message || 'Approved the sample plan and queued the folder process.';
 			await onMutate();
 		} catch (error) {
-			profileError =
-				error instanceof Error ? error.message : 'Folder profile could not be approved.';
+			profileError = actionErrorMessage(error, 'Folder profile could not be approved.');
 		} finally {
 			workflowPending = null;
 		}
@@ -354,6 +369,7 @@
 		workflowPending = action;
 		profileMessage = '';
 		profileError = '';
+		blockerAction = null;
 		try {
 			const response = await postJson<{ ok: boolean; message?: string }>(
 				`${resolve('/')}api/encode-queue/retry-prefix`,
@@ -398,6 +414,7 @@
 		workflowPending = action;
 		benchMessage = '';
 		benchError = '';
+		blockerAction = null;
 		try {
 			const response = await postJson<{ ok?: boolean; message?: string }>(
 				`${resolve('/')}api/calibration-queue/stop`,
@@ -852,6 +869,10 @@
 					{/if}
 					{#if profileError}
 						<p class="decision__status decision__status--fail">{profileError}</p>
+						{#if blockerAction}
+							<a class="blocker-action" href={resolve(blockerAction.route)}>{blockerAction.label}</a
+							>
+						{/if}
 					{:else if profileMessage}
 						<p class="decision__status decision__status--ready">{profileMessage}</p>
 					{/if}
@@ -1035,6 +1056,11 @@
 							</div>
 							{#if benchError}
 								<p class="bench__status bench__status--fail">{benchError}</p>
+								{#if blockerAction}
+									<a class="blocker-action" href={resolve(blockerAction.route)}
+										>{blockerAction.label}</a
+									>
+								{/if}
 							{:else if benchMessage}
 								<p class="bench__status bench__status--ready">{benchMessage}</p>
 							{:else if benchPending}
@@ -1885,6 +1911,14 @@
 	.decision__status--fail {
 		border-left-color: var(--mf-fail-fg);
 		color: var(--mf-fail-fg);
+	}
+
+	.blocker-action {
+		color: var(--mf-active-fg);
+		font-size: var(--mf-text-xs);
+		font-weight: var(--mf-weight-semibold);
+		text-decoration-thickness: 1px;
+		text-underline-offset: 0.2em;
 	}
 
 	.review-workspace {
