@@ -15,6 +15,7 @@ from mediaforce.core.db import _load_sql_asset
 from mediaforce.core.db import open_db
 from mediaforce.core.db import reset_engine_cache
 from mediaforce.core.db_tables import alembic_version
+from mediaforce.core.db_tables import evidence_queue_state
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import encode_queue_state
 from mediaforce.core.db_tables import library_item_evidence_state
@@ -25,7 +26,7 @@ from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.cadence import cadence_policy_snapshot
 from mediaforce.encoding.fingerprint import media_fingerprint_policy_snapshot
 
-CURRENT_DB_REVISION = "20260719_0011"
+CURRENT_DB_REVISION = "20260719_0012"
 
 
 class DatabaseRuntimeTests(unittest.TestCase):
@@ -48,6 +49,10 @@ class DatabaseRuntimeTests(unittest.TestCase):
                     str(index_row["name"])
                     for index_row in inspector.get_indexes("library_item_evidence_state")
                 }
+                evidence_columns = {
+                    str(column["name"])
+                    for column in inspector.get_columns("library_item_evidence_state")
+                }
                 library_columns = {str(column["name"]) for column in inspector.get_columns("library_items")}
 
             self.assertEqual(version, CURRENT_DB_REVISION)
@@ -62,8 +67,13 @@ class DatabaseRuntimeTests(unittest.TestCase):
             self.assertIn("series_metadata", table_names)
             self.assertIn("metadata_sync_state", table_names)
             self.assertIn("library_item_evidence_state", table_names)
+            self.assertIn("evidence_queue_state", table_names)
             self.assertIn("idx_library_item_evidence_state_kind_state", evidence_indexes)
             self.assertIn("idx_library_item_evidence_state_work_ready", evidence_indexes)
+            self.assertIn("idx_library_item_evidence_state_work_claim", evidence_indexes)
+            self.assertIn("work_batch_id", evidence_columns)
+            self.assertIn("work_status", evidence_columns)
+            self.assertIn("lease_expires_at", evidence_columns)
 
     def test_open_db_stamps_existing_legacy_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -414,6 +424,124 @@ class DatabaseRuntimeTests(unittest.TestCase):
             self.assertNotIn("library_item_evidence_state", table_names)
             self.assertEqual(canonical, (cadence_json, fingerprint_json))
             self.assertEqual(version, ("20260712_0010",))
+
+    def test_evidence_queue_migration_round_trip_preserves_state_without_starting_work(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "library.sqlite3"
+            cadence_json = '{"schema_version":1,"decision":{"status":"measured"}}'
+            with open_db(db_path) as connection:
+                item_result = connection.execute(
+                    library_items.insert().values(
+                        **self._library_item_values(
+                            cadence_summary_json=cadence_json,
+                            media_fingerprint_json=None,
+                        )
+                    )
+                )
+                item_id = int(item_result.inserted_primary_key[0])
+                connection.execute(
+                    library_item_evidence_state.insert().values(
+                        library_item_id=item_id,
+                        evidence_kind="cadence_analysis",
+                        state="analysis_required",
+                        reason="retry_required",
+                        summary_sha256="sha256:fixture",
+                        source_fingerprint="content-1",
+                        summary_schema_version=1,
+                        analyzer_name="mediaforce.ffmpeg_idet",
+                        analyzer_version="1",
+                        analyzer_runtime_version="ffmpeg fixture",
+                        policy_hash="sha256:policy",
+                        decision_status="measured",
+                        attempt_count=2,
+                        retry_not_before="2026-07-20T00:00:00+00:00",
+                        last_attempt_at="2026-07-19T12:30:00+00:00",
+                        last_error="fixture failure",
+                        work_batch_id="batch-1",
+                        work_status="queued",
+                        work_source_fingerprint="content-1",
+                        updated_at="2026-07-19T12:30:00+00:00",
+                    )
+                )
+                connection.execute(
+                    evidence_queue_state.insert().values(
+                        queue_name="evidence",
+                        batch_id="batch-1",
+                        status="paused",
+                        scope_json='{"prefix":"tv/show"}',
+                        evidence_kinds_json='["cadence_analysis"]',
+                        is_paused=1,
+                        cancel_requested=0,
+                        item_count=1,
+                        completed_count=0,
+                        failed_count=0,
+                        cancelled_count=0,
+                        created_at="2026-07-19T12:30:00+00:00",
+                        updated_at="2026-07-19T12:30:00+00:00",
+                    )
+                )
+            reset_engine_cache()
+
+            with _alembic_script_location() as script_location:
+                command.downgrade(
+                    _alembic_config(db_path, script_location),
+                    "20260719_0011",
+                )
+
+            raw_connection = sqlite3.connect(db_path)
+            try:
+                table_names = {
+                    str(row[0])
+                    for row in raw_connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    ).fetchall()
+                }
+                evidence_columns = {
+                    str(row[1])
+                    for row in raw_connection.execute(
+                        "PRAGMA table_info(library_item_evidence_state)"
+                    ).fetchall()
+                }
+                downgraded_state = raw_connection.execute(
+                    "SELECT attempt_count, retry_not_before, last_error "
+                    "FROM library_item_evidence_state"
+                ).fetchone()
+                canonical = raw_connection.execute(
+                    "SELECT cadence_summary_json FROM library_items"
+                ).fetchone()
+            finally:
+                raw_connection.close()
+
+            self.assertNotIn("evidence_queue_state", table_names)
+            self.assertNotIn("work_status", evidence_columns)
+            self.assertEqual(
+                downgraded_state,
+                (2, "2026-07-20T00:00:00+00:00", "fixture failure"),
+            )
+            self.assertEqual(canonical, (cadence_json,))
+
+            with patch("subprocess.run", side_effect=AssertionError("unexpected subprocess")), patch(
+                "subprocess.Popen",
+                side_effect=AssertionError("unexpected subprocess"),
+            ), open_db(db_path) as connection:
+                upgraded_state = connection.execute(
+                    select(
+                        library_item_evidence_state.c.attempt_count,
+                        library_item_evidence_state.c.retry_not_before,
+                        library_item_evidence_state.c.last_error,
+                        library_item_evidence_state.c.work_batch_id,
+                        library_item_evidence_state.c.work_status,
+                    )
+                ).one()
+                queue_rows = connection.execute(select(evidence_queue_state.c.queue_name)).fetchall()
+                version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
+
+            self.assertEqual(version, CURRENT_DB_REVISION)
+            self.assertEqual(
+                tuple(upgraded_state),
+                (2, "2026-07-20T00:00:00+00:00", "fixture failure", None, None),
+            )
+            self.assertEqual(queue_rows, [])
 
     def test_open_db_rolls_back_on_base_exception(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

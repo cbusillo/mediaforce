@@ -24,6 +24,8 @@ Use this directory for guidance that should not live in `AGENTS.md`.
   complexity, versioned media fingerprint evidence, and review-moment selection
 - `docs/architecture/evidence-state.md`: additive per-item cadence/fingerprint
   lifecycle state, identities, retry foundation, and media-free rebuilds
+- `docs/architecture/evidence-worker.md`: explicit paused evidence batches,
+  single-concurrency claims, retries, cancellation, and source-safe commits
 - `docs/architecture/stream-budget-ledger.md`: production stream selection,
   non-video overhead, uncertainty, and deterministic size feasibility
 - `docs/architecture/quality-risk-contract.md`: versioned quality-risk facts,

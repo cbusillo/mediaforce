@@ -342,6 +342,12 @@ def media_fingerprint_manifest_payload(
     return envelope, decision
 
 
+def reclassify_media_fingerprint_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
+    payload = copy.deepcopy(object_dict(summary))
+    payload["decision"] = classify_media_fingerprint(object_dict(payload.get("analysis")))
+    return payload
+
+
 def media_fingerprint_staleness(
         envelope: Mapping[str, Any],
         *,

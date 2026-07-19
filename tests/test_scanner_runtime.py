@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -14,8 +15,9 @@ from mediaforce.core.db_tables import library_item_evidence_state, library_items
 from mediaforce.core.models import ProbeSummary
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND
-from mediaforce.library.evidence_state import EVIDENCE_REASON_POLICY_CHANGED, EVIDENCE_REASON_RETRY_REQUIRED, \
-    EVIDENCE_STATE_ANALYSIS_REQUIRED, EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT
+from mediaforce.library.evidence_state import EVIDENCE_REASON_POLICY_CHANGED, EVIDENCE_REASON_SOURCE_CHANGED, \
+    EVIDENCE_STATE_ANALYSIS_REQUIRED, EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, \
+    sync_library_item_evidence_states
 from mediaforce.library.scanner import (
     _content_version_changed,
     _failed_probe_summary,
@@ -204,11 +206,11 @@ class ScannerRuntimeTests(unittest.TestCase):
             movie = media_root / "Feature.mkv"
             movie.write_bytes(b"movie")
             config = self._config(project_root, {"movies": media_root})
-            retryable_summary = _failed_probe_summary(RuntimeError("fixture probe failure"))
-            stale_cadence = json.loads(retryable_summary.cadence_summary_json)
+            retryable_summary = self._retryable_probe_summary()
+            stale_cadence = json.loads(str(retryable_summary.cadence_summary_json))
             stale_cadence.pop("retry_required", None)
             stale_cadence["analysis"]["tool"]["version"] = "0"
-            stale_fingerprint = json.loads(retryable_summary.media_fingerprint_json)
+            stale_fingerprint = json.loads(str(retryable_summary.media_fingerprint_json))
             stale_fingerprint.pop("retry_required", None)
             stale_fingerprint["analysis"]["tool"]["version"] = "0"
 
@@ -311,6 +313,22 @@ class ScannerRuntimeTests(unittest.TestCase):
                     ):
                         scan_library(connection, config)
                     item = connection.execute(select(library_items)).mappings().one()
+                    successful = self._successful_probe_summary()
+                    connection.execute(
+                        update(library_items)
+                        .where(library_items.c.id == item["id"])
+                        .values(
+                            cadence_summary_json=successful.cadence_summary_json,
+                            media_fingerprint_json=successful.media_fingerprint_json,
+                        )
+                    )
+                    item = connection.execute(select(library_items)).mappings().one()
+                    sync_library_item_evidence_states(
+                        connection,
+                        item,
+                        preserve_source_identity=False,
+                        preserve_policy_identity=False,
+                    )
                     connection.execute(
                         update(library_items)
                         .where(library_items.c.id == item["id"])
@@ -773,7 +791,7 @@ class ScannerRuntimeTests(unittest.TestCase):
         self.assertEqual(scan_row["scope"], "limited")
         self.assertEqual(scan_row["file_count"], 0)
 
-    def test_scan_projects_and_refreshes_evidence_state_with_canonical_json(self) -> None:
+    def test_scan_preserves_canonical_evidence_and_marks_changed_source_pending(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
             media_root = project_root / "movies"
@@ -789,10 +807,23 @@ class ScannerRuntimeTests(unittest.TestCase):
                         return_value=_failed_probe_summary(RuntimeError("fixture failure")),
                     ):
                         scan_library(connection, config)
-                    retry_rows = connection.execute(
-                        select(library_item_evidence_state)
-                        .order_by(library_item_evidence_state.c.evidence_kind)
-                    ).mappings().fetchall()
+                    item = connection.execute(select(library_items)).mappings().one()
+                    successful = self._successful_probe_summary()
+                    connection.execute(
+                        update(library_items)
+                        .where(library_items.c.id == item["id"])
+                        .values(
+                            cadence_summary_json=successful.cadence_summary_json,
+                            media_fingerprint_json=successful.media_fingerprint_json,
+                        )
+                    )
+                    item = connection.execute(select(library_items)).mappings().one()
+                    sync_library_item_evidence_states(
+                        connection,
+                        item,
+                        preserve_source_identity=False,
+                        preserve_policy_identity=False,
+                    )
                     connection.execute(
                         update(library_item_evidence_state).values(
                             attempt_count=2,
@@ -803,13 +834,12 @@ class ScannerRuntimeTests(unittest.TestCase):
                     connection.commit()
 
                     movie.write_bytes(b"other")
-                    successful = self._successful_probe_summary()
                     with patch(
                         "mediaforce.library.scanner.probe_media",
                         return_value=successful,
                     ):
                         stats = scan_library(connection, config)
-                    current_rows = connection.execute(
+                    pending_rows = connection.execute(
                         select(library_item_evidence_state)
                         .order_by(library_item_evidence_state.c.evidence_kind)
                     ).mappings().fetchall()
@@ -817,33 +847,22 @@ class ScannerRuntimeTests(unittest.TestCase):
             finally:
                 reset_engine_cache()
 
-        self.assertEqual(
-            [(row["evidence_kind"], row["state"], row["reason"]) for row in retry_rows],
-            [
-                (CADENCE_EVIDENCE_KIND, EVIDENCE_STATE_ANALYSIS_REQUIRED, EVIDENCE_REASON_RETRY_REQUIRED),
-                (
-                    MEDIA_FINGERPRINT_EVIDENCE_KIND,
-                    EVIDENCE_STATE_ANALYSIS_REQUIRED,
-                    EVIDENCE_REASON_RETRY_REQUIRED,
-                ),
-            ],
-        )
         self.assertEqual(stats.reprobed, 1)
-        self.assertEqual([row["state"] for row in current_rows], [EVIDENCE_STATE_CURRENT, EVIDENCE_STATE_CURRENT])
-        self.assertEqual([row["attempt_count"] for row in current_rows], [0, 0])
-        self.assertEqual([row["retry_not_before"] for row in current_rows], [None, None])
+        self.assertEqual(
+            [row["state"] for row in pending_rows],
+            [EVIDENCE_STATE_ANALYSIS_REQUIRED, EVIDENCE_STATE_ANALYSIS_REQUIRED],
+        )
+        self.assertEqual([row["reason"] for row in pending_rows], [EVIDENCE_REASON_SOURCE_CHANGED] * 2)
+        self.assertEqual([row["attempt_count"] for row in pending_rows], [0, 0])
+        self.assertEqual([row["retry_not_before"] for row in pending_rows], [None, None])
         self.assertEqual(item["cadence_summary_json"], successful.cadence_summary_json)
         self.assertEqual(item["media_fingerprint_json"], successful.media_fingerprint_json)
 
-    def test_failed_probe_becomes_blocked_unknown_evidence(self) -> None:
+    def test_failed_inventory_probe_does_not_create_canonical_evidence(self) -> None:
         summary = _failed_probe_summary(RuntimeError("corrupt media"))
 
-        self.assertIn('"classification":"unknown"', summary.cadence_summary_json)
-        self.assertIn("corrupt media", summary.cadence_summary_json)
-        self.assertIn('"retry_required":true', summary.cadence_summary_json)
-        self.assertIn('"status":"unknown"', summary.media_fingerprint_json)
-        self.assertIn("corrupt media", summary.media_fingerprint_json)
-        self.assertIn('"retry_required":true', summary.media_fingerprint_json)
+        self.assertIsNone(summary.cadence_summary_json)
+        self.assertIsNone(summary.media_fingerprint_json)
 
     @staticmethod
     def _successful_probe_summary() -> ProbeSummary:
@@ -899,6 +918,19 @@ class ScannerRuntimeTests(unittest.TestCase):
             subtitle_summary_json="[]",
             cadence_summary_json=cadence_summary_json,
             media_fingerprint_json=fingerprint_json,
+        )
+
+    @classmethod
+    def _retryable_probe_summary(cls) -> ProbeSummary:
+        summary = cls._successful_probe_summary()
+        cadence = json.loads(str(summary.cadence_summary_json))
+        cadence["retry_required"] = True
+        fingerprint = json.loads(str(summary.media_fingerprint_json))
+        fingerprint["retry_required"] = True
+        return replace(
+            summary,
+            cadence_summary_json=json.dumps(cadence, separators=(",", ":"), sort_keys=True),
+            media_fingerprint_json=json.dumps(fingerprint, separators=(",", ":"), sort_keys=True),
         )
 
 

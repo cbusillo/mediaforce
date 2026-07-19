@@ -106,6 +106,22 @@ be reconciled. A full scan also refreshes configured Plex and TMDB metadata;
 provider failures leave the last successful metadata in place and surface a
 warning instead of blocking the catalog scan.
 
+Scans update inventory with `ffprobe` metadata only. Cadence and media
+fingerprint analysis is remembered as canonical evidence and refreshed through
+an explicit paused batch; it is never launched by web startup or an idle scan.
+For a small folder pilot:
+
+```bash
+uv run mediaforce evidence start "tv/Futurama/Season 1" --limit 10
+uv run mediaforce evidence status
+uv run mediaforce evidence resume
+uv run mediaforce evidence run --max-items 1
+```
+
+Repeat the final command to resume durable progress. `evidence pause` prevents
+the next claim, while `evidence cancel` terminates the active managed process
+and cancels the remainder. See `docs/architecture/evidence-worker.md`.
+
 The `/folders` index can browse either season folders or whole TV series
 prefixes. Use the Scope control there when an operation should cover an entire
 series instead of one season.
@@ -395,6 +411,11 @@ port, and reload mode. A checked-in template lives at `.env.example`. Startup
 precedence is explicit CLI arguments, then shell environment variables, then
 `.env`, then built-in defaults. Prefer the `MEDIAFORCE_WEB_*` variable names
 for local defaults.
+
+The macOS launch item is a long-running operator service, not a development
+reloader. Give it an explicit `--no-reload` argument even when `.env` enables
+reload for an active development session; otherwise Uvicorn `StatReload`
+continuously walks the checkout and consumes CPU while the app appears idle.
 
 The frontend dev server now reads the same repo-local `.env` file. The clearest
 local setup is:

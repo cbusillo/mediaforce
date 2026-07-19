@@ -14,6 +14,11 @@ from mediaforce.execution import describe_item_plan, encode_manifest_items, prom
 from mediaforce.encoding.bakeoff import DEFAULT_BAKEOFF_ENGINES, build_bakeoff_plan, write_bakeoff_plan
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.candidate_selection import scope_target_size_blocker
+from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, EvidenceQueueConflict, \
+    cancel_evidence_queue, evidence_queue_summary, pause_evidence_queue, resume_evidence_queue, \
+    start_evidence_work
+from mediaforce.library.evidence_state import EVIDENCE_KINDS
+from mediaforce.library.evidence_worker import run_evidence_queue_until_blocked
 from mediaforce.library.planner import recommend_item
 from mediaforce.library.run_manifests import build_run_manifest as build_db_run_manifest, \
     select_candidates as select_run_manifest_candidates, \
@@ -39,6 +44,49 @@ def build_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument("--prefix", action="append", default=[],
                              help="Restrict scan to rel-path prefixes such as tv/Futurama")
     scan_parser.add_argument("--limit", type=int, help="Only scan the first N matching files")
+
+    evidence_parser = subparsers.add_parser(
+        "evidence",
+        help="Manage explicit bounded cadence and fingerprint evidence work",
+    )
+    evidence_actions = evidence_parser.add_subparsers(dest="evidence_action", required=True)
+    evidence_start_parser = evidence_actions.add_parser(
+        "start",
+        help="Create a paused evidence batch for one item, folder, or root",
+    )
+    evidence_start_parser.add_argument("prefix", help="Explicit scope such as tv/Show/Season 1 or movies")
+    evidence_start_parser.add_argument(
+        "--kind",
+        action="append",
+        choices=EVIDENCE_KINDS,
+        default=[],
+        help="Evidence kind to include; defaults to cadence and fingerprint",
+    )
+    evidence_start_parser.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_EVIDENCE_BATCH_LIMIT,
+        help=f"Maximum per-kind work units to queue (default: {DEFAULT_EVIDENCE_BATCH_LIMIT})",
+    )
+    evidence_actions.add_parser("status", help="Show the current evidence batch")
+    evidence_actions.add_parser("pause", help="Prevent new evidence claims")
+    evidence_actions.add_parser("resume", help="Allow claims from the paused evidence batch")
+    evidence_actions.add_parser("cancel", help="Cancel queued work and stop the active managed process")
+    evidence_run_parser = evidence_actions.add_parser(
+        "run",
+        help="Run a bounded foreground worker pass and exit",
+    )
+    evidence_run_parser.add_argument(
+        "--max-items",
+        type=int,
+        default=1,
+        help="Maximum work units to process before exiting (default: 1)",
+    )
+    evidence_run_parser.add_argument(
+        "--max-seconds",
+        type=float,
+        help="Stop claiming new work after this foreground time budget",
+    )
 
     report_parser = subparsers.add_parser("report", help="Show prioritized candidates from SQLite state")
     report_parser.add_argument("--limit", type=int, default=20, help="Number of rows to show")
@@ -142,6 +190,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     config = load_config(args.config)
     purge_transient_artifacts(config)
     default_review_dir = config.paths.review_dir
+
+    if args.command == "evidence":
+        return _run_evidence_command(config, args)
 
     with open_db(config.paths.db_path) as connection:
         if args.command == "scan":
@@ -368,6 +419,42 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
     return 1
+
+
+def _run_evidence_command(config: MediaforceConfig, args: argparse.Namespace) -> int:
+    action = str(args.evidence_action)
+    try:
+        if action == "run":
+            summary = run_evidence_queue_until_blocked(
+                config_path=config.paths.config_path,
+                max_work_items=args.max_items,
+                max_seconds=args.max_seconds,
+            )
+        else:
+            with open_db(config.paths.db_path) as connection:
+                if action == "start":
+                    summary = start_evidence_work(
+                        connection,
+                        config,
+                        args.prefix,
+                        evidence_kinds=args.kind or None,
+                        limit=args.limit,
+                    )
+                elif action == "status":
+                    summary = evidence_queue_summary(connection)
+                elif action == "pause":
+                    summary = pause_evidence_queue(connection)
+                elif action == "resume":
+                    summary = resume_evidence_queue(connection)
+                elif action == "cancel":
+                    summary = cancel_evidence_queue(connection)
+                else:
+                    raise ValueError(f"Unsupported evidence action: {action}")
+    except (EvidenceQueueConflict, ValueError) as exc:
+        print(f"Evidence command blocked: {exc}")
+        return 2
+    print(json.dumps(summary, separators=(",", ":"), sort_keys=True))
+    return 2 if action == "run" and summary.get("status") == "completed_with_errors" else 0
 
 
 def _add_manifest_selection_args(parser: argparse.ArgumentParser, *, require_manifest: bool = True) -> None:

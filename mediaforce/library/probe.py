@@ -4,9 +4,11 @@ from pathlib import Path
 
 from mediaforce.core.binaries import ffprobe_binary
 from mediaforce.core.models import ProbeSummary
+from mediaforce.core.process_control import ManagedProcessController, run_command
 from mediaforce.core.type_defs import int_value, object_dict, object_list
-from mediaforce.encoding.cadence import analyze_cadence
-from mediaforce.encoding.fingerprint import analyze_media_fingerprint
+from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence
+from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, analyze_media_fingerprint
+from mediaforce.library.evidence_state import EvidenceKind
 
 TRACK_FIELDS = (
     "index",
@@ -59,26 +61,12 @@ def _attachment_entry(stream: dict[str, object]) -> dict[str, object]:
     return {key: entry[key] for key in ATTACHMENT_FIELDS}
 
 
-def probe_media(path: Path) -> ProbeSummary:
-    cmd = [
-        ffprobe_binary(),
-        "-v",
-        "error",
-        "-print_format",
-        "json",
-        "-show_format",
-        "-show_streams",
-        str(path),
-    ]
-    result = subprocess.run(
-        cmd,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=PROBE_TIMEOUT_SECONDS,
-    )
-    payload = object_dict(json.loads(result.stdout))
-
+def probe_media(
+        path: Path,
+        *,
+        process_controller: ManagedProcessController | None = None,
+) -> ProbeSummary:
+    payload = _probe_payload(path, process_controller=process_controller)
     streams = [object_dict(stream) for stream in object_list(payload.get("streams"))]
     format_info = object_dict(payload.get("format"))
     video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
@@ -101,18 +89,6 @@ def probe_media(path: Path) -> ProbeSummary:
         _normalize_language(subtitle_streams[0]) if subtitle_streams else None,
     )
 
-    cadence_summary = analyze_cadence(
-        path,
-        video_stream=video_stream,
-        duration_seconds=duration_seconds,
-    )
-    media_fingerprint = analyze_media_fingerprint(
-        path,
-        video_stream=video_stream,
-        audio_streams=audio_streams,
-        duration_seconds=duration_seconds,
-    )
-
     return ProbeSummary(
         duration_seconds=duration_seconds,
         video_codec=video_stream.get("codec_name") if video_stream else None,
@@ -129,9 +105,74 @@ def probe_media(path: Path) -> ProbeSummary:
         audio_summary_json=json.dumps(audio_summary, separators=(",", ":"), sort_keys=True),
         subtitle_summary_json=json.dumps(subtitle_summary, separators=(",", ":"), sort_keys=True),
         attachment_summary_json=json.dumps(attachment_summary, separators=(",", ":"), sort_keys=True),
-        cadence_summary_json=json.dumps(cadence_summary, separators=(",", ":"), sort_keys=True),
-        media_fingerprint_json=json.dumps(media_fingerprint, separators=(",", ":"), sort_keys=True),
+        cadence_summary_json=None,
+        media_fingerprint_json=None,
     )
+
+
+def probe_evidence(
+        path: Path,
+        evidence_kind: EvidenceKind,
+        *,
+        process_controller: ManagedProcessController | None = None,
+) -> dict[str, object]:
+    payload = _probe_payload(path, process_controller=process_controller)
+    streams = [object_dict(stream) for stream in object_list(payload.get("streams"))]
+    format_info = object_dict(payload.get("format"))
+    video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
+    duration_seconds = _as_float(format_info.get("duration"))
+    if evidence_kind == CADENCE_EVIDENCE_KIND:
+        return analyze_cadence(
+            path,
+            video_stream=video_stream,
+            duration_seconds=duration_seconds,
+            process_controller=process_controller,
+        )
+    if evidence_kind == MEDIA_FINGERPRINT_EVIDENCE_KIND:
+        audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
+        return analyze_media_fingerprint(
+            path,
+            video_stream=video_stream,
+            audio_streams=audio_streams,
+            duration_seconds=duration_seconds,
+            process_controller=process_controller,
+        )
+    raise ValueError(f"Unsupported evidence kind: {evidence_kind}")
+
+
+def _probe_payload(
+        path: Path,
+        *,
+        process_controller: ManagedProcessController | None,
+) -> dict[str, object]:
+    cmd = [
+        ffprobe_binary(),
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
+        str(path),
+    ]
+    if process_controller is None:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=PROBE_TIMEOUT_SECONDS,
+        )
+    else:
+        result = run_command(
+            cmd,
+            process_controller=process_controller,
+            capture_output=True,
+            text=True,
+            timeout=PROBE_TIMEOUT_SECONDS,
+            check=True,
+        )
+    return object_dict(json.loads(result.stdout))
 
 
 def _stream_bit_rate(stream: dict[str, object]) -> int | None:
