@@ -159,15 +159,22 @@ Guidance:
 - `planner.py`
   - item recommendation and manifest-item shaping
 - `probe.py`
-  - ffprobe-based media inspection and audio, subtitle, attachment track summaries
+  - inventory-only ffprobe inspection and audio, subtitle, attachment track summaries
+  - explicitly invoked per-kind cadence and fingerprint analysis for the worker
 - `scanner.py`
   - library inventory orchestration and catalog updates
-  - unchanged inventory rows preserve evidence without launching deep analysis
+  - all inventory rows preserve canonical evidence without launching deep analysis
 - `evidence_state.py`
   - rebuildable per-item/per-kind projection of canonical cadence and
     fingerprint JSON
   - compact freshness reasons, source/analyzer/policy identities, retry timing,
     and media-free status/count queries
+- `evidence_queue.py`
+  - explicit scoped batch state, atomic single-concurrency claims, pause/cancel,
+    lease recovery, retry readiness, and aggregate status
+- `evidence_worker.py`
+  - foreground bounded execution, heartbeat-managed subprocess cancellation,
+    policy-only reclassification, retry backoff, and source-safe canonical commits
 - `media_scopes.py`
   - canonical operator grouping for TV, movie, and generic media roots
   - exact-item versus descendant matching, SQL-safe boundaries, and API scope payloads

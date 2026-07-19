@@ -70,9 +70,12 @@ to use the stricter file fingerprint for final encode-time source validation.
 ## Retry foundation
 
 The state row carries `attempt_count`, `retry_not_before`, `last_attempt_at`,
-and `last_error` for the bounded worker introduced by the next workstream slice.
-There are no leases or worker ownership fields here. Projection rebuilds update
-derived columns while preserving existing retry metadata.
+and `last_error` for the bounded worker. Revision `20260719_0012` also adds
+operational batch, lease, heartbeat, worker, and managed-process fields on the
+same per-kind row. Projection rebuilds update derived columns while preserving
+existing retry and ownership metadata unless the caller explicitly resets a
+changed source. See `docs/architecture/evidence-worker.md` for claim and
+cancellation semantics.
 
 ## Migration and rebuild
 
@@ -88,8 +91,8 @@ destroy catalog membership or measured evidence.
 Rebuild preserves existing source and policy identities so it can mark source,
 analyzer, or policy invalidation without discarding prior state. When a
 projection row is absent, rebuild binds the canonical payload to the current
-catalog identity. The later worker will complete policy-only reclassification
-and then adopt the current policy hash without rereading media.
+catalog identity. The bounded worker completes policy-only reclassification
+and then adopts the current policy hash without rereading media.
 
 Read APIs never call projection sync or rebuild helpers. Missing projection rows
 mean the projection needs an explicit rebuild; they do not mean the canonical
