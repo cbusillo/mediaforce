@@ -10,8 +10,12 @@ from sqlalchemy import select, update
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
-from mediaforce.core.db_tables import library_items, scan_runs
+from mediaforce.core.db_tables import library_item_evidence_state, library_items, scan_runs
 from mediaforce.core.models import ProbeSummary
+from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND
+from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND
+from mediaforce.library.evidence_state import EVIDENCE_REASON_POLICY_CHANGED, EVIDENCE_REASON_RETRY_REQUIRED, \
+    EVIDENCE_STATE_ANALYSIS_REQUIRED, EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT
 from mediaforce.library.scanner import (
     _content_version_changed,
     _failed_probe_summary,
@@ -289,6 +293,65 @@ class ScannerRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(refreshed_row["cadence_summary_json"], original_row["cadence_summary_json"])
         self.assertEqual(refreshed_row["media_fingerprint_json"], original_row["media_fingerprint_json"])
+
+    def test_first_unchanged_scan_upgrades_legacy_source_without_rebinding_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            media_root = project_root / "movies"
+            media_root.mkdir()
+            movie = media_root / "Feature.mkv"
+            movie.write_bytes(b"movie")
+            config = self._config(project_root, {"movies": media_root})
+
+            try:
+                with open_db(config.paths.db_path) as connection:
+                    with patch(
+                        "mediaforce.library.scanner.probe_media",
+                        return_value=self._successful_probe_summary(),
+                    ):
+                        scan_library(connection, config)
+                    item = connection.execute(select(library_items)).mappings().one()
+                    connection.execute(
+                        update(library_items)
+                        .where(library_items.c.id == item["id"])
+                        .values(content_version_fingerprint=None)
+                    )
+                    connection.execute(
+                        update(library_item_evidence_state)
+                        .where(library_item_evidence_state.c.library_item_id == item["id"])
+                        .values(
+                            source_fingerprint=item["fingerprint"],
+                            policy_hash="sha256:old-policy",
+                        )
+                    )
+                    connection.commit()
+
+                    with patch(
+                        "mediaforce.library.scanner.probe_media",
+                        return_value=self._successful_probe_summary(),
+                    ) as probe_mock:
+                        stats = scan_library(connection, config)
+                    refreshed_item = connection.execute(select(library_items)).mappings().one()
+                    state_rows = connection.execute(
+                        select(library_item_evidence_state)
+                        .order_by(library_item_evidence_state.c.evidence_kind)
+                    ).mappings().fetchall()
+            finally:
+                reset_engine_cache()
+
+        probe_mock.assert_not_called()
+        self.assertEqual(stats.unchanged, 1)
+        self.assertIsNotNone(refreshed_item["content_version_fingerprint"])
+        self.assertEqual(
+            [row["source_fingerprint"] for row in state_rows],
+            [refreshed_item["content_version_fingerprint"]] * 2,
+        )
+        self.assertEqual(
+            [row["state"] for row in state_rows],
+            [EVIDENCE_STATE_CLASSIFICATION_REQUIRED] * 2,
+        )
+        self.assertEqual([row["reason"] for row in state_rows], [EVIDENCE_REASON_POLICY_CHANGED] * 2)
+        self.assertEqual([row["policy_hash"] for row in state_rows], ["sha256:old-policy"] * 2)
 
     def test_same_size_same_mtime_content_replacement_still_probes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -710,6 +773,68 @@ class ScannerRuntimeTests(unittest.TestCase):
         self.assertEqual(scan_row["scope"], "limited")
         self.assertEqual(scan_row["file_count"], 0)
 
+    def test_scan_projects_and_refreshes_evidence_state_with_canonical_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            media_root = project_root / "movies"
+            media_root.mkdir()
+            movie = media_root / "Feature.mkv"
+            movie.write_bytes(b"movie")
+            config = self._config(project_root, {"movies": media_root})
+
+            try:
+                with open_db(config.paths.db_path) as connection:
+                    with patch(
+                        "mediaforce.library.scanner.probe_media",
+                        return_value=_failed_probe_summary(RuntimeError("fixture failure")),
+                    ):
+                        scan_library(connection, config)
+                    retry_rows = connection.execute(
+                        select(library_item_evidence_state)
+                        .order_by(library_item_evidence_state.c.evidence_kind)
+                    ).mappings().fetchall()
+                    connection.execute(
+                        update(library_item_evidence_state).values(
+                            attempt_count=2,
+                            retry_not_before="2026-07-20T00:00:00+00:00",
+                            last_error="fixture",
+                        )
+                    )
+                    connection.commit()
+
+                    movie.write_bytes(b"other")
+                    successful = self._successful_probe_summary()
+                    with patch(
+                        "mediaforce.library.scanner.probe_media",
+                        return_value=successful,
+                    ):
+                        stats = scan_library(connection, config)
+                    current_rows = connection.execute(
+                        select(library_item_evidence_state)
+                        .order_by(library_item_evidence_state.c.evidence_kind)
+                    ).mappings().fetchall()
+                    item = connection.execute(select(library_items)).mappings().one()
+            finally:
+                reset_engine_cache()
+
+        self.assertEqual(
+            [(row["evidence_kind"], row["state"], row["reason"]) for row in retry_rows],
+            [
+                (CADENCE_EVIDENCE_KIND, EVIDENCE_STATE_ANALYSIS_REQUIRED, EVIDENCE_REASON_RETRY_REQUIRED),
+                (
+                    MEDIA_FINGERPRINT_EVIDENCE_KIND,
+                    EVIDENCE_STATE_ANALYSIS_REQUIRED,
+                    EVIDENCE_REASON_RETRY_REQUIRED,
+                ),
+            ],
+        )
+        self.assertEqual(stats.reprobed, 1)
+        self.assertEqual([row["state"] for row in current_rows], [EVIDENCE_STATE_CURRENT, EVIDENCE_STATE_CURRENT])
+        self.assertEqual([row["attempt_count"] for row in current_rows], [0, 0])
+        self.assertEqual([row["retry_not_before"] for row in current_rows], [None, None])
+        self.assertEqual(item["cadence_summary_json"], successful.cadence_summary_json)
+        self.assertEqual(item["media_fingerprint_json"], successful.media_fingerprint_json)
+
     def test_failed_probe_becomes_blocked_unknown_evidence(self) -> None:
         summary = _failed_probe_summary(RuntimeError("corrupt media"))
 
@@ -719,6 +844,62 @@ class ScannerRuntimeTests(unittest.TestCase):
         self.assertIn('"status":"unknown"', summary.media_fingerprint_json)
         self.assertIn("corrupt media", summary.media_fingerprint_json)
         self.assertIn('"retry_required":true', summary.media_fingerprint_json)
+
+    @staticmethod
+    def _successful_probe_summary() -> ProbeSummary:
+        cadence_summary_json = json.dumps(
+            {
+                "schema_version": 1,
+                "probe": {"field_order": "progressive", "idet_required": False},
+                "analysis": {
+                    "sampled_frames": 0,
+                    "tool": {
+                        "name": "mediaforce.ffmpeg_idet",
+                        "version": "1",
+                        "ffmpeg_version": "ffmpeg fixture",
+                    }
+                },
+                "decision": {"status": "resolved", "classification": "progressive"},
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        fingerprint_json = json.dumps(
+            {
+                "schema_version": 1,
+                "analysis": {
+                    "sampled_frames": 120,
+                    "coverage": 1.0,
+                    "aggregate": {"dark_frame_fraction": 0.05},
+                    "tool": {
+                        "name": "mediaforce.media_fingerprint",
+                        "version": "1",
+                        "ffmpeg_version": "ffmpeg fixture",
+                    }
+                },
+                "decision": {"status": "measured"},
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return ProbeSummary(
+            duration_seconds=60.0,
+            video_codec="h264",
+            video_bitrate=1_000_000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+            cadence_summary_json=cadence_summary_json,
+            media_fingerprint_json=fingerprint_json,
+        )
 
 
 if __name__ == "__main__":

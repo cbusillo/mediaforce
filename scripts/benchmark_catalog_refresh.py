@@ -19,6 +19,7 @@ from mediaforce.core.config import DEFAULT_CONFIG_PATH, ConfigPaths, MediaforceC
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.utils import content_version_fingerprint
+from mediaforce.library.evidence_state import rebuild_library_item_evidence_states
 from mediaforce.library.scanner import scan_library
 
 
@@ -54,6 +55,9 @@ class _MeasuredConnection:
 
     def execute(self, *args: Any, **kwargs: Any) -> Any:
         return self._measure(self.connection.execute, *args, **kwargs)
+
+    def exec_driver_sql(self, *args: Any, **kwargs: Any) -> Any:
+        return self._measure(self.connection.exec_driver_sql, *args, **kwargs)
 
     def commit(self) -> None:
         self._measure(self.connection.commit)
@@ -279,6 +283,8 @@ def _seed_fixture_catalog(config: MediaforceConfig, media_root: Path, item_count
         if rows:
             connection.execute(library_items.insert(), rows)
             connection.commit()
+        rebuild_library_item_evidence_states(connection)
+        connection.commit()
     reset_engine_cache()
 
 

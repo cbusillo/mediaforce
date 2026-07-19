@@ -16,6 +16,7 @@ from mediaforce.core.process_control import ManagedProcessController, ProcessCan
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 
 MEDIA_FINGERPRINT_SCHEMA_VERSION = 1
+MEDIA_FINGERPRINT_EVIDENCE_KIND = "media_fingerprint"
 MEDIA_FINGERPRINT_TOOL_NAME = "mediaforce.media_fingerprint"
 MEDIA_FINGERPRINT_TOOL_VERSION = "1"
 DEFAULT_FINGERPRINT_MAX_FRAMES = 360
@@ -319,7 +320,7 @@ def media_fingerprint_manifest_payload(
         for item in (object_dict(value) for value in object_list(analysis.get("ranges")))
     ]
     envelope = build_evidence_envelope(
-        kind="media_fingerprint",
+        kind=MEDIA_FINGERPRINT_EVIDENCE_KIND,
         sources=[{"source_id": source_id, "fingerprint": source_fingerprint}],
         policy_hash=stable_policy_hash(media_fingerprint_policy_snapshot()),
         tool_name=str(tool.get("name") or MEDIA_FINGERPRINT_TOOL_NAME),

@@ -5,6 +5,7 @@ from alembic import context
 from sqlalchemy import create_engine
 from sqlalchemy import pool
 
+from mediaforce.core.db_migrations import SQLITE_BUSY_TIMEOUT_MS
 from mediaforce.core.db_tables import metadata
 
 config = context.config
@@ -31,7 +32,11 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = create_engine(migration_url(), poolclass=pool.NullPool)
+    connectable = create_engine(
+        migration_url(),
+        connect_args={"timeout": SQLITE_BUSY_TIMEOUT_MS / 1000},
+        poolclass=pool.NullPool,
+    )
 
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)

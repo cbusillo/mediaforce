@@ -20,6 +20,7 @@ from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.models import ProbeSummary
 from mediaforce.encoding.cadence import unavailable_cadence_summary
 from mediaforce.encoding.fingerprint import unavailable_media_fingerprint_summary
+from mediaforce.library.evidence_state import sync_library_item_evidence_states
 from mediaforce.library.media_scopes import logical_library_rel_path, path_matches_scope
 from mediaforce.library.planner import recommend_item
 from mediaforce.library.probe import probe_media
@@ -155,6 +156,21 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                         status=case((library_items.c.status == "missing", "discovered"), else_=library_items.c.status),
                     )
                 )
+                if not row.get("content_version_fingerprint") and content_fingerprint:
+                    sync_library_item_evidence_states(
+                        connection,
+                        {
+                            **dict(row),
+                            "fingerprint": file_fingerprint(
+                                file_path=file_path,
+                                stat_result=stat_result,
+                                duration_seconds=float_value(row.get("duration_seconds")),
+                            ),
+                            "content_version_fingerprint": content_fingerprint,
+                        },
+                        preserve_source_identity=False,
+                        updated_at=started_at,
+                    )
                 stats.unchanged += 1
                 pending_writes = _flush_scan_progress(connection, scan_id, stats, pending_writes + 1)
                 continue
@@ -217,11 +233,13 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
             }
 
             if row is None:
-                connection.execute(
+                insert_result = connection.execute(
                     insert(library_items).values(**values)
                 )
+                library_item_id = int(insert_result.inserted_primary_key[0])
                 stats.discovered += 1
             else:
+                library_item_id = int(row["id"])
                 previous_content_fingerprint = str(row.get("content_version_fingerprint") or "") or None
                 content_changed = _content_version_changed(
                     row,
@@ -241,6 +259,14 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                     )
                 )
                 stats.reprobed += 1
+            sync_library_item_evidence_states(
+                connection,
+                {**values, "id": library_item_id},
+                preserve_source_identity=False,
+                preserve_policy_identity=False,
+                reset_attempt_state=True,
+                updated_at=started_at,
+            )
             pending_writes = _flush_scan_progress(connection, scan_id, stats, pending_writes + 1)
 
             if limit is not None and stats.total_seen >= limit:
