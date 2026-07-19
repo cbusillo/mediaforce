@@ -60,6 +60,11 @@ from mediaforce.execution import (
     validate_manifest_items,
 )
 from mediaforce.library.folder_profiles import inspect_prefix
+from mediaforce.library.background_work import background_work_is_paused, ensure_background_work_state, \
+    set_background_work_paused
+from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, EvidenceQueueConflict, \
+    cancel_evidence_queue, ensure_evidence_queue_state, evidence_queue_summary, pause_evidence_queue, \
+    resume_evidence_queue, start_evidence_work
 from mediaforce.library.media_scopes import media_group_scope_for_rel_path, resolve_media_scope, resolve_media_scopes, \
     scope_rel_path_filter, series_context_for_prefix, tv_series_scope_for_rel_path
 from mediaforce.library.movie_library import load_movie_library_payload, load_movie_scope_payload
@@ -108,7 +113,8 @@ from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_
 from mediaforce.tuning.size_goals import guided_size_goal_options, operator_intent_from_policy
 from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, object_dict, object_list
 from mediaforce.web.routes import register_completed_routes, register_dashboard_routes, register_folder_routes, \
-    register_frontend_routes, register_host_routes, register_queue_routes, register_settings_routes
+    register_frontend_routes, register_host_routes, register_operator_work_routes, register_queue_routes, \
+    register_settings_routes
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_folders_payload, \
     dashboard_library_payload, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
@@ -209,6 +215,7 @@ from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_
     save_scan_job_state as runtime_save_scan_job_state, scan_is_stale as runtime_scan_is_stale, \
     scan_job_belongs_to_current_process as runtime_scan_job_belongs_to_current_process, \
     scan_process_is_alive as runtime_scan_process_is_alive
+from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner, build_operator_work_payload
 from mediaforce.web.settings_runtime import (
     ALWAYS_SCHEDULE_PROFILE,
     DEFAULT_HOST_SCHEDULE_PROFILE,
@@ -414,6 +421,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     config = load_config(config_path or DEFAULT_CONFIG_PATH)
     advisor_routing = advisor_routing_from_config(config)
     cleanup_lock = threading.Lock()
+    evidence_runner = BoundedEvidenceRunner(config.paths.config_path)
 
     @asynccontextmanager
     async def _app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -434,6 +442,8 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             if repaired_host_rows:
                 LOGGER.warning("Repaired %s persisted encode job host payloads.", repaired_host_rows)
             ensure_queue_state(connection, updated_at=_now_iso())
+            ensure_background_work_state(connection, updated_at=_now_iso())
+            ensure_evidence_queue_state(connection, updated_at=_now_iso())
             _recover_calibration_jobs(connection, config)
             _recover_encode_queue(connection, config)
         _start_background_workers(config)
@@ -467,6 +477,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     if frontend_app_dir.exists():
         app.mount("/_app", StaticFiles(directory=str(frontend_app_dir)), name="frontend_app")
     app.state.config = config
+    app.state.evidence_runner = evidence_runner
 
     @app.middleware("http")
     async def periodic_cleanup(
@@ -849,6 +860,146 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         start_host_action=_start_host_action,
         prepare_host_action=_prepare_host_action,
         reset_host_trust_action=_reset_host_trust_action,
+    )
+
+    def _operator_work_payload(
+            *,
+            backlog_offset: int = 0,
+            backlog_limit: int = 25,
+            evidence_kind: str | None = None,
+            evidence_state: str | None = None,
+            media_root: str | None = None,
+            work_status: str | None = None,
+    ) -> dict[str, Any]:
+        with open_db(config.paths.db_path) as connection:
+            return build_operator_work_payload(
+                connection,
+                config,
+                scan_job=_load_scan_status(connection, config, prefix=None),
+                catalog_is_stale=_scan_is_stale(connection, config, prefix=None),
+                latest_scan_completed_at=_latest_scan_completed_at(connection, prefix=None),
+                evidence_runner_active=evidence_runner.active,
+                backlog_offset=backlog_offset,
+                backlog_limit=backlog_limit,
+                evidence_kind=evidence_kind,
+                evidence_state=evidence_state,
+                media_root=media_root,
+                work_status=work_status,
+            )
+
+    def _pause_background_work_action() -> dict[str, Any]:
+        with open_db(config.paths.db_path) as connection:
+            set_background_work_paused(connection, is_paused=True)
+            pause_evidence_queue(connection)
+        return {
+            "ok": True,
+            "message": "Paused new catalog and analysis work. Any item already running can finish safely.",
+        }
+
+    def _resume_background_work_action() -> dict[str, Any]:
+        with open_db(config.paths.db_path) as connection:
+            set_background_work_paused(connection, is_paused=False)
+        return {
+            "ok": True,
+            "message": "Background work can start again. Prepared analysis remains paused until you resume it.",
+        }
+
+    def _refresh_catalog_action() -> dict[str, Any]:
+        with open_db(config.paths.db_path) as connection:
+            if background_work_is_paused(connection):
+                raise EvidenceQueueConflict(
+                    "Background catalog and analysis work is paused. Resume it before refreshing the catalog."
+                )
+            job = _maybe_schedule_scan(connection, config, prefix=None, force=True)
+        status = str((job or {}).get("status") or "queued")
+        return {
+            "ok": True,
+            "message": (
+                "Catalog refresh is already running."
+                if status == "running"
+                else "Catalog refresh queued. Existing remembered results remain available while it runs."
+            ),
+        }
+
+    def _prepare_evidence_action(
+            prefix: str,
+            evidence_kinds: list[str] | tuple[str, ...] | None,
+            limit: int,
+    ) -> dict[str, Any]:
+        if limit > DEFAULT_EVIDENCE_BATCH_LIMIT:
+            raise ValueError(f"The operator work limit is {DEFAULT_EVIDENCE_BATCH_LIMIT} items per batch.")
+        with open_db(config.paths.db_path) as connection:
+            summary = start_evidence_work(
+                connection,
+                config,
+                prefix,
+                evidence_kinds=evidence_kinds,
+                limit=limit,
+            )
+        item_count = int(summary.get("item_count") or 0)
+        return {
+            "ok": True,
+            "message": (
+                f"Prepared {item_count} evidence {'update' if item_count == 1 else 'updates'}. Review the scope, then start analysis."
+                if item_count
+                else "That scope is already current. No analysis was prepared."
+            ),
+        }
+
+    def _pause_evidence_action() -> dict[str, Any]:
+        with open_db(config.paths.db_path) as connection:
+            pause_evidence_queue(connection)
+        return {
+            "ok": True,
+            "message": "Paused analysis before the next item. An item already running can finish safely.",
+        }
+
+    def _resume_evidence_action() -> dict[str, Any]:
+        with open_db(config.paths.db_path) as connection:
+            if background_work_is_paused(connection):
+                raise EvidenceQueueConflict(
+                    "Background catalog and analysis work is paused. Resume it before starting analysis."
+                )
+            summary = evidence_queue_summary(connection)
+            if not summary.get("batch_id") or str(summary.get("status") or "") not in {
+                "paused",
+                "queued",
+                "running",
+            }:
+                raise EvidenceQueueConflict("Prepare a bounded analysis batch before starting work.")
+            summary = resume_evidence_queue(connection)
+            item_budget = min(
+                max(1, int(summary.get("remaining_count") or summary.get("item_count") or 1)),
+                DEFAULT_EVIDENCE_BATCH_LIMIT,
+            )
+        started = evidence_runner.start(max_work_items=item_budget)
+        return {
+            "ok": True,
+            "message": (
+                "Analysis started. It will stop when this prepared batch is complete or blocked."
+                if started
+                else "Analysis is already running."
+            ),
+        }
+
+    def _cancel_evidence_action() -> dict[str, Any]:
+        with open_db(config.paths.db_path) as connection:
+            cancel_evidence_queue(connection)
+        return {
+            "ok": True,
+            "message": "Cancelled remaining analysis. A running media process is being stopped safely.",
+        }
+
+    register_operator_work_routes(
+        app,
+        operator_work_payload=_operator_work_payload,
+        pause_background_work_action=_pause_background_work_action,
+        resume_background_work_action=_resume_background_work_action,
+        refresh_catalog_action=_refresh_catalog_action,
+        prepare_evidence_action=_prepare_evidence_action,
+        pause_evidence_action=_pause_evidence_action,
+        resume_evidence_action=_resume_evidence_action,
+        cancel_evidence_action=_cancel_evidence_action,
     )
 
     def _folder_content_payload(normalized_prefix: str) -> tuple[dict[str, Any], int]:

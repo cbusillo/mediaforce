@@ -25,6 +25,7 @@ from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.process_control import ManagedProcessController
 from mediaforce.library.media_scopes import path_matches_scope, resolve_media_scope, scope_rel_path_filter
+from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.library.metadata_sync import sync_external_metadata
 from mediaforce.library.scanner import scan_library
 from mediaforce.state_cleanup import purge_transient_artifacts
@@ -265,6 +266,8 @@ def maybe_schedule_scan(
         job = _expire_scan_job(config, prefix, job, deps)
     if job and job.get("status") in {"queued", "running"}:
         return job
+    if background_work_is_paused(connection):
+        return job
     if not force and not scan_is_stale(connection, config, prefix, deps):
         return job
     if not force and job and job.get("status") == "failed":
@@ -309,10 +312,10 @@ def load_scan_status(
     if active_scan is not None:
         return active_scan
     if prefix is not None:
-        full_job = _scan_job_snapshot(config, None, deps)
+        full_job = _current_scan_job_snapshot(connection, config, None, deps)
         if full_job and full_job.get("status") in {"queued", "running"}:
             return full_job
-    return _scan_job_snapshot(config, prefix, deps)
+    return _current_scan_job_snapshot(connection, config, prefix, deps)
 
 
 def run_scan_job(
@@ -323,10 +326,39 @@ def run_scan_job(
         deps: JobRuntimeDeps,
 ) -> None:
     config = load_config(config_path)
+    job: dict[str, Any] = {}
+    with open_db(config.paths.db_path) as connection:
+        connection.commit()
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        try:
+            job = deps.load_scan_job_state(config, prefix) or {}
+            if background_work_is_paused(connection):
+                job.update(
+                    {
+                        "job_id": job_id,
+                        "status": "paused",
+                        "started_at": None,
+                        "finished_at": deps.now_iso(),
+                        "error": None,
+                        "stats": None,
+                    }
+                )
+                deps.save_scan_job_state(config, prefix, job)
+                return
+            job.update(
+                {
+                    "job_id": job_id,
+                    "status": "running",
+                    "started_at": deps.now_iso(),
+                    "finished_at": None,
+                    "error": None,
+                }
+            )
+            deps.save_scan_job_state(config, prefix, job)
+        except BaseException:
+            connection.rollback()
+            raise
     purge_transient_artifacts(config, force=True)
-    job = deps.load_scan_job_state(config, prefix) or {}
-    job.update({"status": "running", "started_at": deps.now_iso(), "finished_at": None, "error": None})
-    deps.save_scan_job_state(config, prefix, job)
 
     try:
         metadata_stats: dict[str, Any] | None = None
@@ -740,6 +772,28 @@ def _scan_job_snapshot(
             deps,
             finished_at=job.get("finished_at") or job.get("started_at") or job.get("created_at"),
         )
+    return job
+
+
+def _current_scan_job_snapshot(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str | None,
+        deps: JobRuntimeDeps,
+) -> dict[str, Any] | None:
+    job = _scan_job_snapshot(config, prefix, deps)
+    if not job or job.get("status") in {"queued", "running"}:
+        return job
+    latest_completed = latest_scan_completed_at(connection, prefix)
+    if latest_completed is None:
+        return job
+    job_timestamp = deps.parse_iso(
+        job.get("finished_at")
+        or job.get("started_at")
+        or job.get("created_at")
+    )
+    if job_timestamp is None or job_timestamp < latest_completed:
+        return None
     return job
 
 

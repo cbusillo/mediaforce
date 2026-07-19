@@ -12,6 +12,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import evidence_queue_state, library_item_evidence_state, library_items
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.core.utils import timestamp
+from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANALYSIS_REQUIRED, \
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EvidenceKind
 from mediaforce.library.media_scopes import MediaScope, resolve_media_scope, scope_rel_path_filter
@@ -128,6 +129,10 @@ def start_evidence_work(
     connection.exec_driver_sql("BEGIN IMMEDIATE")
     try:
         ensure_evidence_queue_state(connection, updated_at=now_iso)
+        if background_work_is_paused(connection):
+            raise EvidenceQueueConflict(
+                "Background catalog and analysis work is paused. Resume background work before preparing evidence."
+            )
         current_state = load_evidence_queue_state(connection)
         if str(current_state.get("status") or "") in EVIDENCE_QUEUE_ACTIVE_STATUSES:
             raise EvidenceQueueConflict(
@@ -306,6 +311,7 @@ def claim_next_evidence_work(
         batch_id = str(queue_state.get("batch_id") or "")
         if (
                 not batch_id
+                or background_work_is_paused(connection)
                 or bool(queue_state.get("is_paused"))
                 or bool(queue_state.get("cancel_requested"))
                 or str(queue_state.get("status") or "") not in EVIDENCE_QUEUE_ACTIVE_STATUSES
@@ -655,6 +661,10 @@ def _set_queue_control(
         if bool(state.get("cancel_requested")):
             connection.rollback()
             return evidence_queue_summary(connection)
+        if not is_paused and background_work_is_paused(connection):
+            raise EvidenceQueueConflict(
+                "Background catalog and analysis work is paused. Resume background work before analysis."
+            )
         connection.execute(
             update(evidence_queue_state)
             .where(evidence_queue_state.c.queue_name == DEFAULT_EVIDENCE_QUEUE_NAME)

@@ -1,9 +1,15 @@
 <script lang="ts">
-	import { onDestroy, onMount } from 'svelte';
+	import { onMount } from 'svelte';
 	import { resolve } from '$app/paths';
 	import { postJson } from '$lib/api/client';
-	import type { DashboardSummaryPayload, HostRuntime, HostsPayload } from '$lib/api/types';
+	import type {
+		DashboardSummaryPayload,
+		HostRuntime,
+		HostsPayload,
+		OperatorWorkPayload
+	} from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
+	import OperatorWorkConsole from './OperatorWorkConsole.svelte';
 	import OperatorShell from './OperatorShell.svelte';
 	import StateBadge from './StateBadge.svelte';
 	import WorkstationPanel from './WorkstationPanel.svelte';
@@ -26,19 +32,22 @@
 		type OpsActionId,
 		type OpsQueueRow
 	} from './ops-workstation';
-
-	const OPS_REFRESH_INTERVAL_MS = 15_000;
+	import { operatorRefreshInterval, type OperatorWorkQuery } from './operator-work';
 
 	let {
 		dashboard,
 		hosts,
+		operatorWork,
 		loadError,
-		onRefresh = async () => {}
+		onRefresh = async () => {},
+		onOperatorRefresh = async () => {}
 	}: {
 		dashboard: DashboardSummaryPayload | null;
 		hosts: HostsPayload | null;
+		operatorWork: OperatorWorkPayload | null;
 		loadError: string | null;
 		onRefresh?: () => Promise<void>;
+		onOperatorRefresh?: (query?: OperatorWorkQuery) => Promise<void>;
 	} = $props();
 
 	const queueRows = $derived(buildOpsQueueRows(dashboard));
@@ -57,6 +66,14 @@
 	const readyHosts = $derived(hosts?.hosts.filter((host) => host.available).length ?? 0);
 	const fleetHasReadyCapacity = $derived(readyHosts > 0);
 	const closedHosts = $derived(hosts?.hosts.filter((host) => host.schedule_open === false) ?? []);
+	const liveRefreshInterval = $derived(
+		operatorRefreshInterval(operatorWork) ??
+			(!encodeQueue?.state.is_paused &&
+			!encodeQueue?.state.stop_requested &&
+			(encodeWorkCount > 0 || (calibrationQueue?.active_count ?? 0) > 0)
+				? 5_000
+				: null)
+	);
 
 	let actionPending = $state<OpsActionId | null>(null);
 	let confirmationAction = $state<OpsActionId | null>(null);
@@ -66,7 +83,6 @@
 	let refreshError = $state('');
 	let lastRefreshAt = $state<Date | null>(null);
 	let hostPasswords = $state<Record<string, string>>({});
-	let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
 	const globalCommands = $derived([
 		{
@@ -219,12 +235,14 @@
 
 	function refreshCopy(): string {
 		if (refreshPending) return 'refreshing';
-		if (!lastRefreshAt) return 'auto-refresh every 15s';
-		return `refreshed ${lastRefreshAt.toLocaleTimeString([], {
+		if (!lastRefreshAt)
+			return liveRefreshInterval ? 'watching active work' : 'manual refresh while idle';
+		const refreshedAt = lastRefreshAt.toLocaleTimeString([], {
 			hour: '2-digit',
 			minute: '2-digit',
 			second: '2-digit'
-		})}`;
+		});
+		return `refreshed ${refreshedAt} · ${liveRefreshInterval ? 'watching active work' : 'quiet while idle'}`;
 	}
 
 	function rowActionDisabled(row: OpsQueueRow): boolean {
@@ -285,11 +303,13 @@
 
 	onMount(() => {
 		lastRefreshAt = new Date();
-		refreshTimer = setInterval(() => void refreshOps({ quiet: true }), OPS_REFRESH_INTERVAL_MS);
 	});
 
-	onDestroy(() => {
-		if (refreshTimer) clearInterval(refreshTimer);
+	$effect(() => {
+		const interval = liveRefreshInterval;
+		if (!interval) return;
+		const timer = setInterval(() => void refreshOps({ quiet: true }), interval);
+		return () => clearInterval(timer);
 	});
 </script>
 
@@ -325,6 +345,8 @@
 					>
 				</div>
 			</header>
+
+			<OperatorWorkConsole work={operatorWork} onRefresh={onOperatorRefresh} />
 
 			<WorkstationPanel eyebrow="Attention" title="Needs your attention">
 				<div class="blocker-list">

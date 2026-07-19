@@ -12,9 +12,11 @@ from typing import Any
 from mediaforce.core.config import load_config
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import (
+    background_work_state,
     calibration_jobs,
     encode_jobs,
     encode_queue_state,
+    evidence_queue_state,
     item_events,
     library_items,
     scan_runs,
@@ -22,6 +24,8 @@ from mediaforce.core.db_tables import (
     staged_artifacts,
 )
 from mediaforce.core.evidence import stable_policy_hash, stable_source_id
+from mediaforce.library.evidence_queue import start_evidence_work
+from mediaforce.library.evidence_state import rebuild_library_item_evidence_states
 from mediaforce.library.planner import build_manifest_item
 from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.web.runtime.folder_tuning_advice import (
@@ -177,6 +181,10 @@ def _library_item(
                         "ffmpeg_version": "web-smoke",
                     },
                 },
+                "decision": {
+                    "status": "resolved",
+                    "classification": "progressive",
+                },
             },
             sort_keys=True,
         ),
@@ -229,6 +237,7 @@ def _library_item(
                         "ffmpeg_version": "web-smoke",
                     },
                 },
+                "decision": {"status": "measured"},
             },
             sort_keys=True,
         ),
@@ -678,6 +687,8 @@ def _write_review_states(config: Any, rows_by_prefix: dict[str, dict[str, Any]])
 
 
 def _clear_fixture_files(config: Any) -> None:
+    for path in config.paths.web_state_dir.glob("scan-*.job.json"):
+        path.unlink(missing_ok=True)
     for prefix in FIXTURE_PREFIXES:
         slug = _slug(prefix)
         for suffix in (".json", ".advice.json", ".proposal.json", ".job.json"):
@@ -709,6 +720,8 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 encode_queue_state.c.queue_name == "heavy"
             )
         )
+        connection.execute(evidence_queue_state.delete())
+        connection.execute(background_work_state.delete())
         connection.execute(
             calibration_jobs.delete().where(
                 calibration_jobs.c.job_id.like("web-smoke-%")
@@ -1219,12 +1232,20 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             )
             for index in range(251)
         )
+        for row in rows:
+            if row["rel_path"] == "tv/Example Show/Season 1/Episode 01.mkv":
+                row["cadence_summary_json"] = None
+            elif row["rel_path"] == "tv/Example Show/Season 1/Episode 02.mkv":
+                row["media_fingerprint_json"] = None
+            elif row["rel_path"] == "movies/Editions Showcase/Feature - Director Cut.mkv":
+                row["media_fingerprint_json"] = None
         inserted_ids: list[int] = []
         for row in rows:
             result = connection.execute(library_items.insert().values(**row))
             inserted_ids.append(int(result.inserted_primary_key[0]))
         for row, item_id in zip(rows, inserted_ids, strict=True):
             row["id"] = item_id
+        rebuild_library_item_evidence_states(connection, library_item_ids=inserted_ids)
         scan_timestamp = _now()
         connection.execute(
             scan_runs.insert().values(
@@ -1569,6 +1590,12 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 active_job_id="web-smoke-encode-running",
                 updated_at=_now(),
             )
+        )
+        start_evidence_work(
+            connection,
+            config,
+            FOLDER_PREFIX,
+            limit=2,
         )
 
     _write_review_states(config, rows_by_prefix)
