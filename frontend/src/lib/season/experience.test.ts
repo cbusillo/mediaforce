@@ -411,6 +411,7 @@ describe('season experience translation', () => {
 		expect(summary).toEqual({
 			verdict: 'Request comparison',
 			blocked: false,
+			requiresCadenceResolution: false,
 			tone: 'ready',
 			title: 'Grain / noise treatment',
 			detail: 'Low-confidence grain findings require comparison.',
@@ -431,6 +432,62 @@ describe('season experience translation', () => {
 				detail: 'Listen for clarity, channel layout, balance, and anything distracting.'
 			}
 		});
+	});
+
+	it('identifies a blocked cadence decision that needs Activity resolution', () => {
+		const summary = compareRiskSummary(
+			folder({
+				quality_risk: {
+					verdict: 'blocked',
+					blocked: true,
+					cadence_gate: 'unknown',
+					cadence_transform: null,
+					blocking_reasons: ['Measured cadence needs explicit review.'],
+					typed_risks: [
+						{
+							tag: 'cadence_interlace_artifacts',
+							label: 'Cadence / interlace artifacts',
+							level: 'medium',
+							rationale: 'Measured cadence needs explicit review.'
+						}
+					]
+				}
+			})
+		);
+
+		expect(summary?.requiresCadenceResolution).toBe(true);
+	});
+
+	it('keeps unrelated quality blockers in the normal revision workflow', () => {
+		const summary = compareRiskSummary(
+			folder({
+				quality_risk: {
+					verdict: 'blocked',
+					blocked: true,
+					cadence_gate: 'progressive',
+					cadence_transform: 'none',
+					blocking_reasons: ['The target-size search is infeasible.']
+				}
+			})
+		);
+
+		expect(summary?.requiresCadenceResolution).toBe(false);
+	});
+
+	it('routes stored cadence blockers without structured gate fields to Activity', () => {
+		const summary = compareRiskSummary(
+			folder({
+				quality_risk: {
+					verdict: 'blocked',
+					blocked: true,
+					blocking_reasons: [
+						'Cadence evidence is missing or inconclusive; refresh cadence analysis before encoding.'
+					]
+				}
+			})
+		);
+
+		expect(summary?.requiresCadenceResolution).toBe(true);
 	});
 
 	it('falls through a pending proposal without video settings', () => {

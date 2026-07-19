@@ -21,10 +21,11 @@ from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND
 from mediaforce.library.evidence_queue import cancel_evidence_queue, claim_next_evidence_work, \
     evidence_queue_summary, mark_evidence_attempt_started, pause_evidence_queue, recover_evidence_queue, \
-    resume_evidence_queue, start_evidence_work
+    queue_decision_evidence_work, resume_evidence_queue, start_evidence_work
 from mediaforce.library.evidence_state import EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, \
     load_library_item_evidence_states, rebuild_library_item_evidence_states, sync_library_item_evidence_state
 from mediaforce.library.evidence_worker import EvidenceWorkerDeps, process_evidence_queue_once
+from mediaforce.web.runtime.decision_evidence import cadence_evidence_blocker
 
 
 class EvidenceWorkerTests(unittest.TestCase):
@@ -113,6 +114,265 @@ class EvidenceWorkerTests(unittest.TestCase):
         self.assertEqual(summary["item_count"], 1)
         self.assertEqual(summary["counts"], {"queued": 1})
         self.assertEqual(summary["scope"]["work_limit"], 1)
+
+    def test_fingerprint_preparation_starts_with_bounded_technical_representatives(self) -> None:
+        item_ids = [
+            self._insert_item(
+                index,
+                cadence_summary_json=self._cadence_summary_json(),
+                media_fingerprint_json=None,
+            )[0]
+            for index in range(1, 4)
+        ]
+
+        with open_db(self.config.paths.db_path) as connection:
+            summary = start_evidence_work(
+                connection,
+                self.config,
+                "tv/show",
+                evidence_kinds=[MEDIA_FINGERPRINT_EVIDENCE_KIND],
+                limit=25,
+            )
+            queued_rows = connection.execute(
+                select(
+                    library_item_evidence_state.c.library_item_id,
+                    library_item_evidence_state.c.work_priority,
+                    library_item_evidence_state.c.work_reason,
+                ).where(
+                    library_item_evidence_state.c.library_item_id.in_(item_ids),
+                    library_item_evidence_state.c.evidence_kind == MEDIA_FINGERPRINT_EVIDENCE_KIND,
+                    library_item_evidence_state.c.work_status == "queued",
+                )
+            ).mappings().fetchall()
+
+        acquisition = summary["scope"]["fingerprint_acquisition"]
+        self.assertEqual(summary["item_count"], 1)
+        self.assertEqual(acquisition["phase"], "technical_representatives")
+        self.assertEqual(acquisition["candidate_count"], 1)
+        self.assertEqual(acquisition["intentionally_unqueued_count"], 2)
+        self.assertEqual(
+            [
+                (row["work_priority"], row["work_reason"])
+                for row in queued_rows
+            ],
+            [(70, "representative_technical_coverage")],
+        )
+
+    def test_decision_evidence_prepares_only_the_affected_item(self) -> None:
+        first_item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
+        second_item_id, _path = self._insert_item(2, cadence_summary_json=None, media_fingerprint_json=None)
+
+        with open_db(self.config.paths.db_path) as connection:
+            prepared = queue_decision_evidence_work(
+                connection,
+                self.config,
+                "tv/show/item-2.mkv",
+                library_item_ids=[second_item_id],
+                evidence_kind=CADENCE_EVIDENCE_KIND,
+                work_reason="sample_safety",
+            )
+            rows = connection.execute(
+                select(
+                    library_item_evidence_state.c.library_item_id,
+                    library_item_evidence_state.c.evidence_kind,
+                    library_item_evidence_state.c.work_status,
+                    library_item_evidence_state.c.work_priority,
+                    library_item_evidence_state.c.work_reason,
+                )
+                .where(library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND)
+                .order_by(library_item_evidence_state.c.library_item_id)
+            ).mappings().fetchall()
+
+        self.assertEqual(prepared["required_count"], 1)
+        self.assertEqual(prepared["work"]["status"], "paused")
+        self.assertEqual(prepared["work"]["item_count"], 1)
+        self.assertEqual(
+            [dict(row) for row in rows],
+            [
+                {
+                    "library_item_id": first_item_id,
+                    "evidence_kind": CADENCE_EVIDENCE_KIND,
+                    "work_status": None,
+                    "work_priority": 100,
+                    "work_reason": None,
+                },
+                {
+                    "library_item_id": second_item_id,
+                    "evidence_kind": CADENCE_EVIDENCE_KIND,
+                    "work_status": "queued",
+                    "work_priority": 0,
+                    "work_reason": "sample_safety",
+                },
+            ],
+        )
+
+    def test_cadence_decision_blocker_queues_only_missing_safety_evidence(self) -> None:
+        first_item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
+        second_item_id, _path = self._insert_item(
+            2,
+            cadence_summary_json=self._cadence_summary_json(),
+            media_fingerprint_json=None,
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            blocker = cadence_evidence_blocker(
+                connection,
+                self.config,
+                "tv/show",
+                library_item_ids=[first_item_id, second_item_id],
+                decision_label="queueing production",
+                work_reason="encode_safety",
+            )
+            rows = connection.execute(
+                select(
+                    library_item_evidence_state.c.library_item_id,
+                    library_item_evidence_state.c.work_status,
+                    library_item_evidence_state.c.work_reason,
+                )
+                .where(library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND)
+                .order_by(library_item_evidence_state.c.library_item_id)
+            ).mappings().fetchall()
+
+        self.assertEqual(blocker["code"], "cadence_analysis_required")
+        self.assertEqual(blocker["affected_item_count"], 1)
+        self.assertEqual(blocker["next_route"], "/ops")
+        self.assertEqual(
+            [dict(row) for row in rows],
+            [
+                {
+                    "library_item_id": first_item_id,
+                    "work_status": "queued",
+                    "work_reason": "encode_safety",
+                },
+                {
+                    "library_item_id": second_item_id,
+                    "work_status": None,
+                    "work_reason": None,
+                },
+            ],
+        )
+
+    def test_cadence_decision_blocker_does_not_requeue_measured_blocked_cadence(self) -> None:
+        item_id, _path = self._insert_item(
+            1,
+            cadence_summary_json=self._blocked_cadence_summary_json(),
+            media_fingerprint_json=None,
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            blocker = cadence_evidence_blocker(
+                connection,
+                self.config,
+                "tv/show/item-1.mkv",
+                library_item_ids=[item_id],
+                decision_label="queueing this sample",
+                work_reason="sample_safety",
+            )
+            row = connection.execute(
+                select(
+                    library_item_evidence_state.c.work_status,
+                    library_item_evidence_state.c.work_reason,
+                ).where(
+                    library_item_evidence_state.c.library_item_id == item_id,
+                    library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+                )
+            ).mappings().one()
+
+        self.assertEqual(blocker["code"], "cadence_unresolved")
+        self.assertEqual(blocker["affected_item_count"], 1)
+        self.assertEqual(dict(row), {"work_status": None, "work_reason": None})
+
+    def test_decision_evidence_is_claimed_before_manual_backfill(self) -> None:
+        first_item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
+        second_item_id, _path = self._insert_item(2, cadence_summary_json=None, media_fingerprint_json=None)
+        with open_db(self.config.paths.db_path) as connection:
+            start_evidence_work(
+                connection,
+                self.config,
+                "tv/show/item-1.mkv",
+                evidence_kinds=[CADENCE_EVIDENCE_KIND],
+            )
+            queue_decision_evidence_work(
+                connection,
+                self.config,
+                "tv/show/item-2.mkv",
+                library_item_ids=[second_item_id],
+                evidence_kind=CADENCE_EVIDENCE_KIND,
+                work_reason="encode_safety",
+            )
+            resume_evidence_queue(connection)
+        with open_db(self.config.paths.db_path) as connection:
+            claim = claim_next_evidence_work(connection, worker_id="worker-a", lease_seconds=30)
+
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim.library_item_id, second_item_id)
+        self.assertNotEqual(claim.library_item_id, first_item_id)
+
+    def test_decision_request_does_not_reset_same_source_failure_budget(self) -> None:
+        item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
+        with open_db(self.config.paths.db_path) as connection:
+            source_fingerprint = connection.execute(
+                select(library_items.c.content_version_fingerprint).where(library_items.c.id == item_id)
+            ).scalar_one()
+            connection.execute(
+                update(library_item_evidence_state)
+                .where(
+                    library_item_evidence_state.c.library_item_id == item_id,
+                    library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+                )
+                .values(
+                    work_batch_id="old-batch",
+                    work_status="failed",
+                    work_source_fingerprint=source_fingerprint,
+                    attempt_count=3,
+                    last_error="decoder failed",
+                )
+            )
+            prepared = queue_decision_evidence_work(
+                connection,
+                self.config,
+                "tv/show/item-1.mkv",
+                library_item_ids=[item_id],
+                evidence_kind=CADENCE_EVIDENCE_KIND,
+                work_reason="sample_safety",
+            )
+            row = connection.execute(
+                select(
+                    library_item_evidence_state.c.work_status,
+                    library_item_evidence_state.c.work_priority,
+                    library_item_evidence_state.c.attempt_count,
+                    library_item_evidence_state.c.last_error,
+                ).where(
+                    library_item_evidence_state.c.library_item_id == item_id,
+                    library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+                )
+            ).mappings().one()
+
+        self.assertEqual(prepared["work"]["status"], "idle")
+        self.assertEqual(prepared["prepared_count"], 0)
+        self.assertEqual(prepared["terminal_failure_count"], 1)
+        self.assertEqual(
+            dict(row),
+            {
+                "work_status": "failed",
+                "work_priority": 0,
+                "attempt_count": 3,
+                "last_error": "decoder failed",
+            },
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            blocker = cadence_evidence_blocker(
+                connection,
+                self.config,
+                "tv/show/item-1.mkv",
+                library_item_ids=[item_id],
+                decision_label="queueing this sample",
+                work_reason="sample_safety",
+            )
+
+        self.assertEqual(blocker["code"], "cadence_analysis_failed")
+        self.assertEqual(blocker["affected_item_count"], 1)
 
     def test_zero_candidate_batch_completes_without_claims(self) -> None:
         self._insert_item(
@@ -682,6 +942,13 @@ class EvidenceWorkerTests(unittest.TestCase):
             separators=(",", ":"),
             sort_keys=True,
         )
+
+    @classmethod
+    def _blocked_cadence_summary_json(cls) -> str:
+        payload = json.loads(cls._cadence_summary_json())
+        payload["decision"]["status"] = "blocked"
+        payload["decision"]["reason"] = "fixture cadence requires operator review"
+        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
     @staticmethod
     def _fingerprint_summary_json() -> str:

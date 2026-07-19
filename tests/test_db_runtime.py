@@ -27,7 +27,7 @@ from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.cadence import cadence_policy_snapshot
 from mediaforce.encoding.fingerprint import media_fingerprint_policy_snapshot
 
-CURRENT_DB_REVISION = "20260719_0013"
+CURRENT_DB_REVISION = "20260719_0014"
 
 
 class DatabaseRuntimeTests(unittest.TestCase):
@@ -50,8 +50,12 @@ class DatabaseRuntimeTests(unittest.TestCase):
                     str(index_row["name"])
                     for index_row in inspector.get_indexes("library_item_evidence_state")
                 }
-                evidence_columns = {
-                    str(column["name"])
+                evidence_index_columns = {
+                    str(index_row["name"]): tuple(index_row.get("column_names") or ())
+                    for index_row in inspector.get_indexes("library_item_evidence_state")
+                }
+                evidence_column_details = {
+                    str(column["name"]): column
                     for column in inspector.get_columns("library_item_evidence_state")
                 }
                 library_columns = {str(column["name"]) for column in inspector.get_columns("library_items")}
@@ -73,9 +77,26 @@ class DatabaseRuntimeTests(unittest.TestCase):
             self.assertIn("idx_library_item_evidence_state_kind_state", evidence_indexes)
             self.assertIn("idx_library_item_evidence_state_work_ready", evidence_indexes)
             self.assertIn("idx_library_item_evidence_state_work_claim", evidence_indexes)
-            self.assertIn("work_batch_id", evidence_columns)
-            self.assertIn("work_status", evidence_columns)
-            self.assertIn("lease_expires_at", evidence_columns)
+            self.assertIn("work_batch_id", evidence_column_details)
+            self.assertIn("work_status", evidence_column_details)
+            self.assertIn("work_priority", evidence_column_details)
+            self.assertIn("work_reason", evidence_column_details)
+            self.assertIn("lease_expires_at", evidence_column_details)
+            self.assertEqual(
+                str(evidence_column_details["work_priority"].get("default") or "").strip("()'\""),
+                "100",
+            )
+            self.assertEqual(
+                evidence_index_columns["idx_library_item_evidence_state_work_claim"],
+                (
+                    "work_batch_id",
+                    "work_status",
+                    "retry_not_before",
+                    "work_priority",
+                    "evidence_kind",
+                    "library_item_id",
+                ),
+            )
 
     def test_open_db_stamps_existing_legacy_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

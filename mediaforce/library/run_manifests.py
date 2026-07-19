@@ -236,7 +236,7 @@ def write_manifest(
     return manifest_path
 
 
-def create_folder_manifest(
+def build_folder_manifest(
         connection: DBClient,
         config: MediaforceConfig,
         *,
@@ -245,7 +245,7 @@ def create_folder_manifest(
         scan_first: bool = False,
         manual_override_prefix: str | None = None,
         older_season_override: OlderSeasonOverrideSelection | None = None,
-) -> tuple[dict[str, Any], Path]:
+) -> dict[str, Any]:
     if manual_override_prefix and older_season_override is not None:
         raise ValueError("Exact-season and older-season lifecycle overrides cannot be combined")
     if scan_first:
@@ -272,5 +272,30 @@ def create_folder_manifest(
     manifest["selection"]["media_scope"] = scope.to_payload()
     if older_season_override is not None:
         manifest["selection"]["lifecycle_override"] = older_season_override.to_payload()
+    return manifest
+
+
+def create_folder_manifest(
+        connection: DBClient,
+        config: MediaforceConfig,
+        *,
+        prefix: str,
+        limit: int | None = None,
+        scan_first: bool = False,
+        manual_override_prefix: str | None = None,
+        older_season_override: OlderSeasonOverrideSelection | None = None,
+        prepare_only: bool = False,
+) -> tuple[dict[str, Any], Path | None]:
+    manifest = build_folder_manifest(
+        connection,
+        config,
+        prefix=prefix,
+        limit=limit,
+        scan_first=scan_first,
+        manual_override_prefix=manual_override_prefix,
+        older_season_override=older_season_override,
+    )
+    if prepare_only:
+        return manifest, None
     manifest_path = write_manifest(connection, config, manifest)
     return manifest, manifest_path

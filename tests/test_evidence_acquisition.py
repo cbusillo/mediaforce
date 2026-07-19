@@ -51,20 +51,19 @@ class EvidenceAcquisitionTests(unittest.TestCase):
 
     def test_plan_caps_the_uncertainty_frontier_and_stops_at_representative_coverage(self) -> None:
         items = [
-            self._item(1, media_traits=["typical"]),
-            self._item(2, media_traits=["dark_luma", "dark_gradient_banding_risk"]),
+            self._item(1, media_traits=["dark_luma"]),
+            self._item(2, media_traits=["dark_luma"]),
             self._item(3, media_traits=["high_motion"]),
             self._item(4, media_traits=["typical"]),
+            self._item(5, media_traits=["typical"]),
+            self._item(6, media_traits=["dark_gradient_banding_risk"]),
         ]
         technical_selection = select_representatives(
             items,
             prefix="tv/Example/Season 1",
             fingerprint_dimensions=(),
         )
-        all_dimension_selection = select_representatives(items, prefix="tv/Example/Season 1")
         technical_ids = tuple(item["source_id"] for item in technical_selection.payload["selected_items"])
-        all_dimension_ids = tuple(item["source_id"] for item in all_dimension_selection.payload["selected_items"])
-        frontier_ids = tuple(source_id for source_id in all_dimension_ids if source_id not in technical_ids)
 
         plan = plan_fingerprint_acquisition(
             items,
@@ -73,9 +72,8 @@ class EvidenceAcquisitionTests(unittest.TestCase):
             max_uncertainty_frontier=1,
         )
 
-        self.assertGreater(len(frontier_ids), 1)
         self.assertEqual(plan.phase, "uncertainty_frontier")
-        self.assertEqual(plan.candidate_ids, frontier_ids[:1])
+        self.assertEqual(plan.candidate_ids, (stable_source_id(items[1]),))
         self.assertEqual(plan.stop_reason, "uncertainty_frontier_capped")
         self.assertEqual(
             plan.intentionally_unqueued_count,
@@ -85,16 +83,14 @@ class EvidenceAcquisitionTests(unittest.TestCase):
         complete_plan = plan_fingerprint_acquisition(
             items,
             prefix="tv/Example/Season 1",
-            measured_source_ids=all_dimension_ids,
+            measured_source_ids=(*technical_ids, stable_source_id(items[1])),
         )
-        unselected_ids = {stable_source_id(item) for item in items} - set(all_dimension_ids)
 
         self.assertEqual(complete_plan.phase, "complete")
         self.assertEqual(complete_plan.candidate_ids, ())
         self.assertEqual(complete_plan.stop_reason, "representative_coverage_satisfied")
-        self.assertEqual(complete_plan.intentionally_unqueued_count, len(unselected_ids))
+        self.assertEqual(complete_plan.intentionally_unqueued_count, len(items) - 2)
         self.assertLess(complete_plan.coverage.global_fingerprint_coverage, 1.0)
-        self.assertEqual(complete_plan.coverage.all_dimension_representative_coverage, 1.0)
 
     def test_replay_reports_dimension_benefit_and_separate_audio_cost(self) -> None:
         items = [

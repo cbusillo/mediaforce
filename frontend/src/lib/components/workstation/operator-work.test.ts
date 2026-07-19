@@ -3,6 +3,7 @@ import type { OperatorEvidenceBacklogRow, OperatorEvidenceState } from '$lib/api
 import {
 	catalogStateView,
 	evidenceStateView,
+	evidenceWorkReasonView,
 	evidenceWorkStatusView,
 	operatorRefreshInterval
 } from './operator-work';
@@ -116,6 +117,25 @@ describe('operator work copy', () => {
 		expect(evidenceWorkStatusView({ ...row, work_status: 'waiting_source' }).label).toBe(
 			'Source unavailable'
 		);
+	});
+
+	it('explains decision-priority work in operator language', () => {
+		expect(evidenceWorkReasonView('sample_safety')).toEqual({
+			label: 'Blocks sample',
+			detail: 'Required before the selected sample can run.'
+		});
+		expect(evidenceWorkReasonView('encode_safety')?.label).toBe('Blocks production');
+		expect(evidenceWorkReasonView('policy_reclassification')?.label).toBe('No media read');
+		expect(evidenceWorkReasonView('representative_technical_coverage')?.detail).toContain(
+			'codec, resolution, cadence, audio layout, and runtime'
+		);
+		expect(evidenceWorkReasonView('representative_uncertainty')?.label).toBe('Bounded follow-up');
+		expect(evidenceWorkReasonView('operator_scope')?.label).toBe('Operator request');
+		expect(evidenceWorkReasonView('future_reason')).toEqual({
+			label: 'Priority work',
+			detail: 'Prepared for a decision that needs current evidence.'
+		});
+		expect(evidenceWorkReasonView(null)).toBeNull();
 	});
 
 	it('polls only while the server reports active work', () => {

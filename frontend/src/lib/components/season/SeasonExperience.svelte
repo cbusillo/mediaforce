@@ -2,7 +2,7 @@
 	import { resolve } from '$app/paths';
 	import { onMount, tick } from 'svelte';
 
-	import { apiDownloadHref, postJson } from '$lib/api/client';
+	import { ApiError, apiDownloadHref, postJson } from '$lib/api/client';
 	import type {
 		FolderPayload,
 		FolderStatusPayload,
@@ -96,6 +96,7 @@
 	let actionPhase = $state<ActionPhase>('idle');
 	let actionError = $state('');
 	let actionMessage = $state('');
+	let blockerAction = $state<{ route: '/ops'; label: string } | null>(null);
 	let actionStartedAt = $state(0);
 	let clock = $state(Date.now());
 	let showInstructions = $state(false);
@@ -372,6 +373,7 @@
 	) {
 		actionError = '';
 		actionMessage = '';
+		blockerAction = null;
 		actionStartedAt = Date.now();
 		actionPhase = 'planning';
 		let succeeded = false;
@@ -421,6 +423,7 @@
 		const draftHash = asText(calibration.draft_hash);
 		actionError = '';
 		actionMessage = '';
+		blockerAction = null;
 		actionStartedAt = Date.now();
 		actionPhase = 'approving';
 		let succeeded = false;
@@ -671,6 +674,7 @@
 	async function runAction(phase: ActionPhase, fallback: string, operation: () => Promise<void>) {
 		actionError = '';
 		actionMessage = '';
+		blockerAction = null;
 		actionStartedAt = Date.now();
 		actionPhase = phase;
 		let succeeded = false;
@@ -687,6 +691,11 @@
 	}
 
 	function humanActionError(error: unknown, fallback: string): string {
+		if (error instanceof ApiError) {
+			const route = String(error.payload?.next_route ?? '').trim();
+			const label = String(error.payload?.next_action_label ?? '').trim();
+			if (route === '/ops' && label) blockerAction = { route, label };
+		}
 		const message = error instanceof Error ? error.message.trim() : '';
 		if (!message) return fallback;
 		const lower = message.toLowerCase();
@@ -899,6 +908,11 @@
 				<div>
 					<strong>Something needs your attention</strong>
 					<p>{actionError || loadError}</p>
+					{#if blockerAction}
+						<a class="action-notice__link" href={resolve(blockerAction.route)}
+							>{blockerAction.label}</a
+						>
+					{/if}
 				</div>
 			</div>
 		{:else if actionMessage}
@@ -1346,6 +1360,15 @@
 						{#if riskSummary.focusMoments.length}
 							<p class="risk-summary__focus">Review focus: {riskSummary.focusMoments[0]}</p>
 						{/if}
+						{#if riskSummary.requiresCadenceResolution}
+							<div class="risk-summary__resolution">
+								<div>
+									<span>Next step</span>
+									<strong>Resolve the selected file’s motion pattern</strong>
+									<small>This is evidence work, not a size or quality-setting problem.</small>
+								</div>
+							</div>
+						{/if}
 					</div>
 				{/if}
 
@@ -1416,63 +1439,65 @@
 					>
 				</div>
 
-				<div class="review-feedback-panel">
-					<div class="review-feedback-panel__heading">
-						<div>
-							<span>Want a revision?</span>
-							<h2>Tell Mediaforce what should change.</h2>
+				{#if !riskSummary?.requiresCadenceResolution}
+					<div class="review-feedback-panel">
+						<div class="review-feedback-panel__heading">
+							<div>
+								<span>Want a revision?</span>
+								<h2>Tell Mediaforce what should change.</h2>
+							</div>
+							<p>The same size target stays in place unless you choose a different goal.</p>
 						</div>
-						<p>The same size target stays in place unless you choose a different goal.</p>
-					</div>
-					<div class="concern-options" role="group" aria-label="Review concerns">
-						{#each REVIEW_CONCERNS as concern (concern.tag)}
+						<div class="concern-options" role="group" aria-label="Review concerns">
+							{#each REVIEW_CONCERNS as concern (concern.tag)}
+								<button
+									type="button"
+									class:active={selectedConcerns.includes(concern.tag)}
+									onclick={() => toggleConcern(concern.tag)}
+									aria-pressed={selectedConcerns.includes(concern.tag)}
+								>
+									{concern.label}
+								</button>
+							{/each}
+						</div>
+						<div class="review-feedback-fields">
+							<label>
+								<span>What did you notice?</span>
+								<textarea
+									bind:value={reviewFeedback}
+									maxlength="600"
+									rows="3"
+									placeholder="For example: fast movement loses texture around faces in Moment 2."
+								></textarea>
+								<small>{reviewFeedback.length}/600</small>
+							</label>
+							<label>
+								<span>Other priorities for the next test <small>(optional)</small></span>
+								<textarea
+									bind:value={operatorInstructions}
+									maxlength="600"
+									rows="3"
+									placeholder="Preserve surround audio, intentional grain, subtitle behavior, or another priority."
+								></textarea>
+								<small>{operatorInstructions.length}/600</small>
+							</label>
+						</div>
+						<div class="review-feedback-panel__action">
+							<p>
+								Submitting a concern records the current evidence as rejected and starts a revised
+								representative test.
+							</p>
 							<button
+								class="secondary-button"
 								type="button"
-								class:active={selectedConcerns.includes(concern.tag)}
-								onclick={() => toggleConcern(concern.tag)}
-								aria-pressed={selectedConcerns.includes(concern.tag)}
+								onclick={submitReviewFeedback}
+								disabled={!hasReviewFeedback || noAvailableHosts}
 							>
-								{concern.label}
+								Make a revised test
 							</button>
-						{/each}
+						</div>
 					</div>
-					<div class="review-feedback-fields">
-						<label>
-							<span>What did you notice?</span>
-							<textarea
-								bind:value={reviewFeedback}
-								maxlength="600"
-								rows="3"
-								placeholder="For example: fast movement loses texture around faces in Moment 2."
-							></textarea>
-							<small>{reviewFeedback.length}/600</small>
-						</label>
-						<label>
-							<span>Other priorities for the next test <small>(optional)</small></span>
-							<textarea
-								bind:value={operatorInstructions}
-								maxlength="600"
-								rows="3"
-								placeholder="Preserve surround audio, intentional grain, subtitle behavior, or another priority."
-							></textarea>
-							<small>{operatorInstructions.length}/600</small>
-						</label>
-					</div>
-					<div class="review-feedback-panel__action">
-						<p>
-							Submitting a concern records the current evidence as rejected and starts a revised
-							representative test.
-						</p>
-						<button
-							class="secondary-button"
-							type="button"
-							onclick={submitReviewFeedback}
-							disabled={!hasReviewFeedback || noAvailableHosts}
-						>
-							Make a revised test
-						</button>
-					</div>
-				</div>
+				{/if}
 
 				<div
 					class="decision"
@@ -1483,6 +1508,11 @@
 						{#if targetConstraint}
 							<h2>{targetConstraint.title}</h2>
 							<p>{targetConstraint.detail}</p>
+						{:else if riskSummary?.requiresCadenceResolution}
+							<h2>Mediaforce needs a motion-pattern decision.</h2>
+							<p>
+								Resolve the selected file in Activity, then return here to finish your decision.
+							</p>
 						{:else if riskSummary?.blocked}
 							<h2>This test is not safe to approve yet.</h2>
 							<p>{riskSummary.detail}</p>
@@ -1512,6 +1542,11 @@
 								{targetConstraint.recoveryLabel}
 								<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
 							</button>
+						{:else if riskSummary?.requiresCadenceResolution}
+							<a class="primary-button primary-button--light" href={resolve('/ops')}>
+								Open Activity
+								<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
+							</a>
 						{:else if riskSummary?.blocked}
 							<button class="secondary-button" type="button" onclick={chooseDifferentSize}>
 								Choose a different goal
@@ -3794,6 +3829,15 @@
 		color: inherit;
 	}
 
+	.action-notice__link {
+		color: inherit;
+		display: inline-flex;
+		font-size: 12px;
+		font-weight: 700;
+		margin-top: 8px;
+		text-underline-offset: 3px;
+	}
+
 	.lifecycle-notice {
 		align-items: flex-start;
 		background: var(--mf-wait-bg);
@@ -4896,6 +4940,12 @@
 		color: var(--mf-fg-secondary) !important;
 		grid-column: 1 / -1;
 		margin: 0 !important;
+	}
+
+	.risk-summary__resolution {
+		border-top: 1px solid var(--mf-fail-line);
+		grid-column: 1 / -1;
+		padding-top: 12px;
 	}
 
 	.comparison-ledger {

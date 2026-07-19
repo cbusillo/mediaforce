@@ -1,6 +1,6 @@
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Sequence
 
@@ -10,15 +10,23 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import evidence_queue_state, library_item_evidence_state, library_items
+from mediaforce.core.evidence import stable_source_id
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.core.utils import timestamp
 from mediaforce.library.background_work import background_work_is_paused
+from mediaforce.library.evidence_acquisition import DEFAULT_UNCERTAINTY_FRONTIER_LIMIT, \
+    FingerprintAcquisitionPlan, load_fingerprint_acquisition_items, plan_fingerprint_acquisition
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANALYSIS_REQUIRED, \
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EvidenceKind
 from mediaforce.library.media_scopes import MediaScope, resolve_media_scope, scope_rel_path_filter
 
 DEFAULT_EVIDENCE_QUEUE_NAME = "evidence"
 DEFAULT_EVIDENCE_BATCH_LIMIT = 25
+
+EVIDENCE_WORK_PRIORITY_DECISION = 0
+EVIDENCE_WORK_PRIORITY_RECLASSIFICATION = 10
+EVIDENCE_WORK_PRIORITY_OPERATOR = 50
+EVIDENCE_WORK_PRIORITY_REPRESENTATIVE = 70
 
 EVIDENCE_QUEUE_ACTIVE_STATUSES = ("queued", "running", "paused", "cancel_requested")
 EVIDENCE_WORK_CLAIMABLE_STATUSES = ("queued", "retry_wait", "waiting_source")
@@ -38,6 +46,8 @@ class EvidenceWorkClaim:
     evidence_kind: EvidenceKind
     evidence_state: str
     evidence_reason: str | None
+    work_priority: int
+    work_reason: str | None
     source_path: str
     rel_path: str
     media_root: str
@@ -147,8 +157,9 @@ def start_evidence_work(
             raise EvidenceQueueConflict(
                 f"Library {scope.root!r} is not enabled for production evidence work."
             )
-        candidates = _evidence_work_candidates(
+        candidates, fingerprint_plan = _evidence_work_candidates(
             connection,
+            config,
             scope,
             selected_kinds,
             limit=normalized_limit,
@@ -165,6 +176,8 @@ def start_evidence_work(
         finished_at = None if item_count else now_iso
         scope_payload = scope.to_payload()
         scope_payload["work_limit"] = normalized_limit
+        if fingerprint_plan is not None:
+            scope_payload["fingerprint_acquisition"] = _fingerprint_plan_summary(fingerprint_plan)
         _save_evidence_queue_state(
             connection,
             {
@@ -191,6 +204,279 @@ def start_evidence_work(
     return evidence_queue_summary(connection)
 
 
+def queue_decision_evidence_work(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+        *,
+        library_item_ids: Sequence[int],
+        evidence_kind: str,
+        work_reason: str,
+        updated_at: str | None = None,
+        manage_transaction: bool = True,
+) -> dict[str, Any]:
+    scope_prefix = str(prefix or "").strip().strip("/")
+    if not scope_prefix:
+        raise ValueError("Decision evidence work requires an explicit item or folder scope.")
+    normalized_ids = sorted({int(item_id) for item_id in library_item_ids})
+    if not normalized_ids:
+        return {
+            "evidence_kind": _normalize_evidence_kinds([evidence_kind])[0],
+            "required_count": 0,
+            "prepared_count": 0,
+            "work": evidence_queue_summary(connection),
+        }
+    selected_kind = _normalize_evidence_kinds([evidence_kind])[0]
+    normalized_reason = str(work_reason or "decision_required").strip() or "decision_required"
+    now_iso = updated_at or timestamp()
+
+    if manage_transaction:
+        connection.commit()
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+    try:
+        ensure_evidence_queue_state(connection, updated_at=now_iso)
+        if background_work_is_paused(connection):
+            raise EvidenceQueueConflict(
+                "Background catalog and analysis work is paused. Resume background work before requesting safety evidence."
+            )
+        scope = resolve_media_scope(
+            connection,
+            scope_prefix,
+            library_types=config.library_type_map,
+        )
+        if scope.root not in config.source_root_map:
+            raise EvidenceQueueConflict(
+                f"Library {scope.root!r} is not enabled for production evidence work."
+            )
+        rows = connection.execute(
+            select(
+                library_item_evidence_state.c.library_item_id,
+                library_item_evidence_state.c.evidence_kind,
+                library_item_evidence_state.c.state,
+                library_item_evidence_state.c.work_batch_id,
+                library_item_evidence_state.c.work_status,
+                library_item_evidence_state.c.work_priority,
+                library_item_evidence_state.c.work_source_fingerprint,
+                library_item_evidence_state.c.retry_not_before,
+                library_item_evidence_state.c.attempt_count,
+                library_item_evidence_state.c.last_attempt_at,
+                library_item_evidence_state.c.last_error,
+                library_items.c.content_version_fingerprint,
+                library_items.c.fingerprint,
+            )
+            .select_from(
+                library_item_evidence_state.join(
+                    library_items,
+                    library_items.c.id == library_item_evidence_state.c.library_item_id,
+                )
+            )
+            .where(
+                library_item_evidence_state.c.library_item_id.in_(normalized_ids),
+                library_item_evidence_state.c.evidence_kind == selected_kind,
+                library_item_evidence_state.c.state.in_((
+                    EVIDENCE_STATE_ANALYSIS_REQUIRED,
+                    EVIDENCE_STATE_CLASSIFICATION_REQUIRED,
+                )),
+                library_items.c.status != "missing",
+                scope_rel_path_filter(library_items.c.rel_path, scope),
+            )
+            .order_by(library_item_evidence_state.c.library_item_id)
+        ).mappings().fetchall()
+        if not rows:
+            if manage_transaction:
+                connection.commit()
+            return {
+                "evidence_kind": selected_kind,
+                "required_count": 0,
+                "prepared_count": 0,
+                "work": evidence_queue_summary(connection),
+            }
+
+        queue_state = load_evidence_queue_state(connection)
+        queue_status = str(queue_state.get("status") or "idle")
+        if bool(queue_state.get("cancel_requested")) or queue_status == "cancel_requested":
+            raise EvidenceQueueConflict(
+                "Evidence work is stopping. Wait for cancellation to finish before requesting safety evidence."
+            )
+        active_batch = queue_status in EVIDENCE_QUEUE_ACTIVE_STATUSES and bool(queue_state.get("batch_id"))
+        batch_id = str(queue_state.get("batch_id") or "") if active_batch else uuid.uuid4().hex
+        if any(
+                str(row.get("work_status") or "") == "running"
+                and str(row.get("work_batch_id") or "") != batch_id
+                for row in rows
+        ):
+            raise EvidenceQueueConflict(
+                "The required evidence item is already owned by another active batch."
+            )
+        prepared_count = 0
+        terminal_failure_count = 0
+        for row in rows:
+            row_batch_id = str(row.get("work_batch_id") or "")
+            row_status = str(row.get("work_status") or "")
+            current_priority = int_value(row.get("work_priority")) or EVIDENCE_WORK_PRIORITY_OPERATOR
+            if row_batch_id == batch_id and row_status in EVIDENCE_WORK_ACTIVE_STATUSES:
+                connection.execute(
+                    update(library_item_evidence_state)
+                    .where(
+                        library_item_evidence_state.c.library_item_id == int(row["library_item_id"]),
+                        library_item_evidence_state.c.evidence_kind == selected_kind,
+                    )
+                    .values(
+                        work_priority=min(current_priority, EVIDENCE_WORK_PRIORITY_DECISION),
+                        work_reason=normalized_reason,
+                        updated_at=now_iso,
+                    )
+                )
+                prepared_count += 1
+                continue
+            current_source_fingerprint = _item_source_fingerprint(row)
+            preserve_retry_state = bool(
+                str(row.get("state") or "") == EVIDENCE_STATE_ANALYSIS_REQUIRED
+                and current_source_fingerprint
+                and str(row.get("work_source_fingerprint") or "") == current_source_fingerprint
+                and row_status in {"retry_wait", "waiting_source", "failed"}
+            )
+            if preserve_retry_state and row_status == "failed":
+                connection.execute(
+                    update(library_item_evidence_state)
+                    .where(
+                        library_item_evidence_state.c.library_item_id == int(row["library_item_id"]),
+                        library_item_evidence_state.c.evidence_kind == selected_kind,
+                    )
+                    .values(
+                        work_priority=EVIDENCE_WORK_PRIORITY_DECISION,
+                        work_reason=normalized_reason,
+                        updated_at=now_iso,
+                    )
+                )
+                terminal_failure_count += 1
+                continue
+            next_status = row_status if preserve_retry_state else "queued"
+            connection.execute(
+                update(library_item_evidence_state)
+                .where(
+                    library_item_evidence_state.c.library_item_id == int(row["library_item_id"]),
+                    library_item_evidence_state.c.evidence_kind == selected_kind,
+                )
+                .values(
+                    work_batch_id=batch_id,
+                    work_status=next_status,
+                    work_priority=EVIDENCE_WORK_PRIORITY_DECISION,
+                    work_reason=normalized_reason,
+                    work_source_fingerprint=current_source_fingerprint,
+                    leased_at=None,
+                    lease_expires_at=None,
+                    heartbeat_at=None,
+                    worker_id=None,
+                    process_pid=None,
+                    retry_not_before=row.get("retry_not_before") if preserve_retry_state else None,
+                    attempt_count=int_value(row.get("attempt_count")) if preserve_retry_state else 0,
+                    last_attempt_at=row.get("last_attempt_at") if preserve_retry_state else None,
+                    last_error=row.get("last_error") if preserve_retry_state else None,
+                    updated_at=now_iso,
+                )
+            )
+            prepared_count += 1
+
+        if not active_batch and prepared_count == 0:
+            if manage_transaction:
+                connection.commit()
+            return {
+                "evidence_kind": selected_kind,
+                "required_count": len(rows),
+                "prepared_count": 0,
+                "terminal_failure_count": terminal_failure_count,
+                "work": evidence_queue_summary(connection),
+            }
+
+        if active_batch:
+            evidence_kinds = list(dict.fromkeys([
+                *object_list(queue_state.get("evidence_kinds")),
+                selected_kind,
+            ]))
+            item_count = int(
+                connection.execute(
+                    select(func.count())
+                    .select_from(library_item_evidence_state)
+                    .where(library_item_evidence_state.c.work_batch_id == batch_id)
+                ).scalar_one()
+            )
+            priority_rows = connection.execute(
+                select(
+                    library_item_evidence_state.c.work_reason,
+                    func.count().label("item_count"),
+                )
+                .where(
+                    library_item_evidence_state.c.work_batch_id == batch_id,
+                    library_item_evidence_state.c.work_priority == EVIDENCE_WORK_PRIORITY_DECISION,
+                )
+                .group_by(library_item_evidence_state.c.work_reason)
+            ).mappings().fetchall()
+            scope_payload = object_dict(queue_state.get("scope"))
+            scope_payload["priority_request_count"] = sum(
+                int(row["item_count"] or 0)
+                for row in priority_rows
+            )
+            scope_payload["priority_reasons"] = sorted(
+                str(row["work_reason"])
+                for row in priority_rows
+                if row["work_reason"]
+            )
+            connection.execute(
+                update(evidence_queue_state)
+                .where(evidence_queue_state.c.queue_name == DEFAULT_EVIDENCE_QUEUE_NAME)
+                .values(
+                    scope_json=json.dumps(scope_payload, separators=(",", ":"), sort_keys=True),
+                    evidence_kinds_json=json.dumps(evidence_kinds, separators=(",", ":")),
+                    item_count=item_count,
+                    finished_at=None,
+                    updated_at=now_iso,
+                )
+            )
+            _refresh_evidence_queue_state(connection, batch_id=batch_id, updated_at=now_iso)
+        else:
+            scope_payload = scope.to_payload()
+            scope_payload.update({
+                "work_limit": prepared_count,
+                "trigger": "decision",
+                "work_reason": normalized_reason,
+            })
+            _save_evidence_queue_state(
+                connection,
+                {
+                    "queue_name": DEFAULT_EVIDENCE_QUEUE_NAME,
+                    "batch_id": batch_id,
+                    "status": "paused",
+                    "scope": scope_payload,
+                    "evidence_kinds": [selected_kind],
+                    "is_paused": True,
+                    "cancel_requested": False,
+                    "item_count": prepared_count,
+                    "completed_count": 0,
+                    "failed_count": 0,
+                    "cancelled_count": 0,
+                    "created_at": now_iso,
+                    "started_at": None,
+                    "finished_at": None,
+                    "updated_at": now_iso,
+                },
+            )
+            _refresh_evidence_queue_state(connection, batch_id=batch_id, updated_at=now_iso)
+        if manage_transaction:
+            connection.commit()
+    except BaseException:
+        if manage_transaction:
+            connection.rollback()
+        raise
+    return {
+        "evidence_kind": selected_kind,
+        "required_count": len(rows),
+        "prepared_count": prepared_count,
+        "terminal_failure_count": terminal_failure_count,
+        "work": evidence_queue_summary(connection),
+    }
+
+
 def evidence_queue_summary(connection: DBClient) -> dict[str, Any]:
     queue_state = load_evidence_queue_state(connection)
     batch_id = str(queue_state.get("batch_id") or "")
@@ -213,6 +499,8 @@ def evidence_queue_summary(connection: DBClient) -> dict[str, Any]:
             select(
                 library_item_evidence_state.c.library_item_id,
                 library_item_evidence_state.c.evidence_kind,
+                library_item_evidence_state.c.work_priority,
+                library_item_evidence_state.c.work_reason,
                 library_item_evidence_state.c.attempt_count,
                 library_item_evidence_state.c.last_attempt_at,
                 library_item_evidence_state.c.heartbeat_at,
@@ -345,6 +633,7 @@ def claim_next_evidence_work(
                 ),
             )
             .order_by(
+                library_item_evidence_state.c.work_priority,
                 case(
                     (library_item_evidence_state.c.state == EVIDENCE_STATE_CLASSIFICATION_REQUIRED, 0),
                     else_=1,
@@ -414,6 +703,8 @@ def load_evidence_work_claim(
             library_item_evidence_state.c.evidence_kind,
             library_item_evidence_state.c.state,
             library_item_evidence_state.c.reason,
+            library_item_evidence_state.c.work_priority,
+            library_item_evidence_state.c.work_reason,
             library_item_evidence_state.c.work_source_fingerprint,
             library_item_evidence_state.c.attempt_count,
             library_item_evidence_state.c.worker_id,
@@ -449,6 +740,8 @@ def load_evidence_work_claim(
         evidence_kind=normalized_kind,
         evidence_state=str(row["state"]),
         evidence_reason=str(row["reason"]) if row["reason"] is not None else None,
+        work_priority=int(row["work_priority"] or EVIDENCE_WORK_PRIORITY_OPERATOR),
+        work_reason=str(row["work_reason"]) if row["work_reason"] is not None else None,
         source_path=str(row["source_path"]),
         rel_path=str(row["rel_path"]),
         media_root=str(row["media_root"]),
@@ -682,15 +975,17 @@ def _set_queue_control(
 
 def _evidence_work_candidates(
         connection: DBClient,
+        config: MediaforceConfig,
         scope: MediaScope,
         evidence_kinds: Sequence[EvidenceKind],
         *,
         limit: int,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], FingerprintAcquisitionPlan | None]:
     query = (
         select(
             library_item_evidence_state.c.library_item_id,
             library_item_evidence_state.c.evidence_kind,
+            library_item_evidence_state.c.state,
             library_items.c.content_version_fingerprint,
             library_items.c.fingerprint,
         )
@@ -713,17 +1008,125 @@ def _evidence_work_candidates(
             library_item_evidence_state.c.library_item_id,
             library_item_evidence_state.c.evidence_kind,
         )
-        .limit(limit)
     )
     rows = connection.execute(query).mappings().fetchall()
-    return [
-        {
-            "library_item_id": int(row["library_item_id"]),
-            "evidence_kind": str(row["evidence_kind"]),
-            "work_source_fingerprint": _item_source_fingerprint(row),
-        }
+    classification_rows = [
+        row
         for row in rows
+        if str(row["state"]) == EVIDENCE_STATE_CLASSIFICATION_REQUIRED
     ]
+    cadence_rows = [
+        row
+        for row in rows
+        if (
+            str(row["state"]) == EVIDENCE_STATE_ANALYSIS_REQUIRED
+            and str(row["evidence_kind"]) == EVIDENCE_KINDS[0]
+        )
+    ]
+    fingerprint_plan: FingerprintAcquisitionPlan | None = None
+    fingerprint_rows: list[Any] = []
+    fingerprint_analysis_required = any(
+        str(row["state"]) == EVIDENCE_STATE_ANALYSIS_REQUIRED
+        and str(row["evidence_kind"]) == EVIDENCE_KINDS[1]
+        for row in rows
+    )
+    if EVIDENCE_KINDS[1] in evidence_kinds and fingerprint_analysis_required:
+        _candidate_scope, representative_items, measured_source_ids = load_fingerprint_acquisition_items(
+            connection,
+            config,
+            scope.prefix,
+        )
+        if representative_items:
+            item_id_by_source_id = {
+                stable_source_id(item): int(item["library_item_id"])
+                for item in representative_items
+            }
+            fingerprint_plan = plan_fingerprint_acquisition(
+                representative_items,
+                prefix=scope.prefix,
+                policy=(
+                    config.resolve_policy(scope.prefix)
+                    if all(
+                        isinstance(config.raw.get(section), dict)
+                        for section in ("video", "audio", "subtitle", "planning")
+                    )
+                    else None
+                ),
+                max_uncertainty_frontier=min(DEFAULT_UNCERTAINTY_FRONTIER_LIMIT, max(1, limit)),
+                measured_source_ids=measured_source_ids,
+            )
+            planned_item_ids = {
+                item_id_by_source_id[source_id]
+                for source_id in fingerprint_plan.candidate_ids
+                if source_id in item_id_by_source_id
+            }
+            fingerprint_rows_by_item = {
+                int(row["library_item_id"]): row
+                for row in rows
+                if (
+                    str(row["state"]) == EVIDENCE_STATE_ANALYSIS_REQUIRED
+                    and str(row["evidence_kind"]) == EVIDENCE_KINDS[1]
+                    and int(row["library_item_id"]) in planned_item_ids
+                )
+            }
+            fingerprint_rows = [
+                fingerprint_rows_by_item[item_id_by_source_id[source_id]]
+                for source_id in fingerprint_plan.candidate_ids
+                if item_id_by_source_id.get(source_id) in fingerprint_rows_by_item
+            ]
+    candidates: list[dict[str, Any]] = []
+    for row in classification_rows:
+        candidates.append(_work_candidate(
+            row,
+            work_priority=EVIDENCE_WORK_PRIORITY_RECLASSIFICATION,
+            work_reason="policy_reclassification",
+        ))
+    for row in cadence_rows:
+        candidates.append(_work_candidate(
+            row,
+            work_priority=EVIDENCE_WORK_PRIORITY_OPERATOR,
+            work_reason="operator_scope",
+        ))
+    fingerprint_reason = (
+        "representative_uncertainty"
+        if fingerprint_plan is not None and fingerprint_plan.phase == "uncertainty_frontier"
+        else "representative_technical_coverage"
+    )
+    for row in fingerprint_rows:
+        candidates.append(_work_candidate(
+            row,
+            work_priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE,
+            work_reason=fingerprint_reason,
+        ))
+    return candidates[:limit], fingerprint_plan
+
+
+def _work_candidate(
+        row: Any,
+        *,
+        work_priority: int,
+        work_reason: str,
+) -> dict[str, Any]:
+    return {
+        "library_item_id": int(row["library_item_id"]),
+        "evidence_kind": str(row["evidence_kind"]),
+        "work_priority": work_priority,
+        "work_reason": work_reason,
+        "work_source_fingerprint": _item_source_fingerprint(row),
+    }
+
+
+def _fingerprint_plan_summary(plan: FingerprintAcquisitionPlan) -> dict[str, Any]:
+    return {
+        "phase": plan.phase,
+        "candidate_count": len(plan.candidate_ids),
+        "analysis_budget": plan.analysis_budget,
+        "remaining_analysis_budget": plan.remaining_analysis_budget,
+        "stop_reason": plan.stop_reason,
+        "intentionally_unqueued_count": plan.intentionally_unqueued_count,
+        "coverage": asdict(plan.coverage),
+        "estimated_analysis_cost": asdict(plan.estimated_analysis_cost),
+    }
 
 
 def _queue_candidate_rows(
@@ -744,6 +1147,8 @@ def _queue_candidate_rows(
         .values(
             work_batch_id=batch_id,
             work_status="queued",
+            work_priority=bindparam("candidate_priority"),
+            work_reason=bindparam("candidate_reason"),
             work_source_fingerprint=bindparam("candidate_source_fingerprint"),
             leased_at=None,
             lease_expires_at=None,
@@ -763,6 +1168,8 @@ def _queue_candidate_rows(
             {
                 "candidate_item_id": candidate["library_item_id"],
                 "candidate_evidence_kind": candidate["evidence_kind"],
+                "candidate_priority": int(candidate.get("work_priority", EVIDENCE_WORK_PRIORITY_OPERATOR)),
+                "candidate_reason": str(candidate.get("work_reason") or "operator_scope"),
                 "candidate_source_fingerprint": candidate["work_source_fingerprint"],
             }
             for candidate in candidates

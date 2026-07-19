@@ -6,11 +6,11 @@
   parser helpers, deterministic classification, source-scoped evidence shaping,
   and low-confidence advisory gates.
 - `mediaforce/library/probe.py` records the persisted fingerprint summary during
-  media probing alongside cadence evidence.
+  explicitly requested evidence analysis alongside cadence evidence.
 - `mediaforce/library/scanner.py` preserves fingerprint summaries while
   reconciling unchanged catalog rows, even when the summary is missing,
-  malformed, old, or retryable. New or content-changed files still receive the
-  existing full probe until the durable evidence worker owns refreshes.
+  malformed, old, or retryable. Catalog inventory performs bounded metadata
+  probing only and does not launch fingerprint `ffmpeg` analysis.
 - `mediaforce/library/evidence_state.py` projects canonical fingerprint JSON
   into independently queryable lifecycle state and keeps policy-only
   reclassification separate from media analysis.
@@ -62,6 +62,13 @@ or folder categories. Representative selection may cover measured fingerprint
 dimensions, but those dimensions come from the fingerprint decision only.
 Missing fingerprint dimensions do not outvote available measured evidence when
 choosing the primary representative.
+
+Automatic acquisition is representative-driven rather than completeness-driven.
+It measures technical representatives first, expands only around measured
+coverage uncertainty, and stops at a small per-scope budget. Missing evidence
+therefore does not stale the catalog, block production, or request analysis for
+unrelated folders. `audio_complexity` cost is accounted separately because its
+loudness measurement adds an audio sampling pass.
 
 ## Review moments
 

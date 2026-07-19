@@ -2,20 +2,33 @@ from __future__ import annotations
 
 import json
 import math
+from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from sqlalchemy import select
+
+from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.db import DBClient
+from mediaforce.core.db_tables import library_item_evidence_state
 from mediaforce.core.evidence import stable_source_id
+from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.encoding.fingerprint import (
     DEFAULT_FINGERPRINT_MAX_FRAMES,
     DEFAULT_FINGERPRINT_RANGE_COUNT,
     DEFAULT_FINGERPRINT_SAMPLE_FPS,
 )
-from mediaforce.library.representatives import FINGERPRINT_DIMENSIONS, RepresentativeSelection, select_representatives
+from mediaforce.library.evidence_state import EVIDENCE_KINDS, parse_evidence_summary
+from mediaforce.library.media_scopes import MediaScope
+from mediaforce.library.representatives import FINGERPRINT_DIMENSIONS, MEANINGFUL_CLUSTER_FRACTION, \
+    TECHNICAL_PROFILE_DIMENSIONS, RepresentativeSelection, load_representative_candidate_rows, \
+    representative_profiles, select_representatives
 
 
 DEFAULT_UNCERTAINTY_FRONTIER_LIMIT = 3
+MIN_FINGERPRINT_ANALYSIS_BUDGET = 3
+FINGERPRINT_ANALYSIS_BUDGET_MULTIPLIER = 2
 
 FingerprintAcquisitionPhase = Literal["technical_representatives", "uncertainty_frontier", "complete"]
 AudioComplexityRecommendation = Literal["retain", "defer", "not_applicable", "evaluate_with_replay"]
@@ -62,6 +75,8 @@ class FingerprintAcquisitionPlan:
     candidate_ids: tuple[str, ...]
     technical_representative_ids: tuple[str, ...]
     all_dimension_representative_ids: tuple[str, ...]
+    analysis_budget: int
+    remaining_analysis_budget: int
     coverage: FingerprintAcquisitionCoverage
     stop_reason: str
     intentionally_unqueued_count: int
@@ -73,10 +88,7 @@ class RepresentativeChanges:
     baseline_ids: tuple[str, ...]
     added_ids: tuple[str, ...]
     removed_ids: tuple[str, ...]
-
-    @property
-    def changed(self) -> bool:
-        return bool(self.added_ids or self.removed_ids)
+    changed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +117,7 @@ class RepresentativeDimensionReplay:
     hard_case_recall: HardCaseRecall
     sample_set_growth: SampleSetGrowth
     estimated_analysis_cost: FingerprintAnalysisCost
+    remaining_analysis_cost: FingerprintAnalysisCost
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +127,50 @@ class RepresentativeDimensionReplayReport:
     leave_one_dimension_out: tuple[RepresentativeDimensionReplay, ...]
     shared_visual_pass_cost: SharedVisualPassCost
     audio_complexity_cost: AudioComplexityCost
+
+
+def load_fingerprint_acquisition_items(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+) -> tuple[MediaScope, list[dict[str, Any]], frozenset[str]]:
+    scope, rows = load_representative_candidate_rows(connection, config, prefix)
+    if not rows:
+        return scope, [], frozenset()
+    item_ids = {int(row["id"]) for row in rows}
+    current_rows = connection.execute(
+        select(
+            library_item_evidence_state.c.library_item_id,
+            library_item_evidence_state.c.evidence_kind,
+        )
+        .where(
+            library_item_evidence_state.c.library_item_id.in_(item_ids),
+            library_item_evidence_state.c.evidence_kind.in_(EVIDENCE_KINDS),
+            library_item_evidence_state.c.state == "current",
+        )
+    ).mappings().fetchall()
+    current_item_ids_by_kind = {
+        evidence_kind: {
+            int(row["library_item_id"])
+            for row in current_rows
+            if str(row["evidence_kind"]) == evidence_kind
+        }
+        for evidence_kind in EVIDENCE_KINDS
+    }
+    items = [
+        _acquisition_item(
+            row,
+            cadence_current=int(row["id"]) in current_item_ids_by_kind[EVIDENCE_KINDS[0]],
+            fingerprint_current=int(row["id"]) in current_item_ids_by_kind[EVIDENCE_KINDS[1]],
+        )
+        for row in rows
+    ]
+    measured_source_ids = frozenset(
+        stable_source_id(item)
+        for item in items
+        if int(item["library_item_id"]) in current_item_ids_by_kind[EVIDENCE_KINDS[1]]
+    )
+    return scope, items, measured_source_ids
 
 
 def plan_fingerprint_acquisition(
@@ -129,14 +186,15 @@ def plan_fingerprint_acquisition(
 
     item_by_source_id = _items_by_source_id(items)
     current_source_ids = _current_source_ids(items, measured_source_ids)
+    selection_items = _selection_items(item_by_source_id, current_source_ids)
     technical_selection = select_representatives(
-        items,
+        selection_items,
         prefix=prefix,
         policy=policy,
         fingerprint_dimensions=(),
     )
     all_dimension_selection = select_representatives(
-        items,
+        selection_items,
         prefix=prefix,
         policy=policy,
         fingerprint_dimensions=FINGERPRINT_DIMENSIONS,
@@ -148,24 +206,38 @@ def plan_fingerprint_acquisition(
         for source_id in technical_representative_ids
         if source_id not in current_source_ids
     )
-    uncertainty_frontier = tuple(
-        source_id
-        for source_id in all_dimension_representative_ids
-        if source_id not in current_source_ids and source_id not in technical_representative_ids
+    analysis_budget = min(
+        len(item_by_source_id),
+        max(
+            MIN_FINGERPRINT_ANALYSIS_BUDGET,
+            len(technical_representative_ids) * FINGERPRINT_ANALYSIS_BUDGET_MULTIPLIER,
+        ),
+    )
+    measured_item_count = len(set(item_by_source_id) & set(current_source_ids))
+    remaining_analysis_budget = max(0, analysis_budget - measured_item_count)
+    uncertainty_frontier = _uncertainty_frontier(
+        selection_items,
+        current_source_ids=current_source_ids,
+        technical_representative_ids=technical_representative_ids,
+        all_dimension_representative_ids=all_dimension_representative_ids,
     )
 
     if technical_candidates:
         phase: FingerprintAcquisitionPhase = "technical_representatives"
         candidate_ids = technical_candidates
         stop_reason = "technical_representatives_pending"
-    elif uncertainty_frontier:
+    elif uncertainty_frontier and remaining_analysis_budget:
         phase = "uncertainty_frontier"
-        candidate_ids = uncertainty_frontier[:max_uncertainty_frontier]
+        candidate_ids = uncertainty_frontier[:min(max_uncertainty_frontier, remaining_analysis_budget)]
         stop_reason = (
             "uncertainty_frontier_capped"
             if len(uncertainty_frontier) > len(candidate_ids)
             else "uncertainty_frontier_pending"
         )
+    elif uncertainty_frontier:
+        phase = "complete"
+        candidate_ids = ()
+        stop_reason = "bounded_analysis_budget_reached"
     else:
         phase = "complete"
         candidate_ids = ()
@@ -184,6 +256,8 @@ def plan_fingerprint_acquisition(
         candidate_ids=candidate_ids,
         technical_representative_ids=technical_representative_ids,
         all_dimension_representative_ids=all_dimension_representative_ids,
+        analysis_budget=analysis_budget,
+        remaining_analysis_budget=max(0, remaining_analysis_budget - len(candidate_ids)),
         coverage=coverage,
         stop_reason=stop_reason,
         intentionally_unqueued_count=intentionally_unqueued_count,
@@ -276,9 +350,8 @@ def replay_representative_dimensions(
         leave_one_dimension_out=leave_one_dimension_out,
         shared_visual_pass_cost=all_dimensions.estimated_analysis_cost.shared_visual_pass,
         audio_complexity_cost=_audio_cost(
-            _unmeasured_selected_items(
+            _selected_items(
                 all_dimension_representative_ids,
-                current_source_ids,
                 item_by_source_id,
             ),
             recommendation=audio_recommendation,
@@ -286,11 +359,149 @@ def replay_representative_dimensions(
     )
 
 
+def _acquisition_item(
+        row: Mapping[str, Any],
+        *,
+        cadence_current: bool,
+        fingerprint_current: bool,
+) -> dict[str, Any]:
+    cadence_summary = parse_evidence_summary(row.get("cadence_summary_json")) if cadence_current else None
+    fingerprint_summary = (
+        parse_evidence_summary(row.get("media_fingerprint_json"))
+        if fingerprint_current
+        else None
+    )
+    cadence_decision = object_dict(cadence_summary.get("decision")) if cadence_summary else {}
+    fingerprint_decision = object_dict(fingerprint_summary.get("decision")) if fingerprint_summary else {}
+    source_fingerprint = str(
+        row.get("content_version_fingerprint")
+        or row.get("fingerprint")
+        or ""
+    ).strip() or None
+    item = {
+        "library_item_id": int(row["id"]),
+        "rel_path": str(row["rel_path"]),
+        "source_fingerprint": source_fingerprint,
+        "source_size_bytes": int_value(row.get("size_bytes")),
+        "video_codec": row.get("video_codec"),
+        "width": row.get("width"),
+        "height": row.get("height"),
+        "cadence_class": str(cadence_decision.get("classification") or "unknown"),
+        "duration_seconds": row.get("duration_seconds"),
+        "audio_summary": _json_list(row.get("audio_summary_json")),
+    }
+    if fingerprint_decision:
+        item["media_fingerprint_decision"] = fingerprint_decision
+    return item
+
+
+def _json_list(value: object) -> list[Any]:
+    if isinstance(value, str):
+        try:
+            return object_list(json.loads(value))
+        except json.JSONDecodeError:
+            return []
+    return object_list(value)
+
+
 def _items_by_source_id(items: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
     item_by_source_id = {stable_source_id(item): item for item in items}
     if len(item_by_source_id) != len(items):
         raise ValueError("Fingerprint acquisition candidates must have unique source IDs")
     return item_by_source_id
+
+
+def _selection_items(
+        item_by_source_id: Mapping[str, Mapping[str, Any]],
+        current_source_ids: Collection[str],
+) -> tuple[dict[str, Any], ...]:
+    current_id_set = set(current_source_ids)
+    selection_items: list[dict[str, Any]] = []
+    for source_id, item in item_by_source_id.items():
+        payload = dict(item)
+        if source_id not in current_id_set:
+            payload.pop("media_fingerprint_decision", None)
+        selection_items.append(payload)
+    return tuple(selection_items)
+
+
+def _uncertainty_frontier(
+        items: Sequence[Mapping[str, Any]],
+        *,
+        current_source_ids: Collection[str],
+        technical_representative_ids: Sequence[str],
+        all_dimension_representative_ids: Sequence[str],
+) -> tuple[str, ...]:
+    current_id_set = set(current_source_ids)
+    if not current_id_set:
+        return ()
+    fingerprint_profiles = representative_profiles(
+        items,
+        fingerprint_dimensions=FINGERPRINT_DIMENSIONS,
+    )
+    hard_value_counts: Counter[tuple[str, str]] = Counter(
+        (dimension, value)
+        for source_id in current_id_set
+        for dimension, value in fingerprint_profiles.get(source_id, {}).items()
+        if dimension in FINGERPRINT_DIMENSIONS and _fingerprint_value_is_hard(value)
+    )
+    meaningful_count = max(1, math.ceil(len(items) * MEANINGFUL_CLUSTER_FRACTION))
+    uncertain_values = {
+        fingerprint_value
+        for fingerprint_value, count in hard_value_counts.items()
+        if count < meaningful_count
+    }
+    if not uncertain_values:
+        return ()
+    seed_ids = tuple(dict.fromkeys((
+        *technical_representative_ids,
+        *all_dimension_representative_ids,
+    )))
+    uncertain_seed_ids = tuple(
+        source_id
+        for source_id in seed_ids
+        if source_id in current_id_set
+        and any(
+            (dimension, value) in uncertain_values
+            for dimension, value in fingerprint_profiles.get(source_id, {}).items()
+        )
+    )
+    if not uncertain_seed_ids:
+        return ()
+    technical_profiles = representative_profiles(items, fingerprint_dimensions=())
+    item_by_source_id = _items_by_source_id(items)
+    all_dimension_id_set = set(all_dimension_representative_ids)
+    unmeasured_ids = set(item_by_source_id) - current_id_set
+    return tuple(sorted(
+        unmeasured_ids,
+        key=lambda source_id: (
+            source_id not in all_dimension_id_set,
+            min(
+                _technical_profile_distance(
+                    technical_profiles[source_id],
+                    technical_profiles[seed_id],
+                )
+                for seed_id in uncertain_seed_ids
+            ),
+            str(item_by_source_id[source_id].get("rel_path") or "").casefold(),
+            source_id,
+        ),
+    ))
+
+
+def _fingerprint_value_is_hard(value: object) -> bool:
+    normalized = str(value or "").strip().lower()
+    return normalized not in {"", "unknown", "typical"}
+
+
+def _technical_profile_distance(
+        first: Mapping[str, str],
+        second: Mapping[str, str],
+) -> int:
+    return sum(
+        first.get(dimension) != second.get(dimension)
+        for dimension in TECHNICAL_PROFILE_DIMENSIONS
+    )
 
 
 def _current_source_ids(
@@ -381,6 +592,11 @@ def _replay_entry(
         estimated_analysis_cost=_estimate_analysis_cost(
             representative_ids,
             item_by_source_id,
+            audio_recommendation="evaluate_with_replay",
+        ),
+        remaining_analysis_cost=_estimate_analysis_cost(
+            representative_ids,
+            item_by_source_id,
             current_source_ids=current_source_ids,
             audio_recommendation="evaluate_with_replay",
         ),
@@ -397,6 +613,7 @@ def _representative_changes(
         baseline_ids=tuple(baseline_ids),
         added_ids=tuple(source_id for source_id in representative_ids if source_id not in baseline_id_set),
         removed_ids=tuple(source_id for source_id in baseline_ids if source_id not in representative_id_set),
+        changed=baseline_id_set != representative_id_set,
     )
 
 
@@ -473,6 +690,13 @@ def _unmeasured_selected_items(
         for source_id in candidate_ids
         if source_id not in current_id_set
     )
+
+
+def _selected_items(
+        candidate_ids: Sequence[str],
+        item_by_source_id: Mapping[str, Mapping[str, Any]],
+) -> tuple[Mapping[str, Any], ...]:
+    return tuple(item_by_source_id[source_id] for source_id in candidate_ids)
 
 
 def _visual_cost(candidate_items: Sequence[Mapping[str, Any]]) -> SharedVisualPassCost:

@@ -88,6 +88,7 @@ export interface ReviewPair {
 export interface CompareRiskSummary {
 	verdict: string;
 	blocked: boolean;
+	requiresCadenceResolution: boolean;
 	tone: HumanSeasonTone;
 	title: string;
 	detail: string;
@@ -287,6 +288,17 @@ export function compareRiskSummary(folder: FolderPayload): CompareRiskSummary | 
 		typedRisks[0] ??
 		null;
 	const authority = riskAuthority(risk);
+	const cadenceGate = text(risk.cadence_gate).toLowerCase();
+	const cadenceTransform = text(risk.cadence_transform).toLowerCase();
+	const legacyCadenceBlocker = (risk.blocking_reasons ?? []).some((reason) =>
+		/\b(cadence|motion[ -]pattern)\b/i.test(reason)
+	);
+	const requiresCadenceResolution =
+		Boolean(risk.blocked) &&
+		(legacyCadenceBlocker ||
+			cadenceGate === 'mixed' ||
+			cadenceGate === 'unknown' ||
+			(['tff', 'bff', 'telecine'].includes(cadenceGate) && !cadenceTransform));
 	const picture = compareRiskFact(
 		typedRisks,
 		(tag) => tag !== 'audio_quality_layout',
@@ -306,6 +318,7 @@ export function compareRiskSummary(folder: FolderPayload): CompareRiskSummary | 
 	return {
 		verdict: riskVerdictCopy(risk.verdict),
 		blocked: Boolean(risk.blocked),
+		requiresCadenceResolution,
 		tone: riskTone(risk),
 		title: topRisk ? topRisk.label : riskVerdictCopy(risk.verdict),
 		detail:

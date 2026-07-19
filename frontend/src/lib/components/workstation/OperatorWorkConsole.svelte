@@ -14,6 +14,7 @@
 		evidenceStateLabel,
 		evidenceStateTone,
 		evidenceStateView,
+		evidenceWorkReasonView,
 		evidenceWorkStatusView,
 		formatCount,
 		formatTimestamp,
@@ -36,6 +37,7 @@
 	const queue = $derived(work?.evidence.queue ?? null);
 	const progress = $derived(work?.evidence.progress ?? null);
 	const currentItem = $derived(progress?.running ?? null);
+	const currentWorkReason = $derived(evidenceWorkReasonView(currentItem?.work_reason ?? null));
 	const overallLabel = $derived(
 		backgroundPaused
 			? 'Background work paused'
@@ -238,6 +240,12 @@
 								: 'Prepare a bounded folder or library scope when evidence needs an update.'}
 					</span>
 				</div>
+				{#if currentWorkReason}
+					<div class="active-reason" aria-label="Why this analysis is running">
+						<strong>{currentWorkReason.label}</strong>
+						<span>{currentWorkReason.detail}</span>
+					</div>
+				{/if}
 				{#if progress?.total_count}
 					<div class="progress-track" aria-label={`${progress.percent ?? 0}% complete`}>
 						<span style={`width: ${progress.percent ?? 0}%`}></span>
@@ -415,6 +423,7 @@
 					<tbody>
 						{#each backlog?.rows ?? [] as row (row.library_item_id + ':' + row.evidence_kind)}
 							{@const workState = evidenceWorkStatusView(row)}
+							{@const workReason = evidenceWorkReasonView(row.work_reason)}
 							<tr>
 								<td data-label="Media">
 									<strong>{row.file_name}</strong>
@@ -435,12 +444,21 @@
 									<strong>{evidenceKindLabel(row.evidence_kind)}</strong>
 									<StateBadge
 										compact
-										tone={evidenceStateTone(row.state)}
-										label={evidenceStateLabel(row.state)}
+										tone={evidenceStateTone(row.state, row.decision_status)}
+										label={evidenceStateLabel(row.state, row.decision_status)}
 									/>
 								</td>
 								<td data-label="Why">
-									<span>{evidenceReasonCopy(row.reason)}</span>
+									<span class="reason-copy">
+										<strong>Needs update because</strong>
+										{evidenceReasonCopy(row.reason, row.state, row.decision_status)}
+									</span>
+									{#if workReason}
+										<span class="reason-copy reason-copy--priority">
+											<strong>{workReason.label}</strong>
+											{workReason.detail}
+										</span>
+									{/if}
 								</td>
 								<td data-label="Batch">
 									<StateBadge compact tone={workState.tone} label={workState.label} />
@@ -611,11 +629,47 @@
 	.work-lane__metric span,
 	.work-lane__actions span,
 	.source-warning span,
-	.backlog-table td span,
 	.backlog__footer > span {
 		color: var(--mf-fg-tertiary);
 		font-size: var(--mf-text-xs);
 		line-height: var(--mf-leading-normal);
+	}
+
+	.active-reason {
+		border-left: 3px solid var(--mf-wait-border);
+		display: grid;
+		gap: var(--mf-space-1);
+		padding: var(--mf-space-2) var(--mf-space-4);
+	}
+
+	.active-reason strong,
+	.reason-copy strong {
+		color: var(--mf-fg-primary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+	}
+
+	.active-reason span,
+	.reason-copy {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+		line-height: var(--mf-leading-normal);
+	}
+
+	.reason-copy {
+		display: grid;
+		gap: var(--mf-space-1);
+	}
+
+	.reason-copy + .reason-copy {
+		margin-top: var(--mf-space-3);
+	}
+
+	.reason-copy--priority {
+		border-left: 2px solid var(--mf-wait-border);
+		padding-left: var(--mf-space-3);
 	}
 
 	.source-warnings {
@@ -883,6 +937,7 @@
 	.backlog-table td > strong {
 		font-weight: var(--mf-weight-semibold);
 		margin-bottom: var(--mf-space-2);
+		overflow-wrap: anywhere;
 	}
 
 	.path-copy {

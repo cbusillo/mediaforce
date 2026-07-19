@@ -34,16 +34,29 @@ evidence is not.
 Alembic revision `20260719_0012` adds this operational state without creating a
 batch or queueing existing evidence. Revision `20260719_0013` adds the durable
 `background_work_state` switch shared by catalog inventory and evidence
-analysis. Analyzer or policy changes remain visible as projection state until
-an operator explicitly prepares and starts work.
+analysis. Revision `20260719_0014` adds durable work priority and a plain-language
+reason so decision-blocking safety work can run before advisory backfill.
+Analyzer or policy changes remain visible as projection state until an operator
+explicitly prepares and starts work.
 
 ## Batch lifecycle
 
 `start_evidence_work()` requires a non-empty resolved scope. It selects only
 non-current evidence inside that exact item or descendant scope, caps the
 batch at 25 evidence updates by default, snapshots each source fingerprint,
-and creates the batch paused. One media file can contribute two updates because
-cadence and media fingerprint are independent evidence kinds.
+and creates the batch paused. Policy-only reclassification is selected first.
+Cadence analysis then follows the explicit operator scope. Fingerprint analysis
+starts with technical representatives, stays within a per-scope budget, and
+adds only a small uncertainty frontier when measured hard cases justify it.
+One media file can contribute two updates because cadence and media fingerprint
+are independent evidence kinds.
+
+Sample and production actions use a separate just-in-time path. Missing or stale
+cadence blocks only the selected media items, adds those exact rows to the active
+batch at decision priority, and returns the operator to Activity. A retained
+terminal failure is reported as a failure and requires an explicit item retry;
+repeating the blocked action does not reset its attempt budget. Fingerprint
+evidence remains advisory and never blocks sample or production queueing.
 
 Queue states are:
 
@@ -101,6 +114,9 @@ media.
   cancellation is observed.
 - Policy-only `classification_required` work is claimed before media analysis
   and reuses stored measurements without `ffmpeg` or `ffprobe`.
+- If fingerprint reclassification reveals that new media measurements are
+  required, the row completes its policy-only pass and returns to the bounded
+  representative planner instead of fanning out into immediate analysis.
 
 ## Operator flow
 
@@ -116,6 +132,11 @@ The Activity workstation exposes the same bounded state machine:
    queue controls near the visible scope and progress.
 5. `Pause new background work` is separate from encode approval and processing
    controls. It governs catalog inventory and evidence analysis only.
+
+The active item and backlog show both why evidence needs an update and why that
+work is scheduled now. Decision-blocking cadence rows are labelled as blocking a
+sample or production action; policy-only rows explicitly say that no media read
+is required.
 
 The workstation polls while a catalog scan or evidence runner is active and
 returns to manual refresh when idle. Backlog totals are paired with filters and
@@ -143,3 +164,9 @@ Repeat `evidence run` to resume durable progress. Use `pause` before the next
 claim or `cancel` to stop the active managed process and cancel the remaining
 batch. A root pilot uses the same commands with an explicit root such as `tv`;
 keep the limit small before considering a broader backfill.
+
+Compare representative dimensions from stored evidence without opening media:
+
+```bash
+uv run mediaforce evidence replay "tv/Show/Season 1"
+```

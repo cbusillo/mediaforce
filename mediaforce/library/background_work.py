@@ -1,18 +1,20 @@
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import background_work_state, library_item_evidence_state, library_items
 from mediaforce.core.utils import timestamp
+from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANALYSIS_REQUIRED, \
-    EVIDENCE_STATE_CLASSIFICATION_REQUIRED
+    EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT
 
 BACKGROUND_WORK_AREA = "catalog_evidence"
 EVIDENCE_BACKLOG_STATES = (
     EVIDENCE_STATE_ANALYSIS_REQUIRED,
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED,
+    EVIDENCE_STATE_CURRENT,
 )
 EVIDENCE_BACKLOG_WORK_STATUSES = (
     "not_prepared",
@@ -95,6 +97,7 @@ def summarize_evidence_inventory(connection: DBClient) -> dict[str, Any]:
             library_item_evidence_state.c.evidence_kind,
             library_item_evidence_state.c.state,
             library_item_evidence_state.c.reason,
+            library_item_evidence_state.c.decision_status,
             func.count().label("item_count"),
         )
         .select_from(
@@ -108,6 +111,7 @@ def summarize_evidence_inventory(connection: DBClient) -> dict[str, Any]:
             library_item_evidence_state.c.evidence_kind,
             library_item_evidence_state.c.state,
             library_item_evidence_state.c.reason,
+            library_item_evidence_state.c.decision_status,
         )
         .order_by(
             library_item_evidence_state.c.evidence_kind,
@@ -127,7 +131,11 @@ def summarize_evidence_inventory(connection: DBClient) -> dict[str, Any]:
         reason = str(row["reason"] or "")
         item_count = int(row["item_count"] or 0)
         total += item_count
-        if state in EVIDENCE_BACKLOG_STATES:
+        if _evidence_needs_attention(
+                evidence_kind=evidence_kind,
+                state=state,
+                decision_status=str(row["decision_status"] or ""),
+        ):
             backlog_total += item_count
         kind_payload = by_kind.setdefault(evidence_kind, {"total": 0, "states": {}, "reasons": {}})
         kind_payload["total"] += item_count
@@ -163,7 +171,7 @@ def list_evidence_backlog(
     normalized_root = str(media_root or "").strip() or None
 
     conditions = [
-        library_item_evidence_state.c.state.in_(EVIDENCE_BACKLOG_STATES),
+        _evidence_backlog_condition(),
         library_items.c.status != "missing",
     ]
     if normalized_kind:
@@ -195,7 +203,10 @@ def list_evidence_backlog(
             library_item_evidence_state.c.evidence_kind,
             library_item_evidence_state.c.state,
             library_item_evidence_state.c.reason,
+            library_item_evidence_state.c.decision_status,
             library_item_evidence_state.c.work_status,
+            library_item_evidence_state.c.work_priority,
+            library_item_evidence_state.c.work_reason,
             library_item_evidence_state.c.attempt_count,
             library_item_evidence_state.c.retry_not_before,
             library_item_evidence_state.c.last_attempt_at,
@@ -209,6 +220,7 @@ def list_evidence_backlog(
         .select_from(joined)
         .where(*conditions)
         .order_by(
+            library_item_evidence_state.c.work_priority,
             library_items.c.media_root,
             library_items.c.rel_path,
             library_item_evidence_state.c.evidence_kind,
@@ -241,3 +253,33 @@ def _optional_choice(value: str | None, choices: tuple[str, ...], label: str) ->
     if normalized is not None and normalized not in choices:
         raise ValueError(f"Unsupported {label}: {normalized}")
     return normalized
+
+
+def _evidence_backlog_condition() -> Any:
+    return or_(
+        library_item_evidence_state.c.state.in_((
+            EVIDENCE_STATE_ANALYSIS_REQUIRED,
+            EVIDENCE_STATE_CLASSIFICATION_REQUIRED,
+        )),
+        and_(
+            library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+            library_item_evidence_state.c.state == EVIDENCE_STATE_CURRENT,
+            library_item_evidence_state.c.decision_status != "resolved",
+        ),
+    )
+
+
+def _evidence_needs_attention(
+        *,
+        evidence_kind: str,
+        state: str,
+        decision_status: str,
+) -> bool:
+    return (
+        state in {EVIDENCE_STATE_ANALYSIS_REQUIRED, EVIDENCE_STATE_CLASSIFICATION_REQUIRED}
+        or (
+            evidence_kind == CADENCE_EVIDENCE_KIND
+            and state == EVIDENCE_STATE_CURRENT
+            and decision_status != "resolved"
+        )
+    )

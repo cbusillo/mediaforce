@@ -14,7 +14,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.evidence import build_evidence_envelope, stable_policy_hash, stable_source_id
 from mediaforce.core.type_defs import mapping_dict, object_dict, object_list
-from mediaforce.library.media_scopes import resolve_media_scope, scope_rel_path_filter
+from mediaforce.library.media_scopes import MediaScope, resolve_media_scope, scope_rel_path_filter
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
 from mediaforce.library.planner import build_manifest_item
 
@@ -121,6 +121,38 @@ def load_representative_selection(
         config: MediaforceConfig,
         prefix: str,
 ) -> RepresentativeSelection | None:
+    scope, items = load_representative_candidates(connection, config, prefix)
+    if not items:
+        return None
+    return select_representatives(
+        items,
+        prefix=scope.prefix,
+        policy=config.resolve_policy(scope.prefix),
+    )
+
+
+def load_representative_candidates(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+) -> tuple[MediaScope, list[dict[str, Any]]]:
+    scope, candidate_rows = load_representative_candidate_rows(connection, config, prefix)
+    items: list[dict[str, Any]] = []
+    for row in candidate_rows:
+        row_payload = mapping_dict(row)
+        item = build_manifest_item(row_payload, config)
+        for field in _OPTIONAL_TECHNICAL_FIELDS:
+            if row_payload.get(field) not in (None, ""):
+                item[field] = row_payload[field]
+        items.append(item)
+    return scope, items
+
+
+def load_representative_candidate_rows(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+) -> tuple[MediaScope, list[Mapping[str, Any]]]:
     scope = resolve_media_scope(connection, prefix, library_types=config.library_type_map)
     rows = connection.execute(
         select(library_items)
@@ -128,7 +160,7 @@ def load_representative_selection(
         .order_by(library_items.c.rel_path.asc())
     ).mappings().fetchall()
     if not rows:
-        return None
+        return scope, []
 
     library = config.library_definition_map.get(scope.root, {})
     if str(library.get("type") or "") == "movie":
@@ -143,23 +175,10 @@ def load_representative_selection(
             and movie_item_included(membership, policy, explicit_exact=explicit_exact)[0]
         ]
         if not rows:
-            return None
+            return scope, []
 
     preferred_rows = [row for row in rows if str(row.get("status") or "") in _PREFERRED_SAMPLE_STATUSES]
-    candidate_rows = preferred_rows or list(rows)
-    items: list[dict[str, Any]] = []
-    for row in candidate_rows:
-        row_payload = mapping_dict(row)
-        item = build_manifest_item(row_payload, config)
-        for field in _OPTIONAL_TECHNICAL_FIELDS:
-            if row_payload.get(field) not in (None, ""):
-                item[field] = row_payload[field]
-        items.append(item)
-    return select_representatives(
-        items,
-        prefix=scope.prefix,
-        policy=config.resolve_policy(scope.prefix),
-    )
+    return scope, preferred_rows or list(rows)
 
 
 def select_representatives(
@@ -176,12 +195,7 @@ def select_representatives(
     active_fingerprint_dimensions = _normalize_fingerprint_dimensions(fingerprint_dimensions)
     coverage_dimensions = (*TECHNICAL_PROFILE_DIMENSIONS, *active_fingerprint_dimensions)
     item_payloads = [copy.deepcopy(dict(item)) for item in items]
-    median_runtime = _median_positive(item.get("duration_seconds") for item in item_payloads)
-    median_size = _median_positive(item.get("source_size_bytes", item.get("size_bytes")) for item in item_payloads)
-    candidates = sorted(
-        (_candidate(item, median_runtime) for item in item_payloads),
-        key=lambda candidate: candidate.sort_key,
-    )
+    candidates, median_runtime, median_size = _representative_candidates(item_payloads)
     outlier_reasons = _outlier_reasons(candidates)
     profile_counts = _profile_counts(candidates, coverage_dimensions)
     dominant_profile = {
@@ -344,6 +358,40 @@ def select_representatives(
         selected_items=tuple(candidate.item for candidate in selected),
         payload=payload,
     )
+
+
+def representative_profiles(
+        items: Sequence[Mapping[str, Any]],
+        *,
+        fingerprint_dimensions: Iterable[str] | None = None,
+) -> dict[str, dict[str, str]]:
+    active_fingerprint_dimensions = _normalize_fingerprint_dimensions(fingerprint_dimensions)
+    profile_dimensions = (*TECHNICAL_PROFILE_DIMENSIONS, *active_fingerprint_dimensions)
+    candidates, _median_runtime, _median_size = _representative_candidates(
+        [copy.deepcopy(dict(item)) for item in items]
+    )
+    return {
+        candidate.source_id: {
+            dimension: candidate.profile[dimension]
+            for dimension in profile_dimensions
+        }
+        for candidate in candidates
+    }
+
+
+def _representative_candidates(
+        item_payloads: Sequence[dict[str, Any]],
+) -> tuple[list[_Candidate], float | None, float | None]:
+    median_runtime = _median_positive(item.get("duration_seconds") for item in item_payloads)
+    median_size = _median_positive(
+        item.get("source_size_bytes", item.get("size_bytes"))
+        for item in item_payloads
+    )
+    candidates = sorted(
+        (_candidate(item, median_runtime) for item in item_payloads),
+        key=lambda candidate: candidate.sort_key,
+    )
+    return candidates, median_runtime, median_size
 
 
 def _candidate(item: dict[str, Any], median_runtime: float | None) -> _Candidate:
