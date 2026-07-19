@@ -19,7 +19,7 @@ def dashboard_summary_payload(
         *,
         folder_card_cache_key: Any,
         preview_folder_cards: Any,
-        maybe_schedule_scan: Any,
+        load_scan_status: Any,
         decorate_encode_queue_for_scheduler: Any,
         library_color_map_for_config: Any,
         preview_limit: int | None = None,
@@ -29,7 +29,7 @@ def dashboard_summary_payload(
 
     cache_key = folder_card_cache_key(config)
     with open_db(config.paths.db_path) as connection:
-        scan_job = maybe_schedule_scan(connection, config, prefix=None)
+        scan_job = load_scan_status(connection, config, prefix=None)
         preview_folders = [] if preview_limit == 0 else preview_folder_cards(config, connection)
         if preview_limit is not None and preview_limit > 0:
             preview_folders = preview_folders[:preview_limit]
@@ -102,7 +102,7 @@ def folder_status_payload(
         *,
         load_job_state: Any,
         load_retryable_sample_job_state: Any,
-        load_scan_job_state: Any,
+        load_scan_status: Any,
         load_active_encode_job_for_prefix: Any,
 ) -> dict[str, Any]:
     with open_db(config.paths.db_path) as connection:
@@ -114,7 +114,7 @@ def folder_status_payload(
         calibration_job = load_job_state(connection, config, normalized_prefix)
         retryable_sample_job = load_retryable_sample_job_state(connection, config, normalized_prefix)
         active_encode_job = load_active_encode_job_for_prefix(connection, normalized_prefix)
-        folder_scan_job = load_scan_job_state(config, normalized_prefix)
+        folder_scan_job = load_scan_status(connection, config, normalized_prefix)
         lifecycle_decisions = (
             project_candidates(connection, config, prefixes=[normalized_prefix])
             if media_scope.domain == "movie"

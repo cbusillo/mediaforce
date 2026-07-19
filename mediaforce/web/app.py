@@ -109,7 +109,7 @@ from mediaforce.tuning.size_goals import guided_size_goal_options, operator_inte
 from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, object_dict, object_list
 from mediaforce.web.routes import register_completed_routes, register_dashboard_routes, register_folder_routes, \
     register_frontend_routes, register_host_routes, register_queue_routes, register_settings_routes
-from mediaforce.web.runtime import FolderCard, cached_folder_cards, dashboard_folders_payload, \
+from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_folders_payload, \
     dashboard_library_payload, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
     archive_cleanup_summary, clear_archive_cleanup_action, \
@@ -174,7 +174,6 @@ from mediaforce.web.runtime.folder_tuning_advice import build_run_verdict_payloa
     calibration_draft_hash as runtime_calibration_draft_hash, \
     job_seed_metadata as runtime_job_seed_metadata, metric_status_copy as runtime_metric_status_copy, \
     matching_request_history as runtime_matching_request_history, \
-    metric_support as runtime_metric_support, \
     maybe_seed_baseline_policy as runtime_maybe_seed_baseline_policy, \
     operator_requested_experiment as runtime_operator_requested_experiment, \
     parse_audio_bitrate_kbps as runtime_parse_audio_bitrate_kbps, \
@@ -185,6 +184,8 @@ from mediaforce.web.runtime.folder_tuning_advice import build_run_verdict_payloa
     tuning_policy_focus as runtime_tuning_policy_focus, \
     tuning_policy_key_paths as runtime_tuning_policy_key_paths, \
     apply_policy_fragment as runtime_apply_policy_fragment
+from mediaforce.web.runtime.tool_capabilities import metric_support as runtime_metric_support, \
+    refresh_metric_support as runtime_refresh_metric_support
 from mediaforce.web.runtime.folder_tuning_helpers import size_budget_sample_analysis
 from mediaforce.web.runtime.catalog_signature import (
     catalog_signature_file as _catalog_signature_file,
@@ -201,6 +202,7 @@ from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_
     load_job_state as runtime_load_job_state, \
     load_overlapping_job_state as runtime_load_overlapping_job_state, \
     load_scan_job_state as runtime_load_scan_job_state, \
+    load_scan_status as runtime_load_scan_status, \
     maybe_schedule_scan as runtime_maybe_schedule_scan, \
     process_calibration_queue_once as runtime_process_calibration_queue_once, \
     run_scan_job as runtime_run_scan_job, save_job_state as runtime_save_job_state, \
@@ -422,6 +424,11 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             name="transient-cleanup",
             daemon=True,
         ).start()
+        threading.Thread(
+            target=_refresh_metric_support,
+            name="metric-support-refresh",
+            daemon=True,
+        ).start()
         with open_db(config.paths.db_path) as connection:
             repaired_host_rows = repair_persisted_encode_job_hosts(connection)
             if repaired_host_rows:
@@ -465,7 +472,8 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     async def periodic_cleanup(
             request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        _run_periodic_cleanup(config, cleanup_lock)
+        if _request_triggers_periodic_cleanup(request.method):
+            _run_periodic_cleanup(config, cleanup_lock)
         return await call_next(request)
 
     def _settings_page_payload(
@@ -505,11 +513,15 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             config,
             folder_card_cache_key=_folder_card_cache_key,
             preview_folder_cards=_preview_folder_cards,
-            maybe_schedule_scan=_maybe_schedule_scan,
+            load_scan_status=_load_scan_status,
             decorate_encode_queue_for_scheduler=_decorate_encode_queue_for_scheduler,
             library_color_map_for_config=_library_color_map_for_config,
             preview_limit=preview_limit,
         )
+
+    def _dashboard_scan_job_payload() -> dict[str, Any] | None:
+        with open_db(config.paths.db_path) as connection:
+            return _load_scan_status(connection, config, prefix=None)
 
     def _dashboard_folders_payload(include_series_folders: bool = True) -> dict[str, Any]:
         return dashboard_folders_payload(
@@ -654,7 +666,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             normalized_prefix,
             load_job_state=_load_overlapping_job_state,
             load_retryable_sample_job_state=_load_retryable_sample_job_state,
-            load_scan_job_state=_load_scan_job_state,
+            load_scan_status=_load_scan_status,
             load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
         )
 
@@ -796,13 +808,13 @@ def create_app(config_path: Path | None = None) -> FastAPI:
 
     def _hosts_payload(compact: int = 0) -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection:
-            hosts = _host_runtime_rows(connection, config)
+            hosts = _host_runtime_rows(connection, config, collect_statuses=_cached_host_statuses)
         return {"compact": bool(compact), "hosts": hosts}
 
     register_dashboard_routes(
         app,
         dashboard_payload=_dashboard_api_payload,
-        dashboard_scan_job_payload=lambda: _load_scan_job_state(config, None),
+        dashboard_scan_job_payload=_dashboard_scan_job_payload,
         dashboard_folders_payload=_dashboard_folders_payload,
         dashboard_library_payload=_dashboard_library_payload,
         dashboard_library_details_payload=_dashboard_library_details_payload,
@@ -876,14 +888,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                     candidate_decisions=movie_decisions,
                 )
             calibration_job = _load_job_state(connection, config, normalized_prefix)
-            if calibration_job and calibration_job.get("status") in {"queued", "running"}:
-                existing_scan_job = _load_scan_job_state(config, normalized_prefix)
-                folder_scan_job = (
-                    existing_scan_job if existing_scan_job and existing_scan_job.get("status") in {"queued",
-                                                                                                   "running"} else None
-                )
-            else:
-                folder_scan_job = _maybe_schedule_scan(connection, config, prefix=normalized_prefix)
+            folder_scan_job = _load_scan_status(connection, config, prefix=normalized_prefix)
             summary = inspect_prefix(connection, config, normalized_prefix)
             metric_support = _metric_support()
             base_context: dict[str, Any] = {
@@ -980,13 +985,6 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             pending_proposal=pending_proposal_raw,
             summary=summary,
         )
-        advice_state = _backfill_multimodal_review_pack(
-            config,
-            normalized_prefix,
-            sample_item=sample_item,
-            calibration=calibration,
-            advice_state=advice_state,
-        )
         size_target_analysis = size_budget_sample_analysis(
             operator_request=object_dict(object_dict(advice_state).get("operator_request")) or None,
             calibration_payload=object_dict(calibration),
@@ -1047,7 +1045,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             ),
         )
         resolved_metric, _ = select_quality_metric(str(video_policy.get("quality_metric", "auto")))
-        sample_host_statuses = _sample_calibration_host_statuses(config)
+        sample_host_statuses = _cached_sample_calibration_host_statuses(config)
         sample_host_choices = _sample_host_options_from_statuses(config, sample_host_statuses)
         sample_host_key = _sample_host_key_from_choices(
             _default_sample_host_key_from_statuses(sample_host_statuses),
@@ -2148,6 +2146,10 @@ def _safe_collect_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
     return safe_collect_host_statuses(config)
 
 
+def _cached_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
+    return cached_host_statuses(config)
+
+
 def _folder_card_cache_key(config: MediaforceConfig) -> tuple[str, int, int]:
     return folder_card_cache_key(config)
 
@@ -2319,12 +2321,16 @@ def _attach_media_scopes(
 
 
 def _host_runtime_rows(
-        connection: DBClient, config: MediaforceConfig, *, now: datetime | None = None
+        connection: DBClient,
+        config: MediaforceConfig,
+        *,
+        collect_statuses: Any | None = None,
+        now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     return host_runtime_rows(
         connection,
         config,
-        safe_collect_statuses=_safe_collect_host_statuses,
+        safe_collect_statuses=collect_statuses or _safe_collect_host_statuses,
         encode_queue_schedule_profiles=_encode_queue_schedule_profiles,
         host_max_parallel_encodes=_host_max_parallel_encodes,
         host_schedule_profile_key=_host_schedule_profile_key,
@@ -2389,6 +2395,10 @@ def _default_sample_host_key_from_statuses(statuses: list[HostStatus]) -> str:
 
 def _sample_calibration_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
     return sample_calibration_host_statuses(config, safe_collect_statuses=_safe_collect_host_statuses)
+
+
+def _cached_sample_calibration_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
+    return sample_calibration_host_statuses(config, safe_collect_statuses=_cached_host_statuses)
 
 
 def _sample_host_options(config: MediaforceConfig) -> list[dict[str, Any]]:
@@ -2709,6 +2719,7 @@ def _load_folder_staged_items(
 
 
 _metric_support = runtime_metric_support
+_refresh_metric_support = runtime_refresh_metric_support
 _metric_status_copy = runtime_metric_status_copy
 _tuning_policy_focus = runtime_tuning_policy_focus
 _tuning_policy_key_paths = runtime_tuning_policy_key_paths
@@ -2830,48 +2841,6 @@ def _multimodal_review_pack_public_view(
         review_pack: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     return multimodal_review_pack_public_view(_folder_tuning_runtime_deps(), config, review_pack)
-
-
-def _backfill_multimodal_review_pack(
-        config: MediaforceConfig,
-        prefix: str,
-        *,
-        sample_item: dict[str, Any],
-        calibration: dict[str, Any] | None,
-        advice_state: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    calibration_payload = object_dict(calibration)
-    if not calibration_payload:
-        return advice_state
-    existing_pack = object_dict(object_dict(advice_state).get("multimodal_review_pack"))
-    if existing_pack:
-        if isinstance(calibration, dict):
-            calibration["advice"] = {**object_dict(calibration.get("advice")), "multimodal_review_pack": existing_pack}
-        return object_dict(advice_state) or advice_state
-    if not bool(calibration_payload.get("review_media_ready")):
-        return advice_state
-    stored_sample_item = object_dict(calibration_payload.get("sample_item")) or object_dict(sample_item)
-    if not stored_sample_item:
-        return advice_state
-    current_policy = object_dict(calibration_payload.get("policy")) or object_dict(stored_sample_item.get("resolved_policy"))
-    if not current_policy:
-        return advice_state
-    draft_hash = str(calibration_payload.get("draft_hash") or _calibration_draft_hash(calibration_payload)).strip()
-    request_id = f"legacy-{draft_hash[:12]}" if draft_hash else "legacy-review-pack"
-    review_pack = _build_multimodal_review_pack(
-        config=config,
-        sample_item=stored_sample_item,
-        current_policy=current_policy,
-        calibration=calibration_payload,
-        output_dir=_review_pack_dir(config, prefix, request_id),
-    )
-    public_review_pack = _multimodal_review_pack_public_view(config, review_pack)
-    if public_review_pack is None:
-        return advice_state
-    merged_advice_state = _merge_advice_state(config, prefix, {"multimodal_review_pack": public_review_pack})
-    if isinstance(calibration, dict):
-        calibration["advice"] = {**object_dict(calibration.get("advice")), "multimodal_review_pack": public_review_pack}
-    return merged_advice_state
 
 
 def _planned_audio_review_context(*, sample_item: dict[str, Any], current_policy: dict[str, Any]) -> dict[str, Any]:
@@ -3222,6 +3191,14 @@ def _expire_calibration_job(
 
 def _load_scan_job_state(config: MediaforceConfig, prefix: str | None) -> dict[str, Any] | None:
     return runtime_load_scan_job_state(config, prefix, _scan_job_file)
+
+
+def _load_scan_status(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str | None,
+) -> dict[str, Any] | None:
+    return runtime_load_scan_status(connection, config, prefix, _job_runtime_deps())
 
 
 def _save_scan_job_state(config: MediaforceConfig, prefix: str | None, payload: dict[str, Any]) -> None:
@@ -3939,6 +3916,10 @@ def _run_periodic_cleanup(config: MediaforceConfig, cleanup_lock: threading.Lock
         daemon=True,
     )
     thread.start()
+
+
+def _request_triggers_periodic_cleanup(method: str) -> bool:
+    return method.upper() not in {"GET", "HEAD", "OPTIONS"}
 
 
 def _run_periodic_cleanup_task(config: MediaforceConfig, cleanup_lock: threading.Lock) -> None:
