@@ -377,7 +377,7 @@ export type QualityRiskPreTestInstruction = {
 
 export type QualityRiskTargetSizeSearch = {
 	trace_id?: string;
-	status?: 'selected' | 'infeasible' | 'quality_conflict' | 'needs_review';
+	status?: 'selected' | 'infeasible' | 'bound_exhausted' | 'quality_conflict' | 'needs_review';
 	selection_reason?: string | null;
 	curve_shape?: 'single_point' | 'monotonic' | 'non_monotonic' | null;
 	candidate_count?: number;
@@ -390,6 +390,11 @@ export type QualityRiskTargetSizeSearch = {
 	predicted_whole_episode_bytes?: number | null;
 	within_sample_band?: boolean | null;
 	transform_plan_id?: string | null;
+	configured_max_crf?: number | null;
+	search_max_crf?: number | null;
+	range_expanded?: boolean;
+	measured_beyond_configured?: boolean;
+	selected_beyond_configured?: boolean;
 };
 
 export type FolderQualityRisk = {

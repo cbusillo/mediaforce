@@ -1,4 +1,5 @@
 import errno
+import hashlib
 import json
 import os
 import threading
@@ -15,9 +16,10 @@ from sqlalchemy import literal_column
 from sqlalchemy import select
 from sqlalchemy import update
 
-from mediaforce.tuning.calibration_jobs import claim_next_queued_calibration_job, load_latest_failed_sample_job, \
+from mediaforce.tuning.calibration_jobs import claim_next_queued_calibration_job, load_active_overlapping_job, \
+    load_latest_failed_sample_job, \
     load_latest_failed_target_size_sample_job, load_latest_job, load_latest_overlapping_job, \
-    load_latest_retryable_sample_job, load_latest_sample_job, queue_position, save_job
+    load_latest_retryable_sample_job, load_latest_sample_job, load_recent_completed_sample_jobs, queue_position, save_job
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, DBRow, open_db
 from mediaforce.core.db_tables import calibration_jobs
@@ -29,7 +31,7 @@ from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.library.metadata_sync import sync_external_metadata
 from mediaforce.library.scanner import scan_library
 from mediaforce.state_cleanup import purge_transient_artifacts
-from mediaforce.core.type_defs import JSONValue, object_dict
+from mediaforce.core.type_defs import JSONValue, float_value, int_value, object_dict
 from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
 
 _MISSING = object()
@@ -63,13 +65,265 @@ class CalibrationQueueRuntimeDeps:
     mark_calibration_submission_complete: Any
     register_calibration_process_controller: Any
     unregister_calibration_process_controller: Any
-    submission_cleanup_callback: Callable[[str], Callable[[Future[object]], None]]
+    submission_cleanup_callback: Callable[[MediaforceConfig, dict[str, Any]], Callable[[Future[object]], None]]
     calibration_submissions: set[str]
     calibration_submissions_lock: Any
     calibration_executors: dict[str, ThreadPoolExecutor]
     sample_calibration_concurrency: int
     full_calibration_concurrency: int
     calibration_queue_poll_seconds: float
+
+
+def calibration_job_public_payload(
+        connection: DBClient,
+        config: MediaforceConfig,
+        payload: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if payload is None:
+        return None
+    owner_prefix = str(payload.get("prefix") or "").strip()
+    if not owner_prefix:
+        return dict(payload)
+    scope = resolve_media_scope(
+        connection,
+        owner_prefix,
+        library_types=config.library_type_map,
+    )
+    return {
+        **payload,
+        "activity_scope": scope.to_payload(),
+        "target_contract": calibration_job_target_contract(payload),
+        "progress": calibration_job_progress_payload(connection, payload),
+    }
+
+
+def calibration_job_target_contract(payload: dict[str, Any]) -> dict[str, Any] | None:
+    video = object_dict(object_dict(payload.get("policy")).get("video"))
+    target_size_bytes = int_value(video.get("target_size_bytes"))
+    target_size_mb = float_value(video.get("target_size_mb"))
+    if target_size_bytes <= 0 and target_size_mb > 0:
+        target_size_bytes = round(target_size_mb * 1_000_000)
+    if target_size_bytes <= 0:
+        return None
+    max_height = int_value(video.get("max_height"))
+    resolution_mode = str(video.get("resolution_intent_mode") or "").strip()
+    if not resolution_mode:
+        resolution_mode = "source" if max_height <= 0 else "max_height"
+    return {
+        "schema_version": 1,
+        "target_size_bytes": target_size_bytes,
+        "mode": str(video.get("size_goal_mode") or "legacy"),
+        "source": str(video.get("size_goal_source") or "legacy"),
+        "target_runtime_minutes": float_value(video.get("target_runtime_minutes")) or None,
+        "sample_tolerance_percent": float_value(video.get("sample_projection_tolerance_percent")) or None,
+        "final_tolerance_percent": float_value(video.get("final_output_tolerance_percent")) or None,
+        "resolution_mode": resolution_mode,
+        "max_height": max_height if max_height > 0 else None,
+    }
+
+
+def calibration_scope_relation(route_prefix: str, owner_prefix: str) -> str | None:
+    normalized_route = route_prefix.strip("/")
+    normalized_owner = owner_prefix.strip("/")
+    if not normalized_route or not normalized_owner:
+        return None
+    if normalized_route == normalized_owner:
+        return "exact"
+    if normalized_route.startswith(f"{normalized_owner}/"):
+        return "ancestor"
+    if normalized_owner.startswith(f"{normalized_route}/"):
+        return "descendant"
+    return None
+
+
+def calibration_job_compatibility_key(payload: dict[str, Any]) -> str:
+    host = object_dict(payload.get("host"))
+    video = object_dict(object_dict(payload.get("policy")).get("video"))
+    sample_item = object_dict(payload.get("sample_item"))
+    height = int_value(sample_item.get("height"))
+    duration_seconds = float_value(sample_item.get("duration_seconds"))
+    width = int_value(sample_item.get("width"))
+    target_size_bytes = int_value(video.get("target_size_bytes"))
+    if target_size_bytes <= 0:
+        target_size_bytes = round(float_value(video.get("target_size_mb")) * 1_000_000)
+    signature = {
+        "schema_version": 2,
+        "pipeline": "sample-calibration-v1",
+        "host": str(host.get("key") or host.get("host") or host.get("label") or "local"),
+        "encoder": str(video.get("encoder") or ""),
+        "preset": str(video.get("preset") or video.get("speed") or ""),
+        "pixel_format": str(video.get("pixel_format") or ""),
+        "quality_engine": str(video.get("quality_engine") or ""),
+        "quality_metric": str(video.get("quality_metric") or ""),
+        "target_vmaf": float_value(video.get("target_vmaf")),
+        "target_xpsnr": float_value(video.get("target_xpsnr")),
+        "min_target_vmaf": float_value(video.get("min_target_vmaf")),
+        "min_target_xpsnr": float_value(video.get("min_target_xpsnr")),
+        "min_crf": int_value(video.get("min_crf")),
+        "max_crf": int_value(video.get("max_crf")),
+        "target_search_max_crf": int_value(video.get("target_search_max_crf")),
+        "max_encoded_percent": float_value(video.get("max_encoded_percent")),
+        "thorough": bool(video.get("thorough", False)),
+        "sample_every": str(video.get("sample_every") or ""),
+        "sample_duration": str(video.get("sample_duration") or ""),
+        "target_size_search": target_size_bytes > 0,
+        "target_size_bucket_mb": round(target_size_bytes / 25_000_000) * 25 if target_size_bytes > 0 else 0,
+        "source_codec": str(sample_item.get("video_codec") or ""),
+        "source_width_class": _resolution_class(width),
+        "resolution_class": _resolution_class(height),
+        "cadence_class": str(sample_item.get("cadence_class") or ""),
+        "runtime_bucket_minutes": round(duration_seconds / 900) * 15 if duration_seconds > 0 else 0,
+    }
+    encoded = json.dumps(signature, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def calibration_job_progress_payload(
+        connection: DBClient,
+        payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    stored = object_dict(payload.get("progress"))
+    status = str(payload.get("status") or "").strip()
+    if not stored and status not in {"queued", "starting", "running"}:
+        return None
+    now = datetime.now(tz=UTC)
+    compatibility_key = str(stored.get("compatibility_key") or calibration_job_compatibility_key(payload))
+    heartbeat_at = _parse_job_timestamp(payload.get("heartbeat_at"))
+    started_at = _parse_job_timestamp(payload.get("started_at") or payload.get("created_at"))
+    finished_at = _parse_job_timestamp(payload.get("finished_at"))
+    active_status = status in {"starting", "running"}
+    terminal_elapsed_seconds = int_value(stored.get("total_elapsed_seconds"))
+    if terminal_elapsed_seconds <= 0 and started_at and finished_at and finished_at >= started_at:
+        terminal_elapsed_seconds = round((finished_at - started_at).total_seconds())
+    elapsed_seconds = (
+        max(0, round((now - started_at).total_seconds()))
+        if active_status and started_at
+        else terminal_elapsed_seconds or None
+    )
+    heartbeat_age_seconds = (
+        max(0, round((now - heartbeat_at).total_seconds()))
+        if active_status and heartbeat_at
+        else None
+    )
+    estimate = (
+        _calibration_history_estimate(
+            connection,
+            payload,
+            compatibility_key=compatibility_key,
+            elapsed_seconds=elapsed_seconds,
+        )
+        if status in {"queued", "starting", "running"}
+        else None
+    )
+    public_progress = {
+        **stored,
+        "schema_version": 1,
+        "compatibility_key": compatibility_key,
+        "elapsed_seconds": elapsed_seconds,
+        "estimate": estimate,
+    }
+    if status == "queued":
+        public_progress["liveness"] = "queued"
+    elif active_status:
+        if heartbeat_age_seconds is None:
+            public_progress["liveness"] = (
+                "starting" if elapsed_seconds is not None and elapsed_seconds <= 45 else "not_reporting"
+            )
+        elif heartbeat_age_seconds <= 15:
+            public_progress["liveness"] = "reporting"
+        elif heartbeat_age_seconds <= 45:
+            public_progress["liveness"] = "delayed"
+        else:
+            public_progress["liveness"] = "not_reporting"
+        public_progress["heartbeat_at"] = payload.get("heartbeat_at")
+        public_progress["heartbeat_age_seconds"] = heartbeat_age_seconds
+    else:
+        public_progress.pop("heartbeat_at", None)
+        public_progress.pop("heartbeat_age_seconds", None)
+        public_progress.pop("liveness", None)
+    return public_progress
+
+
+def _calibration_history_estimate(
+        connection: DBClient,
+        payload: dict[str, Any],
+        *,
+        compatibility_key: str,
+        elapsed_seconds: int | None,
+) -> dict[str, Any] | None:
+    if str(payload.get("status") or "") not in {"running", "starting"} or elapsed_seconds is None:
+        return None
+    durations = []
+    current_job_id = str(payload.get("job_id") or "")
+    for completed in load_recent_completed_sample_jobs(connection):
+        if str(completed.get("job_id") or "") == current_job_id:
+            continue
+        if calibration_job_compatibility_key(completed) != compatibility_key:
+            continue
+        started_at = _parse_job_timestamp(completed.get("started_at"))
+        finished_at = _parse_job_timestamp(completed.get("finished_at"))
+        if started_at is None or finished_at is None or finished_at <= started_at:
+            continue
+        durations.append((finished_at - started_at).total_seconds())
+    if len(durations) < 3:
+        return None
+    ordered = sorted(durations[:30])
+    total_low = _quantize_seconds(_percentile(ordered, 0.10), round_up=False)
+    total_high = _quantize_seconds(_percentile(ordered, 0.90), round_up=True)
+    total_high = max(total_high, total_low + 300)
+    return {
+        "kind": "historical_range",
+        "sample_size": len(ordered),
+        "remaining_seconds_low": max(0, total_low - elapsed_seconds),
+        "remaining_seconds_high": max(0, total_high - elapsed_seconds),
+        "total_seconds_low": total_low,
+        "total_seconds_high": total_high,
+        "longer_than_recent_runs": elapsed_seconds > total_high,
+        "confidence": "moderate" if len(ordered) >= 8 else "limited",
+        "basis": "Comparable completed tests on the same computer and encode profile",
+    }
+
+
+def _parse_job_timestamp(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+def _resolution_class(height: int) -> str:
+    if height <= 0:
+        return "unknown"
+    if height <= 576:
+        return "sd"
+    if height <= 900:
+        return "720p"
+    if height <= 1440:
+        return "1080p"
+    return "uhd"
+
+
+def _percentile(values: list[float], fraction: float) -> float:
+    if len(values) == 1:
+        return values[0]
+    position = (len(values) - 1) * fraction
+    lower_index = int(position)
+    upper_index = min(lower_index + 1, len(values) - 1)
+    weight = position - lower_index
+    return values[lower_index] * (1 - weight) + values[upper_index] * weight
+
+
+def _quantize_seconds(value: float, *, round_up: bool) -> int:
+    step = 300 if value >= 900 else 60
+    units = value / step
+    whole_units = int(units)
+    if round_up and units > whole_units:
+        whole_units += 1
+    return max(step, whole_units * step)
 
 
 def load_job_state(
@@ -88,7 +342,7 @@ def load_overlapping_job_state(
         prefix: str,
         deps: JobRuntimeDeps,
 ) -> dict[str, Any] | None:
-    payload = load_latest_overlapping_job(connection, prefix)
+    payload = load_active_overlapping_job(connection, prefix) or load_latest_overlapping_job(connection, prefix)
     save_prefix = str(payload.get("prefix") or prefix) if payload is not None else prefix
     return _job_state_from_payload(connection, config, save_prefix, payload, deps)
 
@@ -143,6 +397,8 @@ def load_retryable_sample_job_state(
         if position is not None:
             payload["queue_position"] = position[0]
             payload["queue_depth"] = position[1]
+    if status in {"failed", "stopped"} and not retryable_saved_sample_job(payload):
+        return None
     if status in {"failed", "completed", "stopped"}:
         finished_at = deps.parse_iso(payload.get("finished_at") or payload.get("started_at") or payload.get("created_at"))
         if (
@@ -171,7 +427,16 @@ def load_latest_failed_target_size_job_state(
         deps: JobRuntimeDeps,
 ) -> dict[str, Any] | None:
     _ = config, deps
-    return load_latest_failed_target_size_sample_job(connection, prefix)
+    payload = load_latest_failed_target_size_sample_job(connection, prefix)
+    if payload is None:
+        return None
+    latest_sample_payload = load_latest_sample_job(connection, prefix)
+    if (
+            latest_sample_payload is not None
+            and str(latest_sample_payload.get("job_id") or "") != str(payload.get("job_id") or "")
+    ):
+        return None
+    return payload
 
 
 def save_job_state(
@@ -196,6 +461,11 @@ def retryable_saved_sample_job(job: dict[str, Any]) -> bool:
         return False
     mode = str(job.get("mode") or job.get("lane") or "sample").strip()
     if mode != "sample":
+        return False
+    result = object_dict(job.get("result"))
+    trace = object_dict(result.get("target_size_trace"))
+    target_status = str(result.get("target_size_status") or trace.get("status") or "").strip().lower()
+    if target_status in {"infeasible", "bound_exhausted", "quality_conflict"}:
         return False
     action = str(job.get("action") or "").strip()
     return action in {"baseline", "ai_tune"}
@@ -436,7 +706,7 @@ def dispatch_calibration_job(
         deps.mark_calibration_submission_complete(job_id)
         deps.unregister_calibration_process_controller(job_id)
         raise
-    future.add_done_callback(deps.submission_cleanup_callback(job_id))
+    future.add_done_callback(deps.submission_cleanup_callback(config, job_payload))
 
 
 def calibration_queue_worker_loop(
@@ -467,7 +737,7 @@ def process_calibration_queue_once(*, config_path: Any, deps: CalibrationQueueRu
                 calibration_jobs.c.prefix,
                 calibration_jobs.c.status,
             )
-            .where(calibration_jobs.c.status.in_(("running", "pending_review")))
+            .where(calibration_jobs.c.status.in_(("starting", "running", "pending_review")))
             .order_by(calibration_jobs.c.created_at, literal_column("rowid"))
         ).mappings().fetchall()
         running_by_lane = {lane: 0 for lane in capacities}
@@ -477,7 +747,7 @@ def process_calibration_queue_once(*, config_path: Any, deps: CalibrationQueueRu
             status = str(row["status"])
             prefix = str(row["prefix"])
             active_prefixes.add(prefix)
-            if status == "running" and lane in running_by_lane:
+            if status in {"starting", "running"} and lane in running_by_lane:
                 running_by_lane[lane] += 1
 
         for lane, capacity in capacities.items():

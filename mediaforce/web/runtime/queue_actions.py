@@ -201,13 +201,13 @@ def stop_calibration_queue_action(
     with connection_factory() as connection:
         active_rows = connection.execute(
             select(calibration_jobs.c.prefix)
-            .where(calibration_jobs.c.status.in_(("queued", "running")))
+            .where(calibration_jobs.c.status.in_(("queued", "starting", "running")))
             .order_by(calibration_jobs.c.created_at, literal_column("rowid"))
         ).mappings().fetchall()
         active_prefixes = [str(row["prefix"]) for row in active_rows]
         for prefix in active_prefixes:
             payload = load_job_state(connection, config, prefix)
-            if payload is None or str(payload.get("status") or "") not in {"queued", "running"}:
+            if payload is None or str(payload.get("status") or "") not in {"queued", "starting", "running"}:
                 continue
             save_job_state(
                 connection,

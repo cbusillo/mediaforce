@@ -161,7 +161,7 @@ class StreamBudgetTests(unittest.TestCase):
         self.assertEqual(ledger.remaining_video_bytes, -1_000_001)
         self.assertEqual(ledger.feasibility_status, "arithmetically_infeasible")
 
-    def test_small_positive_budget_is_aggressive_but_measurable(self) -> None:
+    def test_small_positive_budget_remains_measurable_without_source_ratio_judgment(self) -> None:
         ledger = self._ledger(
             target_bytes=250_000_000,
             source_size_bytes=4_000_000_000,
@@ -176,8 +176,8 @@ class StreamBudgetTests(unittest.TestCase):
         )
 
         self.assertGreater(ledger.remaining_video_bytes or 0, 0)
-        self.assertEqual(ledger.feasibility_status, "aggressive_but_measurable")
-        self.assertIn("target_at_or_below_10_percent_of_source", ledger.feasibility_reasons)
+        self.assertEqual(ledger.feasibility_status, "feasible")
+        self.assertEqual(ledger.feasibility_reasons, ())
 
     def test_missing_runtime_keeps_bitrate_unknown(self) -> None:
         ledger = self._ledger(
@@ -407,6 +407,47 @@ class StreamBudgetTests(unittest.TestCase):
         self.assertIn("0:t?", command)
         self.assertIn("-c:t", command)
         self.assertEqual(ledger.stream_plan.plan_id, StreamBudgetLedger.from_payload(ledger.to_payload()).stream_plan.plan_id)
+
+    def test_target_search_ceiling_is_explicit_and_legacy_jobs_keep_their_saved_bound(self) -> None:
+        ledger = self._ledger(
+            audio={
+                "index": 1,
+                "codec_name": "aac",
+                "channels": 2,
+                "language": "eng",
+                "default": 1,
+                "bit_rate": 128_000,
+            }
+        )
+        expected = QualitySearchResult(
+            crf=45.0,
+            metric="VMAF",
+            target=85.0,
+            score=91.0,
+            stdout="target-size-search",
+        )
+        for configured_ceiling, expected_ceiling in ((63, 63), (None, 38)):
+            policy = dict(self._policy()["video"])
+            if configured_ceiling is not None:
+                policy["target_search_max_crf"] = configured_ceiling
+            with self.subTest(configured_ceiling=configured_ceiling), patch(
+                "mediaforce.encoding.quality_search.search_target_size",
+                return_value=expected,
+            ) as search_target_size_mock:
+                result = quality_search.search_quality(
+                    Path("/tmp/input.mkv"),
+                    policy,
+                    stream_budget_ledger=ledger,
+                    host_media_access_for_host=Mock(return_value="mounted"),
+                    select_quality_metric=Mock(return_value=("vmaf", 85.0)),
+                    build_svt_params=Mock(return_value=[]),
+                    effective_video_preset=Mock(return_value=4),
+                    run_crf_search=Mock(),
+                    run_sample_encode=Mock(),
+                )
+
+                self.assertIs(result, expected)
+                self.assertEqual(search_target_size_mock.call_args.kwargs["search_max_crf"], expected_ceiling)
 
     def test_retry_measurement_reuses_quality_search_context(self) -> None:
         sample = SampleEncodeResult(

@@ -44,12 +44,16 @@ The ledger distinguishes four deterministic states:
 
 - `feasible`: a positive video budget remains with sufficiently bounded
   non-video costs
-- `aggressive_but_measurable`: the remaining video budget is positive but low
-  enough that measured search is required
 - `arithmetically_infeasible`: even the minimum production stream plan leaves
   no positive video budget
 - `requires_measurement`: an unknown stream cost or missing runtime prevents a
   trustworthy total
+
+Historical ledgers may still contain `aggressive_but_measurable`. New ledgers
+do not infer likely damage from source-size percentages or generic bitrate
+thresholds: any known positive video budget is `feasible`, and the measured
+quality search plus operator review decides whether the requested tradeoff is
+acceptable.
 
 Arithmetic infeasibility is never delegated to an LLM. Quality risk remains a
 separate measured outcome for target-size search and operator review.
@@ -75,9 +79,15 @@ container bytes. The search records a typed trace containing:
 - the selected CRF, measured quality score, quality floor, sample target band,
   source cap, ledger identity, stream-plan identity, and transform-plan identity
 
-The search may only choose among CRFs inside the approved policy range. It does
-not relax max size caps, lower quality floors, pick cadence transforms, change
-stream selection, or rewrite an operator's size goal. Monotonic curves select a
+`video.max_crf` defines the initial search range. Size-directed search may
+expand beyond that inherited default in measured steps, but never beyond the
+explicit `video.target_search_max_crf` ceiling. The trace records both bounds
+and whether expansion was measured or selected. Legacy saved jobs without the
+explicit ceiling retain their original `max_crf` as the hard replay bound.
+
+The search does not relax max size caps, lower quality floors, pick cadence
+transforms, change stream selection, or rewrite an operator's size goal.
+Monotonic curves select a
 candidate inside the sample band when one exists. Arithmetic impossibility,
 quality-floor conflict, and exhausted or noisy non-monotonic searches surface as
 structured infeasibility, quality-conflict, or needs-review outcomes.

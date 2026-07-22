@@ -102,6 +102,10 @@ def _high_impact_policy_change(current_policy: ActionPayload, draft_policy: Acti
             draft_video.get("max_encoded_percent")
     ):
         return True
+    if _normalized_number(current_video.get("target_search_max_crf")) != _normalized_number(
+            draft_video.get("target_search_max_crf")
+    ):
+        return True
     if _normalized_number(current_video.get("default_grain")) != _normalized_number(draft_video.get("default_grain")):
         return True
     return False
@@ -247,7 +251,7 @@ def queue_folder_encode_action(
                 detail="Confirm the older-season selection before starting production.",
             )
         existing_job = load_job_state(connection, config, normalized_prefix)
-        if existing_job and existing_job.get("status") in {"queued", "running", "pending_review"}:
+        if existing_job and existing_job.get("status") in {"queued", "starting", "running", "pending_review"}:
             return {"ok": False, "message": "A calibration job is already active for this folder."}
         calibration = load_calibration_state(config, normalized_prefix)
         gate = review_gate(calibration)
@@ -1282,6 +1286,7 @@ def save_profile_action(
         record_visual_approval_artifact: RecordVisualApprovalArtifactFn,
         merge_advice_state: MergeAdviceStateFn,
         upsert_override: UpsertOverrideFn,
+        load_latest_failed_target_size_job_state: LoadJobStateFn | None = None,
         confirm_high_impact: bool = False,
         confirm_size_tradeoff: bool = False,
         reviewed_draft_hash: str = "",
@@ -1370,6 +1375,20 @@ def save_profile_action(
                 status_code=409,
                 detail="This draft changed after the size tradeoff review. Review the result and confirm approval again.",
             )
+    latest_failed_sample_job = None
+    if load_latest_failed_target_size_job_state is not None:
+        with open_db(config.paths.db_path) as connection:
+            latest_failed_sample_job = load_latest_failed_target_size_job_state(
+                connection,
+                config,
+                normalized_prefix,
+            )
+        failed_target_reason = _failed_target_size_job_blocking_reason(
+            latest_failed_sample_job,
+            calibration_payload,
+        )
+        if failed_target_reason is not None:
+            raise HTTPException(status_code=409, detail=failed_target_reason)
     quality_risk_contract = build_quality_risk_contract(
         prefix=normalized_prefix,
         sample_item=object_dict(calibration_payload.get("sample_item")),
@@ -1378,6 +1397,7 @@ def save_profile_action(
         operator_request=operator_request or None,
         calibration=calibration_payload,
         advice_state=advice_state,
+        latest_failed_sample_job=latest_failed_sample_job,
     )
     blocking_reason = _quality_risk_blocking_reason(quality_risk_contract)
     if blocking_reason is not None:
@@ -1486,7 +1506,15 @@ def _failed_target_size_job_blocking_reason(
     result = object_dict(job_payload.get("result"))
     trace = object_dict(result.get("target_size_trace"))
     target_status = str(result.get("target_size_status") or trace.get("status") or "").strip().lower()
-    if target_status not in {"infeasible", "quality_conflict"}:
+    selection_reason = str(trace.get("selection_reason") or "").strip().lower()
+    if target_status == "infeasible" and selection_reason in {
+        "smallest_quality_safe_candidate_over_target_band",
+        "largest_quality_safe_candidate_under_target_band",
+        "target_lower_bound_exceeds_source_relative_cap",
+        "source_relative_cap_consumed_by_non_video_budget",
+    }:
+        target_status = "bound_exhausted"
+    if target_status not in {"infeasible", "bound_exhausted", "quality_conflict"}:
         return None
     accepted_at = _parse_state_timestamp(calibration.get("accepted_at"))
     failed_at = _parse_state_timestamp(
@@ -1500,6 +1528,12 @@ def _failed_target_size_job_blocking_reason(
         return (
             "The latest size-directed test found that this target cannot fit the required streams. "
             "Choose a different size and approve a fresh test before starting production."
+        )
+    if target_status == "bound_exhausted":
+        return (
+            "The latest size-directed test reached a configured search or source-size limit before it found this "
+            "target. "
+            "Choose updated settings and approve a fresh test before starting production."
         )
     return (
         "The latest size-directed test could not reach this target without crossing the quality floor. "

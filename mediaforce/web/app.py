@@ -32,7 +32,7 @@ from sqlalchemy import select
 from mediaforce.advisor import TuningPolicyResponse
 from mediaforce.advising.routing import advisor_routing_from_config
 from mediaforce.tuning.calibration_jobs import load_active_job, load_job, \
-    list_queue_summary
+    list_queue_summary, update_job_telemetry
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, update_runtime_settings, \
     update_runtime_folder_policy_values, upsert_runtime_folder_policy_override
 from mediaforce.core.binaries import ffmpeg_binary
@@ -109,7 +109,8 @@ from mediaforce.tuning.tuning_memory import (
     record_visual_approval_artifact,
     sibling_approved_season_memory,
 )
-from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_risk_public_view
+from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_risk_public_view, \
+    target_size_search_public_view
 from mediaforce.tuning.size_goals import guided_size_goal_options, operator_intent_from_policy
 from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, object_dict, object_list
 from mediaforce.web.routes import register_completed_routes, register_dashboard_routes, register_folder_routes, \
@@ -202,6 +203,8 @@ from mediaforce.web.runtime.catalog_signature import (
 from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_db as runtime_active_scan_from_db, \
     CalibrationQueueRuntimeDeps, calibration_queue_worker_loop as runtime_calibration_queue_worker_loop, \
     calibration_job_belongs_to_current_process as runtime_calibration_job_belongs_to_current_process, \
+    calibration_job_compatibility_key as runtime_calibration_job_compatibility_key, \
+    calibration_job_public_payload as runtime_calibration_job_public_payload, \
     dispatch_calibration_job as runtime_dispatch_calibration_job, \
     expire_calibration_job as runtime_expire_calibration_job, \
     latest_scan_completed_at as runtime_latest_scan_completed_at, \
@@ -251,6 +254,7 @@ CALIBRATION_JOB_NOTICE_AFTER = timedelta(hours=1)
 SAMPLE_CALIBRATION_CONCURRENCY = 2
 FULL_CALIBRATION_CONCURRENCY = 1
 CALIBRATION_QUEUE_POLL_SECONDS = 2.0
+CALIBRATION_HEARTBEAT_SECONDS = 5.0
 ENCODE_QUEUE_POLL_SECONDS = 2.0
 ENCODE_JOB_LEASE_SECONDS = 45
 ENCODE_JOB_HEARTBEAT_SECONDS = 10.0
@@ -675,7 +679,8 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         return folder_status_payload(
             config,
             normalized_prefix,
-            load_job_state=_load_overlapping_job_state,
+            load_exact_job_state=_load_job_state,
+            load_overlapping_job_state=_load_overlapping_job_state,
             load_retryable_sample_job_state=_load_retryable_sample_job_state,
             load_scan_status=_load_scan_status,
             load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
@@ -1038,7 +1043,11 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                     metrics_by_prefix={card.prefix: asdict(card) for card in movie_cards},
                     candidate_decisions=movie_decisions,
                 )
-            calibration_job = _load_job_state(connection, config, normalized_prefix)
+            calibration_job = runtime_calibration_job_public_payload(
+                connection,
+                config,
+                _load_job_state(connection, config, normalized_prefix),
+            )
             folder_scan_job = _load_scan_status(connection, config, prefix=normalized_prefix)
             summary = inspect_prefix(connection, config, normalized_prefix)
             metric_support = _metric_support()
@@ -1128,7 +1137,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 else None
             )
             latest_failed_sample_job_payload = object_dict(
-                _load_latest_failed_sample_job_state(connection, config, normalized_prefix)
+                _load_latest_failed_target_size_job_state(connection, config, normalized_prefix)
             ) or None
         policy = _folder_display_policy(
             sample_item=sample_item,
@@ -1195,6 +1204,11 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 else None
             ),
         )
+        latest_failed_result = object_dict(object_dict(latest_failed_sample_job_payload).get("result"))
+        latest_failed_target_trace = (
+            object_dict(latest_failed_result.get("target_size_trace"))
+            or object_dict(object_dict(latest_failed_result.get("sample_result")).get("target_size_trace"))
+        )
         resolved_metric, _ = select_quality_metric(str(video_policy.get("quality_metric", "auto")))
         sample_host_statuses = _cached_sample_calibration_host_statuses(config)
         sample_host_choices = _sample_host_options_from_statuses(config, sample_host_statuses)
@@ -1219,6 +1233,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 "stream_budget_ledger": stream_budget.to_payload(),
                 "size_goal_options": size_goal_options,
                 "quality_risk": quality_risk_public_view(quality_risk_contract),
+                "failed_target_size_search": target_size_search_public_view(latest_failed_target_trace),
                 "pending_proposal": pending_proposal,
                 "recent_tuning_sessions": recent_sessions,
                 "approved_season_shortcut": approved_season_shortcut,
@@ -1615,6 +1630,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             record_visual_approval_artifact=record_visual_approval_artifact,
             merge_advice_state=_merge_advice_state,
             upsert_override=_upsert_override,
+            load_latest_failed_target_size_job_state=_load_latest_failed_target_size_job_state,
             confirm_high_impact=confirm_high_impact,
             confirm_size_tradeoff=confirm_size_tradeoff,
             reviewed_draft_hash=reviewed_draft_hash,
@@ -3272,6 +3288,9 @@ def _calibration_run_deps() -> CalibrationRunDeps:
         load_job_state=_load_job_state,
         sample_item=_sample_item,
         save_job_state=_save_job_state,
+        update_job_telemetry=update_job_telemetry,
+        calibration_job_compatibility_key=runtime_calibration_job_compatibility_key,
+        calibration_heartbeat_seconds=CALIBRATION_HEARTBEAT_SECONDS,
         save_calibration_state=_save_calibration_state,
         record_run_verdict=_record_run_verdict,
         summarize_calibration_result=_summarize_calibration_result,
@@ -3814,10 +3833,39 @@ def _active_calibration_process_controllers() -> list[ManagedProcessController]:
         return list(CALIBRATION_QUEUE_PROCESSES.values())
 
 
-def _submission_cleanup_callback(job_id: str) -> Callable[[Future[object]], None]:
-    def _callback(_future: Future[object]) -> None:
-        _mark_calibration_submission_complete(job_id)
-        _unregister_calibration_process_controller(job_id)
+def _submission_cleanup_callback(
+        config: MediaforceConfig,
+        job_payload: dict[str, Any],
+) -> Callable[[Future[object]], None]:
+    job_id = str(job_payload["job_id"])
+    prefix = str(job_payload["prefix"])
+
+    def _callback(future: Future[object]) -> None:
+        try:
+            escaped_error = future.exception()
+        except BaseException as exc:
+            escaped_error = exc
+        try:
+            if escaped_error is not None:
+                with open_db(config.paths.db_path) as connection:
+                    current = load_job(connection, job_id)
+                    if current is not None and str(current.get("status") or "") in {"starting", "running"}:
+                        _save_job_state(
+                            connection,
+                            config,
+                            prefix,
+                            {
+                                **current,
+                                "status": "failed",
+                                "finished_at": _now_iso(),
+                                "error": str(escaped_error),
+                            },
+                        )
+        except Exception:
+            LOGGER.exception("Unable to mark escaped calibration job %s failed", job_id)
+        finally:
+            _mark_calibration_submission_complete(job_id)
+            _unregister_calibration_process_controller(job_id)
 
     return _callback
 

@@ -234,6 +234,8 @@ calibration_jobs = Table(
     Column("owner_pid", Integer),
     Column("created_at", Text, nullable=False),
     Column("started_at", Text),
+    Column("heartbeat_at", Text),
+    Column("progress_json", Text),
     Column("finished_at", Text),
     Column("updated_at", Text, nullable=False),
 )

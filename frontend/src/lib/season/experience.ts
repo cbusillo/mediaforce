@@ -1,4 +1,7 @@
 import type {
+	CalibrationJobPayload,
+	CalibrationScopeActivityPayload,
+	CalibrationTargetContract,
 	DashboardScanJob,
 	DashboardSummaryPayload,
 	EncodeQueueJob,
@@ -124,10 +127,16 @@ export interface ResolvedTargetSummary {
 }
 
 export interface TargetConstraintSummary {
-	kind: 'arithmetic_infeasible' | 'quality_conflict';
+	kind: 'arithmetic_infeasible' | 'bound_exhausted' | 'quality_conflict';
 	title: string;
 	detail: string;
 	recoveryLabel: string;
+}
+
+export interface CalibrationEtaSummary {
+	value: string;
+	detail: string;
+	tone: 'quiet' | 'attention';
 }
 
 export interface ReviewConcern {
@@ -457,6 +466,165 @@ export function formatDecimalFileSize(bytes: number | null | undefined): string 
 	return `${Math.round(value / 1_000)} KB`;
 }
 
+export function calibrationJobTargetContract(
+	job: CalibrationJobPayload | null | undefined
+): CalibrationTargetContract | null {
+	if (!job) return null;
+	if (job.target_contract) return job.target_contract;
+	const video = record(record(job.policy).video);
+	const explicitBytes = numberValue(video.target_size_bytes);
+	const targetSizeBytes =
+		explicitBytes > 0 ? explicitBytes : Math.round(numberValue(video.target_size_mb) * 1_000_000);
+	if (targetSizeBytes <= 0) return null;
+	const maxHeight = numberValue(video.max_height);
+	return {
+		schema_version: 1,
+		target_size_bytes: targetSizeBytes,
+		mode: text(video.size_goal_mode) || 'legacy',
+		source: text(video.size_goal_source) || 'legacy',
+		target_runtime_minutes: numberValue(video.target_runtime_minutes) || null,
+		sample_tolerance_percent: numberValue(video.sample_projection_tolerance_percent) || null,
+		final_tolerance_percent: numberValue(video.final_output_tolerance_percent) || null,
+		resolution_mode:
+			text(video.resolution_intent_mode) || (maxHeight > 0 ? 'max_height' : 'source'),
+		max_height: maxHeight > 0 ? maxHeight : null
+	};
+}
+
+export function calibrationTargetModeLabel(
+	target: CalibrationTargetContract | null | undefined
+): string {
+	if (target?.mode === 'absolute') return 'Absolute per episode';
+	if (target?.mode === 'normalized') return 'Scaled by episode runtime';
+	return 'Saved episode target';
+}
+
+export function calibrationResolutionLabel(
+	target: CalibrationTargetContract | null | undefined
+): string {
+	if (!target) return 'Saved resolution';
+	if (target.resolution_mode === 'source') return 'Keep source resolution';
+	if (target.resolution_mode === 'max_height' && target.max_height) {
+		return `Up to ${target.max_height}p`;
+	}
+	return 'Saved resolution';
+}
+
+export function overlappingCalibrationActivity(
+	status: FolderStatusPayload,
+	routePrefix: string
+): CalibrationScopeActivityPayload | null {
+	const activity = status.scope_activity ?? null;
+	if (!activity || (activity.job.prefix ?? '') === routePrefix) return null;
+	return activity;
+}
+
+export function calibrationStageLabel(job: CalibrationJobPayload | null | undefined): string {
+	const stage = text(job?.progress?.stage);
+	const labels: Record<string, string> = {
+		preparing_host: 'Starting the computer',
+		preparing_source: 'Preparing the source',
+		inspecting_source: 'Inspecting the picture',
+		searching_target: 'Searching for the size target',
+		measuring_quality: 'Measuring picture quality',
+		selecting_review_moments: 'Choosing review moments',
+		building_review: 'Building comparison clips',
+		encoding_full_calibration: 'Encoding the full calibration',
+		saving_results: 'Saving test results',
+		completed: 'Complete'
+	};
+	if (labels[stage]) return labels[stage];
+	if (job?.status === 'queued') return 'Waiting for a computer';
+	if (job?.status === 'running') return 'Making test moments';
+	return job?.status ? job.status.replaceAll('_', ' ') : 'Preparing the test';
+}
+
+export function calibrationWorkLabel(job: CalibrationJobPayload | null | undefined): string {
+	const work = job?.progress?.work;
+	if (!work || work.total <= 0) return '';
+	return `${Math.max(0, Math.min(work.completed, work.total))} of ${work.total} review steps`;
+}
+
+export function calibrationLivenessLabel(job: CalibrationJobPayload | null | undefined): string {
+	if (job?.status === 'completed' || job?.status === 'pending_review') return 'Test finished';
+	if (job?.status === 'failed' || job?.status === 'stopped') return 'Test is not running';
+	const liveness = job?.progress?.liveness;
+	if (liveness === 'reporting') return 'Computer is reporting normally';
+	if (liveness === 'delayed') return 'Computer updates are arriving slowly';
+	if (liveness === 'not_reporting') return 'Computer has stopped reporting progress';
+	if (liveness === 'queued') return 'Waiting in the test queue';
+	return 'Waiting for the first progress update';
+}
+
+export function calibrationEtaSummary(
+	job: CalibrationJobPayload | null | undefined
+): CalibrationEtaSummary {
+	if (job?.status === 'completed' || job?.status === 'pending_review') {
+		return {
+			value: 'Finished',
+			detail: 'This test is no longer running.',
+			tone: 'quiet'
+		};
+	}
+	if (job?.status === 'failed' || job?.status === 'stopped') {
+		return {
+			value: 'Stopped',
+			detail: 'Open the owning scope to review the failure or retry the saved plan.',
+			tone: 'attention'
+		};
+	}
+	const progress = job?.progress;
+	if (progress?.liveness === 'not_reporting') {
+		return {
+			value: 'Progress signal lost',
+			detail: 'The job still exists, but its computer has not sent a recent heartbeat.',
+			tone: 'attention'
+		};
+	}
+	const estimate = progress?.estimate;
+	if (!estimate) {
+		return {
+			value: 'Not enough history for an ETA',
+			detail: 'A remaining-time range appears after three comparable tests have finished.',
+			tone: progress?.liveness === 'delayed' ? 'attention' : 'quiet'
+		};
+	}
+	if (estimate.longer_than_recent_runs) {
+		return {
+			value: 'Longer than recent tests',
+			detail: `Comparable tests usually finished within ${coarseDuration(estimate.total_seconds_high)}. The computer can still be reporting normally.`,
+			tone: 'attention'
+		};
+	}
+	const low = coarseDuration(estimate.remaining_seconds_low);
+	const high = coarseDuration(estimate.remaining_seconds_high);
+	const value =
+		estimate.remaining_seconds_low <= 0
+			? `Up to ${high} left`
+			: low === high
+				? `About ${high} left`
+				: `${low}–${high} left`;
+	return {
+		value,
+		detail: `Based on ${estimate.sample_size} comparable completed tests; this range is not a guarantee.`,
+		tone: progress?.liveness === 'delayed' ? 'attention' : 'quiet'
+	};
+}
+
+function coarseDuration(seconds: number): string {
+	if (!Number.isFinite(seconds) || seconds <= 0) return 'less than 1 min';
+	const minutes = Math.max(1, Math.ceil(seconds / 60));
+	if (minutes < 10) return `${minutes} min`;
+	if (minutes < 60) return `${Math.ceil(minutes / 5) * 5} min`;
+	const hours = Math.floor(minutes / 60);
+	const remaining = Math.ceil((minutes % 60) / 15) * 15;
+	return remaining >= 60
+		? `${hours + 1} hr`
+		: remaining > 0
+			? `${hours} hr ${remaining} min`
+			: `${hours} hr`;
+}
+
 export function formatDuration(seconds: number | null | undefined): string {
 	const value = numberValue(seconds);
 	if (value <= 0) return '';
@@ -527,10 +695,31 @@ export function resolvedTargetSummary(folder: FolderPayload): ResolvedTargetSumm
 	};
 }
 
-export function targetConstraintSummary(folder: FolderPayload): TargetConstraintSummary | null {
-	const search = folder.quality_risk?.target_size_search;
+export function targetConstraintSummary(
+	folder: FolderPayload,
+	status?: FolderStatusPayload
+): TargetConstraintSummary | null {
+	const search = folder.failed_target_size_search ?? folder.quality_risk?.target_size_search;
 	const feasibility = folder.stream_budget_ledger?.feasibility;
-	if (feasibility?.arithmetic_infeasible || search?.status === 'infeasible') {
+	const sourceCap = folder.stream_budget_ledger?.source_relative_cap;
+	const sampleJob = record(status?.calibration_job ?? folder.calibration_job);
+	const jobResult = record(sampleJob.result);
+	const jobTrace = record(jobResult.target_size_trace);
+	const searchStatus =
+		text(search?.status) || text(jobResult.target_size_status) || text(jobTrace.status);
+	const selectionReason = text(search?.selection_reason) || text(jobTrace.selection_reason);
+	const legacyBoundExhaustion =
+		searchStatus === 'infeasible' &&
+		[
+			'smallest_quality_safe_candidate_over_target_band',
+			'largest_quality_safe_candidate_under_target_band',
+			'target_lower_bound_exceeds_source_relative_cap',
+			'source_relative_cap_consumed_by_non_video_budget'
+		].includes(selectionReason);
+	if (
+		feasibility?.arithmetic_infeasible ||
+		(searchStatus === 'infeasible' && !legacyBoundExhaustion)
+	) {
 		return {
 			kind: 'arithmetic_infeasible',
 			title: 'This size cannot fit the required streams.',
@@ -539,9 +728,24 @@ export function targetConstraintSummary(folder: FolderPayload): TargetConstraint
 			recoveryLabel: 'Choose a size that can fit'
 		};
 	}
-	if (search?.status === 'quality_conflict') {
-		const metric = text(search.selected_metric).toUpperCase();
-		const minimum = numberValue(search.minimum_metric_score);
+	if (
+		searchStatus === 'bound_exhausted' ||
+		legacyBoundExhaustion ||
+		sourceCap?.status === 'arithmetically_infeasible'
+	) {
+		return {
+			kind: 'bound_exhausted',
+			title: 'The test reached a configured limit.',
+			detail:
+				'The previous test stopped at an inherited search or source-size limit before it could measure your requested size. Retrying that saved test would repeat the same limit; make a fresh test with updated settings instead.',
+			recoveryLabel: 'Review size and settings'
+		};
+	}
+	if (searchStatus === 'quality_conflict') {
+		const metric = text(search?.selected_metric).toUpperCase();
+		const minimum = numberValue(
+			search?.minimum_metric_score || record(jobTrace.quality_floor).minimum
+		);
 		const floor =
 			metric && minimum > 0 ? ` the ${metric} floor of ${minimum}` : ' the quality floor';
 		return {
@@ -1036,6 +1240,8 @@ export function currentEncodeProgress(job: EncodeQueueJob | null | undefined) {
 }
 
 export function plainFailureMessage(folder: FolderPayload, status: FolderStatusPayload): string {
+	const targetConstraint = targetConstraintSummary(folder, status);
+	if (targetConstraint) return targetConstraint.detail;
 	const retryable = record(status.retryable_sample_job);
 	const sampleJob = record(status.calibration_job ?? folder.calibration_job);
 	const encodeJob = record(folder.encode_job);

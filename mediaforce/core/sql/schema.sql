@@ -89,6 +89,8 @@ CREATE TABLE IF NOT EXISTS calibration_jobs
     owner_pid                 INTEGER,
     created_at                TEXT NOT NULL,
     started_at                TEXT,
+    heartbeat_at              TEXT,
+    progress_json             TEXT,
     finished_at               TEXT,
     updated_at                TEXT NOT NULL
 );

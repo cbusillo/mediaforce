@@ -104,6 +104,7 @@ ALLOW_LISTED_VIDEO_TRANSFORM_KEYS = frozenset(
         "grain_denoise",
         "min_crf",
         "max_crf",
+        "target_search_max_crf",
         "max_encoded_percent",
         "quality_metric",
         "target_vmaf",
@@ -589,6 +590,7 @@ def target_size_search_public_view(trace: Mapping[str, Any] | None) -> dict[str,
     quality_floor = object_dict(payload.get("quality_floor"))
     selected = object_dict(payload.get("selected_candidate"))
     transform_plan = object_dict(payload.get("transform_plan"))
+    crf_bounds = object_dict(payload.get("crf_bounds"))
     return {
         "trace_id": f"tss1_{stable_json_hash(payload)[:24]}",
         "schema_version": int_value(payload.get("schema_version")),
@@ -608,6 +610,11 @@ def target_size_search_public_view(trace: Mapping[str, Any] | None) -> dict[str,
         "predicted_whole_episode_bytes": int_value(selected.get("predicted_whole_episode_bytes")) or None,
         "within_sample_band": bool(selected.get("within_sample_band")) if selected else None,
         "transform_plan_id": str(transform_plan.get("transform_plan_id") or "") or None,
+        "configured_max_crf": int_value(crf_bounds.get("configured_max_crf")) or None,
+        "search_max_crf": int_value(crf_bounds.get("search_max_crf")) or None,
+        "range_expanded": bool(crf_bounds.get("range_expanded")),
+        "measured_beyond_configured": bool(crf_bounds.get("measured_beyond_configured")),
+        "selected_beyond_configured": bool(crf_bounds.get("selected_beyond_configured")),
     }
 
 
@@ -1024,6 +1031,9 @@ def _deterministic_gates(
     feasibility_status = str(object_dict(stream_budget.get("feasibility")).get("status") or "")
     if feasibility_status == "arithmetically_infeasible":
         blocking_reasons.append("The resolved stream budget leaves no positive video budget.")
+    source_cap_status = str(object_dict(stream_budget.get("source_relative_cap")).get("status") or "")
+    if source_cap_status == "arithmetically_infeasible":
+        blocking_reasons.append("The preserved streams consume the configured source-size cap.")
     if rejected_transform_keys:
         blocking_reasons.append(
             "The requested transform includes non-allow-listed keys: " + ", ".join(sorted(rejected_transform_keys))
@@ -1065,7 +1075,7 @@ def _deterministic_gates(
             blocking_reasons.append(
                 str(target_size_trace.get("selection_reason") or "The requested target size is arithmetically infeasible.")
             )
-        elif target_size_status in {"quality_conflict", "needs_review"}:
+        elif target_size_status in {"bound_exhausted", "quality_conflict", "needs_review"}:
             comparison_reason = str(
                 target_size_trace.get("selection_reason")
                 or "The target-size search needs operator review before this policy can be reused."
@@ -1173,14 +1183,6 @@ def _typed_quality_risks(
         )
     feasibility = object_dict(stream_budget.get("feasibility"))
     feasibility_status = str(feasibility.get("status") or "")
-    if feasibility_status == "aggressive_but_measurable":
-        _add_risk(
-            risks_by_tag,
-            tag="softness_detail_loss",
-            level="medium",
-            rationale="The remaining video budget is aggressive enough that detail loss is more likely at the requested size.",
-            evidence_ids=[],
-        )
     if feasibility_status == "requires_measurement":
         _add_risk(
             risks_by_tag,
@@ -1189,16 +1191,6 @@ def _typed_quality_risks(
             rationale="Non-video cost uncertainty still requires measurement before trusting the size tradeoff.",
             evidence_ids=[],
         )
-    if sample_result:
-        predicted_percent = float_value(sample_result.get("predicted_encode_percent"))
-        if predicted_percent > 0 and predicted_percent <= 8.0:
-            _add_risk(
-                risks_by_tag,
-                tag="softness_detail_loss",
-                level="medium",
-                rationale="The sampled result projects to a very small fraction of the source size, so preserved detail should be checked directly.",
-                evidence_ids=[],
-            )
     target_size_status = str(target_size_trace.get("status") or "")
     target_size_reason = str(target_size_trace.get("selection_reason") or "").strip()
     if target_size_status == "quality_conflict":
@@ -1209,11 +1201,11 @@ def _typed_quality_risks(
             rationale=target_size_reason or "The measured target cannot be reached without crossing the quality floor.",
             evidence_ids=[],
         )
-    elif target_size_status in {"needs_review", "infeasible"}:
+    elif target_size_status in {"bound_exhausted", "needs_review", "infeasible"}:
         _add_risk(
             risks_by_tag,
             tag="other",
-            level="high" if target_size_status == "infeasible" else "medium",
+            level="high" if target_size_status in {"bound_exhausted", "infeasible"} else "medium",
             rationale=target_size_reason or "The measured target-size search needs operator review.",
             evidence_ids=[],
         )

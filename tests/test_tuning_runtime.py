@@ -60,7 +60,8 @@ from mediaforce.tuning.tuning_memory import (
 )
 from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_risk_public_view, \
     with_quality_risk_intent
-from mediaforce.tuning.calibration_jobs import load_latest_failed_target_size_sample_job, save_job
+from mediaforce.tuning.calibration_jobs import load_job, load_latest_failed_target_size_sample_job, save_job, \
+    update_job_telemetry
 from mediaforce.tuning.target_size_search import TargetSizeSearchError
 from mediaforce.web.app import (
     _advice_file,
@@ -602,6 +603,8 @@ class TuningRuntimeTests(unittest.TestCase):
             "started_at": "2026-04-11T15:18:10+00:00",
             "finished_at": "2026-04-11T15:18:21+00:00",
             "updated_at": "2026-04-11T15:18:21+00:00",
+            "heartbeat_at": "2026-04-11T15:18:20+00:00",
+            "progress": {"schema_version": 1, "stage": "searching_quality"},
             "error": "Calibration queue job was stopped and cleaned up.",
         }
 
@@ -656,6 +659,8 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIsNone(saved_jobs[0]["finished_at"])
         self.assertIsNone(saved_jobs[0]["error"])
         self.assertIsNone(saved_jobs[0]["result"])
+        self.assertNotIn("heartbeat_at", saved_jobs[0])
+        self.assertNotIn("progress", saved_jobs[0])
         self.assertNotEqual(saved_jobs[0]["job_id"], retryable_job["job_id"])
 
     def test_saved_sample_work_blocks_unconfirmed_legacy_size_goal(self) -> None:
@@ -3987,10 +3992,10 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(request["request_type"], "size_budget")
         self.assertTrue(request["operator_confirmed"])
         self.assertEqual(request["budget_label"], "200 MB per episode")
-        self.assertEqual(request["feasibility"], "aggressive_but_measurable")
+        self.assertEqual(request["feasibility"], "feasible")
         self.assertEqual(
             request["stream_budget_ledger"]["feasibility"]["status"],
-            "aggressive_but_measurable",
+            "feasible",
         )
         self.assertFalse(request["requires_confirmation"])
         self.assertFalse(request["hard_size_cap"])
@@ -4111,7 +4116,7 @@ class TuningRuntimeTests(unittest.TestCase):
         assert request is not None
         self.assertEqual(request["request_type"], "combined_experiment")
         self.assertEqual(request["evidence_authority"], "operator_observed")
-        self.assertEqual(request["feasibility"], "aggressive_but_measurable")
+        self.assertEqual(request["feasibility"], "feasible")
         self.assertEqual(request["scale_height"], 0)
 
     def test_operator_requested_experiment_preserves_visual_rejection(self) -> None:
@@ -4402,7 +4407,7 @@ class TuningRuntimeTests(unittest.TestCase):
         )
 
         assert request is not None
-        self.assertEqual(request["feasibility"], "aggressive_but_measurable")
+        self.assertEqual(request["feasibility"], "feasible")
         self.assertFalse(request["requires_confirmation"])
 
     def test_folder_ai_tune_preview_uses_calibration_policy_for_operator_budget_request(self) -> None:
@@ -4654,6 +4659,12 @@ class TuningRuntimeTests(unittest.TestCase):
                 "max_height": 1080,
             }
         }
+        resolved_policy = {
+            "video": {
+                **base_policy["video"],
+                "target_search_max_crf": 63,
+            }
+        }
         sample_item = {
             "rel_path": "tv/show/episode.mkv",
             "source_path": str(self.root / "source" / "tv" / "show" / "episode.mkv"),
@@ -4662,7 +4673,7 @@ class TuningRuntimeTests(unittest.TestCase):
             "duration_seconds": 5279.774,
             "audio_summary": [],
             "subtitle_summary": [],
-            "resolved_policy": dict(base_policy),
+            "resolved_policy": resolved_policy,
         }
         operator_request = {
             "request_type": "combined_experiment",
@@ -4794,7 +4805,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(proposal["applied_policy"], expected_fragment)
         self.assertEqual(
             proposal["preview_policy"],
-            {"video": {**base_policy["video"], **expected_fragment["video"]}},
+            {"video": {**resolved_policy["video"], **expected_fragment["video"]}},
         )
 
         deps.load_pending_proposal = lambda *_args, **_kwargs: proposal
@@ -4808,6 +4819,7 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertTrue(confirm_result["ok"])
         self.assertEqual(saved_jobs[0]["policy"], proposal["preview_policy"])
+        self.assertEqual(saved_jobs[0]["policy"]["video"]["target_search_max_crf"], 63)
 
     def test_folder_ai_tune_preview_applies_size_target_when_seed_worker_fails(self) -> None:
         saved_proposals: list[dict[str, Any]] = []
@@ -5578,7 +5590,13 @@ class TuningRuntimeTests(unittest.TestCase):
             "duration_seconds": 2400.0,
             "audio_summary": [{"codec_name": "eac3", "channels": 6}],
             "subtitle_summary": [],
-            "resolved_policy": {"video": {"target_vmaf": 95.0, "max_encoded_percent": 30}},
+            "resolved_policy": {
+                "video": {
+                    "target_vmaf": 95.0,
+                    "max_encoded_percent": 30,
+                    "target_search_max_crf": 63,
+                }
+            },
         }
         host = HostStatus(
             key="host-1",
@@ -5666,6 +5684,7 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(len(captured_payloads), 1)
+        self.assertEqual(saved_proposals[0]["current_policy"]["video"]["target_search_max_crf"], 63)
         latest_failed = captured_payloads[0]["latest_failed_sample_job"]
         self.assertIsInstance(latest_failed, dict)
         assert isinstance(latest_failed, dict)
@@ -7863,6 +7882,55 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(job)
         self.assertEqual(job["job_id"], "target-failed")
 
+    def test_calibration_job_telemetry_round_trips(self) -> None:
+        timestamp = "2026-07-19T23:50:00+00:00"
+        with open_db(self.config.paths.db_path) as connection:
+            save_job(
+                connection,
+                {
+                    "job_id": "telemetry-job",
+                    "prefix": "tv/show/Season 1",
+                    "status": "running",
+                    "lane": "sample",
+                    "action": "ai_tune",
+                    "host": {"key": "local"},
+                    "policy": {"video": {"target_size_mb": 225}},
+                    "sample_item": {"height": 1080, "duration_seconds": 2700},
+                    "created_at": timestamp,
+                    "started_at": timestamp,
+                    "updated_at": timestamp,
+                },
+            )
+            update_job_telemetry(
+                connection,
+                "telemetry-job",
+                heartbeat_at=timestamp,
+                progress={
+                    "schema_version": 1,
+                    "stage": "building_review",
+                    "work": {"completed": 2, "total": 3},
+                },
+            )
+            stored = load_job(connection, "telemetry-job")
+            assert stored is not None
+            save_job(
+                connection,
+                {
+                    **stored,
+                    "status": "completed",
+                    "finished_at": timestamp,
+                    "updated_at": timestamp,
+                },
+            )
+            stored = load_job(connection, "telemetry-job")
+
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored["status"], "completed")
+        self.assertEqual(stored["heartbeat_at"], timestamp)
+        self.assertEqual(stored["progress"]["stage"], "building_review")
+        self.assertEqual(stored["progress"]["work"], {"completed": 2, "total": 3})
+
     def test_run_calibration_job_records_storage_recovery_failure_before_sampling(self) -> None:
         saved_payloads: list[dict[str, object]] = []
         sample_item = Mock()
@@ -7878,6 +7946,9 @@ class TuningRuntimeTests(unittest.TestCase):
             load_job_state=lambda *_args, **_kwargs: {"job_id": "job-1", "status": "queued"},
             sample_item=sample_item,
             save_job_state=lambda _connection, _config, _prefix, payload: saved_payloads.append(dict(payload)),
+            update_job_telemetry=lambda *_args, **_kwargs: None,
+            calibration_job_compatibility_key=lambda _payload: "test-profile",
+            calibration_heartbeat_seconds=60.0,
             save_calibration_state=lambda *_args, **_kwargs: None,
             record_run_verdict=lambda *_args, **_kwargs: None,
             summarize_calibration_result=lambda payload: payload,
@@ -7939,6 +8010,9 @@ class TuningRuntimeTests(unittest.TestCase):
                 "duration_seconds": 120.0,
             },
             save_job_state=_save_job_state,
+            update_job_telemetry=lambda *_args, **_kwargs: None,
+            calibration_job_compatibility_key=lambda _payload: "test-profile",
+            calibration_heartbeat_seconds=60.0,
             save_calibration_state=lambda *_args, **_kwargs: None,
             record_run_verdict=lambda *_args, **_kwargs: None,
             summarize_calibration_result=lambda payload: payload,
@@ -8017,6 +8091,9 @@ class TuningRuntimeTests(unittest.TestCase):
                 "subtitle_summary": [],
             },
             save_job_state=lambda _connection, _config, _prefix, payload: saved_payloads.append(dict(payload)),
+            update_job_telemetry=lambda *_args, **_kwargs: None,
+            calibration_job_compatibility_key=lambda _payload: "test-profile",
+            calibration_heartbeat_seconds=60.0,
             save_calibration_state=lambda *_args, **_kwargs: None,
             record_run_verdict=lambda *_args, **_kwargs: None,
             summarize_calibration_result=lambda payload: payload,
@@ -8100,6 +8177,9 @@ class TuningRuntimeTests(unittest.TestCase):
             load_job_state=lambda *_args, **_kwargs: {"job_id": "job-1", "status": "queued", "sample_item": dict(saved_sample_item)},
             sample_item=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not reselect sample item")),
             save_job_state=_save_job_state,
+            update_job_telemetry=lambda *_args, **_kwargs: None,
+            calibration_job_compatibility_key=lambda _payload: "test-profile",
+            calibration_heartbeat_seconds=60.0,
             save_calibration_state=lambda *_args, **_kwargs: None,
             record_run_verdict=lambda *_args, **_kwargs: None,
             summarize_calibration_result=lambda payload: payload,
@@ -8228,6 +8308,9 @@ class TuningRuntimeTests(unittest.TestCase):
             load_job_state=lambda *_args, **_kwargs: dict(job),
             sample_item=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("saved sample required")),
             save_job_state=save_job_state,
+            update_job_telemetry=lambda *_args, **_kwargs: None,
+            calibration_job_compatibility_key=lambda _payload: "test-profile",
+            calibration_heartbeat_seconds=60.0,
             save_calibration_state=lambda *_args, **_kwargs: None,
             record_run_verdict=lambda *_args, **_kwargs: None,
             summarize_calibration_result=lambda payload: payload,

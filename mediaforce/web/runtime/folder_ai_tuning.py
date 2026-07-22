@@ -585,7 +585,7 @@ def folder_ai_tune_preview_action(
     with open_db(config.paths.db_path) as connection:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         existing_job = deps.load_job_state(connection, config, normalized_prefix)
-        if existing_job and existing_job.get("status") in {"queued", "running", "pending_review"}:
+        if existing_job and existing_job.get("status") in {"queued", "starting", "running", "pending_review"}:
             return {"ok": False, "message": "A calibration job is already active for this folder."}
         latest_failed_sample_job_loader = deps.load_latest_failed_sample_job_state or deps.load_retryable_sample_job_state
         latest_failed_sample_job = _latest_failed_sample_job_payload(
@@ -606,7 +606,12 @@ def folder_ai_tune_preview_action(
         if cadence_blocker is not None:
             return cadence_blocker
         calibration = deps.load_calibration_state(config, normalized_prefix)
-        current_policy = object_dict(calibration.get("policy")) if calibration else object_dict(sample_item.get("resolved_policy"))
+        resolved_policy = object_dict(sample_item.get("resolved_policy"))
+        current_policy = (
+            merge_policy_fragments(resolved_policy, object_dict(calibration.get("policy")))
+            if calibration
+            else resolved_policy
+        )
     if object_dict(operator_intent):
         try:
             operator_request = operator_request_from_intent(
@@ -710,7 +715,7 @@ def folder_ai_tune_confirm_action(
     with open_db(config.paths.db_path) as connection:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         existing_job = deps.load_job_state(connection, config, normalized_prefix)
-        if existing_job and existing_job.get("status") in {"queued", "running", "pending_review"}:
+        if existing_job and existing_job.get("status") in {"queued", "starting", "running", "pending_review"}:
             return {"ok": False, "message": "A calibration job is already active for this folder."}
         sample_item = deps.sample_item(connection, config, normalized_prefix)
         if sample_item is None:
@@ -734,7 +739,12 @@ def folder_ai_tune_confirm_action(
         if action == "ai_tune" and calibration is None:
             return {"ok": False, "message": "The folder needs a first sample before the bench can tune a retry."}
 
-        policy_source = object_dict(calibration.get("policy")) if calibration else object_dict(sample_item.get("resolved_policy"))
+        resolved_policy = object_dict(sample_item.get("resolved_policy"))
+        policy_source = (
+            merge_policy_fragments(resolved_policy, object_dict(calibration.get("policy")))
+            if calibration
+            else resolved_policy
+        )
         final_policy = deps.apply_policy_fragment(policy_source, applied_policy)
         legacy_size_issue = _unconfirmed_legacy_size_issue(config, final_policy)
         if legacy_size_issue is not None:
@@ -850,7 +860,7 @@ def _retry_latest_sample_job(
         if existing_job is None:
             return {"ok": False, "message": "Ask the bench for a draft first."}
         status = str(existing_job.get("status") or "").strip()
-        if status in {"queued", "running", "pending_review"}:
+        if status in {"queued", "starting", "running", "pending_review"}:
             return {"ok": False, "message": "A calibration job is already active for this folder."}
         if status not in {"failed", "stopped"}:
             return {"ok": False, "message": "Ask the bench for a draft first."}
@@ -910,6 +920,8 @@ def _retry_latest_sample_job(
         }
         job_payload.pop("queue_position", None)
         job_payload.pop("queue_depth", None)
+        job_payload.pop("heartbeat_at", None)
+        job_payload.pop("progress", None)
         deps.save_job_state(connection, config, normalized_prefix, job_payload)
 
     return {
@@ -1187,7 +1199,12 @@ def _tuned_preview_action(
 ) -> dict[str, Any]:
     if not trimmed_note:
         raise HTTPException(status_code=400, detail="Add a note so the tuner knows what to change before running another sample.")
-    current_policy = object_dict(calibration.get("policy")) if calibration else object_dict(sample_item.get("resolved_policy"))
+    resolved_policy = object_dict(sample_item.get("resolved_policy"))
+    current_policy = (
+        merge_policy_fragments(resolved_policy, object_dict(calibration.get("policy")))
+        if calibration
+        else resolved_policy
+    )
     quality_risk_feedback_state = _persist_quality_risk_feedback(
         config,
         deps,

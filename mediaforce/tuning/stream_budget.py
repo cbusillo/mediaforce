@@ -14,10 +14,6 @@ DEFAULT_CONTAINER_OVERHEAD_BYTES = 4_000_000
 DEFAULT_TEXT_SUBTITLE_BYTES = 128 * 1024
 DEFAULT_IMAGE_SUBTITLE_BYTES = 4 * 1024 * 1024
 DEFAULT_UNKNOWN_ATTACHMENT_BYTES = 4_000_000
-AGGRESSIVE_VIDEO_BITRATE_BPS = 500_000
-AGGRESSIVE_TOTAL_SOURCE_PERCENT = 10.0
-AGGRESSIVE_SOURCE_VIDEO_RATIO = 0.20
-
 BudgetCategory = Literal["audio", "subtitle", "attachment", "container"]
 EstimateConfidence = Literal["exact", "high", "medium", "low", "unknown"]
 FeasibilityStatus = Literal[
@@ -425,10 +421,7 @@ def build_stream_budget_ledger(
         minimum_non_video_bytes=minimum_non_video_bytes,
         non_video_bytes=non_video_bytes,
         remaining_video_bytes=remaining_video_bytes,
-        remaining_video_bitrate_bps=remaining_video_bitrate_bps,
         duration_seconds=duration_seconds,
-        source_size_bytes=source_size_bytes,
-        source_video_bitrate_bps=source_video_bitrate_bps,
         entries=entries,
     )
     confidence = _aggregate_confidence(entries)
@@ -805,10 +798,7 @@ def _feasibility(
         minimum_non_video_bytes: int,
         non_video_bytes: int | None,
         remaining_video_bytes: int | None,
-        remaining_video_bitrate_bps: int | None,
         duration_seconds: float | None,
-        source_size_bytes: int | None,
-        source_video_bitrate_bps: int | None,
         entries: list[StreamBudgetEntry],
 ) -> tuple[FeasibilityStatus, tuple[str, ...]]:
     if total_target_bytes is not None and total_target_bytes <= minimum_non_video_bytes:
@@ -830,21 +820,6 @@ def _feasibility(
         measurement_reasons.append("non_video_total_unknown")
     if measurement_reasons:
         return "requires_measurement", tuple(dict.fromkeys(measurement_reasons))
-
-    aggressive_reasons: list[str] = []
-    total_source_percent = _percent_of_source(total_target_bytes, source_size_bytes)
-    if total_source_percent is not None and total_source_percent <= AGGRESSIVE_TOTAL_SOURCE_PERCENT:
-        aggressive_reasons.append("target_at_or_below_10_percent_of_source")
-    if remaining_video_bitrate_bps is not None and remaining_video_bitrate_bps <= AGGRESSIVE_VIDEO_BITRATE_BPS:
-        aggressive_reasons.append("remaining_video_bitrate_at_or_below_500_kbps")
-    if (
-            remaining_video_bitrate_bps is not None
-            and source_video_bitrate_bps is not None
-            and remaining_video_bitrate_bps <= source_video_bitrate_bps * AGGRESSIVE_SOURCE_VIDEO_RATIO
-    ):
-        aggressive_reasons.append("remaining_video_bitrate_at_or_below_20_percent_of_source_video")
-    if aggressive_reasons:
-        return "aggressive_but_measurable", tuple(dict.fromkeys(aggressive_reasons))
     return "feasible", ()
 
 

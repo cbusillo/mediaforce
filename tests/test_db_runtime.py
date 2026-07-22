@@ -27,7 +27,7 @@ from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.cadence import cadence_policy_snapshot
 from mediaforce.encoding.fingerprint import media_fingerprint_policy_snapshot
 
-CURRENT_DB_REVISION = "20260719_0014"
+CURRENT_DB_REVISION = "20260719_0015"
 
 
 class DatabaseRuntimeTests(unittest.TestCase):
@@ -137,6 +137,36 @@ class DatabaseRuntimeTests(unittest.TestCase):
             self.assertEqual(version, CURRENT_DB_REVISION)
             self.assertEqual(stored["prefix"], "tv/show")
             self.assertIn("idx_encode_jobs_status_retry_ready", indexes)
+
+    def test_open_db_adds_calibration_progress_columns_to_previous_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "library.sqlite3"
+            with open_db(db_path):
+                pass
+            reset_engine_cache()
+
+            raw_connection = sqlite3.connect(db_path)
+            try:
+                raw_connection.execute("ALTER TABLE calibration_jobs DROP COLUMN heartbeat_at")
+                raw_connection.execute("ALTER TABLE calibration_jobs DROP COLUMN progress_json")
+                raw_connection.execute(
+                    "UPDATE alembic_version SET version_num = ?",
+                    ("20260719_0014",),
+                )
+                raw_connection.commit()
+            finally:
+                raw_connection.close()
+
+            with open_db(db_path) as connection:
+                version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
+                calibration_columns = {
+                    str(column["name"])
+                    for column in inspect(connection).get_columns("calibration_jobs")
+                }
+
+            self.assertEqual(version, CURRENT_DB_REVISION)
+            self.assertIn("heartbeat_at", calibration_columns)
+            self.assertIn("progress_json", calibration_columns)
 
     def test_open_db_supports_sqlalchemy_mapping_results(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
