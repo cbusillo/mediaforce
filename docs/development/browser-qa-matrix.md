@@ -68,7 +68,8 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   deterministic target-search-bound failure that explains why the saved retry
   would repeat and routes the operator to a fresh settings review.
 - Review-ready state: `/folders/tv/Review%20Ready/Season%201`, with retained
-  review media, explicit target/band/sample-byte facts, and picture/sound risk.
+  review media, explicit target/band/sample-byte facts, picture/sound risk, and
+  trustworthy sound metadata for the focused comparison workspace.
 - Absolute-target state: `/folders/tv/Absolute%20Goal/Season%201`, proving an
   explicit 225 MB episode goal remains 225 MB for an 88-minute episode.
 - Under- and over-target states: `/folders/tv/Undershoot%20Show/Season%201` and
@@ -204,6 +205,14 @@ must say that the size goal was not met before presenting review media. It must
 distinguish review-clip byte savings from the full-episode estimate, make another
 same-target measured test the primary action, and require an explicit warning
 that accepting the tradeoff saves the profile and queues the full folder encode.
+
+When review media is ready, `Compare in full screen` must open paused in `Side by
+side` and `Fit`. `One at a time` must switch between `Original` and `New` without
+changing the selected moment, playback position, or picture position. Sound
+controls appear only when both clips carry trustworthy sound metadata; legacy or
+silent clips must say they show picture only and offer a plain-language path to
+make a new test when the source has sound. The normal UI must not expose codec,
+quality-score, synchronization, or other implementation vocabulary.
 
 While the review assistant or a representative sample is active, the first
 Folder Studio viewport must show a prominent live-operation state with the
