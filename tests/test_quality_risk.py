@@ -165,10 +165,35 @@ class QualityRiskContractTests(unittest.TestCase):
         self.assertEqual(public["verdict"], "request_comparison")
         self.assertEqual(public["target_size_search"]["status"], "quality_conflict")
         self.assertEqual(public["target_size_search"]["selected_crf"], 31.0)
+        self.assertEqual(public["target_size_search"]["configured_max_crf"], 38)
+        self.assertEqual(public["target_size_search"]["search_max_crf"], 63)
+        self.assertTrue(public["target_size_search"]["range_expanded"])
+        self.assertTrue(public["target_size_search"]["measured_beyond_configured"])
         self.assertNotIn("candidates", public["target_size_search"])
         self.assertIn(
             "softness_detail_loss",
             [risk["tag"] for risk in public["typed_risks"]],
+        )
+
+    def test_source_cap_consumed_by_preserved_streams_is_a_deterministic_blocker(self) -> None:
+        sample = self._sample()
+        sample["stream_budget_ledger"] = {
+            "feasibility": {"status": "feasible"},
+            "source_relative_cap": {"status": "arithmetically_infeasible"},
+        }
+
+        contract = build_quality_risk_contract(
+            prefix="tv/House/Season 2",
+            sample_item=sample,
+            current_policy={"video": {"target_vmaf": 90.0}},
+            preview_policy={"video": {"target_vmaf": 90.0}},
+            calibration={"job_id": "job-current", "sample_result": {}},
+        )
+
+        self.assertTrue(contract["deterministic_gates"]["blocked"])
+        self.assertIn(
+            "The preserved streams consume the configured source-size cap.",
+            contract["deterministic_gates"]["blocking_reasons"],
         )
 
     def test_old_failed_target_trace_does_not_block_newer_successful_calibration(self) -> None:
@@ -406,6 +431,15 @@ class QualityRiskContractTests(unittest.TestCase):
                 "sample_upper_bound_bytes": 247_500_000,
             },
             "quality_floor": {"metric": "VMAF", "minimum": 85.0},
+            "crf_bounds": {
+                "min_crf": 18,
+                "configured_max_crf": 38,
+                "search_max_crf": 63,
+                "max_crf": 63,
+                "range_expanded": True,
+                "measured_beyond_configured": True,
+                "selected_beyond_configured": False,
+            },
             "curve": {"shape": "monotonic", "candidate_count": 4, "max_candidates": 6},
             "transform_plan": transform_plan,
             "selected_candidate": {

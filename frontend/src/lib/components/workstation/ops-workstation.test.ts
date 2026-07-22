@@ -12,11 +12,40 @@ import {
 	hostTone,
 	hostWorkReason,
 	opsWorkLabel,
+	RefreshCoordinator,
 	rowRecoveryLabel,
 	rowRecoveryTitle,
 	retryableEncodeJobIds,
 	workerCapabilitiesSummary
 } from './ops-workstation';
+
+describe('RefreshCoordinator', () => {
+	it('lets a manual refresh supersede an in-flight quiet poll', () => {
+		const coordinator = new RefreshCoordinator();
+
+		const quietId = coordinator.start('quiet');
+		expect(quietId).toBe(1);
+		expect(coordinator.start('quiet')).toBeNull();
+
+		const manualId = coordinator.start('manual');
+		expect(manualId).toBe(2);
+		expect(coordinator.start('quiet')).toBeNull();
+
+		expect(coordinator.finish('quiet', quietId ?? 0)).toBe(false);
+		expect(coordinator.finish('manual', manualId ?? 0)).toBe(true);
+		expect(coordinator.start('quiet')).toBe(3);
+	});
+
+	it('blocks overlapping manual refreshes', () => {
+		const coordinator = new RefreshCoordinator();
+
+		const firstManualId = coordinator.start('manual');
+		expect(firstManualId).toBe(1);
+		expect(coordinator.start('manual')).toBeNull();
+		expect(coordinator.finish('manual', firstManualId ?? 0)).toBe(true);
+		expect(coordinator.start('manual')).toBe(2);
+	});
+});
 
 function dashboardFixture(): DashboardSummaryPayload {
 	return {

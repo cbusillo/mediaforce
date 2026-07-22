@@ -13,6 +13,7 @@ import threading
 import tomllib
 import unittest
 from collections.abc import Mapping
+from concurrent.futures import Future
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -55,7 +56,8 @@ from mediaforce.remote import HostStatus
 from mediaforce.tuning.calibration_jobs import list_queue_summary, \
     load_active_overlapping_job as load_active_overlapping_calibration_job, \
     load_latest_job as load_latest_calibration_job, \
-    load_latest_overlapping_job as load_latest_overlapping_calibration_job
+    load_latest_overlapping_job as load_latest_overlapping_calibration_job, \
+    save_job as save_calibration_job, update_job_telemetry as update_calibration_job_telemetry
 from mediaforce.review import BrowserReviewClip, CompareClip, EncodedPreviewClip
 from mediaforce.reviewing.helpers import ReviewMoment
 from mediaforce.web import app as web_app
@@ -5961,6 +5963,48 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 select(func.count()).select_from(encode_jobs).where(encode_jobs.c.prefix == "tv/show")
             )
         self.assertEqual(queued_count, 0)
+
+    def test_save_profile_action_blocks_current_failed_target_search_before_approval(self) -> None:
+        calibration_payload: folder_actions_runtime.ActionPayload = {
+            "mode": "sample",
+            "job_id": "failed-target-sample",
+            "review_media_ready": True,
+            "policy": {"video": {"target_vmaf": 85.0, "target_size_bytes": 225_000_000}},
+            "sample_item": {
+                "library_item_id": 1,
+                "resolved_policy": {"video": {"target_vmaf": 85.0, "target_size_bytes": 225_000_000}},
+            },
+        }
+
+        with self.assertRaises(HTTPException) as exc:
+            folder_actions_runtime.save_profile_action(
+                self.config,
+                "tv/show",
+                now_iso=web_app._now_iso,
+                load_sample_item=lambda *_args, **_kwargs: None,
+                load_calibration_state=lambda *_args, **_kwargs: dict(calibration_payload),
+                calibration_draft_hash=web_app._calibration_draft_hash,
+                save_calibration_state=lambda *_args, **_kwargs: None,
+                load_advice_state=lambda *_args, **_kwargs: None,
+                record_visual_approval_artifact=lambda *_args, **_kwargs: None,
+                merge_advice_state=lambda *_args, **_kwargs: {},
+                upsert_override=web_app._upsert_override,
+                load_latest_failed_target_size_job_state=lambda *_args, **_kwargs: {
+                    "job_id": "failed-target-sample",
+                    "status": "failed",
+                    "finished_at": web_app._now_iso(),
+                    "result": {
+                        "target_size_status": "infeasible",
+                        "target_size_trace": {
+                            "status": "infeasible",
+                            "selection_reason": "smallest_quality_safe_candidate_over_target_band",
+                        },
+                    },
+                },
+            )
+
+        self.assertEqual(exc.exception.status_code, 409)
+        self.assertIn("configured search or source-size limit", str(exc.exception.detail))
 
     def test_retry_failed_encode_queue_action_retries_latest_approved_failures_only(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
@@ -15322,13 +15366,49 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         payload = dashboard_payloads.folder_status_payload(
             self.config,
             "tv/show",
-            load_job_state=web_app._load_overlapping_job_state,
+            load_exact_job_state=web_app._load_job_state,
+            load_overlapping_job_state=web_app._load_overlapping_job_state,
             load_retryable_sample_job_state=web_app._load_retryable_sample_job_state,
             load_scan_status=web_app._load_scan_status,
             load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
         )
 
         self.assertTrue(payload["polling_active"])
+
+    def test_submission_cleanup_marks_escaped_calibration_task_failed(self) -> None:
+        now = web_app._now_iso()
+        with open_db(self.config.paths.db_path) as connection:
+            save_calibration_job(
+                connection,
+                {
+                    "job_id": "escaped-calibration-task",
+                    "prefix": "tv/show",
+                    "status": "running",
+                    "lane": "sample",
+                    "action": "ai_tune",
+                    "host": {"key": "local"},
+                    "policy": {},
+                    "sample_item": {},
+                    "owner_pid": os.getpid(),
+                    "created_at": now,
+                    "started_at": now,
+                    "updated_at": now,
+                },
+            )
+
+        future: Future[object] = Future()
+        future.set_exception(RuntimeError("worker escaped"))
+        web_app._submission_cleanup_callback(
+            self.config,
+            {"job_id": "escaped-calibration-task", "prefix": "tv/show"},
+        )(future)
+
+        with open_db(self.config.paths.db_path) as connection:
+            stored = load_latest_calibration_job(connection, "tv/show")
+
+        self.assertEqual(stored["status"], "failed")
+        self.assertEqual(stored["error"], "worker escaped")
+        self.assertIsNotNone(stored["finished_at"])
 
     def test_folder_status_payload_polls_while_descendant_calibration_is_active(self) -> None:
         now = web_app._now_iso()
@@ -15354,7 +15434,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         payload = dashboard_payloads.folder_status_payload(
             self.config,
             "tv/show",
-            load_job_state=web_app._load_overlapping_job_state,
+            load_exact_job_state=web_app._load_job_state,
+            load_overlapping_job_state=web_app._load_overlapping_job_state,
             load_retryable_sample_job_state=web_app._load_retryable_sample_job_state,
             load_scan_status=web_app._load_scan_status,
             load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
@@ -15362,7 +15443,183 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertTrue(payload["polling_active"])
         self.assertEqual(payload["calibration_status"], "running")
+        self.assertEqual(payload["exact_calibration_status"], "idle")
+        self.assertEqual(payload["scope_activity_status"], "running")
         self.assertEqual(payload["calibration_job"]["job_id"], "descendant-calibration-active")
+        self.assertEqual(payload["scope_activity"]["relation"], "descendant")
+        self.assertEqual(payload["scope_activity"]["job"]["job_id"], "descendant-calibration-active")
+
+    def test_folder_status_separates_active_show_test_from_stale_season_result(self) -> None:
+        now = datetime.now(tz=UTC)
+        older = (now - timedelta(minutes=10)).isoformat(timespec="seconds")
+        newer = now.isoformat(timespec="seconds")
+        source = self._create_source_file("scope-target.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(
+                connection,
+                source,
+                rel_path="tv/show/Season 1/scope-target.mkv",
+            )
+            for job_id, prefix, status, target_size_mb, timestamp in (
+                    ("stale-season-test", "tv/show/Season 1", "completed", 314.6, newer),
+                    ("active-show-test", "tv/show", "running", 225, older),
+            ):
+                save_calibration_job(
+                    connection,
+                    {
+                        "job_id": job_id,
+                        "prefix": prefix,
+                        "status": status,
+                        "lane": "sample",
+                        "action": "ai_tune",
+                        "host": {"key": "local", "label": "This Mac"},
+                        "policy": {
+                            "video": {
+                                "target_size_mb": target_size_mb,
+                                "size_goal_mode": "absolute",
+                            }
+                        },
+                        "sample_item": {"height": 1080, "duration_seconds": 2700},
+                        "owner_pid": os.getpid(),
+                        "created_at": timestamp,
+                        "started_at": timestamp,
+                        "finished_at": timestamp if status == "completed" else None,
+                        "updated_at": timestamp,
+                    },
+                )
+
+        payload = dashboard_payloads.folder_status_payload(
+            self.config,
+            "tv/show/Season 1",
+            load_exact_job_state=web_app._load_job_state,
+            load_overlapping_job_state=web_app._load_overlapping_job_state,
+            load_retryable_sample_job_state=web_app._load_retryable_sample_job_state,
+            load_scan_status=web_app._load_scan_status,
+            load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
+        )
+
+        self.assertEqual(payload["exact_calibration_job"]["job_id"], "stale-season-test")
+        self.assertEqual(payload["exact_calibration_job"]["target_contract"]["target_size_bytes"], 314_600_000)
+        self.assertEqual(payload["scope_activity"]["relation"], "ancestor")
+        self.assertEqual(payload["scope_activity"]["job"]["job_id"], "active-show-test")
+        self.assertEqual(payload["scope_activity"]["job"]["target_contract"]["target_size_bytes"], 225_000_000)
+
+    def test_calibration_progress_uses_comparable_history_for_eta_range(self) -> None:
+        now = datetime.now(tz=UTC)
+        policy = {
+            "video": {
+                "encoder": "libsvtav1",
+                "preset": 4,
+                "pixel_format": "yuv420p10le",
+                "sample_every": "8m",
+                "sample_duration": "10s",
+                "target_size_mb": 225,
+            }
+        }
+        sample_item = {"height": 1080, "duration_seconds": 2700}
+        with open_db(self.config.paths.db_path) as connection:
+            for index, duration_seconds in enumerate((1200, 1800, 2400), start=1):
+                started_at = now - timedelta(days=index, seconds=duration_seconds)
+                finished_at = started_at + timedelta(seconds=duration_seconds)
+                save_calibration_job(
+                    connection,
+                    {
+                        "job_id": f"history-{index}",
+                        "prefix": f"tv/history/Season {index}",
+                        "status": "completed",
+                        "lane": "sample",
+                        "action": "ai_tune",
+                        "host": {"key": "local"},
+                        "policy": policy,
+                        "sample_item": sample_item,
+                        "created_at": started_at.isoformat(timespec="seconds"),
+                        "started_at": started_at.isoformat(timespec="seconds"),
+                        "finished_at": finished_at.isoformat(timespec="seconds"),
+                        "updated_at": finished_at.isoformat(timespec="seconds"),
+                    },
+                )
+            active_started_at = now - timedelta(minutes=10)
+            save_calibration_job(
+                connection,
+                {
+                    "job_id": "active-history-test",
+                    "prefix": "tv/show",
+                    "status": "running",
+                    "lane": "sample",
+                    "action": "ai_tune",
+                    "host": {"key": "local"},
+                    "policy": policy,
+                    "sample_item": sample_item,
+                    "owner_pid": os.getpid(),
+                    "created_at": active_started_at.isoformat(timespec="seconds"),
+                    "started_at": active_started_at.isoformat(timespec="seconds"),
+                    "heartbeat_at": now.isoformat(timespec="seconds"),
+                    "progress": {
+                        "schema_version": 1,
+                        "stage": "searching_target",
+                        "last_progress_at": now.isoformat(timespec="seconds"),
+                    },
+                    "updated_at": now.isoformat(timespec="seconds"),
+                },
+            )
+            update_calibration_job_telemetry(
+                connection,
+                "active-history-test",
+                heartbeat_at=now.isoformat(timespec="seconds"),
+                progress={
+                    "schema_version": 1,
+                    "stage": "searching_target",
+                    "last_progress_at": now.isoformat(timespec="seconds"),
+                },
+            )
+            active = load_latest_calibration_job(connection, "tv/show")
+            public = job_runtime.calibration_job_public_payload(connection, self.config, active)
+
+        estimate = public["progress"]["estimate"]
+        self.assertEqual(public["progress"]["liveness"], "reporting")
+        self.assertEqual(estimate["kind"], "historical_range")
+        self.assertEqual(estimate["sample_size"], 3)
+        self.assertGreater(estimate["remaining_seconds_high"], estimate["remaining_seconds_low"])
+        self.assertFalse(estimate["longer_than_recent_runs"])
+
+    def test_terminal_calibration_progress_drops_live_eta_and_liveness(self) -> None:
+        now = datetime.now(tz=UTC)
+        with open_db(self.config.paths.db_path) as connection:
+            save_calibration_job(
+                connection,
+                {
+                    "job_id": "completed-progress-test",
+                    "prefix": "tv/show",
+                    "status": "completed",
+                    "lane": "sample",
+                    "action": "ai_tune",
+                    "host": {"key": "local"},
+                    "policy": {"video": {"target_size_mb": 225}},
+                    "sample_item": {"height": 1080, "duration_seconds": 2700},
+                    "created_at": (now - timedelta(minutes=20)).isoformat(timespec="seconds"),
+                    "started_at": (now - timedelta(minutes=20)).isoformat(timespec="seconds"),
+                    "finished_at": (now - timedelta(minutes=5)).isoformat(timespec="seconds"),
+                    "updated_at": (now - timedelta(minutes=5)).isoformat(timespec="seconds"),
+                },
+            )
+            update_calibration_job_telemetry(
+                connection,
+                "completed-progress-test",
+                heartbeat_at=(now - timedelta(minutes=5)).isoformat(timespec="seconds"),
+                progress={
+                    "schema_version": 1,
+                    "stage": "completed",
+                    "liveness": "reporting",
+                    "total_elapsed_seconds": 900,
+                },
+            )
+            completed = load_latest_calibration_job(connection, "tv/show")
+            public = job_runtime.calibration_job_public_payload(connection, self.config, completed)
+
+        self.assertEqual(public["progress"]["elapsed_seconds"], 900)
+        self.assertIsNone(public["progress"]["estimate"])
+        self.assertNotIn("liveness", public["progress"])
+        self.assertNotIn("heartbeat_at", public["progress"])
 
     def test_latest_calibration_lookup_matches_overlapping_series_and_season_scopes(self) -> None:
         older = (datetime.now(tz=UTC) - timedelta(seconds=5)).isoformat(timespec="seconds")
@@ -15457,7 +15714,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         payload = dashboard_payloads.folder_status_payload(
             self.config,
             "tv/show",
-            load_job_state=web_app._load_job_state,
+            load_exact_job_state=web_app._load_job_state,
+            load_overlapping_job_state=web_app._load_overlapping_job_state,
             load_retryable_sample_job_state=web_app._load_retryable_sample_job_state,
             load_scan_status=web_app._load_scan_status,
             load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
@@ -15483,7 +15741,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         payload = dashboard_payloads.folder_status_payload(
             self.config,
             "other/Foo.mkv",
-            load_job_state=lambda _connection, _config, _prefix: None,
+            load_exact_job_state=lambda _connection, _config, _prefix: None,
+            load_overlapping_job_state=lambda _connection, _config, _prefix: None,
             load_retryable_sample_job_state=lambda _connection, _config, _prefix: None,
             load_scan_status=lambda _connection, _config, _prefix: None,
             load_active_encode_job_for_prefix=lambda _connection, _prefix: None,
@@ -17625,6 +17884,55 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(latest_payload["job_id"], "completed-sample-job")
         self.assertIsNone(retryable_payload)
 
+    def test_load_retryable_sample_job_state_hides_deterministic_target_failure(self) -> None:
+        prefix = "tv/show/season-1-target-bound"
+        finished_at = (datetime.now(tz=UTC) - timedelta(minutes=1)).isoformat()
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                calibration_jobs.insert().values(
+                    job_id="bound-exhausted-sample-job",
+                    prefix=prefix,
+                    status="failed",
+                    lane="sample",
+                    action="ai_tune",
+                    host_json=json.dumps({"key": "cbusillo@localhost", "label": "M4 Studio"}, sort_keys=True),
+                    notes="225 MB per episode",
+                    policy_json=json.dumps({"video": {"target_size_bytes": 225_000_000}}, sort_keys=True),
+                    sample_item_json=json.dumps({"rel_path": "tv/show/season-1/episode.mkv"}, sort_keys=True),
+                    result_json=json.dumps(
+                        {
+                            "target_size_status": "bound_exhausted",
+                            "target_size_trace": {
+                                "status": "bound_exhausted",
+                                "selection_reason": "smallest_quality_safe_candidate_over_target_band",
+                            },
+                        },
+                        sort_keys=True,
+                    ),
+                    created_at=finished_at,
+                    started_at=finished_at,
+                    finished_at=finished_at,
+                    updated_at=finished_at,
+                    error="The configured target-size search bound was exhausted.",
+                )
+            )
+
+            latest_payload = web_app._load_job_state(connection, self.config, prefix)
+            retryable_payload = web_app._load_retryable_sample_job_state(connection, self.config, prefix)
+            failed_target_payload = web_app._load_latest_failed_target_size_job_state(
+                connection,
+                self.config,
+                prefix,
+            )
+
+        self.assertIsNotNone(latest_payload)
+        assert latest_payload is not None
+        self.assertEqual(latest_payload["job_id"], "bound-exhausted-sample-job")
+        self.assertIsNone(retryable_payload)
+        self.assertIsNotNone(failed_target_payload)
+        assert failed_target_payload is not None
+        self.assertEqual(failed_target_payload["job_id"], "bound-exhausted-sample-job")
+
     def test_load_latest_failed_sample_job_state_keeps_context_after_newer_sample_run(self) -> None:
         prefix = "tv/show/season-1-bench-failure-context"
         older_finished_at = (
@@ -17642,6 +17950,16 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     notes="what can we do about the failure?",
                     policy_json=json.dumps({"video": {"target_vmaf": 97.0}}, sort_keys=True),
                     sample_item_json=json.dumps({"rel_path": "tv/show/season-1/episode.mkv"}, sort_keys=True),
+                    result_json=json.dumps(
+                        {
+                            "target_size_status": "bound_exhausted",
+                            "target_size_trace": {
+                                "status": "bound_exhausted",
+                                "selection_reason": "smallest_quality_safe_candidate_over_target_band",
+                            },
+                        },
+                        sort_keys=True,
+                    ),
                     created_at=older_finished_at,
                     started_at=older_finished_at,
                     finished_at=older_finished_at,
@@ -17670,8 +17988,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             retryable_payload = web_app._load_retryable_sample_job_state(connection, self.config, prefix)
             failed_payload = web_app._load_latest_failed_sample_job_state(connection, self.config, prefix)
+            failed_target_payload = web_app._load_latest_failed_target_size_job_state(
+                connection,
+                self.config,
+                prefix,
+            )
 
         self.assertIsNone(retryable_payload)
+        self.assertIsNone(failed_target_payload)
         self.assertIsNotNone(failed_payload)
         assert failed_payload is not None
         self.assertEqual(failed_payload["job_id"], "failed-sample-job")

@@ -62,6 +62,7 @@ def search_quality(
     attempted_target = context.metric_target
     last_error: Exception | None = None
     configured_max_crf = int(video_policy["max_crf"])
+    target_search_max_crf = int(video_policy.get("target_search_max_crf", configured_max_crf))
     max_encoded_percent = float(video_policy["max_encoded_percent"])
     if stream_budget_ledger is not None:
         if run_sample_encode is None:
@@ -87,6 +88,7 @@ def search_quality(
             host=context.host,
             quality_temp_dir=quality_temp_dir,
             run_sample_encode=run_sample_encode,
+            search_max_crf=target_search_max_crf,
         )
 
     while attempted_target >= context.min_metric_score:

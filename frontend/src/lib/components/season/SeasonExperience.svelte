@@ -9,9 +9,17 @@
 		OperatorIntentRequestPayload,
 		QualityRiskTag
 	} from '$lib/api/types';
+	import { folderRoutePath } from '$lib/folder-display';
 	import {
 		REVIEW_CONCERNS,
 		approvalGuardFromMessage,
+		calibrationEtaSummary,
+		calibrationJobTargetContract,
+		calibrationLivenessLabel,
+		calibrationResolutionLabel,
+		calibrationStageLabel,
+		calibrationTargetModeLabel,
+		calibrationWorkLabel,
 		compareRiskSummary,
 		currentEncodeProgress,
 		currentOperatorIntent,
@@ -24,6 +32,7 @@
 		isSeriesPrefix,
 		measuredFollowupRequest,
 		normalizeReviewPairs,
+		overlappingCalibrationActivity,
 		plainFailureMessage,
 		predictedEpisodeSize,
 		resolvedTargetSummary,
@@ -181,11 +190,25 @@
 	const actualSampleSizes = $derived(reviewSampleSizes(folder));
 	const sizeTarget = $derived(folderSizeTargetAnalysis(folder));
 	const targetSummary = $derived(resolvedTargetSummary(folder));
-	const targetConstraint = $derived(targetConstraintSummary(folder));
+	const targetConstraint = $derived(targetConstraintSummary(folder, status));
 	const technicalVideo = $derived(technicalVideoPolicy(folder));
 	const expectedSeasonBytes = $derived(expectedEpisodeBytes * productionEpisodeCount);
+	const exactCalibrationJob = $derived(
+		status.exact_calibration_job !== undefined
+			? status.exact_calibration_job
+			: (status.calibration_job ?? folder.calibration_job ?? null)
+	);
+	const exactTargetContract = $derived(calibrationJobTargetContract(exactCalibrationJob));
+	const scopeActivity = $derived(overlappingCalibrationActivity(status, folder.prefix));
+	const scopeActivityJob = $derived(scopeActivity?.job ?? null);
+	const scopeTargetContract = $derived(calibrationJobTargetContract(scopeActivityJob));
+	const activeJobTargetBytes = $derived(exactTargetContract?.target_size_bytes ?? 0);
 	const currentTargetBytes = $derived(
-		targetSummary?.targetBytes || sizeTarget.budgetBytes || selectedGoal?.targetSizeBytes || 0
+		activeJobTargetBytes ||
+			targetSummary?.targetBytes ||
+			sizeTarget.budgetBytes ||
+			selectedGoal?.targetSizeBytes ||
+			0
 	);
 	const sizeTargetLabel = $derived(
 		currentTargetBytes > 0 ? formatDecimalFileSize(currentTargetBytes) : 'the requested size'
@@ -225,7 +248,7 @@
 	const noAvailableHosts = $derived(
 		hostOptions.length > 0 && !hostOptions.some((host) => host.available !== false)
 	);
-	const activeSampleJob = $derived(asRecord(status.calibration_job ?? folder.calibration_job));
+	const activeSampleJob = $derived(asRecord(exactCalibrationJob));
 	const finishedEpisodeCount = $derived(
 		asNumber(folder.summary?.statuses.encoded) +
 			asNumber(folder.summary?.statuses.validated) +
@@ -249,6 +272,51 @@
 	const actionElapsed = $derived(elapsedCopy(actionStartedAt ? clock - actionStartedAt : 0));
 	const backendElapsed = $derived(
 		elapsedCopy(clock - parseTimestamp(activeSampleJob.started_at ?? activeSampleJob.created_at))
+	);
+	const scopeActivityStatus = $derived(scopeActivityJob?.status ?? 'idle');
+	const scopeActivityFailure = $derived(['failed', 'stopped'].includes(scopeActivityStatus));
+	const scopeActivityReady = $derived(
+		['completed', 'pending_review'].includes(scopeActivityStatus)
+	);
+	const scopeActivityScope = $derived(scopeActivityJob?.activity_scope ?? null);
+	const scopeActivityOwnerPrefix = $derived(scopeActivityJob?.prefix ?? '');
+	const scopeActivityOwnerTitle = $derived(
+		scopeActivityScope?.title || seasonIdentity(scopeActivityOwnerPrefix).show || 'Related work'
+	);
+	const scopeActivityOwnerKind = $derived(
+		scopeActivityScope?.kind === 'tv_series'
+			? 'show'
+			: scopeActivityScope?.kind === 'tv_season'
+				? 'season'
+				: 'scope'
+	);
+	const scopeActivityTargetLabel = $derived(
+		scopeTargetContract
+			? formatDecimalFileSize(scopeTargetContract.target_size_bytes)
+			: 'Saved target unavailable'
+	);
+	const scopeActivityWorker = $derived(
+		asText(asRecord(scopeActivityJob?.host).label) || 'Choosing a computer'
+	);
+	const scopeActivityElapsed = $derived(
+		elapsedCopy(
+			clock - parseTimestamp(scopeActivityJob?.started_at ?? scopeActivityJob?.created_at ?? null)
+		)
+	);
+	const scopeActivityHref = $derived(
+		scopeActivityOwnerPrefix ? resolve(folderRoutePath(scopeActivityOwnerPrefix)) : resolve('/ops')
+	);
+	const scopeActivityStage = $derived(calibrationStageLabel(scopeActivityJob));
+	const scopeActivityWork = $derived(calibrationWorkLabel(scopeActivityJob));
+	const scopeActivityLiveness = $derived(calibrationLivenessLabel(scopeActivityJob));
+	const scopeActivityEta = $derived(calibrationEtaSummary(scopeActivityJob));
+	const activeSampleStage = $derived(calibrationStageLabel(exactCalibrationJob));
+	const activeSampleWork = $derived(calibrationWorkLabel(exactCalibrationJob));
+	const activeSampleLiveness = $derived(calibrationLivenessLabel(exactCalibrationJob));
+	const activeSampleEta = $derived(calibrationEtaSummary(exactCalibrationJob));
+	const recoveryScopeTitle = $derived(exactCalibrationJob?.activity_scope?.title || scopeTitle);
+	const recoveryWorker = $derived(
+		asText(asRecord(exactCalibrationJob?.host).label) || 'Saved computer preference'
 	);
 	const showGoalScreen = $derived(humanState.key === 'needs_test' || retryMode);
 	const actionPending = $derived(actionPhase !== 'idle');
@@ -875,15 +943,6 @@
 	function technicalPolicy() {
 		return technicalVideo;
 	}
-
-	function jobStageLabel(value: unknown): string {
-		const currentStatus = typeof value === 'string' ? value.toLowerCase() : '';
-		if (currentStatus === 'queued') return 'Waiting for a computer';
-		if (currentStatus === 'starting') return 'Opening the episode';
-		if (currentStatus === 'running') return 'Making test moments';
-		if (currentStatus === 'stopping') return 'Stopping safely';
-		return 'Preparing the test';
-	}
 </script>
 
 <svelte:head>
@@ -991,13 +1050,72 @@
 					You can leave this page open. The next screen appears when it is ready.
 				</p>
 			</section>
+		{:else if scopeActivity && scopeActivityJob}
+			<section
+				class="scope-activity-room"
+				aria-labelledby="scope-activity-heading"
+				aria-live="polite"
+			>
+				<div class="scope-activity-room__copy">
+					<p class="eyebrow">
+						{scopeActivityFailure
+							? 'Related sample needs attention'
+							: scopeActivityReady
+								? 'Related sample ready'
+								: 'Related sample in progress'}
+					</p>
+					<h1 id="scope-activity-heading">
+						{scopeActivityFailure
+							? `The ${scopeActivityOwnerTitle} sample needs attention`
+							: scopeActivityReady
+								? `The ${scopeActivityOwnerTitle} sample is ready`
+								: scopeActivityOwnerKind === 'show'
+									? 'A show-level sample is running'
+									: 'A season sample is running'}
+					</h1>
+					<p class="lede">
+						{scopeActivityOwnerTitle} owns this shared test. {scopeName} has no separate sample running,
+						so its saved settings are not being used for this work.
+					</p>
+				</div>
+				<div class="scope-activity-facts">
+					<div><span>Activity scope</span><strong>{scopeActivityOwnerTitle}</strong></div>
+					<div><span>Requested target</span><strong>{scopeActivityTargetLabel}</strong></div>
+					<div>
+						<span>Target mode</span><strong
+							>{calibrationTargetModeLabel(scopeTargetContract)}</strong
+						>
+					</div>
+					<div>
+						<span>Resolution</span><strong>{calibrationResolutionLabel(scopeTargetContract)}</strong
+						>
+					</div>
+					<div><span>Current step</span><strong>{scopeActivityStage}</strong></div>
+					<div>
+						<span>Step progress</span><strong>{scopeActivityWork || scopeActivityLiveness}</strong>
+					</div>
+					<div class:telemetry-attention={scopeActivityEta.tone === 'attention'}>
+						<span>Estimated remaining</span><strong>{scopeActivityEta.value}</strong>
+						<small>{scopeActivityEta.detail}</small>
+					</div>
+					<div><span>Computer</span><strong>{scopeActivityWorker}</strong></div>
+					<div><span>Time so far</span><strong>{scopeActivityElapsed}</strong></div>
+				</div>
+				<div class="scope-activity-actions">
+					<a class="primary-button" href={scopeActivityHref}
+						>Open {scopeActivityOwnerKind} test
+						<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
+					</a>
+					<a class="secondary-button" href={resolve('/ops')}>Open Activity</a>
+				</div>
+			</section>
 		{:else if showGoalScreen}
 			<section class="goal-room">
 				<div class="goal-intro">
 					<p class="eyebrow">{scopeTitle}</p>
 					<h1>
 						{retryMode
-							? 'Choose a different size'
+							? 'Choose a size and settings'
 							: isSeriesScope
 								? `Choose one size for all ${seriesSeasonCount} ${seriesSeasonLabel}`
 								: `Choose a size for ${identity.season}`}
@@ -1162,8 +1280,16 @@
 								>
 							</div>
 						{/if}
+						<div><span>Current step</span><strong>{activeSampleStage}</strong></div>
 						<div>
-							<span>Current step</span><strong>{jobStageLabel(activeSampleJob.status)}</strong>
+							<span>Step progress</span><strong>{activeSampleWork || activeSampleLiveness}</strong>
+						</div>
+						<div
+							class="active-fact--eta"
+							class:telemetry-attention={activeSampleEta.tone === 'attention'}
+						>
+							<span>Estimated remaining</span><strong>{activeSampleEta.value}</strong>
+							<small>{activeSampleEta.detail}</small>
 						</div>
 						<div>
 							<span>Computer</span><strong
@@ -1801,24 +1927,50 @@
 						>
 					{/if}
 				</div>
+				{#if humanState.recoveryKind === 'test' && !targetConstraint}
+					<div class="recovery-plan" aria-label="Saved test plan">
+						<div><span>Test scope</span><strong>{recoveryScopeTitle}</strong></div>
+						<div><span>Saved target</span><strong>{sizeTargetLabel}</strong></div>
+						<div>
+							<span>Target mode</span><strong
+								>{calibrationTargetModeLabel(exactTargetContract)}</strong
+							>
+						</div>
+						<div>
+							<span>Resolution</span><strong
+								>{calibrationResolutionLabel(exactTargetContract)}</strong
+							>
+						</div>
+						<div class="recovery-plan__computer">
+							<span>Computer</span><strong>{recoveryWorker}</strong>
+						</div>
+					</div>
+				{/if}
 				{#if humanState.recoveryKind === 'season' && finishedEpisodeCount > 0}
 					<div class="recovery-count">
 						<strong>{finishedEpisodeCount} of {episodeCount}</strong>
 						<span>episodes already made</span>
 					</div>
 				{/if}
-				<button
-					class="primary-button"
-					type="button"
-					onclick={() => (targetConstraint ? chooseDifferentSize() : recoverSeason())}
-				>
-					{targetConstraint?.recoveryLabel ||
-						(recoveryNeedsAdjustment
-							? 'Review retry'
-							: humanState.recoveryKind === 'test'
-								? 'Retry the sample'
-								: 'Retry unfinished episodes')}
-				</button>
+				<div class="help-actions">
+					<button
+						class="primary-button"
+						type="button"
+						onclick={() => (targetConstraint ? chooseDifferentSize() : recoverSeason())}
+					>
+						{targetConstraint?.recoveryLabel ||
+							(recoveryNeedsAdjustment
+								? 'Review retry'
+								: humanState.recoveryKind === 'test'
+									? 'Retry same test'
+									: 'Retry unfinished episodes')}
+					</button>
+					{#if humanState.recoveryKind === 'test' && !targetConstraint}
+						<button class="secondary-button" type="button" onclick={chooseDifferentSize}>
+							Choose a different size or settings
+						</button>
+					{/if}
+				</div>
 			</section>
 		{/if}
 
@@ -3877,6 +4029,7 @@
 	.loading-room,
 	.working-room,
 	.goal-room,
+	.scope-activity-room,
 	.active-room,
 	.compare-room,
 	.ready-room,
@@ -3892,6 +4045,69 @@
 		max-width: none;
 		min-height: 0;
 		padding: 24px;
+	}
+
+	.scope-activity-room {
+		display: grid;
+		gap: 20px;
+	}
+
+	.scope-activity-room__copy {
+		display: grid;
+		gap: 8px;
+		max-width: 760px;
+	}
+
+	.scope-activity-facts,
+	.recovery-plan {
+		background: var(--mf-line-muted);
+		border: 1px solid var(--mf-line-muted);
+		border-radius: var(--mf-radius-3);
+		display: grid;
+		gap: 1px;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		overflow: hidden;
+	}
+
+	.scope-activity-facts div,
+	.recovery-plan div {
+		background: var(--mf-bg-panel-2);
+		display: grid;
+		gap: 3px;
+		min-width: 0;
+		padding: 13px 14px;
+	}
+
+	.scope-activity-facts span,
+	.recovery-plan span {
+		color: var(--mf-fg-tertiary);
+		font-size: 11px;
+	}
+
+	.scope-activity-facts strong,
+	.recovery-plan strong {
+		color: var(--mf-fg-primary);
+		font-size: 13px;
+		overflow-wrap: anywhere;
+	}
+
+	.scope-activity-facts small,
+	.active-facts small {
+		color: var(--mf-fg-tertiary);
+		font-size: 10px;
+		line-height: 1.4;
+	}
+
+	.scope-activity-facts .telemetry-attention,
+	.active-facts .telemetry-attention {
+		background: var(--mf-wait-bg);
+	}
+
+	.scope-activity-actions,
+	.help-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
 	}
 
 	.loading-room {
@@ -4170,25 +4386,21 @@
 	}
 
 	.active-facts {
-		background: var(--mf-bg-panel-2);
+		background: var(--mf-line-muted);
 		border: 1px solid var(--mf-line-muted);
 		border-radius: var(--mf-radius-3);
 		display: grid;
-		gap: 0;
+		gap: 1px;
 		grid-template-columns: repeat(3, minmax(0, 1fr));
 		margin-top: 8px;
 		padding: 0;
 	}
 
 	.active-facts div {
-		border-right: 1px solid var(--mf-line-muted);
+		background: var(--mf-bg-panel-2);
 		display: grid;
 		gap: 3px;
 		padding: 13px 14px;
-	}
-
-	.active-facts div:last-child {
-		border-right: 0;
 	}
 
 	.active-facts span,
@@ -4884,7 +5096,17 @@
 	}
 
 	.active-facts {
-		grid-template-columns: repeat(5, minmax(0, 1fr));
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+	}
+
+	@media (min-width: 761px) {
+		.active-facts .active-fact--eta {
+			grid-column: span 2;
+		}
+
+		.recovery-plan__computer {
+			grid-column: span 2;
+		}
 	}
 
 	.target-warning--constraint {
@@ -5187,6 +5409,8 @@
 		}
 
 		.active-facts,
+		.scope-activity-facts,
+		.recovery-plan,
 		.ready-summary {
 			grid-template-columns: 1fr;
 		}
@@ -5197,12 +5421,15 @@
 		}
 
 		.active-facts div,
+		.scope-activity-facts div,
+		.recovery-plan div,
 		.ready-summary div {
-			border-bottom: 1px solid var(--mf-line-muted);
 			border-right: 0;
 		}
 
 		.active-facts div:last-child,
+		.scope-activity-facts div:last-child,
+		.recovery-plan div:last-child,
 		.ready-summary div:last-child {
 			border-bottom: 0;
 		}
@@ -5243,6 +5470,7 @@
 		.loading-room,
 		.working-room,
 		.goal-room,
+		.scope-activity-room,
 		.active-room,
 		.compare-room,
 		.ready-room,

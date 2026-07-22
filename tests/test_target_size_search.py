@@ -106,7 +106,7 @@ class TargetSizeSearchTests(unittest.TestCase):
         self.assertEqual(trace["best_reachable_candidate"]["predicted_whole_episode_bytes"], 332_000_000)
         self.assertIn("quality floor", str(context.exception).lower())
 
-    def test_source_cap_below_target_band_is_infeasible_without_sampling(self) -> None:
+    def test_source_cap_below_target_band_reports_bound_exhaustion_without_sampling(self) -> None:
         ledger = self._ledger(target_bytes=300_000_000, source_size_bytes=1_000_000_000, max_encoded_percent=20)
         calls = 0
 
@@ -140,8 +140,93 @@ class TargetSizeSearchTests(unittest.TestCase):
             )
 
         self.assertEqual(calls, 0)
-        self.assertEqual(context.exception.status, "infeasible")
+        self.assertEqual(context.exception.status, "bound_exhausted")
         self.assertEqual(context.exception.trace["selection_reason"], "target_lower_bound_exceeds_source_relative_cap")
+
+    def test_size_search_expands_beyond_configured_crf_range_when_measurements_require_it(self) -> None:
+        ledger = self._ledger(target_bytes=225_000_000, source_size_bytes=3_000_000_000)
+        seen: list[int] = []
+
+        def run_sample(_source_path: Path, *, crf: float, **_: Any) -> SampleEncodeResult:
+            crf_int = int(crf)
+            seen.append(crf_int)
+            predicted_video_bytes = max(50_000_000, 2_025_000_000 - 40_000_000 * crf_int)
+            return SampleEncodeResult(
+                "VMAF",
+                94.0 - max(0, crf_int - 38) * 0.2,
+                predicted_video_bytes / 30_000_000,
+                30.0,
+                predicted_video_bytes,
+                f"crf {crf_int}",
+            )
+
+        result = search_target_size(
+            Path("/tmp/source.mkv"),
+            self._policy(),
+            source_codec="h264",
+            metric_name="vmaf",
+            metric_target=85.0,
+            min_metric_score=80.0,
+            preset=4,
+            pixel_format="yuv420p10le",
+            sample_every="8m",
+            sample_duration="20s",
+            min_crf=18,
+            max_crf=38,
+            search_max_crf=63,
+            svt_params=[],
+            video_filter=None,
+            stream_budget_ledger=ledger,
+            transform_plan=self._transform_plan(),
+            process_controller=None,
+            host=None,
+            quality_temp_dir=None,
+            run_sample_encode=run_sample,
+        )
+
+        self.assertEqual(result.crf, 45.0)
+        self.assertIn(45, seen)
+        trace = result.target_size_trace or {}
+        self.assertEqual(trace["crf_bounds"]["configured_max_crf"], 38)
+        self.assertEqual(trace["crf_bounds"]["search_max_crf"], 63)
+        self.assertTrue(trace["crf_bounds"]["range_expanded"])
+        self.assertTrue(trace["crf_bounds"]["measured_beyond_configured"])
+        self.assertTrue(trace["crf_bounds"]["selected_beyond_configured"])
+
+    def test_legacy_target_search_without_explicit_ceiling_preserves_saved_bound(self) -> None:
+        ledger = self._ledger(target_bytes=225_000_000, source_size_bytes=3_000_000_000)
+        seen: list[int] = []
+
+        with self.assertRaises(TargetSizeSearchError) as context:
+            search_target_size(
+                Path("/tmp/source.mkv"),
+                self._policy(),
+                source_codec="h264",
+                metric_name="vmaf",
+                metric_target=85.0,
+                min_metric_score=80.0,
+                preset=4,
+                pixel_format="yuv420p10le",
+                sample_every="8m",
+                sample_duration="20s",
+                min_crf=18,
+                max_crf=38,
+                svt_params=[],
+                video_filter=None,
+                stream_budget_ledger=ledger,
+                transform_plan=self._transform_plan(),
+                process_controller=None,
+                host=None,
+                quality_temp_dir=None,
+                run_sample_encode=lambda _path, *, crf, **_kwargs: (
+                    seen.append(int(crf))
+                    or SampleEncodeResult("VMAF", 92.0, 50.0, 30.0, 500_000_000, "")
+                ),
+            )
+
+        self.assertEqual(context.exception.status, "bound_exhausted")
+        self.assertLessEqual(max(seen), 38)
+        self.assertFalse(context.exception.trace["crf_bounds"]["range_expanded"])
 
     def test_arithmetic_impossible_budget_reports_structured_infeasibility(self) -> None:
         ledger = self._ledger(target_bytes=3_000_000, source_size_bytes=1_000_000_000)
@@ -177,7 +262,14 @@ class TargetSizeSearchTests(unittest.TestCase):
 
     def test_non_monotonic_curve_exhausts_bounded_search_as_needs_review(self) -> None:
         ledger = self._ledger(target_bytes=300_000_000, source_size_bytes=1_000_000_000)
-        sizes = {31: 100_000_000, 18: 500_000_000, 24: 360_000_000, 28: 370_000_000, 30: 380_000_000, 29: 390_000_000}
+        sizes = {
+            18: 500_000_000,
+            24: 360_000_000,
+            28: 370_000_000,
+            30: 380_000_000,
+            31: 100_000_000,
+            38: 400_000_000,
+        }
 
         with self.assertRaises(TargetSizeSearchError) as context:
             search_target_size(

@@ -14,6 +14,11 @@ import type {
 import {
 	activeSeasonCards,
 	approvalGuardFromMessage,
+	calibrationEtaSummary,
+	calibrationJobTargetContract,
+	calibrationLivenessLabel,
+	calibrationStageLabel,
+	calibrationWorkLabel,
 	catalogWarningNotice,
 	compareRiskSummary,
 	currentOperatorIntent,
@@ -28,6 +33,8 @@ import {
 	measuredFollowupRequest,
 	librarySeasonState,
 	normalizeReviewPairs,
+	overlappingCalibrationActivity,
+	plainFailureMessage,
 	resolvedTargetSummary,
 	reviewFeedbackIntent,
 	reviewFeedbackRequest,
@@ -935,6 +942,42 @@ describe('season experience translation', () => {
 			recoveryLabel: 'Choose a roomier goal',
 			detail: expect.stringContaining('VMAF floor of 93')
 		});
+
+		expect(
+			targetConstraintSummary(
+				folder({
+					quality_risk: {
+						target_size_search: {
+							status: 'bound_exhausted',
+							selection_reason: 'smallest_quality_safe_candidate_over_target_band'
+						}
+					}
+				})
+			)
+		).toMatchObject({
+			kind: 'bound_exhausted',
+			recoveryLabel: 'Review size and settings',
+			detail: expect.stringContaining('Retrying that saved test would repeat the same limit')
+		});
+	});
+
+	it('recognizes legacy CRF-bound failures before the generic missing-review message', () => {
+		const failedFolder = folder({
+			calibration: { job_id: 'legacy-bound-failure' },
+			review_gate: { status: 'missing_review_media' },
+			failed_target_size_search: {
+				status: 'infeasible',
+				selection_reason: 'smallest_quality_safe_candidate_over_target_band'
+			}
+		});
+
+		expect(targetConstraintSummary(failedFolder, status)).toMatchObject({
+			kind: 'bound_exhausted',
+			title: 'The test reached a configured limit.'
+		});
+		expect(plainFailureMessage(failedFolder, status)).toContain(
+			'Retrying that saved test would repeat the same limit'
+		);
 	});
 
 	it('preserves typed size intent while recording structured review feedback', () => {
@@ -1066,5 +1109,102 @@ describe('season experience translation', () => {
 			confirmHighImpact: true,
 			confirmSizeTradeoff: true
 		});
+	});
+
+	it('keeps related show activity separate from a season target', () => {
+		const activity = overlappingCalibrationActivity(
+			{
+				...status,
+				scope_activity_status: 'running',
+				scope_activity: {
+					schema_version: 1,
+					relation: 'ancestor',
+					job: {
+						job_id: 'show-test',
+						prefix: 'tv/Big Brother (US)',
+						status: 'running',
+						target_contract: {
+							schema_version: 1,
+							target_size_bytes: 225_000_000,
+							mode: 'absolute',
+							source: 'operator',
+							resolution_mode: 'source'
+						}
+					}
+				}
+			},
+			card.prefix
+		);
+
+		expect(activity?.relation).toBe('ancestor');
+		expect(calibrationJobTargetContract(activity?.job)?.target_size_bytes).toBe(225_000_000);
+	});
+
+	it('describes actual calibration stages, bounded work, and heartbeat state', () => {
+		const job = {
+			job_id: 'test-1',
+			prefix: card.prefix,
+			status: 'running',
+			progress: {
+				schema_version: 1 as const,
+				stage: 'building_review',
+				liveness: 'reporting' as const,
+				work: { completed: 2, total: 3 }
+			}
+		};
+
+		expect(calibrationStageLabel(job)).toBe('Building comparison clips');
+		expect(calibrationWorkLabel(job)).toBe('2 of 3 review steps');
+		expect(calibrationLivenessLabel(job)).toBe('Computer is reporting normally');
+	});
+
+	it('renders historical ETA ranges without false precision', () => {
+		const summary = calibrationEtaSummary({
+			job_id: 'test-2',
+			prefix: card.prefix,
+			status: 'running',
+			progress: {
+				schema_version: 1,
+				liveness: 'reporting',
+				estimate: {
+					kind: 'historical_range',
+					sample_size: 5,
+					remaining_seconds_low: 480,
+					remaining_seconds_high: 1020,
+					total_seconds_low: 1200,
+					total_seconds_high: 1800,
+					longer_than_recent_runs: false,
+					confidence: 'moderate',
+					basis: 'Comparable completed tests'
+				}
+			}
+		});
+
+		expect(summary.value).toBe('8 min–20 min left');
+		expect(summary.detail).toContain('5 comparable completed tests');
+		expect(summary.tone).toBe('quiet');
+	});
+
+	it('calls out missing heartbeats instead of inventing an ETA', () => {
+		expect(
+			calibrationEtaSummary({
+				job_id: 'test-3',
+				prefix: card.prefix,
+				status: 'running',
+				progress: { schema_version: 1, liveness: 'not_reporting' }
+			})
+		).toMatchObject({ value: 'Progress signal lost', tone: 'attention' });
+	});
+
+	it('uses terminal copy instead of stale heartbeat language', () => {
+		const completed = {
+			job_id: 'test-4',
+			prefix: card.prefix,
+			status: 'completed',
+			progress: { schema_version: 1 as const, liveness: 'not_reporting' as const }
+		};
+
+		expect(calibrationLivenessLabel(completed)).toBe('Test finished');
+		expect(calibrationEtaSummary(completed)).toMatchObject({ value: 'Finished', tone: 'quiet' });
 	});
 });

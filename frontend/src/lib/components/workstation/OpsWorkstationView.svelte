@@ -28,6 +28,7 @@
 		opsWorkLabel,
 		rowRecoveryLabel,
 		rowRecoveryTitle,
+		RefreshCoordinator,
 		workerCapabilitiesSummary,
 		type OpsActionId,
 		type OpsQueueRow
@@ -79,7 +80,8 @@
 	let confirmationAction = $state<OpsActionId | null>(null);
 	let actionMessage = $state('');
 	let actionError = $state('');
-	let refreshPending = $state(false);
+	const refreshCoordinator = new RefreshCoordinator();
+	let manualRefreshPending = $state(false);
 	let refreshError = $state('');
 	let lastRefreshAt = $state<Date | null>(null);
 	let hostPasswords = $state<Record<string, string>>({});
@@ -214,27 +216,33 @@
 	}
 
 	async function refreshOps({ quiet = false }: { quiet?: boolean } = {}) {
-		if (refreshPending) return;
-		refreshPending = true;
+		const refreshKind = quiet ? 'quiet' : 'manual';
+		const refreshId = refreshCoordinator.start(refreshKind);
+		if (refreshId === null) return;
+
 		if (!quiet) {
+			manualRefreshPending = true;
 			actionMessage = '';
 			actionError = '';
 		}
+
 		refreshError = '';
 		try {
 			await onRefresh();
+			if (!refreshCoordinator.finish(refreshKind, refreshId)) return;
 			lastRefreshAt = new Date();
 			if (!quiet) actionMessage = 'Activity refreshed.';
 		} catch (error) {
+			if (!refreshCoordinator.finish(refreshKind, refreshId)) return;
 			refreshError = error instanceof Error ? error.message : 'Refresh failed.';
 			if (!quiet) actionError = refreshError;
 		} finally {
-			refreshPending = false;
+			if (!quiet) manualRefreshPending = false;
 		}
 	}
 
 	function refreshCopy(): string {
-		if (refreshPending) return 'refreshing';
+		if (manualRefreshPending) return 'refreshing';
 		if (!lastRefreshAt)
 			return liveRefreshInterval ? 'watching active work' : 'manual refresh while idle';
 		const refreshedAt = lastRefreshAt.toLocaleTimeString([], {
@@ -324,10 +332,10 @@
 					<button
 						type="button"
 						class="control control--compact ops-header__mobile-refresh"
-						disabled={refreshPending}
+						disabled={manualRefreshPending}
+						aria-busy={manualRefreshPending}
 						title="Refresh activity now"
-						onclick={() => refreshOps()}
-						>{refreshPending ? 'Refreshing' : 'Refresh activity'}</button
+						onclick={() => refreshOps()}>Refresh activity</button
 					>
 				</div>
 				<div class="ops-header__status ops-header__status--{readiness.tone}">
@@ -339,9 +347,10 @@
 					<button
 						type="button"
 						class="control control--compact"
-						disabled={refreshPending}
+						disabled={manualRefreshPending}
+						aria-busy={manualRefreshPending}
 						title="Refresh activity now"
-						onclick={() => refreshOps()}>{refreshPending ? 'Refreshing' : 'Refresh'}</button
+						onclick={() => refreshOps()}>Refresh</button
 					>
 				</div>
 			</header>

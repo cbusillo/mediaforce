@@ -39,6 +39,8 @@ LEGACY_FIXTURE_SCAN_IDS = ("fixture-scan",)
 FOLDER_PREFIX = "tv/Example Show/Season 1"
 SAMPLING_PREFIX = "tv/Sampling Show/Season 1"
 RETRY_PREFIX = "tv/Retry Show/Season 1"
+SHARED_TEST_PREFIX = "tv/Shared Test Show/Season 1"
+SHARED_TEST_SERIES_PREFIX = "tv/Shared Test Show"
 COMPLETED_PREFIX = "movies/Archive Ready"
 BLOCKED_COMPLETED_PREFIX = "movies/Blocked Cleanup"
 REVIEW_READY_PREFIX = "tv/Review Ready/Season 1"
@@ -47,6 +49,7 @@ APPROVED_PREFIX = "tv/Approved Show/Season 1"
 MISSED_TARGET_PREFIX = "tv/Overshoot Show/Season 1"
 UNDER_TARGET_PREFIX = "tv/Undershoot Show/Season 1"
 INFEASIBLE_PREFIX = "tv/Infeasible Goal/Season 1"
+BOUND_EXHAUSTED_PREFIX = "tv/Search Limit/Season 1"
 QUALITY_CONFLICT_PREFIX = "tv/Quality Conflict/Season 1"
 ENCODE_RUNNING_PREFIX = "tv/Encoding Show/Season 1"
 ENCODE_RETRY_PREFIX = "tv/Failed Encode/Season 1"
@@ -75,6 +78,7 @@ FIXTURE_PREFIXES = (
     FOLDER_PREFIX,
     SAMPLING_PREFIX,
     RETRY_PREFIX,
+    SHARED_TEST_PREFIX,
     COMPLETED_PREFIX,
     BLOCKED_COMPLETED_PREFIX,
     REVIEW_READY_PREFIX,
@@ -83,6 +87,7 @@ FIXTURE_PREFIXES = (
     MISSED_TARGET_PREFIX,
     UNDER_TARGET_PREFIX,
     INFEASIBLE_PREFIX,
+    BOUND_EXHAUSTED_PREFIX,
     QUALITY_CONFLICT_PREFIX,
     ENCODE_RUNNING_PREFIX,
     ENCODE_RETRY_PREFIX,
@@ -287,6 +292,11 @@ def _job(
     sample_item: dict[str, Any],
     error: str | None = None,
     result: dict[str, Any] | None = None,
+    created_at: str | None = None,
+    started_at: str | None = None,
+    heartbeat_at: str | None = None,
+    finished_at: str | None = None,
+    progress: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     timestamp = _now()
     return {
@@ -301,13 +311,33 @@ def _job(
         "sample_item_json": json.dumps(sample_item, sort_keys=True),
         "result_json": json.dumps(result, sort_keys=True) if result is not None else None,
         "error": error,
-        "created_at": timestamp,
-        "started_at": timestamp if status in {"running", "failed", "stopped"} else None,
-        "finished_at": timestamp
-        if status in {"failed", "stopped", "completed"}
-        else None,
+        "created_at": created_at or timestamp,
+        "started_at": started_at
+        if started_at is not None
+        else timestamp if status in {"running", "failed", "stopped"} else None,
+        "heartbeat_at": heartbeat_at,
+        "progress_json": json.dumps(progress, sort_keys=True) if progress is not None else None,
+        "finished_at": finished_at
+        if finished_at is not None
+        else timestamp if status in {"failed", "stopped", "completed"} else None,
         "updated_at": timestamp,
     }
+
+
+def _policy_with_target(policy: dict[str, Any], target_size_mb: float) -> dict[str, Any]:
+    resolved = json.loads(json.dumps(policy))
+    video = resolved.setdefault("video", {})
+    video.update(
+        {
+            "target_size_mb": target_size_mb,
+            "target_size_bytes": round(target_size_mb * 1_000_000),
+            "size_goal_mode": "absolute",
+            "size_goal_source": "operator",
+            "resolution_intent_mode": "source",
+            "target_runtime_minutes": 45,
+        }
+    )
+    return resolved
 
 
 def _target_search_failure(status: str, selection_reason: str) -> dict[str, Any]:
@@ -935,6 +965,17 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             _library_item(
                 project_root=project_root,
                 media_root="tv",
+                rel_path="tv/Search Limit/Season 1/Episode 01.mkv",
+                size_bytes=7 * 1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=81,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture target-search bound state for browser QA.",
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
                 rel_path="tv/Encoding Show/Season 1/Episode 01.mkv",
                 size_bytes=9 * 1024**3,
                 status="approved",
@@ -1216,6 +1257,17 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 recommendation_reason="Fixture Other promotion state for browser QA.",
                 age_days=760,
             ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
+                rel_path="tv/Shared Test Show/Season 1/Episode 01.mkv",
+                size_bytes=7 * 1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=84,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture show-level sample shown from a season route.",
+            ),
         ]
         rows.extend(
             _library_item(
@@ -1437,6 +1489,11 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
         )
 
         policy = config.resolve_policy(rows[0]["rel_path"])
+        sampling_policy = _policy_with_target(policy, 225)
+        retry_policy = _policy_with_target(policy, 225)
+        fixture_now = datetime.now(UTC)
+        active_started_at = (fixture_now - timedelta(minutes=15)).isoformat(timespec="seconds")
+        heartbeat_at = fixture_now.isoformat(timespec="seconds")
         for item_id, row, job in (
             (
                 inserted_ids[4],
@@ -1449,7 +1506,20 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                         "library_item_id": inserted_ids[4],
                         **rows[4],
                         "source_size_bytes": rows[4]["size_bytes"],
-                        "resolved_policy": policy,
+                        "resolved_policy": sampling_policy,
+                    },
+                    started_at=active_started_at,
+                    heartbeat_at=heartbeat_at,
+                    progress={
+                        "schema_version": 1,
+                        "stage": "building_review",
+                        "stage_started_at": (
+                            fixture_now - timedelta(minutes=3)
+                        ).isoformat(timespec="seconds"),
+                        "last_progress_at": (
+                            fixture_now - timedelta(seconds=20)
+                        ).isoformat(timespec="seconds"),
+                        "work": {"completed": 2, "total": 3},
                     },
                 ),
             ),
@@ -1464,7 +1534,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                         "library_item_id": inserted_ids[5],
                         **rows[5],
                         "source_size_bytes": rows[5]["size_bytes"],
-                        "resolved_policy": policy,
+                        "resolved_policy": retry_policy,
                     },
                     error="Fixture sample failed so retry state is inspectable.",
                 ),
@@ -1513,9 +1583,102 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                     ),
                 ),
             ),
+            (
+                ids_by_rel_path["tv/Search Limit/Season 1/Episode 01.mkv"],
+                rows_by_prefix[BOUND_EXHAUSTED_PREFIX],
+                _job(
+                    job_id="web-smoke-bound-exhausted",
+                    prefix=BOUND_EXHAUSTED_PREFIX,
+                    status="failed",
+                    sample_item={
+                        "library_item_id": ids_by_rel_path[
+                            "tv/Search Limit/Season 1/Episode 01.mkv"
+                        ],
+                        **rows_by_prefix[BOUND_EXHAUSTED_PREFIX],
+                        "source_size_bytes": rows_by_prefix[BOUND_EXHAUSTED_PREFIX]["size_bytes"],
+                        "resolved_policy": policy,
+                    },
+                    error="The configured target-size search bound was exhausted.",
+                    result=_target_search_failure(
+                        "bound_exhausted",
+                        "smallest_quality_safe_candidate_over_target_band",
+                    ),
+                ),
+            ),
         ):
             _ = item_id, row
             connection.execute(calibration_jobs.insert().values(**job))
+
+        sampling_sample_item = {
+            "library_item_id": inserted_ids[4],
+            **rows[4],
+            "source_size_bytes": rows[4]["size_bytes"],
+            "resolved_policy": sampling_policy,
+        }
+        for index, duration_minutes in enumerate((20, 30, 40), start=1):
+            history_started = fixture_now - timedelta(days=index, minutes=duration_minutes)
+            history_finished = history_started + timedelta(minutes=duration_minutes)
+            connection.execute(
+                calibration_jobs.insert().values(
+                    **_job(
+                        job_id=f"web-smoke-sampling-history-{index}",
+                        prefix=f"tv/Sampling History {index}/Season 1",
+                        status="completed",
+                        sample_item=sampling_sample_item,
+                        created_at=history_started.isoformat(timespec="seconds"),
+                        started_at=history_started.isoformat(timespec="seconds"),
+                        finished_at=history_finished.isoformat(timespec="seconds"),
+                    )
+                )
+            )
+
+        shared_row = rows_by_prefix[SHARED_TEST_PREFIX]
+        shared_id = ids_by_rel_path[str(shared_row["rel_path"])]
+        shared_sample_item = {
+            "library_item_id": shared_id,
+            **shared_row,
+            "source_size_bytes": shared_row["size_bytes"],
+            "resolved_policy": _policy_with_target(policy, 314.6),
+        }
+        stale_started = fixture_now - timedelta(minutes=45)
+        stale_finished = fixture_now - timedelta(minutes=30)
+        connection.execute(
+            calibration_jobs.insert().values(
+                **_job(
+                    job_id="web-smoke-shared-stale-season",
+                    prefix=SHARED_TEST_PREFIX,
+                    status="completed",
+                    sample_item=shared_sample_item,
+                    created_at=stale_started.isoformat(timespec="seconds"),
+                    started_at=stale_started.isoformat(timespec="seconds"),
+                    finished_at=stale_finished.isoformat(timespec="seconds"),
+                )
+            )
+        )
+        shared_sample_item["resolved_policy"] = sampling_policy
+        connection.execute(
+            calibration_jobs.insert().values(
+                **_job(
+                    job_id="web-smoke-shared-show-active",
+                    prefix=SHARED_TEST_SERIES_PREFIX,
+                    status="starting",
+                    sample_item=shared_sample_item,
+                    created_at=active_started_at,
+                    started_at=active_started_at,
+                    heartbeat_at=heartbeat_at,
+                    progress={
+                        "schema_version": 1,
+                        "stage": "searching_target",
+                        "stage_started_at": (
+                            fixture_now - timedelta(minutes=8)
+                        ).isoformat(timespec="seconds"),
+                        "last_progress_at": (
+                            fixture_now - timedelta(seconds=10)
+                        ).isoformat(timespec="seconds"),
+                    },
+                )
+            )
+        )
 
         encode_rows = [
             _encode_job(
@@ -1693,13 +1856,19 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Folder Studio sampling fixture",
                 "route": "/folders/tv/Sampling%20Show/Season%201",
                 "marker": "Sampling Show",
-                "stageMarker": "Making your test",
+                "stageMarker": "ESTIMATED REMAINING",
+            },
+            {
+                "label": "Folder Studio shared-scope sample fixture",
+                "route": "/folders/tv/Shared%20Test%20Show/Season%201",
+                "marker": "Shared Test Show",
+                "stageMarker": "A show-level sample is running",
             },
             {
                 "label": "Folder Studio retry fixture",
                 "route": "/folders/tv/Retry%20Show/Season%201",
                 "marker": "Retry Show",
-                "stageMarker": "The test stopped",
+                "stageMarker": "Retry same test",
             },
             {
                 "label": "Completed cleanup fixture",
@@ -1764,6 +1933,12 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "route": "/folders/tv/Quality%20Conflict/Season%201",
                 "marker": "Quality Conflict",
                 "stageMarker": "This size conflicts with the quality floor",
+            },
+            {
+                "label": "Folder Studio target-search-bound fixture",
+                "route": "/folders/tv/Search%20Limit/Season%201",
+                "marker": "Search Limit",
+                "stageMarker": "The test reached a configured limit",
             },
             {
                 "label": "Folder Studio active processing fixture",

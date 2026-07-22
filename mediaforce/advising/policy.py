@@ -353,7 +353,7 @@ def normalize_video_policy_value(key: str, value: JSONValue, base_value: JSONVal
         return round(clamp_float(value, minimum=0.1, maximum=5.0), 2)
     if key in {"sample_every", "sample_duration"}:
         return normalize_duration_like(value, fallback=str(base_value or ""))
-    if key in {"min_crf", "max_crf"}:
+    if key in {"min_crf", "max_crf", "target_search_max_crf"}:
         return clamp_int(value, minimum=0, maximum=63)
     if key == "max_encoded_percent":
         return clamp_int(value, minimum=1, maximum=100)
@@ -453,11 +453,15 @@ def finalize_video_policy_updates(updates: dict[str, Any], base_video: dict[str,
         floor = float_value(finalized.get("min_target_xpsnr", base_video.get("min_target_xpsnr", target)))
         finalized["target_xpsnr"] = round(clamp_float(target, minimum=25.0, maximum=41.0), 2)
         finalized["min_target_xpsnr"] = round(min(clamp_float(floor, minimum=20.0, maximum=40.0), finalized["target_xpsnr"]), 2)
-    if "min_crf" in finalized or "max_crf" in finalized:
+    if "min_crf" in finalized or "max_crf" in finalized or "target_search_max_crf" in finalized:
         min_crf = int_value(finalized.get("min_crf", base_video.get("min_crf", 18)))
         max_crf = int_value(finalized.get("max_crf", base_video.get("max_crf", 38)))
+        target_search_max_crf = int_value(
+            finalized.get("target_search_max_crf", base_video.get("target_search_max_crf", max_crf))
+        )
         finalized["min_crf"] = min(min_crf, max_crf)
         finalized["max_crf"] = max(min_crf, max_crf)
+        finalized["target_search_max_crf"] = max(finalized["max_crf"], target_search_max_crf)
     return finalized
 
 

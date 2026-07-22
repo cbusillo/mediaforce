@@ -430,6 +430,75 @@ export interface EncodeQueueJob {
 	progress?: EncodeJobProgressTelemetry | null;
 }
 
+export interface CalibrationTargetContract {
+	schema_version: 1;
+	target_size_bytes: number;
+	mode: string;
+	source: string;
+	target_runtime_minutes?: number | null;
+	sample_tolerance_percent?: number | null;
+	final_tolerance_percent?: number | null;
+	resolution_mode: string;
+	max_height?: number | null;
+}
+
+export interface CalibrationProgressEstimate {
+	kind: 'historical_range';
+	sample_size: number;
+	remaining_seconds_low: number;
+	remaining_seconds_high: number;
+	total_seconds_low: number;
+	total_seconds_high: number;
+	longer_than_recent_runs: boolean;
+	confidence: 'limited' | 'moderate';
+	basis: string;
+}
+
+export interface CalibrationJobProgress {
+	schema_version: 1;
+	stage?: string;
+	stage_started_at?: string | null;
+	last_progress_at?: string | null;
+	compatibility_key?: string;
+	heartbeat_at?: string | null;
+	heartbeat_age_seconds?: number | null;
+	elapsed_seconds?: number | null;
+	liveness?: 'queued' | 'starting' | 'reporting' | 'delayed' | 'not_reporting';
+	work?: { completed: number; total: number } | null;
+	estimate?: CalibrationProgressEstimate | null;
+	terminal_status?: string;
+	total_elapsed_seconds?: number;
+}
+
+export interface CalibrationJobPayload {
+	job_id?: string;
+	prefix?: string;
+	status: string;
+	lane?: string;
+	mode?: string;
+	action?: string;
+	host?: Record<string, unknown>;
+	notes?: string;
+	policy?: Record<string, unknown>;
+	sample_item?: Record<string, unknown>;
+	result?: Record<string, unknown> | null;
+	error?: string | null;
+	created_at?: string | null;
+	started_at?: string | null;
+	finished_at?: string | null;
+	updated_at?: string | null;
+	heartbeat_at?: string | null;
+	progress?: CalibrationJobProgress | null;
+	activity_scope?: MediaScopePayload;
+	target_contract?: CalibrationTargetContract | null;
+}
+
+export interface CalibrationScopeActivityPayload {
+	schema_version: 1;
+	relation: 'ancestor' | 'descendant';
+	job: CalibrationJobPayload;
+}
+
 export interface EncodeQueueTelemetry {
 	aggregate_speed?: number | null;
 	eta_seconds?: number | null;
@@ -1146,7 +1215,7 @@ export interface QualityRiskOperatorRecord {
 export interface QualityRiskTargetSizeSearch {
 	trace_id?: string;
 	schema_version?: number;
-	status?: 'selected' | 'infeasible' | 'quality_conflict' | 'needs_review';
+	status?: 'selected' | 'infeasible' | 'bound_exhausted' | 'quality_conflict' | 'needs_review';
 	selection_reason?: string | null;
 	curve_shape?: 'single_point' | 'monotonic' | 'non_monotonic' | null;
 	candidate_count?: number;
@@ -1162,6 +1231,11 @@ export interface QualityRiskTargetSizeSearch {
 	predicted_whole_episode_bytes?: number | null;
 	within_sample_band?: boolean | null;
 	transform_plan_id?: string | null;
+	configured_max_crf?: number | null;
+	search_max_crf?: number | null;
+	range_expanded?: boolean;
+	measured_beyond_configured?: boolean;
+	selected_beyond_configured?: boolean;
 }
 
 export interface QualityRiskPreTestInstruction {
@@ -1228,12 +1302,13 @@ export interface FolderPayload {
 	stream_budget_ledger?: StreamBudgetLedgerPayload;
 	size_goal_options?: SizeGoalOptionPayload[];
 	quality_risk?: QualityRiskPayload | null;
+	failed_target_size_search?: QualityRiskTargetSizeSearch | null;
 	approved_season_shortcut?: Record<string, unknown> | null;
 	series_context?: { prefix: string; title: string } | null;
 	pending_proposal?: Record<string, unknown> | null;
 	review_gate?: Record<string, unknown>;
 	calibration_queue?: Record<string, unknown>;
-	calibration_job?: Record<string, unknown> | null;
+	calibration_job?: CalibrationJobPayload | null;
 	folder_scan_job?: Record<string, unknown> | null;
 	metric_support: MetricSupport;
 	metric_status_copy: string;
@@ -1273,9 +1348,13 @@ export interface FolderStatusPayload {
 	media_scope: MediaScopePayload;
 	polling_active: boolean;
 	calibration_status: string;
+	exact_calibration_status?: string;
+	scope_activity_status?: string;
 	folder_scan_status: string;
-	calibration_job: Record<string, unknown> | null;
-	retryable_sample_job?: Record<string, unknown> | null;
+	calibration_job: CalibrationJobPayload | null;
+	exact_calibration_job?: CalibrationJobPayload | null;
+	scope_activity?: CalibrationScopeActivityPayload | null;
+	retryable_sample_job?: CalibrationJobPayload | null;
 	folder_scan_job: Record<string, unknown> | null;
 	workflow_state?: FolderWorkflowState | null;
 }

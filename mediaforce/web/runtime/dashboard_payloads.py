@@ -12,6 +12,7 @@ from mediaforce.library.media_scopes import resolve_media_scope
 from mediaforce.library.movie_library import adapt_movie_workflow_payload, load_movie_scope_payload
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.candidate_selection import encode_candidate_decisions, project_candidates, workflow_eligibility
+from mediaforce.web.runtime.job_runtime import calibration_job_public_payload, calibration_scope_relation
 
 
 def dashboard_summary_payload(
@@ -100,7 +101,8 @@ def folder_status_payload(
         config: MediaforceConfig,
         normalized_prefix: str,
         *,
-        load_job_state: Any,
+        load_exact_job_state: Any,
+        load_overlapping_job_state: Any,
         load_retryable_sample_job_state: Any,
         load_scan_status: Any,
         load_active_encode_job_for_prefix: Any,
@@ -111,7 +113,22 @@ def folder_status_payload(
             normalized_prefix,
             library_types=config.library_type_map,
         )
-        calibration_job = load_job_state(connection, config, normalized_prefix)
+        exact_calibration_job = calibration_job_public_payload(
+            connection,
+            config,
+            load_exact_job_state(connection, config, normalized_prefix),
+        )
+        overlapping_calibration_job = calibration_job_public_payload(
+            connection,
+            config,
+            load_overlapping_job_state(connection, config, normalized_prefix),
+        )
+        scope_activity = _scope_activity_payload(
+            normalized_prefix,
+            exact_calibration_job,
+            overlapping_calibration_job,
+        )
+        legacy_calibration_job = overlapping_calibration_job or exact_calibration_job
         retryable_sample_job = load_retryable_sample_job_state(connection, config, normalized_prefix)
         active_encode_job = load_active_encode_job_for_prefix(connection, normalized_prefix)
         folder_scan_job = load_scan_status(connection, config, normalized_prefix)
@@ -138,7 +155,11 @@ def folder_status_payload(
                     members=list(movie_context.get("members") or []),
                 ) or workflow_state
     polling_active = bool(
-        (calibration_job and calibration_job.get("status") in {"queued", "running"})
+        (exact_calibration_job and exact_calibration_job.get("status") in {"queued", "starting", "running"})
+        or (
+            scope_activity
+            and scope_activity["job"].get("status") in {"queued", "starting", "running"}
+        )
         or (active_encode_job and active_encode_job.get("status") in {"queued", "retry_backoff", "running"})
         or (folder_scan_job and folder_scan_job.get("status") in {"queued", "running"})
     )
@@ -146,12 +167,36 @@ def folder_status_payload(
         "prefix": normalized_prefix,
         "media_scope": media_scope.to_payload(),
         "polling_active": polling_active,
-        "calibration_status": calibration_job.get("status") if calibration_job else "idle",
+        "calibration_status": legacy_calibration_job.get("status") if legacy_calibration_job else "idle",
+        "exact_calibration_status": exact_calibration_job.get("status") if exact_calibration_job else "idle",
+        "scope_activity_status": scope_activity["job"].get("status") if scope_activity else "idle",
         "folder_scan_status": folder_scan_job.get("status") if folder_scan_job else "idle",
-        "calibration_job": calibration_job,
+        "calibration_job": legacy_calibration_job,
+        "exact_calibration_job": exact_calibration_job,
+        "scope_activity": scope_activity,
         "retryable_sample_job": retryable_sample_job,
         "folder_scan_job": folder_scan_job,
         "workflow_state": workflow_state,
+    }
+
+
+def _scope_activity_payload(
+        route_prefix: str,
+        exact_job: dict[str, Any] | None,
+        overlapping_job: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if overlapping_job is None:
+        return None
+    if exact_job and overlapping_job.get("job_id") == exact_job.get("job_id"):
+        return None
+    owner_prefix = str(overlapping_job.get("prefix") or "")
+    relation = calibration_scope_relation(route_prefix, owner_prefix)
+    if relation not in {"ancestor", "descendant"}:
+        return None
+    return {
+        "schema_version": 1,
+        "relation": relation,
+        "job": overlapping_job,
     }
 
 

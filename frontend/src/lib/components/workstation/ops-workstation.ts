@@ -7,6 +7,7 @@ import type {
 import type { FooterSignal, ShellTone, StatusTile } from './shell-types';
 
 export type OpsQueueKind = 'encode' | 'sample' | 'proof';
+export type RefreshKind = 'quiet' | 'manual';
 export type OpsActionId =
 	| 'pause-encode'
 	| 'resume-encode'
@@ -48,6 +49,30 @@ export type OpsReadinessSummary = {
 	metricLabel: string;
 	metricValue: string;
 };
+
+export class RefreshCoordinator {
+	#nextId = 0;
+	#latestId = 0;
+	#quietInFlight = 0;
+	#manualInFlight = 0;
+
+	start(kind: RefreshKind): number | null {
+		if (kind === 'manual' && this.#manualInFlight > 0) return null;
+		if (kind === 'quiet' && (this.#quietInFlight > 0 || this.#manualInFlight > 0)) return null;
+
+		const id = ++this.#nextId;
+		this.#latestId = id;
+		if (kind === 'quiet') this.#quietInFlight += 1;
+		else this.#manualInFlight += 1;
+		return id;
+	}
+
+	finish(kind: RefreshKind, id: number): boolean {
+		if (kind === 'quiet') this.#quietInFlight = Math.max(0, this.#quietInFlight - 1);
+		else this.#manualInFlight = Math.max(0, this.#manualInFlight - 1);
+		return id === this.#latestId;
+	}
+}
 
 type CalibrationJob = Record<string, unknown>;
 

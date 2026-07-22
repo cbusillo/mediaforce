@@ -17,7 +17,7 @@ from mediaforce.library.media_scopes import resolve_media_scope, scope_prefix_ov
 
 T = TypeVar("T")
 
-ACTIVE_JOB_STATUSES = {"queued", "running", "pending_review"}
+ACTIVE_JOB_STATUSES = {"queued", "starting", "running", "pending_review"}
 
 
 def load_latest_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
@@ -71,7 +71,7 @@ def load_latest_failed_target_size_sample_job(connection: DBClient, prefix: str)
         trace = result.get("target_size_trace")
         trace_status = trace.get("status") if isinstance(trace, dict) else None
         target_status = str(result.get("target_size_status") or trace_status or "").strip().lower()
-        if target_status in {"infeasible", "quality_conflict"}:
+        if target_status in {"infeasible", "bound_exhausted", "quality_conflict"}:
             return payload
     return None
 
@@ -117,6 +117,23 @@ def load_active_overlapping_job(connection: DBClient, prefix: str) -> dict[str, 
         .limit(1)
     ).mappings().fetchone()
     return _hydrate_job(row) if row is not None else None
+
+
+def load_recent_completed_sample_jobs(
+        connection: DBClient,
+        *,
+        limit: int = 50,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        _calibration_job_select()
+        .where(calibration_jobs.c.lane == "sample")
+        .where(calibration_jobs.c.status == "completed")
+        .where(calibration_jobs.c.started_at.is_not(None))
+        .where(calibration_jobs.c.finished_at.is_not(None))
+        .order_by(calibration_jobs.c.finished_at.desc(), _rowid_column().desc())
+        .limit(limit)
+    ).mappings().fetchall()
+    return [_hydrate_job(row) for row in rows]
 
 
 def list_queued_jobs(connection: DBClient) -> list[dict[str, Any]]:
@@ -166,7 +183,7 @@ def claim_next_queued_calibration_job(
 def list_queue_summary(connection: DBClient, *, limit_per_lane: int = 6) -> dict[str, Any]:
     active_rows = connection.execute(
         _calibration_job_select()
-        .where(calibration_jobs.c.status.in_(("queued", "running", "pending_review")))
+        .where(calibration_jobs.c.status.in_(tuple(ACTIVE_JOB_STATUSES)))
         .order_by(calibration_jobs.c.created_at.asc(), _rowid_column().asc())
     ).mappings().fetchall()
     recent_terminal_counts = {
@@ -204,13 +221,14 @@ def list_queue_summary(connection: DBClient, *, limit_per_lane: int = 6) -> dict
         lane = str(payload.get("lane") or "sample")
         lane_summary = summary[lane]
         status = str(payload.get("status") or "queued")
-        key = f"{status}_count"
+        bucket = "running" if status == "starting" else status
+        key = f"{bucket}_count"
         if key in lane_summary:
             lane_summary[key] += 1
-        if status in {"queued", "running", "pending_review"}:
+        if status in ACTIVE_JOB_STATUSES:
             summary["active_count"] += 1
-        if status in lane_summary and len(lane_summary[status]) < limit_per_lane:
-            lane_summary[status].append(payload)
+        if bucket in lane_summary and len(lane_summary[bucket]) < limit_per_lane:
+            lane_summary[bucket].append(payload)
     for lane in ("sample", "full"):
         count = recent_terminal_counts.get(lane, 0)
         summary[lane]["recent_failed_count"] = count
@@ -274,8 +292,25 @@ def save_job(connection: DBClient, payload: dict[str, Any]) -> None:
     )
 
 
+def update_job_telemetry(
+        connection: DBClient,
+        job_id: str,
+        *,
+        heartbeat_at: str,
+        progress: dict[str, Any] | None = None,
+) -> None:
+    values: dict[str, Any] = {"heartbeat_at": heartbeat_at, "updated_at": heartbeat_at}
+    if progress is not None:
+        values["progress_json"] = json.dumps(progress, sort_keys=True)
+    connection.execute(
+        update(calibration_jobs)
+        .where(calibration_jobs.c.job_id == job_id)
+        .values(**values)
+    )
+
+
 def _serialize_job(payload: dict[str, Any]) -> dict[str, Any]:
-    return {
+    values = {
         "job_id": str(payload["job_id"]),
         "prefix": str(payload["prefix"]),
         "status": str(payload.get("status") or "queued"),
@@ -301,6 +336,7 @@ def _serialize_job(payload: dict[str, Any]) -> dict[str, Any]:
             payload.get("updated_at") or payload.get("finished_at") or payload.get("started_at") or payload["created_at"]
         ),
     }
+    return values
 
 
 def _hydrate_job(row: DBRow) -> dict[str, Any]:
@@ -326,6 +362,8 @@ def _hydrate_job(row: DBRow) -> dict[str, Any]:
         "owner_pid": row["owner_pid"],
         "created_at": row["created_at"],
         "started_at": row["started_at"],
+        "heartbeat_at": row["heartbeat_at"],
+        "progress": _loads_optional(row["progress_json"], default=None),
         "finished_at": row["finished_at"],
         "updated_at": row["updated_at"],
     }

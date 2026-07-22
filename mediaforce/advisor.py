@@ -655,7 +655,7 @@ def request_run_verdict(
         quality_target = _optional_number(operator_request.get("target"))
     quality_met = None if quality_score is None or quality_target is None else quality_score >= quality_target
 
-    if size_status in {"infeasible", "quality_conflict", "over_target"} or quality_met is False:
+    if size_status in {"infeasible", "bound_exhausted", "quality_conflict", "over_target"} or quality_met is False:
         outcome = "needs_review"
     elif size_status in {"inside_target_band", "under_target"}:
         outcome = "strong_match"
@@ -707,6 +707,8 @@ def _deterministic_run_verdict_summary(
 ) -> str:
     if size_status == "infeasible":
         return "The approved stream plan cannot fit inside the requested size budget."
+    if size_status == "bound_exhausted":
+        return "The measured search reached its configured limit before it found the requested size."
     if size_status == "quality_conflict":
         return "The measured sample reached a quality-floor conflict before it could satisfy the requested size."
     if size_status == "over_target":

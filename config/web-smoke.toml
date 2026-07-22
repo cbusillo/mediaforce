@@ -85,6 +85,7 @@ sample_every = "8m"
 sample_duration = "20s"
 min_crf = 18
 max_crf = 38
+target_search_max_crf = 63
 max_encoded_percent = 80
 default_grain = 8
 grain_denoise = 0

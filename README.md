@@ -144,6 +144,13 @@ and dark or stylized TV material. Direct operator instructions and accepted
 visual samples outrank generic bitrate guidance; real sample evidence decides
 whether a particular folder needs adjustment.
 
+`video.max_crf` is the initial quality-search range, not a hidden veto on an
+approved size goal. Size-directed tests may expand in measured steps up to
+`video.target_search_max_crf` (63 by default) while still enforcing the metric
+floor and requiring operator review. Saved jobs created before that ceiling was
+recorded replay their original CRF range exactly; make a fresh test to use the
+new search contract.
+
 For scene-aware engine research, generate a repeatable bakeoff plan from an
 existing manifest instead of replacing the production engine path directly:
 

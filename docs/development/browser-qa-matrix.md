@@ -55,10 +55,18 @@ The managed smoke seeds a compact but non-empty workflow dataset:
 - Folder Studio: `/folders/tv/Example%20Show/Season%201`, including enough item
   metadata to render policy comparison, sample facts, queue state, and side
   context.
-- Sampling state: `/folders/tv/Sampling%20Show/Season%201`, with a queued
-  sample job.
+- Sampling state: `/folders/tv/Sampling%20Show/Season%201`, with persisted stage,
+  heartbeat, bounded review-step progress, and a historical ETA range.
+- Shared-scope sampling state:
+  `/folders/tv/Shared%20Test%20Show/Season%201`, where a 225 MB show-level test
+  must outrank a stale 314.6 MB season result without pretending the job belongs
+  to the season route.
 - Retryable state: `/folders/tv/Retry%20Show/Season%201`, with a failed sample
-  job that exposes retry copy.
+  job that shows the immutable saved target/settings, `Retry same test`, and a
+  separate path to choose different settings.
+- Search-limit state: `/folders/tv/Search%20Limit/Season%201`, with a
+  deterministic target-search-bound failure that explains why the saved retry
+  would repeat and routes the operator to a fresh settings review.
 - Review-ready state: `/folders/tv/Review%20Ready/Season%201`, with retained
   review media, explicit target/band/sample-byte facts, and picture/sound risk.
 - Absolute-target state: `/folders/tv/Absolute%20Goal/Season%201`, proving an
@@ -110,6 +118,8 @@ For changes to catalog or evidence controls, verify these visible states in a
 real browser at desktop and 390px widths:
 
 - idle: `Quiet`, no repeating network refresh, manual refresh available
+- manual refresh: always issues a fresh read even if a quiet poll is already in
+  flight, and the freshness note reflects the newest completed refresh
 - prepared: explicit scope/count, `Start analysis`, and `Cancel batch`
 - running: current path/evidence kind, completed/remaining counts, and elapsed
   progress with `Pause after this item`
@@ -138,6 +148,7 @@ Every browser QA pass should cover these routes:
 - `/folders/tv/Overshoot%20Show/Season%201`: over-target comparison state.
 - `/folders/tv/Undershoot%20Show/Season%201`: under-target comparison state.
 - `/folders/tv/Infeasible%20Goal/Season%201`: arithmetic infeasibility state.
+- `/folders/tv/Search%20Limit/Season%201`: target-search-bound state.
 - `/folders/tv/Quality%20Conflict/Season%201`: quality-floor conflict state.
 - `/folders/tv/Approved%20Show/Season%201`: approved, not-yet-queued state.
 - `/folders/tv/Encoding%20Show/Season%201`: running processing state.

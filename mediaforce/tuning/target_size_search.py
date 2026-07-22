@@ -18,11 +18,12 @@ from mediaforce.tuning.stream_budget import (
 TARGET_SIZE_SEARCH_SCHEMA_VERSION = 1
 TARGET_SIZE_TRANSFORM_PLAN_SCHEMA_VERSION = 1
 MAX_TARGET_SIZE_CANDIDATES = 6
+TARGET_SIZE_BOUND_EXPANSION_STEP = 8
 MAX_FINAL_OUTPUT_RETRIES = 1
 MIN_FINAL_RETRY_CALIBRATION_FACTOR = 0.5
 MAX_FINAL_RETRY_CALIBRATION_FACTOR = 2.0
 
-SearchStatus = Literal["selected", "infeasible", "quality_conflict", "needs_review"]
+SearchStatus = Literal["selected", "infeasible", "bound_exhausted", "quality_conflict", "needs_review"]
 CurveShape = Literal["single_point", "monotonic", "non_monotonic"]
 FinalSizeStatus = Literal["inside_target_band", "over_target", "under_target", "missing_target"]
 
@@ -130,9 +131,11 @@ def search_target_size(
         host: dict[str, Any] | None,
         quality_temp_dir: Path | None,
         run_sample_encode: Callable[..., SampleEncodeResult],
+        search_max_crf: int | None = None,
 ) -> QualitySearchResult:
     _validate_search_inputs(stream_budget_ledger)
-    normalized_min_crf, normalized_max_crf = _normalized_crf_bounds(min_crf, max_crf)
+    normalized_min_crf, configured_max_crf = _normalized_crf_bounds(min_crf, max_crf)
+    normalized_max_crf = _normalized_search_max_crf(configured_max_crf, search_max_crf)
     if not target_size_transform_plan_valid(transform_plan):
         trace = _trace_payload(
             status="needs_review",
@@ -145,6 +148,7 @@ def search_target_size(
             metric_target=metric_target,
             min_crf=normalized_min_crf,
             max_crf=normalized_max_crf,
+            configured_max_crf=configured_max_crf,
             transform_plan=object_dict(transform_plan) or None,
         )
         raise TargetSizeSearchError(
@@ -156,7 +160,7 @@ def search_target_size(
     source_cap_blocker = _source_cap_blocker(stream_budget_ledger)
     if source_cap_blocker is not None:
         trace = _trace_payload(
-            status="infeasible",
+            status="bound_exhausted",
             reason=source_cap_blocker.code,
             ledger=stream_budget_ledger,
             candidates=[],
@@ -166,17 +170,18 @@ def search_target_size(
             metric_target=metric_target,
             min_crf=normalized_min_crf,
             max_crf=normalized_max_crf,
+            configured_max_crf=configured_max_crf,
             transform_plan=validated_transform_plan,
         )
         raise TargetSizeSearchError(
             source_cap_blocker.message,
-            status="infeasible",
+            status="bound_exhausted",
             trace=trace,
         )
 
     candidates: list[TargetSizeCandidate] = []
     measured_crfs: set[int] = set()
-    seed_crf = _seed_crf(stream_budget_ledger, min_crf=normalized_min_crf, max_crf=normalized_max_crf)
+    seed_crf = _seed_crf(stream_budget_ledger, min_crf=normalized_min_crf, max_crf=configured_max_crf)
 
     def measure(crf: int, role: str) -> None:
         normalized_crf = _clamp_int(crf, normalized_min_crf, normalized_max_crf)
@@ -218,7 +223,7 @@ def search_target_size(
         next_crf = _next_crf(candidates, measured_crfs, normalized_min_crf, normalized_max_crf, stream_budget_ledger)
         if next_crf is None:
             break
-        measure(next_crf, "refine")
+        measure(next_crf, "expanded_bound" if next_crf > configured_max_crf else "refine")
 
     selected = _select_candidate(candidates)
     if selected is not None:
@@ -233,6 +238,7 @@ def search_target_size(
             metric_target=metric_target,
             min_crf=normalized_min_crf,
             max_crf=normalized_max_crf,
+            configured_max_crf=configured_max_crf,
             transform_plan=validated_transform_plan,
         )
         return QualitySearchResult(
@@ -244,7 +250,12 @@ def search_target_size(
             target_size_trace=trace,
         )
 
-    status, reason = _failure_status(candidates, stream_budget_ledger)
+    status, reason = _failure_status(
+        candidates,
+        stream_budget_ledger,
+        min_crf=normalized_min_crf,
+        max_crf=normalized_max_crf,
+    )
     trace = _trace_payload(
         status=status,
         reason=reason,
@@ -256,6 +267,7 @@ def search_target_size(
         metric_target=metric_target,
         min_crf=normalized_min_crf,
         max_crf=normalized_max_crf,
+        configured_max_crf=configured_max_crf,
         transform_plan=validated_transform_plan,
     )
     raise TargetSizeSearchError(_failure_message(status, reason, trace), status=status, trace=trace)
@@ -851,6 +863,12 @@ def _normalized_crf_bounds(min_crf: int, max_crf: int) -> tuple[int, int]:
     return lower, upper
 
 
+def _normalized_search_max_crf(configured_max_crf: int, search_max_crf: int | None) -> int:
+    if search_max_crf is None:
+        return configured_max_crf
+    return min(63, max(configured_max_crf, int(search_max_crf)))
+
+
 def _seed_crf(ledger: StreamBudgetLedger, *, min_crf: int, max_crf: int) -> int:
     if min_crf >= max_crf:
         return min_crf
@@ -944,12 +962,18 @@ def _next_crf(
                 pairs.append((int(round(left.crf)), int(round(right.crf))))
         for left, right in sorted(pairs, key=lambda pair: (abs(pair[1] - pair[0]), pair[0])):
             midpoint = round((left + right) / 2)
-            candidate = _nearest_unmeasured(midpoint, measured_crfs, min_crf, max_crf)
+            candidate = _nearest_unmeasured(midpoint, measured_crfs, left + 1, right - 1)
             if candidate is not None:
                 return candidate
     if above:
-        return _nearest_unmeasured(max_crf, measured_crfs, min_crf, max_crf)
+        highest_measured = max(measured_crfs)
+        if highest_measured >= max_crf:
+            return None
+        expansion_probe = min(max_crf, highest_measured + TARGET_SIZE_BOUND_EXPANSION_STEP)
+        return _nearest_unmeasured(expansion_probe, measured_crfs, highest_measured + 1, max_crf)
     if below:
+        if min(measured_crfs) <= min_crf:
+            return None
         return _nearest_unmeasured(min_crf, measured_crfs, min_crf, max_crf)
     closest = min(candidates, key=lambda candidate: _candidate_distance(candidate), default=None)
     if closest is None:
@@ -965,10 +989,25 @@ def _nearest_unmeasured(seed: int, measured: set[int], min_crf: int, max_crf: in
     return None
 
 
-def _failure_status(candidates: list[TargetSizeCandidate], ledger: StreamBudgetLedger) -> tuple[SearchStatus, str]:
+def _failure_status(
+        candidates: list[TargetSizeCandidate],
+        ledger: StreamBudgetLedger,
+        *,
+        min_crf: int,
+        max_crf: int,
+) -> tuple[SearchStatus, str]:
     in_band = [candidate for candidate in candidates if candidate.within_sample_band and not candidate.violates_source_cap]
     if in_band and not any(candidate.quality_floor_met for candidate in in_band):
         return "quality_conflict", "target_band_violates_quality_floor"
+    _, upper = _sample_bounds(ledger)
+    size_reachable = [
+        candidate for candidate in candidates
+        if candidate.predicted_whole_episode_bytes is not None
+        and candidate.predicted_whole_episode_bytes <= upper
+        and not candidate.violates_source_cap
+    ]
+    if size_reachable and not any(candidate.quality_floor_met for candidate in size_reachable):
+        return "quality_conflict", "target_requires_crossing_quality_floor"
     if not any(candidate.quality_floor_met for candidate in candidates):
         return "quality_conflict", "all_candidates_violate_quality_floor"
     shape = _curve_shape(candidates)
@@ -977,12 +1016,16 @@ def _failure_status(candidates: list[TargetSizeCandidate], ledger: StreamBudgetL
     lower, upper = _sample_bounds(ledger)
     quality_safe = [candidate for candidate in candidates if candidate.quality_floor_met and not candidate.violates_source_cap]
     if quality_safe and all((candidate.predicted_whole_episode_bytes or 0) > upper for candidate in quality_safe):
-        return "infeasible", "smallest_quality_safe_candidate_over_target_band"
+        if any(math.isclose(candidate.crf, max_crf) for candidate in candidates):
+            return "bound_exhausted", "smallest_quality_safe_candidate_over_target_band"
+        return "needs_review", "bounded_search_exhausted_before_upper_bound"
     if quality_safe and all(
             candidate.predicted_whole_episode_bytes is not None and candidate.predicted_whole_episode_bytes < lower
             for candidate in quality_safe
     ):
-        return "infeasible", "largest_quality_safe_candidate_under_target_band"
+        if any(math.isclose(candidate.crf, min_crf) for candidate in candidates):
+            return "bound_exhausted", "largest_quality_safe_candidate_under_target_band"
+        return "needs_review", "bounded_search_exhausted_before_lower_bound"
     return "needs_review", "bounded_search_exhausted"
 
 
@@ -995,11 +1038,13 @@ def _failure_message(status: SearchStatus, reason: str, trace: dict[str, Any]) -
             f"({reason}); target={target.get('total_target_bytes')} bytes, "
             f"best_reachable={best.get('predicted_whole_episode_bytes')} bytes."
         )
-    if status == "infeasible":
+    if status == "bound_exhausted":
         return (
-            "The approved target size is not reachable within the approved CRF range and caps "
+            "The approved target size was not reached before the configured search bound "
             f"({reason}); target={target.get('total_target_bytes')} bytes."
         )
+    if status == "infeasible":
+        return "The approved target size leaves no positive production video budget."
     return f"Target-size search needs review after bounded measurements ({reason})."
 
 
@@ -1015,10 +1060,13 @@ def _trace_payload(
         metric_target: float,
         min_crf: int,
         max_crf: int,
+        configured_max_crf: int | None = None,
         transform_plan: dict[str, Any] | None,
 ) -> dict[str, Any]:
     best = _best_reachable(candidates)
     lower, upper = _sample_bounds(ledger)
+    resolved_configured_max_crf = max_crf if configured_max_crf is None else configured_max_crf
+    measured_beyond_configured = any(candidate.crf > resolved_configured_max_crf for candidate in candidates)
     return {
         "schema_version": TARGET_SIZE_SEARCH_SCHEMA_VERSION,
         "status": status,
@@ -1048,7 +1096,15 @@ def _trace_payload(
             "target": metric_target,
             "minimum": min_metric_score,
         },
-        "crf_bounds": {"min_crf": min_crf, "max_crf": max_crf},
+        "crf_bounds": {
+            "min_crf": min_crf,
+            "configured_max_crf": resolved_configured_max_crf,
+            "search_max_crf": max_crf,
+            "max_crf": max_crf,
+            "range_expanded": max_crf > resolved_configured_max_crf,
+            "measured_beyond_configured": measured_beyond_configured,
+            "selected_beyond_configured": selected is not None and selected.crf > resolved_configured_max_crf,
+        },
         "transform_plan": transform_plan,
         "curve": {
             "shape": _curve_shape(candidates),

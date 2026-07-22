@@ -18,7 +18,7 @@ def video_quality_improvement_change(current_video: dict[str, Any], preview_vide
         preview_value = _number_or_none(preview.get(key))
         if current_value is not None and preview_value is not None and preview_value > current_value + 0.01:
             return True
-    for key in ("min_crf", "max_crf", "grain_denoise", "preset"):
+    for key in ("min_crf", "max_crf", "target_search_max_crf", "grain_denoise", "preset"):
         current_value = _number_or_none(current.get(key))
         preview_value = _number_or_none(preview.get(key))
         if current_value is not None and preview_value is not None and preview_value < current_value - 0.01:
@@ -317,7 +317,14 @@ def proposal_alignment_issue(
         if tradeoff_issue is not None:
             return tradeoff_issue
         if not allow_measured_size_quality_tradeoff and not allow_evidence_backed_video_tradeoff:
-            for key in ("default_grain", "grain_denoise", "min_crf", "max_crf", "preset"):
+            for key in (
+                    "default_grain",
+                    "grain_denoise",
+                    "min_crf",
+                    "max_crf",
+                    "target_search_max_crf",
+                    "preset",
+            ):
                 if key in requested_video:
                     continue
                 current_value = current_video.get(key)
@@ -355,7 +362,14 @@ def proposal_alignment_issue(
             if tradeoff_issue is not None:
                 return tradeoff_issue
             if not allow_measured_size_quality_tradeoff and not allow_evidence_backed_video_tradeoff:
-                for key in ("default_grain", "grain_denoise", "min_crf", "max_crf", "preset"):
+                for key in (
+                        "default_grain",
+                        "grain_denoise",
+                        "min_crf",
+                        "max_crf",
+                        "target_search_max_crf",
+                        "preset",
+                ):
                     if key in requested_video:
                         continue
                     current_value = current_video.get(key)

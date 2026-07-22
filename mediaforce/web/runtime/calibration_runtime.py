@@ -1,5 +1,8 @@
 import json
+import logging
 import shutil
+import threading
+import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -19,6 +22,8 @@ from mediaforce.encoding.video_filters import build_video_filter
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.tuning.target_size_search import TargetSizeSearchError
 
+LOGGER = logging.getLogger(__name__)
+
 
 @dataclass(slots=True)
 class CalibrationRunDeps:
@@ -27,6 +32,9 @@ class CalibrationRunDeps:
     load_job_state: Any
     sample_item: Any
     save_job_state: Any
+    update_job_telemetry: Any
+    calibration_job_compatibility_key: Any
+    calibration_heartbeat_seconds: float
     save_calibration_state: Any
     record_run_verdict: Any
     summarize_calibration_result: Any
@@ -48,6 +56,97 @@ class CalibrationRunDeps:
     staged_artifact_columns: tuple[str, ...]
     recommend_review_moments: Any | None = None
     review_moment_payload: Any | None = None
+
+
+class _CalibrationTelemetry:
+    def __init__(
+            self,
+            config: MediaforceConfig,
+            job_id: str,
+            payload: dict[str, Any],
+            deps: CalibrationRunDeps,
+    ) -> None:
+        self.config = config
+        self.job_id = job_id
+        self.deps = deps
+        self.started_monotonic = time.monotonic()
+        self.stop_event = threading.Event()
+        self.write_lock = threading.Lock()
+        self.thread: threading.Thread | None = None
+        now = deps.now_iso()
+        self.progress: dict[str, Any] = {
+            "schema_version": 1,
+            "stage": "preparing_source",
+            "stage_started_at": now,
+            "last_progress_at": now,
+            "compatibility_key": deps.calibration_job_compatibility_key(payload),
+        }
+
+    def start(self) -> None:
+        self._persist(progress=self.progress)
+        self.thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name=f"calibration-heartbeat-{self.job_id[:8]}",
+            daemon=True,
+        )
+        self.thread.start()
+
+    def update(self, stage: str, *, completed: int | None = None, total: int | None = None) -> None:
+        now = self.deps.now_iso()
+        if self.progress.get("stage") != stage:
+            self.progress["stage"] = stage
+            self.progress["stage_started_at"] = now
+        self.progress["last_progress_at"] = now
+        if completed is not None and total is not None and total > 0:
+            self.progress["work"] = {
+                "completed": max(0, min(completed, total)),
+                "total": total,
+            }
+        else:
+            self.progress.pop("work", None)
+        self._persist(progress=self.progress)
+
+    def refresh_compatibility(self, payload: dict[str, Any]) -> None:
+        compatibility_key = self.deps.calibration_job_compatibility_key(payload)
+        if self.progress.get("compatibility_key") == compatibility_key:
+            return
+        self.progress["compatibility_key"] = compatibility_key
+        self.progress["last_progress_at"] = self.deps.now_iso()
+        self._persist(progress=self.progress)
+
+    def finish(self, terminal_status: str | None) -> None:
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join()
+        if terminal_status is None:
+            return
+        now = self.deps.now_iso()
+        self.progress["terminal_status"] = terminal_status
+        self.progress["last_progress_at"] = now
+        self.progress["total_elapsed_seconds"] = max(0, round(time.monotonic() - self.started_monotonic))
+        if terminal_status == "completed":
+            self.progress["stage"] = "completed"
+            self.progress["stage_started_at"] = now
+            self.progress.pop("work", None)
+        self._persist(progress=self.progress)
+
+    def _heartbeat_loop(self) -> None:
+        while not self.stop_event.wait(self.deps.calibration_heartbeat_seconds):
+            self._persist()
+
+    def _persist(self, *, progress: dict[str, Any] | None = None) -> None:
+        with self.write_lock:
+            heartbeat_at = self.deps.now_iso()
+            try:
+                with open_db(self.config.paths.db_path) as connection:
+                    self.deps.update_job_telemetry(
+                        connection,
+                        self.job_id,
+                        heartbeat_at=heartbeat_at,
+                        progress=dict(progress) if progress is not None else None,
+                    )
+            except Exception:
+                LOGGER.warning("Unable to persist calibration telemetry for %s", self.job_id, exc_info=True)
 
 
 def _stored_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
@@ -173,14 +272,31 @@ def run_calibration_job(
                     "updated_at": deps.now_iso()})
         deps.save_job_state(connection, config, prefix, job)
 
+    telemetry = _CalibrationTelemetry(
+        config,
+        job_id,
+        {
+            **job,
+            "job_id": job_id,
+            "prefix": prefix,
+            "host": host_data,
+            "policy": policy,
+        },
+        deps,
+    )
+    telemetry.start()
+
     calibration_dir: Path | None = None
     manifest_path: Path | None = None
     library_item_id: int | None = None
     staged_artifact_snapshot: dict[str, Any] | None = None
+    terminal_status: str | None = None
 
     try:
+        telemetry.update("preparing_host")
         ready_host = deps.ensure_sample_host_ready(config, host_data)
         host_data = {**host_data, **asdict(ready_host)}
+        telemetry.update("preparing_source")
         with open_db(config.paths.db_path) as connection:
             sample_item = _job_sample_item(job)
             if sample_item is None:
@@ -199,6 +315,14 @@ def run_calibration_job(
             )
             sample_item["stream_budget_ledger"] = stream_budget.to_payload()
             job["sample_item"] = _stored_sample_item_payload(sample_item)
+            telemetry.refresh_compatibility(
+                {
+                    **job,
+                    "host": host_data,
+                    "policy": policy,
+                    "sample_item": job["sample_item"],
+                }
+            )
             deps.save_job_state(connection, config, prefix, job)
             current_library_item_id = int_value(sample_item.get("library_item_id"))
             library_item_id = current_library_item_id
@@ -211,6 +335,7 @@ def run_calibration_job(
 
             calibration_run_id = uuid.uuid4().hex[:12]
             if deps.calibration_mode_for_action(action) == "full":
+                telemetry.update("encoding_full_calibration")
                 calibration_payload, manifest_path, calibration_dir = run_full_calibration(
                     connection=connection,
                     config=config,
@@ -238,8 +363,10 @@ def run_calibration_job(
                     calibration_run_id=calibration_run_id,
                     process_controller=process_controller,
                     deps=deps,
+                    progress_callback=telemetry.update,
                 )
 
+        telemetry.update("saving_results")
         calibration_payload["job_id"] = job_id
         deps.save_calibration_state(config, prefix, calibration_payload)
         deps.record_run_verdict(config, prefix, calibration_payload)
@@ -257,7 +384,9 @@ def run_calibration_job(
                     "result": deps.summarize_calibration_result(calibration_payload),
                 },
             )
+        terminal_status = "completed"
     except ProcessCancelledError:
+        terminal_status = "stopped"
         with open_db(config.paths.db_path) as connection:
             deps.save_job_state(
                 connection,
@@ -272,6 +401,7 @@ def run_calibration_job(
                 },
             )
     except TargetSizeSearchError as exc:
+        terminal_status = "failed"
         with open_db(config.paths.db_path) as connection:
             deps.save_job_state(
                 connection,
@@ -290,6 +420,7 @@ def run_calibration_job(
                 },
             )
     except Exception as exc:
+        terminal_status = "failed"
         with open_db(config.paths.db_path) as connection:
             deps.save_job_state(
                 connection,
@@ -304,6 +435,7 @@ def run_calibration_job(
                 },
             )
     finally:
+        telemetry.finish(terminal_status)
         if library_item_id is not None:
             with open_db(config.paths.db_path) as connection:
                 restore_staged_artifact(
@@ -330,6 +462,7 @@ def run_sampled_calibration(
         calibration_run_id: str,
         process_controller: ManagedProcessController,
         deps: CalibrationRunDeps,
+        progress_callback: Any | None = None,
 ) -> tuple[dict[str, Any], Path | None]:
     _ = prefix
     source_path = Path(sample_item["source_path"])
@@ -357,6 +490,8 @@ def run_sampled_calibration(
         else None
     )
     preset = deps.effective_video_preset(video_policy, width=width, height=height)
+    if progress_callback is not None:
+        progress_callback("inspecting_source")
     detected_crop = deps.detect_video_crop(
         source_path,
         video_policy,
@@ -392,7 +527,11 @@ def run_sampled_calibration(
         quality_kwargs["cadence_source_fingerprint"] = (
             str(sample_item.get("source_fingerprint") or "") or None
         )
+    if progress_callback is not None:
+        progress_callback("searching_target")
     quality_result = deps.search_quality_for_source(source_path, video_policy, **quality_kwargs)
+    if progress_callback is not None:
+        progress_callback("measuring_quality")
     sample_result = deps.run_sample_encode(
         source_path,
         source_codec=str(sample_item.get("video_codec") or ""),
@@ -410,6 +549,8 @@ def run_sampled_calibration(
     )
 
     review_moments = []
+    if progress_callback is not None:
+        progress_callback("selecting_review_moments")
     if deps.recommend_review_moments is not None:
         review_moments = deps.recommend_review_moments(
             source_path,
@@ -429,6 +570,8 @@ def run_sampled_calibration(
         )
         review_moments = []
     output_dir = config.paths.review_dir / calibration_run_id / "item-00"
+    if progress_callback is not None:
+        progress_callback("building_review", completed=0, total=3)
     preview_clips = deps.encode_preview_clips(
         source_path=source_path,
         source_codec=str(sample_item.get("video_codec") or ""),
@@ -444,6 +587,8 @@ def run_sampled_calibration(
         host=host_data,
         process_controller=process_controller,
     )
+    if progress_callback is not None:
+        progress_callback("building_review", completed=1, total=3)
     source_clips = deps.render_source_review_clips(
         source_path=source_path,
         source_codec=str(sample_item.get("video_codec") or ""),
@@ -452,6 +597,8 @@ def run_sampled_calibration(
         duration_seconds=8.0,
         process_controller=process_controller,
     )
+    if progress_callback is not None:
+        progress_callback("building_review", completed=2, total=3)
     compare_clips = deps.generate_compare_clips_from_previews(
         source_path=source_path,
         source_codec=str(sample_item.get("video_codec") or ""),
@@ -459,6 +606,8 @@ def run_sampled_calibration(
         output_dir=output_dir,
         process_controller=process_controller,
     )
+    if progress_callback is not None:
+        progress_callback("building_review", completed=3, total=3)
     estimated_total_size_bytes = (
         sample_result.predicted_encode_size_bytes + stream_budget.non_video_bytes
         if stream_budget.non_video_bytes is not None
