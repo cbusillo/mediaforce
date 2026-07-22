@@ -603,6 +603,63 @@ async function checkOlderSeasonConfirmation(baseUrl, timeoutMs) {
   }
 }
 
+async function checkComparisonWorkspace(baseUrl, route, timeoutMs) {
+  const browser = await chromium.launch({ channel: "chromium" });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 900 },
+    });
+    await page.goto(`${baseUrl}${route}`, {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs,
+    });
+    const openButton = page.getByRole("button", {
+      name: "Compare in full screen",
+    });
+    await openButton.waitFor({ state: "visible", timeout: timeoutMs });
+    await openButton.click();
+    const workspace = page.getByRole("dialog", {
+      name: "Compare picture and sound",
+    });
+    await workspace.waitFor({ state: "visible", timeout: timeoutMs });
+    await workspace.getByRole("button", { name: "One at a time" }).click();
+    await workspace
+      .getByRole("group", { name: "Picture shown" })
+      .getByRole("button", { name: "Original", exact: true })
+      .click();
+    await workspace.getByRole("button", { name: "Actual size" }).click();
+    const state = await workspace.evaluate((element) => ({
+      text: element.textContent ?? "",
+      hasVisibleOriginal: Boolean(
+        element.querySelector(".show-original .media-pane--original"),
+      ),
+      hasSoundChoice: Boolean(
+        element.querySelector('[role="group"][aria-label="Listen to"]'),
+      ),
+    }));
+    if (!state.hasVisibleOriginal || !state.hasSoundChoice) {
+      throw new Error(
+        `Comparison workspace did not expose expected controls: ${JSON.stringify(state)}`,
+      );
+    }
+    if (
+      /\b(CRF|codec|bitrate|VMAF|XPSNR|synchroni[sz]ation)\b/i.test(state.text)
+    ) {
+      throw new Error("Comparison workspace exposed implementation language.");
+    }
+    await workspace.getByRole("button", { name: "Close comparison" }).click();
+    await page.waitForFunction(
+      () =>
+        document.activeElement?.textContent?.includes("Compare in full screen"),
+      undefined,
+      { timeout: timeoutMs },
+    );
+    console.log("route ok: Full-screen comparison workspace");
+  } finally {
+    await browser.close();
+  }
+}
+
 async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
   const browser = await chromium.launch({ channel: "chromium" });
   try {
@@ -785,6 +842,20 @@ async function main() {
       );
       await checkLifecyclePolicyShowIsolation(targetUrl, args.routeTimeoutMs);
       await checkOlderSeasonConfirmation(targetUrl, args.routeTimeoutMs);
+      const reviewReadyFixture = fixtures.folderRoutes.find(
+        (fixtureRoute) =>
+          fixtureRoute.route === "/folders/tv/Review%20Ready/Season%201",
+      );
+      if (!reviewReadyFixture) {
+        throw new Error(
+          "Fixture payload did not include the review-ready route.",
+        );
+      }
+      await checkComparisonWorkspace(
+        targetUrl,
+        reviewReadyFixture.route,
+        args.routeTimeoutMs,
+      );
     }
     if (args.narrow) {
       await checkNarrowRoutes(
