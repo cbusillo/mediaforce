@@ -4426,6 +4426,7 @@ class TuningRuntimeTests(unittest.TestCase):
             load_job_state=lambda *_args, **_kwargs: None,
             load_retryable_sample_job_state=lambda *_args, **_kwargs: None,
             sample_item=lambda *_args, **_kwargs: {
+                "media_root": "tv",
                 "rel_path": "tv/show/episode.mkv",
                 "resolved_policy": {"video": {"encoder": "libx264"}},
             },
@@ -4526,6 +4527,7 @@ class TuningRuntimeTests(unittest.TestCase):
             load_job_state=lambda *_args, **_kwargs: None,
             load_retryable_sample_job_state=lambda *_args, **_kwargs: None,
             sample_item=lambda *_args, **_kwargs: {
+                "media_root": "tv",
                 "rel_path": "tv/show/episode.mkv",
                 "source_path": str(self.root / "source" / "tv" / "show" / "episode.mkv"),
                 "source_size_bytes": 4_000_000_000,
@@ -4606,6 +4608,7 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertTrue(confirm_result["ok"])
         self.assertEqual(saved_jobs[0]["policy"], proposal["preview_policy"])
+        self.assertEqual(saved_jobs[0]["sample_item"]["media_root"], "tv")
         queued_ledger = saved_jobs[0]["sample_item"]["stream_budget_ledger"]
         self.assertEqual(queued_ledger["totals"]["total_target_bytes"], 225_000_000)
         self.assertEqual(queued_ledger["totals"]["remaining_video_bytes"], 217_000_000)

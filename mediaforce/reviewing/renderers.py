@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
@@ -8,6 +9,10 @@ NATIVE_COMPARE_FILTER = (
     "[left][right]xstack=inputs=2:layout=0_0|w0_0:fill=black[stacked];"
     "[stacked]pad=ceil(iw/2)*2:ceil(ih/2)*2[v]"
 )
+BROWSER_REVIEW_AUDIO_BITRATE = "256k"
+BROWSER_REVIEW_AUDIO_CHANNELS = 2
+BROWSER_REVIEW_AUDIO_SAMPLE_RATE = 48_000
+REMOTE_REVIEW_CLEANUP_TIMEOUT_SECONDS = 30
 
 
 def render_compare_clip(
@@ -72,6 +77,7 @@ def render_encoded_preview_clip(
         preset: int,
         crf: float,
         svt_params: list[str],
+        audio_plan: dict[str, Any] | None = None,
         video_filter: str | None = None,
         process_controller: Any = None,
         ffmpeg_binary: Callable[[], str],
@@ -79,24 +85,44 @@ def render_encoded_preview_clip(
         format_crf: Callable[[float], str],
         run_command: Callable[..., Any],
 ) -> None:
-    cmd = _preview_render_command(
-        source_path=source_path,
-        source_codec=source_codec,
-        output_path=output_path,
-        clip_time=clip_time,
-        duration_seconds=duration_seconds,
-        encoder=encoder,
-        pixel_format=pixel_format,
-        preset=preset,
-        crf=crf,
-        svt_params=svt_params,
-        video_filter=video_filter,
-        ffmpeg_binary=ffmpeg_binary,
-        ffmpeg_hwaccel_input_args=ffmpeg_hwaccel_input_args,
-        format_crf=format_crf,
-    )
-    result = run_command(cmd, process_controller=process_controller)
-    _raise_on_failure(result, "Preview sample encode failed")
+    production_audio_path = None
+    try:
+        if _requires_production_audio_render(audio_plan):
+            production_audio_path = output_path.with_name(f".{output_path.stem}-production-audio.opus")
+            audio_cmd = _production_audio_render_command(
+                source_path=source_path,
+                output_path=production_audio_path,
+                clip_time=clip_time,
+                duration_seconds=duration_seconds,
+                audio_plan=audio_plan or {},
+                ffmpeg_binary=ffmpeg_binary,
+            )
+            result = run_command(audio_cmd, process_controller=process_controller)
+            _raise_on_failure(result, "Preview audio render failed")
+
+        cmd = _preview_render_command(
+            source_path=source_path,
+            source_codec=source_codec,
+            output_path=output_path,
+            clip_time=clip_time,
+            duration_seconds=duration_seconds,
+            encoder=encoder,
+            pixel_format=pixel_format,
+            preset=preset,
+            crf=crf,
+            svt_params=svt_params,
+            audio_plan=audio_plan,
+            production_audio_path=production_audio_path,
+            video_filter=video_filter,
+            ffmpeg_binary=ffmpeg_binary,
+            ffmpeg_hwaccel_input_args=ffmpeg_hwaccel_input_args,
+            format_crf=format_crf,
+        )
+        result = run_command(cmd, process_controller=process_controller)
+        _raise_on_failure(result, "Preview sample encode failed")
+    finally:
+        if production_audio_path is not None:
+            production_audio_path.unlink(missing_ok=True)
 
 
 def render_encoded_preview_clip_remote(
@@ -112,6 +138,7 @@ def render_encoded_preview_clip_remote(
         preset: int,
         crf: float,
         svt_params: list[str],
+        audio_plan: dict[str, Any] | None = None,
         video_filter: str | None = None,
         remote_preview_timeout_seconds: int,
         ffmpeg_binary: Callable[[], str],
@@ -119,24 +146,53 @@ def render_encoded_preview_clip_remote(
         format_crf: Callable[[float], str],
         run_remote_command: Callable[..., Any],
 ) -> None:
-    cmd = _preview_render_command(
-        source_path=source_path,
-        source_codec=source_codec,
-        output_path=remote_output_path,
-        clip_time=clip_time,
-        duration_seconds=duration_seconds,
-        encoder=encoder,
-        pixel_format=pixel_format,
-        preset=preset,
-        crf=crf,
-        svt_params=svt_params,
-        video_filter=video_filter,
-        ffmpeg_binary=ffmpeg_binary,
-        ffmpeg_hwaccel_input_args=ffmpeg_hwaccel_input_args,
-        format_crf=format_crf,
-    )
-    result = run_remote_command(host, cmd, remote_preview_timeout_seconds)
-    _raise_on_failure(result, "Preview sample encode failed")
+    production_audio_path = None
+    try:
+        if _requires_production_audio_render(audio_plan):
+            production_audio_path = remote_output_path.with_name(
+                f".{remote_output_path.stem}-production-audio.opus"
+            )
+            audio_cmd = _production_audio_render_command(
+                source_path=source_path,
+                output_path=production_audio_path,
+                clip_time=clip_time,
+                duration_seconds=duration_seconds,
+                audio_plan=audio_plan or {},
+                ffmpeg_binary=ffmpeg_binary,
+            )
+            result = run_remote_command(host, audio_cmd, remote_preview_timeout_seconds)
+            _raise_on_failure(result, "Preview audio render failed")
+
+        cmd = _preview_render_command(
+            source_path=source_path,
+            source_codec=source_codec,
+            output_path=remote_output_path,
+            clip_time=clip_time,
+            duration_seconds=duration_seconds,
+            encoder=encoder,
+            pixel_format=pixel_format,
+            preset=preset,
+            crf=crf,
+            svt_params=svt_params,
+            audio_plan=audio_plan,
+            production_audio_path=production_audio_path,
+            video_filter=video_filter,
+            ffmpeg_binary=ffmpeg_binary,
+            ffmpeg_hwaccel_input_args=ffmpeg_hwaccel_input_args,
+            format_crf=format_crf,
+        )
+        result = run_remote_command(host, cmd, remote_preview_timeout_seconds)
+        _raise_on_failure(result, "Preview sample encode failed")
+    finally:
+        if production_audio_path is not None:
+            try:
+                run_remote_command(
+                    host,
+                    ["rm", "-f", str(production_audio_path)],
+                    min(remote_preview_timeout_seconds, REMOTE_REVIEW_CLEANUP_TIMEOUT_SECONDS),
+                )
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                pass
 
 
 def _preview_render_command(
@@ -151,6 +207,8 @@ def _preview_render_command(
         preset: int,
         crf: float,
         svt_params: list[str],
+        audio_plan: dict[str, Any] | None = None,
+        production_audio_path: Path | None = None,
         video_filter: str | None = None,
         ffmpeg_binary: Callable[[], str],
         ffmpeg_hwaccel_input_args: Callable[[str | None], list[str]],
@@ -170,9 +228,12 @@ def _preview_render_command(
         *ffmpeg_hwaccel_input_args(source_codec),
         "-i",
         str(source_path),
+    ]
+    if production_audio_path is not None:
+        cmd.extend(["-i", str(production_audio_path)])
+    cmd.extend([
         "-map",
         "0:v:0",
-        "-an",
         "-sn",
         "-c:v",
         encoder,
@@ -184,7 +245,26 @@ def _preview_render_command(
         str(preset),
         "-crf",
         format_crf(crf),
-    ]
+    ])
+    if audio_plan is None:
+        cmd.extend(["-an"])
+    else:
+        audio_input = "1:a:0" if production_audio_path is not None else f"0:{_audio_stream_index(audio_plan)}"
+        cmd.extend(
+            [
+                "-map",
+                audio_input,
+                "-c:a",
+                "aac",
+                "-b:a",
+                BROWSER_REVIEW_AUDIO_BITRATE,
+                "-ar",
+                str(BROWSER_REVIEW_AUDIO_SAMPLE_RATE),
+                "-ac",
+                str(BROWSER_REVIEW_AUDIO_CHANNELS),
+                "-shortest",
+            ]
+        )
     if encoder == "libsvtav1":
         cmd.extend(["-svtav1-params", ":".join(svt_params)])
     if video_filter:
@@ -246,6 +326,7 @@ def render_source_review_clip(
         output_path: Path,
         clip_time: float,
         duration_seconds: float,
+        audio_plan: dict[str, Any] | None = None,
         process_controller: Any = None,
         ffmpeg_binary: Callable[[], str],
         ffmpeg_hwaccel_input_args: Callable[[str | None], list[str]],
@@ -267,7 +348,6 @@ def render_source_review_clip(
         str(source_path),
         "-map",
         "0:v:0",
-        "-an",
         "-sn",
         "-c:v",
         "libx264",
@@ -277,10 +357,78 @@ def render_source_review_clip(
         "veryfast",
         "-movflags",
         "+faststart",
-        str(output_path),
     ]
+    if audio_plan is None:
+        cmd.extend(["-an"])
+    else:
+        cmd.extend(
+            [
+                "-map",
+                f"0:{_audio_stream_index(audio_plan)}",
+                "-c:a",
+                "aac",
+                "-b:a",
+                BROWSER_REVIEW_AUDIO_BITRATE,
+                "-ar",
+                str(BROWSER_REVIEW_AUDIO_SAMPLE_RATE),
+                "-ac",
+                str(BROWSER_REVIEW_AUDIO_CHANNELS),
+                "-shortest",
+            ]
+        )
+    cmd.append(str(output_path))
     result = run_command(cmd, process_controller=process_controller)
     _raise_on_failure(result, "Source review clip render failed")
+
+
+def _requires_production_audio_render(audio_plan: dict[str, Any] | None) -> bool:
+    if audio_plan is None:
+        return False
+    return str(audio_plan.get("production_action") or "") == "transcode"
+
+
+def _audio_stream_index(audio_plan: dict[str, Any]) -> int:
+    return int(audio_plan["source_stream_index"])
+
+
+def _production_audio_render_command(
+        *,
+        source_path: Path,
+        output_path: Path,
+        clip_time: float,
+        duration_seconds: float,
+        audio_plan: dict[str, Any],
+        ffmpeg_binary: Callable[[], str],
+) -> list[str]:
+    channels = int(audio_plan.get("source_channels") or 2)
+    cmd = [
+        ffmpeg_binary(),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-ss",
+        f"{clip_time:.3f}",
+        "-t",
+        f"{duration_seconds:.3f}",
+        "-i",
+        str(source_path),
+        "-map",
+        f"0:{_audio_stream_index(audio_plan)}",
+        "-vn",
+        "-sn",
+        "-c:a",
+        "libopus",
+        "-b:a",
+        str(audio_plan.get("production_bitrate_text") or "128k"),
+    ]
+    if channels >= 8:
+        cmd.extend(["-af", "channelmap=channel_layout=7.1", "-mapping_family", "1"])
+    elif channels >= 6:
+        cmd.extend(["-af", "channelmap=channel_layout=5.1", "-mapping_family", "1"])
+    cmd.append(str(output_path))
+    return cmd
 
 
 def _raise_on_failure(result: Any, prefix: str) -> None:

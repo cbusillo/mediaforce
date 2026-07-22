@@ -19,6 +19,7 @@ def encode_preview_clips(
         preset: int,
         crf: float,
         svt_params: list[str],
+        audio_plan: dict[str, Any] | None = None,
         video_filter: str | None = None,
         host: dict[str, Any] | None = None,
         process_controller: Any = None,
@@ -43,6 +44,7 @@ def encode_preview_clips(
             preset=preset,
             crf=crf,
             svt_params=svt_params,
+            audio_plan=audio_plan,
             video_filter=video_filter,
         )
 
@@ -60,6 +62,7 @@ def encode_preview_clips(
             preset=preset,
             crf=crf,
             svt_params=svt_params,
+            audio_plan=audio_plan,
             video_filter=video_filter,
             process_controller=process_controller,
         )
@@ -87,6 +90,7 @@ def encode_preview_clips_remote(
         preset: int,
         crf: float,
         svt_params: list[str],
+        audio_plan: dict[str, Any] | None = None,
         video_filter: str | None = None,
         remote_preview_timeout_seconds: int,
         uuid_factory: Callable[[], Any],
@@ -116,6 +120,7 @@ def encode_preview_clips_remote(
                 preset=preset,
                 crf=crf,
                 svt_params=svt_params,
+                audio_plan=audio_plan,
                 video_filter=video_filter,
             )
             copy_remote_file_to_local(host, remote_output_path, output_path, remote_preview_timeout_seconds)
@@ -259,6 +264,7 @@ def render_source_review_clips(
         output_dir: Path,
         timestamps: list[float],
         duration_seconds: float,
+        audio_plan: dict[str, Any] | None = None,
         process_controller: Any = None,
         render_source_review_clip: Callable[..., None],
         slug_seconds: Callable[[float], str],
@@ -274,6 +280,7 @@ def render_source_review_clips(
             output_path=output_path,
             clip_time=clip_time,
             duration_seconds=duration_seconds,
+            audio_plan=audio_plan,
             process_controller=process_controller,
         )
         rendered.append(
