@@ -2,6 +2,11 @@ import type { HostRuntime, HostsPayload } from '$lib/api/types';
 
 export const HOST_STATUS_PENDING_MESSAGE = 'Checking host status...';
 
+export type HostRuntimeBadgeState = {
+	tone: 'idle' | 'ready' | 'wait' | 'fail';
+	label: 'Not checked' | 'Ready' | 'Needs setup' | 'Checking' | 'Offline';
+};
+
 type QualitySearchMode = 'worker-local' | 'fully-remote' | 'local-assist';
 
 type QualitySearchSummary = {
@@ -92,4 +97,16 @@ export function hostsStatusPending(payload: HostsPayload | null | undefined): bo
 
 export function isPendingHostRuntime(runtime: HostRuntime | null | undefined): boolean {
 	return String(runtime?.message ?? '').trim() === HOST_STATUS_PENDING_MESSAGE;
+}
+
+export function hostRuntimeBadgeState(
+	runtime: HostRuntime | null | undefined
+): HostRuntimeBadgeState {
+	if (!runtime) return { tone: 'idle', label: 'Not checked' };
+	if (isPendingHostRuntime(runtime)) return { tone: 'wait', label: 'Checking' };
+	if (runtime.available && runtime.issues.length === 0) {
+		return { tone: 'ready', label: 'Ready' };
+	}
+	if (runtime.available) return { tone: 'wait', label: 'Needs setup' };
+	return { tone: 'fail', label: 'Offline' };
 }

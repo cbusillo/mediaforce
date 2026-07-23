@@ -13,6 +13,7 @@
 		SettingsLibrary,
 		SettingsPayload
 	} from '$lib/api/types';
+	import { hostRuntimeBadgeState } from '$lib/hosts/runtime';
 	import {
 		SCHEDULE_DAY_OPTIONS,
 		addHostDraft,
@@ -256,17 +257,11 @@
 	}
 
 	function runtimeTone(runtime: HostRuntime | null): BadgeTone {
-		if (!runtime) return 'idle';
-		if (runtime.available && runtime.issues.length === 0) return 'ready';
-		if (runtime.available) return 'wait';
-		return 'fail';
+		return hostRuntimeBadgeState(runtime).tone;
 	}
 
 	function runtimeCopy(runtime: HostRuntime | null): string {
-		if (!runtime) return 'Not checked';
-		if (runtime.available && runtime.issues.length === 0) return 'Ready';
-		if (runtime.available) return 'Needs setup';
-		return 'Offline';
+		return hostRuntimeBadgeState(runtime).label;
 	}
 
 	function updateHost(index: number, patch: Partial<SettingsHost>) {

@@ -1,0 +1,45 @@
+import { describe, expect, it } from 'vitest';
+
+import type { HostRuntime, HostsPayload } from '$lib/api/types';
+import { HOST_STATUS_PENDING_MESSAGE, hostRuntimeBadgeState, hostsStatusPending } from './runtime';
+
+function runtime(overrides: Partial<HostRuntime> = {}): HostRuntime {
+	return {
+		key: 'worker',
+		label: 'Worker',
+		priority: 1,
+		capabilities: ['encode_queue'],
+		available: false,
+		message: 'Offline',
+		missing_paths: [],
+		issues: [],
+		detail: null,
+		max_parallel_encodes: 1,
+		active_encode_count: 0,
+		schedule_profile_label: 'Always',
+		schedule_detail: 'runs at any time',
+		active_flag: 'idle',
+		active_reason: '',
+		...overrides
+	};
+}
+
+describe('host runtime status', () => {
+	it('shows startup probes as checking instead of offline', () => {
+		const pending = runtime({ message: HOST_STATUS_PENDING_MESSAGE });
+
+		expect(hostRuntimeBadgeState(pending)).toEqual({ tone: 'wait', label: 'Checking' });
+		expect(hostsStatusPending({ compact: true, hosts: [pending] } satisfies HostsPayload)).toBe(
+			true
+		);
+	});
+
+	it('stops treating hosts as pending once a real result arrives', () => {
+		const ready = runtime({ available: true, message: 'Mounted and ready' });
+		const offline = runtime({ message: 'Turn on SSH first' });
+
+		expect(hostRuntimeBadgeState(ready)).toEqual({ tone: 'ready', label: 'Ready' });
+		expect(hostRuntimeBadgeState(offline)).toEqual({ tone: 'fail', label: 'Offline' });
+		expect(hostsStatusPending({ compact: true, hosts: [ready, offline] })).toBe(false);
+	});
+});
