@@ -46,6 +46,7 @@ from mediaforce.encoding import quality_search
 from mediaforce.encoding import staging as staging_runtime
 from mediaforce.encoding import video_filters
 from mediaforce.encoding.cadence import analyze_cadence
+from mediaforce.encoding.duration_estimate import EncodeDurationSample, load_encode_duration_samples
 from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_prefix, list_child_encode_jobs, \
     load_active_encode_job_for_prefix, load_encode_job, load_latest_encode_job, \
     load_latest_terminal_encode_job_for_prefix, load_queue_state, repair_persisted_encode_job_hosts, \
@@ -3906,6 +3907,61 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertTrue(transition.is_open)
         self.assertEqual(transition.current_closes_at, web_app._parse_iso("2026-11-01T07:00:00+00:00"))
+
+    def test_scheduler_max_window_uses_full_cross_midnight_duration(self) -> None:
+        policy = web_app._normalize_encode_queue_scheduler(
+            {
+                "mode": "night",
+                "start_hour": 20,
+                "end_hour": 6,
+                "timezone": "utc",
+                "days_of_week": ["mon", "tue", "wed", "thu", "fri"],
+            }
+        )
+
+        duration_seconds = web_app._max_encode_schedule_window_seconds(
+            policy,
+            now=web_app._parse_iso("2026-07-23T12:00:00+00:00"),
+        )
+
+        self.assertEqual(duration_seconds, 10 * 60 * 60)
+
+    def test_scheduler_max_window_treats_continuous_schedule_as_unbounded(self) -> None:
+        policy = web_app._normalize_encode_queue_scheduler(
+            {
+                "mode": "night",
+                "start_hour": 0,
+                "end_hour": 0,
+                "timezone": "utc",
+                "days_of_week": list(settings_runtime.SCHEDULE_DAY_ORDER),
+            }
+        )
+
+        duration_seconds = web_app._max_encode_schedule_window_seconds(
+            policy,
+            now=web_app._parse_iso("2026-07-23T12:00:00+00:00"),
+        )
+
+        self.assertIsNone(duration_seconds)
+
+    def test_scheduler_max_window_uses_elapsed_time_across_fall_back(self) -> None:
+        policy = web_app._normalize_encode_queue_scheduler(
+            {
+                "mode": "night",
+                "start_hour": 0,
+                "end_hour": 2,
+                "timezone": "host_local",
+                "days_of_week": ["sun"],
+            }
+        )
+
+        duration_seconds = web_app._max_encode_schedule_window_seconds(
+            policy,
+            now=web_app._parse_iso("2026-11-01T05:30:00+00:00"),
+            host_payload={"schedule_timezone": "America/New_York"},
+        )
+
+        self.assertEqual(duration_seconds, 3 * 60 * 60)
 
     def test_scheduler_transition_closes_at_first_repeated_hour(self) -> None:
         policy = web_app._normalize_encode_queue_scheduler(
@@ -13949,6 +14005,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             deps = Mock()
             deps.now_iso.return_value = web_app._now_iso()
+            deps.host_runtime_rows.return_value = []
 
             with patch(
                     "mediaforce.web.runtime.encode_runtime.select_encode_host",
@@ -14092,6 +14149,418 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             assert claimed is not None
             self.assertEqual(claimed["status"], "running")
             self.assertIsNone(claimed["schedule_close_deadline_at"])
+
+    def test_duration_aware_selection_skips_fifo_head_that_cannot_finish(self) -> None:
+        close_at = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
+        host_row = self._encode_host_row("worker", schedule_closes_at=close_at)
+
+        with open_db(self.config.paths.db_path) as connection:
+            self._write_manifest("manifest-long-window.json", [self._estimate_manifest_item(7_200.0)])
+            self._write_manifest("manifest-short-window.json", [self._estimate_manifest_item(600.0)])
+            self._save_job(
+                connection,
+                job_id="job-long-window",
+                manifest_name="manifest-long-window.json",
+                host={},
+                status="queued",
+                attempt_count=0,
+            )
+            self._save_job(
+                connection,
+                job_id="job-short-window",
+                manifest_name="manifest-short-window.json",
+                host={},
+                status="queued",
+                attempt_count=0,
+            )
+            connection.commit()
+            deps = web_app._encode_queue_runtime_deps()
+            deps.host_runtime_rows = Mock(return_value=[host_row])
+            deps.max_encode_schedule_window_seconds = Mock(return_value=7_200.0)
+
+            with patch(
+                    "mediaforce.web.runtime.encode_runtime.load_encode_duration_samples",
+                    return_value=self._encode_duration_samples("worker"),
+            ):
+                selected = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
+
+            assert selected is not None
+            self.assertEqual(selected["job_id"], "job-short-window")
+            deferred = load_encode_job(connection, "job-long-window")
+            assert deferred is not None
+            self.assertIn("waiting for a host window with enough time remaining", deferred["waiting_reason"])
+
+    def test_duration_aware_selection_drains_when_no_job_fits(self) -> None:
+        close_at = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
+        host_row = self._encode_host_row("worker", schedule_closes_at=close_at)
+
+        with open_db(self.config.paths.db_path) as connection:
+            self._write_manifest("manifest-drain.json", [self._estimate_manifest_item(7_200.0)])
+            self._save_job(
+                connection,
+                job_id="job-drain",
+                manifest_name="manifest-drain.json",
+                host={},
+                status="queued",
+                attempt_count=0,
+            )
+            connection.commit()
+            deps = web_app._encode_queue_runtime_deps()
+            deps.host_runtime_rows = Mock(return_value=[host_row])
+            deps.max_encode_schedule_window_seconds = Mock(return_value=7_200.0)
+
+            with patch(
+                    "mediaforce.web.runtime.encode_runtime.load_encode_duration_samples",
+                    return_value=self._encode_duration_samples("worker"),
+            ):
+                selected = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
+
+            self.assertIsNone(selected)
+            deferred = load_encode_job(connection, "job-drain")
+            assert deferred is not None
+            self.assertEqual(deferred["status"], "queued")
+            self.assertEqual(deferred["attempt_count"], 0)
+            self.assertIn("waiting for a host window with enough time remaining", deferred["waiting_reason"])
+
+    def test_duration_aware_selection_surfaces_never_fits_reason(self) -> None:
+        close_at = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
+        host_row = self._encode_host_row("worker", schedule_closes_at=close_at)
+
+        with open_db(self.config.paths.db_path) as connection:
+            self._write_manifest("manifest-never-fits.json", [self._estimate_manifest_item(7_200.0)])
+            self._save_job(
+                connection,
+                job_id="job-never-fits",
+                manifest_name="manifest-never-fits.json",
+                host={},
+                status="queued",
+                attempt_count=0,
+            )
+            connection.commit()
+            deps = web_app._encode_queue_runtime_deps()
+            deps.host_runtime_rows = Mock(return_value=[host_row])
+            deps.max_encode_schedule_window_seconds = Mock(return_value=3_600.0)
+
+            with patch(
+                    "mediaforce.web.runtime.encode_runtime.load_encode_duration_samples",
+                    return_value=self._encode_duration_samples("worker"),
+            ):
+                selected = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
+
+            self.assertIsNone(selected)
+            deferred = load_encode_job(connection, "job-never-fits")
+            assert deferred is not None
+            self.assertIn("longer than every configured host schedule window", deferred["waiting_reason"])
+            self.assertIn("Widen a host window or use Bypass scheduler", deferred["waiting_reason"])
+
+    def test_duration_aware_never_fits_reason_persists_while_host_window_is_closed(self) -> None:
+        host_row = self._encode_host_row("worker", schedule_closes_at=None)
+        bounded_policy = {
+            "mode": "night",
+            "start_hour": 18,
+            "end_hour": 19,
+            "timezone": "utc",
+            "days_of_week": list(settings_runtime.SCHEDULE_DAY_ORDER),
+            "all_day_days_of_week": [],
+        }
+
+        with open_db(self.config.paths.db_path) as connection:
+            self._write_manifest("manifest-closed-never-fits.json", [self._estimate_manifest_item(7_200.0)])
+            self._save_job(
+                connection,
+                job_id="job-closed-never-fits",
+                manifest_name="manifest-closed-never-fits.json",
+                host={},
+                status="queued",
+                attempt_count=0,
+                waiting_reason="previous waiting reason",
+            )
+            connection.commit()
+            deps = web_app._encode_queue_runtime_deps()
+            deps.host_runtime_rows = Mock(return_value=[host_row])
+            deps.schedule_profile_policy_for_host = Mock(return_value=bounded_policy)
+            deps.scheduler_allows_encode_run = Mock(return_value=False)
+            deps.max_encode_schedule_window_seconds = Mock(return_value=3_600.0)
+
+            with patch(
+                    "mediaforce.web.runtime.encode_runtime.load_encode_duration_samples",
+                    return_value=self._encode_duration_samples("worker"),
+            ):
+                selected = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
+
+            self.assertIsNone(selected)
+            deferred = load_encode_job(connection, "job-closed-never-fits")
+            assert deferred is not None
+            self.assertIn("longer than every configured host schedule window", deferred["waiting_reason"])
+
+    def test_duration_aware_selection_routes_long_job_to_host_with_room(self) -> None:
+        short_close = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
+        short_window_host = self._encode_host_row("short-window", schedule_closes_at=short_close, priority=10)
+        always_host = self._encode_host_row("always", schedule_closes_at=None, priority=1)
+
+        with open_db(self.config.paths.db_path) as connection:
+            self._write_manifest("manifest-route-long.json", [self._estimate_manifest_item(7_200.0)])
+            self._save_job(
+                connection,
+                job_id="job-route-long",
+                manifest_name="manifest-route-long.json",
+                host={},
+                status="queued",
+                attempt_count=0,
+            )
+            connection.commit()
+            deps = web_app._encode_queue_runtime_deps()
+            deps.host_runtime_rows = Mock(return_value=[short_window_host, always_host])
+
+            samples = (
+                *self._encode_duration_samples("short-window"),
+                *self._encode_duration_samples("always"),
+            )
+            with patch(
+                    "mediaforce.web.runtime.encode_runtime.load_encode_duration_samples",
+                    return_value=samples,
+            ):
+                selected = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
+
+            assert selected is not None
+            self.assertEqual(selected["host"]["key"], "always")
+
+    def test_duration_aware_selection_preserves_fifo_when_oldest_job_fits(self) -> None:
+        close_at = (datetime.now(tz=UTC) + timedelta(hours=3)).isoformat(timespec="seconds")
+        host_row = self._encode_host_row("worker", schedule_closes_at=close_at)
+
+        with open_db(self.config.paths.db_path) as connection:
+            self._write_manifest("manifest-fair-long.json", [self._estimate_manifest_item(7_200.0)])
+            self._write_manifest("manifest-fair-short.json", [self._estimate_manifest_item(600.0)])
+            self._save_job(
+                connection,
+                job_id="job-fair-long",
+                manifest_name="manifest-fair-long.json",
+                host={},
+                status="queued",
+                attempt_count=0,
+            )
+            self._save_job(
+                connection,
+                job_id="job-fair-short",
+                manifest_name="manifest-fair-short.json",
+                host={},
+                status="queued",
+                attempt_count=0,
+            )
+            connection.commit()
+            deps = web_app._encode_queue_runtime_deps()
+            deps.host_runtime_rows = Mock(return_value=[host_row])
+
+            with patch(
+                    "mediaforce.web.runtime.encode_runtime.load_encode_duration_samples",
+                    return_value=self._encode_duration_samples("worker"),
+            ):
+                selected = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
+
+            assert selected is not None
+            self.assertEqual(selected["job_id"], "job-fair-long")
+            self.assertIn("admission_estimate", selected)
+
+    def test_duration_aware_selection_chooses_best_fit_after_fifo_head_blocks(self) -> None:
+        close_at = (datetime.now(tz=UTC) + timedelta(minutes=90)).isoformat(timespec="seconds")
+        host_row = self._encode_host_row("worker", schedule_closes_at=close_at)
+
+        with open_db(self.config.paths.db_path) as connection:
+            self._write_manifest("manifest-best-fit-blocked.json", [self._estimate_manifest_item(10_800.0)])
+            self._write_manifest("manifest-best-fit-tiny.json", [self._estimate_manifest_item(600.0)])
+            self._write_manifest("manifest-best-fit-medium.json", [self._estimate_manifest_item(5_400.0)])
+            for job_id, manifest_name in (
+                    ("job-best-fit-blocked", "manifest-best-fit-blocked.json"),
+                    ("job-best-fit-tiny", "manifest-best-fit-tiny.json"),
+                    ("job-best-fit-medium", "manifest-best-fit-medium.json"),
+            ):
+                self._save_job(
+                    connection,
+                    job_id=job_id,
+                    manifest_name=manifest_name,
+                    host={},
+                    status="queued",
+                    attempt_count=0,
+                )
+            connection.commit()
+            deps = web_app._encode_queue_runtime_deps()
+            deps.host_runtime_rows = Mock(return_value=[host_row])
+
+            with patch(
+                    "mediaforce.web.runtime.encode_runtime.load_encode_duration_samples",
+                    return_value=self._encode_duration_samples("worker"),
+            ):
+                selected = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
+
+            assert selected is not None
+            self.assertEqual(selected["job_id"], "job-best-fit-medium")
+
+    def test_duration_aware_selection_uses_tightest_fitting_host_while_draining(self) -> None:
+        roomy_close = (datetime.now(tz=UTC) + timedelta(hours=3)).isoformat(timespec="seconds")
+        tight_close = (datetime.now(tz=UTC) + timedelta(minutes=90)).isoformat(timespec="seconds")
+        roomy_host = self._encode_host_row("roomy", schedule_closes_at=roomy_close, priority=10)
+        tight_host = self._encode_host_row("tight", schedule_closes_at=tight_close, priority=1)
+
+        with open_db(self.config.paths.db_path) as connection:
+            self._write_manifest("manifest-host-fit-blocked.json", [self._estimate_manifest_item(20_000.0)])
+            self._write_manifest("manifest-host-fit-medium.json", [self._estimate_manifest_item(5_400.0)])
+            self._save_job(
+                connection,
+                job_id="job-host-fit-blocked",
+                manifest_name="manifest-host-fit-blocked.json",
+                host={},
+                status="queued",
+                attempt_count=0,
+            )
+            self._save_job(
+                connection,
+                job_id="job-host-fit-medium",
+                manifest_name="manifest-host-fit-medium.json",
+                host={},
+                status="queued",
+                attempt_count=0,
+            )
+            connection.commit()
+            deps = web_app._encode_queue_runtime_deps()
+            deps.host_runtime_rows = Mock(return_value=[roomy_host, tight_host])
+            samples = (
+                *self._encode_duration_samples("roomy"),
+                *self._encode_duration_samples("tight"),
+            )
+
+            with patch(
+                    "mediaforce.web.runtime.encode_runtime.load_encode_duration_samples",
+                    return_value=samples,
+            ):
+                selected = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
+
+            assert selected is not None
+            self.assertEqual(selected["job_id"], "job-host-fit-medium")
+            self.assertEqual(selected["host"]["key"], "tight")
+
+    def test_duration_aware_admission_estimate_persists_when_job_is_claimed(self) -> None:
+        close_at = (datetime.now(tz=UTC) + timedelta(hours=3)).isoformat(timespec="seconds")
+        host_row = self._encode_host_row("worker", schedule_closes_at=close_at)
+
+        with open_db(self.config.paths.db_path) as connection:
+            self._write_manifest("manifest-admission-progress.json", [self._estimate_manifest_item(600.0)])
+            self._save_job(
+                connection,
+                job_id="job-admission-progress",
+                manifest_name="manifest-admission-progress.json",
+                host={},
+                status="queued",
+                attempt_count=0,
+            )
+            connection.commit()
+            deps = web_app._encode_queue_runtime_deps()
+            deps.host_runtime_rows = Mock(return_value=[host_row])
+
+            with patch(
+                    "mediaforce.web.runtime.encode_runtime.load_encode_duration_samples",
+                    return_value=self._encode_duration_samples("worker"),
+            ):
+                claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)
+
+            assert claimed is not None
+            estimate = object_dict(object_dict(claimed.get("progress")).get("admission_estimate"))
+            self.assertGreater(estimate.get("total_seconds", 0), 0)
+            self.assertEqual(estimate.get("confidence"), "high")
+            connection.commit()
+            deps.load_config = Mock(return_value=self.config)
+            encode_runtime._persist_encode_job_progress(
+                self.config.paths.config_path,
+                "job-admission-progress",
+                {"progress_state": "encoding", "percent_complete": 25.0},
+                deps,
+            )
+
+        with open_db(self.config.paths.db_path) as connection:
+            updated = load_encode_job(connection, "job-admission-progress")
+            assert updated is not None
+            persisted_estimate = object_dict(object_dict(updated.get("progress")).get("admission_estimate"))
+            self.assertEqual(persisted_estimate.get("confidence"), "high")
+
+    def test_duration_aware_admission_does_not_restrict_bypass_job(self) -> None:
+        close_at = (datetime.now(tz=UTC) + timedelta(minutes=1)).isoformat(timespec="seconds")
+        host_row = self._encode_host_row("worker", schedule_closes_at=close_at)
+
+        with open_db(self.config.paths.db_path) as connection:
+            self._write_manifest("manifest-duration-bypass.json", [self._estimate_manifest_item(7_200.0)])
+            self._save_job(
+                connection,
+                job_id="job-duration-bypass",
+                manifest_name="manifest-duration-bypass.json",
+                host={},
+                status="queued",
+                attempt_count=0,
+                bypass_schedule=True,
+            )
+            connection.commit()
+            deps = web_app._encode_queue_runtime_deps()
+            deps.host_runtime_rows = Mock(return_value=[host_row])
+
+            with patch(
+                    "mediaforce.web.runtime.encode_runtime.load_encode_duration_samples",
+                    return_value=self._encode_duration_samples("worker"),
+            ):
+                selected = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
+
+            assert selected is not None
+            self.assertEqual(selected["job_id"], "job-duration-bypass")
+            self.assertNotIn("admission_estimate", selected)
+
+    def test_duration_history_counts_quality_overhead_once_per_job(self) -> None:
+        job_started_at = "2026-07-23T10:00:00+00:00"
+        first_encode_started_at = "2026-07-23T10:10:00+00:00"
+        second_encode_started_at = "2026-07-23T12:00:00+00:00"
+
+        with open_db(self.config.paths.db_path) as connection:
+            first_item_id = self._insert_library_item(connection, self._create_source_file("history-one.mkv"))
+            second_item_id = self._insert_library_item(connection, self._create_source_file("history-two.mkv"))
+            self._save_job(
+                connection,
+                job_id="job-duration-history",
+                manifest_name="manifest-duration-history.json",
+                host={"key": "worker"},
+                status="running",
+                attempt_count=1,
+            )
+            connection.execute(
+                update(encode_jobs)
+                .where(encode_jobs.c.job_id == "job-duration-history")
+                .values(started_at=job_started_at)
+            )
+            for item_id, started_at in (
+                    (first_item_id, first_encode_started_at),
+                    (second_item_id, second_encode_started_at),
+            ):
+                staging_path = self._staging_path(f"history-{item_id}.mkv")
+                self._insert_staged_artifact(connection, item_id, staging_path)
+                connection.execute(
+                    update(staged_artifacts)
+                    .where(staged_artifacts.c.library_item_id == item_id)
+                    .values(
+                        encode_job_id="job-duration-history",
+                        encode_host_key="worker",
+                        encode_host_label="Worker",
+                        source_duration_seconds=1_200.0,
+                        encode_duration_seconds=600.0,
+                        encode_started_at=started_at,
+                        encode_completed_at="2026-07-23T13:00:00+00:00",
+                    )
+                )
+            connection.commit()
+
+            samples = load_encode_duration_samples(connection)
+
+            self.assertEqual(len(samples), 2)
+            self.assertEqual([sample.encode_realtime_factor for sample in samples], [0.5, 0.5])
+            self.assertEqual(
+                sorted(sample.quality_overhead_seconds for sample in samples if sample.quality_overhead_seconds is not None),
+                [600.0],
+            )
 
     def test_schedule_close_requeues_without_failure_and_cleans_partial_output(self) -> None:
         source_path = self._create_source_file("episode-schedule-close.mkv")
@@ -14476,6 +14945,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             connection.commit()
             deps = Mock()
             deps.now_iso.return_value = web_app._now_iso()
+            deps.host_runtime_rows.return_value = []
 
             with patch("mediaforce.web.runtime.encode_runtime.select_encode_host") as select_host:
                 job = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
@@ -14586,7 +15056,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 selected = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
 
             self.assertIsNone(selected)
-            deps.host_runtime_rows.assert_called_once_with(connection, self.config)
+            deps.host_runtime_rows.assert_called_once()
+            self.assertEqual(deps.host_runtime_rows.call_args.args, (connection, self.config))
+            self.assertIn("now", deps.host_runtime_rows.call_args.kwargs)
             self.assertEqual(select_host.call_count, 2)
             self.assertEqual(sync_parent.call_count, 1)
             self.assertEqual(len(manifest_reads), 1)
@@ -14617,9 +15089,39 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertIsNotNone(selected)
             assert selected is not None
             self.assertEqual(selected["job_id"], "shard-waiting-2")
-            deps.host_runtime_rows.assert_called_once_with(connection, self.config)
+            deps.host_runtime_rows.assert_called_once()
+            self.assertEqual(deps.host_runtime_rows.call_args.args, (connection, self.config))
+            self.assertIn("now", deps.host_runtime_rows.call_args.kwargs)
             self.assertEqual(sync_parent.call_count, 1)
             self.assertEqual(len(manifest_reads), 1)
+
+    def test_encode_estimate_manifest_cache_reuses_unchanged_manifest(self) -> None:
+        manifest_path = self._write_manifest(
+            "manifest-estimate-cache.json",
+            [{"library_item_id": 1, "duration_seconds": 120.0}],
+        )
+        job = {
+            "manifest_path": str(manifest_path),
+            "manifest_indexes": [0],
+        }
+        manifest_reads: list[Path] = []
+        original_read_text = Path.read_text
+
+        def tracked_read_text(path: Path, *args: object, **kwargs: object) -> str:
+            if path == manifest_path:
+                manifest_reads.append(path)
+            return original_read_text(path, *args, **kwargs)
+
+        encode_runtime._cached_encode_estimate_manifest_items.cache_clear()
+        try:
+            with patch.object(Path, "read_text", tracked_read_text):
+                first = encode_runtime._encode_job_estimate_items(job, manifest_items_cache={})
+                second = encode_runtime._encode_job_estimate_items(job, manifest_items_cache={})
+        finally:
+            encode_runtime._cached_encode_estimate_manifest_items.cache_clear()
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(manifest_reads), 1)
 
     def test_process_encode_queue_once_dispatches_multiple_jobs(self) -> None:
         manifest_path = self._write_manifest(
@@ -19537,6 +20039,52 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
     def _staging_path(self, name: str) -> Path:
         return self.root / "staging" / "tv" / "show" / name
+
+    @staticmethod
+    def _encode_host_row(
+            key: str,
+            *,
+            schedule_closes_at: str | None,
+            priority: int = 1,
+    ) -> dict[str, object]:
+        return {
+            "key": key,
+            "host": key,
+            "label": key,
+            "mode": "local",
+            "priority": priority,
+            "available": True,
+            "probe_available": True,
+            "capabilities": ["encode_queue"],
+            "active_encode_count": 0,
+            "max_parallel_encodes": 1,
+            "schedule_closes_at": schedule_closes_at,
+        }
+
+    @staticmethod
+    def _estimate_manifest_item(duration_seconds: float) -> dict[str, object]:
+        return {
+            "duration_seconds": duration_seconds,
+            "resolved_policy": {
+                "video": {
+                    "sample_every": "8m",
+                    "sample_duration": "20s",
+                    "thorough": False,
+                }
+            },
+        }
+
+    @staticmethod
+    def _encode_duration_samples(host_key: str) -> tuple[EncodeDurationSample, ...]:
+        return tuple(
+            EncodeDurationSample(
+                host_key=host_key,
+                host_label=host_key,
+                encode_realtime_factor=0.5,
+                quality_overhead_seconds=60.0,
+            )
+            for _ in range(12)
+        )
 
     def _insert_exact_root_staged_items(self, connection: DBClient, *, status: str) -> tuple[int, int]:
         exact_source = self.root / "source" / "other" / "Foo.mkv"

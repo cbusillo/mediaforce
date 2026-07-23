@@ -9,6 +9,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,8 @@ from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS, ensure_q
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ScheduleWindowClosedError
 from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, parse_schedule_close_deadline
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
+from mediaforce.encoding.duration_estimate import EncodeDurationEstimate, EncodeDurationSample, \
+    estimate_encode_job_duration, estimate_fits_before_schedule_close, load_encode_duration_samples
 from mediaforce.encoding.quality import QualitySearchError, QualityTempCleanupError, QualityTempSetupError, \
     analyze_quality_policy_failure, quality_error_message
 from mediaforce.encoding.staging import safe_unlink
@@ -46,6 +49,7 @@ class EncodeQueueRuntimeDeps:
     host_runtime_rows: Any
     schedule_profile_policy_for_host: Any
     scheduler_allows_encode_run: Any
+    max_encode_schedule_window_seconds: Any
     host_lifecycle_start_command: Any
     ensure_encode_host_ready: Any
     stop_encode_host_if_configured: Any
@@ -66,6 +70,7 @@ class EncodeQueueRuntimeDeps:
 ENCODE_HOST_BACKUP_FAILURE_THRESHOLD = 2
 SCHEDULE_CLOSE_WAITING_REASON = "Waiting for a host schedule window."
 SCHEDULE_CLOSE_ERROR_MESSAGE = "Encode host schedule window closed."
+HOST_WINDOW_TOO_SHORT_REASON = "waiting for a host schedule window with enough time remaining"
 
 
 def recover_encode_queue(
@@ -1152,22 +1157,32 @@ def select_encode_host(
         deps: EncodeQueueRuntimeDeps,
         *,
         host_rows: list[dict[str, Any]] | None = None,
+        now: datetime | None = None,
+        host_admission: Any | None = None,
+        host_rank: Any | None = None,
+        globally_blocked_hosts: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     library_key = _encode_job_library_key(job)
+    current_time = now or datetime.now(tz=UTC)
     host_rows = sorted(
-        host_rows if host_rows is not None else deps.host_runtime_rows(connection, config),
+        host_rows if host_rows is not None else deps.host_runtime_rows(connection, config, now=current_time),
         key=lambda status: (-int(status["priority"]), str(status["label"])),
     )
     if library_key:
         host_rows = [host for host in host_rows if _host_allows_library(host, library_key)]
-    now = datetime.now(tz=UTC)
     bypass_schedule = bool(job.get("bypass_schedule"))
+
+    def _admitted(hosts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if host_admission is None:
+            return hosts
+        admitted = [host for host in hosts if bool(host_admission(host))]
+        return sorted(admitted, key=host_rank) if host_rank is not None else admitted
 
     def _schedule_open(host: dict[str, Any]) -> bool:
         return deps.scheduler_allows_encode_run(
             deps.schedule_profile_policy_for_host(config, host),
             bypass_schedule=bypass_schedule,
-            now=now,
+            now=current_time,
             host_payload=host,
         )
 
@@ -1219,7 +1234,8 @@ def select_encode_host(
     if not active_hosts and not startable_hosts and storage_issues:
         return None, storage_issues[0]
 
-    globally_blocked_hosts = _globally_backed_off_encode_hosts(connection, deps, now=now)
+    if globally_blocked_hosts is None:
+        globally_blocked_hosts = _globally_backed_off_encode_hosts(connection, deps, now=current_time)
     blocked_host_tokens = {
         token
         for blocked_host in globally_blocked_hosts.values()
@@ -1251,27 +1267,35 @@ def select_encode_host(
     cooldown_until = deps.parse_iso(job.get("host_cooldown_until"))
     last_host = object_dict(job.get("last_host"))
     blocked_tokens = _host_identity_tokens(last_host)
-    if cooldown_until is not None and cooldown_until > now and blocked_tokens:
+    if cooldown_until is not None and cooldown_until > current_time and blocked_tokens:
         eligible_active_hosts = [
             host
             for host in active_hosts
             if not (_host_identity_tokens(host) & blocked_tokens)
         ]
-        if eligible_active_hosts:
-            return object_dict(eligible_active_hosts[0]), None
+        admitted_active_hosts = _admitted(eligible_active_hosts)
+        if admitted_active_hosts:
+            return object_dict(admitted_active_hosts[0]), None
         eligible_startable_hosts = [
             host
             for host in startable_hosts
             if not (_host_identity_tokens(host) & blocked_tokens)
         ]
-        if eligible_startable_hosts:
-            return object_dict(eligible_startable_hosts[0]), None
+        admitted_startable_hosts = _admitted(eligible_startable_hosts)
+        if admitted_startable_hosts:
+            return object_dict(admitted_startable_hosts[0]), None
+        if host_admission is not None and (eligible_active_hosts or eligible_startable_hosts):
+            return None, HOST_WINDOW_TOO_SHORT_REASON
         host_name = str(last_host.get("label") or last_host.get("key") or "the last host")
         return None, f"waiting for host cooldown to expire on {host_name}"
-    if active_hosts:
-        return object_dict(active_hosts[0]), None
-    if startable_hosts:
-        return object_dict(startable_hosts[0]), None
+    admitted_active_hosts = _admitted(active_hosts)
+    if admitted_active_hosts:
+        return object_dict(admitted_active_hosts[0]), None
+    admitted_startable_hosts = _admitted(startable_hosts)
+    if admitted_startable_hosts:
+        return object_dict(admitted_startable_hosts[0]), None
+    if host_admission is not None and (active_hosts or startable_hosts):
+        return None, HOST_WINDOW_TOO_SHORT_REASON
     if any(
             int(host.get("active_encode_count") or 0) >= int(host.get("max_parallel_encodes") or 1)
             for host in encode_capable_hosts
@@ -1280,7 +1304,7 @@ def select_encode_host(
     if any(
             not deps.scheduler_allows_encode_run(
                 deps.schedule_profile_policy_for_host(config, host),
-                now=now,
+                now=current_time,
                 host_payload=host,
             )
             for host in encode_capable_hosts
@@ -1466,6 +1490,48 @@ def _selected_encode_schedule_close_deadline(
     return deadline.isoformat(timespec="seconds") if deadline is not None else None
 
 
+def _encode_job_estimate_items(
+        job: dict[str, Any],
+        *,
+        manifest_items_cache: dict[Path, list[dict[str, Any]] | None],
+) -> list[dict[str, Any]]:
+    manifest_path = Path(str(job.get("manifest_path") or "").strip())
+    if manifest_path not in manifest_items_cache:
+        try:
+            manifest_stat = manifest_path.stat()
+            cached_items = _cached_encode_estimate_manifest_items(
+                str(manifest_path),
+                manifest_stat.st_mtime_ns,
+                manifest_stat.st_size,
+            )
+        except (OSError, json.JSONDecodeError):
+            manifest_items_cache[manifest_path] = None
+        else:
+            manifest_items_cache[manifest_path] = list(cached_items)
+    manifest_items = manifest_items_cache.get(manifest_path)
+    if manifest_items is None:
+        return []
+    return [
+        manifest_items[index]
+        for index in _manifest_indexes_for_job(job, manifest_items)
+        if 0 <= index < len(manifest_items)
+    ]
+
+
+@lru_cache(maxsize=256)
+def _cached_encode_estimate_manifest_items(
+        manifest_path: str,
+        _mtime_ns: int,
+        _size_bytes: int,
+) -> tuple[dict[str, Any], ...]:
+    manifest = json.loads(Path(manifest_path).read_text())
+    return tuple(object_dict(item) for item in object_list(manifest.get("items")))
+
+
+def _encode_duration_host_cache_key(host: dict[str, Any]) -> str:
+    return "|".join(sorted(_host_identity_tokens(host))) or str(host.get("label") or "unknown")
+
+
 def _encode_host_selection_key(job: dict[str, Any]) -> tuple[str, bool, str, str]:
     return (
         _encode_job_library_key(job),
@@ -1473,6 +1539,117 @@ def _encode_host_selection_key(job: dict[str, Any]) -> tuple[str, bool, str, str
         str(job.get("host_cooldown_until") or ""),
         json.dumps(object_dict(job.get("last_host")), sort_keys=True, separators=(",", ":")),
     )
+
+
+def _duration_aware_encode_waiting_reason(
+        config: MediaforceConfig,
+        job: dict[str, Any],
+        estimate_items: list[dict[str, Any]],
+        host_rows: list[dict[str, Any]],
+        duration_samples: tuple[EncodeDurationSample, ...],
+        deps: EncodeQueueRuntimeDeps,
+        *,
+        now: datetime,
+        impossible_only: bool = False,
+) -> str | None:
+    library_key = _encode_job_library_key(job)
+    encode_hosts = [
+        host
+        for host in host_rows
+        if "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
+        and (not library_key or _host_allows_library(host, library_key))
+    ]
+    if not estimate_items or not encode_hosts:
+        return None
+    best_estimate_seconds: int | None = None
+    longest_window_seconds = 0.0
+    longest_window_host = ""
+    longest_window_estimate_seconds = 0
+    fits_configured_window = False
+    for host in encode_hosts:
+        estimate = estimate_encode_job_duration(estimate_items, host, duration_samples)
+        if best_estimate_seconds is None or estimate.total_seconds < best_estimate_seconds:
+            best_estimate_seconds = estimate.total_seconds
+        policy = deps.schedule_profile_policy_for_host(config, host)
+        max_window_seconds = deps.max_encode_schedule_window_seconds(
+            policy,
+            now=now,
+            host_payload=host,
+        )
+        if max_window_seconds is None:
+            fits_configured_window = True
+            continue
+        if max_window_seconds > longest_window_seconds:
+            longest_window_seconds = max_window_seconds
+            longest_window_host = _blocked_host_display_name(host)
+            longest_window_estimate_seconds = estimate.total_seconds
+        if estimate.total_seconds <= max_window_seconds:
+            fits_configured_window = True
+    estimate_copy = _format_estimated_duration(best_estimate_seconds or 0)
+    if not fits_configured_window:
+        impossible_estimate_copy = _format_estimated_duration(
+            longest_window_estimate_seconds or best_estimate_seconds or 0
+        )
+        longest_copy = _format_estimated_duration(longest_window_seconds)
+        host_copy = f" on {longest_window_host}" if longest_window_host else ""
+        return (
+            f"Estimated runtime {impossible_estimate_copy} is longer than every configured host schedule window "
+            f"(longest {longest_copy}{host_copy}). Widen a host window or use Bypass scheduler."
+        )
+    if impossible_only:
+        return None
+    return f"Estimated runtime {estimate_copy}; waiting for a host window with enough time remaining."
+
+
+def _format_estimated_duration(seconds: float) -> str:
+    total_minutes = max(5, int((max(seconds, 0.0) + 299) // 300) * 5)
+    hours, minutes = divmod(total_minutes, 60)
+    if hours and minutes:
+        return f"about {hours}h {minutes}m"
+    if hours:
+        return f"about {hours}h"
+    return f"about {minutes}m"
+
+
+def _encode_duration_estimate_payload(estimate: EncodeDurationEstimate) -> dict[str, Any]:
+    return {
+        "total_seconds": estimate.total_seconds,
+        "encode_seconds": estimate.encode_seconds,
+        "quality_search_seconds": estimate.quality_search_seconds,
+        "source_duration_seconds": estimate.source_duration_seconds,
+        "host_sample_size": estimate.host_sample_size,
+        "confidence": estimate.confidence,
+    }
+
+
+def _encode_best_fit_score(
+        host: dict[str, Any],
+        estimate: EncodeDurationEstimate | None,
+        *,
+        now: datetime,
+        queue_position: int,
+) -> tuple[int, float, int]:
+    fit_tier, unused_window_seconds, _priority, _label = _encode_host_best_fit_score(
+        host,
+        estimate,
+        now=now,
+    )
+    return fit_tier, unused_window_seconds, queue_position
+
+
+def _encode_host_best_fit_score(
+        host: dict[str, Any],
+        estimate: EncodeDurationEstimate | None,
+        *,
+        now: datetime,
+) -> tuple[int, float, int, str]:
+    schedule_close = parse_schedule_close_deadline(host.get("schedule_closes_at"))
+    priority = -int(host.get("priority") or 0)
+    label = str(host.get("label") or host.get("key") or "")
+    if estimate is None or schedule_close is None:
+        return 1, float("inf"), priority, label
+    remaining_seconds = max((schedule_close - now).total_seconds(), 0.0)
+    return 0, max(remaining_seconds - estimate.total_seconds, 0.0), priority, label
 
 
 def _host_allows_library(host: dict[str, Any], library_key: str) -> bool:
@@ -1641,53 +1818,36 @@ def load_next_runnable_encode_job(
         .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
         .order_by(encode_jobs.c.created_at, literal_column("rowid"))
     ).mappings().fetchall()
-    host_rows = deps.host_runtime_rows(connection, config) if rows else []
+    now = datetime.now(tz=UTC)
+    host_rows = deps.host_runtime_rows(connection, config, now=now) if rows else []
+    duration_estimation_relevant = any(
+        parse_schedule_close_deadline(host.get("schedule_closes_at")) is not None
+        or str(deps.schedule_profile_policy_for_host(config, host).get("mode") or "anytime") != "anytime"
+        for host in host_rows
+        if "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
+    )
+    duration_samples = load_encode_duration_samples(connection) if duration_estimation_relevant else ()
+    globally_blocked_hosts = _globally_backed_off_encode_hosts(connection, deps, now=now) if rows else {}
+    manifest_items_cache: dict[Path, list[dict[str, Any]] | None] = {}
     host_selection_cache: dict[
-        tuple[str, bool, str, str],
+        tuple[str, bool, str, str, bool, tuple[tuple[str, int, bool], ...] | None],
         tuple[dict[str, Any] | None, str | None],
     ] = {}
-    for row in rows:
-        job = load_encode_job(connection, str(row["job_id"]))
-        if job is None:
-            continue
-        library_key = _encode_job_library_key(job)
-        if library_key and library_key not in config.source_root_map:
-            waiting_reason = "Library is Browse only or Disabled in Settings."
-            if str(job.get("waiting_reason") or "") != waiting_reason:
-                job.update({"waiting_reason": waiting_reason, "updated_at": deps.now_iso()})
-                save_encode_job(connection, job)
-                defer_parent_sync(job)
-            continue
-        selection_key = _encode_host_selection_key(job)
-        selection = host_selection_cache.get(selection_key)
-        if selection is None:
-            selection = select_encode_host(
-                connection,
-                config,
-                job,
-                deps,
-                host_rows=host_rows,
-            )
-            host_selection_cache[selection_key] = selection
-        host_payload, waiting_reason = selection
-        if host_payload is None:
-            if (
-                    str(job.get("waiting_reason") or "") != str(waiting_reason or "")
-                    or job.get("schedule_close_deadline_at") is not None
-            ):
-                job.update(
-                    {
-                        "waiting_reason": waiting_reason,
-                        "schedule_close_deadline_at": None,
-                        "updated_at": deps.now_iso(),
-                    }
-                )
-                save_encode_job(connection, job)
-                defer_parent_sync(job)
-            continue
+    saw_duration_block = False
+    best_fit_candidates: list[
+        tuple[tuple[int, float, int], dict[str, Any], dict[str, Any], EncodeDurationEstimate | None]
+    ] = []
+
+    def prepare_selected_job(
+            job: dict[str, Any],
+            host_payload: dict[str, Any],
+            estimate: EncodeDurationEstimate | None,
+    ) -> dict[str, Any] | None:
+        if estimate is not None and not bool(job.get("bypass_schedule")):
+            job["admission_estimate"] = _encode_duration_estimate_payload(estimate)
         schedule_close_deadline_at = _selected_encode_schedule_close_deadline(job, host_payload)
         schedule_close_deadline = parse_schedule_close_deadline(schedule_close_deadline_at)
-        if schedule_close_deadline is not None and schedule_close_deadline <= datetime.now(tz=UTC):
+        if schedule_close_deadline is not None and schedule_close_deadline <= now:
             job.update(
                 {
                     "waiting_reason": SCHEDULE_CLOSE_WAITING_REASON,
@@ -1697,7 +1857,7 @@ def load_next_runnable_encode_job(
             )
             save_encode_job(connection, job)
             defer_parent_sync(job)
-            continue
+            return None
         persisted_host_payload = persisted_encode_host_payload(host_payload)
         if (
                 job.get("waiting_reason")
@@ -1714,8 +1874,147 @@ def load_next_runnable_encode_job(
             )
             save_encode_job(connection, job)
             defer_parent_sync(job)
-        sync_deferred_parents()
         return job
+
+    for queue_position, row in enumerate(rows):
+        job = load_encode_job(connection, str(row["job_id"]))
+        if job is None:
+            continue
+        library_key = _encode_job_library_key(job)
+        if library_key and library_key not in config.source_root_map:
+            waiting_reason = "Library is Browse only or Disabled in Settings."
+            if str(job.get("waiting_reason") or "") != waiting_reason:
+                job.update({"waiting_reason": waiting_reason, "updated_at": deps.now_iso()})
+                save_encode_job(connection, job)
+                defer_parent_sync(job)
+            continue
+        estimate_items = (
+            _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache)
+            if duration_estimation_relevant
+            else []
+        )
+        estimates_by_host: dict[str, EncodeDurationEstimate] = {}
+
+        def estimate_for_host(host: dict[str, Any]) -> EncodeDurationEstimate:
+            host_key = _encode_duration_host_cache_key(host)
+            estimate = estimates_by_host.get(host_key)
+            if estimate is None:
+                estimate = estimate_encode_job_duration(estimate_items, host, duration_samples)
+                estimates_by_host[host_key] = estimate
+            return estimate
+
+        host_admission = None
+        host_rank = None
+        admission_key: tuple[tuple[str, int, bool], ...] | None = None
+        if estimate_items and not bool(job.get("bypass_schedule")):
+            admission_entries = [
+                (
+                    _encode_duration_host_cache_key(host),
+                    estimate_for_host(host).total_seconds,
+                    estimate_fits_before_schedule_close(
+                        estimate_for_host(host),
+                        host,
+                        now=now,
+                    ),
+                )
+                for host in host_rows
+            ]
+            admitted_host_keys = frozenset(
+                host_key for host_key, _estimated_seconds, admitted in admission_entries if admitted
+            )
+            admission_key = tuple(sorted(admission_entries))
+            host_admission = lambda host: _encode_duration_host_cache_key(host) in admitted_host_keys
+            if saw_duration_block:
+                host_rank = lambda host: _encode_host_best_fit_score(
+                    host,
+                    estimate_for_host(host),
+                    now=now,
+                )
+        best_fit_host_selection = host_rank is not None
+        selection_key = (*_encode_host_selection_key(job), best_fit_host_selection, admission_key)
+        selection = host_selection_cache.get(selection_key)
+        if selection is None:
+            selection = select_encode_host(
+                connection,
+                config,
+                job,
+                deps,
+                host_rows=host_rows,
+                now=now,
+                host_admission=host_admission,
+                host_rank=host_rank,
+                globally_blocked_hosts=globally_blocked_hosts,
+            )
+            host_selection_cache[selection_key] = selection
+        host_payload, waiting_reason = selection
+        if host_payload is None:
+            if waiting_reason == HOST_WINDOW_TOO_SHORT_REASON:
+                saw_duration_block = True
+                waiting_reason = _duration_aware_encode_waiting_reason(
+                    config,
+                    job,
+                    estimate_items,
+                    host_rows,
+                    duration_samples,
+                    deps,
+                    now=now,
+                ) or HOST_WINDOW_TOO_SHORT_REASON
+            elif estimate_items and not bool(job.get("bypass_schedule")):
+                impossible_reason = _duration_aware_encode_waiting_reason(
+                    config,
+                    job,
+                    estimate_items,
+                    host_rows,
+                    duration_samples,
+                    deps,
+                    now=now,
+                    impossible_only=True,
+                )
+                if impossible_reason is not None:
+                    waiting_reason = impossible_reason
+            if (
+                    str(job.get("waiting_reason") or "") != str(waiting_reason or "")
+                    or job.get("schedule_close_deadline_at") is not None
+            ):
+                job.update(
+                    {
+                        "waiting_reason": waiting_reason,
+                        "schedule_close_deadline_at": None,
+                        "updated_at": deps.now_iso(),
+                    }
+                )
+                save_encode_job(connection, job)
+                defer_parent_sync(job)
+            continue
+        estimate = (
+            estimate_for_host(host_payload)
+            if estimate_items and not bool(job.get("bypass_schedule"))
+            else None
+        )
+        if not saw_duration_block or bool(job.get("bypass_schedule")):
+            selected_job = prepare_selected_job(job, host_payload, estimate)
+            if selected_job is None:
+                continue
+            sync_deferred_parents()
+            return selected_job
+        best_fit_candidates.append(
+            (
+                _encode_best_fit_score(
+                    host_payload,
+                    estimate,
+                    now=now,
+                    queue_position=queue_position,
+                ),
+                job,
+                host_payload,
+                estimate,
+            )
+        )
+    for _score, job, host_payload, estimate in sorted(best_fit_candidates, key=lambda candidate: candidate[0]):
+        selected_job = prepare_selected_job(job, host_payload, estimate)
+        if selected_job is not None:
+            sync_deferred_parents()
+            return selected_job
     sync_deferred_parents()
     return None
 
@@ -1971,7 +2270,7 @@ def _host_has_other_running_jobs(config: MediaforceConfig, job_id: str, host_pay
 
 def _initial_encode_job_progress(job: dict[str, Any], deps: EncodeQueueRuntimeDeps) -> dict[str, Any]:
     manifest_totals = encode_job_manifest_totals(job)
-    return {
+    progress = {
         **manifest_totals,
         "completed_item_count": 0,
         "completed_duration_seconds": 0.0,
@@ -1986,6 +2285,10 @@ def _initial_encode_job_progress(job: dict[str, Any], deps: EncodeQueueRuntimeDe
         "out_time_seconds": 0.0,
         "updated_at": deps.now_iso(),
     }
+    admission_estimate = object_dict(job.get("admission_estimate"))
+    if admission_estimate:
+        progress["admission_estimate"] = admission_estimate
+    return progress
 
 
 def _persist_encode_job_progress(
@@ -1998,7 +2301,12 @@ def _persist_encode_job_progress(
         job = load_encode_job(connection, job_id)
         if job is None or str(job.get("status") or "") != "running":
             return
-        job.update({"progress": {**progress, "updated_at": deps.now_iso()}, "updated_at": deps.now_iso()})
+        existing_progress = object_dict(job.get("progress"))
+        admission_estimate = object_dict(existing_progress.get("admission_estimate"))
+        next_progress = {**progress, "updated_at": deps.now_iso()}
+        if admission_estimate:
+            next_progress["admission_estimate"] = admission_estimate
+        job.update({"progress": next_progress, "updated_at": deps.now_iso()})
         save_encode_job(connection, job)
         sync_encode_job_parent(connection, job, deps)
 
