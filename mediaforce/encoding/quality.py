@@ -11,7 +11,9 @@ from functools import lru_cache
 from pathlib import Path
 
 from mediaforce.encoding.ffmpeg import ab_av1_hwaccel_input_args
-from mediaforce.core.process_control import ManagedProcessController, run_command
+from mediaforce.core.process_control import ManagedProcessController, ScheduleWindowClosedError, run_command
+from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, guard_command_for_schedule_deadline, \
+    process_result_reached_schedule_deadline
 from mediaforce.core.type_defs import object_dict
 from mediaforce.remote import execution_mode_for_host, run_remote_command
 
@@ -531,16 +533,33 @@ def _run_quality_command(
 ) -> subprocess.CompletedProcess[str]:
     host_mode = execution_mode_for_host(host)
     if host_mode != "ssh":
-        return run_command(cmd, process_controller=process_controller, env=_local_quality_environment())
+        result = run_command(
+            guard_command_for_schedule_deadline(cmd, host, process_controller=process_controller),
+            process_controller=process_controller,
+            env=_local_quality_environment(),
+        )
+        if process_result_reached_schedule_deadline(result, host):
+            raise ScheduleWindowClosedError("Encode host schedule window closed.")
+        return result
     temp_dir = _quality_temp_dir_arg(cmd)
     if temp_dir is not None:
-        mkdir_result = run_remote_command(object_dict(host), ["mkdir", "-p", temp_dir], REMOTE_QUALITY_TIMEOUT_SECONDS)
+        mkdir_result = run_remote_command(
+            object_dict(host),
+            ["mkdir", "-p", temp_dir],
+            REMOTE_QUALITY_TIMEOUT_SECONDS,
+            process_controller=process_controller,
+        )
         if mkdir_result.returncode != 0:
             details = mkdir_result.stdout.strip()
             if mkdir_result.stderr.strip():
                 details = f"{details}\n{mkdir_result.stderr.strip()}".strip()
             raise QualityTempSetupError(details or f"Failed to prepare remote temp dir: {temp_dir}")
-    return run_remote_command(object_dict(host), cmd, REMOTE_QUALITY_TIMEOUT_SECONDS)
+    return run_remote_command(
+        object_dict(host),
+        cmd,
+        REMOTE_QUALITY_TIMEOUT_SECONDS,
+        process_controller=process_controller,
+    )
 
 
 def _scoped_quality_temp_dir(quality_temp_dir: Path | None, *, host: dict[str, object] | None) -> Path | None:
@@ -566,8 +585,10 @@ def _cleanup_scoped_quality_temp_dir(scoped_temp_dir: Path | None, *, host: dict
             return f"Failed to remove local quality temp dir {scoped_temp_dir}: {exc}"
         return None
     try:
+        cleanup_host = object_dict(host)
+        cleanup_host.pop(SCHEDULE_CLOSE_DEADLINE_KEY, None)
         result = run_remote_command(
-            object_dict(host),
+            cleanup_host,
             ["rm", "-rf", str(scoped_temp_dir)],
             REMOTE_QUALITY_CLEANUP_TIMEOUT_SECONDS,
         )

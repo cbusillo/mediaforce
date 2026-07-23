@@ -418,6 +418,7 @@ export interface EncodeQueueJob {
 	created_at?: string | null;
 	finished_at?: string | null;
 	updated_at?: string | null;
+	schedule_close_deadline_at?: string | null;
 	attempt_summary?: string | null;
 	active_hosts?: Array<Record<string, unknown>>;
 	running_shard_count?: number;

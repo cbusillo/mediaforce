@@ -7,6 +7,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable, cast
 
+from mediaforce.core.process_control import ScheduleWindowClosedError
+from mediaforce.core.schedule_deadline import guard_command_for_schedule_deadline, \
+    guard_shell_script_for_schedule_deadline, process_result_reached_schedule_deadline, \
+    managed_schedule_close_deadline
 from mediaforce.core.type_defs import object_dict
 
 
@@ -24,18 +28,25 @@ def run_encode_command(
         remote_shell_path_export_line: Callable[[], str],
         ssh_client_options: Callable[[], list[str]],
         ffmpeg_command_with_progress: Callable[[list[str]], list[str]],
-        run_tracked_encode_command: Callable[..., subprocess.CompletedProcess[str]],
         run_tracked_process_fn: Callable[..., subprocess.CompletedProcess[str]],
         run_streamed_remote_encode_command_fn: Callable[..., subprocess.CompletedProcess[str]],
 ) -> subprocess.CompletedProcess[str]:
     host_mode = execution_mode_for_host(host)
     host_payload = object_dict(host)
+    deadline = managed_schedule_close_deadline(host_payload, process_controller)
     if host_mode != "ssh":
-        return run_tracked_encode_command(
-            ffmpeg_cmd[:-1] + [str(temp_output)],
+        local_cmd = ffmpeg_command_with_progress(ffmpeg_cmd[:-1] + [str(temp_output)])
+        result = run_tracked_process_fn(
+            guard_command_for_schedule_deadline(
+                local_cmd,
+                host_payload,
+                process_controller=process_controller,
+            ),
             process_controller=process_controller,
             progress_callback=progress_callback,
         )
+        _raise_if_schedule_deadline_reached(result, host_payload)
+        return result
 
     if host_media_access_for_host(host) == "stream":
         return run_streamed_remote_encode_command_fn(
@@ -67,17 +78,22 @@ def run_encode_command(
             f"mv -f {shlex.quote(str(temp_output))} {shlex.quote(str(staging_path))}",
         ]
     )
+    remote_script = " && ".join(remote_script_parts)
+    if deadline is not None:
+        remote_script = guard_shell_script_for_schedule_deadline(remote_script, deadline)
     ssh_cmd = [
         "ssh",
         *ssh_client_options(),
         ssh_host,
-        f"sh -lc {shlex.quote(' && '.join(remote_script_parts))}",
+        f"sh -lc {shlex.quote(remote_script)}",
     ]
-    return run_tracked_process_fn(
+    result = run_tracked_process_fn(
         ssh_cmd,
         process_controller=process_controller,
         progress_callback=progress_callback,
     )
+    _raise_if_schedule_deadline_reached(result, host_payload)
+    return result
 
 
 def run_streamed_remote_encode_command(
@@ -94,6 +110,7 @@ def run_streamed_remote_encode_command(
         process_cancelled_error: type[Exception],
 ) -> subprocess.CompletedProcess[str]:
     host_payload = object_dict(host)
+    deadline = managed_schedule_close_deadline(host_payload, process_controller)
     ssh_host = str(host_payload.get("key") or host_payload.get("host") or "").strip()
     if not ssh_host:
         raise RuntimeError("Remote encode host is missing an SSH target.")
@@ -104,11 +121,14 @@ def run_streamed_remote_encode_command(
         output_path=temp_output,
         executable_path=str(host_payload.get("ffmpeg_path") or "") or None,
     )
+    remote_script = shlex.join(remote_ffmpeg_cmd)
+    if deadline is not None:
+        remote_script = guard_shell_script_for_schedule_deadline(remote_script, deadline)
     ssh_cmd = [
         "ssh",
         *ssh_client_options(),
         ssh_host,
-        shlex.join(remote_ffmpeg_cmd),
+        f"sh -lc {shlex.quote(remote_script)}",
     ]
 
     process_controller.throw_if_cancelled() if process_controller is not None else None
@@ -178,8 +198,11 @@ def run_streamed_remote_encode_command(
             process_controller.clear(process_handle)
 
     if process_controller is not None and process_controller.cancelled:
+        process_controller.throw_if_cancelled()
         raise process_cancelled_error("Operation was cancelled.")
-    return subprocess.CompletedProcess(ssh_cmd, return_code, "", "".join(stderr_lines))
+    result = subprocess.CompletedProcess(ssh_cmd, return_code, "", "".join(stderr_lines))
+    _raise_if_schedule_deadline_reached(result, host_payload)
+    return result
 
 
 def run_tracked_process(
@@ -242,5 +265,14 @@ def run_tracked_process(
             process_controller.clear(process)
 
     if process_controller is not None and process_controller.cancelled:
+        process_controller.throw_if_cancelled()
         raise process_cancelled_error("Operation was cancelled.")
     return subprocess.CompletedProcess(cmd, return_code, "".join(stdout_lines), "".join(stderr_lines))
+
+
+def _raise_if_schedule_deadline_reached(
+        result: subprocess.CompletedProcess[Any],
+        host: dict[str, Any],
+) -> None:
+    if process_result_reached_schedule_deadline(result, host):
+        raise ScheduleWindowClosedError("Encode host schedule window closed.")

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.process_control import ManagedProcessController
 from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQUIRED_ISSUE
 from mediaforce.hosts.config import execution_mode_for_host, host_media_access_for_host, \
     host_status_targets_current_machine, host_targets_current_machine, normalize_host_media_access, \
@@ -205,12 +206,14 @@ def run_remote_command(
         command: list[str],
         timeout: int,
         input_text: str | None = None,
+        process_controller: ManagedProcessController | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return run_remote_command_impl(
         host,
         command,
         timeout,
         input_text=input_text,
+        process_controller=process_controller,
         ssh_target_for_host=ssh_target_for_host,
         remote_shell_path_export_line=remote_shell_path_export_line,
         run_remote_ssh=_run_remote_ssh,
@@ -340,6 +343,7 @@ def _run_remote_ssh(
         identity_file: Path | None = None,
         batch_mode: bool = True,
         wake_before_connect: bool = True,
+        process_controller: ManagedProcessController | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return _run_remote_ssh_impl(
         host,
@@ -349,6 +353,7 @@ def _run_remote_ssh(
         identity_file=identity_file,
         batch_mode=batch_mode,
         wake_before_connect=wake_before_connect,
+        process_controller=process_controller,
         ensure_remote_awake_for_ssh=_ensure_remote_awake_for_ssh,
         ssh_client_options_func=ssh_client_options,
         subprocess_run=_run_subprocess_text,

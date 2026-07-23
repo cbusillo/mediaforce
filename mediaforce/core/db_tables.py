@@ -280,6 +280,7 @@ encode_jobs = Table(
     Column("lease_expires_at", Text),
     Column("heartbeat_at", Text),
     Column("worker_id", Text),
+    Column("schedule_close_deadline_at", Text),
     Column("retry_not_before", Text),
     Column("waiting_reason", Text),
     Column("terminal_reason", Text),

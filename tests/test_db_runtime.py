@@ -27,7 +27,7 @@ from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.cadence import cadence_policy_snapshot
 from mediaforce.encoding.fingerprint import media_fingerprint_policy_snapshot
 
-CURRENT_DB_REVISION = "20260719_0015"
+CURRENT_DB_REVISION = "20260723_0016"
 
 
 class DatabaseRuntimeTests(unittest.TestCase):
@@ -59,10 +59,12 @@ class DatabaseRuntimeTests(unittest.TestCase):
                     for column in inspector.get_columns("library_item_evidence_state")
                 }
                 library_columns = {str(column["name"]) for column in inspector.get_columns("library_items")}
+                encode_columns = {str(column["name"]) for column in inspector.get_columns("encode_jobs")}
 
             self.assertEqual(version, CURRENT_DB_REVISION)
             self.assertGreaterEqual(len(table_names), 10)
             self.assertIn("idx_encode_jobs_status_retry_ready", indexes)
+            self.assertIn("schedule_close_deadline_at", encode_columns)
             self.assertIn("cadence_summary_json", library_columns)
             self.assertIn("media_fingerprint_json", library_columns)
             self.assertIn("attachment_summary_json", library_columns)
