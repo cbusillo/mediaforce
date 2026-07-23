@@ -3,9 +3,12 @@ import { describe, expect, it } from 'vitest';
 import {
 	alignedScrollOffset,
 	clampMomentIndex,
+	comparisonSideMuted,
 	comparisonKeyboardAction,
 	formatPlaybackTime,
 	frameAspectRatio,
+	mediaElementReady,
+	mediaSourceMatches,
 	normalizedScrollPosition,
 	reviewPairHasSound,
 	scrollOffsetForPosition
@@ -49,6 +52,31 @@ describe('comparison workspace helpers', () => {
 		const mislabeled = pair(true);
 		mislabeled.preview.audio = { trustworthy: true, role: 'original' };
 		expect(reviewPairHasSound(mislabeled)).toBe(false);
+	});
+
+	it('keeps only the chosen comparison side audible', () => {
+		expect(comparisonSideMuted('original', 'new', true)).toBe(true);
+		expect(comparisonSideMuted('new', 'new', true)).toBe(false);
+		expect(comparisonSideMuted('new', 'new', false)).toBe(true);
+	});
+
+	it('accepts only decoded data from the expected clip', () => {
+		expect(mediaElementReady(1)).toBe(false);
+		expect(mediaElementReady(2)).toBe(true);
+		expect(
+			mediaSourceMatches(
+				'http://localhost/review/moment-2.mp4',
+				'/review/moment-2.mp4',
+				'http://localhost/folders/show'
+			)
+		).toBe(true);
+		expect(
+			mediaSourceMatches(
+				'http://localhost/review/moment-1.mp4',
+				'/review/moment-2.mp4',
+				'http://localhost/folders/show'
+			)
+		).toBe(false);
 	});
 
 	it('keeps moments, time, and frame shape bounded and readable', () => {

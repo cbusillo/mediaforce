@@ -42,6 +42,31 @@ export function reviewPairHasSound(pair: ReviewPair | undefined): boolean {
 	);
 }
 
+export function comparisonSideMuted(
+	side: ComparisonSide,
+	audioChoice: ComparisonSide,
+	hasSound: boolean
+): boolean {
+	return !hasSound || side !== audioChoice;
+}
+
+export function mediaElementReady(readyState: number): boolean {
+	return readyState >= 2;
+}
+
+export function mediaSourceMatches(
+	currentSource: string,
+	expectedSource: string,
+	baseUrl: string
+): boolean {
+	if (!currentSource || !expectedSource) return false;
+	try {
+		return new URL(currentSource, baseUrl).href === new URL(expectedSource, baseUrl).href;
+	} catch {
+		return false;
+	}
+}
+
 export function clampMomentIndex(index: number, momentCount: number): number {
 	if (momentCount <= 0) return 0;
 	return Math.min(Math.max(index, 0), momentCount - 1);
