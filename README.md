@@ -497,6 +497,16 @@ operating system exposes one, use fixed UTC offsets only as a compatibility
 fallback, and publish exact UTC close and next-open transitions for runtime
 enforcement and operator surfaces.
 
+Bounded host schedules are hard execution windows. A non-bypassed quality
+search or episode encode receives the selected host's absolute UTC close
+deadline; controller-side cancellation and a host-side watchdog stop encode
+CPU at that boundary even if SSH or the web process disappears. Mediaforce
+discards that episode's partial output and returns it directly to the queue
+without consuming a failure attempt or applying host cooldown. Completed
+episodes stay complete, and the interrupted episode restarts from the beginning
+when a compatible window opens. Mediaforce does not create resumable media or
+phase checkpoints. `Bypass scheduler` intentionally omits the deadline.
+
 For a blank remote Mac, first turn on Remote Login so SSH answers. Once that is
 reachable, the runtime settings UI can finish setup from the web surface: if
 the host only needs first-time trust, enter the remote account password once so

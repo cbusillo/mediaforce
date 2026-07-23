@@ -1,11 +1,40 @@
 import signal
+import sys
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
-from mediaforce.core.process_control import ManagedProcessController, run_command
+from mediaforce.core.process_control import ManagedProcessController, ScheduleWindowClosedError, run_command
 
 
 class ProcessControlTests(TestCase):
+    def test_managed_command_accepts_stdin_text(self) -> None:
+        result = run_command(
+            [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"],
+            process_controller=ManagedProcessController(),
+            input_text="hello",
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "hello")
+
+    def test_schedule_cancellation_preserves_specific_error(self) -> None:
+        controller = ManagedProcessController()
+
+        controller.cancel(ScheduleWindowClosedError("Schedule closed."))
+
+        with self.assertRaisesRegex(ScheduleWindowClosedError, "Schedule closed"):
+            controller.throw_if_cancelled()
+
+    def test_first_cancellation_reason_wins(self) -> None:
+        controller = ManagedProcessController()
+
+        controller.cancel()
+        controller.cancel(ScheduleWindowClosedError("Schedule closed."))
+
+        with self.assertRaisesRegex(RuntimeError, "Operation was cancelled") as raised:
+            controller.throw_if_cancelled()
+        self.assertNotIsInstance(raised.exception, ScheduleWindowClosedError)
+
     @patch("mediaforce.core.process_control.subprocess.Popen")
     def test_run_command_starts_new_session_for_managed_processes(self, popen_mock: Mock) -> None:
         process = Mock()

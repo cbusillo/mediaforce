@@ -10,11 +10,17 @@ class ProcessCancelledError(RuntimeError):
     pass
 
 
+class ScheduleWindowClosedError(ProcessCancelledError):
+    pass
+
+
 class ManagedProcessController:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._process: subprocess.Popen[str] | None = None
         self._cancel_requested = False
+        self._cancel_error_type: type[ProcessCancelledError] = ProcessCancelledError
+        self._cancel_message = "Operation was cancelled."
         self._terminate_process_group = False
 
     def attach(self, process: subprocess.Popen[str], *, terminate_process_group: bool = False) -> None:
@@ -30,8 +36,11 @@ class ManagedProcessController:
                 self._process = None
                 self._terminate_process_group = False
 
-    def cancel(self) -> None:
+    def cancel(self, error: ProcessCancelledError | None = None) -> None:
         with self._lock:
+            if not self._cancel_requested and error is not None:
+                self._cancel_error_type = type(error)
+                self._cancel_message = str(error)
             self._cancel_requested = True
             self._terminate_locked()
 
@@ -42,13 +51,18 @@ class ManagedProcessController:
     def reset(self) -> None:
         with self._lock:
             self._cancel_requested = False
+            self._cancel_error_type = ProcessCancelledError
+            self._cancel_message = "Operation was cancelled."
             self._process = None
             self._terminate_process_group = False
 
     def throw_if_cancelled(self) -> None:
         with self._lock:
-            if self._cancel_requested:
-                raise ProcessCancelledError("Operation was cancelled.")
+            if not self._cancel_requested:
+                return
+            error_type = self._cancel_error_type
+            message = self._cancel_message
+        raise error_type(message)
 
     @property
     def cancelled(self) -> bool:
@@ -103,6 +117,7 @@ def run_command(
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
         check: bool = False,
+        input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if process_controller is None:
         return subprocess.run(
@@ -112,6 +127,7 @@ def run_command(
             env=env,
             timeout=timeout,
             check=check,
+            input=input_text,
         )
 
     process_controller.throw_if_cancelled()
@@ -119,6 +135,7 @@ def run_command(
     stderr_pipe = subprocess.PIPE if capture_output else None
     process = subprocess.Popen(
         cmd,
+        stdin=subprocess.PIPE if input_text is not None else None,
         stdout=stdout_pipe,
         stderr=stderr_pipe,
         text=text,
@@ -129,17 +146,16 @@ def run_command(
     try:
         try:
             if timeout is None:
-                stdout, stderr = process.communicate()
+                stdout, stderr = process.communicate(input_text)
             else:
-                stdout, stderr = process.communicate(timeout=timeout)
+                stdout, stderr = process.communicate(input_text, timeout=timeout)
         except subprocess.TimeoutExpired:
             process_controller.terminate()
             process.communicate()
             raise
     finally:
         process_controller.clear(process)
-    if process_controller.cancelled:
-        raise ProcessCancelledError("Operation was cancelled.")
+    process_controller.throw_if_cancelled()
     completed = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
     if check and completed.returncode:
         raise subprocess.CalledProcessError(

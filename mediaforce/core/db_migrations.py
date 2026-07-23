@@ -94,6 +94,7 @@ def _bootstrap_legacy_schema(connection: Connection) -> None:
     _ensure_column(connection, "encode_jobs", "heartbeat_at", "TEXT")
     _ensure_column(connection, "encode_jobs", "manifest_indexes_json", "TEXT")
     _ensure_column(connection, "encode_jobs", "worker_id", "TEXT")
+    _ensure_column(connection, "encode_jobs", "schedule_close_deadline_at", "TEXT")
     _ensure_column(connection, "encode_jobs", "retry_not_before", "TEXT")
     _ensure_column(connection, "encode_jobs", "waiting_reason", "TEXT")
     _ensure_column(connection, "encode_jobs", "terminal_reason", "TEXT")

@@ -34,7 +34,10 @@ from mediaforce.encoding.streams import ProductionStreamPlan, _audio_codec as _a
 from mediaforce.encoding.video_filters import most_common_crop
 from mediaforce.encoding.ffmpeg import ffmpeg_hwaccel_input_args
 from mediaforce.library.probe import probe_media
-from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, run_command
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ScheduleWindowClosedError, \
+    run_command
+from mediaforce.core.schedule_deadline import ScheduleDeadlineConfigurationError, guard_command_for_schedule_deadline, \
+    process_result_reached_schedule_deadline
 from mediaforce.core.type_defs import float_value, int_value, object_dict
 from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult, run_crf_search, run_sample_encode, \
     select_quality_metric
@@ -491,10 +494,24 @@ def _detect_video_crop(
             if execution_mode_for_host(host) == "ssh" and host_media_access_for_host(host) != "stream":
                 remote_cmd = list(cmd)
                 remote_cmd[0] = Path(remote_cmd[0]).name
-                result = run_remote_command(host_payload, remote_cmd, VIDEO_CROP_DETECT_TIMEOUT_SECONDS)
+                result = run_remote_command(
+                    host_payload,
+                    remote_cmd,
+                    VIDEO_CROP_DETECT_TIMEOUT_SECONDS,
+                    process_controller=process_controller,
+                )
             else:
-                result = run_command(cmd, process_controller=process_controller)
+                guarded_cmd = guard_command_for_schedule_deadline(
+                    cmd,
+                    host_payload,
+                    process_controller=process_controller,
+                )
+                result = run_command(guarded_cmd, process_controller=process_controller)
+                if process_result_reached_schedule_deadline(result, host_payload):
+                    raise ScheduleWindowClosedError("Encode host schedule window closed.")
             stderr_parts.append(result.stderr or "")
+    except (ProcessCancelledError, ScheduleDeadlineConfigurationError):
+        raise
     except (OSError, RuntimeError, subprocess.SubprocessError):
         return None
     return most_common_crop("\n".join(stderr_parts), source_width=width, source_height=height)
@@ -568,7 +585,6 @@ def _run_encode_command(
         remote_shell_path_export_line=remote_shell_path_export_line,
         ssh_client_options=ssh_client_options,
         ffmpeg_command_with_progress=_ffmpeg_command_with_progress,
-        run_tracked_encode_command=_run_tracked_encode_command,
         run_tracked_process_fn=_run_tracked_process,
         run_streamed_remote_encode_command_fn=_run_streamed_remote_encode_command,
     )

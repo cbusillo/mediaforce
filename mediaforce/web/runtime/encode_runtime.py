@@ -27,7 +27,8 @@ from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS, ensure_queue_state, list_child_encode_jobs, \
     load_encode_job, load_queue_state, persisted_encode_host_payload, save_encode_job, save_queue_state
-from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ScheduleWindowClosedError
+from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, parse_schedule_close_deadline
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.quality import QualitySearchError, QualityTempCleanupError, QualityTempSetupError, \
     analyze_quality_policy_failure, quality_error_message
@@ -63,6 +64,8 @@ class EncodeQueueRuntimeDeps:
 
 
 ENCODE_HOST_BACKUP_FAILURE_THRESHOLD = 2
+SCHEDULE_CLOSE_WAITING_REASON = "Waiting for a host schedule window."
+SCHEDULE_CLOSE_ERROR_MESSAGE = "Encode host schedule window closed."
 
 
 def recover_encode_queue(
@@ -94,6 +97,7 @@ def reconcile_encode_jobs(
         lease_expires_at = deps.parse_iso(payload.get("lease_expires_at"))
         if not restart_recovery and lease_expires_at is not None and lease_expires_at > now:
             continue
+        schedule_close_due = _encode_job_schedule_close_due(payload, now=now)
         failure_kind = "worker_restart" if restart_recovery else "stale_lease"
         failure_message = (
             "Encode queue job was interrupted by a web process restart."
@@ -107,6 +111,9 @@ def reconcile_encode_jobs(
             restart_recovery=restart_recovery,
         )
         if payload is None:
+            continue
+        if schedule_close_due:
+            transition_encode_job_schedule_close(connection, config, payload, deps)
             continue
         transition_encode_job_failure(
             connection,
@@ -137,6 +144,7 @@ def reconcile_encode_jobs(
                 connection,
                 manifest_path=Path(manifest_path),
                 indexes=payload.get("manifest_indexes"),
+                host=object_dict(payload.get("host")),
                 deps=deps,
             )
         payload.update(
@@ -322,22 +330,29 @@ def _candidate_stale_staging_targets(
     return targets
 
 
-def _remove_stale_staging_path(path: Path, *, host: dict[str, Any] | None = None) -> None:
+def _remove_stale_staging_path(
+        path: Path,
+        *,
+        host: dict[str, Any] | None = None,
+        prefer_remote: bool = True,
+) -> None:
     host_payload = object_dict(host)
-    if (
-            host_payload
-            and execution_mode_for_host(host_payload) == "ssh"
-            and host_media_access_for_host(host_payload) != "stream"
-    ):
+    remote_mounted_host = (
+        bool(host_payload)
+        and execution_mode_for_host(host_payload) == "ssh"
+        and host_media_access_for_host(host_payload) != "stream"
+    )
+    if remote_mounted_host and prefer_remote:
         _remove_remote_stale_staging_path(path, host_payload)
         return
-    if path.is_dir():
-        return
     if path.exists():
-        try:
-            safe_unlink(path)
-        except OSError:
-            pass
+        _remove_path(path)
+        _prune_empty_quality_temp_dir(path.parent)
+        return
+    if remote_mounted_host:
+        _remove_remote_stale_staging_path(path, host_payload)
+        return
+    _remove_path(path)
     _prune_empty_quality_temp_dir(path.parent)
 
 
@@ -656,6 +671,153 @@ def _manifest_indexes_for_job(job: dict[str, Any], manifest_items: list[dict[str
     return indexes or list(range(len(manifest_items)))
 
 
+def transition_encode_job_schedule_close(
+        connection: DBClient,
+        config: MediaforceConfig,
+        job: dict[str, Any],
+        deps: EncodeQueueRuntimeDeps,
+        *,
+        expected_worker_id: str | None = None,
+) -> bool:
+    if str(job.get("status") or "") != "running" or bool(job.get("bypass_schedule")):
+        return False
+    if expected_worker_id is not None and str(job.get("worker_id") or "") != expected_worker_id:
+        return False
+
+    connection.commit()
+    connection.exec_driver_sql("BEGIN IMMEDIATE")
+    current_job = load_encode_job(connection, str(job["job_id"]))
+    if current_job is None or str(current_job.get("status") or "") != "running":
+        connection.rollback()
+        return False
+    if bool(current_job.get("bypass_schedule")):
+        connection.rollback()
+        return False
+    if expected_worker_id is not None and str(current_job.get("worker_id") or "") != expected_worker_id:
+        connection.rollback()
+        return False
+    job = current_job
+    if _encode_job_outputs_completed(connection, job):
+        job.update(
+            {
+                "status": "completed",
+                "finished_at": deps.now_iso(),
+                "process_pid": None,
+                "leased_at": None,
+                "lease_expires_at": None,
+                "heartbeat_at": None,
+                "worker_id": None,
+                "schedule_close_deadline_at": None,
+                "retry_not_before": None,
+                "waiting_reason": None,
+                "terminal_reason": None,
+                "last_failure_kind": None,
+                "last_host": _reset_host_failure_streak(job),
+                "host_cooldown_until": None,
+                "error": None,
+                "progress": _finalize_encode_job_progress(job, deps=deps, terminal_state="completed"),
+                "updated_at": deps.now_iso(),
+            }
+        )
+        save_encode_job(connection, job)
+        sync_encode_job_parent(connection, job, deps)
+        connection.commit()
+        return True
+    assigned_host = object_dict(job.get("host"))
+    _cleanup_encode_retry_artifacts(
+        connection,
+        manifest_path=Path(str(job["manifest_path"])),
+        indexes=job.get("manifest_indexes"),
+        host=assigned_host,
+        commit_between_items=False,
+        deps=deps,
+    )
+    progress = _initial_encode_job_progress(job, deps)
+    progress["progress_state"] = "schedule_waiting"
+    job.update(
+        {
+            "status": "queued",
+            "started_at": None,
+            "finished_at": None,
+            "process_pid": None,
+            "leased_at": None,
+            "lease_expires_at": None,
+            "heartbeat_at": None,
+            "worker_id": None,
+            "schedule_close_deadline_at": None,
+            "attempt_count": max(int_value(job.get("attempt_count")) - 1, 0),
+            "retry_not_before": None,
+            "waiting_reason": SCHEDULE_CLOSE_WAITING_REASON,
+            "terminal_reason": None,
+            "last_failure_kind": None,
+            "host_cooldown_until": None,
+            "host": {},
+            "error": None,
+            "progress": progress,
+            "updated_at": deps.now_iso(),
+        }
+    )
+    save_encode_job(connection, job)
+    sync_encode_job_parent(connection, job, deps)
+    connection.commit()
+    return True
+
+
+def _encode_job_outputs_completed(connection: DBClient, job: dict[str, Any]) -> bool:
+    manifest_path = Path(str(job.get("manifest_path") or "").strip())
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
+    indexes = _manifest_indexes_for_job(job, manifest_items)
+    if not indexes:
+        return False
+    job_id = str(job.get("job_id") or "")
+    for index in indexes:
+        item = manifest_items[index]
+        library_item_id = int_value(item.get("library_item_id"))
+        if library_item_id <= 0:
+            return False
+        row = connection.execute(
+            select(
+                staged_artifacts.c.item_index,
+                staged_artifacts.c.encode_job_id,
+                staged_artifacts.c.staging_path,
+                staged_artifacts.c.staging_fingerprint,
+                staged_artifacts.c.promoted_at,
+                library_items.c.status,
+            )
+            .select_from(
+                staged_artifacts.join(
+                    library_items,
+                    library_items.c.id == staged_artifacts.c.library_item_id,
+                )
+            )
+            .where(staged_artifacts.c.library_item_id == library_item_id)
+        ).mappings().fetchone()
+        if row is None:
+            return False
+        if row["promoted_at"] is not None and str(row["status"] or "") == "promoted":
+            continue
+        if str(row["encode_job_id"] or "") != job_id:
+            return False
+        if row["item_index"] is None or int_value(row["item_index"]) != index:
+            return False
+        if not str(row["staging_fingerprint"] or "").strip():
+            return False
+        if str(row["status"] or "") not in {"encoded", "validated"}:
+            return False
+        host = object_dict(job.get("host"))
+        staging_path = Path(str(row["staging_path"] or ""))
+        if (
+                execution_mode_for_host(host) != "ssh"
+                or host_media_access_for_host(host) == "stream"
+        ) and not staging_path.exists():
+            return False
+    return True
+
+
 def transition_encode_job_failure(
         connection: DBClient,
         config: MediaforceConfig,
@@ -689,6 +851,7 @@ def transition_encode_job_failure(
             "lease_expires_at": None,
             "heartbeat_at": None,
             "worker_id": None,
+            "schedule_close_deadline_at": None,
             "last_failure_kind": failure_kind,
             "last_failure_at": now_iso,
             "error": error_message,
@@ -733,6 +896,7 @@ def transition_encode_job_failure(
             connection,
             manifest_path=Path(str(job["manifest_path"])),
             indexes=job.get("manifest_indexes"),
+            host=assigned_host,
             deps=deps,
         )
         connection.commit()
@@ -1292,6 +1456,16 @@ def _encode_job_library_key(job: dict[str, Any]) -> str:
     return prefix.split("/", 1)[0].strip().lower()
 
 
+def _selected_encode_schedule_close_deadline(
+        job: dict[str, Any],
+        host_payload: dict[str, Any],
+) -> str | None:
+    if bool(job.get("bypass_schedule")):
+        return None
+    deadline = parse_schedule_close_deadline(host_payload.get("schedule_closes_at"))
+    return deadline.isoformat(timespec="seconds") if deadline is not None else None
+
+
 def _encode_host_selection_key(job: dict[str, Any]) -> tuple[str, bool, str, str]:
     return (
         _encode_job_library_key(job),
@@ -1334,6 +1508,25 @@ def encode_job_heartbeat_loop(
                 }
             )
             save_encode_job(connection, job)
+
+
+def encode_job_schedule_deadline_loop(
+        *,
+        schedule_close_deadline_at: str,
+        stop_event: threading.Event,
+        process_controller: ManagedProcessController,
+) -> None:
+    deadline = parse_schedule_close_deadline(schedule_close_deadline_at)
+    if deadline is None:
+        return
+    while True:
+        remaining_seconds = (deadline - datetime.now(tz=UTC)).total_seconds()
+        if remaining_seconds <= 0:
+            break
+        if stop_event.wait(min(remaining_seconds, 1.0)):
+            return
+    if not stop_event.is_set():
+        process_controller.cancel(ScheduleWindowClosedError(SCHEDULE_CLOSE_ERROR_MESSAGE))
 
 
 def encode_queue_worker_loop(*, config_path: Path, deps: EncodeQueueRuntimeDeps) -> None:
@@ -1398,6 +1591,9 @@ def claim_next_runnable_encode_job(
             heartbeat_at=now_iso,
             lease_expires_at=_encode_job_lease_expires_at(deps),
             worker_id=worker_id,
+            schedule_close_deadline_at=(
+                None if bool(next_job.get("bypass_schedule")) else next_job.get("schedule_close_deadline_at")
+            ),
             attempt_count=int_value(next_job.get("attempt_count")) + 1,
             retry_not_before=None,
             waiting_reason=None,
@@ -1475,14 +1671,47 @@ def load_next_runnable_encode_job(
             host_selection_cache[selection_key] = selection
         host_payload, waiting_reason = selection
         if host_payload is None:
-            if str(job.get("waiting_reason") or "") != str(waiting_reason or ""):
-                job.update({"waiting_reason": waiting_reason, "updated_at": deps.now_iso()})
+            if (
+                    str(job.get("waiting_reason") or "") != str(waiting_reason or "")
+                    or job.get("schedule_close_deadline_at") is not None
+            ):
+                job.update(
+                    {
+                        "waiting_reason": waiting_reason,
+                        "schedule_close_deadline_at": None,
+                        "updated_at": deps.now_iso(),
+                    }
+                )
                 save_encode_job(connection, job)
                 defer_parent_sync(job)
             continue
+        schedule_close_deadline_at = _selected_encode_schedule_close_deadline(job, host_payload)
+        schedule_close_deadline = parse_schedule_close_deadline(schedule_close_deadline_at)
+        if schedule_close_deadline is not None and schedule_close_deadline <= datetime.now(tz=UTC):
+            job.update(
+                {
+                    "waiting_reason": SCHEDULE_CLOSE_WAITING_REASON,
+                    "schedule_close_deadline_at": None,
+                    "updated_at": deps.now_iso(),
+                }
+            )
+            save_encode_job(connection, job)
+            defer_parent_sync(job)
+            continue
         persisted_host_payload = persisted_encode_host_payload(host_payload)
-        if job.get("waiting_reason") or job.get("host") != persisted_host_payload:
-            job.update({"waiting_reason": None, "host": persisted_host_payload, "updated_at": deps.now_iso()})
+        if (
+                job.get("waiting_reason")
+                or job.get("host") != persisted_host_payload
+                or job.get("schedule_close_deadline_at") != schedule_close_deadline_at
+        ):
+            job.update(
+                {
+                    "waiting_reason": None,
+                    "host": persisted_host_payload,
+                    "schedule_close_deadline_at": schedule_close_deadline_at,
+                    "updated_at": deps.now_iso(),
+                }
+            )
             save_encode_job(connection, job)
             defer_parent_sync(job)
         sync_deferred_parents()
@@ -1512,6 +1741,7 @@ def run_encode_job(
                     "worker_id": None,
                     "owner_pid": None,
                     "process_pid": None,
+                    "schedule_close_deadline_at": None,
                     "waiting_reason": "Library is Browse only or Disabled in Settings.",
                     "updated_at": deps.now_iso(),
                 }
@@ -1525,6 +1755,15 @@ def run_encode_job(
         indexes = _manifest_indexes_for_job(job, manifest_items)
         job.update({"process_pid": process_controller.pid, "updated_at": deps.now_iso()})
         save_encode_job(connection, job)
+
+    schedule_close_deadline_at = (
+        None
+        if bool(job.get("bypass_schedule"))
+        else str(job.get("schedule_close_deadline_at") or "").strip() or None
+    )
+    encode_host = object_dict(job.get("host"))
+    if schedule_close_deadline_at is not None:
+        encode_host[SCHEDULE_CLOSE_DEADLINE_KEY] = schedule_close_deadline_at
 
     progress_write_lock = threading.Lock()
     last_progress_write = 0.0
@@ -1559,13 +1798,29 @@ def run_encode_job(
         name=f"encode-heartbeat-{job_id}",
     )
     heartbeat_thread.start()
+    schedule_deadline_stop = threading.Event()
+    schedule_deadline_thread: threading.Thread | None = None
+    if schedule_close_deadline_at is not None:
+        schedule_deadline_thread = threading.Thread(
+            target=encode_job_schedule_deadline_loop,
+            kwargs={
+                "schedule_close_deadline_at": schedule_close_deadline_at,
+                "stop_event": schedule_deadline_stop,
+                "process_controller": process_controller,
+            },
+            daemon=True,
+            name=f"encode-schedule-deadline-{job_id}",
+        )
+        schedule_deadline_thread.start()
     final_status: str | None = None
+    schedule_interrupted = False
     failure_kind: str | None = None
     error: str | None = None
     started_host_for_job = False
     try:
         process_controller.throw_if_cancelled()
         started_host_for_job = deps.ensure_encode_host_ready(config, job.get("host"))
+        process_controller.throw_if_cancelled()
         with open_db(config.paths.db_path) as connection:
             deps.encode_manifest_items(
                 connection,
@@ -1575,7 +1830,7 @@ def run_encode_job(
                 indexes,
                 overwrite=False,
                 process_controller=process_controller,
-                host=job.get("host"),
+                host=encode_host,
                 progress_callback=report_progress,
                 encode_context={
                     "origin": "queue",
@@ -1583,7 +1838,14 @@ def run_encode_job(
                     "encode_worker_id": worker_id,
                 },
             )
+        schedule_deadline_stop.set()
+        if schedule_deadline_thread is not None:
+            schedule_deadline_thread.join(timeout=1.0)
+        process_controller.throw_if_cancelled()
         final_status = "completed"
+    except ScheduleWindowClosedError:
+        schedule_interrupted = True
+        error = SCHEDULE_CLOSE_ERROR_MESSAGE
     except ProcessCancelledError:
         final_status = "stopped"
         error = "Encode queue job was stopped and cleaned up."
@@ -1591,6 +1853,9 @@ def run_encode_job(
         failure_kind = _classify_encode_failure(exc, job)
         error = quality_error_message(exc)
     finally:
+        schedule_deadline_stop.set()
+        if schedule_deadline_thread is not None:
+            schedule_deadline_thread.join(timeout=1.0)
         if started_host_for_job and not _host_has_other_running_jobs(config, job_id, job.get("host")):
             try:
                 deps.stop_encode_host_if_configured(config, job.get("host"))
@@ -1601,7 +1866,15 @@ def run_encode_job(
         with open_db(config.paths.db_path) as connection:
             job = load_encode_job(connection, job_id)
             if job is not None:
-                if final_status is not None:
+                if schedule_interrupted:
+                    transition_encode_job_schedule_close(
+                        connection,
+                        config,
+                        job,
+                        deps,
+                        expected_worker_id=worker_id,
+                    )
+                elif final_status is not None:
                     last_host = object_dict(job.get("last_host"))
                     if final_status == "completed":
                         last_host = _reset_host_failure_streak(job)
@@ -1615,6 +1888,7 @@ def run_encode_job(
                             "lease_expires_at": None,
                             "heartbeat_at": None,
                             "worker_id": None,
+                            "schedule_close_deadline_at": None,
                             "retry_not_before": None,
                             "waiting_reason": None,
                             "terminal_reason": None,
@@ -1653,6 +1927,20 @@ def _encode_job_worker_id() -> str:
 
 def _encode_job_lease_expires_at(deps: EncodeQueueRuntimeDeps) -> str:
     return (datetime.now(tz=UTC) + timedelta(seconds=deps.encode_job_lease_seconds)).isoformat(timespec="seconds")
+
+
+def _encode_job_schedule_close_due(
+        job: dict[str, Any],
+        *,
+        now: datetime | None = None,
+) -> bool:
+    if bool(job.get("bypass_schedule")):
+        return False
+    deadline = parse_schedule_close_deadline(job.get("schedule_close_deadline_at"))
+    if deadline is None:
+        return False
+    current = now.astimezone(UTC) if now is not None else datetime.now(tz=UTC)
+    return current >= deadline
 
 
 def _encode_job_retry_delay_seconds(attempt_count: int, deps: EncodeQueueRuntimeDeps) -> int:
@@ -1872,6 +2160,7 @@ def prepare_terminal_encode_job_for_requeue(
         connection,
         manifest_path=manifest_path,
         indexes=selected_indexes,
+        host=object_dict(job.get("host")),
         deps=deps,
     )
 
@@ -1881,6 +2170,8 @@ def _cleanup_encode_retry_artifacts(
         *,
         manifest_path: Path,
         indexes: list[int] | None = None,
+        host: dict[str, Any] | None = None,
+        commit_between_items: bool = True,
         deps: EncodeQueueRuntimeDeps,
 ) -> None:
     try:
@@ -1894,18 +2185,25 @@ def _cleanup_encode_retry_artifacts(
         if not isinstance(index, int) or index < 0 or index >= len(manifest_items):
             continue
         item = manifest_items[index]
-        staging_value = item.get("staging_path")
-        if staging_value:
-            staging_path = Path(str(staging_value))
-            _remove_path(staging_path)
-            _remove_path(staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}"))
         library_item_id = item.get("library_item_id")
-        if library_item_id is None:
+        stage_row = None
+        if library_item_id is not None:
+            stage_row = connection.execute(
+                select(staged_artifacts.c.promoted_at).where(staged_artifacts.c.library_item_id == library_item_id)
+            ).mappings().fetchone()
+        promoted = stage_row is not None and stage_row["promoted_at"] is not None
+        staging_value = item.get("staging_path")
+        if staging_value and not promoted:
+            staging_path = Path(str(staging_value))
+            _remove_stale_staging_path(staging_path, host=host, prefer_remote=False)
+            _remove_stale_staging_path(
+                staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}"),
+                host=host,
+                prefer_remote=False,
+            )
+        if library_item_id is None or promoted:
             continue
-        stage_row = connection.execute(
-            select(staged_artifacts.c.promoted_at).where(staged_artifacts.c.library_item_id == library_item_id)
-        ).mappings().fetchone()
-        if stage_row is not None and not stage_row["promoted_at"]:
+        if stage_row is not None:
             connection.execute(delete(staged_artifacts).where(staged_artifacts.c.library_item_id == library_item_id))
         connection.execute(
             update(library_items)
@@ -1915,7 +2213,8 @@ def _cleanup_encode_retry_artifacts(
                 updated_at=now_iso,
             )
         )
-        connection.commit()
+        if commit_between_items:
+            connection.commit()
 
 
 def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:

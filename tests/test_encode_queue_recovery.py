@@ -37,7 +37,9 @@ from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_policy_hash, stable_source_id
 from mediaforce.core.models import ProbeSummary
-from mediaforce.core.process_control import ProcessCancelledError
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ScheduleWindowClosedError
+from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, SCHEDULE_DEADLINE_MARKER
+from mediaforce.core.schedule_deadline import ScheduleDeadlineConfigurationError
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.encoding import manifest as manifest
 from mediaforce.encoding import quality_search
@@ -9409,6 +9411,32 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
         self.assertEqual(tracked_process_mock.call_count, 1)
 
+    def test_run_encode_command_wraps_remote_ffmpeg_with_host_deadline(self) -> None:
+        ffmpeg_cmd = ["ffmpeg", "-hide_banner", "-i", "/tmp/in.mkv", "/tmp/out.mkv"]
+        temp_output = self.root / "staging" / "episode.partial.mkv"
+        staging_path = self.root / "staging" / "episode.mkv"
+        deadline = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
+        with patch(
+                "mediaforce.execution._run_tracked_process",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
+        ) as tracked_process_mock:
+            execution._run_encode_command(
+                ffmpeg_cmd=ffmpeg_cmd,
+                temp_output=temp_output,
+                staging_path=staging_path,
+                overwrite=False,
+                process_controller=ManagedProcessController(),
+                host={
+                    "key": "cbusillo@sample-host",
+                    "mode": "ssh",
+                    SCHEDULE_CLOSE_DEADLINE_KEY: deadline,
+                },
+            )
+
+        ssh_cmd = tracked_process_mock.call_args.args[0]
+        self.assertEqual(ssh_cmd[0], "ssh")
+        self.assertIn(SCHEDULE_DEADLINE_MARKER, ssh_cmd[-1])
+
     def test_effective_video_preset_bumps_8k_svt_av1_jobs_to_supported_preset(self) -> None:
         preset = execution.effective_video_preset(
             {"encoder": "libsvtav1", "preset": 4},
@@ -10137,6 +10165,83 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(temp_output.read_bytes(), b"encoded-output")
         self.assertEqual(snapshots[-1]["out_time_seconds"], 45.0)
         self.assertEqual(snapshots[-1]["progress_state"], "continue")
+
+    def test_run_streamed_remote_encode_command_wraps_remote_deadline(self) -> None:
+        class FakeBinaryProcess:
+            pid = 123
+
+            def __init__(self) -> None:
+                self.stdin = io.BytesIO()
+                self.stdout = io.BytesIO(b"encoded-output")
+                self.stderr = io.BytesIO()
+
+            @staticmethod
+            def wait() -> int:
+                return 0
+
+        source_path = self._create_source_file("episode-stream-deadline.mkv")
+        temp_output = self.root / "staging" / "tv" / "show" / "episode-stream-deadline.partial.mkv"
+        temp_output.parent.mkdir(parents=True, exist_ok=True)
+        deadline = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
+
+        with patch(
+                "mediaforce.execution.subprocess.Popen",
+                return_value=FakeBinaryProcess(),
+        ) as popen_mock, patch("mediaforce.execution.ssh_client_options", return_value=[]):
+            execution._run_streamed_remote_encode_command(
+                ffmpeg_cmd=["ffmpeg", "-y", "-i", str(source_path), "/tmp/output.mkv"],
+                temp_output=temp_output,
+                source_path=source_path,
+                process_controller=ManagedProcessController(),
+                host={
+                    "key": "cbusillo@sample-host",
+                    "mode": "ssh",
+                    SCHEDULE_CLOSE_DEADLINE_KEY: deadline,
+                },
+                progress_callback=None,
+            )
+
+        ssh_cmd = popen_mock.call_args.args[0]
+        self.assertIn(SCHEDULE_DEADLINE_MARKER, ssh_cmd[-1])
+
+    def test_detect_video_crop_propagates_schedule_deadline(self) -> None:
+        deadline = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
+        deadline_result = subprocess.CompletedProcess(
+            ["sh"],
+            returncode=124,
+            stdout="",
+            stderr=SCHEDULE_DEADLINE_MARKER,
+        )
+
+        with patch("mediaforce.execution.run_command", return_value=deadline_result):
+            with self.assertRaises(ScheduleWindowClosedError):
+                execution.detect_video_crop(
+                    Path("/tmp/input.mkv"),
+                    {"black_bar_handling": "auto"},
+                    duration_seconds=60.0,
+                    process_controller=ManagedProcessController(),
+                    host={
+                        "key": "local",
+                        "mode": "local",
+                        SCHEDULE_CLOSE_DEADLINE_KEY: deadline,
+                    },
+                )
+
+    def test_detect_video_crop_rejects_deadline_without_managed_controller(self) -> None:
+        deadline = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
+
+        with self.assertRaises(ScheduleDeadlineConfigurationError):
+            execution.detect_video_crop(
+                Path("/tmp/input.mkv"),
+                {"black_bar_handling": "auto"},
+                duration_seconds=60.0,
+                process_controller=None,
+                host={
+                    "key": "local",
+                    "mode": "local",
+                    SCHEDULE_CLOSE_DEADLINE_KEY: deadline,
+                },
+            )
 
     def test_finalize_output_path_retries_transient_resource_busy(self) -> None:
         temp_output = self.root / "staging" / "episode.partial.mkv"
@@ -11663,6 +11768,26 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
         )
         run_remote_command_mock.assert_not_called()
+
+    def test_run_quality_command_wraps_local_search_with_host_deadline(self) -> None:
+        deadline = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
+        with patch(
+                "mediaforce.quality.run_command",
+                return_value=subprocess.CompletedProcess(args=["sh"], returncode=0, stdout="{}", stderr=""),
+        ) as run_command_mock:
+            quality._run_quality_command(
+                ["ab-av1", "sample-encode", "-i", "/tmp/input.mkv"],
+                process_controller=ManagedProcessController(),
+                host={
+                    "key": "cbusillo@localhost",
+                    "mode": "ssh",
+                    SCHEDULE_CLOSE_DEADLINE_KEY: deadline,
+                },
+            )
+
+        guarded_command = run_command_mock.call_args.args[0]
+        self.assertEqual(guarded_command[:2], ["sh", "-c"])
+        self.assertIn(SCHEDULE_DEADLINE_MARKER, guarded_command[2])
 
     def test_local_quality_environment_prefers_mediaforce_binary_overrides(self) -> None:
         with patch.dict(
@@ -13835,6 +13960,492 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             assert job is not None
             self.assertEqual(job["job_id"], "job-queued-runtime")
             self.assertEqual(job["host"]["key"], "local")
+
+    def test_claim_next_runnable_encode_job_stamps_absolute_schedule_deadline(self) -> None:
+        source_path = self._create_source_file("episode-deadline.mkv")
+        staging_path = self._staging_path("episode-deadline.mkv")
+        deadline = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path)
+            self._write_manifest(
+                "manifest-deadline.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-deadline",
+                manifest_name="manifest-deadline.json",
+                host={},
+                status="queued",
+                attempt_count=0,
+            )
+            connection.commit()
+            deps = web_app._encode_queue_runtime_deps()
+            deps.host_runtime_rows = Mock(return_value=[])
+
+            with patch(
+                    "mediaforce.web.runtime.encode_runtime.select_encode_host",
+                    return_value=(
+                        {
+                            "key": "local",
+                            "label": "Local",
+                            "mode": "local",
+                            "schedule_closes_at": deadline,
+                        },
+                        None,
+                    ),
+            ):
+                claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)
+
+            self.assertIsNotNone(claimed)
+            assert claimed is not None
+            self.assertEqual(claimed["status"], "running")
+            self.assertEqual(claimed["attempt_count"], 1)
+            self.assertEqual(claimed["schedule_close_deadline_at"], deadline)
+            self.assertNotIn("schedule_closes_at", claimed["host"])
+
+    def test_claim_next_runnable_encode_job_does_not_start_after_close_boundary(self) -> None:
+        source_path = self._create_source_file("episode-closed.mkv")
+        staging_path = self._staging_path("episode-closed.mkv")
+        deadline = (datetime.now(tz=UTC) - timedelta(seconds=1)).isoformat(timespec="seconds")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path)
+            self._write_manifest(
+                "manifest-closed.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-closed",
+                manifest_name="manifest-closed.json",
+                host={},
+                status="queued",
+                attempt_count=0,
+            )
+            connection.commit()
+            deps = web_app._encode_queue_runtime_deps()
+            deps.host_runtime_rows = Mock(return_value=[])
+
+            with patch(
+                    "mediaforce.web.runtime.encode_runtime.select_encode_host",
+                    return_value=(
+                        {
+                            "key": "local",
+                            "label": "Local",
+                            "mode": "local",
+                            "schedule_closes_at": deadline,
+                        },
+                        None,
+                    ),
+            ):
+                claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)
+
+            self.assertIsNone(claimed)
+            queued = load_encode_job(connection, "job-closed")
+            assert queued is not None
+            self.assertEqual(queued["status"], "queued")
+            self.assertEqual(queued["attempt_count"], 0)
+            self.assertEqual(queued["waiting_reason"], encode_runtime.SCHEDULE_CLOSE_WAITING_REASON)
+            self.assertIsNone(queued["schedule_close_deadline_at"])
+
+    def test_bypass_job_claim_ignores_schedule_close_deadline(self) -> None:
+        source_path = self._create_source_file("episode-bypass-deadline.mkv")
+        staging_path = self._staging_path("episode-bypass-deadline.mkv")
+        deadline = (datetime.now(tz=UTC) - timedelta(seconds=1)).isoformat(timespec="seconds")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path)
+            self._write_manifest(
+                "manifest-bypass-deadline.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-bypass-deadline",
+                manifest_name="manifest-bypass-deadline.json",
+                host={},
+                status="queued",
+                attempt_count=0,
+                bypass_schedule=True,
+            )
+            connection.commit()
+            deps = web_app._encode_queue_runtime_deps()
+            deps.host_runtime_rows = Mock(return_value=[])
+
+            with patch(
+                    "mediaforce.web.runtime.encode_runtime.select_encode_host",
+                    return_value=(
+                        {
+                            "key": "local",
+                            "label": "Local",
+                            "mode": "local",
+                            "schedule_closes_at": deadline,
+                        },
+                        None,
+                    ),
+            ):
+                claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)
+
+            self.assertIsNotNone(claimed)
+            assert claimed is not None
+            self.assertEqual(claimed["status"], "running")
+            self.assertIsNone(claimed["schedule_close_deadline_at"])
+
+    def test_schedule_close_requeues_without_failure_and_cleans_partial_output(self) -> None:
+        source_path = self._create_source_file("episode-schedule-close.mkv")
+        staging_path = self._staging_path("episode-schedule-close.mkv")
+        partial_path = staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("staged")
+        partial_path.write_text("partial")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-schedule-close.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path), "duration_seconds": 120.0}],
+            )
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            self._save_job(
+                connection,
+                job_id="job-schedule-close",
+                manifest_name="manifest-schedule-close.json",
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="running",
+                attempt_count=3,
+                schedule_close_deadline_at=datetime.now(tz=UTC).isoformat(timespec="seconds"),
+                host_cooldown_until=(datetime.now(tz=UTC) + timedelta(hours=1)).isoformat(timespec="seconds"),
+            )
+            connection.commit()
+            job = load_encode_job(connection, "job-schedule-close")
+            assert job is not None
+
+            transitioned = encode_runtime.transition_encode_job_schedule_close(
+                connection,
+                self.config,
+                job,
+                web_app._encode_queue_runtime_deps(),
+                expected_worker_id="test-worker",
+            )
+
+            self.assertTrue(transitioned)
+            queued = load_encode_job(connection, "job-schedule-close")
+            assert queued is not None
+            self.assertEqual(queued["status"], "queued")
+            self.assertEqual(queued["attempt_count"], 2)
+            self.assertEqual(queued["waiting_reason"], encode_runtime.SCHEDULE_CLOSE_WAITING_REASON)
+            self.assertEqual(queued["progress"]["progress_state"], "schedule_waiting")
+            self.assertEqual(queued["host"], {})
+            self.assertIsNone(queued["host_cooldown_until"])
+            self.assertIsNone(queued["schedule_close_deadline_at"])
+            self.assertIsNone(queued["last_failure_kind"])
+            self.assertIsNone(queued["error"])
+            self.assertIsNone(queued["started_at"])
+            self.assertIsNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.library_item_id))
+            item = self._library_item_value(connection, item_id, library_items.c.status)
+            assert item is not None
+            self.assertEqual(item["status"], "planned")
+
+        self.assertFalse(staging_path.exists())
+        self.assertFalse(partial_path.exists())
+
+    def test_schedule_cleanup_preserves_promoted_artifact(self) -> None:
+        source_path = self._create_source_file("episode-promoted-deadline.mkv")
+        staging_path = self._staging_path("episode-promoted-deadline.mkv")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("promoted")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="promoted")
+            manifest_path = self._write_manifest(
+                "manifest-promoted-deadline.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(promoted_at=web_app._now_iso())
+            )
+            connection.commit()
+
+            encode_runtime._cleanup_encode_retry_artifacts(
+                connection,
+                manifest_path=manifest_path,
+                host={"key": "local", "mode": "local"},
+                deps=web_app._encode_queue_runtime_deps(),
+            )
+
+            artifact = self._staged_artifact_value(connection, item_id, staged_artifacts.c.promoted_at)
+            item = self._library_item_value(connection, item_id, library_items.c.status)
+            self.assertIsNotNone(artifact)
+            assert item is not None
+            self.assertEqual(item["status"], "promoted")
+        self.assertTrue(staging_path.exists())
+
+    def test_restart_recovery_keeps_output_completed_before_job_finalization(self) -> None:
+        source_path = self._create_source_file("episode-completed-at-deadline.mkv")
+        staging_path = self._staging_path("episode-completed-at-deadline.mkv")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("completed encode")
+        deadline = (datetime.now(tz=UTC) - timedelta(seconds=1)).isoformat(timespec="seconds")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoded")
+            self._write_manifest(
+                "manifest-completed-at-deadline.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path), "duration_seconds": 120.0}],
+            )
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(
+                    item_index=0,
+                    encode_job_id="job-completed-at-deadline",
+                    staging_fingerprint="sha256:completed",
+                    staged_at=web_app._now_iso(),
+                )
+            )
+            self._save_job(
+                connection,
+                job_id="job-completed-at-deadline",
+                manifest_name="manifest-completed-at-deadline.json",
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="running",
+                attempt_count=1,
+                lease_expires_at=(datetime.now(tz=UTC) + timedelta(hours=1)).isoformat(timespec="seconds"),
+                schedule_close_deadline_at=deadline,
+            )
+            connection.commit()
+
+            encode_runtime.recover_encode_queue(
+                connection,
+                self.config,
+                web_app._encode_queue_runtime_deps(),
+            )
+
+            completed = load_encode_job(connection, "job-completed-at-deadline")
+            assert completed is not None
+            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(completed["attempt_count"], 1)
+            self.assertIsNone(completed["waiting_reason"])
+            self.assertIsNotNone(
+                self._staged_artifact_value(connection, item_id, staged_artifacts.c.library_item_id)
+            )
+        self.assertTrue(staging_path.exists())
+
+    def test_schedule_requeue_preserves_completed_sibling_parent_progress(self) -> None:
+        manifest_path = self._write_manifest(
+            "manifest-parent-schedule-close.json",
+            [
+                {"library_item_id": 101, "duration_seconds": 100.0},
+                {"library_item_id": 102, "duration_seconds": 200.0},
+            ],
+        )
+        now = web_app._now_iso()
+
+        def payload(
+                *,
+                job_id: str,
+                job_kind: str,
+                parent_job_id: str | None,
+                status: str,
+                indexes: list[int] | None,
+                progress: dict[str, object] | None,
+        ) -> dict[str, object]:
+            running = status == "running"
+            return {
+                "job_id": job_id,
+                "prefix": "tv/show",
+                "job_kind": job_kind,
+                "parent_job_id": parent_job_id,
+                "status": status,
+                "manifest_path": str(manifest_path),
+                "manifest_indexes": indexes,
+                "item_count": 2 if job_kind == "folder" else 1,
+                "saved_profile_path": None,
+                "host": {"key": "local", "label": "Local", "mode": "local"} if running else {},
+                "last_host": {},
+                "notes": "",
+                "bypass_schedule": False,
+                "attempt_count": 1 if status in {"running", "completed"} else 0,
+                "process_pid": 123 if running else None,
+                "error": None,
+                "leased_at": now if running else None,
+                "lease_expires_at": now if running else None,
+                "heartbeat_at": now if running else None,
+                "worker_id": "test-worker" if running else None,
+                "schedule_close_deadline_at": now if running else None,
+                "retry_not_before": None,
+                "waiting_reason": None,
+                "terminal_reason": None,
+                "last_failure_kind": None,
+                "last_failure_at": None,
+                "host_cooldown_until": None,
+                "progress": progress,
+                "created_at": now,
+                "started_at": now if status in {"running", "completed"} else None,
+                "finished_at": now if status == "completed" else None,
+                "updated_at": now,
+            }
+
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                payload(
+                    job_id="folder-schedule-close",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="running",
+                    indexes=None,
+                    progress=None,
+                ),
+            )
+            save_encode_job(
+                connection,
+                payload(
+                    job_id="shard-completed",
+                    job_kind="shard",
+                    parent_job_id="folder-schedule-close",
+                    status="completed",
+                    indexes=[0],
+                    progress={
+                        "total_item_count": 1,
+                        "completed_item_count": 1,
+                        "total_duration_seconds": 100.0,
+                        "overall_completed_duration_seconds": 100.0,
+                        "remaining_duration_seconds": 0.0,
+                        "percent_complete": 100.0,
+                    },
+                ),
+            )
+            save_encode_job(
+                connection,
+                payload(
+                    job_id="shard-interrupted",
+                    job_kind="shard",
+                    parent_job_id="folder-schedule-close",
+                    status="running",
+                    indexes=[1],
+                    progress={
+                        "total_item_count": 1,
+                        "completed_item_count": 0,
+                        "total_duration_seconds": 200.0,
+                        "overall_completed_duration_seconds": 80.0,
+                        "remaining_duration_seconds": 120.0,
+                        "percent_complete": 40.0,
+                    },
+                ),
+            )
+            connection.commit()
+            interrupted = load_encode_job(connection, "shard-interrupted")
+            assert interrupted is not None
+
+            encode_runtime.transition_encode_job_schedule_close(
+                connection,
+                self.config,
+                interrupted,
+                web_app._encode_queue_runtime_deps(),
+                expected_worker_id="test-worker",
+            )
+
+            parent = load_encode_job(connection, "folder-schedule-close")
+            assert parent is not None
+            resolved = encode_runtime.resolve_encode_job_for_display(
+                connection,
+                parent,
+                web_app._encode_queue_runtime_deps(),
+            )
+
+            assert resolved is not None
+            self.assertEqual(resolved["status"], "queued")
+            self.assertEqual(resolved["completed_shard_count"], 1)
+            self.assertEqual(resolved["queued_shard_count"], 1)
+            self.assertEqual(resolved["progress"]["completed_item_count"], 1)
+            self.assertEqual(resolved["progress"]["overall_completed_duration_seconds"], 100.0)
+            self.assertEqual(resolved["progress"]["remaining_duration_seconds"], 200.0)
+
+    def test_run_encode_job_requeues_schedule_interruption(self) -> None:
+        source_path = self._create_source_file("episode-live-deadline.mkv")
+        staging_path = self._staging_path("episode-live-deadline.mkv")
+        deadline = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-live-deadline.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path), "duration_seconds": 120.0}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-live-deadline",
+                manifest_name="manifest-live-deadline.json",
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="running",
+                attempt_count=2,
+                schedule_close_deadline_at=deadline,
+            )
+            connection.commit()
+
+        deps = web_app._encode_queue_runtime_deps()
+        deps.load_config = Mock(return_value=self.config)
+        deps.ensure_encode_host_ready = Mock(return_value=False)
+        deps.encode_manifest_items = Mock(side_effect=ScheduleWindowClosedError("deadline"))
+
+        encode_runtime.run_encode_job(
+            config_path=self.config.paths.config_path,
+            job_id="job-live-deadline",
+            process_controller=ManagedProcessController(),
+            deps=deps,
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            queued = load_encode_job(connection, "job-live-deadline")
+            assert queued is not None
+            self.assertEqual(queued["status"], "queued")
+            self.assertEqual(queued["attempt_count"], 1)
+            self.assertEqual(queued["waiting_reason"], encode_runtime.SCHEDULE_CLOSE_WAITING_REASON)
+            self.assertIsNone(queued["schedule_close_deadline_at"])
+
+    def test_restart_recovery_prefers_schedule_requeue_after_deadline(self) -> None:
+        source_path = self._create_source_file("episode-restart-deadline.mkv")
+        staging_path = self._staging_path("episode-restart-deadline.mkv")
+        deadline = (datetime.now(tz=UTC) - timedelta(seconds=1)).isoformat(timespec="seconds")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-restart-deadline.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-restart-deadline",
+                manifest_name="manifest-restart-deadline.json",
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="running",
+                attempt_count=2,
+                lease_expires_at=(datetime.now(tz=UTC) + timedelta(hours=1)).isoformat(timespec="seconds"),
+                schedule_close_deadline_at=deadline,
+            )
+            connection.commit()
+
+            encode_runtime.recover_encode_queue(
+                connection,
+                self.config,
+                web_app._encode_queue_runtime_deps(),
+            )
+
+            queued = load_encode_job(connection, "job-restart-deadline")
+            assert queued is not None
+            self.assertEqual(queued["status"], "queued")
+            self.assertEqual(queued["attempt_count"], 1)
+            self.assertEqual(queued["waiting_reason"], encode_runtime.SCHEDULE_CLOSE_WAITING_REASON)
+            self.assertIsNone(queued["retry_not_before"])
+            self.assertIsNone(queued["last_failure_kind"])
 
     def test_load_next_runnable_encode_job_holds_browse_only_library_work(self) -> None:
         source_path = self._create_source_file("episode-browse-only.mkv")
@@ -19061,6 +19672,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             lease_expires_at: str | None = None,
             retry_not_before: str | None = None,
             waiting_reason: str | None = None,
+            bypass_schedule: bool = False,
+            schedule_close_deadline_at: str | None = None,
+            host_cooldown_until: str | None = None,
     ) -> None:
         manifest_path = self.root / "runs" / manifest_name
         now = web_app._now_iso()
@@ -19076,7 +19690,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "host": host,
                 "last_host": {},
                 "notes": "",
-                "bypass_schedule": False,
+                "bypass_schedule": bypass_schedule,
                 "attempt_count": attempt_count,
                 "process_pid": 111 if status == "running" else None,
                 "error": None,
@@ -19084,12 +19698,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "lease_expires_at": lease_expires_at,
                 "heartbeat_at": now if status == "running" else None,
                 "worker_id": "test-worker" if status == "running" else None,
+                "schedule_close_deadline_at": schedule_close_deadline_at,
                 "retry_not_before": retry_not_before,
                 "waiting_reason": waiting_reason,
                 "terminal_reason": None,
                 "last_failure_kind": None,
                 "last_failure_at": None,
-                "host_cooldown_until": None,
+                "host_cooldown_until": host_cooldown_until,
                 "created_at": now,
                 "started_at": now if status == "running" else None,
                 "finished_at": None,

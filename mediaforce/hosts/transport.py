@@ -1,7 +1,11 @@
 import shlex
 import subprocess
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
+
+from mediaforce.core.process_control import ManagedProcessController, ScheduleWindowClosedError, run_command
+from mediaforce.core.schedule_deadline import guard_shell_script_for_schedule_deadline, \
+    managed_schedule_close_deadline, process_result_reached_schedule_deadline
 
 
 def ssh_client_options(*, batch_mode: bool = True, connect_timeout_seconds: int = 5) -> list[str]:
@@ -27,6 +31,7 @@ def _run_remote_ssh(
         identity_file: Path | None = None,
         batch_mode: bool = True,
         wake_before_connect: bool = True,
+        process_controller: ManagedProcessController | None = None,
         ensure_remote_awake_for_ssh: Callable[[dict[str, object]], None],
         ssh_client_options_func: Callable[..., list[str]],
         subprocess_run: Callable[..., subprocess.CompletedProcess[str]],
@@ -41,6 +46,13 @@ def _run_remote_ssh(
     cmd.append(ssh_host)
     if remote_args:
         cmd.append(shlex.join([str(arg) for arg in remote_args]))
+    if process_controller is not None:
+        return run_command(
+            cmd,
+            process_controller=process_controller,
+            timeout=timeout,
+            input_text=input_text,
+        )
     return subprocess_run(cmd, capture_output=True, text=True, timeout=timeout, input_text=input_text)
 
 
@@ -49,6 +61,7 @@ def run_remote_command(
         command: list[str],
         timeout: int,
         input_text: str | None = None,
+        process_controller: ManagedProcessController | None = None,
         *,
         ssh_target_for_host: Callable[[dict[str, object]], str],
         remote_shell_path_export_line: Callable[[], str],
@@ -71,14 +84,25 @@ def run_remote_command(
             shlex.join(remote_command),
         ]
     )
-    return run_remote_ssh(
+    deadline = managed_schedule_close_deadline(host, process_controller)
+    if deadline is not None:
+        script = guard_shell_script_for_schedule_deadline(script, deadline)
+    remote_kwargs: dict[str, Any] = {
+        "input_text": input_text,
+        "timeout": timeout,
+    }
+    if process_controller is not None:
+        remote_kwargs["process_controller"] = process_controller
+    result = run_remote_ssh(
         normalized_host,
         "sh",
         "-lc",
         script,
-        input_text=input_text,
-        timeout=timeout,
+        **remote_kwargs,
     )
+    if deadline is not None and process_result_reached_schedule_deadline(result, host):
+        raise ScheduleWindowClosedError("Encode host schedule window closed.")
+    return result
 
 
 def copy_remote_file_to_local(
