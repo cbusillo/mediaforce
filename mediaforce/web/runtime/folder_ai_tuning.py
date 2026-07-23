@@ -74,6 +74,7 @@ class FolderAiTuneDeps:
 def _job_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
     return {
         "library_item_id": sample_item.get("library_item_id"),
+        "media_root": sample_item.get("media_root"),
         "rel_path": sample_item.get("rel_path"),
         "source_path": sample_item.get("source_path"),
         "source_fingerprint": sample_item.get("source_fingerprint"),

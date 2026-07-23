@@ -128,8 +128,12 @@ series instead of one season.
 
 Folder calibration now uses a size-first review flow by default. The checked-in
 defaults aim for roughly 300 MB per 45-minute episode at up to 1080p, then use
-sampled metrics as guardrails and visual review clips as the operator decision
-point. The first size note is measured before it becomes a ceiling; once a
+sampled metrics as guardrails and representative picture-and-sound clips as the
+operator decision point. The comparison can open in a focused full-screen
+workspace with side-by-side and instant Original/New views, shared playback,
+and actual-size inspection. Technical encoding evidence remains under Details,
+and approval stays on the calm folder page. The first size note is measured
+before it becomes a ceiling; once a
 follow-up target lands above the band, the next sample draft carries the learned
 size ceiling forward instead of repeating the oversized run. The current fast
 sample engine is still `ab-av1`; scene-aware engine work is tracked separately so

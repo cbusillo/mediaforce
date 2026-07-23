@@ -3,6 +3,7 @@
 	import { onMount, tick } from 'svelte';
 
 	import { ApiError, apiDownloadHref, postJson } from '$lib/api/client';
+	import ComparisonWorkspace from '$lib/components/season/ComparisonWorkspace.svelte';
 	import type {
 		FolderPayload,
 		FolderStatusPayload,
@@ -10,6 +11,7 @@
 		QualityRiskTag
 	} from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
+	import { reviewPairHasSound } from '$lib/season/comparison';
 	import {
 		REVIEW_CONCERNS,
 		approvalGuardFromMessage,
@@ -112,8 +114,6 @@
 	let operatorInstructions = $state('');
 	let selectedConcerns = $state<QualityRiskTag[]>([]);
 	let reviewFeedback = $state('');
-	let sourceVideo = $state<HTMLVideoElement | null>(null);
-	let previewVideo = $state<HTMLVideoElement | null>(null);
 	let goalButtons = $state<HTMLButtonElement[]>([]);
 	let safetyDialog = $state<SafetyDialog | null>(null);
 	let safetyDialogReturnFocus = $state<HTMLElement | null>(null);
@@ -168,9 +168,14 @@
 		((folder.sample_host_options ?? []) as HostOption[]).filter((host) => host.key)
 	);
 	const sampleItem = $derived(asRecord(folder.sample_item));
+	const sampleHasAudio = $derived(
+		Array.isArray(sampleItem.audio_summary) && sampleItem.audio_summary.length > 0
+	);
 	const sampleEpisode = $derived(episodeLabel(asText(sampleItem.rel_path)));
 	const reviewPairs = $derived(normalizeReviewPairs(folder));
 	const currentPair = $derived(reviewPairs[Math.min(selectedMoment, reviewPairs.length - 1)]);
+	const reviewHasSound = $derived(reviewPairHasSound(currentPair));
+	const reviewSubject = $derived(reviewHasSound ? 'picture and sound' : 'picture');
 	const calibration = $derived(asRecord(folder.calibration));
 	const sampleResult = $derived(asRecord(calibration.sample_result));
 	const encodeProgress = $derived(currentEncodeProgress(folder.encode_job));
@@ -815,28 +820,30 @@
 		const baselinePolicy = asRecord(asRecord(calibration.sample_item).resolved_policy);
 		const baselineVideo = asRecord(baselinePolicy.video);
 		const draftVideo = asRecord(asRecord(calibration.policy).video);
-		const fields: Array<[string, string, string]> = [
-			['quality_metric', 'Picture quality method', 'text'],
-			['target_vmaf', 'VMAF target', 'number'],
-			['min_target_vmaf', 'VMAF floor', 'number'],
-			['target_xpsnr', 'XPSNR target', 'number'],
-			['min_target_xpsnr', 'XPSNR floor', 'number'],
-			['max_encoded_percent', 'Largest allowed size', 'percent'],
-			['default_grain', 'Film grain', 'number']
-		];
-		return fields.flatMap(([key, label, kind]) => {
-			const before = baselineVideo[key];
-			const after = draftVideo[key];
-			if (JSON.stringify(before ?? null) === JSON.stringify(after ?? null)) return [];
-			return [`${label}: ${policyValue(before, kind)} → ${policyValue(after, kind)}`];
-		});
+		const changed = (key: string) =>
+			JSON.stringify(baselineVideo[key] ?? null) !== JSON.stringify(draftVideo[key] ?? null);
+		const changes: string[] = [];
+		if (
+			['quality_metric', 'target_vmaf', 'min_target_vmaf', 'target_xpsnr', 'min_target_xpsnr'].some(
+				changed
+			)
+		) {
+			changes.push('Picture quality checks will be updated.');
+		}
+		if (changed('max_encoded_percent')) {
+			changes.push(
+				`Largest allowed file: ${policyPercent(baselineVideo.max_encoded_percent)} → ${policyPercent(draftVideo.max_encoded_percent)}`
+			);
+		}
+		if (changed('default_grain')) {
+			changes.push('Natural texture handling will be updated.');
+		}
+		return changes;
 	}
 
-	function policyValue(value: unknown, kind: string): string {
+	function policyPercent(value: unknown): string {
 		if (value === null || value === undefined || value === '') return 'not set';
-		if (kind === 'percent') return `${asNumber(value)}% of the original`;
-		if (kind === 'number') return String(asNumber(value));
-		return asText(value).toUpperCase() || String(value);
+		return `${asNumber(value)}% of the original`;
 	}
 
 	async function focusSafetyDialog() {
@@ -907,37 +914,12 @@
 		goalButtons[nextIndex]?.focus();
 	}
 
-	async function chooseMoment(index: number) {
+	function chooseMoment(index: number) {
 		selectedMoment = index;
-		await tick();
-		previewVideo?.pause();
-		sourceVideo?.pause();
 	}
 
 	function downloadComparison() {
 		window.location.assign(apiDownloadHref(endpoint('review-compare/download')));
-	}
-
-	function syncPlay() {
-		if (!previewVideo || !sourceVideo) return;
-		sourceVideo.currentTime = previewVideo.currentTime;
-		void sourceVideo.play().catch(() => undefined);
-	}
-
-	function syncPause() {
-		sourceVideo?.pause();
-	}
-
-	function syncSeek() {
-		if (!previewVideo || !sourceVideo) return;
-		sourceVideo.currentTime = previewVideo.currentTime;
-	}
-
-	function keepVideosTogether() {
-		if (!previewVideo || !sourceVideo) return;
-		if (Math.abs(previewVideo.currentTime - sourceVideo.currentTime) > 0.18) {
-			sourceVideo.currentTime = previewVideo.currentTime;
-		}
 	}
 
 	function technicalPolicy() {
@@ -1323,23 +1305,9 @@
 									? 'Size goal not met'
 									: 'Looks good'}
 						</p>
-						<h1>{targetConstraint ? targetConstraint.title : 'Review picture and sound'}</h1>
+						<h1>{targetConstraint ? targetConstraint.title : `Review ${reviewSubject}`}</h1>
 						<p>{sampleEpisode} · Compare the same moment on both sides.</p>
 					</div>
-					{#if reviewPairs.length > 1}
-						<div class="moment-picker" role="group" aria-label="Test moments">
-							{#each reviewPairs as pair, index (`${pair.source.path}-${index}`)}
-								<button
-									type="button"
-									class:active={selectedMoment === index}
-									onclick={() => chooseMoment(index)}
-									aria-pressed={selectedMoment === index}
-								>
-									Moment {index + 1}
-								</button>
-							{/each}
-						</div>
-					{/if}
 				</div>
 
 				{#if targetConstraint}
@@ -1365,9 +1333,9 @@
 						</div>
 						<p>
 							{crfLimitReached
-								? `The search reached its CRF ${asNumber(sampleResult.chosen_crf)} limit before it reached your size goal.`
+								? 'The test reached its smallest practical setting before it reached your size goal.'
 								: 'The measured result stayed above your size goal.'}
-							Review this as a picture-and-sound checkpoint, then make a smaller test.
+							Review this as a {reviewSubject} checkpoint, then make a smaller test.
 						</p>
 					</div>
 				{:else if sizeTarget.status === 'under_target'}
@@ -1380,7 +1348,7 @@
 								{formatDecimalFileSize(sizeTarget.budgetBytes)} goal.</strong
 							>
 						</div>
-						<p>Make another test that spends the unused size on picture and sound quality.</p>
+						<p>Make another test that spends the unused size on {reviewSubject} quality.</p>
 					</div>
 				{:else if sizeTarget.status === 'missing_prediction'}
 					<div class="target-warning" role="status">
@@ -1393,67 +1361,21 @@
 				{/if}
 
 				{#if currentPair}
-					<div
-						class="video-stage"
-						role="group"
-						aria-label="Synchronized original and new video comparison. Use the controls on the new video to play both."
-					>
-						<div class="video-card">
-							<div class="video-label">
-								<span>Original</span><small
-									>{formatDecimalFileSize(asNumber(sampleItem.source_size_bytes))} episode</small
-								>
-							</div>
-							<video
-								bind:this={sourceVideo}
-								src={currentPair.source.path}
-								muted={audioChoice !== 'original'}
-								playsinline
-								preload="metadata"
-								aria-hidden="true"
-								tabindex="-1"
-							></video>
-						</div>
-						<div class="video-card video-card--new">
-							<div class="video-label">
-								<span>New</span>
-								<small
-									>{expectedEpisodeBytes
-										? `about ${formatDecimalFileSize(expectedEpisodeBytes)} episode`
-										: 'test version'}</small
-								>
-							</div>
-							<video
-								bind:this={previewVideo}
-								src={currentPair.preview.path}
-								muted={audioChoice !== 'new'}
-								playsinline
-								preload="metadata"
-								controls
-								aria-label="Play the synchronized original and new test videos"
-								onplay={syncPlay}
-								onpause={syncPause}
-								onseeking={syncSeek}
-								ontimeupdate={keepVideosTogether}
-							></video>
-						</div>
-					</div>
-					<div class="sound-choice" role="group" aria-label="Sound source">
-						<span>Listen to</span>
-						<button
-							type="button"
-							class:active={audioChoice === 'original'}
-							onclick={() => (audioChoice = 'original')}
-							aria-pressed={audioChoice === 'original'}>Original sound</button
-						>
-						<button
-							type="button"
-							class:active={audioChoice === 'new'}
-							onclick={() => (audioChoice = 'new')}
-							aria-pressed={audioChoice === 'new'}>New sound</button
-						>
-						<small>The right-hand controls play both videos together.</small>
-					</div>
+					<ComparisonWorkspace
+						pairs={reviewPairs}
+						{selectedMoment}
+						{audioChoice}
+						episodeLabel={sampleEpisode}
+						originalSizeLabel={`${formatDecimalFileSize(asNumber(sampleItem.source_size_bytes))} per episode`}
+						newSizeLabel={expectedEpisodeBytes
+							? `about ${formatDecimalFileSize(expectedEpisodeBytes)} per episode`
+							: 'test version'}
+						canMakeSoundTest={sampleHasAudio}
+						soundTestDisabled={actionPhase !== 'idle' || noAvailableHosts}
+						onMomentChange={chooseMoment}
+						onAudioChange={(side) => (audioChoice = side)}
+						onRequestSoundTest={() => void retryMeasuredTarget()}
+					/>
 				{:else}
 					<div class="missing-media">
 						<h2>The test finished, but the comparison clips are missing.</h2>
@@ -1464,7 +1386,7 @@
 				{#if riskSummary}
 					<div class={`risk-summary risk-summary--${riskSummary.tone}`}>
 						<div class="risk-summary__headline">
-							<span>Quality risk</span>
+							<span>What to check</span>
 							<strong>{riskSummary.verdict}</strong>
 						</div>
 						<div class="risk-summary__fact">
@@ -1478,7 +1400,7 @@
 							<small>{riskSummary.sound.level} · {riskSummary.sound.detail}</small>
 						</div>
 						<div class="risk-summary__fact">
-							<span>Authority</span>
+							<span>Decision</span>
 							<strong>{riskSummary.authority}</strong>
 							<small>{riskSummary.authorityDetail}</small>
 						</div>
@@ -1648,14 +1570,22 @@
 						{:else if sizeTarget.status === 'under_target'}
 							<h2>This result is smaller than requested.</h2>
 							<p>
-								Make another test that uses the available size for more picture and sound quality.
+								Make another test that uses the available size for more {reviewSubject} quality.
 							</p>
 						{:else if sizeTarget.status === 'missing_prediction'}
 							<h2>The size result is incomplete.</h2>
 							<p>Make another test before deciding whether to use this setting for the season.</p>
 						{:else}
-							<h2>Does the new version look and sound right?</h2>
-							<p>Look at faces, motion, dark scenes, and listen for anything distracting.</p>
+							<h2>
+								{reviewHasSound
+									? 'Does the new version look and sound right?'
+									: 'Does the new version look right?'}
+							</h2>
+							<p>
+								{reviewHasSound
+									? 'Look at faces, motion, dark scenes, and listen for anything distracting.'
+									: 'Look at faces, motion, dark scenes, and fine detail.'}
+							</p>
 						{/if}
 					</div>
 					<div class="decision-actions">
@@ -2549,16 +2479,14 @@
 	button:focus-visible,
 	a:focus-visible,
 	select:focus-visible,
-	summary:focus-visible,
-	video:focus-visible {
+	summary:focus-visible {
 		outline: 3px solid #4b8060;
 		outline-offset: 3px;
 	}
 
 	.cinematic button:focus-visible,
 	.cinematic a:focus-visible,
-	.cinematic summary:focus-visible,
-	.cinematic video:focus-visible {
+	.cinematic summary:focus-visible {
 		outline-color: #a8d7b9;
 	}
 
@@ -2844,102 +2772,6 @@
 		color: var(--muted);
 		font-size: 13px;
 		margin-bottom: 0;
-	}
-
-	.moment-picker {
-		background: rgb(255 255 255 / 5%);
-		border: 1px solid var(--line);
-		border-radius: 999px;
-		display: flex;
-		padding: 4px;
-	}
-
-	.moment-picker button,
-	.sound-choice button {
-		background: transparent;
-		border: 0;
-		border-radius: 999px;
-		color: var(--muted);
-		cursor: pointer;
-		font: inherit;
-		font-size: 11px;
-		font-weight: 700;
-		padding: 8px 12px;
-	}
-
-	.moment-picker button.active,
-	.sound-choice button.active {
-		background: #e8eee8;
-		color: #1d241f;
-	}
-
-	.video-stage {
-		display: grid;
-		gap: 13px;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
-	}
-
-	.video-card {
-		background: #070908;
-		border: 1px solid rgb(255 255 255 / 10%);
-		border-radius: 18px;
-		overflow: hidden;
-	}
-
-	.video-card--new {
-		border-color: rgb(137 190 157 / 48%);
-		box-shadow:
-			0 0 0 1px rgb(137 190 157 / 10%),
-			0 28px 80px rgb(0 0 0 / 32%);
-	}
-
-	.video-label {
-		align-items: center;
-		color: #efede7;
-		display: flex;
-		justify-content: space-between;
-		min-height: 48px;
-		padding: 0 16px;
-	}
-
-	.video-label span {
-		font-size: 11px;
-		font-weight: 800;
-		letter-spacing: 0.12em;
-		text-transform: uppercase;
-	}
-
-	.video-label small {
-		color: #929792;
-		font-size: 11px;
-	}
-
-	.video-card video {
-		aspect-ratio: 16 / 9;
-		background: #000;
-		display: block;
-		object-fit: contain;
-		width: 100%;
-	}
-
-	.sound-choice {
-		align-items: center;
-		color: var(--muted);
-		display: flex;
-		font-size: 11px;
-		gap: 5px;
-		justify-content: center;
-		margin-top: 14px;
-	}
-
-	.sound-choice > span {
-		font-weight: 700;
-		margin-right: 3px;
-	}
-
-	.sound-choice small {
-		margin-left: 8px;
-		opacity: 0.7;
 	}
 
 	.missing-media {
@@ -3738,49 +3570,6 @@
 			font-size: 46px;
 		}
 
-		.moment-picker {
-			overflow-x: auto;
-			width: 100%;
-		}
-
-		.moment-picker button {
-			flex: 1 0 auto;
-		}
-
-		.sound-choice {
-			align-items: stretch;
-			flex-wrap: wrap;
-		}
-
-		.sound-choice > span {
-			flex-basis: 100%;
-			text-align: center;
-		}
-
-		.sound-choice button {
-			flex: 1;
-		}
-
-		.sound-choice small {
-			flex-basis: 100%;
-			margin: 5px 0 0;
-			text-align: center;
-		}
-
-		.video-stage {
-			gap: 6px;
-			grid-template-columns: repeat(2, minmax(0, 1fr));
-		}
-
-		.video-label {
-			min-height: 38px;
-			padding-inline: 8px;
-		}
-
-		.video-label small {
-			display: none;
-		}
-
 		.safety-dialog {
 			border-radius: 19px;
 			padding: 24px 20px;
@@ -4517,113 +4306,6 @@
 	.target-warning--under span,
 	.target-warning--under p {
 		color: var(--mf-wait-fg);
-	}
-
-	.moment-picker {
-		background: var(--mf-bg-raised);
-		border: 1px solid var(--mf-line);
-		border-radius: 999px;
-		gap: 2px;
-		padding: 3px;
-	}
-
-	.moment-picker button {
-		border-radius: 999px;
-		color: var(--mf-fg-secondary);
-		font-family: var(--mf-font-sans);
-		font-size: 12px;
-		font-weight: 600;
-		min-height: 32px;
-		padding: 0 12px;
-	}
-
-	.moment-picker button.active {
-		background: var(--mf-bg-panel);
-		box-shadow: 0 1px 2px rgb(30 34 39 / 10%);
-		color: var(--mf-active-fg);
-	}
-
-	.video-stage {
-		background: var(--mf-bg-stage);
-		border: 0;
-		border-radius: 12px;
-		box-shadow: 0 8px 28px rgb(20 22 25 / 16%);
-		display: grid;
-		gap: 10px;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
-		margin: 0;
-		overflow: hidden;
-		padding: 10px;
-	}
-
-	.video-card,
-	.video-card--new {
-		background: #090a0c;
-		border: 1px solid rgb(255 255 255 / 12%);
-		border-radius: 8px;
-		overflow: hidden;
-	}
-
-	.video-card--new {
-		border-color: rgb(120 208 190 / 62%);
-	}
-
-	.video-label {
-		background: #111316;
-		color: #f4f5f2;
-		font-family: var(--mf-font-sans);
-		min-height: 38px;
-		padding: 0 12px;
-	}
-
-	.video-label span {
-		font-size: 11px;
-		letter-spacing: 0.08em;
-	}
-
-	.video-label small {
-		color: #a8ada8;
-		font-size: 11px;
-	}
-
-	.video-card video {
-		aspect-ratio: 16 / 9;
-		display: block;
-		width: 100%;
-	}
-
-	.sound-choice {
-		align-items: center;
-		color: var(--mf-fg-secondary);
-		display: flex;
-		font-family: var(--mf-font-sans);
-		font-size: 12px;
-		gap: 4px;
-		justify-content: center;
-		margin: -7px 0 0;
-	}
-
-	.sound-choice button {
-		background: transparent;
-		border: 1px solid transparent;
-		border-radius: 999px;
-		color: var(--mf-fg-secondary);
-		font-size: 12px;
-		font-weight: 600;
-		min-height: 32px;
-		padding: 0 11px;
-	}
-
-	.sound-choice button.active {
-		background: var(--mf-active-bg);
-		border-color: #c6ddd7;
-		color: var(--mf-active-fg);
-	}
-
-	.sound-choice small {
-		color: var(--mf-fg-tertiary);
-		font-size: 11px;
-		margin-left: 7px;
 	}
 
 	.missing-media {
@@ -5478,31 +5160,6 @@
 		.finished-room,
 		.help-room {
 			padding: 18px;
-		}
-
-		.video-stage {
-			grid-template-columns: 1fr;
-			padding: 7px;
-		}
-
-		.sound-choice {
-			align-items: stretch;
-			flex-wrap: wrap;
-		}
-
-		.sound-choice > span {
-			flex-basis: 100%;
-			text-align: center;
-		}
-
-		.sound-choice button {
-			flex: 1;
-		}
-
-		.sound-choice small {
-			flex-basis: 100%;
-			margin: 4px 0 0;
-			text-align: center;
 		}
 
 		.comparison-ledger,

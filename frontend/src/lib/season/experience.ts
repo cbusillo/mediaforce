@@ -80,6 +80,12 @@ export interface ReviewClip {
 	timestampSeconds: number;
 	durationSeconds: number;
 	sizeBytes: number;
+	audio: ReviewAudio | null;
+}
+
+export interface ReviewAudio {
+	trustworthy: boolean;
+	role: 'original' | 'new' | '';
 }
 
 export interface ReviewPair {
@@ -232,11 +238,11 @@ function qualityRisk(folder: FolderPayload): QualityRiskPayload | null {
 
 function riskVerdictCopy(verdict: string | null | undefined): string {
 	const normalized = text(verdict).toLowerCase();
-	if (normalized === 'blocked') return 'Blocked';
-	if (normalized === 'request_comparison') return 'Request comparison';
-	if (normalized === 'needs_operator_review') return 'Needs operator review';
-	if (normalized === 'safe_to_sample') return 'Safe to sample';
-	return 'Review evidence';
+	if (normalized === 'blocked') return 'Needs attention';
+	if (normalized === 'request_comparison') return 'Review recommended';
+	if (normalized === 'needs_operator_review') return 'Your review is needed';
+	if (normalized === 'safe_to_sample') return 'Ready for a test';
+	return 'Review recommended';
 }
 
 function riskTone(risk: QualityRiskPayload | null): HumanSeasonTone {
@@ -251,20 +257,61 @@ function riskAuthority(risk: QualityRiskPayload | null): { value: string; detail
 	const status = text(decision.status).toLowerCase();
 	if (status === 'rejected') {
 		return {
-			value: 'Current rejection',
-			detail: 'The latest matching rejection outranks any older approval.'
+			value: 'Not approved',
+			detail: 'This exact test was most recently marked as not acceptable.'
 		};
 	}
 	if (status === 'approved') {
 		return {
-			value: 'Current approval',
-			detail: 'The current sample, source, and policy hash have an authoritative approval.'
+			value: 'Approved',
+			detail: 'A decision has been saved for this exact test.'
 		};
 	}
 	return {
-		value: 'No current decision',
-		detail: 'Older, stale, or sibling evidence is not treated as authority here.'
+		value: 'Not decided yet',
+		detail: 'No decision has been saved for this test.'
 	};
+}
+
+function plainRiskCopy(tag: QualityRiskTag): { label: string; detail: string } {
+	const copy: Record<QualityRiskTag, { label: string; detail: string }> = {
+		softness_detail_loss: {
+			label: 'Fine detail',
+			detail: 'Check faces, text, hair, and fine textures for softness or missing detail.'
+		},
+		motion_breakup: {
+			label: 'Fast movement',
+			detail: 'Watch movement and busy scenes for blocks, smearing, or distracting edges.'
+		},
+		banding_dark_scene_damage: {
+			label: 'Dark scenes',
+			detail: 'Check shadows and smooth color changes for visible steps or lost detail.'
+		},
+		grain_noise_treatment: {
+			label: 'Texture and grain',
+			detail: 'Check natural texture for waxiness, crawling noise, or an overly smooth look.'
+		},
+		cadence_interlace_artifacts: {
+			label: 'Motion pattern',
+			detail: 'Watch movement for combing, judder, repeated frames, or an uneven rhythm.'
+		},
+		audio_quality_layout: {
+			label: 'Sound',
+			detail: 'Listen for clear dialogue, balanced sound, and anything distracting.'
+		},
+		other: {
+			label: 'Something to check',
+			detail: 'Compare the selected moments closely before deciding.'
+		}
+	};
+	return copy[tag];
+}
+
+function plainRiskLevel(level: unknown): string {
+	const normalized = text(level).toLowerCase();
+	if (normalized === 'high') return 'Check closely';
+	if (normalized === 'medium') return 'Worth checking';
+	return 'Review note';
 }
 
 function compareRiskFact(
@@ -280,10 +327,11 @@ function compareRiskFact(
 	if (!risk) {
 		return { label: fallbackLabel, level: 'No specific warning', detail: fallbackDetail };
 	}
+	const copy = plainRiskCopy(risk.tag);
 	return {
-		label: risk.label,
-		level: `${risk.level} risk`,
-		detail: risk.rationale
+		label: copy.label,
+		level: plainRiskLevel(risk.level),
+		detail: copy.detail
 	};
 }
 
@@ -312,32 +360,30 @@ export function compareRiskSummary(folder: FolderPayload): CompareRiskSummary | 
 		typedRisks,
 		(tag) => tag !== 'audio_quality_layout',
 		'No specific picture warning',
-		'Judge detail, motion, dark scenes, grain, and cadence in the selected moments.'
+		'Check detail, movement, dark scenes, and natural texture in the selected moments.'
 	);
 	const sound = compareRiskFact(
 		typedRisks,
 		(tag) => tag === 'audio_quality_layout',
 		'No specific sound warning',
-		'Listen for clarity, channel layout, balance, and anything distracting.'
+		'Listen for clear dialogue, balanced sound, and anything distracting.'
 	);
-	const focusMoments = (risk.pre_test_instruction?.moments ?? []).slice(0, 3).map((moment) => {
-		const labels = Array.isArray(moment.risk_tags) ? moment.risk_tags.join(', ') : 'review risk';
-		return `Moment ${moment.moment} · ${labels}`;
-	});
+	const focusMoments = (risk.pre_test_instruction?.moments ?? [])
+		.slice(0, 3)
+		.map((moment) => `Moment ${moment.moment} needs the closest look.`);
+	const topRiskCopy = topRisk ? plainRiskCopy(topRisk.tag) : null;
 	return {
 		verdict: riskVerdictCopy(risk.verdict),
 		blocked: Boolean(risk.blocked),
 		requiresCadenceResolution,
 		tone: riskTone(risk),
-		title: topRisk ? topRisk.label : riskVerdictCopy(risk.verdict),
-		detail:
-			(risk.blocking_reasons && risk.blocking_reasons[0]) ||
-			risk.comparison_reason ||
-			text(risk.interpretation?.summary) ||
-			'Measured evidence and review authority define the current risk state.',
-		topRisk: topRisk?.label ?? 'No elevated typed risk',
-		topRiskLevel: topRisk?.level ? `${topRisk.level} risk` : 'unknown risk',
-		topRiskDetail: topRisk?.rationale ?? 'No typed review focus was published for this sample.',
+		title: topRiskCopy?.label ?? riskVerdictCopy(risk.verdict),
+		detail: risk.blocked
+			? 'This test needs attention before it can be approved.'
+			: 'Compare the selected moments before deciding.',
+		topRisk: topRiskCopy?.label ?? 'No specific warning',
+		topRiskLevel: topRisk ? plainRiskLevel(topRisk.level) : 'Review note',
+		topRiskDetail: topRiskCopy?.detail ?? 'Compare the selected moments before deciding.',
 		authority: authority.value,
 		authorityDetail: authority.detail,
 		focusMoments,
@@ -1160,23 +1206,41 @@ export function normalizeReviewPairs(folder: FolderPayload): ReviewPair[] {
 			const source = record(pair.source_clip);
 			const preview = record(pair.preview_clip);
 			const compare = record(pair.compare_clip);
+			const sourceAudio = record(source.audio);
+			const previewAudio = record(preview.audio);
 			return {
 				source: {
 					path: text(source.path),
 					timestampSeconds: numberValue(source.timestamp_seconds),
 					durationSeconds: numberValue(source.duration_seconds),
-					sizeBytes: numberValue(source.size_bytes)
+					sizeBytes: numberValue(source.size_bytes),
+					audio: Object.keys(sourceAudio).length
+						? {
+								trustworthy: booleanValue(sourceAudio.trustworthy),
+								role: reviewAudioRole(sourceAudio.role)
+							}
+						: null
 				},
 				preview: {
 					path: text(preview.path),
 					timestampSeconds: numberValue(preview.timestamp_seconds),
 					durationSeconds: numberValue(preview.duration_seconds),
-					sizeBytes: numberValue(preview.size_bytes)
+					sizeBytes: numberValue(preview.size_bytes),
+					audio: Object.keys(previewAudio).length
+						? {
+								trustworthy: booleanValue(previewAudio.trustworthy),
+								role: reviewAudioRole(previewAudio.role)
+							}
+						: null
 				},
 				comparePath: text(compare.path)
 			};
 		})
 		.filter((pair) => pair.source.path && pair.preview.path);
+}
+
+function reviewAudioRole(value: unknown): ReviewAudio['role'] {
+	return value === 'original' || value === 'new' ? value : '';
 }
 
 export function predictedEpisodeSize(folder: FolderPayload): number {

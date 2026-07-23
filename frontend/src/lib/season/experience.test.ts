@@ -416,27 +416,28 @@ describe('season experience translation', () => {
 		);
 
 		expect(summary).toEqual({
-			verdict: 'Request comparison',
+			verdict: 'Review recommended',
 			blocked: false,
 			requiresCadenceResolution: false,
 			tone: 'ready',
-			title: 'Grain / noise treatment',
-			detail: 'Low-confidence grain findings require comparison.',
-			topRisk: 'Grain / noise treatment',
-			topRiskLevel: 'medium risk',
-			topRiskDetail: 'Measured temporal noise may be grain rather than removable noise.',
-			authority: 'No current decision',
-			authorityDetail: 'Older, stale, or sibling evidence is not treated as authority here.',
-			focusMoments: ['Moment 2 · grain_noise_treatment'],
+			title: 'Texture and grain',
+			detail: 'Compare the selected moments before deciding.',
+			topRisk: 'Texture and grain',
+			topRiskLevel: 'Worth checking',
+			topRiskDetail:
+				'Check natural texture for waxiness, crawling noise, or an overly smooth look.',
+			authority: 'Not decided yet',
+			authorityDetail: 'No decision has been saved for this test.',
+			focusMoments: ['Moment 2 needs the closest look.'],
 			picture: {
-				label: 'Grain / noise treatment',
-				level: 'medium risk',
-				detail: 'Measured temporal noise may be grain rather than removable noise.'
+				label: 'Texture and grain',
+				level: 'Worth checking',
+				detail: 'Check natural texture for waxiness, crawling noise, or an overly smooth look.'
 			},
 			sound: {
 				label: 'No specific sound warning',
 				level: 'No specific warning',
-				detail: 'Listen for clarity, channel layout, balance, and anything distracting.'
+				detail: 'Listen for clear dialogue, balanced sound, and anything distracting.'
 			}
 		});
 	});
@@ -1071,17 +1072,43 @@ describe('season experience translation', () => {
 					path: '/source.mp4',
 					timestampSeconds: 0,
 					durationSeconds: 0,
-					sizeBytes: 120
+					sizeBytes: 120,
+					audio: null
 				},
 				preview: {
 					path: '/preview.mp4',
 					timestampSeconds: 0,
 					durationSeconds: 0,
-					sizeBytes: 35
+					sizeBytes: 35,
+					audio: null
 				},
 				comparePath: '/compare.mkv'
 			}
 		]);
+	});
+
+	it('preserves trustworthy sound metadata for review clips', () => {
+		const [pair] = normalizeReviewPairs(
+			folder({
+				calibration: {
+					review_pairs: [
+						{
+							source_clip: {
+								path: '/source.mp4',
+								audio: { trustworthy: true, role: 'original' }
+							},
+							preview_clip: {
+								path: '/preview.mp4',
+								audio: { trustworthy: true, role: 'new' }
+							}
+						}
+					]
+				}
+			})
+		);
+
+		expect(pair.source.audio).toEqual({ trustworthy: true, role: 'original' });
+		expect(pair.preview.audio).toEqual({ trustworthy: true, role: 'new' });
 	});
 
 	it('formats filenames and sizes for people', () => {

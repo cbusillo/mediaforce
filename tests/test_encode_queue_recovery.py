@@ -6657,8 +6657,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             ):
                 with patch.object(web_app, "recommend_review_moments", return_value=[review_moment]):
                     with patch.object(web_app, "recommend_review_timestamps", return_value=[10.0]):
-                        with patch.object(web_app, "encode_preview_clips", return_value=[preview_clip]):
-                            with patch.object(web_app, "render_source_review_clips", return_value=[source_clip]):
+                        with patch.object(
+                                web_app, "encode_preview_clips", return_value=[preview_clip]
+                        ) as preview_mock:
+                            with patch.object(
+                                    web_app, "render_source_review_clips", return_value=[source_clip]
+                            ) as source_mock:
                                 with patch.object(web_app, "generate_compare_clips_from_previews",
                                                   return_value=[compare_clip]):
                                     payload, cleanup_path = web_app._run_sampled_calibration(
@@ -6676,7 +6680,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                                                 "sample_duration": "20s",
                                                 "preset": 4,
                                             },
-                                            "audio": {},
+                                            "audio": {
+                                                "copy_codecs": ["aac", "opus"],
+                                                "convert_to_opus_codecs": ["eac3"],
+                                                "stereo_opus_bitrate": "128k",
+                                                "surround_5_1_opus_bitrate": "256k",
+                                                "surround_7_1_opus_bitrate": "320k",
+                                            },
                                             "subtitle": {},
                                         },
                                         seed_metadata=None,
@@ -6685,6 +6695,26 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                                             "source_size_bytes": 200_000_000,
                                             "duration_seconds": 2600.0,
                                             "rel_path": "tv/show/episode-review.mkv",
+                                            "resolved_policy": {
+                                                "audio": {
+                                                    "copy_codecs": ["aac", "opus"],
+                                                    "convert_to_opus_codecs": ["eac3"],
+                                                    "stereo_opus_bitrate": "128k",
+                                                    "surround_5_1_opus_bitrate": "256k",
+                                                    "surround_7_1_opus_bitrate": "320k",
+                                                },
+                                                "subtitle": {},
+                                            },
+                                            "audio_summary": [
+                                                {
+                                                    "index": 1,
+                                                    "codec_name": "eac3",
+                                                    "channels": 2,
+                                                    "language": "eng",
+                                                    "default": 1,
+                                                    "bit_rate": 224_000,
+                                                }
+                                            ],
                                         },
                                         calibration_run_id="run-123",
                                         process_controller=Mock(),
@@ -6694,6 +6724,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertTrue(payload["preview_clips"][0]["path"].startswith("/review-media/run-123/"))
         self.assertTrue(payload["source_clips"][0]["path"].startswith("/review-media/run-123/"))
         self.assertTrue(payload["compare_clips"][0]["path"].startswith("/review-media/run-123/"))
+        self.assertTrue(payload["source_clips"][0]["audio"]["trustworthy"])
+        self.assertEqual(payload["source_clips"][0]["audio"]["role"], "original")
+        self.assertEqual(payload["preview_clips"][0]["audio"]["role"], "new")
+        self.assertEqual(payload["preview_clips"][0]["audio"]["production_action"], "transcode")
+        self.assertEqual(preview_mock.call_args.kwargs["audio_plan"]["source_stream_index"], 1)
+        self.assertEqual(source_mock.call_args.kwargs["audio_plan"]["production_codec"], "opus")
         self.assertEqual(payload["review_moments"][0]["role"], "hard")
         self.assertEqual(payload["review_moments"][0]["evidence_id"], "ev1_fingerprint")
         self.assertEqual(
@@ -7262,7 +7298,16 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             source_review_mock: Mock,
             compare_preview_mock: Mock,
     ) -> None:
+        self.config.raw["remote_hosts"] = [
+            {
+                "host": "cbusillo@m1-mini",
+                "label": "M1 mini",
+                "capabilities": ["sample_calibration", "encode_queue"],
+                "source_roots": {"tv": "/srv/media/tv"},
+            }
+        ]
         source_path = self._create_source_file("episode-remote.mkv")
+        remote_source_path = Path("/srv/media/tv/show/episode-remote.mkv")
         preview_path = self.root / "review" / "remote-run" / "item-00" / "encoded-01-12m-00s.mp4"
         source_review_path = self.root / "review" / "remote-run" / "item-00" / "source-01-12m-00s.mp4"
         compare_path = self.root / "review" / "remote-run" / "item-00" / "compare-01-12m-00s.mkv"
@@ -7288,6 +7333,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "subtitle": {"prefer_text": True},
         }
         sample_item = {
+            "media_root": "tv",
             "source_path": str(source_path),
             "rel_path": "tv/show/episode-remote.mkv",
             "source_size_bytes": 1_000_000,
@@ -7360,27 +7406,26 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             process_controller=web_app.ManagedProcessController(),
         )
 
-        search_quality_mock.assert_called_once_with(
-            source_path,
-            policy["video"],
-            source_codec="h264",
-            width=None,
-            height=None,
-            detected_crop=None,
-            process_controller=unittest.mock.ANY,
-            host=host,
-            quality_temp_dir=self.config.staging_root,
-            stream_budget_ledger=unittest.mock.ANY,
-        )
+        self.assertEqual(search_quality_mock.call_args.args[0], remote_source_path)
+        self.assertEqual(search_quality_mock.call_args.args[1], policy["video"])
+        quality_host = search_quality_mock.call_args.kwargs["host"]
+        self.assertEqual(quality_host["key"], host["key"])
+        self.assertEqual(quality_host["source_roots"], {"tv": "/srv/media/tv"})
+        self.assertEqual(search_quality_mock.call_args.kwargs["source_codec"], "h264")
+        self.assertIsNone(search_quality_mock.call_args.kwargs["detected_crop"])
+        self.assertEqual(search_quality_mock.call_args.kwargs["quality_temp_dir"], self.config.staging_root)
         sample_encode_mock.assert_called_once()
-        self.assertEqual(sample_encode_mock.call_args.kwargs["host"], host)
+        self.assertEqual(sample_encode_mock.call_args.args[0], remote_source_path)
+        self.assertEqual(sample_encode_mock.call_args.kwargs["host"], quality_host)
         self.assertEqual(sample_encode_mock.call_args.kwargs["source_codec"], "h264")
         self.assertIsNone(sample_encode_mock.call_args.kwargs["video_filter"])
         self.assertEqual(sample_encode_mock.call_args.kwargs["quality_temp_dir"], self.config.staging_root)
         encode_preview_mock.assert_called_once()
-        self.assertEqual(encode_preview_mock.call_args.kwargs["host"], host)
+        self.assertEqual(encode_preview_mock.call_args.kwargs["source_path"], remote_source_path)
+        self.assertEqual(encode_preview_mock.call_args.kwargs["host"], quality_host)
         self.assertEqual(encode_preview_mock.call_args.kwargs["source_codec"], "h264")
         self.assertIsNone(encode_preview_mock.call_args.kwargs["video_filter"])
+        self.assertEqual(source_review_mock.call_args.kwargs["source_path"], source_path)
         self.assertEqual(payload["host"], host)
         self.assertEqual(payload["compare_clips"][0]["path"], "/review-media/remote-run/item-00/compare-01-12m-00s.mkv")
 
@@ -7577,6 +7622,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(sample_encode_mock.call_args.kwargs["host"]["mode"], "local")
         self.assertEqual(search_quality_mock.call_args.kwargs["host"]["media_access"], "stream")
         self.assertEqual(sample_encode_mock.call_args.kwargs["host"]["media_access"], "stream")
+        self.assertEqual(encode_preview_mock.call_args.kwargs["host"]["mode"], "local")
+        self.assertEqual(encode_preview_mock.call_args.kwargs["source_path"], source_path)
 
     def test_purge_transient_artifacts_prunes_ab_av1_dirs_in_host_specific_staging_roots(self) -> None:
         host_staging_root = self.root / "custom-local-staging"
@@ -11059,6 +11106,78 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIn("tune=0:film-grain=0", cmd)
         self.assertIn("28.25", cmd)
 
+    def test_render_encoded_preview_clip_normalizes_copied_audio_for_browser_review(self) -> None:
+        with patch("mediaforce.review.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
+                "mediaforce.review.ffmpeg_hwaccel_input_args", return_value=[]
+        ), patch(
+            "mediaforce.review.run_command",
+            return_value=subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr=""),
+        ) as run_mock:
+            review._render_encoded_preview_clip(
+                source_path=Path("/tmp/input.mkv"),
+                output_path=Path("/tmp/preview.mp4"),
+                clip_time=12.0,
+                duration_seconds=8.0,
+                encoder="libsvtav1",
+                pixel_format="yuv420p10le",
+                preset=4,
+                crf=28.0,
+                svt_params=["tune=0"],
+                audio_plan={
+                    "source_stream_index": 2,
+                    "source_channels": 2,
+                    "production_action": "copy",
+                    "production_codec": "aac",
+                },
+            )
+
+        self.assertEqual(run_mock.call_count, 1)
+        cmd = run_mock.call_args.args[0]
+        self.assertIn("0:2", cmd)
+        self.assertEqual(cmd[cmd.index("-c:a") + 1], "aac")
+        self.assertEqual(cmd[cmd.index("-b:a") + 1], "256k")
+        self.assertEqual(cmd[cmd.index("-ar") + 1], "48000")
+        self.assertEqual(cmd[cmd.index("-ac") + 1], "2")
+        self.assertNotIn("-an", cmd)
+
+    def test_render_encoded_preview_clip_applies_production_opus_before_browser_audio(self) -> None:
+        output_path = self.root / "preview-with-audio.mp4"
+        with patch("mediaforce.review.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
+                "mediaforce.review.ffmpeg_hwaccel_input_args", return_value=[]
+        ), patch(
+            "mediaforce.review.run_command",
+            return_value=subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr=""),
+        ) as run_mock:
+            review._render_encoded_preview_clip(
+                source_path=Path("/tmp/input.mkv"),
+                output_path=output_path,
+                clip_time=12.0,
+                duration_seconds=8.0,
+                encoder="libsvtav1",
+                pixel_format="yuv420p10le",
+                preset=4,
+                crf=28.0,
+                svt_params=["tune=0"],
+                audio_plan={
+                    "source_stream_index": 3,
+                    "source_channels": 6,
+                    "production_action": "transcode",
+                    "production_codec": "opus",
+                    "production_bitrate_text": "256k",
+                },
+            )
+
+        self.assertEqual(run_mock.call_count, 2)
+        production_audio_cmd = run_mock.call_args_list[0].args[0]
+        browser_preview_cmd = run_mock.call_args_list[1].args[0]
+        self.assertEqual(production_audio_cmd[production_audio_cmd.index("-map") + 1], "0:3")
+        self.assertEqual(production_audio_cmd[production_audio_cmd.index("-c:a") + 1], "libopus")
+        self.assertEqual(production_audio_cmd[production_audio_cmd.index("-b:a") + 1], "256k")
+        self.assertIn("channelmap=channel_layout=5.1", production_audio_cmd)
+        self.assertEqual(browser_preview_cmd[browser_preview_cmd.index("-map", 1) + 1], "0:v:0")
+        self.assertIn("1:a:0", browser_preview_cmd)
+        self.assertFalse((self.root / ".preview-with-audio-production-audio.opus").exists())
+
     def test_resolve_item_paths_use_host_overrides(self) -> None:
         item = {
             "source_path": "/Volumes/media/tv/show/episode.mkv",
@@ -12459,6 +12578,33 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIn("-hwaccel", cmd)
         self.assertIn("videotoolbox", cmd)
 
+    def test_render_source_review_clip_adds_truthful_browser_audio(self) -> None:
+        with patch("mediaforce.review.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
+                "mediaforce.review.ffmpeg_hwaccel_input_args", return_value=[]
+        ), patch(
+            "mediaforce.review.run_command",
+            return_value=subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr=""),
+        ) as run_mock:
+            review._render_source_review_clip(
+                source_path=Path("/tmp/input.mkv"),
+                output_path=Path("/tmp/review.mp4"),
+                clip_time=12.0,
+                duration_seconds=8.0,
+                audio_plan={
+                    "source_stream_index": 4,
+                    "source_channels": 6,
+                    "production_action": "transcode",
+                    "production_codec": "opus",
+                },
+            )
+
+        cmd = run_mock.call_args.args[0]
+        self.assertIn("0:4", cmd)
+        self.assertEqual(cmd[cmd.index("-c:a") + 1], "aac")
+        self.assertEqual(cmd[cmd.index("-ar") + 1], "48000")
+        self.assertEqual(cmd[cmd.index("-ac") + 1], "2")
+        self.assertNotIn("-an", cmd)
+
     def test_render_compare_clip_preserves_native_resolution(self) -> None:
         with patch("mediaforce.review.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
                 "mediaforce.review.ffmpeg_hwaccel_input_args", return_value=[]
@@ -12699,6 +12845,75 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIn("tune=0:film-grain=0", cmd)
         self.assertIn("28.25", cmd)
         self.assertEqual(cmd[-1], "/tmp/output.mp4")
+
+    def test_render_encoded_preview_clip_remote_cleans_up_production_audio(self) -> None:
+        with patch("mediaforce.review.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
+                "mediaforce.review.ffmpeg_hwaccel_input_args", return_value=[]
+        ), patch(
+            "mediaforce.review.run_remote_command",
+            return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
+        ) as remote_mock:
+            review._render_encoded_preview_clip_remote(
+                host={"key": "cbusillo@studio", "mode": "ssh"},
+                source_path=Path("/tmp/input.mkv"),
+                remote_output_path=Path("/tmp/output.mp4"),
+                clip_time=12.0,
+                duration_seconds=8.0,
+                encoder="libsvtav1",
+                pixel_format="yuv420p10le",
+                preset=4,
+                crf=28.0,
+                svt_params=["tune=0"],
+                audio_plan={
+                    "source_stream_index": 3,
+                    "source_channels": 8,
+                    "production_action": "transcode",
+                    "production_codec": "opus",
+                    "production_bitrate_text": "320k",
+                },
+            )
+
+        self.assertEqual(remote_mock.call_count, 3)
+        production_audio_cmd = remote_mock.call_args_list[0].args[1]
+        browser_preview_cmd = remote_mock.call_args_list[1].args[1]
+        cleanup_cmd = remote_mock.call_args_list[2].args[1]
+        self.assertIn("channelmap=channel_layout=7.1", production_audio_cmd)
+        self.assertIn("1:a:0", browser_preview_cmd)
+        self.assertEqual(cleanup_cmd[:2], ["rm", "-f"])
+        self.assertEqual(remote_mock.call_args_list[2].args[2], 30)
+
+    def test_render_encoded_preview_clip_remote_preserves_preview_failure_when_cleanup_times_out(self) -> None:
+        success = subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr="")
+        preview_failure = subprocess.CompletedProcess(
+            args=["ssh"], returncode=1, stdout="", stderr="preview failed"
+        )
+        cleanup_timeout = subprocess.TimeoutExpired(cmd=["ssh"], timeout=30)
+        with patch("mediaforce.review.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
+                "mediaforce.review.ffmpeg_hwaccel_input_args", return_value=[]
+        ), patch(
+            "mediaforce.review.run_remote_command",
+            side_effect=[success, preview_failure, cleanup_timeout],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Preview sample encode failed: preview failed"):
+                review._render_encoded_preview_clip_remote(
+                    host={"key": "cbusillo@studio", "mode": "ssh"},
+                    source_path=Path("/tmp/input.mkv"),
+                    remote_output_path=Path("/tmp/output.mp4"),
+                    clip_time=12.0,
+                    duration_seconds=8.0,
+                    encoder="libsvtav1",
+                    pixel_format="yuv420p10le",
+                    preset=4,
+                    crf=28.0,
+                    svt_params=["tune=0"],
+                    audio_plan={
+                        "source_stream_index": 3,
+                        "source_channels": 6,
+                        "production_action": "transcode",
+                        "production_codec": "opus",
+                        "production_bitrate_text": "256k",
+                    },
+                )
 
     def test_generate_compare_clips_uses_staged_artifacts_and_auto_timestamps(self) -> None:
         source_path = self._create_source_file("episode-compare.mkv")

@@ -17,8 +17,10 @@ from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
+from mediaforce.encoding.helpers import resolve_item_source_path
 from mediaforce.encoding.quality import quality_error_message, resolve_local_quality_temp_root
 from mediaforce.encoding.video_filters import build_video_filter
+from mediaforce.hosts.config import host_media_access_for_host
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.tuning.target_size_search import TargetSizeSearchError
 
@@ -200,6 +202,38 @@ def _output_container(config: MediaforceConfig, sample_item: dict[str, Any]) -> 
         return item_container.removeprefix(".")
     source_suffix = Path(str(sample_item.get("source_path") or "")).suffix
     return source_suffix.removeprefix(".") or "mkv"
+
+
+def _review_audio_plan(stream_budget: Any) -> dict[str, Any] | None:
+    audio_streams = tuple(stream_budget.stream_plan.audio_streams)
+    if not audio_streams:
+        return None
+    stream = audio_streams[0]
+    if stream.action == "transcode" and stream.codec_argument != "libopus":
+        return None
+    if stream.action not in {"copy", "transcode"}:
+        return None
+    return {
+        "source_stream_index": stream.source_index,
+        "source_codec": stream.source_codec,
+        "source_channels": stream.channels or 2,
+        "production_action": stream.action,
+        "production_codec": stream.output_codec or stream.source_codec,
+        "production_bitrate_bps": stream.output_bitrate_bps,
+        "production_bitrate_text": stream.output_bitrate_text,
+    }
+
+
+def _review_audio_payload(audio_plan: dict[str, Any] | None, role: str) -> dict[str, Any] | None:
+    if audio_plan is None:
+        return None
+    return {
+        **audio_plan,
+        "trustworthy": True,
+        "role": role,
+        "review_codec": "aac",
+        "review_channels": 2,
+    }
 
 
 def snapshot_staged_artifact(
@@ -465,8 +499,14 @@ def run_sampled_calibration(
         progress_callback: Any | None = None,
 ) -> tuple[dict[str, Any], Path | None]:
     _ = prefix
-    source_path = Path(sample_item["source_path"])
+    controller_source_path = Path(sample_item["source_path"])
     quality_host = _quality_host_data(config, host_data)
+    quality_source_path = resolve_item_source_path(
+        config,
+        sample_item,
+        host=quality_host,
+        host_media_access_for_host=host_media_access_for_host,
+    )
     quality_temp_dir = _quality_temp_dir_for_host(config, quality_host)
     video_policy = object_dict(policy.get("video"))
     stream_budget = deps.resolve_stream_budget_ledger(
@@ -475,6 +515,7 @@ def run_sampled_calibration(
         output_container=_output_container(config, sample_item),
     )
     stream_budget.require_positive_target_video_budget()
+    review_audio_plan = _review_audio_plan(stream_budget)
     sample_item["stream_budget_ledger"] = stream_budget.to_payload()
     sample_item["output_container"] = _output_container(config, sample_item)
     width = int_value(sample_item.get("width")) or None
@@ -493,7 +534,7 @@ def run_sampled_calibration(
     if progress_callback is not None:
         progress_callback("inspecting_source")
     detected_crop = deps.detect_video_crop(
-        source_path,
+        quality_source_path,
         video_policy,
         source_codec=str(sample_item.get("video_codec") or ""),
         width=width,
@@ -529,11 +570,11 @@ def run_sampled_calibration(
         )
     if progress_callback is not None:
         progress_callback("searching_target")
-    quality_result = deps.search_quality_for_source(source_path, video_policy, **quality_kwargs)
+    quality_result = deps.search_quality_for_source(quality_source_path, video_policy, **quality_kwargs)
     if progress_callback is not None:
         progress_callback("measuring_quality")
     sample_result = deps.run_sample_encode(
-        source_path,
+        quality_source_path,
         source_codec=str(sample_item.get("video_codec") or ""),
         preferred_metric=str(video_policy.get("quality_metric", "auto")),
         crf=quality_result.crf,
@@ -553,7 +594,7 @@ def run_sampled_calibration(
         progress_callback("selecting_review_moments")
     if deps.recommend_review_moments is not None:
         review_moments = deps.recommend_review_moments(
-            source_path,
+            controller_source_path,
             float_value(sample_item.get("duration_seconds")),
             8.0,
             media_fingerprint=object_dict(sample_item.get("media_fingerprint")),
@@ -563,7 +604,7 @@ def run_sampled_calibration(
     timestamps = [moment.timestamp_seconds for moment in review_moments]
     if not timestamps:
         timestamps = deps.recommend_review_timestamps(
-            source_path,
+            controller_source_path,
             float_value(sample_item.get("duration_seconds")),
             8.0,
             process_controller=process_controller,
@@ -573,7 +614,7 @@ def run_sampled_calibration(
     if progress_callback is not None:
         progress_callback("building_review", completed=0, total=3)
     preview_clips = deps.encode_preview_clips(
-        source_path=source_path,
+        source_path=quality_source_path,
         source_codec=str(sample_item.get("video_codec") or ""),
         output_dir=output_dir,
         timestamps=timestamps,
@@ -583,24 +624,26 @@ def run_sampled_calibration(
         preset=preset,
         crf=quality_result.crf,
         svt_params=deps.build_svt_params(video_policy),
+        audio_plan=review_audio_plan,
         video_filter=video_filter,
-        host=host_data,
+        host=quality_host,
         process_controller=process_controller,
     )
     if progress_callback is not None:
         progress_callback("building_review", completed=1, total=3)
     source_clips = deps.render_source_review_clips(
-        source_path=source_path,
+        source_path=controller_source_path,
         source_codec=str(sample_item.get("video_codec") or ""),
         output_dir=output_dir,
         timestamps=timestamps,
         duration_seconds=8.0,
+        audio_plan=review_audio_plan,
         process_controller=process_controller,
     )
     if progress_callback is not None:
         progress_callback("building_review", completed=2, total=3)
     compare_clips = deps.generate_compare_clips_from_previews(
-        source_path=source_path,
+        source_path=controller_source_path,
         source_codec=str(sample_item.get("video_codec") or ""),
         previews=preview_clips,
         output_dir=output_dir,
@@ -668,6 +711,7 @@ def run_sampled_calibration(
                 "timestamp_seconds": clip.timestamp_seconds,
                 "duration_seconds": clip.duration_seconds,
                 "size_bytes": clip.size_bytes,
+                "audio": _review_audio_payload(review_audio_plan, "new"),
             }
             for clip in preview_clips
         ],
@@ -677,6 +721,7 @@ def run_sampled_calibration(
                 "timestamp_seconds": clip.timestamp_seconds,
                 "duration_seconds": clip.duration_seconds,
                 "size_bytes": clip.size_bytes,
+                "audio": _review_audio_payload(review_audio_plan, "original"),
             }
             for clip in source_clips
         ],

@@ -554,12 +554,24 @@ def _write_review_sample_state(
                     "timestamp_seconds": 60,
                     "duration_seconds": 12,
                     "size_bytes": 96_000_000,
+                    "audio": {
+                        "trustworthy": True,
+                        "role": "original",
+                        "review_codec": "aac",
+                        "review_channels": 2,
+                    },
                 },
                 "preview_clip": {
                     "path": f"/review-media/{review_slug}/preview.mov",
                     "timestamp_seconds": 60,
                     "duration_seconds": 12,
                     "size_bytes": 12_000_000,
+                    "audio": {
+                        "trustworthy": True,
+                        "role": "new",
+                        "review_codec": "aac",
+                        "review_channels": 2,
+                    },
                 },
             }
         ],

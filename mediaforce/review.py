@@ -199,6 +199,7 @@ def encode_preview_clips(
         preset: int,
         crf: float,
         svt_params: list[str],
+        audio_plan: dict[str, Any] | None = None,
         video_filter: str | None = None,
         host: dict[str, Any] | None = None,
         process_controller: ManagedProcessController | None = None,
@@ -214,6 +215,7 @@ def encode_preview_clips(
         preset=preset,
         crf=crf,
         svt_params=svt_params,
+        audio_plan=audio_plan,
         video_filter=video_filter,
         host=host,
         process_controller=process_controller,
@@ -238,6 +240,7 @@ def _encode_preview_clips_remote(
         preset: int,
         crf: float,
         svt_params: list[str],
+        audio_plan: dict[str, Any] | None = None,
         video_filter: str | None = None,
 ) -> list[EncodedPreviewClip]:
     return _encode_preview_clips_remote_impl(
@@ -252,6 +255,7 @@ def _encode_preview_clips_remote(
         preset=preset,
         crf=crf,
         svt_params=svt_params,
+        audio_plan=audio_plan,
         video_filter=video_filter,
         remote_preview_timeout_seconds=REMOTE_PREVIEW_TIMEOUT_SECONDS,
         uuid_factory=uuid.uuid4,
@@ -314,6 +318,7 @@ def render_source_review_clips(
         output_dir: Path,
         timestamps: list[float],
         duration_seconds: float,
+        audio_plan: dict[str, Any] | None = None,
         process_controller: ManagedProcessController | None = None,
 ) -> list[BrowserReviewClip]:
     return render_source_review_clips_impl(
@@ -322,6 +327,7 @@ def render_source_review_clips(
         output_dir=output_dir,
         timestamps=timestamps,
         duration_seconds=duration_seconds,
+        audio_plan=audio_plan,
         process_controller=process_controller,
         render_source_review_clip=_render_source_review_clip,
         slug_seconds=_slug_seconds,
@@ -365,6 +371,7 @@ def _render_encoded_preview_clip(
         preset: int,
         crf: float,
         svt_params: list[str],
+        audio_plan: dict[str, Any] | None = None,
         video_filter: str | None = None,
         process_controller: ManagedProcessController | None = None,
 ) -> None:
@@ -379,6 +386,7 @@ def _render_encoded_preview_clip(
         preset=preset,
         crf=crf,
         svt_params=svt_params,
+        audio_plan=audio_plan,
         video_filter=video_filter,
         process_controller=process_controller,
         ffmpeg_binary=ffmpeg_binary,
@@ -401,6 +409,7 @@ def _render_encoded_preview_clip_remote(
         preset: int,
         crf: float,
         svt_params: list[str],
+        audio_plan: dict[str, Any] | None = None,
         video_filter: str | None = None,
 ) -> None:
     return _render_encoded_preview_clip_remote_impl(
@@ -415,6 +424,7 @@ def _render_encoded_preview_clip_remote(
         preset=preset,
         crf=crf,
         svt_params=svt_params,
+        audio_plan=audio_plan,
         video_filter=video_filter,
         remote_preview_timeout_seconds=REMOTE_PREVIEW_TIMEOUT_SECONDS,
         ffmpeg_binary=ffmpeg_binary,
@@ -455,6 +465,7 @@ def _render_source_review_clip(
         output_path: Path,
         clip_time: float,
         duration_seconds: float,
+        audio_plan: dict[str, Any] | None = None,
         process_controller: ManagedProcessController | None = None,
 ) -> None:
     return _render_source_review_clip_impl(
@@ -463,6 +474,7 @@ def _render_source_review_clip(
         output_path=output_path,
         clip_time=clip_time,
         duration_seconds=duration_seconds,
+        audio_plan=audio_plan,
         process_controller=process_controller,
         ffmpeg_binary=ffmpeg_binary,
         ffmpeg_hwaccel_input_args=ffmpeg_hwaccel_input_args,
