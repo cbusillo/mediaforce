@@ -644,7 +644,7 @@ def run_scan_job(
                     }
         if prefix is None:
             deps.save_catalog_signature(config)
-            deps.reset_folder_card_cache()
+        deps.reset_folder_card_cache()
         deps.save_scan_job_state(
             config,
             prefix,

@@ -18,23 +18,13 @@
 
 	onMount(() => {
 		disposed = false;
-		let refreshTimer: number | undefined;
 		void hydrateStructure().finally(async () => {
 			if (disposed) return;
 			await hydrateDetails();
-			if (!disposed) scheduleRefresh();
 		});
-
-		function scheduleRefresh() {
-			refreshTimer = window.setTimeout(async () => {
-				await hydrateDetails(true);
-				if (!disposed) scheduleRefresh();
-			}, 7000);
-		}
 
 		return () => {
 			disposed = true;
-			if (refreshTimer) window.clearTimeout(refreshTimer);
 		};
 	});
 
@@ -53,8 +43,8 @@
 		}
 	}
 
-	async function hydrateDetails(background = false) {
-		if (!background) detailsPending = true;
+	async function hydrateDetails() {
+		detailsPending = true;
 		try {
 			const response = await fetchJson<MovieLibraryPayload>(
 				'/api/dashboard/library/movies/details'

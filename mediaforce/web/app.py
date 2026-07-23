@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from tempfile import NamedTemporaryFile, mkdtemp
+from time import monotonic
 from typing import Any, NamedTuple
 
 import uvicorn
@@ -246,6 +247,8 @@ class VideoGeometry(NamedTuple):
     height: int
 
 MIN_RECOMMENDED_SAVINGS_BYTES = 100 * 1024 * 1024
+REPRESENTATIVE_SELECTION_CACHE_LIMIT = 32
+REPRESENTATIVE_SELECTION_CACHE_TTL_SECONDS = 60.0
 FULL_SCAN_STALE_AFTER = timedelta(minutes=15)
 PREFIX_SCAN_STALE_AFTER = timedelta(minutes=15)
 SCAN_RETRY_COOLDOWN = timedelta(minutes=5)
@@ -265,6 +268,10 @@ ENCODE_JOB_MAX_ATTEMPTS = 3
 HOST_LIFECYCLE_COMMAND_TIMEOUT_SECONDS = 30
 HOST_LIFECYCLE_POLL_SECONDS = 2.0
 ENCODE_HOST_COOLDOWN_SECONDS = 10 * 60
+_REPRESENTATIVE_SELECTION_CACHE_LOCK = threading.Lock()
+_REPRESENTATIVE_SELECTION_CACHE: dict[
+    tuple[str, str, int], tuple[float, RepresentativeSelection | None]
+] = {}
 CALIBRATION_STAGED_ARTIFACT_COLUMNS = (
     "library_item_id",
     "manifest_run_id",
@@ -1064,7 +1071,11 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             if summary.get("item_count", 0) == 0:
                 status_code = 200 if folder_scan_job and folder_scan_job.get("status") in {"queued", "running"} else 404
                 return {**base_context, "pending": True, "scan_job": folder_scan_job}, status_code
-            representative_selection = _representative_selection(connection, config, normalized_prefix)
+            representative_selection = _cached_representative_selection(
+                connection,
+                config,
+                normalized_prefix,
+            )
             if representative_selection is None:
                 return (
                     {
@@ -2323,15 +2334,18 @@ def _folder_card_cache_key(config: MediaforceConfig) -> tuple[str, int, int]:
 
 def _reset_folder_card_cache() -> None:
     reset_folder_card_cache()
+    with _REPRESENTATIVE_SELECTION_CACHE_LOCK:
+        _REPRESENTATIVE_SELECTION_CACHE.clear()
 
 
 def _list_library_structure_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
     needs_attention_badges = _folder_needs_attention_badges(connection)
     calibration_job_badges = _folder_calibration_job_badges(connection)
+    library_types = config.library_type_map
     cards = list_library_structure_cards(
         connection,
         config=config,
-        folder_group=lambda rel_path: _folder_group(rel_path, library_types=config.library_type_map),
+        folder_group=lambda rel_path: _folder_group(rel_path, library_types=library_types),
         review_badge_for_prefix=lambda prefix: _folder_review_badge(
             config,
             prefix,
@@ -2343,12 +2357,13 @@ def _list_library_structure_cards(config: MediaforceConfig, connection: DBClient
 
 
 def _list_library_detail_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
+    library_types = config.library_type_map
     return _folder_cards_for_group(
         config,
         connection,
         folder_group=lambda rel_path: _tv_season_folder_group(
             rel_path,
-            library_types=config.library_type_map,
+            library_types=library_types,
         ),
         minimum_recommended_savings_bytes=None,
         media_roots={root for root, library_type in config.library_type_map.items() if library_type == "tv"},
@@ -2358,6 +2373,7 @@ def _list_library_detail_cards(config: MediaforceConfig, connection: DBClient) -
 def _list_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
     needs_attention_badges: dict[str, dict[str, str | None]] | None = None
     calibration_job_badges: dict[str, dict[str, str | None]] | None = None
+    library_types = config.library_type_map
 
     def review_badge_for_prefix(prefix: str) -> dict[str, str | None]:
         nonlocal calibration_job_badges, needs_attention_badges
@@ -2376,7 +2392,7 @@ def _list_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[F
         config,
         connection,
         minimum_recommended_savings_bytes=MIN_RECOMMENDED_SAVINGS_BYTES,
-        folder_group=lambda rel_path: _folder_group(rel_path, library_types=config.library_type_map),
+        folder_group=lambda rel_path: _folder_group(rel_path, library_types=library_types),
         age_days=_age_days,
         estimate_savings_bytes=_estimate_savings_bytes,
         review_badge_for_prefix=review_badge_for_prefix,
@@ -2385,12 +2401,13 @@ def _list_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[F
 
 
 def _list_series_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
+    library_types = config.library_type_map
     return _folder_cards_for_group(
         config,
         connection,
         folder_group=lambda rel_path: _tv_series_folder_group(
             rel_path,
-            library_types=config.library_type_map,
+            library_types=library_types,
         ),
         aggregate_badges=True,
         media_roots={root for root, library_type in config.library_type_map.items() if library_type == "tv"},
@@ -2456,11 +2473,12 @@ def _folder_cards_for_group(
 def _preview_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
     needs_attention_badges = _folder_needs_attention_badges(connection)
     calibration_job_badges = _folder_calibration_job_badges(connection)
+    library_types = config.library_type_map
     cards = preview_folder_cards(
         connection,
         config=config,
         minimum_recommended_savings_bytes=MIN_RECOMMENDED_SAVINGS_BYTES,
-        folder_group=lambda rel_path: _folder_group(rel_path, library_types=config.library_type_map),
+        folder_group=lambda rel_path: _folder_group(rel_path, library_types=library_types),
         estimate_savings_bytes=_estimate_savings_bytes,
         review_badge_for_prefix=lambda prefix: _folder_review_badge(
             config,
@@ -2839,6 +2857,44 @@ def _representative_selection(
         prefix: str,
 ) -> RepresentativeSelection | None:
     return load_representative_selection(connection, config, prefix)
+
+
+def _cache_path_mtime_ns(path: Path) -> int:
+    try:
+        return path.stat().st_mtime_ns
+    except FileNotFoundError:
+        return -1
+
+
+def _cached_representative_selection(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+) -> RepresentativeSelection | None:
+    cache_key = (
+        str(config.paths.db_path),
+        prefix,
+        max(
+            _cache_path_mtime_ns(config.paths.config_path),
+            _cache_path_mtime_ns(config.paths.runtime_settings_path),
+        ),
+    )
+    now = monotonic()
+    with _REPRESENTATIVE_SELECTION_CACHE_LOCK:
+        cached = _REPRESENTATIVE_SELECTION_CACHE.get(cache_key)
+        if cached is not None and now - cached[0] < REPRESENTATIVE_SELECTION_CACHE_TTL_SECONDS:
+            return cached[1]
+
+    selection = load_representative_selection(connection, config, prefix)
+    with _REPRESENTATIVE_SELECTION_CACHE_LOCK:
+        if len(_REPRESENTATIVE_SELECTION_CACHE) >= REPRESENTATIVE_SELECTION_CACHE_LIMIT:
+            oldest_key = min(
+                _REPRESENTATIVE_SELECTION_CACHE,
+                key=lambda key: _REPRESENTATIVE_SELECTION_CACHE[key][0],
+            )
+            _REPRESENTATIVE_SELECTION_CACHE.pop(oldest_key, None)
+        _REPRESENTATIVE_SELECTION_CACHE[cache_key] = (now, selection)
+    return selection
 
 
 def _load_folder_staged_items(

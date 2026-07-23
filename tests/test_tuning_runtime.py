@@ -4470,6 +4470,94 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertEqual(captured_current_policy, [{"video": {"encoder": "libsvtav1"}}])
 
+    def test_folder_ai_tune_preview_does_not_block_on_superseded_failed_sample(self) -> None:
+        failed_job = {
+            "job_id": "older-stopped-job",
+            "status": "stopped",
+            "lane": "sample",
+            "action": "ai_tune",
+            "error": "Calibration queue job was stopped and cleaned up.",
+        }
+        deps = FolderAiTuneDeps(
+            resolve_sample_host=lambda _config, _host_key: {"key": "host-1"},
+            load_job_state=lambda *_args, **_kwargs: None,
+            load_retryable_sample_job_state=lambda *_args, **_kwargs: None,
+            load_latest_failed_sample_job_state=lambda *_args, **_kwargs: dict(failed_job),
+            sample_item=lambda *_args, **_kwargs: {
+                "library_item_id": 0,
+                "media_root": "tv",
+                "rel_path": "tv/show/episode.mkv",
+                "resolved_policy": {"video": {"target_vmaf": 90.0}},
+            },
+            operator_requested_experiment=lambda *_args, **_kwargs: None,
+            load_calibration_state=lambda *_args, **_kwargs: {
+                "job_id": "newer-completed-job",
+                "policy": {"video": {"target_vmaf": 90.0}},
+            },
+            recent_tuning_sessions=lambda *_args, **_kwargs: [],
+            matching_request_history=lambda *_args, **_kwargs: None,
+            metric_support=lambda: {},
+            maybe_seed_baseline_policy=lambda *_args, **_kwargs: None,
+            seed_advice_payload=lambda *_args, **_kwargs: None,
+            proposal_alignment_issue=lambda *_args, **_kwargs: None,
+            now_iso=lambda: "2026-07-23T02:45:00+00:00",
+            proposal_signal_copy=lambda *_args, **_kwargs: "",
+            proposal_context_snapshot=lambda *_args, **_kwargs: {},
+            save_pending_proposal=lambda *_args, **_kwargs: None,
+            pending_proposal_public_view=lambda payload: payload,
+            build_tuning_runtime_toolbelt=lambda *_args, **_kwargs: {},
+            review_pack_dir=lambda *_args, **_kwargs: self.root / "review-pack",
+            remove_path_if_exists=lambda *_args, **_kwargs: None,
+            build_multimodal_review_pack=lambda *_args, **_kwargs: None,
+            multimodal_review_pack_public_view=lambda *_args, **_kwargs: None,
+            tuning_advice_payload=lambda *_args, **_kwargs: {},
+            load_pending_proposal=lambda *_args, **_kwargs: None,
+            apply_policy_fragment=lambda current, fragment: {**current, **fragment},
+            save_advice_state=lambda *_args, **_kwargs: None,
+            save_job_state=lambda *_args, **_kwargs: None,
+            clear_pending_proposal=lambda *_args, **_kwargs: None,
+            record_tuning_session=lambda *_args, **_kwargs: "session-1",
+        )
+
+        with patch(
+            "mediaforce.web.runtime.folder_ai_tuning.inspect_prefix",
+            return_value={"item_count": 1},
+        ), patch(
+            "mediaforce.web.runtime.folder_ai_tuning._tuned_preview_action",
+            return_value={"ok": True},
+        ) as tuned_preview:
+            result = folder_ai_tune_preview_action(
+                self.config,
+                deps,
+                "tv/show",
+                "Try the current draft again.",
+                "host-1",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(tuned_preview.call_args.kwargs["latest_failed_sample_job"]["job_id"], "older-stopped-job")
+        self.assertIsNone(tuned_preview.call_args.kwargs["blocking_failed_sample_job"])
+
+        deps.load_calibration_state = lambda *_args, **_kwargs: None
+        with patch(
+            "mediaforce.web.runtime.folder_ai_tuning.inspect_prefix",
+            return_value={"item_count": 1},
+        ), patch(
+            "mediaforce.web.runtime.folder_ai_tuning._seed_preview_action",
+            return_value={"ok": True},
+        ) as seed_preview:
+            result = folder_ai_tune_preview_action(
+                self.config,
+                deps,
+                "tv/show",
+                "Try the current draft again.",
+                "host-1",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(seed_preview.call_args.kwargs["latest_failed_sample_job"]["job_id"], "older-stopped-job")
+        self.assertIsNone(seed_preview.call_args.kwargs["blocking_failed_sample_job"])
+
     def test_folder_ai_tune_preview_and_confirm_preserve_combined_225_mb_request(self) -> None:
         saved_proposals: list[dict[str, Any]] = []
         saved_jobs: list[dict[str, Any]] = []

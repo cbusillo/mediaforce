@@ -30,6 +30,7 @@
 	let hosts = $state<HostsPayload>(initialHosts);
 	let foldersPending = $state(false);
 	let folderPending = $state(false);
+	let statusPending = $state(false);
 	let folderHydrated = $state(false);
 	let loadError = $state<string | null>(null);
 	let hydrationGeneration = 0;
@@ -94,6 +95,27 @@
 		await hydrateStudio(prefix);
 	}
 
+	async function refreshStudioStatus(currentPrefix: string) {
+		if (currentPrefix !== prefix || folderPending || statusPending || !status.polling_active)
+			return;
+		const generation = hydrationGeneration;
+		statusPending = true;
+		try {
+			const encodedPrefix = encodePrefix(currentPrefix);
+			const nextStatus = await fetchJson<FolderStatusPayload>(
+				`/api/folders/${encodedPrefix}/status`
+			);
+			if (generation !== hydrationGeneration || currentPrefix !== prefix) return;
+			const finishedWork = status.polling_active && !nextStatus.polling_active;
+			status = nextStatus;
+			if (finishedWork) await hydrateStudio(currentPrefix);
+		} catch {
+			// Keep the last useful progress state when a background poll briefly fails.
+		} finally {
+			statusPending = false;
+		}
+	}
+
 	$effect(() => {
 		const currentMode = mode;
 		const currentPrefix = prefix;
@@ -106,7 +128,7 @@
 			hosts = initialHosts;
 			void hydrateStudio(currentPrefix);
 			const refreshTimer = window.setInterval(() => {
-				if (!folderPending) void hydrateStudio(currentPrefix);
+				void refreshStudioStatus(currentPrefix);
 			}, 7000);
 			return () => {
 				window.clearInterval(refreshTimer);

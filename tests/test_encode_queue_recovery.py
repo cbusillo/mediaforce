@@ -4034,6 +4034,24 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual([card.prefix for card in library_cards], ["tv/show/Season 1"])
         self.assertFalse(library_cards[0].details_loading)
 
+    def test_folder_content_reuses_representative_selection_until_cache_reset(self) -> None:
+        selection = Mock()
+        web_app._reset_folder_card_cache()
+        with open_db(self.config.paths.db_path) as connection, patch.object(
+            web_app,
+            "load_representative_selection",
+            return_value=selection,
+        ) as load_selection:
+            first = web_app._cached_representative_selection(connection, self.config, "tv/show")
+            second = web_app._cached_representative_selection(connection, self.config, "tv/show")
+            web_app._reset_folder_card_cache()
+            third = web_app._cached_representative_selection(connection, self.config, "tv/show")
+
+        self.assertIs(first, selection)
+        self.assertIs(second, selection)
+        self.assertIs(third, selection)
+        self.assertEqual(load_selection.call_count, 2)
+
     def test_library_detail_cards_keep_pending_seasons_with_negative_measured_savings(self) -> None:
         source = self._create_source_file("library-detail-larger-output.mkv")
 
@@ -11099,12 +11117,19 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 crf=28.25,
                 svt_params=["tune=0", "film-grain=0"],
             )
-        cmd = run_mock.call_args.args[0]
-        self.assertIn("-hwaccel", cmd)
-        self.assertIn("videotoolbox", cmd)
-        self.assertIn("-svtav1-params", cmd)
-        self.assertIn("tune=0:film-grain=0", cmd)
-        self.assertIn("28.25", cmd)
+        self.assertEqual(run_mock.call_count, 2)
+        production_cmd = run_mock.call_args_list[0].args[0]
+        browser_cmd = run_mock.call_args_list[1].args[0]
+        self.assertIn("-hwaccel", production_cmd)
+        self.assertIn("videotoolbox", production_cmd)
+        self.assertIn("-svtav1-params", production_cmd)
+        self.assertIn("tune=0:film-grain=0", production_cmd)
+        self.assertIn("28.25", production_cmd)
+        self.assertEqual(production_cmd[-1], "/tmp/.preview-production-preview.mp4")
+        self.assertEqual(browser_cmd[browser_cmd.index("-c:v") + 1], "libx264")
+        self.assertEqual(browser_cmd[browser_cmd.index("-pix_fmt") + 1], "yuv420p")
+        self.assertEqual(browser_cmd[browser_cmd.index("-crf") + 1], "16")
+        self.assertEqual(browser_cmd[-1], "/tmp/preview.mp4")
 
     def test_render_encoded_preview_clip_normalizes_copied_audio_for_browser_review(self) -> None:
         with patch("mediaforce.review.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
@@ -11131,14 +11156,17 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(run_mock.call_count, 1)
-        cmd = run_mock.call_args.args[0]
-        self.assertIn("0:2", cmd)
-        self.assertEqual(cmd[cmd.index("-c:a") + 1], "aac")
-        self.assertEqual(cmd[cmd.index("-b:a") + 1], "256k")
-        self.assertEqual(cmd[cmd.index("-ar") + 1], "48000")
-        self.assertEqual(cmd[cmd.index("-ac") + 1], "2")
-        self.assertNotIn("-an", cmd)
+        self.assertEqual(run_mock.call_count, 2)
+        production_cmd = run_mock.call_args_list[0].args[0]
+        browser_cmd = run_mock.call_args_list[1].args[0]
+        self.assertIn("0:2", production_cmd)
+        self.assertEqual(production_cmd[production_cmd.index("-c:a") + 1], "aac")
+        self.assertEqual(production_cmd[production_cmd.index("-b:a") + 1], "256k")
+        self.assertEqual(production_cmd[production_cmd.index("-ar") + 1], "48000")
+        self.assertEqual(production_cmd[production_cmd.index("-ac") + 1], "2")
+        self.assertNotIn("-an", production_cmd)
+        self.assertIn("0:a:0", browser_cmd)
+        self.assertEqual(browser_cmd[browser_cmd.index("-c:a") + 1], "copy")
 
     def test_render_encoded_preview_clip_applies_production_opus_before_browser_audio(self) -> None:
         output_path = self.root / "preview-with-audio.mp4"
@@ -11167,16 +11195,19 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(run_mock.call_count, 2)
+        self.assertEqual(run_mock.call_count, 3)
         production_audio_cmd = run_mock.call_args_list[0].args[0]
-        browser_preview_cmd = run_mock.call_args_list[1].args[0]
+        production_preview_cmd = run_mock.call_args_list[1].args[0]
+        browser_preview_cmd = run_mock.call_args_list[2].args[0]
         self.assertEqual(production_audio_cmd[production_audio_cmd.index("-map") + 1], "0:3")
         self.assertEqual(production_audio_cmd[production_audio_cmd.index("-c:a") + 1], "libopus")
         self.assertEqual(production_audio_cmd[production_audio_cmd.index("-b:a") + 1], "256k")
         self.assertIn("channelmap=channel_layout=5.1", production_audio_cmd)
-        self.assertEqual(browser_preview_cmd[browser_preview_cmd.index("-map", 1) + 1], "0:v:0")
-        self.assertIn("1:a:0", browser_preview_cmd)
+        self.assertEqual(production_preview_cmd[production_preview_cmd.index("-map", 1) + 1], "0:v:0")
+        self.assertIn("1:a:0", production_preview_cmd)
+        self.assertEqual(browser_preview_cmd[browser_preview_cmd.index("-c:v") + 1], "libx264")
         self.assertFalse((self.root / ".preview-with-audio-production-audio.opus").exists())
+        self.assertFalse((self.root / ".preview-with-audio-production-preview.mp4").exists())
 
     def test_resolve_item_paths_use_host_overrides(self) -> None:
         item = {
@@ -12838,13 +12869,19 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 crf=28.25,
                 svt_params=["tune=0", "film-grain=0"],
             )
-        cmd = remote_mock.call_args.args[1]
-        self.assertIn("-hwaccel", cmd)
-        self.assertIn("videotoolbox", cmd)
-        self.assertIn("-svtav1-params", cmd)
-        self.assertIn("tune=0:film-grain=0", cmd)
-        self.assertIn("28.25", cmd)
-        self.assertEqual(cmd[-1], "/tmp/output.mp4")
+        self.assertEqual(remote_mock.call_count, 3)
+        production_cmd = remote_mock.call_args_list[0].args[1]
+        browser_cmd = remote_mock.call_args_list[1].args[1]
+        cleanup_cmd = remote_mock.call_args_list[2].args[1]
+        self.assertIn("-hwaccel", production_cmd)
+        self.assertIn("videotoolbox", production_cmd)
+        self.assertIn("-svtav1-params", production_cmd)
+        self.assertIn("tune=0:film-grain=0", production_cmd)
+        self.assertIn("28.25", production_cmd)
+        self.assertEqual(production_cmd[-1], "/tmp/.output-production-preview.mp4")
+        self.assertEqual(browser_cmd[browser_cmd.index("-c:v") + 1], "libx264")
+        self.assertEqual(browser_cmd[-1], "/tmp/output.mp4")
+        self.assertEqual(cleanup_cmd, ["rm", "-f", "/tmp/.output-production-preview.mp4"])
 
     def test_render_encoded_preview_clip_remote_cleans_up_production_audio(self) -> None:
         with patch("mediaforce.review.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
@@ -12873,14 +12910,18 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(remote_mock.call_count, 3)
+        self.assertEqual(remote_mock.call_count, 4)
         production_audio_cmd = remote_mock.call_args_list[0].args[1]
-        browser_preview_cmd = remote_mock.call_args_list[1].args[1]
-        cleanup_cmd = remote_mock.call_args_list[2].args[1]
+        production_preview_cmd = remote_mock.call_args_list[1].args[1]
+        browser_preview_cmd = remote_mock.call_args_list[2].args[1]
+        cleanup_cmd = remote_mock.call_args_list[3].args[1]
         self.assertIn("channelmap=channel_layout=7.1", production_audio_cmd)
-        self.assertIn("1:a:0", browser_preview_cmd)
+        self.assertIn("1:a:0", production_preview_cmd)
+        self.assertEqual(browser_preview_cmd[browser_preview_cmd.index("-c:v") + 1], "libx264")
+        self.assertIn("/tmp/.output-production-preview.mp4", cleanup_cmd)
+        self.assertIn("/tmp/.output-production-audio.opus", cleanup_cmd)
         self.assertEqual(cleanup_cmd[:2], ["rm", "-f"])
-        self.assertEqual(remote_mock.call_args_list[2].args[2], 30)
+        self.assertEqual(remote_mock.call_args_list[3].args[2], 30)
 
     def test_render_encoded_preview_clip_remote_preserves_preview_failure_when_cleanup_times_out(self) -> None:
         success = subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr="")

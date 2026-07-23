@@ -18,28 +18,18 @@
 
 	onMount(() => {
 		disposed = false;
-		let refreshTimer: number | undefined;
 		void hydrateStructure().finally(async () => {
 			if (disposed) return;
 			await hydrateDetails();
-			if (!disposed) scheduleRefresh();
 		});
-
-		function scheduleRefresh() {
-			refreshTimer = window.setTimeout(async () => {
-				await Promise.all([hydrateStructure(true), hydrateDetails(true)]);
-				if (!disposed) scheduleRefresh();
-			}, 7000);
-		}
 
 		return () => {
 			disposed = true;
-			if (refreshTimer) window.clearTimeout(refreshTimer);
 		};
 	});
 
-	async function hydrateStructure(background = false) {
-		if (!background) structurePending = true;
+	async function hydrateStructure() {
+		structurePending = true;
 		try {
 			const response = await fetchJson<OtherLibraryPayload>('/api/dashboard/library/other');
 			if (disposed) return;
@@ -54,8 +44,8 @@
 		}
 	}
 
-	async function hydrateDetails(background = false) {
-		if (!background) detailsPending = true;
+	async function hydrateDetails() {
+		detailsPending = true;
 		try {
 			const response = await fetchJson<OtherLibraryPayload>('/api/dashboard/library/other/details');
 			if (disposed) return;

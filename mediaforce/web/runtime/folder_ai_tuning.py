@@ -592,6 +592,9 @@ def folder_ai_tune_preview_action(
         latest_failed_sample_job = _latest_failed_sample_job_payload(
             latest_failed_sample_job_loader(connection, config, normalized_prefix)
         )
+        blocking_failed_sample_job = _latest_failed_sample_job_payload(
+            deps.load_retryable_sample_job_state(connection, config, normalized_prefix)
+        )
         summary = inspect_prefix(connection, config, normalized_prefix)
         sample_item = deps.sample_item(connection, config, normalized_prefix)
         if sample_item is None:
@@ -671,6 +674,7 @@ def folder_ai_tune_preview_action(
                 summary=summary,
                 operator_request=operator_request,
                 latest_failed_sample_job=latest_failed_sample_job,
+                blocking_failed_sample_job=blocking_failed_sample_job,
             )
     return _tuned_preview_action(
         config,
@@ -683,6 +687,7 @@ def folder_ai_tune_preview_action(
         operator_request=operator_request,
         calibration=calibration,
         latest_failed_sample_job=latest_failed_sample_job,
+        blocking_failed_sample_job=blocking_failed_sample_job,
     )
 
 
@@ -969,6 +974,7 @@ def _seed_preview_action(
         summary: dict[str, Any],
         operator_request: dict[str, Any] | None,
         latest_failed_sample_job: dict[str, Any] | None,
+        blocking_failed_sample_job: dict[str, Any] | None,
 ) -> dict[str, Any]:
     base_policy = object_dict(sample_item.get("resolved_policy"))
     metric_support = deps.metric_support()
@@ -1017,7 +1023,7 @@ def _seed_preview_action(
     advice_details = object_dict(advice_payload)
     if not combined_fragment and _can_keep_first_size_budget_sample(
             operator_request,
-            latest_failed_sample_job=latest_failed_sample_job,
+            latest_failed_sample_job=blocking_failed_sample_job,
     ):
         advice_payload = _keep_first_size_budget_sample(
             advice_payload=advice_payload,
@@ -1038,7 +1044,7 @@ def _seed_preview_action(
     )
     blocking_evidence_issue = _blocking_sample_evidence_issue(
         operator_request=operator_request,
-        latest_failed_sample_job=latest_failed_sample_job,
+        latest_failed_sample_job=blocking_failed_sample_job,
         current_policy=base_policy,
         preview_policy=seeded_policy,
     )
@@ -1197,6 +1203,7 @@ def _tuned_preview_action(
         operator_request: dict[str, Any] | None,
         calibration: dict[str, Any],
         latest_failed_sample_job: dict[str, Any] | None,
+        blocking_failed_sample_job: dict[str, Any] | None,
 ) -> dict[str, Any]:
     if not trimmed_note:
         raise HTTPException(status_code=400, detail="Add a note so the tuner knows what to change before running another sample.")
@@ -1449,7 +1456,7 @@ def _tuned_preview_action(
     )
     blocking_evidence_issue = _blocking_sample_evidence_issue(
         operator_request=operator_request,
-        latest_failed_sample_job=latest_failed_sample_job,
+        latest_failed_sample_job=blocking_failed_sample_job,
         current_policy=current_policy,
         preview_policy=tuned_policy,
     )
