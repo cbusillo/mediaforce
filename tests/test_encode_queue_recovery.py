@@ -13632,6 +13632,140 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             assert blocked is not None
             self.assertEqual(blocked["waiting_reason"], "Library is Browse only or Disabled in Settings.")
 
+    def test_load_next_runnable_encode_job_batches_parent_sync_and_manifest_read(self) -> None:
+        manifest_path = self._write_manifest(
+            "manifest-waiting-shards.json",
+            [
+                {"library_item_id": 1, "duration_seconds": 90.0, "source_size_bytes": 900},
+                {"library_item_id": 2, "duration_seconds": 120.0, "source_size_bytes": 1_200},
+                {"library_item_id": 3, "duration_seconds": 150.0, "source_size_bytes": 1_500},
+            ],
+        )
+        now = web_app._now_iso()
+
+        def job_payload(
+                *,
+                job_id: str,
+                job_kind: str,
+                parent_job_id: str | None,
+                manifest_indexes: list[int] | None,
+                item_count: int,
+                bypass_schedule: bool = False,
+        ) -> dict[str, object]:
+            return {
+                "job_id": job_id,
+                "prefix": "tv/show",
+                "job_kind": job_kind,
+                "parent_job_id": parent_job_id,
+                "status": "queued",
+                "manifest_path": str(manifest_path),
+                "manifest_indexes": manifest_indexes,
+                "item_count": item_count,
+                "saved_profile_path": None,
+                "host": {},
+                "last_host": {},
+                "notes": "",
+                "bypass_schedule": bypass_schedule,
+                "attempt_count": 0,
+                "process_pid": None,
+                "error": None,
+                "leased_at": None,
+                "lease_expires_at": None,
+                "heartbeat_at": None,
+                "worker_id": None,
+                "retry_not_before": None,
+                "waiting_reason": None,
+                "terminal_reason": None,
+                "last_failure_kind": None,
+                "last_failure_at": None,
+                "host_cooldown_until": None,
+                "created_at": now,
+                "started_at": None,
+                "finished_at": None,
+                "updated_at": now,
+            }
+
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                job_payload(
+                    job_id="folder-waiting",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    manifest_indexes=None,
+                    item_count=3,
+                ),
+            )
+            for index in range(3):
+                save_encode_job(
+                    connection,
+                    job_payload(
+                        job_id=f"shard-waiting-{index}",
+                        job_kind="shard",
+                        parent_job_id="folder-waiting",
+                        manifest_indexes=[index],
+                        item_count=1,
+                        bypass_schedule=index == 2,
+                    ),
+                )
+            connection.commit()
+
+            deps = Mock()
+            deps.now_iso.return_value = now
+            deps.host_runtime_rows = Mock(return_value=[])
+            manifest_reads: list[Path] = []
+            original_read_text = Path.read_text
+
+            def tracked_read_text(path: Path, *args: object, **kwargs: object) -> str:
+                if path == manifest_path:
+                    manifest_reads.append(path)
+                return original_read_text(path, *args, **kwargs)
+
+            with patch(
+                "mediaforce.web.runtime.encode_runtime.select_encode_host",
+                wraps=encode_runtime.select_encode_host,
+            ) as select_host, patch(
+                "mediaforce.web.runtime.encode_runtime.sync_encode_job_parent",
+                wraps=encode_runtime.sync_encode_job_parent,
+            ) as sync_parent, patch.object(Path, "read_text", tracked_read_text):
+                selected = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
+
+            self.assertIsNone(selected)
+            deps.host_runtime_rows.assert_called_once_with(connection, self.config)
+            self.assertEqual(select_host.call_count, 2)
+            self.assertEqual(sync_parent.call_count, 1)
+            self.assertEqual(len(manifest_reads), 1)
+            parent = load_encode_job(connection, "folder-waiting")
+            shards = [load_encode_job(connection, f"shard-waiting-{index}") for index in range(3)]
+            self.assertIsNotNone(parent)
+            assert parent is not None
+            self.assertEqual(parent["waiting_reason"], "waiting for an available encode host")
+            self.assertTrue(all(shard is not None for shard in shards))
+            self.assertTrue(
+                all(shard["waiting_reason"] == "waiting for an available encode host" for shard in shards if shard)
+            )
+
+            manifest_reads.clear()
+            deps.host_runtime_rows.reset_mock()
+            with patch(
+                    "mediaforce.web.runtime.encode_runtime.select_encode_host",
+                    side_effect=[
+                        (None, "waiting for an available encode host"),
+                        ({"key": "local", "label": "Local", "mode": "local"}, None),
+                    ],
+            ), patch(
+                "mediaforce.web.runtime.encode_runtime.sync_encode_job_parent",
+                wraps=encode_runtime.sync_encode_job_parent,
+            ) as sync_parent, patch.object(Path, "read_text", tracked_read_text):
+                selected = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
+
+            self.assertIsNotNone(selected)
+            assert selected is not None
+            self.assertEqual(selected["job_id"], "shard-waiting-2")
+            deps.host_runtime_rows.assert_called_once_with(connection, self.config)
+            self.assertEqual(sync_parent.call_count, 1)
+            self.assertEqual(len(manifest_reads), 1)
+
     def test_process_encode_queue_once_dispatches_multiple_jobs(self) -> None:
         manifest_path = self._write_manifest(
             "manifest-fanout.json",
