@@ -55,6 +55,13 @@ cadence transform.
 Sampling, preview clips, bakeoff plans, and production all call the same filter
 compiler, so the reviewed transform cannot drift before the final encode.
 
+Bulk older-season actions partition their candidate set before writing a run
+manifest. Only items with current, resolved cadence evidence enter production;
+measured blockers and items that still need cadence evidence remain original and
+are reported separately. Exact-season, sample, and recovery actions keep their
+hard blocker because silently dropping an explicitly selected item would change
+the operator's requested scope.
+
 New manifests built from catalog rows without cadence evidence remain blocked
 until cadence analysis is refreshed. Already-written legacy manifests that
 predate the cadence contract remain runnable; rebuilding them opts them into the

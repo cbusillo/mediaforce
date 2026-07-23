@@ -140,6 +140,15 @@
 	const canQueueOlderSeasons = $derived(
 		Boolean(olderSeasonOverride?.available && olderSeasonOverride.candidate_count > 0)
 	);
+	const cadenceBlockedEpisodeCount = $derived(
+		olderSeasonOverride?.cadence_blocked_candidate_count ?? 0
+	);
+	const cadenceEvidenceRequiredEpisodeCount = $derived(
+		olderSeasonOverride?.cadence_evidence_required_candidate_count ?? 0
+	);
+	const cadenceExcludedEpisodeCount = $derived(
+		cadenceBlockedEpisodeCount + cadenceEvidenceRequiredEpisodeCount
+	);
 	const lifecycleHoldReasons = $derived(currentSeasonLifecycle?.hold_reasons ?? []);
 	const lifecycleHold = $derived(lifecycleHoldReasons[0] ?? null);
 	const scopeTitle = $derived(
@@ -568,7 +577,7 @@
 
 	async function queueOlderSeasons() {
 		await runAction('queueing', 'We couldn’t start the older seasons.', async () => {
-			ensureOk(
+			const response = ensureOk(
 				await postJson<ActionResponse>(endpoint('queue-older-seasons'), {
 					notes: 'Approved after reviewing the explicit older-season lifecycle override.',
 					bypass_schedule: false,
@@ -576,6 +585,7 @@
 				}),
 				'We couldn’t start the older seasons.'
 			);
+			actionMessage = response.message || 'Queued the safety-cleared older seasons.';
 		});
 	}
 
@@ -584,12 +594,18 @@
 		if (!selection?.available) return;
 		const latestSeason = selection.latest_season_label || 'The latest season';
 		const changes = [
-			`${selection.season_count} ${selection.season_count === 1 ? 'season' : 'seasons'} · ${selection.candidate_count} ${selection.candidate_count === 1 ? 'episode' : 'episodes'}.`,
-			`Current size: ${formatDecimalFileSize(selection.current_size_bytes)}.`,
+			`${selection.season_count} ${selection.season_count === 1 ? 'season' : 'seasons'} · ${selection.candidate_count} safety-cleared ${selection.candidate_count === 1 ? 'episode' : 'episodes'}.`,
+			`Safety-cleared size: ${formatDecimalFileSize(selection.current_size_bytes)}.`,
 			olderSeasonProjectedSavingsBytes !== null
 				? `Projected savings: about ${formatDecimalFileSize(olderSeasonProjectedSavingsBytes)}.`
 				: 'Projected savings are not available for this setup.',
 			`${latestSeason} stays original.`,
+			cadenceBlockedEpisodeCount > 0
+				? `${cadenceBlockedEpisodeCount} ${cadenceBlockedEpisodeCount === 1 ? 'episode has' : 'episodes have'} a measured motion pattern that Mediaforce cannot convert automatically and will stay original.`
+				: '',
+			cadenceEvidenceRequiredEpisodeCount > 0
+				? `${cadenceEvidenceRequiredEpisodeCount} ${cadenceEvidenceRequiredEpisodeCount === 1 ? 'episode still needs' : 'episodes still need'} motion-pattern analysis and will stay original for now.`
+				: '',
 			selection.overridden_candidate_count > 0
 				? `${selection.overridden_candidate_count} ${selection.overridden_candidate_count === 1 ? 'episode bypasses' : 'episodes bypass'} lifecycle timing holds.`
 				: 'No lifecycle hold is bypassed; this action only excludes the latest season.',
@@ -597,12 +613,12 @@
 				? `${selection.already_eligible_candidate_count} already-eligible ${selection.already_eligible_candidate_count === 1 ? 'episode is' : 'episodes are'} included.`
 				: '',
 			'The current-season policy does not change.',
-			'Specials, ambiguous seasons, and unsafe items remain excluded.'
+			'Specials, ambiguous seasons, and episodes without motion-pattern clearance remain excluded.'
 		].filter(Boolean);
 		await openSafetyDialog({
 			kind: 'older_seasons_override',
 			title: `Process ${selection.season_count} older ${selection.season_count === 1 ? 'season' : 'seasons'} now?`,
-			detail: `This queues ${selection.candidate_count} ${selection.candidate_count === 1 ? 'episode' : 'episodes'} with the approved setup. Mediaforce will recheck the selection before anything starts.`,
+			detail: `This queues ${selection.candidate_count} safety-cleared ${selection.candidate_count === 1 ? 'episode' : 'episodes'} with the approved setup. ${cadenceExcludedEpisodeCount > 0 ? `${cadenceExcludedEpisodeCount} ${cadenceExcludedEpisodeCount === 1 ? 'episode stays' : 'episodes stay'} original for motion-pattern safety. ` : ''}Mediaforce will recheck the selection before anything starts.`,
 			primaryLabel: 'Process older seasons',
 			changes
 		});
@@ -980,14 +996,29 @@
 								: lifecycleHold?.label || 'Season protected'}
 					</strong>
 					{#if isSeriesScope}
-						{#if canQueueOlderSeasons && olderSeasonOverride}
+						{#if olderSeasonOverride && cadenceExcludedEpisodeCount > 0 && !canQueueOlderSeasons}
+							<p>
+								No older-season episodes are cleared for automatic conversion yet.
+								{#if cadenceBlockedEpisodeCount > 0}
+									{cadenceBlockedEpisodeCount} have measured motion patterns that require review.
+								{/if}
+								{#if cadenceEvidenceRequiredEpisodeCount > 0}
+									{cadenceEvidenceRequiredEpisodeCount} still need motion-pattern analysis.
+								{/if}
+							</p>
+						{:else if canQueueOlderSeasons && olderSeasonOverride}
 							<p>
 								{eligibleEpisodeCount} episodes are eligible normally. A separate confirmed action can
-								include {olderSeasonOverride.candidate_count}
+								include {olderSeasonOverride.candidate_count} safety-cleared
 								{olderSeasonOverride.candidate_count === 1 ? 'episode' : 'episodes'} across
 								{olderSeasonOverride.season_count} older
 								{olderSeasonOverride.season_count === 1 ? 'season' : 'seasons'} while
 								{olderSeasonOverride.latest_season_label || 'the latest season'} stays original.
+								{#if cadenceExcludedEpisodeCount > 0}
+									{cadenceExcludedEpisodeCount} more
+									{cadenceExcludedEpisodeCount === 1 ? 'episode stays' : 'episodes stay'} original for
+									motion-pattern safety.
+								{/if}
 							</p>
 						{:else}
 							<p>
@@ -1111,12 +1142,15 @@
 					</h1>
 					<p class="lede">
 						{#if isSeriesScope && olderSeasonOverride?.available}
-							{olderSeasonOverride.candidate_count} episodes across
+							{olderSeasonOverride.candidate_count} safety-cleared episodes across
 							{olderSeasonOverride.season_count} older
 							{olderSeasonOverride.season_count === 1 ? 'season' : 'seasons'} ·
 							{formatDecimalFileSize(olderSeasonOverride.current_size_bytes)} now.
 							{olderSeasonOverride.latest_season_label || 'The latest season'} stays original. You will
 							compare one representative test before Mediaforce makes the selected older seasons.
+							{#if cadenceExcludedEpisodeCount > 0}
+								{cadenceExcludedEpisodeCount} episodes without motion-pattern clearance stay original.
+							{/if}
 						{:else}
 							{episodeCount} episodes{isSeriesScope
 								? ` across ${seriesSeasonCount} ${seriesSeasonLabel}`
@@ -1691,7 +1725,7 @@
 					<p class="lede">
 						The approved setup can make {eligibleEpisodeCount} normally eligible
 						{eligibleEpisodeCount === 1 ? 'episode' : 'episodes'}. The older-season option can
-						include {olderSeasonOverride.candidate_count}
+						include {olderSeasonOverride.candidate_count} safety-cleared
 						{olderSeasonOverride.candidate_count === 1 ? 'episode' : 'episodes'} across
 						{olderSeasonOverride.season_count} older
 						{olderSeasonOverride.season_count === 1 ? 'season' : 'seasons'} with explicit confirmation.
@@ -1735,6 +1769,11 @@
 							<strong>Process older seasons</strong>
 							<p>
 								{olderSeasonOverride.latest_season_label || 'The latest season'} stays original.
+								{#if cadenceExcludedEpisodeCount > 0}
+									{cadenceExcludedEpisodeCount} additional
+									{cadenceExcludedEpisodeCount === 1 ? 'episode stays' : 'episodes stay'} original for
+									motion-pattern safety.
+								{/if}
 								{#if olderSeasonOverride.overridden_candidate_count > 0}
 									{olderSeasonOverride.overridden_candidate_count} protected
 									{olderSeasonOverride.overridden_candidate_count === 1 ? 'episode' : 'episodes'} will
