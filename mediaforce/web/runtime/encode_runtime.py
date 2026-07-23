@@ -447,9 +447,10 @@ def aggregate_encode_parent_job(
     active_hosts: list[dict[str, Any]] = []
     seen_host_keys: set[str] = set()
     current_items: list[str] = []
+    manifest_items_cache: dict[Path, list[dict[str, Any]] | None] = {}
     for child in children:
         progress = object_dict(child.get("progress"))
-        child_totals = encode_job_manifest_totals(child)
+        child_totals = encode_job_manifest_totals(child, manifest_items_cache=manifest_items_cache)
         child_total_duration_seconds = float_value(
             progress.get("total_duration_seconds") or child_totals.get("total_duration_seconds")
         )
@@ -607,24 +608,32 @@ def aggregate_encode_parent_job(
     return aggregated
 
 
-def encode_job_manifest_totals(job: dict[str, Any]) -> dict[str, Any]:
+def encode_job_manifest_totals(
+        job: dict[str, Any],
+        *,
+        manifest_items_cache: dict[Path, list[dict[str, Any]] | None] | None = None,
+) -> dict[str, Any]:
     manifest_path = Path(str(job.get("manifest_path") or "")).expanduser()
     fallback_item_count = int_value(job.get("item_count"))
-    if not manifest_path.exists():
+    if manifest_items_cache is not None and manifest_path in manifest_items_cache:
+        manifest_items = manifest_items_cache[manifest_path]
+    else:
+        manifest_items = None
+        if manifest_path.exists():
+            try:
+                payload = json.loads(manifest_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                pass
+            else:
+                manifest_items = [object_dict(item) for item in object_list(payload.get("items"))]
+        if manifest_items_cache is not None:
+            manifest_items_cache[manifest_path] = manifest_items
+    if manifest_items is None:
         return {
             "total_item_count": fallback_item_count,
             "total_duration_seconds": 0.0,
             "total_source_size_bytes": 0,
         }
-    try:
-        payload = json.loads(manifest_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {
-            "total_item_count": fallback_item_count,
-            "total_duration_seconds": 0.0,
-            "total_source_size_bytes": 0,
-        }
-    manifest_items = [object_dict(item) for item in object_list(payload.get("items"))]
     indexes = _manifest_indexes_for_job(job, manifest_items)
     items = [manifest_items[index] for index in indexes if 0 <= index < len(manifest_items)]
     return {
@@ -977,10 +986,12 @@ def select_encode_host(
         config: MediaforceConfig,
         job: dict[str, Any],
         deps: EncodeQueueRuntimeDeps,
+        *,
+        host_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     library_key = _encode_job_library_key(job)
     host_rows = sorted(
-        deps.host_runtime_rows(connection, config),
+        host_rows if host_rows is not None else deps.host_runtime_rows(connection, config),
         key=lambda status: (-int(status["priority"]), str(status["label"])),
     )
     if library_key:
@@ -1281,6 +1292,15 @@ def _encode_job_library_key(job: dict[str, Any]) -> str:
     return prefix.split("/", 1)[0].strip().lower()
 
 
+def _encode_host_selection_key(job: dict[str, Any]) -> tuple[str, bool, str, str]:
+    return (
+        _encode_job_library_key(job),
+        bool(job.get("bypass_schedule")),
+        str(job.get("host_cooldown_until") or ""),
+        json.dumps(object_dict(job.get("last_host")), sort_keys=True, separators=(",", ":")),
+    )
+
+
 def _host_allows_library(host: dict[str, Any], library_key: str) -> bool:
     allowed_libraries = host.get("allowed_libraries")
     if not isinstance(allowed_libraries, list) or not allowed_libraries:
@@ -1408,12 +1428,28 @@ def load_next_runnable_encode_job(
         config: MediaforceConfig,
         deps: EncodeQueueRuntimeDeps,
 ) -> dict[str, Any] | None:
+    parent_sync_jobs: dict[str, dict[str, Any]] = {}
+
+    def defer_parent_sync(job: dict[str, Any]) -> None:
+        parent_job_id = str(job.get("parent_job_id") or "").strip()
+        if parent_job_id:
+            parent_sync_jobs[parent_job_id] = job
+
+    def sync_deferred_parents() -> None:
+        for pending_job in parent_sync_jobs.values():
+            sync_encode_job_parent(connection, pending_job, deps)
+
     rows = connection.execute(
         select(encode_jobs.c.job_id)
         .where(encode_jobs.c.status == "queued")
         .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
         .order_by(encode_jobs.c.created_at, literal_column("rowid"))
     ).mappings().fetchall()
+    host_rows = deps.host_runtime_rows(connection, config) if rows else []
+    host_selection_cache: dict[
+        tuple[str, bool, str, str],
+        tuple[dict[str, Any] | None, str | None],
+    ] = {}
     for row in rows:
         job = load_encode_job(connection, str(row["job_id"]))
         if job is None:
@@ -1424,21 +1460,34 @@ def load_next_runnable_encode_job(
             if str(job.get("waiting_reason") or "") != waiting_reason:
                 job.update({"waiting_reason": waiting_reason, "updated_at": deps.now_iso()})
                 save_encode_job(connection, job)
-                sync_encode_job_parent(connection, job, deps)
+                defer_parent_sync(job)
             continue
-        host_payload, waiting_reason = select_encode_host(connection, config, job, deps)
+        selection_key = _encode_host_selection_key(job)
+        selection = host_selection_cache.get(selection_key)
+        if selection is None:
+            selection = select_encode_host(
+                connection,
+                config,
+                job,
+                deps,
+                host_rows=host_rows,
+            )
+            host_selection_cache[selection_key] = selection
+        host_payload, waiting_reason = selection
         if host_payload is None:
             if str(job.get("waiting_reason") or "") != str(waiting_reason or ""):
                 job.update({"waiting_reason": waiting_reason, "updated_at": deps.now_iso()})
                 save_encode_job(connection, job)
-                sync_encode_job_parent(connection, job, deps)
+                defer_parent_sync(job)
             continue
         persisted_host_payload = persisted_encode_host_payload(host_payload)
         if job.get("waiting_reason") or job.get("host") != persisted_host_payload:
             job.update({"waiting_reason": None, "host": persisted_host_payload, "updated_at": deps.now_iso()})
             save_encode_job(connection, job)
-            sync_encode_job_parent(connection, job, deps)
+            defer_parent_sync(job)
+        sync_deferred_parents()
         return job
+    sync_deferred_parents()
     return None
 
 
