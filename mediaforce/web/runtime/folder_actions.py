@@ -58,6 +58,7 @@ CalibrationDraftHashFn: TypeAlias = Callable[[ActionPayload], str]
 SaveCalibrationStateFn: TypeAlias = Callable[[MediaforceConfig, str, ActionPayload], None]
 LoadAdviceStateFn: TypeAlias = Callable[[MediaforceConfig, str], ActionPayload | None]
 MergeAdviceStateFn: TypeAlias = Callable[[MediaforceConfig, str, ActionPayload], ActionPayload]
+ClearPendingProposalFn: TypeAlias = Callable[[MediaforceConfig, str], None]
 LoadSampleItemFn: TypeAlias = Callable[[DBClient, MediaforceConfig, str], FolderItem | None]
 QueueFolderEncodeActionFn: TypeAlias = Callable[[str, str, bool], ActionPayload]
 ValidateScopeActionFn: TypeAlias = Callable[[DBClient, str], ActionPayload | None]
@@ -1396,6 +1397,7 @@ def save_profile_action(
         record_visual_approval_artifact: RecordVisualApprovalArtifactFn,
         merge_advice_state: MergeAdviceStateFn,
         upsert_override: UpsertOverrideFn,
+        clear_pending_proposal: ClearPendingProposalFn | None = None,
         load_latest_failed_target_size_job_state: LoadJobStateFn | None = None,
         confirm_high_impact: bool = False,
         confirm_size_tradeoff: bool = False,
@@ -1583,6 +1585,8 @@ def save_profile_action(
         normalized_prefix,
         calibration_payload["policy"],
     )
+    if clear_pending_proposal is not None:
+        clear_pending_proposal(config, normalized_prefix)
     return {
         "ok": True,
         "queued": False,
