@@ -12,6 +12,9 @@ NATIVE_COMPARE_FILTER = (
 BROWSER_REVIEW_AUDIO_BITRATE = "256k"
 BROWSER_REVIEW_AUDIO_CHANNELS = 2
 BROWSER_REVIEW_AUDIO_SAMPLE_RATE = 48_000
+BROWSER_REVIEW_VIDEO_CRF = "16"
+BROWSER_REVIEW_VIDEO_PIXEL_FORMAT = "yuv420p"
+BROWSER_REVIEW_VIDEO_PRESET = "veryfast"
 REMOTE_REVIEW_CLEANUP_TIMEOUT_SECONDS = 30
 
 
@@ -86,6 +89,7 @@ def render_encoded_preview_clip(
         run_command: Callable[..., Any],
 ) -> None:
     production_audio_path = None
+    production_preview_path = output_path.with_name(f".{output_path.stem}-production-preview.mp4")
     try:
         if _requires_production_audio_render(audio_plan):
             production_audio_path = output_path.with_name(f".{output_path.stem}-production-audio.opus")
@@ -103,7 +107,7 @@ def render_encoded_preview_clip(
         cmd = _preview_render_command(
             source_path=source_path,
             source_codec=source_codec,
-            output_path=output_path,
+            output_path=production_preview_path,
             clip_time=clip_time,
             duration_seconds=duration_seconds,
             encoder=encoder,
@@ -120,9 +124,18 @@ def render_encoded_preview_clip(
         )
         result = run_command(cmd, process_controller=process_controller)
         _raise_on_failure(result, "Preview sample encode failed")
+        browser_cmd = _browser_preview_proxy_command(
+            source_path=production_preview_path,
+            output_path=output_path,
+            include_audio=audio_plan is not None,
+            ffmpeg_binary=ffmpeg_binary,
+        )
+        result = run_command(browser_cmd, process_controller=process_controller)
+        _raise_on_failure(result, "Browser preview render failed")
     finally:
         if production_audio_path is not None:
             production_audio_path.unlink(missing_ok=True)
+        production_preview_path.unlink(missing_ok=True)
 
 
 def render_encoded_preview_clip_remote(
@@ -147,6 +160,9 @@ def render_encoded_preview_clip_remote(
         run_remote_command: Callable[..., Any],
 ) -> None:
     production_audio_path = None
+    production_preview_path = remote_output_path.with_name(
+        f".{remote_output_path.stem}-production-preview.mp4"
+    )
     try:
         if _requires_production_audio_render(audio_plan):
             production_audio_path = remote_output_path.with_name(
@@ -166,7 +182,7 @@ def render_encoded_preview_clip_remote(
         cmd = _preview_render_command(
             source_path=source_path,
             source_codec=source_codec,
-            output_path=remote_output_path,
+            output_path=production_preview_path,
             clip_time=clip_time,
             duration_seconds=duration_seconds,
             encoder=encoder,
@@ -183,16 +199,26 @@ def render_encoded_preview_clip_remote(
         )
         result = run_remote_command(host, cmd, remote_preview_timeout_seconds)
         _raise_on_failure(result, "Preview sample encode failed")
+        browser_cmd = _browser_preview_proxy_command(
+            source_path=production_preview_path,
+            output_path=remote_output_path,
+            include_audio=audio_plan is not None,
+            ffmpeg_binary=ffmpeg_binary,
+        )
+        result = run_remote_command(host, browser_cmd, remote_preview_timeout_seconds)
+        _raise_on_failure(result, "Browser preview render failed")
     finally:
+        temporary_paths = [production_preview_path]
         if production_audio_path is not None:
-            try:
-                run_remote_command(
-                    host,
-                    ["rm", "-f", str(production_audio_path)],
-                    min(remote_preview_timeout_seconds, REMOTE_REVIEW_CLEANUP_TIMEOUT_SECONDS),
-                )
-            except (OSError, RuntimeError, subprocess.SubprocessError):
-                pass
+            temporary_paths.append(production_audio_path)
+        try:
+            run_remote_command(
+                host,
+                ["rm", "-f", *(str(path) for path in temporary_paths)],
+                min(remote_preview_timeout_seconds, REMOTE_REVIEW_CLEANUP_TIMEOUT_SECONDS),
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            pass
 
 
 def _preview_render_command(
@@ -269,6 +295,44 @@ def _preview_render_command(
         cmd.extend(["-svtav1-params", ":".join(svt_params)])
     if video_filter:
         cmd.extend(["-vf", video_filter])
+    cmd.append(str(output_path))
+    return cmd
+
+
+def _browser_preview_proxy_command(
+        *,
+        source_path: Path,
+        output_path: Path,
+        include_audio: bool,
+        ffmpeg_binary: Callable[[], str],
+) -> list[str]:
+    cmd = [
+        ffmpeg_binary(),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-i",
+        str(source_path),
+        "-map",
+        "0:v:0",
+        "-sn",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        BROWSER_REVIEW_VIDEO_PIXEL_FORMAT,
+        "-preset",
+        BROWSER_REVIEW_VIDEO_PRESET,
+        "-crf",
+        BROWSER_REVIEW_VIDEO_CRF,
+        "-movflags",
+        "+faststart",
+    ]
+    if include_audio:
+        cmd.extend(["-map", "0:a:0", "-c:a", "copy", "-shortest"])
+    else:
+        cmd.extend(["-an"])
     cmd.append(str(output_path))
     return cmd
 

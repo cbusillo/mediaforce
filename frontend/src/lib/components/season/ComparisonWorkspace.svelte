@@ -62,6 +62,8 @@
 	let sourceHeight = $state(0);
 	let previewWidth = $state(0);
 	let previewHeight = $state(0);
+	let sourceReady = $state(false);
+	let previewReady = $state(false);
 	let previousBodyOverflow = '';
 	let scrollSyncPending = false;
 	let picturePositionX = 0.5;
@@ -94,6 +96,9 @@
 		sourceHeight = 0;
 		previewWidth = 0;
 		previewHeight = 0;
+		sourceReady = false;
+		previewReady = false;
+		playbackError = '';
 		picturePositionX = 0.5;
 		picturePositionY = 0.5;
 		void tick().then(() => {
@@ -157,7 +162,11 @@
 				.then(() => (nativeFullscreen = true))
 				.catch(() => (nativeFullscreen = false));
 		}
-		void tick().then(() => closeButton?.focus());
+		void tick().then(() => {
+			sourceVideo?.load();
+			previewVideo?.load();
+			closeButton?.focus();
+		});
 	}
 
 	async function closeWorkspace() {
@@ -230,6 +239,23 @@
 			? previewVideo.duration
 			: currentPair?.preview.durationSeconds || 0;
 		if (scale === 'actual') void tick().then(centerActualSize);
+	}
+
+	function handleMediaError(side: ComparisonSide) {
+		if (side === 'original') sourceReady = false;
+		else previewReady = false;
+		playbackError = `${side === 'original' ? 'The original' : 'The new'} clip could not be decoded in this browser.`;
+	}
+
+	function handleMediaLoaded(side: ComparisonSide, video: HTMLVideoElement) {
+		const loadedSource = video.currentSrc;
+		requestAnimationFrame(() => {
+			requestAnimationFrame(() => {
+				if (video.currentSrc !== loadedSource) return;
+				if (side === 'original') sourceReady = true;
+				else previewReady = true;
+			});
+		});
 	}
 
 	function handleSourceMetadata() {
@@ -464,7 +490,10 @@
 							aria-label="Original test moment"
 							tabindex="-1"
 							onloadedmetadata={handleSourceMetadata}
+							onloadeddata={(event) => handleMediaLoaded('original', event.currentTarget)}
+							onerror={() => handleMediaError('original')}
 						></video>
+						{#if !sourceReady}<span class="media-loading">Loading original picture…</span>{/if}
 					</div>
 				</div>
 				<div
@@ -487,6 +516,8 @@
 							aria-label="New test moment"
 							tabindex="-1"
 							onloadedmetadata={handlePreviewMetadata}
+							onloadeddata={(event) => handleMediaLoaded('new', event.currentTarget)}
+							onerror={() => handleMediaError('new')}
 							onplaying={() => {
 								playing = true;
 								preparing = false;
@@ -496,6 +527,7 @@
 							ontimeupdate={handleTimeUpdate}
 							onended={handleEnded}
 						></video>
+						{#if !previewReady}<span class="media-loading">Loading new picture…</span>{/if}
 					</div>
 				</div>
 			</div>
@@ -759,13 +791,24 @@
 		display: grid;
 		min-height: 0;
 		place-items: center;
+		position: relative;
 	}
 
 	.media-frame video {
+		grid-area: 1 / 1;
 		display: block;
 		height: 100%;
 		object-fit: contain;
 		width: 100%;
+	}
+
+	.media-loading {
+		background: rgb(5 6 7 / 82%);
+		color: #c5ceca;
+		font-size: 12px;
+		grid-area: 1 / 1;
+		padding: 7px 10px;
+		pointer-events: none;
 	}
 
 	.is-open {
