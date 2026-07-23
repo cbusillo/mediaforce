@@ -4,6 +4,7 @@ import type {
 	DashboardScanJob,
 	DashboardScanWarning,
 	DashboardSummaryPayload,
+	EncodeQueueJob,
 	FolderCard,
 	FolderPayload,
 	FolderStatusPayload,
@@ -39,6 +40,7 @@ import {
 	reviewFeedbackIntent,
 	reviewFeedbackRequest,
 	reviewSampleSizes,
+	scopedEncodeProgress,
 	seasonIdentity,
 	shouldPrioritizeScopeActivity,
 	sizeGoals,
@@ -350,6 +352,29 @@ describe('season experience translation', () => {
 			show: 'Big Brother (US)',
 			season: 'Season 19',
 			showPrefix: 'tv/Big Brother (US)'
+		});
+	});
+
+	it('uses the active encode job scope for progress counts', () => {
+		const activeJob: EncodeQueueJob = {
+			job_id: 'folder-encode',
+			prefix: 'tv/Big Brother (US)',
+			status: 'queued',
+			progress: {
+				total_item_count: 269,
+				completed_item_count: 0,
+				percent_complete: 0
+			}
+		};
+
+		expect(scopedEncodeProgress(activeJob, 90, 359)).toMatchObject({
+			total: 269,
+			completed: 0,
+			percent: 0
+		});
+		expect(scopedEncodeProgress(null, 90, 359)).toMatchObject({
+			total: 359,
+			completed: 90
 		});
 	});
 

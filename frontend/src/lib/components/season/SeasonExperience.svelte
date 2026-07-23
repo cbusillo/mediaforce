@@ -23,7 +23,6 @@
 		calibrationTargetModeLabel,
 		calibrationWorkLabel,
 		compareRiskSummary,
-		currentEncodeProgress,
 		currentOperatorIntent,
 		detailSeasonState,
 		episodeLabel,
@@ -41,6 +40,7 @@
 		reviewFeedbackIntent,
 		reviewFeedbackRequest,
 		reviewSampleSizes,
+		scopedEncodeProgress,
 		seasonIdentity,
 		shouldPrioritizeScopeActivity,
 		sizeGoals,
@@ -189,7 +189,6 @@
 	const calibration = $derived(asRecord(folder.calibration));
 	const hasOwnCalibration = $derived(Object.keys(calibration).length > 0);
 	const sampleResult = $derived(asRecord(calibration.sample_result));
-	const encodeProgress = $derived(currentEncodeProgress(folder.encode_job));
 	const episodeCount = $derived(folder.summary?.item_count ?? 0);
 	const productionEpisodeCount = $derived(isSeriesScope ? eligibleEpisodeCount : episodeCount);
 	const originalSeasonSize = $derived(folder.summary?.total_size_bytes ?? 0);
@@ -270,14 +269,18 @@
 			asNumber(folder.summary?.statuses.validated) +
 			asNumber(folder.summary?.statuses.promoted)
 	);
-	const seasonProgressCompleted = $derived(
-		Math.max(finishedEpisodeCount, encodeProgress.completed)
+	const encodeProgress = $derived(
+		scopedEncodeProgress(folder.encode_job, finishedEpisodeCount, episodeCount)
 	);
-	const seasonProgressPercent = $derived(
-		Math.max(
-			encodeProgress.percent,
-			episodeCount > 0 ? (finishedEpisodeCount / episodeCount) * 100 : 0
-		)
+	const seasonProgressCompleted = $derived(encodeProgress.completed);
+	const seasonProgressPercent = $derived(encodeProgress.percent);
+	const activeOlderSeasonCount = $derived(
+		isSeriesScope &&
+			olderSeasonOverride &&
+			encodeProgress.total > 0 &&
+			encodeProgress.total === olderSeasonOverride.candidate_count
+			? olderSeasonOverride.season_count
+			: 0
 	);
 	const recoveryNeedsAdjustment = $derived(
 		humanState.recoveryKind === 'season' && Boolean(folder.encode_job?.progress?.failure_analysis)
@@ -1815,9 +1818,11 @@
 				<div class="progress-copy">
 					<p class="eyebrow">In progress</p>
 					<h1>
-						{isSeriesScope
-							? `Making all ${seriesSeasonCount} ${seriesSeasonLabel}`
-							: `Making ${identity.season}`}
+						{activeOlderSeasonCount > 0
+							? `Making ${activeOlderSeasonCount} older ${activeOlderSeasonCount === 1 ? 'season' : 'seasons'}`
+							: isSeriesScope
+								? `Making all ${seriesSeasonCount} ${seriesSeasonLabel}`
+								: `Making ${identity.season}`}
 					</h1>
 					<p class="lede">
 						{encodeProgress.currentEpisode === 'A representative episode'
@@ -1825,7 +1830,7 @@
 							: `${encodeProgress.currentEpisode} is being made now.`}
 					</p>
 					<div class="progress-facts">
-						<strong>{seasonProgressCompleted} of {episodeCount || encodeProgress.total}</strong>
+						<strong>{seasonProgressCompleted} of {encodeProgress.total}</strong>
 						<span>episodes finished</span>
 						{#if encodeProgress.eta}<small>{encodeProgress.eta}</small>{/if}
 					</div>
