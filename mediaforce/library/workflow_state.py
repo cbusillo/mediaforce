@@ -156,6 +156,21 @@ def build_folder_workflow_states(
     if not normalized_prefixes:
         return {}
     scopes = resolve_media_scopes(connection, normalized_prefixes, library_types=library_types)
+    return build_folder_workflow_states_for_scopes(
+        connection,
+        scopes,
+        candidate_eligibility=candidate_eligibility,
+    )
+
+
+def build_folder_workflow_states_for_scopes(
+        connection: DBClient,
+        scopes: list[MediaScope],
+        *,
+        candidate_eligibility: Mapping[int, EncodeEligibility] | None = None,
+) -> dict[str, FolderWorkflowState]:
+    if not scopes:
+        return {}
     rows = _load_item_rows_for_scopes(connection, scopes)
     rows_by_prefix = _group_item_rows_by_scope(scopes, rows)
     job_states = _load_encode_job_states(connection, scopes)

@@ -40,6 +40,7 @@ import {
 	reviewFeedbackRequest,
 	reviewSampleSizes,
 	seasonIdentity,
+	shouldPrioritizeScopeActivity,
 	sizeGoals,
 	targetConstraintSummary,
 	testRequestWithInstructions,
@@ -1165,6 +1166,27 @@ describe('season experience translation', () => {
 
 		expect(activity?.relation).toBe('ancestor');
 		expect(calibrationJobTargetContract(activity?.job)?.target_size_bytes).toBe(225_000_000);
+	});
+
+	it('does not hide an owned review behind completed related activity', () => {
+		const activity = {
+			schema_version: 1 as const,
+			relation: 'descendant' as const,
+			job: {
+				job_id: 'season-test',
+				prefix: 'tv/Big Brother (US)/Season 19',
+				status: 'completed'
+			}
+		};
+
+		expect(shouldPrioritizeScopeActivity(activity, true)).toBe(false);
+		expect(shouldPrioritizeScopeActivity(activity, false)).toBe(true);
+		expect(
+			shouldPrioritizeScopeActivity(
+				{ ...activity, job: { ...activity.job, status: 'running' } },
+				true
+			)
+		).toBe(true);
 	});
 
 	it('describes actual calibration stages, bounded work, and heartbeat state', () => {

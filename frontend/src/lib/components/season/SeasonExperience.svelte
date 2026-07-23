@@ -42,6 +42,7 @@
 		reviewFeedbackRequest,
 		reviewSampleSizes,
 		seasonIdentity,
+		shouldPrioritizeScopeActivity,
 		sizeGoals,
 		targetConstraintSummary,
 		technicalVideoPolicy,
@@ -177,6 +178,7 @@
 	const reviewHasSound = $derived(reviewPairHasSound(currentPair));
 	const reviewSubject = $derived(reviewHasSound ? 'picture and sound' : 'picture');
 	const calibration = $derived(asRecord(folder.calibration));
+	const hasOwnCalibration = $derived(Object.keys(calibration).length > 0);
 	const sampleResult = $derived(asRecord(calibration.sample_result));
 	const encodeProgress = $derived(currentEncodeProgress(folder.encode_job));
 	const episodeCount = $derived(folder.summary?.item_count ?? 0);
@@ -282,6 +284,9 @@
 	const scopeActivityFailure = $derived(['failed', 'stopped'].includes(scopeActivityStatus));
 	const scopeActivityReady = $derived(
 		['completed', 'pending_review'].includes(scopeActivityStatus)
+	);
+	const showScopeActivity = $derived(
+		shouldPrioritizeScopeActivity(scopeActivity, hasOwnCalibration)
 	);
 	const scopeActivityScope = $derived(scopeActivityJob?.activity_scope ?? null);
 	const scopeActivityOwnerPrefix = $derived(scopeActivityJob?.prefix ?? '');
@@ -1032,7 +1037,7 @@
 					You can leave this page open. The next screen appears when it is ready.
 				</p>
 			</section>
-		{:else if scopeActivity && scopeActivityJob}
+		{:else if showScopeActivity && scopeActivity && scopeActivityJob}
 			<section
 				class="scope-activity-room"
 				aria-labelledby="scope-activity-heading"
@@ -1098,15 +1103,26 @@
 					<h1>
 						{retryMode
 							? 'Choose a size and settings'
-							: isSeriesScope
-								? `Choose one size for all ${seriesSeasonCount} ${seriesSeasonLabel}`
-								: `Choose a size for ${identity.season}`}
+							: isSeriesScope && olderSeasonOverride?.available
+								? `Choose one size for ${olderSeasonOverride.season_count} older ${olderSeasonOverride.season_count === 1 ? 'season' : 'seasons'}`
+								: isSeriesScope
+									? `Choose one size for all ${seriesSeasonCount} ${seriesSeasonLabel}`
+									: `Choose a size for ${identity.season}`}
 					</h1>
 					<p class="lede">
-						{episodeCount} episodes{isSeriesScope
-							? ` across ${seriesSeasonCount} ${seriesSeasonLabel}`
-							: ''} · {formatDecimalFileSize(originalSeasonSize)} now. You will compare one representative
-						test before Mediaforce makes the rest.
+						{#if isSeriesScope && olderSeasonOverride?.available}
+							{olderSeasonOverride.candidate_count} episodes across
+							{olderSeasonOverride.season_count} older
+							{olderSeasonOverride.season_count === 1 ? 'season' : 'seasons'} ·
+							{formatDecimalFileSize(olderSeasonOverride.current_size_bytes)} now.
+							{olderSeasonOverride.latest_season_label || 'The latest season'} stays original. You will
+							compare one representative test before Mediaforce makes the selected older seasons.
+						{:else}
+							{episodeCount} episodes{isSeriesScope
+								? ` across ${seriesSeasonCount} ${seriesSeasonLabel}`
+								: ''} · {formatDecimalFileSize(originalSeasonSize)} now. You will compare one representative
+							test before Mediaforce makes the rest.
+						{/if}
 					</p>
 				</div>
 

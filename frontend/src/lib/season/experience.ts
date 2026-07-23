@@ -565,6 +565,15 @@ export function overlappingCalibrationActivity(
 	return activity;
 }
 
+export function shouldPrioritizeScopeActivity(
+	activity: CalibrationScopeActivityPayload | null | undefined,
+	hasOwnCalibration: boolean
+): boolean {
+	if (!activity) return false;
+	const status = activity.job.status ?? 'idle';
+	return ['queued', 'starting', 'running'].includes(status) || !hasOwnCalibration;
+}
+
 export function calibrationStageLabel(job: CalibrationJobPayload | null | undefined): string {
 	const stage = text(job?.progress?.stage);
 	const labels: Record<string, string> = {

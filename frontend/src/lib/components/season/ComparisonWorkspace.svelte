@@ -4,8 +4,11 @@
 	import {
 		alignedScrollOffset,
 		comparisonKeyboardAction,
+		comparisonSideMuted,
 		formatPlaybackTime,
 		frameAspectRatio,
+		mediaElementReady,
+		mediaSourceMatches,
 		normalizedScrollPosition,
 		reviewPairHasSound,
 		scrollOffsetForPosition,
@@ -64,8 +67,11 @@
 	let previewHeight = $state(0);
 	let sourceReady = $state(false);
 	let previewReady = $state(false);
+	let sourceError = $state(false);
+	let previewError = $state(false);
 	let previousBodyOverflow = '';
 	let scrollSyncPending = false;
+	let mediaGeneration = 0;
 	let picturePositionX = 0.5;
 	let picturePositionY = 0.5;
 
@@ -89,7 +95,9 @@
 
 	$effect(() => {
 		if (!pairKey) return;
+		mediaGeneration += 1;
 		pauseBoth();
+		preparing = false;
 		currentTime = 0;
 		duration = currentPair?.preview.durationSeconds || currentPair?.source.durationSeconds || 0;
 		sourceWidth = 0;
@@ -98,6 +106,8 @@
 		previewHeight = 0;
 		sourceReady = false;
 		previewReady = false;
+		sourceError = false;
+		previewError = false;
 		playbackError = '';
 		picturePositionX = 0.5;
 		picturePositionY = 0.5;
@@ -242,18 +252,34 @@
 	}
 
 	function handleMediaError(side: ComparisonSide) {
-		if (side === 'original') sourceReady = false;
-		else previewReady = false;
+		if (side === 'original') {
+			sourceReady = false;
+			sourceError = true;
+		} else {
+			previewReady = false;
+			previewError = true;
+		}
 		playbackError = `${side === 'original' ? 'The original' : 'The new'} clip could not be decoded in this browser.`;
 	}
 
 	function handleMediaLoaded(side: ComparisonSide, video: HTMLVideoElement) {
+		const expectedSource =
+			side === 'original' ? currentPair?.source.path : currentPair?.preview.path;
 		const loadedSource = video.currentSrc;
+		const generation = mediaGeneration;
 		requestAnimationFrame(() => {
 			requestAnimationFrame(() => {
+				if (generation !== mediaGeneration) return;
 				if (video.currentSrc !== loadedSource) return;
-				if (side === 'original') sourceReady = true;
-				else previewReady = true;
+				if (!mediaElementReady(video.readyState)) return;
+				if (!mediaSourceMatches(video.currentSrc, expectedSource ?? '', document.baseURI)) return;
+				if (side === 'original') {
+					sourceReady = true;
+					sourceError = false;
+				} else {
+					previewReady = true;
+					previewError = false;
+				}
 			});
 		});
 	}
@@ -469,7 +495,7 @@
 				</div>
 			{/if}
 
-			<div class="comparison-media" aria-live="off">
+			<div class="comparison-media">
 				<div
 					bind:this={sourcePane}
 					class="media-pane media-pane--original"
@@ -484,16 +510,26 @@
 						<video
 							bind:this={sourceVideo}
 							src={currentPair.source.path}
-							muted={!isOpen || !hasSound || audioChoice !== 'original'}
+							muted={comparisonSideMuted('original', audioChoice, hasSound)}
 							playsinline
-							preload={isOpen ? 'auto' : 'metadata'}
+							preload="auto"
 							aria-label="Original test moment"
 							tabindex="-1"
-							onloadedmetadata={handleSourceMetadata}
+							onloadedmetadata={(event) => {
+								handleSourceMetadata();
+								handleMediaLoaded('original', event.currentTarget);
+							}}
 							onloadeddata={(event) => handleMediaLoaded('original', event.currentTarget)}
+							oncanplay={(event) => handleMediaLoaded('original', event.currentTarget)}
 							onerror={() => handleMediaError('original')}
 						></video>
-						{#if !sourceReady}<span class="media-loading">Loading original picture…</span>{/if}
+						{#if sourceError}
+							<span class="media-loading media-loading--error" role="alert"
+								>Original clip could not load.</span
+							>
+						{:else if !sourceReady}
+							<span class="media-loading" aria-live="polite">Loading original picture…</span>
+						{/if}
 					</div>
 				</div>
 				<div
@@ -510,13 +546,17 @@
 						<video
 							bind:this={previewVideo}
 							src={currentPair.preview.path}
-							muted={!isOpen || !hasSound || audioChoice !== 'new'}
+							muted={comparisonSideMuted('new', audioChoice, hasSound)}
 							playsinline
-							preload={isOpen ? 'auto' : 'metadata'}
+							preload="auto"
 							aria-label="New test moment"
 							tabindex="-1"
-							onloadedmetadata={handlePreviewMetadata}
+							onloadedmetadata={(event) => {
+								handlePreviewMetadata();
+								handleMediaLoaded('new', event.currentTarget);
+							}}
 							onloadeddata={(event) => handleMediaLoaded('new', event.currentTarget)}
+							oncanplay={(event) => handleMediaLoaded('new', event.currentTarget)}
 							onerror={() => handleMediaError('new')}
 							onplaying={() => {
 								playing = true;
@@ -527,51 +567,69 @@
 							ontimeupdate={handleTimeUpdate}
 							onended={handleEnded}
 						></video>
-						{#if !previewReady}<span class="media-loading">Loading new picture…</span>{/if}
+						{#if previewError}
+							<span class="media-loading media-loading--error" role="alert"
+								>New clip could not load.</span
+							>
+						{:else if !previewReady}
+							<span class="media-loading" aria-live="polite">Loading new picture…</span>
+						{/if}
 					</div>
 				</div>
 			</div>
 
-			{#if isOpen}
-				<footer class="workspace-controls">
-					<button class="play-control" type="button" onclick={togglePlayback} disabled={preparing}>
-						{preparing ? 'Preparing…' : playing ? 'Pause' : 'Play'}
-					</button>
-					<label class="timeline-control">
-						<span class="sr-only">Playback position</span>
-						<input
-							type="range"
-							min="0"
-							max={Math.max(duration, 0.01)}
-							step="0.01"
-							value={currentTime}
-							oninput={handleTimeline}
-							aria-valuetext={timeText}
-						/>
-					</label>
-					<output class="time-display">{timeText}</output>
-					{#if hasSound}
-						<div class="sound-control" role="group" aria-label="Listen to">
-							<span>Listen to</span>
-							<button
-								type="button"
-								class:active={audioChoice === 'original'}
-								onclick={() => chooseSound('original')}
-								aria-pressed={audioChoice === 'original'}>Original</button
-							>
-							<button
-								type="button"
-								class:active={audioChoice === 'new'}
-								onclick={() => chooseSound('new')}
-								aria-pressed={audioChoice === 'new'}>New</button
-							>
-						</div>
-					{:else}
-						<p class="picture-only-note">These clips show picture only.</p>
-					{/if}
-					{#if playbackError}<p class="playback-error" role="alert">{playbackError}</p>{/if}
-				</footer>
-			{/if}
+			<footer class="workspace-controls" aria-label="Comparison playback controls">
+				<button
+					class="play-control"
+					type="button"
+					onclick={togglePlayback}
+					disabled={preparing || !sourceReady || !previewReady || sourceError || previewError}
+				>
+					{sourceError || previewError
+						? 'Unavailable'
+						: !sourceReady || !previewReady
+							? 'Loading…'
+							: preparing
+								? 'Preparing…'
+								: playing
+									? 'Pause'
+									: 'Play'}
+				</button>
+				<label class="timeline-control">
+					<span class="sr-only">Playback position</span>
+					<input
+						type="range"
+						min="0"
+						max={Math.max(duration, 0.01)}
+						step="0.01"
+						value={currentTime}
+						oninput={handleTimeline}
+						aria-valuetext={timeText}
+						disabled={!sourceReady || !previewReady || sourceError || previewError}
+					/>
+				</label>
+				<output class="time-display">{timeText}</output>
+				{#if hasSound}
+					<div class="sound-control" role="group" aria-label="Listen to">
+						<span>Listen to</span>
+						<button
+							type="button"
+							class:active={audioChoice === 'original'}
+							onclick={() => chooseSound('original')}
+							aria-pressed={audioChoice === 'original'}>Original</button
+						>
+						<button
+							type="button"
+							class:active={audioChoice === 'new'}
+							onclick={() => chooseSound('new')}
+							aria-pressed={audioChoice === 'new'}>New</button
+						>
+					</div>
+				{:else}
+					<p class="picture-only-note">These clips show picture only.</p>
+				{/if}
+				{#if playbackError}<p class="playback-error" role="alert">{playbackError}</p>{/if}
+			</footer>
 		</div>
 
 		<div class="comparison-entry">
@@ -809,6 +867,11 @@
 		grid-area: 1 / 1;
 		padding: 7px 10px;
 		pointer-events: none;
+	}
+
+	.media-loading--error {
+		background: rgb(52 20 18 / 90%);
+		color: #ffd1c8;
 	}
 
 	.is-open {
