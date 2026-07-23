@@ -816,6 +816,9 @@ export interface HostRuntime {
 	schedule_profile_label: string;
 	schedule_detail: string;
 	schedule_open?: boolean;
+	schedule_timezone?: string | null;
+	schedule_closes_at?: string | null;
+	schedule_next_opens_at?: string | null;
 	active_flag: string;
 	active_reason: string;
 	repo_path?: string;

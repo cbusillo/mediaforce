@@ -10,8 +10,9 @@ from mediaforce.hosts.config import _host_capabilities, _host_priority, _parse_u
     host_media_access_for_host, host_targets_current_machine, stream_host_has_remote_source_roots
 from mediaforce.hosts.mount_runtime import finder_mount_roots_for_paths
 from mediaforce.hosts.status_helpers import _classify_ssh_failure, _find_local_tool, _host_capability_issues, \
-    _host_setup_supported, _local_platform_name, _local_utc_offset_minutes, _parse_remote_status_output, \
-    _remote_setup_needs_password, _remote_status_script, _status_from_paths, _status_platform
+    _host_setup_supported, _local_platform_name, _local_schedule_timezone, _local_utc_offset_minutes, \
+    _parse_remote_status_output, _remote_setup_needs_password, _remote_status_script, _status_from_paths, \
+    _status_platform
 from mediaforce.hosts.types import HostStatus
 
 REMOTE_TOOL_CACHE_TTL_SECONDS = 24 * 60 * 60
@@ -362,6 +363,7 @@ def _remote_host_status(
         ffmpeg_path=str(tool_paths.get("ffmpeg") or "") or None,
         platform=platform_name,
         videotoolbox_available=bool(tools.get("ffmpeg_videotoolbox")),
+        schedule_timezone=str(payload.get("schedule_timezone") or "") or None,
         utc_offset_minutes=_parse_utc_offset_minutes(payload.get("utc_offset")),
         issues=capability_issues,
         missing_mounts=missing_mounts,
@@ -439,6 +441,7 @@ def _current_machine_host_status(
         ffmpeg_path=ffmpeg_bin,
         platform=platform_name,
         videotoolbox_available=bool(tools.get("ffmpeg_videotoolbox")),
+        schedule_timezone=_local_schedule_timezone(),
         utc_offset_minutes=_local_utc_offset_minutes(),
         issues=capability_issues,
         missing_mounts=missing_mounts,

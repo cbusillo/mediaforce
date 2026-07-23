@@ -3006,8 +3006,58 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(rows[0]["schedule_profile"], "never")
         self.assertEqual(rows[0]["schedule_profile_label"], "Never")
         self.assertFalse(rows[0]["schedule_open"])
+        self.assertIsNone(rows[0]["schedule_closes_at"])
+        self.assertIsNone(rows[0]["schedule_next_opens_at"])
         self.assertFalse(rows[0]["queue_active"])
         self.assertEqual(rows[0]["active_reason"], "encode queue disabled by schedule")
+
+    def test_host_runtime_rows_include_exact_schedule_transitions(self) -> None:
+        self.config.raw["remote_hosts"] = [
+            {
+                "host": "remote-a",
+                "label": "Remote A",
+                "schedule_profile": "off_peak",
+                "capabilities": ["encode_queue"],
+            }
+        ]
+        self.config.raw["encode_queue"] = {
+            "schedule_profiles": [
+                {
+                    "key": "off_peak",
+                    "label": "Off Peak",
+                    "mode": "night",
+                    "timezone": "host_local",
+                    "start_hour": 18,
+                    "end_hour": 15,
+                    "days_of_week": ["mon", "tue", "wed", "thu", "fri"],
+                }
+            ]
+        }
+        status = HostStatus(
+            key="remote-a",
+            label="Remote A",
+            mode="ssh",
+            priority=20,
+            capabilities=["encode_queue"],
+            available=True,
+            message="Mounted and ready",
+            missing_paths=[],
+            schedule_timezone="America/New_York",
+            utc_offset_minutes=-300,
+        )
+
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.web.app._safe_collect_host_statuses", return_value=[status]
+        ):
+            rows = web_app._host_runtime_rows(
+                connection,
+                self.config,
+                now=web_app._parse_iso("2026-07-23T18:30:00+00:00"),
+            )
+
+        self.assertTrue(rows[0]["schedule_open"])
+        self.assertEqual(rows[0]["schedule_closes_at"], "2026-07-23T19:00:00+00:00")
+        self.assertEqual(rows[0]["schedule_next_opens_at"], "2026-07-23T22:00:00+00:00")
 
     def test_host_runtime_rows_marks_missing_storage_as_automatically_recoverable(self) -> None:
         self.config.raw["remote_hosts"] = [
@@ -3736,6 +3786,171 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
         )
 
+    def test_scheduler_normalizes_legacy_controller_local_timezone(self) -> None:
+        policy = web_app._normalize_encode_queue_scheduler(
+            {"mode": "night", "start_hour": 22, "end_hour": 6, "timezone": "local"}
+        )
+
+        self.assertEqual(policy["timezone"], "controller_local")
+
+    def test_scheduler_transition_prefers_iana_timezone_over_stale_offset(self) -> None:
+        policy = web_app._normalize_encode_queue_scheduler(
+            {
+                "mode": "night",
+                "start_hour": 18,
+                "end_hour": 15,
+                "timezone": "host_local",
+                "days_of_week": ["mon", "tue", "wed", "thu", "fri"],
+            }
+        )
+
+        transition = web_app._evaluate_encode_schedule_transition(
+            policy,
+            now=web_app._parse_iso("2026-07-23T18:30:00+00:00"),
+            host_payload={
+                "schedule_timezone": "America/New_York",
+                "utc_offset_minutes": -300,
+            },
+        )
+
+        self.assertTrue(transition.is_open)
+        self.assertEqual(transition.current_closes_at, web_app._parse_iso("2026-07-23T19:00:00+00:00"))
+        self.assertEqual(transition.next_opens_at, web_app._parse_iso("2026-07-23T22:00:00+00:00"))
+
+    def test_scheduler_transition_closes_at_exact_boundary(self) -> None:
+        policy = web_app._normalize_encode_queue_scheduler(
+            {
+                "mode": "night",
+                "start_hour": 18,
+                "end_hour": 15,
+                "timezone": "host_local",
+                "days_of_week": ["mon", "tue", "wed", "thu", "fri"],
+            }
+        )
+
+        transition = web_app._evaluate_encode_schedule_transition(
+            policy,
+            now=web_app._parse_iso("2026-07-23T19:00:00+00:00"),
+            host_payload={"schedule_timezone": "America/New_York"},
+        )
+
+        self.assertFalse(transition.is_open)
+        self.assertIsNone(transition.current_closes_at)
+        self.assertEqual(transition.next_opens_at, web_app._parse_iso("2026-07-23T22:00:00+00:00"))
+
+    def test_scheduler_transition_handles_spring_forward_boundary(self) -> None:
+        policy = web_app._normalize_encode_queue_scheduler(
+            {
+                "mode": "night",
+                "start_hour": 0,
+                "end_hour": 4,
+                "timezone": "host_local",
+                "days_of_week": ["sun"],
+            }
+        )
+
+        transition = web_app._evaluate_encode_schedule_transition(
+            policy,
+            now=web_app._parse_iso("2026-03-08T06:30:00+00:00"),
+            host_payload={"schedule_timezone": "America/New_York"},
+        )
+
+        self.assertTrue(transition.is_open)
+        self.assertEqual(transition.current_closes_at, web_app._parse_iso("2026-03-08T08:00:00+00:00"))
+
+    def test_scheduler_transition_advances_nonexistent_opening_boundary(self) -> None:
+        policy = web_app._normalize_encode_queue_scheduler(
+            {
+                "mode": "night",
+                "start_hour": 2,
+                "end_hour": 5,
+                "timezone": "host_local",
+                "days_of_week": ["sun"],
+            }
+        )
+
+        before_transition = web_app._evaluate_encode_schedule_transition(
+            policy,
+            now=web_app._parse_iso("2026-03-08T06:30:00+00:00"),
+            host_payload={"schedule_timezone": "America/New_York"},
+        )
+        after_transition = web_app._evaluate_encode_schedule_transition(
+            policy,
+            now=web_app._parse_iso("2026-03-08T07:30:00+00:00"),
+            host_payload={"schedule_timezone": "America/New_York"},
+        )
+
+        self.assertFalse(before_transition.is_open)
+        self.assertEqual(before_transition.next_opens_at, web_app._parse_iso("2026-03-08T07:00:00+00:00"))
+        self.assertTrue(after_transition.is_open)
+        self.assertEqual(after_transition.current_closes_at, web_app._parse_iso("2026-03-08T09:00:00+00:00"))
+
+    def test_scheduler_transition_handles_fall_back_boundary(self) -> None:
+        policy = web_app._normalize_encode_queue_scheduler(
+            {
+                "mode": "night",
+                "start_hour": 0,
+                "end_hour": 2,
+                "timezone": "host_local",
+                "days_of_week": ["sun"],
+            }
+        )
+
+        transition = web_app._evaluate_encode_schedule_transition(
+            policy,
+            now=web_app._parse_iso("2026-11-01T05:30:00+00:00"),
+            host_payload={"schedule_timezone": "America/New_York"},
+        )
+
+        self.assertTrue(transition.is_open)
+        self.assertEqual(transition.current_closes_at, web_app._parse_iso("2026-11-01T07:00:00+00:00"))
+
+    def test_scheduler_transition_closes_at_first_repeated_hour(self) -> None:
+        policy = web_app._normalize_encode_queue_scheduler(
+            {
+                "mode": "night",
+                "start_hour": 0,
+                "end_hour": 1,
+                "timezone": "host_local",
+                "days_of_week": ["sun"],
+            }
+        )
+
+        first_repeated_hour = web_app._evaluate_encode_schedule_transition(
+            policy,
+            now=web_app._parse_iso("2026-11-01T04:30:00+00:00"),
+            host_payload={"schedule_timezone": "America/New_York"},
+        )
+        second_repeated_hour = web_app._evaluate_encode_schedule_transition(
+            policy,
+            now=web_app._parse_iso("2026-11-01T06:30:00+00:00"),
+            host_payload={"schedule_timezone": "America/New_York"},
+        )
+
+        self.assertTrue(first_repeated_hour.is_open)
+        self.assertEqual(first_repeated_hour.current_closes_at, web_app._parse_iso("2026-11-01T05:00:00+00:00"))
+        self.assertFalse(second_repeated_hour.is_open)
+
+    def test_scheduler_preserves_legacy_empty_days_as_every_day(self) -> None:
+        policy = web_app._normalize_encode_queue_scheduler(
+            {
+                "mode": "night",
+                "start_hour": 22,
+                "end_hour": 6,
+                "timezone": "utc",
+                "days_of_week": [],
+                "all_day_days_of_week": [],
+            }
+        )
+
+        self.assertEqual(policy["days_of_week"], list(settings_runtime.SCHEDULE_DAY_ORDER))
+        self.assertTrue(
+            web_app._scheduler_allows_encode_run(
+                policy,
+                now=web_app._parse_iso("2026-07-23T23:00:00+00:00"),
+            )
+        )
+
     def test_scheduler_host_local_time_falls_back_to_runner_timezone_without_remote_offset(self) -> None:
         policy = web_app._normalize_encode_queue_scheduler(
             {"mode": "night", "start_hour": 22, "end_hour": 6, "timezone": "host_local"}
@@ -3830,6 +4045,30 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 policy,
                 now=now,
                 host_payload={"utc_offset_minutes": 600},
+            )
+        )
+
+    def test_scheduler_equal_nonzero_hours_do_not_leak_into_unselected_day(self) -> None:
+        policy = web_app._normalize_encode_queue_scheduler(
+            {
+                "mode": "night",
+                "start_hour": 22,
+                "end_hour": 22,
+                "timezone": "utc",
+                "days_of_week": ["mon", "tue", "wed", "thu", "fri"],
+            }
+        )
+
+        self.assertTrue(
+            web_app._scheduler_allows_encode_run(
+                policy,
+                now=web_app._parse_iso("2026-07-24T12:00:00+00:00"),
+            )
+        )
+        self.assertFalse(
+            web_app._scheduler_allows_encode_run(
+                policy,
+                now=web_app._parse_iso("2026-07-25T12:00:00+00:00"),
             )
         )
 
@@ -8027,6 +8266,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "tool|ffmpeg_libsvtav1|1",
                 "tool|ab_av1|1",
                 "meta|platform|linux",
+                "time|schedule_timezone|America/New_York",
                 "time|utc_offset|+0000",
                 "repo|exists|1",
             ]
@@ -8036,6 +8276,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
         ) as run_remote_ssh_mock, patch("mediaforce.remote._learn_remote_wake_mac"):
             status = remote._remote_host_status(self.config, host)
+
+        self.assertEqual(status.schedule_timezone, "America/New_York")
         self.assertTrue(status.available)
         self.assertIn("/srv/media/tv", run_remote_ssh_mock.call_args.kwargs["input_text"])
         self.assertIn("/srv/media/transcode", run_remote_ssh_mock.call_args.kwargs["input_text"])
@@ -12386,6 +12628,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "source_roots": {"tv": "/srv/tv"},
             "staging_root": "/srv/staging",
             "schedule_profile": "always",
+            "schedule_timezone": "America/New_York",
             "queue_active": True,
             "telemetry": {"eta_copy": "2m"},
             "running_jobs": [
@@ -12422,6 +12665,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "media_access": "stream",
                 "mode": "ssh",
                 "schedule_profile": "always",
+                "schedule_timezone": "America/New_York",
                 "source_roots": {"tv": "/srv/tv"},
                 "staging_root": "/srv/staging",
             },

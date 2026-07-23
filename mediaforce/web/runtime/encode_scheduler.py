@@ -1,9 +1,11 @@
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta, timezone, tzinfo
+from functools import lru_cache
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.timezones import system_timezone, valid_timezone_name
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 
 SCHEDULE_DAY_ORDER = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -18,6 +20,26 @@ class EncodeSchedulerDeps:
     default_scheduler_policy: dict[str, Any]
     encode_job_manifest_totals: Any
     encode_job_max_attempts: int
+
+
+@dataclass(frozen=True, slots=True)
+class EncodeScheduleTransition:
+    is_open: bool
+    current_closes_at: datetime | None = None
+    next_opens_at: datetime | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "schedule_open": self.is_open,
+            "schedule_closes_at": _transition_timestamp(self.current_closes_at),
+            "schedule_next_opens_at": _transition_timestamp(self.next_opens_at),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _ScheduleInterval:
+    starts_at: datetime
+    ends_at: datetime
 
 
 def encode_queue_scheduler_policy(config: MediaforceConfig, deps: EncodeSchedulerDeps) -> dict[str, Any]:
@@ -82,20 +104,80 @@ def encode_queue_scheduler_summary(policy: dict[str, Any]) -> str:
 
 
 def host_schedule_now(current: datetime, host_payload: dict[str, Any] | None) -> datetime:
+    return _current_utc(current).astimezone(_host_schedule_timezone(host_payload))
+
+
+def _host_schedule_timezone(host_payload: dict[str, Any] | None) -> tzinfo:
     host_data = object_dict(host_payload)
+    for key in ("schedule_timezone", "timezone"):
+        timezone_name = valid_timezone_name(host_data.get(key))
+        if timezone_name:
+            return ZoneInfo(timezone_name)
     offset_minutes = host_data.get("utc_offset_minutes")
     try:
         if isinstance(offset_minutes, str | int | float):
-            return current.astimezone(timezone(timedelta(minutes=int(offset_minutes))))
+            return timezone(timedelta(minutes=int(offset_minutes)))
     except (TypeError, ValueError):
         pass
-    timezone_name = str(host_data.get("schedule_timezone") or host_data.get("timezone") or "").strip()
-    if timezone_name:
-        try:
-            return current.astimezone(ZoneInfo(timezone_name))
-        except ZoneInfoNotFoundError:
-            pass
-    return current.astimezone()
+    return system_timezone()
+
+
+def evaluate_encode_schedule_transition(
+        policy: dict[str, Any],
+        deps: EncodeSchedulerDeps,
+        *,
+        bypass_schedule: bool = False,
+        now: datetime | None = None,
+        host_payload: dict[str, Any] | None = None,
+) -> EncodeScheduleTransition:
+    mode = str(policy.get("mode") or "anytime")
+    if mode == "never":
+        return EncodeScheduleTransition(is_open=False)
+    if bypass_schedule or mode == "anytime":
+        return EncodeScheduleTransition(is_open=True)
+
+    current_utc = _current_utc(now or datetime.now(UTC))
+    schedule_timezone = _schedule_timezone(policy, host_payload)
+    current_local_date = current_utc.astimezone(schedule_timezone).date()
+    window_days = _schedule_days(policy, "days_of_week")
+    all_day_days = _schedule_days(policy, "all_day_days_of_week")
+    if not window_days and not all_day_days:
+        window_days = frozenset(SCHEDULE_DAY_ORDER)
+    start_hour = _schedule_hour(policy, "start_hour", deps)
+    end_hour = _schedule_hour(policy, "end_hour", deps)
+    if start_hour == end_hour and (window_days | all_day_days) == set(SCHEDULE_DAY_ORDER):
+        return EncodeScheduleTransition(is_open=True)
+    if all_day_days == set(SCHEDULE_DAY_ORDER):
+        return EncodeScheduleTransition(is_open=True)
+
+    intervals = _schedule_intervals(
+        anchor_date=current_local_date,
+        schedule_timezone=schedule_timezone,
+        window_days=window_days,
+        all_day_days=all_day_days,
+        start_hour=start_hour,
+        end_hour=end_hour,
+    )
+    cycle_start = _local_boundary(current_local_date, 0, schedule_timezone)
+    cycle_end = _local_boundary(current_local_date + timedelta(days=7), 0, schedule_timezone)
+    if any(interval.starts_at <= cycle_start and interval.ends_at >= cycle_end for interval in intervals):
+        return EncodeScheduleTransition(is_open=True)
+    active_interval = next(
+        (interval for interval in intervals if interval.starts_at <= current_utc < interval.ends_at),
+        None,
+    )
+    if active_interval is not None:
+        next_open = next(
+            (interval.starts_at for interval in intervals if interval.starts_at > active_interval.ends_at),
+            None,
+        )
+        return EncodeScheduleTransition(
+            is_open=True,
+            current_closes_at=active_interval.ends_at,
+            next_opens_at=next_open,
+        )
+    next_open = next((interval.starts_at for interval in intervals if interval.starts_at > current_utc), None)
+    return EncodeScheduleTransition(is_open=False, next_opens_at=next_open)
 
 
 def scheduler_allows_encode_run(
@@ -106,65 +188,130 @@ def scheduler_allows_encode_run(
         now: datetime | None = None,
         host_payload: dict[str, Any] | None = None,
 ) -> bool:
-    mode = str(policy.get("mode") or "anytime")
-    if mode == "never":
-        return False
-    if bypass_schedule or mode == "anytime":
-        return True
-    current = datetime.now(UTC) if now is None else now
+    return evaluate_encode_schedule_transition(
+        policy,
+        deps,
+        bypass_schedule=bypass_schedule,
+        now=now,
+        host_payload=host_payload,
+    ).is_open
+
+
+def _current_utc(current: datetime) -> datetime:
     if current.tzinfo is None:
         current = current.replace(tzinfo=UTC)
-    timezone_name = str(policy.get("timezone") or "local")
-    if timezone_name == "host_local":
-        local_now = host_schedule_now(current, host_payload)
-    elif timezone_name == "local":
-        local_now = current.astimezone()
-    else:
-        try:
-            local_now = current.astimezone(ZoneInfo(timezone_name))
-        except ZoneInfoNotFoundError:
-            local_now = current.astimezone()
-    current_day = SCHEDULE_DAY_ORDER[local_now.weekday()]
-    full_day_days = [
-        day
-        for day in object_list(policy.get("all_day_days_of_week"))
+    return current.astimezone(UTC)
+
+
+def _schedule_timezone(policy: dict[str, Any], host_payload: dict[str, Any] | None) -> tzinfo:
+    timezone_scope = str(policy.get("timezone") or "controller_local").strip()
+    if timezone_scope == "host_local":
+        return _host_schedule_timezone(host_payload)
+    if timezone_scope in {"controller_local", "local"}:
+        return system_timezone()
+    if timezone_scope == "utc":
+        return UTC
+    timezone_name = valid_timezone_name(timezone_scope)
+    return ZoneInfo(timezone_name) if timezone_name else system_timezone()
+
+
+def _schedule_days(policy: dict[str, Any], key: str) -> frozenset[str]:
+    return frozenset({
+        str(day).strip().lower()
+        for day in object_list(policy.get(key))
         if str(day).strip().lower() in SCHEDULE_DAY_ORDER
-    ]
-    if current_day in full_day_days:
-        return True
-    allowed_days = [
-        day for day in object_list(policy.get("days_of_week")) if str(day).strip().lower() in SCHEDULE_DAY_ORDER
-    ]
-    if not allowed_days and full_day_days:
-        return False
-    start_hour_value = policy.get("start_hour")
-    if start_hour_value is None:
-        start_hour_value = deps.default_scheduler_policy["start_hour"]
-    end_hour_value = policy.get("end_hour")
-    if end_hour_value is None:
-        end_hour_value = deps.default_scheduler_policy["end_hour"]
-    start_hour = int(str(start_hour_value))
-    end_hour = int(str(end_hour_value))
-    if start_hour == end_hour:
-        if allowed_days and current_day not in allowed_days:
-            return False
-        return True
-    current_hour = local_now.hour
-    if allowed_days:
-        if start_hour < end_hour and current_day not in allowed_days:
-            return False
-        if start_hour > end_hour:
-            if current_hour >= start_hour and current_day not in allowed_days:
-                return False
-            if current_hour < end_hour:
-                previous_day = SCHEDULE_DAY_ORDER[(local_now.weekday() - 1) % len(SCHEDULE_DAY_ORDER)]
-                if previous_day not in allowed_days and current_day not in allowed_days:
-                    return False
-            if end_hour <= current_hour < start_hour:
-                return False
-    if start_hour < end_hour:
-        return start_hour <= current_hour < end_hour
-    return current_hour >= start_hour or current_hour < end_hour
+    })
+
+
+def _schedule_hour(policy: dict[str, Any], key: str, deps: EncodeSchedulerDeps) -> int:
+    value = policy.get(key)
+    if value is None:
+        value = deps.default_scheduler_policy[key]
+    return max(0, min(23, int(str(value))))
+
+
+@lru_cache(maxsize=512)
+def _schedule_intervals(
+        *,
+        anchor_date: date,
+        schedule_timezone: tzinfo,
+        window_days: frozenset[str],
+        all_day_days: frozenset[str],
+        start_hour: int,
+        end_hour: int,
+) -> tuple[_ScheduleInterval, ...]:
+    intervals: list[_ScheduleInterval] = []
+    for day_offset in range(-1, 16):
+        local_date = anchor_date + timedelta(days=day_offset)
+        day_name = SCHEDULE_DAY_ORDER[local_date.weekday()]
+        if day_name in all_day_days or (day_name in window_days and start_hour == end_hour):
+            intervals.append(_local_interval(local_date, 0, local_date + timedelta(days=1), 0, schedule_timezone))
+            continue
+        if start_hour == end_hour:
+            continue
+        if start_hour < end_hour:
+            if day_name in window_days:
+                intervals.append(_local_interval(local_date, start_hour, local_date, end_hour, schedule_timezone))
+            continue
+        previous_day_name = SCHEDULE_DAY_ORDER[(local_date.weekday() - 1) % len(SCHEDULE_DAY_ORDER)]
+        if end_hour > 0 and (day_name in window_days or previous_day_name in window_days):
+            intervals.append(_local_interval(local_date, 0, local_date, end_hour, schedule_timezone))
+        if day_name in window_days:
+            intervals.append(_local_interval(local_date, start_hour, local_date + timedelta(days=1), 0, schedule_timezone))
+    return tuple(_merge_schedule_intervals(intervals))
+
+
+def _local_interval(
+        start_date: date,
+        start_hour: int,
+        end_date: date,
+        end_hour: int,
+        schedule_timezone: tzinfo,
+) -> _ScheduleInterval:
+    return _ScheduleInterval(
+        starts_at=_local_boundary(start_date, start_hour, schedule_timezone),
+        ends_at=_local_boundary(end_date, end_hour, schedule_timezone),
+    )
+
+
+def _local_boundary(local_date: date, hour: int, schedule_timezone: tzinfo) -> datetime:
+    local_wall_time = datetime.combine(local_date, time(hour=hour))
+    candidates = _valid_boundary_candidates(local_wall_time, schedule_timezone)
+    if candidates:
+        return min(candidates)
+    for minute_offset in range(1, 181):
+        candidates = _valid_boundary_candidates(local_wall_time + timedelta(minutes=minute_offset), schedule_timezone)
+        if candidates:
+            return min(candidates)
+    raise ValueError(f"Could not resolve schedule boundary for {local_wall_time.isoformat()}")
+
+
+def _valid_boundary_candidates(local_wall_time: datetime, schedule_timezone: tzinfo) -> list[datetime]:
+    candidates: set[datetime] = set()
+    for fold in (0, 1):
+        localized = local_wall_time.replace(tzinfo=schedule_timezone, fold=fold)
+        candidate_utc = localized.astimezone(UTC)
+        round_trip = candidate_utc.astimezone(schedule_timezone).replace(tzinfo=None)
+        if round_trip == local_wall_time:
+            candidates.add(candidate_utc)
+    return sorted(candidates)
+
+
+def _merge_schedule_intervals(intervals: list[_ScheduleInterval]) -> list[_ScheduleInterval]:
+    merged: list[_ScheduleInterval] = []
+    for interval in sorted(intervals, key=lambda item: item.starts_at):
+        if interval.ends_at <= interval.starts_at:
+            continue
+        if not merged or interval.starts_at > merged[-1].ends_at:
+            merged.append(interval)
+            continue
+        previous = merged[-1]
+        merged[-1] = _ScheduleInterval(previous.starts_at, max(previous.ends_at, interval.ends_at))
+    return merged
+
+
+def _transition_timestamp(value: datetime | None) -> str | None:
+    return value.astimezone(UTC).isoformat(timespec="seconds") if value is not None else None
 
 
 def format_eta_seconds(seconds: float | None) -> str | None:

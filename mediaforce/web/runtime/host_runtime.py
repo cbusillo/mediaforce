@@ -43,7 +43,7 @@ def host_runtime_rows(
         encode_queue_schedule_profiles: Any,
         host_max_parallel_encodes: Any,
         host_schedule_profile_key: Any,
-        scheduler_allows_encode_run: Any,
+        evaluate_encode_schedule_transition: Any,
         format_eta_seconds: Any,
         always_schedule_profile: str,
         default_host_schedule_profile: str,
@@ -88,7 +88,12 @@ def host_runtime_rows(
         policy = object_dict(profiles.get(schedule_profile) or profiles[default_host_schedule_profile])
         active_encode_count = running_counts.get(status.key, 0)
         status_payload = asdict(status)
-        schedule_open = scheduler_allows_encode_run(policy, now=current_time, host_payload=status_payload)
+        schedule_transition = evaluate_encode_schedule_transition(
+            policy,
+            now=current_time,
+            host_payload=status_payload,
+        )
+        schedule_open = schedule_transition.is_open
         encode_capable = "encode_queue" in capabilities
         queue_active = status.available and encode_capable and schedule_open and active_encode_count < max_parallel_encodes
         host_running_jobs = [job for job in running_jobs if str(job.get("host_key") or "") == status.key]
@@ -146,7 +151,7 @@ def host_runtime_rows(
                 "schedule_profile_label": str(policy.get("label") or "Always"),
                 "scheduler_summary": str(policy["summary"]),
                 "schedule_detail": schedule_detail,
-                "schedule_open": schedule_open,
+                **schedule_transition.to_payload(),
                 "max_parallel_encodes": max_parallel_encodes,
                 "active_encode_count": active_encode_count,
                 "running_jobs": host_running_jobs,

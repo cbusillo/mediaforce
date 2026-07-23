@@ -492,7 +492,10 @@ during certain hours, on specific days of the week, or all day on explicit
 exception days such as Sunday. `Never` is also built in for temporarily
 disabling queued encodes on a host without removing its capabilities or setup
 state. Those windows are evaluated in the local time of the host that is
-actually running the work.
+actually running the work. Host probes retain an IANA timezone when the
+operating system exposes one, use fixed UTC offsets only as a compatibility
+fallback, and publish exact UTC close and next-open transitions for runtime
+enforcement and operator surfaces.
 
 For a blank remote Mac, first turn on Remote Login so SSH answers. Once that is
 reachable, the runtime settings UI can finish setup from the web surface: if

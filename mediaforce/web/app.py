@@ -168,12 +168,13 @@ from mediaforce.web.runtime.encode_runtime import EncodeQueueRuntimeDeps, \
     run_encode_job as runtime_run_encode_job, \
     select_encode_host as runtime_select_encode_host, \
     transition_encode_job_failure as runtime_transition_encode_job_failure
-from mediaforce.web.runtime.encode_scheduler import EncodeSchedulerDeps, \
+from mediaforce.web.runtime.encode_scheduler import EncodeScheduleTransition, EncodeSchedulerDeps, \
     decorate_encode_job_for_scheduler as runtime_decorate_encode_job_for_scheduler, \
     decorate_encode_queue_for_scheduler as runtime_decorate_encode_queue_for_scheduler, \
     encode_queue_schedule_profiles as runtime_encode_queue_schedule_profiles, \
     encode_queue_scheduler_policy as runtime_encode_queue_scheduler_policy, \
     encode_queue_summary_copy as runtime_encode_queue_summary_copy, \
+    evaluate_encode_schedule_transition as runtime_evaluate_encode_schedule_transition, \
     format_eta_seconds as runtime_format_eta_seconds, \
     host_schedule_now as runtime_host_schedule_now, \
     schedule_profile_policy_for_host as runtime_schedule_profile_policy_for_host, \
@@ -2570,7 +2571,7 @@ def _host_runtime_rows(
         encode_queue_schedule_profiles=_encode_queue_schedule_profiles,
         host_max_parallel_encodes=_host_max_parallel_encodes,
         host_schedule_profile_key=_host_schedule_profile_key,
-        scheduler_allows_encode_run=_scheduler_allows_encode_run,
+        evaluate_encode_schedule_transition=_evaluate_encode_schedule_transition,
         format_eta_seconds=_format_eta_seconds,
         always_schedule_profile=ALWAYS_SCHEDULE_PROFILE,
         default_host_schedule_profile=DEFAULT_HOST_SCHEDULE_PROFILE,
@@ -2659,10 +2660,10 @@ def _sample_host_schedule_fields(config: MediaforceConfig, status: HostStatus) -
     host_config = _host_config_for_key(config, status.key)
     host_payload = {**host_config, **asdict(status)}
     policy = _schedule_profile_policy_for_host(config, host_payload)
-    schedule_open = _scheduler_allows_encode_run(policy, host_payload=host_payload)
+    schedule_transition = _evaluate_encode_schedule_transition(policy, host_payload=host_payload)
     summary = str(policy.get("summary") or "").strip()
     return {
-        "schedule_open": schedule_open,
+        **schedule_transition.to_payload(),
         "schedule_detail": summary,
         "schedule_profile_label": str(policy.get("label") or "Always"),
         "storage_recovery_available": remote_mount_recovery_supported(config, host_config, status),
@@ -3147,6 +3148,22 @@ def _schedule_profile_policy_for_host(config: MediaforceConfig, host_payload: di
 
 def _host_schedule_now(current: datetime, host_payload: dict[str, Any] | None) -> datetime:
     return runtime_host_schedule_now(current, host_payload)
+
+
+def _evaluate_encode_schedule_transition(
+        policy: dict[str, Any],
+        *,
+        bypass_schedule: bool = False,
+        now: datetime | None = None,
+        host_payload: dict[str, Any] | None = None,
+) -> EncodeScheduleTransition:
+    return runtime_evaluate_encode_schedule_transition(
+        policy,
+        _encode_scheduler_deps(),
+        bypass_schedule=bypass_schedule,
+        now=now,
+        host_payload=host_payload,
+    )
 
 
 def _scheduler_allows_encode_run(
