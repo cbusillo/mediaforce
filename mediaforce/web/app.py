@@ -177,6 +177,7 @@ from mediaforce.web.runtime.encode_scheduler import EncodeScheduleTransition, En
     evaluate_encode_schedule_transition as runtime_evaluate_encode_schedule_transition, \
     format_eta_seconds as runtime_format_eta_seconds, \
     host_schedule_now as runtime_host_schedule_now, \
+    max_encode_schedule_window_seconds as runtime_max_encode_schedule_window_seconds, \
     schedule_profile_policy_for_host as runtime_schedule_profile_policy_for_host, \
     scheduler_allows_encode_run as runtime_scheduler_allows_encode_run
 from mediaforce.web.runtime.folder_tuning_advice import build_run_verdict_payload as runtime_build_run_verdict_payload, \
@@ -3182,6 +3183,20 @@ def _scheduler_allows_encode_run(
     )
 
 
+def _max_encode_schedule_window_seconds(
+        policy: dict[str, Any],
+        *,
+        now: datetime | None = None,
+        host_payload: dict[str, Any] | None = None,
+) -> float | None:
+    return runtime_max_encode_schedule_window_seconds(
+        policy,
+        _encode_scheduler_deps(),
+        now=now,
+        host_payload=host_payload,
+    )
+
+
 def _format_eta_seconds(seconds: float | None) -> str | None:
     return runtime_format_eta_seconds(seconds)
 
@@ -3387,6 +3402,7 @@ def _encode_queue_runtime_deps() -> EncodeQueueRuntimeDeps:
         host_runtime_rows=_host_runtime_rows,
         schedule_profile_policy_for_host=_schedule_profile_policy_for_host,
         scheduler_allows_encode_run=_scheduler_allows_encode_run,
+        max_encode_schedule_window_seconds=_max_encode_schedule_window_seconds,
         host_lifecycle_start_command=_host_lifecycle_start_command,
         ensure_encode_host_ready=_ensure_encode_host_ready,
         stop_encode_host_if_configured=_stop_encode_host_if_configured,

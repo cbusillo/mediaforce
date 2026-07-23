@@ -116,6 +116,9 @@ test patch targets.
 
 - `encode_queue.py`
   - encode queue state, job persistence, and summaries
+- `duration_estimate.py`
+  - conservative host-specific search-plus-encode admission estimates from
+    recent successful runs
 - `ffmpeg.py`
   - ffmpeg capability and hwaccel helpers
 - `quality.py`

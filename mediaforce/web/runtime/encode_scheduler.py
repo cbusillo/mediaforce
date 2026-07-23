@@ -197,6 +197,46 @@ def scheduler_allows_encode_run(
     ).is_open
 
 
+def max_encode_schedule_window_seconds(
+        policy: dict[str, Any],
+        deps: EncodeSchedulerDeps,
+        *,
+        now: datetime | None = None,
+        host_payload: dict[str, Any] | None = None,
+) -> float | None:
+    mode = str(policy.get("mode") or "anytime")
+    if mode == "anytime":
+        return None
+    if mode == "never":
+        return 0.0
+    current_utc = _current_utc(now or datetime.now(UTC))
+    schedule_timezone = _schedule_timezone(policy, host_payload)
+    current_local_date = current_utc.astimezone(schedule_timezone).date()
+    window_days = _schedule_days(policy, "days_of_week")
+    all_day_days = _schedule_days(policy, "all_day_days_of_week")
+    if not window_days and not all_day_days:
+        window_days = frozenset(SCHEDULE_DAY_ORDER)
+    intervals = _schedule_intervals(
+        anchor_date=current_local_date,
+        schedule_timezone=schedule_timezone,
+        window_days=window_days,
+        all_day_days=all_day_days,
+        start_hour=_schedule_hour(policy, "start_hour", deps),
+        end_hour=_schedule_hour(policy, "end_hour", deps),
+    )
+    durations = [
+        (interval.ends_at - interval.starts_at).total_seconds()
+        for interval in intervals
+        if interval.ends_at > interval.starts_at
+    ]
+    if not durations:
+        return 0.0
+    longest = max(durations)
+    if longest >= timedelta(days=7).total_seconds():
+        return None
+    return longest
+
+
 def _current_utc(current: datetime) -> datetime:
     if current.tzinfo is None:
         current = current.replace(tzinfo=UTC)
