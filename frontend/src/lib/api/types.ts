@@ -101,6 +101,8 @@ export interface OlderSeasonOverridePayload {
 	overridden_candidate_count: number;
 	already_eligible_candidate_count: number;
 	current_size_bytes: number;
+	cadence_blocked_candidate_count: number;
+	cadence_evidence_required_candidate_count: number;
 }
 
 export type MediaScopeDomain = 'tv' | 'movie' | 'other';

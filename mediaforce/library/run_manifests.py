@@ -1,5 +1,6 @@
 import json
 import uuid
+from collections.abc import Collection
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -53,7 +54,13 @@ def select_candidates(
         require_encode_lane: bool = False,
         manual_override_prefix: str | None = None,
         manual_override_prefixes: list[str] | tuple[str, ...] | None = None,
+        include_library_item_ids: Collection[int] | None = None,
 ) -> list[dict[str, Any]]:
+    included_item_ids = None if include_library_item_ids is None else {
+        int(item_id)
+        for item_id in include_library_item_ids
+        if int(item_id) > 0
+    }
     if require_encode_lane:
         projected = project_candidates(
             connection,
@@ -65,7 +72,10 @@ def select_candidates(
         )
         ranked: list[tuple[Any, dict[str, Any]]] = []
         for decision in projected:
-            if not decision.eligible:
+            if (
+                    not decision.eligible
+                    or (included_item_ids is not None and decision.item_id not in included_item_ids)
+            ):
                 continue
             recommendation_bucket, recommendation_score, recommendation_reason = _selection_recommendation(
                 decision.row,
@@ -122,6 +132,10 @@ def select_candidates(
     if prefixes:
         scopes = resolve_media_scopes(connection, prefixes, library_types=config.library_type_map)
         query = query.where(or_(*(scope_rel_path_filter(library_items.c.rel_path, scope) for scope in scopes)))
+    if included_item_ids is not None:
+        if not included_item_ids:
+            return []
+        query = query.where(library_items.c.id.in_(sorted(included_item_ids)))
     query = query.order_by(library_items.c.priority_score.desc(), library_items.c.size_bytes.desc())
     if limit is not None:
         query = query.limit(limit)
@@ -140,6 +154,7 @@ def select_encode_candidates(
         buckets: list[str] | None = None,
         manual_override_prefix: str | None = None,
         manual_override_prefixes: list[str] | tuple[str, ...] | None = None,
+        include_library_item_ids: Collection[int] | None = None,
 ) -> list[dict[str, Any]]:
     return select_candidates(
         connection,
@@ -151,6 +166,7 @@ def select_encode_candidates(
         require_encode_lane=True,
         manual_override_prefix=manual_override_prefix,
         manual_override_prefixes=manual_override_prefixes,
+        include_library_item_ids=include_library_item_ids,
     )
 
 
@@ -245,6 +261,7 @@ def build_folder_manifest(
         scan_first: bool = False,
         manual_override_prefix: str | None = None,
         older_season_override: OlderSeasonOverrideSelection | None = None,
+        include_library_item_ids: Collection[int] | None = None,
 ) -> dict[str, Any]:
     if manual_override_prefix and older_season_override is not None:
         raise ValueError("Exact-season and older-season lifecycle overrides cannot be combined")
@@ -267,6 +284,7 @@ def build_folder_manifest(
             if older_season_override is not None
             else None
         ),
+        include_library_item_ids=include_library_item_ids,
     )
     manifest = build_run_manifest(rows, config)
     manifest["selection"]["media_scope"] = scope.to_payload()
@@ -284,6 +302,7 @@ def create_folder_manifest(
         scan_first: bool = False,
         manual_override_prefix: str | None = None,
         older_season_override: OlderSeasonOverrideSelection | None = None,
+        include_library_item_ids: Collection[int] | None = None,
         prepare_only: bool = False,
 ) -> tuple[dict[str, Any], Path | None]:
     manifest = build_folder_manifest(
@@ -294,6 +313,7 @@ def create_folder_manifest(
         scan_first=scan_first,
         manual_override_prefix=manual_override_prefix,
         older_season_override=older_season_override,
+        include_library_item_ids=include_library_item_ids,
     )
     if prepare_only:
         return manifest, None

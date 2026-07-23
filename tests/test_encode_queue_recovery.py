@@ -15586,6 +15586,177 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             queued_manifest["selection"]["lifecycle_override"]["included_season_prefixes"],
         )
 
+    def test_queue_older_seasons_queues_only_cadence_cleared_items(self) -> None:
+        with config_runtime.DEFAULT_CONFIG_PATH.open("rb") as handle:
+            complete_raw = copy.deepcopy(tomllib.load(handle))
+        complete_raw["media"].update(self.config.raw["media"])
+        complete_raw["remote_hosts"] = []
+        complete_raw["encode_queue"] = self.config.raw["encode_queue"]
+        queue_config = MediaforceConfig(raw=complete_raw, paths=self.config.paths)
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids: dict[str, int] = {}
+            for rel_path in (
+                    "tv/show/Season 1/Episode 1.mkv",
+                    "tv/show/Season 1/Episode 2.mkv",
+                    "tv/show/Season 2/Episode 1.mkv",
+                    "tv/show/Season 3/Episode 1.mkv",
+            ):
+                source = self._create_source_file(rel_path.replace("/", "-"))
+                item_ids[rel_path] = self._insert_library_item(
+                    connection,
+                    source,
+                    status="discovered",
+                    rel_path=rel_path,
+                )
+            safe_summary_json = connection.execute(
+                select(library_items.c.cadence_summary_json).where(
+                    library_items.c.id == item_ids["tv/show/Season 1/Episode 1.mkv"]
+                )
+            ).scalar_one()
+            blocked_summary = json.loads(str(safe_summary_json))
+            blocked_summary["decision"].update({
+                "status": "blocked",
+                "rationale": "Fixture cadence requires operator review.",
+            })
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_ids["tv/show/Season 1/Episode 2.mkv"])
+                .values(cadence_summary_json=json.dumps(blocked_summary, separators=(",", ":")))
+            )
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_ids["tv/show/Season 2/Episode 1.mkv"])
+                .values(cadence_summary_json=None)
+            )
+
+        saved_jobs: list[dict[str, Any]] = []
+        calibration = {
+            "policy": {},
+            "accepted_at": web_app._now_iso(),
+            "draft_hash": "approved-draft",
+        }
+        with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
+            result = folder_actions_runtime.queue_folder_encode_action(
+                queue_config,
+                "tv/show",
+                "Approved older seasons after comparing the representative test.",
+                False,
+                override_older_seasons=True,
+                older_seasons_confirmed=True,
+                now_iso=web_app._now_iso,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=lambda *_args, **_kwargs: calibration,
+                review_gate=self._accepted_review_gate,
+                upsert_override=self._noop_upsert_override,
+                load_active_encode_job_for_prefix_fn=lambda *_args, **_kwargs: None,
+                clear_terminal_encode_jobs_for_prefix_fn=lambda *_args, **_kwargs: None,
+                prepare_terminal_encode_job_for_requeue_fn=lambda *_args, **_kwargs: None,
+                save_encode_job=lambda _connection, job: saved_jobs.append(dict(job)),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["older_season_override"]["candidate_count"], 1)
+        self.assertEqual(result["older_season_override"]["cadence_blocked_candidate_count"], 1)
+        self.assertEqual(result["older_season_override"]["cadence_evidence_required_candidate_count"], 1)
+        parent_job = next(job for job in saved_jobs if job["job_kind"] == "folder")
+        self.assertEqual(parent_job["item_count"], 1)
+        queued_manifest = json.loads(Path(parent_job["manifest_path"]).read_text())
+        self.assertEqual(queued_manifest["selection"]["item_count"], 1)
+        self.assertEqual(
+            [item["library_item_id"] for item in queued_manifest["items"]],
+            [item_ids["tv/show/Season 1/Episode 1.mkv"]],
+        )
+        self.assertEqual(
+            queued_manifest["selection"]["cadence_safety"],
+            {
+                "schema_version": 1,
+                "mode": "older_season_override",
+                "cleared_item_count": 1,
+                "blocked_item_count": 1,
+                "evidence_required_item_count": 1,
+                "excluded_item_count": 2,
+                "excluded_library_item_ids": sorted([
+                    item_ids["tv/show/Season 1/Episode 2.mkv"],
+                    item_ids["tv/show/Season 2/Episode 1.mkv"],
+                ]),
+            },
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            statuses = dict(connection.execute(
+                select(library_items.c.id, library_items.c.status).where(
+                    library_items.c.id.in_(item_ids.values())
+                )
+            ).fetchall())
+        self.assertEqual(statuses[item_ids["tv/show/Season 1/Episode 1.mkv"]], "planned")
+        self.assertEqual(statuses[item_ids["tv/show/Season 1/Episode 2.mkv"]], "discovered")
+        self.assertEqual(statuses[item_ids["tv/show/Season 2/Episode 1.mkv"]], "discovered")
+        self.assertEqual(statuses[item_ids["tv/show/Season 3/Episode 1.mkv"]], "discovered")
+
+    def test_queue_older_seasons_does_not_create_an_empty_job_when_none_are_cleared(self) -> None:
+        with config_runtime.DEFAULT_CONFIG_PATH.open("rb") as handle:
+            complete_raw = copy.deepcopy(tomllib.load(handle))
+        complete_raw["media"].update(self.config.raw["media"])
+        complete_raw["remote_hosts"] = []
+        complete_raw["encode_queue"] = self.config.raw["encode_queue"]
+        queue_config = MediaforceConfig(raw=complete_raw, paths=self.config.paths)
+        with open_db(self.config.paths.db_path) as connection:
+            older_source = self._create_source_file("all-blocked-older.mkv")
+            latest_source = self._create_source_file("all-blocked-latest.mkv")
+            older_item_id = self._insert_library_item(
+                connection,
+                older_source,
+                status="discovered",
+                rel_path="tv/show/Season 1/Episode 1.mkv",
+            )
+            self._insert_library_item(
+                connection,
+                latest_source,
+                status="discovered",
+                rel_path="tv/show/Season 2/Episode 1.mkv",
+            )
+            blocked_summary = json.loads(str(connection.execute(
+                select(library_items.c.cadence_summary_json).where(library_items.c.id == older_item_id)
+            ).scalar_one()))
+            blocked_summary["decision"].update({
+                "status": "blocked",
+                "rationale": "Fixture cadence requires operator review.",
+            })
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == older_item_id)
+                .values(cadence_summary_json=json.dumps(blocked_summary, separators=(",", ":")))
+            )
+
+        saved_jobs: list[dict[str, Any]] = []
+        calibration = {
+            "policy": {},
+            "accepted_at": web_app._now_iso(),
+            "draft_hash": "approved-draft",
+        }
+        with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
+            result = folder_actions_runtime.queue_folder_encode_action(
+                queue_config,
+                "tv/show",
+                "Approved older seasons after comparing the representative test.",
+                False,
+                override_older_seasons=True,
+                older_seasons_confirmed=True,
+                now_iso=web_app._now_iso,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=lambda *_args, **_kwargs: calibration,
+                review_gate=self._accepted_review_gate,
+                upsert_override=self._noop_upsert_override,
+                load_active_encode_job_for_prefix_fn=lambda *_args, **_kwargs: None,
+                clear_terminal_encode_jobs_for_prefix_fn=lambda *_args, **_kwargs: None,
+                prepare_terminal_encode_job_for_requeue_fn=lambda *_args, **_kwargs: None,
+                save_encode_job=lambda _connection, job: saved_jobs.append(dict(job)),
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "cadence_no_cleared_older_seasons")
+        self.assertEqual(result["affected_item_count"], 1)
+        self.assertEqual(saved_jobs, [])
+
     def test_validate_folder_outputs_action_uses_only_validate_lane_outputs(self) -> None:
         encoded_source = self._create_source_file("episode-encoded-validate.mkv")
         validated_source = self._create_source_file("episode-validated-promote.mkv")

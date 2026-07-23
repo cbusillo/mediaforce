@@ -23,12 +23,15 @@ from mediaforce.library.media_scopes import MediaScope, path_matches_scope, reso
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.run_manifests import create_folder_manifest, write_manifest
-from mediaforce.library.candidate_selection import encode_candidate_decisions, older_season_override_selection, \
-    project_candidates, scope_lifecycle_payload_from_decisions, scope_target_size_blocker, workflow_eligibility
+from mediaforce.library.candidate_selection import OlderSeasonOverrideSelection, encode_candidate_decisions, \
+    older_season_candidate_item_ids, older_season_override_selection, project_candidates, \
+    restrict_older_season_override_selection, scope_lifecycle_payload_from_decisions, scope_target_size_blocker, \
+    workflow_eligibility
 from mediaforce.tuning.quality_risk import build_quality_risk_contract
 from mediaforce.tuning.quality_risk import append_quality_risk_record
 from mediaforce.tuning.size_goals import operator_intent_from_policy
-from mediaforce.web.runtime.decision_evidence import cadence_evidence_blocker
+from mediaforce.web.runtime.decision_evidence import CadenceSafetyPartition, cadence_evidence_blocker, \
+    cadence_safety_partition, older_season_cadence_payload
 from mediaforce.web.runtime.folder_tuning_helpers import (
     proposal_alignment_issue,
     size_budget_sample_analysis,
@@ -78,6 +81,41 @@ def _normalized_number(value: Any) -> float | None:
 
 def _normalized_text(value: Any) -> str:
     return str(value or "").strip().lower()
+
+
+def _folder_encode_queue_message(
+        older_season_selection: OlderSeasonOverrideSelection | None,
+        cadence_partition: CadenceSafetyPartition | None,
+        *,
+        queued_item_count: int,
+) -> str:
+    if older_season_selection is None:
+        return "Queued the eligible folder encode."
+    blocked_count = len(cadence_partition.blocked_item_ids) if cadence_partition is not None else 0
+    evidence_required_count = (
+        len(cadence_partition.evidence_required_item_ids)
+        if cadence_partition is not None
+        else 0
+    )
+    excluded_count = blocked_count + evidence_required_count
+    if excluded_count == 0:
+        return "Queued the older seasons."
+    reasons: list[str] = []
+    if blocked_count:
+        reasons.append(
+            f"{blocked_count} {'has' if blocked_count == 1 else 'have'} measured motion patterns "
+            "that Mediaforce cannot convert automatically"
+        )
+    if evidence_required_count:
+        reasons.append(
+            f"{evidence_required_count} still {'needs' if evidence_required_count == 1 else 'need'} "
+            "motion-pattern analysis"
+        )
+    return (
+        f"Queued {queued_item_count} cadence-cleared older-season "
+        f"{'episode' if queued_item_count == 1 else 'episodes'}. "
+        f"Left {excluded_count} original: {'; '.join(reasons)}."
+    )
 
 
 def _high_impact_policy_change(current_policy: ActionPayload, draft_policy: ActionPayload) -> bool:
@@ -421,15 +459,17 @@ def queue_folder_encode_action(
             )
         manifest_kwargs: dict[str, Any] = {"prefix": normalized_prefix}
         older_season_selection = None
+        older_season_cadence_partition: CadenceSafetyPartition | None = None
         if override_policy_holds:
             manifest_kwargs["manual_override_prefix"] = normalized_prefix
         elif override_older_seasons:
+            older_season_decisions = project_candidates(
+                connection,
+                preflight_config,
+                prefixes=[normalized_prefix],
+            )
             older_season_selection = older_season_override_selection(
-                project_candidates(
-                    connection,
-                    preflight_config,
-                    prefixes=[normalized_prefix],
-                ),
+                older_season_decisions,
                 normalized_prefix,
             )
             if not older_season_selection.available:
@@ -437,7 +477,48 @@ def queue_folder_encode_action(
                     status_code=409,
                     detail="No safe older-season candidates remain for this show.",
                 )
+            older_season_candidate_ids = older_season_candidate_item_ids(
+                older_season_decisions,
+                older_season_selection,
+            )
+            older_season_cadence_partition = cadence_safety_partition(
+                connection,
+                library_item_ids=older_season_candidate_ids,
+                synchronize=True,
+            )
+            older_season_selection = restrict_older_season_override_selection(
+                older_season_decisions,
+                older_season_selection,
+                included_item_ids=older_season_cadence_partition.cleared_item_ids,
+            )
+            if not older_season_selection.available:
+                blocked_count = len(older_season_cadence_partition.blocked_item_ids)
+                evidence_required_count = len(older_season_cadence_partition.evidence_required_item_ids)
+                exclusion_reasons: list[str] = []
+                if blocked_count:
+                    exclusion_reasons.append(
+                        f"{blocked_count} {'has' if blocked_count == 1 else 'have'} a measured motion pattern "
+                        "Mediaforce cannot convert automatically"
+                    )
+                if evidence_required_count:
+                    exclusion_reasons.append(
+                        f"{evidence_required_count} still "
+                        f"{'needs' if evidence_required_count == 1 else 'need'} motion-pattern analysis"
+                    )
+                exclusion_detail = " and ".join(exclusion_reasons)
+                return {
+                    "ok": False,
+                    "code": "cadence_no_cleared_older_seasons",
+                    "message": (
+                        "No older-season episodes are currently cleared for safe production. "
+                        f"{exclusion_detail[:1].upper()}{exclusion_detail[1:]}. No files were queued."
+                    ),
+                    "affected_item_count": blocked_count + evidence_required_count,
+                    "next_route": "/ops",
+                    "next_action_label": "Open Activity",
+                }
             manifest_kwargs["older_season_override"] = older_season_selection
+            manifest_kwargs["include_library_item_ids"] = older_season_cadence_partition.cleared_item_ids
         preview_transaction = None
         if terminal_job_needs_requeue:
             stale_rows = _stale_prefix_encoding_rows_for_requeue(
@@ -506,6 +587,34 @@ def queue_folder_encode_action(
                 status_code=400,
                 detail=f"No encode candidates were found for this folder. Next action: {action_label}.",
             )
+        if older_season_selection is not None and older_season_cadence_partition is not None:
+            manifest_item_ids = {
+                int(item.get("library_item_id") or 0)
+                for item in manifest["items"]
+                if int(item.get("library_item_id") or 0) > 0
+            }
+            if (
+                    len(manifest["items"]) != older_season_selection.candidate_count
+                    or manifest_item_ids != older_season_cadence_partition.cleared_item_ids
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "The cadence-cleared older-season selection changed before it could be queued. "
+                        "Reload the show and review it again."
+                    ),
+                )
+            manifest["selection"]["cadence_safety"] = {
+                "schema_version": 1,
+                "mode": "older_season_override",
+                "cleared_item_count": len(manifest["items"]),
+                "blocked_item_count": len(older_season_cadence_partition.blocked_item_ids),
+                "evidence_required_item_count": len(
+                    older_season_cadence_partition.evidence_required_item_ids
+                ),
+                "excluded_item_count": len(older_season_cadence_partition.excluded_item_ids),
+                "excluded_library_item_ids": sorted(older_season_cadence_partition.excluded_item_ids),
+            }
         cadence_blocker = cadence_evidence_blocker(
             connection,
             preflight_config,
@@ -516,6 +625,7 @@ def queue_folder_encode_action(
             ],
             decision_label="queueing production",
             work_reason="encode_safety",
+            synchronize=older_season_cadence_partition is None,
         )
         if cadence_blocker is not None:
             return cadence_blocker
@@ -577,10 +687,10 @@ def queue_folder_encode_action(
             )
     return {
         "ok": True,
-        "message": (
-            "Queued the older seasons."
-            if older_season_selection is not None
-            else "Queued the eligible folder encode."
+        "message": _folder_encode_queue_message(
+            older_season_selection,
+            older_season_cadence_partition,
+            queued_item_count=int(queue_job["item_count"]),
         ),
         "job": queue_job,
         "policy_holds_overridden": bool(
@@ -591,8 +701,8 @@ def queue_folder_encode_action(
             )
         ),
         "older_season_override": (
-            older_season_selection.to_payload()
-            if older_season_selection is not None
+            older_season_cadence_payload(older_season_selection, older_season_cadence_partition)
+            if older_season_selection is not None and older_season_cadence_partition is not None
             else None
         ),
     }

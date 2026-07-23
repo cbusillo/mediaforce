@@ -25,7 +25,7 @@ from mediaforce.library.evidence_queue import cancel_evidence_queue, claim_next_
 from mediaforce.library.evidence_state import EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, \
     load_library_item_evidence_states, rebuild_library_item_evidence_states, sync_library_item_evidence_state
 from mediaforce.library.evidence_worker import EvidenceWorkerDeps, process_evidence_queue_once
-from mediaforce.web.runtime.decision_evidence import cadence_evidence_blocker
+from mediaforce.web.runtime.decision_evidence import cadence_evidence_blocker, cadence_safety_partition
 
 
 class EvidenceWorkerTests(unittest.TestCase):
@@ -281,6 +281,66 @@ class EvidenceWorkerTests(unittest.TestCase):
         self.assertEqual(blocker["code"], "cadence_unresolved")
         self.assertEqual(blocker["affected_item_count"], 1)
         self.assertEqual(dict(row), {"work_status": None, "work_reason": None})
+
+    def test_cadence_safety_partition_separates_cleared_blocked_and_required_items(self) -> None:
+        cleared_item_id, _path = self._insert_item(
+            1,
+            cadence_summary_json=self._cadence_summary_json(),
+            media_fingerprint_json=None,
+        )
+        blocked_item_id, _path = self._insert_item(
+            2,
+            cadence_summary_json=self._blocked_cadence_summary_json(),
+            media_fingerprint_json=None,
+        )
+        required_item_id, _path = self._insert_item(
+            3,
+            cadence_summary_json=None,
+            media_fingerprint_json=None,
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            partition = cadence_safety_partition(
+                connection,
+                library_item_ids=[cleared_item_id, blocked_item_id, required_item_id],
+                synchronize=True,
+            )
+
+        self.assertEqual(partition.cleared_item_ids, frozenset({cleared_item_id}))
+        self.assertEqual(partition.blocked_item_ids, frozenset({blocked_item_id}))
+        self.assertEqual(partition.evidence_required_item_ids, frozenset({required_item_id}))
+        self.assertEqual(
+            partition.excluded_item_ids,
+            frozenset({blocked_item_id, required_item_id}),
+        )
+
+    def test_cadence_safety_partition_projects_missing_state_without_writing_on_read(self) -> None:
+        item_id, _path = self._insert_item(
+            1,
+            cadence_summary_json=self._cadence_summary_json(),
+            media_fingerprint_json=None,
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                library_item_evidence_state.delete().where(
+                    library_item_evidence_state.c.library_item_id == item_id,
+                    library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+                )
+            )
+            partition = cadence_safety_partition(
+                connection,
+                library_item_ids=[item_id],
+                synchronize=False,
+            )
+            persisted_row = connection.execute(
+                select(library_item_evidence_state.c.library_item_id).where(
+                    library_item_evidence_state.c.library_item_id == item_id,
+                    library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+                )
+            ).fetchone()
+
+        self.assertEqual(partition.cleared_item_ids, frozenset({item_id}))
+        self.assertIsNone(persisted_row)
 
     def test_decision_evidence_is_claimed_before_manual_backfill(self) -> None:
         first_item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)

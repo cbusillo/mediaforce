@@ -173,7 +173,7 @@ class OlderSeasonOverrideSelection:
 
     @property
     def available(self) -> bool:
-        return bool(self.included_season_prefixes)
+        return bool(self.included_season_prefixes) and self.candidate_count > 0
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -555,6 +555,68 @@ def older_season_override_selection(
         candidate_count=candidate_count,
         overridden_candidate_count=overridden_candidate_count,
         current_size_bytes=current_size_bytes,
+    )
+
+
+def older_season_candidate_item_ids(
+        decisions: list[CandidateDecision],
+        selection: OlderSeasonOverrideSelection,
+) -> tuple[int, ...]:
+    included_prefixes = set(selection.included_season_prefixes)
+    return tuple(sorted(
+        decision.item_id
+        for decision in decisions
+        if decision.workflow_lane == "encode"
+        and decision.season is not None
+        and decision.season.season_prefix in included_prefixes
+    ))
+
+
+def restrict_older_season_override_selection(
+        decisions: list[CandidateDecision],
+        selection: OlderSeasonOverrideSelection,
+        *,
+        included_item_ids: Collection[int],
+) -> OlderSeasonOverrideSelection:
+    included_prefixes = set(selection.included_season_prefixes)
+    candidate_decisions = [
+        decision
+        for decision in decisions
+        if decision.workflow_lane == "encode"
+        and decision.season is not None
+        and decision.season.season_prefix in included_prefixes
+    ]
+    included_ids = {int(item_id) for item_id in included_item_ids}
+    cleared_decisions = [
+        decision
+        for decision in candidate_decisions
+        if decision.item_id in included_ids
+    ]
+    cleared_prefixes = {
+        decision.season.season_prefix
+        for decision in cleared_decisions
+        if decision.season is not None
+    }
+    return OlderSeasonOverrideSelection(
+        series_prefix=selection.series_prefix,
+        latest_season_number=selection.latest_season_number,
+        latest_season_prefixes=selection.latest_season_prefixes,
+        included_season_prefixes=tuple(
+            prefix
+            for prefix in selection.included_season_prefixes
+            if prefix in cleared_prefixes
+        ),
+        overridden_season_prefixes=tuple(
+            prefix
+            for prefix in selection.overridden_season_prefixes
+            if prefix in cleared_prefixes
+        ),
+        candidate_count=len(cleared_decisions),
+        overridden_candidate_count=sum(bool(decision.hold_reasons) for decision in cleared_decisions),
+        current_size_bytes=sum(
+            max(0, int(decision.row.get("size_bytes") or 0))
+            for decision in cleared_decisions
+        ),
     )
 
 
