@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from mediaforce.core.timezones import system_timezone_name
 from mediaforce.core.type_defs import object_list
 from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQUIRED_ISSUE, has_videotoolbox_hwaccel, \
     normalize_execution_platform
@@ -175,6 +176,10 @@ def _local_utc_offset_minutes() -> int | None:
     return _parse_utc_offset_minutes(text)
 
 
+def _local_schedule_timezone() -> str | None:
+    return system_timezone_name()
+
+
 def _status_from_paths(
         *,
         key: str,
@@ -187,6 +192,7 @@ def _status_from_paths(
         ffmpeg_path: str | None = None,
         platform: str = "unknown",
         videotoolbox_available: bool | None = None,
+        schedule_timezone: str | None = None,
         utc_offset_minutes: int | None = None,
         issues: list[str] | None = None,
         missing_mounts: list[str] | None = None,
@@ -221,6 +227,7 @@ def _status_from_paths(
         ffmpeg_path=ffmpeg_path,
         platform=platform,
         videotoolbox_available=videotoolbox_available,
+        schedule_timezone=schedule_timezone,
         utc_offset_minutes=utc_offset_minutes,
         issues=issue_list,
         missing_mounts=missing_mount_list,
@@ -445,6 +452,11 @@ def _remote_status_script(
     lines.extend([
         'if [ -n "$AB_AV1_BIN" ]; then printf "tool|ab_av1|1\\n"; else printf "tool|ab_av1|0\\n"; fi',
         'printf "meta|platform|%s\\n" "$PLATFORM_NAME"',
+        'TIMEZONE_NAME=""',
+        'if [ -L /etc/localtime ]; then TIMEZONE_PATH="$(readlink /etc/localtime 2>/dev/null || true)"; case "$TIMEZONE_PATH" in */zoneinfo.default/*) TIMEZONE_NAME="${TIMEZONE_PATH#*/zoneinfo.default/}" ;; */zoneinfo/*) TIMEZONE_NAME="${TIMEZONE_PATH#*/zoneinfo/}" ;; esac; fi',
+        'if [ -z "$TIMEZONE_NAME" ] && [ -r /etc/timezone ]; then TIMEZONE_NAME="$(head -n 1 /etc/timezone 2>/dev/null | tr -d "[:space:]" || true)"; fi',
+        'if [ -z "$TIMEZONE_NAME" ] && command -v timedatectl >/dev/null 2>&1; then TIMEZONE_NAME="$(timedatectl show --property=Timezone --value 2>/dev/null || true)"; fi',
+        'printf "time|schedule_timezone|%s\\n" "$TIMEZONE_NAME"',
         'printf "time|utc_offset|%s\\n" "$(date +%z)"',
     ])
     if mount_paths:
@@ -577,6 +589,7 @@ __all__ = [
     "_host_message",
     "_host_setup_supported",
     "_local_platform_name",
+    "_local_schedule_timezone",
     "_local_tool_status_snapshot",
     "_local_utc_offset_minutes",
     "_needs_initial_ssh_key_install",

@@ -21,7 +21,7 @@ DEFAULT_SCHEDULER_POLICY = {
     "mode": "anytime",
     "start_hour": 22,
     "end_hour": 8,
-    "timezone": "local",
+    "timezone": "controller_local",
 }
 DISPLAY_ENCODE_JOB_KINDS = ("single", "folder")
 RUNNABLE_ENCODE_JOB_KINDS = ("single", "shard")
@@ -43,6 +43,7 @@ _PERSISTED_ENCODE_HOST_KEYS = (
     "priority",
     "repo_path",
     "schedule_profile",
+    "schedule_timezone",
     "source_roots",
     "staging_root",
     "start_command",

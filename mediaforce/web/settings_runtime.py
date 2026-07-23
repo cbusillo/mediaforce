@@ -584,6 +584,8 @@ def normalize_encode_queue_scheduler(raw: dict[str, Any] | None) -> dict[str, An
         payload.update(raw)
     mode = str(payload.get("mode") or DEFAULT_SCHEDULER_POLICY["mode"]).strip().lower()
     timezone = str(payload.get("timezone") or DEFAULT_SCHEDULER_POLICY["timezone"]).strip().lower()
+    if timezone == "local":
+        timezone = "controller_local"
     if mode not in {"anytime", "night", "never"}:
         mode = str(DEFAULT_SCHEDULER_POLICY["mode"])
     if timezone not in {"host_local", "controller_local", "utc"}:
@@ -606,6 +608,8 @@ def normalize_encode_queue_scheduler(raw: dict[str, Any] | None) -> dict[str, An
         )
         if day not in all_day_days_of_week
     ]
+    if mode == "night" and not days_of_week and not all_day_days_of_week:
+        days_of_week = list(SCHEDULE_DAY_ORDER)
     normalized = {
         "mode": mode,
         "timezone": timezone,

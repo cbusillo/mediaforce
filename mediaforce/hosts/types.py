@@ -28,6 +28,7 @@ class HostStatus:
     ffmpeg_path: str | None = None
     platform: str = "unknown"
     videotoolbox_available: bool | None = None
+    schedule_timezone: str | None = None
     utc_offset_minutes: int | None = None
     issues: list[str] = field(default_factory=list)
     missing_mounts: list[str] = field(default_factory=list)

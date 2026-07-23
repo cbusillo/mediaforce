@@ -4,8 +4,9 @@ from mediaforce.hosts.config import _host_capabilities, _host_lookup_targets_cur
     normalize_host_media_access, remote_shell_path_export_line, ssh_target_for_host
 from mediaforce.hosts.status_helpers import _classify_ssh_failure, _command_output, _command_succeeds, \
     _default_public_key_path, _find_local_tool, _host_capability_issues, _host_message, \
-    _host_setup_supported, _local_platform_name, _local_tool_status_snapshot, _local_utc_offset_minutes, \
-    _needs_initial_ssh_key_install, _parse_remote_status_output, _private_key_path_for_public_key, \
+    _host_setup_supported, _local_platform_name, _local_schedule_timezone, _local_tool_status_snapshot, \
+    _local_utc_offset_minutes, _needs_initial_ssh_key_install, _parse_remote_status_output, \
+    _private_key_path_for_public_key, \
     _remote_setup_needs_password, _remote_status_script, _should_retry_remote_status_exception, \
     _should_retry_remote_status_failure, _ssh_access_must_be_fixed_first, _status_from_paths, \
     _status_platform
@@ -55,6 +56,7 @@ __all__ = [
     "_broadcast_addresses_for_interface",
     "_interface_for_ip",
     "_local_platform_name",
+    "_local_schedule_timezone",
     "_local_broadcast_addresses",
     "_learn_remote_wake_mac",
     "_local_tool_status_snapshot",
