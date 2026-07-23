@@ -13,7 +13,8 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, staged_artifacts
 from mediaforce.library.candidate_selection import CandidateDecision, project_candidates, \
     scope_lifecycle_payload_from_decisions, workflow_eligibility
-from mediaforce.library.workflow_state import build_folder_workflow_states
+from mediaforce.library.media_scopes import MediaScope, media_scope_from_prefix, resolve_media_scopes
+from mediaforce.library.workflow_state import build_folder_workflow_states_for_scopes
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES
 from mediaforce.library.workflow_state import WorkflowPayload
 
@@ -103,6 +104,7 @@ def cached_folder_cards(
         age_days: Callable[[str], float],
         estimate_savings_bytes: Callable[..., int],
         review_badge_for_prefix: Callable[[str], FolderBadge],
+        candidate_decisions: list[CandidateDecision] | None = None,
 ) -> list[FolderCard]:
     global _FOLDER_CARD_CACHE_KEY, _FOLDER_CARD_CACHE_VALUE, _FOLDER_CARD_CACHE_GENERATION
 
@@ -125,6 +127,7 @@ def cached_folder_cards(
             age_days=age_days,
             estimate_savings_bytes=estimate_savings_bytes,
             review_badge_for_prefix=review_badge_for_prefix,
+            candidate_decisions=candidate_decisions,
         )
         with _FOLDER_CARD_CACHE_LOCK:
             current_cache_key = folder_card_cache_key(config)
@@ -532,15 +535,53 @@ def _apply_folder_workflow_states(
 ) -> None:
     if not cards:
         return
-    workflow_by_prefix = build_folder_workflow_states(
+    scopes = _folder_card_media_scopes(
         connection,
-        [card.prefix for card in cards],
-        candidate_eligibility=workflow_eligibility(decisions or []),
+        cards,
         library_types=config.library_type_map if config is not None else None,
     )
-    for card in cards:
+    workflow_by_prefix = build_folder_workflow_states_for_scopes(
+        connection,
+        scopes,
+        candidate_eligibility=workflow_eligibility(decisions or []),
+    )
+    for card, scope in zip(cards, scopes, strict=True):
         workflow = workflow_by_prefix.get(card.prefix)
         card.workflow_state = workflow.to_payload() if workflow is not None else None
+        card.media_scope = scope.to_payload()
+
+
+def _folder_card_media_scopes(
+        connection: DBClient,
+        cards: list[FolderCard],
+        *,
+        library_types: dict[str, str] | None,
+) -> list[MediaScope]:
+    scopes_by_prefix: dict[str, MediaScope] = {}
+    unresolved_prefixes: list[str] = []
+    for card in cards:
+        if card.scope_label in {"Library", "Series", "Season", "Folder"}:
+            match = "descendants"
+        elif card.scope_label == "File":
+            match = "exact_item"
+        else:
+            unresolved_prefixes.append(card.prefix)
+            continue
+        scopes_by_prefix[card.prefix] = media_scope_from_prefix(
+            card.prefix,
+            match=match,
+            library_types=library_types,
+        )
+    if unresolved_prefixes:
+        scopes_by_prefix.update(
+            (scope.prefix, scope)
+            for scope in resolve_media_scopes(
+                connection,
+                unresolved_prefixes,
+                library_types=library_types,
+            )
+        )
+    return [scopes_by_prefix[card.prefix] for card in cards]
 
 
 def _folder_delivery_badge(card: FolderCard) -> FolderBadge | None:
@@ -580,6 +621,7 @@ def _copy_folder_card(card: FolderCard, *, include_review_badges: bool = True) -
         review_badge_detail=card.review_badge_detail if include_review_badges else None,
         workflow_state=deepcopy(card.workflow_state),
         lifecycle=deepcopy(card.lifecycle),
+        media_scope=deepcopy(card.media_scope),
         details_loading=card.details_loading,
         estimate_unavailable_count=card.estimate_unavailable_count,
     )

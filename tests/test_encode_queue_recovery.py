@@ -5455,6 +5455,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "counts": {"ready_to_validate": 1},
                 "next_action": {"kind": "validate_outputs"},
             },
+            media_scope={
+                "schema_version": 1,
+                "prefix": "tv/show/Season 10",
+                "domain": "tv",
+                "kind": "tv_season",
+                "match": "descendants",
+            },
         )
         list_folder_cards = Mock(return_value=[cached_source_card])
 
@@ -5472,6 +5479,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         first_cards[0].workflow_state["counts"]["ready_to_validate"] = 99
         first_cards[0].workflow_state["next_action"]["kind"] = "mutated"
+        first_cards[0].media_scope["kind"] = "mutated"
 
         with patch.object(folder_cards_runtime, "folder_card_cache_key", return_value=("cache", 1, 1)):
             with patch.object(folder_cards_runtime, "list_folder_cards", list_folder_cards):
@@ -5487,7 +5495,47 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual(second_cards[0].workflow_state["counts"]["ready_to_validate"], 1)
         self.assertEqual(second_cards[0].workflow_state["next_action"]["kind"], "validate_outputs")
+        self.assertEqual(second_cards[0].media_scope["kind"], "tv_season")
         folder_cards_runtime.reset_folder_card_cache()
+
+    def test_folder_cards_reuse_group_scope_when_building_workflow_state(self) -> None:
+        card = folder_cards_runtime.FolderCard(
+            prefix="tv/show/Season 10",
+            title="Season 10",
+            subtitle="TV",
+            scope_label="Season",
+            item_count=1,
+            pending_count=1,
+            total_size_bytes=2 * 1024 * 1024 * 1024,
+            estimated_savings_bytes=200 * 1024 * 1024,
+            known_saved_bytes=0,
+            projected_reclaim_bytes=200 * 1024 * 1024,
+            average_age_days=10.0,
+            sort_score=0.2,
+            statuses={"planned": 1},
+            video_codecs={"h264": 1},
+        )
+        workflow = Mock()
+        workflow.to_payload.return_value = {"state": "sample_and_approval"}
+
+        with patch.object(folder_cards_runtime, "resolve_media_scopes") as resolve_scopes:
+            with patch.object(
+                    folder_cards_runtime,
+                    "build_folder_workflow_states_for_scopes",
+                    return_value={card.prefix: workflow},
+            ) as build_states:
+                folder_cards_runtime._apply_folder_workflow_states(
+                    Mock(),
+                    [card],
+                    [],
+                    config=self.config,
+                )
+
+        resolve_scopes.assert_not_called()
+        scope = build_states.call_args.args[1][0]
+        self.assertEqual(scope.kind, "tv_season")
+        self.assertEqual(scope.match, "descendants")
+        self.assertEqual(card.media_scope["kind"], "tv_season")
 
     def test_folder_cards_require_multiple_labeled_samples_before_using_folder_history(self) -> None:
         pending = self._create_source_file("episode-pending.mkv")

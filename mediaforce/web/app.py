@@ -546,11 +546,27 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             return _load_scan_status(connection, config, prefix=None)
 
     def _dashboard_folders_payload(include_series_folders: bool = True) -> dict[str, Any]:
+        shared_decisions: list[CandidateDecision] | None = None
+
+        def folder_decisions(connection: DBClient) -> list[CandidateDecision]:
+            nonlocal shared_decisions
+            if shared_decisions is None:
+                shared_decisions = project_candidates(connection, config, prefixes=[])
+            return shared_decisions
+
         return dashboard_folders_payload(
             config,
             folder_card_cache_key=_folder_card_cache_key,
-            list_folder_cards=_list_folder_cards,
-            list_series_folder_cards=_list_series_folder_cards,
+            list_folder_cards=lambda active_config, connection: _list_folder_cards(
+                active_config,
+                connection,
+                candidate_decisions=folder_decisions(connection),
+            ),
+            list_series_folder_cards=lambda active_config, connection: _list_series_folder_cards(
+                active_config,
+                connection,
+                candidate_decisions=folder_decisions(connection),
+            ),
             include_series_folders=include_series_folders,
         )
 
@@ -2370,7 +2386,12 @@ def _list_library_detail_cards(config: MediaforceConfig, connection: DBClient) -
     )
 
 
-def _list_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
+def _list_folder_cards(
+        config: MediaforceConfig,
+        connection: DBClient,
+        *,
+        candidate_decisions: list[CandidateDecision] | None = None,
+) -> list[FolderCard]:
     needs_attention_badges: dict[str, dict[str, str | None]] | None = None
     calibration_job_badges: dict[str, dict[str, str | None]] | None = None
     library_types = config.library_type_map
@@ -2396,11 +2417,17 @@ def _list_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[F
         age_days=_age_days,
         estimate_savings_bytes=_estimate_savings_bytes,
         review_badge_for_prefix=review_badge_for_prefix,
+        candidate_decisions=candidate_decisions,
     )
     return _attach_media_scopes(connection, config, cards)
 
 
-def _list_series_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
+def _list_series_folder_cards(
+        config: MediaforceConfig,
+        connection: DBClient,
+        *,
+        candidate_decisions: list[CandidateDecision] | None = None,
+) -> list[FolderCard]:
     library_types = config.library_type_map
     return _folder_cards_for_group(
         config,
@@ -2411,6 +2438,7 @@ def _list_series_folder_cards(config: MediaforceConfig, connection: DBClient) ->
         ),
         aggregate_badges=True,
         media_roots={root for root, library_type in config.library_type_map.items() if library_type == "tv"},
+        candidate_decisions=candidate_decisions,
     )
 
 
@@ -2495,12 +2523,15 @@ def _attach_media_scopes(
         config: MediaforceConfig,
         cards: list[FolderCard],
 ) -> list[FolderCard]:
+    missing_cards = [card for card in cards if card.media_scope is None]
+    if not missing_cards:
+        return cards
     scopes = resolve_media_scopes(
         connection,
-        [card.prefix for card in cards],
+        [card.prefix for card in missing_cards],
         library_types=config.library_type_map,
     )
-    for card, scope in zip(cards, scopes, strict=True):
+    for card, scope in zip(missing_cards, scopes, strict=True):
         card.media_scope = scope.to_payload()
     return cards
 
