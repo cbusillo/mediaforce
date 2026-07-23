@@ -78,8 +78,8 @@ from mediaforce.library.representatives import RepresentativeSelection, load_rep
     public_representative_item
 from mediaforce.library.run_manifests import select_encode_candidates
 from mediaforce.library.candidate_selection import CandidateDecision, encode_candidate_decisions, \
-    older_season_override_selection, project_candidates, scope_lifecycle_payload_from_decisions, \
-    workflow_eligibility
+    older_season_candidate_item_ids, older_season_override_selection, project_candidates, \
+    restrict_older_season_override_selection, scope_lifecycle_payload_from_decisions, workflow_eligibility
 from mediaforce.hosts.types import HostSetupResult
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.core.process_control import ManagedProcessController
@@ -117,6 +117,7 @@ from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, obje
 from mediaforce.web.routes import register_completed_routes, register_dashboard_routes, register_folder_routes, \
     register_frontend_routes, register_host_routes, register_operator_work_routes, register_queue_routes, \
     register_settings_routes
+from mediaforce.web.runtime.decision_evidence import cadence_safety_partition, older_season_cadence_payload
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_folders_payload, \
     dashboard_library_payload, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
@@ -1139,10 +1140,28 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 else None
             )
             if media_scope.kind == "tv_series":
-                older_season_override = older_season_override_selection(
+                older_season_selection = older_season_override_selection(
                     lifecycle_decisions,
                     normalized_prefix,
-                ).to_payload()
+                )
+                older_season_candidate_ids = older_season_candidate_item_ids(
+                    lifecycle_decisions,
+                    older_season_selection,
+                )
+                cadence_partition = cadence_safety_partition(
+                    connection,
+                    library_item_ids=older_season_candidate_ids,
+                    synchronize=False,
+                )
+                older_season_selection = restrict_older_season_override_selection(
+                    lifecycle_decisions,
+                    older_season_selection,
+                    included_item_ids=cadence_partition.cleared_item_ids,
+                )
+                older_season_override = older_season_cadence_payload(
+                    older_season_selection,
+                    cadence_partition,
+                )
             if media_scope.domain == "other":
                 other_context = load_other_scope_payload(
                     connection,

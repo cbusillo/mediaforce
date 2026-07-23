@@ -576,8 +576,8 @@ async function checkOlderSeasonConfirmation(baseUrl, timeoutMs) {
     await dialog.waitFor({ state: "visible", timeout: timeoutMs });
     const dialogText = await dialog.innerText();
     for (const marker of [
-      "1 season · 1 episode",
-      "Current size:",
+      "1 season · 1 safety-cleared episode",
+      "Safety-cleared size:",
       "Projected savings: about",
       "Season 2 stays original",
       "current-season policy does not change",
