@@ -6002,6 +6002,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ) -> None:
             calibration_state[prefix] = dict(payload)
 
+        cleared_proposals: list[str] = []
+
         result = folder_actions_runtime.save_profile_action(
             self.config,
             "tv/show",
@@ -6014,6 +6016,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             record_visual_approval_artifact=lambda *_args, **_kwargs: None,
             merge_advice_state=lambda *_args, **_kwargs: {},
             upsert_override=web_app._upsert_override,
+            clear_pending_proposal=lambda _config, prefix: cleared_proposals.append(prefix),
         )
 
         self.assertTrue(result["ok"])
@@ -6024,6 +6027,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         assert calibration is not None
         self.assertTrue(calibration.get("accepted_at"))
         self.assertTrue(calibration.get("accepted_policy_hash"))
+        self.assertEqual(cleared_proposals, ["tv/show"])
         with open_db(self.config.paths.db_path) as connection:
             queued_count = connection.scalar(
                 select(func.count()).select_from(encode_jobs).where(encode_jobs.c.prefix == "tv/show")

@@ -1657,6 +1657,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             record_visual_approval_artifact=record_visual_approval_artifact,
             merge_advice_state=_merge_advice_state,
             upsert_override=_upsert_override,
+            clear_pending_proposal=_clear_pending_proposal,
             load_latest_failed_target_size_job_state=_load_latest_failed_target_size_job_state,
             confirm_high_impact=confirm_high_impact,
             confirm_size_tradeoff=confirm_size_tradeoff,
