@@ -1312,6 +1312,27 @@ export function currentEncodeProgress(job: EncodeQueueJob | null | undefined) {
 	};
 }
 
+export function scopedEncodeProgress(
+	job: EncodeQueueJob | null | undefined,
+	fallbackCompleted: number,
+	fallbackTotal: number
+) {
+	const progress = currentEncodeProgress(job);
+	const usesActiveJob = progress.total > 0;
+	const total = usesActiveJob ? progress.total : Math.max(0, fallbackTotal);
+	const completed = Math.min(
+		total,
+		Math.max(0, usesActiveJob ? progress.completed : fallbackCompleted)
+	);
+	const completedPercent = total > 0 ? (completed / total) * 100 : 0;
+	return {
+		...progress,
+		total,
+		completed,
+		percent: Math.min(100, Math.max(progress.percent, completedPercent))
+	};
+}
+
 export function plainFailureMessage(folder: FolderPayload, status: FolderStatusPayload): string {
 	const targetConstraint = targetConstraintSummary(folder, status);
 	if (targetConstraint) return targetConstraint.detail;
