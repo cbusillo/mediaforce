@@ -507,6 +507,17 @@ episodes stay complete, and the interrupted episode restarts from the beginning
 when a compatible window opens. Mediaforce does not create resumable media or
 phase checkpoints. `Bypass scheduler` intentionally omits the deadline.
 
+Before starting non-bypassed work on a bounded host, Mediaforce now estimates
+the episode's quality-search and full-encode time from its source duration and
+recent successful runs on that host. Sparse history receives a larger safety
+margin. If the oldest queued episode cannot safely finish before any compatible
+host closes, the queue may choose the fitting episode that leaves the least
+unused window time; normal FIFO order resumes whenever the oldest episode fits.
+When no episode fits, the host drains without consuming attempts, and an episode
+that exceeds every compatible configured window receives an actionable waiting
+reason. The hard close deadline remains the correctness backstop when an
+estimate is wrong, and `Bypass scheduler` skips duration admission entirely.
+
 For a blank remote Mac, first turn on Remote Login so SSH answers. Once that is
 reachable, the runtime settings UI can finish setup from the web surface: if
 the host only needs first-time trust, enter the remote account password once so
